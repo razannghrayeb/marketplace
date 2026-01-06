@@ -55,7 +55,9 @@ CREATE TABLE IF NOT EXISTS price_history (
     price_cents BIGINT NOT NULL,
     sales_price_cents BIGINT,
     currency TEXT NOT NULL,
-    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    
+    UNIQUE(product_id, recorded_at)
 );
 CREATE INDEX IF NOT EXISTS idx_price_history_product_id ON price_history(product_id);
 CREATE INDEX IF NOT EXISTS idx_price_history_recorded_at ON price_history(recorded_at DESC);
@@ -112,3 +114,14 @@ CREATE TABLE IF NOT EXISTS product_price_analysis (
     price_level TEXT NOT NULL CHECK (price_level IN ('green', 'yellow', 'red')),
     computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS price_drop_events (
+    id SERIAL PRIMARY KEY,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    old_price_cents BIGINT NOT NULL,
+    new_price_cents BIGINT NOT NULL,
+    drop_percent DECIMAL(5, 2) NOT NULL,
+    detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_price_drop_events_product_id ON price_drop_events(product_id);
+CREATE INDEX IF NOT EXISTS idx_price_drop_events_detected_at ON price_drop_events(detected_at DESC)

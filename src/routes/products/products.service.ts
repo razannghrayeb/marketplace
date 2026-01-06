@@ -784,7 +784,26 @@ export async function getAttributeFacets(filters: SearchFilters = {}): Promise<A
     categories: transformBuckets(aggs.categories?.buckets || []),
   };
 }
-
+export async function dropPriceProducts() {
+  const res = await pg.query(
+    `SELECT 
+       e.id,
+       e.product_id, 
+       e.old_price_cents, 
+       e.new_price_cents, 
+       e.drop_percent, 
+       e.detected_at,
+       p.title,
+       p.brand,
+       p.image_cdn
+     FROM price_drop_events e
+     JOIN products p ON p.id = e.product_id
+     WHERE e.detected_at > NOW() - INTERVAL '7 days'
+     ORDER BY e.drop_percent DESC, e.detected_at DESC
+     LIMIT 50`
+  );
+  return res.rows;
+}
 // Backwards-compatible wrappers removed — use the richer functions:
 // - searchByTextWithRelated
 // - searchByImageWithSimilarity

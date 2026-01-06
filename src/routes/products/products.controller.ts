@@ -235,3 +235,18 @@ export async function getProductFacets(req: Request, res: Response) {
     res.status(500).json({ success: false, error: "Failed to fetch facets" });
   }
 }
+
+/**
+ * GET /products/price-drops
+ * Get recent price drop events
+ */
+export async function getPriceDrops(req: Request, res: Response) {
+  try {
+    const { dropPriceProducts } = await import("./products.service");
+    const drops = await dropPriceProducts();
+    res.json({ success: true, data: drops });
+  } catch (error) {
+    console.error("Error fetching price drops:", error);
+    res.status(500).json({ success: false, error: "Failed to fetch price drops" });
+  }
+}

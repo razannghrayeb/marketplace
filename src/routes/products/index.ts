@@ -7,11 +7,13 @@
  * - products.controller.ts → HTTP handlers for product endpoints
  * - images.service.ts  → Image upload/storage/retrieval logic
  * - images.controller.ts → HTTP handlers for image endpoints
+ * - outfit.controller.ts → HTTP handlers for outfit completion
  */
 import { Router } from "express";
 import multer from "multer";
-import { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory, getProductFacets } from "./products.controller";
+import { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory, getProductFacets, getPriceDrops } from "./products.controller";
 import { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
+import { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller";
 
 const router = Router();
 
@@ -42,6 +44,20 @@ router.post("/search/image", upload.single("image"), searchProductsByImage);
 // ============================================================================
 
 router.get("/:id/price-history", getProductPriceHistory);
+
+// ============================================================================
+// Price Drop Tracking
+// ============================================================================
+
+router.get("/price-drops", getPriceDrops);
+
+// ============================================================================
+// Complete My Style - Outfit Recommendations
+// ============================================================================
+
+router.get("/:id/complete-style", completeStyle);
+router.get("/:id/style-profile", getStyleProfile);
+router.post("/complete-style", completeStyleFromBody);
 
 // ============================================================================
 // Product Image Routes

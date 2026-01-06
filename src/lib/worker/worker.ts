@@ -85,15 +85,45 @@ async function handleCleanupOldData(job: Job): Promise<{ deletedPrices: number; 
   return result;
 }
 
-async function handlePriceDropDetection(job: Job): Promise<{ dropsFound: number }> {
+async function handlePriceDropDetection(job: Job): Promise<{ dropsFound: number; inserted: number }> {
   console.log(`[Job ${job.id}] Starting price drop detection...`);
   
   await job.updateProgress(10);
-  const drops = await findPriceDrops(10, 1); // 10% threshold, last 1 day
+  
+  // Find price drops (10% threshold, comparing last 1 day to previous 7 days)
+  const drops = await findPriceDrops(10, 1);
+  
+  await job.updateProgress(50);
+  
+  // Insert new drops into price_drop_events table (avoid duplicates)
+  let inserted = 0;
+  for (const drop of drops) {
+    try {
+      // Check if this drop was already recorded recently
+      const existing = await pg.query(
+        `SELECT id FROM price_drop_events 
+         WHERE product_id = $1 
+           AND detected_at > NOW() - INTERVAL '24 hours'`,
+        [drop.product_id]
+      );
+      
+      if (existing.rowCount === 0) {
+        await pg.query(
+          `INSERT INTO price_drop_events (product_id, old_price_cents, new_price_cents, drop_percent)
+           VALUES ($1, $2, $3, $4)`,
+          [drop.product_id, drop.old_price, drop.new_price, drop.drop_percent]
+        );
+        inserted++;
+      }
+    } catch (err) {
+      console.error(`Failed to insert price drop for product ${drop.product_id}:`, err);
+    }
+  }
+  
   await job.updateProgress(100);
 
-  console.log(`[Job ${job.id}] Price drop detection complete: ${drops.length} drops found`);
-  return { dropsFound: drops.length };
+  console.log(`[Job ${job.id}] Price drop detection complete: ${drops.length} drops found, ${inserted} new events inserted`);
+  return { dropsFound: drops.length, inserted };
 }
 
 async function handleCategoryBaselineCompute(job: Job): Promise<{ computed: number; errors: string[] }> {

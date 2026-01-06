@@ -87,3 +87,6 @@ export { normalizeTitle as normalizeAttributeTitle } from "./search/attributeExt
 
 // Compare services
 export * from "./compare";
+
+// Outfit completion / Complete My Style
+export * from "./outfit";
