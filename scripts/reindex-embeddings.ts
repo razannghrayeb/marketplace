@@ -3,6 +3,7 @@ import { pg } from "../src/lib/db";
 import { osClient } from "../src/lib/opensearch";
 import { config } from "../src/config";
 import { processImageForEmbedding, computePHash } from "../src/lib/imageProcessor";
+import { extractAttributesSync } from "../src/lib/attributeExtractor";
 
 async function columnExists(columnName: string) {
   const res = await pg.query(
@@ -42,6 +43,9 @@ async function main() {
     try {
       const embedding = await processImageForEmbedding(buf);
       const ph = await computePHash(buf);
+      
+      // Extract attributes from title
+      const { attributes } = extractAttributesSync(title);
 
       // Index into OpenSearch
       const body = {
@@ -58,6 +62,17 @@ async function main() {
         image_cdn: image_url,
         p_hash: ph,
         last_seen_at: last_seen,
+        // Extracted attributes
+        attr_color: attributes.color || null,
+        attr_colors: attributes.colors || [],
+        attr_material: attributes.material || null,
+        attr_materials: attributes.materials || [],
+        attr_fit: attributes.fit || null,
+        attr_style: attributes.style || null,
+        attr_gender: attributes.gender || null,
+        attr_pattern: attributes.pattern || null,
+        attr_sleeve: attributes.sleeve || null,
+        attr_neckline: attributes.neckline || null,
       };
 
       await osClient.index({ index: config.opensearch.index, id: String(id), body, refresh: true });

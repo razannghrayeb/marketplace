@@ -2,10 +2,10 @@
  * Product Images Service
  * Handles all image business logic, storage, and retrieval
  */
-import { pg } from "../../lib/db";
-import { uploadImage, generateImageKey } from "../../lib/r2";
-import { processImageForEmbedding, computePHash, validateImage } from "../../lib/imageProcessor";
-import { osClient } from "../../lib/opensearch";
+import { pg } from "../../lib/core";
+import { uploadImage, generateImageKey } from "../../lib/image";
+import { processImageForEmbedding, computePHash, validateImage } from "../../lib/image";
+import { osClient } from "../../lib/core";
 import { config } from "../../config";
 
 // ============================================================================

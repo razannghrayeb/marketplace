@@ -1,14 +1,15 @@
 /**
  * Job Worker
  * 
- * Processes scheduled jobs from the queue
+ * Processes scheduled jobs from the queue.
  */
 import { Worker, Job } from "bullmq";
-import { config } from "../config";
-import { ScheduledJobData } from "./jobScheduler";
-import { takePriceSnapshot } from "./priceHistory";
-import { recomputeAllCanonicals } from "./canonical";
-import { pg } from "./db";
+import { config } from "../../config";
+import { ScheduledJobData } from "../scheduler";
+import { takePriceSnapshot, findPriceDrops } from "../products/priceHistory";
+import { recomputeAllCanonicals } from "../products/canonical";
+import { computeAllCategoryBaselines } from "../compare/priceAnomalyDetector";
+import { pg } from "../core";
 
 // ============================================================================
 // Redis Connection
@@ -84,6 +85,28 @@ async function handleCleanupOldData(job: Job): Promise<{ deletedPrices: number; 
   return result;
 }
 
+async function handlePriceDropDetection(job: Job): Promise<{ dropsFound: number }> {
+  console.log(`[Job ${job.id}] Starting price drop detection...`);
+  
+  await job.updateProgress(10);
+  const drops = await findPriceDrops(10, 1); // 10% threshold, last 1 day
+  await job.updateProgress(100);
+
+  console.log(`[Job ${job.id}] Price drop detection complete: ${drops.length} drops found`);
+  return { dropsFound: drops.length };
+}
+
+async function handleCategoryBaselineCompute(job: Job): Promise<{ computed: number; errors: string[] }> {
+  console.log(`[Job ${job.id}] Starting category baseline computation...`);
+  
+  await job.updateProgress(10);
+  const result = await computeAllCategoryBaselines();
+  await job.updateProgress(100);
+
+  console.log(`[Job ${job.id}] Category baseline computation complete: ${result.computed} categories`);
+  return result;
+}
+
 // ============================================================================
 // Worker Setup
 // ============================================================================
@@ -117,6 +140,12 @@ export function createWorker(): Worker {
             break;
           case "cleanup-old-data":
             result = await handleCleanupOldData(job);
+            break;
+          case "price-drop-detection":
+            result = await handlePriceDropDetection(job);
+            break;
+          case "category-baseline-compute":
+            result = await handleCategoryBaselineCompute(job);
             break;
           default:
             throw new Error(`Unknown job type: ${job.data.type}`);
@@ -174,7 +203,7 @@ export function createWorker(): Worker {
 // Standalone Worker Script
 // ============================================================================
 
-if (process.argv[1]?.endsWith("jobWorker.ts") || process.argv[1]?.endsWith("jobWorker.js")) {
+if (process.argv[1]?.endsWith("worker.ts") || process.argv[1]?.endsWith("worker.js")) {
   console.log("🚀 Starting job worker...");
   const worker = createWorker();
   

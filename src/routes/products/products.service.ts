@@ -1,8 +1,22 @@
-import { osClient } from "../../lib/opensearch";
-import { pg, getProductsByIdsOrdered } from "../../lib/db";
+import { osClient } from "../../lib/core";
+import { pg, getProductsByIdsOrdered } from "../../lib/core";
 import { config } from "../../config";
 import { getImagesForProducts, ProductImageResponse } from "./images.service";
-import { hammingDistance } from "../../lib/canonical";
+import { hammingDistance } from "../../lib/products";
+import { 
+  parseQuery, 
+  buildSemanticOpenSearchQuery, 
+  countEntityMatches,
+  calculateHybridScore,
+  ParsedQuery,
+  QueryEntities,
+} from "../../lib/search";
+import {
+  processQuery,
+  processQuerySync,
+  getQueryEmbedding,
+  ProcessedQuery,
+} from "../../lib/queryProcessor";
 
 // ============================================================================
 // Types
@@ -16,6 +30,13 @@ export interface SearchFilters {
   currency?: string;  // 'LBP' or 'USD' - defaults to LBP
   availability?: boolean;
   vendorId?: string;
+  // Attribute filters (extracted from titles)
+  color?: string;
+  material?: string;
+  fit?: string;
+  style?: string;
+  gender?: string;
+  pattern?: string;
 }
 
 export interface SearchParams {
@@ -35,6 +56,7 @@ export interface ImageSearchParams extends SearchParams {
 export interface TextSearchParams extends SearchParams {
   includeRelated?: boolean;      // Include related products (same category/brand)
   relatedLimit?: number;         // Max related products to return
+  useLLM?: boolean;              // Allow LLM for ambiguous queries (default false)
 }
 
 export interface ProductResult {
@@ -66,6 +88,9 @@ export interface SearchResultWithRelated {
     threshold?: number;
     total_results: number;
     total_related?: number;
+    parsed_query?: ParsedQuery;  // Include parsed query info for debugging/transparency
+    processed_query?: ProcessedQuery;  // Query processing info (corrections, etc.)
+    did_you_mean?: string;  // Suggestion if not auto-applied
   };
 }
 
@@ -123,6 +148,14 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
     }
     filter.push({ range: { price_usd: range } });
   }
+
+  // Attribute filters (extracted from titles)
+  if (filters.color) filter.push({ term: { attr_color: filters.color } });
+  if (filters.material) filter.push({ term: { attr_material: filters.material } });
+  if (filters.fit) filter.push({ term: { attr_fit: filters.fit } });
+  if (filters.style) filter.push({ term: { attr_style: filters.style } });
+  if (filters.gender) filter.push({ term: { attr_gender: filters.gender } });
+  if (filters.pattern) filter.push({ term: { attr_pattern: filters.pattern } });
 
   // Build final query
   let searchBody: any;
@@ -383,11 +416,16 @@ async function findSimilarByPHash(
 }
 
 // ============================================================================
-// Enhanced Text Search with Related Products
+// Enhanced Text Search with Semantic Query Understanding
 // ============================================================================
 
 /**
- * Search products by text with related products from same category/brand
+ * Search products by text with semantic query understanding
+ * - Processes query (spelling correction, arabizi, normalization)
+ * - Extracts entities (brands, categories, colors, sizes)
+ * - Expands query with synonyms
+ * - Classifies intent
+ * - Returns related products from same category/brand
  */
 export async function searchByTextWithRelated(
   params: TextSearchParams
@@ -399,34 +437,132 @@ export async function searchByTextWithRelated(
     limit = 20,
     includeRelated = true,
     relatedLimit = 10,
+    useLLM = false,
   } = params;
 
   if (!query) {
     return { results: [], meta: { total_results: 0 } };
   }
 
-  // Build filter array
-  const filter: any[] = [{ term: { is_hidden: false } }];
-  if (filters.category) filter.push({ term: { category: filters.category } });
-  if (filters.brand) filter.push({ term: { brand: filters.brand } });
-  if (filters.vendorId) filter.push({ term: { vendor_id: filters.vendorId } });
+  // Step 1: Process query (spelling, arabizi, normalization)
+  const processed = useLLM 
+    ? await processQuery(query)
+    : processQuerySync(query);
+  
+  // Use the search query (auto-corrected or original based on confidence)
+  const effectiveQuery = processed.searchQuery;
+  
+  // Merge extracted filters with explicit filters (explicit takes precedence)
+  const mergedFilters = {
+    ...filters,
+    gender: filters.gender || processed.extractedFilters.gender,
+    color: filters.color || processed.extractedFilters.color,
+    brand: filters.brand || processed.extractedFilters.brand,
+    category: filters.category || processed.extractedFilters.category,
+  };
 
-  // Main text search with multi-match
+  // Parse query with semantic understanding
+  const parsedQuery = parseQuery(effectiveQuery);
+  const { entities, expandedTerms, semanticQuery, intent } = parsedQuery;
+
+  // Build filter array - combine explicit filters with extracted entities
+  const filter: any[] = [{ term: { is_hidden: false } }];
+  
+  // Use explicit filter OR extracted entity
+  const effectiveBrand = mergedFilters.brand || (entities.brands.length === 1 ? entities.brands[0] : undefined);
+  const effectiveCategory = mergedFilters.category || (entities.categories.length === 1 ? entities.categories[0] : undefined);
+  
+  if (effectiveBrand) filter.push({ term: { brand: effectiveBrand } });
+  if (effectiveCategory) filter.push({ term: { category: effectiveCategory } });
+  if (mergedFilters.vendorId) filter.push({ term: { vendor_id: mergedFilters.vendorId } });
+  
+  // Apply extracted attribute filters
+  if (mergedFilters.gender) filter.push({ term: { attr_gender: mergedFilters.gender } });
+  if (mergedFilters.color) filter.push({ term: { attr_color: mergedFilters.color } });
+
+  // Apply price filter from explicit params or extracted entities
+  if (mergedFilters.minPriceCents !== undefined || mergedFilters.maxPriceCents !== undefined) {
+    const range: any = {};
+    const currency = mergedFilters.currency?.toUpperCase() || 'LBP';
+    const LBP_TO_USD = 89000;
+    if (currency === 'USD') {
+      if (mergedFilters.minPriceCents !== undefined) range.gte = mergedFilters.minPriceCents / 100;
+      if (mergedFilters.maxPriceCents !== undefined) range.lte = mergedFilters.maxPriceCents / 100;
+    } else {
+      if (mergedFilters.minPriceCents !== undefined) range.gte = Math.floor(mergedFilters.minPriceCents / LBP_TO_USD);
+      if (mergedFilters.maxPriceCents !== undefined) range.lte = Math.ceil(mergedFilters.maxPriceCents / LBP_TO_USD);
+    }
+    filter.push({ range: { price_usd: range } });
+  } else if (entities.priceRange) {
+    const range: any = {};
+    if (entities.priceRange.min) range.gte = entities.priceRange.min;
+    if (entities.priceRange.max) range.lte = entities.priceRange.max;
+    filter.push({ range: { price_usd: range } });
+  }
+
+  // Build semantic-aware query with expanded terms
+  const should: any[] = [
+    // Primary: semantic query (entities + cleaned query)
+    {
+      multi_match: {
+        query: semanticQuery,
+        fields: ["title^3", "brand^2", "category", "description"],
+        fuzziness: "AUTO",
+        type: "best_fields",
+        boost: 2,
+      },
+    },
+  ];
+
+  // Add expanded terms (synonyms, related words)
+  if (expandedTerms.length > 0) {
+    should.push({
+      multi_match: {
+        query: expandedTerms.join(" "),
+        fields: ["title^2", "description"],
+        fuzziness: "AUTO",
+        operator: "or",
+        boost: 0.8,
+      },
+    });
+  }
+
+  // Boost color matches in title
+  for (const color of entities.colors) {
+    should.push({
+      match: { title: { query: color, boost: 1.5 } },
+    });
+  }
+
+  // Boost style/attribute matches
+  for (const attr of entities.attributes) {
+    should.push({
+      match: { title: { query: attr, boost: 1.3 } },
+    });
+  }
+
+  // Multiple brand search (if more than one brand mentioned)
+  if (entities.brands.length > 1) {
+    should.push({
+      terms: { brand: entities.brands, boost: 2 },
+    });
+  }
+
+  // Multiple category search
+  if (entities.categories.length > 1) {
+    should.push({
+      terms: { category: entities.categories, boost: 1.5 },
+    });
+  }
+
   const searchBody = {
     size: limit,
     from: (page - 1) * limit,
     query: {
       bool: {
-        must: {
-          multi_match: {
-            query,
-            fields: ["title^3", "brand^2", "category", "description"],
-            fuzziness: "AUTO",
-            operator: "or",
-            minimum_should_match: "50%",
-          },
-        },
-        filter: filter,
+        should,
+        filter,
+        minimum_should_match: 1,
       },
     },
   };
@@ -447,25 +583,35 @@ export async function searchByTextWithRelated(
 
   // Fetch main results
   let results: ProductResult[] = [];
-  let extractedBrands: string[] = [];
-  let extractedCategories: string[] = [];
+  let extractedBrands: string[] = entities.brands;
+  let extractedCategories: string[] = entities.categories;
 
   if (productIds.length > 0) {
     const products = await getProductsByIdsOrdered(productIds);
     const numericIds = productIds.map((id: string) => parseInt(id, 10));
     const imagesByProduct = await getImagesForProducts(numericIds);
 
-    // Extract brands and categories for related search
-    extractedBrands = [...new Set(products.map((p: any) => p.brand).filter(Boolean))];
-    extractedCategories = [...new Set(products.map((p: any) => p.category).filter(Boolean))];
+    // Also extract brands/categories from results for related search
+    const resultBrands = [...new Set(products.map((p: any) => p.brand?.toLowerCase()).filter(Boolean))];
+    const resultCategories = [...new Set(products.map((p: any) => p.category?.toLowerCase()).filter(Boolean))];
+    extractedBrands = [...new Set([...extractedBrands, ...resultBrands])];
+    extractedCategories = [...new Set([...extractedCategories, ...resultCategories])];
 
     results = products.map((p: any) => {
       const images = imagesByProduct.get(parseInt(p.id, 10)) || [];
-      const score = scoreMap.get(String(p.id)) || 0;
+      const baseScore = scoreMap.get(String(p.id)) || 0;
+      
+      // Boost score based on entity matches
+      const entityMatches = countEntityMatches(
+        { brand: p.brand, category: p.category, title: p.title },
+        entities
+      );
+      const boostedScore = Math.min(1, baseScore * (1 + entityMatches * 0.1));
+      
       return {
         ...p,
-        similarity_score: score,
-        match_type: score >= 0.8 ? "exact" : "similar",
+        similarity_score: Math.round(boostedScore * 100) / 100,
+        match_type: boostedScore >= 0.8 ? "exact" : "similar",
         images: images.map((img) => ({
           id: img.id,
           url: img.cdn_url,
@@ -490,9 +636,12 @@ export async function searchByTextWithRelated(
     results,
     related: related.length > 0 ? related : undefined,
     meta: {
-      query,
+      query: effectiveQuery,
       total_results: results.length,
       total_related: related.length,
+      parsed_query: parsedQuery,
+      processed_query: processed,
+      did_you_mean: processed.suggestText,
     },
   };
 }
@@ -563,40 +712,80 @@ async function findRelatedProducts(
 }
 
 // ============================================================================
-// Original Functions (backward compatible)
+// Facets / Aggregations
 // ============================================================================
 
-/**
- * Search products by title text
- */
-export async function searchByTitle(
-  title: string,
-  filters?: SearchFilters,
-  page?: number,
-  limit?: number
-): Promise<ProductResult[]> {
-  return searchProducts({ query: title, filters, page, limit });
+export interface AttributeFacets {
+  colors: Array<{ value: string; count: number }>;
+  materials: Array<{ value: string; count: number }>;
+  fits: Array<{ value: string; count: number }>;
+  styles: Array<{ value: string; count: number }>;
+  genders: Array<{ value: string; count: number }>;
+  patterns: Array<{ value: string; count: number }>;
+  brands: Array<{ value: string; count: number }>;
+  categories: Array<{ value: string; count: number }>;
 }
 
 /**
- * Search products by image embedding (vector similarity)
+ * Get available attribute values (facets) for filtering
+ * Respects current filters to show relevant options
  */
-export async function searchByImage(
-  embedding: number[],
-  filters?: SearchFilters,
-  page?: number,
-  limit?: number
-): Promise<ProductResult[]> {
-  return searchProducts({ imageEmbedding: embedding, filters, page, limit });
+export async function getAttributeFacets(filters: SearchFilters = {}): Promise<AttributeFacets> {
+  // Build filter array based on current filters
+  const filter: any[] = [{ term: { is_hidden: false } }];
+  
+  if (filters.category) filter.push({ term: { category: filters.category } });
+  if (filters.brand) filter.push({ term: { brand: filters.brand } });
+  if (filters.color) filter.push({ term: { attr_color: filters.color } });
+  if (filters.material) filter.push({ term: { attr_material: filters.material } });
+  if (filters.fit) filter.push({ term: { attr_fit: filters.fit } });
+  if (filters.style) filter.push({ term: { attr_style: filters.style } });
+  if (filters.gender) filter.push({ term: { attr_gender: filters.gender } });
+  if (filters.pattern) filter.push({ term: { attr_pattern: filters.pattern } });
+
+  const searchBody = {
+    size: 0,  // No hits, just aggregations
+    query: {
+      bool: { filter },
+    },
+    aggs: {
+      colors: { terms: { field: "attr_color", size: 50, missing: "__none__" } },
+      materials: { terms: { field: "attr_material", size: 50, missing: "__none__" } },
+      fits: { terms: { field: "attr_fit", size: 30, missing: "__none__" } },
+      styles: { terms: { field: "attr_style", size: 30, missing: "__none__" } },
+      genders: { terms: { field: "attr_gender", size: 10, missing: "__none__" } },
+      patterns: { terms: { field: "attr_pattern", size: 30, missing: "__none__" } },
+      brands: { terms: { field: "brand", size: 100, missing: "__none__" } },
+      categories: { terms: { field: "category", size: 50, missing: "__none__" } },
+    },
+  };
+
+  const osResponse = await osClient.search({
+    index: config.opensearch.index,
+    body: searchBody,
+  });
+
+  const aggs = osResponse.body.aggregations;
+
+  // Transform aggregation results, filtering out __none__ bucket
+  const transformBuckets = (buckets: any[]) =>
+    buckets
+      .filter((b: any) => b.key !== "__none__")
+      .map((b: any) => ({ value: b.key, count: b.doc_count }));
+
+  return {
+    colors: transformBuckets(aggs.colors?.buckets || []),
+    materials: transformBuckets(aggs.materials?.buckets || []),
+    fits: transformBuckets(aggs.fits?.buckets || []),
+    styles: transformBuckets(aggs.styles?.buckets || []),
+    genders: transformBuckets(aggs.genders?.buckets || []),
+    patterns: transformBuckets(aggs.patterns?.buckets || []),
+    brands: transformBuckets(aggs.brands?.buckets || []),
+    categories: transformBuckets(aggs.categories?.buckets || []),
+  };
 }
 
-/**
- * Get all products with optional filters
- */
-export async function getProducts(
-  filters?: SearchFilters,
-  page?: number,
-  limit?: number
-): Promise<ProductResult[]> {
-  return searchProducts({ filters, page, limit });
-}
+// Backwards-compatible wrappers removed — use the richer functions:
+// - searchByTextWithRelated
+// - searchByImageWithSimilarity
+// - searchProducts (generic)

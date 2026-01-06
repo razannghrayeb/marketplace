@@ -1,9 +1,9 @@
 /**
  * Price History Service
  * 
- * Handles price tracking, snapshots, and history queries
+ * Handles price tracking, snapshots, and history queries.
  */
-import { pg } from "../lib/db";
+import { pg } from "../core";
 
 // ============================================================================
 // Types
@@ -210,7 +210,7 @@ export async function getPriceHistoryDaily(
 }
 
 // ============================================================================
-// Price Alerts (future feature stub)
+// Price Alerts
 // ============================================================================
 
 /**

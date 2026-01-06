@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { osClient } from "../lib/opensearch";
-import { pg } from "../lib/db";
+import { osClient } from "../lib/core";
+import { pg } from "../lib/core";
 
 
 export const healthRouter = Router();

@@ -6,7 +6,7 @@
  * - Title similarity (Levenshtein distance)
  * - Brand + Category matching
  */
-import { pg } from "../lib/db";
+import { pg } from "../core";
 
 // ============================================================================
 // Types
@@ -253,7 +253,7 @@ export async function processProductCanonical(productId: number): Promise<{
 }> {
   // Get product data
   const productResult = await pg.query(
-    `SELECT id, title, brand, category, p_hash, image_cdn, price_cents 
+    `SELECT id, title, brand, category, p_hash, image_cdn, price_cents, canonical_id
      FROM products WHERE id = $1`,
     [productId]
   );

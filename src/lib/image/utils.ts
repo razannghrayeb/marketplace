@@ -1,3 +1,8 @@
+/**
+ * Image Utilities
+ * 
+ * Low-level image manipulation: loading, normalization, pHash computation.
+ */
 import sharp from "sharp";
 
 export interface ImageData {
@@ -7,10 +12,12 @@ export interface ImageData {
   channels: number;
 }
 
+/**
+ * Load image buffer into raw pixel data
+ */
 export async function loadImage(buffer: Buffer): Promise<ImageData> {
   const img = sharp(buffer);
   const { data, info } = await img.raw().ensureAlpha().toBuffer({ resolveWithObject: true });
-  // ensureAlpha gives channels possibly 4; we trim alpha if present
   const channels = info.channels;
   return { data: Buffer.from(data), width: info.width, height: info.height, channels };
 }
@@ -44,7 +51,6 @@ export function normalizeImage(
     }
   }
 
-  // If original had alpha channel, leave alpha out
   return out;
 }
 
@@ -55,7 +61,7 @@ export function normalizeImage(
 export async function pHash(buffer: Buffer): Promise<string> {
   // Resize to 32x32 grayscale
   const resized = await sharp(buffer).resize(32, 32, { fit: "fill" }).greyscale().raw().toBuffer({ resolveWithObject: true });
-  const { data, info } = resized;
+  const { data } = resized;
   const pixels: number[] = Array.from(data).map((v) => v & 0xff);
 
   const N = 32;

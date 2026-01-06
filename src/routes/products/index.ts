@@ -10,7 +10,7 @@
  */
 import { Router } from "express";
 import multer from "multer";
-import { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory } from "./products.controller";
+import { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory, getProductFacets } from "./products.controller";
 import { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
 
 const router = Router();
@@ -33,6 +33,7 @@ const upload = multer({
 // ============================================================================
 
 router.get("/", listProducts);
+router.get("/facets", getProductFacets);
 router.get("/search", searchProductsByTitle);
 router.post("/search/image", upload.single("image"), searchProductsByImage);
 

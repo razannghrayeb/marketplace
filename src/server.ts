@@ -2,11 +2,12 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import { config } from "./config";
-import { healthRouter } from "./routes/health";
-import { searchRouter } from "./routes/search";
+import { healthRouter } from "./routes/health/index";
+import { searchRouter } from "./routes/search/index";
 import productsRouter from "./routes/products";
 import adminRouter from "./routes/admin";
-import { ensureIndex } from "./lib/opensearch";
+import compareRouter from "./routes/compare/index";
+import { ensureIndex } from "./lib/core";
 import {
   errorHandler,
   notFoundHandler,
@@ -37,6 +38,7 @@ app.use("/health", healthRouter);
 app.use("/search", searchRouter);
 app.use("/products", productsRouter);
 app.use("/admin", adminRouter);
+app.use("/api/compare", compareRouter);
 
 app.get("/", (_req, res) => res.json({ ok: true }));
 

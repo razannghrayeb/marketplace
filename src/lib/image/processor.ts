@@ -1,6 +1,11 @@
+/**
+ * Image Processor
+ * 
+ * High-level image processing: CLIP embeddings, validation, pHash.
+ */
 import sharp from "sharp";
 import { getImageEmbedding, preprocessImage, isClipAvailable, initClip } from "./clip";
-import { loadImage, normalizeImage, pHash } from "./imageUtils";
+import { loadImage, normalizeImage, pHash } from "./utils";
 
 /**
  * Process an uploaded image and generate CLIP embedding

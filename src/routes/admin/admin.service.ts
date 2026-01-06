@@ -3,9 +3,9 @@
  * 
  * Business logic for admin operations: product moderation, canonical management
  */
-import { pg } from "../../lib/db";
-import { mergeCanonicals, getCanonicalWithProducts, findSimilarByPHash } from "../../lib/canonical";
-import { triggerJob, getScheduleInfo, getQueueMetrics } from "../../lib/jobScheduler";
+import { pg } from "../../lib/core";
+import { mergeCanonicals, getCanonicalWithProducts, findSimilarByPHash } from "../../lib/products";
+import { triggerJob, getScheduleInfo, getQueueMetrics } from "../../lib/scheduler";
 
 // ============================================================================
 // Types

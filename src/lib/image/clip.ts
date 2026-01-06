@@ -1,3 +1,8 @@
+/**
+ * CLIP Model Service
+ * 
+ * CLIP (Contrastive Language-Image Pre-training) model for image embeddings.
+ */
 import * as ort from "onnxruntime-node";
 import * as fs from "fs";
 import * as path from "path";
@@ -156,7 +161,6 @@ export async function getTextEmbedding(text: string): Promise<number[]> {
   }
 
   // Simple tokenization (real CLIP uses BPE tokenizer)
-  // For production, use a proper tokenizer
   const tokens = simpleTokenize(text);
   const inputTensor = new ort.Tensor("int32", new Int32Array(tokens), [1, tokens.length]);
 
@@ -172,13 +176,10 @@ export async function getTextEmbedding(text: string): Promise<number[]> {
  * In production, use proper CLIP BPE tokenizer
  */
 function simpleTokenize(text: string): number[] {
-  // Placeholder - returns dummy tokens
-  // Real implementation needs CLIP's BPE vocabulary
   const maxLen = 77;
   const tokens = new Array(maxLen).fill(0);
   tokens[0] = 49406; // <start>
   
-  // Simple char-to-token (not accurate, just placeholder)
   const chars = text.toLowerCase().slice(0, maxLen - 2).split("");
   for (let i = 0; i < chars.length; i++) {
     tokens[i + 1] = chars[i].charCodeAt(0);

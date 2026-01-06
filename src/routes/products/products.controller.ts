@@ -3,16 +3,14 @@
  * Thin HTTP layer - delegates all business logic to service
  */
 import { Request, Response } from "express";
-import { 
-  searchByTitle, 
-  searchByImage, 
-  getProducts, 
+import {
+  searchProducts,
   SearchFilters,
   searchByImageWithSimilarity,
   searchByTextWithRelated,
 } from "./products.service";
-import { processImageForEmbedding, validateImage, computePHash } from "../../lib/imageProcessor";
-import { isClipAvailable } from "../../lib/clip";
+import { processImageForEmbedding, validateImage, computePHash } from "../../lib/image";
+import { isClipAvailable } from "../../lib/image";
 
 // ============================================================================
 // Request Helpers
@@ -30,6 +28,14 @@ function parseFilters(query: any): SearchFilters {
   if (query.availability !== undefined) {
     filters.availability = query.availability === "true" || query.availability === "1";
   }
+  
+  // Attribute filters (extracted from titles)
+  if (query.color) filters.color = String(query.color).toLowerCase();
+  if (query.material) filters.material = String(query.material).toLowerCase();
+  if (query.fit) filters.fit = String(query.fit).toLowerCase();
+  if (query.style) filters.style = String(query.style).toLowerCase();
+  if (query.gender) filters.gender = String(query.gender).toLowerCase();
+  if (query.pattern) filters.pattern = String(query.pattern).toLowerCase();
 
   return filters;
 }
@@ -53,7 +59,7 @@ export async function listProducts(req: Request, res: Response) {
     const filters = parseFilters(req.query);
     const { page, limit } = parsePagination(req.query);
 
-    const products = await getProducts(filters, page, limit);
+    const products = await searchProducts({ filters, page, limit });
 
     res.json({ success: true, data: products, pagination: { page, limit } });
   } catch (error) {
@@ -194,7 +200,7 @@ export async function getProductPriceHistory(req: Request, res: Response) {
     const format = req.query.format as string || "raw";
 
     // Dynamic import to avoid circular deps
-    const { getPriceHistory, getPriceHistoryDaily, getPriceStats } = await import("../../lib/priceHistory");
+    const { getPriceHistory, getPriceHistoryDaily, getPriceStats } = await import("../../lib/products");
 
     let history: any;
     let stats: any;
@@ -211,5 +217,21 @@ export async function getProductPriceHistory(req: Request, res: Response) {
   } catch (error) {
     console.error("Error fetching price history:", error);
     res.status(500).json({ success: false, error: "Failed to fetch price history" });
+  }
+}
+
+/**
+ * GET /products/facets
+ * Get available attribute values for filtering (facets)
+ */
+export async function getProductFacets(req: Request, res: Response) {
+  try {
+    const { getAttributeFacets } = await import("./products.service");
+    const filters = parseFilters(req.query);
+    const facets = await getAttributeFacets(filters);
+    res.json({ success: true, data: facets });
+  } catch (error) {
+    console.error("Error fetching facets:", error);
+    res.status(500).json({ success: false, error: "Failed to fetch facets" });
   }
 }

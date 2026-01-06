@@ -3,8 +3,8 @@
  * 
  * Manages recurring jobs: nightly crawl, price snapshots, canonical recompute
  */
-import { Queue, Worker, Job } from "bullmq";
-import { config } from "../config";
+import { Queue, Job } from "bullmq";
+import { config } from "../../config";
 
 // ============================================================================
 // Queue Configuration
@@ -41,7 +41,9 @@ export type JobType =
   | "nightly-crawl"
   | "price-snapshot"
   | "canonical-recompute"
-  | "cleanup-old-data";
+  | "cleanup-old-data"
+  | "price-drop-detection"
+  | "category-baseline-compute";
 
 export interface ScheduledJobData {
   type: JobType;
@@ -73,6 +75,16 @@ export async function setupSchedules(): Promise<void> {
     }
   );
 
+  // Price drop detection: Every 6 hours
+  await scheduledJobsQueue.add(
+    "price-drop-detection",
+    { type: "price-drop-detection" } as ScheduledJobData,
+    {
+      repeat: { pattern: "0 */6 * * *" }, // Every 6 hours
+      jobId: "price-drop-detection-recurring",
+    }
+  );
+
   // Canonical recompute: Every night at 2 AM
   await scheduledJobsQueue.add(
     "canonical-recompute",
@@ -90,6 +102,16 @@ export async function setupSchedules(): Promise<void> {
     {
       repeat: { pattern: "0 3 * * 0" }, // Sunday 3 AM
       jobId: "cleanup-old-data-recurring",
+    }
+  );
+
+  // Category baseline computation: Weekly on Monday at 4 AM
+  await scheduledJobsQueue.add(
+    "category-baseline-compute",
+    { type: "category-baseline-compute" } as ScheduledJobData,
+    {
+      repeat: { pattern: "0 4 * * 1" }, // Monday 4 AM
+      jobId: "category-baseline-compute-recurring",
     }
   );
 
