@@ -382,3 +382,145 @@ export async function getDashboardStats(): Promise<{
     priceRecordsToday: parseInt(row.price_records_today),
   };
 }
+
+// ============================================================================
+// Recommendation Labeling
+// ============================================================================
+
+// Re-export from recommendations library for admin use
+export {
+  getRecommendationsForLabeling,
+  saveLabel,
+  saveLabelsBatch,
+  getLabeledData,
+  getLabelStats,
+  getImpressionStats,
+  type LabelData,
+  type RecommendationWithLabel,
+} from "../../lib/recommendations";
+
+/**
+ * Get base product with similar recommendations for labeling
+ * Uses getCandidateScoresForProducts if no existing impressions
+ */
+export async function getProductWithRecommendations(
+  baseProductId: number,
+  limit: number = 20
+): Promise<{
+  baseProduct: any;
+  recommendations: any[];
+  source: "impressions" | "generated";
+}> {
+  // First check if we have existing impressions for this product
+  const existingRes = await pg.query(
+    `SELECT COUNT(*) as count FROM recommendation_impressions WHERE base_product_id = $1`,
+    [baseProductId]
+  );
+  
+  const hasExistingImpressions = parseInt(existingRes.rows[0].count) > 0;
+  
+  // Fetch base product
+  const baseRes = await pg.query(`
+    SELECT id, title, brand, category, price_cents, currency,
+           COALESCE(image_cdn, image_url) as image
+    FROM products WHERE id = $1
+  `, [baseProductId]);
+  
+  if (baseRes.rows.length === 0) {
+    throw new Error(`Product ${baseProductId} not found`);
+  }
+  
+  const baseProduct = baseRes.rows[0];
+  
+  if (hasExistingImpressions) {
+    // Use existing impressions with their labels
+    const { getRecommendationsForLabeling } = await import("../../lib/recommendations");
+    const recommendations = await getRecommendationsForLabeling(baseProductId, limit);
+    
+    return {
+      baseProduct,
+      recommendations,
+      source: "impressions",
+    };
+  } else {
+    // Generate new recommendations using candidate generator
+    const { getCandidateScoresForProducts } = await import("../products/products.service");
+    const { logImpressionBatch } = await import("../../lib/recommendations");
+    
+    const result = await getCandidateScoresForProducts({
+      baseProductId: String(baseProductId),
+      limit,
+      clipLimit: 100,
+      textLimit: 100,
+    });
+    
+    // Log these as impressions for future use
+    if (result.candidates.length > 0) {
+      const impressions = result.candidates.map((c, idx) => ({
+        baseProductId,
+        candidateProductId: parseInt(c.candidateId),
+        position: idx + 1,
+        candidateScore: c.clipSim * 0.6 + c.textSim * 0.4,
+        clipSim: c.clipSim,
+        textSim: c.textSim,
+        opensearchScore: c.opensearchScore,
+        pHashDist: c.pHashDist,
+        categoryPair: `${baseProduct.category || "unknown"}->${c.product.category || "unknown"}`,
+        priceRatio: c.product.price_cents / (baseProduct.price_cents || 1),
+        sameBrand: c.product.brand?.toLowerCase() === baseProduct.brand?.toLowerCase(),
+        matchReasons: [],
+        source: c.source as "clip" | "text" | "both",
+        context: "admin_label_generated",
+      }));
+      
+      await logImpressionBatch({ baseProductId, impressions, context: "admin_label_generated" });
+    }
+    
+    // Format for response
+    const recommendations = result.candidates.map((c, idx) => ({
+      impressionId: null,  // Will be set after refresh
+      requestId: null,
+      baseProductId,
+      candidateProductId: parseInt(c.candidateId),
+      position: idx + 1,
+      candidateScore: c.clipSim * 0.6 + c.textSim * 0.4,
+      clipSim: c.clipSim,
+      textSim: c.textSim,
+      opensearchScore: c.opensearchScore,
+      pHashDist: c.pHashDist,
+      styleScore: null,
+      colorScore: null,
+      finalMatchScore: null,
+      categoryPair: `${baseProduct.category || "unknown"}->${c.product.category || "unknown"}`,
+      priceRatio: c.product.price_cents / (baseProduct.price_cents || 1),
+      matchReasons: [],
+      source: c.source,
+      context: "admin_label_generated",
+      createdAt: new Date(),
+      baseProduct: {
+        id: baseProduct.id,
+        title: baseProduct.title,
+        brand: baseProduct.brand,
+        category: baseProduct.category,
+        priceCents: baseProduct.price_cents,
+        image: baseProduct.image,
+      },
+      candidateProduct: {
+        id: c.product.id,
+        title: c.product.title,
+        brand: c.product.brand,
+        category: c.product.category,
+        priceCents: c.product.price_cents,
+        image: c.product.image_cdn || c.product.image_url,
+      },
+      label: null,
+    }));
+    
+    return {
+      baseProduct,
+      recommendations,
+      source: "generated",
+    };
+  }
+}
+

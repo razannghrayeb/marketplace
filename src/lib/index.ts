@@ -90,3 +90,6 @@ export * from "./compare";
 
 // Outfit completion / Complete My Style
 export * from "./outfit";
+
+// Recommendation system training data
+export * from "./recommendations";

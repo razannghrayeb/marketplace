@@ -14,6 +14,10 @@ import {
   type ProductCategory,
 } from "../../lib/outfit";
 import { pg } from "../../lib/core";
+import {
+  logImpressionBatch,
+  type RecommendationImpression,
+} from "../../lib/recommendations";
 
 // ============================================================================
 // Types
@@ -109,7 +113,14 @@ export async function getOutfitRecommendations(
     return null;
   }
 
-  return formatOutfitCompletion(result);
+  const response = formatOutfitCompletion(result);
+
+  // Log impressions for training data (async, non-blocking)
+  logOutfitImpressions(productId, result).catch((err) =>
+    console.error("[OutfitService] Failed to log impressions:", err)
+  );
+
+  return response;
 }
 
 /**
@@ -250,5 +261,86 @@ function getPriorityLabel(priority: number): string {
     case 1: return "Essential";
     case 2: return "Recommended";
     default: return "Optional";
+  }
+}
+
+// ============================================================================
+// Impression Logging
+// ============================================================================
+
+/**
+ * Log outfit recommendations as impressions for training data
+ * Maps outfit completion results to the impression format
+ */
+async function logOutfitImpressions(
+  baseProductId: number,
+  result: OutfitCompletion
+): Promise<void> {
+  const impressions: RecommendationImpression[] = [];
+  let globalPosition = 0;
+
+  const basePriceCents = result.sourceProduct.price_cents || 1;
+  const baseCategory = result.detectedCategory;
+
+  for (const recommendation of result.recommendations) {
+    for (const product of recommendation.products) {
+      globalPosition++;
+
+      // Calculate price ratio
+      const priceRatio = product.price_cents / basePriceCents;
+
+      // Build category pair string
+      const candidateCategory = recommendation.category.split(" / ")[0]?.toLowerCase() || "unknown";
+      const categoryPair = `${baseCategory}->${candidateCategory}`;
+
+      // Extract style/color scores from match reasons
+      const matchReasons = product.matchReasons || [];
+      const hasColorMatch = matchReasons.some((r) => r.toLowerCase().includes("color"));
+      const hasStyleMatch = matchReasons.some(
+        (r) => r.toLowerCase().includes("formality") || r.toLowerCase().includes("occasion")
+      );
+
+      // Normalize matchScore to 0-1 (assuming max ~100)
+      const normalizedMatchScore = Math.min(1, product.matchScore / 100);
+
+      impressions.push({
+        baseProductId,
+        candidateProductId: product.id,
+        position: globalPosition,
+        
+        // Core scores - outfit engine doesn't have CLIP/text scores directly
+        candidateScore: normalizedMatchScore,
+        clipSim: undefined,  // Not available from outfit engine
+        textSim: undefined,
+        opensearchScore: undefined,
+        pHashDist: undefined,
+        
+        // Style matching scores
+        styleScore: hasStyleMatch ? normalizedMatchScore * 0.7 : normalizedMatchScore * 0.3,
+        colorScore: hasColorMatch ? 0.8 : 0.2,
+        finalMatchScore: product.matchScore,
+        
+        // Context features
+        categoryPair,
+        priceRatio,
+        sameBrand: product.brand?.toLowerCase() === result.sourceProduct.brand?.toLowerCase(),
+        sameVendor: false,  // Not tracked in outfit completion
+        
+        // Match reasons
+        matchReasons,
+        
+        // Source
+        source: "outfit",
+        context: "complete_outfit",
+      });
+    }
+  }
+
+  if (impressions.length > 0) {
+    await logImpressionBatch({
+      baseProductId,
+      impressions,
+      context: "complete_outfit",
+    });
   }
 }

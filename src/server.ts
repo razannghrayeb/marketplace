@@ -7,6 +7,7 @@ import { searchRouter } from "./routes/search/index";
 import productsRouter from "./routes/products";
 import adminRouter from "./routes/admin";
 import compareRouter from "./routes/compare/index";
+import imageAnalysisRouter from "./routes/products/image-analysis.controller";
 import { ensureIndex } from "./lib/core";
 import {
   errorHandler,
@@ -39,7 +40,8 @@ app.use("/search", searchRouter);
 app.use("/products", productsRouter);
 app.use("/admin", adminRouter);
 app.use("/api/compare", compareRouter);
-
+app.use("/api/images", imageAnalysisRouter);  // Unified image analysis API
+app.use('/products/price-drops', productsRouter);
 app.get("/", (_req, res) => res.json({ ok: true }));
 
 // Error handling (must be last)

@@ -1,0 +1,51 @@
+# YOLOv8 Fashion Detection Service Dockerfile
+# Optimized for inference with CPU (use NVIDIA base image for GPU)
+
+FROM python:3.10-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security
+RUN useradd -m -u 1000 yolo && chown -R yolo:yolo /app
+
+# Copy requirements first for layer caching
+COPY requirements-yolo.txt requirements.txt
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY yolov8_api.py .
+
+# Create models directory and set permissions
+RUN mkdir -p /app/models && chown -R yolo:yolo /app/models
+
+# Switch to non-root user
+USER yolo
+
+# Download YOLOv8n model (smallest, fastest) on first run
+# The model will be cached in /app/models
+ENV YOLO_MODEL_PATH=/app/models/yolov8n.pt
+ENV PYTHONUNBUFFERED=1
+
+# Expose port
+EXPOSE 8001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8001/health || exit 1
+
+# Run the server
+CMD ["uvicorn", "yolov8_api:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]
