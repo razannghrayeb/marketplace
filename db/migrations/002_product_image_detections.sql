@@ -1,10 +1,14 @@
 -- Migration: Product Image Detections
 -- Purpose: Persist YOLO detection results per uploaded product image
 
+
+-- Note: We avoid adding strict foreign key constraints here so the migration
+-- can run on fresh databases where `product_images` / `products` may not yet exist.
 CREATE TABLE IF NOT EXISTS product_image_detections (
     id SERIAL PRIMARY KEY,
-    product_image_id INTEGER REFERENCES product_images(id) ON DELETE CASCADE,
-    product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+    -- Integer references kept as plain integers to avoid migration ordering issues
+    product_image_id INTEGER,
+    product_id INTEGER,
     label TEXT NOT NULL,
     raw_label TEXT,
     confidence DECIMAL(5,4),
