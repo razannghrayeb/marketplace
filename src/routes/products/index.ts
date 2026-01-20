@@ -87,3 +87,13 @@ router.put("/:id/images/:imageId/primary", setAsPrimary);
 router.delete("/:id/images/:imageId", removeImage);
 
 export default router;
+
+// Re-export services for other modules
+export * from "./products.service";
+export * from "./images.service";
+export * from "./outfit.service";
+export * from "./recommendations.service";
+export * from "./canonical.service";
+export * from "./priceHistory.service";
+export * from "./completestyle.service";
+export * from "./recommendations-logger.service";

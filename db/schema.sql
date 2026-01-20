@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS product_images (
     product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     r2_key TEXT NOT NULL UNIQUE,
     cdn_url TEXT NOT NULL,
+    -- embedding using pgvector when available
     embedding vector(512),
     p_hash TEXT,
     is_primary BOOLEAN DEFAULT FALSE,
@@ -123,5 +124,84 @@ CREATE TABLE IF NOT EXISTS price_drop_events (
     drop_percent DECIMAL(5, 2) NOT NULL,
     detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS users (
+    id BIGSERIAL PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_login TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS  users_closet (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    image_url TEXT[],
+    image_cdn TEXT,
+
+    UNIQUE(user_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS outfits (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    closet_id INTEGER NOT NULL REFERENCES users_closet(id) ON DELETE CASCADE,
+    outfit_name TEXT,
+    product_ids BIGINT[],
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Cart items: products users have added to their cart
+CREATE TABLE IF NOT EXISTS cart_items (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    quantity INTEGER NOT NULL DEFAULT 1,
+    added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(user_id, product_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cart_items_user_id ON cart_items(user_id);
+
+-- Favorites / wishlists
+CREATE TABLE IF NOT EXISTS favorites (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(user_id, product_id)
+);
+CREATE INDEX IF NOT EXISTS idx_favorites_user_id ON favorites(user_id);
+
+-- User uploaded images for products (user's closet uploads)
+CREATE TABLE IF NOT EXISTS user_uploaded_images (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    product_id BIGINT REFERENCES products(id) ON DELETE SET NULL,
+    image_url TEXT,
+    image_cdn TEXT,
+    r2_key TEXT UNIQUE,
+    p_hash TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_user_uploaded_images_user_id ON user_uploaded_images(user_id);
+
+-- Unified user-saved-items: references either a product or an uploaded image
+CREATE TABLE IF NOT EXISTS user_saved_items (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    product_id BIGINT REFERENCES products(id) ON DELETE CASCADE,
+    uploaded_image_id INTEGER REFERENCES user_uploaded_images(id) ON DELETE CASCADE,
+    source TEXT NOT NULL CHECK (source IN ('cart', 'uploaded', 'favorite', 'manual')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- exactly one of product_id or uploaded_image_id must be set
+    CHECK (
+        (product_id IS NOT NULL AND uploaded_image_id IS NULL) OR
+        (product_id IS NULL AND uploaded_image_id IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_user_saved_items_user_id ON user_saved_items(user_id);
+
 CREATE INDEX IF NOT EXISTS idx_price_drop_events_product_id ON price_drop_events(product_id);
 CREATE INDEX IF NOT EXISTS idx_price_drop_events_detected_at ON price_drop_events(detected_at DESC)

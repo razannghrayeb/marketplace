@@ -118,12 +118,3 @@ def predict(request: PredictionRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Prediction failed: {str(e)}")
 
-
-@app.post("/reload")
-def reload_model():
-    """Reload model from disk (useful after retraining)."""
-    try:
-        load_model()
-        return {"ok": True, "message": "Model reloaded", "n_features": len(feature_names)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to reload: {str(e)}")

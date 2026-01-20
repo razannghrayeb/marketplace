@@ -12,6 +12,28 @@ The Fashion Aggregator API is a complex system with multiple components:
 - Python FastAPI service for ML predictions
 - Cloudflare R2 for image storage
 
+## Code Organization
+
+The codebase follows a modular architecture with services co-located in routes:
+
+```
+src/
+  routes/
+    <module>/
+      <module>.routes.ts       # Route definitions
+      <module>.controller.ts   # HTTP handlers
+      <module>.service.ts      # Business logic (DB, search, queues)
+      index.ts                 # Module exports
+  lib/
+    core/                     # Database & search clients
+    image/                    # CLIP embeddings, image processing
+    ranker/                   # ML pipeline utilities
+    metrics/                  # Prometheus instrumentation
+    # Some lib/* folders re-export from routes/* for compatibility
+```
+
+Each route module is self-contained with its service logic. See `docs/architecture.md` for details.
+
 ## Prerequisites
 
 ### Development Environment

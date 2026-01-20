@@ -7,6 +7,16 @@ This document provides detailed information about all API endpoints available in
 http://localhost:4000
 ```
 
+## Code Organization
+
+The codebase follows a modular route structure. Each API module lives under `src/routes/<module>/` and is split into:
+
+- `*.routes.ts` — route definitions only (mounting, middleware)
+- `*.controller.ts` — HTTP handlers (request/response logic)
+- `*.service.ts` — business logic (DB, search, orchestration)
+
+Keeping services alongside routes makes modules self-contained. See `docs/architecture.md` for developer guidance and examples.
+
 ## Authentication
 Currently, the API does not require authentication for most endpoints. Admin endpoints may require authentication in production.
 
@@ -36,6 +46,163 @@ Error responses:
   }
 }
 ```
+
+## Features Overview
+
+The Fashion Aggregator API provides a comprehensive suite of features for fashion e-commerce, powered by machine learning and computer vision. Here's what you can build with this platform:
+
+### 🖼️ **Visual Fashion Intelligence**
+- **Image Upload & Processing**: Upload fashion images for automatic attribute extraction
+- **Fashion Attribute Detection**: AI-powered recognition of categories, colors, patterns, and materials
+- **Visual Similarity Search**: Find similar fashion items using CLIP embeddings
+- **Smart Categorization**: Automatic classification of fashion items into 100+ categories
+
+### 🔍 **Advanced Search & Discovery**
+- **Semantic Text Search**: Search using natural language ("red summer dress", "casual sneakers")
+- **Visual Search**: Upload an image to find similar products
+- **Hybrid Search**: Combine text and visual queries for precise results
+- **Personalized Recommendations**: ML-powered outfit suggestions and product recommendations
+
+### 👔 **Wardrobe Management**
+- **Personal Wardrobe**: Upload and organize your fashion collection
+- **Style Analysis**: Get insights about your fashion preferences
+- **Outfit Suggestions**: AI-generated outfit combinations from your wardrobe
+- **Gap Detection**: Identify missing wardrobe essentials
+
+### 🎯 **Active Learning System**
+- **Human-in-the-Loop**: AI flags uncertain predictions for human review
+- **Labeling Interface**: Web UI for efficient manual categorization
+- **Continuous Improvement**: Models learn from human corrections
+- **Quality Assurance**: Maintain high accuracy through active learning
+
+### 📊 **Analytics & Insights**
+- **Fashion Trends**: Analyze popular categories, colors, and patterns
+- **Price Intelligence**: Track price changes and find deals
+- **Market Analysis**: Understand fashion market dynamics
+- **Personalization Metrics**: Measure recommendation effectiveness
+
+### 🔧 **Developer Features**
+- **RESTful API**: Clean, consistent API design
+- **Real-time Processing**: Asynchronous image processing with job tracking
+- **Scalable Architecture**: Built for high-volume fashion marketplaces
+- **Extensible ML Pipeline**: Easy to add new models and features
+
+### 🏗️ **Technical Architecture**
+- **ONNX Models**: Fast inference with FashionCLIP for embeddings
+- **OpenSearch**: High-performance vector similarity search
+- **PostgreSQL**: Robust data storage with advanced queries
+- **Redis Queue**: Asynchronous job processing
+- **Cloudflare R2**: Global CDN for image storage
+
+## Technical Deep Dive
+
+### 🤖 **Machine Learning Pipeline**
+
+#### FashionCLIP Integration
+- **Dual Encoder Architecture**: Separate text and image encoders sharing 512-dim embedding space
+- **CLIP Tokenizer**: HuggingFace transformers for proper text tokenization (77-token max length)
+- **Image Preprocessing**: Center crop, resize to 224×224, ImageNet normalization
+- **Cosine Similarity**: Measures semantic alignment between text and images
+
+#### Attribute Extraction Models
+- **Multi-Head Classification**: Separate heads for category, pattern, material, color prediction
+- **ONNX Runtime**: Optimized inference with CPU threading and graph optimization
+- **Confidence Thresholding**: Active learning triggers below 70% confidence scores
+- **Batch Processing**: Efficient GPU/CPU utilization for multiple images
+
+#### Ranking & Recommendations
+- **XGBoost Classifier**: Trained on user interaction data for personalization
+- **Feature Engineering**: Price ratios, category compatibility, visual similarity scores
+- **A/B Testing Framework**: Compare ranking algorithms and measure engagement
+- **Real-time Inference**: Sub-100ms response times for recommendation serving
+
+### 🔍 **Search & Retrieval Systems**
+
+#### OpenSearch Integration
+- **Vector Fields**: 512-dimensional float arrays for CLIP embeddings
+- **Hybrid Scoring**: Combines BM25 text search with cosine similarity
+- **Index Optimization**: Custom analyzers for fashion-specific terminology
+- **Real-time Updates**: Streaming ingestion for new products and price changes
+
+#### Semantic Search Processing
+- **Query Expansion**: Synonym expansion ("sneakers" → "athletic shoes", "runners")
+- **Entity Recognition**: Extract brands, categories, colors, sizes from natural language
+- **Intent Classification**: Distinguish product search from style advice queries
+- **Query Rewriting**: LLM-powered query enhancement for better results
+
+#### Visual Search Pipeline
+- **Perceptual Hashing**: dHash/pHash for duplicate detection and fast similarity
+- **CLIP Embeddings**: Semantic visual understanding beyond pixel matching
+- **Multi-Modal Retrieval**: Combine visual and textual features for hybrid search
+- **Similarity Thresholding**: Configurable thresholds (0.7-0.9) for result quality
+
+### 📊 **Data Processing & Analytics**
+
+#### Price Intelligence
+- **Time Series Analysis**: Track price volatility and trends over time
+- **Anomaly Detection**: Statistical methods to identify unusual price movements
+- **Market Positioning**: Compare prices against category averages and competitors
+- **Discount Detection**: Automated identification of sales and promotions
+
+#### Quality Analysis
+- **NLP Text Analysis**: Sentiment analysis, readability scores, information completeness
+- **Image Quality Metrics**: Resolution, composition, uniqueness scoring
+- **Policy Analysis**: Automated parsing of return policies and shipping terms
+- **Trust Scoring**: Aggregate quality signals into overall product trustworthiness
+
+### ⚡ **Performance & Scalability**
+
+#### Asynchronous Processing
+- **Redis Queue**: Bull.js for job queuing with retry logic and dead letter queues
+- **Worker Pools**: Configurable concurrency for CPU-intensive ML tasks
+- **Progress Tracking**: Real-time job status updates for long-running operations
+- **Error Handling**: Circuit breakers and exponential backoff for external services
+
+#### Caching Strategy
+- **Multi-Level Caching**: Redis for hot data, application-level for computed results
+- **Cache Invalidation**: Event-driven cache clearing on data updates
+- **Cache Warming**: Pre-populate frequently accessed data on startup
+- **TTL Management**: Intelligent cache expiration based on data volatility
+
+#### Database Optimization
+- **Connection Pooling**: PgBouncer for efficient PostgreSQL connection management
+- **Query Optimization**: Strategic indexing on search-heavy columns
+- **Partitioning**: Time-based partitioning for large tables (price_history, search_logs)
+- **Read Replicas**: Separate read/write workloads for analytics queries
+
+### 🔒 **Security & Reliability**
+
+#### Input Validation
+- **File Upload Security**: Type validation, size limits, malware scanning
+- **Rate Limiting**: Token bucket algorithm with Redis backing
+- **SQL Injection Prevention**: Parameterized queries with type checking
+- **XSS Protection**: Input sanitization and output encoding
+
+#### Monitoring & Observability
+- **Structured Logging**: JSON logs with correlation IDs for request tracing
+- **Metrics Collection**: Prometheus metrics for latency, error rates, throughput
+- **Health Checks**: Comprehensive endpoint monitoring for all services
+- **Alerting**: Automated alerts for service degradation and anomalies
+
+#### Data Integrity
+- **Transactional Operations**: ACID compliance for multi-table updates
+- **Referential Integrity**: Foreign key constraints and cascade operations
+- **Backup Strategy**: Automated daily backups with point-in-time recovery
+- **Data Validation**: Schema validation and business rule enforcement
+
+### 🚀 **Deployment & DevOps**
+
+#### Container Orchestration
+- **Docker Images**: Multi-stage builds for optimized production images
+- **Kubernetes Manifests**: Declarative deployment with rolling updates
+- **Service Mesh**: Istio for traffic management and observability
+- **Config Management**: Environment-based configuration with validation
+
+#### CI/CD Pipeline
+- **Automated Testing**: Unit, integration, and E2E test suites
+- **Code Quality**: ESLint, Prettier, and TypeScript strict mode
+- **Security Scanning**: Dependency vulnerability checks and SAST
+- **Performance Testing**: Load testing with k6 and synthetic monitoring
 
 ---
 

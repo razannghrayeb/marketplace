@@ -262,9 +262,13 @@ pnpm add-image-cdn-col     # Add CDN column to products
 #### Route Handlers (`src/routes/`)
 
 Each route module follows the pattern:
-- `*.controller.ts`: HTTP request handlers
-- `*.service.ts`: Business logic
-- `index.ts`: Route definitions
+- `*.routes.ts`: Route definitions only (mounting + middleware)
+- `*.controller.ts`: HTTP request handlers (request/response, validation)
+- `*.service.ts`: Business logic (database calls, orchestration)
+
+Note: In this repository services are kept alongside their routes under `src/routes/<module>/` to make each module self-contained. For convenience and backward compatibility some `src/lib/*` entrypoints re-export service functions from the corresponding `src/routes/*` modules.
+
+See `docs/architecture.md` for developer guidelines on adding new routes, controllers, and services.
 
 ### Testing & Quality
 

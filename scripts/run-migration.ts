@@ -7,7 +7,10 @@ import { config } from '../src/config';
 async function run() {
   let pool: Pool | null = null;
   try {
-    const filePath = path.resolve(process.cwd(), 'db', 'migrations', '002_product_image_detections.sql');
+    // Get migration file from CLI arg or default to latest
+    const migrationArg = process.argv[2];
+    const migrationFile = migrationArg || '003_digital_twin_phase0.sql';
+    const filePath = path.resolve(process.cwd(), 'db', 'migrations', migrationFile);
     const sql = await fs.readFile(filePath, 'utf8');
 
     // Determine target DB connection info

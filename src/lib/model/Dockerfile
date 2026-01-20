@@ -30,7 +30,7 @@ RUN mkdir -p models
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
 # Copy model files if they exist (optional - can mount at runtime)
-COPY models/ ./models/ 2>/dev/null || true
+COPY models/ ./models/ 2>/dev/null || quit 0
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash appuser
