@@ -10,18 +10,12 @@
  * - search/    - Semantic search and attribute extraction
  * - compare/   - Product comparison features
  */
-
-// Core - Database & OpenSearch
-export * from "./core";
-
-// Image processing
-export * from "./image";
-
-// Job scheduling
-export * from "./scheduler";
-
-// Job worker
-export * from "./worker";
+export * from "./core/index.js";
+export * from "./image/index.js";
+export * from "./scheduler/index.js";
+export * from "./worker/index.js";
+export * from "./compare/index.js";
+export * from "./outfit/index.js";
 
 // Product services (import specific exports to avoid conflicts)
 export {
@@ -50,7 +44,7 @@ export {
   findPriceDrops,
   type PriceRecord,
   type PriceStats,
-} from "./products";
+} from "./products/index.js";
 
 // Search services (rename normalizeTitle to avoid conflict)
 export {
@@ -80,9 +74,10 @@ export {
   type ExtractedAttributes,
   type ExtractionResult,
   type ExtractionOptions,
-} from "./search";
+} from "./search/index.js";
 
 // Search normalizeTitle as alias
+export { normalizeTitle as normalizeAttributeTitle } from "./search/attributeExtractor.js";
 export { normalizeTitle as normalizeAttributeTitle } from "./search/attributeExtractor";
 
 // Compare services

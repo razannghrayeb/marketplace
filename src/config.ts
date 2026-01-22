@@ -1,16 +1,35 @@
+
+
 export const config = {
   port: Number(process.env.PORT || 4000),
   corsOrigin: process.env.CORS_ORIGIN || "*",
-  postgres: {
-    host: process.env.PG_HOST || "localhost",
-    port: Number(process.env.PG_PORT || 5432),
-    user: process.env.PG_USER || "postgres",
-    password: process.env.PG_PASSWORD || "postgres",
-    database: process.env.PG_DATABASE || "fashion",
+  // used for local data just for testing 
+  // postgres: {
+  //   host: process.env.PG_HOST || "localhost",
+  //   port: Number(process.env.PG_PORT || 4444),//note 5432
+  //   user: process.env.PG_USER || "postgres",
+  //   password: process.env.PG_PASSWORD || "postgres",
+  //   database: process.env.PG_DATABASE || "fashion",
+  // },
+
+  // Supabase
+    supabase: {
+    url: process.env.SUPABASE_URL!,
+    anonKey: process.env.SUPABASE_ANON_KEY || "",
+    serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    storageBucket: process.env.SUPABASE_STORAGE_BUCKET || "product-images",
   },
+  // Supabase Postgres
+  database: {
+    url: process.env.DATABASE_URL!,
+    
+  },
+
   opensearch: {
     node: process.env.OS_NODE || "http://localhost:9200",
     index: process.env.OS_INDEX || "products",
+    username: process.env.OS_USERNAME || "",
+    password: process.env.OS_PASSWORD || "",
   },
   redis: {
     url: process.env.REDIS_URL || "redis://localhost:6379",
