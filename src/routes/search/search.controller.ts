@@ -5,7 +5,7 @@
  */
 
 import { Router, Request, Response } from "express";
-import { textSearch, imageSearch } from "./search.service";
+import { textSearch, imageSearch } from "./search.service.js";
 
 const router = Router();
 

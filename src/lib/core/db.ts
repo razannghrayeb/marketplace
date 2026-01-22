@@ -4,9 +4,23 @@
  * PostgreSQL connection pool using pg library.
  */
 import { Pool } from "pg";
-import { config } from "../../config";
+import { config } from "../../config.js";
 
-export const pg = new Pool(config.postgres);
+// export const pg = new Pool(config.postgres);
+
+// // Handle pool errors
+// pg.on("error", (err) => {
+//   console.error("Unexpected database pool error:", err);
+// });
+
+//supabase
+export const pg = new Pool({
+  connectionString: config.database.url,
+  ssl: {
+    rejectUnauthorized: false,
+  },
+});
+
 
 // Handle pool errors
 pg.on("error", (err) => {
@@ -25,6 +39,7 @@ export async function testConnection(): Promise<boolean> {
     return false;
   }
 }
+
 
 /**
  * Close database pool
