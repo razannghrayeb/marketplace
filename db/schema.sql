@@ -5,9 +5,13 @@ CREATE TABLE IF NOT EXISTS vendors (
     ship_to_lebanon BOOLEAN NOT NULL DEFAULT TRUE
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vendors_url
+ON vendors(url);
+-- Products
 CREATE TABLE IF NOT EXISTS products(
     id BIGSERIAL PRIMARY KEY,
     vendor_id BIGINT NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+    product_url TEXT NOT NULL,
     title TEXT NOT NULL,
     brand TEXT,
     category TEXT,
@@ -25,17 +29,29 @@ CREATE TABLE IF NOT EXISTS products(
     primary_image_id INTEGER,
     p_hash TEXT,
     return_policy TEXT
-);
-CREATE INDEX idx_products_vendor_id ON products(vendor_id);
-CREATE INDEX idx_products_title ON products USING gin(to_tsvector('english', title));
-CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_products_vendor_id
+    ON products(vendor_id);
+
+    CREATE INDEX IF NOT EXISTS idx_products_title
+    ON products USING gin(to_tsvector('english', title));
+
+    CREATE INDEX IF NOT EXISTS idx_products_category
+    ON products(category);
+
+    --needed for scraping upserts
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_products_vendor_product_url
+    ON products(vendor_id, product_url);
+
 
 -- Product Images (for R2 storage, CLIP embeddings, pHash)
 CREATE TABLE IF NOT EXISTS product_images (
     id SERIAL PRIMARY KEY,
-    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     r2_key TEXT NOT NULL UNIQUE,
     cdn_url TEXT NOT NULL,
+    embedding TEXT,
     -- embedding using pgvector when available
     embedding vector(512),
     p_hash TEXT,
@@ -52,7 +68,7 @@ ALTER TABLE products ADD CONSTRAINT fk_products_primary_image
 -- Price History (for anomaly detection)
 CREATE TABLE IF NOT EXISTS price_history (
     id SERIAL PRIMARY KEY,
-    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     price_cents BIGINT NOT NULL,
     sales_price_cents BIGINT,
     currency TEXT NOT NULL,
@@ -82,7 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_category_baselines_category ON category_price_bas
 -- Product Quality Scores (cached compare analysis)
 CREATE TABLE IF NOT EXISTS product_quality_scores (
     id SERIAL PRIMARY KEY,
-    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE UNIQUE,
+    product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE UNIQUE,
     quality_score INTEGER NOT NULL CHECK (quality_score >= 0 AND quality_score <= 100),
     quality_level TEXT NOT NULL CHECK (quality_level IN ('green', 'yellow', 'red')),
     confidence_score INTEGER NOT NULL CHECK (confidence_score >= 0 AND confidence_score <= 100),
@@ -102,7 +118,7 @@ CREATE TABLE IF NOT EXISTS product_quality_scores (
 -- Product Price Analysis (cached compare analysis)
 CREATE TABLE IF NOT EXISTS product_price_analysis (
     id SERIAL PRIMARY KEY,
-    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE UNIQUE,
+    product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE UNIQUE,
     current_price_usd DECIMAL(10, 2) NOT NULL,
     volatility_30d DECIMAL(5, 2),
     volatility_level TEXT CHECK (volatility_level IN ('stable', 'moderate', 'high')),
@@ -118,7 +134,7 @@ CREATE TABLE IF NOT EXISTS product_price_analysis (
 
 CREATE TABLE IF NOT EXISTS price_drop_events (
     id SERIAL PRIMARY KEY,
-    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     old_price_cents BIGINT NOT NULL,
     new_price_cents BIGINT NOT NULL,
     drop_percent DECIMAL(5, 2) NOT NULL,

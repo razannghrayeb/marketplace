@@ -1,6 +1,13 @@
 import express from "express";
+import { config } from "./config.js";
 import cors from "cors";
 import helmet from "helmet";
+import { healthRouter } from "./routes/health/index.js";
+import { searchRouter } from "./routes/search/index.js";
+import productsRouter from "./routes/products/index.js";
+import adminRouter from "./routes/admin/index.js";
+import compareRouter from "./routes/compare/index.js";
+import { ensureIndex } from "./lib/core/index.js";
 import path from "path";
 import { config } from "./config";
 import { healthRouter } from "./routes/health/index";
@@ -19,17 +26,25 @@ import {
   notFoundHandler,
   requestLogger,
   rateLimit,
-} from "./middleware";
+} from "./middleware/index.js";
 import { metricsMiddleware } from "./middleware/metrics";
 
 
 export async function createServer() {
-try {
-  await ensureIndex();
-} catch (err) {
-  console.error("Warning: Could not ensure OpenSearch index:", err);
-}
-const app = express();
+// try {
+//   await ensureIndex();
+// } catch (err) {
+//   console.error("Warning: Could not ensure OpenSearch index:", err);
+// }process.env.NODE_ENV = "test";
+process.env.NODE_ENV = "test";
+
+if (process.env.NODE_ENV !== "test") {
+    try {
+      await ensureIndex();
+    } catch (err) {
+      console.error("Warning: Could not ensure OpenSearch index:", err);
+    }
+}const app = express();
 
 // Security & parsing
 app.use(helmet());
