@@ -10,8 +10,13 @@
  * - outfit.controller.ts → HTTP handlers for outfit completion (complementary items)
  * - recommendations.controller.ts → HTTP handlers for similar products (ML ranked)
  */
+import "dotenv/config";
+
 import { Router } from "express";
 import multer from "multer";
+import { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory, getProductFacets, getPriceDrops } from "./products.controller.js";
+import { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller.js";
+import { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller.js";
 import { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory, getProductFacets, getPriceDrops, getSimilarProducts } from "./products.controller";
 import { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
 import { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller";
@@ -87,6 +92,9 @@ router.put("/:id/images/:imageId/primary", setAsPrimary);
 router.delete("/:id/images/:imageId", removeImage);
 
 export default router;
+export { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory, getProductFacets, getPriceDrops } from "./products.controller.js";
+export { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller.js";
+export { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller.js";
 
 // Re-export services for other modules
 export * from "./products.service";
