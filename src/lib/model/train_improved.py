@@ -19,6 +19,10 @@ from tqdm import tqdm
 from PIL import Image
 
 from config import TrainingConfig, CATEGORY_NAMES
+from pathlib import Path
+
+# Base directory for resolving relative paths
+_BASE_DIR = Path(__file__).parent.resolve()
 
 
 class MultiLabelFashionDataset(Dataset):
@@ -35,8 +39,13 @@ class MultiLabelFashionDataset(Dataset):
             for row in reader:
                 # Expected CSV format:
                 # path, category_id, color_ids, pattern_id, material_id, season_ids, occasion_ids
+                # Resolve relative paths to absolute
+                img_path = row['path']
+                if not os.path.isabs(img_path):
+                    img_path = str(_BASE_DIR / img_path)
+                
                 self.rows.append({
-                    'path': row['path'],
+                    'path': img_path,
                     'category_id': int(row['category_id']) - 1,  # 1-indexed to 0-indexed
                     'color_ids': [int(x) for x in row.get('color_ids', '0').split(',') if x],
                     'pattern_id': int(row.get('pattern_id', 0)),

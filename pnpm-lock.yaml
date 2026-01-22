@@ -14,6 +14,9 @@ importers:
       '@aws-sdk/s3-request-presigner':
         specifier: ^3.962.0
         version: 3.962.0
+      '@google/generative-ai':
+        specifier: ^0.24.1
+        version: 0.24.1
       '@opensearch-project/opensearch':
         specifier: ^2.12.0
         version: 2.13.0
@@ -456,6 +459,10 @@ packages:
   '@eslint/js@8.57.1':
     resolution: {integrity: sha512-d9zaMRSTIKDLhctzH12MtXvJKSSUhaHcjV+2Z+GK+EEY7XKpP5yR4x+N3TAcHTcu963nIr+TMcCb4DBCYX1z6Q==}
     engines: {node: ^12.22.0 || ^14.17.0 || >=16.0.0}
+
+  '@google/generative-ai@0.24.1':
+    resolution: {integrity: sha512-MqO+MLfM6kjxcKoy0p1wRzG3b4ZZXtPI+z2IE26UogS2Cm/XHO+7gGRBh6gcJsOiIVoH93UwKvW4HdgiOZCy9Q==}
+    engines: {node: '>=18.0.0'}
 
   '@huggingface/jinja@0.2.2':
     resolution: {integrity: sha512-/KPde26khDUIPkTGU82jdtTW9UAuvUTumCAbFs/7giR0SxsvZC4hru51PBvpijH6BVkHcROcvZM/lpy5h1jRRA==}
@@ -2928,6 +2935,8 @@ snapshots:
       - supports-color
 
   '@eslint/js@8.57.1': {}
+
+  '@google/generative-ai@0.24.1': {}
 
   '@huggingface/jinja@0.2.2': {}
 

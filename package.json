@@ -19,6 +19,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.962.0",
     "@aws-sdk/s3-request-presigner": "^3.962.0",
+    "@google/generative-ai": "^0.24.1",
     "@opensearch-project/opensearch": "^2.12.0",
     "@types/ioredis": "^5.0.0",
     "@types/multer": "^2.0.0",
