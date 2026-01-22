@@ -4,10 +4,16 @@
  * Manages OpenSearch connection and index configuration.
  */
 import { Client } from "@opensearch-project/opensearch";
-import { config } from "../../config";
+import { config } from "../../config.js";
+console.log("OS config:", config.opensearch.node, config.opensearch.username, config.opensearch.password?.length);
 
 export const osClient = new Client({
   node: config.opensearch.node,
+    auth: {
+    username: config.opensearch.username,
+    password: config.opensearch.password,
+  },
+  ssl: { rejectUnauthorized: false },
 });
 
 // CLIP ViT-B/32 embedding dimension

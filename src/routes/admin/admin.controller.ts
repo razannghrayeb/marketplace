@@ -4,7 +4,7 @@
  * HTTP handlers for admin operations
  */
 import { Request, Response, NextFunction } from "express";
-import * as adminService from "./admin.service";
+import * as adminService from "./admin.service.js";
 
 // ============================================================================
 // Product Moderation

@@ -22,7 +22,7 @@ export {
   findSimilarByPHash,
   type CanonicalProduct,
   type CanonicalMatch,
-} from "./canonical";
+} from "./canonical.js";
 
 // Price history
 export {
@@ -35,4 +35,4 @@ export {
   findPriceDrops,
   type PriceRecord,
   type PriceStats,
-} from "./priceHistory";
+} from "./priceHistory.js";

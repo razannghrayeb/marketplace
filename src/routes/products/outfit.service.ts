@@ -12,8 +12,8 @@ import {
   type OutfitCompletion,
   type StyleProfile,
   type ProductCategory,
-} from "../../lib/outfit";
-import { pg } from "../../lib/core";
+} from "../../lib/outfit/index.js";
+import { pg } from "../../lib/core/index.js";
 
 // ============================================================================
 // Types

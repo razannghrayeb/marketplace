@@ -11,7 +11,7 @@ import {
   deleteProductImage,
   productExists,
   toImageResponse,
-} from "./images.service";
+} from "./images.service.js";
 
 // ============================================================================
 // Request Helpers

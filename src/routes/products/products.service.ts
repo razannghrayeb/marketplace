@@ -1,5 +1,5 @@
-import { osClient } from "../../lib/core";
-import { pg, getProductsByIdsOrdered } from "../../lib/core";
+import { osClient } from "../../lib/core/index.js";
+import { pg, getProductsByIdsOrdered } from "../../lib/core/index.js";
 import { config } from "../../config";
 import { getImagesForProducts, ProductImageResponse } from "./images.service";
 import { hammingDistance } from "../../lib/products";

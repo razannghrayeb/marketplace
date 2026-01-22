@@ -8,9 +8,9 @@ import {
   SearchFilters,
   searchByImageWithSimilarity,
   searchByTextWithRelated,
-} from "./products.service";
-import { processImageForEmbedding, validateImage, computePHash } from "../../lib/image";
-import { isClipAvailable } from "../../lib/image";
+} from "./products.service.js";
+import { processImageForEmbedding, validateImage, computePHash } from "../../lib/image/index.js";
+import { isClipAvailable } from "../../lib/image/index.js";
 
 // ============================================================================
 // Request Helpers
@@ -200,7 +200,7 @@ export async function getProductPriceHistory(req: Request, res: Response) {
     const format = req.query.format as string || "raw";
 
     // Dynamic import to avoid circular deps
-    const { getPriceHistory, getPriceHistoryDaily, getPriceStats } = await import("../../lib/products");
+    const { getPriceHistory, getPriceHistoryDaily, getPriceStats } = await import("../../lib/products/index.js");
 
     let history: any;
     let stats: any;
@@ -226,7 +226,7 @@ export async function getProductPriceHistory(req: Request, res: Response) {
  */
 export async function getProductFacets(req: Request, res: Response) {
   try {
-    const { getAttributeFacets } = await import("./products.service");
+    const { getAttributeFacets } = await import("./products.service.js");
     const filters = parseFilters(req.query);
     const facets = await getAttributeFacets(filters);
     res.json({ success: true, data: facets });
@@ -242,7 +242,7 @@ export async function getProductFacets(req: Request, res: Response) {
  */
 export async function getPriceDrops(req: Request, res: Response) {
   try {
-    const { dropPriceProducts } = await import("./products.service");
+    const { dropPriceProducts } = await import("./products.service.js");
     const drops = await dropPriceProducts();
     res.json({ success: true, data: drops });
   } catch (error) {

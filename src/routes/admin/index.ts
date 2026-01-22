@@ -4,7 +4,7 @@
  * Routes for admin operations: moderation, canonicals, jobs
  */
 import { Router } from "express";
-import * as adminController from "./admin.controller";
+import * as adminController from "./admin.controller.js";
 
 const router = Router();
 
@@ -47,3 +47,4 @@ router.get("/jobs/history", adminController.getJobHistory);
 router.get("/stats", adminController.getDashboardStats);
 
 export default router;
+export * from "./admin.controller.js";
