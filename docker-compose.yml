@@ -1,4 +1,38 @@
 services:
+  # ==========================================================================
+  # API Server
+  # ==========================================================================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/fashion
+      - REDIS_URL=redis://redis:6379
+      - OPENSEARCH_URL=http://opensearch-node:9200
+      - RANKER_API_URL=http://ranker:8000
+      - YOLO_API_URL=http://yolov8:8001
+      - ONNX_API_URL=http://onnx-inference:8002
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      opensearch-node:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ==========================================================================
+  # OpenSearch
+  # ==========================================================================
   opensearch-node:
     image: opensearchproject/opensearch:latest
     environment:
@@ -25,7 +59,7 @@ services:
       - opensearch-node
 
   postgres:
-    image: postgres:16
+    image: ankane/pgvector:latest
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -34,15 +68,95 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
     command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================================
+  # ONNX Inference Service (FashionCLIP + Attributes)
+  # ==========================================================================
+  onnx-inference:
+    build:
+      context: ./src/lib/model
+      dockerfile: Dockerfile.onnx
+    ports:
+      - "8002:8000"
+    environment:
+      - MODEL_DIR=/models
+      - ONNX_NUM_THREADS=4
+    volumes:
+      - ./models:/models:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  ranker:
+    build:
+      context: ./src/lib/model
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - RANKER_MODEL_PATH=/app/models/xgb_ranker_model.json
+      - RANKER_META_PATH=/app/models/ranker_model_metadata.json
+    volumes:
+      - ranker_models:/app/models
+      - ./models:/app/models:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    command: ["python", "-m", "uvicorn", "ranker_api:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  yolov8:
+    build:
+      context: ./src/lib/model
+      dockerfile: Dockerfile.yolo
+    ports:
+      - "8001:8001"
+    environment:
+      - YOLO_MODEL_PATH=/app/models/yolov8n.pt
+      - YOLO_FASHION_MODEL_PATH=/app/models/yolov8-fashion.pt
+      - YOLO_CONFIDENCE_THRESHOLD=0.25
+      - YOLO_IOU_THRESHOLD=0.45
+      - YOLO_MAX_DETECTIONS=30
+    volumes:
+      - yolo_models:/app/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
 
 volumes:
   pgdata:
     driver: local
-  db:
+  ranker_models:
+    driver: local
+  yolo_models:
+    driver: local
+  onnx_models:
     driver: local

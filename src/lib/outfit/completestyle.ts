@@ -295,7 +295,7 @@ export function getColorHarmonies(color: string): ColorHarmony[] {
 // Style & Occasion Rules
 // ============================================================================
 
-const CATEGORY_STYLE_MAP: Record<ProductCategory, Partial<StyleProfile>> = {
+export const CATEGORY_STYLE_MAP: Record<ProductCategory, Partial<StyleProfile>> = {
   // Dresses
   dress: { occasion: "semi-formal", formality: 6 },
   gown: { occasion: "formal", aesthetic: "classic", formality: 9 },

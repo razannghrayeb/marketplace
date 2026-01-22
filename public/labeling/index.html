@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fashion Item Labeling</title>
+  <style>
+    :root {
+      --primary: #6366f1;
+      --primary-dark: #4f46e5;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --gray-100: #f3f4f6;
+      --gray-200: #e5e7eb;
+      --gray-600: #4b5563;
+      --gray-800: #1f2937;
+    }
+    
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--gray-100);
+      color: var(--gray-800);
+      min-height: 100vh;
+    }
+    
+    .header {
+      background: white;
+      padding: 1rem 2rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    
+    .header h1 { font-size: 1.25rem; }
+    
+    .stats {
+      display: flex;
+      gap: 1.5rem;
+      font-size: 0.875rem;
+    }
+    
+    .stat { display: flex; align-items: center; gap: 0.5rem; }
+    .stat-value { font-weight: 600; color: var(--primary); }
+    
+    .main {
+      max-width: 1200px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      display: grid;
+      grid-template-columns: 1fr 350px;
+      gap: 1.5rem;
+    }
+    
+    .card {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      overflow: hidden;
+    }
+    
+    .card-header {
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid var(--gray-200);
+      font-weight: 600;
+    }
+    
+    .card-body { padding: 1.5rem; }
+    
+    .image-container {
+      aspect-ratio: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--gray-100);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    
+    .image-container img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+    }
+    
+    .task-info {
+      margin-top: 1rem;
+      padding: 1rem;
+      background: var(--gray-100);
+      border-radius: 8px;
+      font-size: 0.875rem;
+    }
+    
+    .task-info p { margin-bottom: 0.5rem; }
+    .task-info strong { color: var(--gray-600); }
+    
+    .prediction {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.25rem 0.75rem;
+      background: var(--primary);
+      color: white;
+      border-radius: 20px;
+      font-size: 0.875rem;
+    }
+    
+    .confidence {
+      opacity: 0.8;
+      font-size: 0.75rem;
+    }
+    
+    .label-form { margin-top: 1rem; }
+    
+    .form-group { margin-bottom: 1rem; }
+    
+    .form-group label {
+      display: block;
+      margin-bottom: 0.5rem;
+      font-weight: 500;
+      font-size: 0.875rem;
+    }
+    
+    .form-group select,
+    .form-group input {
+      width: 100%;
+      padding: 0.75rem;
+      border: 1px solid var(--gray-200);
+      border-radius: 8px;
+      font-size: 1rem;
+    }
+    
+    .form-group select:focus,
+    .form-group input:focus {
+      outline: none;
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+    }
+    
+    .category-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.5rem;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    
+    .category-btn {
+      padding: 0.75rem;
+      border: 1px solid var(--gray-200);
+      border-radius: 8px;
+      background: white;
+      cursor: pointer;
+      text-align: left;
+      font-size: 0.875rem;
+      transition: all 0.15s;
+    }
+    
+    .category-btn:hover {
+      border-color: var(--primary);
+      background: rgba(99, 102, 241, 0.05);
+    }
+    
+    .category-btn.selected {
+      border-color: var(--primary);
+      background: var(--primary);
+      color: white;
+    }
+    
+    .btn-group {
+      display: flex;
+      gap: 0.75rem;
+      margin-top: 1.5rem;
+    }
+    
+    .btn {
+      flex: 1;
+      padding: 0.875rem 1.5rem;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    
+    .btn-primary {
+      background: var(--primary);
+      color: white;
+    }
+    
+    .btn-primary:hover { background: var(--primary-dark); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    
+    .btn-secondary {
+      background: var(--gray-200);
+      color: var(--gray-600);
+    }
+    
+    .btn-secondary:hover { background: var(--gray-200); }
+    
+    .shortcuts {
+      font-size: 0.75rem;
+      color: var(--gray-600);
+      margin-top: 1rem;
+      text-align: center;
+    }
+    
+    .shortcuts kbd {
+      padding: 0.125rem 0.375rem;
+      background: var(--gray-200);
+      border-radius: 4px;
+      font-family: monospace;
+    }
+    
+    .queue-list { list-style: none; }
+    
+    .queue-item {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 0.75rem;
+      border-bottom: 1px solid var(--gray-200);
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    
+    .queue-item:hover { background: var(--gray-100); }
+    .queue-item.active { background: rgba(99, 102, 241, 0.1); }
+    
+    .queue-item img {
+      width: 48px;
+      height: 48px;
+      object-fit: cover;
+      border-radius: 6px;
+    }
+    
+    .queue-item-info { flex: 1; }
+    .queue-item-type { font-size: 0.75rem; color: var(--gray-600); }
+    .queue-item-priority {
+      font-size: 0.75rem;
+      padding: 0.125rem 0.5rem;
+      background: var(--warning);
+      color: white;
+      border-radius: 10px;
+    }
+    
+    .empty-state {
+      text-align: center;
+      padding: 3rem;
+      color: var(--gray-600);
+    }
+    
+    .empty-state svg {
+      width: 64px;
+      height: 64px;
+      margin-bottom: 1rem;
+      opacity: 0.5;
+    }
+    
+    @media (max-width: 768px) {
+      .main { grid-template-columns: 1fr; }
+      .stats { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <h1>🏷️ Fashion Labeling</h1>
+    <div class="stats">
+      <div class="stat">
+        <span>Pending:</span>
+        <span class="stat-value" id="stat-pending">-</span>
+      </div>
+      <div class="stat">
+        <span>Completed:</span>
+        <span class="stat-value" id="stat-completed">-</span>
+      </div>
+      <div class="stat">
+        <span>Your labels:</span>
+        <span class="stat-value" id="stat-yours">0</span>
+      </div>
+    </div>
+  </header>
+  
+  <main class="main">
+    <div class="card">
+      <div class="card-header">Current Task</div>
+      <div class="card-body">
+        <div id="task-content">
+          <div class="empty-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="18" height="18" rx="2"/>
+              <circle cx="8.5" cy="8.5" r="1.5"/>
+              <path d="M21 15l-5-5L5 21"/>
+            </svg>
+            <p>Loading tasks...</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="card">
+      <div class="card-header">Queue (<span id="queue-count">0</span>)</div>
+      <div class="card-body" style="padding: 0;">
+        <ul class="queue-list" id="queue-list"></ul>
+      </div>
+    </div>
+  </main>
+  
+  <script>
+    const API_BASE = '/api/labeling';
+    const LABELER_ID = localStorage.getItem('labeler_id') || prompt('Enter your labeler ID:') || '1';
+    localStorage.setItem('labeler_id', LABELER_ID);
+    
+    let currentTask = null;
+    let categories = [];
+    let selectedCategory = null;
+    let taskStartTime = null;
+    let labelsCompleted = parseInt(localStorage.getItem('labels_completed') || '0');
+    
+    document.getElementById('stat-yours').textContent = labelsCompleted;
+    
+    async function fetchAPI(endpoint, options = {}) {
+      const res = await fetch(`${API_BASE}${endpoint}`, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-labeler-id': LABELER_ID,
+          ...options.headers
+        }
+      });
+      return res.json();
+    }
+    
+    async function loadCategories() {
+      const data = await fetchAPI('/categories');
+      if (data.success) categories = data.categories;
+    }
+    
+    async function loadStats() {
+      const data = await fetchAPI('/stats');
+      if (data.success) {
+        document.getElementById('stat-pending').textContent = data.stats.pending;
+        document.getElementById('stat-completed').textContent = data.stats.completed;
+      }
+    }
+    
+    async function loadTasks() {
+      const data = await fetchAPI('/tasks?limit=20');
+      if (data.success && data.tasks.length > 0) {
+        renderQueue(data.tasks);
+        if (!currentTask) selectTask(data.tasks[0]);
+      } else {
+        document.getElementById('task-content').innerHTML = `
+          <div class="empty-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+              <polyline points="22 4 12 14.01 9 11.01"/>
+            </svg>
+            <p>No pending tasks! 🎉</p>
+          </div>
+        `;
+        document.getElementById('queue-list').innerHTML = '';
+        document.getElementById('queue-count').textContent = '0';
+      }
+    }
+    
+    function renderQueue(tasks) {
+      document.getElementById('queue-count').textContent = tasks.length;
+      document.getElementById('queue-list').innerHTML = tasks.map(task => `
+        <li class="queue-item ${currentTask?.id === task.id ? 'active' : ''}" onclick="selectTask(${JSON.stringify(task).replace(/"/g, '&quot;')})">
+          <img src="${task.image_cdn || task.image_url}" alt="">
+          <div class="queue-item-info">
+            <div>${task.task_type}</div>
+            <div class="queue-item-type">#${task.id}</div>
+          </div>
+          <span class="queue-item-priority">${task.priority}</span>
+        </li>
+      `).join('');
+    }
+    
+    function selectTask(task) {
+      currentTask = task;
+      selectedCategory = null;
+      taskStartTime = Date.now();
+      
+      document.querySelectorAll('.queue-item').forEach(el => el.classList.remove('active'));
+      
+      const confidence = task.predicted_confidence 
+        ? `${(task.predicted_confidence * 100).toFixed(0)}%` 
+        : 'N/A';
+      
+      document.getElementById('task-content').innerHTML = `
+        <div class="image-container">
+          <img src="${task.image_cdn || task.image_url}" alt="Item to label">
+        </div>
+        
+        <div class="task-info">
+          <p><strong>Task:</strong> ${task.task_type}</p>
+          <p><strong>Source:</strong> ${task.source_type} #${task.source_id}</p>
+          ${task.predicted_label ? `
+            <p><strong>AI Prediction:</strong> 
+              <span class="prediction">
+                ${task.predicted_label}
+                <span class="confidence">${confidence}</span>
+              </span>
+            </p>
+          ` : ''}
+        </div>
+        
+        <div class="label-form">
+          <div class="form-group">
+            <label>Select Category:</label>
+            <div class="category-grid" id="category-grid">
+              ${categories.map(cat => `
+                <button type="button" class="category-btn" data-id="${cat.id}" data-name="${cat.name}">
+                  ${cat.name}
+                </button>
+              `).join('')}
+            </div>
+          </div>
+          
+          <div class="btn-group">
+            <button class="btn btn-secondary" onclick="skipCurrentTask()">Skip</button>
+            <button class="btn btn-primary" id="submit-btn" onclick="submitCurrentTask()" disabled>
+              Submit Label
+            </button>
+          </div>
+          
+          <div class="shortcuts">
+            <kbd>Enter</kbd> Submit · <kbd>S</kbd> Skip · <kbd>1-9</kbd> Quick select
+          </div>
+        </div>
+      `;
+      
+      document.querySelectorAll('.category-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.category-btn').forEach(b => b.classList.remove('selected'));
+          btn.classList.add('selected');
+          selectedCategory = { id: btn.dataset.id, name: btn.dataset.name };
+          document.getElementById('submit-btn').disabled = false;
+        });
+      });
+    }
+    
+    async function submitCurrentTask() {
+      if (!currentTask || !selectedCategory) return;
+      
+      const timeSpent = Date.now() - taskStartTime;
+      
+      await fetchAPI(`/tasks/${currentTask.id}/assign`, { method: 'POST' });
+      
+      const result = await fetchAPI(`/tasks/${currentTask.id}/submit`, {
+        method: 'POST',
+        body: JSON.stringify({
+          label_value: selectedCategory.name,
+          time_spent_ms: timeSpent
+        })
+      });
+      
+      if (result.success) {
+        labelsCompleted++;
+        localStorage.setItem('labels_completed', labelsCompleted);
+        document.getElementById('stat-yours').textContent = labelsCompleted;
+        currentTask = null;
+        loadTasks();
+        loadStats();
+      }
+    }
+    
+    async function skipCurrentTask() {
+      if (!currentTask) return;
+      
+      await fetchAPI(`/tasks/${currentTask.id}/skip`, { method: 'POST' });
+      currentTask = null;
+      loadTasks();
+    }
+    
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      
+      if (e.key === 'Enter' && selectedCategory) {
+        submitCurrentTask();
+      } else if (e.key === 's' || e.key === 'S') {
+        skipCurrentTask();
+      } else if (e.key >= '1' && e.key <= '9') {
+        const idx = parseInt(e.key) - 1;
+        const btns = document.querySelectorAll('.category-btn');
+        if (btns[idx]) btns[idx].click();
+      }
+    });
+    
+    // Initialize
+    (async () => {
+      await loadCategories();
+      await loadStats();
+      await loadTasks();
+    })();
+  </script>
+</body>
+</html>

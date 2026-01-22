@@ -44,3 +44,21 @@ export {
   deleteImage,
   getCdnUrl,
 } from "./r2";
+
+// YOLOv8 Fashion Detection
+export {
+  YOLOv8Client,
+  getYOLOv8Client,
+  filterByCategory,
+  filterByConfidence,
+  getPrimaryDetection,
+  groupByCategory,
+  extractOutfitComposition,
+  type Detection,
+  type DetectionResponse,
+  type BoundingBox,
+  type StyleInfo,
+  type HealthResponse,
+  type LabelsResponse,
+  type DetectOptions,
+} from "./yolov8Client";

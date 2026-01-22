@@ -78,3 +78,13 @@ export {
 
 // Search normalizeTitle as alias
 export { normalizeTitle as normalizeAttributeTitle } from "./search/attributeExtractor.js";
+export { normalizeTitle as normalizeAttributeTitle } from "./search/attributeExtractor";
+
+// Compare services
+export * from "./compare";
+
+// Outfit completion / Complete My Style
+export * from "./outfit";
+
+// Recommendation system training data
+export * from "./recommendations";

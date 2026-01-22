@@ -1,0 +1,13 @@
+# Python dependencies for the XGBoost ranker API
+fastapi>=0.109.0
+uvicorn>=0.27.0
+xgboost>=2.0.0
+pandas>=2.0.0
+pydantic>=2.0.0
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pillow==10.4.0
+numpy==2.0.1
+ultralytics==8.3.0
+opencv-python-headless==4.10.0.84
+python-multipart==0.0.9

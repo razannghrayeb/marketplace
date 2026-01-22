@@ -287,3 +287,199 @@ export async function getDashboardStats(req: Request, res: Response, next: NextF
     next(error);
   }
 }
+
+// ============================================================================
+// Recommendation Labeling
+// ============================================================================
+
+/**
+ * GET /admin/reco/label
+ * Get base product with recommendations for labeling
+ * Query params: baseProductId (required), limit (optional, default 20)
+ */
+export async function getRecoForLabeling(req: Request, res: Response, next: NextFunction) {
+  try {
+    const baseProductId = parseInt(req.query.baseProductId as string);
+    const limit = parseInt(req.query.limit as string) || 20;
+
+    if (!baseProductId || isNaN(baseProductId)) {
+      return res.status(400).json({ 
+        error: "baseProductId query parameter is required and must be a number" 
+      });
+    }
+
+    const result = await adminService.getProductWithRecommendations(baseProductId, limit);
+    
+    res.json({
+      baseProduct: result.baseProduct,
+      recommendations: result.recommendations,
+      source: result.source,
+      count: result.recommendations.length,
+    });
+  } catch (error: any) {
+    if (error.message?.includes("not found")) {
+      return res.status(404).json({ error: error.message });
+    }
+    next(error);
+  }
+}
+
+/**
+ * POST /admin/reco/label
+ * Save a label for a recommendation pair
+ * Body: { baseProductId, candidateProductId, label, labelScore?, labelerId?, notes?, impressionId? }
+ */
+export async function saveRecoLabel(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { 
+      baseProductId, 
+      candidateProductId, 
+      label, 
+      labelScore, 
+      labelerId, 
+      notes,
+      impressionId 
+    } = req.body;
+
+    // Validate required fields
+    if (!baseProductId || !candidateProductId || !label) {
+      return res.status(400).json({ 
+        error: "baseProductId, candidateProductId, and label are required" 
+      });
+    }
+
+    // Validate label value
+    if (!["good", "ok", "bad"].includes(label)) {
+      return res.status(400).json({ 
+        error: "label must be one of: good, ok, bad" 
+      });
+    }
+
+    // Validate labelScore if provided
+    if (labelScore !== undefined && (labelScore < 0 || labelScore > 10)) {
+      return res.status(400).json({ 
+        error: "labelScore must be between 0 and 10" 
+      });
+    }
+
+    const id = await adminService.saveLabel({
+      baseProductId: parseInt(baseProductId),
+      candidateProductId: parseInt(candidateProductId),
+      label,
+      labelScore,
+      labelerId: labelerId || "admin",
+      notes,
+      impressionId: impressionId ? parseInt(impressionId) : undefined,
+    });
+
+    res.json({ 
+      success: true, 
+      labelId: id,
+      message: `Label '${label}' saved for ${baseProductId} -> ${candidateProductId}` 
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * POST /admin/reco/label/batch
+ * Save multiple labels at once
+ * Body: { labels: [{ baseProductId, candidateProductId, label, ... }] }
+ */
+export async function saveRecoLabelsBatch(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { labels } = req.body;
+
+    if (!Array.isArray(labels) || labels.length === 0) {
+      return res.status(400).json({ error: "labels array is required" });
+    }
+
+    // Validate all labels
+    for (const label of labels) {
+      if (!label.baseProductId || !label.candidateProductId || !label.label) {
+        return res.status(400).json({ 
+          error: "Each label must have baseProductId, candidateProductId, and label" 
+        });
+      }
+      if (!["good", "ok", "bad"].includes(label.label)) {
+        return res.status(400).json({ 
+          error: "label must be one of: good, ok, bad" 
+        });
+      }
+    }
+
+    const count = await adminService.saveLabelsBatch(
+      labels.map((l: any) => ({
+        baseProductId: parseInt(l.baseProductId),
+        candidateProductId: parseInt(l.candidateProductId),
+        label: l.label,
+        labelScore: l.labelScore,
+        labelerId: l.labelerId || "admin",
+        notes: l.notes,
+        impressionId: l.impressionId ? parseInt(l.impressionId) : undefined,
+      }))
+    );
+
+    res.json({ 
+      success: true, 
+      savedCount: count,
+      message: `${count} labels saved` 
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * GET /admin/reco/labels
+ * Get all labeled data for export/review
+ * Query params: baseProductId?, label?, labelerId?, limit?, offset?
+ */
+export async function getLabeledData(req: Request, res: Response, next: NextFunction) {
+  try {
+    const baseProductId = req.query.baseProductId ? parseInt(req.query.baseProductId as string) : undefined;
+    const label = req.query.label as "good" | "ok" | "bad" | undefined;
+    const labelerId = req.query.labelerId as string | undefined;
+    const limit = parseInt(req.query.limit as string) || 100;
+    const offset = parseInt(req.query.offset as string) || 0;
+
+    const data = await adminService.getLabeledData({
+      baseProductId,
+      label,
+      labelerId,
+      limit,
+      offset,
+    });
+
+    res.json({
+      labels: data,
+      count: data.length,
+      offset,
+      limit,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * GET /admin/reco/stats
+ * Get recommendation system statistics
+ */
+export async function getRecoStats(req: Request, res: Response, next: NextFunction) {
+  try {
+    const [labelStats, impressionStats] = await Promise.all([
+      adminService.getLabelStats(),
+      adminService.getImpressionStats(),
+    ]);
+
+    res.json({
+      labels: labelStats,
+      impressions: impressionStats,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+

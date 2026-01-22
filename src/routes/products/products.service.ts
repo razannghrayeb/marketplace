@@ -78,6 +78,11 @@ export interface ProductResult {
   images?: Array<{ id: number; url: string; is_primary: boolean }>;
   similarity_score?: number;     // For image search results
   match_type?: "exact" | "similar" | "related";  // How the product matched
+  clipSim?: number;        // 0..1 (cosine or normalized)
+  textSim?: number;        // 0..1 (normalized)
+  openSearchScore?: number; // raw or normalized
+  pHashDist?: number;  
+  candidateScore?: number;
 }
 
 export interface SearchResultWithRelated {
@@ -94,6 +99,49 @@ export interface SearchResultWithRelated {
   };
 }
 
+// ============================================================================
+// Unified Candidate Generator
+// ============================================================================
+
+export type CandidateSource = "clip" | "text" | "both";
+
+export interface CandidateResult {
+  candidateId: string;
+  clipSim: number;           // 0..1 normalized CLIP similarity
+  textSim: number;           // 0..1 normalized text/hybrid similarity
+  opensearchScore: number;   // raw OpenSearch score from text search
+  pHashDist?: number;        // Hamming distance (0-64), lower = more similar
+  source: CandidateSource;   // where did this candidate come from
+  // Product data
+  product: ProductResult;
+}
+
+export interface CandidateGeneratorParams {
+  baseProductId: string;
+  limit?: number;            // final number of candidates returned (default 30)
+  clipLimit?: number;        // how many to pull from CLIP kNN (default 200)
+  textLimit?: number;        // how many to pull from text search (default 200)
+  usePHashDedup?: boolean;   // use pHash to filter near-duplicates (default false)
+  pHashThreshold?: number;   // max Hamming distance to consider duplicate (default 5)
+}
+
+export interface CandidateGeneratorResult {
+  candidates: CandidateResult[];
+  meta: {
+    baseProductId: string;
+    clipCandidates: number;
+    textCandidates: number;
+    mergedTotal: number;
+    pHashFiltered: number;
+    finalCount: number;
+    timings?: {
+      clipMs: number;
+      textMs: number;
+      pHashMs: number;
+      totalMs: number;
+    };
+  };
+}
 /**
  * Search products by title text or image embedding
  * Returns array of products with images
@@ -804,7 +852,344 @@ export async function dropPriceProducts() {
   );
   return res.rows;
 }
-// Backwards-compatible wrappers removed — use the richer functions:
-// - searchByTextWithRelated
-// - searchByImageWithSimilarity
-// - searchProducts (generic)
+type RankRow = Record<string, number>;
+
+function toRankRow(rec: any, oneHotCats: Record<string, number>): RankRow {
+  return {
+    style_score: rec.styleScore ?? 0,
+    color_score: rec.colorScore ?? 0,
+    clip_sim: rec.clipSim ?? 0,
+    text_sim: rec.textSim ?? 0,
+    opensearch_score: rec.openSearchScore ?? 0,
+    candidate_score: rec.candidateScore ?? 0,
+    price_ratio: rec.priceRatio ?? 0,
+    phash_dist: rec.pHashDist ?? 0,
+    ...oneHotCats, // e.g. cat_top__shoes:1
+  };
+}
+
+
+/**
+ * Unified candidate generator for recommendation/outfit engine
+ * 
+ * Pulls candidates from multiple sources:
+ * 1. CLIP k-NN (visually similar items)
+ * 2. Text/hybrid search (same name/material/attributes)
+ * 3. Optional pHash deduplication (removes near-identical images)
+ * 
+ * Returns a consistent list with scores from each source.
+ */
+export async function getCandidateScoresForProducts(
+  params: CandidateGeneratorParams
+): Promise<CandidateGeneratorResult> {
+  const startTime = Date.now();
+  const {
+    baseProductId,
+    limit = 30,
+    clipLimit = 200,
+    textLimit = 200,
+    usePHashDedup = true,
+    pHashThreshold = 5,
+  } = params;
+
+  // Input validation
+  const numericId = parseInt(baseProductId, 10);
+  if (isNaN(numericId) || numericId <= 0) {
+    console.warn(`[CandidateGenerator] Invalid baseProductId: ${baseProductId}`);
+    return {
+      candidates: [],
+      meta: {
+        baseProductId,
+        clipCandidates: 0,
+        textCandidates: 0,
+        mergedTotal: 0,
+        pHashFiltered: 0,
+        finalCount: 0,
+      },
+    };
+  }
+
+  // Fetch base product from Postgres
+  const prodRes = await pg.query(
+    `SELECT id, title, brand, category, image_cdn, p_hash FROM products WHERE id = $1`,
+    [numericId]
+  );
+
+  if (prodRes.rowCount === 0) {
+    console.warn(`[CandidateGenerator] Base product not found: ${baseProductId}`);
+    return {
+      candidates: [],
+      meta: {
+        baseProductId,
+        clipCandidates: 0,
+        textCandidates: 0,
+        mergedTotal: 0,
+        pHashFiltered: 0,
+        finalCount: 0,
+      },
+    };
+  }
+
+  const base = prodRes.rows[0];
+  const basePHash: string | null = base.p_hash;
+
+  // Try to get embedding from OpenSearch document
+  let embedding: number[] | undefined;
+  try {
+    const osGet = await osClient.get({ index: config.opensearch.index, id: String(base.id) });
+    if (osGet?.body?._source?.embedding && Array.isArray(osGet.body._source.embedding)) {
+      embedding = osGet.body._source.embedding;
+    }
+  } catch {
+    // ignore - document may not exist
+  }
+
+  // Score maps
+  const clipScoreMap = new Map<string, number>();
+  const clipRawMap = new Map<string, number>();
+  const textScoreMap = new Map<string, number>();
+  const textRawMap = new Map<string, number>();
+
+  // Timing tracking
+  let clipMs = 0;
+  let textMs = 0;
+
+  // -------------------------------------------------------------------------
+  // Run CLIP and Text searches in parallel for performance
+  // -------------------------------------------------------------------------
+  const searchPromises: Promise<void>[] = [];
+
+  // 1) CLIP k-NN search (visually similar)
+  if (embedding && embedding.length > 0) {
+    const clipPromise = (async () => {
+      const clipStart = Date.now();
+      const fetchLimit = Math.min(clipLimit, 500);
+      const clipBody = {
+        size: fetchLimit,
+        _source: ["product_id"],
+        query: {
+          bool: {
+            must: { knn: { embedding: { vector: embedding, k: fetchLimit } } },
+            filter: [{ term: { is_hidden: false } }],
+          },
+        },
+      };
+
+      try {
+        const resp = await osClient.search({ index: config.opensearch.index, body: clipBody });
+        const hits = resp.body.hits.hits || [];
+        const maxScore = hits.length > 0 ? hits[0]._score : 1;
+
+        for (const hit of hits) {
+          const id = String(hit._source.product_id);
+          if (id === String(base.id)) continue;
+          clipRawMap.set(id, hit._score);
+          clipScoreMap.set(id, Math.round(Math.min(1, hit._score / maxScore) * 1000) / 1000);
+        }
+      } catch (err) {
+        console.warn(`[CandidateGenerator] CLIP search failed for ${baseProductId}:`, err);
+      }
+      clipMs = Date.now() - clipStart;
+    })();
+    searchPromises.push(clipPromise);
+  }
+
+  // 2) Text/hybrid search (same item/name/material)
+  if (base.title) {
+    const textPromise = (async () => {
+      const textStart = Date.now();
+      try {
+        const parsed = parseQuery(base.title);
+        const textQuery = buildSemanticOpenSearchQuery(parsed, undefined, textLimit);
+        // Add hidden filter
+        if (!textQuery.query.bool) textQuery.query = { bool: { must: textQuery.query } };
+        if (!textQuery.query.bool.filter) textQuery.query.bool.filter = [];
+        textQuery.query.bool.filter.push({ term: { is_hidden: false } });
+
+        const resp = await osClient.search({ index: config.opensearch.index, body: textQuery });
+        const hits = resp.body.hits.hits || [];
+        const maxScore = hits.length > 0 ? hits[0]._score : 1;
+
+        for (const hit of hits) {
+          const id = String(hit._source.product_id);
+          if (id === String(base.id)) continue;
+          textRawMap.set(id, hit._score);
+          textScoreMap.set(id, Math.round(Math.min(1, hit._score / maxScore) * 1000) / 1000);
+        }
+      } catch (err) {
+        console.warn(`[CandidateGenerator] Text search failed for ${baseProductId}:`, err);
+      }
+      textMs = Date.now() - textStart;
+    })();
+    searchPromises.push(textPromise);
+  }
+
+  // Wait for both searches to complete
+  await Promise.all(searchPromises);
+
+  // -------------------------------------------------------------------------
+  // 3) Merge candidate IDs and determine source
+  // -------------------------------------------------------------------------
+  const clipIds = new Set(clipScoreMap.keys());
+  const textIds = new Set(textScoreMap.keys());
+  const allIds = new Set([...clipIds, ...textIds]);
+
+  const sourceMap = new Map<string, CandidateSource>();
+  for (const id of allIds) {
+    const inClip = clipIds.has(id);
+    const inText = textIds.has(id);
+    if (inClip && inText) sourceMap.set(id, "both");
+    else if (inClip) sourceMap.set(id, "clip");
+    else sourceMap.set(id, "text");
+  }
+
+  const metaClipCount = clipIds.size;
+  const metaTextCount = textIds.size;
+  const metaMergedTotal = allIds.size;
+
+  // -------------------------------------------------------------------------
+  // 4) Rank candidates by combined score FIRST
+  // -------------------------------------------------------------------------
+  const rankedIds = Array.from(allIds)
+    .map((id) => ({
+      id,
+      score: (clipScoreMap.get(id) ?? 0) * 0.6 + (textScoreMap.get(id) ?? 0) * 0.4,
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.max(limit * 3, 150)) // Take extra buffer for pHash filtering
+    .map((x) => x.id);
+
+  // -------------------------------------------------------------------------
+  // 5) pHash deduplication on TOP candidates only
+  // -------------------------------------------------------------------------
+  const pHashStart = Date.now();
+  let pHashDistMap = new Map<string, number>();
+  let filteredIds = rankedIds;
+  let pHashFiltered = 0;
+
+  if (rankedIds.length > 0 && basePHash) {
+    // Fetch pHash for top candidates only (much smaller set)
+    const candidateNumericIds = rankedIds.map((id) => parseInt(id, 10));
+    try {
+      const pHashRes = await pg.query(
+        `SELECT id, p_hash FROM products WHERE id = ANY($1) AND p_hash IS NOT NULL`,
+        [candidateNumericIds]
+      );
+
+      for (const row of pHashRes.rows) {
+        const dist = hammingDistance(basePHash, row.p_hash);
+        pHashDistMap.set(String(row.id), dist);
+      }
+
+      // Filter out near-duplicates if enabled
+      if (usePHashDedup) {
+        const beforeCount = filteredIds.length;
+        filteredIds = filteredIds.filter((id) => {
+          const dist = pHashDistMap.get(id);
+          // Keep if no pHash or distance > threshold (not a duplicate)
+          return dist === undefined || dist > pHashThreshold;
+        });
+        pHashFiltered = beforeCount - filteredIds.length;
+      }
+    } catch (err) {
+      console.warn(`[CandidateGenerator] pHash lookup failed:`, err);
+    }
+  }
+  const pHashMs = Date.now() - pHashStart;
+
+  // -------------------------------------------------------------------------
+  // 6) Fetch product data and build results
+  // -------------------------------------------------------------------------
+  const finalIds = filteredIds.slice(0, Math.max(limit * 2, 100));
+
+  if (finalIds.length === 0) {
+    return {
+      candidates: [],
+      meta: {
+        baseProductId,
+        clipCandidates: metaClipCount,
+        textCandidates: metaTextCount,
+        mergedTotal: metaMergedTotal,
+        pHashFiltered,
+        finalCount: 0,
+      },
+    };
+  }
+
+  const products = await getProductsByIdsOrdered(finalIds);
+  const numericIds = finalIds.map((id) => parseInt(id, 10));
+  const imagesByProduct = await getImagesForProducts(numericIds);
+
+  // Build candidate results
+  const candidates: CandidateResult[] = products.map((p: any) => {
+    const id = String(p.id);
+    const images = imagesByProduct.get(parseInt(p.id, 10)) || [];
+
+    const clipSim = clipScoreMap.get(id) ?? 0;
+    const textSim = textScoreMap.get(id) ?? 0;
+    const opensearchScore = textRawMap.get(id) ?? 0;
+    const pHashDist = pHashDistMap.get(id);
+    const source = sourceMap.get(id) ?? "text";
+
+    const product: ProductResult = {
+      ...p,
+      images: images.map((img) => ({ id: img.id, url: img.cdn_url, is_primary: img.is_primary })),
+      clipSim,
+      textSim,
+      openSearchScore: opensearchScore,
+      pHashDist,
+      match_type: source === "both" ? "exact" : "similar",
+    };
+
+    return {
+      candidateId: id,
+      clipSim,
+      textSim,
+      opensearchScore,
+      pHashDist,
+      source,
+      product,
+    };
+  });
+
+  // Sort: both > clip > text, then by combined score
+  candidates.sort((a, b) => {
+    const sourceOrder = { both: 0, clip: 1, text: 2 };
+    const srcDiff = sourceOrder[a.source] - sourceOrder[b.source];
+    if (srcDiff !== 0) return srcDiff;
+    const scoreA = a.clipSim * 0.6 + a.textSim * 0.4;
+    const scoreB = b.clipSim * 0.6 + b.textSim * 0.4;
+    return scoreB - scoreA;
+  });
+
+  const finalCandidates = candidates.slice(0, limit);
+  const totalMs = Date.now() - startTime;
+
+  // Log performance metrics in non-production or if slow
+  if (process.env.NODE_ENV !== "production" || totalMs > 1000) {
+    console.log(
+      `[CandidateGenerator] baseProductId=${baseProductId} ` +
+      `clip=${metaClipCount} text=${metaTextCount} merged=${metaMergedTotal} ` +
+      `pHashFiltered=${pHashFiltered} final=${finalCandidates.length} ` +
+      `timings: clip=${clipMs}ms text=${textMs}ms pHash=${pHashMs}ms total=${totalMs}ms`
+    );
+  }
+
+  return {
+    candidates: finalCandidates,
+    meta: {
+      baseProductId,
+      clipCandidates: metaClipCount,
+      textCandidates: metaTextCount,
+      mergedTotal: metaMergedTotal,
+      pHashFiltered,
+      finalCount: finalCandidates.length,
+      timings: {
+        clipMs,
+        textMs,
+        pHashMs,
+        totalMs,
+      },
+    },
+  };
+}
