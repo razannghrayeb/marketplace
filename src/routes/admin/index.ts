@@ -46,5 +46,24 @@ router.get("/jobs/history", adminController.getJobHistory);
 
 router.get("/stats", adminController.getDashboardStats);
 
+// ============================================================================
+// Recommendation Labeling (Training Data)
+// ============================================================================
+
+// GET /admin/reco/label?baseProductId=123 - Get recommendations for labeling
+router.get("/reco/label", adminController.getRecoForLabeling);
+
+// POST /admin/reco/label - Save a single label
+router.post("/reco/label", adminController.saveRecoLabel);
+
+// POST /admin/reco/label/batch - Save multiple labels
+router.post("/reco/label/batch", adminController.saveRecoLabelsBatch);
+
+// GET /admin/reco/labels - Get all labeled data (for export)
+router.get("/reco/labels", adminController.getLabeledData);
+
+// GET /admin/reco/stats - Get labeling statistics
+router.get("/reco/stats", adminController.getRecoStats);
+
 export default router;
 export * from "./admin.controller.js";

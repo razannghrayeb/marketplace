@@ -2,46 +2,148 @@
  * CLIP Model Service
  * 
  * CLIP (Contrastive Language-Image Pre-training) model for image embeddings.
+ * 
+ * Supported models (in order of preference for fashion):
+ * 1. Fashion-CLIP (patrickjohncyh/fashion-clip) - Best for apparel details
+ * 2. ViT-L/14 - Higher accuracy, larger embeddings (768-dim)
+ * 3. ViT-B/32 - Baseline model (512-dim) - LEGACY
+ * 
+ * Set CLIP_MODEL_TYPE env var to: "fashion-clip", "vit-l-14", or "vit-b-32"
  */
 import * as ort from "onnxruntime-node";
 import * as fs from "fs";
 import * as path from "path";
 
 const MODEL_DIR = path.join(process.cwd(), "models");
-const IMAGE_MODEL_PATH = path.join(MODEL_DIR, "clip-image-vit-32.onnx");
-const TEXT_MODEL_PATH = path.join(MODEL_DIR, "clip-text-vit-32.onnx");
+
+// ============================================================================
+// Model Configuration
+// ============================================================================
+
+export type ClipModelType = "fashion-clip" | "vit-l-14" | "vit-b-32";
+
+interface ModelConfig {
+  name: string;
+  imageModelFile: string;
+  textModelFile: string;
+  imageSize: number;
+  embeddingDim: number;
+  description: string;
+}
+
+const MODEL_CONFIGS: Record<ClipModelType, ModelConfig> = {
+  "fashion-clip": {
+    name: "Fashion-CLIP (ViT-B/32 fine-tuned)",
+    imageModelFile: "fashion-clip-image.onnx",
+    textModelFile: "fashion-clip-text.onnx",
+    imageSize: 224,
+    embeddingDim: 512,
+    description: "Fine-tuned on fashion data - best for apparel details, fabric textures, styles",
+  },
+  "vit-l-14": {
+    name: "CLIP ViT-L/14",
+    imageModelFile: "clip-image-vit-l-14.onnx",
+    textModelFile: "clip-text-vit-l-14.onnx",
+    imageSize: 224,
+    embeddingDim: 768,
+    description: "Larger model with higher accuracy and 768-dim embeddings",
+  },
+  "vit-b-32": {
+    name: "CLIP ViT-B/32 (Legacy)",
+    imageModelFile: "clip-image-vit-32.onnx",
+    textModelFile: "clip-text-vit-32.onnx",
+    imageSize: 224,
+    embeddingDim: 512,
+    description: "Baseline model - faster but less accurate for subtle details",
+  },
+};
+
+// Determine which model to use (priority: env var > fashion-clip > vit-l-14 > vit-b-32)
+function getActiveModelType(): ClipModelType {
+  const envModel = process.env.CLIP_MODEL_TYPE as ClipModelType;
+  if (envModel && MODEL_CONFIGS[envModel]) {
+    return envModel;
+  }
+  
+  // Auto-detect: prefer fashion-clip > vit-l-14 > vit-b-32
+  const priority: ClipModelType[] = ["fashion-clip", "vit-l-14", "vit-b-32"];
+  for (const modelType of priority) {
+    const config = MODEL_CONFIGS[modelType];
+    const modelPath = path.join(MODEL_DIR, config.imageModelFile);
+    if (fs.existsSync(modelPath)) {
+      return modelType;
+    }
+  }
+  
+  return "vit-b-32"; // Default fallback
+}
+
+let activeModelType: ClipModelType = getActiveModelType();
+let activeConfig: ModelConfig = MODEL_CONFIGS[activeModelType];
+
+// Model paths (dynamically set based on active model)
+const getImageModelPath = () => path.join(MODEL_DIR, activeConfig.imageModelFile);
+const getTextModelPath = () => path.join(MODEL_DIR, activeConfig.textModelFile);
 
 let imageSession: ort.InferenceSession | null = null;
 let textSession: ort.InferenceSession | null = null;
 
-// CLIP ViT-B/32 constants
-const IMAGE_SIZE = 224;
-const EMBEDDING_DIM = 512;
+// Dynamic model constants
+let IMAGE_SIZE = activeConfig.imageSize;
+let EMBEDDING_DIM = activeConfig.embeddingDim;
 
-// ImageNet normalization values
+// ImageNet normalization values (same for all CLIP variants)
 const MEAN = [0.48145466, 0.4578275, 0.40821073];
 const STD = [0.26862954, 0.26130258, 0.27577711];
 
 /**
  * Initialize CLIP models
  */
-export async function initClip(): Promise<void> {
-  if (!fs.existsSync(IMAGE_MODEL_PATH)) {
+export async function initClip(modelType?: ClipModelType): Promise<void> {
+  // Allow explicit model selection
+  if (modelType && MODEL_CONFIGS[modelType]) {
+    activeModelType = modelType;
+    activeConfig = MODEL_CONFIGS[modelType];
+    IMAGE_SIZE = activeConfig.imageSize;
+    EMBEDDING_DIM = activeConfig.embeddingDim;
+  } else {
+    // Re-detect best available model
+    activeModelType = getActiveModelType();
+    activeConfig = MODEL_CONFIGS[activeModelType];
+    IMAGE_SIZE = activeConfig.imageSize;
+    EMBEDDING_DIM = activeConfig.embeddingDim;
+  }
+
+  const imageModelPath = getImageModelPath();
+  const textModelPath = getTextModelPath();
+
+  if (!fs.existsSync(imageModelPath)) {
     throw new Error(
-      `CLIP image model not found at ${IMAGE_MODEL_PATH}. Run 'npx tsx scripts/download-clip.ts' first.`
+      `CLIP image model not found at ${imageModelPath}. Run 'npx tsx scripts/download-clip.ts' first.\n` +
+      `Available models: fashion-clip, vit-l-14, vit-b-32`
     );
   }
 
-  if (!imageSession) {
-    console.log("Loading CLIP image model...");
-    imageSession = await ort.InferenceSession.create(IMAGE_MODEL_PATH);
-    console.log("CLIP image model loaded");
+  // Reset sessions if switching models
+  if (imageSession) {
+    imageSession = null;
+  }
+  if (textSession) {
+    textSession = null;
   }
 
-  if (fs.existsSync(TEXT_MODEL_PATH) && !textSession) {
-    console.log("Loading CLIP text model...");
-    textSession = await ort.InferenceSession.create(TEXT_MODEL_PATH);
-    console.log("CLIP text model loaded");
+  if (!imageSession) {
+    console.log(`Loading ${activeConfig.name} image model...`);
+    console.log(`  - Embedding dimension: ${EMBEDDING_DIM}`);
+    console.log(`  - ${activeConfig.description}`);
+    imageSession = await ort.InferenceSession.create(imageModelPath);
+    console.log(`${activeConfig.name} image model loaded`);
+  }
+
+  if (fs.existsSync(textModelPath) && !textSession) {
+    console.log(`Loading ${activeConfig.name} text model...`);
+    textSession = await ort.InferenceSession.create(textModelPath);
+    console.log(`${activeConfig.name} text model loaded`);
   }
 }
 
@@ -49,7 +151,25 @@ export async function initClip(): Promise<void> {
  * Check if CLIP models are available
  */
 export function isClipAvailable(): boolean {
-  return fs.existsSync(IMAGE_MODEL_PATH);
+  return fs.existsSync(getImageModelPath());
+}
+
+/**
+ * Get current model info
+ */
+export function getModelInfo(): { type: ClipModelType; config: ModelConfig } {
+  return { type: activeModelType, config: activeConfig };
+}
+
+/**
+ * List available models (downloaded)
+ */
+export function listAvailableModels(): Array<{ type: ClipModelType; available: boolean; config: ModelConfig }> {
+  return (Object.keys(MODEL_CONFIGS) as ClipModelType[]).map((type) => ({
+    type,
+    available: fs.existsSync(path.join(MODEL_DIR, MODEL_CONFIGS[type].imageModelFile)),
+    config: MODEL_CONFIGS[type],
+  }));
 }
 
 /**

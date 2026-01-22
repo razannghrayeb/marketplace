@@ -1,0 +1,1126 @@
+{
+  "info": {
+    "name": "Fashion Marketplace API",
+    "description": "Complete API collection for the Fashion Marketplace platform with ML-powered search, recommendations, and visual intelligence features.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "version": "1.0.0"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:4000",
+      "type": "string"
+    },
+    {
+      "key": "productId",
+      "value": "1",
+      "type": "string"
+    },
+    {
+      "key": "imageId",
+      "value": "1",
+      "type": "string"
+    },
+    {
+      "key": "jobId",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health & Status",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            },
+            "description": "Check overall service health"
+          }
+        },
+        {
+          "name": "Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/metrics",
+              "host": ["{{baseUrl}}"],
+              "path": ["metrics"]
+            },
+            "description": "Get service metrics"
+          }
+        },
+        {
+          "name": "Image Services Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/images/status",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "images", "status"]
+            },
+            "description": "Check CLIP and YOLO service availability"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Image Analysis",
+      "item": [
+        {
+          "name": "Get Supported Labels",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/images/labels",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "images", "labels"]
+            },
+            "description": "Get all supported fashion categories for detection"
+          }
+        },
+        {
+          "name": "Visual Search (Main)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "image",
+                  "type": "file",
+                  "src": []
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/images/search?limit_per_item=10&threshold=0.7&filter_category=true&confidence=0.25",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "images", "search"],
+              "query": [
+                {
+                  "key": "limit_per_item",
+                  "value": "10",
+                  "description": "Max products per detection"
+                },
+                {
+                  "key": "threshold",
+                  "value": "0.7",
+                  "description": "Similarity threshold 0-1"
+                },
+                {
+                  "key": "filter_category",
+                  "value": "true",
+                  "description": "Filter by detected category"
+                },
+                {
+                  "key": "confidence",
+                  "value": "0.25",
+                  "description": "Detection confidence"
+                },
+                {
+                  "key": "store",
+                  "value": "false",
+                  "description": "Store image in R2",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Upload image to detect fashion items and find similar products grouped by detection"
+          }
+        },
+        {
+          "name": "Visual Search from URL",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"https://example.com/outfit.jpg\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/images/search/url?limit_per_item=10&threshold=0.7",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "images", "search", "url"],
+              "query": [
+                {
+                  "key": "limit_per_item",
+                  "value": "10"
+                },
+                {
+                  "key": "threshold",
+                  "value": "0.7"
+                },
+                {
+                  "key": "category",
+                  "value": "dresses",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Find similar products from an image URL"
+          }
+        },
+        {
+          "name": "Full Image Analysis",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "image",
+                  "type": "file",
+                  "src": []
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/images/analyze?store=true&embed=true&detect=true&confidence=0.25",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "images", "analyze"],
+              "query": [
+                {
+                  "key": "store",
+                  "value": "true",
+                  "description": "Store image in R2"
+                },
+                {
+                  "key": "embed",
+                  "value": "true",
+                  "description": "Generate CLIP embedding"
+                },
+                {
+                  "key": "detect",
+                  "value": "true",
+                  "description": "Run YOLOv8 detection"
+                },
+                {
+                  "key": "confidence",
+                  "value": "0.25",
+                  "description": "Detection threshold"
+                },
+                {
+                  "key": "product_id",
+                  "value": "{{productId}}",
+                  "description": "Associate with product",
+                  "disabled": true
+                },
+                {
+                  "key": "is_primary",
+                  "value": "false",
+                  "description": "Set as primary image",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Full pipeline: store, embed, and detect"
+          }
+        },
+        {
+          "name": "Quick Detection",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "image",
+                  "type": "file",
+                  "src": []
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/images/detect?confidence=0.25",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "images", "detect"],
+              "query": [
+                {
+                  "key": "confidence",
+                  "value": "0.25",
+                  "description": "Detection threshold"
+                }
+              ]
+            },
+            "description": "Fast detection without storage or search"
+          }
+        },
+        {
+          "name": "Detection from URL",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"https://example.com/image.jpg\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/images/detect/url?confidence=0.25",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "images", "detect", "url"],
+              "query": [
+                {
+                  "key": "confidence",
+                  "value": "0.25"
+                }
+              ]
+            },
+            "description": "Quick detection from image URL"
+          }
+        },
+        {
+          "name": "Batch Detection",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "images",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "images",
+                  "type": "file",
+                  "src": []
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/images/detect/batch?confidence=0.25",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "images", "detect", "batch"],
+              "query": [
+                {
+                  "key": "confidence",
+                  "value": "0.25"
+                }
+              ]
+            },
+            "description": "Detect fashion items in multiple images (max 10)"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Background Processing",
+      "item": [
+        {
+          "name": "Queue Image Processing",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "image",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "user_id",
+                  "value": "42",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/ingest/image",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "ingest", "image"]
+            },
+            "description": "Upload image and queue for background processing"
+          }
+        },
+        {
+          "name": "Get Job Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/ingest/{{jobId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "ingest", "{{jobId}}"]
+            },
+            "description": "Check status of background processing job"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Products",
+      "item": [
+        {
+          "name": "List Products",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products?page=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["products"],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "category",
+                  "value": "dresses",
+                  "disabled": true
+                },
+                {
+                  "key": "brand",
+                  "value": "Zara",
+                  "disabled": true
+                },
+                {
+                  "key": "min_price",
+                  "value": "1000",
+                  "disabled": true
+                },
+                {
+                  "key": "max_price",
+                  "value": "50000",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "List products with optional filters"
+          }
+        },
+        {
+          "name": "Get Product Facets",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/facets",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "facets"]
+            },
+            "description": "Get available filters (categories, brands, price ranges)"
+          }
+        },
+        {
+          "name": "Search Products by Title",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/search?q=red dress&page=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "search"],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "red dress",
+                  "description": "Search query"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Search products by title/description"
+          }
+        },
+        {
+          "name": "Search by Image (Legacy)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "image",
+                  "type": "file",
+                  "src": []
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/products/search/image?threshold=0.7&includeRelated=true",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "search", "image"],
+              "query": [
+                {
+                  "key": "threshold",
+                  "value": "0.7",
+                  "description": "Similarity threshold"
+                },
+                {
+                  "key": "includeRelated",
+                  "value": "true",
+                  "description": "Include pHash similar"
+                },
+                {
+                  "key": "category",
+                  "value": "dresses",
+                  "disabled": true
+                },
+                {
+                  "key": "page",
+                  "value": "1",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Image search with comprehensive filters (legacy endpoint)"
+          }
+        },
+        {
+          "name": "Get Price History",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productId}}/price-history",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "{{productId}}", "price-history"]
+            },
+            "description": "Get price history for a product"
+          }
+        },
+        {
+          "name": "Get Price Drops",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/price-drops?days=7&min_discount=10",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "price-drops"],
+              "query": [
+                {
+                  "key": "days",
+                  "value": "7",
+                  "description": "Look back period"
+                },
+                {
+                  "key": "min_discount",
+                  "value": "10",
+                  "description": "Minimum discount %"
+                }
+              ]
+            },
+            "description": "Get recent price drops"
+          }
+        },
+        {
+          "name": "Get Similar Products",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productId}}/similar?limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "{{productId}}", "similar"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Get similar products (legacy candidate generator)"
+          }
+        },
+        {
+          "name": "Get Recommendations (ML Ranked)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productId}}/recommendations?limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "{{productId}}", "recommendations"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Get ML-ranked similar product recommendations"
+          }
+        },
+        {
+          "name": "Batch Recommendations",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_ids\": [1, 2, 3],\n  \"limit_per_product\": 10\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/products/recommendations/batch",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "recommendations", "batch"]
+            },
+            "description": "Get recommendations for multiple products at once"
+          }
+        },
+        {
+          "name": "Complete My Style",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productId}}/complete-style?maxPerCategory=5",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "{{productId}}", "complete-style"],
+              "query": [
+                {
+                  "key": "maxPerCategory",
+                  "value": "5",
+                  "description": "Max items per category"
+                },
+                {
+                  "key": "maxTotal",
+                  "value": "20",
+                  "disabled": true
+                },
+                {
+                  "key": "preferSameBrand",
+                  "value": "true",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Get outfit completion recommendations"
+          }
+        },
+        {
+          "name": "Complete Style from Body",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product\": {\n    \"title\": \"Red Summer Dress\",\n    \"brand\": \"Zara\",\n    \"category\": \"dresses\",\n    \"color\": \"red\",\n    \"price_cents\": 8900\n  },\n  \"options\": {\n    \"maxPerCategory\": 5,\n    \"maxTotal\": 20\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/products/complete-style",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "complete-style"]
+            },
+            "description": "Get outfit recommendations for a product not in database"
+          }
+        },
+        {
+          "name": "Get Style Profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productId}}/style-profile",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "{{productId}}", "style-profile"]
+            },
+            "description": "Get style attributes for a product"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Product Images",
+      "item": [
+        {
+          "name": "List Product Images",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productId}}/images",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "{{productId}}", "images"]
+            },
+            "description": "Get all images for a product"
+          }
+        },
+        {
+          "name": "Upload Image (File)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "image",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "is_primary",
+                  "value": "true",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productId}}/images",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "{{productId}}", "images"]
+            },
+            "description": "Upload image file to product (auto-generates embedding and pHash)"
+          }
+        },
+        {
+          "name": "Upload Image (URL)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"https://example.com/product.jpg\",\n  \"is_primary\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productId}}/images",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "{{productId}}", "images"]
+            },
+            "description": "Upload image from URL to product"
+          }
+        },
+        {
+          "name": "Set Primary Image",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productId}}/images/{{imageId}}/primary",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "{{productId}}", "images", "{{imageId}}", "primary"]
+            },
+            "description": "Set specific image as primary for product"
+          }
+        },
+        {
+          "name": "Delete Product Image",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productId}}/images/{{imageId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "{{productId}}", "images", "{{imageId}}"]
+            },
+            "description": "Remove image from product"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Search",
+      "item": [
+        {
+          "name": "Semantic Search",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/search?q=red summer dress&page=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["search"],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "red summer dress",
+                  "description": "Natural language query"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "category",
+                  "value": "dresses",
+                  "disabled": true
+                },
+                {
+                  "key": "brand",
+                  "value": "Zara",
+                  "disabled": true
+                },
+                {
+                  "key": "min_price",
+                  "value": "1000",
+                  "disabled": true
+                },
+                {
+                  "key": "max_price",
+                  "value": "50000",
+                  "disabled": true
+                },
+                {
+                  "key": "color",
+                  "value": "red",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Semantic search using text embeddings and hybrid ranking"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Compare",
+      "item": [
+        {
+          "name": "Compare Products",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_ids\": [1, 2]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/compare",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "compare"]
+            },
+            "description": "Compare two or more products with detailed analysis"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Wardrobe",
+      "item": [
+        {
+          "name": "Get User Wardrobe",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/wardrobe?user_id=1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "wardrobe"],
+              "query": [
+                {
+                  "key": "user_id",
+                  "value": "1"
+                },
+                {
+                  "key": "category_id",
+                  "value": "1",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Get all items in user's wardrobe"
+          }
+        },
+        {
+          "name": "Add Wardrobe Item",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "user_id",
+                  "value": "1",
+                  "type": "text"
+                },
+                {
+                  "key": "source",
+                  "value": "uploaded",
+                  "type": "text"
+                },
+                {
+                  "key": "image",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "name",
+                  "value": "Blue Denim Jacket",
+                  "type": "text"
+                },
+                {
+                  "key": "category_id",
+                  "value": "3",
+                  "type": "text"
+                },
+                {
+                  "key": "brand",
+                  "value": "Levi's",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/wardrobe",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "wardrobe"]
+            },
+            "description": "Add new item to wardrobe (generates embedding and detections)"
+          }
+        },
+        {
+          "name": "Get Wardrobe Recommendations",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/wardrobe/recommendations?user_id=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "wardrobe", "recommendations"],
+              "query": [
+                {
+                  "key": "user_id",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Get personalized recommendations based on wardrobe"
+          }
+        },
+        {
+          "name": "Get Style Profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/wardrobe/style-profile?user_id=1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "wardrobe", "style-profile"],
+              "query": [
+                {
+                  "key": "user_id",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "Get user's fashion style profile analysis"
+          }
+        },
+        {
+          "name": "Detect Wardrobe Gaps",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/wardrobe/gaps?user_id=1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "wardrobe", "gaps"],
+              "query": [
+                {
+                  "key": "user_id",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "Identify missing essentials in user's wardrobe"
+          }
+        },
+        {
+          "name": "Check Item Compatibility",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": 1,\n  \"item_ids\": [1, 2, 3]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/wardrobe/compatibility",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "wardrobe", "compatibility"]
+            },
+            "description": "Check if wardrobe items work well together"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Labeling",
+      "item": [
+        {
+          "name": "Get Labeling Jobs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/labeling/jobs?status=pending&limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "labeling", "jobs"],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "pending",
+                  "description": "Job status filter"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "Get labeling jobs for human annotation"
+          }
+        },
+        {
+          "name": "Submit Label",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"job_id\": \"job_123\",\n  \"labels\": {\n    \"category\": \"dress\",\n    \"color\": \"red\",\n    \"pattern\": \"floral\",\n    \"confidence\": 1.0\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/labeling/submit",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "labeling", "submit"]
+            },
+            "description": "Submit human labels for training data"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin",
+      "item": [
+        {
+          "name": "OpenSearch Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/opensearch",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "opensearch"]
+            },
+            "description": "Get OpenSearch cluster status"
+          }
+        },
+        {
+          "name": "Reindex Products",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/opensearch/reindex",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "opensearch", "reindex"]
+            },
+            "description": "Trigger full product reindexing in OpenSearch"
+          }
+        },
+        {
+          "name": "Ranker Service Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/ranker",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "ranker"]
+            },
+            "description": "Check ML ranker service health"
+          }
+        },
+        {
+          "name": "Background Jobs Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/jobs",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "jobs"]
+            },
+            "description": "Get background job queue status"
+          }
+        }
+      ]
+    }
+  ]
+}

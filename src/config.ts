@@ -44,4 +44,12 @@ export const config = {
     bucket: process.env.R2_BUCKET || "fashion-images",
     publicBaseUrl: process.env.R2_PUBLIC_BASE_URL || "",
   },
+  clip: {
+    // Model type: "fashion-clip" (recommended) | "vit-l-14" | "vit-b-32"
+    // Fashion-CLIP is fine-tuned for apparel and captures fabric textures, styles better
+    modelType: process.env.CLIP_MODEL_TYPE || "fashion-clip",
+    // Similarity thresholds
+    similarityThreshold: Number(process.env.CLIP_SIMILARITY_THRESHOLD || 0.7),
+    duplicateThreshold: Number(process.env.CLIP_DUPLICATE_THRESHOLD || 0.92),
+  },
 };

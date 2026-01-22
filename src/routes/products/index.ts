@@ -7,7 +7,8 @@
  * - products.controller.ts → HTTP handlers for product endpoints
  * - images.service.ts  → Image upload/storage/retrieval logic
  * - images.controller.ts → HTTP handlers for image endpoints
- * - outfit.controller.ts → HTTP handlers for outfit completion
+ * - outfit.controller.ts → HTTP handlers for outfit completion (complementary items)
+ * - recommendations.controller.ts → HTTP handlers for similar products (ML ranked)
  */
 import "dotenv/config";
 
@@ -16,6 +17,10 @@ import multer from "multer";
 import { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory, getProductFacets, getPriceDrops } from "./products.controller.js";
 import { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller.js";
 import { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller.js";
+import { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory, getProductFacets, getPriceDrops, getSimilarProducts } from "./products.controller";
+import { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
+import { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller";
+import { getRecommendations, getBatchRecommendationsHandler } from "./recommendations.controller";
 
 const router = Router();
 
@@ -48,6 +53,22 @@ router.post("/search/image", upload.single("image"), searchProductsByImage);
 router.get("/:id/price-history", getProductPriceHistory);
 
 // ============================================================================
+// Similar Products (Candidate Generator - legacy)
+// ============================================================================
+
+router.get("/:id/similar", getSimilarProducts);
+
+// ============================================================================
+// ML-Ranked Recommendations (Similar Items)
+// ============================================================================
+
+// GET /products/:id/recommendations - Similar products with ML ranking
+router.get("/:id/recommendations", getRecommendations);
+
+// POST /products/recommendations/batch - Batch recommendations for multiple products
+router.post("/recommendations/batch", getBatchRecommendationsHandler);
+
+// ============================================================================
 // Price Drop Tracking
 // ============================================================================
 
@@ -74,3 +95,13 @@ export default router;
 export { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory, getProductFacets, getPriceDrops } from "./products.controller.js";
 export { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller.js";
 export { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller.js";
+
+// Re-export services for other modules
+export * from "./products.service";
+export * from "./images.service";
+export * from "./outfit.service";
+export * from "./recommendations.service";
+export * from "./canonical.service";
+export * from "./priceHistory.service";
+export * from "./completestyle.service";
+export * from "./recommendations-logger.service";
