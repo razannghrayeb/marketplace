@@ -5,18 +5,22 @@ from dataclasses import dataclass, field
 from typing import List, Dict
 import json
 from pathlib import Path
+import os
+
+# Get the directory where this config file is located
+_BASE_DIR = Path(__file__).parent.resolve()
 
 @dataclass
 class TrainingConfig:
-    # Paths
-    data_root: str = "data/df2"
-    train_csv: str = "data/df2/train_crops.csv"
-    val_csv: str = "data/df2/val_crops.csv"
-    test_csv: str = "data/df2/test_crops.csv"
-    output_dir: str = "models/attribute_extractor"
+    # Paths (relative to this config file's directory)
+    data_root: str = str(_BASE_DIR / "data/df2")
+    train_csv: str = str(_BASE_DIR / "data/df2/train_crops.csv")
+    val_csv: str = str(_BASE_DIR / "data/df2/validation_crops.csv")
+    test_csv: str = str(_BASE_DIR / "data/df2/test_crops.csv")
+    output_dir: str = str(_BASE_DIR / "models/attribute_extractor")
     
     # Model
-    model_name: str = "resnet50"  # or "efficientnet_b0", "convnext_tiny"
+    model_name: str = "mobilenetv3_small_100"  # Smaller model for CPU training
     pretrained: bool = True
     dropout: float = 0.3
     
@@ -29,7 +33,7 @@ class TrainingConfig:
     num_occasions: int = 8
     
     # Training hyperparameters
-    batch_size: int = 64
+    batch_size: int = 32  # Smaller batch for CPU
     num_epochs: int = 50
     learning_rate: float = 1e-4
     weight_decay: float = 1e-4
