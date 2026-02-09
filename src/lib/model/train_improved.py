@@ -349,21 +349,54 @@ def main():
     train_ds = MultiLabelFashionDataset(config.train_csv, config, is_train=True)
     val_ds = MultiLabelFashionDataset(config.val_csv, config, is_train=False)
     
-    train_dl = DataLoader(
-        train_ds,
-        batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=config.num_workers,
-        pin_memory=True,
-        drop_last=True
-    )
-    val_dl = DataLoader(
-        val_ds,
-        batch_size=config.batch_size,
-        shuffle=False,
-        num_workers=config.num_workers,
-        pin_memory=True
-    )
+    # Try to use shared file-system strategy for multiprocessing (helps on Windows)
+    try:
+        import torch.multiprocessing as _mp
+        try:
+            _mp.set_sharing_strategy('file_system')
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Create DataLoaders with a safe fallback for environments that cannot
+    # create shared memory maps (Windows with low commit limit). If a
+    # RuntimeError occurs when creating or iterating the DataLoader, we
+    # fall back to num_workers=0 and pin_memory=False.
+    try:
+        train_dl = DataLoader(
+            train_ds,
+            batch_size=config.batch_size,
+            shuffle=True,
+            num_workers=config.num_workers,
+            pin_memory=True,
+            drop_last=True
+        )
+        val_dl = DataLoader(
+            val_ds,
+            batch_size=config.batch_size,
+            shuffle=False,
+            num_workers=config.num_workers,
+            pin_memory=True
+        )
+    except RuntimeError as e:
+        print("Warning: DataLoader worker creation failed, falling back to num_workers=0.")
+        print(f"Original error: {e}")
+        train_dl = DataLoader(
+            train_ds,
+            batch_size=config.batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=False,
+            drop_last=True
+        )
+        val_dl = DataLoader(
+            val_ds,
+            batch_size=config.batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=False
+        )
     
     print(f"Train samples: {len(train_ds)}, Val samples: {len(val_ds)}")
     

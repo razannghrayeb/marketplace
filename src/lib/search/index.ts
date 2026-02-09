@@ -18,6 +18,23 @@ export {
 } from "./semanticSearch";
 
 export {
+  MultiVectorSearchEngine,
+  cosineSimilarity,
+  normalizeVector,
+  blendEmbeddings,
+  type SemanticAttribute,
+  type AttributeEmbedding,
+  type MultiVectorSearchConfig,
+  type SearchFilters as MultiVectorSearchFilters,
+  type MultiVectorSearchResult,
+} from "./multiVectorSearch";
+
+export {
+  AttributeEmbeddingGenerator,
+  attributeEmbeddings,
+} from "./attributeEmbeddings";
+
+export {
   extractAttributes,
   extractAttributesSync,
   extractAttributesBatch,

@@ -1,0 +1,119 @@
+{
+  "config": {
+    "data_root": "C:\\Users\\USER\\Desktop\\marketplace\\src\\lib\\model\\data\\df2",
+    "train_csv": "C:\\Users\\USER\\Desktop\\marketplace\\src\\lib\\model\\data\\df2\\train_crops.csv",
+    "val_csv": "C:\\Users\\USER\\Desktop\\marketplace\\src\\lib\\model\\data\\df2\\validation_crops.csv",
+    "test_csv": "C:\\Users\\USER\\Desktop\\marketplace\\src\\lib\\model\\data\\df2\\test_crops.csv",
+    "output_dir": "C:\\Users\\USER\\Desktop\\marketplace\\src\\lib\\model\\models\\attribute_extractor",
+    "model_name": "mobilenetv3_small_100",
+    "pretrained": true,
+    "dropout": 0.3,
+    "num_categories": 13,
+    "num_colors": 12,
+    "num_patterns": 8,
+    "num_materials": 10,
+    "num_seasons": 5,
+    "num_occasions": 8,
+    "batch_size": 32,
+    "num_epochs": 50,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.0001,
+    "warmup_epochs": 3,
+    "img_size": 224,
+    "crop_scale_min": 0.7,
+    "crop_scale_max": 1.0,
+    "color_jitter": 0.2,
+    "gradient_clip_val": 1.0,
+    "mixed_precision": true,
+    "label_smoothing": 0.1,
+    "patience": 10,
+    "min_delta": 0.001,
+    "num_workers": 4,
+    "device": "cuda",
+    "log_interval": 50,
+    "save_interval": 1
+  },
+  "category_names": [
+    "short_sleeve_top",
+    "long_sleeve_top",
+    "short_sleeve_outwear",
+    "long_sleeve_outwear",
+    "vest",
+    "sling",
+    "shorts",
+    "trousers",
+    "skirt",
+    "short_sleeve_dress",
+    "long_sleeve_dress",
+    "vest_dress",
+    "sling_dress"
+  ],
+  "color_names": [
+    "black",
+    "white",
+    "red",
+    "blue",
+    "green",
+    "yellow",
+    "pink",
+    "purple",
+    "brown",
+    "gray",
+    "beige",
+    "multi"
+  ],
+  "pattern_names": [
+    "solid",
+    "stripes",
+    "floral",
+    "plaid",
+    "polka-dots",
+    "geometric",
+    "animal-print",
+    "other"
+  ],
+  "material_names": [
+    "cotton",
+    "polyester",
+    "denim",
+    "silk",
+    "wool",
+    "leather",
+    "linen",
+    "knit",
+    "chiffon",
+    "other"
+  ],
+  "season_names": [
+    "spring",
+    "summer",
+    "fall",
+    "winter",
+    "all-season"
+  ],
+  "occasion_names": [
+    "casual",
+    "work",
+    "formal",
+    "sport",
+    "party",
+    "beach",
+    "lounge",
+    "date"
+  ],
+  "input_size": [
+    224,
+    224
+  ],
+  "mean": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "std": [
+    0.229,
+    0.224,
+    0.225
+  ],
+  "opset_version": 14
+}

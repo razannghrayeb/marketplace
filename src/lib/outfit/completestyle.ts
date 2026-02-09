@@ -12,9 +12,12 @@
 
 import { pg, osClient } from "../core";
 import { config } from "../../config";
-import { getTextEmbedding, cosineSimilarity } from "../image";
+import { getTextEmbedding, getImageEmbedding, cosineSimilarity, initClip, preprocessImage, loadImage } from "../image";
 import { buildLookupMaps, FABRICS, OCCASIONS, type OccasionEntry } from "../compare";
-import { extractAttributesSync, type ExtractedAttributes } from "../search";
+import { extractAttributesSync, extractAttributes, type ExtractedAttributes } from "../search";
+import { type RankerFeatureRow } from "../ranker/types";
+import { predictWithFallback as predictRankerScoresWithFallback } from "../ranker/client";
+import { MultiVectorSearchEngine, blendEmbeddings, type AttributeEmbedding } from "../search/multiVectorSearch";
 
 // ============================================================================
 // Types
@@ -42,7 +45,17 @@ export interface StyleRecommendation {
 
 export interface RecommendedProduct extends Product {
   matchScore: number;
+  confidence: number;
   matchReasons: string[];
+  explainability: {
+    visualSimilarity: number;
+    attributeMatch: number;
+    colorHarmony: number;
+    styleCompatibility: number;
+    occasionAlignment: number;
+  };
+  rankerFeatures?: Partial<RankerFeatureRow>;
+  diversityScore?: number;
 }
 
 export interface OutfitCompletion {
@@ -713,50 +726,210 @@ export const CATEGORY_PAIRINGS: Record<ProductCategory, CategoryPairing[]> = {
 // ============================================================================
 
 /**
- * Detect product category from title and description
+ * AI-Enhanced Category Detection using ONNX Attribute Extraction
+ * 
+ * Phase 1: Use ONNX attribute model instead of keyword matching
+ * - Higher accuracy for fashion items
+ * - Handles typos and variations
+ * - Confidence scoring
  */
-export function detectCategory(title: string, description?: string): ProductCategory {
-  const text = `${title} ${description || ""}`.toLowerCase();
+export async function detectCategory(title: string, description?: string): Promise<{
+  category: ProductCategory;
+  confidence: number;
+  attributes: ExtractedAttributes;
+}> {
+  const text = `${title} ${description || ""}`.trim();
   
-  // Check each category's keywords (longer/more specific first)
-  const sortedCategories = Object.entries(CATEGORY_KEYWORDS)
-    .filter(([cat]) => cat !== "unknown")
-    .sort((a, b) => {
-      // Sort by max keyword length (more specific categories first)
-      const maxLenA = Math.max(...a[1].map(k => k.length));
-      const maxLenB = Math.max(...b[1].map(k => k.length));
-      return maxLenB - maxLenA;
+  try {
+    // Use ONNX attribute extractor
+    const result = await extractAttributes(text, {
+      useML: true,
+      mlThreshold: 0.7,
     });
+    
+    const { attributes, confidence } = result;
+    
+    // Map extracted style/type to our category system
+    let detectedCategory: ProductCategory = "unknown";
+    let categoryConfidence = 0;
+    
+    // First try: direct style mapping
+    if (attributes.style) {
+      detectedCategory = mapStyleToCategory(attributes.style, text);
+      categoryConfidence = confidence.style || 0.7;
+    }
+    
+    // Fallback: pattern matching with higher confidence
+    if (detectedCategory === "unknown" || categoryConfidence < 0.6) {
+      const fallbackResult = detectCategoryFallback(text);
+      if (fallbackResult.confidence > categoryConfidence) {
+        detectedCategory = fallbackResult.category;
+        categoryConfidence = fallbackResult.confidence;
+      }
+    }
+    
+    return {
+      category: detectedCategory,
+      confidence: categoryConfidence,
+      attributes,
+    };
+  } catch (error) {
+    console.warn('[detectCategory] ONNX extraction failed, using fallback:', error);
+    const fallback = detectCategoryFallback(text);
+    return {
+      category: fallback.category,
+      confidence: fallback.confidence,
+      attributes: {},
+    };
+  }
+}
+
+/**
+ * Map extracted style attribute to product category
+ */
+function mapStyleToCategory(style: string, text: string): ProductCategory {
+  const styleMap: Record<string, ProductCategory[]> = {
+    "dress": ["dress", "gown", "maxi_dress", "mini_dress", "midi_dress"],
+    "formal": ["gown", "blazer", "heels", "dress"],
+    "casual": ["tshirt", "jeans", "sneakers", "hoodie"],
+    "athletic": ["activewear", "sneakers", "leggings"],
+    "swimwear": ["swimwear"],
+    "workwear": ["blazer", "pants", "shirt", "loafers"],
+    "streetwear": ["hoodie", "sneakers", "jeans", "bomber"],
+    "activewear": ["activewear", "sneakers", "leggings"],
+    "sportswear": ["sportswear", "sneakers"],
+  };
   
-  for (const [category, keywords] of sortedCategories) {
+  // Check text for specific indicators
+  const lowerText = text.toLowerCase();
+  
+  // Direct category matches
+  if (lowerText.includes("dress")) return "dress";
+  if (lowerText.includes("hoodie")) return "hoodie";
+  if (lowerText.includes("jeans")) return "jeans";
+  if (lowerText.includes("sneaker")) return "sneakers";
+  if (lowerText.includes("heel")) return "heels";
+  if (lowerText.includes("boot")) return "boots";
+  if (lowerText.includes("jacket")) return "jacket";
+  if (lowerText.includes("blazer")) return "blazer";
+  
+  // Style-based mapping
+  const candidates = styleMap[style] || [];
+  return candidates.length > 0 ? candidates[0] : "unknown";
+}
+
+/**
+ * Fallback category detection using improved keyword matching
+ */
+function detectCategoryFallback(text: string): { category: ProductCategory; confidence: number } {
+  const lowerText = text.toLowerCase();
+  
+  // Weighted keyword matching with confidence scores
+  const categoryScores: Record<ProductCategory, number> = {
+    dress: 0, gown: 0, maxi_dress: 0, mini_dress: 0, midi_dress: 0,
+    hoodie: 0, sweatshirt: 0, sweater: 0, cardigan: 0,
+    tshirt: 0, shirt: 0, blouse: 0, top: 0, tank_top: 0, crop_top: 0,
+    jeans: 0, pants: 0, shorts: 0, skirt: 0, leggings: 0,
+    jacket: 0, blazer: 0, coat: 0, parka: 0, bomber: 0,
+    sneakers: 0, heels: 0, boots: 0, sandals: 0, loafers: 0, flats: 0,
+    bag: 0, clutch: 0, tote: 0, backpack: 0, crossbody: 0,
+    watch: 0, jewelry: 0, necklace: 0, bracelet: 0, earrings: 0, ring: 0,
+    belt: 0, scarf: 0, hat: 0, sunglasses: 0, wallet: 0,
+    activewear: 0, sportswear: 0, swimwear: 0, unknown: 0,
+  };
+  
+  // Score based on exact keyword matches
+  for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+    if (category === "unknown") continue;
+    
     for (const keyword of keywords) {
-      // Word boundary check for more accurate matching
       const regex = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-      if (regex.test(text)) {
-        return category as ProductCategory;
+      if (regex.test(lowerText)) {
+        categoryScores[category as ProductCategory] += 1.0;
       }
     }
   }
   
-  return "unknown";
+  // Find highest scoring category
+  let bestCategory: ProductCategory = "unknown";
+  let bestScore = 0;
+  
+  for (const [category, score] of Object.entries(categoryScores)) {
+    if (score > bestScore) {
+      bestCategory = category as ProductCategory;
+      bestScore = score;
+    }
+  }
+  
+  return {
+    category: bestCategory,
+    confidence: Math.min(bestScore, 1.0),
+  };
 }
 
 /**
- * Extract color from product title/description
+ * AI-Enhanced Color Detection using ONNX Attribute Extraction
+ * 
+ * Phase 1: Use ONNX attribute model for accurate color extraction
+ * - Handles color variations and synonyms
+ * - Multi-color support
+ * - Confidence scoring
  */
-export function detectColor(title: string, description?: string): string | undefined {
-  const text = `${title} ${description || ""}`.toLowerCase();
+export async function detectColor(title: string, description?: string): Promise<{
+  primary?: string;
+  colors?: string[];
+  confidence: number;
+}> {
+  const text = `${title} ${description || ""}`.trim();
   
-  // Use attribute extractor for color detection
-  const attributes = extractAttributesSync(title);
-  if (attributes.attributes.color) {
-    return attributes.attributes.color;
+  try {
+    // Use ONNX attribute extractor for color detection
+    const result = await extractAttributes(text, {
+      useML: true,
+      mlThreshold: 0.6, // Lower threshold for colors
+    });
+    
+    const { attributes, confidence } = result;
+    
+    if (attributes.color) {
+      return {
+        primary: attributes.color,
+        colors: attributes.colors || [attributes.color],
+        confidence: confidence.color || 0.7,
+      };
+    }
+    
+    // Fallback to manual color detection
+    const fallbackColor = detectColorFallback(text);
+    return {
+      primary: fallbackColor,
+      colors: fallbackColor ? [fallbackColor] : [],
+      confidence: fallbackColor ? 0.8 : 0,
+    };
+  } catch (error) {
+    console.warn('[detectColor] ONNX extraction failed, using fallback:', error);
+    const fallbackColor = detectColorFallback(text);
+    return {
+      primary: fallbackColor,
+      colors: fallbackColor ? [fallbackColor] : [],
+      confidence: fallbackColor ? 0.6 : 0,
+    };
   }
+}
+
+/**
+ * Fallback color detection using color wheel matching
+ */
+function detectColorFallback(text: string): string | undefined {
+  const lowerText = text.toLowerCase();
   
-  // Fallback: check our color wheel
-  for (const color of Object.keys(COLOR_WHEEL)) {
-    const regex = new RegExp(`\\b${color}\\b`, 'i');
-    if (regex.test(text)) {
+  // Check our color wheel for matches (prioritize specific colors)
+  const sortedColors = Object.keys(COLOR_WHEEL)
+    .sort((a, b) => b.length - a.length); // Longer color names first
+  
+  for (const color of sortedColors) {
+    const regex = new RegExp(`\\b${color.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    if (regex.test(lowerText)) {
       return color;
     }
   }
@@ -765,11 +938,26 @@ export function detectColor(title: string, description?: string): string | undef
 }
 
 /**
- * Build complete style profile for a product
+ * Build complete style profile for a product (AI-Enhanced)
+ * 
+ * Phase 1: Uses ONNX attribute extraction for accurate categorization
+ * - Async to support ML models
+ * - Returns confidence scores
+ * - Handles multiple colors
  */
-export function buildStyleProfile(product: Product): StyleProfile {
-  const category = detectCategory(product.title, product.description);
-  const color = product.color || detectColor(product.title, product.description);
+export async function buildStyleProfile(product: Product): Promise<StyleProfile> {
+  // Use async category detection
+  const categoryResult = await detectCategory(product.title, product.description);
+  const category = categoryResult.category;
+  
+  // Use async color detection with fallback
+  let color: string | undefined;
+  if (product.color) {
+    color = product.color;
+  } else {
+    const colorResult = await detectColor(product.title, product.description);
+    color = colorResult.primary;
+  }
   
   // Get base style from category
   const categoryStyle = CATEGORY_STYLE_MAP[category] || {};
@@ -790,6 +978,57 @@ export function buildStyleProfile(product: Product): StyleProfile {
     colorProfile,
     formality: categoryStyle.formality || 5,
   };
+}
+
+/**
+ * Phase 2: Generate Ensemble CLIP Embeddings (Fashion-CLIP + OpenAI CLIP)
+ * 
+ * Combines multiple CLIP models for better visual similarity matching:
+ * - Fashion-CLIP: Specialized for apparel details
+ * - OpenAI CLIP: General visual understanding
+ * - Blended: Weighted combination for robust matching
+ */
+async function generateEnsembleEmbeddings(product: Product): Promise<{
+  fashion: number[];
+  openai: number[];
+  blended: number[];
+} | null> {
+  try {
+    // Ensure image URL exists
+    const imageUrl = product.image_cdn || product.image_url;
+    if (!imageUrl) return null;
+
+    // Load and preprocess image buffer
+    const response = await fetch(imageUrl);
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const { data, width, height, channels } = await (await import("../image/utils")).loadImage(buffer);
+
+    // Get Fashion-CLIP embedding
+    await initClip("fashion-clip");
+    const preprocessedFashion = preprocessImage(new Uint8Array(data), width, height, channels);
+    const fashionEmbedding = await getImageEmbedding(preprocessedFashion);
+
+    // Get OpenAI CLIP embedding
+    await initClip("vit-l-14");
+    const preprocessedOpenai = preprocessImage(new Uint8Array(data), width, height, channels);
+    const openaiEmbedding = await getImageEmbedding(preprocessedOpenai);
+
+    // Create weighted blend (60% Fashion-CLIP, 40% OpenAI)
+    const blendedEmbedding = blendEmbeddings([
+      { attribute: "global", vector: fashionEmbedding, weight: 0.6 },
+      { attribute: "global", vector: openaiEmbedding, weight: 0.4 },
+    ]);
+
+    return {
+      fashion: fashionEmbedding,
+      openai: openaiEmbedding,
+      blended: blendedEmbedding,
+    };
+  } catch (error) {
+    console.warn('[generateEnsembleEmbeddings] Failed to generate embeddings:', error);
+    return null;
+  }
 }
 
 /**
@@ -846,9 +1085,10 @@ export async function completeMyStyle(
       : undefined
   );
   
-  // Detect category and style
-  const detectedCategory = detectCategory(product.title, product.description);
-  const detectedStyle = buildStyleProfile(product);
+  // Detect category and style (now async with AI models)
+  const categoryResult = await detectCategory(product.title, product.description);
+  const detectedCategory = categoryResult.category;
+  const detectedStyle = await buildStyleProfile(product);
   
   // Get pairing rules
   const pairings = CATEGORY_PAIRINGS[detectedCategory] || CATEGORY_PAIRINGS.unknown;
@@ -987,61 +1227,225 @@ async function findProductsForCategory(
     
     const hits = response.body.hits.hits || [];
     
-    // Score and rank products
+    // Phase 2-4: Advanced AI-powered scoring with neural ranking
     const scoredProducts: RecommendedProduct[] = [];
+    const rankerFeatures: Partial<RankerFeatureRow>[] = [];
+    
+    // Generate ensemble embeddings for source product if visual similarity is enabled
+    let sourceEmbeddings: Awaited<ReturnType<typeof generateEnsembleEmbeddings>> = null;
+    if (options.useVisualSimilarity && options.sourceProduct) {
+      sourceEmbeddings = await generateEnsembleEmbeddings(options.sourceProduct);
+    }
     
     for (const hit of hits) {
       const product = hit._source as Product;
       const matchReasons: string[] = [];
-      let matchScore = hit._score || 0;
+      let baseScore = hit._score || 0;
       
-      // Check style compatibility
-      const productStyle = buildStyleProfile(product);
+      // Check style compatibility (now async)
+      const productStyle = await buildStyleProfile(product);
       
-      // Formality match (±2 is acceptable)
-      const formalityDiff = Math.abs(productStyle.formality - style.formality);
-      if (formalityDiff <= 2) {
-        matchScore += 10;
-        matchReasons.push("Matches formality level");
-      } else if (formalityDiff <= 4) {
-        matchScore += 5;
-      }
+      // Extract attributes for hybrid retrieval
+      const productAttributes = await extractAttributes(product.title, { useML: true });
       
-      // Color harmony check
-      if (product.color || detectColor(product.title)) {
-        const productColor = product.color || detectColor(product.title);
-        if (productColor) {
-          const isHarmonious = style.colorProfile.harmonies.some(h => 
-            h.colors.includes(productColor.toLowerCase())
-          );
-          if (isHarmonious) {
-            matchScore += 15;
-            matchReasons.push("Color harmony match");
+      // Initialize explainability scores
+      const explainability = {
+        visualSimilarity: 0,
+        attributeMatch: 0,
+        colorHarmony: 0,
+        styleCompatibility: 0,
+        occasionAlignment: 0,
+      };
+      
+      // Phase 2: Visual Similarity with Ensemble CLIP
+      let visualScore = 0;
+      let clipSim = 0;
+      if (options.useVisualSimilarity && sourceEmbeddings) {
+        const candidateEmbeddings = await generateEnsembleEmbeddings(product);
+        if (candidateEmbeddings) {
+          // Use blended embedding for primary similarity
+          const blendedSim = cosineSimilarity(sourceEmbeddings.blended, candidateEmbeddings.blended);
+          const fashionSim = cosineSimilarity(sourceEmbeddings.fashion, candidateEmbeddings.fashion);
+          const openaiSim = cosineSimilarity(sourceEmbeddings.openai, candidateEmbeddings.openai);
+          
+          // Weighted ensemble (prioritize fashion for detail matching)
+          visualScore = blendedSim * 0.5 + fashionSim * 0.3 + openaiSim * 0.2;
+          clipSim = blendedSim;
+          
+          if (visualScore > 0.7) {
+            matchReasons.push("Strong visual similarity");
+          } else if (visualScore > 0.5) {
+            matchReasons.push("Good visual match");
           }
+          
+          explainability.visualSimilarity = visualScore;
         }
       }
       
-      // Occasion match
-      if (productStyle.occasion === style.occasion) {
-        matchScore += 10;
-        matchReasons.push(`Perfect for ${style.occasion} occasions`);
+      // Phase 3: Hybrid Attribute Matching
+      let attributeScore = 0;
+      const sourceAttributes = await extractAttributes(
+        options.sourceProduct.title,
+        { useML: true }
+      );
+      
+      // Material matching
+      if (productAttributes.attributes.material && sourceAttributes.attributes.material) {
+        if (productAttributes.attributes.material === sourceAttributes.attributes.material) {
+          attributeScore += 0.3;
+          matchReasons.push("Similar material");
+        }
       }
       
+      // Fit matching
+      if (productAttributes.attributes.fit && sourceAttributes.attributes.fit) {
+        if (productAttributes.attributes.fit === sourceAttributes.attributes.fit) {
+          attributeScore += 0.2;
+          matchReasons.push("Matching fit style");
+        }
+      }
+      
+      // Pattern compatibility
+      if (productAttributes.attributes.pattern) {
+        // Avoid too many patterns in one outfit
+        if (sourceAttributes.attributes.pattern && 
+            productAttributes.attributes.pattern !== sourceAttributes.attributes.pattern) {
+          attributeScore -= 0.1; // Small penalty for pattern clash
+        } else if (!sourceAttributes.attributes.pattern) {
+          attributeScore += 0.1; // Bonus for complementary plain item
+        }
+      }
+      
+      explainability.attributeMatch = Math.max(0, attributeScore);
+      
+      // Formality match (±2 is acceptable)
+      const formalityDiff = Math.abs(productStyle.formality - style.formality);
+      let styleScore = 0;
+      if (formalityDiff <= 2) {
+        styleScore += 0.5;
+        matchReasons.push("Matches formality level");
+      } else if (formalityDiff <= 4) {
+        styleScore += 0.25;
+      } else {
+        styleScore -= 0.2; // Penalty for formality mismatch
+      }
+      
+      explainability.styleCompatibility = Math.max(0, styleScore);
+      // Color harmony check (now async)
+      let productColor: string | undefined = product.color;
+      if (!productColor) {
+        const colorResult = await detectColor(product.title);
+        productColor = colorResult.primary;
+      }
+      
+      let colorScore = 0;
+      if (productColor) {
+        const isHarmonious = style.colorProfile.harmonies.some(h => 
+          h.colors.includes(productColor!.toLowerCase())
+        );
+        if (isHarmonious) {
+          colorScore = 1.0;
+          matchReasons.push("Color harmony match");
+        } else if (productColor.toLowerCase() === style.colorProfile.primary.toLowerCase()) {
+          colorScore = 0.5;
+          matchReasons.push("Matching color");
+        }
+      }
+      
+      explainability.colorHarmony = colorScore;
+      
+      // Occasion match
+      let occasionScore = 0;
+      if (productStyle.occasion === style.occasion) {
+        occasionScore = 1.0;
+        matchReasons.push(`Perfect for ${style.occasion} occasions`);
+      } else {
+        // Check if occasions are compatible (e.g., casual + semi-formal)
+        const compatibleOccasions: Record<string, string[]> = {
+          'formal': ['semi-formal'],
+          'semi-formal': ['formal', 'casual'],
+          'casual': ['semi-formal', 'active'],
+          'active': ['casual'],
+          'party': ['semi-formal', 'casual'],
+        };
+        const compatible = compatibleOccasions[style.occasion]?.includes(productStyle.occasion);
+        if (compatible) {
+          occasionScore = 0.5;
+        }
+      }
+      
+      explainability.occasionAlignment = occasionScore;
+      
       // Same brand bonus
-      if (options.preferSameBrand && product.brand?.toLowerCase() === options.preferSameBrand.toLowerCase()) {
-        matchScore += 5;
+      const sameBrand = options.preferSameBrand && 
+        product.brand?.toLowerCase() === options.preferSameBrand.toLowerCase() ? 1 : 0;
+      if (sameBrand) {
         matchReasons.push("Same brand for cohesive look");
       }
       
+      // Phase 2: Build features for neural ranker
+      const features: Partial<RankerFeatureRow> = {
+        clip_sim: clipSim,
+        text_sim: 0, // Could add text embedding similarity
+        style_score: styleScore,
+        color_score: colorScore,
+        same_brand: sameBrand,
+        phash_sim: 0, // Could add perceptual hash if available
+        price_ratio: options.sourceProduct.price_cents > 0
+          ? product.price_cents / options.sourceProduct.price_cents
+          : 1.0,
+        formality_score: 1 - Math.min(formalityDiff / 10, 1), // Normalize to 0-1, higher is better
+      };
+
+      rankerFeatures.push(features);
+
+      // Calculate preliminary confidence based on attribute extraction
+      const avgConfidence = Object.values(productAttributes.confidence)
+        .reduce((sum, c) => sum + c, 0) / Math.max(Object.keys(productAttributes.confidence).length, 1);
+
+      // Add required fields for RecommendedProduct
       scoredProducts.push({
         ...product,
-        matchScore,
+        matchScore: baseScore, // Will be updated by ranker
+        confidence: avgConfidence,
         matchReasons: matchReasons.length > 0 ? matchReasons : ["Complementary style"],
+        explainability,
+        rankerFeatures: features,
       });
     }
     
+    // Phase 2: Neural Ranking - Replace manual scoring with ML model
+    let rankingMethod: 'neural' | 'fallback' = 'fallback';
+    if (scoredProducts.length > 0) {
+      try {
+        const rankerResult = await predictRankerScoresWithFallback(rankerFeatures);
+        rankingMethod = rankerResult.source === 'model' ? 'neural' : 'fallback';
+
+        // Update match scores with ranker predictions
+        rankerResult.scores.forEach((score, idx) => {
+          scoredProducts[idx].matchScore = score * 100; // Scale to 0-100
+        });
+
+        if (rankingMethod === 'neural') {
+          console.log('[CompleteMyStyle] Using neural ranking model');
+        }
+      } catch (error) {
+        console.warn('[CompleteMyStyle] Ranker failed, using heuristic scores:', error);
+      }
+    }
+
+    // Phase 3: Confidence-based Quality Filtering
+    // Filter out low-confidence predictions (below 40% confidence)
+    const highConfidenceProducts = scoredProducts.filter(p => p.confidence >= 0.4);
+
+    // Phase 3: Diversification - Avoid all products from same brand
+    const diversified = diversifyRecommendations(highConfidenceProducts, {
+      maxSameBrand: Math.ceil(options.maxResults / 3), // Max 1/3 from same brand
+      maxSamePrice: Math.ceil(options.maxResults / 2), // Max 1/2 in same price range
+    });
+
     // Sort by score and return top results
-    return scoredProducts
+    return diversified
       .sort((a, b) => b.matchScore - a.matchScore)
       .slice(0, options.maxResults);
       
@@ -1049,6 +1453,68 @@ async function findProductsForCategory(
     console.error("Error finding complementary products:", error);
     return [];
   }
+}
+
+/**
+ * Phase 3: Diversification Algorithm
+ * 
+ * Ensures variety in recommendations by limiting:
+ * - Same brand products
+ * - Same price range products
+ * - Similar visual styles
+ */
+function diversifyRecommendations(
+  products: RecommendedProduct[],
+  options: {
+    maxSameBrand: number;
+    maxSamePrice: number;
+  }
+): RecommendedProduct[] {
+  const { maxSameBrand, maxSamePrice } = options;
+  
+  // Track counts
+  const brandCounts = new Map<string, number>();
+  const priceRangeCounts = new Map<string, number>();
+  
+  const diversified: RecommendedProduct[] = [];
+  
+  // Helper to get price range bucket
+  const getPriceRange = (price: number): string => {
+    if (price < 5000) return 'budget'; // < $50
+    if (price < 15000) return 'mid'; // $50-$150
+    if (price < 30000) return 'premium'; // $150-$300
+    return 'luxury'; // > $300
+  };
+  
+  // Sort by match score first
+  const sorted = [...products].sort((a, b) => b.matchScore - a.matchScore);
+  
+  for (const product of sorted) {
+    const brand = product.brand?.toLowerCase() || 'unknown';
+    const priceRange = getPriceRange(product.price_cents);
+    
+    const brandCount = brandCounts.get(brand) || 0;
+    const priceCount = priceRangeCounts.get(priceRange) || 0;
+    
+    // Check diversification constraints
+    const exceedsBrandLimit = brandCount >= maxSameBrand;
+    const exceedsPriceLimit = priceCount >= maxSamePrice;
+    
+    // Skip if exceeds both limits (too similar)
+    if (exceedsBrandLimit && exceedsPriceLimit) {
+      continue;
+    }
+    
+    // Add diversity score to explainability
+    const diversityPenalty = (brandCount / maxSameBrand + priceCount / maxSamePrice) / 2;
+    product.diversityScore = 1 - diversityPenalty;
+    
+    diversified.push(product);
+    brandCounts.set(brand, brandCount + 1);
+    priceRangeCounts.set(priceRange, priceCount + 1);
+  }
+  
+  return diversified;
 }
 
 /**
