@@ -13,8 +13,7 @@ import {
   type StyleProfile,
   type ProductCategory,
 } from "../../lib/outfit/index.js";
-import { pg } from "../../lib/core/index.js";
-} from "../../lib/outfit";
+import { type ExtractedAttributes } from "../../lib/search/attributeExtractor";
 import { pg } from "../../lib/core";
 import {
   logImpressionBatch,
@@ -74,6 +73,8 @@ export interface StyleProfileResponse {
     brand?: string;
   };
   detectedCategory: ProductCategory;
+  categoryConfidence: number;
+  extractedAttributes: ExtractedAttributes;
   styleProfile: {
     occasion: string;
     aesthetic: string;
@@ -162,8 +163,8 @@ export async function getProductStyleProfile(
   }
 
   const product = result.rows[0] as Product;
-  const category = detectCategory(product.title, product.description);
-  const styleProfile = buildStyleProfile(product);
+  const categoryResult = await detectCategory(product.title, product.description);
+  const styleProfile = await buildStyleProfile(product);
 
   return {
     product: {
@@ -171,7 +172,9 @@ export async function getProductStyleProfile(
       title: product.title,
       brand: product.brand,
     },
-    detectedCategory: category,
+    detectedCategory: categoryResult.category,
+    categoryConfidence: categoryResult.confidence,
+    extractedAttributes: categoryResult.attributes,
     styleProfile: {
       occasion: styleProfile.occasion,
       aesthetic: styleProfile.aesthetic,
@@ -193,13 +196,20 @@ export async function getProductStyleProfile(
 /**
  * Analyze a product and return its detected category and style
  */
-export function analyzeProductStyle(product: Product): {
+export async function analyzeProductStyle(product: Product): Promise<{
   category: ProductCategory;
+  categoryConfidence: number;
+  attributes: ExtractedAttributes;
   style: StyleProfile;
-} {
-  const category = detectCategory(product.title, product.description);
-  const style = buildStyleProfile(product);
-  return { category, style };
+}> {
+  const categoryResult = await detectCategory(product.title, product.description);
+  const style = await buildStyleProfile(product);
+  return {
+    category: categoryResult.category,
+    categoryConfidence: categoryResult.confidence,
+    attributes: categoryResult.attributes,
+    style,
+  };
 }
 
 // ============================================================================

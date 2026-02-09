@@ -1,2 +1,2 @@
-// Re-export services from routes/products to keep service logic in routes
-export * from "../../routes/products/completestyle.service";
+// Export from the main completestyle module
+export * from "./completestyle";
