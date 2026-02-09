@@ -1,0 +1,9 @@
+torch>=1.12
+torchvision
+pandas
+numpy
+requests
+beautifulsoup4
+Pillow
+scikit-learn
+tqdm

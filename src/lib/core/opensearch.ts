@@ -82,6 +82,72 @@ export async function ensureIndex() {
                 },
               },
             },
+            // Per-attribute embeddings for multi-vector weighted search
+            embedding_color: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
+            embedding_texture: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
+            embedding_material: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
+            embedding_style: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
+            embedding_pattern: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
           },
         },
       },

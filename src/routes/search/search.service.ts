@@ -4,12 +4,21 @@
  * Business logic for product search functionality with composite query support.
  */
 
-import { getPool } from '../../lib/core/db';
-import { getOpenSearchClient } from '../../lib/core/opensearch';
+import { pg } from '../../lib/core/db';
+import { osClient } from '../../lib/core/opensearch';
 import { IntentParserService, ParsedIntent } from '../../lib/prompt/gemeni';
 import { CompositeQueryBuilder, CompositeQuery } from '../../lib/query/compositeQueryBuilder';
 import { QueryMapper, SearchQueryBundle } from '../../lib/query/queryMapper';
-import { generateEmbedding } from '../../lib/image/clip';
+import { processImageForEmbedding } from '../../lib/image/processor';
+import { 
+  MultiVectorSearchEngine, 
+  AttributeEmbedding, 
+  SemanticAttribute,
+  MultiVectorSearchResult,
+  MultiVectorSearchConfig
+} from '../../lib/search/multiVectorSearch';
+import { attributeEmbeddings } from '../../lib/search/attributeEmbeddings';
+import { intentAwareRerank, type RerankOptions } from '../../lib/ranker/intentReranker';
 
 export interface SearchFilters {
   brand?: string;
@@ -33,6 +42,7 @@ export interface MultiImageSearchRequest {
   images: Buffer[];
   userPrompt: string;
   limit?: number;
+  rerankWeights?: RerankOptions | any;
 }
 
 // Initialize services
@@ -52,7 +62,7 @@ export async function textSearch(
   const offset = options?.offset || 0;
 
   try {
-    const opensearch = getOpenSearchClient();
+    const opensearch = osClient;
     
     // Build OpenSearch query
     const searchQuery: any = {
@@ -128,10 +138,10 @@ export async function imageSearch(
 
   try {
     // Generate embedding for the image
-    const embedding = await generateEmbedding(imageBuffer);
+    const embedding = await processImageForEmbedding(imageBuffer);
 
     // Search OpenSearch with kNN
-    const opensearch = getOpenSearchClient();
+    const opensearch = osClient;
     const response = await opensearch.search({
       index: 'products',
       body: {
@@ -177,7 +187,7 @@ export async function multiImageSearch(
   request: MultiImageSearchRequest
 ): Promise<SearchResult> {
   const startTime = Date.now();
-  const { images, userPrompt, limit = 50 } = request;
+  const { images, userPrompt, limit = 50, rerankWeights } = request;
 
   try {
     // Step 1: Parse user intent from images + text
@@ -191,7 +201,7 @@ export async function multiImageSearch(
 
     // Step 2: Generate embeddings for all images
     const imageEmbeddings = await Promise.all(
-      images.map(img => generateEmbedding(img))
+      images.map(img => processImageForEmbedding(img))
     );
 
     // Step 3: Build composite query
@@ -206,7 +216,7 @@ export async function multiImageSearch(
     });
 
     // Step 5: Execute OpenSearch query
-    const opensearch = getOpenSearchClient();
+    const opensearch = osClient;
     const response = await opensearch.search({
       index: 'products',
       body: queryBundle.opensearch,
@@ -236,11 +246,47 @@ export async function multiImageSearch(
             }
           : null;
       })
-      .filter((r): r is NonNullable<typeof r> => r !== null)
-      .sort((a, b) => b.compositeScore - a.compositeScore);
+        .filter((r: any): r is NonNullable<typeof r> => r !== null);
+
+      // Apply intent-aware reranking to the composite results
+      // Map composite results to MultiVectorSearchResult shape (minimal fields required)
+      const mappedForRerank: MultiVectorSearchResult[] = results.map((r: any) => ({
+        productId: r.id || r.product_id || r.productId,
+        score: normalizeVectorScore(r.vectorScore),
+        product: {
+          vendorId: r.vendor_id || r.vendorId,
+          title: r.name || r.title,
+          brand: r.brand,
+          category: r.category,
+          priceUsd: r.price || r.price_usd || r.priceUsd,
+          availability: r.availability,
+          imageCdn: r.image_url || r.imageCdn,
+        },
+        scoreBreakdown: [],
+      }));
+
+      const defaultRerank: RerankOptions = {
+        vectorWeight: 0.6,
+        attributeWeight: 0.3,
+        priceWeight: 0.1,
+        recencyWeight: 0.0,
+      };
+
+      const rerankOpts = Object.assign({}, defaultRerank, rerankWeights || {});
+      const reranked = intentAwareRerank(mappedForRerank, parsedIntent, rerankOpts);
+
+      // Map reranked results back to response shape, preserving hydrated metadata
+      const finalResults = reranked.map((rer: any) => {
+        const original = results.find((o: any) => (o.id || o.product_id || o.productId) === rer.productId);
+        return {
+          ...original,
+          rerankScore: (rer as any).rerankScore,
+          rerankBreakdown: (rer as any).rerankBreakdown,
+        };
+      }).sort((a: any, b: any) => (b.rerankScore ?? 0) - (a.rerankScore ?? 0));
 
     return {
-      results,
+      results: finalResults,
       total: response.body.hits.total.value,
       tookMs: Date.now() - startTime,
       explanation: compositeQuery.explanation,
@@ -253,6 +299,156 @@ export async function multiImageSearch(
 }
 
 /**
+ * Advanced multi-vector weighted search (NEW - Option B Implementation)
+ * 
+ * Executes parallel per-attribute kNN searches with weighted re-ranking.
+ * This implements the "multi-kNN + union + re-rank" strategy.
+ * 
+ * Use this for advanced attribute-specific searches like:
+ * - "Color from first image, texture from second"
+ * - "Style similar to image A but pattern from image B"
+ */
+export async function multiVectorWeightedSearch(
+  request: MultiImageSearchRequest & { 
+    attributeWeights?: Partial<Record<SemanticAttribute, number>>;
+    explainScores?: boolean;
+    rerankWeights?: RerankOptions | any;
+  }
+): Promise<{ results: MultiVectorSearchResult[]; total: number; tookMs: number }> {
+  const startTime = Date.now();
+  const { images, userPrompt, limit = 50, attributeWeights, explainScores = false } = request;
+
+  try {
+    // Step 1: Parse user intent to extract attribute-specific instructions
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error('GEMINI_API_KEY not configured');
+    }
+
+    const intentParser = new IntentParserService({ apiKey });
+    const parsedIntent = await intentParser.parseUserIntent(images, userPrompt);
+
+    // Step 2: Generate per-attribute embeddings based on intent
+    const attributeEmbedList: AttributeEmbedding[] = [];
+
+    // Use imageIntents to determine which attributes to extract from which images
+    if (parsedIntent.imageIntents && parsedIntent.imageIntents.length > 0) {
+      for (const imageIntent of parsedIntent.imageIntents) {
+        const imageIndex = imageIntent.imageIndex;
+        const imageBuffer = images[imageIndex];
+
+        if (imageBuffer && imageIntent.primaryAttributes) {
+          for (const attr of imageIntent.primaryAttributes) {
+            const semanticAttr = attr.toLowerCase() as SemanticAttribute;
+            
+            // Map parsed attributes to our semantic attributes
+            const attrMapping: Record<string, SemanticAttribute> = {
+              'color': 'color',
+              'texture': 'texture',
+              'material': 'material',
+              'style': 'style',
+              'pattern': 'pattern',
+              'overall': 'global',
+              'global': 'global',
+            };
+
+            const mappedAttr = attrMapping[semanticAttr] || 'global';
+
+            const embedding = await attributeEmbeddings.generateImageAttributeEmbedding(
+              imageBuffer,
+              mappedAttr
+            );
+
+            attributeEmbedList.push({
+              attribute: mappedAttr,
+              vector: embedding,
+              weight: attributeWeights?.[mappedAttr] || imageIntent.weight || (1.0 / parsedIntent.imageIntents.length),
+            });
+          }
+        }
+      }
+    } else {
+      // Fallback: use global embeddings from all images with equal weight
+      for (let i = 0; i < images.length; i++) {
+        const embedding = await processImageForEmbedding(images[i]);
+        attributeEmbedList.push({
+          attribute: "global",
+          vector: embedding,
+          weight: attributeWeights?.global || 1.0 / images.length,
+        });
+      }
+    }
+
+    // Step 3: Build filters from parsed intent
+    const filters = buildFiltersFromIntent(parsedIntent);
+
+    // Step 4: Execute multi-vector search
+    const searchEngine = new MultiVectorSearchEngine();
+    const searchConfig: MultiVectorSearchConfig = {
+      embeddings: attributeEmbedList,
+      filters,
+      size: limit,
+      explainScores,
+      baseK: 100,
+      candidateMultiplier: 2.0,
+      minCandidatesPerAttribute: 20,
+      maxTotalCandidates: 1000,
+    };
+
+    const results = await searchEngine.search(searchConfig);
+
+    // Apply intent-aware reranking to multi-vector results
+    const defaultRerank: RerankOptions = {
+      vectorWeight: 0.6,
+      attributeWeight: 0.3,
+      priceWeight: 0.1,
+      recencyWeight: 0.0,
+    };
+    const rerankOpts = Object.assign({}, defaultRerank, request.rerankWeights || {});
+    const reranked = intentAwareRerank(results, parsedIntent, rerankOpts);
+
+    return {
+      results: reranked,
+      total: reranked.length,
+      tookMs: Date.now() - startTime,
+    };
+  } catch (error) {
+    console.error('[multiVectorWeightedSearch] Error:', error);
+    return { results: [], total: 0, tookMs: Date.now() - startTime };
+  }
+}
+
+/**
+ * Build search filters from parsed intent
+ */
+function buildFiltersFromIntent(intent: ParsedIntent): any {
+  const filters: any = {};
+
+  // Extract from constraints
+  if (intent.constraints) {
+    if (intent.constraints.priceMin !== undefined) {
+      filters.priceMin = intent.constraints.priceMin;
+    }
+    if (intent.constraints.priceMax !== undefined) {
+      filters.priceMax = intent.constraints.priceMax;
+    }
+    if (intent.constraints.category) {
+      filters.categories = [intent.constraints.category];
+    }
+    if (intent.constraints.brands && intent.constraints.brands.length > 0) {
+      filters.brands = intent.constraints.brands;
+    }
+    if (intent.constraints.gender) {
+      filters.gender = intent.constraints.gender;
+    }
+  }
+
+  filters.excludeHidden = true;
+
+  return filters;
+}
+
+/**
  * Hydrate product details from PostgreSQL
  */
 async function hydrateProductDetails(
@@ -261,7 +457,7 @@ async function hydrateProductDetails(
 ): Promise<any[]> {
   if (productIds.length === 0) return [];
 
-  const pool = getPool();
+  const pool = pg;
   
   const query = `
     SELECT 
@@ -308,4 +504,22 @@ function calculateCompositeScore(
   }
 
   return score;
+}
+
+// ---------------------------------------------------------------------------
+// Helper utilities
+// ---------------------------------------------------------------------------
+
+function clamp01(v: number) { return Math.max(0, Math.min(1, v)); }
+
+/**
+ * Normalize an OpenSearch vector score into [0,1]
+ * - If score looks like cosine [-1,1] → map to (s+1)/2
+ * - Otherwise apply a soft saturation: 1 - exp(-s/scale)
+ */
+function normalizeVectorScore(s: any): number {
+  if (typeof s !== 'number' || !isFinite(s)) return 0;
+  if (s >= -1 && s <= 1) return (s + 1) / 2;
+  // scale chosen so scores ~10 map near 0.63
+  return clamp01(1 - Math.exp(-s / 10));
 }

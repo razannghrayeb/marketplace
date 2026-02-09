@@ -458,7 +458,60 @@ GET /search?q=red running shoes nike&limit=10&use_semantic=true
 }
 ```
 
-### Image Search
+---
+
+## Search API
+
+The Fashion Aggregator provides **THREE distinct search capabilities**:
+
+1. **Text Search** - Traditional keyword + filter search
+2. **Single Image Search** - Find similar products to one image
+3. **Multi-Image Composite Search** - Mix attributes from multiple images (NEW)
+
+For YOLO-based product detection ("shop the look"), see [Image Analysis API](#image-analysis-api).
+
+### Quick Comparison
+
+| Feature | Endpoint | Input | Best For |
+|---------|----------|-------|----------|
+| **Text Search** | `GET /search` | Query + filters | Keyword search, filtering |
+| **Image Search** | `POST /search/image` | 1 image | "Find similar to this" |
+| **Multi-Image** | `POST /search/multi-image` | 1-5 images + prompt | "Color from first, style from second" |
+| **YOLO Detection** | `POST /images/search` | 1 image | "Shop this outfit" |
+
+📚 **See [SEARCH_FEATURES_GUIDE.md](./SEARCH_FEATURES_GUIDE.md) for comprehensive comparison and examples.**
+
+---
+
+### Text Search
+Search products using keywords and filters.
+
+```http
+GET /search
+```
+
+#### Query Parameters
+| Parameter | Type | Description | Default |
+|-----------|------|-------------|---------|
+| `q` | string | Search query | - |
+| `brand` | string | Filter by brand | - |
+| `category` | string | Filter by category | - |
+| `minPrice` | number | Minimum price | - |
+| `maxPrice` | number | Maximum price | - |
+| `color` | string | Filter by color | - |
+| `size` | string | Filter by size | - |
+| `vendor_id` | number | Filter by vendor | - |
+| `limit` | integer | Max results | 20 |
+| `offset` | integer | Pagination offset | 0 |
+
+#### Example Request
+```bash
+curl "http://localhost:3000/api/search?q=red+dress&brand=Nike&maxPrice=15000&limit=10"
+```
+
+---
+
+### Single Image Search
 Find visually similar products using image uploads.
 
 ```http
@@ -472,31 +525,244 @@ POST /search/image
 #### Query Parameters
 | Parameter | Type | Description | Default |
 |-----------|------|-------------|---------|
-| `limit` | integer | Maximum results | 20 |
-| `similarity_threshold` | number | Minimum similarity (0-1) | 0.7 |
-| `category` | string | Filter by category | - |
+| `limit` | integer | Maximum results | 50 |
 
 #### Example Request
 ```bash
-curl -X POST \
-  -F "image=@/path/to/image.jpg" \
-  "http://localhost:4000/search/image?limit=10&similarity_threshold=0.8"
+curl -X POST http://localhost:3000/api/search/image \
+  -F "image=@dress.jpg" \
+  -F "limit=20"
+```
+
+#### Example Response
+```json
+{
+  "results": [
+    {
+      "id": 12345,
+      "name": "Similar Red Dress",
+      "score": 0.92,
+      "price": 79.99,
+      "brand": "StyleCo",
+      "category": "dresses",
+      "imageUrl": "https://cdn.example.com/dress.jpg"
+    }
+  ],
+  "total": 147,
+  "tookMs": 45
+}
+```
+
+---
+
+### Multi-Image Composite Search (NEW)
+Mix attributes from multiple images using natural language prompts.
+
+```http
+POST /search/multi-image
+```
+
+This is the **unique feature** that enables cross-image attribute mixing with AI-powered intent parsing.
+
+#### Request
+- **Content-Type**: `multipart/form-data`
+- **Body**: 
+  - `images`: 1-5 image files (order matters!)
+  - `prompt`: Natural language description
+  - `limit`: Max results (optional)
+  - `rerankWeights`: JSON object for ranking weights (optional)
+
+#### Example Requests
+
+**Basic Cross-Image Attributes:**
+```bash
+curl -X POST http://localhost:3000/api/search/multi-image \
+  -F "images=@red_dress.jpg" \
+  -F "images=@leather_jacket.jpg" \
+  -F "prompt=I want the red color from the first image with the leather texture from the second" \
+  -F "limit=20"
+```
+
+**With Custom Ranking Weights:**
+```bash
+curl -X POST http://localhost:3000/api/search/multi-image \
+  -F "images=@vintage_coat.jpg" \
+  -F "images=@modern_blazer.jpg" \
+  -F "prompt=Vintage style from first with modern fit like second, under $200" \
+  -F "rerankWeights={\"vectorWeight\":0.5,\"attributeWeight\":0.4,\"priceWeight\":0.1}"
+```
+
+#### Rerank Weights
+```json
+{
+  "vectorWeight": 0.6,      // Vector similarity (default: 0.6)
+  "attributeWeight": 0.3,   // Attribute matches (default: 0.3)
+  "priceWeight": 0.1,       // Price relevance (default: 0.1)
+  "recencyWeight": 0.0      // Recency (default: 0.0)
+}
+```
+
+#### Example Response
+```json
+{
+  "results": [
+    {
+      "id": "prod_789",
+      "name": "Burgundy Leather Bomber Jacket",
+      "score": 0.87,
+      "rerankScore": 0.91,
+      "rerankBreakdown": {
+        "vector": 0.52,
+        "attribute": 0.27,
+        "price": 0.09,
+        "recency": 0.03
+      },
+      "price": 189.99,
+      "brand": "StyleCo",
+      "category": "jackets"
+    }
+  ],
+  "total": 147,
+  "tookMs": 234,
+  "explanation": "Found products matching burgundy color (image 0) with distressed leather texture (image 1)"
+}
+```
+
+#### How It Works (5-Phase Pipeline)
+1. **Intent Understanding** - Gemini AI parses natural language + images
+2. **DNA Extraction** - Extract per-attribute embeddings (color, texture, style, etc.)
+3. **Composite Query** - Build weighted query from intent
+4. **Multi-Vector Search** - Parallel kNN + union + weighted re-rank
+5. **Intent-Aware Ranking** - Final ranking with vector + attributes + price + recency
+
+---
+
+### Advanced Multi-Vector Search
+For power users who want explicit control over attribute weights.
+
+```http
+POST /search/multi-vector
+```
+
+#### Request Body
+- `images`: 1-5 image files
+- `prompt`: Text description
+- `attributeWeights`: JSON with explicit weights per attribute
+- `explainScores`: Boolean - return per-attribute breakdown
+- `limit`: Max results (optional)
+
+#### Example Request
+```bash
+curl -X POST http://localhost:3000/api/search/multi-vector \
+  -F "images=@dress1.jpg" \
+  -F "images=@dress2.jpg" \
+  -F "prompt=Elegant evening wear" \
+  -F "attributeWeights={\"color\":0.4,\"style\":0.4,\"texture\":0.2}" \
+  -F "explainScores=true"
+```
+
+#### Example Response
+```json
+{
+  "results": [
+    {
+      "id": "prod_456",
+      "name": "Navy Silk Evening Gown",
+      "score": 0.88,
+      "rerankScore": 0.92,
+      "attributeScores": {
+        "global": 0.85,
+        "color": 0.91,
+        "texture": 0.87,
+        "material": 0.89,
+        "style": 0.90,
+        "pattern": 0.78
+      },
+      "price": 299.99
+    }
+  ],
+  "total": 89,
+  "tookMs": 187
+}
+```
+
+---
+
+## Image Analysis API
+
+For YOLO-based product detection and "shop the look" functionality.
+
+### Visual Product Search (Shop the Look)
+Upload an image to detect fashion items and find similar products for each.
+
+```http
+POST /images/search
+```
+
+#### Request
+- **Content-Type**: `multipart/form-data`
+- **Body**: Form data with `image` file field
+
+#### Query Parameters
+| Parameter | Type | Description | Default |
+|-----------|------|-------------|---------|
+| `confidence` | number | Detection confidence (0-1) | 0.25 |
+| `threshold` | number | Similarity threshold (0-1) | 0.7 |
+| `limit_per_item` | number | Max products per detected item | 10 |
+| `filter_category` | boolean | Filter by detected category | true |
+| `store` | boolean | Store image in R2 | false |
+
+#### Example Request
+```bash
+curl -X POST http://localhost:3000/api/images/search \
+  -F "image=@outfit.jpg" \
+  -F "confidence=0.25" \
+  -F "limit_per_item=10"
 ```
 
 #### Example Response
 ```json
 {
   "success": true,
-  "data": {
-    "query_image": {
-      "size": 245760,
-      "mime_type": "image/jpeg",
-      "embedding_dim": 512
-    },
-    "results": [
+  "detection": {
+    "items": [
       {
-        "id": 12345,
-        "title": "Similar Product",
+        "label": "dress",
+        "confidence": 0.92,
+        "bbox": [120, 50, 300, 450],
+        "category": "dresses"
+      },
+      {
+        "label": "heels",
+        "confidence": 0.87,
+        "bbox": [150, 420, 220, 495],
+        "category": "footwear"
+      }
+    ],
+    "count": 2
+  },
+  "similarProducts": {
+    "byDetection": [
+      {
+        "detection": { "label": "dress", "confidence": 0.92 },
+        "category": "dresses",
+        "products": [
+          {
+            "id": 123,
+            "title": "Floral Midi Dress",
+            "similarity_score": 0.89,
+            "price": 79.99
+          }
+        ],
+        "count": 10
+      }
+    ],
+    "totalProducts": 18
+  }
+}
+```
+
+---
         "similarity_score": 0.92,
         "clip_similarity": 0.89,
         "visual_features": ["similar_color", "similar_shape", "similar_texture"],
