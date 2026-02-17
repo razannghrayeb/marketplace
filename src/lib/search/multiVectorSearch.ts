@@ -7,9 +7,9 @@
  * @see docs/composite-query-system.md for architecture details
  */
 
-import { osClient } from "../core/opensearch.js";
-import { pg } from "../core/db.js";
-import { config } from "../../config.js";
+import { osClient } from "../core/opensearch";
+import { pg } from "../core/db";
+import { config } from "../../config";
 
 // ============================================================================
 // Types & Interfaces

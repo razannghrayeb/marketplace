@@ -1,13 +1,6 @@
 import express from "express";
-import { config } from "./config.js";
 import cors from "cors";
 import helmet from "helmet";
-import { healthRouter } from "./routes/health/index.js";
-import { searchRouter } from "./routes/search/index.js";
-import productsRouter from "./routes/products/index.js";
-import adminRouter from "./routes/admin/index.js";
-import compareRouter from "./routes/compare/index.js";
-import { ensureIndex } from "./lib/core/index.js";
 import path from "path";
 import { config } from "./config";
 import { healthRouter } from "./routes/health/index";
@@ -26,7 +19,7 @@ import {
   notFoundHandler,
   requestLogger,
   rateLimit,
-} from "./middleware/index.js";
+} from "./middleware/index";
 import { metricsMiddleware } from "./middleware/metrics";
 
 

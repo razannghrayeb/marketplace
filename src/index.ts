@@ -1,5 +1,5 @@
 import "dotenv/config";
-// import { config } from "./config.js";
+// import { config } from "./config";
 // import dotenv from "dotenv";
 // dotenv.config();
 
@@ -7,8 +7,8 @@ import "dotenv/config";
 // // the rest of your imports can stay
 
 // console.log("DATABASE_URL =", process.env.DATABASE_URL);
-import { createServer } from "./server.js";
-import { testConnection } from "./lib/core/db.js";
+import { createServer } from "./server";
+import { testConnection } from "./lib/core/db";
 
 async function main() {
   console.log("Supabase connected:", await testConnection());
