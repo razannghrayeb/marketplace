@@ -10,7 +10,7 @@ import {
   getOutfitRecommendationsFromProduct,
   getProductStyleProfile,
   type CompleteStyleOptions,
-} from "./outfit.service.js";
+} from "./outfit.service";
 import { type Product } from "../../lib/outfit";
 
 // ============================================================================

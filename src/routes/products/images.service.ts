@@ -2,11 +2,11 @@
  * Product Images Service
  * Handles all image business logic, storage, and retrieval
  */
-import { pg } from "../../lib/core/index.js";
-import { uploadImage, generateImageKey } from "../../lib/image/index.js";
-import { processImageForEmbedding, computePHash, validateImage } from "../../lib/image/index.js";
-import { osClient } from "../../lib/core/index.js";
-import { config } from "../../config.js";
+import { pg } from "../../lib/core/index";
+import { uploadImage, generateImageKey } from "../../lib/image/index";
+import { processImageForEmbedding, computePHash, validateImage } from "../../lib/image/index";
+import { osClient } from "../../lib/core/index";
+import { config } from "../../config";
 
 // ============================================================================
 // Types

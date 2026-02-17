@@ -10,23 +10,23 @@ import {
   CompareVerdict,
   ProductComparison,
   CompareReason,
-} from "../../lib/compare/compareEngine.js";
+} from "../../lib/compare/compareEngine";
 import { 
   generateVerdict, 
   FullVerdictResponse,
   getReasonTooltip,
-} from "../../lib/compare/verdictGenerator.js";
+} from "../../lib/compare/verdictGenerator";
 import { 
   analyzeTextQuality,
   QualityAnalysis,
-} from "../../lib/compare/textQualityAnalyzer.js";
+} from "../../lib/compare/textQualityAnalyzer";
 import {
   analyzePriceAnomalies,
   computeAllCategoryBaselines,
   getCategoryBaseline,
   PriceAnalysis,
   CategoryBaseline,
-} from "../../lib/compare/priceAnomalyDetector.js";
+} from "../../lib/compare/priceAnomalyDetector";
 
 // ============================================================================
 // Types

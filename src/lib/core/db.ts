@@ -4,7 +4,7 @@
  * PostgreSQL connection pool using pg library.
  */
 import { Pool } from "pg";
-import { config } from "../../config.js";
+import { config } from "../../config";
 
 // export const pg = new Pool(config.postgres);
 

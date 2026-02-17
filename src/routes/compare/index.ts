@@ -2,6 +2,6 @@
  * Compare Module Exports
  */
 
-export { default } from "./compare.controller.js";
-export { default as compareRouter } from "./compare.controller.js";
-export * from "./compare.service.js";
+export { default } from "./compare.controller";
+export { default as compareRouter } from "./compare.controller";
+export * from "./compare.service";

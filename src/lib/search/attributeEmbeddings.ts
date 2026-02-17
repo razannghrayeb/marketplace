@@ -5,9 +5,9 @@
  * using prompt engineering and CLIP text/image encoding.
  */
 
-import { getTextEmbedding } from "../image/clip.js";
-import { processImageForEmbedding } from "../image/processor.js";
-import type { SemanticAttribute } from "./multiVectorSearch.js";
+import { getTextEmbedding } from "../image/clip";
+import { processImageForEmbedding } from "../image/processor";
+import type { SemanticAttribute } from "./multiVectorSearch";
 
 // ============================================================================
 // Attribute Prompt Templates
