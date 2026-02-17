@@ -1,6 +1,6 @@
 // Middleware exports
-export { errorHandler, notFoundHandler } from "./errorHandler.js";
-export { validateBody, validateQuery } from "./validate.js";
-export { rateLimit, cleanupRateLimiter } from "./rateLimit.js";
-export { requestLogger } from "./logger.js";
-export { apiKeyAuth, optionalApiKeyAuth } from "./auth.js";
+export { errorHandler, notFoundHandler } from "./errorHandler";
+export { validateBody, validateQuery } from "./validate";
+export { rateLimit, cleanupRateLimiter } from "./rateLimit";
+export { requestLogger } from "./logger";
+export { apiKeyAuth, optionalApiKeyAuth } from "./auth";

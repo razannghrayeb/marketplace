@@ -5,7 +5,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { pg } from "../../lib/core";
 import { uploadImage } from "../../lib/image";
-import { getIngestQueue } from "../../lib/queue";
+import { getIngestQueue, isRedisAvailable } from "../../lib/queue";
 
 // ============================================================================
 // Types
@@ -56,13 +56,22 @@ export async function createIngestJob(input: CreateIngestJobInput): Promise<{ jo
     [jobUuid, userId, "uploaded", key, cdnUrl, filename, "queued"]
   );
 
-  // Enqueue job
-  const q = getIngestQueue();
-  await q.add(
-    "ingest-image",
-    { job_uuid: jobUuid, user_id: userId, r2_key: key, cdn_url: cdnUrl, filename },
-    { jobId: jobUuid }
-  );
+  // Enqueue job only if Redis is available
+  if (isRedisAvailable()) {
+    try {
+      const q = getIngestQueue();
+      await q.add(
+        "ingest-image",
+        { job_uuid: jobUuid, user_id: userId, r2_key: key, cdn_url: cdnUrl, filename },
+        { jobId: jobUuid }
+      );
+    } catch (err) {
+      console.warn("[Ingest] Could not enqueue job (Redis unavailable):", (err as Error).message);
+      // Job is still recorded in database, can be processed later
+    }
+  } else {
+    console.warn("[Ingest] Redis unavailable - job saved to database but not queued");
+  }
 
   return { jobId: jobUuid, cdnUrl };
 }

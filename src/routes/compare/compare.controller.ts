@@ -16,7 +16,7 @@ import {
   validateCompareInput,
   validateProductId,
   validateTextInput,
-} from "./compare.service.js";
+} from "./compare.service";
 
 const router = Router();
 

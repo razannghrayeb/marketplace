@@ -5,7 +5,7 @@
  */
 
 import { Router, Request, Response } from "express";
-import { checkReadiness, checkLiveness } from "./health.service.js";
+import { checkReadiness, checkLiveness } from "./health.service";
 
 const router = Router();
 

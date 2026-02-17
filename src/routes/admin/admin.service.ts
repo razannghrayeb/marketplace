@@ -3,7 +3,7 @@
  * 
  * Business logic for admin operations: product moderation, canonical management
  */
-import { pg } from "../../lib/core/index.js";
+import { pg } from "../../lib/core/index";
 import { mergeCanonicals, getCanonicalWithProducts, findSimilarByPHash } from "../../lib/products";
 import { triggerJob, getScheduleInfo, getQueueMetrics } from "../../lib/scheduler";
 

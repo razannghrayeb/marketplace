@@ -5,5 +5,5 @@
  */
 import "dotenv/config";
 
-export { pg, testConnection, closePool, getProductsByIdsOrdered } from "./db.js";
-export { osClient, ensureIndex, recreateIndex, getIndexStats } from "./opensearch.js";
+export { pg, testConnection, closePool, getProductsByIdsOrdered } from "./db";
+export { osClient, ensureIndex, recreateIndex, getIndexStats } from "./opensearch";

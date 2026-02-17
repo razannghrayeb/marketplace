@@ -4,7 +4,7 @@
  * Manages OpenSearch connection and index configuration.
  */
 import { Client } from "@opensearch-project/opensearch";
-import { config } from "../../config.js";
+import { config } from "../../config";
 console.log("OS config:", config.opensearch.node, config.opensearch.username, config.opensearch.password?.length);
 
 export const osClient = new Client({
