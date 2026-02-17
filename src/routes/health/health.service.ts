@@ -4,8 +4,8 @@
  * Business logic for health checks.
  */
 
-import { osClient } from "../../lib/core/index.js";
-import { pg } from "../../lib/core/index.js";
+import { osClient } from "../../lib/core/index";
+import { pg } from "../../lib/core/index";
 
 export interface HealthStatus {
   ok: boolean;

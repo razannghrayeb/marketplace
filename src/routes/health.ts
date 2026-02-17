@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { osClient } from "../lib/core/index.js";
-import { pg } from "../lib/core/index.js";
+import { osClient } from "../lib/core/index";
+import { pg } from "../lib/core/index";
 
 
 export const healthRouter = Router();

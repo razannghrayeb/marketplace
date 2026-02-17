@@ -12,7 +12,7 @@ import {
   type OutfitCompletion,
   type StyleProfile,
   type ProductCategory,
-} from "../../lib/outfit/index.js";
+} from "../../lib/outfit/index";
 import { type ExtractedAttributes } from "../../lib/search/attributeExtractor";
 import { pg } from "../../lib/core";
 import {

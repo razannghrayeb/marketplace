@@ -22,7 +22,7 @@ export {
   findSimilarByPHash,
   type CanonicalProduct,
   type CanonicalMatch,
-} from "./canonical.js";
+} from "./canonical";
 
 // Price history
 export {
@@ -35,7 +35,7 @@ export {
   findPriceDrops,
   type PriceRecord,
   type PriceStats,
-} from "./priceHistory.js";
+} from "./priceHistory";
 // Re-export services from routes/products to keep service logic in routes
 export * from "../../routes/products/canonical.service";
 export * from "../../routes/products/priceHistory.service";
