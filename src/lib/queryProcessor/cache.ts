@@ -6,7 +6,7 @@
  */
 
 import crypto from "crypto";
-import { CacheEntry, QueryCacheStats, ProcessedQuery } from "./types";
+import { CacheEntry, QueryCacheStats, ProcessedQuery, QueryAST } from "./types";
 
 // ============================================================================
 // Configuration
@@ -298,6 +298,50 @@ export function warmUpCache(queries: string[], processQuery: (q: string) => Proc
   }
   
   console.log(`Warmed up ${warmed} queries`);
+}
+
+// ============================================================================
+// QueryAST Cache Functions (NEW)
+// ============================================================================
+
+const queryASTCache = new LRUCache<QueryAST>();
+
+/**
+ * Cache QueryAST result
+ */
+export function cacheQueryAST(query: string, result: QueryAST): void {
+  const key = LRUCache.hashQuery(query);
+  queryASTCache.set(key, result);
+}
+
+/**
+ * Get cached QueryAST result
+ */
+export function getCachedQueryAST(query: string): QueryAST | null {
+  const key = LRUCache.hashQuery(query);
+  return queryASTCache.get(key);
+}
+
+/**
+ * Check if QueryAST is cached
+ */
+export function isQueryASTCached(query: string): boolean {
+  const key = LRUCache.hashQuery(query);
+  return queryASTCache.has(key);
+}
+
+/**
+ * Clear QueryAST cache
+ */
+export function clearQueryASTCache(): void {
+  queryASTCache.clear();
+}
+
+/**
+ * Get QueryAST cache stats
+ */
+export function getQueryASTCacheStats(): QueryCacheStats {
+  return queryASTCache.getStats();
 }
 
 // ============================================================================

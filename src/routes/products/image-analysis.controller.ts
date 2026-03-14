@@ -59,7 +59,8 @@ const yoloClient = getYOLOv8Client();
  *   "ok": true,
  *   "services": {
  *     "clip": true,
- *     "yolo": true
+ *     "yolo": true,
+ *     "blip": true
  *   }
  * }
  */
@@ -116,7 +117,7 @@ router.get("/labels", async (_req: Request, res: Response, next: NextFunction) =
  *     "summary": { "shirt": 1, "jeans": 1, ... },
  *     "composition": { "tops": [...], "bottoms": [...], ... }
  *   },
- *   "services": { "clip": true, "yolo": true }
+ *   "services": { "clip": true, "yolo": true, "blip": true }
  * }
  */
 router.post(

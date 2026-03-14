@@ -1,4 +1,4 @@
-# YOLOv8 Fashion Detection Service Dockerfile
+# YOLOv8-seg Fashion Instance Segmentation Service Dockerfile
 # Optimized for inference with CPU (use NVIDIA base image for GPU)
 
 FROM python:3.10-slim
@@ -35,9 +35,10 @@ RUN mkdir -p /app/models && chown -R yolo:yolo /app/models
 # Switch to non-root user
 USER yolo
 
-# Download YOLOv8n model (smallest, fastest) on first run
-# The model will be cached in /app/models
-ENV YOLO_MODEL_PATH=/app/models/yolov8n.pt
+# Use Hugging Face pre-trained clothing detection model
+# Model will be auto-downloaded from HF hub on first run
+ENV YOLO_MODEL_PATH=kesimeg/yolov8n-clothing-detection
+ENV HF_HOME=/app/.cache/huggingface
 ENV PYTHONUNBUFFERED=1
 
 # Expose port

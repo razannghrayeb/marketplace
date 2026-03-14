@@ -18,7 +18,7 @@ The Image Analysis API provides a comprehensive computer vision pipeline for fas
 ### Core Components
 
 1. **Image Ingestion Service** - Handles upload, validation, and storage
-2. **Object Detection Engine** - YOLOv8-based fashion item detection
+2. **Object Detection Engine** - Dual-model detector (YOLOv8 DeepFashion2 + YOLOS Fashionpedia)
 3. **Embedding Service** - CLIP-based semantic image understanding
 4. **Similarity Search** - Vector search in OpenSearch
 5. **Result Aggregation** - Combines detections with product matches
@@ -26,7 +26,7 @@ The Image Analysis API provides a comprehensive computer vision pipeline for fas
 ### Data Flow
 
 ```
-User Upload → Validation → Storage (R2) → Detection (YOLOv8) → Cropping → Embedding (CLIP) → Search (OpenSearch) → Results
+User Upload → Validation → Storage (R2) → Detection (Dual Detector: YOLOv8 + YOLOS) → Cropping → Embedding (CLIP) → Search (OpenSearch) → Results
 ```
 
 ## Technical Implementation
@@ -99,127 +99,43 @@ export async function validateImage(buffer: Buffer): Promise<ValidationResult> {
 
 ### Object Detection Pipeline
 
-#### YOLOv8 Integration
+#### Dual-Model Detector Integration
 ```python
-# model/yolov8_detector.py
-class YOLOv8FashionDetector:
-    def __init__(self, model_path: str, confidence_threshold: float = 0.3):
-        self.model_path = model_path
-        self.confidence_threshold = confidence_threshold
-        self.input_size = (640, 640)
+# src/lib/model/dual_model_yolo.py
+from dual_model_yolo import DualDetector
+from PIL import Image
+import io
 
-        # Fashion-specific class mapping
-        self.classes = {
-            0: "shirt", 1: "pants", 2: "dress", 3: "shoes",
-            4: "hat", 5: "bag", 6: "jacket", 7: "skirt",
-            8: "shorts", 9: "socks", 10: "gloves"
-        }
 
-        # Product category mapping
-        self.category_mapping = {
-            "shirt": "tops", "jacket": "outerwear", "dress": "dresses",
-            "pants": "bottoms", "skirt": "bottoms", "shorts": "bottoms",
-            "shoes": "footwear", "hat": "accessories", "bag": "accessories",
-            "socks": "accessories", "gloves": "accessories"
-        }
+detector = DualDetector(conf=0.6)
 
-        self.session = None
+def detect_fashion_items(image_bytes: bytes):
+  """Run the dual detector on a single image and return JSON-like results."""
+  image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+  result = detector.predict(image)
 
-    def preprocess_image(self, image: Image.Image) -> Tuple[np.ndarray, Tuple[int, int]]:
-        """Preprocess image for YOLOv8"""
-        original_size = image.size
+  items = []
+  for p in result["all"]:
+    x1, y1, x2, y2 = p["box"]
+    items.append({
+      "label": str(p["label"]),
+      "confidence": float(p["score"]),
+      "box": {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)},
+    })
 
-        # Resize maintaining aspect ratio
-        image = image.resize(self.input_size, Image.Resampling.LANCZOS)
-
-        # Convert to numpy array
-        img_array = np.array(image, dtype=np.float32)
-
-        # BGR conversion for OpenCV compatibility
-        img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-
-        # Normalize to 0-1
-        img_array = img_array / 255.0
-
-        # CHW format for ONNX
-        img_array = np.transpose(img_array, (2, 0, 1))
-
-        # Add batch dimension
-        img_array = np.expand_dims(img_array, axis=0)
-
-        return img_array.astype(np.float32), original_size
-
-    def detect(self, image: Image.Image) -> List[Dict]:
-        """Run complete detection pipeline"""
-        self.load_model()
-
-        # Preprocess
-        input_tensor, original_size = self.preprocess_image(image)
-
-        # Run inference
-        input_name = self.session.get_inputs()[0].name
-        output_name = self.session.get_outputs()[0].name
-
-        outputs = self.session.run([output_name], {input_name: input_tensor})
-
-        # Postprocess
-        detections = self.postprocess_detections(outputs[0], original_size)
-
-        return detections
+  return {
+    "success": True,
+    "detections": items,
+    "count": len(items),
+  }
 ```
 
 #### Detection Postprocessing
-```python
-# model/yolov8_detector.py
-def postprocess_detections(
-    self, 
-    outputs: np.ndarray, 
-    original_size: Tuple[int, int]
-) -> List[Dict]:
-    """Postprocess YOLOv8 outputs to bounding boxes"""
-    detections = []
 
-    # YOLOv8 outputs: [batch, num_boxes, 84] for 80 COCO classes + 4 bbox
-    # Our model has 11 fashion classes + 4 bbox = 15 values per box
-    predictions = outputs[0]  # Remove batch dimension
-
-    for prediction in predictions:
-        # Extract confidence scores for all classes
-        confidences = prediction[4:]  # Skip bbox coordinates
-
-        # Find class with highest confidence
-        class_id = np.argmax(confidences)
-        confidence = confidences[class_id]
-
-        if confidence < self.confidence_threshold:
-            continue
-
-        # Extract bounding box (cx, cy, w, h) in normalized coordinates
-        cx, cy, w, h = prediction[:4]
-
-        # Convert to corner coordinates
-        x1 = (cx - w/2) * original_size[0]
-        x2 = (cx + w/2) * original_size[0]
-        y1 = (cy - h/2) * original_size[1]
-        y2 = (cy + h/2) * original_size[1]
-
-        # Clip to image boundaries
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(original_size[0], x2), min(original_size[1], y2)
-
-        detections.append({
-            "label": self.classes[class_id],
-            "confidence": float(confidence),
-            "bbox": [float(x1), float(y1), float(x2), float(y2)],
-            "category": self.category_mapping.get(self.classes[class_id], "unknown"),
-            "class_id": int(class_id)
-        })
-
-    # Sort by confidence (highest first)
-    detections.sort(key=lambda x: x["confidence"], reverse=True)
-
-    return detections
-```
+With DualDetector, most postprocessing (NMS, label mapping, area ratios) is
+handled inside the Python service. The Node.js client receives a clean list of
+detections with labels, confidences, and pixel / normalized boxes, so no
+custom postprocessing is required in the backend.
 
 ### Embedding Generation
 

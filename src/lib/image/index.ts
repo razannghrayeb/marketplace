@@ -45,7 +45,10 @@ export {
   getCdnUrl,
 } from "./r2";
 
-// YOLOv8 Fashion Detection
+// BLIP image captioning
+export { BlipService, blip } from "./blip";
+
+// Dual-Model Fashion Detection
 export {
   YOLOv8Client,
   getYOLOv8Client,
@@ -58,6 +61,7 @@ export {
   type DetectionResponse,
   type BoundingBox,
   type StyleInfo,
+  type SegmentationMask,
   type HealthResponse,
   type LabelsResponse,
   type DetectOptions,

@@ -1,580 +1,512 @@
 /**
- * Query Processor
- * 
- * Main entry point for query normalization, correction, and rewriting.
- * Implements the full pipeline:
- * 1. Normalize query
- * 2. Detect script (en/ar/arabizi/mixed)
- * 3. Rule-based corrections (spell check, arabizi, brand aliases)
- * 4. Extract filters (gender, etc.)
- * 5. LLM fallback (if needed)
- * 6. Decide auto-apply vs suggest
- * 7. Cache result
+ * Query Processor – Single-path pipeline
+ *
+ * Every text query flows through ONE function: `processQuery`.
+ * It always returns a `QueryAST`.
+ *
+ * Pipeline:
+ *   1. Cache check
+ *   2. Normalize text
+ *   3. Detect script  (en / ar / arabizi / mixed)
+ *   4. Tokenize
+ *   5. Corrections    (arabizi → english, brand aliases, spell-check)
+ *   6. LLM rewrite    (async path only, skipped in sync mode)
+ *   7. Extract entities & filters
+ *   8. Build rewritten search query
+ *   9. Classify intent (rules; ML fallback when confidence is low)
+ *  10. Generate expansions
+ *  11. Cache & return QueryAST
  */
 
-import {
-  ProcessedQuery,
+import type {
+  QueryAST,
+  QueryIntent,
+  QueryExpansions,
+  QueryEntities,
+  QueryFilters,
+  QueryTokens,
   ScriptAnalysis,
   Correction,
   ExtractedFilters,
-  CorrectionSource,
-  ConfidenceLevel,
 } from "./types";
 
 import {
   detectScript,
   arabiziToArabic,
-  arabicToArabizi,
   normalizeArabic,
   getTransliterationVariants,
   expandFashionTerm,
-  FASHION_ARABIZI,
 } from "./arabizi";
 
-import {
-  correctQuery,
-  confidenceToLevel,
-  levenshteinDistance,
-} from "./spellCorrector";
+import { correctQuery, confidenceToLevel } from "./spellCorrector";
 
 import {
   getDictionaries,
   findBrand,
   findCategory,
-  findAttribute,
   getAllBrandNames,
   getAllCategoryNames,
   getAllGenders,
 } from "./dictionary";
 
-import {
-  rewriteWithLLM,
-  shouldUseLLM,
-  isLLMAvailable,
-} from "./llmRewriter";
+import { rewriteWithLLM, shouldUseLLM } from "./llmRewriter";
 
 import {
-  getCachedQuery,
-  cacheQuery,
+  getCachedQueryAST,
+  cacheQueryAST,
   getCachedEmbedding,
   cacheEmbedding,
 } from "./cache";
 
+import {
+  classifyQueryIntent,
+  classifyQueryIntentHybrid,
+  getConfidenceScore,
+} from "./intent";
+
 import { getTextEmbedding, isClipAvailable } from "../image";
 
-// ============================================================================
-// Configuration
-// ============================================================================
+// ─── Configuration ───────────────────────────────────────────────────────────
 
-const CONFIDENCE_THRESHOLDS = {
-  autoApply: 0.85,      // Auto-apply correction
-  suggest: 0.65,        // Suggest ("Did you mean...?")
-  reject: 0.40,         // Reject correction
-  llmThreshold: 0.70,   // Minimum LLM confidence to accept
-};
+const THRESHOLDS = {
+  autoApply: 0.85,
+  suggest: 0.65,
+  reject: 0.40,
+  llm: 0.70,
+} as const;
 
-// ============================================================================
-// Query Normalization
-// ============================================================================
+const STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "but", "in", "on", "at",
+  "to", "for", "of", "with", "by", "from",
+]);
 
-/**
- * Normalize query text
- * - lowercase
- * - normalize spaces/punctuation
- * - limit repeated characters
- */
-export function normalizeQuery(query: string): string {
-  let normalized = query
-    .toLowerCase()
-    .trim()
-    // Normalize Unicode spaces
-    .replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, " ")
-    // Collapse multiple spaces
-    .replace(/\s+/g, " ")
-    // Remove excessive punctuation but keep apostrophes and hyphens
-    .replace(/[^\w\s\u0600-\u06FF\u0750-\u077F'-]/g, " ")
-    // Limit repeated characters (e.g., "niiiiice" → "niice")
-    .replace(/(.)\1{2,}/g, "$1$1")
-    // Normalize Arabic text
-    .trim();
-  
-  // If contains Arabic, also normalize Arabic-specific characters
-  if (/[\u0600-\u06FF]/.test(normalized)) {
-    normalized = normalizeArabic(normalized);
-  }
-  
-  return normalized;
-}
-
-// ============================================================================
-// Filter Extraction
-// ============================================================================
+// ─── Public API ──────────────────────────────────────────────────────────────
 
 /**
- * Extract filters from query without modifying search text
+ * Full async pipeline (includes optional LLM rewrite + ML intent).
+ * This is THE recommended entry-point for search routes.
  */
-function extractFilters(query: string, script: ScriptAnalysis): {
-  filters: ExtractedFilters;
-  remainingQuery: string;
-} {
-  const filters: ExtractedFilters = {};
-  let remaining = query;
-  const dict = getDictionaries();
-  
-  // Gender patterns (extract and potentially remove from query)
-  const genderPatterns: Array<{ pattern: RegExp; gender: string }> = [
-    // English
-    { pattern: /\b(mens?|male|boys?)\b/gi, gender: "men" },
-    { pattern: /\b(womens?|female|ladies|lady|girls?)\b/gi, gender: "women" },
-    { pattern: /\b(kids?|children|child)\b/gi, gender: "kids" },
-    { pattern: /\b(unisex|gender\s*neutral)\b/gi, gender: "unisex" },
-    // Arabic
-    { pattern: /\b(رجالي|للرجال)\b/g, gender: "men" },
-    { pattern: /\b(نسائي|للنساء|حريمي)\b/g, gender: "women" },
-    { pattern: /\b(أطفال|للأطفال)\b/g, gender: "kids" },
-    // Arabizi
-    { pattern: /\b(rijali|rejali)\b/gi, gender: "men" },
-    { pattern: /\b(nisa2i|nisai|nisaei|7arimi)\b/gi, gender: "women" },
-    { pattern: /\b(atfal)\b/gi, gender: "kids" },
-  ];
-  
-  for (const { pattern, gender } of genderPatterns) {
-    if (pattern.test(remaining)) {
-      filters.gender = gender;
-      // Don't remove gender from query - it helps with relevance
-      // remaining = remaining.replace(pattern, " ").trim();
-      break;
-    }
-  }
-  
-  // Color extraction (for filtering, keep in query for relevance)
-  for (const [key, entry] of dict.attributes) {
-    if (entry.normalizedTerm && remaining.toLowerCase().includes(entry.normalizedTerm)) {
-      // Check if it's a color attribute
-      const attrData = findAttribute(key);
-      if (attrData) {
-        // Try to determine type from the entry or its aliases
-        const colorTerms = ["black", "white", "red", "blue", "green", "yellow", "pink", "purple", "orange", "brown", "gray", "grey", "beige", "navy"];
-        if (colorTerms.includes(entry.normalizedTerm)) {
-          filters.color = entry.term;
-          break;
-        }
-      }
-    }
-  }
-  
-  // Brand extraction (keep in query)
-  const words = remaining.split(/\s+/);
-  for (const word of words) {
-    const brand = findBrand(word);
-    if (brand) {
-      filters.brand = brand.term;
-      break;
-    }
-  }
-  
-  // Category extraction (keep in query)
-  for (const word of words) {
-    const category = findCategory(word);
-    if (category) {
-      filters.category = category.term;
-      break;
-    }
-  }
-  
-  // Clean up remaining query
-  remaining = remaining.replace(/\s+/g, " ").trim();
-  
-  return { filters, remainingQuery: remaining };
-}
-
-// ============================================================================
-// Arabizi Processing
-// ============================================================================
-
-/**
- * Process Arabizi terms in query
- */
-function processArabizi(query: string): Correction[] {
-  const corrections: Correction[] = [];
-  const words = query.split(/\s+/);
-  
-  for (const word of words) {
-    const normalized = word.toLowerCase();
-    
-    // Check if it's a known Arabizi fashion term
-    const fashionTerm = expandFashionTerm(normalized);
-    if (fashionTerm) {
-      // Use English form for search (more common in product titles)
-      if (fashionTerm.english && fashionTerm.english !== normalized) {
-        corrections.push({
-          original: word,
-          corrected: fashionTerm.english,
-          source: "arabizi",
-          confidence: 0.95,
-          confidenceLevel: "high",
-          alternatives: [fashionTerm.arabic || ""],
-        });
-      }
-    } else {
-      // Check if it looks like Arabizi (has numbers 2-9 mixed with letters)
-      if (/[a-z]+[2-9]+[a-z]*/i.test(word) || /[2-9]+[a-z]+/i.test(word)) {
-        // Try to transliterate
-        const arabicForm = arabiziToArabic(normalized);
-        if (arabicForm !== normalized) {
-          corrections.push({
-            original: word,
-            corrected: arabicForm,
-            source: "arabizi",
-            confidence: 0.75,
-            confidenceLevel: "medium",
-          });
-        }
-      }
-    }
-  }
-  
-  return corrections;
-}
-
-// ============================================================================
-// Brand Alias Expansion
-// ============================================================================
-
-/**
- * Expand brand aliases to canonical names
- */
-function expandBrandAliases(query: string): Correction[] {
-  const corrections: Correction[] = [];
-  const words = query.split(/\s+/);
-  const dict = getDictionaries();
-  
-  for (const word of words) {
-    const normalized = word.toLowerCase();
-    
-    // Check if it's a brand alias
-    const brandEntry = dict.brands.get(normalized);
-    if (brandEntry && brandEntry.term.toLowerCase() !== normalized) {
-      corrections.push({
-        original: word,
-        corrected: brandEntry.term,
-        source: "brand_alias",
-        confidence: 0.95,
-        confidenceLevel: "high",
-      });
-    }
-  }
-  
-  return corrections;
-}
-
-// ============================================================================
-// Main Processing Pipeline
-// ============================================================================
-
-/**
- * Process a search query through the full pipeline
- */
-export async function processQuery(query: string): Promise<ProcessedQuery> {
-  const startTime = performance.now();
-  
-  // Check cache first
-  const cached = getCachedQuery(query);
-  if (cached) {
-    return cached;
-  }
-  
-  // Step 1: Normalize query
-  const normalizedQuery = normalizeQuery(query);
-  
-  // Step 2: Detect script
-  const script = detectScript(normalizedQuery);
-  
-  // Step 3: Collect all corrections
-  const allCorrections: Correction[] = [];
-  
-  // 3a: Arabizi processing
-  if (script.hasArabizi || script.primary === "arabizi") {
-    const arabiziCorrections = processArabizi(normalizedQuery);
-    allCorrections.push(...arabiziCorrections);
-  }
-  
-  // 3b: Brand alias expansion
-  const brandCorrections = expandBrandAliases(normalizedQuery);
-  allCorrections.push(...brandCorrections);
-  
-  // 3c: Spell correction against dictionaries
-  const dict = getDictionaries();
-  const spellCorrections = correctQuery(normalizedQuery, {
-    brands: dict.brands,
-    categories: dict.categories,
-    attributes: dict.attributes,
-    commonQueries: dict.commonQueries,
-  });
-  
-  // Add spell corrections that don't duplicate existing corrections
-  for (const correction of spellCorrections) {
-    const alreadyExists = allCorrections.some(
-      c => c.original.toLowerCase() === correction.original.toLowerCase()
-    );
-    if (!alreadyExists) {
-      allCorrections.push(correction);
-    }
-  }
-  
-  // Step 4: Extract filters
-  const { filters, remainingQuery } = extractFilters(normalizedQuery, script);
-  
-  // Step 5: Calculate overall confidence
-  let overallConfidence = 1.0;
-  if (allCorrections.length > 0) {
-    overallConfidence = allCorrections.reduce((sum, c) => sum + c.confidence, 0) / allCorrections.length;
-  }
-  
-  // Step 6: Decide if LLM is needed
-  let llmUsed = false;
-  let llmCorrection: Correction | null = null;
-  
-  if (shouldUseLLM(normalizedQuery, script, allCorrections.length > 0, overallConfidence)) {
-    const llmResult = await rewriteWithLLM({
-      originalQuery: query,
-      normalizedQuery,
-      script,
-      allowedBrands: getAllBrandNames(),
-      allowedCategories: getAllCategoryNames(),
-      allowedGenders: getAllGenders(),
-    });
-    
-    if (llmResult && llmResult.confidence >= CONFIDENCE_THRESHOLDS.llmThreshold) {
-      llmUsed = true;
-      
-      // Add LLM correction
-      llmCorrection = {
-        original: normalizedQuery,
-        corrected: llmResult.rewrittenQuery,
-        source: "llm",
-        confidence: llmResult.confidence,
-        confidenceLevel: confidenceToLevel(llmResult.confidence),
-      };
-      allCorrections.push(llmCorrection);
-      
-      // Update filters from LLM
-      if (llmResult.extractedBrand) filters.brand = llmResult.extractedBrand;
-      if (llmResult.extractedCategory) filters.category = llmResult.extractedCategory;
-      if (llmResult.extractedGender) filters.gender = llmResult.extractedGender;
-      
-      // Recalculate overall confidence
-      overallConfidence = (overallConfidence + llmResult.confidence) / 2;
-    }
-  }
-  
-  // Step 7: Build rewritten query
-  let rewrittenQuery = normalizedQuery;
-  
-  // Apply corrections to query
-  for (const correction of allCorrections) {
-    if (correction.confidence >= CONFIDENCE_THRESHOLDS.reject) {
-      // Case-insensitive replacement
-      const regex = new RegExp(`\\b${escapeRegex(correction.original)}\\b`, "gi");
-      rewrittenQuery = rewrittenQuery.replace(regex, correction.corrected);
-    }
-  }
-  
-  // If LLM provided a full rewrite, use that
-  if (llmCorrection && llmCorrection.confidence >= CONFIDENCE_THRESHOLDS.autoApply) {
-    rewrittenQuery = llmCorrection.corrected;
-  }
-  
-  rewrittenQuery = rewrittenQuery.replace(/\s+/g, " ").trim();
-  
-  // Step 8: Decide auto-apply vs suggest
-  const highConfidenceCorrections = allCorrections.filter(
-    c => c.confidence >= CONFIDENCE_THRESHOLDS.autoApply
-  );
-  const autoApply = highConfidenceCorrections.length > 0 || 
-                    (allCorrections.length > 0 && overallConfidence >= CONFIDENCE_THRESHOLDS.autoApply);
-  
-  let suggestText: string | undefined;
-  if (!autoApply && allCorrections.length > 0 && overallConfidence >= CONFIDENCE_THRESHOLDS.suggest) {
-    suggestText = `Did you mean "${rewrittenQuery}"?`;
-  }
-  
-  // Step 9: Determine final search query
-  const searchQuery = autoApply ? rewrittenQuery : normalizedQuery;
-  
-  // Build result
-  const result: ProcessedQuery = {
-    originalQuery: query,
-    normalizedQuery,
-    script,
-    corrections: allCorrections,
-    rewrittenQuery,
-    autoApply,
-    suggestText,
-    extractedFilters: filters,
-    searchQuery,
-    processingTimeMs: performance.now() - startTime,
-    llmUsed,
-    cacheHit: false,
-  };
-  
-  // Cache result
-  cacheQuery(query, result);
-  
-  return result;
+export async function processQuery(raw: string): Promise<QueryAST> {
+  return runPipeline(raw, { useLLM: true, useMLIntent: true });
 }
 
 /**
- * Process query synchronously (no LLM, for high-throughput)
+ * Fast pipeline (no LLM, no ML model).
+ * Use for autocomplete / typeahead / high-throughput paths.
  */
-export function processQuerySync(query: string): ProcessedQuery {
-  const startTime = performance.now();
-  
-  // Check cache first
-  const cached = getCachedQuery(query);
-  if (cached) {
-    return cached;
-  }
-  
-  // Normalize
-  const normalizedQuery = normalizeQuery(query);
-  const script = detectScript(normalizedQuery);
-  
-  // Collect corrections (no LLM)
-  const allCorrections: Correction[] = [];
-  
-  // Arabizi processing
-  if (script.hasArabizi || script.primary === "arabizi") {
-    allCorrections.push(...processArabizi(normalizedQuery));
-  }
-  
-  // Brand aliases
-  allCorrections.push(...expandBrandAliases(normalizedQuery));
-  
-  // Spell correction
-  const dict = getDictionaries();
-  const spellCorrections = correctQuery(normalizedQuery, {
-    brands: dict.brands,
-    categories: dict.categories,
-    attributes: dict.attributes,
-    commonQueries: dict.commonQueries,
-  });
-  
-  for (const correction of spellCorrections) {
-    const alreadyExists = allCorrections.some(
-      c => c.original.toLowerCase() === correction.original.toLowerCase()
-    );
-    if (!alreadyExists) {
-      allCorrections.push(correction);
-    }
-  }
-  
-  // Extract filters
-  const { filters } = extractFilters(normalizedQuery, script);
-  
-  // Calculate confidence
-  let overallConfidence = 1.0;
-  if (allCorrections.length > 0) {
-    overallConfidence = allCorrections.reduce((sum, c) => sum + c.confidence, 0) / allCorrections.length;
-  }
-  
-  // Build rewritten query
-  let rewrittenQuery = normalizedQuery;
-  for (const correction of allCorrections) {
-    if (correction.confidence >= CONFIDENCE_THRESHOLDS.reject) {
-      const regex = new RegExp(`\\b${escapeRegex(correction.original)}\\b`, "gi");
-      rewrittenQuery = rewrittenQuery.replace(regex, correction.corrected);
-    }
-  }
-  rewrittenQuery = rewrittenQuery.replace(/\s+/g, " ").trim();
-  
-  // Decide auto-apply
-  const autoApply = allCorrections.some(c => c.confidence >= CONFIDENCE_THRESHOLDS.autoApply) ||
-                    (allCorrections.length > 0 && overallConfidence >= CONFIDENCE_THRESHOLDS.autoApply);
-  
-  let suggestText: string | undefined;
-  if (!autoApply && allCorrections.length > 0 && overallConfidence >= CONFIDENCE_THRESHOLDS.suggest) {
-    suggestText = `Did you mean "${rewrittenQuery}"?`;
-  }
-  
-  const searchQuery = autoApply ? rewrittenQuery : normalizedQuery;
-  
-  const result: ProcessedQuery = {
-    originalQuery: query,
-    normalizedQuery,
-    script,
-    corrections: allCorrections,
-    rewrittenQuery,
-    autoApply,
-    suggestText,
-    extractedFilters: filters,
-    searchQuery,
-    processingTimeMs: performance.now() - startTime,
-    llmUsed: false,
-    cacheHit: false,
-  };
-  
-  cacheQuery(query, result);
-  return result;
+export async function processQueryFast(raw: string): Promise<QueryAST> {
+  return runPipeline(raw, { useLLM: false, useMLIntent: false });
 }
 
 /**
- * Get embedding for processed query (with caching)
+ * Get (or compute & cache) a CLIP text embedding for a search query.
  */
 export async function getQueryEmbedding(query: string): Promise<number[] | null> {
-  // Check cache
   const cached = getCachedEmbedding(query);
-  if (cached) {
-    return cached;
-  }
-  
-  if (!isClipAvailable()) {
-    return null;
-  }
-  
+  if (cached) return cached;
+
+  if (!isClipAvailable()) return null;
+
   try {
     const embedding = await getTextEmbedding(query);
     cacheEmbedding(query, embedding);
     return embedding;
   } catch (err) {
-    console.warn("Failed to compute query embedding:", err);
+    console.warn("[queryProcessor] embedding failed:", err);
     return null;
   }
 }
 
-// ============================================================================
-// Utility Functions
-// ============================================================================
+// ─── Re-exports (convenience) ────────────────────────────────────────────────
 
-/**
- * Escape special regex characters
- */
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+export { detectScript, normalizeArabic, getTransliterationVariants };
 
-/**
- * Get all transliteration variants for a query
- */
-export { getTransliterationVariants };
-
-/**
- * Get script detection for a query
- */
-export { detectScript };
-
-/**
- * Normalize Arabic text
- */
-export { normalizeArabic };
-
-/**
- * Re-export types for external use
- */
 export type {
-  ProcessedQuery,
+  QueryAST,
+  QueryIntent,
+  QueryExpansions,
+  QueryEntities,
+  QueryFilters,
+  QueryTokens,
   ScriptAnalysis,
   Correction,
   ExtractedFilters,
-  ConfidenceLevel,
 } from "./types";
+
+// ─── Pipeline Implementation (single path) ──────────────────────────────────
+
+interface PipelineOpts {
+  useLLM: boolean;
+  useMLIntent: boolean;
+}
+
+async function runPipeline(raw: string, opts: PipelineOpts): Promise<QueryAST> {
+  const t0 = performance.now();
+
+  // 1. Cache
+  const cached = getCachedQueryAST(raw);
+  if (cached) return { ...cached, cacheHit: true };
+
+  // 2. Normalize
+  const normalized = normalizeQuery(raw);
+
+  // 3. Script detection
+  const script = detectScript(normalized);
+
+  // 4. Tokenize
+  const tokens = tokenize(raw, normalized);
+
+  // 5. Corrections
+  const corrections = collectCorrections(normalized, script);
+
+  // 6. LLM rewrite (optional)
+  let llmUsed = false;
+  if (opts.useLLM) {
+    const llmResult = await tryLLMRewrite(normalized, script, corrections);
+    if (llmResult) {
+      corrections.push(llmResult);
+      llmUsed = true;
+    }
+  }
+
+  // 7. Extract entities & filters
+  const extracted = extractFilters(normalized);
+  applyLLMEntities(corrections, extracted);
+  const entities = toEntities(extracted);
+  const filters  = toFilters(extracted);
+
+  // 8. Build final search text
+  const searchQuery = buildSearchQuery(normalized, corrections);
+
+  // 9. Classify intent
+  const intent = opts.useMLIntent
+    ? await classifyIntentHybrid(normalized, entities)
+    : classifyIntentRules(normalized, entities);
+
+  // 10. Expansions
+  const expansions = generateExpansions(normalized, script, entities, corrections);
+
+  // 11. Confidence
+  const confidence = corrections.length > 0
+    ? corrections.reduce((s, c) => s + c.confidence, 0) / corrections.length
+    : 1.0;
+
+  const ast: QueryAST = {
+    original: raw,
+    normalized,
+    tokens,
+    entities,
+    filters,
+    intent,
+    expansions,
+    script,
+    corrections,
+    processingTimeMs: performance.now() - t0,
+    llmUsed,
+    cacheHit: false,
+    confidence,
+    searchQuery,
+  };
+
+  cacheQueryAST(raw, ast);
+  return ast;
+}
+
+// ─── Step helpers ────────────────────────────────────────────────────────────
+
+/** Normalize query text (lowercase, collapse spaces, limit repeats, arabic) */
+export function normalizeQuery(query: string): string {
+  let n = query
+    .toLowerCase()
+    .trim()
+    .replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[^\w\s\u0600-\u06FF\u0750-\u077F'-]/g, " ")
+    .replace(/(.)\1{2,}/g, "$1$1")
+    .trim();
+
+  if (/[\u0600-\u06FF]/.test(n)) n = normalizeArabic(n);
+  return n;
+}
+
+/** Tokenize into several useful views */
+function tokenize(raw: string, normalized: string): QueryTokens {
+  const original   = raw.trim().split(/\s+/);
+  const norm       = normalized.split(/\s+/);
+  const important  = norm.filter(t => !STOPWORDS.has(t) && t.length > 2);
+  const stops      = norm.filter(t => STOPWORDS.has(t));
+
+  return { original, normalized: norm, stemmed: norm, important, stopwords: stops };
+}
+
+/** Gather all rule-based corrections (arabizi → eng, brand aliases, spell) */
+function collectCorrections(normalized: string, script: ScriptAnalysis): Correction[] {
+  const out: Correction[] = [];
+
+  // Arabizi
+  if (script.hasArabizi || script.primary === "arabizi") {
+    for (const word of normalized.split(/\s+/)) {
+      const lw = word.toLowerCase();
+      const fashion = expandFashionTerm(lw);
+      if (fashion?.english && fashion.english !== lw) {
+        out.push({
+          original: word, corrected: fashion.english,
+          source: "arabizi", confidence: 0.95, confidenceLevel: "high",
+          alternatives: fashion.arabic ? [fashion.arabic] : undefined,
+        });
+      } else if (/[a-z]+[2-9]+[a-z]*/i.test(word) || /[2-9]+[a-z]+/i.test(word)) {
+        const arabic = arabiziToArabic(lw);
+        if (arabic !== lw) {
+          out.push({
+            original: word, corrected: arabic,
+            source: "arabizi", confidence: 0.75, confidenceLevel: "medium",
+          });
+        }
+      }
+    }
+  }
+
+  // Brand aliases
+  const dict = getDictionaries();
+  for (const word of normalized.split(/\s+/)) {
+    const entry = dict.brands.get(word.toLowerCase());
+    if (entry && entry.term.toLowerCase() !== word.toLowerCase()) {
+      out.push({
+        original: word, corrected: entry.term,
+        source: "brand_alias", confidence: 0.95, confidenceLevel: "high",
+      });
+    }
+  }
+
+  // Spell-check (skip duplicates)
+  const spellHits = correctQuery(normalized, {
+    brands: dict.brands, categories: dict.categories,
+    attributes: dict.attributes, commonQueries: dict.commonQueries,
+  });
+  const seen = new Set(out.map(c => c.original.toLowerCase()));
+  for (const c of spellHits) {
+    if (!seen.has(c.original.toLowerCase())) out.push(c);
+  }
+
+  return out;
+}
+
+/** Attempt LLM rewrite; returns a Correction or null */
+async function tryLLMRewrite(
+  normalized: string,
+  script: ScriptAnalysis,
+  corrections: Correction[],
+): Promise<Correction | null> {
+  const avg = corrections.length > 0
+    ? corrections.reduce((s, c) => s + c.confidence, 0) / corrections.length
+    : 1.0;
+
+  if (!shouldUseLLM(normalized, script, corrections.length > 0, avg)) return null;
+
+  const result = await rewriteWithLLM({
+    originalQuery: normalized,
+    normalizedQuery: normalized,
+    script,
+    allowedBrands: getAllBrandNames(),
+    allowedCategories: getAllCategoryNames(),
+    allowedGenders: getAllGenders(),
+  });
+
+  if (!result || result.confidence < THRESHOLDS.llm) return null;
+
+  return {
+    original: normalized,
+    corrected: result.rewrittenQuery,
+    source: "llm",
+    confidence: result.confidence,
+    confidenceLevel: confidenceToLevel(result.confidence),
+    alternatives: [
+      result.extractedBrand,
+      result.extractedCategory,
+      result.extractedGender,
+    ].filter(Boolean) as string[],
+  };
+}
+
+/** Extract gender / color / brand / category from the normalized text */
+function extractFilters(query: string): ExtractedFilters {
+  const f: ExtractedFilters = {};
+  const dict = getDictionaries();
+
+  // Gender
+  const genderRules: Array<{ pattern: RegExp; gender: string }> = [
+    { pattern: /\b(mens?|male|boys?)\b/gi,                  gender: "men"    },
+    { pattern: /\b(womens?|female|ladies|lady|girls?)\b/gi,  gender: "women"  },
+    { pattern: /\b(kids?|children|child)\b/gi,               gender: "kids"   },
+    { pattern: /\b(unisex|gender\s*neutral)\b/gi,            gender: "unisex" },
+    { pattern: /\b(رجالي|للرجال)\b/g,                        gender: "men"    },
+    { pattern: /\b(نسائي|للنساء|حريمي)\b/g,                  gender: "women"  },
+    { pattern: /\b(أطفال|للأطفال)\b/g,                       gender: "kids"   },
+    { pattern: /\b(rijali|rejali)\b/gi,                      gender: "men"    },
+    { pattern: /\b(nisa2i|nisai|nisaei|7arimi)\b/gi,         gender: "women"  },
+    { pattern: /\b(atfal)\b/gi,                              gender: "kids"   },
+  ];
+  for (const { pattern, gender } of genderRules) {
+    if (pattern.test(query)) { f.gender = gender; break; }
+  }
+
+  // Color (from dictionary attributes)
+  const COLORS = new Set(["black","white","red","blue","green","yellow","pink","purple","orange","brown","gray","grey","beige","navy"]);
+  for (const [, entry] of dict.attributes) {
+    if (entry.normalizedTerm && query.includes(entry.normalizedTerm) && COLORS.has(entry.normalizedTerm)) {
+      f.color = entry.term;
+      break;
+    }
+  }
+
+  // Brand
+  for (const word of query.split(/\s+/)) {
+    const brand = findBrand(word);
+    if (brand) { f.brand = brand.term; break; }
+  }
+
+  // Category
+  for (const word of query.split(/\s+/)) {
+    const cat = findCategory(word);
+    if (cat) { f.category = cat.term; break; }
+  }
+
+  return f;
+}
+
+/** If the LLM correction carried extracted entities, merge them into filters */
+function applyLLMEntities(corrections: Correction[], filters: ExtractedFilters): void {
+  const llm = corrections.find(c => c.source === "llm");
+  if (!llm?.alternatives?.length) return;
+
+  const [brand, category, gender] = llm.alternatives;
+  if (brand)    filters.brand    = brand;
+  if (category) filters.category = category;
+  if (gender)   filters.gender   = gender;
+}
+
+/** Convert flat ExtractedFilters → structured QueryEntities */
+function toEntities(f: ExtractedFilters): QueryEntities {
+  return {
+    brands:     f.brand    ? [f.brand]    : [],
+    categories: f.category ? [f.category] : [],
+    colors:     f.color    ? [f.color]    : [],
+    materials:  f.material ? [f.material] : [],
+    patterns:   [],
+    sizes:      [],
+    gender:     f.gender,
+  };
+}
+
+/** Convert flat ExtractedFilters → structured QueryFilters */
+function toFilters(f: ExtractedFilters): QueryFilters {
+  return {
+    priceRange: f.priceRange,
+    brand:      f.brand    ? [f.brand]    : undefined,
+    category:   f.category ? [f.category] : undefined,
+    color:      f.color    ? [f.color]    : undefined,
+    material:   f.material ? [f.material] : undefined,
+    gender:     f.gender,
+  };
+}
+
+/** Apply corrections to produce the final search text */
+function buildSearchQuery(normalized: string, corrections: Correction[]): string {
+  let q = normalized;
+
+  const llm = corrections.find(c => c.source === "llm" && c.confidence >= THRESHOLDS.autoApply);
+  if (llm) return llm.corrected.replace(/\s+/g, " ").trim();
+
+  for (const c of corrections) {
+    if (c.confidence >= THRESHOLDS.reject && c.source !== "llm") {
+      q = q.replace(new RegExp(`\\b${escapeRegex(c.original)}\\b`, "gi"), c.corrected);
+    }
+  }
+  return q.replace(/\s+/g, " ").trim();
+}
+
+// ─── Intent mapping ──────────────────────────────────────────────────────────
+
+function mapIntentResult(
+  raw: { type: string; confidence: "high" | "medium" | "low"; source?: string },
+  entities: QueryEntities,
+): QueryIntent {
+  let type: QueryIntent["type"];
+  let desc: string;
+
+  switch (raw.type) {
+    case "price_search":      type = "filter";      desc = "Price-constrained search";   break;
+    case "comparison":        type = "comparison";   desc = "Product / brand comparison"; break;
+    case "brand_search":      type = "exploration";  desc = "Brand exploration";          break;
+    case "outfit_completion": type = "completion";   desc = "Outfit completion";          break;
+    case "trending_search":   type = "exploration";  desc = "Trending / popular items";   break;
+    case "product_search":
+      if (entities.gender || entities.colors.length || entities.categories.length) {
+        type = "filter"; desc = "Filtered product search";
+      } else {
+        type = "search"; desc = "General product search";
+      }
+      break;
+    default:
+      type = "search"; desc = "Standard search";
+  }
+
+  return {
+    type,
+    confidence: getConfidenceScore(raw.confidence),
+    description: `${desc} (${raw.source ?? "rules"})`,
+  };
+}
+
+function classifyIntentRules(query: string, entities: QueryEntities): QueryIntent {
+  const result = classifyQueryIntent(query, getAllBrandNames());
+  return mapIntentResult(result, entities);
+}
+
+async function classifyIntentHybrid(query: string, entities: QueryEntities): Promise<QueryIntent> {
+  const result = await classifyQueryIntentHybrid(query, getAllBrandNames(), true);
+  return mapIntentResult(result, entities);
+}
+
+// ─── Expansions ──────────────────────────────────────────────────────────────
+
+const CATEGORY_SYNONYMS: Record<string, string[]> = {
+  shirt: ["top", "blouse", "tee", "t-shirt"],
+  dress: ["gown", "frock", "outfit"],
+  pants: ["trousers", "jeans", "bottoms"],
+  shoes: ["footwear", "sneakers", "boots"],
+  bag:   ["handbag", "purse", "tote", "backpack"],
+};
+
+function generateExpansions(
+  query: string, script: ScriptAnalysis,
+  entities: QueryEntities, corrections: Correction[],
+): QueryExpansions {
+  const exp: QueryExpansions = {
+    synonyms: [],
+    transliterations: (script.hasArabic || script.hasArabizi) ? getTransliterationVariants(query) : [],
+    brandAliases: [],
+    categoryExpansions: [],
+    corrections: corrections.map(c => c.corrected),
+  };
+
+  const dict = getDictionaries();
+  for (const brand of entities.brands) {
+    const entry = dict.brands.get(brand.toLowerCase());
+    if (entry?.aliases) exp.brandAliases.push(...entry.aliases);
+  }
+
+  for (const cat of entities.categories) {
+    const syns = CATEGORY_SYNONYMS[cat.toLowerCase()];
+    if (syns) exp.categoryExpansions.push(...syns);
+  }
+
+  return exp;
+}
+
+// ─── Utility ─────────────────────────────────────────────────────────────────
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+

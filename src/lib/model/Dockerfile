@@ -26,8 +26,8 @@ COPY ranker_api.py .
 # Create models directory
 RUN mkdir -p models
 
-# Pre-download YOLOv8n model (will be cached in image)
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+# Pre-download Hugging Face clothing detection model (will be cached in image)
+RUN python -c "from ultralytics import YOLO; YOLO('kesimeg/yolov8n-clothing-detection')"
 
 # Copy model files if they exist (optional - can mount at runtime)
 COPY models/ ./models/ 2>/dev/null || quit 0

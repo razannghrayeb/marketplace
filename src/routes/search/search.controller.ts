@@ -45,14 +45,24 @@ const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 /**
- * GET /search?q=shirt&brand=Nike
- * 
- * Text-based product search
+ * GET /search?q=shirt&brand=Nike&gender=men
+ *
+ * Text-based product search powered by the QueryAST pipeline.
+ *
+ * The query string `q` flows through:
+ *   normalize → spell-correct → entity extraction → intent classification → expand
+ *
+ * Filters supplied via query params override AST-extracted entities.
+ * The response includes a `query` object with the full AST summary
+ * (intent, entities, corrections, suggestText, etc.).
+ *
+ * Supported query params:
+ *  q, brand, category, minPrice, maxPrice, color, size, gender, vendor_id, limit, offset
  */
 router.get("/", async (req: Request, res: Response) => {
   try {
-    const { q, brand, category, minPrice, maxPrice, color, size, vendor_id, limit, offset } = req.query;
-    
+    const { q, brand, category, minPrice, maxPrice, color, size, gender, vendor_id, limit, offset } = req.query;
+
     const filters = {
       brand: brand as string,
       category: category as string,
@@ -60,14 +70,15 @@ router.get("/", async (req: Request, res: Response) => {
       maxPrice: maxPrice ? Number(maxPrice) : undefined,
       color: color as string,
       size: size as string,
+      gender: gender as string,
       vendorId: vendor_id ? Number(vendor_id) : undefined,
     };
-    
+
     const options = {
       limit: limit ? Number(limit) : 20,
       offset: offset ? Number(offset) : 0,
     };
-    
+
     const result = await textSearch(q as string || "", filters, options);
     res.json(result);
   } catch (error) {
@@ -78,8 +89,17 @@ router.get("/", async (req: Request, res: Response) => {
 
 /**
  * POST /search/image
- * 
- * Single image-based similarity search
+ *
+ * Single image similarity search using Hybrid Search (CLIP + BLIP fusion)
+ *
+ * Pipeline:
+ * 1. CLIP image embed (60% weight) - visual features (shape, texture, style)
+ * 2. BLIP caption → enrichment → CLIP text embed (30% weight) - semantic features
+ * 3. Fuse embeddings with L2 normalization
+ * 4. OpenSearch k-NN vector search
+ *
+ * Note: This searches for products similar to the WHOLE image.
+ * For per-item detection + search ("shop the look"), use POST /api/images/search instead.
  */
 router.post("/image", upload.single("image"), async (req: Request, res: Response) => {
   try {

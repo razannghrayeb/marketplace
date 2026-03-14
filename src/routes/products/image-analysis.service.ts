@@ -4,7 +4,7 @@
  * Single entry point for image uploads that provides:
  * - Image storage (R2)
  * - CLIP embeddings for similarity search
- * - YOLOv8 fashion detection
+ * - Dual-model fashion detection (clothing + accessories)
  *
  * Use this service when you want a complete analysis pipeline.
  */
@@ -18,6 +18,7 @@ import {
   validateImage,
   isClipAvailable,
 } from "../../lib/image";
+import { hybridSearch } from "../../lib/search";
 import {
   YOLOv8Client,
   getYOLOv8Client,
@@ -59,6 +60,7 @@ export interface ImageAnalysisResult {
   services: {
     clip: boolean;
     yolo: boolean;
+    blip: boolean;
   };
 }
 
@@ -164,15 +166,17 @@ export class ImageAnalysisService {
   /**
    * Check which services are available
    */
-  async getServiceStatus(): Promise<{ clip: boolean; yolo: boolean }> {
+  async getServiceStatus(): Promise<{ clip: boolean; yolo: boolean; blip: boolean }> {
     const [clipAvailable, yoloAvailable] = await Promise.all([
       Promise.resolve(isClipAvailable()),
       this.yoloClient.isAvailable().catch(() => false),
     ]);
 
+    // BLIP availability is checked on-demand by hybridSearch
     return {
       clip: clipAvailable,
       yolo: yoloAvailable,
+      blip: true, // hybridSearch gracefully degrades if BLIP unavailable
     };
   }
 
@@ -331,13 +335,38 @@ export class ImageAnalysisService {
       generateEmbedding: true, // Force embedding for similarity search
     });
 
-    // If no detection results or similarity search disabled, return early
-    if (!findSimilar || !analysisResult.detection || analysisResult.detection.items.length === 0) {
+    // Similarity search disabled — return early
+    if (!findSimilar) {
+      return {
+        ...analysisResult,
+        similarProducts: { byDetection: [], totalProducts: 0, threshold: similarityThreshold, detectedCategories: [] },
+      };
+    }
+
+    // No YOLO detections — fall back to a whole-image embedding search
+    if (!analysisResult.detection || analysisResult.detection.items.length === 0) {
+      if (!analysisResult.embedding) {
+        return {
+          ...analysisResult,
+          similarProducts: { byDetection: [], totalProducts: 0, threshold: similarityThreshold, detectedCategories: [] },
+        };
+      }
+      const fallback = await searchByImageWithSimilarity({
+        imageEmbedding: analysisResult.embedding,
+        filters: {},
+        limit: similarLimitPerItem,
+        similarityThreshold,
+      });
       return {
         ...analysisResult,
         similarProducts: {
-          byDetection: [],
-          totalProducts: 0,
+          byDetection: fallback.results.length > 0 ? [{
+            detection: { label: "full_image", confidence: 1.0, box: { x1: 0, y1: 0, x2: imageWidth, y2: imageHeight }, area_ratio: 1.0 },
+            category: "all",
+            products: fallback.results,
+            count: fallback.results.length,
+          }] : [],
+          totalProducts: fallback.results.length,
           threshold: similarityThreshold,
           detectedCategories: [],
         },
@@ -381,7 +410,8 @@ export class ImageAnalysisService {
           continue;
         }
 
-        // Crop and generate embedding for this detection
+        // Crop detected region from ORIGINAL RGB buffer (not YOLO-preprocessed)
+        // YOLO detection boxes are in original image coordinate space
         const croppedBuffer = await sharp(buffer)
           .extract({
             left: cropLeft,
@@ -391,7 +421,12 @@ export class ImageAnalysisService {
           })
           .toBuffer();
 
-        const croppedEmbedding = await processImageForEmbedding(croppedBuffer);
+        // Use hybrid search to build query vectors (CLIP image + BLIP caption → CLIP text)
+        // Pass original buffer for better captioning context
+        const vectors = await hybridSearch.buildQueryVectors(croppedBuffer, buffer);
+
+        // Fuse vectors: 60% image + 30% caption (see hybridSearch.ts WEIGHTS)
+        const finalEmbedding = hybridSearch.fuseVectors(vectors);
 
         // Map detection to product category for filtering
         const category = this.mapDetectionToCategory(label);
@@ -403,7 +438,7 @@ export class ImageAnalysisService {
         }
 
         const similarResult = await searchByImageWithSimilarity({
-          imageEmbedding: croppedEmbedding,
+          imageEmbedding: finalEmbedding,
           filters,
           limit: similarLimitPerItem,
           similarityThreshold,

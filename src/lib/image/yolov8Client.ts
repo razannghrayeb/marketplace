@@ -1,7 +1,10 @@
 /**
- * YOLOv8 Fashion Detection Client
+ * Dual-Model Fashion Detection Client
  *
- * TypeScript client for the YOLOv8 Fashion Detection API.
+ * TypeScript client for the Dual-Model Fashion Detection API.
+ * Uses a hybrid detector combining:
+ *   - Model A: deepfashion2_yolov8s-seg (clothing: tops, bottoms, dresses, outerwear)
+ *   - Model B: valentinafeve/yolos-fashionpedia (accessories: shoes, bags, hats)
  * Provides type-safe methods for detecting fashion items in images.
  */
 
@@ -22,6 +25,19 @@ export interface StyleInfo {
   formality?: number;
 }
 
+export interface SegmentationMask {
+  /** Polygon contour points [[x1,y1],[x2,y2],...] in pixel coordinates */
+  polygon: number[][];
+  /** Polygon contour points normalized to 0-1 */
+  polygon_normalized: number[][];
+  /** Run-length encoded binary mask (base64) */
+  mask_rle?: string;
+  /** Mask area in pixels */
+  mask_area: number;
+  /** Mask area as ratio of image area */
+  mask_area_ratio: number;
+}
+
 export interface Detection {
   label: string;
   raw_label: string;
@@ -30,6 +46,7 @@ export interface Detection {
   box_normalized: BoundingBox;
   area_ratio: number;
   style?: StyleInfo;
+  mask?: SegmentationMask;
 }
 
 export interface DetectionResponse {
@@ -65,6 +82,8 @@ export interface DetectOptions {
   confidence?: number;
   includePerson?: boolean;
   normalizedBoxes?: boolean;
+  /** Include instance segmentation masks in results (default: true) */
+  includeMasks?: boolean;
 }
 
 export interface OutfitComposition {
@@ -160,6 +179,9 @@ export class YOLOv8Client {
     }
     if (options.normalizedBoxes !== undefined) {
       url.searchParams.set("normalized_boxes", options.normalizedBoxes.toString());
+    }
+    if (options.includeMasks !== undefined) {
+      url.searchParams.set("include_masks", options.includeMasks.toString());
     }
 
     const response = await fetch(url.toString(), {

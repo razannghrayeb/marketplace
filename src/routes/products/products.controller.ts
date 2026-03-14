@@ -9,8 +9,9 @@ import {
   searchByImageWithSimilarity,
   searchByTextWithRelated,
 } from "./products.service";
-import { processImageForEmbedding, validateImage, computePHash } from "../../lib/image/index";
+import { validateImage, computePHash } from "../../lib/image/index";
 import { isClipAvailable } from "../../lib/image/index";
+import { hybridSearch } from "../../lib/search";
 
 // ============================================================================
 // Request Helpers
@@ -112,7 +113,14 @@ export async function searchProductsByTitle(req: Request, res: Response) {
 
 /**
  * POST /products/search/image
- * Enhanced image search with similarity threshold
+ * Enhanced image search using Hybrid Search (CLIP image + BLIP caption fusion)
+ *
+ * Pipeline:
+ * 1. CLIP image embed (60% weight) - visual features
+ * 2. BLIP caption → enrichment → CLIP text embed (30% weight) - semantic features
+ * 3. Fuse embeddings with L2 normalization
+ * 4. OpenSearch k-NN vector search
+ *
  * Accepts: multipart/form-data with 'image' field OR JSON with 'embedding' array
  * Query params:
  *   - threshold: similarity threshold 0-1, default 0.7
@@ -143,16 +151,16 @@ export async function searchProductsByImage(req: Request, res: Response) {
         return res.status(400).json({ success: false, error: validation.error });
       }
 
-      // Process image for embedding and pHash in parallel
-      const [embeddingResult, pHashResult] = await Promise.all([
-        processImageForEmbedding(file.buffer),
+      // Use hybrid search: CLIP image + BLIP caption fusion
+      const [vectors, pHashResult] = await Promise.all([
+        hybridSearch.buildQueryVectors(file.buffer),
         computePHash(file.buffer),
       ]);
-      
-      embedding = embeddingResult;
+
+      embedding = hybridSearch.fuseVectors(vectors);
       pHash = pHashResult;
     } else if (req.body.embedding && Array.isArray(req.body.embedding)) {
-      // Embedding provided directly
+      // Embedding provided directly (already fused)
       embedding = req.body.embedding;
       pHash = req.body.pHash; // Optional pHash if provided
     } else {
@@ -173,12 +181,12 @@ export async function searchProductsByImage(req: Request, res: Response) {
       pHash,
     });
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       data: result.results,
       related: result.related,
       meta: result.meta,
-      pagination: { page, limit } 
+      pagination: { page, limit }
     });
   } catch (error) {
     console.error("Error searching by image:", error);

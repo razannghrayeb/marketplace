@@ -1,5 +1,4 @@
 /node_modules
-/models
 /.venv
 /src/lib/model/__pycache__
 /src/lib/model/.venv
