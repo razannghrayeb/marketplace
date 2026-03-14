@@ -26,7 +26,7 @@ export const config = {
   },
 
   opensearch: {
-    node: process.env.OS_NODE || "http://localhost:9200",
+    node: process.env.OS_NODE || "http://opensearch-node:9200",
     index: process.env.OS_INDEX || "products",
     username: process.env.OS_USERNAME || "",
     password: process.env.OS_PASSWORD || "",
