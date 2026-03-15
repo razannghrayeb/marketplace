@@ -165,7 +165,7 @@ mapQuery(
 
 **New Endpoint:**
 ```typescript
-POST /api/search/multi-image
+POST /search/multi-image
 Content-Type: multipart/form-data
 
 Fields:
@@ -187,7 +187,7 @@ Fields:
 
 **Example Usage:**
 ```bash
-curl -X POST http://localhost:3000/api/search/multi-image \
+curl -X POST http://localhost:3000/search/multi-image \
   -F "images=@jacket1.jpg" \
   -F "images=@jacket2.jpg" \
   -F "prompt=I want the color of the first picture with the texture from the second" \
@@ -452,3 +452,5 @@ OPENSEARCH_URL=https://...
 ## License
 
 MIT
+
+

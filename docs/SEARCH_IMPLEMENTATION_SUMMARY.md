@@ -6,9 +6,9 @@ The Fashion Aggregator API now has **THREE complete search systems**, each servi
 
 | # | Feature | Status | Endpoint | Description |
 |---|---------|--------|----------|-------------|
-| 1 | **Normal Search** | ✅ Live | `POST /api/search/image` | Single-image similarity search |
+| 1 | **Normal Search** | ✅ Live | `POST /search/image` | Single-image similarity search |
 | 2 | **YOLO Detection** | ✅ Live | `POST /api/images/search` | Shop-the-look with automatic item detection |
-| 3 | **Multi-Image Composite** | ✅ Live | `POST /api/search/multi-image` | Mix attributes from multiple images (NEW) |
+| 3 | **Multi-Image Composite** | ✅ Live | `POST /search/multi-image` | Mix attributes from multiple images (NEW) |
 
 ---
 
@@ -28,7 +28,7 @@ The Fashion Aggregator API now has **THREE complete search systems**, each servi
 
 ### API Example
 ```bash
-curl -X POST http://localhost:3000/api/search/image \
+curl -X POST http://localhost:3000/search/image \
   -F "image=@dress.jpg" \
   -F "limit=20"
 ```
@@ -146,7 +146,7 @@ curl -X POST http://localhost:3000/api/images/search \
 
 **Main Endpoint (Natural Language):**
 ```bash
-curl -X POST http://localhost:3000/api/search/multi-image \
+curl -X POST http://localhost:3000/search/multi-image \
   -F "images=@red_dress.jpg" \
   -F "images=@leather_jacket.jpg" \
   -F "prompt=Red color from first, leather texture from second" \
@@ -155,7 +155,7 @@ curl -X POST http://localhost:3000/api/search/multi-image \
 
 **Advanced Endpoint (Explicit Weights):**
 ```bash
-curl -X POST http://localhost:3000/api/search/multi-vector \
+curl -X POST http://localhost:3000/search/multi-vector \
   -F "images=@dress1.jpg" \
   -F "images=@dress2.jpg" \
   -F "prompt=Elegant evening wear" \
@@ -165,7 +165,7 @@ curl -X POST http://localhost:3000/api/search/multi-vector \
 
 **With Custom Ranking:**
 ```bash
-curl -X POST http://localhost:3000/api/search/multi-image \
+curl -X POST http://localhost:3000/search/multi-image \
   -F "images=@vintage_coat.jpg" \
   -F "images=@modern_blazer.jpg" \
   -F "prompt=Vintage style from first with modern fit, under $200" \
@@ -271,7 +271,7 @@ npx tsx scripts/test-multi-vector-search.ts
 
 4. **Use API**:
 ```bash
-curl -X POST http://localhost:3000/api/search/multi-image \
+curl -X POST http://localhost:3000/search/multi-image \
   -F "images=@dress1.jpg" \
   -F "images=@dress2.jpg" \
   -F "prompt=Color from first, style from second"
@@ -315,12 +315,12 @@ See [SEARCH_FEATURES_GUIDE.md](./SEARCH_FEATURES_GUIDE.md#quick-start-examples) 
 
 ## API Endpoints Summary
 
-### Search API (`/api/search`)
+### Search API (`/search`)
 ```
-GET  /api/search              - Text search with filters
-POST /api/search/image        - Single image similarity
-POST /api/search/multi-image  - Multi-image composite (main)
-POST /api/search/multi-vector - Multi-image (advanced)
+GET  /search              - Text search with filters
+POST /search/image        - Single image similarity
+POST /search/multi-image  - Multi-image composite (main)
+POST /search/multi-vector - Multi-image (advanced)
 ```
 
 ### Image Analysis API (`/api/images`)
@@ -364,8 +364,8 @@ GET  /api/images/status       - Service health
 **Purpose**: Produce complementary product recommendations to "complete" an outfit or enrich a product page, with provenance and explainability for each suggestion.
 
 **Endpoints / Locations**
-- `GET /api/products/:id/complete-style` - Complete a product page with curated suggestions
-- `POST /api/products/complete-style` - Submit outfit images / product ids for completion
+- `GET /products/:id/complete-style` - Complete a product page with curated suggestions
+- `POST /products/complete-style` - Submit outfit images / product ids for completion
 - Core logic: [src/lib/outfit/completestyle.ts](../src/lib/outfit/completestyle.ts#L1)
 - Controller: [src/routes/products/outfit.controller.ts](../src/routes/products/outfit.controller.ts#L1)
 - Service: [src/routes/products/outfit.service.ts](../src/routes/products/outfit.service.ts#L1)
@@ -464,3 +464,5 @@ All three search systems are **production-ready** and fully documented:
 The multi-image composite search is the **standout feature** that enables advanced use cases not possible with traditional image search. Users can now express complex queries like "I want the color from this dress but the texture of that jacket" in natural language.
 
 🚀 **All features are live and ready to use!**
+
+

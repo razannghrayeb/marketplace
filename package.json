@@ -9,11 +9,14 @@
     "lint": "eslint .",
     "recreate-index": "npx tsx scripts/recreate-opensearch-index.ts",
     "reindex-embeddings": "npx tsx scripts/reindex-embeddings.ts",
+    "docs:endpoints": "npx tsx scripts/generate-endpoint-matrix.ts",
     "migrate:run": "npx tsx scripts/run-migration.ts",
     "backfill-r2": "npx tsx scripts/backfill-r2-images.ts",
     "add-image-cdn-col": "npx tsx scripts/add-image-cdn-column.ts",
     "migrate:canonicals": "npx tsx scripts/migrate-canonicals.ts",
-    "worker": "npx tsx src/workers/ingest.worker.ts"
+    "worker": "npx tsx src/workers/ingest.worker.ts",
+    "models:download": "python scripts/download-models.py",
+    "models:list": "python scripts/download-models.py --dry-run"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.962.0",

@@ -463,3 +463,5 @@ User Image → YOLO Detect → Crop from Original → HybridSearch (CLIP + BLIP)
 
 ✅ **Ready to use:**
 `POST /api/images/search` with multipart image upload
+
+

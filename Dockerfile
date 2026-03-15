@@ -3,6 +3,25 @@
 # Multi-stage build for optimized production image
 # ============================================================================
 
+# Stage 0: Download ML models from HuggingFace
+# Pass --build-arg HF_TOKEN=hf_xxx  if the repo is private.
+FROM python:3.11-slim AS model-downloader
+ARG HF_TOKEN=""
+ENV HF_TOKEN=${HF_TOKEN}
+RUN pip install --no-cache-dir huggingface_hub
+RUN python - <<'EOF'
+from huggingface_hub import snapshot_download
+import os
+snapshot_download(
+    repo_id="razangh/fashion-models",
+    repo_type="model",
+    local_dir="/models",
+    token=os.environ.get("HF_TOKEN") or None,
+    ignore_patterns=["*.gitattributes", ".gitattributes", "README.md"],
+)
+print("Models downloaded.")
+EOF
+
 # Stage 1: Build
 FROM node:20-alpine AS builder
 
@@ -45,7 +64,8 @@ RUN pnpm install --frozen-lockfile --prod
 # Copy built files
 COPY --from=builder /app/dist ./dist
 COPY public ./public
-COPY models ./models
+# Copy models downloaded from HuggingFace (razangh/fashion-models)
+COPY --from=model-downloader /models ./models
 
 # Set ownership
 RUN chown -R nodejs:nodejs /app

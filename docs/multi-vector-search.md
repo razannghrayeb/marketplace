@@ -108,13 +108,13 @@ OpenSearch index now includes per-attribute vector fields:
 
 ## API Endpoints
 
-### POST /api/search/multi-vector
+### POST /search/multi-vector
 
 Advanced multi-vector weighted search with per-attribute control.
 
 **Request:**
 ```bash
-curl -X POST http://localhost:3000/api/search/multi-vector \
+curl -X POST http://localhost:3000/search/multi-vector \
   -F "images=@dress1.jpg" \
   -F "images=@dress2.jpg" \
   -F "prompt=I want the color from the first image with the style from the second" \
@@ -311,7 +311,7 @@ To enable multi-vector search on an existing index:
 
 4. **Test endpoint**:
    ```bash
-   curl -X POST http://localhost:3000/api/search/multi-vector \
+   curl -X POST http://localhost:3000/search/multi-vector \
      -F "images=@test.jpg" \
      -F "prompt=test query"
    ```
@@ -321,3 +321,5 @@ To enable multi-vector search on an existing index:
 - CLIP: [Learning Transferable Visual Models From Natural Language Supervision](https://arxiv.org/abs/2103.00020)
 - Fashion-CLIP: [Contrastive Language and Vision Learning of General Fashion Concepts](https://arxiv.org/abs/2210.15162)
 - HNSW: [Efficient and robust approximate nearest neighbor search](https://arxiv.org/abs/1603.09320)
+
+

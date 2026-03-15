@@ -6,6 +6,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Set HF_TOKEN in .env or CI secrets if razangh/fashion-models is private
+        HF_TOKEN: ${HF_TOKEN:-}
     ports:
       - "3000:3000"
     environment:

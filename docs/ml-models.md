@@ -2,6 +2,8 @@
 
 This guide covers the machine learning components of the Fashion Aggregator API, including model architectures, training procedures, and integration details.
 
+For ranker operations (training, startup, fallback behavior, deployment checks), see `docs/ranker-runbook.md`.
+
 ## Overview
 
 The Fashion Aggregator API incorporates several ML models to provide intelligent features:
@@ -1147,7 +1149,7 @@ export async function predictWithFallback(
   try {
     // Try ML service first
     if (await isRankerAvailable()) {
-      const response = await fetch(`${RANKER_SERVICE_URL}/predict`, {
+      const response = await fetch(`${RANKER_API_URL}/predict`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ features }),
@@ -2263,3 +2265,4 @@ export class ModelVersionManager {
 ```
 
 This ML guide provides comprehensive coverage of all machine learning components in the Fashion Aggregator API. Each section includes practical implementation details, performance considerations, and maintenance procedures.
+

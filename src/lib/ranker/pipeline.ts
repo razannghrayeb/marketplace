@@ -114,7 +114,7 @@ function sleep(ms: number): Promise<void> {
  * fail, and logs explicitly when that happens.
  */
 async function predictWithRetry(
-  featureRows: RankerFeatureRow[],
+  featureRows: Partial<RankerFeatureRow>[],
   candidates: CandidateWithScores[],
   attempts: number,
   delayMs: number,
