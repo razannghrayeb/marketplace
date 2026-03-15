@@ -84,6 +84,15 @@ export interface DetectOptions {
   normalizedBoxes?: boolean;
   /** Include instance segmentation masks in results (default: true) */
   includeMasks?: boolean;
+  /** Preprocessing options for improved detection on cluttered backgrounds */
+  preprocessing?: {
+    /** Apply contrast enhancement (default: false) */
+    enhanceContrast?: boolean;
+    /** Apply sharpness enhancement (default: false) */
+    enhanceSharpness?: boolean;
+    /** Apply bilateral filtering for noise reduction (default: false) */
+    bilateralFilter?: boolean;
+  };
 }
 
 export interface OutfitComposition {
@@ -182,6 +191,16 @@ export class YOLOv8Client {
     }
     if (options.includeMasks !== undefined) {
       url.searchParams.set("include_masks", options.includeMasks.toString());
+    }
+    // Preprocessing options for cluttered backgrounds
+    if (options.preprocessing?.enhanceContrast) {
+      url.searchParams.set("enhance_contrast", "true");
+    }
+    if (options.preprocessing?.enhanceSharpness) {
+      url.searchParams.set("enhance_sharpness", "true");
+    }
+    if (options.preprocessing?.bilateralFilter) {
+      url.searchParams.set("bilateral_filter", "true");
     }
 
     const response = await fetch(url.toString(), {

@@ -34,7 +34,6 @@ import { config } from "../src/config";
 import { processImageForEmbedding, computePHash } from "../src/lib/image";
 import { extractAttributesSync } from "../src/lib/search/attributeExtractor";
 import { promises as fs } from "fs";
-import path from "path";
 
 // ============================================================================
 // Configuration
@@ -124,19 +123,19 @@ async function getUnindexedProductIds(productIds: number[]): Promise<number[]> {
   if (productIds.length === 0) return [];
 
   try {
-    // Batch check existence
-    const body = productIds.flatMap((id) => [
-      { index: config.opensearch.index },
-      { query: { term: { product_id: String(id) } } },
-    ]);
+    const result = await osClient.mget({
+      index: config.opensearch.index,
+      body: {
+        ids: productIds.map(String),
+      },
+    });
 
-    const result = await osClient.msearch({ body });
-    const responses = result.body.responses;
+    const docs = result.body.docs ?? [];
 
     const unindexed: number[] = [];
     for (let i = 0; i < productIds.length; i++) {
-      const response = responses[i];
-      if (!response.hits || response.hits.total.value === 0) {
+      const doc = docs[i];
+      if (!doc?.found) {
         unindexed.push(productIds[i]);
       }
     }
@@ -180,20 +179,19 @@ async function fetchImage(url: string, retries: number, timeoutMs: number): Prom
 
 async function reindexProduct(
   product: any,
-  config: ReindexConfig,
-  columns: { hasIsHidden: boolean; hasCanonicalId: boolean }
+  reindexConfig: ReindexConfig
 ): Promise<boolean> {
   const { id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_url, is_hidden, canonical_id } = product;
 
   try {
     // Fetch image
-    const buf = await fetchImage(image_url, config.maxRetries, config.timeoutMs);
+    const buf = await fetchImage(image_url, reindexConfig.maxRetries, reindexConfig.timeoutMs);
     if (!buf) {
       console.error(`  ❌ Product ${id}: Failed to fetch image`);
       return false;
     }
 
-    if (config.dryRun) {
+    if (reindexConfig.dryRun) {
       console.log(`  [DRY RUN] Would index product ${id}: ${title}`);
       return true;
     }
@@ -305,9 +303,9 @@ Examples:
     }
   }
 
-  console.log("="*70);
+  console.log("=".repeat(70));
   console.log("📦 Resumable Product Reindexing");
-  console.log("="*70);
+  console.log("=".repeat(70));
   console.log("Configuration:");
   console.log(`  Start from ID:      ${reindexConfig.startFromId || "auto-detect"}`);
   console.log(`  Force reindex:      ${reindexConfig.force}`);
@@ -392,7 +390,7 @@ Examples:
 
     // Process each product
     for (const product of productsToIndex) {
-      const success = await reindexProduct(product, reindexConfig, columns);
+      const success = await reindexProduct(product, reindexConfig);
 
       processed++;
       progress.totalProcessed++;
@@ -424,9 +422,9 @@ Examples:
 
   // Final summary
   console.log();
-  console.log("="*70);
+  console.log("=".repeat(70));
   console.log("✅ Reindexing Complete!");
-  console.log("="*70);
+  console.log("=".repeat(70));
   console.log(`Total processed:  ${progress.totalProcessed}`);
   console.log(`Successful:       ${progress.totalSuccess} ✅`);
   console.log(`Failed:           ${progress.totalFailed} ❌`);

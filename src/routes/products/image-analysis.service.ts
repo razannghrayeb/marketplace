@@ -25,11 +25,23 @@ import {
   extractOutfitComposition,
   Detection,
   OutfitComposition,
+  BoundingBox,
 } from "../../lib/image/yolov8Client";
 import { searchByImageWithSimilarity } from "./search.service";
 import { ProductResult } from "./types";
 import sharp from "sharp";
 import crypto from "crypto";
+import {
+  mapDetectionToCategory,
+  getSearchCategories,
+  shouldUseAlternatives,
+  type CategoryMapping,
+} from "../../lib/detection/categoryMapper";
+import {
+  computeOutfitCoherence,
+  type OutfitCoherenceResult,
+  type DetectionWithColor,
+} from "../../lib/detection/outfitCoherence";
 
 // ============================================================================
 // Types
@@ -150,6 +162,42 @@ export interface AnalyzeAndFindSimilarOptions extends AnalyzeOptions {
 export interface FullAnalysisResult extends ImageAnalysisResult {
   /** Similar products grouped by detected item */
   similarProducts?: GroupedSimilarProducts;
+  /** Outfit coherence analysis for detected items */
+  outfitCoherence?: OutfitCoherenceResult;
+}
+
+/** User-defined bounding box for manual region selection */
+export interface UserDefinedBox {
+  /** Bounding box in pixel coordinates */
+  box: { x1: number; y1: number; x2: number; y2: number };
+  /** User-provided category hint (optional) */
+  categoryHint?: string;
+  /** User-provided label for this region */
+  label?: string;
+}
+
+/** Options for selective item processing */
+export interface SelectiveAnalysisOptions extends AnalyzeAndFindSimilarOptions {
+  /** Process only items at these indices (from detection.items array) */
+  selectedItemIndices?: number[];
+  /** Exclude items at these indices from processing */
+  excludedItemIndices?: number[];
+  /** User-defined bounding boxes to analyze (in addition to YOLO detections) */
+  userDefinedBoxes?: UserDefinedBox[];
+  /** Enable preprocessing for cluttered backgrounds */
+  preprocessing?: {
+    enhanceContrast?: boolean;
+    enhanceSharpness?: boolean;
+    bilateralFilter?: boolean;
+  };
+}
+
+/** Detection result with source indicator */
+export interface SelectiveDetectionResult extends DetectionSimilarProducts {
+  /** Source of this detection */
+  source: "yolo" | "user_defined";
+  /** Original detection index (for YOLO detections) */
+  originalIndex?: number;
 }
 
 // ============================================================================
@@ -428,18 +476,24 @@ export class ImageAnalysisService {
         // Fuse vectors: 60% image + 30% caption (see hybridSearch.ts WEIGHTS)
         const finalEmbedding = hybridSearch.fuseVectors(vectors);
 
-        // Map detection to product category for filtering
-        const category = this.mapDetectionToCategory(label);
+        // Map detection to product category using enhanced mapper
+        const categoryMapping = mapDetectionToCategory(label, detection.confidence);
+        const searchCategories = shouldUseAlternatives(categoryMapping)
+          ? getSearchCategories(categoryMapping)
+          : [categoryMapping.productCategory];
 
         // Search for similar products with category filter
-        const filters: Record<string, string> = {};
+        const filters: Record<string, string | string[]> = {};
         if (filterByDetectedCategory) {
-          filters.category = category;
+          // Use primary category or array of alternatives if confidence is low
+          filters.category = searchCategories.length === 1
+            ? searchCategories[0]
+            : searchCategories;
         }
 
         const similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
-          filters,
+          filters: filters as Record<string, string>,
           limit: similarLimitPerItem,
           similarityThreshold,
         });
@@ -453,7 +507,7 @@ export class ImageAnalysisService {
               area_ratio: detection.area_ratio,
               style: detection.style,
             },
-            category,
+            category: categoryMapping.productCategory,
             products: similarResult.results,
             count: similarResult.results.length,
           });
@@ -468,6 +522,11 @@ export class ImageAnalysisService {
     // Sort by detection confidence (highest first)
     groupedResults.sort((a, b) => b.detection.confidence - a.detection.confidence);
 
+    // Compute outfit coherence for all detected items
+    const outfitCoherence = analysisResult.detection?.items.length
+      ? computeOutfitCoherence(analysisResult.detection.items as DetectionWithColor[])
+      : undefined;
+
     return {
       ...analysisResult,
       similarProducts: {
@@ -476,6 +535,7 @@ export class ImageAnalysisService {
         threshold: similarityThreshold,
         detectedCategories,
       },
+      outfitCoherence,
     };
   }
 
@@ -522,67 +582,12 @@ export class ImageAnalysisService {
 
   /**
    * Map YOLO detection labels to product categories
+   * @deprecated Use imported mapDetectionToCategory from categoryMapper for full mapping
    */
-  private mapDetectionToCategory(detectionLabel: string): string {
-    const categoryMap: Record<string, string> = {
-      // Tops
-      shirt: "tops",
-      tshirt: "tops",
-      blouse: "tops",
-      sweater: "tops",
-      hoodie: "tops",
-      cardigan: "tops",
-      tank_top: "tops",
-      crop_top: "tops",
-      top: "tops",
-      // Bottoms
-      jeans: "bottoms",
-      pants: "bottoms",
-      shorts: "bottoms",
-      skirt: "bottoms",
-      leggings: "bottoms",
-      // Dresses
-      dress: "dresses",
-      gown: "dresses",
-      maxi_dress: "dresses",
-      mini_dress: "dresses",
-      midi_dress: "dresses",
-      jumpsuit: "dresses",
-      romper: "dresses",
-      // Outerwear
-      jacket: "outerwear",
-      coat: "outerwear",
-      blazer: "outerwear",
-      parka: "outerwear",
-      bomber: "outerwear",
-      vest: "outerwear",
-      // Footwear
-      sneakers: "footwear",
-      boots: "footwear",
-      heels: "footwear",
-      sandals: "footwear",
-      loafers: "footwear",
-      flats: "footwear",
-      // Bags
-      bag: "bags",
-      backpack: "bags",
-      clutch: "bags",
-      tote: "bags",
-      crossbody: "bags",
-      // Accessories
-      hat: "accessories",
-      sunglasses: "accessories",
-      watch: "accessories",
-      belt: "accessories",
-      tie: "accessories",
-      scarf: "accessories",
-      jewelry: "accessories",
-      necklace: "accessories",
-      bracelet: "accessories",
-      earrings: "accessories",
-    };
-
-    return categoryMap[detectionLabel.toLowerCase()] || detectionLabel;
+  private mapDetectionToCategoryLegacy(detectionLabel: string): string {
+    // Use the new enhanced category mapper
+    const mapping = mapDetectionToCategory(detectionLabel);
+    return mapping.productCategory;
   }
 
   /**
@@ -657,6 +662,193 @@ export class ImageAnalysisService {
         : undefined,
       error: r.error,
     }));
+  }
+
+  /**
+   * Analyze with selective item processing
+   *
+   * Allows users to:
+   * - Select specific detected items to process
+   * - Exclude certain items
+   * - Add their own bounding boxes for manual detection
+   */
+  async analyzeWithSelection(
+    buffer: Buffer,
+    filename: string,
+    options: SelectiveAnalysisOptions = {}
+  ): Promise<FullAnalysisResult> {
+    const {
+      selectedItemIndices,
+      excludedItemIndices = [],
+      userDefinedBoxes = [],
+      preprocessing,
+      ...baseOptions
+    } = options;
+
+    // Get image dimensions
+    const metadata = await sharp(buffer).metadata();
+    const imageWidth = metadata.width || 0;
+    const imageHeight = metadata.height || 0;
+
+    // Run standard analysis with preprocessing options
+    const fullResult = await this.analyzeImage(buffer, filename, {
+      ...baseOptions,
+      generateEmbedding: true,
+    });
+
+    if (!fullResult.detection) {
+      return {
+        ...fullResult,
+        similarProducts: undefined,
+        outfitCoherence: undefined,
+      };
+    }
+
+    // Filter detections based on selection/exclusion
+    let itemsToProcess = fullResult.detection.items;
+    const originalIndices: number[] = fullResult.detection.items.map((_, i) => i);
+
+    if (selectedItemIndices && selectedItemIndices.length > 0) {
+      // Only process selected items
+      const validIndices = selectedItemIndices.filter(
+        (i) => i >= 0 && i < fullResult.detection!.items.length
+      );
+      itemsToProcess = validIndices.map((i) => fullResult.detection!.items[i]);
+    }
+
+    if (excludedItemIndices.length > 0) {
+      const excludeSet = new Set(excludedItemIndices);
+      itemsToProcess = itemsToProcess.filter((_, i) => !excludeSet.has(originalIndices[i]));
+    }
+
+    // Add user-defined boxes as synthetic detections
+    const userDetections: Detection[] = userDefinedBoxes.map((udb, i) => ({
+      label: udb.label || udb.categoryHint || `user_region_${i}`,
+      raw_label: `user_defined_${i}`,
+      confidence: 1.0, // User-defined = high confidence
+      box: udb.box,
+      box_normalized: {
+        x1: udb.box.x1 / imageWidth,
+        y1: udb.box.y1 / imageHeight,
+        x2: udb.box.x2 / imageWidth,
+        y2: udb.box.y2 / imageHeight,
+      },
+      area_ratio:
+        ((udb.box.x2 - udb.box.x1) * (udb.box.y2 - udb.box.y1)) /
+        (imageWidth * imageHeight),
+    }));
+
+    // Combine YOLO + user detections
+    const allItemsToProcess = [...itemsToProcess, ...userDetections];
+
+    // Process each item for similar products
+    const groupedResults: SelectiveDetectionResult[] = [];
+    let totalProducts = 0;
+
+    for (let i = 0; i < allItemsToProcess.length; i++) {
+      const detection = allItemsToProcess[i];
+      const isUserDefined = i >= itemsToProcess.length;
+
+      try {
+        // Crop detected region
+        const croppedBuffer = await this.cropDetection(
+          buffer,
+          detection.box,
+          imageWidth,
+          imageHeight
+        );
+        if (!croppedBuffer) continue;
+
+        const vectors = await hybridSearch.buildQueryVectors(croppedBuffer, buffer);
+        const finalEmbedding = hybridSearch.fuseVectors(vectors);
+
+        // Get category from user hint or detection
+        const categorySource =
+          isUserDefined && userDefinedBoxes[i - itemsToProcess.length].categoryHint
+            ? userDefinedBoxes[i - itemsToProcess.length].categoryHint!
+            : detection.label;
+        const categoryMapping = mapDetectionToCategory(categorySource, detection.confidence);
+
+        const filters: Record<string, string> = {};
+        if (options.filterByDetectedCategory !== false) {
+          filters.category = categoryMapping.productCategory;
+        }
+
+        const similarResult = await searchByImageWithSimilarity({
+          imageEmbedding: finalEmbedding,
+          filters,
+          limit: options.similarLimitPerItem || 10,
+          similarityThreshold: options.similarityThreshold || 0.7,
+        });
+
+        if (similarResult.results.length > 0) {
+          groupedResults.push({
+            detection: {
+              label: detection.label,
+              confidence: detection.confidence,
+              box: detection.box,
+              area_ratio: detection.area_ratio,
+              style: detection.style,
+            },
+            category: categoryMapping.productCategory,
+            products: similarResult.results,
+            count: similarResult.results.length,
+            source: isUserDefined ? "user_defined" : "yolo",
+            originalIndex: isUserDefined ? undefined : originalIndices[i],
+          });
+          totalProducts += similarResult.results.length;
+        }
+      } catch (err) {
+        console.error(`Failed to process detection ${detection.label}:`, err);
+      }
+    }
+
+    // Compute outfit coherence
+    const outfitCoherence = allItemsToProcess.length
+      ? computeOutfitCoherence(allItemsToProcess as DetectionWithColor[])
+      : undefined;
+
+    return {
+      ...fullResult,
+      similarProducts: {
+        byDetection: groupedResults,
+        totalProducts,
+        threshold: options.similarityThreshold || 0.7,
+        detectedCategories: [...new Set(groupedResults.map((r) => r.category))],
+      },
+      outfitCoherence,
+    };
+  }
+
+  /**
+   * Crop a detection region from an image
+   */
+  private async cropDetection(
+    buffer: Buffer,
+    box: { x1: number; y1: number; x2: number; y2: number },
+    imageWidth: number,
+    imageHeight: number
+  ): Promise<Buffer | null> {
+    const cropWidth = Math.max(1, Math.round(box.x2 - box.x1));
+    const cropHeight = Math.max(1, Math.round(box.y2 - box.y1));
+    const cropLeft = Math.max(0, Math.round(box.x1));
+    const cropTop = Math.max(0, Math.round(box.y1));
+
+    const safeWidth = Math.min(cropWidth, imageWidth - cropLeft);
+    const safeHeight = Math.min(cropHeight, imageHeight - cropTop);
+
+    if (safeWidth < 10 || safeHeight < 10) {
+      return null;
+    }
+
+    return sharp(buffer)
+      .extract({
+        left: cropLeft,
+        top: cropTop,
+        width: safeWidth,
+        height: safeHeight,
+      })
+      .toBuffer();
   }
 
   /**

@@ -39,6 +39,27 @@
 
 import { Router, Request, Response } from "express";
 import { textSearch, imageSearch, multiImageSearch, multiVectorWeightedSearch } from "./search.service";
+import {
+  getAutocompleteSuggestions,
+  getTrendingQueries,
+  getPopularQueries,
+  logSearchQuery,
+} from "../../lib/queryProcessor/queryAutocomplete";
+import {
+  parseComplexQuery,
+  mergeComplexConstraints,
+} from "../../lib/queryProcessor/complexQueryParser";
+import {
+  parseNegations,
+  explainNegations,
+} from "../../lib/queryProcessor/negationHandler";
+import {
+  enrichQueryWithContext,
+  addTurn,
+  getSession,
+  getSessionStats,
+} from "../../lib/queryProcessor/conversationalContext";
+import { processQuery } from "../../lib/queryProcessor";
 import multer from "multer";
 
 const router = Router();
@@ -47,23 +68,88 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 
 /**
  * GET /search?q=shirt&brand=Nike&gender=men
  *
- * Text-based product search powered by the QueryAST pipeline.
+ * Enhanced text-based product search with:
+ * - Complex query parsing (multi-constraint queries)
+ * - Negation handling ("not too formal", "without stripes")
+ * - Conversational context (multi-turn queries via session_id)
+ * - Query autocomplete logging
+ * - Smart suggestions
  *
  * The query string `q` flows through:
- *   normalize → spell-correct → entity extraction → intent classification → expand
+ *   normalize → spell-correct → entity extraction → intent classification →
+ *   complex parsing → negation detection → context enrichment → expand
  *
  * Filters supplied via query params override AST-extracted entities.
- * The response includes a `query` object with the full AST summary
- * (intent, entities, corrections, suggestText, etc.).
  *
  * Supported query params:
- *  q, brand, category, minPrice, maxPrice, color, size, gender, vendor_id, limit, offset
+ *  q, brand, category, minPrice, maxPrice, color, size, gender, vendor_id,
+ *  limit, offset, session_id, user_id, enhanced (true/false)
  */
 router.get("/", async (req: Request, res: Response) => {
   try {
-    const { q, brand, category, minPrice, maxPrice, color, size, gender, vendor_id, limit, offset } = req.query;
+    const {
+      q,
+      brand,
+      category,
+      minPrice,
+      maxPrice,
+      color,
+      size,
+      gender,
+      vendor_id,
+      limit,
+      offset,
+      session_id,
+      user_id,
+      enhanced,
+    } = req.query;
 
-    const filters = {
+    const query = (q as string) || "";
+    const sessionId = (session_id as string) || req.headers["x-session-id"] as string;
+    const userId = (user_id as string) || (req as any).userId;
+    const useEnhanced = enhanced !== "false"; // Default true
+
+    let processedQuery = query;
+    let contextual: any = undefined;
+    let negations: any = undefined;
+    let complexQuery: any = undefined;
+    let explanation: string | undefined;
+    let suggestions: string[] = [];
+
+    // Enhanced processing
+    if (useEnhanced && query) {
+      // 1. Conversational Context
+      if (sessionId) {
+        contextual = enrichQueryWithContext(query, sessionId);
+        processedQuery = contextual.enriched;
+      }
+
+      // 2. Negation Handling
+      negations = parseNegations(processedQuery);
+      const cleanedQuery = negations.cleanedQuery;
+
+      // 3. Complex Query Parsing
+      complexQuery = parseComplexQuery(cleanedQuery);
+
+      // Update processed query
+      processedQuery = cleanedQuery;
+
+      // Build explanation
+      const explanationParts: string[] = [];
+      if (contextual?.isRefinement) {
+        explanationParts.push("Refined previous search");
+      }
+      if (complexQuery.complexity !== "simple") {
+        explanationParts.push(`${complexQuery.complexity} query`);
+      }
+      if (negations.hasNegation) {
+        explanationParts.push(explainNegations(negations.negations));
+      }
+      explanation = explanationParts.length > 0 ? explanationParts.join(" • ") : undefined;
+    }
+
+    // Build filters
+    let filters: any = {
       brand: brand as string,
       category: category as string,
       minPrice: minPrice ? Number(minPrice) : undefined,
@@ -74,13 +160,62 @@ router.get("/", async (req: Request, res: Response) => {
       vendorId: vendor_id ? Number(vendor_id) : undefined,
     };
 
+    // Merge complex constraints
+    if (useEnhanced && complexQuery) {
+      filters = mergeComplexConstraints(filters, complexQuery);
+    }
+
+    // Merge contextual filters
+    if (useEnhanced && contextual?.inheritedFilters) {
+      filters = { ...contextual.inheritedFilters, ...filters };
+    }
+
     const options = {
       limit: limit ? Number(limit) : 20,
       offset: offset ? Number(offset) : 0,
     };
 
-    const result = await textSearch(q as string || "", filters, options);
-    res.json(result);
+    // Execute search
+    const result = await textSearch(processedQuery, filters, options);
+
+    // Log search (async, non-blocking)
+    if (useEnhanced && query) {
+      logSearchQuery(query, userId, category as string, result.total).catch(err =>
+        console.error("[Search] Failed to log query:", err)
+      );
+
+      // Add turn to conversation
+      if (sessionId) {
+        const ast = await processQuery(processedQuery);
+        addTurn(sessionId, query, ast, result.total);
+      }
+
+      // Generate suggestions
+      if (result.total === 0) {
+        suggestions.push("Try simpler query or fewer filters");
+        if (negations?.hasNegation) {
+          suggestions.push("Remove exclusions");
+        }
+      } else if (result.total > 100) {
+        suggestions.push("Add more filters to narrow results");
+      }
+    }
+
+    // Enhanced response
+    const response: any = {
+      ...result,
+      ...(useEnhanced && {
+        enhanced: {
+          contextual,
+          negations: negations?.hasNegation ? negations : undefined,
+          complexQuery: complexQuery?.complexity !== "simple" ? complexQuery : undefined,
+          explanation,
+          suggestions: suggestions.length > 0 ? suggestions : undefined,
+        },
+      }),
+    };
+
+    res.json(response);
   } catch (error) {
     console.error("Search error:", error);
     res.status(500).json({ error: "Search failed" });
@@ -363,6 +498,114 @@ router.post("/multi-vector", upload.array("images", 5), async (req: Request, res
   } catch (error) {
     console.error("Multi-vector search error:", error);
     res.status(500).json({ error: "Multi-vector search failed" });
+  }
+});
+
+/**
+ * GET /search/autocomplete?q=blue%20dre
+ *
+ * Query autocomplete suggestions with trending and personal history
+ *
+ * Query params:
+ * - q: Query prefix (required, min 2 chars)
+ * - limit: Max suggestions (default: 10)
+ * - category: Filter by category (optional)
+ * - trending: Include trending (default: true)
+ * - personal: Include personal history (default: true, requires auth)
+ */
+router.get("/autocomplete", async (req: Request, res: Response) => {
+  try {
+    const prefix = req.query.q as string;
+
+    if (!prefix) {
+      return res.status(400).json({ error: "Missing 'q' parameter" });
+    }
+
+    const userId = (req.query.user_id as string) || (req as any).userId;
+    const sessionId = (req.query.session_id as string) || req.headers["x-session-id"] as string;
+
+    const startTime = Date.now();
+    const suggestions = await getAutocompleteSuggestions({
+      prefix,
+      limit: parseInt(req.query.limit as string) || 10,
+      userId,
+      sessionId,
+      category: req.query.category as string,
+      includeTrending: req.query.trending !== "false",
+      includePersonal: req.query.personal !== "false",
+    });
+    const tookMs = Date.now() - startTime;
+
+    res.json({ suggestions, prefix, tookMs });
+  } catch (error: any) {
+    console.error("[Autocomplete] Error:", error);
+    res.status(500).json({ error: "Autocomplete failed", message: error.message });
+  }
+});
+
+/**
+ * GET /search/trending?limit=10
+ *
+ * Get trending queries (last 7 days, time-decayed)
+ */
+router.get("/trending", async (req: Request, res: Response) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
+    const category = req.query.category as string;
+
+    const startTime = Date.now();
+    const trending = await getTrendingQueries(limit, category);
+    const tookMs = Date.now() - startTime;
+
+    res.json({ trending, window: "7 days", tookMs });
+  } catch (error: any) {
+    console.error("[Trending] Error:", error);
+    res.status(500).json({ error: "Failed to fetch trending queries", message: error.message });
+  }
+});
+
+/**
+ * GET /search/popular?limit=10
+ *
+ * Get popular queries (all-time)
+ */
+router.get("/popular", async (req: Request, res: Response) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
+
+    const startTime = Date.now();
+    const popular = await getPopularQueries(limit);
+    const tookMs = Date.now() - startTime;
+
+    res.json({ popular, tookMs });
+  } catch (error: any) {
+    console.error("[Popular] Error:", error);
+    res.status(500).json({ error: "Failed to fetch popular queries", message: error.message });
+  }
+});
+
+/**
+ * GET /search/session/:sessionId
+ *
+ * Get conversation session context
+ */
+router.get("/session/:sessionId", async (req: Request, res: Response) => {
+  try {
+    const { sessionId } = req.params;
+
+    const session = getSession(sessionId);
+    const stats = getSessionStats(sessionId);
+
+    res.json({
+      sessionId: session.sessionId,
+      ...stats,
+      accumulatedFilters: session.accumulatedFilters,
+      lastCategory: session.lastCategory,
+      lastBrand: session.lastBrand,
+    });
+  } catch (error: any) {
+    console.error("[Session] Error:", error);
+    res.status(500).json({ error: "Failed to fetch session", message: error.message });
   }
 });
 

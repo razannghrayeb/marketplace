@@ -11,6 +11,12 @@ export interface DetectedItem {
   attributes: Record<string, string>;
 }
 
+export interface SpatialDetail {
+  attribute: string;      // e.g., "stripes", "embroidery"
+  location: string;       // e.g., "sleeves", "collar"
+  relationship: string;   // e.g., "on", "across"
+}
+
 export interface AttributeMap {
   color?: string[];
   colorTone?: string;
@@ -23,6 +29,7 @@ export interface AttributeMap {
   occasion?: string[];
   season?: string[];
   details?: string;
+  spatialDetails?: SpatialDetail[]; // NEW: Spatial relationships
 }
 
 export interface ImageAnalysisResult {

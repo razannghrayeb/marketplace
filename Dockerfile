@@ -1,22 +1,32 @@
+# syntax=docker/dockerfile:1.7
+
 # ============================================================================
 # Fashion Marketplace API
 # Multi-stage build for optimized production image
 # ============================================================================
 
 # Stage 0: Download ML models from HuggingFace
-# Pass --build-arg HF_TOKEN=hf_xxx  if the repo is private.
+# For CI/CD, pass a BuildKit secret named `hf_token` if the repo is private.
+# For local compose, the Dockerfile also falls back to the HF_TOKEN env var.
 FROM python:3.11-slim AS model-downloader
 ARG HF_TOKEN=""
 ENV HF_TOKEN=${HF_TOKEN}
 RUN pip install --no-cache-dir huggingface_hub
-RUN python - <<'EOF'
+RUN --mount=type=secret,id=hf_token python - <<'EOF'
 from huggingface_hub import snapshot_download
 import os
+token = None
+secret_path = "/run/secrets/hf_token"
+if os.path.exists(secret_path):
+    with open(secret_path, "r", encoding="utf-8") as fh:
+        token = fh.read().strip() or None
+if token is None:
+    token = os.environ.get("HF_TOKEN") or None
 snapshot_download(
     repo_id="razangh/fashion-models",
     repo_type="model",
     local_dir="/models",
-    token=os.environ.get("HF_TOKEN") or None,
+    token=token,
     ignore_patterns=["*.gitattributes", ".gitattributes", "README.md"],
 )
 print("Models downloaded.")

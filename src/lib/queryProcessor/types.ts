@@ -48,6 +48,8 @@ export interface ExtractedFilters {
   category?: string;
   brand?: string;
   priceRange?: { min?: number; max?: number };
+  style?: string[];
+  similarityReference?: string;
 }
 
 // ============================================================================

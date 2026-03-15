@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from PIL import Image
 
 from dual_model_yolo import DualDetector
+from image_preprocessor import preprocess_for_detection, PreprocessingConfig
 
 
 app = FastAPI(title="Dual-Model Fashion Detection API", version="1.0.0")
@@ -202,12 +203,24 @@ def labels() -> LabelsResponse:
 async def detect(
     file: UploadFile = File(...),
     confidence: float = Query(0.6),
+    enhance_contrast: bool = Query(False, description="Apply contrast enhancement"),
+    enhance_sharpness: bool = Query(False, description="Apply sharpness enhancement"),
+    bilateral_filter: bool = Query(False, description="Apply bilateral filtering for noise reduction"),
 ) -> DetectionResponse:
     try:
         content = await file.read()
         image = Image.open(io.BytesIO(content)).convert("RGB")
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=400, detail=f"Invalid image: {exc}") from exc
+
+    # Apply preprocessing if any option is enabled
+    if enhance_contrast or enhance_sharpness or bilateral_filter:
+        config = PreprocessingConfig(
+            enhance_contrast=enhance_contrast,
+            enhance_sharpness=enhance_sharpness,
+            bilateral_filter=bilateral_filter,
+        )
+        image, _ = preprocess_for_detection(image, config)
 
     return _run_dual_detector(image, conf=confidence)
 
@@ -216,12 +229,29 @@ async def detect(
 async def detect_batch(
     files: List[UploadFile] = File(...),
     confidence: float = Query(0.6),
+    enhance_contrast: bool = Query(False, description="Apply contrast enhancement"),
+    enhance_sharpness: bool = Query(False, description="Apply sharpness enhancement"),
+    bilateral_filter: bool = Query(False, description="Apply bilateral filtering for noise reduction"),
 ):
+    # Create preprocessing config if needed
+    preprocess_config = None
+    if enhance_contrast or enhance_sharpness or bilateral_filter:
+        preprocess_config = PreprocessingConfig(
+            enhance_contrast=enhance_contrast,
+            enhance_sharpness=enhance_sharpness,
+            bilateral_filter=bilateral_filter,
+        )
+
     results = []
     for f in files:
         try:
             content = await f.read()
             image = Image.open(io.BytesIO(content)).convert("RGB")
+
+            # Apply preprocessing if configured
+            if preprocess_config:
+                image, _ = preprocess_for_detection(image, preprocess_config)
+
             resp = _run_dual_detector(image, conf=confidence)
             results.append({"filename": f.filename, "result": resp.dict()})
         except Exception as exc:
