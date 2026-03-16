@@ -1,9 +1,5 @@
 # 🚀 Quick Reference: All Search Features
 
-Base URLs used in examples:
-- Docker Compose: `http://localhost:3000`
-- Local `pnpm dev`: `http://localhost:4000`
-
 ## Which Search Should I Use?
 
 ```
@@ -22,7 +18,7 @@ Base URLs used in examples:
 │        │                    │                    │                  │
 │        ▼                    ▼                    ▼                  │
 │  NORMAL SEARCH       YOLO DETECTION      MULTI-IMAGE                │
-│  /search/image   /api/images/search  /search/multi-image   │
+│  /api/search/image   /api/images/search  /api/search/multi-image   │
 │                                                                       │
 │  "Find similar"      "Shop the look"    "Mix attributes"           │
 │                                                                       │
@@ -35,12 +31,12 @@ Base URLs used in examples:
 
 | I want to... | Use | Endpoint |
 |--------------|-----|----------|
-| Find products like this one image | **Normal Search** | `POST /search/image` |
+| Find products like this one image | **Normal Search** | `POST /api/search/image` |
 | Find items for each product in an outfit photo | **YOLO Detection** | `POST /api/images/search` |
-| Mix color from one image with style from another | **Multi-Image** | `POST /search/multi-image` |
-| Manually control attribute weights | **Multi-Vector** | `POST /search/multi-vector` |
-| Complete a product / finish an outfit with curated suggestions | **Complete My Style** | `GET /products/:id/complete-style` `POST /products/complete-style` |
-| Search by text/keywords | **Text Search** | `GET /search?q=...` |
+| Mix color from one image with style from another | **Multi-Image** | `POST /api/search/multi-image` |
+| Manually control attribute weights | **Multi-Vector** | `POST /api/search/multi-vector` |
+| Complete a product / finish an outfit with curated suggestions | **Complete My Style** | `GET /api/products/:id/complete-style` `POST /api/products/complete-style` |
+| Search by text/keywords | **Text Search** | `GET /api/search?q=...` |
 
 ---
 
@@ -48,7 +44,7 @@ Base URLs used in examples:
 
 ### 1. Normal Search
 ```bash
-curl -X POST http://localhost:3000/search/image \
+curl -X POST http://localhost:3000/api/search/image \
   -F "image=@dress.jpg" \
   -F "limit=20"
 ```
@@ -62,7 +58,7 @@ curl -X POST http://localhost:3000/api/images/search \
 
 ### 3. Multi-Image Composite
 ```bash
-curl -X POST http://localhost:3000/search/multi-image \
+curl -X POST http://localhost:3000/api/search/multi-image \
   -F "images=@red_dress.jpg" \
   -F "images=@leather_jacket.jpg" \
   -F "prompt=Red color from first, leather texture from second"
@@ -75,7 +71,7 @@ curl -X POST http://localhost:3000/search/multi-image \
 ### Scenario: "I like this dress, find me similar ones"
 **Solution**: Normal Search
 ```bash
-POST /search/image
+POST /api/search/image
 Body: image=dress.jpg
 ```
 
@@ -93,7 +89,7 @@ Body: image=instagram_outfit.jpg
 ### Scenario: "I want the red color from this dress but leather texture from this jacket"
 **Solution**: Multi-Image Composite
 ```bash
-POST /search/multi-image
+POST /api/search/multi-image
 Body:
   images=[red_dress.jpg, leather_jacket.jpg]
   prompt="Red color from first, leather texture from second"
@@ -104,7 +100,7 @@ Body:
 ### Scenario: "Mix vintage style from this coat with modern fit from this blazer, under $200"
 **Solution**: Multi-Image Composite with Price
 ```bash
-POST /search/multi-image
+POST /api/search/multi-image
 Body:
   images=[vintage_coat.jpg, modern_blazer.jpg]
   prompt="Vintage style from first, modern fit from second, under $200"
@@ -128,7 +124,7 @@ Body:
 
 ## 🔑 Key Parameters
 
-### Normal Search (`/search/image`)
+### Normal Search (`/api/search/image`)
 ```
 image: File (required)
 limit: Number (default: 50)
@@ -142,7 +138,7 @@ threshold: 0-1 (default: 0.7)
 limit_per_item: Number (default: 10)
 ```
 
-### Multi-Image Composite (`/search/multi-image`)
+### Multi-Image Composite (`/api/search/multi-image`)
 ```
 images: File[] (1-5, required)
 prompt: String (required)
@@ -185,18 +181,18 @@ rerankWeights: JSON (optional)
 ### ❌ Wrong: Using multi-image for single image similarity
 ```bash
 # Don't do this:
-POST /search/multi-image
+POST /api/search/multi-image
   images=[single_dress.jpg]
   prompt="Find similar"
 ```
-**✅ Use instead**: `POST /search/image`
+**✅ Use instead**: `POST /api/search/image`
 
 ---
 
 ### ❌ Wrong: Using normal search for outfit shopping
 ```bash
 # Don't do this for outfits:
-POST /search/image
+POST /api/search/image
   image=outfit_with_dress_shoes_bag.jpg
 ```
 **✅ Use instead**: `POST /api/images/search` (YOLO Detection)
@@ -206,7 +202,7 @@ POST /search/image
 ### ❌ Wrong: Missing prompt in multi-image
 ```bash
 # This will fail:
-POST /search/multi-image
+POST /api/search/multi-image
   images=[dress1.jpg, dress2.jpg]
   # Missing prompt!
 ```
@@ -291,5 +287,3 @@ All three are production-ready and documented! 🚀
 ---
 
 **Need help?** Check [SEARCH_FEATURES_GUIDE.md](./SEARCH_FEATURES_GUIDE.md) for detailed examples.
-
-

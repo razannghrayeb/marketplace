@@ -8,6 +8,8 @@
 
 import { pg } from '../../lib/core/db';
 import { osClient } from '../../lib/core/opensearch';
+import { pg } from '../../lib/core/db';
+import { osClient } from '../../lib/core/opensearch';
 import { IntentParserService, ParsedIntent } from '../../lib/prompt/gemeni';
 import { CompositeQueryBuilder, CompositeQuery } from '../../lib/query/compositeQueryBuilder';
 import { QueryMapper } from '../../lib/query/queryMapper';
@@ -65,6 +67,7 @@ export interface MultiImageSearchRequest {
   images: Buffer[];
   userPrompt: string;
   limit?: number;
+  rerankWeights?: RerankOptions | any;
   rerankWeights?: RerankOptions | any;
 }
 
@@ -293,6 +296,7 @@ export async function multiImageSearch(
 ): Promise<SearchResult> {
   const startTime = Date.now();
   const { images, userPrompt, limit = 50, rerankWeights } = request;
+  const { images, userPrompt, limit = 50, rerankWeights } = request;
 
   try {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -302,6 +306,7 @@ export async function multiImageSearch(
     const parsedIntent = await intentParser.parseUserIntent(images, userPrompt);
 
     const imageEmbeddings = await Promise.all(
+      images.map(img => processImageForEmbedding(img))
       images.map(img => processImageForEmbedding(img))
     );
 
@@ -361,6 +366,7 @@ export async function multiImageSearch(
     }).sort((a: any, b: any) => (b.rerankScore ?? 0) - (a.rerankScore ?? 0));
 
     return {
+      results: finalResults,
       results: finalResults,
       total: response.body.hits.total.value,
       tookMs: Date.now() - startTime,

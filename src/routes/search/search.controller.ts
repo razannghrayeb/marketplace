@@ -35,6 +35,40 @@
  * /api/images/search - Upload image → detect items → find similar for each
  * 
  * See docs/SEARCH_FEATURES_GUIDE.md for comprehensive comparison.
+ * This module provides THREE distinct search capabilities:
+ * 
+ * 1. NORMAL SEARCH (Single Image Similarity)
+ *    Endpoint: POST /api/search/image
+ *    Purpose: Find products most similar to ONE reference image
+ *    Use Case: "Find me products that look like this"
+ *    Input: Single image file
+ *    Output: Ranked list of similar products by vector similarity
+ * 
+ * 2. TEXT SEARCH (Keyword/Filter Based)
+ *    Endpoint: GET /api/search?q=...
+ *    Purpose: Traditional text search with filters
+ *    Use Case: "Show me Nike shoes under $200"
+ *    Input: Query string + filters (brand, category, price, etc.)
+ *    Output: Filtered and ranked products
+ * 
+ * 3. MULTI-IMAGE COMPOSITE SEARCH (NEW - Unique Feature)
+ *    Endpoints: POST /api/search/multi-image (main), /api/search/multi-vector (advanced)
+ *    Purpose: Mix attributes from MULTIPLE images using natural language
+ *    Use Case: "Color from first image, texture from second image"
+ *    Input: 1-5 images + natural language prompt
+ *    Output: Products matching composite attribute blend with intent-aware ranking
+ *    
+ *    How it works:
+ *    - Phase 1: Gemini AI parses intent from prompt + images
+ *    - Phase 2: Extract per-attribute embeddings (color, texture, style, etc.)
+ *    - Phase 3: Build composite query from intent weights
+ *    - Phase 4: Multi-vector search (parallel kNN + union + weighted re-rank)
+ *    - Phase 5: Intent-aware reranking (vector + attributes + price + recency)
+ * 
+ * Note: For YOLO-based product detection ("shop the look"), see:
+ * /api/images/search - Upload image → detect items → find similar for each
+ * 
+ * See docs/SEARCH_FEATURES_GUIDE.md for comprehensive comparison.
  */
 
 import { Router, Request, Response } from "express";
@@ -304,6 +338,9 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
  *   -F "images=@red_dress.jpg" \
  *   -F "images=@leather_jacket.jpg" \
  *   -F "prompt=I want the red color from the first image with the leather texture from the second" \
+ *   -F "images=@red_dress.jpg" \
+ *   -F "images=@leather_jacket.jpg" \
+ *   -F "prompt=I want the red color from the first image with the leather texture from the second" \
  *   -F "limit=20"
  *
  * 2️⃣ Style Mixing with Negatives:
@@ -366,6 +403,7 @@ router.post("/multi-image", upload.array("images", 5), async (req: Request, res:
   try {
     const files = req.files as Express.Multer.File[];
     const { prompt, limit, rerankWeights } = req.body;
+    const { prompt, limit, rerankWeights } = req.body;
 
     if (!files || files.length === 0) {
       return res.status(400).json({ error: "At least one image is required" });
@@ -391,10 +429,21 @@ router.post("/multi-image", upload.array("images", 5), async (req: Request, res:
       }
     }
 
+    // Parse rerank weights if provided
+    let parsedRerank = undefined;
+    if (rerankWeights) {
+      try {
+        parsedRerank = typeof rerankWeights === 'string' ? JSON.parse(rerankWeights) : rerankWeights;
+      } catch (e) {
+        return res.status(400).json({ error: 'Invalid rerankWeights JSON' });
+      }
+    }
+
     const result = await multiImageSearch({
       images,
       userPrompt: prompt,
       limit: limit ? Number(limit) : 50,
+      rerankWeights: parsedRerank,
       rerankWeights: parsedRerank,
     });
 
