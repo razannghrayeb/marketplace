@@ -1,8 +1,10 @@
 import fetch from "node-fetch";
 import { parseProductPage } from "./vendors/myholdal_lb";
-import { upsertProduct } from "./ingest";
+import { getOrCreateVendorId, markUnseenProductsUnavailable, upsertProduct } from "./ingest";
 
 const BASE = "https://myholdal.com";
+const VENDOR_NAME = "MYHOLDAL";
+const VENDOR_URL = "https://myholdal.com";
 
 /** Fetch text (HTML/XML) */
 async function fetchText(url: string): Promise<string> {
@@ -15,6 +17,28 @@ async function fetchText(url: string): Promise<string> {
   });
   if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
   return await res.text();
+}
+
+async function fetchProductJson(productUrl: string): Promise<any | null> {
+  const base = productUrl.split("#")[0].split("?")[0];
+  const url = base.endsWith(".js") ? base : `${base}.js`;
+  const res = await fetch(url, {
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+      "accept-language": "en-US,en;q=0.9",
+      accept: "application/json",
+    },
+  });
+  if (!res.ok) return null;
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 /** Extract <loc>...</loc> URLs from sitemap XML */
@@ -72,19 +96,26 @@ async function run() {
 
   let saved = 0;
   let failed = 0;
+  const seenProductUrls = new Set<string>();
 
   for (const url of productUrls) {
     try {
       const html = await fetchText(url);
-      const product = parseProductPage(html, url);
+      const productJson = await fetchProductJson(url);
+      const productOrList = parseProductPage(html, url, productJson);
 
-      if (!product) {
+      if (!productOrList) {
         failed++;
         continue;
       }
 
-      await upsertProduct(product as any);
-      saved++;
+      const products = Array.isArray(productOrList) ? productOrList : [productOrList];
+
+      for (const product of products) {
+        await upsertProduct(product as any);
+        saved++;
+        seenProductUrls.add(product.product_url);
+      }
 
       if (saved % 50 === 0) {
         console.log(`Progress: ${saved}/${productUrls.length}`);
@@ -92,8 +123,13 @@ async function run() {
     } catch (e: any) {
       failed++;
       console.log(`Failed: ${url} -> ${e.message}`);
+    } finally {
+      await sleep(500);
     }
   }
+
+  const vendorId = await getOrCreateVendorId(VENDOR_NAME, VENDOR_URL);
+  await markUnseenProductsUnavailable(vendorId, seenProductUrls);
 
   console.log(`\nDone. TotalUrls=${productUrls.length}, Saved=${saved}, Failed=${failed}`);
 }

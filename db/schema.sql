@@ -11,25 +11,43 @@ ON vendors(url);
 CREATE TABLE IF NOT EXISTS products(
     id BIGSERIAL PRIMARY KEY,
     vendor_id BIGINT NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+
     product_url TEXT NOT NULL,
+    parent_product_url TEXT,
+    variant_id TEXT,
+
     title TEXT NOT NULL,
     brand TEXT,
     category TEXT,
     description TEXT,
     size TEXT,
     color TEXT,
+
     currency TEXT NOT NULL,
     price_cents BIGINT NOT NULL,
     sales_price_cents BIGINT,
-    availability BOOLEAN NOT NULL DEFAULT TRUE,
+
+    availability BOOLEAN NOT NULL DEFAULT FALSE,
     last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    -- Added for image & compare features
+
     image_url TEXT,
+    image_urls JSONB,
     image_cdn TEXT,
     primary_image_id INTEGER,
     p_hash TEXT,
+
     return_policy TEXT
-    );
+);
+
+
+    CREATE INDEX IF NOT EXISTS idx_products_parent_product_url
+    ON products(parent_product_url);
+
+    CREATE INDEX IF NOT EXISTS idx_products_variant_id
+    ON products(variant_id);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_products_vendor_product_url
+    ON products(vendor_id, product_url);
 
     CREATE INDEX IF NOT EXISTS idx_products_vendor_id
     ON products(vendor_id);
@@ -51,7 +69,7 @@ CREATE TABLE IF NOT EXISTS product_images (
     product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     r2_key TEXT NOT NULL UNIQUE,
     cdn_url TEXT NOT NULL,
-    embedding TEXT,
+    -- embedding TEXT,
     -- embedding using pgvector when available
     embedding vector(512),
     p_hash TEXT,
