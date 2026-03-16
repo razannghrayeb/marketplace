@@ -54,12 +54,23 @@ import {
   explainNegations,
 } from "../../lib/queryProcessor/negationHandler";
 import {
+  parseSpatialRelationships,
+  summarizeSpatial,
+} from "../../lib/queryProcessor/spatialRelationships";
+import {
   enrichQueryWithContext,
   addTurn,
   getSession,
   getSessionStats,
 } from "../../lib/queryProcessor/conversationalContext";
 import { processQuery } from "../../lib/queryProcessor";
+import {
+  PROMPT_TEMPLATES,
+  PROMPT_SUGGESTIONS,
+  parsePromptStructure,
+  suggestPromptImprovements,
+  recommendTemplate,
+} from "../../lib/search/promptTemplates";
 import multer from "multer";
 
 const router = Router();
@@ -255,12 +266,16 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
 
 /**
  * POST /search/multi-image
- * 
+ *
  * 🎯 COMPOSITE MULTI-IMAGE SEARCH WITH INTENT PARSING
- * 
+ *
  * This is the MAIN ENDPOINT for cross-image attribute mixing.
  * Uses Gemini AI to understand natural language and extract attributes from specific images.
- * 
+ *
+ * ✨ NEW FEATURES:
+ * - 🚫 Negative Attributes: "not too shiny", "without leather", "avoid stripes"
+ * - 📍 Spatial Relationships: "stripes on the sleeves", "pattern on the collar"
+ *
  * 📥 REQUEST BODY (multipart/form-data):
  * ┌─────────────────┬──────────┬──────────────────────────────────────────────────┐
  * │ Parameter       │ Required │ Description                                      │
@@ -272,6 +287,8 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
  * │                 │          │ - "Color from first, texture from second"       │
  * │                 │          │ - "I want the style of image 1 with pattern of 2│
  * │                 │          │ - "Mix vintage vibe from first with modern cut" │
+ * │                 │          │ - "Like first but NOT too shiny" (negatives!)   │
+ * │                 │          │ - "Stripes on sleeves" (spatial relationships!) │
  * ├─────────────────┼──────────┼──────────────────────────────────────────────────┤
  * │ limit           │          │ Max results (default: 50)                        │
  * ├─────────────────┼──────────┼──────────────────────────────────────────────────┤
@@ -279,29 +296,37 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
  * │                 │          │ {"vectorWeight": 0.6, "attributeWeight": 0.3,    │
  * │                 │          │  "priceWeight": 0.1, "recencyWeight": 0.0}       │
  * └─────────────────┴──────────┴──────────────────────────────────────────────────┘
- * 
+ *
  * 🎨 EXAMPLE REQUESTS:
- * 
+ *
  * 1️⃣ Cross-Image Color + Texture:
  * curl -X POST http://localhost:3000/api/search/multi-image \
  *   -F "images=@red_dress.jpg" \
  *   -F "images=@leather_jacket.jpg" \
  *   -F "prompt=I want the red color from the first image with the leather texture from the second" \
  *   -F "limit=20"
- * 
- * 2️⃣ Style Mixing with Price Constraint:
+ *
+ * 2️⃣ Style Mixing with Negatives:
  * curl -X POST http://localhost:3000/api/search/multi-image \
  *   -F "images=@vintage_coat.jpg" \
- *   -F "images=@modern_blazer.jpg" \
- *   -F "prompt=Vintage style from first but with modern fit like second, under $200" \
- *   -F "rerankWeights={\"vectorWeight\":0.5,\"attributeWeight\":0.4,\"priceWeight\":0.1}"
- * 
+ *   -F "prompt=Vintage style from first but NOT too formal and without buttons"
+ *
  * 3️⃣ Pattern + Silhouette:
  * curl -X POST http://localhost:3000/api/search/multi-image \
  *   -F "images=@floral_dress.jpg" \
  *   -F "images=@aline_skirt.jpg" \
  *   -F "prompt=Floral pattern from image 1 with A-line silhouette from image 2"
- * 
+ *
+ * 4️⃣ Spatial Relationships:
+ * curl -X POST http://localhost:3000/api/search/multi-image \
+ *   -F "images=@striped_shirt.jpg" \
+ *   -F "prompt=Looking for shirts with stripes on the sleeves but solid on the body"
+ *
+ * 5️⃣ Complex Multi-Constraint:
+ * curl -X POST http://localhost:3000/api/search/multi-image \
+ *   -F "images=@jacket.jpg" \
+ *   -F "prompt=Like this but with zipper on the front, not too shiny, avoid leather"
+ *
  * 📤 RESPONSE:
  * {
  *   "results": [
@@ -323,8 +348,19 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
  *   ],
  *   "total": 147,
  *   "tookMs": 234,
- *   "explanation": "Found products matching burgundy color (image 0) with distressed leather texture (image 1)"
+ *   "explanation": "Found products matching burgundy color (image 0) with distressed leather texture (image 1), excluding shiny finishes",
+ *   "compositeQuery": {
+ *     "constraints": {
+ *       "negativeAttributes": { "textures": ["shiny"] },
+ *       "spatialRequirements": []
+ *     }
+ *   }
  * }
+ *
+ * 💡 TIPS:
+ * - Use GET /search/prompt-templates to see example prompts
+ * - Use POST /search/prompt-analyze to get suggestions for your prompt
+ * - Use GET /search/prompt-suggestions to get helpful phrases
  */
 router.post("/multi-image", upload.array("images", 5), async (req: Request, res: Response) => {
   try {
@@ -606,6 +642,202 @@ router.get("/session/:sessionId", async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("[Session] Error:", error);
     res.status(500).json({ error: "Failed to fetch session", message: error.message });
+  }
+});
+
+/**
+ * GET /search/prompt-templates?difficulty=beginner&supports=negatives
+ *
+ * 📋 Get available prompt templates for multi-image search
+ *
+ * Templates help users craft better prompts by providing examples organized by:
+ * - Difficulty level (beginner, intermediate, advanced)
+ * - Feature support (negatives, spatial relationships)
+ * - Use case category (color-swap, texture-mix, style-transfer, etc.)
+ *
+ * Query params:
+ * - difficulty: Filter by difficulty level (beginner|intermediate|advanced)
+ * - supports: Filter templates that support specific features (negatives|spatial)
+ * - category: Filter by use case category
+ */
+router.get("/prompt-templates", async (req: Request, res: Response) => {
+  try {
+    const { difficulty, supports, category } = req.query;
+
+    let templates = [...PROMPT_TEMPLATES];
+
+    // Filter by difficulty
+    if (difficulty) {
+      templates = templates.filter(t => t.difficulty === difficulty);
+    }
+
+    // Filter by feature support
+    if (supports === 'negatives') {
+      templates = templates.filter(t => t.supportsNegatives);
+    } else if (supports === 'spatial') {
+      templates = templates.filter(t => t.supportsSpatial);
+    }
+
+    // Filter by category
+    if (category) {
+      templates = templates.filter(t => t.category === category);
+    }
+
+    res.json({
+      templates: templates.map(t => ({
+        id: t.id,
+        name: t.name,
+        description: t.description,
+        difficulty: t.difficulty,
+        category: t.category,
+        example: t.example,
+        recommendedImages: t.recommendedImages,
+        supportsNegatives: t.supportsNegatives || false,
+        supportsSpatial: t.supportsSpatial || false,
+      })),
+      total: templates.length,
+      categories: [...new Set(PROMPT_TEMPLATES.map(t => t.category))],
+      difficulties: ['beginner', 'intermediate', 'advanced'],
+    });
+  } catch (error: any) {
+    console.error("[PromptTemplates] Error:", error);
+    res.status(500).json({ error: "Failed to fetch templates", message: error.message });
+  }
+});
+
+/**
+ * POST /search/prompt-analyze
+ *
+ * 🔍 Analyze a user's prompt and suggest improvements
+ *
+ * This endpoint parses a prompt to detect:
+ * - Negative constraints ("not too shiny", "without leather")
+ * - Spatial relationships ("stripes on sleeves")
+ * - Missing clarity or opportunities for improvement
+ * - Recommended templates based on intent
+ *
+ * Request body:
+ * {
+ *   "prompt": "I want something like the first image but not too formal"
+ * }
+ *
+ * Response:
+ * {
+ *   "original": "...",
+ *   "analysis": {
+ *     "negatives": [...],
+ *     "spatialRelationships": [...],
+ *     "detectedIntent": "...",
+ *     "clarity": "high|medium|low"
+ *   },
+ *   "suggestions": [...],
+ *   "recommendedTemplates": [...]
+ * }
+ */
+router.post("/prompt-analyze", async (req: Request, res: Response) => {
+  try {
+    const { prompt } = req.body;
+
+    if (!prompt || typeof prompt !== 'string') {
+      return res.status(400).json({ error: "Prompt string is required" });
+    }
+
+    // Parse structure
+    const structure = parsePromptStructure(prompt);
+
+    // Parse negatives
+    const negationResult = parseNegations(prompt);
+
+    // Parse spatial relationships
+    const spatialResult = parseSpatialRelationships(prompt);
+
+    // Get suggestions
+    const suggestions = suggestPromptImprovements(prompt);
+
+    // Recommend templates based on prompt characteristics
+    const recommendedTemplates = recommendTemplate({
+      numImages: structure.attributes.length > 0 ? 2 : 1, // Estimate from complexity
+      needsNegatives: negationResult.hasNegation,
+      needsSpatial: spatialResult.hasSpatial,
+    });
+
+    res.json({
+      original: prompt,
+      analysis: {
+        structure,
+        negatives: negationResult.hasNegation ? {
+          found: negationResult.negations.length,
+          constraints: negationResult.negations.map(n => ({
+            type: n.type,
+            value: n.value,
+            confidence: n.confidence,
+            originalText: n.originalText,
+          })),
+          summary: explainNegations(negationResult.negations),
+        } : null,
+        spatialRelationships: spatialResult.hasSpatial ? {
+          found: spatialResult.spatialConstraints.length,
+          constraints: spatialResult.spatialConstraints.map(s => ({
+            attribute: s.attribute,
+            location: s.location,
+            relationship: s.relationship,
+            confidence: s.confidence,
+          })),
+          summary: summarizeSpatial(spatialResult.spatialConstraints),
+        } : null,
+        clarity: structure.attributes.length > 2 ? 'high' :
+                 structure.attributes.length > 0 ? 'medium' : 'low',
+      },
+      suggestions,
+      recommendedTemplates: recommendedTemplates.slice(0, 3), // Top 3
+    });
+  } catch (error: any) {
+    console.error("[PromptAnalyze] Error:", error);
+    res.status(500).json({ error: "Failed to analyze prompt", message: error.message });
+  }
+});
+
+/**
+ * GET /search/prompt-suggestions?type=color
+ *
+ * 💡 Get helpful prompt suggestions organized by type
+ *
+ * Returns categorized suggestions for building effective prompts:
+ * - color: Color-related phrases
+ * - style: Style and aesthetic terms
+ * - texture: Texture descriptions
+ * - material: Material specifications
+ * - pattern: Pattern types
+ * - spatial: Spatial relationship examples
+ * - formality: Formality level descriptors
+ *
+ * Query params:
+ * - type: Filter by suggestion type (color|style|texture|material|pattern|spatial|formality)
+ */
+router.get("/prompt-suggestions", async (req: Request, res: Response) => {
+  try {
+    const { type } = req.query;
+
+    if (type && typeof type === 'string') {
+      const suggestions = PROMPT_SUGGESTIONS[type];
+      if (!suggestions) {
+        return res.status(400).json({ error: `Invalid type. Valid types: ${Object.keys(PROMPT_SUGGESTIONS).join(', ')}` });
+      }
+
+      res.json({
+        type,
+        suggestions,
+      });
+    } else {
+      // Return all suggestions
+      res.json({
+        suggestionTypes: Object.keys(PROMPT_SUGGESTIONS),
+        suggestions: PROMPT_SUGGESTIONS,
+      });
+    }
+  } catch (error: any) {
+    console.error("[PromptSuggestions] Error:", error);
+    res.status(500).json({ error: "Failed to fetch suggestions", message: error.message });
   }
 });
 

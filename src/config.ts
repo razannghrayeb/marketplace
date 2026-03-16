@@ -52,4 +52,12 @@ export const config = {
     similarityThreshold: Number(process.env.CLIP_SIMILARITY_THRESHOLD || 0.7),
     duplicateThreshold: Number(process.env.CLIP_DUPLICATE_THRESHOLD || 0.92),
   },
+  tryon: {
+    // Google Cloud Vertex AI Virtual Try-On
+    // Auth: gcloud auth application-default login  OR  GOOGLE_APPLICATION_CREDENTIALS=/key.json
+    project: process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || "",
+    location: process.env.TRYON_LOCATION || "us-central1",
+    model: process.env.TRYON_MODEL || "virtual-try-on@002",
+    timeout: Number(process.env.TRYON_TIMEOUT || 60000),
+  },
 };

@@ -1,9 +1,10 @@
 /**
  * Wardrobe Controller
- * 
+ *
  * HTTP request/response handlers - business logic is in service files
  */
 import { Request, Response, NextFunction } from "express";
+import { pg } from "../../lib/core/db";
 import {
   createWardrobeItem,
   getWardrobeItem,
@@ -374,6 +375,398 @@ export async function getSimilarItems(req: Request, res: Response, next: NextFun
 
     const similar = await findSimilarWardrobeItems(userId, item.embedding, limit, itemId);
     res.json({ success: true, similar });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ============================================================================
+// 🆕 Auto-Sync Settings (Feature #6 Enhancement)
+// ============================================================================
+
+/**
+ * GET /api/wardrobe/auto-sync/settings - Get user's auto-sync settings
+ */
+export async function getAutoSyncSettings(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = getUserId(req);
+    const { getUserAutoSyncSettings } = await import("../../lib/wardrobe/autoSync");
+
+    const settings = await getUserAutoSyncSettings(userId);
+    res.json({ success: true, settings });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * PUT /api/wardrobe/auto-sync/settings - Update auto-sync settings
+ */
+export async function updateAutoSyncSettings(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = getUserId(req);
+    const { updateUserAutoSyncSettings } = await import("../../lib/wardrobe/autoSync");
+
+    await updateUserAutoSyncSettings(userId, req.body);
+    res.json({ success: true, message: "Settings updated" });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/wardrobe/auto-sync/manual - Manually sync a purchase
+ */
+export async function manualSyncPurchase(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = getUserId(req);
+    const { syncPurchaseToWardrobe } = await import("../../lib/wardrobe/autoSync");
+
+    const result = await syncPurchaseToWardrobe({
+      productId: req.body.product_id,
+      orderId: req.body.order_id,
+      userId,
+      title: req.body.title,
+      brand: req.body.brand,
+      price: req.body.price,
+      imageUrl: req.body.image_url,
+      purchasedAt: new Date(req.body.purchased_at || Date.now()),
+    });
+
+    res.json({ success: true, result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ============================================================================
+// 🆕 Image Recognition (Feature #6 Enhancement)
+// ============================================================================
+
+/**
+ * POST /api/wardrobe/analyze-photo - Analyze a wardrobe photo with AI
+ */
+export async function analyzeWardrobePhoto(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: "Image file required" });
+    }
+
+    const { analyzeWardrobePhoto, enrichWardrobeItem } = await import("../../lib/wardrobe/imageRecognition");
+
+    const analysis = await analyzeWardrobePhoto(req.file.buffer, {
+      useGemini: req.body.use_gemini !== "false",
+      extractEmbedding: req.body.extract_embedding !== "false",
+    });
+
+    const enriched = enrichWardrobeItem(analysis);
+
+    res.json({ success: true, analysis, enriched });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/wardrobe/analyze-photos/batch - Batch analyze multiple photos
+ */
+export async function batchAnalyzePhotos(req: Request, res: Response, next: NextFunction) {
+  try {
+    const files = req.files as Express.Multer.File[];
+
+    if (!files || files.length === 0) {
+      return res.status(400).json({ success: false, error: "At least one image required" });
+    }
+
+    const { batchAnalyzeWardrobePhotos } = await import("../../lib/wardrobe/imageRecognition");
+
+    const imageBuffers = files.map(f => f.buffer);
+    const analyses = await batchAnalyzeWardrobePhotos(imageBuffers);
+
+    res.json({ success: true, analyses, count: analyses.length });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/wardrobe/items/:id/re-analyze - Re-analyze existing wardrobe item
+ */
+export async function reanalyzeItem(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = getUserId(req);
+    const itemId = parseInt(req.params.id, 10);
+
+    const item = await getWardrobeItem(itemId, userId);
+    if (!item) {
+      return res.status(404).json({ success: false, error: "Item not found" });
+    }
+
+    if (!item.image_url) {
+      return res.status(400).json({ success: false, error: "Item has no image" });
+    }
+
+    // Fetch image
+    const response = await fetch(item.image_url);
+    const arrayBuffer = await response.arrayBuffer();
+    const imageBuffer = Buffer.from(arrayBuffer);
+
+    const { reanalyzeWardrobeItem } = await import("../../lib/wardrobe/imageRecognition");
+    const analysis = await reanalyzeWardrobeItem(itemId, imageBuffer);
+
+    // Update wardrobe item with new analysis
+    await updateWardrobeItem(itemId, userId, {
+      category_id: analysis.categoryId,
+      pattern_id: analysis.patternId,
+      material_id: analysis.materialId,
+    });
+
+    res.json({ success: true, analysis });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ============================================================================
+// 🆕 Visual Coherence (Feature #6 Enhancement)
+// ============================================================================
+
+/**
+ * POST /api/wardrobe/outfit-coherence - Assess visual coherence of outfit pieces
+ */
+export async function assessOutfitCoherence(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = getUserId(req);
+    const { piece_ids } = req.body;
+
+    if (!piece_ids || !Array.isArray(piece_ids) || piece_ids.length < 2) {
+      return res.status(400).json({ success: false, error: "At least 2 piece IDs required" });
+    }
+
+    // Fetch pieces
+    const pieces = await Promise.all(
+      piece_ids.map((id: number) => getWardrobeItem(id, userId))
+    );
+
+    if (pieces.some(p => !p)) {
+      return res.status(404).json({ success: false, error: "One or more pieces not found" });
+    }
+
+    const { assessOutfitCoherence } = await import("../../lib/wardrobe/visualCoherence");
+
+    const coherenceScore = await assessOutfitCoherence(
+      pieces.map((p: any) => ({
+        id: p.id,
+        category: p.category || 'unknown',
+        embedding: p.embedding ? JSON.parse(p.embedding) : undefined,
+        colors: {
+          primary: p.primary_colors || [],
+          secondary: p.secondary_colors || [],
+          hexCodes: p.hex_codes || [],
+        },
+        pattern: p.pattern,
+        material: p.material,
+        style: p.style_tags || [],
+        formality: p.formality_score,
+        imageUrl: p.image_url,
+      }))
+    );
+
+    res.json({ success: true, coherence: coherenceScore });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/wardrobe/outfit/:outfitId/coherence - Assess saved outfit coherence
+ */
+export async function assessSavedOutfitCoherence(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = getUserId(req);
+    const outfitId = parseInt(req.params.outfitId, 10);
+
+    // Fetch outfit and its pieces
+    const result = await pg.query(
+      `SELECT wi.* FROM outfit_items oi
+       JOIN wardrobe_items wi ON wi.id = oi.wardrobe_item_id
+       JOIN outfits o ON o.id = oi.outfit_id
+       WHERE oi.outfit_id = $1 AND o.user_id = $2`,
+      [outfitId, userId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: "Outfit not found or empty" });
+    }
+
+    const { assessOutfitCoherence } = await import("../../lib/wardrobe/visualCoherence");
+
+    const coherenceScore = await assessOutfitCoherence(
+      result.rows.map((p: any) => ({
+        id: p.id,
+        category: p.category || 'unknown',
+        embedding: p.embedding ? JSON.parse(p.embedding) : undefined,
+        colors: {
+          primary: p.primary_colors || [],
+          secondary: p.secondary_colors ||[],
+          hexCodes: p.hex_codes || [],
+        },
+        pattern: p.pattern,
+        material: p.material,
+        style: p.style_tags || [],
+        formality: p.formality_score,
+        imageUrl: p.image_url,
+      }))
+    );
+
+    res.json({ success: true, coherence: coherenceScore });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ============================================================================
+// 🆕 Layering Analysis (Feature #6 Enhancement)
+// ============================================================================
+
+/**
+ * POST /api/wardrobe/layering/analyze - Analyze layering order
+ */
+export async function analyzeLayering(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = getUserId(req);
+    const { piece_ids } = req.body;
+
+    if (!piece_ids || !Array.isArray(piece_ids)) {
+      return res.status(400).json({ success: false, error: "piece_ids array required" });
+    }
+
+    // Fetch pieces
+    const pieces = await Promise.all(
+      piece_ids.map((id: number) => getWardrobeItem(id, userId))
+    );
+
+    const { determineLayeringOrder } = await import("../../lib/wardrobe/layeringOrder");
+
+    const layering = determineLayeringOrder(
+      pieces.map((p: any) => ({ id: p.id, category: p.category }))
+    );
+
+    res.json({ success: true, layering });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/wardrobe/layering/suggest - Get layering suggestions
+ */
+export async function suggestLayering(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = getUserId(req);
+    const { piece_ids } = req.body;
+
+    const pieces = await Promise.all(
+      piece_ids.map((id: number) => getWardrobeItem(id, userId))
+    );
+
+    const { determineLayeringOrder, suggestLayering } = await import("../../lib/wardrobe/layeringOrder");
+
+    const layering = determineLayeringOrder(
+      pieces.map((p: any) => ({ id: p.id, category: p.category }))
+    );
+
+    const suggestions = suggestLayering(layering.pieces);
+
+    res.json({ success: true, layering, suggestions });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/wardrobe/layering/weather-check - Check if outfit appropriate for weather
+ */
+export async function checkWeatherAppropriate(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = getUserId(req);
+    const { piece_ids, temperature } = req.query;
+
+    if (!piece_ids || !temperature) {
+      return res.status(400).json({ success: false, error: "piece_ids and temperature required" });
+    }
+
+    const pieceIdArray = (piece_ids as string).split(',').map(id => parseInt(id, 10));
+    const temp = parseFloat(temperature as string);
+
+    const pieces = await Promise.all(
+      pieceIdArray.map((id: number) => getWardrobeItem(id, userId))
+    );
+
+    const { determineLayeringOrder, isAppropriateForWeather } = await import("../../lib/wardrobe/layeringOrder");
+
+    const layering = determineLayeringOrder(
+      pieces.map((p: any) => ({ id: p.id, category: p.category }))
+    );
+
+    const weatherCheck = isAppropriateForWeather(layering.pieces, temp);
+
+    res.json({ success: true, weatherCheck });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ============================================================================
+// 🆕 Learned Compatibility (Feature #6 Enhancement)
+// ============================================================================
+
+/**
+ * GET /api/wardrobe/compatibility/:category/learned - Get learned compatibility for category
+ */
+export async function getLearnedCompatibility(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { category } = req.params;
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 10;
+
+    const { getTopCompatibleCategories } = await import("../../lib/wardrobe/learnedCompatibility");
+
+    const compatible = await getTopCompatibleCategories(category, limit);
+
+    res.json({ success: true, category, compatible });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/wardrobe/compatibility/graph - Get compatibility graph
+ */
+export async function getCompatibilityGraph(req: Request, res: Response, next: NextFunction) {
+  try {
+    const minScore = req.query.min_score ? parseFloat(req.query.min_score as string) : 0.6;
+    const minOccurrences = req.query.min_occurrences ? parseInt(req.query.min_occurrences as string, 10) : 5;
+
+    const { buildCompatibilityGraph } = await import("../../lib/wardrobe/learnedCompatibility");
+
+    const graph = await buildCompatibilityGraph(minScore, minOccurrences);
+
+    res.json({ success: true, graph });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/wardrobe/compatibility/learn - Trigger compatibility learning
+ */
+export async function triggerCompatibilityLearning(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { learnCompatibilityRules } = await import("../../lib/wardrobe/learnedCompatibility");
+
+    const rules = await learnCompatibilityRules();
+
+    res.json({ success: true, rulesLearned: rules.length });
   } catch (err) {
     next(err);
   }

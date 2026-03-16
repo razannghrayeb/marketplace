@@ -18,7 +18,7 @@ services:
       - OPENSEARCH_URL=http://opensearch-node:9200
       - RANKER_API_URL=http://ranker:8000
       - YOLO_API_URL=http://yolov8:8001
-      - ONNX_API_URL=http://onnx-inference:8002
+      - ONNX_API_URL=http://onnx-inference:8000
     depends_on:
       postgres:
         condition: service_healthy
@@ -114,7 +114,7 @@ services:
   ranker:
     build:
       context: ./src/lib/model
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.ranker
     ports:
       - "8000:8000"
     environment:
@@ -130,7 +130,6 @@ services:
       retries: 3
       start_period: 20s
     restart: unless-stopped
-    command: ["python", "-m", "uvicorn", "ranker_api:app", "--host", "0.0.0.0", "--port", "8000"]
 
   yolov8:
     build:
@@ -160,6 +159,4 @@ volumes:
   ranker_models:
     driver: local
   yolo_models:
-    driver: local
-  onnx_models:
     driver: local

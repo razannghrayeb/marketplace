@@ -58,5 +58,39 @@ router.post("/complete-look", controller.completeLook);
 router.post("/backfill-embeddings", controller.backfillEmbeddings);
 router.get("/similar/:itemId", controller.getSimilarItems);
 
+// ============================================================================
+// 🆕 Auto-Sync Settings (Feature #6 Enhancement)
+// ============================================================================
+router.get("/auto-sync/settings", controller.getAutoSyncSettings);
+router.put("/auto-sync/settings", controller.updateAutoSyncSettings);
+router.post("/auto-sync/manual", controller.manualSyncPurchase);
+
+// ============================================================================
+// 🆕 Image Recognition (Feature #6 Enhancement)
+// ============================================================================
+router.post("/analyze-photo", upload.single("image"), controller.analyzeWardrobePhoto);
+router.post("/analyze-photos/batch", upload.array("images", 10), controller.batchAnalyzePhotos);
+router.post("/items/:id/re-analyze", controller.reanalyzeItem);
+
+// ============================================================================
+// 🆕 Visual Coherence (Feature #6 Enhancement)
+// ============================================================================
+router.post("/outfit-coherence", controller.assessOutfitCoherence);
+router.post("/outfit/:outfitId/coherence", controller.assessSavedOutfitCoherence);
+
+// ============================================================================
+// 🆕 Layering Analysis (Feature #6 Enhancement)
+// ============================================================================
+router.post("/layering/analyze", controller.analyzeLayering);
+router.post("/layering/suggest", controller.suggestLayering);
+router.get("/layering/weather-check", controller.checkWeatherAppropriate);
+
+// ============================================================================
+// 🆕 Learned Compatibility (Feature #6 Enhancement)
+// ============================================================================
+router.get("/compatibility/:category/learned", controller.getLearnedCompatibility);
+router.get("/compatibility/graph", controller.getCompatibilityGraph);
+router.post("/compatibility/learn", controller.triggerCompatibilityLearning);
+
 export default router;
 export { router as wardrobeRouter };

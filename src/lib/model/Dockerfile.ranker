@@ -1,0 +1,38 @@
+# XGBoost Ranker API Service
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -u 1000 ranker && chown -R ranker:ranker /app
+
+# Copy requirements first for layer caching
+COPY requirements-ranker.txt requirements.txt
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY ranker_api.py .
+
+# Create models directory (models mounted at runtime)
+RUN mkdir -p /app/models && chown -R ranker:ranker /app/models
+
+USER ranker
+
+# Environment
+ENV PYTHONUNBUFFERED=1
+ENV RANKER_MODEL_PATH=/app/models/xgb_ranker_model.json
+ENV RANKER_META_PATH=/app/models/ranker_model_metadata.json
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["uvicorn", "ranker_api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

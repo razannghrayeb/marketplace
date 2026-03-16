@@ -2,13 +2,13 @@ import { Worker } from "bullmq";
 import fetch from "node-fetch";
 import sharp from "sharp";
 import { pg } from "../lib/core";
-import { getRedisConnection } from "../lib/queue";
+import { getRedisConnection, getIngestQueue } from "../lib/queue";
 import { config } from "../config";
 import { getImageAnalysisService } from "../routes/products/image-analysis.service";
 import { uploadImage, processImageForEmbedding, computePHash, validateImage } from "../lib/image";
-import { ingestQueue } from "../lib/queue";
 
 const connection = getRedisConnection();
+const ingestQueue = getIngestQueue();
 
 console.log("Starting ingest worker...");
 

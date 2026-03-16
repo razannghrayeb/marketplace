@@ -66,3 +66,13 @@ export {
   type LabelsResponse,
   type DetectOptions,
 } from "./yolov8Client";
+
+// Vertex AI Virtual Try-On
+export {
+  TryOnClient,
+  getTryOnClient,
+  type TryOnHealthResponse,
+  type TryOnResult,
+  type TryOnBatchResult,
+  type TryOnOptions,
+} from "./tryonClient";
