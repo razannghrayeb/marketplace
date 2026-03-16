@@ -54,16 +54,20 @@ COPY src ./src
 RUN pnpm build
 
 # Stage 2: Production
-FROM node:20-alpine AS production
+FROM node:20-bookworm-slim AS production
 
 WORKDIR /app
 
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@9 --activate
 
+# Install runtime OS packages required by health checks and native modules
+RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
 # Create non-root user
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nodejs -u 1001
+RUN groupadd -g 1001 nodejs && \
+    useradd -r -u 1001 -g nodejs nodejs
 
 # Copy package files
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
