@@ -22,14 +22,6 @@ import { getTryOnClient } from "../../lib/image/tryonClient";
 // Shared helpers
 // ============================================================================
 
-// Matches wardrobe controller pattern for user identity
-function getUserId(req: Request): number {
-  const userId =
-    req.headers["x-user-id"] || req.query.user_id || req.body?.user_id;
-  if (!userId) throw new Error("User ID required");
-  return parseInt(String(userId), 10);
-}
-
 const ALLOWED_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
 function validateImageFile(
@@ -59,7 +51,7 @@ export async function createTryOn(
   next: NextFunction
 ) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const files = req.files as
       | { [fieldname: string]: Express.Multer.File[] }
       | undefined;
@@ -113,7 +105,7 @@ export async function tryOnFromWardrobe(
   next: NextFunction
 ) {
   try {
-    const userId     = getUserId(req);
+    const userId     = req.user!.id;
     const personFile = req.file;
     if (!personFile) {
       return res.status(400).json({ success: false, error: "person_image is required" });
@@ -154,7 +146,7 @@ export async function tryOnFromProduct(
   next: NextFunction
 ) {
   try {
-    const userId     = getUserId(req);
+    const userId     = req.user!.id;
     const personFile = req.file;
     if (!personFile) {
       return res.status(400).json({ success: false, error: "person_image is required" });
@@ -198,7 +190,7 @@ export async function batchTryOn(
   next: NextFunction
 ) {
   try {
-    const userId     = getUserId(req);
+    const userId     = req.user!.id;
     const files      = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
     const personFile = files?.person_image?.[0];
 
@@ -272,7 +264,7 @@ export async function cancelJob(
   next: NextFunction
 ) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const jobId  = parseInt(req.params.id, 10);
 
     const cancelled = await cancelTryOnJob(jobId, userId);
@@ -301,7 +293,7 @@ export async function getHistory(
   next: NextFunction
 ) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const limit  = req.query.limit  ? parseInt(req.query.limit  as string, 10) : 20;
     const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
     const status = req.query.status as string | undefined;
@@ -323,7 +315,7 @@ export async function getResult(
   next: NextFunction
 ) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const jobId  = parseInt(req.params.id, 10);
 
     const job = await getTryOnJob(jobId, userId);
@@ -345,7 +337,7 @@ export async function deleteResult(
   next: NextFunction
 ) {
   try {
-    const userId  = getUserId(req);
+    const userId  = req.user!.id;
     const jobId   = parseInt(req.params.id, 10);
     const deleted = await deleteTryOnJob(jobId, userId);
     if (!deleted) {
@@ -371,7 +363,7 @@ export async function saveResult(
   next: NextFunction
 ) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const jobId  = parseInt(req.params.id, 10);
 
     const saved = await saveTryOnResult(
@@ -395,7 +387,7 @@ export async function listSaved(
   next: NextFunction
 ) {
   try {
-    const userId       = getUserId(req);
+    const userId       = req.user!.id;
     const favoritesOnly = req.query.favorites_only === "true";
     const limit  = req.query.limit  ? parseInt(req.query.limit  as string, 10) : 20;
     const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
@@ -417,7 +409,7 @@ export async function updateSaved(
   next: NextFunction
 ) {
   try {
-    const userId  = getUserId(req);
+    const userId  = req.user!.id;
     const savedId = parseInt(req.params.savedId, 10);
 
     const updated = await updateSavedResult(savedId, userId, {
@@ -445,7 +437,7 @@ export async function deleteSaved(
   next: NextFunction
 ) {
   try {
-    const userId  = getUserId(req);
+    const userId  = req.user!.id;
     const savedId = parseInt(req.params.savedId, 10);
 
     const deleted = await deleteSavedResult(savedId, userId);

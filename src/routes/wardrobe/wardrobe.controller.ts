@@ -33,13 +33,6 @@ import {
   completeLookSuggestions
 } from "./recommendations.service";
 
-// Helper to get user ID (in production, from auth middleware)
-function getUserId(req: Request): number {
-  const userId = req.headers["x-user-id"] || req.query.user_id || req.body?.user_id;
-  if (!userId) throw new Error("User ID required");
-  return parseInt(String(userId), 10);
-}
-
 // ============================================================================
 // Wardrobe Items CRUD
 // ============================================================================
@@ -49,7 +42,7 @@ function getUserId(req: Request): number {
  */
 export async function listItems(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const categoryId = req.query.category_id ? parseInt(req.query.category_id as string, 10) : undefined;
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
     const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
@@ -73,7 +66,7 @@ export async function listItems(req: Request, res: Response, next: NextFunction)
  */
 export async function createItem(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
 
     const item = await createWardrobeItem({
       user_id: userId,
@@ -99,7 +92,7 @@ export async function createItem(req: Request, res: Response, next: NextFunction
  */
 export async function getItem(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const itemId = parseInt(req.params.id, 10);
 
     const item = await getWardrobeItem(itemId, userId);
@@ -118,7 +111,7 @@ export async function getItem(req: Request, res: Response, next: NextFunction) {
  */
 export async function updateItem(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const itemId = parseInt(req.params.id, 10);
 
     const item = await updateWardrobeItem(itemId, userId, {
@@ -145,7 +138,7 @@ export async function updateItem(req: Request, res: Response, next: NextFunction
  */
 export async function deleteItem(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const itemId = parseInt(req.params.id, 10);
 
     const deleted = await deleteWardrobeItem(itemId, userId);
@@ -168,7 +161,7 @@ export async function deleteItem(req: Request, res: Response, next: NextFunction
  */
 export async function getProfile(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     let profile = await getStyleProfile(userId);
 
     if (!profile) {
@@ -187,7 +180,7 @@ export async function getProfile(req: Request, res: Response, next: NextFunction
  */
 export async function recomputeProfile(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const profile = await computeStyleProfile(userId);
     res.json({ success: true, profile });
   } catch (err) {
@@ -204,7 +197,7 @@ export async function recomputeProfile(req: Request, res: Response, next: NextFu
  */
 export async function getGaps(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const recompute = req.query.recompute === "true";
 
     let result;
@@ -234,7 +227,7 @@ export async function getGaps(req: Request, res: Response, next: NextFunction) {
  */
 export async function getRecommendationsHandler(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 20;
     const priceMin = req.query.price_min ? parseInt(req.query.price_min as string, 10) : undefined;
     const priceMax = req.query.price_max ? parseInt(req.query.price_max as string, 10) : undefined;
@@ -263,7 +256,7 @@ export async function getRecommendationsHandler(req: Request, res: Response, nex
  */
 export async function getCompatibleItems(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const itemId = parseInt(req.params.itemId, 10);
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 10;
 
@@ -279,7 +272,7 @@ export async function getCompatibleItems(req: Request, res: Response, next: Next
  */
 export async function precomputeCompatibility(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const edgesComputed = await precomputeCompatibilityEdges(userId);
     res.json({ success: true, edges_computed: edgesComputed });
   } catch (err) {
@@ -292,7 +285,7 @@ export async function precomputeCompatibility(req: Request, res: Response, next:
  */
 export async function getCompatibilityScore(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const score = await getWardrobeCompatibilityScore(userId);
     res.json({ success: true, score });
   } catch (err) {
@@ -309,7 +302,7 @@ export async function getCompatibilityScore(req: Request, res: Response, next: N
  */
 export async function outfitSuggestions(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const itemId = parseInt(req.body.item_id, 10);
     const limit = req.body.limit || 5;
 
@@ -325,7 +318,7 @@ export async function outfitSuggestions(req: Request, res: Response, next: NextF
  */
 export async function completeLook(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const itemIds = req.body.item_ids as number[];
     const limit = req.body.limit || 10;
 
@@ -349,7 +342,7 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
  */
 export async function backfillEmbeddings(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const batchSize = req.body.batch_size || 50;
 
     const processed = await backfillMissingEmbeddings(userId, batchSize);
@@ -364,7 +357,7 @@ export async function backfillEmbeddings(req: Request, res: Response, next: Next
  */
 export async function getSimilarItems(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const itemId = parseInt(req.params.itemId, 10);
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 10;
 
@@ -389,7 +382,7 @@ export async function getSimilarItems(req: Request, res: Response, next: NextFun
  */
 export async function getAutoSyncSettings(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const { getUserAutoSyncSettings } = await import("../../lib/wardrobe/autoSync");
 
     const settings = await getUserAutoSyncSettings(userId);
@@ -404,7 +397,7 @@ export async function getAutoSyncSettings(req: Request, res: Response, next: Nex
  */
 export async function updateAutoSyncSettings(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const { updateUserAutoSyncSettings } = await import("../../lib/wardrobe/autoSync");
 
     await updateUserAutoSyncSettings(userId, req.body);
@@ -419,7 +412,7 @@ export async function updateAutoSyncSettings(req: Request, res: Response, next: 
  */
 export async function manualSyncPurchase(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const { syncPurchaseToWardrobe } = await import("../../lib/wardrobe/autoSync");
 
     const result = await syncPurchaseToWardrobe({
@@ -494,7 +487,7 @@ export async function batchAnalyzePhotos(req: Request, res: Response, next: Next
  */
 export async function reanalyzeItem(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const itemId = parseInt(req.params.id, 10);
 
     const item = await getWardrobeItem(itemId, userId);
@@ -536,7 +529,7 @@ export async function reanalyzeItem(req: Request, res: Response, next: NextFunct
  */
 export async function assessOutfitCoherence(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const { piece_ids } = req.body;
 
     if (!piece_ids || !Array.isArray(piece_ids) || piece_ids.length < 2) {
@@ -583,7 +576,7 @@ export async function assessOutfitCoherence(req: Request, res: Response, next: N
  */
 export async function assessSavedOutfitCoherence(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const outfitId = parseInt(req.params.outfitId, 10);
 
     // Fetch outfit and its pieces
@@ -634,7 +627,7 @@ export async function assessSavedOutfitCoherence(req: Request, res: Response, ne
  */
 export async function analyzeLayering(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const { piece_ids } = req.body;
 
     if (!piece_ids || !Array.isArray(piece_ids)) {
@@ -663,7 +656,7 @@ export async function analyzeLayering(req: Request, res: Response, next: NextFun
  */
 export async function suggestLayering(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const { piece_ids } = req.body;
 
     const pieces = await Promise.all(
@@ -689,7 +682,7 @@ export async function suggestLayering(req: Request, res: Response, next: NextFun
  */
 export async function checkWeatherAppropriate(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const { piece_ids, temperature } = req.query;
 
     if (!piece_ids || !temperature) {

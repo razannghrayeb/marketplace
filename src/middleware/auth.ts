@@ -1,48 +1,61 @@
 import { Request, Response, NextFunction } from "express";
+import jwt from "jsonwebtoken";
+import { config } from "../config";
 
-/**
- * Simple API key authentication middleware
- * Checks for X-API-Key header
- */
-export function apiKeyAuth(req: Request, res: Response, next: NextFunction) {
-  const apiKey = req.headers["x-api-key"];
-  const expectedKey = process.env.API_KEY;
+export function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith("Bearer ")) {
+    return res.status(401).json({ success: false, error: "Authentication required" });
+  }
 
-  // Skip auth if no API_KEY is configured
-  if (!expectedKey) {
+  const token = header.slice(7);
+  try {
+    const payload = jwt.verify(token, config.jwt.secret) as unknown as {
+      sub: number;
+      email: string;
+      is_admin: boolean;
+      type?: string;
+    };
+
+    if (payload.type === "refresh") {
+      return res.status(401).json({ success: false, error: "Access token required" });
+    }
+
+    req.user = { id: payload.sub, email: payload.email, is_admin: payload.is_admin };
+    next();
+  } catch (err: any) {
+    const message = err.name === "TokenExpiredError" ? "Token expired" : "Invalid token";
+    return res.status(401).json({ success: false, error: message });
+  }
+}
+
+export function optionalAuth(req: Request, res: Response, next: NextFunction) {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith("Bearer ")) {
     return next();
   }
 
-  if (!apiKey) {
-    return res.status(401).json({
-      success: false,
-      error: "API key is required. Provide X-API-Key header.",
-    });
-  }
+  const token = header.slice(7);
+  try {
+    const payload = jwt.verify(token, config.jwt.secret) as unknown as {
+      sub: number;
+      email: string;
+      is_admin: boolean;
+      type?: string;
+    };
 
-  if (apiKey !== expectedKey) {
-    return res.status(403).json({
-      success: false,
-      error: "Invalid API key.",
-    });
+    if (payload.type !== "refresh") {
+      req.user = { id: payload.sub, email: payload.email, is_admin: payload.is_admin };
+    }
+    next();
+  } catch {
+    return res.status(401).json({ success: false, error: "Invalid token" });
   }
-
-  next();
 }
 
-/**
- * Optional auth - doesn't block if no key provided
- */
-export function optionalApiKeyAuth(req: Request, res: Response, next: NextFunction) {
-  const apiKey = req.headers["x-api-key"];
-  const expectedKey = process.env.API_KEY;
-
-  if (expectedKey && apiKey && apiKey !== expectedKey) {
-    return res.status(403).json({
-      success: false,
-      error: "Invalid API key.",
-    });
+export function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  if (!req.user || !req.user.is_admin) {
+    return res.status(403).json({ success: false, error: "Admin access required" });
   }
-
   next();
 }
