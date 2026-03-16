@@ -8,9 +8,9 @@ This document explains all three search capabilities in the Fashion Aggregator A
 
 | Feature | Endpoint | Input | Use Case |
 |---------|----------|-------|----------|
-| **Normal Search** | `POST /search/image` | Single image | Find similar products to one image |
+| **Normal Search** | `POST /api/search/image` | Single image | Find similar products to one image |
 | **YOLO Detection Search** | `POST /api/images/search` | Single image | Upload image → detect items → find similar for each item |
-| **Multi-Image Composite** | `POST /search/multi-image` | Multiple images + prompt | Mix attributes from multiple images |
+| **Multi-Image Composite** | `POST /api/search/multi-image` | Multiple images + prompt | Mix attributes from multiple images |
 
 ---
 
@@ -20,7 +20,7 @@ This document explains all three search capabilities in the Fashion Aggregator A
 
 ### Endpoint
 ```
-POST /search/image
+POST /api/search/image
 ```
 
 ### When to Use
@@ -31,7 +31,7 @@ POST /search/image
 
 ### Request
 ```bash
-curl -X POST http://localhost:3000/search/image \
+curl -X POST http://localhost:3000/api/search/image \
   -F "image=@dress.jpg" \
   -F "limit=20"
 ```
@@ -188,8 +188,8 @@ curl -X POST http://localhost:3000/api/images/search \
 **Purpose**: Mix and match attributes from multiple images using natural language prompts.
 
 ### Endpoints
-- `POST /search/multi-image` - Main endpoint (recommended)
-- `POST /search/multi-vector` - Advanced with explicit attribute weights
+- `POST /api/search/multi-image` - Main endpoint (recommended)
+- `POST /api/search/multi-vector` - Advanced with explicit attribute weights
 
 ### When to Use
 - Want color from one image, texture from another
@@ -200,7 +200,7 @@ curl -X POST http://localhost:3000/api/images/search \
 
 ### Request (Main Endpoint)
 ```bash
-curl -X POST http://localhost:3000/search/multi-image \
+curl -X POST http://localhost:3000/api/search/multi-image \
   -F "images=@red_dress.jpg" \
   -F "images=@leather_jacket.jpg" \
   -F "prompt=I want the red color from the first image with the leather texture from the second" \
@@ -231,7 +231,7 @@ curl -X POST http://localhost:3000/search/multi-image \
 
 #### ✅ Cross-Image Color + Texture
 ```bash
-curl -X POST http://localhost:3000/search/multi-image \
+curl -X POST http://localhost:3000/api/search/multi-image \
   -F "images=@red_dress.jpg" \
   -F "images=@leather_jacket.jpg" \
   -F "prompt=Red color from first, leather texture from second"
@@ -239,7 +239,7 @@ curl -X POST http://localhost:3000/search/multi-image \
 
 #### ✅ Style Mixing
 ```bash
-curl -X POST http://localhost:3000/search/multi-image \
+curl -X POST http://localhost:3000/api/search/multi-image \
   -F "images=@vintage_coat.jpg" \
   -F "images=@modern_blazer.jpg" \
   -F "prompt=Vintage style from first with modern fit like second, under $200"
@@ -247,7 +247,7 @@ curl -X POST http://localhost:3000/search/multi-image \
 
 #### ✅ Pattern + Silhouette
 ```bash
-curl -X POST http://localhost:3000/search/multi-image \
+curl -X POST http://localhost:3000/api/search/multi-image \
   -F "images=@floral_dress.jpg" \
   -F "images=@aline_skirt.jpg" \
   -F "prompt=Floral pattern from image 1 with A-line silhouette from image 2"
@@ -255,7 +255,7 @@ curl -X POST http://localhost:3000/search/multi-image \
 
 #### ✅ Material + Color + Style
 ```bash
-curl -X POST http://localhost:3000/search/multi-image \
+curl -X POST http://localhost:3000/api/search/multi-image \
   -F "images=@silk_blouse.jpg" \
   -F "images=@navy_pants.jpg" \
   -F "images=@professional_blazer.jpg" \
@@ -349,9 +349,9 @@ curl -X POST http://localhost:3000/search/multi-image \
 ### Scenario 1: Find Similar Products
 **Goal**: Find products similar to a dress I like
 
-**Use**: Normal Search (`/search/image`)
+**Use**: Normal Search (`/api/search/image`)
 ```bash
-curl -X POST http://localhost:3000/search/image \
+curl -X POST http://localhost:3000/api/search/image \
   -F "image=@my_dress.jpg" \
   -F "limit=20"
 ```
@@ -373,9 +373,9 @@ curl -X POST http://localhost:3000/api/images/search \
 ### Scenario 3: Custom Mix & Match
 **Goal**: I want the red color from this dress but the leather texture from this jacket
 
-**Use**: Multi-Image Composite (`/search/multi-image`)
+**Use**: Multi-Image Composite (`/api/search/multi-image`)
 ```bash
-curl -X POST http://localhost:3000/search/multi-image \
+curl -X POST http://localhost:3000/api/search/multi-image \
   -F "images=@red_dress.jpg" \
   -F "images=@leather_jacket.jpg" \
   -F "prompt=Red color from first, leather texture from second"
@@ -484,9 +484,9 @@ Not directly. You can:
 
 | Feature | Status | Endpoints |
 |---------|--------|-----------|
-| Normal Search | ✅ Live | `/search/image` |
+| Normal Search | ✅ Live | `/api/search/image` |
 | YOLO Detection | ✅ Live | `/api/images/search` |
-| Multi-Image Composite | ✅ Live | `/search/multi-image`, `/search/multi-vector` |
+| Multi-Image Composite | ✅ Live | `/api/search/multi-image`, `/api/search/multi-vector` |
 
 All features are production-ready and available now! 🚀
 
@@ -497,8 +497,8 @@ All features are production-ready and available now! 🚀
 **Purpose**: Given a partial outfit or a product, suggest complementary items to "complete the look" with explainable, diversified recommendations.
 
 ### Endpoints
-- `GET /products/:id/complete-style` - Complete a product page with suggested complementary items
-- `POST /products/complete-style` - Submit an outfit (images or product ids) and receive completion suggestions
+- `GET /api/products/:id/complete-style` - Complete a product page with suggested complementary items
+- `POST /api/products/complete-style` - Submit an outfit (images or product ids) and receive completion suggestions
 
 ### When to Use
 - You have a product page and want suggested accessories/outerwear/shoes to complete a set
@@ -512,7 +512,7 @@ All features are production-ready and available now! 🚀
 
 ### Example (POST)
 ```bash
-curl -X POST http://localhost:3000/products/complete-style \
+curl -X POST http://localhost:3000/api/products/complete-style \
   -F "items=@top.jpg" \
   -F "items=@skirt.jpg" \
   -F "preferences={\"style\":\"casual\",\"maxPrice\":150}" \
@@ -555,5 +555,3 @@ curl -X POST http://localhost:3000/products/complete-style \
 - Tune `limit` + `diversity` for broader or tighter suggestions
 
 ---
-
-

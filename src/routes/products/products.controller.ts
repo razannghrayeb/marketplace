@@ -209,6 +209,7 @@ export async function getProductPriceHistory(req: Request, res: Response) {
 
     // Dynamic import to avoid circular deps
     const { getPriceHistory, getPriceHistoryDaily, getPriceStats } = await import("../../lib/products/index");
+    const { getPriceHistory, getPriceHistoryDaily, getPriceStats } = await import("../../lib/products/index");
 
     let history: any;
     let stats: any;
@@ -235,6 +236,7 @@ export async function getProductPriceHistory(req: Request, res: Response) {
 export async function getProductFacets(req: Request, res: Response) {
   try {
     const { getAttributeFacets } = await import("./products.service");
+    const { getAttributeFacets } = await import("./products.service");
     const filters = parseFilters(req.query);
     const facets = await getAttributeFacets(filters);
     res.json({ success: true, data: facets });
@@ -250,6 +252,7 @@ export async function getProductFacets(req: Request, res: Response) {
  */
 export async function getPriceDrops(req: Request, res: Response) {
   try {
+    const { dropPriceProducts } = await import("./products.service");
     const { dropPriceProducts } = await import("./products.service");
     const drops = await dropPriceProducts();
     res.json({ success: true, data: drops });
@@ -300,3 +303,4 @@ export async function getSimilarProducts(req: Request, res: Response) {
     res.status(500).json({ success: false, error: "Failed to fetch similar products" });
   }
 }
+
