@@ -6,7 +6,6 @@ import { getRedisConnection, getIngestQueue } from "../lib/queue";
 import { config } from "../config";
 import { getImageAnalysisService } from "../routes/products/image-analysis.service";
 import { uploadImage, processImageForEmbedding, computePHash, validateImage } from "../lib/image";
-import { getIngestQueue  } from "../lib/queue";
 
 const connection = getRedisConnection();
 const ingestQueue = getIngestQueue();
