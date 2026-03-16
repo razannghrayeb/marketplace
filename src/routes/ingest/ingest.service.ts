@@ -2,7 +2,7 @@
  * Ingest Service
  * Business logic for image ingestion
  */
-import { v4 as uuidv4 } from "uuid";
+import { randomUUID } from "node:crypto";
 import { pg } from "../../lib/core";
 import { uploadImage } from "../../lib/image";
 import { getIngestQueue, isRedisAvailable } from "../../lib/queue";
@@ -43,7 +43,7 @@ export interface CreateIngestJobInput {
 export async function createIngestJob(input: CreateIngestJobInput): Promise<{ jobId: string; cdnUrl: string }> {
   const { imageBuffer, userId = null, filename = "upload.jpg", mimetype = "image/jpeg" } = input;
   
-  const jobUuid = uuidv4();
+  const jobUuid = randomUUID();
 
   // Upload raw image to R2 immediately (so worker can fetch)
   const { key, cdnUrl } = await uploadImage(imageBuffer, undefined, mimetype);

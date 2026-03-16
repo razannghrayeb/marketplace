@@ -403,7 +403,6 @@ router.post("/multi-image", upload.array("images", 5), async (req: Request, res:
   try {
     const files = req.files as Express.Multer.File[];
     const { prompt, limit, rerankWeights } = req.body;
-    const { prompt, limit, rerankWeights } = req.body;
 
     if (!files || files.length === 0) {
       return res.status(400).json({ error: "At least one image is required" });
@@ -429,21 +428,10 @@ router.post("/multi-image", upload.array("images", 5), async (req: Request, res:
       }
     }
 
-    // Parse rerank weights if provided
-    let parsedRerank = undefined;
-    if (rerankWeights) {
-      try {
-        parsedRerank = typeof rerankWeights === 'string' ? JSON.parse(rerankWeights) : rerankWeights;
-      } catch (e) {
-        return res.status(400).json({ error: 'Invalid rerankWeights JSON' });
-      }
-    }
-
     const result = await multiImageSearch({
       images,
       userPrompt: prompt,
       limit: limit ? Number(limit) : 50,
-      rerankWeights: parsedRerank,
       rerankWeights: parsedRerank,
     });
 
