@@ -73,7 +73,7 @@ RUN pnpm install --frozen-lockfile --prod
 
 # Copy built files
 COPY --from=builder /app/dist ./dist
-COPY public ./public
+RUN mkdir -p ./public
 # Copy models downloaded from HuggingFace (razangh/fashion-models)
 COPY --from=model-downloader /models ./models
 
