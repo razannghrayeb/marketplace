@@ -3,14 +3,15 @@
  *
  * Provides a single, organized API for all image operations:
  *
- * POST /api/images/analyze         - Full analysis (store + embed + detect)
- * POST /api/images/search          - Detect + find similar products (main endpoint!)
- * POST /api/images/search/url      - Find similar from URL
- * POST /api/images/detect          - Quick detection only
- * POST /api/images/detect/url      - Detection from URL
- * POST /api/images/detect/batch    - Batch detection
- * GET  /api/images/status          - Service health status
- * GET  /api/images/labels          - Supported fashion categories
+ * POST /api/images/analyze           - Full analysis (store + embed + detect)
+ * POST /api/images/search            - Detect + find similar products (main endpoint!)
+ * POST /api/images/search/selective  - Search with selective item processing
+ * POST /api/images/search/url        - Find similar from URL
+ * POST /api/images/detect            - Quick detection only
+ * POST /api/images/detect/url        - Detection from URL
+ * POST /api/images/detect/batch      - Batch detection
+ * GET  /api/images/status            - Service health status
+ * GET  /api/images/labels            - Supported fashion categories
  */
 
 import { Router, Request, Response, NextFunction } from "express";
@@ -18,6 +19,8 @@ import multer from "multer";
 import {
   ImageAnalysisService,
   getImageAnalysisService,
+  SelectiveAnalysisOptions,
+  UserDefinedBox,
 } from "./image-analysis.service";
 import { getYOLOv8Client } from "../../lib/image/yolov8Client";
 
@@ -59,7 +62,8 @@ const yoloClient = getYOLOv8Client();
  *   "ok": true,
  *   "services": {
  *     "clip": true,
- *     "yolo": true
+ *     "yolo": true,
+ *     "blip": true
  *   }
  * }
  */
@@ -116,7 +120,7 @@ router.get("/labels", async (_req: Request, res: Response, next: NextFunction) =
  *     "summary": { "shirt": 1, "jeans": 1, ... },
  *     "composition": { "tops": [...], "bottoms": [...], ... }
  *   },
- *   "services": { "clip": true, "yolo": true }
+ *   "services": { "clip": true, "yolo": true, "blip": true }
  * }
  */
 router.post(
@@ -167,6 +171,7 @@ router.post(
  *
  * This is the primary endpoint for "shop by image" functionality.
  * It detects what's in the image and returns similar products for EACH detected item.
+ * Also includes outfit coherence analysis showing how well items go together.
  *
  * @body multipart/form-data
  *   - image: File (required)
@@ -177,6 +182,9 @@ router.post(
  *   - limit_per_item: number (default: 10) - Max similar products per detection
  *   - filter_category: boolean (default: true) - Filter by detected category
  *   - confidence: number (default: 0.25) - Detection confidence
+ *   - enhance_contrast: boolean (default: false) - Preprocess: enhance contrast
+ *   - enhance_sharpness: boolean (default: false) - Preprocess: enhance sharpness
+ *   - bilateral_filter: boolean (default: false) - Preprocess: noise reduction
  *
  * @example Response:
  * {
@@ -191,23 +199,20 @@ router.post(
  *       {
  *         "detection": { "label": "dress", "confidence": 0.92, ... },
  *         "category": "dresses",
- *         "products": [
- *           { "id": 123, "title": "Floral Midi Dress", "similarity_score": 0.89, ... }
- *         ],
+ *         "products": [{ "id": 123, "title": "Floral Midi Dress", ... }],
  *         "count": 10
- *       },
- *       {
- *         "detection": { "label": "heels", "confidence": 0.87, ... },
- *         "category": "footwear",
- *         "products": [
- *           { "id": 456, "title": "Strappy Heels", "similarity_score": 0.85, ... }
- *         ],
- *         "count": 8
  *       }
  *     ],
  *     "totalProducts": 18,
  *     "threshold": 0.7,
  *     "detectedCategories": ["dress", "heels", "bag"]
+ *   },
+ *   "outfitCoherence": {
+ *     "overallScore": 0.85,
+ *     "pairwiseScores": [...],
+ *     "categoryAnalysis": { "hasTop": false, "hasDress": true, "hasFootwear": true, ... },
+ *     "styleAnalysis": { "dominantOccasion": "semi-formal", "formalityRange": [5, 8], ... },
+ *     "recommendations": ["Well-coordinated outfit!"]
  *   }
  * }
  */
@@ -247,6 +252,123 @@ router.post(
       );
 
       // Don't expose raw embedding to clients
+      const { embedding, ...safeResult } = result;
+
+      return res.json({
+        success: true,
+        ...safeResult,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route POST /api/images/search/selective
+ * @desc Search with selective item processing and user-defined regions
+ * @access Public
+ *
+ * Allows users to:
+ * - Select specific detected items to process (by index)
+ * - Exclude certain items from processing
+ * - Add custom bounding boxes for manual region detection
+ *
+ * @body multipart/form-data
+ *   - image: File (required)
+ *   - selection: JSON string with selection options (optional)
+ *
+ * @query
+ *   - store: boolean (default: false)
+ *   - threshold: number (default: 0.7)
+ *   - limit_per_item: number (default: 10)
+ *   - confidence: number (default: 0.25)
+ *   - enhance_contrast: boolean (default: false)
+ *   - enhance_sharpness: boolean (default: false)
+ *   - bilateral_filter: boolean (default: false)
+ *
+ * @example selection JSON:
+ * {
+ *   "selectedItemIndices": [0, 2],
+ *   "excludedItemIndices": [1],
+ *   "userDefinedBoxes": [
+ *     { "box": {"x1": 100, "y1": 200, "x2": 300, "y2": 500}, "categoryHint": "bags", "label": "handbag" }
+ *   ]
+ * }
+ *
+ * @example Response:
+ * {
+ *   "success": true,
+ *   "detection": { ... },
+ *   "similarProducts": {
+ *     "byDetection": [
+ *       { ..., "source": "yolo", "originalIndex": 0 },
+ *       { ..., "source": "user_defined" }
+ *     ]
+ *   },
+ *   "outfitCoherence": { ... }
+ * }
+ */
+router.post(
+  "/search/selective",
+  upload.single("image"),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          error: "No image file provided. Use 'image' field in multipart/form-data.",
+        });
+      }
+
+      // Parse selection options from body
+      let selectionOptions: Partial<SelectiveAnalysisOptions> = {};
+      if (req.body.selection) {
+        try {
+          selectionOptions = JSON.parse(req.body.selection);
+        } catch {
+          return res.status(400).json({
+            success: false,
+            error: "Invalid selection JSON. Check syntax.",
+          });
+        }
+      }
+
+      // Build preprocessing options
+      const preprocessing =
+        req.query.enhance_contrast === "true" ||
+        req.query.enhance_sharpness === "true" ||
+        req.query.bilateral_filter === "true"
+          ? {
+              enhanceContrast: req.query.enhance_contrast === "true",
+              enhanceSharpness: req.query.enhance_sharpness === "true",
+              bilateralFilter: req.query.bilateral_filter === "true",
+            }
+          : undefined;
+
+      const options: SelectiveAnalysisOptions = {
+        store: req.query.store === "true",
+        findSimilar: true,
+        confidence: req.query.confidence
+          ? parseFloat(req.query.confidence as string)
+          : 0.25,
+        similarityThreshold: req.query.threshold
+          ? parseFloat(req.query.threshold as string)
+          : 0.7,
+        similarLimitPerItem: req.query.limit_per_item
+          ? parseInt(req.query.limit_per_item as string, 10)
+          : 10,
+        filterByDetectedCategory: req.query.filter_category !== "false",
+        preprocessing,
+        ...selectionOptions,
+      };
+
+      const result = await analysisService.analyzeWithSelection(
+        req.file.buffer,
+        req.file.originalname,
+        options
+      );
+
       const { embedding, ...safeResult } = result;
 
       return res.json({
@@ -315,6 +437,9 @@ router.post(
  *
  * @query
  *   - confidence: number (default: 0.25) - Detection confidence threshold
+ *   - enhance_contrast: boolean (default: false) - Preprocess: enhance contrast
+ *   - enhance_sharpness: boolean (default: false) - Preprocess: enhance sharpness
+ *   - bilateral_filter: boolean (default: false) - Preprocess: noise reduction
  */
 router.post(
   "/detect",
@@ -332,10 +457,23 @@ router.post(
         ? parseFloat(req.query.confidence as string)
         : 0.25;
 
-      const result = await analysisService.quickDetect(
+      // Build preprocessing options if any are enabled
+      const preprocessing =
+        req.query.enhance_contrast === "true" ||
+        req.query.enhance_sharpness === "true" ||
+        req.query.bilateral_filter === "true"
+          ? {
+              enhanceContrast: req.query.enhance_contrast === "true",
+              enhanceSharpness: req.query.enhance_sharpness === "true",
+              bilateralFilter: req.query.bilateral_filter === "true",
+            }
+          : undefined;
+
+      // Use YOLO client directly with preprocessing options
+      const result = await yoloClient.detectFromBuffer(
         req.file.buffer,
         req.file.originalname,
-        confidence
+        { confidence, preprocessing }
       );
 
       return res.json(result);
@@ -355,6 +493,9 @@ router.post(
  *
  * @query
  *   - confidence: number (default: 0.25)
+ *   - enhance_contrast: boolean (default: false)
+ *   - enhance_sharpness: boolean (default: false)
+ *   - bilateral_filter: boolean (default: false)
  */
 router.post(
   "/detect/url",
@@ -373,7 +514,19 @@ router.post(
         ? parseFloat(req.query.confidence as string)
         : 0.25;
 
-      const result = await analysisService.quickDetectFromUrl(url, confidence);
+      // Build preprocessing options if any are enabled
+      const preprocessing =
+        req.query.enhance_contrast === "true" ||
+        req.query.enhance_sharpness === "true" ||
+        req.query.bilateral_filter === "true"
+          ? {
+              enhanceContrast: req.query.enhance_contrast === "true",
+              enhanceSharpness: req.query.enhance_sharpness === "true",
+              bilateralFilter: req.query.bilateral_filter === "true",
+            }
+          : undefined;
+
+      const result = await yoloClient.detectFromUrl(url, { confidence, preprocessing });
 
       return res.json(result);
     } catch (error) {

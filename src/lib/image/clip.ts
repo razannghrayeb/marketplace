@@ -58,11 +58,35 @@ const MODEL_CONFIGS: Record<ClipModelType, ModelConfig> = {
   },
 };
 
+const MIN_BYTES_BY_MODEL_FILE: Record<string, number> = {
+  "fashion-clip-image.onnx": 200 * 1024 * 1024,
+  "fashion-clip-text.onnx": 120 * 1024 * 1024,
+  "clip-image-vit-l-14.onnx": 900 * 1024 * 1024,
+  "clip-text-vit-l-14.onnx": 300 * 1024 * 1024,
+  "clip-image-vit-32.onnx": 250 * 1024 * 1024,
+  "clip-text-vit-32.onnx": 120 * 1024 * 1024,
+};
+
+function isUsableModelFile(filePath: string): boolean {
+  try {
+    const stat = fs.statSync(filePath);
+    const minBytes = MIN_BYTES_BY_MODEL_FILE[path.basename(filePath)] ?? 1;
+    return stat.isFile() && stat.size >= minBytes;
+  } catch {
+    return false;
+  }
+}
+
 // Determine which model to use (priority: env var > fashion-clip > vit-l-14 > vit-b-32)
 function getActiveModelType(): ClipModelType {
   const envModel = process.env.CLIP_MODEL_TYPE as ClipModelType;
   if (envModel && MODEL_CONFIGS[envModel]) {
-    return envModel;
+    const envConfig = MODEL_CONFIGS[envModel];
+    const envModelPath = path.join(MODEL_DIR, envConfig.imageModelFile);
+    if (isUsableModelFile(envModelPath)) {
+      return envModel;
+    }
+    console.warn(`Requested CLIP_MODEL_TYPE=${envModel}, but model file is missing/empty: ${envModelPath}`);
   }
   
   // Auto-detect: prefer fashion-clip > vit-l-14 > vit-b-32
@@ -70,7 +94,7 @@ function getActiveModelType(): ClipModelType {
   for (const modelType of priority) {
     const config = MODEL_CONFIGS[modelType];
     const modelPath = path.join(MODEL_DIR, config.imageModelFile);
-    if (fs.existsSync(modelPath)) {
+    if (isUsableModelFile(modelPath)) {
       return modelType;
     }
   }
@@ -117,9 +141,9 @@ export async function initClip(modelType?: ClipModelType): Promise<void> {
   const imageModelPath = getImageModelPath();
   const textModelPath = getTextModelPath();
 
-  if (!fs.existsSync(imageModelPath)) {
+  if (!isUsableModelFile(imageModelPath)) {
     throw new Error(
-      `CLIP image model not found at ${imageModelPath}. Run 'npx tsx scripts/download-clip.ts' first.\n` +
+      `CLIP image model missing/invalid at ${imageModelPath}. Run 'npx tsx scripts/download-clip.ts' first.\n` +
       `Available models: fashion-clip, vit-l-14, vit-b-32`
     );
   }
@@ -151,7 +175,7 @@ export async function initClip(modelType?: ClipModelType): Promise<void> {
  * Check if CLIP models are available
  */
 export function isClipAvailable(): boolean {
-  return fs.existsSync(getImageModelPath());
+  return isUsableModelFile(getImageModelPath());
 }
 
 /**
@@ -167,7 +191,7 @@ export function getModelInfo(): { type: ClipModelType; config: ModelConfig } {
 export function listAvailableModels(): Array<{ type: ClipModelType; available: boolean; config: ModelConfig }> {
   return (Object.keys(MODEL_CONFIGS) as ClipModelType[]).map((type) => ({
     type,
-    available: fs.existsSync(path.join(MODEL_DIR, MODEL_CONFIGS[type].imageModelFile)),
+    available: isUsableModelFile(path.join(MODEL_DIR, MODEL_CONFIGS[type].imageModelFile)),
     config: MODEL_CONFIGS[type],
   }));
 }
@@ -248,8 +272,10 @@ export async function getImageEmbedding(
   // Create input tensor [1, 3, 224, 224]
   const inputTensor = new ort.Tensor("float32", preprocessedImage, [1, 3, IMAGE_SIZE, IMAGE_SIZE]);
 
-  // Run inference
-  const results = await imageSession.run({ input: inputTensor });
+  // Run inference - use dynamic input name (supports both "input" and "pixel_values")
+  const inputName = imageSession.inputNames[0];
+  const feeds: Record<string, ort.Tensor> = { [inputName]: inputTensor };
+  const results = await imageSession.run(feeds);
 
   // Get output embedding
   const outputName = imageSession.outputNames[0];
@@ -284,7 +310,11 @@ export async function getTextEmbedding(text: string): Promise<number[]> {
   const tokens = simpleTokenize(text);
   const inputTensor = new ort.Tensor("int32", new Int32Array(tokens), [1, tokens.length]);
 
-  const results = await textSession.run({ input: inputTensor });
+  // Run inference - use dynamic input name (supports both "input" and "input_ids")
+  const inputName = textSession.inputNames[0];
+  const feeds: Record<string, ort.Tensor> = { [inputName]: inputTensor };
+  const results = await textSession.run(feeds);
+
   const outputName = textSession.outputNames[0];
   const embedding = Array.from(results[outputName].data as Float32Array);
 

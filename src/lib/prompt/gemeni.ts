@@ -1,4 +1,6 @@
 import { GoogleGenerativeAI, Part } from '@google/generative-ai';
+import { parseNegations, type NegationConstraint } from '../queryProcessor/negationHandler';
+import { parseSpatialRelationships, type SpatialConstraint } from '../queryProcessor/spatialRelationships';
 
 // ============================================================================
 // Types & Interfaces
@@ -9,6 +11,12 @@ export interface DetectedItem {
   confidence: number;
   boundingBox?: { x1: number; y1: number; x2: number; y2: number };
   attributes: Record<string, string>;
+}
+
+export interface SpatialDetail {
+  attribute: string;      // e.g., "stripes", "embroidery"
+  location: string;       // e.g., "sleeves", "collar"
+  relationship: string;   // e.g., "on", "across"
 }
 
 export interface AttributeMap {
@@ -23,6 +31,7 @@ export interface AttributeMap {
   occasion?: string[];
   season?: string[];
   details?: string;
+  spatialDetails?: SpatialDetail[]; // NEW: Spatial relationships
 }
 
 export interface ImageAnalysisResult {
@@ -48,6 +57,15 @@ export interface SearchConstraints {
   brands?: string[];
   mustHave: string[];
   mustNotHave: string[];
+  negativeAttributes?: {  // NEW: Structured negative constraints
+    colors?: string[];
+    patterns?: string[];
+    materials?: string[];
+    textures?: string[];
+    styles?: string[];
+    details?: string[];
+  };
+  spatialRequirements?: SpatialDetail[];  // NEW: Spatial relationships
   size?: string;
   gender?: string;
 }
@@ -93,11 +111,29 @@ export class IntentParserService {
     imageAnalyses?: ImageAnalysisResult[]
   ): Promise<ParsedIntent> {
     try {
+      // Step 0: Pre-parse negations and spatial relationships
+      const negationResult = parseNegations(userPrompt);
+      const spatialResult = parseSpatialRelationships(userPrompt);
+
+      // Use cleaned prompt for main analysis (negations/spatial removed)
+      let workingPrompt = userPrompt;
+      if (negationResult.hasNegation) {
+        workingPrompt = negationResult.cleanedQuery;
+      }
+      if (spatialResult.hasSpatial) {
+        workingPrompt = spatialResult.cleanedPrompt;
+      }
+
       // Step 1: If no pre-analysis provided, analyze images first
       const analyses = imageAnalyses || await this.analyzeImages(images);
 
-      // Step 2: Build the intent extraction prompt
-      const prompt = this.buildIntentPrompt(analyses, userPrompt);
+      // Step 2: Build the intent extraction prompt (with negations/spatial context)
+      const prompt = this.buildIntentPrompt(
+        analyses,
+        workingPrompt,
+        negationResult.negations,
+        spatialResult.spatialConstraints
+      );
 
       // Step 3: Call Gemini API with images + prompt
       const response = await this.callGeminiWithRetry(images, prompt);
@@ -105,6 +141,13 @@ export class IntentParserService {
       // Step 4: Parse and validate the response
       const parsedIntent = this.parseIntentResponse(response);
       parsedIntent.rawQuery = userPrompt;
+
+      // Step 5: Merge pre-parsed constraints into the result
+      this.mergePreParsedConstraints(
+        parsedIntent,
+        negationResult.negations,
+        spatialResult.spatialConstraints
+      );
 
       return parsedIntent;
 
@@ -203,7 +246,9 @@ Respond ONLY with valid JSON array (no markdown, no explanation):
   // -------------------------------------------------------------------------
   private buildIntentPrompt(
     imageAnalyses: ImageAnalysisResult[],
-    userPrompt: string
+    userPrompt: string,
+    negations: NegationConstraint[] = [],
+    spatialConstraints: SpatialConstraint[] = []
   ): string {
     // Build a clear image reference guide
     const imageGuide = imageAnalyses.map((analysis, idx) => {
@@ -261,6 +306,22 @@ When user says they want a specific attribute FROM a specific image, extract EXA
 ### PATTERN References
 - "pattern from second" → Extract pattern type + scale from image 1
 - "same print" → Extract pattern details
+
+## NEGATIVE CONSTRAINTS (What to AVOID)
+${negations.length > 0 ? `
+User has specified the following things to AVOID:
+${negations.map(n => `- NO ${n.value} (${n.type}): "${n.originalText}"`).join('\n')}
+
+**IMPORTANT**: These are EXCLUSIONS. Add them to mustNotHave array and negativeAttributes object.
+` : ''}
+
+## SPATIAL RELATIONSHIPS (Specific Placement)
+${spatialConstraints.length > 0 ? `
+User has specified WHERE attributes should appear:
+${spatialConstraints.map(s => `- ${s.attribute} ${s.relationship} ${s.location}: "${s.originalPhrase}"`).join('\n')}
+
+**IMPORTANT**: These specify LOCATION-SPECIFIC requirements. Add them to spatialRequirements array.
+` : ''}
 
 ## YOUR TASK
 
@@ -320,6 +381,15 @@ Respond ONLY with valid JSON (no markdown, no explanation, no extra text):
     "brands": [],
     "mustHave": ["leather", "burgundy", "distressed"],
     "mustNotHave": [],
+    "negativeAttributes": {
+      "textures": [],
+      "patterns": [],
+      "materials": [],
+      "colors": [],
+      "styles": [],
+      "details": []
+    },
+    "spatialRequirements": [],
     "size": null,
     "gender": null
   },
@@ -461,6 +531,58 @@ Respond ONLY with valid JSON (no markdown, no explanation, no extra text):
     }
     if (typeof parsed.confidence !== 'number') {
       parsed.confidence = 0.5;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Step 5: Merge pre-parsed constraints into parsed intent
+  // -------------------------------------------------------------------------
+  private mergePreParsedConstraints(
+    parsedIntent: ParsedIntent,
+    negations: NegationConstraint[],
+    spatialConstraints: SpatialConstraint[]
+  ): void {
+    // Merge negative constraints
+    if (negations.length > 0) {
+      if (!parsedIntent.constraints.negativeAttributes) {
+        parsedIntent.constraints.negativeAttributes = {};
+      }
+
+      for (const neg of negations) {
+        const type = neg.type;
+        const pluralType = `${type}s` as keyof NonNullable<typeof parsedIntent.constraints.negativeAttributes>;
+
+        if (!parsedIntent.constraints.negativeAttributes[pluralType]) {
+          parsedIntent.constraints.negativeAttributes[pluralType] = [];
+        }
+
+        // Add to typed array
+        const arr = parsedIntent.constraints.negativeAttributes[pluralType] as string[];
+        if (!arr.includes(neg.value)) {
+          arr.push(neg.value);
+        }
+
+        // Also add to mustNotHave for backward compatibility
+        if (!parsedIntent.constraints.mustNotHave.includes(neg.value)) {
+          parsedIntent.constraints.mustNotHave.push(neg.value);
+        }
+      }
+    }
+
+    // Merge spatial constraints
+    if (spatialConstraints.length > 0) {
+      if (!parsedIntent.constraints.spatialRequirements) {
+        parsedIntent.constraints.spatialRequirements = [];
+      }
+
+      for (const spatial of spatialConstraints) {
+        // Convert SpatialConstraint to SpatialDetail format
+        parsedIntent.constraints.spatialRequirements.push({
+          attribute: spatial.attribute,
+          location: spatial.location,
+          relationship: spatial.relationship
+        });
+      }
     }
   }
 

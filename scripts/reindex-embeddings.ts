@@ -1,9 +1,9 @@
+import "dotenv/config";
 import axios from "axios";
-import { pg } from "../src/lib/db";
-import { osClient } from "../src/lib/opensearch";
+import { pg, osClient } from "../src/lib/core";
 import { config } from "../src/config";
-import { processImageForEmbedding, computePHash } from "../src/lib/imageProcessor";
-import { extractAttributesSync } from "../src/lib/attributeExtractor";
+import { processImageForEmbedding, computePHash } from "../src/lib/image";
+import { extractAttributesSync } from "../src/lib/search/attributeExtractor";
 
 async function columnExists(columnName: string) {
   const res = await pg.query(
@@ -11,6 +11,14 @@ async function columnExists(columnName: string) {
     [columnName]
   );
   return res.rowCount > 0;
+}
+
+async function getProductColumns(): Promise<{ hasIsHidden: boolean; hasCanonicalId: boolean }> {
+  const [hasIsHidden, hasCanonicalId] = await Promise.all([
+    columnExists("is_hidden"),
+    columnExists("canonical_id"),
+  ]);
+  return { hasIsHidden, hasCanonicalId };
 }
 
 async function fetchImage(url: string): Promise<Buffer | null> {
@@ -29,8 +37,19 @@ async function main() {
     process.exit(1);
   }
 
+  const { hasIsHidden, hasCanonicalId } = await getProductColumns();
+
   console.log("Fetching products with images...");
-  const res = await pg.query(`SELECT id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_url, is_hidden, canonical_id FROM products WHERE image_url IS NOT NULL`);
+  const optionalColumns = [
+    hasIsHidden ? "is_hidden" : "NULL::boolean AS is_hidden",
+    hasCanonicalId ? "canonical_id" : "NULL::text AS canonical_id",
+  ].join(", ");
+
+  const res = await pg.query(
+    `SELECT id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_url, ${optionalColumns}
+     FROM products
+     WHERE image_url IS NOT NULL`
+  );
 
   console.log(`Found ${res.rowCount} products with images`);
 

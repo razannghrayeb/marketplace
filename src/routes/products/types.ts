@@ -5,7 +5,7 @@
  * Organized by concern: search, candidates, facets, results.
  */
 import type { ParsedQuery } from "../../lib/search";
-import type { ProcessedQuery } from "../../lib/queryProcessor";
+import type { QueryAST } from "../../lib/queryProcessor";
 
 // ============================================================================
 // Search Filters
@@ -98,7 +98,7 @@ export interface SearchResultWithRelated {
     total_results: number;
     total_related?: number;
     parsed_query?: ParsedQuery; // Include parsed query info for debugging/transparency
-    processed_query?: ProcessedQuery; // Query processing info (corrections, etc.)
+    processed_query?: QueryAST; // Query processing info (corrections, etc.)
     did_you_mean?: string; // Suggestion if not auto-applied
   };
 }

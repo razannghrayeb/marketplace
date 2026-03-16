@@ -13,9 +13,9 @@ import {
 } from "../../lib/search";
 import {
   processQuery,
-  processQuerySync,
+  processQueryFast,
   getQueryEmbedding,
-  ProcessedQuery,
+  type QueryAST,
 } from "../../lib/queryProcessor";
 
 // ============================================================================
@@ -94,7 +94,7 @@ export interface SearchResultWithRelated {
     total_results: number;
     total_related?: number;
     parsed_query?: ParsedQuery;  // Include parsed query info for debugging/transparency
-    processed_query?: ProcessedQuery;  // Query processing info (corrections, etc.)
+    processed_query?: QueryAST;  // Query processing info (corrections, etc.)
     did_you_mean?: string;  // Suggestion if not auto-applied
   };
 }
@@ -495,18 +495,18 @@ export async function searchByTextWithRelated(
   // Step 1: Process query (spelling, arabizi, normalization)
   const processed = useLLM 
     ? await processQuery(query)
-    : processQuerySync(query);
-  
+    : await processQueryFast(query);
+
   // Use the search query (auto-corrected or original based on confidence)
   const effectiveQuery = processed.searchQuery;
   
   // Merge extracted filters with explicit filters (explicit takes precedence)
   const mergedFilters = {
     ...filters,
-    gender: filters.gender || processed.extractedFilters.gender,
-    color: filters.color || processed.extractedFilters.color,
-    brand: filters.brand || processed.extractedFilters.brand,
-    category: filters.category || processed.extractedFilters.category,
+    gender: filters.gender || processed.entities.gender,
+    color: filters.color || processed.entities.colors[0],
+    brand: filters.brand || processed.entities.brands[0],
+    category: filters.category || processed.entities.categories[0],
   };
 
   // Parse query with semantic understanding
@@ -689,7 +689,9 @@ export async function searchByTextWithRelated(
       total_related: related.length,
       parsed_query: parsedQuery,
       processed_query: processed,
-      did_you_mean: processed.suggestText,
+      did_you_mean: processed.corrections.length > 0 && processed.confidence < 0.85
+        ? `Did you mean "${processed.searchQuery}"?`
+        : undefined,
     },
   };
 }

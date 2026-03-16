@@ -48,12 +48,103 @@ export interface ExtractedFilters {
   category?: string;
   brand?: string;
   priceRange?: { min?: number; max?: number };
+  style?: string[];
+  similarityReference?: string;
 }
 
 // ============================================================================
-// Processed Query
+// Query AST (Abstract Syntax Tree) - NEW UNIFIED STRUCTURE
 // ============================================================================
 
+export interface QueryIntent {
+  type: "search" | "filter" | "comparison" | "completion" | "exploration";
+  confidence: number; // 0-1
+  description?: string;
+}
+
+export interface QueryExpansions {
+  synonyms: string[];           // Related terms
+  transliterations: string[];   // Arabic/Arabizi variants
+  brandAliases: string[];       // Nike -> Just Do It, etc.
+  categoryExpansions: string[]; // shirt -> top, blouse, etc.
+  corrections: string[];        // Spell corrections
+}
+
+export interface QueryEntities {
+  brands: string[];
+  categories: string[];
+  colors: string[];
+  materials: string[];
+  patterns: string[];
+  sizes: string[];
+  gender?: string;
+  occasion?: string;
+  season?: string;
+}
+
+export interface QueryFilters {
+  priceRange?: { min?: number; max?: number };
+  sizeRange?: string[];
+  availability?: "in_stock" | "all";
+  rating?: { min?: number };
+  brand?: string[];
+  category?: string[];
+  color?: string[];
+  material?: string[];
+  gender?: string;
+}
+
+export interface QueryTokens {
+  original: string[];      // Original words
+  normalized: string[];    // Cleaned/lowercased
+  stemmed: string[];      // Stemmed forms
+  important: string[];    // High-importance terms
+  stopwords: string[];    // Filtered out terms
+}
+
+/**
+ * Unified Query AST - Single output format for all query processing
+ */
+export interface QueryAST {
+  // ========== ORIGINAL INPUT ==========
+  original: string;
+  normalized: string;
+
+  // ========== TOKENIZATION ==========
+  tokens: QueryTokens;
+
+  // ========== ENTITIES ==========
+  entities: QueryEntities;
+
+  // ========== FILTERS ==========
+  filters: QueryFilters;
+
+  // ========== INTENT ==========
+  intent: QueryIntent;
+
+  // ========== EXPANSIONS ==========
+  expansions: QueryExpansions;
+
+  // ========== PROCESSING METADATA ==========
+  script: ScriptAnalysis;
+  corrections: Correction[];
+  processingTimeMs: number;
+  llmUsed: boolean;
+  cacheHit: boolean;
+  confidence: number;      // Overall processing confidence
+
+  // ========== SEARCH READY ==========
+  searchQuery: string;     // Final query for BM25/vector search
+  embedding?: number[];    // Precomputed embedding if available
+}
+
+// ============================================================================
+// Backward Compatibility - DEPRECATED but maintained
+// ============================================================================
+
+/**
+ * @deprecated Use QueryAST instead. Maintained for backward compatibility.
+ */
 export interface ProcessedQuery {
   // Original input
   originalQuery: string;

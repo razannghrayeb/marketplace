@@ -1,7 +1,36 @@
+# syntax=docker/dockerfile:1.7
+
 # ============================================================================
 # Fashion Marketplace API
 # Multi-stage build for optimized production image
 # ============================================================================
+
+# Stage 0: Download ML models from HuggingFace
+# For CI/CD, pass a BuildKit secret named `hf_token` if the repo is private.
+# For local compose, the Dockerfile also falls back to the HF_TOKEN env var.
+FROM python:3.11-slim AS model-downloader
+ARG HF_TOKEN=""
+ENV HF_TOKEN=${HF_TOKEN}
+RUN pip install --no-cache-dir huggingface_hub
+RUN --mount=type=secret,id=hf_token python - <<'EOF'
+from huggingface_hub import snapshot_download
+import os
+token = None
+secret_path = "/run/secrets/hf_token"
+if os.path.exists(secret_path):
+    with open(secret_path, "r", encoding="utf-8") as fh:
+        token = fh.read().strip() or None
+if token is None:
+    token = os.environ.get("HF_TOKEN") or None
+snapshot_download(
+    repo_id="razangh/fashion-models",
+    repo_type="model",
+    local_dir="/models",
+    token=token,
+    ignore_patterns=["*.gitattributes", ".gitattributes", "README.md"],
+)
+print("Models downloaded.")
+EOF
 
 # Stage 1: Build
 FROM node:20-alpine AS builder
@@ -25,16 +54,20 @@ COPY src ./src
 RUN pnpm build
 
 # Stage 2: Production
-FROM node:20-alpine AS production
+FROM node:20-bookworm-slim AS production
 
 WORKDIR /app
 
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@9 --activate
 
+# Install runtime OS packages required by health checks and native modules
+RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
 # Create non-root user
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nodejs -u 1001
+RUN groupadd -g 1001 nodejs && \
+    useradd -r -u 1001 -g nodejs nodejs
 
 # Copy package files
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
@@ -44,8 +77,9 @@ RUN pnpm install --frozen-lockfile --prod
 
 # Copy built files
 COPY --from=builder /app/dist ./dist
-COPY public ./public
-COPY models ./models
+RUN mkdir -p ./public
+# Copy models downloaded from HuggingFace (razangh/fashion-models)
+COPY --from=model-downloader /models ./models
 
 # Set ownership
 RUN chown -R nodejs:nodejs /app
