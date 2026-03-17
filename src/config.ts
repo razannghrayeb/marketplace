@@ -60,4 +60,9 @@ export const config = {
     model: process.env.TRYON_MODEL || "virtual-try-on@002",
     timeout: Number(process.env.TRYON_TIMEOUT || 60000),
   },
+  jwt: {
+    secret: process.env.JWT_SECRET || "change-me-in-production",
+    accessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "15m",
+    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || "7d",
+  },
 };
