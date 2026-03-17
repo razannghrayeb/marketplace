@@ -6,6 +6,8 @@
     "dev": "nodemon",
     "build": "tsc -p .",
     "start": "node dist/index.js",
+    "start:api": "node dist/index.js",
+    "start:ml": "node dist/index.js",
     "lint": "eslint .",
     "recreate-index": "npx tsx scripts/recreate-opensearch-index.ts",
     "reindex-embeddings": "npx tsx scripts/reindex-embeddings.ts",
