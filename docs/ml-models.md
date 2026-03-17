@@ -2264,5 +2264,70 @@ export class ModelVersionManager {
 }
 ```
 
+---
+
+## Intent Classification Model Evaluation
+
+### Model Performance Summary
+
+We trained and evaluated 3 different machine learning models for Lebanese fashion intent classification.
+
+#### Model Comparison
+
+| Model | Accuracy | Avg Confidence | Best Use Case |
+|-------|----------|---------------|---------------|
+| **Random Forest** 🥇 | **83.9%** | **0.731** | **Production Ready** |
+| Logistic Regression | 61.3% | 0.384 | Baseline |
+| Naive Bayes | 41.9% | 0.381 | Poor performance |
+
+**Winner: Random Forest Model**
+- ✅ **83.9% accuracy** on Lebanese fashion queries
+- ✅ **0.731 average confidence** (much higher than alternatives)
+- ✅ **Excellent multi-language support** (English/Arabic/Arabizi/Mixed)
+- ✅ **Strong performance across all intent types**
+
+### Per-Intent Performance Analysis
+
+| Intent Type | Accuracy | Confidence | Performance |
+|-------------|----------|------------|-------------|
+| **Product Search** | 100.0% | 0.82 | 🟢 Excellent |
+| **Brand Search** | 100.0% | 0.71 | 🟢 Excellent |
+| **Outfit Completion** | 100.0% | 0.74 | 🟢 Excellent |
+| **Trending Search** | 75.0% | 0.70 | 🟡 Good |
+| **Price Search** | 66.7% | 0.64 | 🟡 Good |
+| **Comparison** | 60.0% | 0.73 | 🟡 Acceptable |
+
+### Multi-Language Performance
+
+| Language | Avg Confidence | Performance |
+|----------|---------------|-------------|
+| **Mixed** | 0.833 | 🟢 Excellent |
+| **Arabic** | 0.817 | 🟢 Excellent |
+| **English** | 0.790 | 🟢 Excellent |
+| **Arabizi** | 0.663 | 🟡 Good |
+
+### Production Readiness Assessment
+
+✅ **Ready for Production**
+- **High accuracy** (83.9%) exceeds typical industry standards (70-80%)
+- **Strong confidence scores** (>0.7) indicate reliable predictions
+- **Multi-language support** works well for Lebanese market
+- **Fast inference** suitable for real-time applications
+
+### Deployment Configuration
+
+```typescript
+const ML_CONFIG = {
+  enabled: true,
+  modelPath: "models/intent_classifier_rf.pkl",
+  minRuleConfidence: 0.7,
+  modelType: "random_forest"
+};
+```
+
+For complete intent classification system details, see `ml-intent-classification.md`.
+
+---
+
 This ML guide provides comprehensive coverage of all machine learning components in the Fashion Aggregator API. Each section includes practical implementation details, performance considerations, and maintenance procedures.
 

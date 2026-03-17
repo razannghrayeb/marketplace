@@ -26,41 +26,35 @@ import {
 } from "./middleware/index";
 import { metricsMiddleware } from "./middleware/metrics";
 
-
 export async function createServer() {
-// try {
-//   await ensureIndex();
-// } catch (err) {
-//   console.error("Warning: Could not ensure OpenSearch index:", err);
-// }process.env.NODE_ENV = "test";
-process.env.NODE_ENV = "test";
-
-if (process.env.NODE_ENV !== "test") {
+  if (process.env.NODE_ENV !== "test") {
     try {
       await ensureIndex();
     } catch (err) {
       console.error("Warning: Could not ensure OpenSearch index:", err);
     }
-}const app = express();
+  }
 
-// Security & parsing
-app.use(helmet());
-app.use(cors({ origin: config.corsOrigin }));
-app.use(express.json({ limit: "5mb" }));
+  const app = express();
 
-// Logging & rate limiting
-app.use(requestLogger);
-app.use(metricsMiddleware);
-app.use(rateLimit({ windowMs: 60000, maxRequests: 100 }));
+  // Security & parsing
+  app.use(helmet());
+  app.use(cors({ origin: config.corsOrigin }));
+  app.use(express.json({ limit: "5mb" }));
 
-// Routes
-app.use("/metrics", metricsRouter);
-app.use("/health", healthRouter);
-app.use("/search", searchRouter);
-app.use("/products", productsRouter);
-app.use("/admin", adminRouter);
-app.use("/api/compare", compareRouter);
-app.use("/api/images", imageAnalysisRouter);  // Unified image analysis API
+  // Logging & rate limiting
+  app.use(requestLogger);
+  app.use(metricsMiddleware);
+  app.use(rateLimit({ windowMs: 60000, maxRequests: 100 }));
+
+  // Routes
+  app.use("/metrics", metricsRouter);
+  app.use("/health", healthRouter);
+  app.use("/search", searchRouter);
+  app.use("/products", productsRouter);
+  app.use("/admin", adminRouter);
+  app.use("/api/compare", compareRouter);
+  app.use("/api/images", imageAnalysisRouter); // Unified image analysis API
   app.use("/api/ingest", ingestRouter);
   app.use("/api/wardrobe", wardrobeRouter);
   app.use("/api/tryon", tryonRouter);
@@ -68,16 +62,16 @@ app.use("/api/images", imageAnalysisRouter);  // Unified image analysis API
   app.use("/api/auth", authRouter);
   app.use("/api/cart", cartRouter);
   app.use("/api/favorites", favoritesRouter);
-app.use('/products/price-drops', productsRouter);
+  app.use("/products/price-drops", productsRouter);
 
-// Serve static files (labeling UI)
-app.use(express.static(path.join(process.cwd(), "public")));
+  // Serve static files (labeling UI)
+  app.use(express.static(path.join(process.cwd(), "public")));
 
-app.get("/", (_req, res) => res.json({ ok: true }));
+  app.get("/", (_req, res) => res.json({ ok: true }));
 
-// Error handling (must be last)
-app.use(notFoundHandler);
-app.use(errorHandler);
+  // Error handling (must be last)
+  app.use(notFoundHandler);
+  app.use(errorHandler);
 
-return app;
+  return app;
 }

@@ -345,7 +345,7 @@ metadata:
   namespace: fashion-aggregator
 type: Opaque
 data:
-  PG_PASSWORD: <base64-encoded-password>
+  DATABASE_URL: <base64-encoded-connection-string>
   R2_ACCESS_KEY_ID: <base64-encoded-key>
   R2_SECRET_ACCESS_KEY: <base64-encoded-secret>
 ```
@@ -966,7 +966,7 @@ BACKUP_DATE=$(date +%Y%m%d_%H%M%S)
 BACKUP_DIR="/backups/postgres"
 
 # Full backup
-pg_dump -h $PG_HOST -U $PG_USER -d $PG_DATABASE | gzip > "$BACKUP_DIR/full_$BACKUP_DATE.sql.gz"
+pg_dump "$DATABASE_URL" | gzip > "$BACKUP_DIR/full_$BACKUP_DATE.sql.gz"
 
 # Incremental backup using WAL-E or similar
 # wal-e backup-push /var/lib/postgresql/data

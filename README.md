@@ -1,198 +1,254 @@
 # Fashion Aggregator API
 
-A sophisticated fashion marketplace API that aggregates products from multiple vendors and provides advanced search, comparison, and recommendation capabilities powered by machine learning.
+A sophisticated fashion marketplace API that aggregates products from multiple vendors and provides advanced search, comparison, recommendation, wardrobe management, and virtual try-on capabilities powered by machine learning.
 
-## 🚀 Features
+## Features
 
-### Core Functionality
-- **Product Aggregation**: Multi-vendor product catalog with real-time price tracking
-- **Intelligent Search**: Semantic search powered by CLIP embeddings and OpenSearch
-- **Image Search**: Visual similarity search using CLIP neural networks
-- **Product Comparison**: AI-powered product quality analysis and comparison
-- **Recommendations**: ML-driven similar product suggestions using XGBoost
-- **Price Monitoring**: Historical price tracking and anomaly detection
-- **Style Completion**: Outfit completion and complementary item suggestions
+### Core Commerce
+- **User Auth**: JWT-based signup/login with access + refresh tokens (bcrypt, 15m access / 7d refresh)
+- **Cart**: Full cart management with quantity tracking and price totals
+- **Favorites**: Toggle and batch-check product favorites
+- **Product Aggregation**: Multi-vendor catalog with real-time price tracking
 
-### AI/ML Capabilities
-- **CLIP Embeddings**: 512-dimensional image embeddings for visual search
-- **Semantic Understanding**: Query intent classification and entity extraction
-- **Quality Analysis**: Automated product description quality scoring
-- **Price Analytics**: Market position analysis and volatility detection
-- **ML Ranking**: XGBoost-based ranking with feature engineering
-- **Computer Vision**: Perceptual hashing (pHash) for duplicate detection
+### Search & Discovery
+- **Semantic Text Search**: CLIP embeddings + OpenSearch hybrid, NLP pipeline with intent classification, entity extraction, negation handling, Arabizi support, conversational context, spell correction
+- **Single Image Search**: Fashion-CLIP visual similarity (ONNX, 512-dim)
+- **Multi-Image Composite Search**: Up to 5 images + natural language prompt → Gemini intent parsing → 6 per-attribute embeddings → weighted re-ranking
+- **Multi-Vector Search**: Explicit per-attribute weight control (color, style, texture, material, pattern)
+- **Shop-the-Look Image Analysis**: YOLOv8 item detection → per-item CLIP search → grouped results
+- **Autocomplete & Trending**: Query suggestions, trending queries, popular queries
 
-## 🏗️ Architecture
+### Recommendations & Comparison
+- **ML Ranking**: XGBoost-based recommendations with feature engineering; heuristic fallback
+- **Outfit Completion**: Category + color harmony rules; wardrobe + marketplace combined results
+- **Product Comparison**: Multi-dimensional quality analysis (text, price, image, policy); letter grades; baselines
+- **Price Intelligence**: Historical tracking, anomaly detection, price-drop events
+
+### Wardrobe & Styling
+- **Wardrobe CRUD**: Full item management with CLIP embeddings and image storage
+- **Style Profile**: Computed dominant colors, patterns, aesthetic clusters
+- **Gap Analysis**: Missing essentials by category and occasion
+- **Compatibility Engine**: Static rules + learned rules from real user outfit data
+- **Outfit Suggestions & Complete Look**
+- **Auto-Sync from Purchases**: Payment integration detection syncs purchases to wardrobe
+- **Hybrid Image Recognition**: YOLO + Gemini Vision auto-categorizes wardrobe photos
+- **Visual Coherence Scoring**: 6-dimension outfit quality (color harmony, style, balance, pattern, texture, aesthetic — 100% weighted)
+- **Layering Analysis**: 6-layer system with weather validation
+
+### Virtual Try-On
+- **Vertex AI Try-On**: Google Cloud `virtual-try-on@002`, fully managed, no GPU needed
+- **Async Job Pattern**: 202 Accepted immediately; background processing; client polls until complete
+- **Multiple Input Modes**: File upload, from wardrobe item, from product catalog, batch (up to 5 garments)
+- **Full Job Lifecycle**: Pending → processing → completed/failed; cancel, delete, save/bookmark results
+- **Rate Limiting**: 10 try-ons/hour per user; IP-based rate limiting on submit routes
+
+### Operations
+- **Admin Tools**: Product moderation (hide/flag/canonical), job queue management, labeling workflow
+- **Active Learning Labeling**: Task queue, assign, submit, skip for recommendation training data
+- **Ingest Pipeline**: BullMQ worker — download → validate → CLIP + YOLO → crop → wardrobe items
+- **Prometheus Metrics**: Request counts and durations via `/metrics`
+- **Health Checks**: `/health/live` and `/health/ready`
+
+---
+
+## Architecture
 
 ### Technology Stack
-- **Runtime**: Node.js with TypeScript
-- **Framework**: Express.js with comprehensive middleware
-- **Database**: PostgreSQL with vector support for embeddings
-- **Search**: OpenSearch for full-text and vector search
-- **Cache**: Redis for caching and job queues
-- **Storage**: Cloudflare R2 for image storage
-- **ML Models**: ONNX Runtime for CLIP, Python FastAPI for XGBoost
-- **Queue**: BullMQ for background job processing
 
-### Key Components
+| Layer | Technology |
+|-------|-----------|
+| Runtime | Node.js 18+ + TypeScript (ES2022, CommonJS) |
+| Framework | Express.js |
+| Database | PostgreSQL via Supabase (`pg` pool + pgvector) |
+| Search | OpenSearch (HNSW k-NN + BM25 hybrid) |
+| Cache/Queue | Redis (ioredis) + BullMQ |
+| Image Storage | Cloudflare R2 (S3-compatible) + Supabase Storage |
+| ML (local) | ONNX Runtime (Fashion-CLIP), YOLOv8 client, BLIP client |
+| ML (cloud) | Gemini 1.5 Flash (intent/attrs), Vertex AI (virtual try-on), Python FastAPI (XGBoost) |
+| Frontend | Next.js 13 admin dashboard (`apps/dashboard-admin`) |
+
+### Source Structure
 
 ```
 src/
-├── config.ts                 # Environment configuration
-├── index.ts                  # Application entry point
-├── server.ts                 # Express server setup
-├── types.ts                  # Core TypeScript types
-├── lib/                      # Business logic libraries
-│   ├── compare/              # Product comparison engine
-│   ├── core/                 # Database and OpenSearch clients
-│   ├── image/                # CLIP embeddings and image processing
-│   ├── model/                # XGBoost training and serving
-│   ├── ranker/               # ML-based ranking pipeline
-│   ├── recommendations/      # Recommendation system
-│   ├── search/               # Semantic search and query processing
-│   └── ...
-├── routes/                   # API endpoints
-│   ├── products/             # Product-related endpoints
-│   ├── search/               # Search endpoints
-│   ├── compare/              # Comparison endpoints
-│   └── admin/                # Administrative endpoints
-└── middleware/               # Express middleware
+├── config.ts              # All env var mapping (DATABASE_URL, SUPABASE_*, JWT_*, etc.)
+├── server.ts              # Express app factory — mounts all routers + middleware
+├── index.ts               # Entry point
+├── types.ts               # Core TypeScript types
+├── middleware/            # auth, errorHandler, logger, metrics, rateLimit, validate
+├── lib/
+│   ├── core/              # pg pool, OpenSearch client
+│   ├── image/             # CLIP (ONNX), BLIP, YOLOv8 client, TryOnClient, R2, processor
+│   ├── search/            # semanticSearch, hybridSearch, multiVectorSearch, attributeEmbeddings
+│   ├── queryProcessor/    # NLP pipeline: intent, entities, negation, conversational, autocomplete
+│   ├── ranker/            # XGBoost client + feature engineering + pipeline
+│   ├── compare/           # compareEngine, priceAnomaly, textQuality, verdictGenerator
+│   ├── wardrobe/          # autoSync, imageRecognition, visualCoherence, learnedCompatibility, layeringOrder
+│   ├── outfit/            # completeStyle logic
+│   ├── prompt/            # Gemini Vision API client
+│   └── scrape/            # Multi-vendor scrapers (Shopify, Everlane, Moustache, Hashtag, etc.)
+└── routes/
+    ├── auth/              # signup, login, refresh, me, update profile
+    ├── cart/              # get, add, update, remove, clear
+    ├── favorites/         # list, toggle, check, batch-check
+    ├── products/          # listing, search, recommendations, outfit, images, price history
+    ├── search/            # text, image, multi-image, multi-vector, autocomplete, trending
+    ├── wardrobe/          # full CRUD + Feature #6 endpoints
+    ├── tryon/             # full Virtual Try-On lifecycle
+    ├── compare/           # quality/price/text comparison
+    ├── admin/             # moderation, canonicals, jobs, labeling
+    ├── ingest/            # image upload + queue
+    ├── labeling/          # active learning task queue
+    ├── health/            # live/ready probes
+    └── metrics/           # Prometheus scrape
 ```
 
-## 📊 Database Schema
+---
 
-### Core Tables
-- **products**: Main product catalog with metadata and pricing
-- **vendors**: Store information and shipping capabilities
-- **product_images**: R2 storage with CLIP embeddings and pHash
-- **price_history**: Historical pricing data for trend analysis
-- **product_quality_scores**: Cached quality analysis results
-- **product_price_analysis**: Market position and volatility metrics
+## API Endpoints (summary)
 
-### ML/Analytics Tables
-- **category_price_baselines**: Statistical baselines for price anomaly detection
-- **price_drop_events**: Significant price change tracking
-- **recommendation_impressions**: Training data for recommendation system
-- **recommendation_labels**: User feedback for model training
-
-## 🔍 API Endpoints
-
-### Product Management
+### Auth (`/api/auth`)
 ```
-GET    /products              # List products with filters
-GET    /products/facets       # Get available filters/facets
-GET    /products/:id/price-history  # Price history for product
-GET    /products/price-drops  # Recent price drop events
+POST  /api/auth/signup          # register; returns access + refresh tokens
+POST  /api/auth/login           # login; returns access + refresh tokens
+POST  /api/auth/refresh         # exchange refresh token
+GET   /api/auth/me              # current user profile (JWT required)
+PATCH /api/auth/me              # update email or password (JWT required)
 ```
 
-### Search & Discovery
+### Cart & Favorites (JWT required)
 ```
-GET    /search                # Text-based product search
-POST   /search/image          # Image similarity search
-GET    /products/:id/recommendations  # Similar product suggestions
-POST   /products/:id/complete-style   # Outfit completion
-```
-
-### Product Comparison
-```
-POST   /api/compare           # Compare multiple products
-GET    /api/compare/quality/:id      # Individual product quality analysis
-POST   /api/compare/compute-baselines # Recompute price baselines
+GET/POST/PATCH/DELETE  /api/cart
+POST                   /api/favorites/toggle
+GET                    /api/favorites
 ```
 
-### Image Management
+### Search (`/search`)
 ```
-GET    /products/:id/images   # List product images
-POST   /products/:id/images   # Upload new image
-PUT    /products/:id/images/:imageId/primary # Set primary image
-DELETE /products/:id/images/:imageId         # Remove image
-```
-
-### Administration
-```
-GET    /admin/opensearch      # OpenSearch cluster status
-POST   /admin/opensearch/reindex     # Reindex products
-GET    /admin/ranker          # ML ranker service status
-GET    /admin/jobs            # Background job status
+GET   /search                        # enhanced text search
+POST  /search/image                  # single-image CLIP search
+POST  /search/multi-image            # multi-image + Gemini composite
+POST  /search/multi-vector           # explicit per-attribute weights
+GET   /search/autocomplete
+GET   /search/trending
+GET   /search/popular
 ```
 
-## 🧠 Machine Learning Pipeline
+### Products (`/products`)
+```
+GET  /products                       # list with filters & pagination
+GET  /products/:id/recommendations   # XGBoost ML recommendations
+GET  /products/:id/complete-style    # outfit completion
+POST /products/search/image          # image search via products router
+```
 
-### 1. Image Embeddings (CLIP)
-- **Model**: OpenAI CLIP ViT-B/32 (ONNX format)
-- **Dimensions**: 512-dimensional embeddings
-- **Usage**: Visual similarity search, duplicate detection
-- **Processing**: Real-time embedding generation on image upload
+### Image Analysis (`/api/images`)
+```
+POST /api/images/search              # shop-the-look detect + find similar
+POST /api/images/detect              # YOLO detection only
+POST /api/images/detect/batch        # batch YOLO (up to 10 images)
+POST /api/images/search/url          # find similar from image URL
+```
 
-### 2. Ranking Model (XGBoost)
-- **Type**: Gradient boosting classifier
-- **Features**: Style scores, price ratios, similarity metrics, category encoding
-- **Training**: Automated retraining on user interaction data
-- **Serving**: FastAPI microservice with fallback heuristics
+### Wardrobe (`/api/wardrobe`, JWT required)
+```
+GET/POST               /api/wardrobe/items
+GET/PATCH/DELETE       /api/wardrobe/items/:id
+POST                   /api/wardrobe/outfit-suggestions
+POST                   /api/wardrobe/analyze-photo       # YOLO + Gemini auto-categorize
+POST                   /api/wardrobe/outfit-coherence    # 6-dim coherence score
+POST                   /api/wardrobe/layering/analyze    # layering order analysis
+GET                    /api/wardrobe/compatibility/graph  # learned compat graph
+```
 
-### 3. Quality Analysis
-- **Text Analysis**: Description completeness, attribute extraction, red flags
-- **Price Analysis**: Market position, volatility, anomaly detection
-- **Image Analysis**: Originality scoring via pHash comparison
-- **Output**: Comprehensive quality scores (0-100) with explanations
+### Virtual Try-On (`/api/tryon`, JWT required)
+```
+POST /api/tryon/                     # file upload; returns 202
+POST /api/tryon/from-wardrobe        # from wardrobe item
+POST /api/tryon/batch                # up to 5 garments
+GET  /api/tryon/:id                  # poll job status
+GET  /api/tryon/history
+GET  /api/tryon/saved
+```
 
-### 4. Semantic Search
-- **Query Processing**: Intent classification, entity extraction
-- **Entity Types**: Brands, categories, colors, sizes, price ranges
-- **Knowledge Base**: Expandable synonym and brand dictionaries
-- **Hybrid Approach**: Combines keyword and semantic matching
+### Admin (`/admin`)
+```
+POST /admin/products/:id/hide|unhide|flag|unflag
+GET  /admin/products/flagged|hidden
+GET  /admin/stats
+POST /admin/jobs/:type/run
+```
 
-## 🚀 Getting Started
+---
+
+## Machine Learning Pipeline
+
+### Models in Use
+
+| Model | Purpose | Serving |
+|-------|---------|---------|
+| Fashion-CLIP (ONNX) | 512-dim image/text embeddings | ONNX Runtime (in-process) |
+| YOLOv8 DeepFashion2 | Fashion item detection + bounding boxes | External HTTP client |
+| BLIP | Image captioning for semantic descriptions | External HTTP client |
+| XGBoost | Re-ranking recommendations | Python FastAPI (`RANKER_API_URL`) |
+| Gemini 1.5 Flash | Intent parsing, attribute extraction, query rewriting | Google API (`GEMINI_API_KEY`) |
+| Vertex AI Try-On | Virtual garment try-on | GCP REST API (`GCLOUD_PROJECT`) |
+
+### Ranking Pipeline
+```
+Product ID → CLIP kNN (top 200) + Text kNN (top 200) →
+Union + Deduplicate →
+Feature Engineering (style, color, price, pHash similarity) →
+XGBoost Score → Fallback: heuristic weights →
+Top-N sorted results → Log impressions
+```
+
+---
+
+## Getting Started
 
 ### Prerequisites
 - Node.js 18+ with pnpm
-- Docker and Docker Compose
-- Python 3.8+ (for ML components)
+- Docker and Docker Compose (for OpenSearch, Redis, Postgres)
+- Python 3.8+ (for ML training scripts)
+- Google Cloud project (for Virtual Try-On)
 
 ### Quick Start
 
-1. **Clone and Install**
-   ```bash
-   git clone <repository-url>
-   cd marketplace
-   pnpm install
-   ```
+```bash
+# 1. Install dependencies
+pnpm install
 
-2. **Start Infrastructure**
-   ```bash
-   docker-compose up -d
-   ```
+# 2. Start infrastructure
+docker-compose up -d
 
-3. **Setup Database**
-   ```bash
-   # Run migrations
-   psql -h localhost -U postgres -d fashion -f db/schema.sql
-   ```
+# 3. Run database migrations
+npx tsx scripts/run-migration.ts
 
-4. **Download ML Models**
-   ```bash
-   pnpm run-script download-clip
-   ```
+# 4. Download ML models
+pnpm models:download
 
-5. **Initialize Search Index**
-   ```bash
-   pnpm run recreate-index
-   ```
+# 5. Create OpenSearch index
+pnpm recreate-index
 
-6. **Start Development Server**
-   ```bash
-   pnpm dev
-   ```
+# 6. Start development server
+pnpm dev
+```
 
 ### Environment Configuration
 
-Create `.env` file with required variables:
+Create a `.env` file:
 ```env
-# Database
-PG_HOST=localhost
-PG_PORT=5432
-PG_USER=postgres
-PG_PASSWORD=postgres
-PG_DATABASE=fashion
+# Server
+PORT=4000
+CORS_ORIGIN=*
+NODE_ENV=production
+
+# Database (Supabase Postgres — single DATABASE_URL required)
+DATABASE_URL=postgresql://postgres:<password>@db.<project>.supabase.co:5432/postgres
+SUPABASE_URL=https://<project>.supabase.co
+SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
 
 # OpenSearch
 OS_NODE=http://localhost:9200
@@ -202,171 +258,95 @@ OS_INDEX=products
 REDIS_URL=redis://localhost:6379
 
 # Cloudflare R2
-R2_ACCOUNT_ID=your_account_id
-R2_ACCESS_KEY_ID=your_access_key
-R2_SECRET_ACCESS_KEY=your_secret_key
+R2_ACCOUNT_ID=
+R2_ACCESS_KEY_ID=
+R2_SECRET_ACCESS_KEY=
 R2_BUCKET=fashion-images
 R2_PUBLIC_BASE_URL=https://your-domain.r2.dev
 
-# API
-PORT=4000
-CORS_ORIGIN=*
+# JWT (must set a strong secret in production)
+JWT_SECRET=<strong-random-secret>
+JWT_ACCESS_EXPIRES_IN=15m
+JWT_REFRESH_EXPIRES_IN=7d
+
+# CLIP
+CLIP_MODEL_TYPE=fashion-clip
+
+# Gemini
+GEMINI_API_KEY=
+
+# Vertex AI (Virtual Try-On)
+GCLOUD_PROJECT=
+GOOGLE_APPLICATION_CREDENTIALS=   # path to service account key (or use ADC)
+
+# XGBoost Ranker (Python FastAPI)
+RANKER_API_URL=http://localhost:8000
 ```
-
-## 🛠️ Development
-
-### Available Scripts
-
-```bash
-# Development
-pnpm dev                    # Start development server
-pnpm build                  # Build TypeScript
-pnpm start                  # Start production server
-
-# Database & Search
-pnpm recreate-index         # Rebuild OpenSearch index
-pnpm reindex-embeddings     # Regenerate CLIP embeddings
-pnpm migrate:canonicals     # Run canonical migrations
-
-# ML & Data
-pnpm backfill-r2           # Upload images to R2 storage
-pnpm add-image-cdn-col     # Add CDN column to products
-```
-
-### Project Structure Details
-
-#### Core Libraries (`src/lib/`)
-
-- **`compare/`**: Product comparison engine with quality analysis
-  - `compareEngine.ts`: Main comparison logic
-  - `textQualityAnalyzer.ts`: Description quality scoring
-  - `priceAnomalyDetector.ts`: Price analysis and market positioning
-  - `verdictGenerator.ts`: Human-readable comparison results
-
-- **`image/`**: Computer vision and image processing
-  - `clip.ts`: CLIP model integration for embeddings
-  - `processor.ts`: Image preprocessing and optimization
-  - `r2.ts`: Cloudflare R2 storage interface
-  - `utils.ts`: Image utilities and validation
-
-- **`ranker/`**: ML-based ranking system
-  - `pipeline.ts`: End-to-end ranking pipeline
-  - `features.ts`: Feature engineering for ML models
-  - `client.ts`: XGBoost service client with fallbacks
-
-- **`search/`**: Intelligent search capabilities
-  - `semanticSearch.ts`: Query understanding and expansion
-  - `attributeExtractor.ts`: Product attribute extraction
-  - `arabizi.ts`: Arabic transliteration support
-
-#### Route Handlers (`src/routes/`)
-
-Each route module follows the pattern:
-- `*.routes.ts`: Route definitions only (mounting + middleware)
-- `*.controller.ts`: HTTP request handlers (request/response, validation)
-- `*.service.ts`: Business logic (database calls, orchestration)
-
-Note: In this repository services are kept alongside their routes under `src/routes/<module>/` to make each module self-contained. For convenience and backward compatibility some `src/lib/*` entrypoints re-export service functions from the corresponding `src/routes/*` modules.
-
-See `docs/architecture.md` for developer guidelines on adding new routes, controllers, and services.
-
-### Testing & Quality
-
-#### Manual Testing Scripts
-```bash
-# Test individual components
-npx tsx scripts/test-semantic-search.ts
-npx tsx scripts/test-attribute-extraction.ts
-npx tsx scripts/test-query-processor.ts
-```
-
-#### Model Training
-```bash
-# Train XGBoost ranking model
-cd src/lib/model
-python train_xgb_classifier.py
-```
-
-#### Data Quality
-- **Price Monitoring**: Automatic anomaly detection for suspicious pricing
-- **Image Deduplication**: pHash-based duplicate image detection
-- **Quality Scoring**: Automated product description quality analysis
-
-## 📈 Performance & Scaling
-
-### Caching Strategy
-- **Redis**: Query results, embeddings, computed features
-- **Application**: In-memory LRU caches for frequent operations
-- **Database**: Optimized indexes on search columns
-
-### Database Optimization
-- **Indexes**: GIN indexes for full-text search, vector similarity
-- **Partitioning**: Time-based partitioning for price history
-- **Connection Pooling**: PostgreSQL connection pooling
-
-### Search Performance
-- **OpenSearch**: Distributed search with replicas
-- **Vector Search**: Approximate nearest neighbor (ANN) search
-- **Hybrid Queries**: Combined keyword and semantic search
-
-### Background Processing
-- **BullMQ**: Job queues for heavy operations
-- **Workers**: Separate worker processes for ML tasks
-- **Scheduling**: Automated retraining and maintenance tasks
-
-## 🔧 Configuration
-
-### Feature Flags
-Control features via environment variables:
-```env
-ENABLE_ML_RANKING=true      # Use XGBoost for ranking
-ENABLE_CLIP_SEARCH=true     # Enable image similarity search
-ENABLE_PRICE_ALERTS=true    # Price drop notifications
-ENABLE_QUALITY_ANALYSIS=true # Product quality scoring
-```
-
-### Model Configuration
-```env
-CLIP_MODEL_PATH=models/clip-image-vit-32.onnx
-RANKER_SERVICE_URL=http://localhost:8000
-EMBEDDING_BATCH_SIZE=32
-QUALITY_SCORE_THRESHOLD=70
-```
-
-## 📚 Additional Resources
-
-### Documentation Files
-- [API Reference](docs/api-reference.md) - Detailed endpoint documentation
-- [Deployment Guide](docs/deployment.md) - Production deployment instructions
-- [ML Models Guide](docs/ml-models.md) - Machine learning components
-- [Database Guide](docs/database.md) - Schema and migration details
-
-### Key Concepts
-- **Semantic Search**: Understanding user intent beyond keyword matching
-- **Quality Signals**: Multi-dimensional product quality assessment
-- **Visual Similarity**: CLIP-powered image understanding
-- **Price Intelligence**: Market analysis and anomaly detection
-- **Recommendation Systems**: Collaborative and content-based filtering
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Development Guidelines
-- Follow TypeScript best practices
-- Add tests for new features
-- Update documentation for API changes
-- Use semantic commit messages
-- Ensure ML models are properly versioned
-
-## 📄 License
-
-This project is proprietary software. All rights reserved.
 
 ---
 
-**Fashion Aggregator API** - Powered by AI, built for scale.
+## Development Scripts
+
+```bash
+pnpm dev                      # Development server (nodemon)
+pnpm build                    # Compile TypeScript
+pnpm start                    # Production server
+
+pnpm recreate-index           # Rebuild OpenSearch k-NN index
+pnpm reindex-embeddings       # Regenerate all CLIP embeddings
+pnpm migrate:run              # Run a specific migration
+pnpm backfill-r2              # Upload existing images to R2
+pnpm worker                   # Start BullMQ ingest worker
+
+pnpm models:download          # Download ONNX model files
+pnpm docs:endpoints           # Auto-generate endpoint matrix from routes
+```
+
+---
+
+## Database Migrations
+
+Migrations live in `db/migrations/`. Run them in order:
+
+```
+001_recommendation_training.sql     — recommendation_impressions, recommendation_labels
+002_product_image_detections.sql    — product_image_detections
+003_digital_twin_phase0.sql         — users, wardrobe_items, outfits, outfit_items
+004_ingest_jobs.sql                 — ingest_jobs
+005_labeling_system.sql             — label_queue, labels
+006_add_products_image_urls.sql     — image_urls column on products
+006_feature6_wardrobe_enhancements.sql  — wardrobe enhancement tables (pgvector required)
+007_virtual_tryon.sql               — tryon_jobs, tryon_saved_results
+```
+
+> **Note:** Three files share the `006_` prefix due to a naming conflict.
+> Apply `006_add_products_image_urls.sql` before `006_feature6_wardrobe_enhancements.sql`.
+
+---
+
+## Known Issues (see `docs/IMPLEMENTATION_STATUS.md` for full list)
+
+1. `src/server.ts:36` has `process.env.NODE_ENV = "test"` hardcoded — must be removed before production
+2. Admin routes have **no authentication middleware** — any unauthenticated user can call them
+3. No `POST /api/auth/logout` endpoint — refresh tokens cannot be revoked
+4. No checkout/payment/order flow — cart exists but stops before checkout
+5. Missing `cart_items` table migration file
+
+---
+
+## Additional Documentation
+
+| File | Contents |
+|------|---------|
+| `docs/IMPLEMENTATION_STATUS.md` | Full audit of what is done, missing, and known issues |
+| `docs/api-reference.md` | Detailed endpoint documentation |
+| `docs/architecture.md` | Architecture deep-dive |
+| `docs/ml-models.md` | ML model details and evaluation |
+| `docs/deployment.md` | Production deployment guide |
+| `FEATURE_ANALYSIS.md` | In-depth feature analysis with strengths, weaknesses, grades |
+| `docs/ENDPOINT_MATRIX.md` | Auto-generated endpoint matrix |
+| `postman_collection.json` | Postman collection for API testing |
+
+---
+
+**Fashion Aggregator API** — Powered by AI, built for scale.

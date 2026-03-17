@@ -1,0 +1,59 @@
+# Keep Docker build context lean without excluding required app sources.
+# This is conservative: it removes local caches/venvs/artifacts only.
+
+# Git / editor
+.git
+.gitignore
+.vscode
+.idea
+
+# Node artifacts
+node_modules
+**/node_modules
+dist
+**/dist
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python caches / environments
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.python-version
+.venv
+venv
+env
+**/.venv
+**/.venv311
+**/venv
+
+# Local model/training caches and outputs
+runs
+**/runs
+.cache
+**/.cache
+.pytest_cache
+**/.pytest_cache
+.mypy_cache
+**/.mypy_cache
+.ipynb_checkpoints
+**/.ipynb_checkpoints
+
+# Large local datasets/artifacts not required by Docker builds in this repo
+data/fashion_train
+data/fashion_train_old
+data/raw
+src/lib/model/models
+src/lib/model/checkpoints
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Local env files (runtime env should be configured in Render)
+.env
+.env.*

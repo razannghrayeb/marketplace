@@ -382,7 +382,7 @@ export async function getSimilarItems(req: Request, res: Response, next: NextFun
  */
 export async function getAutoSyncSettings(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const { getUserAutoSyncSettings } = await import("../../lib/wardrobe/autoSync");
 
     const settings = await getUserAutoSyncSettings(userId);
@@ -397,7 +397,7 @@ export async function getAutoSyncSettings(req: Request, res: Response, next: Nex
  */
 export async function updateAutoSyncSettings(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const { updateUserAutoSyncSettings } = await import("../../lib/wardrobe/autoSync");
 
     await updateUserAutoSyncSettings(userId, req.body);
@@ -412,7 +412,7 @@ export async function updateAutoSyncSettings(req: Request, res: Response, next: 
  */
 export async function manualSyncPurchase(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const { syncPurchaseToWardrobe } = await import("../../lib/wardrobe/autoSync");
 
     const result = await syncPurchaseToWardrobe({
@@ -487,7 +487,7 @@ export async function batchAnalyzePhotos(req: Request, res: Response, next: Next
  */
 export async function reanalyzeItem(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const itemId = parseInt(req.params.id, 10);
 
     const item = await getWardrobeItem(itemId, userId);
@@ -529,7 +529,7 @@ export async function reanalyzeItem(req: Request, res: Response, next: NextFunct
  */
 export async function assessOutfitCoherence(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const { piece_ids } = req.body;
 
     if (!piece_ids || !Array.isArray(piece_ids) || piece_ids.length < 2) {
@@ -576,7 +576,7 @@ export async function assessOutfitCoherence(req: Request, res: Response, next: N
  */
 export async function assessSavedOutfitCoherence(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const outfitId = parseInt(req.params.outfitId, 10);
 
     // Fetch outfit and its pieces
@@ -627,7 +627,7 @@ export async function assessSavedOutfitCoherence(req: Request, res: Response, ne
  */
 export async function analyzeLayering(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const { piece_ids } = req.body;
 
     if (!piece_ids || !Array.isArray(piece_ids)) {
@@ -656,7 +656,7 @@ export async function analyzeLayering(req: Request, res: Response, next: NextFun
  */
 export async function suggestLayering(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const { piece_ids } = req.body;
 
     const pieces = await Promise.all(
@@ -682,7 +682,7 @@ export async function suggestLayering(req: Request, res: Response, next: NextFun
  */
 export async function checkWeatherAppropriate(req: Request, res: Response, next: NextFunction) {
   try {
-    const userId = getUserId(req);
+    const userId = req.user!.id;
     const { piece_ids, temperature } = req.query;
 
     if (!piece_ids || !temperature) {

@@ -4,9 +4,12 @@
  * Routes for admin operations: moderation, canonicals, jobs
  */
 import { Router } from "express";
+import { requireAdmin, requireAuth } from "../../middleware/auth";
 import * as adminController from "./admin.controller";
 
 const router = Router();
+
+router.use(requireAuth, requireAdmin);
 
 // ============================================================================
 // Product Moderation

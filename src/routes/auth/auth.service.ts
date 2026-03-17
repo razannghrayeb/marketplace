@@ -1,5 +1,10 @@
 import bcrypt from "bcryptjs";
-import jwt, { SignOptions } from "jsonwebtoken";
+import jwt, { JwtPayload, SignOptions } from "jsonwebtoken";
+import {
+  blacklistRefreshToken,
+  deleteExpiredBlacklistedRefreshTokens,
+  isRefreshTokenBlacklisted,
+} from "../../lib/auth/refreshTokenBlacklist";
 import { pg } from "../../lib/core/db";
 import { config } from "../../config";
 import { AuthUser, UserRow } from "../../types";
@@ -20,6 +25,25 @@ function signRefreshToken(userId: number): string {
     config.jwt.secret,
     { expiresIn: config.jwt.refreshExpiresIn } as SignOptions
   );
+}
+
+function verifyRefreshToken(refreshToken: string): JwtPayload & { sub: number; type: string } {
+  let payload: any;
+  try {
+    payload = jwt.verify(refreshToken, config.jwt.secret);
+  } catch {
+    const err: any = new Error("Invalid or expired refresh token");
+    err.statusCode = 401;
+    throw err;
+  }
+
+  if (payload.type !== "refresh") {
+    const err: any = new Error("Invalid token type");
+    err.statusCode = 401;
+    throw err;
+  }
+
+  return payload;
 }
 
 export async function signup(
@@ -96,17 +120,11 @@ export async function login(
 export async function refreshTokens(
   refreshToken: string
 ): Promise<{ accessToken: string; refreshToken: string }> {
-  let payload: any;
-  try {
-    payload = jwt.verify(refreshToken, config.jwt.secret);
-  } catch {
-    const err: any = new Error("Invalid or expired refresh token");
-    err.statusCode = 401;
-    throw err;
-  }
+  const payload = verifyRefreshToken(refreshToken);
 
-  if (payload.type !== "refresh") {
-    const err: any = new Error("Invalid token type");
+  await deleteExpiredBlacklistedRefreshTokens();
+  if (await isRefreshTokenBlacklisted(refreshToken)) {
+    const err: any = new Error("Invalid or expired refresh token");
     err.statusCode = 401;
     throw err;
   }
@@ -127,6 +145,18 @@ export async function refreshTokens(
     accessToken: signAccessToken(user),
     refreshToken: signRefreshToken(user.id),
   };
+}
+
+export async function logout(refreshToken: string): Promise<void> {
+  const payload = verifyRefreshToken(refreshToken);
+  if (!payload.exp) {
+    const err: any = new Error("Refresh token is missing expiry");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  await deleteExpiredBlacklistedRefreshTokens();
+  await blacklistRefreshToken(payload.sub, refreshToken, new Date(payload.exp * 1000));
 }
 
 export async function getMe(userId: number) {
