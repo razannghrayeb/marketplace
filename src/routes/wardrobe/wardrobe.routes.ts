@@ -5,9 +5,12 @@
  */
 import { Router } from "express";
 import multer from "multer";
+import { requireAuth } from "../../middleware/auth";
 import * as controller from "./wardrobe.controller";
 
 const router = Router();
+
+router.use(requireAuth);
 
 const upload = multer({
   storage: multer.memoryStorage(),

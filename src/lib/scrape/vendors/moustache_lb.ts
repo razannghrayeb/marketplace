@@ -135,11 +135,13 @@ function guessOptionIndexes(productJson: any): { colorIndex: number; sizeIndex: 
     : optionNames;
 
   let colorIndex = names.findIndex((o) => {
+  let colorIndex = names.findIndex((o: string) => {
     const name = normalizeOptionName(o);
     return name.includes("color") || name.includes("colour");
   });
 
   let sizeIndex = names.findIndex((o) => {
+  let sizeIndex = names.findIndex((o: string) => {
     const name = normalizeOptionName(o);
     return (
       name.includes("size") ||
