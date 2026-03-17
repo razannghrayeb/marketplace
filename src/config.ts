@@ -10,6 +10,30 @@ function getServiceRole(): ServiceRole {
   return "all";
 }
 
+function getRedisConfig() {
+  const url = process.env.REDIS_URL || "redis://localhost:6379";
+  const parsed = (() => {
+    try {
+      return new URL(url);
+    } catch {
+      return null;
+    }
+  })();
+
+  const hostFromUrl = parsed?.hostname;
+  const portFromUrl = parsed?.port ? Number(parsed.port) : undefined;
+  const passwordFromUrl = parsed?.password ? decodeURIComponent(parsed.password) : undefined;
+  const tlsFromUrl = parsed?.protocol === "rediss:";
+
+  return {
+    url,
+    host: process.env.REDIS_HOST || hostFromUrl || "localhost",
+    port: Number(process.env.REDIS_PORT || portFromUrl || 6379),
+    password: process.env.REDIS_PASSWORD || passwordFromUrl || undefined,
+    tls: (process.env.REDIS_TLS || "").toLowerCase() === "true" || tlsFromUrl,
+  };
+}
+
 export const config = {
   port: Number(process.env.PORT || 4000),
   corsOrigin: process.env.CORS_ORIGIN || "*",
@@ -43,12 +67,7 @@ export const config = {
     username: process.env.OS_USERNAME || "",
     password: process.env.OS_PASSWORD || "",
   },
-  redis: {
-    url: process.env.REDIS_URL || "redis://localhost:6379",
-    host: process.env.REDIS_HOST || "localhost",
-    port: Number(process.env.REDIS_PORT || 6379),
-    password: process.env.REDIS_PASSWORD || undefined,
-  },
+  redis: getRedisConfig(),
   r2: {
     accountId: process.env.R2_ACCOUNT_ID || "",
     accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
