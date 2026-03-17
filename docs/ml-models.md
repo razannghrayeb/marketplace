@@ -2,12 +2,14 @@
 
 This guide covers the machine learning components of the Fashion Aggregator API, including model architectures, training procedures, and integration details.
 
+For ranker operations (training, startup, fallback behavior, deployment checks), see `docs/ranker-runbook.md`.
+
 ## Overview
 
 The Fashion Aggregator API incorporates several ML models to provide intelligent features:
 
 1. **CLIP (Contrastive Language-Image Pre-training)** - For image embeddings and visual similarity
-2. **YOLOv8 Object Detection** - For fashion item detection and cropping
+2. **Dual-Model Object Detection (YOLOv8 + YOLOS)** - For fashion item detection and cropping
 3. **XGBoost Ranker** - For ranking product recommendations
 4. **Semantic Search** - For query understanding and expansion
 5. **Quality Analysis** - For automated product quality assessment
@@ -43,60 +45,32 @@ export async function createIngestJob(input: CreateIngestJobInput): Promise<{ jo
 }
 ```
 
-#### 2. Object Detection with YOLOv8
+#### 2. Object Detection with DualDetector (YOLOv8 + YOLOS)
 ```python
-# model/yolov8_api.py
-from ultralytics import YOLO
-import cv2
-import numpy as np
+# src/lib/model/dual_model_yolo.py
+from dual_model_yolo import DualDetector
+from PIL import Image
+import io
 
-class FashionDetector:
-    def __init__(self, model_path: str = "/models/yolov8_fashion.onnx"):
-        self.model = YOLO(model_path)
-        self.fashion_classes = {
-            0: "shirt", 1: "pants", 2: "dress", 3: "shoes", 
-            4: "hat", 5: "bag", 6: "jacket", 7: "skirt",
-            8: "shorts", 9: "socks", 10: "gloves"
-        }
-        
-    def detect_objects(self, image: np.ndarray) -> List[DetectionResult]:
-        """Run YOLOv8 detection on fashion image"""
-        results = self.model(image, conf=0.3, iou=0.5)
-        
-        detections = []
-        for result in results:
-            boxes = result.boxes
-            for box in boxes:
-                # Extract bounding box coordinates
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                confidence = box.conf[0].cpu().numpy()
-                class_id = int(box.cls[0].cpu().numpy())
-                
-                detections.append({
-                    "label": self.fashion_classes[class_id],
-                    "confidence": float(confidence),
-                    "bbox": [float(x1), float(y1), float(x2), float(y2)],
-                    "category": self.map_to_product_category(self.fashion_classes[class_id])
-                })
-        
-        return detections
-    
-    def map_to_product_category(self, detection_label: str) -> str:
-        """Map YOLO detection labels to product categories"""
-        mapping = {
-            "shirt": "tops",
-            "pants": "bottoms", 
-            "dress": "dresses",
-            "shoes": "footwear",
-            "hat": "accessories",
-            "bag": "accessories",
-            "jacket": "outerwear",
-            "skirt": "bottoms",
-            "shorts": "bottoms",
-            "socks": "accessories",
-            "gloves": "accessories"
-        }
-        return mapping.get(detection_label, "unknown")
+
+detector = DualDetector(conf=0.6)
+
+def detect_objects(image_bytes: bytes) -> list[dict]:
+  """Run hybrid YOLOv8 (DeepFashion2) + YOLOS (Fashionpedia) detection."""
+  image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+  result = detector.predict(image)
+
+  detections: list[dict] = []
+  for p in result["all"]:
+    x1, y1, x2, y2 = p["box"]
+    detections.append({
+      "label": str(p["label"]),
+      "confidence": float(p["score"]),
+      "bbox": [float(x1), float(y1), float(x2), float(y2)],
+      "source": p["source"],  # "A" (YOLOv8) or "B" (YOLOS)
+    })
+
+  return detections
 ```
 
 #### 3. Per-Object CLIP Embedding Generation
@@ -1175,7 +1149,7 @@ export async function predictWithFallback(
   try {
     // Try ML service first
     if (await isRankerAvailable()) {
-      const response = await fetch(`${RANKER_SERVICE_URL}/predict`, {
+      const response = await fetch(`${RANKER_API_URL}/predict`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ features }),
@@ -2291,3 +2265,4 @@ export class ModelVersionManager {
 ```
 
 This ML guide provides comprehensive coverage of all machine learning components in the Fashion Aggregator API. Each section includes practical implementation details, performance considerations, and maintenance procedures.
+

@@ -26,7 +26,7 @@ export const config = {
   },
 
   opensearch: {
-    node: process.env.OS_NODE || "http://localhost:9200",
+    node: process.env.OS_NODE || "http://opensearch-node:9200",
     index: process.env.OS_INDEX || "products",
     username: process.env.OS_USERNAME || "",
     password: process.env.OS_PASSWORD || "",
@@ -51,5 +51,13 @@ export const config = {
     // Similarity thresholds
     similarityThreshold: Number(process.env.CLIP_SIMILARITY_THRESHOLD || 0.7),
     duplicateThreshold: Number(process.env.CLIP_DUPLICATE_THRESHOLD || 0.92),
+  },
+  tryon: {
+    // Google Cloud Vertex AI Virtual Try-On
+    // Auth: gcloud auth application-default login  OR  GOOGLE_APPLICATION_CREDENTIALS=/key.json
+    project: process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || "",
+    location: process.env.TRYON_LOCATION || "us-central1",
+    model: process.env.TRYON_MODEL || "virtual-try-on@002",
+    timeout: Number(process.env.TRYON_TIMEOUT || 60000),
   },
 };

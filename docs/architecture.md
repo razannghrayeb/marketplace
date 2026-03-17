@@ -41,3 +41,5 @@ Notes
 - Maintain consistent error handling via the middleware in `src/middleware/errorHandler.ts`.
 
 This guideline helps keep the codebase modular, testable, and easy to navigate for new contributors.
+
+

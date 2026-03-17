@@ -11,6 +11,7 @@ import compareRouter from "./routes/compare/index";
 import imageAnalysisRouter from "./routes/products/image-analysis.controller";
 import ingestRouter from "./routes/ingest/ingest.routes";
 import { wardrobeRouter } from "./routes/wardrobe/index";
+import { tryonRouter } from "./routes/tryon/index";
 import { metricsRouter } from "./routes/metrics/index";
 import { labelingRouter } from "./routes/labeling/index";
 import { ensureIndex } from "./lib/core";
@@ -59,6 +60,7 @@ app.use("/api/compare", compareRouter);
 app.use("/api/images", imageAnalysisRouter);  // Unified image analysis API
   app.use("/api/ingest", ingestRouter);
   app.use("/api/wardrobe", wardrobeRouter);
+  app.use("/api/tryon", tryonRouter);
   app.use("/api/labeling", labelingRouter);
 app.use('/products/price-drops', productsRouter);
 

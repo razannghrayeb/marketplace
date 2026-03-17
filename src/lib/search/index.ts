@@ -1,6 +1,6 @@
 /**
  * Search Module Exports
- * 
+ *
  * Semantic search and attribute extraction.
  */
 
@@ -53,3 +53,9 @@ export {
   type ExtractionResult,
   type ExtractionOptions,
 } from "./attributeExtractor";
+
+export {
+  HybridSearchService,
+  hybridSearch,
+  type SearchVectors,
+} from "./hybridsearch";

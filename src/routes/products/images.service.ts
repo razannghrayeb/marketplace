@@ -236,14 +236,14 @@ export async function updateProductIndex(productId: number): Promise<void> {
   const product = productResult.rows[0];
 
   const imagesResult = await pg.query(
-    `SELECT cdn_url, embedding, p_hash, is_primary
+    `SELECT id, r2_key, cdn_url, embedding, p_hash, is_primary
      FROM product_images WHERE product_id = $1
      ORDER BY is_primary DESC, created_at ASC`,
     [productId]
   );
 
   const images = imagesResult.rows;
-  const primaryImage = images.find((img: any) => img.is_primary) || images[0];
+  let primaryImage = images.find((img: any) => img.is_primary) || images[0];
 
   const doc: any = {
     product_id: String(productId),
@@ -264,6 +264,50 @@ export async function updateProductIndex(productId: number): Promise<void> {
 
   if (primaryImage?.embedding?.length > 0) {
     doc.embedding = primaryImage.embedding;
+  } else if (primaryImage) {
+    // Attempt to backfill missing embedding by computing it now
+    try {
+      // Prefer fetching from public CDN URL; fallback to R2 if needed
+      let buffer: Buffer | null = null;
+      if (primaryImage.cdn_url) {
+        try {
+          const res = await fetch(primaryImage.cdn_url, { signal: AbortSignal.timeout(20000) });
+          if (res.ok) {
+            buffer = Buffer.from(await res.arrayBuffer());
+          }
+        } catch {}
+      }
+
+      if (!buffer && primaryImage.r2_key) {
+        try {
+          const { r2Client } = await import("../../lib/image/r2");
+          const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+          const resp: any = await r2Client.send(new GetObjectCommand({ Bucket: config.r2.bucket, Key: primaryImage.r2_key }));
+          const chunks: Uint8Array[] = [];
+          await new Promise<void>((resolve, reject) => {
+            resp.Body.on("data", (chunk: Uint8Array) => chunks.push(chunk));
+            resp.Body.on("end", () => resolve());
+            resp.Body.on("error", (err: any) => reject(err));
+          });
+          buffer = Buffer.concat(chunks);
+        } catch {}
+      }
+
+      if (buffer) {
+        const { processImageForEmbedding } = await import("../../lib/image/processor");
+        const embedding = await processImageForEmbedding(buffer);
+        // Update DB for this image row and include in document
+        await pg.query(
+          `UPDATE product_images SET embedding = $1 WHERE id = $2`,
+          [embedding, primaryImage.id]
+        );
+        doc.embedding = embedding;
+        // Refresh local variable for any further usage
+        primaryImage = { ...primaryImage, embedding };
+      }
+    } catch (err) {
+      console.warn(`[updateProductIndex] Failed to backfill embedding for product ${productId}:`, err);
+    }
   }
 
   await osClient.index({

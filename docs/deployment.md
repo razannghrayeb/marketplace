@@ -121,7 +121,10 @@ python ranker_api.py
 
 ```bash
 # Health check
-curl http://localhost:4000/health
+curl http://localhost:4000/health/live
+
+# Readiness (dependencies)
+curl http://localhost:4000/health/ready
 
 # Test search
 curl "http://localhost:4000/search?q=red%20sneakers"
@@ -168,8 +171,11 @@ services:
       - "4000:4000"
     environment:
       NODE_ENV: production
-      PG_HOST: postgres
-      PG_PASSWORD_FILE: /run/secrets/postgres_password
+      PORT: 4000
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/fashion
+      OS_NODE: http://opensearch:9200
+      REDIS_URL: redis://redis:6379
+      RANKER_API_URL: http://ranker:8000
       R2_ACCESS_KEY_ID_FILE: /run/secrets/r2_access_key
       R2_SECRET_ACCESS_KEY_FILE: /run/secrets/r2_secret
     secrets:
@@ -198,7 +204,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      MODEL_PATH: /app/models/xgb_ranker_model.json
+      RANKER_MODEL_PATH: /app/models/xgb_ranker_model.json
+      RANKER_META_PATH: /app/models/ranker_model_metadata.json
     volumes:
       - ranker_models:/app/models
     networks:
@@ -323,12 +330,10 @@ metadata:
   namespace: fashion-aggregator
 data:
   NODE_ENV: "production"
-  PG_HOST: "postgres-service"
-  PG_PORT: "5432"
-  PG_DATABASE: "fashion"
+  DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@postgres-service:5432/fashion"
   OS_NODE: "http://opensearch-service:9200"
-  REDIS_HOST: "redis-service"
-  PORT: "4000"
+  REDIS_URL: "redis://redis-service:6379"
+  PORT: "3000"
 ```
 
 Create `k8s/secrets.yaml`:
@@ -417,17 +422,15 @@ kubectl logs -f deployment/api-deployment -n fashion-aggregator
 ```env
 # Environment
 NODE_ENV=production
-PORT=4000
+PORT=3000
 CORS_ORIGIN=https://your-domain.com
 
 # Database
-PG_HOST=postgres-host
-PG_PORT=5432
-PG_USER=postgres
-PG_PASSWORD=secure-password
-PG_DATABASE=fashion
-PG_SSL=true
-PG_POOL_SIZE=20
+DATABASE_URL=postgresql://postgres:secure-password@postgres-host:5432/fashion
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_ANON_KEY=your-supabase-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
+SUPABASE_STORAGE_BUCKET=product-images
 
 # OpenSearch
 OS_NODE=https://opensearch-host:9200
@@ -448,7 +451,7 @@ R2_BUCKET=fashion-images
 R2_PUBLIC_BASE_URL=https://your-domain.r2.dev
 
 # ML Services
-RANKER_SERVICE_URL=http://ranker-service:8000
+RANKER_API_URL=http://ranker-service:8000
 RANKER_TIMEOUT_MS=5000
 ENABLE_ML_RANKING=true
 
@@ -1076,3 +1079,4 @@ psql -h postgres-host -U postgres -d fashion -c "VACUUM ANALYZE;"
 - Alert on error rate increases
 
 This deployment guide provides a comprehensive foundation for deploying the Fashion Aggregator API in production environments. Adjust configurations based on your specific infrastructure and requirements.
+

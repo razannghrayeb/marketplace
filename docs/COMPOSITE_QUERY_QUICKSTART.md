@@ -35,13 +35,13 @@ docs/
 
 **API Endpoint:**
 ```
-POST /api/search/multi-image
+POST /search/multi-image
 Content-Type: multipart/form-data
 ```
 
 **Example cURL:**
 ```bash
-curl -X POST http://localhost:3000/api/search/multi-image \
+curl -X POST http://localhost:3000/search/multi-image \
   -F "images=@burgundy_dress.jpg" \
   -F "images=@leather_jacket.jpg" \
   -F "prompt=I want the color of the first picture with the texture from the second" \
@@ -56,7 +56,7 @@ formData.append('images', file2);
 formData.append('prompt', 'Color from first, texture from second');
 formData.append('limit', '20');
 
-const response = await fetch('/api/search/multi-image', {
+const response = await fetch('/search/multi-image', {
   method: 'POST',
   body: formData,
 });
@@ -291,3 +291,5 @@ const searchBundle = queryMapper.mapQuery(compositeQuery, {
 ---
 
 **Questions?** Check the full docs or search codebase for examples.
+
+

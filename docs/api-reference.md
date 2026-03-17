@@ -4,7 +4,8 @@ This document provides detailed information about all API endpoints available in
 
 ## Base URL
 ```
-http://localhost:4000
+Local Node (pnpm dev): http://localhost:4000
+Docker Compose API:    http://localhost:3000
 ```
 
 ## Code Organization
@@ -18,7 +19,27 @@ The codebase follows a modular route structure. Each API module lives under `src
 Keeping services alongside routes makes modules self-contained. See `docs/architecture.md` for developer guidance and examples.
 
 ## Authentication
-Currently, the API does not require authentication for most endpoints. Admin endpoints may require authentication in production.
+Authentication is currently disabled for all routes in this repository snapshot (including `/admin/*`).
+
+If you deploy behind an auth gateway or add middleware, document that in your environment-specific runbook.
+
+## Route Prefixes (Current)
+
+The server mounts modules with these prefixes:
+
+| Module | Prefix |
+|--------|--------|
+| Health | `/health` |
+| Search | `/search` |
+| Products | `/products` |
+| Admin | `/admin` |
+| Compare | `/api/compare` |
+| Image Analysis | `/api/images` |
+| Ingest Queue | `/api/ingest` |
+| Wardrobe | `/api/wardrobe` |
+| Labeling | `/api/labeling` |
+
+See also: `docs/ENDPOINT_MATRIX.md` (auto-generated endpoint inventory).
 
 ## Response Format
 All API responses follow a consistent JSON format:
@@ -1104,55 +1125,275 @@ DELETE /products/{id}/images/{imageId}
 
 ---
 
+## Health API
+
+```http
+GET /health/ready
+GET /health/live
+```
+
+- `/health/ready`: dependency-aware readiness probe
+- `/health/live`: lightweight liveness probe
+
+---
+
+## Wardrobe API
+
+Most wardrobe endpoints require a user identity. In the current implementation, user identity is read from:
+
+- `x-user-id` header, or
+- `user_id` query/body field.
+
+### Endpoint Inventory
+
+```http
+GET    /api/wardrobe/items
+POST   /api/wardrobe/items
+GET    /api/wardrobe/items/{id}
+PATCH  /api/wardrobe/items/{id}
+DELETE /api/wardrobe/items/{id}
+GET    /api/wardrobe/profile
+POST   /api/wardrobe/profile/recompute
+GET    /api/wardrobe/gaps
+GET    /api/wardrobe/recommendations
+GET    /api/wardrobe/compatibility/score
+GET    /api/wardrobe/compatibility/{itemId}
+POST   /api/wardrobe/compatibility/precompute
+POST   /api/wardrobe/outfit-suggestions
+POST   /api/wardrobe/complete-look
+POST   /api/wardrobe/backfill-embeddings
+GET    /api/wardrobe/similar/{itemId}
+```
+
+### Create Wardrobe Item
+
+```http
+POST /api/wardrobe/items
+```
+
+Request: multipart/form-data (or JSON without image)
+
+```bash
+curl -X POST "http://localhost:3000/api/wardrobe/items" \
+  -H "x-user-id: 42" \
+  -F "name=Black Linen Shirt" \
+  -F "brand=Zara" \
+  -F "source=manual" \
+  -F "category_id=12" \
+  -F "pattern_id=1" \
+  -F "material_id=3" \
+  -F "image=@shirt.jpg"
+```
+
+Example response:
+
+```json
+{
+  "success": true,
+  "item": {
+    "id": 901,
+    "user_id": 42,
+    "name": "Black Linen Shirt",
+    "brand": "Zara",
+    "category_id": 12
+  }
+}
+```
+
+### Get Wardrobe Recommendations
+
+```http
+GET /api/wardrobe/recommendations
+```
+
+Example request:
+
+```bash
+curl "http://localhost:3000/api/wardrobe/recommendations?user_id=42&limit=20&price_min=2000&price_max=15000&include_gaps=true&include_style=true&include_compat=true"
+```
+
+Example response:
+
+```json
+{
+  "success": true,
+  "recommendations": [
+    {
+      "product_id": 12345,
+      "score": 0.89,
+      "reason": "gap+style"
+    }
+  ]
+}
+```
+
+### Complete Look Suggestions
+
+```http
+POST /api/wardrobe/complete-look
+```
+
+Example request:
+
+```json
+{
+  "user_id": 42,
+  "item_ids": [901, 910],
+  "limit": 10
+}
+```
+
+Example response:
+
+```json
+{
+  "success": true,
+  "suggestions": [
+    {
+      "product_id": 7788,
+      "score": 0.86,
+      "slot": "footwear"
+    }
+  ]
+}
+```
+
+---
+
 ## Admin API
 
-### OpenSearch Status
-Get OpenSearch cluster health and statistics.
+Authentication note: current code does not enforce admin auth middleware yet.
+
+### Endpoint Inventory
 
 ```http
-GET /admin/opensearch
+POST /admin/products/{id}/hide
+POST /admin/products/{id}/unhide
+POST /admin/products/{id}/flag
+POST /admin/products/{id}/unflag
+POST /admin/products/hide-batch
+GET  /admin/products/flagged
+GET  /admin/products/hidden
+GET  /admin/products/{id}/duplicates
+
+GET  /admin/canonicals
+GET  /admin/canonicals/{id}
+POST /admin/canonicals/merge
+POST /admin/canonicals/{id}/detach/{productId}
+
+POST /admin/jobs/{type}/run
+GET  /admin/jobs/schedules
+GET  /admin/jobs/metrics
+GET  /admin/jobs/history
+
+GET  /admin/stats
+
+GET  /admin/reco/label
+POST /admin/reco/label
+POST /admin/reco/label/batch
+GET  /admin/reco/labels
+GET  /admin/reco/stats
 ```
 
-#### Example Response
+### Flag Product
+
+```http
+POST /admin/products/{id}/flag
+```
+
+Example request:
+
 ```json
 {
-  "success": true,
-  "data": {
-    "cluster_health": "green",
-    "total_documents": 15450,
-    "index_size": "2.3GB",
-    "last_update": "2026-01-17T10:15:00Z"
-  }
+  "reason": "suspected duplicate listing"
 }
 ```
 
-### Reindex Products
-Trigger a full reindex of all products in OpenSearch.
+Example response:
 
-```http
-POST /admin/opensearch/reindex
-```
-
-### ML Ranker Status
-Check the status of the ML ranking service.
-
-```http
-GET /admin/ranker
-```
-
-#### Example Response
 ```json
 {
   "success": true,
-  "data": {
-    "service_status": "healthy",
-    "model_version": "v2.1",
-    "last_training": "2026-01-15T12:00:00Z",
-    "prediction_count_24h": 1250,
-    "average_response_time_ms": 45
-  }
+  "message": "Product flagged"
 }
 ```
+
+### Merge Canonical Groups
+
+```http
+POST /admin/canonicals/merge
+```
+
+Example request:
+
+```json
+{
+  "sourceId": 120,
+  "targetId": 55
+}
+```
+
+Example response:
+
+```json
+{
+  "success": true,
+  "movedCount": 8
+}
+```
+
+### Trigger Background Job
+
+```http
+POST /admin/jobs/{type}/run
+```
+
+Valid `type` values:
+
+- `nightly-crawl`
+- `price-snapshot`
+- `canonical-recompute`
+- `cleanup-old-data`
+
+Example response:
+
+```json
+{
+  "success": true,
+  "message": "Job nightly-crawl queued"
+}
+```
+
+### Save Recommendation Label
+
+```http
+POST /admin/reco/label
+```
+
+Example request:
+
+```json
+{
+  "baseProductId": 111,
+  "candidateProductId": 222,
+  "label": "good",
+  "labelScore": 9,
+  "labelerId": "ops-admin",
+  "notes": "Great style match"
+}
+```
+
+Example response:
+
+```json
+{
+  "success": true,
+  "labelId": 3456,
+  "message": "Label 'good' saved for 111 -> 222"
+}
+```
+
+Legacy examples like `/admin/opensearch` and `/admin/ranker` are removed from this reference because they are not mounted in the current code.
 
 ---
 
@@ -1210,3 +1451,4 @@ const recommendations = await api.products.getRecommendations(12345);
 // Upload image for search
 const imageResults = await api.search.image({ image: fileBuffer });
 ```
+
