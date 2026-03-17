@@ -1,0 +1,4 @@
+node_modules/
+.next/
+apps/scrape-admin/
+tmp_scrape_admin_review/
