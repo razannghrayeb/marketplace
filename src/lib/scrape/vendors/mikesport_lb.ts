@@ -175,11 +175,13 @@ function guessOptionIndexes(product: any): { colorIndex: number; sizeIndex: numb
     return configured.length > 0 ? configured : actual;
   };
 
+  let colorIndex = names.findIndex((o) => {
   let colorIndex = names.findIndex((o: string) => {
     const name = normalizeOptionName(o);
     return name.includes("color") || name.includes("colour");
   });
 
+  let sizeIndex = names.findIndex((o) => {
   let sizeIndex = names.findIndex((o: string) => {
     const name = normalizeOptionName(o);
     return (

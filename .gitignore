@@ -3,6 +3,10 @@
 .env
 .env.*
 !.env.example
+node_modules/
+.next/
+dist/
+build/
 /src/lib/model/__pycache__
 /src/lib/model/.venv
 /src/lib/model/.venv311

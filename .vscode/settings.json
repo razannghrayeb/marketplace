@@ -1,0 +1,24 @@
+{
+  "files.exclude": {
+    "**/.next": true,
+    "**/node_modules": true,
+    "apps/scrape-admin": true,
+    "tmp_scrape_admin_review": true
+  },
+  "search.exclude": {
+    "**/.next": true,
+    "**/node_modules": true,
+    "apps/scrape-admin": true,
+    "tmp_scrape_admin_review": true
+  },
+  "files.watcherExclude": {
+    "**/.next/**": true,
+    "**/node_modules/**": true,
+    "**/apps/scrape-admin/**": true,
+    "**/tmp_scrape_admin_review/**": true
+  },
+  "typescript.tsserver.watchOptions": {
+    "watchDirectory": "useFsEvents"
+  },
+  "jshint.excludePath": ".jshintignore"
+}

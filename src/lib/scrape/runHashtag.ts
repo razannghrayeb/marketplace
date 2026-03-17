@@ -2,6 +2,7 @@ import { scrapeHashtagCollection } from "./vendors/hashtag";
 import { getOrCreateVendorId, markProductsUnavailableBefore, upsertProduct } from "./ingest";
 
 const VENDOR_NAME = "Hashtag";
+
 const VENDOR_URL = "https://www.hashtag-lb.com";
 
 export async function runHashtagCrawl() {

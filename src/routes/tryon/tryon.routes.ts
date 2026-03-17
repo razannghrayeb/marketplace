@@ -11,12 +11,9 @@
 import { Router } from "express";
 import multer from "multer";
 import { rateLimit } from "../../middleware/index";
-import { requireAuth } from "../../middleware/auth";
 import * as controller from "./tryon.controller";
 
 const router = Router();
-
-router.use(requireAuth);
 
 const upload = multer({
   storage: multer.memoryStorage(),
