@@ -7,21 +7,29 @@ import { config } from '../src/config';
 async function run() {
   let pool: Pool | null = null;
   try {
+    const migrationsDir = path.resolve(process.cwd(), 'db', 'migrations');
+    const migrationFiles = (await fs.readdir(migrationsDir))
+      .filter((file) => file.endsWith('.sql'))
+      .sort((left, right) => left.localeCompare(right));
+
+    if (migrationFiles.length === 0) {
+      throw new Error('No migration files found in db/migrations');
+    }
+
     // Get migration file from CLI arg or default to latest
     const migrationArg = process.argv[2];
-    const migrationFile = migrationArg || '003_digital_twin_phase0.sql';
-    const filePath = path.resolve(process.cwd(), 'db', 'migrations', migrationFile);
+    const migrationFile = migrationArg || migrationFiles[migrationFiles.length - 1];
+    const filePath = path.resolve(migrationsDir, migrationFile);
     const sql = await fs.readFile(filePath, 'utf8');
 
     // Determine target DB connection info
-    let targetDb = process.env.DATABASE_URL;
-    const cfg = config.postgres || {} as any;
+    let targetDb = process.env.DATABASE_URL || config.database.url;
     if (!targetDb) {
-      const host = process.env.PG_HOST || cfg.host || 'localhost';
-      const port = process.env.PG_PORT || cfg.port || 5432;
-      const user = process.env.PG_USER || cfg.user || 'postgres';
-      const password = process.env.PG_PASSWORD || cfg.password || 'postgres';
-      const database = process.env.PG_DATABASE || cfg.database || 'fashion';
+      const host = process.env.PG_HOST || 'localhost';
+      const port = process.env.PG_PORT || 5432;
+      const user = process.env.PG_USER || 'postgres';
+      const password = process.env.PG_PASSWORD || 'postgres';
+      const database = process.env.PG_DATABASE || 'fashion';
       targetDb = `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${database}`;
     }
 

@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { signup, login, refreshTokens, getMe, updateProfile } from "./auth.service";
+import { signup, login, refreshTokens, logout, getMe, updateProfile } from "./auth.service";
 
 export async function signupHandler(req: Request, res: Response, next: NextFunction) {
   try {
@@ -42,6 +42,17 @@ export async function refreshHandler(req: Request, res: Response, next: NextFunc
       access_token: result.accessToken,
       refresh_token: result.refreshToken,
     });
+  } catch (err: any) {
+    if (err.statusCode) return res.status(err.statusCode).json({ success: false, error: err.message });
+    next(err);
+  }
+}
+
+export async function logoutHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { refresh_token } = req.body;
+    await logout(refresh_token);
+    res.json({ success: true });
   } catch (err: any) {
     if (err.statusCode) return res.status(err.statusCode).json({ success: false, error: err.message });
     next(err);

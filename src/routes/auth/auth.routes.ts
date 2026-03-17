@@ -6,6 +6,7 @@ import {
   signupHandler,
   loginHandler,
   refreshHandler,
+  logoutHandler,
   meHandler,
   updateProfileHandler,
 } from "./auth.controller";
@@ -26,6 +27,10 @@ const refreshSchema = z.object({
   refresh_token: z.string().min(1, "Refresh token is required"),
 });
 
+const logoutSchema = z.object({
+  refresh_token: z.string().min(1, "Refresh token is required"),
+});
+
 const updateProfileSchema = z.object({
   email: z.string().email("Invalid email format").optional(),
   password: z.string().min(8, "Password must be at least 8 characters").optional(),
@@ -36,6 +41,7 @@ const updateProfileSchema = z.object({
 router.post("/signup", validateBody(signupSchema), signupHandler);
 router.post("/login", validateBody(loginSchema), loginHandler);
 router.post("/refresh", validateBody(refreshSchema), refreshHandler);
+router.post("/logout", validateBody(logoutSchema), logoutHandler);
 
 router.get("/me", requireAuth, meHandler);
 router.patch("/me", requireAuth, validateBody(updateProfileSchema), updateProfileHandler);

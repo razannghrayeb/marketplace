@@ -592,11 +592,9 @@ DB_NAME="fashion"
 mkdir -p "$BACKUP_DIR"
 
 # Full database dump
+# Note: DATABASE_URL format is: postgresql://username:password@host:port/database
 pg_dump \
-    --host=$PG_HOST \
-    --port=$PG_PORT \
-    --username=$PG_USER \
-    --dbname=$DB_NAME \
+    "$DATABASE_URL" \
     --format=custom \
     --verbose \
     --file="$BACKUP_DIR/fashion_full_$TIMESTAMP.dump"

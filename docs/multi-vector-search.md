@@ -114,7 +114,7 @@ Advanced multi-vector weighted search with per-attribute control.
 
 **Request:**
 ```bash
-curl -X POST http://localhost:3000/api/search/multi-vector \
+curl -X POST http://localhost:4000/api/search/multi-vector \
   -F "images=@dress1.jpg" \
   -F "images=@dress2.jpg" \
   -F "prompt=I want the color from the first image with the style from the second" \
@@ -311,7 +311,7 @@ To enable multi-vector search on an existing index:
 
 4. **Test endpoint**:
    ```bash
-   curl -X POST http://localhost:3000/api/search/multi-vector \
+   curl -X POST http://localhost:4000/api/search/multi-vector \
      -F "images=@test.jpg" \
      -F "prompt=test query"
    ```
