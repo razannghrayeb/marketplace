@@ -14,6 +14,9 @@ import { wardrobeRouter } from "./routes/wardrobe/index";
 import { tryonRouter } from "./routes/tryon/index";
 import { metricsRouter } from "./routes/metrics/index";
 import { labelingRouter } from "./routes/labeling/index";
+import { authRouter } from "./routes/auth/index";
+import { cartRouter } from "./routes/cart/index";
+import { favoritesRouter } from "./routes/favorites/index";
 import { ensureIndex } from "./lib/core";
 import {
   errorHandler,
@@ -62,6 +65,9 @@ app.use("/api/images", imageAnalysisRouter);  // Unified image analysis API
   app.use("/api/wardrobe", wardrobeRouter);
   app.use("/api/tryon", tryonRouter);
   app.use("/api/labeling", labelingRouter);
+  app.use("/api/auth", authRouter);
+  app.use("/api/cart", cartRouter);
+  app.use("/api/favorites", favoritesRouter);
 app.use('/products/price-drops', productsRouter);
 
 // Serve static files (labeling UI)

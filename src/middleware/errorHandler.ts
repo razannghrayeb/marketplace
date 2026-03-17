@@ -4,18 +4,19 @@ import { Request, Response, NextFunction } from "express";
  * Global error handler middleware
  */
 export function errorHandler(
-  err: Error,
+  err: Error & { statusCode?: number },
   _req: Request,
   res: Response,
   _next: NextFunction
 ) {
+  const status = err.statusCode || 500;
   console.error("Error:", err.message);
-  console.error(err.stack);
+  if (status === 500) console.error(err.stack);
 
-  res.status(500).json({
+  res.status(status).json({
     success: false,
-    error: process.env.NODE_ENV === "production" 
-      ? "Internal server error" 
+    error: status === 500 && process.env.NODE_ENV === "production"
+      ? "Internal server error"
       : err.message,
   });
 }
