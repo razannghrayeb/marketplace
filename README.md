@@ -243,6 +243,8 @@ Create a `.env` file:
 PORT=4000
 CORS_ORIGIN=*
 NODE_ENV=production
+SERVICE_ROLE=all # all | api | ml
+ML_SERVICE_URL=   # Optional: URL of ML service for client/service discovery
 
 # Database (Supabase Postgres — single DATABASE_URL required)
 DATABASE_URL=postgresql://postgres:<password>@db.<project>.supabase.co:5432/postgres
@@ -282,6 +284,30 @@ GOOGLE_APPLICATION_CREDENTIALS=   # path to service account key (or use ADC)
 # XGBoost Ranker (Python FastAPI)
 RANKER_API_URL=http://localhost:8000
 ```
+
+---
+
+## Render Split Deployment (API + ML)
+
+Use two Render Web Services from the same repository:
+
+1. API Service
+- Start Command: `pnpm start:api`
+- Environment:
+    - `SERVICE_ROLE=api`
+    - `ML_SERVICE_URL=https://<your-ml-service>.onrender.com`
+
+2. ML Service
+- Start Command: `pnpm start:ml`
+- Environment:
+    - `SERVICE_ROLE=ml`
+
+Behavior by role:
+- `SERVICE_ROLE=api` mounts auth/cart/favorites/compare/admin/tryon plus health/metrics.
+- `SERVICE_ROLE=ml` mounts search/products/image-analysis/wardrobe/ingest/labeling plus health/metrics.
+- `SERVICE_ROLE=all` keeps current monolith behavior.
+
+When `SERVICE_ROLE=api`, ML routes are transparently proxied to `ML_SERVICE_URL`.
 
 ---
 
