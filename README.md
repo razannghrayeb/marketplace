@@ -287,6 +287,29 @@ RANKER_API_URL=http://localhost:8000
 
 ---
 
+## Google Cloud Run Deployment (Recommended)
+
+This repository now includes a Cloud Build pipeline that deploys the same image into two Cloud Run services:
+- `marketplace-ml` with `SERVICE_ROLE=ml`
+- `marketplace-api` with `SERVICE_ROLE=api` and `ML_SERVICE_URL=<ml-service-url>`
+
+Files added for Cloud Run:
+- `cloudbuild.cloudrun.yaml` — build + push + deploy both services
+- `.env.example` — safe environment variable template
+- `docs/deploy-cloud-run.md` — complete step-by-step deployment runbook
+
+Quick deploy command:
+
+```bash
+gcloud builds submit \
+  --config cloudbuild.cloudrun.yaml \
+  --substitutions _REGION=us-central1,_REPOSITORY=marketplace,_SERVICE_API=marketplace-api,_SERVICE_ML=marketplace-ml,_IMAGE_NAME=marketplace
+```
+
+See `docs/deploy-cloud-run.md` for full setup (APIs, Artifact Registry, Secret Manager, IAM, verification).
+
+---
+
 ## Render Split Deployment (API + ML)
 
 Use two Render Web Services from the same repository with Docker:
@@ -410,6 +433,7 @@ DRY_RUN=1 pnpm migrate:bootstrap
 | `docs/architecture.md` | Architecture deep-dive |
 | `docs/ml-models.md` | ML model details and evaluation |
 | `docs/deployment.md` | Production deployment guide |
+| `docs/deploy-cloud-run.md` | Google Cloud Run deployment runbook |
 | `FEATURE_ANALYSIS.md` | In-depth feature analysis with strengths, weaknesses, grades |
 | `docs/ENDPOINT_MATRIX.md` | Auto-generated endpoint matrix |
 | `postman_collection.json` | Postman collection for API testing |
