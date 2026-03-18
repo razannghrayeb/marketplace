@@ -13,6 +13,7 @@
     "reindex-embeddings": "npx tsx scripts/reindex-embeddings.ts",
     "docs:endpoints": "npx tsx scripts/generate-endpoint-matrix.ts",
     "migrate:run": "npx tsx scripts/run-migration.ts",
+    "migrate:bootstrap": "npx tsx scripts/bootstrap-db.ts",
     "backfill-r2": "npx tsx scripts/backfill-r2-images.ts",
     "add-image-cdn-col": "npx tsx scripts/add-image-cdn-column.ts",
     "migrate:canonicals": "npx tsx scripts/migrate-canonicals.ts",

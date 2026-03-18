@@ -367,13 +367,27 @@ Migrations live in `db/migrations/`. Run them in order:
 003_digital_twin_phase0.sql         — users, wardrobe_items, outfits, outfit_items
 004_ingest_jobs.sql                 — ingest_jobs
 005_labeling_system.sql             — label_queue, labels
-006_add_products_image_urls.sql     — image_urls column on products
-006_feature6_wardrobe_enhancements.sql  — wardrobe enhancement tables (pgvector required)
+005a_cart_items.sql                 — cart_items table
+006a_add_products_image_urls.sql    — image_urls column on products
+006b_feature6_wardrobe_enhancements.sql  — wardrobe enhancement tables (pgvector required)
+006c_feature6_wardrobe_enhancements_no_vector.sql — wardrobe fallback without pgvector
 007_virtual_tryon.sql               — tryon_jobs, tryon_saved_results
+008_refresh_token_blacklist.sql     — refresh token revoke/denylist
 ```
 
-> **Note:** Three files share the `006_` prefix due to a naming conflict.
-> Apply `006_add_products_image_urls.sql` before `006_feature6_wardrobe_enhancements.sql`.
+For first-time production setup, use one command:
+
+```bash
+pnpm migrate:bootstrap
+```
+
+This applies `db/schema.sql` first, then all SQL files in `db/migrations/` in lexical order.
+
+You can preview the execution plan without applying SQL:
+
+```bash
+DRY_RUN=1 pnpm migrate:bootstrap
+```
 
 ---
 
