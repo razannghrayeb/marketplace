@@ -378,27 +378,26 @@ export async function searchByTextWithRelated(
   const parsedQuery = parseQuery(effectiveQuery);
   const { entities, expandedTerms, semanticQuery, intent } = parsedQuery;
 
-  // Build filter array - combine explicit filters with extracted entities
+  // Build filter array - ONLY explicit user-provided filters go here
   const filter: any[] = [{ term: { is_hidden: false } }];
 
-  // Use explicit filter OR extracted entity
-  const effectiveBrand =
-    mergedFilters.brand || (entities.brands.length === 1 ? entities.brands[0] : undefined);
-  const effectiveCategory =
-    mergedFilters.category || (entities.categories.length === 1 ? entities.categories[0] : undefined);
+  // ⭐ IMPORTANT: Only apply strict filters for EXPLICIT (user-provided) criteria
+  // Extracted entities (like categories from "blazer" → "outerwear") should be used for BOOSTING, not filtering
+  const effectiveBrand = mergedFilters.brand; // Only if user explicitly provided
+  const effectiveCategory = mergedFilters.category; // Only if user explicitly provided
 
   if (effectiveBrand) filter.push({ term: { brand: effectiveBrand } });
   if (effectiveCategory) filter.push({ term: { category: effectiveCategory } });
   if (mergedFilters.vendorId) filter.push({ term: { vendor_id: mergedFilters.vendorId } });
 
-  // Apply extracted attribute filters
+  // Apply extracted attribute filters (these are from explicit params, not query extraction)
   if (mergedFilters.gender) filter.push({ term: { attr_gender: mergedFilters.gender } });
   if (mergedFilters.color) filter.push({ term: { attr_color: mergedFilters.color } });
 
   // Apply price filter from explicit params or extracted entities
   applyPriceFilter(filter, mergedFilters, entities);
 
-  // Build semantic-aware query with expanded terms
+  // Build semantic-aware query with expanded terms + extracted entities as boosts
   const should: any[] = buildSemanticShouldClauses(semanticQuery, expandedTerms, entities);
 
   const searchBody = {
@@ -673,6 +672,21 @@ function buildSemanticShouldClauses(
     });
   }
 
+  // 🔑 BOOST extracted categories (soft matching, not filtering)
+  // This allows "blazer" to match outerwear products even if category field doesn't match exactly
+  if (entities.categories.length > 0) {
+    should.push({
+      terms: { category: entities.categories, boost: 1.2 },
+    });
+  }
+
+  // 🔑 BOOST extracted brands (soft matching)
+  if (entities.brands.length > 1) {
+    should.push({
+      terms: { brand: entities.brands, boost: 1.5 },
+    });
+  }
+
   // Boost color matches in title
   for (const color of entities.colors) {
     should.push({
@@ -684,20 +698,6 @@ function buildSemanticShouldClauses(
   for (const attr of entities.attributes) {
     should.push({
       match: { title: { query: attr, boost: 1.3 } },
-    });
-  }
-
-  // Multiple brand search (if more than one brand mentioned)
-  if (entities.brands.length > 1) {
-    should.push({
-      terms: { brand: entities.brands, boost: 2 },
-    });
-  }
-
-  // Multiple category search
-  if (entities.categories.length > 1) {
-    should.push({
-      terms: { category: entities.categories, boost: 1.5 },
     });
   }
 
