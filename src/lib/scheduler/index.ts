@@ -3,7 +3,6 @@
  */
 
 export {
-  scheduledJobsQueue,
   setupSchedules,
   triggerJob,
   getJobStatus,

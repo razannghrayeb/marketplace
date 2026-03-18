@@ -45,46 +45,6 @@ export async function setupSchedules(): Promise<void> {
   await upstashSet("scheduled-job-definitions", JSON.stringify(schedules));
   console.log("✅ Job schedules configured (Upstash REST)");
 }
-    "price-drop-detection",
-    { type: "price-drop-detection" } as ScheduledJobData,
-    {
-      repeat: { pattern: "0 */6 * * *" }, // Every 6 hours
-      jobId: "price-drop-detection-recurring",
-    }
-  );
-
-  // Canonical recompute: Every night at 2 AM
-  await scheduledJobsQueue.add(
-    "canonical-recompute",
-    { type: "canonical-recompute" } as ScheduledJobData,
-    {
-      repeat: { pattern: "0 2 * * *" }, // 2 AM daily
-      jobId: "canonical-recompute-recurring",
-    }
-  );
-
-  // Cleanup old data: Weekly on Sunday at 3 AM
-  await scheduledJobsQueue.add(
-    "cleanup-old-data",
-    { type: "cleanup-old-data" } as ScheduledJobData,
-    {
-      repeat: { pattern: "0 3 * * 0" }, // Sunday 3 AM
-      jobId: "cleanup-old-data-recurring",
-    }
-  );
-
-  // Category baseline computation: Weekly on Monday at 4 AM
-  await scheduledJobsQueue.add(
-    "category-baseline-compute",
-    { type: "category-baseline-compute" } as ScheduledJobData,
-    {
-      repeat: { pattern: "0 4 * * 1" }, // Monday 4 AM
-      jobId: "category-baseline-compute-recurring",
-    }
-  );
-
-  console.log("✅ Job schedules configured");
-}
 
 // ============================================================================
 // Manual Job Triggers
@@ -93,7 +53,7 @@ export async function setupSchedules(): Promise<void> {
 /**
  * Manually trigger a job
  */
-export async function triggerJob(type: JobType, params?: Record<string, any>): Promise<Job> {
+export async function triggerJob(type: JobType, params?: Record<string, any>): Promise<{ jobId: string; id: string; type: string }> {
   // Manual trigger: enqueue job to Upstash
   const jobId = `${type}-manual-${Date.now()}`;
   const jobData = { type, params, triggeredBy: "manual", job_uuid: jobId };
@@ -111,7 +71,7 @@ export async function triggerJob(type: JobType, params?: Record<string, any>): P
   }
   jobQueue.push(jobId);
   await upstashSet("scheduled-job-queue", JSON.stringify(jobQueue));
-  return jobData;
+  return { jobId, id: jobId, type };
 }
 
 /**

@@ -27,20 +27,18 @@
     "@google/generative-ai": "^0.24.1",
     "@opensearch-project/opensearch": "^2.12.0",
     "@supabase/supabase-js": "^2.90.1",
-    
     "@types/multer": "^2.0.0",
     "@types/sharp": "^0.31.1",
+    "@upstash/redis": "^1.37.0",
     "@xenova/transformers": "^2.17.2",
     "axios": "^1.13.2",
     "bcryptjs": "^3.0.3",
-    
     "cheerio": "^1.2.0",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.21.1",
     "google-auth-library": "^10.6.1",
     "helmet": "^7.1.0",
-    
     "jsonwebtoken": "^9.0.3",
     "multer": "^1.4.5-lts.1",
     "node-fetch": "^3.3.2",
@@ -66,5 +64,5 @@
     "tsx": "^4.21.0",
     "typescript": "^5.6.3"
   },
-"type": "module"
+  "type": "module"
 }

@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { pg } from "../../lib/core";
 import { uploadImage } from "../../lib/image";
-import { upstashSet } from "../../lib/queue";
+import { upstashGet, upstashSet } from "../../lib/queue";
 
 // ============================================================================
 // Types

@@ -2,4 +2,4 @@
  * Worker Module Exports
  */
 
-export { createWorker } from "./worker";
+export { pollAndProcessOne, runWorkerLoop } from "./worker";
