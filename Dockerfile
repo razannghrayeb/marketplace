@@ -12,18 +12,12 @@ FROM python:3.11-slim AS model-downloader
 ARG HF_TOKEN=""
 ENV HF_TOKEN=${HF_TOKEN}
 RUN pip install --no-cache-dir huggingface_hub
-RUN --mount=type=secret,id=hf_token python - <<'EOF'
+RUN python - <<'EOF'
 from huggingface_hub import snapshot_download
 import os
 import sys
 
-token = None
-secret_path = "/run/secrets/hf_token"
-if os.path.exists(secret_path):
-    with open(secret_path, "r", encoding="utf-8") as fh:
-        token = fh.read().strip() or None
-if token is None:
-    token = os.environ.get("HF_TOKEN") or None
+token = os.environ.get("HF_TOKEN") or None
 
 try:
     snapshot_download(
@@ -107,7 +101,7 @@ ENV PORT=3000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/health || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/health/live || exit 1
 
 EXPOSE 3000
 
