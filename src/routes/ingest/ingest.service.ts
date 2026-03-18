@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { pg } from "../../lib/core";
 import { uploadImage } from "../../lib/image";
-import { getIngestQueue, isRedisAvailable } from "../../lib/queue";
+import { upstashSet } from "../../lib/queue";
 
 // ============================================================================
 // Types
@@ -42,7 +42,6 @@ export interface CreateIngestJobInput {
  */
 export async function createIngestJob(input: CreateIngestJobInput): Promise<{ jobId: string; cdnUrl: string }> {
   const { imageBuffer, userId = null, filename = "upload.jpg", mimetype = "image/jpeg" } = input;
-  
   const jobUuid = randomUUID();
 
   // Upload raw image to R2 immediately (so worker can fetch)
@@ -56,21 +55,26 @@ export async function createIngestJob(input: CreateIngestJobInput): Promise<{ jo
     [jobUuid, userId, "uploaded", key, cdnUrl, filename, "queued"]
   );
 
-  // Enqueue job only if Redis is available
-  if (isRedisAvailable()) {
-    try {
-      const q = getIngestQueue();
-      await q.add(
-        "ingest-image",
-        { job_uuid: jobUuid, user_id: userId, r2_key: key, cdn_url: cdnUrl, filename },
-        { jobId: jobUuid }
-      );
-    } catch (err) {
-      console.warn("[Ingest] Could not enqueue job (Redis unavailable):", (err as Error).message);
-      // Job is still recorded in database, can be processed later
+  // Enqueue job using Upstash REST API
+  try {
+    // Store job data
+    await upstashSet(`ingest-job:${jobUuid}`, JSON.stringify({ job_uuid: jobUuid, user_id: userId, r2_key: key, cdn_url: cdnUrl, filename }));
+
+    // Add job UUID to ingest-job-queue list
+    const queueRes = await upstashGet("ingest-job-queue");
+    let jobQueue: string[] = [];
+    if (queueRes.result) {
+      try {
+        jobQueue = JSON.parse(queueRes.result);
+      } catch (e) {
+        jobQueue = [];
+      }
     }
-  } else {
-    console.warn("[Ingest] Redis unavailable - job saved to database but not queued");
+    jobQueue.push(jobUuid);
+    await upstashSet("ingest-job-queue", JSON.stringify(jobQueue));
+  } catch (err) {
+    console.warn("[Ingest] Could not enqueue job (Upstash REST unavailable):", (err as Error).message);
+    // Job is still recorded in database, can be processed later
   }
 
   return { jobId: jobUuid, cdnUrl };

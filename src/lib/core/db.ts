@@ -19,8 +19,9 @@ export const pg = new Pool({
   ssl: {
     rejectUnauthorized: false,
   },
+  idleTimeoutMillis: 30000, // 30 seconds
+  connectionTimeoutMillis: 10000, // 10 seconds
 });
-
 
 // Handle pool errors
 pg.on("error", (err) => {
