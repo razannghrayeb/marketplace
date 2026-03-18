@@ -12,27 +12,7 @@ FROM python:3.11-slim AS model-downloader
 ARG HF_TOKEN=""
 ENV HF_TOKEN=${HF_TOKEN}
 RUN pip install --no-cache-dir huggingface_hub
-RUN python - <<'EOF'
-from huggingface_hub import snapshot_download
-import os
-import sys
-
-token = os.environ.get("HF_TOKEN") or None
-
-try:
-    snapshot_download(
-        repo_id="razangh/fashion-models",
-        repo_type="model",
-        local_dir="/models",
-        token=token,
-        ignore_patterns=["*.gitattributes", ".gitattributes", "README.md"],
-    )
-    print("✅ Models downloaded successfully to /models")
-    sys.exit(0)
-except Exception as e:
-    print(f"❌ Model download failed: {e}")
-    sys.exit(1)
-EOF
+RUN python -c "from huggingface_hub import snapshot_download; import os; token = os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, ignore_patterns=['*.gitattributes', '.gitattributes', 'README.md']); print('Models downloaded successfully to /models')"
 
 # Stage 1: Build
 FROM node:20-alpine AS builder

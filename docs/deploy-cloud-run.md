@@ -31,6 +31,9 @@ gcloud artifacts repositories create marketplace \
 ```
 
 ## 3) Create required secrets
+Do not put real tokens directly in `cloudbuild.cloudrun.yaml`.
+Keep real values in a local env file and push them to Secret Manager.
+
 Create one secret for each runtime variable listed below. Example pattern:
 
 ```bash
@@ -59,6 +62,18 @@ Required secret names used by `cloudbuild.cloudrun.yaml`:
 - `r2-bucket`
 - `r2-public-base-url`
 
+### PowerShell automation (recommended on Windows)
+
+This repository includes a script that reads env values and creates/updates the matching Secret Manager secrets:
+
+```powershell
+# Preview what will be updated
+powershell -ExecutionPolicy Bypass -File scripts/gcp/sync-secrets-from-env.ps1 -EnvFile .env -ProjectId marketplace-490613 -DryRun
+
+# Apply changes
+powershell -ExecutionPolicy Bypass -File scripts/gcp/sync-secrets-from-env.ps1 -EnvFile .env -ProjectId marketplace-490613
+```
+
 Grant Cloud Run runtime service account secret access (replace project number):
 
 ```bash
@@ -79,6 +94,12 @@ From repo root:
 gcloud builds submit \
   --config cloudbuild.cloudrun.yaml \
   --substitutions _REGION=us-central1,_REPOSITORY=marketplace,_SERVICE_API=marketplace-api,_SERVICE_ML=marketplace-ml,_IMAGE_NAME=marketplace
+```
+
+PowerShell-safe single-line command:
+
+```powershell
+& "$env:LOCALAPPDATA\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd" builds submit --config cloudbuild.cloudrun.yaml --substitutions _REGION=us-central1,_REPOSITORY=marketplace,_SERVICE_API=marketplace-api,_SERVICE_ML=marketplace-ml,_IMAGE_NAME=marketplace --project marketplace-490613
 ```
 
 Optional (if HuggingFace model repo is private):
