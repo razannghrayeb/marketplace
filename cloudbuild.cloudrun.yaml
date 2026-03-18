@@ -1,0 +1,155 @@
+# Cloud Build pipeline for Google Cloud Run
+# Deploys two services from the same container image:
+# 1) marketplace-ml   (SERVICE_ROLE=ml)
+# 2) marketplace-api  (SERVICE_ROLE=api, proxies ML routes to marketplace-ml)
+#
+# Trigger manually:
+# gcloud builds submit --config cloudbuild.cloudrun.yaml \
+#   --substitutions _REGION=us-central1,_REPOSITORY=marketplace,_SERVICE_API=marketplace-api,_SERVICE_ML=marketplace-ml,_IMAGE_NAME=marketplace
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    id: Build image
+    args:
+      - build
+      - --build-arg
+      - HF_TOKEN=${_HF_TOKEN}
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$SHORT_SHA
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    id: Push image
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$SHORT_SHA
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: Deploy ML service
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$SHORT_SHA"
+        ENV_VARS="NODE_ENV=production,SERVICE_ROLE=ml"
+        if [ -n "${_COMMON_ENV_VARS}" ]; then
+          ENV_VARS="${ENV_VARS},${_COMMON_ENV_VARS}"
+        fi
+        if [ -n "${_ML_ENV_VARS}" ]; then
+          ENV_VARS="${ENV_VARS},${_ML_ENV_VARS}"
+        fi
+
+        SECRET_FLAGS=()
+        SECRET_MAPPINGS="${_COMMON_SECRETS}"
+        if [ -n "${_ML_SECRETS}" ]; then
+          SECRET_MAPPINGS="${SECRET_MAPPINGS},${_ML_SECRETS}"
+        fi
+        if [ -n "${SECRET_MAPPINGS}" ]; then
+          SECRET_FLAGS=(--update-secrets "${SECRET_MAPPINGS}")
+        fi
+
+        gcloud run deploy "${_SERVICE_ML}" \
+          --project "$PROJECT_ID" \
+          --region "${_REGION}" \
+          --platform managed \
+          --image "$IMAGE" \
+          --allow-unauthenticated \
+          --port 3000 \
+          --memory "${_MEMORY_ML}" \
+          --cpu "${_CPU_ML}" \
+          --timeout "${_TIMEOUT}" \
+          --concurrency "${_CONCURRENCY}" \
+          --min-instances "${_MIN_INSTANCES_ML}" \
+          --max-instances "${_MAX_INSTANCES_ML}" \
+          --set-env-vars "${ENV_VARS}" \
+          "${SECRET_FLAGS[@]}"
+
+        gcloud run services describe "${_SERVICE_ML}" \
+          --project "$PROJECT_ID" \
+          --region "${_REGION}" \
+          --format='value(status.url)' > /workspace/ml_url.txt
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: Deploy API service
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$SHORT_SHA"
+        ML_URL="$(cat /workspace/ml_url.txt)"
+        ENV_VARS="NODE_ENV=production,SERVICE_ROLE=api,ML_SERVICE_URL=$ML_URL"
+        if [ -n "${_COMMON_ENV_VARS}" ]; then
+          ENV_VARS="${ENV_VARS},${_COMMON_ENV_VARS}"
+        fi
+        if [ -n "${_API_ENV_VARS}" ]; then
+          ENV_VARS="${ENV_VARS},${_API_ENV_VARS}"
+        fi
+
+        SECRET_FLAGS=()
+        SECRET_MAPPINGS="${_COMMON_SECRETS}"
+        if [ -n "${_API_SECRETS}" ]; then
+          SECRET_MAPPINGS="${SECRET_MAPPINGS},${_API_SECRETS}"
+        fi
+        if [ -n "${SECRET_MAPPINGS}" ]; then
+          SECRET_FLAGS=(--update-secrets "${SECRET_MAPPINGS}")
+        fi
+
+        gcloud run deploy "${_SERVICE_API}" \
+          --project "$PROJECT_ID" \
+          --region "${_REGION}" \
+          --platform managed \
+          --image "$IMAGE" \
+          --allow-unauthenticated \
+          --port 3000 \
+          --memory "${_MEMORY_API}" \
+          --cpu "${_CPU_API}" \
+          --timeout "${_TIMEOUT}" \
+          --concurrency "${_CONCURRENCY}" \
+          --min-instances "${_MIN_INSTANCES_API}" \
+          --max-instances "${_MAX_INSTANCES_API}" \
+          --set-env-vars "${ENV_VARS}" \
+          "${SECRET_FLAGS[@]}"
+
+substitutions:
+  _REGION: us-central1
+  _REPOSITORY: marketplace
+  _IMAGE_NAME: marketplace
+  _SERVICE_API: marketplace-api
+  _SERVICE_ML: marketplace-ml
+
+  # Build-time token for model download in Dockerfile stage.
+  # If your HuggingFace model repo is public, leave empty.
+  _HF_TOKEN: ""
+
+  # Runtime sizing
+  _CPU_API: "2"
+  _CPU_ML: "4"
+  _MEMORY_API: 1Gi
+  _MEMORY_ML: 4Gi
+  _TIMEOUT: "900"
+  _CONCURRENCY: "20"
+  _MIN_INSTANCES_API: "0"
+  _MAX_INSTANCES_API: "20"
+  _MIN_INSTANCES_ML: "0"
+  _MAX_INSTANCES_ML: "10"
+
+  # Non-secret env vars (comma-separated KEY=VALUE pairs)
+  _COMMON_ENV_VARS: "OS_INDEX=products"
+  _API_ENV_VARS: "CORS_ORIGIN=*"
+  _ML_ENV_VARS: "CORS_ORIGIN=*"
+
+  # Secret mappings (comma-separated KEY=secret-name:version)
+  # Example: DATABASE_URL=database-url:latest,JWT_SECRET=jwt-secret:latest
+  _COMMON_SECRETS: "DATABASE_URL=database-url:latest,SUPABASE_URL=supabase-url:latest,SUPABASE_ANON_KEY=supabase-anon-key:latest,SUPABASE_SERVICE_ROLE_KEY=supabase-service-role-key:latest,OS_NODE=os-node:latest,REDIS_URL=redis-url:latest,JWT_SECRET=jwt-secret:latest,GEMINI_API_KEY=gemini-api-key:latest,GCLOUD_PROJECT=gcloud-project:latest,R2_ACCOUNT_ID=r2-account-id:latest,R2_ACCESS_KEY_ID=r2-access-key-id:latest,R2_SECRET_ACCESS_KEY=r2-secret-access-key:latest,R2_BUCKET=r2-bucket:latest,R2_PUBLIC_BASE_URL=r2-public-base-url:latest"
+  _API_SECRETS: ""
+  _ML_SECRETS: ""
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$SHORT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
