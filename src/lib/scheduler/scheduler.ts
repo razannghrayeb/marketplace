@@ -14,6 +14,7 @@ const redisConnection = {
   host: config.redis.host,
   port: config.redis.port,
   password: config.redis.password || undefined,
+  ...(config.redis.tls ? { tls: {} } : {}),
 };
 
 // ============================================================================

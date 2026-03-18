@@ -289,20 +289,47 @@ RANKER_API_URL=http://localhost:8000
 
 ## Render Split Deployment (API + ML)
 
-Use two Render Web Services from the same repository:
+Use two Render Web Services from the same repository with Docker:
 
-1. API Service
-- Start Command: `pnpm start:api`
+### Docker Build Configuration
+
+Both services use the same Dockerfile. The build has 3 stages:
+1. **model-downloader** (Python) — Downloads ML models from HuggingFace
+2. **builder** (Node) — Compiles TypeScript
+3. **production** (Node) — Final runtime image with compiled code + models
+
+**Critical:** Pass `HF_TOKEN` during build so models can be downloaded:
+
+#### For Render Docker builds:
+- In Render service settings, add environment variable during build:
+  - Key: `HF_TOKEN`
+  - Value: your HuggingFace token (from https://huggingface.co/settings/tokens)
+  - Mark as "Secret" (not normal env var — it should not be in the runtime)
+
+The Dockerfile will use this token to download models from `razangh/fashion-models` repo.
+
+If model download fails (invalid token or repo inaccessible), the build will **fail early** with error: `ML models missing! Model download failed or HF_TOKEN invalid.`
+
+### Service Configuration
+
+1. **API Service**
+- Runtime: Docker
+- Health Check Path: `/health/live`
 - Environment:
-    - `SERVICE_ROLE=api`
-    - `ML_SERVICE_URL=https://<your-ml-service>.onrender.com`
+  - `SERVICE_ROLE=api`
+  - `ML_SERVICE_URL=https://<your-ml-service>.onrender.com`
+  - Plus: DATABASE_URL, SUPABASE_*, R2_*, etc.
 
-2. ML Service
-- Start Command: `pnpm start:ml`
+2. **ML Service**
+- Runtime: Docker
+- Health Check Path: `/health/live`
 - Environment:
-    - `SERVICE_ROLE=ml`
+  - `SERVICE_ROLE=ml`
+  - Plus: DATABASE_URL, SUPABASE_*, OS_NODE, OS_USERNAME, OS_PASSWORD, R2_*, REDIS_URL, etc.
 
-Behavior by role:
+**Note:** HF_TOKEN should ONLY be set during build (Dockerfile ARG), NOT in runtime env vars.
+
+### Behavior by role:
 - `SERVICE_ROLE=api` mounts auth/cart/favorites/compare/admin/tryon plus health/metrics.
 - `SERVICE_ROLE=ml` mounts search/products/image-analysis/wardrobe/ingest/labeling plus health/metrics.
 - `SERVICE_ROLE=all` keeps current monolith behavior.

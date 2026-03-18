@@ -298,17 +298,28 @@ function expandQuery(query: string, entities: QueryEntities): string[] {
 
 /**
  * Build optimized query for semantic search
+ * 
+ * IMPORTANT: Preserve the original query term while adding semantic context.
+ * Example: "blazer" → "blazer outerwear" (not just "outerwear")
  */
 function buildSemanticQuery(query: string, entities: QueryEntities, intent: QueryIntent): string {
   const parts: string[] = [];
 
-  // Add entity context
+  // ⭐ PRIORITY: Add original query first (most important for matching)
+  parts.push(query);
+
+  // Add entity context for semantic enhancement
   if (entities.brands.length > 0) {
     parts.push(entities.brands.join(" "));
   }
 
+  // Add category but only if it differs from query
+  // (Avoid duplication like "blazer" + "blazer" from category name)
   if (entities.categories.length > 0) {
-    parts.push(entities.categories.join(" "));
+    const categoryStr = entities.categories.join(" ");
+    if (!query.toLowerCase().includes(categoryStr.toLowerCase())) {
+      parts.push(categoryStr);
+    }
   }
 
   if (entities.colors.length > 0) {
@@ -317,20 +328,6 @@ function buildSemanticQuery(query: string, entities: QueryEntities, intent: Quer
 
   if (entities.attributes.length > 0) {
     parts.push(entities.attributes.join(" "));
-  }
-
-  // Add cleaned query
-  let cleanedQuery = query;
-  
-  // Remove extracted entities to avoid repetition
-  for (const brand of entities.brands) {
-    cleanedQuery = cleanedQuery.replace(new RegExp(brand, "gi"), "");
-  }
-  
-  cleanedQuery = cleanedQuery.replace(/\s+/g, " ").trim();
-  
-  if (cleanedQuery.length > 0) {
-    parts.push(cleanedQuery);
   }
 
   // Add intent-specific context for CLIP
@@ -346,7 +343,8 @@ function buildSemanticQuery(query: string, entities: QueryEntities, intent: Quer
       break;
   }
 
-  return parts.join(" ").trim();
+  const result = parts.join(" ").replace(/\s+/g, " ").trim();
+  return result;
 }
 
 // ============================================================================

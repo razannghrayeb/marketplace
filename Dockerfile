@@ -6,8 +6,8 @@
 # ============================================================================
 
 # Stage 0: Download ML models from HuggingFace
-# For CI/CD, pass a BuildKit secret named `hf_token` if the repo is private.
-# For local compose, the Dockerfile also falls back to the HF_TOKEN env var.
+# Pass HF_TOKEN during build: docker build --build-arg HF_TOKEN=hf_xxx
+# or mount as BuildKit secret: --secret hf_token=/path/to/token.txt
 FROM python:3.11-slim AS model-downloader
 ARG HF_TOKEN=""
 ENV HF_TOKEN=${HF_TOKEN}
@@ -15,6 +15,8 @@ RUN pip install --no-cache-dir huggingface_hub
 RUN --mount=type=secret,id=hf_token python - <<'EOF'
 from huggingface_hub import snapshot_download
 import os
+import sys
+
 token = None
 secret_path = "/run/secrets/hf_token"
 if os.path.exists(secret_path):
@@ -22,14 +24,20 @@ if os.path.exists(secret_path):
         token = fh.read().strip() or None
 if token is None:
     token = os.environ.get("HF_TOKEN") or None
-snapshot_download(
-    repo_id="razangh/fashion-models",
-    repo_type="model",
-    local_dir="/models",
-    token=token,
-    ignore_patterns=["*.gitattributes", ".gitattributes", "README.md"],
-)
-print("Models downloaded.")
+
+try:
+    snapshot_download(
+        repo_id="razangh/fashion-models",
+        repo_type="model",
+        local_dir="/models",
+        token=token,
+        ignore_patterns=["*.gitattributes", ".gitattributes", "README.md"],
+    )
+    print("✅ Models downloaded successfully to /models")
+    sys.exit(0)
+except Exception as e:
+    print(f"❌ Model download failed: {e}")
+    sys.exit(1)
 EOF
 
 # Stage 1: Build
@@ -80,6 +88,13 @@ COPY --from=builder /app/dist ./dist
 RUN mkdir -p ./public
 # Copy models downloaded from HuggingFace (razangh/fashion-models)
 COPY --from=model-downloader /models ./models
+
+# Validate models were downloaded (fail early if missing)
+RUN if [ ! -f "./models/fashion-clip-image.onnx" ] || [ ! -f "./models/fashion-clip-text.onnx" ]; then \
+    echo "❌ ERROR: ML models missing! Model download failed or HF_TOKEN invalid."; \
+    exit 1; \
+  fi && \
+  echo "✅ ML models present: $(ls -lh ./models/*.onnx | wc -l) ONNX files"
 
 # Set ownership
 RUN chown -R nodejs:nodejs /app
