@@ -3,36 +3,8 @@
  * 
  * Manages recurring jobs: nightly crawl, price snapshots, canonical recompute
  */
-import { Queue, Job } from "bullmq";
+import { upstashGet, upstashSet } from "../queue";
 import { config } from "../../config";
-
-// ============================================================================
-// Queue Configuration
-// ============================================================================
-
-const redisConnection = {
-  host: config.redis.host,
-  port: config.redis.port,
-  password: config.redis.password || undefined,
-  ...(config.redis.tls ? { tls: {} } : {}),
-};
-
-// ============================================================================
-// Queues
-// ============================================================================
-
-export const scheduledJobsQueue = new Queue("scheduled-jobs", {
-  connection: redisConnection,
-  defaultJobOptions: {
-    removeOnComplete: 100,
-    removeOnFail: 500,
-    attempts: 3,
-    backoff: {
-      type: "exponential",
-      delay: 5000,
-    },
-  },
-});
 
 // ============================================================================
 // Job Types
@@ -58,26 +30,21 @@ export interface ScheduledJobData {
 
 /**
  * Initialize all recurring job schedules
+ * (Upstash REST API placeholder, implement scheduling logic as needed)
  */
 export async function setupSchedules(): Promise<void> {
-  // Remove existing repeatable jobs first
-  const existingJobs = await scheduledJobsQueue.getRepeatableJobs();
-  for (const job of existingJobs) {
-    await scheduledJobsQueue.removeRepeatableByKey(job.key);
-  }
-
-  // Price snapshot: Every 6 hours
-  await scheduledJobsQueue.add(
-    "price-snapshot",
-    { type: "price-snapshot" } as ScheduledJobData,
-    {
-      repeat: { pattern: "0 */6 * * *" }, // Every 6 hours
-      jobId: "price-snapshot-recurring",
-    }
-  );
-
-  // Price drop detection: Every 6 hours
-  await scheduledJobsQueue.add(
+  // Recurring jobs: store schedule definitions in Upstash
+  const schedules = [
+    { name: "price-snapshot", pattern: "0 1 * * *", type: "price-snapshot" }, // 1 AM daily
+    { name: "nightly-crawl", pattern: "0 0 * * *", type: "nightly-crawl" }, // Midnight daily
+    { name: "price-drop-detection", pattern: "0 */6 * * *", type: "price-drop-detection" }, // Every 6 hours
+    { name: "canonical-recompute", pattern: "0 2 * * *", type: "canonical-recompute" }, // 2 AM daily
+    { name: "cleanup-old-data", pattern: "0 3 * * 0", type: "cleanup-old-data" }, // Sunday 3 AM
+    { name: "category-baseline-compute", pattern: "0 4 * * 1", type: "category-baseline-compute" }, // Monday 4 AM
+  ];
+  await upstashSet("scheduled-job-definitions", JSON.stringify(schedules));
+  console.log("✅ Job schedules configured (Upstash REST)");
+}
     "price-drop-detection",
     { type: "price-drop-detection" } as ScheduledJobData,
     {
@@ -127,11 +94,24 @@ export async function setupSchedules(): Promise<void> {
  * Manually trigger a job
  */
 export async function triggerJob(type: JobType, params?: Record<string, any>): Promise<Job> {
-  return scheduledJobsQueue.add(
-    type,
-    { type, params, triggeredBy: "manual" } as ScheduledJobData,
-    { priority: 1 } // Higher priority for manual jobs
-  );
+  // Manual trigger: enqueue job to Upstash
+  const jobId = `${type}-manual-${Date.now()}`;
+  const jobData = { type, params, triggeredBy: "manual", job_uuid: jobId };
+  // Store job data
+  await upstashSet(`scheduled-job:${jobId}`, JSON.stringify(jobData));
+  // Add job to scheduled-job-queue
+  const queueRes = await upstashGet("scheduled-job-queue");
+  let jobQueue: string[] = [];
+  if (queueRes.result) {
+    try {
+      jobQueue = JSON.parse(queueRes.result);
+    } catch (e) {
+      jobQueue = [];
+    }
+  }
+  jobQueue.push(jobId);
+  await upstashSet("scheduled-job-queue", JSON.stringify(jobQueue));
+  return jobData;
 }
 
 /**
@@ -144,52 +124,49 @@ export async function getJobStatus(jobId: string): Promise<{
   data: any;
   failedReason?: string;
 } | null> {
-  const job = await scheduledJobsQueue.getJob(jobId);
-  if (!job) return null;
-
-  const state = await job.getState();
+  // Fetch job status from Upstash
+  const jobRes = await upstashGet(`scheduled-job:${jobId}`);
+  if (!jobRes.result) return null;
+  const jobData = JSON.parse(jobRes.result);
+  // Example status fields
   return {
-    id: job.id!,
-    state,
-    progress: job.progress as number,
-    data: job.data,
-    failedReason: job.failedReason,
+    id: jobId,
+    state: jobData.status || "unknown",
+    progress: jobData.progress || 0,
+    data: jobData,
+    failedReason: jobData.error_message || undefined,
   };
 }
 
 /**
  * Get all scheduled jobs info
+ * (Upstash REST API placeholder)
  */
-export async function getScheduleInfo(): Promise<Array<{
-  name: string;
-  pattern: string;
-  next: Date | null;
-}>> {
-  const jobs = await scheduledJobsQueue.getRepeatableJobs();
-  return jobs.map((j) => ({
-    name: j.name,
-    pattern: j.pattern ?? "unknown",
-    next: j.next ? new Date(j.next) : null,
-  }));
+export async function getScheduleInfo(): Promise<Array<{ name: string; pattern: string; next: Date | null }>> {
+  // Fetch schedule definitions from Upstash
+  const res = await upstashGet("scheduled-job-definitions");
+  if (!res.result) return [];
+  const schedules = JSON.parse(res.result);
+  // Optionally compute next run time (not implemented)
+  return schedules.map((s: any) => ({ name: s.name, pattern: s.pattern, next: null }));
 }
 
 /**
  * Get queue metrics
+ * (Upstash REST API placeholder)
  */
-export async function getQueueMetrics(): Promise<{
-  waiting: number;
-  active: number;
-  completed: number;
-  failed: number;
-  delayed: number;
-}> {
-  const [waiting, active, completed, failed, delayed] = await Promise.all([
-    scheduledJobsQueue.getWaitingCount(),
-    scheduledJobsQueue.getActiveCount(),
-    scheduledJobsQueue.getCompletedCount(),
-    scheduledJobsQueue.getFailedCount(),
-    scheduledJobsQueue.getDelayedCount(),
-  ]);
-
-  return { waiting, active, completed, failed, delayed };
+export async function getQueueMetrics(): Promise<{ waiting: number; active: number; completed: number; failed: number; delayed: number }> {
+  // Fetch queue metrics from Upstash
+  const queueRes = await upstashGet("scheduled-job-queue");
+  let waiting = 0;
+  if (queueRes.result) {
+    try {
+      const jobQueue = JSON.parse(queueRes.result);
+      waiting = Array.isArray(jobQueue) ? jobQueue.length : 0;
+    } catch (e) {
+      waiting = 0;
+    }
+  }
+  // Other metrics not tracked in Upstash REST (placeholders)
+  return { waiting, active: 0, completed: 0, failed: 0, delayed: 0 };
 }

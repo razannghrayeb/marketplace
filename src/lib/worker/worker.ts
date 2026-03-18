@@ -3,24 +3,12 @@
  * 
  * Processes scheduled jobs from the queue.
  */
-import { Worker, Job } from "bullmq";
-import { config } from "../../config";
+import { upstashGet, upstashSet } from "../queue";
 import { ScheduledJobData } from "../scheduler";
 import { takePriceSnapshot, findPriceDrops } from "../products/priceHistory";
 import { recomputeAllCanonicals } from "../products/canonical";
 import { computeAllCategoryBaselines } from "../compare/priceAnomalyDetector";
 import { pg } from "../core";
-
-// ============================================================================
-// Redis Connection
-// ============================================================================
-
-const redisConnection = {
-  host: config.redis.host,
-  port: config.redis.port,
-  password: config.redis.password || undefined,
-  ...(config.redis.tls ? { tls: {} } : {}),
-};
 
 // ============================================================================
 // Job Handlers

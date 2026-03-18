@@ -1,54 +1,26 @@
-import { Queue } from "bullmq";
-import IORedis from "ioredis";
+// Upstash REST API usage placeholder
 import { config } from "../../config";
 
-// Lazy-load Redis connection to avoid startup failures
-let connection: IORedis | null = null;
-let ingestQueue: Queue | null = null;
-let redisAvailable = true;
+// Example: fetch/axios for Upstash REST API
+import axios from "axios";
 
-function getConnection(): IORedis {
-  if (!connection) {
-    connection = new IORedis(config.redis.url, {
-      maxRetriesPerRequest: null, // Required for BullMQ
-      lazyConnect: true,
-      retryStrategy: (times) => {
-        if (times > 3) {
-          redisAvailable = false;
-          console.warn("[Redis] Connection failed after 3 retries - queue features disabled");
-          return null; // Stop retrying
-        }
-        return Math.min(times * 200, 1000);
-      },
-    });
-
-    connection.on("error", (err) => {
-      if (redisAvailable) {
-        console.warn("[Redis] Connection error (queue features disabled):", err.message);
-        redisAvailable = false;
-      }
-    });
-
-    connection.on("connect", () => {
-      redisAvailable = true;
-      console.log("[Redis] Connected successfully");
-    });
-  }
-  return connection;
+export async function upstashGet(key: string) {
+  const url = `${config.redis.restUrl}/get/${key}`;
+  const res = await axios.get(url, {
+    headers: {
+      Authorization: `Bearer ${config.redis.restToken}`,
+    },
+  });
+  return res.data;
 }
 
-export function isRedisAvailable(): boolean {
-  return redisAvailable;
-}
-
-export function getIngestQueue(): Queue {
-  if (!ingestQueue) {
-    ingestQueue = new Queue("ingest", { connection: getConnection() });
-  }
-  return ingestQueue;
-}
-
-export function getRedisConnection(): IORedis {
-  return getConnection();
+export async function upstashSet(key: string, value: string) {
+  const url = `${config.redis.restUrl}/set/${key}/${value}`;
+  const res = await axios.get(url, {
+    headers: {
+      Authorization: `Bearer ${config.redis.restToken}`,
+    },
+  });
+  return res.data;
 }
 

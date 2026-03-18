@@ -11,26 +11,9 @@ function getServiceRole(): ServiceRole {
 }
 
 function getRedisConfig() {
-  const url = process.env.REDIS_URL || "redis://localhost:6379";
-  const parsed = (() => {
-    try {
-      return new URL(url);
-    } catch {
-      return null;
-    }
-  })();
-
-  const hostFromUrl = parsed?.hostname;
-  const portFromUrl = parsed?.port ? Number(parsed.port) : undefined;
-  const passwordFromUrl = parsed?.password ? decodeURIComponent(parsed.password) : undefined;
-  const tlsFromUrl = parsed?.protocol === "rediss:";
-
   return {
-    url,
-    host: process.env.REDIS_HOST || hostFromUrl || "localhost",
-    port: Number(process.env.REDIS_PORT || portFromUrl || 6379),
-    password: process.env.REDIS_PASSWORD || passwordFromUrl || undefined,
-    tls: (process.env.REDIS_TLS || "").toLowerCase() === "true" || tlsFromUrl,
+    restUrl: process.env.UPSTASH_REDIS_REST_URL || "",
+    restToken: process.env.UPSTASH_REDIS_REST_TOKEN || "",
   };
 }
 
@@ -58,11 +41,11 @@ export const config = {
   // Supabase Postgres
   database: {
     url: process.env.DATABASE_URL!,
-    
+    ssl: { rejectUnauthorized: false },
   },
 
   opensearch: {
-    node: process.env.OS_NODE || "http://opensearch-node:9200",
+    node: process.env.OS_NODE || "https://avnadmin:AVNS_seqtyHr-NLC1nO4M5Yt@os-270aa11c-lau-6d81.j.aivencloud.com:12588",
     index: process.env.OS_INDEX || "products",
     username: process.env.OS_USERNAME || "",
     password: process.env.OS_PASSWORD || "",

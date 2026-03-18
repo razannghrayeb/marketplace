@@ -1,7 +1,7 @@
 import { osClient } from "../../lib/core/index";
 import { pg, getProductsByIdsOrdered } from "../../lib/core/index";
 import { config } from "../../config";
-import { getImagesForProducts, ProductImageResponse } from "./images.service";
+import { getImagesForProducts, ProductImage } from "./images.service";
 import { hammingDistance } from "../../lib/products";
 import { 
   parseQuery, 
@@ -279,7 +279,7 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
 
   // Attach images and scores to products (convert to response format)
   const productsWithImages = products.map((p: any) => {
-    const images = imagesByProduct.get(parseInt(p.id, 10)) || [];
+    const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
     return {
       ...p,
       similarity_score: scoreMap.get(String(p.id)),
@@ -378,7 +378,7 @@ export async function searchByImageWithSimilarity(
     const imagesByProduct = await getImagesForProducts(numericIds);
 
     results = products.map((p: any) => {
-      const images = imagesByProduct.get(parseInt(p.id, 10)) || [];
+      const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
       return {
         ...p,
         similarity_score: scoreMap.get(String(p.id)),
@@ -448,7 +448,7 @@ async function findSimilarByPHash(
   const distanceMap = new Map(topSimilar.map(s => [s.id, s.distance]));
 
   return products.map((p: any) => {
-    const images = imagesByProduct.get(p.id) || [];
+    const images: ProductImage[] = imagesByProduct.get(p.id) || [];
     const distance = distanceMap.get(p.id) || 64;
     return {
       ...p,
@@ -646,7 +646,7 @@ export async function searchByTextWithRelated(
     extractedCategories = [...new Set([...extractedCategories, ...resultCategories])];
 
     results = products.map((p: any) => {
-      const images = imagesByProduct.get(parseInt(p.id, 10)) || [];
+      const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
       const baseScore = scoreMap.get(String(p.id)) || 0;
       
       // Boost score based on entity matches
@@ -748,7 +748,7 @@ async function findRelatedProducts(
   const imagesByProduct = await getImagesForProducts(numericIds);
 
   return products.map((p: any) => {
-    const images = imagesByProduct.get(parseInt(p.id, 10)) || [];
+    const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
     return {
       ...p,
       match_type: "related" as const,
@@ -1125,7 +1125,7 @@ export async function getCandidateScoresForProducts(
   // Build candidate results
   const candidates: CandidateResult[] = products.map((p: any) => {
     const id = String(p.id);
-    const images = imagesByProduct.get(parseInt(p.id, 10)) || [];
+    const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
 
     const clipSim = clipScoreMap.get(id) ?? 0;
     const textSim = textScoreMap.get(id) ?? 0;
