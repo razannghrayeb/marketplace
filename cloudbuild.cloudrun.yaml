@@ -15,14 +15,14 @@ steps:
       - --build-arg
       - HF_TOKEN=${_HF_TOKEN}
       - -t
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$SHORT_SHA
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$BUILD_ID
       - .
 
   - name: gcr.io/cloud-builders/docker
     id: Push image
     args:
       - push
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$SHORT_SHA
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$BUILD_ID
 
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     id: Deploy ML service
@@ -32,29 +32,29 @@ steps:
       - |
         set -euo pipefail
 
-        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$SHORT_SHA"
+        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$BUILD_ID"
         ENV_VARS="NODE_ENV=production,SERVICE_ROLE=ml"
         if [ -n "${_COMMON_ENV_VARS}" ]; then
-          ENV_VARS="${ENV_VARS},${_COMMON_ENV_VARS}"
+          ENV_VARS="$$ENV_VARS,${_COMMON_ENV_VARS}"
         fi
         if [ -n "${_ML_ENV_VARS}" ]; then
-          ENV_VARS="${ENV_VARS},${_ML_ENV_VARS}"
+          ENV_VARS="$$ENV_VARS,${_ML_ENV_VARS}"
         fi
 
         SECRET_FLAGS=()
         SECRET_MAPPINGS="${_COMMON_SECRETS}"
         if [ -n "${_ML_SECRETS}" ]; then
-          SECRET_MAPPINGS="${SECRET_MAPPINGS},${_ML_SECRETS}"
+          SECRET_MAPPINGS="$$SECRET_MAPPINGS,${_ML_SECRETS}"
         fi
-        if [ -n "${SECRET_MAPPINGS}" ]; then
-          SECRET_FLAGS=(--update-secrets "${SECRET_MAPPINGS}")
+        if [ -n "$$SECRET_MAPPINGS" ]; then
+          SECRET_FLAGS=(--update-secrets "$$SECRET_MAPPINGS")
         fi
 
         gcloud run deploy "${_SERVICE_ML}" \
           --project "$PROJECT_ID" \
           --region "${_REGION}" \
           --platform managed \
-          --image "$IMAGE" \
+          --image "$$IMAGE" \
           --allow-unauthenticated \
           --port 3000 \
           --memory "${_MEMORY_ML}" \
@@ -63,8 +63,8 @@ steps:
           --concurrency "${_CONCURRENCY}" \
           --min-instances "${_MIN_INSTANCES_ML}" \
           --max-instances "${_MAX_INSTANCES_ML}" \
-          --set-env-vars "${ENV_VARS}" \
-          "${SECRET_FLAGS[@]}"
+          --set-env-vars "$$ENV_VARS" \
+          "$${SECRET_FLAGS[@]}"
 
         gcloud run services describe "${_SERVICE_ML}" \
           --project "$PROJECT_ID" \
@@ -79,30 +79,30 @@ steps:
       - |
         set -euo pipefail
 
-        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$SHORT_SHA"
-        ML_URL="$(cat /workspace/ml_url.txt)"
-        ENV_VARS="NODE_ENV=production,SERVICE_ROLE=api,ML_SERVICE_URL=$ML_URL"
+        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$BUILD_ID"
+        ML_URL="$$(cat /workspace/ml_url.txt)"
+        ENV_VARS="NODE_ENV=production,SERVICE_ROLE=api,ML_SERVICE_URL=$$ML_URL"
         if [ -n "${_COMMON_ENV_VARS}" ]; then
-          ENV_VARS="${ENV_VARS},${_COMMON_ENV_VARS}"
+          ENV_VARS="$$ENV_VARS,${_COMMON_ENV_VARS}"
         fi
         if [ -n "${_API_ENV_VARS}" ]; then
-          ENV_VARS="${ENV_VARS},${_API_ENV_VARS}"
+          ENV_VARS="$$ENV_VARS,${_API_ENV_VARS}"
         fi
 
         SECRET_FLAGS=()
         SECRET_MAPPINGS="${_COMMON_SECRETS}"
         if [ -n "${_API_SECRETS}" ]; then
-          SECRET_MAPPINGS="${SECRET_MAPPINGS},${_API_SECRETS}"
+          SECRET_MAPPINGS="$$SECRET_MAPPINGS,${_API_SECRETS}"
         fi
-        if [ -n "${SECRET_MAPPINGS}" ]; then
-          SECRET_FLAGS=(--update-secrets "${SECRET_MAPPINGS}")
+        if [ -n "$$SECRET_MAPPINGS" ]; then
+          SECRET_FLAGS=(--update-secrets "$$SECRET_MAPPINGS")
         fi
 
         gcloud run deploy "${_SERVICE_API}" \
           --project "$PROJECT_ID" \
           --region "${_REGION}" \
           --platform managed \
-          --image "$IMAGE" \
+          --image "$$IMAGE" \
           --allow-unauthenticated \
           --port 3000 \
           --memory "${_MEMORY_API}" \
@@ -111,8 +111,8 @@ steps:
           --concurrency "${_CONCURRENCY}" \
           --min-instances "${_MIN_INSTANCES_API}" \
           --max-instances "${_MAX_INSTANCES_API}" \
-          --set-env-vars "${ENV_VARS}" \
-          "${SECRET_FLAGS[@]}"
+          --set-env-vars "$$ENV_VARS" \
+          "$${SECRET_FLAGS[@]}"
 
 substitutions:
   _REGION: us-central1
@@ -149,7 +149,7 @@ substitutions:
   _ML_SECRETS: ""
 
 images:
-  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$SHORT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$BUILD_ID
 
 options:
   logging: CLOUD_LOGGING_ONLY
