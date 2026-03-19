@@ -483,9 +483,11 @@ export async function imageSearch(
       },
     });
 
-    // Apply minimum similarity threshold. OpenSearch cosinesimil returns
-    // [0, 1]; below 0.20 the match is effectively random.
-    const MIN_SIMILARITY = 0.20;
+    // OpenSearch cosinesimil (FAISS) score = (1 + cosine_similarity) / 2
+    // Range [0, 1]: 1.0 = identical, 0.5 = orthogonal, 0.0 = opposite.
+    // CLIP visual matches are meaningful above cosine ~0.20 → score ~0.60.
+    // Below 0.55 (cosine < 0.10), results are effectively random.
+    const MIN_SIMILARITY = 0.55;
     const results = response.body.hits.hits
       .filter((hit: any) => (hit._score ?? 0) >= MIN_SIMILARITY)
       .map((hit: any) => ({

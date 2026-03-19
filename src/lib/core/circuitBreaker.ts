@@ -69,6 +69,22 @@ export const CIRCUIT_CONFIGS: Record<string, CircuitBreakerConfig> = {
     halfOpenMaxCalls: 2,
     successThreshold: 2,
   },
+  /** CLIP text ONNX — single-threaded CPU; parallel bursts were falsely tripping the breaker */
+  "clip-text": {
+    name: "clip-text",
+    failureThreshold: 20,
+    resetTimeoutMs: 8000,
+    halfOpenMaxCalls: 8,
+    successThreshold: 2,
+  },
+  /** CLIP image ONNX — same rationale as clip-text for batch reindex */
+  clip: {
+    name: "clip",
+    failureThreshold: 20,
+    resetTimeoutMs: 8000,
+    halfOpenMaxCalls: 8,
+    successThreshold: 2,
+  },
 };
 
 // ============================================================================
@@ -82,6 +98,7 @@ export class CircuitBreaker {
   private lastFailureTime: Date | null = null;
   private lastSuccessTime: Date | null = null;
   private halfOpenCalls: number = 0;
+  private halfOpenFailures: number = 0;
   private totalCalls: number = 0;
   private totalFailures: number = 0;
   
@@ -168,8 +185,13 @@ export class CircuitBreaker {
         break;
         
       case "half-open":
-        // Any failure in half-open immediately reopens
-        this.transitionToOpen();
+        this.halfOpenFailures++;
+        // Only reopen if majority of half-open probes fail, not on a single failure.
+        // This prevents the circuit from being permanently stuck OPEN when a
+        // transient error (e.g. tokenizer init delay) hits the first probe call.
+        if (this.halfOpenFailures >= Math.max(2, Math.ceil(this.config.halfOpenMaxCalls / 2))) {
+          this.transitionToOpen();
+        }
         break;
     }
   }
@@ -192,6 +214,7 @@ export class CircuitBreaker {
     console.warn(`[CircuitBreaker] ${this.config.name}: OPEN (failures: ${this.failures})`);
     this.state = "open";
     this.halfOpenCalls = 0;
+    this.halfOpenFailures = 0;
     this.successes = 0;
   }
   
@@ -199,6 +222,7 @@ export class CircuitBreaker {
     console.info(`[CircuitBreaker] ${this.config.name}: HALF-OPEN (attempting recovery)`);
     this.state = "half-open";
     this.halfOpenCalls = 0;
+    this.halfOpenFailures = 0;
     this.successes = 0;
   }
   
@@ -208,6 +232,7 @@ export class CircuitBreaker {
     this.failures = 0;
     this.successes = 0;
     this.halfOpenCalls = 0;
+    this.halfOpenFailures = 0;
   }
   
   /**
@@ -233,6 +258,7 @@ export class CircuitBreaker {
     this.failures = 0;
     this.successes = 0;
     this.halfOpenCalls = 0;
+    this.halfOpenFailures = 0;
   }
 }
 

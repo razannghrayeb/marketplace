@@ -120,16 +120,11 @@ export class AttributeEmbeddingGenerator {
       "pattern",
     ];
 
-    const results = await Promise.all(
-      attributes.map(async (attr) => ({
-        attr,
-        embedding: await this.generateImageAttributeEmbedding(imageBuffer, attr),
-      }))
-    );
-
+    // Sequential ingestion: parallel runs N× image + M× text ONNX sessions and
+    // overwhelms CPU / trips circuit breakers. Order keeps global first for cache warmth.
     const embeddings: Partial<Record<SemanticAttribute, number[]>> = {};
-    for (const { attr, embedding } of results) {
-      embeddings[attr] = embedding;
+    for (const attr of attributes) {
+      embeddings[attr] = await this.generateImageAttributeEmbedding(imageBuffer, attr);
     }
 
     return embeddings as Record<SemanticAttribute, number[]>;
