@@ -21,6 +21,7 @@ export const pg = new Pool({
   },
   idleTimeoutMillis: 30000, // 30 seconds
   connectionTimeoutMillis: 10000, // 10 seconds
+  keepAlive: true, // Prevent ECONNRESET from idle connection drops (Cloud Run, load balancers)
 });
 
 // Handle pool errors

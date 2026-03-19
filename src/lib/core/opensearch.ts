@@ -9,11 +9,14 @@ console.log("OS config:", config.opensearch.node, config.opensearch.username, co
 
 export const osClient = new Client({
   node: config.opensearch.node,
-    auth: {
+  auth: {
     username: config.opensearch.username,
     password: config.opensearch.password,
   },
   ssl: { rejectUnauthorized: false },
+  // Resilience: retry on ECONNRESET/ETIMEDOUT (common with Aiven/Cloud Run idle connections)
+  maxRetries: 5,
+  requestTimeout: 60000,
 });
 
 // CLIP ViT-B/32 embedding dimension
