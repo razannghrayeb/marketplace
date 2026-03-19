@@ -726,6 +726,17 @@ export async function getImageEmbeddingFromBuffer(
 }
 
 /**
+ * Build the text-model input tensor with the dtype the active ONNX graph expects.
+ */
+function createClipTextInputTensor(tokens: number[]): ort.Tensor {
+  const shape: readonly number[] = [1, tokens.length];
+  if (activeModelType === "vit-b-32") {
+    return new ort.Tensor("int32", new Int32Array(tokens), shape);
+  }
+  return new ort.Tensor("int64", new BigInt64Array(tokens.map(BigInt)), shape);
+}
+
+/**
  * Generate text embedding (if text model is available).
  * Wrapped with a circuit breaker to fast-fail when ONNX is unhealthy.
  *
@@ -757,7 +768,10 @@ export async function getTextEmbedding(text: string): Promise<number[]> {
       }
 
       const tokens = await tokenize(text);
-      const inputTensor = new ort.Tensor("int64", new BigInt64Array(tokens.map(BigInt)), [1, tokens.length]);
+      // Rocca's clip-text-vit-32-float32-**int32**.onnx expects int32 input_ids.
+      // Xenova exports (fashion-clip, vit-l-14) use int64. Wrong dtype makes every
+      // text run fail → clip-text circuit opens during reindex (see terminal logs).
+      const inputTensor = createClipTextInputTensor(tokens);
 
       const inputName = textSession.inputNames[0];
       const feeds: Record<string, ort.Tensor> = { [inputName]: inputTensor };
