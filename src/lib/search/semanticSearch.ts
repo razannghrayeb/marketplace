@@ -351,41 +351,42 @@ function buildSemanticQuery(query: string, entities: QueryEntities, intent: Quer
 // Dynamic Entity Learning
 // ============================================================================
 
-/**
- * Load brands from database to extend knowledge base
- */
-export async function loadBrandsFromDB(): Promise<void> {
-  try {
-    const result = await pg.query(
-      `SELECT DISTINCT LOWER(brand) as brand FROM products WHERE brand IS NOT NULL`
-    );
-    for (const row of result.rows) {
-      KNOWN_BRANDS.add(row.brand);
-    }
-    console.log(`Loaded ${result.rowCount} brands from database`);
-  } catch (err) {
-    console.warn("Could not load brands from DB:", err);
-  }
-}
+let _dbEntitiesLoaded = false;
 
 /**
- * Load categories from database
+ * One-time DB enrichment — safe to call multiple times (no-op after first).
+ * Call once at startup before serving traffic.
  */
-export async function loadCategoriesFromDB(): Promise<void> {
+export async function loadEntitiesFromDB(): Promise<void> {
+  if (_dbEntitiesLoaded) return;
+
   try {
-    const result = await pg.query(
-      `SELECT DISTINCT LOWER(category) as category FROM products WHERE category IS NOT NULL`
-    );
-    for (const row of result.rows) {
+    const [brandsResult, categoriesResult] = await Promise.all([
+      pg.query(`SELECT DISTINCT LOWER(brand) as brand FROM products WHERE brand IS NOT NULL`),
+      pg.query(`SELECT DISTINCT LOWER(category) as category FROM products WHERE category IS NOT NULL`),
+    ]);
+
+    for (const row of brandsResult.rows) {
+      KNOWN_BRANDS.add(row.brand);
+    }
+
+    for (const row of categoriesResult.rows) {
       if (!CATEGORY_MAP[row.category]) {
         CATEGORY_MAP[row.category] = [row.category];
       }
     }
-    console.log(`Loaded ${result.rowCount} categories from database`);
+
+    _dbEntitiesLoaded = true;
+    console.log(`[SemanticSearch] Loaded ${brandsResult.rowCount} brands + ${categoriesResult.rowCount} categories from DB`);
   } catch (err) {
-    console.warn("Could not load categories from DB:", err);
+    console.warn("[SemanticSearch] Could not load entities from DB:", err);
   }
 }
+
+/** @deprecated Use loadEntitiesFromDB() instead */
+export const loadBrandsFromDB = loadEntitiesFromDB;
+/** @deprecated Use loadEntitiesFromDB() instead */
+export const loadCategoriesFromDB = loadEntitiesFromDB;
 
 // ============================================================================
 // Hybrid Search Scoring

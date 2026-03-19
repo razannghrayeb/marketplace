@@ -105,6 +105,7 @@ import {
   suggestPromptImprovements,
   recommendTemplate,
 } from "../../lib/search/promptTemplates";
+import { validateImage } from "../../lib/image";
 import multer from "multer";
 
 const router = Router();
@@ -285,6 +286,11 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
   try {
     if (!req.file) {
       return res.status(400).json({ error: "Image file is required" });
+    }
+
+    const validation = await validateImage(req.file.buffer);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error || "Invalid image" });
     }
     
     const result = await imageSearch(req.file.buffer, {

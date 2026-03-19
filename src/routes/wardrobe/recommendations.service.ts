@@ -8,6 +8,11 @@ import { config } from "../../config";
 import { getStyleProfile } from "./styleProfile.service";
 import { analyzeWardrobeGaps } from "./gaps.service";
 import { getTopCompatibleItems } from "./compatibility.service";
+import { 
+  getOnboardingRecommendations as getColdStartOnboarding,
+  isUserColdStart 
+} from "../../lib/recommendations/coldStart";
+import { getAdaptedEssentials, inferPriceTier } from "../../lib/wardrobe/lifestyleAdapter";
 
 // ============================================================================
 // Types
@@ -384,4 +389,52 @@ export async function completeLookSuggestions(
   }
 
   return suggestions.slice(0, limit);
+}
+
+// ============================================================================
+// Cold Start / Onboarding Recommendations
+// ============================================================================
+
+/**
+ * Get onboarding recommendations for new users with empty/small wardrobes
+ */
+export async function getOnboardingRecommendationsForUser(
+  userId: number,
+  limit: number = 20
+): Promise<ProductRecommendation[]> {
+  const isColdStart = await isUserColdStart(userId);
+  
+  if (!isColdStart) {
+    // User has enough wardrobe items, use regular recommendations
+    return getRecommendations(userId, { limit });
+  }
+  
+  // Use cold start onboarding logic
+  const onboardingRecs = await getColdStartOnboarding(userId, limit);
+  
+  return onboardingRecs.map(rec => ({
+    product_id: rec.productId,
+    title: rec.title,
+    brand: rec.brand,
+    category: rec.category,
+    price_cents: rec.priceCents,
+    image_url: rec.imageUrl,
+    score: rec.score,
+    reason: rec.reason,
+    reason_type: rec.reasonType as "gap" | "style_match" | "compatible" | "trending",
+  }));
+}
+
+/**
+ * Get user's adapted essential categories based on their lifestyle
+ */
+export async function getAdaptedEssentialsForUser(userId: number) {
+  return getAdaptedEssentials(userId);
+}
+
+/**
+ * Get user's inferred price tier
+ */
+export async function getUserPriceTier(userId: number) {
+  return inferPriceTier(userId);
 }

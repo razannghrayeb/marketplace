@@ -20,8 +20,9 @@ import {
   rateLimit,
 } from "./middleware/index";
 import { metricsMiddleware } from "./middleware/metrics";
-// FIX: import initClip so it can be called at startup
 import { initClip } from "./lib/image/clip";
+import { blip } from "./lib/image/blip";
+import { loadEntitiesFromDB } from "./lib/search/semanticSearch";
 
 const ML_ROUTE_PREFIXES = [
   "/search",
@@ -177,11 +178,24 @@ export async function createServer() {
       await initClip();
       console.log("[server] ✅ CLIP models ready");
     } catch (err) {
-      // Crash loudly — a broken ML service silently serving 500s is worse
-      // than a clean startup failure that surfaces in Cloud Run logs.
       console.error("[server] ❌ FATAL: CLIP model initialization failed:", err);
       process.exit(1);
     }
+
+    // BLIP is optional — hybrid search degrades gracefully without it,
+    // but when models are present captions significantly improve image search.
+    try {
+      console.log("[server] Initializing BLIP captioning model...");
+      await blip.init();
+      console.log("[server] ✅ BLIP captioning ready");
+    } catch (err) {
+      console.warn("[server] ⚠️ BLIP init failed — image search will use image-only embeddings:", (err as Error).message);
+    }
+
+    // Pre-load brand/category knowledge base from DB for semantic search
+    loadEntitiesFromDB().catch((err) =>
+      console.warn("[server] ⚠️ Entity loading failed:", err)
+    );
   }
 
   if (isApiRole) {

@@ -2,6 +2,7 @@
  * Compare Service
  * 
  * Business logic for product comparison feature.
+ * Now includes review sentiment analysis.
  */
 
 import { 
@@ -27,6 +28,11 @@ import {
   PriceAnalysis,
   CategoryBaseline,
 } from "../../lib/compare/priceAnomalyDetector";
+import {
+  analyzeProductReviews,
+  compareProductReviews,
+  type ReviewAnalysis,
+} from "../../lib/reviews/sentimentAnalysis";
 
 // ============================================================================
 // Types
@@ -221,4 +227,26 @@ export function validateTextInput(
     return { error: "Title is required" };
   }
   return null;
+}
+
+// ============================================================================
+// Review Analysis
+// ============================================================================
+
+/**
+ * Get review analysis for a single product
+ */
+export async function getProductReviewAnalysis(
+  productId: number
+): Promise<ReviewAnalysis> {
+  return analyzeProductReviews(productId);
+}
+
+/**
+ * Compare reviews across multiple products
+ */
+export async function compareReviews(
+  productIds: number[]
+): Promise<Map<number, ReviewAnalysis>> {
+  return compareProductReviews(productIds);
 }

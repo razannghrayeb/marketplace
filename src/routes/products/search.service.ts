@@ -14,9 +14,7 @@ import { config } from "../../config";
 import { getImagesForProducts } from "./images.service";
 import { hammingDistance } from "../../lib/products";
 import {
-  parseQuery,
   countEntityMatches,
-  type ParsedQuery,
 } from "../../lib/search";
 import {
   processQuery,
@@ -182,7 +180,13 @@ export async function searchByImageWithSimilarity(
 
   // Build filter array
   const filter: any[] = [{ term: { is_hidden: false } }];
-  if (filters.category) filter.push({ term: { category: filters.category } });
+  if (filters.category) {
+    if (Array.isArray(filters.category)) {
+      filter.push({ terms: { category: filters.category } });
+    } else {
+      filter.push({ term: { category: filters.category } });
+    }
+  }
   if (filters.brand) filter.push({ term: { brand: filters.brand } });
   if (filters.vendorId) filter.push({ term: { vendor_id: filters.vendorId } });
 
@@ -212,20 +216,23 @@ export async function searchByImageWithSimilarity(
 
   const hits = osResponse.body.hits.hits;
 
-  // OpenSearch k-NN scores are cosine similarity (0-1 for normalized vectors)
-  // Filter by threshold and normalize scores
-  const maxScore = hits.length > 0 ? hits[0]._score : 1;
+  // OpenSearch cosinesimil scores are in [0, 2] range: score = 1 + cosine_sim
+  // Convert to standard [0, 1] cosine similarity for absolute thresholding.
+  const toAbsoluteScore = (rawScore: number): number => {
+    if (rawScore >= 0 && rawScore <= 2) return Math.max(0, Math.min(1, rawScore - 1));
+    if (rawScore >= 0 && rawScore <= 1) return rawScore; // already normalized
+    return Math.max(0, Math.min(1, rawScore)); // clamp fallback
+  };
 
   const filteredHits = hits.filter((hit: any) => {
-    const normalizedScore = hit._score / maxScore;
-    return normalizedScore >= similarityThreshold;
+    return toAbsoluteScore(hit._score) >= similarityThreshold;
   });
 
   const productIds = filteredHits.slice(0, limit).map((hit: any) => hit._source.product_id);
   const scoreMap = new Map<string, number>();
   filteredHits.forEach((hit: any) => {
-    const normalizedScore = hit._score / maxScore;
-    scoreMap.set(hit._source.product_id, Math.round(normalizedScore * 100) / 100);
+    const score = toAbsoluteScore(hit._score);
+    scoreMap.set(hit._source.product_id, Math.round(score * 100) / 100);
   });
 
   // Fetch product data
@@ -279,16 +286,19 @@ export async function findSimilarByPHash(
   excludeIds: string[],
   limit: number = 10
 ): Promise<ProductResult[]> {
-  // Get all products with pHash
-  const result = await pg.query(
-    `SELECT id, p_hash FROM products 
-     WHERE p_hash IS NOT NULL AND is_hidden = false 
-     ${
-       excludeIds.length > 0
-         ? `AND id NOT IN (${excludeIds.map((id) => parseInt(id, 10)).join(",")})`
-         : ""
-     }`
-  );
+  // Get all products with pHash (parameterized to prevent SQL injection)
+  const excludeNumeric = excludeIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
+  const result = excludeNumeric.length > 0
+    ? await pg.query(
+        `SELECT id, p_hash FROM products
+         WHERE p_hash IS NOT NULL AND is_hidden = false
+         AND id != ALL($1::int[])`,
+        [excludeNumeric]
+      )
+    : await pg.query(
+        `SELECT id, p_hash FROM products
+         WHERE p_hash IS NOT NULL AND is_hidden = false`
+      );
 
   // Calculate Hamming distance and filter similar
   const similar: Array<{ id: number; distance: number }> = [];
@@ -359,11 +369,28 @@ export async function searchByTextWithRelated(
     return { results: [], meta: { total_results: 0 } };
   }
 
-  // Step 1: Process query (spelling, arabizi, normalization)
+  // Single-pass query processing (spelling, arabizi, entity extraction, intent)
   const processed = useLLM ? await processQuery(query) : await processQueryFast(query);
-
-  // Use the search query (auto-corrected or original based on confidence)
   const effectiveQuery = processed.searchQuery;
+
+  // Use AST entities directly — no second parseQuery call needed
+  const entities = {
+    brands: processed.entities.brands || [],
+    categories: processed.entities.categories || [],
+    colors: processed.entities.colors || [],
+    sizes: processed.entities.sizes || [],
+    priceRange: processed.filters?.priceRange,
+    attributes: [
+      ...(processed.entities.materials || []),
+      ...(processed.entities.patterns || []),
+    ],
+  };
+  const expandedTerms = [
+    ...processed.expansions.synonyms,
+    ...processed.expansions.categoryExpansions,
+    ...processed.expansions.corrections,
+  ];
+  const semanticQuery = effectiveQuery;
 
   // Merge extracted filters with explicit filters (explicit takes precedence)
   const mergedFilters = {
@@ -373,10 +400,6 @@ export async function searchByTextWithRelated(
     brand: filters.brand || processed.entities.brands[0],
     category: filters.category || processed.entities.categories[0],
   };
-
-  // Parse query with semantic understanding
-  const parsedQuery = parseQuery(effectiveQuery);
-  const { entities, expandedTerms, semanticQuery, intent } = parsedQuery;
 
   // Build filter array - ONLY explicit user-provided filters go here
   const filter: any[] = [{ term: { is_hidden: false } }];
@@ -483,7 +506,6 @@ export async function searchByTextWithRelated(
       query: effectiveQuery,
       total_results: results.length,
       total_related: related.length,
-      parsed_query: parsedQuery,
       processed_query: processed,
       did_you_mean: processed.corrections.length > 0 && processed.confidence < 0.85
         ? `Did you mean "${processed.searchQuery}"?`
@@ -571,7 +593,11 @@ const LBP_TO_USD = 89000;
  */
 function applySearchFilters(filter: any[], filters: SearchFilters): void {
   if (filters.category) {
-    filter.push({ term: { category: filters.category } });
+    if (Array.isArray(filters.category)) {
+      filter.push({ terms: { category: filters.category } });
+    } else {
+      filter.push({ term: { category: filters.category } });
+    }
   }
   if (filters.brand) {
     filter.push({ term: { brand: filters.brand } });

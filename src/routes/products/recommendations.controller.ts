@@ -26,6 +26,10 @@ function parseRecommendationOptions(query: any, headers: any): RecommendationOpt
     debug: query.debug === "true",
     userId: headers["x-user-id"] || query.userId,
     sessionId: headers["x-session-id"] || query.sessionId,
+    // New MMR diversity options
+    diversityLambda: query.diversityLambda ? parseFloat(query.diversityLambda) : 0.7,
+    applyDiversity: query.applyDiversity !== "false",
+    applyColdStartBoost: query.applyColdStartBoost !== "false",
   };
 }
 
@@ -44,6 +48,9 @@ function parseRecommendationOptions(query: any, headers: any): RecommendationOpt
  * - useModel: Use ML model if available (default: true)
  * - minScore: Minimum score threshold (default: 0)
  * - debug: Include timing info (default: false)
+ * - diversityLambda: MMR diversity parameter 0-1 (default: 0.7)
+ * - applyDiversity: Enable MMR diversity ranking (default: true)
+ * - applyColdStartBoost: Boost new products (default: true)
  * 
  * Headers:
  * - x-user-id: User ID for impression tracking

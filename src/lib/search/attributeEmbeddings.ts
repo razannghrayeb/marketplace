@@ -3,10 +3,17 @@
  * 
  * Generates specialized embeddings for different semantic attributes
  * using prompt engineering and CLIP text/image encoding.
+ * 
+ * Now includes:
+ * - Redis caching for embeddings (24h TTL)
+ * - Attention-based adaptive fusion (replaces static 70/30)
+ * - A/B testing support for fusion strategies
  */
 
 import { getTextEmbedding } from "../image/clip";
 import { processImageForEmbedding } from "../image/processor";
+import { getOrComputeImageEmbedding, getOrComputeTextEmbedding } from "../cache/embeddingCache";
+import { fuseEmbeddingsAdaptive, getAdaptiveWeights } from "./attentionFusion";
 import type { SemanticAttribute } from "./multiVectorSearch";
 
 // ============================================================================
@@ -31,51 +38,68 @@ const ATTRIBUTE_PROMPTS: Record<Exclude<SemanticAttribute, "global">, string> = 
 
 export class AttributeEmbeddingGenerator {
   /**
-   * Generate embedding for a specific semantic attribute from an image
-   * 
-   * Strategy: Use image embedding directly (CLIP is trained to understand all visual aspects)
-   * The attribute specificity comes from the multi-vector search weights, not from
-   * different embedding models.
+   * Generate embedding for a specific semantic attribute from an image.
+   *
+   * Now uses:
+   * - Redis caching for embeddings (avoids recomputation)
+   * - Attention-based adaptive fusion (replaces static 70/30)
+   * - Learned attribute-specific weights
    */
   async generateImageAttributeEmbedding(
     imageBuffer: Buffer,
     attribute: SemanticAttribute
   ): Promise<number[]> {
-    if (attribute === "global") {
-      // Global embedding: standard image embedding
-      return await processImageForEmbedding(imageBuffer);
-    }
+    // Try cache first, then compute
+    return getOrComputeImageEmbedding(imageBuffer, attribute, async () => {
+      const imageEmbed = await processImageForEmbedding(imageBuffer);
 
-    // For per-attribute embeddings, we use the same image embedding
-    // The semantic separation happens during multi-vector search via weighted combination
-    // Future enhancement: Could fine-tune separate models per attribute or use attention masks
-    return await processImageForEmbedding(imageBuffer);
+      if (attribute === "global") {
+        return imageEmbed;
+      }
+
+      try {
+        const prompt = ATTRIBUTE_PROMPTS[attribute as Exclude<SemanticAttribute, "global">];
+        const textEmbed = await getTextEmbedding(prompt);
+
+        // Use attention-based adaptive fusion instead of static 70/30
+        const { embedding } = fuseEmbeddingsAdaptive(imageEmbed, textEmbed, attribute);
+        return embedding;
+      } catch {
+        return imageEmbed;
+      }
+    });
   }
 
   /**
    * Generate embedding for a specific semantic attribute from text description
    * 
    * Uses prompt engineering to guide the text encoder toward the desired attribute
+   * Now with caching support
    */
   async generateTextAttributeEmbedding(
     text: string,
     attribute: SemanticAttribute
   ): Promise<number[]> {
-    if (attribute === "global") {
-      // Global: use text as-is
-      return await getTextEmbedding(text);
-    }
+    // Build cache key from text + attribute
+    const cacheText = attribute === "global" ? text : `${ATTRIBUTE_PROMPTS[attribute as Exclude<SemanticAttribute, "global">]}: ${text}`;
+    
+    return getOrComputeTextEmbedding(cacheText, attribute, async () => {
+      if (attribute === "global") {
+        return await getTextEmbedding(text);
+      }
 
-    // Combine user text with attribute-specific prompt
-    const attributePrompt = ATTRIBUTE_PROMPTS[attribute as Exclude<SemanticAttribute, "global">];
-    const augmentedText = `${attributePrompt}: ${text}`;
+      const attributePrompt = ATTRIBUTE_PROMPTS[attribute as Exclude<SemanticAttribute, "global">];
+      const augmentedText = `${attributePrompt}: ${text}`;
 
-    return await getTextEmbedding(augmentedText);
+      return await getTextEmbedding(augmentedText);
+    });
   }
 
   /**
-   * Generate all attribute embeddings for an image (for ingestion)
-   * Returns a map of attribute → embedding vector
+   * Generate all attribute embeddings for an image (for ingestion).
+   * Each attribute gets a distinct embedding: image fused with an
+   * attribute-specific text prompt so the vectors occupy different
+   * regions of CLIP space.
    */
   async generateAllAttributeEmbeddings(
     imageBuffer: Buffer
@@ -89,16 +113,16 @@ export class AttributeEmbeddingGenerator {
       "pattern",
     ];
 
-    // For now, all use the same image embedding (separation via search weights)
-    // In production, you'd extract per-attribute embeddings using:
-    // - Attention-based cropping/masking
-    // - Separate fine-tuned models per attribute
-    // - Multi-task learning with attribute-specific heads
-    const globalEmbedding = await processImageForEmbedding(imageBuffer);
+    const results = await Promise.all(
+      attributes.map(async (attr) => ({
+        attr,
+        embedding: await this.generateImageAttributeEmbedding(imageBuffer, attr),
+      }))
+    );
 
     const embeddings: Partial<Record<SemanticAttribute, number[]>> = {};
-    for (const attr of attributes) {
-      embeddings[attr] = globalEmbedding; // Shared for now
+    for (const { attr, embedding } of results) {
+      embeddings[attr] = embedding;
     }
 
     return embeddings as Record<SemanticAttribute, number[]>;

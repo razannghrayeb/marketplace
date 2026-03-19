@@ -8,6 +8,7 @@
 
 import { pg } from '../../lib/core/db';
 import { osClient } from '../../lib/core/opensearch';
+import { config } from '../../config';
 import { IntentParserService, ParsedIntent } from '../../lib/prompt/gemeni';
 import { CompositeQueryBuilder, CompositeQuery } from '../../lib/query/compositeQueryBuilder';
 import { QueryMapper } from '../../lib/query/queryMapper';
@@ -106,11 +107,12 @@ export async function textSearch(
     const filterClauses: any[] = [];
 
     // Primary text match – use the corrected searchQuery
+    // Fields must match the OpenSearch index mapping (title, category, brand)
     if (ast.searchQuery) {
       mustClauses.push({
         multi_match: {
           query: ast.searchQuery,
-          fields: ['name^3', 'description^2', 'category', 'brand'],
+          fields: ['title^3', 'category', 'brand'],
           fuzziness: 'AUTO',
         },
       });
@@ -128,7 +130,7 @@ export async function textSearch(
       shouldClauses.push({
         multi_match: {
           query: expansionTerms.join(' '),
-          fields: ['name', 'description', 'category'],
+          fields: ['title', 'category', 'brand'],
           fuzziness: 'AUTO',
           boost: 0.3,
         },
@@ -136,6 +138,7 @@ export async function textSearch(
     }
 
     // ── 4. Apply merged filters ────────────────────────────────────────────
+    // Field names must match OpenSearch index mapping (attr_color, attr_gender, price_usd, etc.)
     if (merged.category) {
       filterClauses.push({ term: { category: merged.category.toLowerCase() } });
     }
@@ -143,22 +146,19 @@ export async function textSearch(
       filterClauses.push({ term: { brand: merged.brand.toLowerCase() } });
     }
     if (merged.color) {
-      filterClauses.push({ term: { color: merged.color.toLowerCase() } });
+      filterClauses.push({ term: { attr_color: merged.color.toLowerCase() } });
     }
     if (merged.gender) {
-      filterClauses.push({ term: { gender: merged.gender.toLowerCase() } });
-    }
-    if (merged.size) {
-      filterClauses.push({ term: { size: merged.size } });
+      filterClauses.push({ term: { attr_gender: merged.gender.toLowerCase() } });
     }
     if (merged.vendorId) {
-      filterClauses.push({ term: { vendor_id: merged.vendorId } });
+      filterClauses.push({ term: { vendor_id: String(merged.vendorId) } });
     }
     if (merged.minPrice !== undefined || merged.maxPrice !== undefined) {
       const range: any = {};
       if (merged.minPrice !== undefined) range.gte = merged.minPrice;
       if (merged.maxPrice !== undefined) range.lte = merged.maxPrice;
-      filterClauses.push({ range: { price: range } });
+      filterClauses.push({ range: { price_usd: range } });
     }
 
     const searchBody: any = {
@@ -172,7 +172,7 @@ export async function textSearch(
       },
       from: offset,
       size: limit,
-      _source: ['id', 'name', 'brand', 'price', 'image_url', 'category', 'gender', 'color'],
+      _source: ['product_id', 'title', 'brand', 'price_usd', 'image_cdn', 'category', 'attr_gender', 'attr_color'],
     };
 
     // ── 5. Optional hybrid kNN boost ───────────────────────────────────────
@@ -208,22 +208,24 @@ export async function textSearch(
 
     // ── 6. Execute ─────────────────────────────────────────────────────────
     const opensearch = osClient;
-    const response = await opensearch.search({ index: 'products', body: searchBody });
+    const response = await opensearch.search({ index: config.opensearch.index, body: searchBody });
 
     const results = response.body.hits.hits.map((hit: any) => ({
-      id: hit._source.id,
-      name: hit._source.name,
+      id: hit._source.product_id,
+      name: hit._source.title,
       brand: hit._source.brand,
-      price: hit._source.price,
-      imageUrl: hit._source.image_url,
+      price: hit._source.price_usd,
+      imageUrl: hit._source.image_cdn,
       category: hit._source.category,
+      gender: hit._source.attr_gender,
+      color: hit._source.attr_color,
       score: hit._score,
     }));
 
     // ── 7. Build response ──────────────────────────────────────────────────
     return {
       results,
-      total: response.body.hits.total.value,
+      total: response.body.hits.total?.value ?? response.body.hits.total ?? 0,
       tookMs: Date.now() - startTime,
       query: summarizeAST(ast),
     };
@@ -264,7 +266,7 @@ export async function imageSearch(
 
     const opensearch = osClient;
     const response = await opensearch.search({
-      index: 'products',
+      index: config.opensearch.index,
       body: {
         size: limit,
         query: {
@@ -275,23 +277,23 @@ export async function imageSearch(
             },
           },
         },
-        _source: ['id', 'name', 'brand', 'price', 'image_url', 'category'],
+        _source: ['product_id', 'title', 'brand', 'price_usd', 'image_cdn', 'category'],
       },
     });
 
     const results = response.body.hits.hits.map((hit: any) => ({
-      id: hit._source.id,
-      name: hit._source.name,
+      id: hit._source.product_id,
+      name: hit._source.title,
       brand: hit._source.brand,
-      price: hit._source.price,
-      imageUrl: hit._source.image_url,
+      price: hit._source.price_usd,
+      imageUrl: hit._source.image_cdn,
       category: hit._source.category,
       score: hit._score,
     }));
 
     return {
       results,
-      total: response.body.hits.total.value,
+      total: response.body.hits.total?.value ?? response.body.hits.total ?? 0,
       tookMs: Date.now() - startTime,
       explanation: vectors.caption ? `Caption: "${vectors.caption}"` : undefined,
     };
@@ -332,16 +334,16 @@ export async function multiImageSearch(
 
     const opensearch = osClient;
     const response = await opensearch.search({
-      index: 'products',
+      index: config.opensearch.index,
       body: queryBundle.opensearch,
     });
 
-    const productIds = response.body.hits.hits.map((hit: any) => hit._source.id);
+    const productIds = response.body.hits.hits.map((hit: any) => hit._source.product_id);
     const hydratedResults = await hydrateProductDetails(productIds, queryBundle.sqlFilters);
 
     const results = response.body.hits.hits
       .map((hit: any) => {
-        const hydrated = hydratedResults.find((p: any) => p.id === hit._source.id);
+        const hydrated = hydratedResults.find((p: any) => String(p.id) === String(hit._source.product_id));
         return hydrated
           ? {
               ...hydrated,
@@ -522,16 +524,20 @@ function buildFiltersFromIntent(intent: ParsedIntent): any {
   return filters;
 }
 
-async function hydrateProductDetails(productIds: number[], sqlFilters: any[]): Promise<any[]> {
+async function hydrateProductDetails(productIds: (string | number)[], sqlFilters: any[]): Promise<any[]> {
   if (productIds.length === 0) return [];
   const pool = pg;
+  const numericIds = productIds.map(id => Number(id)).filter(id => !isNaN(id));
+  if (numericIds.length === 0) return [];
   const query = `
-    SELECT p.id, p.name, p.brand, p.price, p.image_url, p.category,
-           p.attributes, p.description, p.vendor_id, p.size, p.gender
+    SELECT p.id, p.title AS name, p.brand,
+           ROUND(p.price_cents / 100.0, 2) AS price,
+           COALESCE(p.image_cdn, p.image_url) AS image_url,
+           p.category, p.description, p.vendor_id, p.size, p.color
     FROM products p
-    WHERE p.id = ANY($1)
+    WHERE p.id = ANY($1::bigint[])
   `;
-  const result = await pool.query(query, [productIds]);
+  const result = await pool.query(query, [numericIds]);
   return result.rows;
 }
 

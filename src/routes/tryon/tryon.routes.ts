@@ -30,6 +30,29 @@ const tryonRateLimit = rateLimit({ windowMs: 5 * 60 * 1000, maxRequests: 10 });
 router.get("/service/health", controller.serviceHealth);
 
 // ============================================================================
+// Garment Validation (pre-check)
+// ============================================================================
+
+router.post("/validate", controller.validateGarmentEndpoint);
+
+// ============================================================================
+// Webhook Management
+// ============================================================================
+
+router.post("/webhooks", controller.createWebhook);
+router.get("/webhooks", controller.getWebhook);
+router.delete("/webhooks", controller.removeWebhook);
+router.post("/webhooks/disable", controller.pauseWebhook);
+
+// ============================================================================
+// Admin: Dead Letter Queue & Retry Management
+// ============================================================================
+
+router.get("/admin/dlq", controller.getDLQ);
+router.post("/admin/dlq/:jobId/retry", controller.retryDLQJob);
+router.post("/admin/process-retries", controller.processRetries);
+
+// ============================================================================
 // Saved Results (must be before /:id)
 // ============================================================================
 
