@@ -311,6 +311,48 @@ export function confidenceToLevel(confidence: number): ConfidenceLevel {
 }
 
 /**
+ * Words that are valid search terms and should NOT be spell-corrected
+ * even if they're similar to dictionary entries.
+ */
+const VALID_SEARCH_TERMS = new Set([
+  // Product types that shouldn't be corrected to category names
+  "jogging", "running", "walking", "hiking", "training", "workout",
+  "casual", "formal", "vintage", "modern", "classic", "trendy",
+  "summer", "winter", "spring", "autumn", "fall",
+  "party", "wedding", "office", "beach", "gym", "sport", "sports",
+  "everyday", "daily", "weekend",
+]);
+
+/**
+ * Check if a word is an exact match (or alias) in any dictionary.
+ * If so, it shouldn't be "corrected" to something else.
+ */
+function isExactDictionaryMatch(
+  word: string,
+  dictionaries: {
+    brands: Map<string, DictionaryEntry>;
+    categories: Map<string, DictionaryEntry>;
+    attributes: Map<string, DictionaryEntry>;
+    commonQueries: Map<string, DictionaryEntry>;
+  },
+): boolean {
+  const normalized = word.toLowerCase();
+  
+  for (const dict of [dictionaries.brands, dictionaries.categories, dictionaries.attributes, dictionaries.commonQueries]) {
+    // Check if it's a key
+    if (dict.has(normalized)) return true;
+    
+    // Check if it's an alias of any entry
+    for (const entry of dict.values()) {
+      if (entry.aliases?.some(a => a.toLowerCase() === normalized)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Find corrections for all words in a query
  */
 export function correctQuery(
@@ -327,6 +369,19 @@ export function correctQuery(
   const corrections: Correction[] = [];
   
   for (const word of words) {
+    const normalizedWord = word.toLowerCase();
+    
+    // Skip words that are known valid search terms
+    if (VALID_SEARCH_TERMS.has(normalizedWord)) {
+      continue;
+    }
+    
+    // Skip words that are exact matches in any dictionary (including aliases)
+    // This prevents "jogging" from being corrected when "jogging" is an alias
+    if (isExactDictionaryMatch(word, dictionaries)) {
+      continue;
+    }
+    
     // Try each dictionary in order of priority
     let bestCorrection: SpellCorrection | null = null;
     

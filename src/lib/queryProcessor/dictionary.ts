@@ -67,7 +67,8 @@ const CATEGORY_DATA: Array<{
   popularity: number;
 }> = [
   { name: "tops", aliases: ["top", "shirts", "shirt", "blouse", "blouses", "tshirt", "t-shirt", "tee", "tank", "tank top", "polo", "sweater", "hoodie", "sweatshirt", "pullover", "henley", "tunic", "crop top", "camisole"], arabic: "قمصان", arabizi: "qomsan", popularity: 0.9 },
-  { name: "bottoms", aliases: ["bottom", "pants", "pant", "trousers", "trouser", "jeans", "jean", "chinos", "chino", "joggers", "jogger", "leggings", "legging", "shorts", "short", "skirt", "skirts", "culottes", "sweatpants", "cargo"], arabic: "بناطيل", arabizi: "banatil", popularity: 0.85 },
+  { name: "bottoms", aliases: ["bottom", "pants", "pant", "trousers", "trouser", "jeans", "jean", "chinos", "chino", "leggings", "legging", "shorts", "short", "skirt", "skirts", "culottes", "sweatpants", "cargo"], arabic: "بناطيل", arabizi: "banatil", popularity: 0.85 },
+  { name: "joggers", aliases: ["jogger", "jogging pants", "jogging", "jogging bottoms", "track pants", "trackpants"], arabic: "بنطلون جوجينج", arabizi: "jogging", popularity: 0.75 },
   { name: "dresses", aliases: ["dress", "gown", "frock", "maxi", "midi", "sundress", "jumpsuit", "romper"], arabic: "فساتين", arabizi: "fsatin", popularity: 0.88 },
   { name: "outerwear", aliases: ["jacket", "jackets", "coat", "coats", "blazer", "blazers", "cardigan", "cardigans", "parka", "windbreaker", "vest", "gilet", "trench", "poncho"], arabic: "جاكيتات", arabizi: "jaketaat", popularity: 0.82 },
   { name: "footwear", aliases: ["shoes", "shoe", "sneakers", "sneaker", "boots", "boot", "sandals", "sandal", "heels", "heel", "loafers", "loafer", "flats", "flat", "mules", "slides", "slippers", "pumps", "trainers", "trainer", "oxfords"], arabic: "أحذية", arabizi: "a7thya", popularity: 0.87 },
