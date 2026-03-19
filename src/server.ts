@@ -20,6 +20,8 @@ import {
   rateLimit,
 } from "./middleware/index";
 import { metricsMiddleware } from "./middleware/metrics";
+// FIX: import initClip so it can be called at startup
+import { initClip } from "./lib/image/clip";
 
 const ML_ROUTE_PREFIXES = [
   "/search",
@@ -159,6 +161,27 @@ export async function createServer() {
     app.use("/api/wardrobe", wardrobeRouter);
     app.use("/api/labeling", labelingRouter);
     app.use("/products/price-drops", productsRouter);
+
+    // =========================================================================
+    // FIX: Initialize CLIP models at startup before serving any traffic.
+    //
+    // Previously initClip() was never called, so imageSession and textSession
+    // remained null. The first search request would hit getTextEmbedding()
+    // which immediately threw: "CLIP text model not loaded."
+    //
+    // We call it here (after routes are registered but before app.listen in
+    // index.ts) so both sessions are fully loaded and ready.
+    // =========================================================================
+    try {
+      console.log("[server] Initializing CLIP models...");
+      await initClip();
+      console.log("[server] ✅ CLIP models ready");
+    } catch (err) {
+      // Crash loudly — a broken ML service silently serving 500s is worse
+      // than a clean startup failure that surfaces in Cloud Run logs.
+      console.error("[server] ❌ FATAL: CLIP model initialization failed:", err);
+      process.exit(1);
+    }
   }
 
   if (isApiRole) {

@@ -1,13 +1,13 @@
 /**
  * CLIP Model Service
- * 
+ *
  * CLIP (Contrastive Language-Image Pre-training) model for image embeddings.
- * 
+ *
  * Supported models (in order of preference for fashion):
  * 1. Fashion-CLIP (patrickjohncyh/fashion-clip) - Best for apparel details
  * 2. ViT-L/14 - Higher accuracy, larger embeddings (768-dim)
  * 3. ViT-B/32 - Baseline model (512-dim) - LEGACY
- * 
+ *
  * Set CLIP_MODEL_TYPE env var to: "fashion-clip", "vit-l-14", or "vit-b-32"
  */
 import * as ort from "onnxruntime-node";
@@ -86,9 +86,11 @@ function getActiveModelType(): ClipModelType {
     if (isUsableModelFile(envModelPath)) {
       return envModel;
     }
-    console.warn(`Requested CLIP_MODEL_TYPE=${envModel}, but model file is missing/empty: ${envModelPath}`);
+    console.warn(
+      `[CLIP] Requested CLIP_MODEL_TYPE=${envModel}, but model file is missing/too small: ${envModelPath}`
+    );
   }
-  
+
   // Auto-detect: prefer fashion-clip > vit-l-14 > vit-b-32
   const priority: ClipModelType[] = ["fashion-clip", "vit-l-14", "vit-b-32"];
   for (const modelType of priority) {
@@ -98,7 +100,7 @@ function getActiveModelType(): ClipModelType {
       return modelType;
     }
   }
-  
+
   return "vit-b-32"; // Default fallback
 }
 
@@ -120,18 +122,53 @@ let EMBEDDING_DIM = activeConfig.embeddingDim;
 const MEAN = [0.48145466, 0.4578275, 0.40821073];
 const STD = [0.26862954, 0.26130258, 0.27577711];
 
+// ============================================================================
+// FIX: in-flight init guard — prevents parallel calls each triggering their
+//      own InferenceSession.create() during concurrent startup requests
+// ============================================================================
+let initPromise: Promise<void> | null = null;
+
 /**
- * Initialize CLIP models
+ * Initialize CLIP models.
+ * Safe to call multiple times — subsequent calls are no-ops once loaded.
  */
 export async function initClip(modelType?: ClipModelType): Promise<void> {
-  // Allow explicit model selection
+  // If already initializing, wait for that to finish instead of double-loading
+  if (initPromise) {
+    return initPromise;
+  }
+
+  initPromise = _doInit(modelType).catch((err) => {
+    // Reset so a retry is possible
+    initPromise = null;
+    throw err;
+  });
+
+  return initPromise;
+}
+
+async function _doInit(modelType?: ClipModelType): Promise<void> {
+  // ── Diagnostics: always log what we see on disk ──────────────────────────
+  console.log(`[CLIP] MODEL_DIR = ${MODEL_DIR}`);
+  try {
+    const files = fs.readdirSync(MODEL_DIR);
+    console.log(`[CLIP] Files in model dir: ${files.join(", ")}`);
+    for (const f of files) {
+      const fp = path.join(MODEL_DIR, f);
+      const stat = fs.statSync(fp);
+      console.log(`[CLIP]   ${f} — ${(stat.size / 1024 / 1024).toFixed(1)} MB`);
+    }
+  } catch (e) {
+    console.error(`[CLIP] ⚠️  Cannot read MODEL_DIR: ${e}`);
+  }
+
+  // ── Model selection ───────────────────────────────────────────────────────
   if (modelType && MODEL_CONFIGS[modelType]) {
     activeModelType = modelType;
     activeConfig = MODEL_CONFIGS[modelType];
     IMAGE_SIZE = activeConfig.imageSize;
     EMBEDDING_DIM = activeConfig.embeddingDim;
   } else {
-    // Re-detect best available model
     activeModelType = getActiveModelType();
     activeConfig = MODEL_CONFIGS[activeModelType];
     IMAGE_SIZE = activeConfig.imageSize;
@@ -141,41 +178,62 @@ export async function initClip(modelType?: ClipModelType): Promise<void> {
   const imageModelPath = getImageModelPath();
   const textModelPath = getTextModelPath();
 
+  console.log(`[CLIP] Selected model type : ${activeModelType}`);
+  console.log(`[CLIP] Image model path    : ${imageModelPath}`);
+  console.log(`[CLIP] Text  model path    : ${textModelPath}`);
+  console.log(`[CLIP] Image model usable  : ${isUsableModelFile(imageModelPath)}`);
+  console.log(`[CLIP] Text  model usable  : ${isUsableModelFile(textModelPath)}`);
+
   if (!isUsableModelFile(imageModelPath)) {
     throw new Error(
-      `CLIP image model missing/invalid at ${imageModelPath}. Run 'npx tsx scripts/download-clip.ts' first.\n` +
-      `Available models: fashion-clip, vit-l-14, vit-b-32`
+      `[CLIP] Image model missing or too small at: ${imageModelPath}\n` +
+        `Available .onnx files in ${MODEL_DIR}: ` +
+        (fs.existsSync(MODEL_DIR)
+          ? fs
+              .readdirSync(MODEL_DIR)
+              .filter((f) => f.endsWith(".onnx"))
+              .join(", ") || "none"
+          : "directory does not exist")
     );
   }
 
-  // Reset sessions if switching models
-  if (imageSession) {
-    imageSession = null;
-  }
-  if (textSession) {
-    textSession = null;
-  }
+  // ── Reset sessions if switching models ───────────────────────────────────
+  imageSession = null;
+  textSession = null;
 
-  if (!imageSession) {
-    console.log(`Loading ${activeConfig.name} image model...`);
-    console.log(`  - Embedding dimension: ${EMBEDDING_DIM}`);
-    console.log(`  - ${activeConfig.description}`);
-    imageSession = await ort.InferenceSession.create(imageModelPath);
-    console.log(`${activeConfig.name} image model loaded`);
-  }
+  // ── Load image model ─────────────────────────────────────────────────────
+  console.log(`[CLIP] Loading image model: ${activeConfig.name}...`);
+  console.log(`[CLIP]   Embedding dim: ${EMBEDDING_DIM}`);
+  console.log(`[CLIP]   ${activeConfig.description}`);
+  imageSession = await ort.InferenceSession.create(imageModelPath);
+  console.log(`[CLIP] ✅ Image model loaded`);
 
-  if (fs.existsSync(textModelPath) && !textSession) {
-    console.log(`Loading ${activeConfig.name} text model...`);
+  // ── Load text model ───────────────────────────────────────────────────────
+  // FIX: use isUsableModelFile (size-aware) instead of just fs.existsSync
+  if (isUsableModelFile(textModelPath)) {
+    console.log(`[CLIP] Loading text model: ${activeConfig.name}...`);
     textSession = await ort.InferenceSession.create(textModelPath);
-    console.log(`${activeConfig.name} text model loaded`);
+    console.log(`[CLIP] ✅ Text model loaded`);
+  } else {
+    console.warn(
+      `[CLIP] ⚠️  Text model missing or too small at: ${textModelPath}. ` +
+        `Text search will not be available.`
+    );
   }
 }
 
 /**
- * Check if CLIP models are available
+ * Check if CLIP image model is available on disk
  */
 export function isClipAvailable(): boolean {
   return isUsableModelFile(getImageModelPath());
+}
+
+/**
+ * Check if CLIP text model is loaded and ready
+ */
+export function isTextSearchAvailable(): boolean {
+  return textSession !== null;
 }
 
 /**
@@ -188,7 +246,11 @@ export function getModelInfo(): { type: ClipModelType; config: ModelConfig } {
 /**
  * List available models (downloaded)
  */
-export function listAvailableModels(): Array<{ type: ClipModelType; available: boolean; config: ModelConfig }> {
+export function listAvailableModels(): Array<{
+  type: ClipModelType;
+  available: boolean;
+  config: ModelConfig;
+}> {
   return (Object.keys(MODEL_CONFIGS) as ClipModelType[]).map((type) => ({
     type,
     available: isUsableModelFile(path.join(MODEL_DIR, MODEL_CONFIGS[type].imageModelFile)),
@@ -206,10 +268,8 @@ export function preprocessImage(
   height: number,
   channels: number = 3
 ): Float32Array {
-  // Simple bilinear resize to 224x224
   const resized = resizeImage(imageData, width, height, channels, IMAGE_SIZE, IMAGE_SIZE);
 
-  // Normalize and convert to CHW format (channels first)
   const normalized = new Float32Array(3 * IMAGE_SIZE * IMAGE_SIZE);
 
   for (let c = 0; c < 3; c++) {
@@ -217,7 +277,6 @@ export function preprocessImage(
       for (let w = 0; w < IMAGE_SIZE; w++) {
         const srcIdx = (h * IMAGE_SIZE + w) * channels + c;
         const dstIdx = c * IMAGE_SIZE * IMAGE_SIZE + h * IMAGE_SIZE + w;
-        // Normalize: (pixel/255 - mean) / std
         normalized[dstIdx] = (resized[srcIdx] / 255.0 - MEAN[c]) / STD[c];
       }
     }
@@ -258,30 +317,30 @@ function resizeImage(
 /**
  * Generate image embedding from preprocessed image data
  */
-export async function getImageEmbedding(
-  preprocessedImage: Float32Array
-): Promise<number[]> {
+export async function getImageEmbedding(preprocessedImage: Float32Array): Promise<number[]> {
+  // Self-heal: load model if not yet initialized
   if (!imageSession) {
     await initClip();
   }
 
   if (!imageSession) {
-    throw new Error("CLIP image model not loaded");
+    throw new Error("[CLIP] Image model not loaded after initialization attempt.");
   }
 
-  // Create input tensor [1, 3, 224, 224]
-  const inputTensor = new ort.Tensor("float32", preprocessedImage, [1, 3, IMAGE_SIZE, IMAGE_SIZE]);
+  const inputTensor = new ort.Tensor("float32", preprocessedImage, [
+    1,
+    3,
+    IMAGE_SIZE,
+    IMAGE_SIZE,
+  ]);
 
-  // Run inference - use dynamic input name (supports both "input" and "pixel_values")
   const inputName = imageSession.inputNames[0];
   const feeds: Record<string, ort.Tensor> = { [inputName]: inputTensor };
   const results = await imageSession.run(feeds);
 
-  // Get output embedding
   const outputName = imageSession.outputNames[0];
   const embedding = Array.from(results[outputName].data as Float32Array);
 
-  // L2 normalize the embedding
   return normalizeVector(embedding);
 }
 
@@ -302,15 +361,24 @@ export async function getImageEmbeddingFromBuffer(
  * Generate text embedding (if text model is available)
  */
 export async function getTextEmbedding(text: string): Promise<number[]> {
+  // FIX: self-heal exactly like getImageEmbedding — do NOT just throw
   if (!textSession) {
-    throw new Error("CLIP text model not loaded. Text search not available.");
+    await initClip();
   }
 
-  // Simple tokenization (real CLIP uses BPE tokenizer)
+  if (!textSession) {
+    // Give a detailed error so it's easy to diagnose in logs
+    throw new Error(
+      `[CLIP] Text model not loaded. ` +
+        `Path: ${getTextModelPath()} | ` +
+        `Exists: ${fs.existsSync(getTextModelPath())} | ` +
+        `Usable (size check): ${isUsableModelFile(getTextModelPath())}`
+    );
+  }
+
   const tokens = simpleTokenize(text);
   const inputTensor = new ort.Tensor("int32", new Int32Array(tokens), [1, tokens.length]);
 
-  // Run inference - use dynamic input name (supports both "input" and "input_ids")
   const inputName = textSession.inputNames[0];
   const feeds: Record<string, ort.Tensor> = { [inputName]: inputTensor };
   const results = await textSession.run(feeds);
@@ -329,12 +397,12 @@ function simpleTokenize(text: string): number[] {
   const maxLen = 77;
   const tokens = new Array(maxLen).fill(0);
   tokens[0] = 49406; // <start>
-  
+
   const chars = text.toLowerCase().slice(0, maxLen - 2).split("");
   for (let i = 0; i < chars.length; i++) {
     tokens[i + 1] = chars[i].charCodeAt(0);
   }
-  
+
   tokens[chars.length + 1] = 49407; // <end>
   return tokens;
 }
