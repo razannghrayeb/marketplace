@@ -377,7 +377,8 @@ export async function getTextEmbedding(text: string): Promise<number[]> {
   }
 
   const tokens = simpleTokenize(text);
-  const inputTensor = new ort.Tensor("int32", new Int32Array(tokens), [1, tokens.length]);
+  // FIX: ONNX text model expects int64, not int32
+  const inputTensor = new ort.Tensor("int64", new BigInt64Array(tokens.map(BigInt)), [1, tokens.length]);
 
   const inputName = textSession.inputNames[0];
   const feeds: Record<string, ort.Tensor> = { [inputName]: inputTensor };
