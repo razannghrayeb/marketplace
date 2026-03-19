@@ -233,14 +233,20 @@ async function _doInit(modelType?: ClipModelType): Promise<void> {
   console.log(`[CLIP] Loading image model: ${activeConfig.name}...`);
   console.log(`[CLIP]   Embedding dim: ${EMBEDDING_DIM}`);
   console.log(`[CLIP]   ${activeConfig.description}`);
-  imageSession = await ort.InferenceSession.create(imageModelPath);
+  // Force CPU in Cloud Run: avoid ONNX Runtime selecting unsupported GPU/DML devices.
+  imageSession = await ort.InferenceSession.create(imageModelPath, {
+    executionProviders: ["cpu"],
+  });
   console.log(`[CLIP] ✅ Image model loaded`);
 
   // ── Load text model ───────────────────────────────────────────────────────
   // FIX: use isUsableModelFile (size-aware) instead of just fs.existsSync
   if (isUsableModelFile(textModelPath)) {
     console.log(`[CLIP] Loading text model: ${activeConfig.name}...`);
-    textSession = await ort.InferenceSession.create(textModelPath);
+    // Force CPU in Cloud Run: avoid ONNX Runtime selecting unsupported GPU/DML devices.
+    textSession = await ort.InferenceSession.create(textModelPath, {
+      executionProviders: ["cpu"],
+    });
     console.log(`[CLIP] ✅ Text model loaded`);
 
     // Pre-load BPE tokenizer so the first text embedding is fast

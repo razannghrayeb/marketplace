@@ -183,7 +183,7 @@ function initClip(modelType) {
                     console.log("Loading ".concat(activeConfig.name, " image model..."));
                     console.log("  - Embedding dimension: ".concat(EMBEDDING_DIM));
                     console.log("  - ".concat(activeConfig.description));
-                    return [4 /*yield*/, ort.InferenceSession.create(imageModelPath)];
+                    return [4 /*yield*/, ort.InferenceSession.create(imageModelPath, { executionProviders: ["cpu"] })];
                 case 1:
                     imageSession = _a.sent();
                     console.log("".concat(activeConfig.name, " image model loaded"));
@@ -191,7 +191,7 @@ function initClip(modelType) {
                 case 2:
                     if (!(fs.existsSync(textModelPath) && !textSession)) return [3 /*break*/, 4];
                     console.log("Loading ".concat(activeConfig.name, " text model..."));
-                    return [4 /*yield*/, ort.InferenceSession.create(textModelPath)];
+                    return [4 /*yield*/, ort.InferenceSession.create(textModelPath, { executionProviders: ["cpu"] })];
                 case 3:
                     textSession = _a.sent();
                     console.log("".concat(activeConfig.name, " text model loaded"));
