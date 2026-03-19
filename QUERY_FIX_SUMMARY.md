@@ -216,7 +216,7 @@ Response:
    pnpm dev    # Start dev server
    
    # Test the endpoint
-   curl "http://localhost:4000/products/search?q=blazer&limit=10"
+   curl "http://0.0.0.0:4000/products/search?q=blazer&limit=10"
    ```
 
 2. **Test Cases to Verify:**

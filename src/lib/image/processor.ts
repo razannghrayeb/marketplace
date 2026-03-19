@@ -3,10 +3,11 @@
  * 
  * High-level image processing: CLIP embeddings, validation, pHash.
  */
-import sharp from "sharp";
+
 import { getImageEmbedding, preprocessImage, isClipAvailable, initClip } from "./clip";
 import { loadImage, normalizeImage, pHash } from "./utils";
-
+import sharpLib from "sharp";
+const sharp = typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
 /**
  * Process an uploaded image and generate CLIP embedding
  */

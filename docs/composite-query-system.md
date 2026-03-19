@@ -187,7 +187,7 @@ Fields:
 
 **Example Usage:**
 ```bash
-curl -X POST http://localhost:4000/search/multi-image \
+curl -X POST http://0.0.0.0:4000/search/multi-image \
   -F "images=@jacket1.jpg" \
   -F "images=@jacket2.jpg" \
   -F "prompt=I want the color of the first picture with the texture from the second" \

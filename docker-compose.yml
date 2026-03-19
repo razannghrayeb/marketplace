@@ -10,7 +10,7 @@ services:
         # Set HF_TOKEN in .env or CI secrets if razangh/fashion-models is private
         HF_TOKEN: ${HF_TOKEN:-}
     ports:
-      - "3000:3000"
+      - "8080:8080"
     environment:
       - NODE_ENV=production
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/fashion
@@ -27,7 +27,7 @@ services:
       opensearch-node:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://0.0.0.0:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -47,7 +47,7 @@ services:
       - "9200:9200"
       - "9600:9600"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9200"]
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:9200"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -104,7 +104,7 @@ services:
     volumes:
       - ./models:/models:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -124,7 +124,7 @@ services:
       - ranker_models:/app/models
       - ./models:/app/models:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -146,7 +146,7 @@ services:
     volumes:
       - yolo_models:/app/models
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:8001/health"]
       interval: 30s
       timeout: 10s
       retries: 3

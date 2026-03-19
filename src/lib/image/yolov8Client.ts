@@ -115,7 +115,7 @@ export class YOLOv8Client {
 
   constructor(baseUrl?: string, timeout?: number) {
     this.baseUrl =
-      baseUrl || process.env.YOLOV8_SERVICE_URL || "http://localhost:8001";
+      baseUrl || process.env.YOLOV8_SERVICE_URL || "http://0.0.0.0:8001";
     this.timeout = timeout || 30000;
   }
 

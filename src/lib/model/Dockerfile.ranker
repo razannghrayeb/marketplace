@@ -33,6 +33,6 @@ ENV RANKER_META_PATH=/app/models/ranker_model_metadata.json
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://0.0.0.0:8000/health || exit 1
 
 CMD ["uvicorn", "ranker_api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

@@ -24,7 +24,7 @@ export type {
 // Configuration
 // ============================================================================
 
-const RANKER_API_URL = process.env.RANKER_API_URL || "http://localhost:8000";
+const RANKER_API_URL = process.env.RANKER_API_URL || "http://0.0.0.0:8000";
 const RANKER_TIMEOUT_MS = parseInt(process.env.RANKER_TIMEOUT_MS || "5000", 10);
 
 // ============================================================================

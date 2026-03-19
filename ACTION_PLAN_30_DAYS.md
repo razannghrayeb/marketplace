@@ -48,7 +48,7 @@ Priority 5 (1 min): Set JWT secret
 ```bash
 npm run build          # Should pass (no TypeScript errors)
 npm run dev           # Should start without errors
-curl http://localhost:4000/health  # Should respond
+curl http://0.0.0.0:4000/health  # Should respond
 ```
 
 ---

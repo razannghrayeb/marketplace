@@ -24,7 +24,7 @@ Node expects these ranker endpoints:
 
 Node environment variables:
 
-- RANKER_API_URL (default: http://localhost:8000)
+- RANKER_API_URL (default: http://0.0.0.0:8000)
 - RANKER_TIMEOUT_MS (default: 5000)
 - RANKER_RETRY_ATTEMPTS (default: 2)
 - RANKER_RETRY_DELAY_MS (default: 50)
@@ -58,12 +58,12 @@ The script sets model paths and launches:
 
 ## Verify Service Health
 
-- curl http://localhost:8000/health
-- curl http://localhost:8000/features
+- curl http://0.0.0.0:8000/health
+- curl http://0.0.0.0:8000/features
 
 For end-to-end API-side verification:
 
-- curl http://localhost:4000/health/ready
+- curl http://0.0.0.0:4000/health/ready
 - Trigger a recommendation flow that invokes rankCandidatesWithModel
 
 ## Train a New Model
@@ -85,7 +85,7 @@ Important data expectations:
 
 Training script DB variables (Python side):
 
-- DB_HOST (default: localhost)
+- DB_HOST (default: 0.0.0.0)
 - DB_PORT (default: 5432)
 - DB_NAME (default: fashion_marketplace)
 - DB_USER (default: postgres)

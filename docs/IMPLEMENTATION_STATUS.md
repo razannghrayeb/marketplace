@@ -8,7 +8,7 @@
 ## Runtime & Routing
 
 - Default port: `4000` (`PORT` env var, fallback in `src/config.ts`)
-- Docker Compose API mapping: `http://localhost:3000`
+- Docker Compose API mapping: `http://0.0.0.0:3000`
 - **Known bug:** `src/server.ts:36` contains `process.env.NODE_ENV = "test"` hardcoded
   inside `createServer()`. This forces the OpenSearch index initialization block to be
   skipped in **every environment** — not just tests. This is a leftover debug line that
@@ -340,8 +340,8 @@ OS_USERNAME=
 OS_PASSWORD=
 
 # Redis
-REDIS_URL=redis://localhost:6379
-REDIS_HOST=localhost
+REDIS_URL=redis://0.0.0.0:6379
+REDIS_HOST=0.0.0.0
 REDIS_PORT=6379
 REDIS_PASSWORD=
 
@@ -370,7 +370,7 @@ TRYON_TIMEOUT=60000
 GOOGLE_APPLICATION_CREDENTIALS=
 
 # External ML services
-RANKER_API_URL=http://localhost:8000
+RANKER_API_URL=http://0.0.0.0:8000
 GEMINI_API_KEY=
 ```
 

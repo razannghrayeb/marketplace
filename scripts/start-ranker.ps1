@@ -23,5 +23,5 @@ $env:RANKER_MODEL_PATH = $modelPath
 $env:RANKER_META_PATH = $metaPath
 
 # Start the API
-Write-Host "Starting uvicorn server on http://localhost:8000" -ForegroundColor Green
+Write-Host "Starting uvicorn server on http://0.0.0.0:8000" -ForegroundColor Green
 uvicorn src.lib.model.ranker_api:app --host 0.0.0.0 --port 8000 --reload

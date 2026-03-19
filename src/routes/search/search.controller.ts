@@ -334,7 +334,7 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
  * 🎨 EXAMPLE REQUESTS:
  *
  * 1️⃣ Cross-Image Color + Texture:
- * curl -X POST http://localhost:3000/api/search/multi-image \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-image \
  *   -F "images=@red_dress.jpg" \
  *   -F "images=@leather_jacket.jpg" \
  *   -F "prompt=I want the red color from the first image with the leather texture from the second" \
@@ -344,23 +344,23 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
  *   -F "limit=20"
  *
  * 2️⃣ Style Mixing with Negatives:
- * curl -X POST http://localhost:3000/api/search/multi-image \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-image \
  *   -F "images=@vintage_coat.jpg" \
  *   -F "prompt=Vintage style from first but NOT too formal and without buttons"
  *
  * 3️⃣ Pattern + Silhouette:
- * curl -X POST http://localhost:3000/api/search/multi-image \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-image \
  *   -F "images=@floral_dress.jpg" \
  *   -F "images=@aline_skirt.jpg" \
  *   -F "prompt=Floral pattern from image 1 with A-line silhouette from image 2"
  *
  * 4️⃣ Spatial Relationships:
- * curl -X POST http://localhost:3000/api/search/multi-image \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-image \
  *   -F "images=@striped_shirt.jpg" \
  *   -F "prompt=Looking for shirts with stripes on the sleeves but solid on the body"
  *
  * 5️⃣ Complex Multi-Constraint:
- * curl -X POST http://localhost:3000/api/search/multi-image \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-image \
  *   -F "images=@jacket.jpg" \
  *   -F "prompt=Like this but with zipper on the front, not too shiny, avoid leather"
  *
@@ -473,7 +473,7 @@ router.post("/multi-image", upload.array("images", 5), async (req: Request, res:
  * 🎨 EXAMPLE REQUESTS:
  * 
  * 1️⃣ Explicit Attribute Weights:
- * curl -X POST http://localhost:3000/api/search/multi-vector \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-vector \
  *   -F "images=@dress1.jpg" \
  *   -F "images=@dress2.jpg" \
  *   -F "prompt=Elegant evening wear" \
@@ -481,13 +481,13 @@ router.post("/multi-image", upload.array("images", 5), async (req: Request, res:
  *   -F "explainScores=true"
  * 
  * 2️⃣ Heavy Color Focus:
- * curl -X POST http://localhost:3000/api/search/multi-vector \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-vector \
  *   -F "images=@reference.jpg" \
  *   -F "prompt=Find similar colors" \
  *   -F "attributeWeights={\"color\":0.8,\"global\":0.2}"
  * 
  * 3️⃣ Pattern + Material Priority:
- * curl -X POST http://localhost:3000/api/search/multi-vector \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-vector \
  *   -F "images=@shirt.jpg" \
  *   -F "prompt=Striped linen shirts" \
  *   -F "attributeWeights={\"pattern\":0.5,\"material\":0.5}"
