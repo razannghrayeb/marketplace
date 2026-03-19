@@ -246,6 +246,24 @@ async function reindexProduct(
   }
 }
 
+async function waitForDatabase(retries = 3, delayMs = 5000): Promise<void> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      console.log(`🔌 Connecting to database (attempt ${attempt}/${retries})...`);
+      await pg.query("SELECT 1");
+      console.log("✅ Database connected\n");
+      return;
+    } catch (err: any) {
+      console.warn(`   ⚠️  Attempt ${attempt} failed: ${err.message}`);
+      if (attempt < retries) {
+        console.log(`   Retrying in ${delayMs / 1000}s...`);
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+  }
+  throw new Error("Could not connect to database after all retries");
+}
+
 async function main() {
   // Parse CLI args
   const args = process.argv.slice(2);
@@ -314,6 +332,8 @@ Examples:
   console.log(`  Batch size:         ${reindexConfig.batchSize}`);
   console.log(`  Max retries:        ${reindexConfig.maxRetries}`);
   console.log();
+
+  await waitForDatabase();
 
   // Check columns
   if (!(await columnExists("image_url"))) {

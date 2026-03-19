@@ -12,7 +12,7 @@ import type { QueryAST } from "../../lib/queryProcessor";
 // ============================================================================
 
 export interface SearchFilters {
-  category?: string;
+  category?: string | string[];
   brand?: string;
   minPriceCents?: number;
   maxPriceCents?: number;

@@ -13,7 +13,7 @@
 import { pg } from "../core";
 import { analyzeTextQuality, QualityAnalysis, getQualityReasons } from "./textQualityAnalyzer";
 import { analyzePriceAnomalies, PriceAnalysis, getPriceReasons } from "./priceAnomalyDetector";
-import { hammingDistance } from "../products/canonical";
+import { analyzeImageSignalsFast } from "../image/lsh";
 
 // ============================================================================
 // Types
@@ -110,42 +110,15 @@ export interface CompareVerdict {
 // ============================================================================
 
 /**
- * Analyze image originality using pHash
+ * Analyze image originality using LSH (fast O(1) lookup)
+ * Replaced O(N) full table scan with LSH bucket index lookup
  */
 async function analyzeImageSignals(
   productId: number,
   pHash: string | null
 ): Promise<ComparisonSignals["image_signals"]> {
-  if (!pHash) {
-    return {
-      has_image: false,
-      is_original: true,
-      similar_image_count: 0,
-      image_quality: "unknown",
-    };
-  }
-  
-  // Find similar images in database
-  const result = await pg.query(
-    `SELECT p_hash FROM product_images 
-     WHERE p_hash IS NOT NULL AND product_id != $1`,
-    [productId]
-  );
-  
-  let similarCount = 0;
-  for (const row of result.rows) {
-    const distance = hammingDistance(pHash, row.p_hash);
-    if (distance <= 10) { // Very similar (< 16% different)
-      similarCount++;
-    }
-  }
-  
-  return {
-    has_image: true,
-    is_original: similarCount === 0,
-    similar_image_count: similarCount,
-    image_quality: similarCount > 5 ? "low" : similarCount > 0 ? "medium" : "high",
-  };
+  // Use the new LSH-based fast analysis
+  return analyzeImageSignalsFast(productId, pHash);
 }
 
 /**

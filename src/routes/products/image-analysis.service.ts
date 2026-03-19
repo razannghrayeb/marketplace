@@ -86,7 +86,7 @@ export interface AnalyzeOptions {
   /** Run YOLO detection (default: true) */
   runDetection?: boolean;
 
-  /** Detection confidence threshold (default: 0.25) */
+  /** Detection confidence threshold (default: 0.45 — balances recall vs noise) */
   confidence?: number;
 
   /** Product ID to associate image with */
@@ -243,7 +243,7 @@ export class ImageAnalysisService {
       store = true,
       generateEmbedding = true,
       runDetection = true,
-      confidence = 0.25,
+      confidence = 0.45,
       productId,
       isPrimary = false,
     } = options;
@@ -436,86 +436,72 @@ export class ImageAnalysisService {
       }
     }
 
-    // For each unique detection, crop the region and find similar products
+    // Process all detections in parallel for significant latency reduction.
+    // CLIP inference serializes at the ONNX level, but cropping, BLIP captions,
+    // and OpenSearch kNN queries all benefit from concurrent execution.
+    const searchTasks = [...detectionsByLabel].map(async ([label, detection]) => {
+      const box = detection.box;
+      const cropWidth = Math.max(1, Math.round(box.x2 - box.x1));
+      const cropHeight = Math.max(1, Math.round(box.y2 - box.y1));
+      const cropLeft = Math.max(0, Math.round(box.x1));
+      const cropTop = Math.max(0, Math.round(box.y1));
+      const safeWidth = Math.min(cropWidth, imageWidth - cropLeft);
+      const safeHeight = Math.min(cropHeight, imageHeight - cropTop);
+
+      if (safeWidth < 10 || safeHeight < 10) return null;
+
+      const croppedBuffer = await sharp(buffer)
+        .extract({ left: cropLeft, top: cropTop, width: safeWidth, height: safeHeight })
+        .toBuffer();
+
+      const vectors = await hybridSearch.buildQueryVectors(croppedBuffer, buffer);
+      const finalEmbedding = hybridSearch.fuseVectors(vectors);
+
+      const categoryMapping = mapDetectionToCategory(label, detection.confidence);
+      const searchCategories = shouldUseAlternatives(categoryMapping)
+        ? getSearchCategories(categoryMapping)
+        : [categoryMapping.productCategory];
+
+      const filters: Partial<import("./types").SearchFilters> = {};
+      if (filterByDetectedCategory) {
+        filters.category = searchCategories.length === 1
+          ? searchCategories[0]
+          : searchCategories;
+      }
+
+      const similarResult = await searchByImageWithSimilarity({
+        imageEmbedding: finalEmbedding,
+        filters,
+        limit: similarLimitPerItem,
+        similarityThreshold,
+      });
+
+      if (similarResult.results.length === 0) return null;
+
+      return {
+        detection: {
+          label: detection.label,
+          confidence: detection.confidence,
+          box: detection.box,
+          area_ratio: detection.area_ratio,
+          style: detection.style,
+        },
+        category: categoryMapping.productCategory,
+        products: similarResult.results,
+        count: similarResult.results.length,
+      } as DetectionSimilarProducts;
+    });
+
+    const settled = await Promise.allSettled(searchTasks);
     const groupedResults: DetectionSimilarProducts[] = [];
     let totalProducts = 0;
 
-    for (const [label, detection] of detectionsByLabel) {
-      try {
-        // Crop the detected region from the image
-        const box = detection.box;
-        const cropWidth = Math.max(1, Math.round(box.x2 - box.x1));
-        const cropHeight = Math.max(1, Math.round(box.y2 - box.y1));
-        const cropLeft = Math.max(0, Math.round(box.x1));
-        const cropTop = Math.max(0, Math.round(box.y1));
-
-        // Ensure crop is within image bounds
-        const safeWidth = Math.min(cropWidth, imageWidth - cropLeft);
-        const safeHeight = Math.min(cropHeight, imageHeight - cropTop);
-
-        if (safeWidth < 10 || safeHeight < 10) {
-          // Skip very small detections
-          continue;
-        }
-
-        // Crop detected region from ORIGINAL RGB buffer (not YOLO-preprocessed)
-        // YOLO detection boxes are in original image coordinate space
-        const croppedBuffer = await sharp(buffer)
-          .extract({
-            left: cropLeft,
-            top: cropTop,
-            width: safeWidth,
-            height: safeHeight,
-          })
-          .toBuffer();
-
-        // Use hybrid search to build query vectors (CLIP image + BLIP caption → CLIP text)
-        // Pass original buffer for better captioning context
-        const vectors = await hybridSearch.buildQueryVectors(croppedBuffer, buffer);
-
-        // Fuse vectors: 60% image + 30% caption (see hybridSearch.ts WEIGHTS)
-        const finalEmbedding = hybridSearch.fuseVectors(vectors);
-
-        // Map detection to product category using enhanced mapper
-        const categoryMapping = mapDetectionToCategory(label, detection.confidence);
-        const searchCategories = shouldUseAlternatives(categoryMapping)
-          ? getSearchCategories(categoryMapping)
-          : [categoryMapping.productCategory];
-
-        // Search for similar products with category filter
-        const filters: Record<string, string | string[]> = {};
-        if (filterByDetectedCategory) {
-          // Use primary category or array of alternatives if confidence is low
-          filters.category = searchCategories.length === 1
-            ? searchCategories[0]
-            : searchCategories;
-        }
-
-        const similarResult = await searchByImageWithSimilarity({
-          imageEmbedding: finalEmbedding,
-          filters: filters as Record<string, string>,
-          limit: similarLimitPerItem,
-          similarityThreshold,
-        });
-
-        if (similarResult.results.length > 0) {
-          groupedResults.push({
-            detection: {
-              label: detection.label,
-              confidence: detection.confidence,
-              box: detection.box,
-              area_ratio: detection.area_ratio,
-              style: detection.style,
-            },
-            category: categoryMapping.productCategory,
-            products: similarResult.results,
-            count: similarResult.results.length,
-          });
-          totalProducts += similarResult.results.length;
-        }
-      } catch (err) {
-        console.error(`Failed to find similar products for ${label}:`, err);
-        // Continue with other detections
+    for (const outcome of settled) {
+      if (outcome.status === "fulfilled" && outcome.value) {
+        groupedResults.push(outcome.value);
+        totalProducts += outcome.value.count;
+      } else if (outcome.status === "rejected") {
+        console.error("Failed to find similar products for a detection:", outcome.reason);
       }
     }
 
@@ -598,7 +584,7 @@ export class ImageAnalysisService {
   async quickDetect(
     buffer: Buffer,
     filename: string,
-    confidence: number = 0.25
+    confidence: number = 0.45
   ): Promise<QuickDetectResult> {
     const result = await this.yoloClient.detectFromBuffer(buffer, filename, {
       confidence,
@@ -619,7 +605,7 @@ export class ImageAnalysisService {
    */
   async quickDetectFromUrl(
     url: string,
-    confidence: number = 0.25
+    confidence: number = 0.45
   ): Promise<QuickDetectResult> {
     const result = await this.yoloClient.detectFromUrl(url, { confidence });
 

@@ -16,6 +16,8 @@ import {
   validateCompareInput,
   validateProductId,
   validateTextInput,
+  getProductReviewAnalysis,
+  compareReviews,
 } from "./compare.service";
 
 const router = Router();
@@ -193,6 +195,61 @@ router.post("/admin/compute-baselines", async (req: Request, res: Response) => {
 router.get("/tooltips", async (_req: Request, res: Response) => {
   const tooltips = getAllTooltips();
   res.json(tooltips);
+});
+
+// ============================================================================
+// Review Analysis
+// ============================================================================
+
+/**
+ * GET /api/compare/reviews/:productId
+ * 
+ * Get review analysis for a product
+ */
+router.get("/reviews/:productId", async (req: Request, res: Response) => {
+  try {
+    const productId = validateProductId(req.params.productId);
+    
+    if (!productId) {
+      return res.status(400).json({ error: "Invalid product ID" });
+    }
+    
+    const analysis = await getProductReviewAnalysis(productId);
+    res.json(analysis);
+  } catch (error) {
+    console.error("Review analysis error:", error);
+    res.status(500).json({ error: "Failed to analyze reviews" });
+  }
+});
+
+/**
+ * POST /api/compare/reviews
+ * 
+ * Compare reviews across multiple products
+ * Body: { product_ids: number[] }
+ */
+router.post("/reviews", async (req: Request, res: Response) => {
+  try {
+    const { product_ids } = req.body;
+    
+    const validationError = validateCompareInput(product_ids);
+    if (validationError) {
+      return res.status(400).json(validationError);
+    }
+    
+    const comparison = await compareReviews(product_ids);
+    
+    // Convert Map to object for JSON
+    const result: Record<number, any> = {};
+    comparison.forEach((analysis, id) => {
+      result[id] = analysis;
+    });
+    
+    res.json({ reviews: result });
+  } catch (error) {
+    console.error("Review comparison error:", error);
+    res.status(500).json({ error: "Failed to compare reviews" });
+  }
 });
 
 export default router;

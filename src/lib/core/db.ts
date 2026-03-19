@@ -4,24 +4,22 @@
  * PostgreSQL connection pool using pg library.
  */
 import { Pool } from "pg";
+import dns from "dns";
 import { config } from "../../config";
 
-// export const pg = new Pool(config.postgres);
+// Force IPv4-first DNS resolution — avoids long IPv6 timeouts on Windows
+// when connecting to cloud-hosted databases (Supabase, Neon, etc.)
+dns.setDefaultResultOrder("ipv4first");
 
-// // Handle pool errors
-// pg.on("error", (err) => {
-//   console.error("Unexpected database pool error:", err);
-// });
-
-//supabase
 export const pg = new Pool({
   connectionString: config.database.url,
   ssl: {
     rejectUnauthorized: false,
   },
-  idleTimeoutMillis: 30000, // 30 seconds
-  connectionTimeoutMillis: 10000, // 10 seconds
-  keepAlive: true, // Prevent ECONNRESET from idle connection drops (Cloud Run, load balancers)
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 30000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
 });
 
 // Handle pool errors

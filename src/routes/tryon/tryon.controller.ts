@@ -17,6 +17,18 @@ import {
   deleteSavedResult,
 } from "./tryon.service";
 import { getTryOnClient } from "../../lib/image/tryonClient";
+import {
+  registerWebhook,
+  getWebhookConfig,
+  disableWebhook,
+  deleteWebhook,
+} from "../../lib/tryon/webhooks";
+import {
+  getDeadLetterEntries,
+  retryFromDeadLetter,
+  processRetryQueue,
+} from "../../lib/tryon/retryQueue";
+import { validateGarment } from "../../lib/tryon/garmentValidation";
 
 // ============================================================================
 // Shared helpers
@@ -475,6 +487,187 @@ export async function serviceHealth(
     const available = await client.isAvailable();
     const health    = await client.health();
     res.json({ success: true, available, ...health });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ============================================================================
+// Webhook Management
+// ============================================================================
+
+/**
+ * POST /api/tryon/webhooks
+ * Body: { url: string, secret: string, events?: string[] }
+ */
+export async function createWebhook(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = getUserId(req);
+    const { url, secret, events } = req.body;
+    
+    if (!url || !secret) {
+      return res.status(400).json({ 
+        success: false, 
+        error: "url and secret are required" 
+      });
+    }
+    
+    const webhook = await registerWebhook(userId, url, secret, events);
+    res.status(201).json({ success: true, webhook });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/tryon/webhooks
+ */
+export async function getWebhook(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = getUserId(req);
+    const config = await getWebhookConfig(userId);
+    
+    if (!config) {
+      return res.status(404).json({ 
+        success: false, 
+        error: "No webhook configured" 
+      });
+    }
+    
+    res.json({ success: true, webhook: config });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * DELETE /api/tryon/webhooks
+ */
+export async function removeWebhook(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = getUserId(req);
+    await deleteWebhook(userId);
+    res.json({ success: true, message: "Webhook removed" });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/tryon/webhooks/disable
+ */
+export async function pauseWebhook(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = getUserId(req);
+    await disableWebhook(userId);
+    res.json({ success: true, message: "Webhook disabled" });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ============================================================================
+// Garment Validation (pre-check before submission)
+// ============================================================================
+
+/**
+ * POST /api/tryon/validate
+ * Body: { title: string, description?: string, category?: string }
+ */
+export async function validateGarmentEndpoint(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const { title, description, category } = req.body;
+    
+    if (!title) {
+      return res.status(400).json({
+        success: false,
+        error: "title is required",
+      });
+    }
+    
+    const result = validateGarment(title, description, category);
+    res.json({ success: true, validation: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ============================================================================
+// Dead Letter Queue Management (Admin)
+// ============================================================================
+
+/**
+ * GET /api/tryon/admin/dlq
+ * Query: limit? (default: 50)
+ */
+export async function getDLQ(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+    const entries = await getDeadLetterEntries(limit);
+    res.json({ success: true, entries, count: entries.length });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/tryon/admin/dlq/:jobId/retry
+ */
+export async function retryDLQJob(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const jobId = parseInt(req.params.jobId, 10);
+    const success = await retryFromDeadLetter(jobId);
+    
+    if (success) {
+      res.json({ success: true, message: "Job queued for retry" });
+    } else {
+      res.status(404).json({ success: false, error: "Job not found in DLQ" });
+    }
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/tryon/admin/process-retries
+ * Manually trigger retry queue processing
+ */
+export async function processRetries(
+  _req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const result = await processRetryQueue();
+    res.json({ success: true, ...result });
   } catch (err) {
     next(err);
   }

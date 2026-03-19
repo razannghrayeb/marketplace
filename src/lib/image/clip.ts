@@ -13,6 +13,34 @@
 import * as ort from "onnxruntime-node";
 import * as fs from "fs";
 import * as path from "path";
+import { clipBreaker } from "../core/circuitBreaker";
+
+// ============================================================================
+// CLIP BPE Tokenizer (lazy-loaded from @xenova/transformers)
+// ============================================================================
+
+let clipTokenizer: any = null;
+let tokenizerInitPromise: Promise<void> | null = null;
+
+async function ensureTokenizer(): Promise<void> {
+  if (clipTokenizer) return;
+  if (tokenizerInitPromise) return tokenizerInitPromise;
+
+  tokenizerInitPromise = (async () => {
+    try {
+      const { AutoTokenizer } = await import("@xenova/transformers");
+      clipTokenizer = await AutoTokenizer.from_pretrained(
+        "Xenova/clip-vit-base-patch32"
+      );
+      console.log("[CLIP] BPE tokenizer loaded (Xenova/clip-vit-base-patch32)");
+    } catch (err) {
+      console.warn("[CLIP] Failed to load BPE tokenizer, falling back to simple tokenizer:", err);
+      tokenizerInitPromise = null;
+    }
+  })();
+
+  return tokenizerInitPromise;
+}
 
 const MODEL_DIR = path.join(process.cwd(), "models");
 
@@ -214,6 +242,10 @@ async function _doInit(modelType?: ClipModelType): Promise<void> {
     console.log(`[CLIP] Loading text model: ${activeConfig.name}...`);
     textSession = await ort.InferenceSession.create(textModelPath);
     console.log(`[CLIP] ✅ Text model loaded`);
+
+    // Pre-load BPE tokenizer so the first text embedding is fast
+    console.log(`[CLIP] Loading BPE tokenizer...`);
+    await ensureTokenizer();
   } else {
     console.warn(
       `[CLIP] ⚠️  Text model missing or too small at: ${textModelPath}. ` +
@@ -315,33 +347,87 @@ function resizeImage(
 }
 
 /**
- * Generate image embedding from preprocessed image data
+ * Generate image embedding from preprocessed image data.
+ * Wrapped with a circuit breaker to fast-fail when ONNX is unhealthy.
  */
 export async function getImageEmbedding(preprocessedImage: Float32Array): Promise<number[]> {
-  // Self-heal: load model if not yet initialized
-  if (!imageSession) {
-    await initClip();
+  return clipBreaker.call(async () => {
+    if (!imageSession) {
+      await initClip();
+    }
+
+    if (!imageSession) {
+      throw new Error("[CLIP] Image model not loaded after initialization attempt.");
+    }
+
+    const inputTensor = new ort.Tensor("float32", preprocessedImage, [
+      1,
+      3,
+      IMAGE_SIZE,
+      IMAGE_SIZE,
+    ]);
+
+    const inputName = imageSession.inputNames[0];
+    const feeds: Record<string, ort.Tensor> = { [inputName]: inputTensor };
+    const results = await imageSession.run(feeds);
+
+    const outputName = imageSession.outputNames[0];
+    const embedding = Array.from(results[outputName].data as Float32Array);
+
+    return normalizeVector(embedding);
+  });
+}
+
+/**
+ * Batch image embedding: stack N preprocessed images into one tensor and
+ * run a single ONNX forward pass. Falls back to sequential if batch size is 1
+ * or if the ONNX model doesn't support dynamic batch.
+ */
+export async function getImageEmbeddingBatch(
+  preprocessedImages: Float32Array[]
+): Promise<number[][]> {
+  if (preprocessedImages.length === 0) return [];
+  if (preprocessedImages.length === 1) {
+    return [await getImageEmbedding(preprocessedImages[0])];
   }
 
-  if (!imageSession) {
-    throw new Error("[CLIP] Image model not loaded after initialization attempt.");
-  }
+  return clipBreaker.call(async () => {
+    if (!imageSession) await initClip();
+    if (!imageSession) throw new Error("[CLIP] Image model not loaded.");
 
-  const inputTensor = new ort.Tensor("float32", preprocessedImage, [
-    1,
-    3,
-    IMAGE_SIZE,
-    IMAGE_SIZE,
-  ]);
+    const N = preprocessedImages.length;
+    const pixelsPerImage = 3 * IMAGE_SIZE * IMAGE_SIZE;
 
-  const inputName = imageSession.inputNames[0];
-  const feeds: Record<string, ort.Tensor> = { [inputName]: inputTensor };
-  const results = await imageSession.run(feeds);
+    try {
+      // Stack into [N, 3, H, W]
+      const stacked = new Float32Array(N * pixelsPerImage);
+      for (let i = 0; i < N; i++) {
+        stacked.set(preprocessedImages[i], i * pixelsPerImage);
+      }
 
-  const outputName = imageSession.outputNames[0];
-  const embedding = Array.from(results[outputName].data as Float32Array);
+      const inputTensor = new ort.Tensor("float32", stacked, [N, 3, IMAGE_SIZE, IMAGE_SIZE]);
+      const inputName = imageSession.inputNames[0];
+      const results = await imageSession.run({ [inputName]: inputTensor });
 
-  return normalizeVector(embedding);
+      const outputName = imageSession.outputNames[0];
+      const flat = results[outputName].data as Float32Array;
+      const dim = flat.length / N;
+
+      const embeddings: number[][] = [];
+      for (let i = 0; i < N; i++) {
+        const slice = Array.from(flat.slice(i * dim, (i + 1) * dim));
+        embeddings.push(normalizeVector(slice));
+      }
+      return embeddings;
+    } catch {
+      // Dynamic batch not supported — fall back to sequential
+      const embeddings: number[][] = [];
+      for (const img of preprocessedImages) {
+        embeddings.push(await getImageEmbedding(img));
+      }
+      return embeddings;
+    }
+  });
 }
 
 /**
@@ -358,43 +444,63 @@ export async function getImageEmbeddingFromBuffer(
 }
 
 /**
- * Generate text embedding (if text model is available)
+ * Generate text embedding (if text model is available).
+ * Wrapped with a circuit breaker to fast-fail when ONNX is unhealthy.
  */
 export async function getTextEmbedding(text: string): Promise<number[]> {
-  // FIX: self-heal exactly like getImageEmbedding — do NOT just throw
-  if (!textSession) {
-    await initClip();
-  }
+  return clipBreaker.call(async () => {
+    if (!textSession) {
+      await initClip();
+    }
 
-  if (!textSession) {
-    // Give a detailed error so it's easy to diagnose in logs
-    throw new Error(
-      `[CLIP] Text model not loaded. ` +
-        `Path: ${getTextModelPath()} | ` +
-        `Exists: ${fs.existsSync(getTextModelPath())} | ` +
-        `Usable (size check): ${isUsableModelFile(getTextModelPath())}`
-    );
-  }
+    if (!textSession) {
+      throw new Error(
+        `[CLIP] Text model not loaded. ` +
+          `Path: ${getTextModelPath()} | ` +
+          `Exists: ${fs.existsSync(getTextModelPath())} | ` +
+          `Usable (size check): ${isUsableModelFile(getTextModelPath())}`
+      );
+    }
 
-  const tokens = simpleTokenize(text);
-  // FIX: ONNX text model expects int64, not int32
-  const inputTensor = new ort.Tensor("int64", new BigInt64Array(tokens.map(BigInt)), [1, tokens.length]);
+    const tokens = await tokenize(text);
+    const inputTensor = new ort.Tensor("int64", new BigInt64Array(tokens.map(BigInt)), [1, tokens.length]);
 
-  const inputName = textSession.inputNames[0];
-  const feeds: Record<string, ort.Tensor> = { [inputName]: inputTensor };
-  const results = await textSession.run(feeds);
+    const inputName = textSession.inputNames[0];
+    const feeds: Record<string, ort.Tensor> = { [inputName]: inputTensor };
+    const results = await textSession.run(feeds);
 
-  const outputName = textSession.outputNames[0];
-  const embedding = Array.from(results[outputName].data as Float32Array);
+    const outputName = textSession.outputNames[0];
+    const embedding = Array.from(results[outputName].data as Float32Array);
 
-  return normalizeVector(embedding);
+    return normalizeVector(embedding);
+  });
 }
 
 /**
- * Simple tokenizer placeholder
- * In production, use proper CLIP BPE tokenizer
+ * Tokenize text using CLIP BPE tokenizer from @xenova/transformers.
+ * Falls back to a basic char-code tokenizer only if the BPE model fails to load.
  */
-function simpleTokenize(text: string): number[] {
+async function tokenize(text: string): Promise<number[]> {
+  await ensureTokenizer();
+
+  if (clipTokenizer) {
+    const encoded = await clipTokenizer(text, {
+      padding: "max_length",
+      max_length: 77,
+      truncation: true,
+    });
+    return Array.from(encoded.input_ids.data as BigInt64Array, Number);
+  }
+
+  return simpleTokenizeFallback(text);
+}
+
+/**
+ * Last-resort fallback if the BPE tokenizer cannot load.
+ * Produces degraded embeddings — logs a warning on every call.
+ */
+function simpleTokenizeFallback(text: string): number[] {
+  console.warn("[CLIP] Using char-code fallback tokenizer — text embeddings will be degraded");
   const maxLen = 77;
   const tokens = new Array(maxLen).fill(0);
   tokens[0] = 49406; // <start>
