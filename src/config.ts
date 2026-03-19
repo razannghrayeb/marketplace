@@ -24,7 +24,7 @@ export const config = {
   mlServiceUrl: process.env.ML_SERVICE_URL || "",
   // used for local data just for testing 
   // postgres: {
-  //   host: process.env.PG_HOST || "localhost",
+  //   host: process.env.PG_HOST || "0.0.0.0",
   //   port: Number(process.env.PG_PORT || 4444),//note 5432
   //   user: process.env.PG_USER || "postgres",
   //   password: process.env.PG_PASSWORD || "postgres",

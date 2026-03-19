@@ -25,7 +25,7 @@ async function run() {
     // Determine target DB connection info
     let targetDb = process.env.DATABASE_URL || config.database.url;
     if (!targetDb) {
-      const host = process.env.PG_HOST || 'localhost';
+      const host = process.env.PG_HOST || '0.0.0.0';
       const port = process.env.PG_PORT || 5432;
       const user = process.env.PG_USER || 'postgres';
       const password = process.env.PG_PASSWORD || 'postgres';

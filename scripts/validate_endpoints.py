@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple
 
 import requests
 
-BASE_URL = "http://localhost:4000"
+BASE_URL = "http://0.0.0.0:4000"
 MATRIX_FILE = Path("docs/ENDPOINT_MATRIX.md")
 OUT_FILE = Path("docs/ENDPOINT_VALIDATION_REPORT.md")
 TIMEOUT = 10

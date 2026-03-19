@@ -75,10 +75,10 @@ docker-compose logs -f
 
 ```bash
 # Create database schema
-psql -h localhost -U postgres -d fashion -f db/schema.sql
+psql -h 0.0.0.0 -U postgres -d fashion -f db/schema.sql
 
 # Run migrations
-psql -h localhost -U postgres -d fashion -f db/migrations/001_recommendation_training.sql
+psql -h 0.0.0.0 -U postgres -d fashion -f db/migrations/001_recommendation_training.sql
 
 # Seed sample data (optional)
 pnpm run seed
@@ -121,16 +121,16 @@ python ranker_api.py
 
 ```bash
 # Health check
-curl http://localhost:4000/health/live
+curl http://0.0.0.0:4000/health/live
 
 # Readiness (dependencies)
-curl http://localhost:4000/health/ready
+curl http://0.0.0.0:4000/health/ready
 
 # Test search
-curl "http://localhost:4000/search?q=red%20sneakers"
+curl "http://0.0.0.0:4000/search?q=red%20sneakers"
 
 # Check ML ranker
-curl http://localhost:8000/health
+curl http://0.0.0.0:8000/health
 ```
 
 ---
@@ -538,7 +538,7 @@ EXPOSE 4000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:4000/health || exit 1
+  CMD curl -f http://0.0.0.0:4000/health || exit 1
 
 CMD ["node", "dist/index.js"]
 ```
@@ -569,7 +569,7 @@ EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:8000/health || exit 1
+  CMD curl -f http://0.0.0.0:8000/health || exit 1
 
 CMD ["uvicorn", "ranker_api:app", "--host", "0.0.0.0", "--port", "8000"]
 ```

@@ -102,7 +102,7 @@ The Fashion Aggregator marketplace is a sophisticated system with strong ML/AI c
 ### 4. **SEARCH_IMPLEMENTATION_SUMMARY.md** — Deduped ✅
 - **Issue:** Lines 468-935 were exact duplicate of lines 1-467
 - **Fixed:** Removed duplicate (467 lines reduced to just valid content)
-- **Updated:** localhost port references (3000 docker → 4000 dev)
+- **Updated:** 0.0.0.0 port references (3000 docker → 4000 dev)
 
 ### 5. **New: docs/INDEX.md** ✅
 - Master documentation index

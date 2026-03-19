@@ -103,7 +103,7 @@ npx supabase gen types typescript \
 
 ```bash
 npm run dev
-# -> http://localhost:3000
+# -> http://0.0.0.0:3000
 ```
 
 ## Notes for This Repository

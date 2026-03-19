@@ -28,7 +28,7 @@ The Fashion Aggregator API now has **THREE complete search systems**, each servi
 
 ### API Example
 ```bash
-curl -X POST http://localhost:4000/search/image \
+curl -X POST http://0.0.0.0:4000/search/image \
   -F "image=@dress.jpg" \
   -F "limit=20"
 ```
@@ -57,7 +57,7 @@ curl -X POST http://localhost:4000/search/image \
 
 ### API Example
 ```bash
-curl -X POST http://localhost:4000/api/images/search \
+curl -X POST http://0.0.0.0:4000/api/images/search \
   -F "image=@outfit.jpg" \
   -F "confidence=0.25" \
   -F "limit_per_item=10"
@@ -146,7 +146,7 @@ curl -X POST http://localhost:4000/api/images/search \
 
 **Main Endpoint (Natural Language):**
 ```bash
-curl -X POST http://localhost:4000/search/multi-image \
+curl -X POST http://0.0.0.0:4000/search/multi-image \
   -F "images=@red_dress.jpg" \
   -F "images=@leather_jacket.jpg" \
   -F "prompt=Red color from first, leather texture from second" \
@@ -155,7 +155,7 @@ curl -X POST http://localhost:4000/search/multi-image \
 
 **Advanced Endpoint (Explicit Weights):**
 ```bash
-curl -X POST http://localhost:4000/search/multi-vector \
+curl -X POST http://0.0.0.0:4000/search/multi-vector \
   -F "images=@dress1.jpg" \
   -F "images=@dress2.jpg" \
   -F "prompt=Elegant evening wear" \
@@ -165,7 +165,7 @@ curl -X POST http://localhost:4000/search/multi-vector \
 
 **With Custom Ranking:**
 ```bash
-curl -X POST http://localhost:4000/search/multi-image \
+curl -X POST http://0.0.0.0:4000/search/multi-image \
   -F "images=@vintage_coat.jpg" \
   -F "images=@modern_blazer.jpg" \
   -F "prompt=Vintage style from first with modern fit, under $200" \
@@ -271,7 +271,7 @@ npx tsx scripts/test-multi-vector-search.ts
 
 4. **Use API**:
 ```bash
-curl -X POST http://localhost:4000/search/multi-image \
+curl -X POST http://0.0.0.0:4000/search/multi-image \
   -F "images=@dress1.jpg" \
   -F "images=@dress2.jpg" \
   -F "prompt=Color from first, style from second"

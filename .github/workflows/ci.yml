@@ -89,7 +89,7 @@ jobs:
         
       - name: Run migrations
         env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/fashion_test
+          DATABASE_URL: postgresql://test:test@0.0.0.0:5432/fashion_test
         run: |
           for f in db/migrations/*.sql; do
             psql "$DATABASE_URL" -f "$f"
@@ -97,8 +97,8 @@ jobs:
           
       - name: Run tests
         env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/fashion_test
-          REDIS_URL: redis://localhost:6379
+          DATABASE_URL: postgresql://test:test@0.0.0.0:5432/fashion_test
+          REDIS_URL: redis://0.0.0.0:6379
           NODE_ENV: test
         run: pnpm test
 

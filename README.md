@@ -253,11 +253,11 @@ SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
 
 # OpenSearch
-OS_NODE=http://localhost:9200
+OS_NODE=http://0.0.0.0:9200
 OS_INDEX=products
 
 # Redis
-REDIS_URL=redis://localhost:6379
+REDIS_URL=redis://0.0.0.0:6379
 
 # Cloudflare R2
 R2_ACCOUNT_ID=
@@ -282,7 +282,7 @@ GCLOUD_PROJECT=
 GOOGLE_APPLICATION_CREDENTIALS=   # path to service account key (or use ADC)
 
 # XGBoost Ranker (Python FastAPI)
-RANKER_API_URL=http://localhost:8000
+RANKER_API_URL=http://0.0.0.0:8000
 ```
 
 ---

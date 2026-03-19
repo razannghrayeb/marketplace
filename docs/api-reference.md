@@ -4,8 +4,8 @@ This document provides detailed information about all API endpoints available in
 
 ## Base URL
 ```
-Local Node (pnpm dev): http://localhost:4000
-Docker Compose API:    http://localhost:3000
+Local Node (pnpm dev): http://0.0.0.0:4000
+Docker Compose API:    http://0.0.0.0:3000
 ```
 
 ## Code Organization
@@ -527,7 +527,7 @@ GET /search
 
 #### Example Request
 ```bash
-curl "http://localhost:3000/api/search?q=red+dress&brand=Nike&maxPrice=15000&limit=10"
+curl "http://0.0.0.0:3000/api/search?q=red+dress&brand=Nike&maxPrice=15000&limit=10"
 ```
 
 ---
@@ -550,7 +550,7 @@ POST /search/image
 
 #### Example Request
 ```bash
-curl -X POST http://localhost:3000/api/search/image \
+curl -X POST http://0.0.0.0:3000/api/search/image \
   -F "image=@dress.jpg" \
   -F "limit=20"
 ```
@@ -597,7 +597,7 @@ This is the **unique feature** that enables cross-image attribute mixing with AI
 
 **Basic Cross-Image Attributes:**
 ```bash
-curl -X POST http://localhost:3000/api/search/multi-image \
+curl -X POST http://0.0.0.0:3000/api/search/multi-image \
   -F "images=@red_dress.jpg" \
   -F "images=@leather_jacket.jpg" \
   -F "prompt=I want the red color from the first image with the leather texture from the second" \
@@ -606,7 +606,7 @@ curl -X POST http://localhost:3000/api/search/multi-image \
 
 **With Custom Ranking Weights:**
 ```bash
-curl -X POST http://localhost:3000/api/search/multi-image \
+curl -X POST http://0.0.0.0:3000/api/search/multi-image \
   -F "images=@vintage_coat.jpg" \
   -F "images=@modern_blazer.jpg" \
   -F "prompt=Vintage style from first with modern fit like second, under $200" \
@@ -674,7 +674,7 @@ POST /search/multi-vector
 
 #### Example Request
 ```bash
-curl -X POST http://localhost:3000/api/search/multi-vector \
+curl -X POST http://0.0.0.0:3000/api/search/multi-vector \
   -F "images=@dress1.jpg" \
   -F "images=@dress2.jpg" \
   -F "prompt=Elegant evening wear" \
@@ -735,7 +735,7 @@ POST /images/search
 
 #### Example Request
 ```bash
-curl -X POST http://localhost:3000/api/images/search \
+curl -X POST http://0.0.0.0:3000/api/images/search \
   -F "image=@outfit.jpg" \
   -F "confidence=0.25" \
   -F "limit_per_item=10"
@@ -1174,7 +1174,7 @@ POST /api/wardrobe/items
 Request: multipart/form-data (or JSON without image)
 
 ```bash
-curl -X POST "http://localhost:3000/api/wardrobe/items" \
+curl -X POST "http://0.0.0.0:3000/api/wardrobe/items" \
   -H "x-user-id: 42" \
   -F "name=Black Linen Shirt" \
   -F "brand=Zara" \
@@ -1209,7 +1209,7 @@ GET /api/wardrobe/recommendations
 Example request:
 
 ```bash
-curl "http://localhost:3000/api/wardrobe/recommendations?user_id=42&limit=20&price_min=2000&price_max=15000&include_gaps=true&include_style=true&include_compat=true"
+curl "http://0.0.0.0:3000/api/wardrobe/recommendations?user_id=42&limit=20&price_min=2000&price_max=15000&include_gaps=true&include_style=true&include_compat=true"
 ```
 
 Example response:
@@ -1440,7 +1440,7 @@ pip install fashion-aggregator-client
 ```javascript
 import { FashionApi } from '@fashion-aggregator/api-client';
 
-const api = new FashionApi('http://localhost:4000');
+const api = new FashionApi('http://0.0.0.0:4000');
 
 // Search for products
 const results = await api.search.text({ q: 'red sneakers', limit: 10 });
