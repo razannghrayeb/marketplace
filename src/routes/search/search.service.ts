@@ -176,16 +176,32 @@ export async function textSearch(
     };
 
     // ── 5. Optional hybrid kNN boost ───────────────────────────────────────
+    // FIX: OpenSearch 3.x removed the Painless cosineSimilarity() script
+    // function that was used in script_score queries. It throws a
+    // [script_exception] compile error on OpenSearch 3.3.2+.
+    //
+    // Solution: use knn inside bool/should — both BM25 and vector similarity
+    // scores contribute naturally without needing a Painless script at all.
     const embedding = await getQueryEmbedding(ast.searchQuery);
     if (embedding) {
-      // Use OpenSearch's script_score to blend BM25 + vector
       searchBody.query = {
-        script_score: {
-          query: searchBody.query,
-          script: {
-            source: "_score * 0.7 + cosineSimilarity(params.query_vector, 'embedding') * 0.3 + 1.0",
-            params: { query_vector: embedding },
-          },
+        bool: {
+          must: mustClauses,
+          should: [
+            // Expansion term boosts (BM25)
+            ...shouldClauses,
+            // kNN vector similarity as a soft boost
+            {
+              knn: {
+                embedding: {
+                  vector: embedding,
+                  k: limit * 2, // over-fetch so BM25 can rerank within candidates
+                },
+              },
+            },
+          ],
+          filter: filterClauses,
+          minimum_should_match: 0,
         },
       };
     }
