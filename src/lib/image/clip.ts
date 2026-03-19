@@ -13,7 +13,7 @@
 import * as ort from "onnxruntime-node";
 import * as fs from "fs";
 import * as path from "path";
-import { clipBreaker } from "../core/circuitBreaker";
+import { withCircuitBreaker } from "../core/circuitBreaker";
 
 // ============================================================================
 // CLIP BPE Tokenizer (lazy-loaded from @xenova/transformers)
@@ -351,7 +351,7 @@ function resizeImage(
  * Wrapped with a circuit breaker to fast-fail when ONNX is unhealthy.
  */
 export async function getImageEmbedding(preprocessedImage: Float32Array): Promise<number[]> {
-  return clipBreaker.call(async () => {
+  return withCircuitBreaker("clip", async () => {
     if (!imageSession) {
       await initClip();
     }
@@ -391,7 +391,7 @@ export async function getImageEmbeddingBatch(
     return [await getImageEmbedding(preprocessedImages[0])];
   }
 
-  return clipBreaker.call(async () => {
+  return withCircuitBreaker("clip", async () => {
     if (!imageSession) await initClip();
     if (!imageSession) throw new Error("[CLIP] Image model not loaded.");
 
@@ -448,7 +448,7 @@ export async function getImageEmbeddingFromBuffer(
  * Wrapped with a circuit breaker to fast-fail when ONNX is unhealthy.
  */
 export async function getTextEmbedding(text: string): Promise<number[]> {
-  return clipBreaker.call(async () => {
+  return withCircuitBreaker("clip", async () => {
     if (!textSession) {
       await initClip();
     }

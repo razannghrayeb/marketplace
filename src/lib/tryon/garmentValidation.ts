@@ -6,7 +6,6 @@
  */
 
 import { pg } from "../core/db";
-import { detectCategoryFromText } from "../products/categoryDetector";
 
 // ============================================================================
 // Types

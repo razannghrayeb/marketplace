@@ -205,12 +205,12 @@ export async function processRetryQueue(): Promise<{
   const now = Date.now();
   
   // Get jobs ready for retry
-  const entries = await redis.zrangebyscore<string[]>(
+  const entries = (await redis.zrange(
     REDIS_KEYS.retryQueue,
     0,
     now,
-    { offset: 0, count: 10 }
-  );
+    { byScore: true, offset: 0, count: 10 }
+  )) as string[];
   
   for (const entry of entries) {
     const job: RetryableJob = JSON.parse(entry);
@@ -366,8 +366,8 @@ export async function getDeadLetterEntries(
   const redis = getRedis();
   if (!redis) return [];
   
-  const entries = await redis.lrange<string>(REDIS_KEYS.deadLetter, 0, limit - 1);
-  return entries.map(e => JSON.parse(e));
+  const entries = (await redis.lrange(REDIS_KEYS.deadLetter, 0, limit - 1)) as string[];
+  return entries.map((e: string) => JSON.parse(e));
 }
 
 /**
@@ -388,7 +388,7 @@ export async function retryFromDeadLetter(jobId: number): Promise<boolean> {
   if (isRedisAvailable()) {
     const redis = getRedis();
     if (redis) {
-      const entries = await redis.lrange<string>(REDIS_KEYS.deadLetter, 0, -1);
+      const entries = (await redis.lrange(REDIS_KEYS.deadLetter, 0, -1)) as string[];
       for (const entry of entries) {
         const parsed: DeadLetterEntry = JSON.parse(entry);
         if (parsed.jobId === jobId) {

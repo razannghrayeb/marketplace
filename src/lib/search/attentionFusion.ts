@@ -263,7 +263,7 @@ async function getActiveExperiment(): Promise<ExperimentConfig | null> {
     const redis = getRedis();
     if (redis) {
       try {
-        const config = await redis.get<ExperimentConfig>("fusion:experiment:active");
+        const config = (await redis.get("fusion:experiment:active")) as ExperimentConfig | null;
         if (config) return config;
       } catch {
         // Fall through to env config

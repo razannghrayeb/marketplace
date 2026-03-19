@@ -4,11 +4,13 @@
  * Use getRedis() and guard every call: if (redis) { await redis.set(...) }
  * Do not assume Redis always exists.
  */
-import { Redis } from "@upstash/redis";
+type RedisClient = {
+  [key: string]: (...args: any[]) => any;
+};
 
-let redis: Redis | null = null;
+let redis: RedisClient | null = null;
 
-export function getRedis(): Redis | null {
+export function getRedis(): RedisClient | null {
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
 
@@ -17,7 +19,15 @@ export function getRedis(): Redis | null {
   }
 
   if (!redis) {
-    redis = new Redis({ url, token });
+    try {
+      // Lazy-load to keep builds resilient when the package isn't present.
+      // Runtime still requires @upstash/redis when Redis is enabled.
+      const upstash = require("@upstash/redis");
+      const RedisCtor = upstash.Redis;
+      redis = new RedisCtor({ url, token });
+    } catch {
+      return null;
+    }
   }
 
   return redis;
