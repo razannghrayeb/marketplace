@@ -79,6 +79,9 @@ export interface ProductResult {
   image_url?: string;
   image_cdn?: string;
   images?: ProductImage[];
+  embedding?: number[]; // Optional vector payload when returned from vector search
+  created_at?: string | Date; // Optional for exploration/cold-start logic
+  interaction_count?: number; // Optional interaction signal for ranking/boosting
   similarity_score?: number; // For image search results
   match_type?: "exact" | "similar" | "related"; // How the product matched
   // Scores from candidate generator

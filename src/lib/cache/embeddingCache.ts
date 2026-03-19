@@ -88,7 +88,7 @@ export async function getCachedImageEmbedding(
   
   try {
     const key = generateImageCacheKey(imageBuffer, attribute);
-    const cached = await redis.get<CachedEmbedding>(key);
+    const cached = (await redis.get(key)) as CachedEmbedding | null;
     
     if (cached) {
       cacheStats.hits++;
@@ -145,7 +145,7 @@ export async function getCachedTextEmbedding(
   
   try {
     const key = generateTextCacheKey(text, attribute);
-    const cached = await redis.get<CachedEmbedding>(key);
+    const cached = (await redis.get(key)) as CachedEmbedding | null;
     
     if (cached) {
       cacheStats.hits++;
@@ -255,7 +255,7 @@ export async function batchGetImageEmbeddings(
     
     // Redis mget for batch retrieval
     const cached = await Promise.all(
-      keys.map(key => redis.get<CachedEmbedding>(key))
+      keys.map(key => redis.get(key) as Promise<CachedEmbedding | null>)
     );
     
     for (let i = 0; i < attributes.length; i++) {
