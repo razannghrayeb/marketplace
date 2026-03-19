@@ -9,20 +9,46 @@
 
 steps:
   - name: gcr.io/cloud-builders/docker
-    id: Build image
+    id: Pull cache image (best-effort)
+    entrypoint: bash
     args:
-      - build
-      - --build-arg
-      - HF_TOKEN=${_HF_TOKEN}
-      - -t
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$BUILD_ID
-      - .
+      - -c
+      - |
+        set -euo pipefail
+        IMAGE_BASE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}"
+        docker pull "${IMAGE_BASE}:latest" || true
+
+  - name: gcr.io/cloud-builders/docker
+    id: Build image
+    entrypoint: bash
+    env:
+      - DOCKER_BUILDKIT=1
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        IMAGE_BASE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}"
+        CACHE_IMAGE="${IMAGE_BASE}:latest"
+
+        docker build \
+          --build-arg HF_TOKEN=${_HF_TOKEN} \
+          --build-arg BUILDKIT_INLINE_CACHE=1 \
+          --cache-from "${CACHE_IMAGE}" \
+          -t "${IMAGE_BASE}:$BUILD_ID" \
+          -t "${IMAGE_BASE}:latest" \
+          .
 
   - name: gcr.io/cloud-builders/docker
     id: Push image
     args:
       - push
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$BUILD_ID
+
+  - name: gcr.io/cloud-builders/docker
+    id: Push cache image (latest)
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:latest
 
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     id: Deploy ML service
