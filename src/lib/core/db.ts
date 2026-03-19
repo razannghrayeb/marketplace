@@ -12,20 +12,76 @@ import { config } from "../../config";
 dns.setDefaultResultOrder("ipv4first");
 
 /**
- * Session-mode poolers (PgBouncer, some Cloud SQL / AlloyDB setups) cap clients at pool_size.
- * Node's pg default max=10 × Cloud Run concurrency exhausts that quickly → MaxClientsInSessionMode.
- * Override anytime with PG_POOL_MAX (e.g. 2 if your pooler allows it).
+ * Session-mode poolers (PgBouncer, Supabase pooler on :5432) cap clients at pool_size.
+ * Node's pg default max=10 × many instances → MaxClientsInSessionMode.
+ * Override anytime with PG_POOL_MAX (e.g. 1 for Supabase session mode).
  */
 function resolvePoolMax(): number {
-  const raw = process.env.PG_POOL_MAX;
+  const raw = process.env.PG_POOL_MAX?.trim();
   if (raw !== undefined && raw !== "") {
     const n = parseInt(raw, 10);
     return Number.isFinite(n) && n > 0 ? n : 1;
   }
+
+  const dbUrl = process.env.DATABASE_URL || "";
+  // Supabase transaction pooler (6543) can handle more; session pooler (5432) cannot.
+  const isSupabaseSessionPooler =
+    /pooler\.supabase\.com/i.test(dbUrl) &&
+    !/:6543\b/.test(dbUrl) &&
+    !/transaction/i.test(dbUrl);
+
+  if (isSupabaseSessionPooler || /pgbouncer=true/i.test(dbUrl)) {
+    return 1;
+  }
+
   if (process.env.K_SERVICE) {
     return 1;
   }
+
+  if (process.env.NODE_ENV === "production") {
+    return 2;
+  }
+
   return 10;
+}
+
+/** True for PgBouncer / Supabase session pool "max clients" style errors */
+export function isPgCapacityError(err: unknown): boolean {
+  const msg = String((err as Error)?.message || "").toLowerCase();
+  return (
+    msg.includes("maxclientsinsessionmode") ||
+    msg.includes("max clients reached") ||
+    msg.includes("too many connections")
+  );
+}
+
+/**
+ * Retry a DB operation when the pooler rejects new sessions (transient under load).
+ */
+export async function queryWithPgCapacityRetry<T>(
+  label: string,
+  fn: () => Promise<T>,
+  opts?: { attempts?: number; baseDelayMs?: number },
+): Promise<T> {
+  const attempts = opts?.attempts ?? 8;
+  const baseDelayMs = opts?.baseDelayMs ?? 400;
+  let lastErr: unknown;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isPgCapacityError(err) || i === attempts) {
+        throw err;
+      }
+      const delay = Math.min(30_000, baseDelayMs * i);
+      console.warn(
+        `[pg] ${label}: pooler capacity (${i}/${attempts}) — retry in ${delay}ms`,
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
 }
 
 export const pg = new Pool({

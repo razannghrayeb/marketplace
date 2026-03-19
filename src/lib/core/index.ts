@@ -11,6 +11,8 @@ export {
   closePool,
   getProductsByIdsOrdered,
   productsTableHasIsHiddenColumn,
+  isPgCapacityError,
+  queryWithPgCapacityRetry,
 } from "./db";
 export { osClient, ensureIndex, recreateIndex, getIndexStats } from "./opensearch";
 export {
