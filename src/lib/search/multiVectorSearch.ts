@@ -297,17 +297,30 @@ export class MultiVectorSearchEngine {
       unified.ranks[candidate.attribute] = candidate.rank;
     }
 
-    // Compute combined score for each candidate
+    // Compute combined score for each candidate.
+    //
+    // OpenSearch cosinesimil (FAISS engine) returns scores in [0, 1] where
+    // 1.0 = identical vectors.  No further normalization needed — using the
+    // raw score preserves the full dynamic range for ranking.
     const weightMap = new Map(embeddings.map(e => [e.attribute, e.weight]));
+    const numAttributes = embeddings.length;
 
     for (const unified of candidateMap.values()) {
       let combinedScore = 0;
+      const matchedAttributes = Object.keys(unified.attributeScores).length;
 
       for (const [attr, score] of Object.entries(unified.attributeScores)) {
         const weight = weightMap.get(attr as SemanticAttribute) || 0;
-        // Normalize cosine similarity to [0, 1] range: (score + 1) / 2
-        const normalizedScore = (score + 1) / 2;
-        combinedScore += weight * normalizedScore;
+        combinedScore += weight * score;
+      }
+
+      // Penalize candidates that only appeared in a subset of attribute
+      // searches — they are likely partial matches.  A candidate that
+      // matched 1/4 attributes gets its score multiplied by 0.625.
+      if (matchedAttributes < numAttributes) {
+        const coverage = matchedAttributes / numAttributes;
+        const coveragePenalty = 0.5 + 0.5 * coverage;
+        combinedScore *= coveragePenalty;
       }
 
       unified.combinedScore = combinedScore;
@@ -377,17 +390,15 @@ export class MultiVectorSearchEngine {
         } : undefined,
       };
 
-      // Add score breakdown for explainability
       if (explainScores) {
         result.scoreBreakdown = Object.entries(candidate.attributeScores).map(
           ([attr, similarity]) => {
             const weight = weightMap.get(attr as SemanticAttribute) || 0;
-            const normalizedSim = (similarity + 1) / 2;
             return {
               attribute: attr as SemanticAttribute,
               weight,
               similarity,
-              contribution: weight * normalizedSim,
+              contribution: weight * similarity,
             };
           }
         );

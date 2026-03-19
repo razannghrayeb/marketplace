@@ -33,6 +33,7 @@ import { pg, osClient } from "../src/lib/core";
 import { config } from "../src/config";
 import { processImageForEmbedding, computePHash } from "../src/lib/image";
 import { extractAttributesSync } from "../src/lib/search/attributeExtractor";
+import { attributeEmbeddings } from "../src/lib/search/attributeEmbeddings";
 import { promises as fs } from "fs";
 
 // ============================================================================
@@ -196,15 +197,20 @@ async function reindexProduct(
       return true;
     }
 
-    // Generate embedding and hash
-    const embedding = await processImageForEmbedding(buf);
-    const ph = await computePHash(buf);
+    // Generate global embedding, attribute embeddings, and hash in parallel
+    const [embedding, attrEmbeddings, ph] = await Promise.all([
+      processImageForEmbedding(buf),
+      attributeEmbeddings.generateAllAttributeEmbeddings(buf).catch((err: any) => {
+        console.warn(`  ⚠️  Product ${id}: attribute embeddings failed (${err.message}), using global only`);
+        return null;
+      }),
+      computePHash(buf),
+    ]);
 
-    // Extract attributes
+    // Extract attributes from title
     const { attributes } = extractAttributesSync(title);
 
-    // Index into OpenSearch
-    const body = {
+    const body: Record<string, any> = {
       product_id: String(id),
       vendor_id: String(vendor_id),
       title,
@@ -219,7 +225,6 @@ async function reindexProduct(
       image_cdn: image_url,
       p_hash: ph,
       last_seen_at: last_seen,
-      // Extracted attributes
       attr_color: attributes.color || null,
       attr_colors: attributes.colors || [],
       attr_material: attributes.material || null,
@@ -232,11 +237,20 @@ async function reindexProduct(
       attr_neckline: attributes.neckline || null,
     };
 
+    // Include per-attribute embeddings when available
+    if (attrEmbeddings) {
+      body.embedding_color    = attrEmbeddings.color;
+      body.embedding_texture  = attrEmbeddings.texture;
+      body.embedding_material = attrEmbeddings.material;
+      body.embedding_style    = attrEmbeddings.style;
+      body.embedding_pattern  = attrEmbeddings.pattern;
+    }
+
     await osClient.index({
       index: config.opensearch.index,
       id: String(id),
       body,
-      refresh: false, // Don't refresh immediately for performance
+      refresh: false,
     });
 
     console.log(`  ✅ Product ${id}: ${title.substring(0, 60)}`);
