@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-display: 'Playfair Display', Georgia, serif;
+    --font-sans: 'DM Sans', system-ui, sans-serif;
+    --color-cream: #FDF8F3;
+    --color-wine: #722F37;
+    --color-gold: #C9A86C;
+    --color-charcoal: #1A1A1A;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-cream-100 text-charcoal-700 antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  /* Selection */
+  ::selection {
+    @apply bg-wine-200 text-wine-900;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-medium
+           bg-wine-700 text-white hover:bg-wine-800 active:scale-[0.98]
+           transition-all duration-200 shadow-soft hover:shadow-elevated;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-medium
+           bg-cream-200 text-charcoal-700 hover:bg-cream-300 border border-cream-300
+           transition-all duration-200 active:scale-[0.98];
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full font-medium
+           text-charcoal-600 hover:bg-cream-200 hover:text-charcoal-800
+           transition-all duration-200;
+  }
+
+  .card-hover {
+    @apply transition-all duration-300 hover:shadow-elevated hover:-translate-y-1;
+  }
+
+  .input-field {
+    @apply w-full px-4 py-3 rounded-xl border border-cream-300 bg-white
+           text-charcoal-700 placeholder-charcoal-300
+           focus:outline-none focus:ring-2 focus:ring-wine-500/30 focus:border-wine-500
+           transition-all duration-200;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-cream-200 rounded-full;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-charcoal-300 rounded-full hover:bg-charcoal-400;
+}
