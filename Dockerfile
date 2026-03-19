@@ -14,6 +14,22 @@ ENV HF_TOKEN=${HF_TOKEN}
 RUN pip install --no-cache-dir huggingface_hub
 RUN python -c "from huggingface_hub import snapshot_download; import os; token = os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, ignore_patterns=['*.gitattributes', '.gitattributes', 'README.md']); print('Models downloaded successfully to /models')"
 
+# Pre-download tokenizer vocab files (CLIP BPE + BLIP WordPiece) so the
+# production container never needs network access for tokenizer init.
+RUN pip install --no-cache-dir requests && python -c "\
+import requests, os; \
+os.makedirs('/models/.cache', exist_ok=True); \
+for url, name in [ \
+  ('https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json', 'vocab.json'), \
+  ('https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/merges.txt', 'merges.txt'), \
+  ('https://huggingface.co/Xenova/blip-image-captioning-base/resolve/main/vocab.txt', 'blip-vocab.txt'), \
+]: \
+  r = requests.get(url, allow_redirects=True); r.raise_for_status(); \
+  open(f'/models/.cache/{name}', 'wb').write(r.content); \
+  print(f'  Downloaded {name} ({len(r.content)} bytes)'); \
+print('Tokenizer files cached successfully') \
+"
+
 # Stage 1: Build
 FROM node:20-alpine AS builder
 
@@ -69,17 +85,6 @@ RUN if [ ! -f "./models/fashion-clip-image.onnx" ] || [ ! -f "./models/fashion-c
     exit 1; \
   fi && \
   echo "✅ ML models present: $(ls -lh ./models/*.onnx | wc -l) ONNX files"
-
-# Pre-download tokenizer files so startup doesn't depend on network access.
-# CLIP BPE vocab + merges (for text→embedding) and BLIP WordPiece vocab (for captioning).
-RUN mkdir -p ./models/.cache && \
-  wget -q -O ./models/.cache/vocab.json \
-    "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json" && \
-  wget -q -O ./models/.cache/merges.txt \
-    "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/merges.txt" && \
-  wget -q -O ./models/.cache/blip-vocab.txt \
-    "https://huggingface.co/Xenova/blip-image-captioning-base/resolve/main/vocab.txt" && \
-  echo "✅ Tokenizer files cached: $(ls -1 ./models/.cache/ | wc -l) files"
 
 # Set ownership
 RUN chown -R nodejs:nodejs /app
