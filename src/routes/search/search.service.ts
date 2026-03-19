@@ -135,7 +135,9 @@ export async function textSearch(
                   'brand.search^1.5',
                   'description',
                 ],
-                type: 'cross_fields',
+                // OpenSearch rejects fuzziness with cross_fields.
+                // best_fields preserves fuzzy typo tolerance safely.
+                type: 'best_fields',
                 fuzziness: 'AUTO',
                 operator: 'or',
                 minimum_should_match: '60%',
@@ -337,7 +339,59 @@ export async function textSearch(
     }));
 
     const opensearch = osClient;
-    const response = await opensearch.search({ index: config.opensearch.index, body: searchBody });
+    let response: any;
+    try {
+      response = await opensearch.search({ index: config.opensearch.index, body: searchBody });
+    } catch (err: any) {
+      const reason =
+        err?.meta?.body?.error?.reason ||
+        err?.meta?.body?.error?.root_cause?.[0]?.reason ||
+        err?.message ||
+        "";
+      const type =
+        err?.meta?.body?.error?.type ||
+        err?.meta?.body?.error?.root_cause?.[0]?.type ||
+        "";
+
+      const isParseError =
+        String(type).includes("parsing_exception") ||
+        String(type).includes("x_content_parse_exception") ||
+        String(reason).toLowerCase().includes("fuzziness not allowed");
+
+      if (!isParseError) throw err;
+
+      console.warn("[textSearch] Parse error on advanced query, retrying with safe fallback:", {
+        type,
+        reason,
+      });
+
+      // Safe fallback: strip kNN and run a simple best_fields query that
+      // OpenSearch accepts across versions. Keep user filters to preserve intent.
+      const fallbackBody: any = {
+        query: {
+          bool: {
+            must: [
+              {
+                multi_match: {
+                  query: ast.searchQuery || rawQuery,
+                  fields: ["title^4", "category.search^2", "brand.search^2", "description"],
+                  type: "best_fields",
+                  operator: "or",
+                },
+              },
+            ],
+            filter: filterClauses,
+            should: shouldClauses.filter((c: any) => !c?.knn),
+            minimum_should_match: 0,
+          },
+        },
+        from: offset,
+        size: limit,
+        _source: ["product_id", "title", "brand", "price_usd", "image_cdn", "category", "attr_gender", "attr_color"],
+      };
+
+      response = await opensearch.search({ index: config.opensearch.index, body: fallbackBody });
+    }
 
     const results = response.body.hits.hits.map((hit: any) => ({
       id: hit._source.product_id,
