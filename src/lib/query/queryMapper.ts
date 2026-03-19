@@ -48,21 +48,15 @@ export class QueryMapper {
   private fuzzyThreshold: number;
 
   constructor() {
-    // Map semantic attributes to database columns
     this.attributeColumnMap = {
-      color: 'attributes->\'color\'',
-      material: 'attributes->\'material\'',
-      pattern: 'attributes->\'pattern\'',
-      style: 'attributes->\'style\'',
-      silhouette: 'attributes->\'silhouette\'',
-      fit: 'attributes->\'fit\'',
-      texture: 'attributes->\'texture\'',
-      occasion: 'attributes->\'occasion\'',
+      color: 'color',
+      material: 'description',
+      pattern: 'description',
+      style: 'description',
       category: 'category',
       brand: 'brand',
-      price: 'price',
-      size: 'size',
-      gender: 'gender',
+      price: 'price_cents',
+      gender: 'color',
     };
 
     this.fuzzyThreshold = 0.7; // Similarity threshold for fuzzy matching
@@ -143,47 +137,38 @@ export class QueryMapper {
       });
     }
 
-    if (query.constraints.size) {
-      filter.push({
-        term: { size: query.constraints.size.toLowerCase() },
-      });
-    }
-
     if (query.constraints.gender) {
       filter.push({
-        term: { gender: query.constraints.gender.toLowerCase() },
+        term: { attr_gender: query.constraints.gender.toLowerCase() },
       });
     }
 
-    // Add price range filter
     if (query.constraints.price) {
-      const priceFilter: any = { range: { price: {} } };
+      const priceFilter: any = { range: { price_usd: {} } };
       if (query.constraints.price.min !== undefined) {
-        priceFilter.range.price.gte = query.constraints.price.min;
+        priceFilter.range.price_usd.gte = query.constraints.price.min;
       }
       if (query.constraints.price.max !== undefined) {
-        priceFilter.range.price.lte = query.constraints.price.max;
+        priceFilter.range.price_usd.lte = query.constraints.price.max;
       }
       filter.push(priceFilter);
     }
 
-    // Add must-have terms as text match
     for (const term of query.mustHave) {
       must.push({
         multi_match: {
           query: term,
-          fields: ['name', 'description', 'attributes.*'],
+          fields: ['title', 'category', 'brand'],
           fuzziness: 'AUTO',
         },
       });
     }
 
-    // Add must-not-have terms as exclusions
     for (const term of query.mustNotHave) {
       must_not.push({
         multi_match: {
           query: term,
-          fields: ['name', 'description', 'attributes.*'],
+          fields: ['title', 'category', 'brand'],
         },
       });
     }
@@ -204,7 +189,7 @@ export class QueryMapper {
         },
       },
       size: maxResults,
-      _source: ['id', 'name', 'brand', 'price', 'image_url', 'category', 'attributes'],
+      _source: ['product_id', 'title', 'brand', 'price_usd', 'image_cdn', 'category'],
     };
   }
 
@@ -261,14 +246,12 @@ export class QueryMapper {
   // -------------------------------------------------------------------------
   private getOpenSearchField(attribute: string): string {
     const fieldMap: Record<string, string> = {
-      color: 'attributes.color',
-      material: 'attributes.material',
-      pattern: 'attributes.pattern',
-      style: 'attributes.style',
-      silhouette: 'attributes.silhouette',
-      fit: 'attributes.fit',
-      texture: 'attributes.texture',
-      occasion: 'attributes.occasion',
+      color: 'attr_color',
+      material: 'attr_material',
+      pattern: 'attr_pattern',
+      style: 'attr_style',
+      fit: 'attr_fit',
+      gender: 'attr_gender',
     };
 
     return fieldMap[attribute] || attribute;
@@ -342,12 +325,12 @@ export class QueryMapper {
 
     if (query.constraints.price) {
       const values: number[] = [];
-      if (query.constraints.price.min !== undefined) values.push(query.constraints.price.min);
-      if (query.constraints.price.max !== undefined) values.push(query.constraints.price.max);
+      if (query.constraints.price.min !== undefined) values.push(query.constraints.price.min * 100);
+      if (query.constraints.price.max !== undefined) values.push(query.constraints.price.max * 100);
 
       if (values.length > 0) {
         filters.push({
-          column: 'price',
+          column: 'price_cents',
           operator: 'between',
           value: values,
         });

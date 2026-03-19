@@ -334,23 +334,25 @@ export class MultiVectorSearchEngine {
     }
 
     const productIds = candidates.map(c => c.productId);
+    const numericIds = productIds.map(id => Number(id)).filter(id => !isNaN(id));
 
     // Batch fetch from DB
+    // PG table uses `id` (not `product_id`) and `price_cents` (not `price_usd`)
     const query = `
       SELECT 
-        p.product_id,
-        p.vendor_id,
+        p.id::text AS product_id,
+        p.vendor_id::text AS vendor_id,
         p.title,
         p.brand,
         p.category,
-        p.price_usd,
-        p.availability,
-        p.image_cdn
+        ROUND(p.price_cents / 100.0, 2) AS price_usd,
+        CASE WHEN p.availability THEN 'in_stock' ELSE 'out_of_stock' END AS availability,
+        COALESCE(p.image_cdn, p.image_url) AS image_cdn
       FROM products p
-      WHERE p.product_id = ANY($1)
+      WHERE p.id = ANY($1::bigint[])
     `;
 
-    const dbResult = await pg.query(query, [productIds]);
+    const dbResult = await pg.query(query, [numericIds]);
     const productMap = new Map(
       dbResult.rows.map((row: any) => [row.product_id, row])
     );
