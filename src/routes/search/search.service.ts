@@ -13,7 +13,6 @@ import { IntentParserService, ParsedIntent } from '../../lib/prompt/gemeni';
 import { CompositeQueryBuilder, CompositeQuery } from '../../lib/query/compositeQueryBuilder';
 import { QueryMapper } from '../../lib/query/queryMapper';
 import { processImageForEmbedding } from '../../lib/image/processor';
-import { hybridSearch } from '../../lib/search';
 import {
   MultiVectorSearchEngine,
   AttributeEmbedding,
@@ -421,14 +420,17 @@ export async function textSearch(
 // ─── Image Search ────────────────────────────────────────────────────────────
 
 /**
- * Single image similarity search using Hybrid Search (CLIP image + BLIP caption fusion)
+ * Single image similarity search using pure CLIP image embeddings
  *
  * Pipeline:
- * 1. CLIP image embed (65% weight) - visual features
- * 2. BLIP caption → CLIP text embed (35% weight) - semantic grounding
- * 3. Fuse embeddings with L2 normalization
- * 4. OpenSearch k-NN vector search with filters
- * 5. Minimum similarity threshold to cut irrelevant tail
+ * 1. CLIP image embed - pure visual features (matching indexed embeddings)
+ * 2. OpenSearch k-NN vector search with filters
+ * 3. Minimum similarity threshold to cut irrelevant tail
+ *
+ * NOTE: We use pure image embeddings (not fused with caption) because the
+ * indexed embeddings are pure image embeddings from processImageForEmbedding().
+ * Mixing fused query vectors with pure index vectors causes modality mismatch
+ * and reduces cosine similarity, leading to poor search results.
  */
 export async function imageSearch(
   imageBuffer: Buffer,
@@ -438,8 +440,8 @@ export async function imageSearch(
   const limit = options?.limit || 50;
 
   try {
-    const vectors = await hybridSearch.buildQueryVectors(imageBuffer);
-    const embedding = hybridSearch.fuseVectors(vectors);
+    // Use pure image embedding (matches indexed format) - no caption fusion
+    const embedding = await processImageForEmbedding(imageBuffer);
 
     const kCandidates = Math.min(limit * 3, 200);
 
@@ -506,7 +508,6 @@ export async function imageSearch(
       results,
       total: response.body.hits.total?.value ?? response.body.hits.total ?? 0,
       tookMs: Date.now() - startTime,
-      explanation: vectors.caption ? `Caption: "${vectors.caption}"` : undefined,
     };
   } catch (error) {
     console.error('[imageSearch] Error:', error);
@@ -691,7 +692,8 @@ export async function multiVectorWeightedSearch(
 function getCategorySearchTerms(category: string): string[] {
   const CATEGORY_ALIASES: Record<string, string[]> = {
     tops: ["tops", "top", "shirts", "shirt", "blouse", "blouses", "tshirt", "t-shirt", "tee", "tank top", "polo", "henley", "tunic", "crop top", "camisole", "sweater", "pullover", "hoodie", "sweatshirt"],
-    bottoms: ["bottoms", "bottom", "pants", "pant", "trousers", "jeans", "jean", "chinos", "joggers", "leggings", "shorts", "short", "skirt", "skirts", "culottes", "cargo pants", "sweatpants"],
+    bottoms: ["bottoms", "bottom", "pants", "pant", "trousers", "jeans", "jean", "chinos", "leggings", "shorts", "short", "skirt", "skirts", "culottes", "cargo pants", "sweatpants"],
+    joggers: ["joggers", "jogger", "jogging", "jogging pants", "track pants", "trackpants", "jogging bottoms"],
     dresses: ["dresses", "dress", "gown", "frock", "maxi dress", "mini dress", "midi dress", "sundress", "jumpsuit", "romper"],
     outerwear: ["outerwear", "jacket", "jackets", "coat", "coats", "blazer", "blazers", "cardigan", "cardigans", "parka", "windbreaker", "vest", "gilet", "poncho", "cape", "trench"],
     footwear: ["footwear", "shoes", "shoe", "sneakers", "sneaker", "boots", "boot", "sandals", "sandal", "heels", "heel", "loafers", "loafer", "flats", "flat", "mules", "slides", "slippers", "pumps", "oxfords", "trainers"],

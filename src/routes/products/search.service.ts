@@ -220,12 +220,11 @@ export async function searchByImageWithSimilarity(
 
   const hits = osResponse.body.hits.hits;
 
-  // OpenSearch cosinesimil scores are in [0, 2] range: score = 1 + cosine_sim
-  // Convert to standard [0, 1] cosine similarity for absolute thresholding.
+  // OpenSearch cosinesimil (FAISS) score = (1 + cosine_similarity) / 2
+  // Range [0, 1]: 1.0 = identical vectors, 0.5 = orthogonal, 0.0 = opposite.
+  // This is already in [0, 1], so we use it directly.
   const toAbsoluteScore = (rawScore: number): number => {
-    if (rawScore >= 0 && rawScore <= 2) return Math.max(0, Math.min(1, rawScore - 1));
-    if (rawScore >= 0 && rawScore <= 1) return rawScore; // already normalized
-    return Math.max(0, Math.min(1, rawScore)); // clamp fallback
+    return Math.max(0, Math.min(1, rawScore));
   };
 
   const filteredHits = hits.filter((hit: any) => {
