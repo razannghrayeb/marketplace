@@ -16,19 +16,11 @@ RUN python -c "from huggingface_hub import snapshot_download; import os; token =
 
 # Pre-download tokenizer vocab files (CLIP BPE + BLIP WordPiece) so the
 # production container never needs network access for tokenizer init.
-RUN pip install --no-cache-dir requests && python -c "\
-import requests, os; \
-os.makedirs('/models/.cache', exist_ok=True); \
-for url, name in [ \
-  ('https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json', 'vocab.json'), \
-  ('https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/merges.txt', 'merges.txt'), \
-  ('https://huggingface.co/Xenova/blip-image-captioning-base/resolve/main/vocab.txt', 'blip-vocab.txt'), \
-]: \
-  r = requests.get(url, allow_redirects=True); r.raise_for_status(); \
-  open(f'/models/.cache/{name}', 'wb').write(r.content); \
-  print(f'  Downloaded {name} ({len(r.content)} bytes)'); \
-print('Tokenizer files cached successfully') \
-"
+RUN python3 -c "import urllib.request, os; os.makedirs('/models/.cache', exist_ok=True)" && \
+    python3 -c "import urllib.request; urllib.request.urlretrieve('https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json', '/models/.cache/vocab.json'); print('Downloaded vocab.json')" && \
+    python3 -c "import urllib.request; urllib.request.urlretrieve('https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/merges.txt', '/models/.cache/merges.txt'); print('Downloaded merges.txt')" && \
+    python3 -c "import urllib.request; urllib.request.urlretrieve('https://huggingface.co/Xenova/blip-image-captioning-base/resolve/main/vocab.txt', '/models/.cache/blip-vocab.txt'); print('Downloaded blip-vocab.txt')" && \
+    echo "Tokenizer files cached:" && ls -lh /models/.cache/
 
 # Stage 1: Build
 FROM node:20-alpine AS builder
