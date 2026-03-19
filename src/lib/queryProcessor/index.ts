@@ -100,15 +100,12 @@ export async function processQueryFast(raw: string): Promise<QueryAST> {
 
 /**
  * Get (or compute & cache) a CLIP text embedding for a search query.
- */
-/**
- * Get (or compute & cache) a CLIP text embedding for a search query.
  *
  * CLIP was trained on (image, caption) pairs.  Product embeddings in the
  * index are image embeddings, so a raw text query like "blue jeans" sits
  * in a different region of the latent space than a product photo of blue
- * jeans.  Wrapping the query in a fashion-domain prompt template bridges
- * the modality gap and dramatically improves text→image cosine similarity.
+ * jeans.  We use prompt ensembling (averaging multiple templates) from
+ * the original CLIP paper to bridge this modality gap.
  */
 export async function getQueryEmbedding(query: string): Promise<number[] | null> {
   const cached = getCachedEmbedding(query);
@@ -120,8 +117,7 @@ export async function getQueryEmbedding(query: string): Promise<number[] | null>
   }
 
   try {
-    const prompted = buildClipPrompt(query);
-    const embedding = await getTextEmbedding(prompted);
+    const embedding = await buildEnsembledEmbedding(query);
     cacheEmbedding(query, embedding);
     return embedding;
   } catch (err) {
@@ -131,24 +127,61 @@ export async function getQueryEmbedding(query: string): Promise<number[] | null>
 }
 
 /**
- * Wrap a user query in a fashion-domain prompt that aligns with the
- * distribution CLIP saw during training (image captions).
- *
- * Multiple templates are embedded and averaged to make the resulting
- * vector more robust — this is the "prompt ensembling" technique from
- * the original CLIP paper.  For speed we use a single best template
- * and only fall back to ensembling for very short queries where a
- * single template may be ambiguous.
+ * Fashion-domain prompt templates aligned with CLIP's training
+ * distribution (image-caption pairs).  Each template emphasizes a
+ * slightly different framing, and the averaged embedding is more
+ * robust than any single template — this is the "prompt ensembling"
+ * technique from the original CLIP paper (Section 3.1.4).
  */
-function buildClipPrompt(query: string): string {
-  const q = query.trim().toLowerCase();
+const PROMPT_TEMPLATES = [
+  (q: string) => `a photo of ${q}, fashion product`,
+  (q: string) => `a fashion product photo of ${q}`,
+  (q: string) => `a product photo of ${q}, high quality`,
+  (q: string) => `${q}, fashion item, studio photography`,
+  (q: string) => `a close-up photo of ${q}`,
+];
 
-  // Already looks like a descriptive phrase — just add minimal context
-  if (q.split(/\s+/).length >= 4) {
-    return `a fashion product photo of ${q}`;
+/**
+ * For longer queries (>= 4 words) that already carry enough semantic
+ * signal, fewer templates avoid diluting the specificity.
+ */
+const LONG_QUERY_TEMPLATES = [
+  (q: string) => `a fashion product photo of ${q}`,
+  (q: string) => `a photo of ${q}, fashion product`,
+];
+
+/**
+ * Generate an ensembled embedding by averaging across multiple prompt
+ * templates.  The averaged vector sits closer to the centroid of the
+ * "fashion product" region in CLIP space, making it more likely to
+ * match product image embeddings regardless of caption phrasing.
+ */
+async function buildEnsembledEmbedding(query: string): Promise<number[]> {
+  const q = query.trim().toLowerCase();
+  const templates = q.split(/\s+/).length >= 4
+    ? LONG_QUERY_TEMPLATES
+    : PROMPT_TEMPLATES;
+
+  const embeddings = await Promise.all(
+    templates.map(tpl => getTextEmbedding(tpl(q)))
+  );
+
+  // Element-wise average + L2 normalize
+  const dim = embeddings[0].length;
+  const avg = new Array(dim).fill(0);
+  for (const emb of embeddings) {
+    for (let i = 0; i < dim; i++) {
+      avg[i] += emb[i];
+    }
+  }
+  const n = embeddings.length;
+  for (let i = 0; i < dim; i++) {
+    avg[i] /= n;
   }
 
-  return `a photo of ${q}, fashion product, studio lighting`;
+  const norm = Math.sqrt(avg.reduce((s, v) => s + v * v, 0));
+  if (norm < 1e-8) return avg;
+  return avg.map(v => v / norm);
 }
 
 // ─── Re-exports (convenience) ────────────────────────────────────────────────

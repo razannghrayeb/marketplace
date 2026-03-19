@@ -2,6 +2,9 @@
  * OpenSearch Client & Index Management
  * 
  * Manages OpenSearch connection and index configuration.
+ * 
+ * EMBEDDING_DIM is derived from the same env var (EXPECTED_EMBEDDING_DIM)
+ * that clip.ts validates against, ensuring model ↔ index consistency.
  */
 import { Client } from "@opensearch-project/opensearch";
 import { config } from "../../config";
@@ -40,8 +43,12 @@ function buildOsClientConfig() {
 
 export const osClient = new Client(buildOsClientConfig());
 
-// CLIP ViT-B/32 embedding dimension
-const EMBEDDING_DIM = 512;
+/**
+ * Single source of truth for embedding dimension.
+ * Shared with clip.ts via the EXPECTED_EMBEDDING_DIM env var.
+ * Defaults to 512 (CLIP ViT-B/32).
+ */
+const EMBEDDING_DIM = parseInt(process.env.EXPECTED_EMBEDDING_DIM || "512", 10);
 
 /**
  * Ensure the products index exists with proper mapping

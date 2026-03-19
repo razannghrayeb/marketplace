@@ -367,10 +367,21 @@ async function _doInit(modelType?: ClipModelType): Promise<void> {
   const textModelPath = getTextModelPath();
 
   console.log(`[CLIP] Selected model type : ${activeModelType}`);
+  console.log(`[CLIP] Model embedding dim : ${EMBEDDING_DIM}`);
+  console.log(`[CLIP] Index expected dim  : ${EXPECTED_INDEX_DIM}`);
   console.log(`[CLIP] Image model path    : ${imageModelPath}`);
   console.log(`[CLIP] Text  model path    : ${textModelPath}`);
   console.log(`[CLIP] Image model usable  : ${isUsableModelFile(imageModelPath)}`);
   console.log(`[CLIP] Text  model usable  : ${isUsableModelFile(textModelPath)}`);
+
+  if (EMBEDDING_DIM !== EXPECTED_INDEX_DIM) {
+    throw new Error(
+      `[CLIP] FATAL: Model "${activeModelType}" produces ${EMBEDDING_DIM}-dim embeddings, ` +
+      `but the index expects ${EXPECTED_INDEX_DIM}-dim. ` +
+      `Fix by setting CLIP_MODEL_TYPE to a ${EXPECTED_INDEX_DIM}-dim model, ` +
+      `or change EXPECTED_EMBEDDING_DIM=${EMBEDDING_DIM} and recreate the index.`
+    );
+  }
 
   if (!isUsableModelFile(imageModelPath)) {
     throw new Error(
@@ -531,6 +542,27 @@ function resizeImage(
 }
 
 /**
+ * Expected embedding dimension for the index. All embeddings MUST match
+ * this value.  Set via EXPECTED_EMBEDDING_DIM env var or defaults to 512.
+ */
+const EXPECTED_INDEX_DIM = parseInt(process.env.EXPECTED_EMBEDDING_DIM || "512", 10);
+
+/**
+ * Validate that an embedding has the expected dimension for the index.
+ * Throws immediately on mismatch so corrupt vectors never reach storage.
+ */
+function assertEmbeddingDim(embedding: number[], context: string): void {
+  if (embedding.length !== EXPECTED_INDEX_DIM) {
+    throw new Error(
+      `[CLIP] Embedding dimension mismatch in ${context}: ` +
+      `got ${embedding.length}, expected ${EXPECTED_INDEX_DIM}. ` +
+      `Active model "${activeModelType}" produces ${EMBEDDING_DIM}-dim vectors. ` +
+      `Set CLIP_MODEL_TYPE or EXPECTED_EMBEDDING_DIM to fix.`
+    );
+  }
+}
+
+/**
  * Generate image embedding from preprocessed image data.
  * Wrapped with a circuit breaker to fast-fail when ONNX is unhealthy.
  */
@@ -557,8 +589,10 @@ export async function getImageEmbedding(preprocessedImage: Float32Array): Promis
 
     const outputName = imageSession.outputNames[0];
     const embedding = Array.from(results[outputName].data as Float32Array);
+    const normalized = normalizeVector(embedding);
 
-    return normalizeVector(embedding);
+    assertEmbeddingDim(normalized, "getImageEmbedding");
+    return normalized;
   });
 }
 
@@ -600,7 +634,9 @@ export async function getImageEmbeddingBatch(
       const embeddings: number[][] = [];
       for (let i = 0; i < N; i++) {
         const slice = Array.from(flat.slice(i * dim, (i + 1) * dim));
-        embeddings.push(normalizeVector(slice));
+        const normalized = normalizeVector(slice);
+        assertEmbeddingDim(normalized, `getImageEmbeddingBatch[${i}]`);
+        embeddings.push(normalized);
       }
       return embeddings;
     } catch {
@@ -655,8 +691,10 @@ export async function getTextEmbedding(text: string): Promise<number[]> {
 
     const outputName = textSession.outputNames[0];
     const embedding = Array.from(results[outputName].data as Float32Array);
+    const normalized = normalizeVector(embedding);
 
-    return normalizeVector(embedding);
+    assertEmbeddingDim(normalized, "getTextEmbedding");
+    return normalized;
   });
 }
 
@@ -751,8 +789,16 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Get embedding dimension
+ * Get the embedding dimension produced by the active model.
  */
 export function getEmbeddingDimension(): number {
   return EMBEDDING_DIM;
+}
+
+/**
+ * Get the expected index dimension (what OpenSearch expects).
+ * This is the source of truth used for dimension validation.
+ */
+export function getExpectedIndexDimension(): number {
+  return EXPECTED_INDEX_DIM;
 }

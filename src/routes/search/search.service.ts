@@ -421,23 +421,18 @@ export async function textSearch(
 // ─── Image Search ────────────────────────────────────────────────────────────
 
 /**
- * Image-based similarity search using CLIP embeddings
- */
-/**
  * Single image similarity search using Hybrid Search (CLIP image + BLIP caption fusion)
  *
- * This is for finding products similar to a whole image (no YOLO detection).
- * For per-item detection + search, use POST /api/images/search instead.
- *
  * Pipeline:
- * 1. CLIP image embed (60% weight) - visual features
- * 2. BLIP caption → CLIP text embed (30% weight) - semantic features
+ * 1. CLIP image embed (65% weight) - visual features
+ * 2. BLIP caption → CLIP text embed (35% weight) - semantic grounding
  * 3. Fuse embeddings with L2 normalization
- * 4. OpenSearch k-NN vector search
+ * 4. OpenSearch k-NN vector search with filters
+ * 5. Minimum similarity threshold to cut irrelevant tail
  */
 export async function imageSearch(
   imageBuffer: Buffer,
-  options?: { limit?: number }
+  options?: { limit?: number; filters?: SearchFilters }
 ): Promise<SearchResult> {
   const startTime = Date.now();
   const limit = options?.limit || 50;
@@ -446,10 +441,23 @@ export async function imageSearch(
     const vectors = await hybridSearch.buildQueryVectors(imageBuffer);
     const embedding = hybridSearch.fuseVectors(vectors);
 
-    // Request more candidates from the HNSW graph than we need to return,
-    // then let OpenSearch rank the top `limit`.  A larger k improves recall
-    // at a small latency cost (HNSW is sub-linear).
     const kCandidates = Math.min(limit * 3, 200);
+
+    const filterClauses: any[] = [
+      { term: { is_hidden: false } },
+    ];
+    if (options?.filters?.category) {
+      filterClauses.push({ term: { category: options.filters.category.toLowerCase() } });
+    }
+    if (options?.filters?.gender) {
+      filterClauses.push({ term: { attr_gender: options.filters.gender.toLowerCase() } });
+    }
+    if (options?.filters?.brand) {
+      filterClauses.push({ term: { brand: options.filters.brand.toLowerCase() } });
+    }
+    if (options?.filters?.color) {
+      filterClauses.push({ term: { attr_color: options.filters.color.toLowerCase() } });
+    }
 
     const opensearch = osClient;
     const response = await opensearch.search({
@@ -457,28 +465,40 @@ export async function imageSearch(
       body: {
         size: limit,
         query: {
-          knn: {
-            embedding: {
-              vector: embedding,
-              k: kCandidates,
-            },
+          bool: {
+            must: [
+              {
+                knn: {
+                  embedding: {
+                    vector: embedding,
+                    k: kCandidates,
+                  },
+                },
+              },
+            ],
+            filter: filterClauses,
           },
         },
         _source: ['product_id', 'title', 'brand', 'price_usd', 'image_cdn', 'category', 'attr_color', 'attr_gender'],
       },
     });
 
-    const results = response.body.hits.hits.map((hit: any) => ({
-      id: hit._source.product_id,
-      name: hit._source.title,
-      brand: hit._source.brand,
-      price: hit._source.price_usd,
-      imageUrl: hit._source.image_cdn,
-      category: hit._source.category,
-      color: hit._source.attr_color,
-      gender: hit._source.attr_gender,
-      score: hit._score,
-    }));
+    // Apply minimum similarity threshold. OpenSearch cosinesimil returns
+    // [0, 1]; below 0.20 the match is effectively random.
+    const MIN_SIMILARITY = 0.20;
+    const results = response.body.hits.hits
+      .filter((hit: any) => (hit._score ?? 0) >= MIN_SIMILARITY)
+      .map((hit: any) => ({
+        id: hit._source.product_id,
+        name: hit._source.title,
+        brand: hit._source.brand,
+        price: hit._source.price_usd,
+        imageUrl: hit._source.image_cdn,
+        category: hit._source.category,
+        color: hit._source.attr_color,
+        gender: hit._source.attr_gender,
+        score: hit._score,
+      }));
 
     return {
       results,
@@ -784,8 +804,15 @@ function calculateCompositeScore(
 
 function clamp01(v: number) { return Math.max(0, Math.min(1, v)); }
 
+/**
+ * Normalize a vector score to [0, 1].
+ * OpenSearch cosinesimil (FAISS) already returns [0, 1] so most scores
+ * pass through the identity path.  The exponential branch handles
+ * older BM25-scale scores that may appear in hybrid results.
+ */
 function normalizeVectorScore(s: any): number {
   if (typeof s !== 'number' || !isFinite(s)) return 0;
-  if (s >= -1 && s <= 1) return (s + 1) / 2;
+  if (s >= 0 && s <= 1) return s;
+  if (s < 0) return 0;
   return clamp01(1 - Math.exp(-s / 10));
 }
