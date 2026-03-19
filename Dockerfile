@@ -14,13 +14,10 @@ ENV HF_TOKEN=${HF_TOKEN}
 RUN pip install --no-cache-dir huggingface_hub
 RUN python -c "from huggingface_hub import snapshot_download; import os; token = os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, ignore_patterns=['*.gitattributes', '.gitattributes', 'README.md']); print('Models downloaded successfully to /models')"
 
-# Pre-download tokenizer vocab files (CLIP BPE + BLIP WordPiece) so the
-# production container never needs network access for tokenizer init.
-RUN python3 -c "import urllib.request, os; os.makedirs('/models/.cache', exist_ok=True)" && \
-    python3 -c "import urllib.request; urllib.request.urlretrieve('https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json', '/models/.cache/vocab.json'); print('Downloaded vocab.json')" && \
-    python3 -c "import urllib.request; urllib.request.urlretrieve('https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/merges.txt', '/models/.cache/merges.txt'); print('Downloaded merges.txt')" && \
-    python3 -c "import urllib.request; urllib.request.urlretrieve('https://huggingface.co/Xenova/blip-image-captioning-base/resolve/main/vocab.txt', '/models/.cache/blip-vocab.txt'); print('Downloaded blip-vocab.txt')" && \
-    echo "Tokenizer files cached:" && ls -lh /models/.cache/
+# Pre-download tokenizer vocab files via huggingface_hub (already installed,
+# handles auth + redirects). CLIP BPE: openai/clip-vit-base-patch32 (public).
+# BLIP WordPiece: google-bert/bert-base-uncased (public, same BERT vocab).
+RUN python3 -c "from huggingface_hub import hf_hub_download; import os, shutil; os.makedirs('/models/.cache', exist_ok=True); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'vocab.json'), '/models/.cache/vocab.json'); print('vocab.json ok'); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'merges.txt'), '/models/.cache/merges.txt'); print('merges.txt ok'); shutil.copy(hf_hub_download('google-bert/bert-base-uncased', 'vocab.txt'), '/models/.cache/blip-vocab.txt'); print('blip-vocab.txt ok')"
 
 # Stage 1: Build
 FROM node:20-alpine AS builder

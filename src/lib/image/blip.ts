@@ -23,8 +23,10 @@ const UNK_TOKEN_ID = 100;  // [UNK]
 const MODEL_DIR = path.join(process.cwd(), 'models');
 const CACHE_DIR = path.join(MODEL_DIR, '.cache');
 
+// BLIP uses standard BERT WordPiece vocab. google-bert/bert-base-uncased is
+// public and doesn't require authentication (unlike the Xenova repo).
 const BLIP_VOCAB_URL =
-  'https://huggingface.co/Xenova/blip-image-captioning-base/resolve/main/vocab.txt';
+  'https://huggingface.co/google-bert/bert-base-uncased/resolve/main/vocab.txt';
 
 // ============================================================================
 // Standalone BERT WordPiece tokenizer
