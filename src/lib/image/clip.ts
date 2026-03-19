@@ -13,36 +13,196 @@
 import * as ort from "onnxruntime-node";
 import * as fs from "fs";
 import * as path from "path";
+import * as https from "https";
+import * as http from "http";
 import { withCircuitBreaker } from "../core/circuitBreaker";
 
+const MODEL_DIR = path.join(process.cwd(), "models");
+
 // ============================================================================
-// CLIP BPE Tokenizer (lazy-loaded from @xenova/transformers)
+// CLIP BPE Tokenizer (standalone implementation — no @xenova/transformers
+// dependency, which conflicts with onnxruntime-node)
 // ============================================================================
 
-let clipTokenizer: any = null;
+const VOCAB_URL = "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json";
+const MERGES_URL = "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/merges.txt";
+
+let bpeRanks: Map<string, number> | null = null;
+let encoder: Map<string, number> | null = null;
+let decoder: Map<number, string> | null = null;
+let byteEncoder: Map<number, string> | null = null;
+let bpeCache: Map<string, string> = new Map();
+let tokenizerReady = false;
 let tokenizerInitPromise: Promise<void> | null = null;
 
+function fetchJSON(url: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const get = url.startsWith("https") ? https.get : http.get;
+    get(url, { headers: { "User-Agent": "clip-tokenizer" } }, (res) => {
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        fetchJSON(res.headers.location).then(resolve, reject);
+        return;
+      }
+      const chunks: Buffer[] = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf-8"))); }
+        catch (e) { reject(e); }
+      });
+      res.on("error", reject);
+    }).on("error", reject);
+  });
+}
+
+function fetchText(url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const get = url.startsWith("https") ? https.get : http.get;
+    get(url, { headers: { "User-Agent": "clip-tokenizer" } }, (res) => {
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        fetchText(res.headers.location).then(resolve, reject);
+        return;
+      }
+      const chunks: Buffer[] = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+      res.on("error", reject);
+    }).on("error", reject);
+  });
+}
+
+function buildByteEncoder(): Map<number, string> {
+  const bs: number[] = [];
+  for (let i = 33; i <= 126; i++) bs.push(i);    // '!' to '~'
+  for (let i = 161; i <= 172; i++) bs.push(i);   // '¡' to '¬'
+  for (let i = 174; i <= 255; i++) bs.push(i);   // '®' to 'ÿ'
+  const cs = [...bs];
+  let n = 0;
+  for (let b = 0; b < 256; b++) {
+    if (!bs.includes(b)) {
+      bs.push(b);
+      cs.push(256 + n);
+      n++;
+    }
+  }
+  const map = new Map<number, string>();
+  for (let i = 0; i < bs.length; i++) {
+    map.set(bs[i], String.fromCharCode(cs[i]));
+  }
+  return map;
+}
+
+function getPairs(word: string[]): Set<string> {
+  const pairs = new Set<string>();
+  for (let i = 0; i < word.length - 1; i++) {
+    pairs.add(word[i] + " " + word[i + 1]);
+  }
+  return pairs;
+}
+
+function bpe(token: string): string {
+  if (bpeCache.has(token)) return bpeCache.get(token)!;
+  if (!bpeRanks) return token;
+
+  let word = token.slice(0, -1).split("").concat([token.slice(-1) + "</w>"]);
+  let pairs = getPairs(word);
+  if (pairs.size === 0) {
+    bpeCache.set(token, token + "</w>");
+    return token + "</w>";
+  }
+
+  while (true) {
+    let minRank = Infinity;
+    let bigram = "";
+    for (const pair of pairs) {
+      const rank = bpeRanks.get(pair);
+      if (rank !== undefined && rank < minRank) {
+        minRank = rank;
+        bigram = pair;
+      }
+    }
+    if (minRank === Infinity) break;
+
+    const [first, second] = bigram.split(" ");
+    const newWord: string[] = [];
+    let i = 0;
+    while (i < word.length) {
+      const j = word.indexOf(first, i);
+      if (j === -1) {
+        newWord.push(...word.slice(i));
+        break;
+      }
+      newWord.push(...word.slice(i, j));
+      if (j < word.length - 1 && word[j] === first && word[j + 1] === second) {
+        newWord.push(first + second);
+        i = j + 2;
+      } else {
+        newWord.push(word[j]);
+        i = j + 1;
+      }
+    }
+    word = newWord;
+    if (word.length === 1) break;
+    pairs = getPairs(word);
+  }
+
+  const result = word.join(" ");
+  bpeCache.set(token, result);
+  return result;
+}
+
 async function ensureTokenizer(): Promise<void> {
-  if (clipTokenizer) return;
+  if (tokenizerReady) return;
   if (tokenizerInitPromise) return tokenizerInitPromise;
 
   tokenizerInitPromise = (async () => {
     try {
-      const { AutoTokenizer } = await import("@xenova/transformers");
-      clipTokenizer = await AutoTokenizer.from_pretrained(
-        "Xenova/clip-vit-base-patch32"
-      );
-      console.log("[CLIP] BPE tokenizer loaded (Xenova/clip-vit-base-patch32)");
+      const vocabCachePath = path.join(MODEL_DIR, ".cache", "vocab.json");
+      const mergesCachePath = path.join(MODEL_DIR, ".cache", "merges.txt");
+
+      let vocabData: Record<string, number>;
+      let mergesText: string;
+
+      const cacheDir = path.join(MODEL_DIR, ".cache");
+      if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+
+      if (fs.existsSync(vocabCachePath) && fs.existsSync(mergesCachePath)) {
+        vocabData = JSON.parse(fs.readFileSync(vocabCachePath, "utf-8"));
+        mergesText = fs.readFileSync(mergesCachePath, "utf-8");
+        console.log("[CLIP] BPE tokenizer loaded from cache");
+      } else {
+        console.log("[CLIP] Downloading BPE vocab and merges from HuggingFace...");
+        [vocabData, mergesText] = await Promise.all([
+          fetchJSON(VOCAB_URL),
+          fetchText(MERGES_URL),
+        ]);
+        fs.writeFileSync(vocabCachePath, JSON.stringify(vocabData));
+        fs.writeFileSync(mergesCachePath, mergesText);
+        console.log("[CLIP] BPE vocab and merges downloaded and cached");
+      }
+
+      encoder = new Map(Object.entries(vocabData));
+      decoder = new Map<number, string>();
+      for (const [k, v] of encoder) decoder.set(v, k);
+
+      const mergeLines = mergesText.split("\n").filter(l => l.trim() && !l.startsWith("#"));
+      bpeRanks = new Map<string, number>();
+      for (let i = 0; i < mergeLines.length; i++) {
+        bpeRanks.set(mergeLines[i].trim(), i);
+      }
+
+      byteEncoder = buildByteEncoder();
+      bpeCache = new Map();
+      tokenizerReady = true;
+      console.log(`[CLIP] BPE tokenizer ready (${encoder.size} vocab, ${bpeRanks.size} merges)`);
     } catch (err) {
       console.warn("[CLIP] Failed to load BPE tokenizer, falling back to simple tokenizer:", err);
+      tokenizerReady = false;
       tokenizerInitPromise = null;
     }
   })();
 
   return tokenizerInitPromise;
 }
-
-const MODEL_DIR = path.join(process.cwd(), "models");
 
 // ============================================================================
 // Model Configuration
@@ -454,7 +614,7 @@ export async function getImageEmbeddingFromBuffer(
  * Wrapped with a circuit breaker to fast-fail when ONNX is unhealthy.
  */
 export async function getTextEmbedding(text: string): Promise<number[]> {
-  return withCircuitBreaker("clip", async () => {
+  return withCircuitBreaker("clip-text", async () => {
     if (!textSession) {
       await initClip();
     }
@@ -483,19 +643,41 @@ export async function getTextEmbedding(text: string): Promise<number[]> {
 }
 
 /**
- * Tokenize text using CLIP BPE tokenizer from @xenova/transformers.
- * Falls back to a basic char-code tokenizer only if the BPE model fails to load.
+ * Tokenize text using the built-in CLIP BPE tokenizer.
+ * Falls back to a basic char-code tokenizer only if vocab/merges failed to load.
  */
 async function tokenize(text: string): Promise<number[]> {
   await ensureTokenizer();
 
-  if (clipTokenizer) {
-    const encoded = await clipTokenizer(text, {
-      padding: "max_length",
-      max_length: 77,
-      truncation: true,
-    });
-    return Array.from(encoded.input_ids.data as BigInt64Array, Number);
+  if (tokenizerReady && encoder && byteEncoder) {
+    const SOT = 49406; // <|startoftext|>
+    const EOT = 49407; // <|endoftext|>
+    const maxLen = 77;
+
+    const cleaned = text.toLowerCase().trim();
+    const pat = /<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[a-z]+|[0-9]+|[^\sa-z0-9]+/gi;
+    const matches = cleaned.match(pat) || [];
+
+    const bpeTokens: number[] = [SOT];
+    for (const token of matches) {
+      const encoded_bytes = Array.from(Buffer.from(token, "utf-8"))
+        .map(b => byteEncoder!.get(b) || "")
+        .join("");
+      const bpeResult = bpe(encoded_bytes);
+      for (const bpeToken of bpeResult.split(" ")) {
+        const id = encoder!.get(bpeToken);
+        if (id !== undefined) bpeTokens.push(id);
+      }
+      if (bpeTokens.length >= maxLen - 1) break;
+    }
+    bpeTokens.push(EOT);
+
+    // Pad/truncate to maxLen
+    const result = new Array(maxLen).fill(0);
+    for (let i = 0; i < Math.min(bpeTokens.length, maxLen); i++) {
+      result[i] = bpeTokens[i];
+    }
+    return result;
   }
 
   return simpleTokenizeFallback(text);
@@ -509,14 +691,14 @@ function simpleTokenizeFallback(text: string): number[] {
   console.warn("[CLIP] Using char-code fallback tokenizer — text embeddings will be degraded");
   const maxLen = 77;
   const tokens = new Array(maxLen).fill(0);
-  tokens[0] = 49406; // <start>
+  tokens[0] = 49406;
 
   const chars = text.toLowerCase().slice(0, maxLen - 2).split("");
   for (let i = 0; i < chars.length; i++) {
     tokens[i + 1] = chars[i].charCodeAt(0);
   }
 
-  tokens[chars.length + 1] = 49407; // <end>
+  tokens[chars.length + 1] = 49407;
   return tokens;
 }
 

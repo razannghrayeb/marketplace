@@ -70,6 +70,17 @@ RUN if [ ! -f "./models/fashion-clip-image.onnx" ] || [ ! -f "./models/fashion-c
   fi && \
   echo "✅ ML models present: $(ls -lh ./models/*.onnx | wc -l) ONNX files"
 
+# Pre-download tokenizer files so startup doesn't depend on network access.
+# CLIP BPE vocab + merges (for text→embedding) and BLIP WordPiece vocab (for captioning).
+RUN mkdir -p ./models/.cache && \
+  wget -q -O ./models/.cache/vocab.json \
+    "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json" && \
+  wget -q -O ./models/.cache/merges.txt \
+    "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/merges.txt" && \
+  wget -q -O ./models/.cache/blip-vocab.txt \
+    "https://huggingface.co/Xenova/blip-image-captioning-base/resolve/main/vocab.txt" && \
+  echo "✅ Tokenizer files cached: $(ls -1 ./models/.cache/ | wc -l) files"
+
 # Set ownership
 RUN chown -R nodejs:nodejs /app
 
