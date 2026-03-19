@@ -5,7 +5,13 @@
  */
 import "dotenv/config";
 
-export { pg, testConnection, closePool, getProductsByIdsOrdered } from "./db";
+export {
+  pg,
+  testConnection,
+  closePool,
+  getProductsByIdsOrdered,
+  productsTableHasIsHiddenColumn,
+} from "./db";
 export { osClient, ensureIndex, recreateIndex, getIndexStats } from "./opensearch";
 export {
   CircuitBreaker,

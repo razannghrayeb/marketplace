@@ -6,7 +6,7 @@
  * - Title similarity (Levenshtein distance)
  * - Brand + Category matching
  */
-import { pg } from "../core";
+import { pg, productsTableHasIsHiddenColumn } from "../core";
 
 // ============================================================================
 // Types
@@ -387,8 +387,10 @@ export async function findSimilarByPHash(
   threshold = 10,
   limit = 20
 ): Promise<Array<{ product_id: number; distance: number }>> {
+  const hasIsHidden = await productsTableHasIsHiddenColumn();
+  const hiddenClause = hasIsHidden ? "AND is_hidden = false" : "";
   const products = await pg.query(
-    `SELECT id, p_hash FROM products WHERE p_hash IS NOT NULL AND is_hidden = false`
+    `SELECT id, p_hash FROM products WHERE p_hash IS NOT NULL ${hiddenClause}`
   );
 
   const similar: Array<{ product_id: number; distance: number }> = [];

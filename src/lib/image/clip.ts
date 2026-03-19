@@ -35,12 +35,58 @@ let bpeCache: Map<string, string> = new Map();
 let tokenizerReady = false;
 let tokenizerInitPromise: Promise<void> | null = null;
 
-function fetchJSON(url: string): Promise<any> {
+/**
+ * Serialize CLIP text ONNX inference. Concurrent `session.run()` calls on the same
+ * CPU-bound session cause failures and spurious circuit-breaker opens during reindex.
+ */
+let textEncoderChain: Promise<unknown> = Promise.resolve();
+
+function enqueueTextEncoder<T>(fn: () => Promise<T>): Promise<T> {
+  const run = textEncoderChain.then(() => fn());
+  textEncoderChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+const MAX_HTTP_REDIRECTS = 15;
+
+/**
+ * HuggingFace often returns a relative Location on 3xx (e.g. /api/resolve-cache/...).
+ * Node's http(s).get requires an absolute URL — resolve against the request URL.
+ */
+function resolveRedirectUrl(currentUrl: string, location: string): string {
+  const loc = location.trim();
+
+  // Already absolute
+  if (/^https?:\/\//i.test(loc)) return loc;
+
+  // Relative path — resolve against the origin of the current URL
+  try {
+    const base = new URL(currentUrl);
+    return new URL(loc, base.origin).href;
+  } catch {
+    // Last resort: if currentUrl itself is malformed, try constructing from HuggingFace origin
+    try {
+      return new URL(loc, "https://huggingface.co").href;
+    } catch {
+      return loc;
+    }
+  }
+}
+
+function fetchJSON(url: string, redirectDepth = 0): Promise<any> {
   return new Promise((resolve, reject) => {
+    if (redirectDepth > MAX_HTTP_REDIRECTS) {
+      reject(new Error(`fetchJSON: too many redirects (${MAX_HTTP_REDIRECTS})`));
+      return;
+    }
     const get = url.startsWith("https") ? https.get : http.get;
     get(url, { headers: { "User-Agent": "clip-tokenizer" } }, (res) => {
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        fetchJSON(res.headers.location).then(resolve, reject);
+        const next = resolveRedirectUrl(url, res.headers.location);
+        fetchJSON(next, redirectDepth + 1).then(resolve, reject);
         return;
       }
       const chunks: Buffer[] = [];
@@ -54,12 +100,17 @@ function fetchJSON(url: string): Promise<any> {
   });
 }
 
-function fetchText(url: string): Promise<string> {
+function fetchText(url: string, redirectDepth = 0): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (redirectDepth > MAX_HTTP_REDIRECTS) {
+      reject(new Error(`fetchText: too many redirects (${MAX_HTTP_REDIRECTS})`));
+      return;
+    }
     const get = url.startsWith("https") ? https.get : http.get;
     get(url, { headers: { "User-Agent": "clip-tokenizer" } }, (res) => {
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        fetchText(res.headers.location).then(resolve, reject);
+        const next = resolveRedirectUrl(url, res.headers.location);
+        fetchText(next, redirectDepth + 1).then(resolve, reject);
         return;
       }
       const chunks: Buffer[] = [];
@@ -197,11 +248,14 @@ async function ensureTokenizer(): Promise<void> {
     } catch (err) {
       console.warn("[CLIP] Failed to load BPE tokenizer, falling back to simple tokenizer:", err);
       tokenizerReady = false;
+      // Allow retries — clear the init promise so subsequent calls re-attempt
       tokenizerInitPromise = null;
+      throw err;
     }
   })();
 
-  return tokenizerInitPromise;
+  // Don't propagate the error to callers — they will fall back to simpleTokenizeFallback
+  return tokenizerInitPromise.catch(() => {});
 }
 
 // ============================================================================
@@ -276,6 +330,14 @@ function getActiveModelType(): ClipModelType {
     }
     console.warn(
       `[CLIP] Requested CLIP_MODEL_TYPE=${envModel}, but model file is missing/too small: ${envModelPath}`
+    );
+  }
+
+  if (!envModel) {
+    console.warn(
+      `[CLIP] ⚠️  CLIP_MODEL_TYPE not set — auto-detecting model. ` +
+      `This can cause model mismatch between indexing and search. ` +
+      `Set CLIP_MODEL_TYPE in .env to ensure consistency.`
     );
   }
 
@@ -439,10 +501,10 @@ export function isClipAvailable(): boolean {
 }
 
 /**
- * Check if CLIP text model is loaded and ready
+ * Check if CLIP text model is loaded, BPE tokenizer ready, and text search is usable.
  */
 export function isTextSearchAvailable(): boolean {
-  return textSession !== null;
+  return textSession !== null && tokenizerReady;
 }
 
 /**
@@ -666,41 +728,55 @@ export async function getImageEmbeddingFromBuffer(
 /**
  * Generate text embedding (if text model is available).
  * Wrapped with a circuit breaker to fast-fail when ONNX is unhealthy.
+ *
+ * Requires the BPE tokenizer — throws immediately if it's not loaded,
+ * preventing garbage embeddings from polluting the circuit breaker stats.
  */
 export async function getTextEmbedding(text: string): Promise<number[]> {
-  return withCircuitBreaker("clip-text", async () => {
-    if (!textSession) {
-      await initClip();
-    }
+  // Pre-check: ensure tokenizer is loaded BEFORE entering the serialized
+  // queue + circuit breaker.  This avoids counting tokenizer failures as
+  // ONNX failures and stops the circuit breaker from tripping falsely.
+  await ensureTokenizer();
+  if (!tokenizerReady) {
+    throw new Error("[CLIP] BPE tokenizer not available — text embedding disabled");
+  }
 
-    if (!textSession) {
-      throw new Error(
-        `[CLIP] Text model not loaded. ` +
-          `Path: ${getTextModelPath()} | ` +
-          `Exists: ${fs.existsSync(getTextModelPath())} | ` +
-          `Usable (size check): ${isUsableModelFile(getTextModelPath())}`
-      );
-    }
+  return enqueueTextEncoder(() =>
+    withCircuitBreaker("clip-text", async () => {
+      if (!textSession) {
+        await initClip();
+      }
 
-    const tokens = await tokenize(text);
-    const inputTensor = new ort.Tensor("int64", new BigInt64Array(tokens.map(BigInt)), [1, tokens.length]);
+      if (!textSession) {
+        throw new Error(
+          `[CLIP] Text model not loaded. ` +
+            `Path: ${getTextModelPath()} | ` +
+            `Exists: ${fs.existsSync(getTextModelPath())} | ` +
+            `Usable (size check): ${isUsableModelFile(getTextModelPath())}`
+        );
+      }
 
-    const inputName = textSession.inputNames[0];
-    const feeds: Record<string, ort.Tensor> = { [inputName]: inputTensor };
-    const results = await textSession.run(feeds);
+      const tokens = await tokenize(text);
+      const inputTensor = new ort.Tensor("int64", new BigInt64Array(tokens.map(BigInt)), [1, tokens.length]);
 
-    const outputName = textSession.outputNames[0];
-    const embedding = Array.from(results[outputName].data as Float32Array);
-    const normalized = normalizeVector(embedding);
+      const inputName = textSession.inputNames[0];
+      const feeds: Record<string, ort.Tensor> = { [inputName]: inputTensor };
+      const results = await textSession.run(feeds);
 
-    assertEmbeddingDim(normalized, "getTextEmbedding");
-    return normalized;
-  });
+      const outputName = textSession.outputNames[0];
+      const embedding = Array.from(results[outputName].data as Float32Array);
+      const normalized = normalizeVector(embedding);
+
+      assertEmbeddingDim(normalized, "getTextEmbedding");
+      return normalized;
+    }),
+  );
 }
 
 /**
  * Tokenize text using the built-in CLIP BPE tokenizer.
- * Falls back to a basic char-code tokenizer only if vocab/merges failed to load.
+ * Throws if the BPE tokenizer is not available — callers should catch and
+ * fall back to image-only embeddings rather than producing garbage vectors.
  */
 async function tokenize(text: string): Promise<number[]> {
   await ensureTokenizer();
@@ -741,21 +817,19 @@ async function tokenize(text: string): Promise<number[]> {
 
 /**
  * Last-resort fallback if the BPE tokenizer cannot load.
- * Produces degraded embeddings — logs a warning on every call.
+ *
+ * CRITICAL: The char-code approach is invalid — CLIP's vocabulary expects
+ * BPE token IDs, not raw char codes.  Feeding char codes produces garbage
+ * embeddings that pollute the index and degrade search quality.
+ *
+ * Instead, refuse to produce text embeddings until the real tokenizer is
+ * ready.  Callers catch this error and fall back to image-only embeddings.
  */
-function simpleTokenizeFallback(text: string): number[] {
-  console.warn("[CLIP] Using char-code fallback tokenizer — text embeddings will be degraded");
-  const maxLen = 77;
-  const tokens = new Array(maxLen).fill(0);
-  tokens[0] = 49406;
-
-  const chars = text.toLowerCase().slice(0, maxLen - 2).split("");
-  for (let i = 0; i < chars.length; i++) {
-    tokens[i + 1] = chars[i].charCodeAt(0);
-  }
-
-  tokens[chars.length + 1] = 49407;
-  return tokens;
+function simpleTokenizeFallback(_text: string): number[] {
+  throw new Error(
+    "[CLIP] BPE tokenizer not loaded — cannot produce valid text embeddings. " +
+    "Ensure vocab.json and merges.txt are downloaded or cached."
+  );
 }
 
 /**

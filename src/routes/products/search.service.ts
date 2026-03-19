@@ -9,7 +9,11 @@
  * - Related products discovery
  */
 import { osClient } from "../../lib/core";
-import { pg, getProductsByIdsOrdered } from "../../lib/core";
+import {
+  pg,
+  getProductsByIdsOrdered,
+  productsTableHasIsHiddenColumn,
+} from "../../lib/core";
 import { config } from "../../config";
 import { getImagesForProducts } from "./images.service";
 import { hammingDistance } from "../../lib/products";
@@ -286,18 +290,19 @@ export async function findSimilarByPHash(
   excludeIds: string[],
   limit: number = 10
 ): Promise<ProductResult[]> {
-  // Get all products with pHash (parameterized to prevent SQL injection)
+  const hasIsHidden = await productsTableHasIsHiddenColumn();
+  const hiddenClause = hasIsHidden ? "AND is_hidden = false" : "";
   const excludeNumeric = excludeIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
   const result = excludeNumeric.length > 0
     ? await pg.query(
         `SELECT id, p_hash FROM products
-         WHERE p_hash IS NOT NULL AND is_hidden = false
+         WHERE p_hash IS NOT NULL ${hiddenClause}
          AND id != ALL($1::int[])`,
         [excludeNumeric]
       )
     : await pg.query(
         `SELECT id, p_hash FROM products
-         WHERE p_hash IS NOT NULL AND is_hidden = false`
+         WHERE p_hash IS NOT NULL ${hiddenClause}`
       );
 
   // Calculate Hamming distance and filter similar

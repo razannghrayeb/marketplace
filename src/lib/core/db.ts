@@ -11,8 +11,26 @@ import { config } from "../../config";
 // when connecting to cloud-hosted databases (Supabase, Neon, etc.)
 dns.setDefaultResultOrder("ipv4first");
 
+/**
+ * Session-mode poolers (PgBouncer, some Cloud SQL / AlloyDB setups) cap clients at pool_size.
+ * Node's pg default max=10 × Cloud Run concurrency exhausts that quickly → MaxClientsInSessionMode.
+ * Override anytime with PG_POOL_MAX (e.g. 2 if your pooler allows it).
+ */
+function resolvePoolMax(): number {
+  const raw = process.env.PG_POOL_MAX;
+  if (raw !== undefined && raw !== "") {
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : 1;
+  }
+  if (process.env.K_SERVICE) {
+    return 1;
+  }
+  return 10;
+}
+
 export const pg = new Pool({
   connectionString: config.database.url,
+  max: resolvePoolMax(),
   ssl: {
     rejectUnauthorized: false,
   },
@@ -21,6 +39,25 @@ export const pg = new Pool({
   keepAlive: true,
   keepAliveInitialDelayMillis: 10000,
 });
+
+let cachedProductsHasIsHidden: boolean | undefined;
+
+/** Cached once per process; avoids 42703 when prod DB is behind migrations. */
+export async function productsTableHasIsHiddenColumn(): Promise<boolean> {
+  if (cachedProductsHasIsHidden !== undefined) {
+    return cachedProductsHasIsHidden;
+  }
+  const r = await pg.query(
+    `SELECT 1
+     FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = 'products'
+       AND column_name = 'is_hidden'
+     LIMIT 1`
+  );
+  cachedProductsHasIsHidden = (r.rowCount ?? 0) > 0;
+  return cachedProductsHasIsHidden;
+}
 
 // Handle pool errors
 pg.on("error", (err) => {

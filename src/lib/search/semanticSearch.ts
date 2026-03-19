@@ -353,18 +353,53 @@ function buildSemanticQuery(query: string, entities: QueryEntities, intent: Quer
 
 let _dbEntitiesLoaded = false;
 
+function isDbCapacityError(err: unknown): boolean {
+  const msg = String((err as Error)?.message || "").toLowerCase();
+  return (
+    msg.includes("maxclientsinsessionmode") ||
+    msg.includes("max clients reached") ||
+    msg.includes("too many connections")
+  );
+}
+
+async function queryWithCapacityRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  const attempts = 6;
+  const baseMs = 1500;
+  let lastErr: unknown;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isDbCapacityError(err) || i === attempts) throw err;
+      const delay = baseMs * i;
+      console.warn(
+        `[SemanticSearch] DB ${label} capacity wait (attempt ${i}/${attempts}): ${(err as Error).message}. Retrying in ${delay}ms...`
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
+
 /**
  * One-time DB enrichment — safe to call multiple times (no-op after first).
  * Call once at startup before serving traffic.
+ *
+ * Uses sequential queries (not Promise.all) so PgBouncer "session" mode only
+ * needs one connection at a time for this step; retries on max-clients errors.
  */
 export async function loadEntitiesFromDB(): Promise<void> {
   if (_dbEntitiesLoaded) return;
 
   try {
-    const [brandsResult, categoriesResult] = await Promise.all([
-      pg.query(`SELECT DISTINCT LOWER(brand) as brand FROM products WHERE brand IS NOT NULL`),
-      pg.query(`SELECT DISTINCT LOWER(category) as category FROM products WHERE category IS NOT NULL`),
-    ]);
+    const brandsResult = await queryWithCapacityRetry("brands", () =>
+      pg.query(`SELECT DISTINCT LOWER(brand) as brand FROM products WHERE brand IS NOT NULL`)
+    );
+
+    const categoriesResult = await queryWithCapacityRetry("categories", () =>
+      pg.query(`SELECT DISTINCT LOWER(category) as category FROM products WHERE category IS NOT NULL`)
+    );
 
     for (const row of brandsResult.rows) {
       KNOWN_BRANDS.add(row.brand);
