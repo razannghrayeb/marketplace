@@ -1,7 +1,7 @@
 {
-  "lastProcessedId": "34121",
-  "totalProcessed": 9270,
-  "totalSuccess": 8936,
+  "lastProcessedId": "34591",
+  "totalProcessed": 9740,
+  "totalSuccess": 9406,
   "totalFailed": 334,
   "totalSkipped": 102,
   "failedIds": [
@@ -341,5 +341,5 @@
     "33028"
   ],
   "startedAt": "2026-03-19T00:49:19.085Z",
-  "lastUpdatedAt": "2026-03-19T23:00:02.496Z"
+  "lastUpdatedAt": "2026-03-19T23:04:59.644Z"
 }
