@@ -9,7 +9,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as https from 'https';
 import * as http from 'http';
-import sharp from 'sharp';
+import sharpLib from 'sharp';
+
+// See `src/lib/image/processor.ts` / `utils.ts` for why we guard this.
+const sharp: any =
+  typeof sharpLib === 'function' ? sharpLib : (sharpLib as any).default;
 
 const BLIP_MEAN    = [0.48145466, 0.4578275,  0.40821073];
 const BLIP_STD     = [0.26862954, 0.26130258, 0.27577711];

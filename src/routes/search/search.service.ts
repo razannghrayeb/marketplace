@@ -103,47 +103,82 @@ export async function textSearch(
     const merged = mergeFilters(callerFilters, ast);
 
     // ── 3. Build OpenSearch query ──────────────────────────────────────────
+    //
+    // Key design decisions:
+    //  • title (text) gets highest boost — this is where product names live
+    //  • brand.search / category.search (text sub-fields) allow full-text
+    //    matching with fuzziness — the parent keyword fields do NOT support
+    //    fuzziness or tokenization
+    //  • description (text) adds recall for long-tail queries
+    //  • attr_color, attr_gender are keyword → only exact term filters
+    //  • We use a two-layer approach:
+    //    MUST = at least one text match (ensures relevance)
+    //    SHOULD = entity boosts + expansions (improves ranking)
+    //    FILTER = hard constraints from caller-supplied or high-confidence entities
+
     const mustClauses: any[] = [];
     const filterClauses: any[] = [];
+    const shouldClauses: any[] = [];
 
-    // Primary text match – use the corrected searchQuery
-    // Fields must match the OpenSearch index mapping (title, category, brand)
+    // Primary text match — use corrected searchQuery against text fields
     if (ast.searchQuery) {
       mustClauses.push({
-        multi_match: {
-          query: ast.searchQuery,
-          fields: ['title^3', 'category', 'brand'],
-          fuzziness: 'AUTO',
+        bool: {
+          should: [
+            {
+              multi_match: {
+                query: ast.searchQuery,
+                fields: [
+                  'title^4',
+                  'title.raw^2',
+                  'category.search^2',
+                  'brand.search^1.5',
+                  'description',
+                ],
+                type: 'cross_fields',
+                fuzziness: 'AUTO',
+                operator: 'or',
+                minimum_should_match: '60%',
+              },
+            },
+            {
+              multi_match: {
+                query: ast.searchQuery,
+                fields: ['title^5', 'category.search^3'],
+                type: 'phrase',
+                boost: 2.0,
+              },
+            },
+          ],
+          minimum_should_match: 1,
         },
       });
     }
 
-    // Expansion terms → should-match to improve recall without hurting precision
+    // ── 4. Expansion terms → should-match for better recall ───────────────
     const expansionTerms = [
       ...ast.expansions.synonyms,
       ...ast.expansions.categoryExpansions,
       ...ast.expansions.transliterations,
     ].filter(Boolean);
 
-    const shouldClauses: any[] = [];
     if (expansionTerms.length > 0) {
       shouldClauses.push({
         multi_match: {
           query: expansionTerms.join(' '),
-          fields: ['title', 'category', 'brand'],
+          fields: ['title^2', 'category.search^2', 'description'],
+          type: 'best_fields',
           fuzziness: 'AUTO',
-          boost: 0.3,
+          boost: 0.8,
         },
       });
     }
 
-    // ── 4. Apply merged filters ────────────────────────────────────────────
-    // Field names must match OpenSearch index mapping (attr_color, attr_gender, price_usd, etc.)
+    // ── 5. Apply merged filters ────────────────────────────────────────────
     //
-    // Category & brand from entity extraction are treated as BOOSTS (should),
-    // not hard filters, because the dictionary canonical names (e.g. "bottoms")
-    // often don't match the actual values stored in OpenSearch (e.g. "pants").
-    // Only caller-supplied filters are treated as hard term filters.
+    // Entity-extracted values: use as SHOULD boosts (they may not match
+    // the exact keyword values stored in OpenSearch).
+    // Caller-supplied values: use as hard FILTER constraints.
     if (merged.category) {
       if (callerFilters?.category) {
         filterClauses.push({ term: { category: merged.category.toLowerCase() } });
@@ -151,16 +186,28 @@ export async function textSearch(
         const catAliases = getCategorySearchTerms(merged.category);
         shouldClauses.push({
           bool: {
-            should: catAliases.map(alias => ({ term: { category: alias.toLowerCase() } })),
-            boost: 2.0,
-          },
-        });
-        shouldClauses.push({
-          multi_match: {
-            query: catAliases.join(' '),
-            fields: ['title^2', 'category^3'],
-            fuzziness: 'AUTO',
-            boost: 1.5,
+            should: [
+              ...catAliases.map(alias => ({
+                term: { category: { value: alias.toLowerCase(), boost: 3.0 } },
+              })),
+              {
+                match: {
+                  'category.search': {
+                    query: catAliases.join(' '),
+                    boost: 2.0,
+                    fuzziness: 'AUTO',
+                  },
+                },
+              },
+              {
+                multi_match: {
+                  query: catAliases.join(' '),
+                  fields: ['title^2'],
+                  fuzziness: 'AUTO',
+                  boost: 1.5,
+                },
+              },
+            ],
           },
         });
       }
@@ -169,21 +216,42 @@ export async function textSearch(
       if (callerFilters?.brand) {
         filterClauses.push({ term: { brand: merged.brand.toLowerCase() } });
       } else {
-        shouldClauses.push({ term: { brand: { value: merged.brand.toLowerCase(), boost: 3.0 } } });
+        shouldClauses.push({
+          bool: {
+            should: [
+              { term: { brand: { value: merged.brand.toLowerCase(), boost: 4.0 } } },
+              { match: { 'brand.search': { query: merged.brand, boost: 2.0, fuzziness: 'AUTO' } } },
+            ],
+          },
+        });
       }
     }
     if (merged.color) {
       if (callerFilters?.color) {
         filterClauses.push({ term: { attr_color: merged.color.toLowerCase() } });
       } else {
-        shouldClauses.push({ term: { attr_color: { value: merged.color.toLowerCase(), boost: 2.0 } } });
+        shouldClauses.push({
+          bool: {
+            should: [
+              { term: { attr_color: { value: merged.color.toLowerCase(), boost: 3.0 } } },
+              { match: { title: { query: merged.color, boost: 1.5 } } },
+            ],
+          },
+        });
       }
     }
     if (merged.gender) {
       if (callerFilters?.gender) {
         filterClauses.push({ term: { attr_gender: merged.gender.toLowerCase() } });
       } else {
-        shouldClauses.push({ term: { attr_gender: { value: merged.gender.toLowerCase(), boost: 1.5 } } });
+        shouldClauses.push({
+          bool: {
+            should: [
+              { term: { attr_gender: { value: merged.gender.toLowerCase(), boost: 2.5 } } },
+              { match: { title: { query: merged.gender, boost: 1.0 } } },
+            ],
+          },
+        });
       }
     }
     if (merged.vendorId) {
@@ -202,8 +270,10 @@ export async function textSearch(
       mustClauses.push({
         multi_match: {
           query: rawQuery.trim(),
-          fields: ['title^3', 'category^2', 'brand'],
+          fields: ['title^4', 'title.raw^2', 'category.search^2', 'brand.search', 'description'],
+          type: 'best_fields',
           fuzziness: 'AUTO',
+          minimum_should_match: '50%',
         },
       });
     }
@@ -227,9 +297,15 @@ export async function textSearch(
       _source: ['product_id', 'title', 'brand', 'price_usd', 'image_cdn', 'category', 'attr_gender', 'attr_color'],
     };
 
-    // ── 5. Optional hybrid kNN boost ───────────────────────────────────────
-    // kNN is a soft boost via bool/should — both BM25 and vector similarity
-    // scores contribute naturally. We only add it when embedding succeeds.
+    // ── 6. Optional hybrid kNN boost ───────────────────────────────────────
+    //
+    // kNN cosine similarity scores range [0, 1] while BM25 scores can be
+    // 5–50+. Adding raw kNN as a should clause makes it nearly invisible.
+    // We boost the kNN score to bring it into the same magnitude as BM25.
+    //
+    // Strategy: kNN with boost = 10 puts cosine ~0.3 → score ~3.0, which
+    // meaningfully contributes alongside BM25 ~5–15 for typical queries.
+    // For short/ambiguous queries where BM25 is weak, kNN can rescue.
     let embedding: number[] | null = null;
     try {
       embedding = await getQueryEmbedding(ast.searchQuery);
@@ -243,17 +319,19 @@ export async function textSearch(
           knn: {
             embedding: {
               vector: embedding,
-              k: limit * 2,
+              k: Math.min(limit * 3, 100),
+              boost: 10.0,
             },
           },
         },
       ];
     }
 
-    // ── 6. Execute ─────────────────────────────────────────────────────────
+    // ── 7. Execute ─────────────────────────────────────────────────────────
     console.log('[textSearch] Query:', JSON.stringify({
       raw: rawQuery, processed: ast.searchQuery,
       entities: { category: merged.category, brand: merged.brand, color: merged.color, gender: merged.gender },
+      corrections: ast.corrections.map((c: any) => `${c.original}→${c.corrected}`),
       mustCount: mustClauses.length, shouldCount: searchBody.query.bool.should?.length ?? 0,
       filterCount: filterClauses.length, hasEmbedding: !!embedding,
     }));
@@ -273,7 +351,7 @@ export async function textSearch(
       score: hit._score,
     }));
 
-    // ── 7. Build response ──────────────────────────────────────────────────
+    // ── 8. Build response ──────────────────────────────────────────────────
     return {
       results,
       total: response.body.hits.total?.value ?? response.body.hits.total ?? 0,
@@ -311,9 +389,13 @@ export async function imageSearch(
   const limit = options?.limit || 50;
 
   try {
-    // Use hybrid search: CLIP image + BLIP caption fusion
     const vectors = await hybridSearch.buildQueryVectors(imageBuffer);
     const embedding = hybridSearch.fuseVectors(vectors);
+
+    // Request more candidates from the HNSW graph than we need to return,
+    // then let OpenSearch rank the top `limit`.  A larger k improves recall
+    // at a small latency cost (HNSW is sub-linear).
+    const kCandidates = Math.min(limit * 3, 200);
 
     const opensearch = osClient;
     const response = await opensearch.search({
@@ -324,11 +406,11 @@ export async function imageSearch(
           knn: {
             embedding: {
               vector: embedding,
-              k: limit,
+              k: kCandidates,
             },
           },
         },
-        _source: ['product_id', 'title', 'brand', 'price_usd', 'image_cdn', 'category'],
+        _source: ['product_id', 'title', 'brand', 'price_usd', 'image_cdn', 'category', 'attr_color', 'attr_gender'],
       },
     });
 
@@ -339,6 +421,8 @@ export async function imageSearch(
       price: hit._source.price_usd,
       imageUrl: hit._source.image_cdn,
       category: hit._source.category,
+      color: hit._source.attr_color,
+      gender: hit._source.attr_gender,
       score: hit._score,
     }));
 
@@ -530,18 +614,24 @@ export async function multiVectorWeightedSearch(
  */
 function getCategorySearchTerms(category: string): string[] {
   const CATEGORY_ALIASES: Record<string, string[]> = {
-    tops: ["tops", "top", "shirts", "shirt", "blouse", "blouses", "tshirt", "t-shirt"],
-    bottoms: ["bottoms", "bottom", "pants", "pant", "trousers", "jeans"],
-    dresses: ["dresses", "dress", "gown", "frock"],
-    outerwear: ["outerwear", "jacket", "jackets", "coat", "coats", "blazer"],
-    footwear: ["footwear", "shoes", "shoe", "sneakers", "boots", "sandals", "heels"],
-    accessories: ["accessories", "accessory", "bag", "bags", "belt", "belts", "hat", "hats", "watch", "watches"],
-    activewear: ["activewear", "sportswear", "athletic", "gym", "workout", "running"],
-    swimwear: ["swimwear", "swim", "swimming", "bikini", "swimsuit"],
-    underwear: ["underwear", "lingerie", "undergarments", "innerwear"],
+    tops: ["tops", "top", "shirts", "shirt", "blouse", "blouses", "tshirt", "t-shirt", "tee", "tank top", "polo", "henley", "tunic", "crop top", "camisole", "sweater", "pullover", "hoodie", "sweatshirt"],
+    bottoms: ["bottoms", "bottom", "pants", "pant", "trousers", "jeans", "jean", "chinos", "joggers", "leggings", "shorts", "short", "skirt", "skirts", "culottes", "cargo pants", "sweatpants"],
+    dresses: ["dresses", "dress", "gown", "frock", "maxi dress", "mini dress", "midi dress", "sundress", "jumpsuit", "romper"],
+    outerwear: ["outerwear", "jacket", "jackets", "coat", "coats", "blazer", "blazers", "cardigan", "cardigans", "parka", "windbreaker", "vest", "gilet", "poncho", "cape", "trench"],
+    footwear: ["footwear", "shoes", "shoe", "sneakers", "sneaker", "boots", "boot", "sandals", "sandal", "heels", "heel", "loafers", "loafer", "flats", "flat", "mules", "slides", "slippers", "pumps", "oxfords", "trainers"],
+    accessories: ["accessories", "accessory", "bag", "bags", "belt", "belts", "hat", "hats", "cap", "watch", "watches", "scarf", "scarves", "sunglasses", "jewelry", "bracelet", "necklace", "earrings", "wallet", "purse", "handbag", "tote", "backpack", "clutch"],
+    activewear: ["activewear", "sportswear", "athletic", "gym", "workout", "running", "yoga", "training", "sports bra", "track pants", "performance"],
+    swimwear: ["swimwear", "swim", "swimming", "bikini", "swimsuit", "swim trunks", "one piece", "two piece", "beach wear", "board shorts"],
+    underwear: ["underwear", "lingerie", "undergarments", "innerwear", "boxers", "briefs", "bra", "panties", "thong", "undershirt"],
   };
   const key = category.toLowerCase();
-  return CATEGORY_ALIASES[key] || [key];
+  if (CATEGORY_ALIASES[key]) return CATEGORY_ALIASES[key];
+
+  for (const [cat, aliases] of Object.entries(CATEGORY_ALIASES)) {
+    if (aliases.includes(key)) return CATEGORY_ALIASES[cat];
+  }
+
+  return [key];
 }
 
 /** Merge caller-supplied filters with QueryAST-extracted entities.

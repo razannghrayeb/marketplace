@@ -2,11 +2,15 @@ console.log("Starting ingest worker (Upstash REST)...");
 
 import { upstashGet, upstashSet } from "../lib/queue";
 import fetch from "node-fetch";
-import sharp from "sharp";
+import sharpLib from "sharp";
 import { pg } from "../lib/core";
 import { config } from "../config";
 import { getImageAnalysisService } from "../routes/products/image-analysis.service";
 import { uploadImage, processImageForEmbedding, computePHash, validateImage } from "../lib/image";
+
+// See `src/lib/image/utils.ts` for the reason we guard this.
+const sharp: any =
+  typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
 
 async function processIngestJobs() {
   const queueRes = await upstashGet("ingest-job-queue");

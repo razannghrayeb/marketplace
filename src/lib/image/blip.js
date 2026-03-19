@@ -40,6 +40,11 @@ exports.blip = exports.BlipService = void 0;
 // src/lib/image/blip.ts
 var ort = require("onnxruntime-node");
 var sharp_1 = require("sharp");
+// `sharp` is CommonJS callable, but TS/Node interop may expose it as `sharp.default`.
+// Ensure `.default` is callable to match transpiled call sites.
+if (typeof sharp_1.default !== "function") {
+    sharp_1.default = sharp_1;
+}
 var BLIP_MEAN = [0.48145466, 0.4578275, 0.40821073];
 var BLIP_STD = [0.26862954, 0.26130258, 0.27577711];
 var INPUT_SIZE = 384;

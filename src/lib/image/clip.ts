@@ -484,7 +484,11 @@ export function preprocessImage(
 }
 
 /**
- * Simple bilinear image resize
+ * Bilinear image resize with proper interpolation.
+ *
+ * The original used nearest-neighbor (Math.floor) which creates aliasing
+ * artifacts that degrade CLIP embedding quality.  Bilinear interpolation
+ * produces smoother down-sampled images that match what CLIP was trained on.
  */
 function resizeImage(
   src: Uint8Array,
@@ -495,16 +499,30 @@ function resizeImage(
   dstH: number
 ): Uint8Array {
   const dst = new Uint8Array(dstW * dstH * channels);
-  const xRatio = srcW / dstW;
-  const yRatio = srcH / dstH;
+  const xRatio = (srcW - 1) / Math.max(dstW - 1, 1);
+  const yRatio = (srcH - 1) / Math.max(dstH - 1, 1);
 
   for (let y = 0; y < dstH; y++) {
+    const srcYf = y * yRatio;
+    const y0 = Math.floor(srcYf);
+    const y1 = Math.min(y0 + 1, srcH - 1);
+    const wy = srcYf - y0;
+
     for (let x = 0; x < dstW; x++) {
-      const srcX = Math.min(Math.floor(x * xRatio), srcW - 1);
-      const srcY = Math.min(Math.floor(y * yRatio), srcH - 1);
+      const srcXf = x * xRatio;
+      const x0 = Math.floor(srcXf);
+      const x1 = Math.min(x0 + 1, srcW - 1);
+      const wx = srcXf - x0;
 
       for (let c = 0; c < channels; c++) {
-        dst[(y * dstW + x) * channels + c] = src[(srcY * srcW + srcX) * channels + c];
+        const v00 = src[(y0 * srcW + x0) * channels + c];
+        const v10 = src[(y0 * srcW + x1) * channels + c];
+        const v01 = src[(y1 * srcW + x0) * channels + c];
+        const v11 = src[(y1 * srcW + x1) * channels + c];
+
+        const top = v00 * (1 - wx) + v10 * wx;
+        const bot = v01 * (1 - wx) + v11 * wx;
+        dst[(y * dstW + x) * channels + c] = Math.round(top * (1 - wy) + bot * wy);
       }
     }
   }

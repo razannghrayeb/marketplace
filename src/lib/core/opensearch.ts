@@ -56,16 +56,76 @@ export async function ensureIndex() {
         settings: {
           index: {
             knn: true,
-            "knn.algo_param.ef_search": 100,
+            "knn.algo_param.ef_search": 256,
+          },
+          analysis: {
+            analyzer: {
+              product_analyzer: {
+                type: "custom",
+                tokenizer: "standard",
+                filter: ["lowercase", "product_stemmer", "product_synonyms"],
+              },
+            },
+            filter: {
+              product_stemmer: {
+                type: "stemmer",
+                language: "light_english",
+              },
+              product_synonyms: {
+                type: "synonym",
+                synonyms: [
+                  "pant,pants,trousers,bottoms",
+                  "shirt,top,blouse,tee",
+                  "dress,gown,frock",
+                  "jacket,coat,blazer,outerwear",
+                  "shoe,shoes,sneaker,sneakers,footwear,boot,boots",
+                  "bag,handbag,purse,tote",
+                  "jeans,denim",
+                  "hoodie,hooded sweatshirt,pullover",
+                  "tshirt,t-shirt,tee",
+                  "sweater,pullover,jumper,knitwear",
+                  "skirt,mini skirt,maxi skirt",
+                  "shorts,short pants",
+                  "sandal,sandals,flip flops",
+                  "heel,heels,pumps,stilettos",
+                  "cap,hat,beanie",
+                  "scarf,scarves,shawl",
+                  "cardigan,knit jacket",
+                  "vest,waistcoat,gilet",
+                  "legging,leggings,tights",
+                ],
+              },
+            },
           },
         },
         mappings: {
           properties: {
             product_id: { type: "keyword" },
             vendor_id: { type: "keyword" },
-            title: { type: "text" },
-            brand: { type: "keyword" },
-            category: { type: "keyword" },
+            title: {
+              type: "text",
+              analyzer: "product_analyzer",
+              fields: {
+                keyword: { type: "keyword", ignore_above: 256 },
+                raw: { type: "text", analyzer: "standard" },
+              },
+            },
+            description: {
+              type: "text",
+              analyzer: "product_analyzer",
+            },
+            brand: {
+              type: "keyword",
+              fields: {
+                search: { type: "text", analyzer: "standard" },
+              },
+            },
+            category: {
+              type: "keyword",
+              fields: {
+                search: { type: "text", analyzer: "product_analyzer" },
+              },
+            },
             price_usd: { type: "float" },
             availability: { type: "keyword" },
             is_hidden: { type: "boolean" },

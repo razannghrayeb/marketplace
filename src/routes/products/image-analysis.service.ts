@@ -29,7 +29,7 @@ import {
 } from "../../lib/image/yolov8Client";
 import { searchByImageWithSimilarity } from "./search.service";
 import { ProductResult } from "./types";
-import sharp from "sharp";
+import sharpLib from "sharp";
 import crypto from "crypto";
 import {
   mapDetectionToCategory,
@@ -42,6 +42,11 @@ import {
   type OutfitCoherenceResult,
   type DetectionWithColor,
 } from "../../lib/detection/outfitCoherence";
+
+// `sharp` is CommonJS callable. TS interop can cause `import sharp from "sharp"`
+// to produce a non-callable object at runtime, so we guard it.
+const sharp: any =
+  typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
 
 // ============================================================================
 // Types

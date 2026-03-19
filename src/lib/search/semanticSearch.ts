@@ -494,13 +494,11 @@ export function buildSemanticOpenSearchQuery(
 
   // Build query based on available data
   if (embedding && embedding.length > 0) {
-    // Hybrid: k-NN + text
     return {
       size: limit,
       query: {
         bool: {
           should: [
-            // Semantic vector search
             {
               knn: {
                 embedding: {
@@ -509,11 +507,10 @@ export function buildSemanticOpenSearchQuery(
                 },
               },
             },
-            // Text search with expanded terms
             {
               multi_match: {
                 query: [semanticQuery, ...expandedTerms].join(" "),
-                fields: ["title^3", "brand^2", "category", "description"],
+                fields: ["title^4", "title.raw^2", "brand.search^2", "category.search^2", "description"],
                 fuzziness: "AUTO",
                 operator: "or",
               },
@@ -525,41 +522,45 @@ export function buildSemanticOpenSearchQuery(
       },
     };
   } else {
-    // Text-only search with semantic understanding
     const should: any[] = [
-      // Main query
       {
         multi_match: {
           query: semanticQuery,
-          fields: ["title^3", "brand^2", "category", "description"],
+          fields: ["title^4", "title.raw^2", "brand.search^2", "category.search^2", "description"],
           fuzziness: "AUTO",
           type: "best_fields",
           boost: 2,
         },
       },
+      {
+        multi_match: {
+          query: semanticQuery,
+          fields: ["title^5", "category.search^3"],
+          type: "phrase",
+          boost: 3,
+        },
+      },
     ];
 
-    // Add expanded term matches
     if (expandedTerms.length > 0) {
       should.push({
         multi_match: {
           query: expandedTerms.join(" "),
-          fields: ["title", "description"],
+          fields: ["title^2", "category.search", "description"],
           fuzziness: "AUTO",
           operator: "or",
-          boost: 0.5,
+          boost: 0.8,
         },
       });
     }
 
-    // Boost color matches
     for (const color of entities.colors) {
-      should.push({
-        match: { title: { query: color, boost: 1.5 } },
-      });
+      should.push(
+        { term: { attr_color: { value: color, boost: 3.0 } } },
+        { match: { title: { query: color, boost: 1.5 } } },
+      );
     }
 
-    // Boost style matches
     for (const attr of entities.attributes) {
       should.push({
         match: { title: { query: attr, boost: 1.3 } },

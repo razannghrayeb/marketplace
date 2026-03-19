@@ -47,6 +47,11 @@ exports.initImageProcessing = initImageProcessing;
  * High-level image processing: CLIP embeddings, validation, pHash.
  */
 var sharp_1 = require("sharp");
+// `sharp` is CommonJS callable, but TS/Node interop may expose it as `sharp.default`.
+// Ensure `.default` is callable to match transpiled call sites.
+if (typeof sharp_1.default !== "function") {
+    sharp_1.default = sharp_1;
+}
 var clip_1 = require("./clip");
 var utils_1 = require("./utils");
 /**

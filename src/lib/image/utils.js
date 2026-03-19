@@ -45,6 +45,11 @@ exports.pHash = pHash;
  * Low-level image manipulation: loading, normalization, pHash computation.
  */
 var sharp_1 = require("sharp");
+// `sharp` is CommonJS callable, but TS/Node interop may expose it as `sharp.default`.
+// If `.default` isn't callable, map it to the callable export.
+if (typeof sharp_1.default !== "function") {
+    sharp_1.default = sharp_1;
+}
 /**
  * Load image buffer into raw pixel data
  */
