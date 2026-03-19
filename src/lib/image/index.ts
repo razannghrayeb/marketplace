@@ -8,6 +8,7 @@
 export {
   initClip,
   isClipAvailable,
+  isTextSearchAvailable,
   preprocessImage,
   getImageEmbedding,
   getImageEmbeddingFromBuffer,

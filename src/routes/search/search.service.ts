@@ -139,17 +139,52 @@ export async function textSearch(
 
     // ── 4. Apply merged filters ────────────────────────────────────────────
     // Field names must match OpenSearch index mapping (attr_color, attr_gender, price_usd, etc.)
+    //
+    // Category & brand from entity extraction are treated as BOOSTS (should),
+    // not hard filters, because the dictionary canonical names (e.g. "bottoms")
+    // often don't match the actual values stored in OpenSearch (e.g. "pants").
+    // Only caller-supplied filters are treated as hard term filters.
     if (merged.category) {
-      filterClauses.push({ term: { category: merged.category.toLowerCase() } });
+      if (callerFilters?.category) {
+        filterClauses.push({ term: { category: merged.category.toLowerCase() } });
+      } else {
+        const catAliases = getCategorySearchTerms(merged.category);
+        shouldClauses.push({
+          bool: {
+            should: catAliases.map(alias => ({ term: { category: alias.toLowerCase() } })),
+            boost: 2.0,
+          },
+        });
+        shouldClauses.push({
+          multi_match: {
+            query: catAliases.join(' '),
+            fields: ['title^2', 'category^3'],
+            fuzziness: 'AUTO',
+            boost: 1.5,
+          },
+        });
+      }
     }
     if (merged.brand) {
-      filterClauses.push({ term: { brand: merged.brand.toLowerCase() } });
+      if (callerFilters?.brand) {
+        filterClauses.push({ term: { brand: merged.brand.toLowerCase() } });
+      } else {
+        shouldClauses.push({ term: { brand: { value: merged.brand.toLowerCase(), boost: 3.0 } } });
+      }
     }
     if (merged.color) {
-      filterClauses.push({ term: { attr_color: merged.color.toLowerCase() } });
+      if (callerFilters?.color) {
+        filterClauses.push({ term: { attr_color: merged.color.toLowerCase() } });
+      } else {
+        shouldClauses.push({ term: { attr_color: { value: merged.color.toLowerCase(), boost: 2.0 } } });
+      }
     }
     if (merged.gender) {
-      filterClauses.push({ term: { attr_gender: merged.gender.toLowerCase() } });
+      if (callerFilters?.gender) {
+        filterClauses.push({ term: { attr_gender: merged.gender.toLowerCase() } });
+      } else {
+        shouldClauses.push({ term: { attr_gender: { value: merged.gender.toLowerCase(), boost: 1.5 } } });
+      }
     }
     if (merged.vendorId) {
       filterClauses.push({ term: { vendor_id: String(merged.vendorId) } });
@@ -161,13 +196,30 @@ export async function textSearch(
       filterClauses.push({ range: { price_usd: range } });
     }
 
+    // If entity extraction consumed the whole query, ensure we still have a
+    // text match on the raw query so BM25 can find results.
+    if (mustClauses.length === 0 && rawQuery.trim()) {
+      mustClauses.push({
+        multi_match: {
+          query: rawQuery.trim(),
+          fields: ['title^3', 'category^2', 'brand'],
+          fuzziness: 'AUTO',
+        },
+      });
+    }
+
+    // If still no must clauses (completely empty query), match everything
+    if (mustClauses.length === 0) {
+      mustClauses.push({ match_all: {} });
+    }
+
     const searchBody: any = {
       query: {
         bool: {
           must: mustClauses,
           should: shouldClauses,
           filter: filterClauses,
-          minimum_should_match: shouldClauses.length > 0 ? 0 : undefined,
+          minimum_should_match: 0,
         },
       },
       from: offset,
@@ -176,37 +228,36 @@ export async function textSearch(
     };
 
     // ── 5. Optional hybrid kNN boost ───────────────────────────────────────
-    // FIX: OpenSearch 3.x removed the Painless cosineSimilarity() script
-    // function that was used in script_score queries. It throws a
-    // [script_exception] compile error on OpenSearch 3.3.2+.
-    //
-    // Solution: use knn inside bool/should — both BM25 and vector similarity
-    // scores contribute naturally without needing a Painless script at all.
-    const embedding = await getQueryEmbedding(ast.searchQuery);
+    // kNN is a soft boost via bool/should — both BM25 and vector similarity
+    // scores contribute naturally. We only add it when embedding succeeds.
+    let embedding: number[] | null = null;
+    try {
+      embedding = await getQueryEmbedding(ast.searchQuery);
+    } catch (err) {
+      console.warn('[textSearch] Embedding generation failed, proceeding with BM25-only:', err);
+    }
     if (embedding) {
-      searchBody.query = {
-        bool: {
-          must: mustClauses,
-          should: [
-            // Expansion term boosts (BM25)
-            ...shouldClauses,
-            // kNN vector similarity as a soft boost
-            {
-              knn: {
-                embedding: {
-                  vector: embedding,
-                  k: limit * 2, // over-fetch so BM25 can rerank within candidates
-                },
-              },
+      searchBody.query.bool.should = [
+        ...shouldClauses,
+        {
+          knn: {
+            embedding: {
+              vector: embedding,
+              k: limit * 2,
             },
-          ],
-          filter: filterClauses,
-          minimum_should_match: 0,
+          },
         },
-      };
+      ];
     }
 
     // ── 6. Execute ─────────────────────────────────────────────────────────
+    console.log('[textSearch] Query:', JSON.stringify({
+      raw: rawQuery, processed: ast.searchQuery,
+      entities: { category: merged.category, brand: merged.brand, color: merged.color, gender: merged.gender },
+      mustCount: mustClauses.length, shouldCount: searchBody.query.bool.should?.length ?? 0,
+      filterCount: filterClauses.length, hasEmbedding: !!embedding,
+    }));
+
     const opensearch = osClient;
     const response = await opensearch.search({ index: config.opensearch.index, body: searchBody });
 
@@ -472,6 +523,26 @@ export async function multiVectorWeightedSearch(
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Get all search terms for a category (canonical name + aliases).
+ * e.g. "bottoms" → ["bottoms", "bottom", "pants", "pant", "trousers", "jeans"]
+ */
+function getCategorySearchTerms(category: string): string[] {
+  const CATEGORY_ALIASES: Record<string, string[]> = {
+    tops: ["tops", "top", "shirts", "shirt", "blouse", "blouses", "tshirt", "t-shirt"],
+    bottoms: ["bottoms", "bottom", "pants", "pant", "trousers", "jeans"],
+    dresses: ["dresses", "dress", "gown", "frock"],
+    outerwear: ["outerwear", "jacket", "jackets", "coat", "coats", "blazer"],
+    footwear: ["footwear", "shoes", "shoe", "sneakers", "boots", "sandals", "heels"],
+    accessories: ["accessories", "accessory", "bag", "bags", "belt", "belts", "hat", "hats", "watch", "watches"],
+    activewear: ["activewear", "sportswear", "athletic", "gym", "workout", "running"],
+    swimwear: ["swimwear", "swim", "swimming", "bikini", "swimsuit"],
+    underwear: ["underwear", "lingerie", "undergarments", "innerwear"],
+  };
+  const key = category.toLowerCase();
+  return CATEGORY_ALIASES[key] || [key];
+}
 
 /** Merge caller-supplied filters with QueryAST-extracted entities.
  *  Caller-supplied values always win; AST fills in the blanks. */

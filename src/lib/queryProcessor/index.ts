@@ -64,7 +64,7 @@ import {
   getConfidenceScore,
 } from "./intent";
 
-import { getTextEmbedding, isClipAvailable } from "../image";
+import { getTextEmbedding, isClipAvailable, isTextSearchAvailable } from "../image";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -105,7 +105,10 @@ export async function getQueryEmbedding(query: string): Promise<number[] | null>
   const cached = getCachedEmbedding(query);
   if (cached) return cached;
 
-  if (!isClipAvailable()) return null;
+  if (!isTextSearchAvailable()) {
+    console.warn("[queryProcessor] text embedding skipped — text model not loaded");
+    return null;
+  }
 
   try {
     const embedding = await getTextEmbedding(query);

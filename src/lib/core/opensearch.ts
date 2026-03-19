@@ -5,19 +5,40 @@
  */
 import { Client } from "@opensearch-project/opensearch";
 import { config } from "../../config";
-console.log("OS config:", config.opensearch.node, config.opensearch.username, config.opensearch.password?.length);
 
-export const osClient = new Client({
-  node: config.opensearch.node,
-  auth: {
-    username: config.opensearch.username,
-    password: config.opensearch.password,
-  },
-  ssl: { rejectUnauthorized: false },
-  // Resilience: retry on ECONNRESET/ETIMEDOUT (common with Aiven/Cloud Run idle connections)
-  maxRetries: 5,
-  requestTimeout: 60000,
-});
+/**
+ * Extract auth from URL if separate username/password are not provided.
+ * Aiven connection strings embed creds: https://user:pass@host:port
+ */
+function buildOsClientConfig() {
+  const nodeUrl = config.opensearch.node;
+  let username = config.opensearch.username;
+  let password = config.opensearch.password;
+
+  if (!username || !password) {
+    try {
+      const parsed = new URL(nodeUrl);
+      if (parsed.username && parsed.password) {
+        username = decodeURIComponent(parsed.username);
+        password = decodeURIComponent(parsed.password);
+      }
+    } catch {
+      // URL parsing failed — proceed without extracted creds
+    }
+  }
+
+  console.log("OS config:", nodeUrl, username, password?.length);
+
+  return {
+    node: nodeUrl,
+    ...(username && password ? { auth: { username, password } } : {}),
+    ssl: { rejectUnauthorized: false },
+    maxRetries: 5,
+    requestTimeout: 60000,
+  };
+}
+
+export const osClient = new Client(buildOsClientConfig());
 
 // CLIP ViT-B/32 embedding dimension
 const EMBEDDING_DIM = 512;
