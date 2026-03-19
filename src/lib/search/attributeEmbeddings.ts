@@ -24,12 +24,19 @@ import type { SemanticAttribute } from "./multiVectorSearch";
  * Attribute-focused prompts to guide CLIP text encoder
  * These prompts prime the embedding space for specific semantic aspects
  */
+/**
+ * Attribute-focused prompts for CLIP text encoder.
+ *
+ * These are structured as image captions (matching CLIP's training data)
+ * rather than abstract descriptions.  Shorter, concrete prompts produce
+ * tighter clusters in CLIP's latent space.
+ */
 const ATTRIBUTE_PROMPTS: Record<Exclude<SemanticAttribute, "global">, string> = {
-  color: "The dominant colors and color palette of this fashion item, including primary color, secondary colors, and overall color scheme",
-  texture: "The surface texture, fabric feel, and material texture of this clothing item - smooth, rough, soft, coarse, ribbed, or textured",
-  material: "The fabric material and composition - cotton, silk, wool, leather, denim, polyester, linen, or other material type",
-  style: "The fashion style and aesthetic - casual, formal, vintage, modern, bohemian, sporty, elegant, streetwear, or other style category",
-  pattern: "The pattern or print on the garment - solid, striped, floral, geometric, polka dot, plaid, checkered, or other pattern type",
+  color: "a fashion item in this color, showing the dominant color of the garment",
+  texture: "a close-up of the fabric texture of this clothing item",
+  material: "a fashion product made of this fabric material",
+  style: "a fashion outfit in this style aesthetic",
+  pattern: "a garment with this pattern or print design",
 };
 
 // ============================================================================

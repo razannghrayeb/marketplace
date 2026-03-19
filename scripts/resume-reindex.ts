@@ -181,7 +181,7 @@ async function reindexProduct(
   product: any,
   reindexConfig: ReindexConfig
 ): Promise<boolean> {
-  const { id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_url, is_hidden, canonical_id } = product;
+  const { id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_url, is_hidden, canonical_id, description } = product;
 
   try {
     // Fetch image
@@ -208,6 +208,7 @@ async function reindexProduct(
       product_id: String(id),
       vendor_id: String(vendor_id),
       title,
+      description: description || null,
       brand,
       category,
       price_usd: Math.round(price_cents / 89000),
@@ -363,10 +364,12 @@ Examples:
     columns.hasCanonicalId ? "canonical_id" : "NULL::text AS canonical_id",
   ].join(", ");
 
-  const whereClause = startFromId > 0 ? `WHERE image_url IS NOT NULL AND id > ${startFromId}` : `WHERE image_url IS NOT NULL`;
+  // Include the start ID itself; otherwise `--start-from-id` (and the suggested
+  // retry command using failedIds[0]) would skip the first intended product.
+  const whereClause = startFromId > 0 ? `WHERE image_url IS NOT NULL AND id >= ${startFromId}` : `WHERE image_url IS NOT NULL`;
 
   const res = await pg.query(
-    `SELECT id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_url, ${optionalColumns}
+    `SELECT id, vendor_id, title, description, brand, category, price_cents, availability, last_seen, image_url, ${optionalColumns}
      FROM products
      ${whereClause}
      ORDER BY id ASC`

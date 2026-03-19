@@ -66,15 +66,15 @@ const CATEGORY_DATA: Array<{
   arabizi?: string;
   popularity: number;
 }> = [
-  { name: "tops", aliases: ["top", "shirts", "shirt", "blouse", "blouses", "tshirt", "t-shirt"], arabic: "قمصان", arabizi: "qomsan", popularity: 0.9 },
-  { name: "bottoms", aliases: ["bottom", "pants", "pant", "trousers", "jeans"], arabic: "بناطيل", arabizi: "banatil", popularity: 0.85 },
-  { name: "dresses", aliases: ["dress", "gown", "frock"], arabic: "فساتين", arabizi: "fsatin", popularity: 0.88 },
-  { name: "outerwear", aliases: ["jacket", "jackets", "coat", "coats", "blazer"], arabic: "جاكيتات", arabizi: "jaketaat", popularity: 0.82 },
-  { name: "footwear", aliases: ["shoes", "shoe", "sneakers", "boots", "sandals", "heels"], arabic: "أحذية", arabizi: "a7thya", popularity: 0.87 },
-  { name: "accessories", aliases: ["accessory", "bag", "bags", "belt", "belts", "hat", "hats", "watch", "watches"], arabic: "إكسسوارات", arabizi: "akseswaraat", popularity: 0.80 },
-  { name: "activewear", aliases: ["sportswear", "athletic", "gym", "workout", "running"], arabic: "ملابس رياضية", arabizi: "malabes riyadya", popularity: 0.78 },
-  { name: "swimwear", aliases: ["swim", "swimming", "bikini", "swimsuit"], arabic: "ملابس سباحة", arabizi: "malabes sba7a", popularity: 0.65 },
-  { name: "underwear", aliases: ["lingerie", "undergarments", "innerwear"], arabic: "ملابس داخلية", arabizi: "malabes dakhleya", popularity: 0.60 },
+  { name: "tops", aliases: ["top", "shirts", "shirt", "blouse", "blouses", "tshirt", "t-shirt", "tee", "tank", "tank top", "polo", "sweater", "hoodie", "sweatshirt", "pullover", "henley", "tunic", "crop top", "camisole"], arabic: "قمصان", arabizi: "qomsan", popularity: 0.9 },
+  { name: "bottoms", aliases: ["bottom", "pants", "pant", "trousers", "trouser", "jeans", "jean", "chinos", "chino", "joggers", "jogger", "leggings", "legging", "shorts", "short", "skirt", "skirts", "culottes", "sweatpants", "cargo"], arabic: "بناطيل", arabizi: "banatil", popularity: 0.85 },
+  { name: "dresses", aliases: ["dress", "gown", "frock", "maxi", "midi", "sundress", "jumpsuit", "romper"], arabic: "فساتين", arabizi: "fsatin", popularity: 0.88 },
+  { name: "outerwear", aliases: ["jacket", "jackets", "coat", "coats", "blazer", "blazers", "cardigan", "cardigans", "parka", "windbreaker", "vest", "gilet", "trench", "poncho"], arabic: "جاكيتات", arabizi: "jaketaat", popularity: 0.82 },
+  { name: "footwear", aliases: ["shoes", "shoe", "sneakers", "sneaker", "boots", "boot", "sandals", "sandal", "heels", "heel", "loafers", "loafer", "flats", "flat", "mules", "slides", "slippers", "pumps", "trainers", "trainer", "oxfords"], arabic: "أحذية", arabizi: "a7thya", popularity: 0.87 },
+  { name: "accessories", aliases: ["accessory", "bag", "bags", "belt", "belts", "hat", "hats", "cap", "watch", "watches", "scarf", "scarves", "sunglasses", "jewelry", "bracelet", "necklace", "earrings", "wallet", "purse", "handbag", "tote", "backpack", "clutch"], arabic: "إكسسوارات", arabizi: "akseswaraat", popularity: 0.80 },
+  { name: "activewear", aliases: ["sportswear", "athletic", "gym", "workout", "running", "yoga", "training", "sports bra", "track pants", "performance"], arabic: "ملابس رياضية", arabizi: "malabes riyadya", popularity: 0.78 },
+  { name: "swimwear", aliases: ["swim", "swimming", "bikini", "swimsuit", "swim trunks", "board shorts", "beach wear"], arabic: "ملابس سباحة", arabizi: "malabes sba7a", popularity: 0.65 },
+  { name: "underwear", aliases: ["lingerie", "undergarments", "innerwear", "boxers", "briefs", "bra", "panties", "undershirt"], arabic: "ملابس داخلية", arabizi: "malabes dakhleya", popularity: 0.60 },
 ];
 
 // Attribute data (colors, materials, fits, genders)
@@ -87,19 +87,19 @@ const ATTRIBUTE_DATA: Array<{
   popularity: number;
 }> = [
   // Colors
-  { name: "black", type: "color", aliases: ["blak", "blck"], arabic: "أسود", arabizi: "aswad", popularity: 0.95 },
-  { name: "white", type: "color", aliases: ["wite", "whit"], arabic: "أبيض", arabizi: "abyad", popularity: 0.93 },
-  { name: "red", type: "color", aliases: ["redd"], arabic: "أحمر", arabizi: "a7mar", popularity: 0.88 },
-  { name: "blue", type: "color", aliases: ["bleu", "blu"], arabic: "أزرق", arabizi: "azra2", popularity: 0.90 },
-  { name: "green", type: "color", aliases: ["gren", "grean"], arabic: "أخضر", arabizi: "akhdar", popularity: 0.82 },
-  { name: "yellow", type: "color", aliases: ["yelow"], arabic: "أصفر", arabizi: "asfar", popularity: 0.70 },
-  { name: "pink", type: "color", aliases: ["pnk"], arabic: "وردي", arabizi: "wardi", popularity: 0.78 },
-  { name: "purple", type: "color", aliases: ["purpl", "violet"], arabic: "بنفسجي", arabizi: "banafsaji", popularity: 0.72 },
-  { name: "orange", type: "color", aliases: ["orenge"], arabic: "برتقالي", arabizi: "borto2ali", popularity: 0.68 },
-  { name: "brown", type: "color", aliases: ["brwn"], arabic: "بني", arabizi: "bonni", popularity: 0.75 },
-  { name: "gray", type: "color", aliases: ["grey", "gry"], arabic: "رمادي", arabizi: "ramadi", popularity: 0.80 },
-  { name: "beige", type: "color", aliases: ["bege", "biege"], arabic: "بيج", arabizi: "beige", popularity: 0.72 },
-  { name: "navy", type: "color", aliases: ["navy blue"], arabic: "كحلي", arabizi: "ka7li", popularity: 0.78 },
+  { name: "black", type: "color", aliases: ["blak", "blck", "balck", "blac", "blacc"], arabic: "أسود", arabizi: "aswad", popularity: 0.95 },
+  { name: "white", type: "color", aliases: ["wite", "whit", "whte", "whtie", "withe", "whiet"], arabic: "أبيض", arabizi: "abyad", popularity: 0.93 },
+  { name: "red", type: "color", aliases: ["redd", "rd"], arabic: "أحمر", arabizi: "a7mar", popularity: 0.88 },
+  { name: "blue", type: "color", aliases: ["bleu", "blu", "bule", "bluw"], arabic: "أزرق", arabizi: "azra2", popularity: 0.90 },
+  { name: "green", type: "color", aliases: ["gren", "grean", "geen", "gree"], arabic: "أخضر", arabizi: "akhdar", popularity: 0.82 },
+  { name: "yellow", type: "color", aliases: ["yelow", "yello", "yellw", "yelo"], arabic: "أصفر", arabizi: "asfar", popularity: 0.70 },
+  { name: "pink", type: "color", aliases: ["pnk", "pnik", "pinl"], arabic: "وردي", arabizi: "wardi", popularity: 0.78 },
+  { name: "purple", type: "color", aliases: ["purpl", "violet", "pruple", "purpel", "purpple"], arabic: "بنفسجي", arabizi: "banafsaji", popularity: 0.72 },
+  { name: "orange", type: "color", aliases: ["orenge", "orang", "ornage"], arabic: "برتقالي", arabizi: "borto2ali", popularity: 0.68 },
+  { name: "brown", type: "color", aliases: ["brwn", "brow", "borwn", "broen"], arabic: "بني", arabizi: "bonni", popularity: 0.75 },
+  { name: "gray", type: "color", aliases: ["grey", "gry", "gery", "graey"], arabic: "رمادي", arabizi: "ramadi", popularity: 0.80 },
+  { name: "beige", type: "color", aliases: ["bege", "biege", "beig", "biej"], arabic: "بيج", arabizi: "beige", popularity: 0.72 },
+  { name: "navy", type: "color", aliases: ["navy blue", "nawy", "navey"], arabic: "كحلي", arabizi: "ka7li", popularity: 0.78 },
   
   // Materials
   { name: "cotton", type: "material", aliases: ["coton", "cotten"], arabic: "قطن", arabizi: "qoton", popularity: 0.90 },
@@ -137,13 +137,24 @@ const COMMON_QUERIES: Array<{
   arabizi?: string;
   popularity: number;
 }> = [
-  { query: "black dress", aliases: ["blak dress", "black dres"], arabic: "فستان أسود", arabizi: "fostan aswad", popularity: 0.85 },
-  { query: "white shirt", aliases: ["wite shirt", "white shrit"], arabic: "قميص أبيض", arabizi: "qamees abyad", popularity: 0.88 },
-  { query: "blue jeans", aliases: ["blu jeans", "blue jeens"], arabic: "جينز أزرق", arabizi: "jeans azra2", popularity: 0.90 },
-  { query: "running shoes", aliases: ["runing shoes", "run shoes"], arabic: "حذاء رياضي", arabizi: "7itha2 riyadi", popularity: 0.82 },
-  { query: "leather jacket", aliases: ["lether jacket", "leather jaket"], arabic: "جاكيت جلد", arabizi: "jaket jild", popularity: 0.80 },
-  { query: "summer dress", aliases: ["sumer dress"], arabic: "فستان صيفي", arabizi: "fostan saifi", popularity: 0.78 },
-  { query: "winter coat", aliases: ["winter cot", "wintr coat"], arabic: "كوت شتوي", arabizi: "koot shatwi", popularity: 0.75 },
+  { query: "black dress", aliases: ["blak dress", "black dres", "blck dress"], arabic: "فستان أسود", arabizi: "fostan aswad", popularity: 0.85 },
+  { query: "white shirt", aliases: ["wite shirt", "white shrit", "whit shirt", "white shrt"], arabic: "قميص أبيض", arabizi: "qamees abyad", popularity: 0.88 },
+  { query: "white pants", aliases: ["whit pants", "wite pants", "white pant", "whit pant", "white pnts"], arabic: "بنطلون أبيض", arabizi: "bantalon abyad", popularity: 0.82 },
+  { query: "black pants", aliases: ["blak pants", "black pant", "blck pants", "balck pants"], arabic: "بنطلون أسود", arabizi: "bantalon aswad", popularity: 0.82 },
+  { query: "blue jeans", aliases: ["blu jeans", "blue jeens", "bleu jeans"], arabic: "جينز أزرق", arabizi: "jeans azra2", popularity: 0.90 },
+  { query: "running shoes", aliases: ["runing shoes", "run shoes", "running shoe"], arabic: "حذاء رياضي", arabizi: "7itha2 riyadi", popularity: 0.82 },
+  { query: "leather jacket", aliases: ["lether jacket", "leather jaket", "leathr jacket"], arabic: "جاكيت جلد", arabizi: "jaket jild", popularity: 0.80 },
+  { query: "summer dress", aliases: ["sumer dress", "summr dress"], arabic: "فستان صيفي", arabizi: "fostan saifi", popularity: 0.78 },
+  { query: "winter coat", aliases: ["winter cot", "wintr coat", "winter cote"], arabic: "كوت شتوي", arabizi: "koot shatwi", popularity: 0.75 },
+  { query: "red dress", aliases: ["redd dress", "red dres"], arabic: "فستان أحمر", arabizi: "fostan a7mar", popularity: 0.80 },
+  { query: "blue shirt", aliases: ["blu shirt", "blue shrit", "bleu shirt"], arabic: "قميص أزرق", arabizi: "qamees azra2", popularity: 0.80 },
+  { query: "black shoes", aliases: ["blak shoes", "black sheos", "black shoe"], arabic: "حذاء أسود", arabizi: "7itha2 aswad", popularity: 0.82 },
+  { query: "white sneakers", aliases: ["wite sneakers", "white sneaker", "whit sneakers"], arabic: "سنيكرز أبيض", arabizi: "sneakers abyad", popularity: 0.78 },
+  { query: "casual shirt", aliases: ["casuel shirt", "casual shrt"], arabic: "قميص كاجوال", arabizi: "qamees casual", popularity: 0.75 },
+  { query: "slim fit jeans", aliases: ["slim jeans", "slimfit jeans", "slim jean"], arabic: "جينز ضيق", arabizi: "jeans dayye2", popularity: 0.75 },
+  { query: "hoodie", aliases: ["hoody", "hudie", "hudi"], arabic: "هودي", arabizi: "hoodi", popularity: 0.78 },
+  { query: "sneakers", aliases: ["sneekers", "sneaker", "snekers", "snakers"], arabic: "سنيكرز", arabizi: "sneakers", popularity: 0.82 },
+  { query: "t-shirt", aliases: ["tshirt", "tee shirt", "tee-shirt", "teeshirt"], arabic: "تيشيرت", arabizi: "teeshirt", popularity: 0.88 },
 ];
 
 // ============================================================================

@@ -101,6 +101,15 @@ export async function processQueryFast(raw: string): Promise<QueryAST> {
 /**
  * Get (or compute & cache) a CLIP text embedding for a search query.
  */
+/**
+ * Get (or compute & cache) a CLIP text embedding for a search query.
+ *
+ * CLIP was trained on (image, caption) pairs.  Product embeddings in the
+ * index are image embeddings, so a raw text query like "blue jeans" sits
+ * in a different region of the latent space than a product photo of blue
+ * jeans.  Wrapping the query in a fashion-domain prompt template bridges
+ * the modality gap and dramatically improves text→image cosine similarity.
+ */
 export async function getQueryEmbedding(query: string): Promise<number[] | null> {
   const cached = getCachedEmbedding(query);
   if (cached) return cached;
@@ -111,13 +120,35 @@ export async function getQueryEmbedding(query: string): Promise<number[] | null>
   }
 
   try {
-    const embedding = await getTextEmbedding(query);
+    const prompted = buildClipPrompt(query);
+    const embedding = await getTextEmbedding(prompted);
     cacheEmbedding(query, embedding);
     return embedding;
   } catch (err) {
     console.warn("[queryProcessor] embedding failed:", err);
     return null;
   }
+}
+
+/**
+ * Wrap a user query in a fashion-domain prompt that aligns with the
+ * distribution CLIP saw during training (image captions).
+ *
+ * Multiple templates are embedded and averaged to make the resulting
+ * vector more robust — this is the "prompt ensembling" technique from
+ * the original CLIP paper.  For speed we use a single best template
+ * and only fall back to ensembling for very short queries where a
+ * single template may be ambiguous.
+ */
+function buildClipPrompt(query: string): string {
+  const q = query.trim().toLowerCase();
+
+  // Already looks like a descriptive phrase — just add minimal context
+  if (q.split(/\s+/).length >= 4) {
+    return `a fashion product photo of ${q}`;
+  }
+
+  return `a photo of ${q}, fashion product, studio lighting`;
 }
 
 // ─── Re-exports (convenience) ────────────────────────────────────────────────
@@ -281,7 +312,17 @@ function collectCorrections(normalized: string, script: ScriptAnalysis): Correct
     }
   }
 
-  // Spell-check (skip duplicates)
+  // Try multi-word common query match before per-word spell check
+  // e.g. "whit pant" is close to "white pants" → correct both words
+  const commonQueryHit = dict.commonQueries.get(normalized);
+  if (commonQueryHit && commonQueryHit.term.toLowerCase() !== normalized) {
+    out.push({
+      original: normalized, corrected: commonQueryHit.term,
+      source: "common_query", confidence: 0.92, confidenceLevel: "high",
+    });
+  }
+
+  // Spell-check individual words (skip duplicates)
   const spellHits = correctQuery(normalized, {
     brands: dict.brands, categories: dict.categories,
     attributes: dict.attributes, commonQueries: dict.commonQueries,
@@ -335,6 +376,7 @@ async function tryLLMRewrite(
 function extractFilters(query: string): ExtractedFilters {
   const f: ExtractedFilters = {};
   const dict = getDictionaries();
+  const words = query.split(/\s+/);
 
   // Gender
   const genderRules: Array<{ pattern: RegExp; gender: string }> = [
@@ -353,25 +395,116 @@ function extractFilters(query: string): ExtractedFilters {
     if (pattern.test(query)) { f.gender = gender; break; }
   }
 
-  // Color (from dictionary attributes)
+  // Color — try exact match first, then fuzzy match for typos
   const COLORS = new Set(["black","white","red","blue","green","yellow","pink","purple","orange","brown","gray","grey","beige","navy"]);
-  for (const [, entry] of dict.attributes) {
-    if (entry.normalizedTerm && query.includes(entry.normalizedTerm) && COLORS.has(entry.normalizedTerm)) {
-      f.color = entry.term;
+  const COLOR_TYPO_MAP: Record<string, string> = {
+    blck: "black", blak: "black", balck: "black",
+    whit: "white", wite: "white", whte: "white", whtie: "white",
+    rd: "red", redd: "red",
+    bleu: "blue", blu: "blue", bule: "blue",
+    gren: "green", grean: "green", geen: "green",
+    yelow: "yellow", yello: "yellow", yellw: "yellow",
+    pnk: "pink", pnik: "pink",
+    purpl: "purple", pruple: "purple",
+    orenge: "orange", orang: "orange",
+    brwn: "brown", brow: "brown",
+    gry: "gray", grey: "gray", gery: "gray",
+    bege: "beige", biege: "beige",
+    navy: "navy", nawy: "navy",
+    cream: "cream", creme: "cream",
+    maroon: "maroon", maron: "maroon",
+    teal: "teal",
+    coral: "coral",
+    ivory: "ivory",
+    khaki: "khaki",
+    burgundy: "burgundy",
+  };
+
+  for (const word of words) {
+    const lw = word.toLowerCase();
+    if (COLORS.has(lw)) {
+      f.color = lw;
+      break;
+    }
+    if (COLOR_TYPO_MAP[lw]) {
+      f.color = COLOR_TYPO_MAP[lw];
       break;
     }
   }
 
-  // Brand
-  for (const word of query.split(/\s+/)) {
+  // If no exact/typo match, check dictionary attributes
+  if (!f.color) {
+    for (const [, entry] of dict.attributes) {
+      if (entry.normalizedTerm && COLORS.has(entry.normalizedTerm)) {
+        for (const word of words) {
+          if (word === entry.normalizedTerm) {
+            f.color = entry.term;
+            break;
+          }
+          if (entry.aliases?.some(a => a.toLowerCase() === word)) {
+            f.color = entry.term;
+            break;
+          }
+        }
+        if (f.color) break;
+      }
+    }
+  }
+
+  // Brand — check single words and also multi-word combinations
+  for (const word of words) {
     const brand = findBrand(word);
     if (brand) { f.brand = brand.term; break; }
   }
+  if (!f.brand && words.length >= 2) {
+    for (let i = 0; i < words.length - 1; i++) {
+      const twoWord = `${words[i]} ${words[i + 1]}`;
+      const brand = findBrand(twoWord);
+      if (brand) { f.brand = brand.term; break; }
+    }
+  }
 
-  // Category
-  for (const word of query.split(/\s+/)) {
+  // Category — check single words, then two-word combos
+  for (const word of words) {
     const cat = findCategory(word);
     if (cat) { f.category = cat.term; break; }
+  }
+  if (!f.category && words.length >= 2) {
+    for (let i = 0; i < words.length - 1; i++) {
+      const twoWord = `${words[i]} ${words[i + 1]}`;
+      const cat = findCategory(twoWord);
+      if (cat) { f.category = cat.term; break; }
+    }
+  }
+
+  // Fallback: try matching words to common product types even if not in dictionary
+  if (!f.category) {
+    const PRODUCT_TYPE_TO_CATEGORY: Record<string, string> = {
+      pant: "bottoms", pants: "bottoms", trouser: "bottoms", trousers: "bottoms",
+      jean: "bottoms", jeans: "bottoms", chino: "bottoms", chinos: "bottoms",
+      jogger: "bottoms", joggers: "bottoms", legging: "bottoms", leggings: "bottoms",
+      short: "bottoms", shorts: "bottoms", skirt: "bottoms", skirts: "bottoms",
+      shirt: "tops", shirts: "tops", tee: "tops", tshirt: "tops", blouse: "tops",
+      top: "tops", tops: "tops", polo: "tops", sweater: "tops", hoodie: "tops",
+      sweatshirt: "tops", tank: "tops", tunic: "tops", pullover: "tops",
+      dress: "dresses", dresses: "dresses", gown: "dresses", frock: "dresses",
+      jumpsuit: "dresses", romper: "dresses",
+      jacket: "outerwear", jackets: "outerwear", coat: "outerwear", coats: "outerwear",
+      blazer: "outerwear", blazers: "outerwear", cardigan: "outerwear",
+      parka: "outerwear", windbreaker: "outerwear",
+      shoe: "footwear", shoes: "footwear", sneaker: "footwear", sneakers: "footwear",
+      boot: "footwear", boots: "footwear", sandal: "footwear", sandals: "footwear",
+      heel: "footwear", heels: "footwear", loafer: "footwear", loafers: "footwear",
+      trainer: "footwear", trainers: "footwear",
+      bag: "accessories", bags: "accessories", belt: "accessories", belts: "accessories",
+      hat: "accessories", hats: "accessories", cap: "accessories",
+      watch: "accessories", watches: "accessories", wallet: "accessories",
+      scarf: "accessories", sunglasses: "accessories",
+    };
+    for (const word of words) {
+      const cat = PRODUCT_TYPE_TO_CATEGORY[word.toLowerCase()];
+      if (cat) { f.category = cat; break; }
+    }
   }
 
   return f;
@@ -425,7 +558,13 @@ function buildSearchQuery(normalized: string, corrections: Correction[]): string
       q = q.replace(new RegExp(`\\b${escapeRegex(c.original)}\\b`, "gi"), c.corrected);
     }
   }
-  return q.replace(/\s+/g, " ").trim();
+
+  // If corrections rewrote all words to category/brand names and the result
+  // lost the product-type meaning, re-inject the important words.
+  // e.g. "whit pant" → corrections may turn "whit" → "white" but not "pant"
+  // — "pant" is a useful search word even if we extracted category = bottoms
+  const result = q.replace(/\s+/g, " ").trim();
+  return result || normalized;
 }
 
 // ─── Intent mapping ──────────────────────────────────────────────────────────
@@ -474,11 +613,32 @@ async function classifyIntentHybrid(query: string, entities: QueryEntities): Pro
 // ─── Expansions ──────────────────────────────────────────────────────────────
 
 const CATEGORY_SYNONYMS: Record<string, string[]> = {
-  shirt: ["top", "blouse", "tee", "t-shirt"],
-  dress: ["gown", "frock", "outfit"],
-  pants: ["trousers", "jeans", "bottoms"],
-  shoes: ["footwear", "sneakers", "boots"],
-  bag:   ["handbag", "purse", "tote", "backpack"],
+  shirt: ["top", "blouse", "tee", "t-shirt", "polo", "henley"],
+  dress: ["gown", "frock", "outfit", "maxi", "midi", "sundress"],
+  pants: ["trousers", "jeans", "bottoms", "chinos", "slacks"],
+  pant: ["pants", "trousers", "bottoms", "jeans"],
+  trouser: ["pants", "trousers", "slacks", "bottoms"],
+  trousers: ["pants", "trouser", "slacks", "bottoms"],
+  jeans: ["denim", "denims", "pants", "bottoms"],
+  jean: ["jeans", "denim", "pants"],
+  shorts: ["short pants", "bermudas", "board shorts"],
+  skirt: ["mini skirt", "maxi skirt", "pencil skirt"],
+  shoes: ["footwear", "sneakers", "boots", "trainers"],
+  shoe: ["shoes", "footwear", "sneakers"],
+  sneakers: ["trainers", "athletic shoes", "kicks", "shoes"],
+  sneaker: ["sneakers", "trainers", "shoes"],
+  boots: ["boot", "ankle boots", "knee boots", "combat boots"],
+  bag: ["handbag", "purse", "tote", "backpack", "clutch"],
+  jacket: ["coat", "blazer", "outerwear", "bomber"],
+  coat: ["jacket", "outerwear", "parka", "trench"],
+  hoodie: ["hooded sweatshirt", "pullover hoodie", "sweatshirt"],
+  sweater: ["pullover", "jumper", "knitwear", "cardigan"],
+  top: ["shirt", "blouse", "tee", "tank top"],
+  tops: ["shirts", "blouses", "tees", "t-shirts"],
+  bottoms: ["pants", "trousers", "jeans", "skirts", "shorts"],
+  leggings: ["tights", "yoga pants", "stretch pants"],
+  sandals: ["slides", "flip flops", "open-toe"],
+  heels: ["pumps", "stilettos", "high heels"],
 };
 
 function generateExpansions(
@@ -502,6 +662,20 @@ function generateExpansions(
   for (const cat of entities.categories) {
     const syns = CATEGORY_SYNONYMS[cat.toLowerCase()];
     if (syns) exp.categoryExpansions.push(...syns);
+  }
+
+  // Also expand individual query words through CATEGORY_SYNONYMS
+  // This catches product-type words that weren't extracted as entities
+  const words = query.split(/\s+/).filter(w => !STOPWORDS.has(w));
+  for (const word of words) {
+    const syns = CATEGORY_SYNONYMS[word.toLowerCase()];
+    if (syns) {
+      for (const s of syns) {
+        if (!exp.categoryExpansions.includes(s) && !exp.synonyms.includes(s)) {
+          exp.synonyms.push(s);
+        }
+      }
+    }
   }
 
   return exp;

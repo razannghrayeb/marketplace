@@ -27,6 +27,7 @@ export type CorrectionSource =
   | "spell_check"      // Edit distance correction
   | "arabizi"          // Arabizi transliteration
   | "brand_alias"      // Brand alias expansion
+  | "common_query"     // Matched a known common query pattern
   | "llm"              // LLM rewrite
   | "none";            // No correction needed
 
