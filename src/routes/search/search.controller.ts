@@ -217,18 +217,21 @@ router.get("/", async (req: Request, res: Response) => {
       filters = { ...contextual.inheritedFilters, ...filters };
     }
 
+    const limitNum = Array.isArray(limit) ? Number(limit[0]) : limit ? Number(limit) : 20;
+    const offsetNum = Array.isArray(offset) ? Number(offset[0]) : offset ? Number(offset) : 0;
+
     const options = {
-      limit: limit ? Number(limit) : 20,
-      offset: offset ? Number(offset) : 0,
+      limit: limitNum || 20,
+      offset: offsetNum || 0,
     };
 
     // Execute search
-    const page = Math.floor((offset ?? 0) / (options.limit ?? 20)) + 1;
+    const page = Math.floor(options.offset / options.limit) + 1;
     const result = await searchText({
       query: processedQuery,
       filters,
       page,
-      limit: options.limit ?? 20,
+      limit: options.limit,
       includeRelated: false,
       relatedLimit: 10,
     });
