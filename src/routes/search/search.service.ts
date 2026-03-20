@@ -111,6 +111,7 @@ export async function textSearch(
   const offset = options?.offset ?? 0;
   const includeRelated = options?.includeRelated ?? false;
   const relatedLimit = options?.relatedLimit ?? 10;
+  const debug = String(process.env.SEARCH_DEBUG ?? "").toLowerCase() === "1";
 
   try {
     // ── 1. Process query through the AST pipeline ──────────────────────────
@@ -672,6 +673,22 @@ export async function textSearch(
         total_related: related.length,
         processed_query: ast,
         did_you_mean: didYouMean,
+        ...(debug
+          ? {
+              debug: {
+                openSearchHitsTotal:
+                  response.body.hits.total?.value ?? response.body.hits.total ?? null,
+                openSearchHitsCount: hits.length,
+                openSearchFirstProductId: productIds[0] ?? null,
+                hydratedProductsCount: products.length,
+                hydratedFirstProductId: (products[0] as any)?.id ?? null,
+                filterClausesCount: filterClauses.length,
+                hasProductTypeConstraint,
+                colorsForFilter,
+                colorMode,
+              },
+            }
+          : {}),
       },
     };
   } catch (error) {
