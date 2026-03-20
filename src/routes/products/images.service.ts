@@ -2,7 +2,7 @@
  * Product Images Service
  * Handles all image business logic, storage, and retrieval
  */
-import { pg, productsTableHasIsHiddenColumn } from "../../lib/core/index";
+import { pg, productsTableHasIsHiddenColumn, productsTableHasCanonicalIdColumn } from "../../lib/core/index";
 import { uploadImage, generateImageKey } from "../../lib/image/index";
 import { processImageForEmbedding, computePHash, validateImage } from "../../lib/image/index";
 import { osClient } from "../../lib/core/index";
@@ -228,9 +228,11 @@ export async function deleteProductImage(productId: number, imageId: number): Pr
  */
 export async function updateProductIndex(productId: number, sourceBuffer?: Buffer): Promise<void> {
   const hasIsHidden = await productsTableHasIsHiddenColumn();
+  const hasCanonicalId = await productsTableHasCanonicalIdColumn();
   const productResult = await pg.query(
     `SELECT id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_cdn,
-            ${hasIsHidden ? "is_hidden" : "false AS is_hidden"}
+            ${hasIsHidden ? "is_hidden" : "false AS is_hidden"},
+            ${hasCanonicalId ? "canonical_id" : "NULL::integer AS canonical_id"}
      FROM products WHERE id = $1`,
     [productId]
   );
@@ -264,7 +266,7 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
     priceCents: product.price_cents,
     availability: Boolean(product.availability),
     isHidden: Boolean(product.is_hidden),
-    canonicalId: null,
+    canonicalId: hasCanonicalId ? product.canonical_id : null,
     imageCdn: product.image_cdn,
     pHash: primaryImage?.p_hash ?? null,
     lastSeenAt: product.last_seen,

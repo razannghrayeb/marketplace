@@ -1,4 +1,5 @@
 import { extractAttributesSync } from "./attributeExtractor";
+import { inferCategoryCanonical } from "./categoryFilter";
 
 const LBP_TO_USD = 89000;
 
@@ -44,6 +45,8 @@ export function extractProductTypesFromTitle(title: string): string[] {
     ["jogging pants", "joggers"],
     ["track pants", "joggers"],
     ["sweat pants", "joggers"],
+    ["crop top", "tshirt"],
+    ["tank top", "tshirt"],
   ];
   for (const [needle, mapped] of phrases) {
     if (normalized.includes(needle)) add(mapped);
@@ -81,6 +84,14 @@ export function extractProductTypesFromTitle(title: string): string[] {
     sweaters: "sweater",
     blazer: "blazer",
     blazers: "blazer",
+    top: "tshirt",
+    tops: "tshirt",
+    blouse: "tshirt",
+    blouses: "tshirt",
+    shirt: "tshirt",
+    shirts: "tshirt",
+    camisole: "tshirt",
+    tunic: "tshirt",
   };
 
   for (const token of normalized.split(" ")) {
@@ -143,13 +154,17 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
         : []
   );
 
+  const categoryLower = toLowerTrim(input.category);
+  const categoryCanonical = inferCategoryCanonical(input.category ?? null, input.title || "");
+
   const doc: Record<string, any> = {
     product_id: String(input.productId),
     vendor_id: input.vendorId !== null && input.vendorId !== undefined ? String(input.vendorId) : null,
     title: input.title,
     description: input.description ?? null,
     brand: toLowerTrim(input.brand),
-    category: toLowerTrim(input.category),
+    category: categoryLower,
+    category_canonical: categoryCanonical,
     price_usd: Math.round(Number(input.priceCents ?? 0) / LBP_TO_USD),
     availability: input.availability ? "in_stock" : "out_of_stock",
     is_hidden: Boolean(input.isHidden ?? false),

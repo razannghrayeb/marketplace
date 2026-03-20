@@ -11,6 +11,7 @@ export {
   closePool,
   getProductsByIdsOrdered,
   productsTableHasIsHiddenColumn,
+  productsTableHasCanonicalIdColumn,
   isPgCapacityError,
   queryWithPgCapacityRetry,
 } from "./db";

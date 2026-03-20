@@ -7,9 +7,8 @@ import {
   SearchFilters,
 } from "./products.service";
 import { searchBrowse, searchImage, searchText } from "../../lib/search/fashionSearchFacade";
-import { validateImage, computePHash } from "../../lib/image/index";
+import { validateImage, computePHash, processImageForEmbedding } from "../../lib/image/index";
 import { isClipAvailable } from "../../lib/image/index";
-import { hybridSearch } from "../../lib/search";
 
 // ============================================================================
 // Request Helpers
@@ -111,13 +110,7 @@ export async function searchProductsByTitle(req: Request, res: Response) {
 
 /**
  * POST /products/search/image
- * Enhanced image search using Hybrid Search (CLIP image + BLIP caption fusion)
- *
- * Pipeline:
- * 1. CLIP image embed (60% weight) - visual features
- * 2. BLIP caption → enrichment → CLIP text embed (30% weight) - semantic features
- * 3. Fuse embeddings with L2 normalization
- * 4. OpenSearch k-NN vector search
+ * CLIP image embedding k-NN search (matches indexed primary-image vectors).
  *
  * Accepts: multipart/form-data with 'image' field OR JSON with 'embedding' array
  * Query params:
@@ -149,16 +142,14 @@ export async function searchProductsByImage(req: Request, res: Response) {
         return res.status(400).json({ success: false, error: validation.error });
       }
 
-      // Use hybrid search: CLIP image + BLIP caption fusion
-      const [vectors, pHashResult] = await Promise.all([
-        hybridSearch.buildQueryVectors(file.buffer),
+      const [emb, pHashResult] = await Promise.all([
+        processImageForEmbedding(file.buffer),
         computePHash(file.buffer),
       ]);
-
-      embedding = hybridSearch.fuseVectors(vectors);
+      embedding = emb;
       pHash = pHashResult;
     } else if (req.body.embedding && Array.isArray(req.body.embedding)) {
-      // Embedding provided directly (already fused)
+      // Client-provided vector (expected: same CLIP image space as the index)
       embedding = req.body.embedding;
       pHash = req.body.pHash; // Optional pHash if provided
     } else {

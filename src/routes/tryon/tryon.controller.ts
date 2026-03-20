@@ -34,12 +34,74 @@ import { validateGarment } from "../../lib/tryon/garmentValidation";
 // Shared helpers
 // ============================================================================
 
-// Matches wardrobe controller pattern for user identity
+function httpError(statusCode: number, message: string): Error {
+  const err = new Error(message);
+  (err as any).statusCode = statusCode;
+  return err;
+}
+
+/**
+ * Resolves the signed-in user for try-on quotas and job ownership.
+ * Without this, Postgres rejects the job row and the client only sees a generic 500.
+ *
+ * Prefer `x-user-id` (or `user_id` in form/query). For demos, set TRYON_DEMO_USER_ID
+ * on the server when the app has no auth yet.
+ */
 function getUserId(req: Request): number {
-  const userId =
-    req.headers["x-user-id"] || req.query.user_id || req.body?.user_id;
-  if (!userId) throw new Error("User ID required");
-  return parseInt(String(userId), 10);
+  const rawHeader =
+    req.headers["x-user-id"] ?? req.query.user_id ?? req.body?.user_id;
+  const trimmed =
+    rawHeader !== undefined && rawHeader !== null && String(rawHeader).trim() !== ""
+      ? String(rawHeader).trim()
+      : "";
+  const demo = process.env.TRYON_DEMO_USER_ID?.trim();
+  const raw =
+    trimmed ||
+    (demo && /^\d+$/.test(demo) ? demo : "");
+
+  if (!raw) {
+    throw httpError(
+      400,
+      "User ID required: send x-user-id header or user_id in the form body. " +
+        "For unauthenticated demos, set TRYON_DEMO_USER_ID on the server.",
+    );
+  }
+
+  const id = parseInt(raw, 10);
+  if (!Number.isFinite(id) || id < 1) {
+    throw httpError(400, "Invalid user_id: must be a positive integer");
+  }
+  return id;
+}
+
+const PERSON_FIELD_ORDER = [
+  "person_image",
+  "person",
+  "model",
+  "model_image",
+] as const;
+const GARMENT_FIELD_ORDER = [
+  "garment_image",
+  "garment",
+  "clothing",
+] as const;
+
+function filesMap(
+  req: Request,
+): { [fieldname: string]: Express.Multer.File[] } | undefined {
+  return req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+}
+
+function pickFirstUploadedFile(
+  req: Request,
+  names: readonly string[],
+): Express.Multer.File | undefined {
+  const files = filesMap(req);
+  for (const n of names) {
+    const f = files?.[n]?.[0];
+    if (f) return f;
+  }
+  return (req as Express.Request & { file?: Express.Multer.File }).file;
 }
 
 const ALLOWED_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -72,17 +134,18 @@ export async function createTryOn(
 ) {
   try {
     const userId = getUserId(req);
-    const files = req.files as
-      | { [fieldname: string]: Express.Multer.File[] }
-      | undefined;
 
-    const personFile  = files?.person_image?.[0];
-    const garmentFile = files?.garment_image?.[0];
+    const personFile = pickFirstUploadedFile(req, PERSON_FIELD_ORDER);
+    const garmentFile = pickFirstUploadedFile(req, GARMENT_FIELD_ORDER);
 
     if (!personFile) {
-      return res.status(400).json({ success: false, error: "person_image is required" });
+      return res.status(400).json({
+        success: false,
+        error:
+          "Person image required (multipart field: person_image, person, model, or model_image)",
+      });
     }
-    validateImageFile(personFile,  "person_image");
+    validateImageFile(personFile, "person_image");
     validateImageFile(garmentFile, "garment_image");
 
     const garmentId = req.body.garment_id
@@ -108,7 +171,7 @@ export async function createTryOn(
       garmentDescription: req.body.garment_description,
     });
 
-    res.status(202).json({ success: true, job });
+    res.status(202).json({ success: true, job, jobId: job.id });
   } catch (err) {
     next(err);
   }
@@ -125,10 +188,14 @@ export async function tryOnFromWardrobe(
   next: NextFunction
 ) {
   try {
-    const userId     = getUserId(req);
-    const personFile = req.file;
+    const userId = getUserId(req);
+    const personFile = pickFirstUploadedFile(req, PERSON_FIELD_ORDER);
     if (!personFile) {
-      return res.status(400).json({ success: false, error: "person_image is required" });
+      return res.status(400).json({
+        success: false,
+        error:
+          "Person image required (multipart field: person_image, person, model, or model_image)",
+      });
     }
     validateImageFile(personFile, "person_image");
 
@@ -166,10 +233,14 @@ export async function tryOnFromProduct(
   next: NextFunction
 ) {
   try {
-    const userId     = getUserId(req);
-    const personFile = req.file;
+    const userId = getUserId(req);
+    const personFile = pickFirstUploadedFile(req, PERSON_FIELD_ORDER);
     if (!personFile) {
-      return res.status(400).json({ success: false, error: "person_image is required" });
+      return res.status(400).json({
+        success: false,
+        error:
+          "Person image required (multipart field: person_image, person, model, or model_image)",
+      });
     }
     validateImageFile(personFile, "person_image");
 
@@ -190,7 +261,7 @@ export async function tryOnFromProduct(
       garmentDescription: req.body.garment_description,
     });
 
-    res.status(202).json({ success: true, job });
+    res.status(202).json({ success: true, job, jobId: job.id });
   } catch (err) {
     next(err);
   }
@@ -210,12 +281,16 @@ export async function batchTryOn(
   next: NextFunction
 ) {
   try {
-    const userId     = getUserId(req);
-    const files      = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
-    const personFile = files?.person_image?.[0];
+    const userId = getUserId(req);
+    const personFile = pickFirstUploadedFile(req, PERSON_FIELD_ORDER);
+    const files = filesMap(req);
 
     if (!personFile) {
-      return res.status(400).json({ success: false, error: "person_image is required" });
+      return res.status(400).json({
+        success: false,
+        error:
+          "Person image required (multipart field: person_image, person, model, or model_image)",
+      });
     }
     validateImageFile(personFile, "person_image");
 

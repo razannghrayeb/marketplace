@@ -33,12 +33,19 @@ import { extractAttributesSync } from "../../lib/search/attributeExtractor";
 import { getImagesForProducts } from '../products/images.service';
 import type { ProductResult, SearchResultWithRelated } from '../products/types';
 import { findRelatedProducts } from '../../lib/search/relatedProducts';
+import { dedupeSearchResults, filterRelatedAgainstMain } from '../../lib/search/resultDedup';
+import {
+  getCategorySearchTerms,
+  loadCategoryVocabulary,
+  resolveCategoryTermsForOpensearch,
+  shouldHardFilterAstCategory,
+} from '../../lib/search/categoryFilter';
 
 // ─── Shared types ────────────────────────────────────────────────────────────
 
 export interface SearchFilters {
   brand?: string;
-  category?: string;
+  category?: string | string[];
   minPrice?: number;
   maxPrice?: number;
   color?: string;
@@ -159,6 +166,21 @@ export async function textSearch(
 
     // ── 2. Merge filters: caller-supplied take precedence, AST fills gaps ──
     const merged = mergeFilters(callerFilters, ast);
+    const callerCategory =
+      Array.isArray(callerFilters?.category) ? callerFilters?.category[0] : callerFilters?.category;
+    const mergedCategory =
+      Array.isArray(merged.category) ? merged.category[0] : merged.category;
+    const hasProductTypeConstraint = ast.entities.productTypes?.length > 0;
+    const hardAstCategory =
+      shouldHardFilterAstCategory(
+        ast,
+        rawQuery,
+        callerCategory,
+        mergedCategory,
+        hasProductTypeConstraint,
+      ) && Boolean(merged.category);
+    const categoryVocab = hardAstCategory ? await loadCategoryVocabulary() : null;
+    const textMinimumShouldMatch = hardAstCategory ? "30%" : "60%";
 
     // ── 3. Build OpenSearch query ──────────────────────────────────────────
     //
@@ -201,7 +223,7 @@ export async function textSearch(
                 type: 'best_fields',
                 fuzziness: 'AUTO',
                 operator: 'or',
-                minimum_should_match: '60%',
+                minimum_should_match: textMinimumShouldMatch,
               },
             },
             {
@@ -244,7 +266,6 @@ export async function textSearch(
     //
     // This prevents "hoodie" from returning generic "tops" and makes
     // multi-color queries deterministic.
-    const hasProductTypeConstraint = ast.entities.productTypes?.length > 0;
     if (hasProductTypeConstraint) {
       const primaryProductType = ast.entities.productTypes[0];
       if (primaryProductType) {
@@ -309,40 +330,57 @@ export async function textSearch(
     // Entity-extracted values: use as SHOULD boosts (they may not match
     // the exact keyword values stored in OpenSearch).
     // Caller-supplied values: use as hard FILTER constraints.
-    if (merged.category) {
+    if (mergedCategory) {
       if (callerFilters?.category) {
-        filterClauses.push({ term: { category: merged.category.toLowerCase() } });
-      } else {
-        // Reduce broad category boosting when product-type constraints exist.
-        if (!hasProductTypeConstraint) {
-          const catAliases = getCategorySearchTerms(merged.category);
-          shouldClauses.push({
+        const cc = callerFilters.category as string | string[];
+        if (Array.isArray(cc)) {
+          const terms = cc.map((c) => String(c).toLowerCase()).filter(Boolean);
+          if (terms.length > 0) filterClauses.push({ terms: { category: terms } });
+        } else {
+          filterClauses.push({ term: { category: String(cc).toLowerCase() } });
+        }
+      } else if (hardAstCategory && categoryVocab) {
+        const resolved = resolveCategoryTermsForOpensearch(mergedCategory, categoryVocab);
+        if (resolved.length > 0) {
+          filterClauses.push({
             bool: {
+              _name: "hard_ast_category_filter",
               should: [
-                ...catAliases.map((alias) => ({
-                  term: { category: { value: alias.toLowerCase(), boost: 3.0 } },
-                })),
-                {
-                  match: {
-                    'category.search': {
-                      query: catAliases.join(' '),
-                      boost: 2.0,
-                      fuzziness: 'AUTO',
-                    },
-                  },
-                },
-                {
-                  multi_match: {
-                    query: catAliases.join(' '),
-                    fields: ['title^2'],
-                    fuzziness: 'AUTO',
-                    boost: 1.5,
-                  },
-                },
+                { terms: { category: resolved } },
+                { terms: { category_canonical: resolved } },
               ],
+              minimum_should_match: 1,
             },
           });
         }
+      } else if (!hasProductTypeConstraint) {
+        const catAliases = getCategorySearchTerms(mergedCategory);
+        shouldClauses.push({
+          bool: {
+            should: [
+              ...catAliases.map((alias) => ({
+                term: { category: { value: alias.toLowerCase(), boost: 3.0 } },
+              })),
+              {
+                match: {
+                  'category.search': {
+                    query: catAliases.join(' '),
+                    boost: 2.0,
+                    fuzziness: 'AUTO',
+                  },
+                },
+              },
+              {
+                multi_match: {
+                  query: catAliases.join(' '),
+                  fields: ['title^2'],
+                  fuzziness: 'AUTO',
+                  boost: 1.5,
+                },
+              },
+            ],
+          },
+        });
       }
     }
     if (merged.brand) {
@@ -445,6 +483,8 @@ export async function textSearch(
         'price_usd',
         'image_cdn',
         'category',
+        'category_canonical',
+        'canonical_id',
         'attr_gender',
         'attr_color',
         'attr_colors',
@@ -452,14 +492,12 @@ export async function textSearch(
       ],
     };
 
-    // ── 6. Optional hybrid kNN with similarity threshold ─────────────────────
+    // ── 6. Optional hybrid kNN ───────────────────────────────────────────────
     //
-    // When embedding is available, we require BOTH text match AND embedding
-    // similarity >= threshold. This filters out irrelevant results (e.g., skincare
-    // products that happen to match text) that would otherwise rank high.
+    // Default: kNN in `must` with min_score (text + embedding agreement).
+    // Category-dominant queries: kNN in `should` only (BM25 + hard category filter drive precision).
     //
     // OpenSearch cosinesimil score = (1 + cosine) / 2, range [0, 1].
-    // min_score enforces acceptable similarity; use min_score (not k) per OpenSearch API.
     const queryTokenCount =
       ast.tokens?.important?.length && ast.tokens.important.length > 0
         ? ast.tokens.important.length
@@ -479,21 +517,27 @@ export async function textSearch(
     }
     let mustWithoutKnnForRetry: any[] | null = null;
     if (embedding) {
-      // Keep a copy of must-clauses without kNN for "zero-hit fallback".
-      // Note: `searchBody.query.bool.must` points at `mustClauses`, so we must
-      // not reuse it after we push the kNN clause.
       mustWithoutKnnForRetry = mustClauses.filter((c: any) => !c?.knn);
 
-      // Require embedding similarity >= threshold (filters low-similarity results)
-      // min_score both filters and contributes to ranking; OpenSearch allows only one of k/min_score per clause
-      searchBody.query.bool.must.push({
-        knn: {
-          embedding: {
-            vector: embedding,
-            min_score: EMBEDDING_MIN_SIMILARITY,
+      if (hardAstCategory) {
+        shouldClauses.push({
+          knn: {
+            embedding: {
+              vector: embedding,
+              k: Math.min(Math.max(limit * 4, 80), 400),
+            },
           },
-        },
-      });
+        });
+      } else {
+        searchBody.query.bool.must.push({
+          knn: {
+            embedding: {
+              vector: embedding,
+              min_score: EMBEDDING_MIN_SIMILARITY,
+            },
+          },
+        });
+      }
       searchBody.query.bool.should = shouldClauses;
     }
 
@@ -504,6 +548,8 @@ export async function textSearch(
       corrections: ast.corrections.map((c: any) => `${c.original}→${c.corrected}`),
       mustCount: mustClauses.length, shouldCount: searchBody.query.bool.should?.length ?? 0,
       filterCount: filterClauses.length, hasEmbedding: !!embedding,
+      hardAstCategory,
+      knnMode: embedding ? (hardAstCategory ? "should_boost" : "must_min_score") : "none",
     }));
 
     const opensearch = osClient;
@@ -599,6 +645,7 @@ export async function textSearch(
     // If strict constraints (product_types and/or attr_colors) produce 0 hits,
     // retry without color constraints first (keep product_types), then without
     // product_types if still zero.
+    let relaxedUsed = false;
     let currentTotal = response.body.hits.total?.value ?? response.body.hits.total ?? 0;
     const hasStrictColor = colorsForFilter.length > 0;
     const hasStrictProductTypeConstraint = hasProductTypeConstraint;
@@ -627,11 +674,33 @@ export async function textSearch(
       return Boolean(c?.term?.attr_gender) || Boolean(c?.terms?.attr_gender);
     };
 
+    const isHardAstCategoryClause = (c: any): boolean => c?.bool?._name === "hard_ast_category_filter";
+
+    if (currentTotal === 0 && hardAstCategory && mergedCategory) {
+      const widen = getCategorySearchTerms(mergedCategory).map((t) => t.toLowerCase());
+      const replacedFilter = filterClauses.map((c) =>
+        isHardAstCategoryClause(c) ? { terms: { category: widen } } : c,
+      );
+      console.warn("[textSearch] relaxed: category filter widened to full alias list (0 hits with vocab-narrow terms).");
+      const widenBody: any = {
+        ...searchBody,
+        query: {
+          bool: {
+            must: mustWithoutKnnForRetry ?? mustClauses.filter((c: any) => !c?.knn),
+            should: shouldClauses,
+            filter: replacedFilter,
+            minimum_should_match: 0,
+          },
+        },
+      };
+      response = await opensearch.search({ index: config.opensearch.index, body: widenBody });
+      currentTotal = response.body.hits.total?.value ?? response.body.hits.total ?? currentTotal;
+      relaxedUsed = true;
+    }
+
     const filterWithoutColors = filterClauses.filter((c) => !isColorFilterClause(c));
     const filterWithoutProductTypes = filterClauses.filter((c) => !isProductTypeFilterClause(c));
     const filterWithoutGender = filterClauses.filter((c) => !isGenderFilterClause(c));
-
-    let relaxedUsed = false;
 
     // If single-color strict filter by `attr_color` yields 0 hits,
     // retry by allowing `attr_colors` (multi-color palette) matches.
@@ -839,7 +908,7 @@ export async function textSearch(
     const numericIds = finalProductIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
     const imagesByProduct = await getImagesForProducts(numericIds);
 
-    const results: ProductResult[] = products.map((p: any) => {
+    let results: ProductResult[] = products.map((p: any) => {
       const productIdStr = String(p.id);
       const images = imagesByProduct.get(parseInt(p.id, 10)) || [];
       const similarityScore = scoreMap.get(productIdStr) ?? 0;
@@ -865,6 +934,7 @@ export async function textSearch(
           id: img.id,
           url: img.cdn_url,
           is_primary: img.is_primary,
+          p_hash: img.p_hash ?? undefined,
         })),
       } as ProductResult;
     });
@@ -960,12 +1030,21 @@ export async function textSearch(
       }
     }
 
+    results = dedupeSearchResults(results as any, { imageHammingMax: 10 }) as ProductResult[];
+
     // Related products (optional)
     let related: ProductResult[] = [];
     if (includeRelated) {
       const brands = ast.entities.brands.map((b) => b.toLowerCase());
       const categories = ast.entities.categories.map((c) => c.toLowerCase());
-      related = await findRelatedProducts(productIds, brands, categories, relatedLimit);
+      related = await findRelatedProducts(
+        results.map((p) => String(p.id)),
+        brands,
+        categories,
+        relatedLimit,
+      );
+      const relFiltered = filterRelatedAgainstMain(results as any, related as any);
+      related = (relFiltered ?? []) as ProductResult[];
     }
 
     const includeDebug = debug || results.length === 0;
@@ -1052,7 +1131,12 @@ export async function imageSearch(
       { term: { is_hidden: false } },
     ];
     if (options?.filters?.category) {
-      filterClauses.push({ term: { category: options.filters.category.toLowerCase() } });
+      const category = Array.isArray(options.filters.category)
+        ? options.filters.category[0]
+        : options.filters.category;
+      if (category) {
+        filterClauses.push({ term: { category: String(category).toLowerCase() } });
+      }
     }
     if (options?.filters?.gender) {
       filterClauses.push({ term: { attr_gender: options.filters.gender.toLowerCase() } });
@@ -1286,33 +1370,6 @@ export async function multiVectorWeightedSearch(
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/**
- * Get all search terms for a category (canonical name + aliases).
- * e.g. "bottoms" → ["bottoms", "bottom", "pants", "pant", "trousers", "jeans"]
- */
-function getCategorySearchTerms(category: string): string[] {
-  const CATEGORY_ALIASES: Record<string, string[]> = {
-    tops: ["tops", "top", "shirts", "shirt", "blouse", "blouses", "tshirt", "t-shirt", "tee", "tank top", "polo", "henley", "tunic", "crop top", "camisole", "sweater", "pullover", "hoodie", "sweatshirt"],
-    bottoms: ["bottoms", "bottom", "pants", "pant", "trousers", "jeans", "jean", "chinos", "leggings", "shorts", "short", "skirt", "skirts", "culottes", "cargo pants", "sweatpants"],
-    joggers: ["joggers", "jogger", "jogging", "jogging pants", "track pants", "trackpants", "jogging bottoms"],
-    dresses: ["dresses", "dress", "gown", "frock", "maxi dress", "mini dress", "midi dress", "sundress", "jumpsuit", "romper"],
-    outerwear: ["outerwear", "jacket", "jackets", "coat", "coats", "blazer", "blazers", "cardigan", "cardigans", "parka", "windbreaker", "vest", "gilet", "poncho", "cape", "trench"],
-    footwear: ["footwear", "shoes", "shoe", "sneakers", "sneaker", "boots", "boot", "sandals", "sandal", "heels", "heel", "loafers", "loafer", "flats", "flat", "mules", "slides", "slippers", "pumps", "oxfords", "trainers"],
-    accessories: ["accessories", "accessory", "bag", "bags", "belt", "belts", "hat", "hats", "cap", "watch", "watches", "scarf", "scarves", "sunglasses", "jewelry", "bracelet", "necklace", "earrings", "wallet", "purse", "handbag", "tote", "backpack", "clutch"],
-    activewear: ["activewear", "sportswear", "athletic", "gym", "workout", "running", "yoga", "training", "sports bra", "track pants", "performance"],
-    swimwear: ["swimwear", "swim", "swimming", "bikini", "swimsuit", "swim trunks", "one piece", "two piece", "beach wear", "board shorts"],
-    underwear: ["underwear", "lingerie", "undergarments", "innerwear", "boxers", "briefs", "bra", "panties", "thong", "undershirt"],
-  };
-  const key = category.toLowerCase();
-  if (CATEGORY_ALIASES[key]) return CATEGORY_ALIASES[key];
-
-  for (const [cat, aliases] of Object.entries(CATEGORY_ALIASES)) {
-    if (aliases.includes(key)) return CATEGORY_ALIASES[cat];
-  }
-
-  return [key];
-}
 
 /** Merge caller-supplied filters with QueryAST-extracted entities.
  *  Caller-supplied values always win; AST fills in the blanks. */

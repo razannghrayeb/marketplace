@@ -18,7 +18,6 @@ import {
   validateImage,
   isClipAvailable,
 } from "../../lib/image";
-import { hybridSearch } from "../../lib/search";
 import {
   YOLOv8Client,
   getYOLOv8Client,
@@ -225,11 +224,10 @@ export class ImageAnalysisService {
       this.yoloClient.isAvailable().catch(() => false),
     ]);
 
-    // BLIP availability is checked on-demand by hybridSearch
     return {
       clip: clipAvailable,
       yolo: yoloAvailable,
-      blip: true, // hybridSearch gracefully degrades if BLIP unavailable
+      blip: true,
     };
   }
 
@@ -406,6 +404,7 @@ export class ImageAnalysisService {
       }
       const fallback = await searchByImageWithSimilarity({
         imageEmbedding: analysisResult.embedding,
+        imageBuffer: buffer,
         filters: {},
         limit: similarLimitPerItem,
         similarityThreshold,
@@ -459,8 +458,7 @@ export class ImageAnalysisService {
         .extract({ left: cropLeft, top: cropTop, width: safeWidth, height: safeHeight })
         .toBuffer();
 
-      const vectors = await hybridSearch.buildQueryVectors(croppedBuffer, buffer);
-      const finalEmbedding = hybridSearch.fuseVectors(vectors);
+      const finalEmbedding = await processImageForEmbedding(croppedBuffer);
 
       const categoryMapping = mapDetectionToCategory(label, detection.confidence);
       const searchCategories = shouldUseAlternatives(categoryMapping)
@@ -476,6 +474,7 @@ export class ImageAnalysisService {
 
       const similarResult = await searchByImageWithSimilarity({
         imageEmbedding: finalEmbedding,
+        imageBuffer: croppedBuffer,
         filters,
         limit: similarLimitPerItem,
         similarityThreshold,
@@ -750,8 +749,7 @@ export class ImageAnalysisService {
         );
         if (!croppedBuffer) continue;
 
-        const vectors = await hybridSearch.buildQueryVectors(croppedBuffer, buffer);
-        const finalEmbedding = hybridSearch.fuseVectors(vectors);
+        const finalEmbedding = await processImageForEmbedding(croppedBuffer);
 
         // Get category from user hint or detection
         const categorySource =
@@ -767,6 +765,7 @@ export class ImageAnalysisService {
 
         const similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
+          imageBuffer: croppedBuffer,
           filters,
           limit: options.similarLimitPerItem || 10,
           similarityThreshold: options.similarityThreshold || 0.7,

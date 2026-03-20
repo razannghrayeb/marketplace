@@ -133,6 +133,7 @@ export async function ensureIndex() {
                 search: { type: "text", analyzer: "product_analyzer" },
               },
             },
+            category_canonical: { type: "keyword" },
             // Canonical product-type tokens used for strict garment matching
             // (e.g. hoodie, joggers). Stored as multi-value keyword.
             product_types: { type: "keyword" },

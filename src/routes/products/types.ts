@@ -44,6 +44,8 @@ export interface ImageSearchParams extends SearchParams {
   similarityThreshold?: number; // 0-1, default 0.7 (70% similarity)
   includeRelated?: boolean; // Include related by pHash
   pHash?: string; // Optional pHash for visual similarity
+  /** When set with `includeRelated`, used to compute pHash if `pHash` is omitted */
+  imageBuffer?: Buffer;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -60,6 +62,8 @@ export interface ProductImage {
   id: number;
   url: string;
   is_primary: boolean;
+  /** Primary image pHash when loaded from DB (optional, for dedup) */
+  p_hash?: string | null;
 }
 
 export interface ProductResult {

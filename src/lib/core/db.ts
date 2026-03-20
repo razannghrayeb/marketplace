@@ -97,6 +97,7 @@ export const pg = new Pool({
 });
 
 let cachedProductsHasIsHidden: boolean | undefined;
+let cachedProductsHasCanonicalId: boolean | undefined;
 
 /** Cached once per process; avoids 42703 when prod DB is behind migrations. */
 export async function productsTableHasIsHiddenColumn(): Promise<boolean> {
@@ -113,6 +114,23 @@ export async function productsTableHasIsHiddenColumn(): Promise<boolean> {
   );
   cachedProductsHasIsHidden = (r.rowCount ?? 0) > 0;
   return cachedProductsHasIsHidden;
+}
+
+/** Cached once per process. */
+export async function productsTableHasCanonicalIdColumn(): Promise<boolean> {
+  if (cachedProductsHasCanonicalId !== undefined) {
+    return cachedProductsHasCanonicalId;
+  }
+  const r = await pg.query(
+    `SELECT 1
+     FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = 'products'
+       AND column_name = 'canonical_id'
+     LIMIT 1`
+  );
+  cachedProductsHasCanonicalId = (r.rowCount ?? 0) > 0;
+  return cachedProductsHasCanonicalId;
 }
 
 // Handle pool errors

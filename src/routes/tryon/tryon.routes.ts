@@ -65,13 +65,23 @@ router.delete("/saved/:savedId",      controller.deleteSaved);
 // ============================================================================
 
 // Generic: person photo + garment image or garment_id
+const personUploadFields = [
+  { name: "person_image", maxCount: 1 },
+  { name: "person", maxCount: 1 },
+  { name: "model", maxCount: 1 },
+  { name: "model_image", maxCount: 1 },
+] as const;
+
+const garmentSingleFields = [
+  { name: "garment_image", maxCount: 1 },
+  { name: "garment", maxCount: 1 },
+  { name: "clothing", maxCount: 1 },
+] as const;
+
 router.post(
   "/",
   tryonRateLimit,
-  upload.fields([
-    { name: "person_image",  maxCount: 1 },
-    { name: "garment_image", maxCount: 1 },
-  ]),
+  upload.fields([...personUploadFields, ...garmentSingleFields]),
   controller.createTryOn
 );
 
@@ -79,7 +89,7 @@ router.post(
 router.post(
   "/from-wardrobe",
   tryonRateLimit,
-  upload.single("person_image"),
+  upload.fields([...personUploadFields]),
   controller.tryOnFromWardrobe
 );
 
@@ -87,7 +97,7 @@ router.post(
 router.post(
   "/from-product",
   tryonRateLimit,
-  upload.single("person_image"),
+  upload.fields([...personUploadFields]),
   controller.tryOnFromProduct
 );
 
@@ -96,7 +106,7 @@ router.post(
   "/batch",
   tryonRateLimit,
   upload.fields([
-    { name: "person_image",   maxCount: 1 },
+    ...personUploadFields,
     { name: "garment_images", maxCount: 5 },
   ]),
   controller.batchTryOn

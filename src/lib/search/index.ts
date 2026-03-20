@@ -59,3 +59,19 @@ export {
   hybridSearch,
   type SearchVectors,
 } from "./hybridsearch";
+
+export {
+  dedupeSearchResults,
+  filterRelatedAgainstMain,
+  type DedupSearchResultItem,
+  type DedupOptions,
+} from "./resultDedup";
+
+export {
+  getCategorySearchTerms,
+  loadCategoryVocabulary,
+  resolveCategoryTermsForOpensearch,
+  shouldHardFilterAstCategory,
+  isCategoryDominantQuery,
+  inferCategoryCanonical,
+} from "./categoryFilter";
