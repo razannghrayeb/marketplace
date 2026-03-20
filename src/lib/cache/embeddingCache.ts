@@ -38,6 +38,14 @@ const CACHE_CONFIG = {
   maxEntries: 100000,         // Soft limit for monitoring
 };
 
+/** When true, skip all Redis cache ops (e.g. during reindex to avoid Upstash quota) */
+function isCacheDisabled(): boolean {
+  return process.env.DISABLE_EMBEDDING_CACHE === "1" ||
+         process.env.DISABLE_EMBEDDING_CACHE === "true" ||
+         process.env.EMBEDDING_CACHE_ENABLED === "0" ||
+         process.env.EMBEDDING_CACHE_ENABLED === "false";
+}
+
 // In-memory stats
 let cacheStats = {
   hits: 0,
@@ -81,7 +89,7 @@ export async function getCachedImageEmbedding(
   imageBuffer: Buffer,
   attribute: SemanticAttribute
 ): Promise<number[] | null> {
-  if (!isRedisAvailable()) return null;
+  if (isCacheDisabled() || !isRedisAvailable()) return null;
   
   const redis = getRedis();
   if (!redis) return null;
@@ -111,7 +119,7 @@ export async function cacheImageEmbedding(
   attribute: SemanticAttribute,
   embedding: number[]
 ): Promise<void> {
-  if (!isRedisAvailable()) return;
+  if (isCacheDisabled() || !isRedisAvailable()) return;
   
   const redis = getRedis();
   if (!redis) return;
@@ -138,7 +146,7 @@ export async function getCachedTextEmbedding(
   text: string,
   attribute: SemanticAttribute
 ): Promise<number[] | null> {
-  if (!isRedisAvailable()) return null;
+  if (isCacheDisabled() || !isRedisAvailable()) return null;
   
   const redis = getRedis();
   if (!redis) return null;
@@ -168,7 +176,7 @@ export async function cacheTextEmbedding(
   attribute: SemanticAttribute,
   embedding: number[]
 ): Promise<void> {
-  if (!isRedisAvailable()) return;
+  if (isCacheDisabled() || !isRedisAvailable()) return;
   
   const redis = getRedis();
   if (!redis) return;
@@ -235,7 +243,7 @@ export async function batchGetImageEmbeddings(
 ): Promise<Map<SemanticAttribute, number[] | null>> {
   const results = new Map<SemanticAttribute, number[] | null>();
   
-  if (!isRedisAvailable()) {
+  if (isCacheDisabled() || !isRedisAvailable()) {
     for (const attr of attributes) {
       results.set(attr, null);
     }
@@ -305,7 +313,7 @@ export function resetCacheStats(): void {
  * Invalidate all cached embeddings for an image
  */
 export async function invalidateImageCache(imageBuffer: Buffer): Promise<void> {
-  if (!isRedisAvailable()) return;
+  if (isCacheDisabled() || !isRedisAvailable()) return;
   
   const redis = getRedis();
   if (!redis) return;

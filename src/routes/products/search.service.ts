@@ -24,6 +24,7 @@ import {
   processQuery,
   processQueryFast,
 } from "../../lib/queryProcessor";
+import { searchBrowse, searchImage, searchText } from "../../lib/search/fashionSearchFacade";
 import type {
   SearchParams,
   SearchFilters,
@@ -43,6 +44,31 @@ import type {
  */
 export async function searchProducts(params: SearchParams): Promise<ProductResult[]> {
   const { query, imageEmbedding, filters = {}, page = 1, limit = 20 } = params;
+
+  // Phase 2 alignment: route through the unified canonical facade.
+  if (Array.isArray(imageEmbedding) && imageEmbedding.length > 0) {
+    const res = await searchImage({
+      imageEmbedding,
+      filters,
+      limit,
+      includeRelated: false,
+    });
+    return res.results;
+  }
+
+  if (query) {
+    const res = await searchText({
+      query,
+      filters,
+      page,
+      limit,
+      includeRelated: false,
+      relatedLimit: 0,
+    });
+    return res.results;
+  }
+
+  return searchBrowse({ filters, page, limit });
 
   // Build OpenSearch query
   const must: any[] = [];
@@ -68,14 +94,16 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
   // Build final query
   let searchBody: any;
 
-  if (imageEmbedding && imageEmbedding.length > 0) {
+  const hasImageEmbedding = Array.isArray(imageEmbedding) && (imageEmbedding?.length ?? 0) > 0;
+  if (hasImageEmbedding) {
+    const embedding = imageEmbedding as number[];
     // Image-based search (k-NN) with OpenSearch syntax
     searchBody = {
       size: limit,
       query: {
         knn: {
           embedding: {
-            vector: imageEmbedding,
+            vector: embedding,
             k: limit,
           },
         },
@@ -89,7 +117,7 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
           must: {
             knn: {
               embedding: {
-                vector: imageEmbedding,
+                vector: embedding,
                 k: limit,
               },
             },
@@ -175,7 +203,18 @@ export async function searchByImageWithSimilarity(
     pHash,
   } = params;
 
-  if (!imageEmbedding || imageEmbedding.length === 0) {
+  // Phase 2 alignment: route through the unified canonical facade.
+  const unified = await searchImage({
+    imageEmbedding,
+    filters,
+    limit,
+    similarityThreshold,
+    includeRelated,
+    pHash,
+  });
+  return unified as any;
+
+  if (!imageEmbedding?.length) {
     return { results: [], meta: { threshold: similarityThreshold, total_results: 0 } };
   }
 
@@ -263,7 +302,7 @@ export async function searchByImageWithSimilarity(
   // Find additional related products by pHash if provided
   let related: ProductResult[] = [];
   if (includeRelated && pHash) {
-    related = await findSimilarByPHash(pHash, productIds, limit);
+    related = await findSimilarByPHash(pHash!, productIds, limit);
   }
 
   return {
@@ -373,8 +412,22 @@ export async function searchByTextWithRelated(
     return { results: [], meta: { total_results: 0 } };
   }
 
+  // Phase 2 alignment: route through the unified canonical facade.
+  // This unifies query understanding + strict filtering behavior across
+  // legacy and enhanced endpoints.
+  const unified = await searchText({
+    query,
+    filters,
+    page,
+    limit,
+    includeRelated,
+    relatedLimit,
+    useEnhanced: true,
+  });
+  return unified as any;
+
   // Single-pass query processing (spelling, arabizi, entity extraction, intent)
-  const processed = useLLM ? await processQuery(query) : await processQueryFast(query);
+  const processed = useLLM ? await processQuery(query!) : await processQueryFast(query!);
   const effectiveQuery = processed.searchQuery;
 
   // Use AST entities directly — no second parseQuery call needed

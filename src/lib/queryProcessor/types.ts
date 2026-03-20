@@ -44,13 +44,18 @@ export interface Correction {
 
 export interface ExtractedFilters {
   gender?: string;
+  // Single color (kept for backward compatibility)
   color?: string;
+  // Multi-color support
+  colors?: string[];
+  colorMode?: "any" | "all";
   material?: string;
   category?: string;
   brand?: string;
   priceRange?: { min?: number; max?: number };
   style?: string[];
   similarityReference?: string;
+  productTypes?: string[];
 }
 
 // ============================================================================
@@ -75,6 +80,7 @@ export interface QueryEntities {
   brands: string[];
   categories: string[];
   colors: string[];
+  productTypes: string[];
   materials: string[];
   patterns: string[];
   sizes: string[];
@@ -91,6 +97,7 @@ export interface QueryFilters {
   brand?: string[];
   category?: string[];
   color?: string[];
+  colorMode?: "any" | "all";
   material?: string[];
   gender?: string;
 }

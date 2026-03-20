@@ -65,6 +65,25 @@ const PATTERNS = {
   },
 };
 
+// Color tokens for complex query extraction
+const KNOWN_COLORS: string[] = [
+  "black",
+  "white",
+  "red",
+  "blue",
+  "green",
+  "yellow",
+  "pink",
+  "purple",
+  "orange",
+  "brown",
+  "gray",
+  "grey",
+  "beige",
+  "navy",
+  "cream",
+];
+
 // ─── Main Parser ─────────────────────────────────────────────────────────────
 
 /**
@@ -78,6 +97,9 @@ export function parseComplexQuery(query: string): ComplexQueryResult {
 
   // Extract price constraints
   constraints.push(...extractPriceConstraints(normalized));
+
+  // Extract color constraints (multi-color queries)
+  constraints.push(...extractColorConstraints(normalized));
 
   // Extract comparison constraints
   constraints.push(...extractComparisonConstraints(normalized));
@@ -221,6 +243,31 @@ function extractComparisonConstraints(query: string): ComplexConstraint[] {
   return constraints;
 }
 
+function extractColorConstraints(query: string): ComplexConstraint[] {
+  const constraints: ComplexConstraint[] = [];
+
+  for (const color of KNOWN_COLORS) {
+    // Word-boundary match to reduce accidental substring hits
+    const regex = new RegExp(`\\b${color}\\b`, "gi");
+    let match: RegExpExecArray | null;
+
+    // Reset lastIndex before each new regex usage
+    regex.lastIndex = 0;
+
+    while ((match = regex.exec(query)) !== null) {
+      constraints.push({
+        type: "color",
+        operator: "eq",
+        value: color,
+        confidence: 0.9,
+        originalText: match[0],
+      });
+    }
+  }
+
+  return constraints;
+}
+
 function extractStyleConstraints(query: string): ComplexConstraint[] {
   const constraints: ComplexConstraint[] = [];
 
@@ -264,6 +311,7 @@ function determinePrimaryIntent(constraints: ComplexConstraint[], query: string)
   if (constraints.some(c => c.type === "comparison")) return "comparison_search";
   if (constraints.filter(c => c.type === "price").length >= 2) return "price_filtered_search";
   if (constraints.some(c => c.type === "style")) return "style_search";
+  if (constraints.some(c => c.type === "color")) return "product_search";
 
   // Fallback to keyword analysis
   if (/\b(?:show|find|search|look(?:ing)? for)\b/i.test(query)) return "product_search";
@@ -325,6 +373,20 @@ export function mergeComplexConstraints(
   const similarityConstraints = complexResult.constraints.filter(c => c.type === "similarity");
   if (similarityConstraints.length > 0) {
     merged.similarityReference = similarityConstraints[0].value as string;
+  }
+
+  // Apply color constraints (multi-color)
+  const colorConstraints = complexResult.constraints.filter(c => c.type === "color");
+  if (colorConstraints.length > 0) {
+    const colors = Array.from(new Set(colorConstraints.map(c => String(c.value))));
+    merged.colors = colors;
+    merged.color = colors[0]; // backward compat
+
+    // Mode: if the query contains an OR connector, treat as "any",
+    // otherwise treat as "all" when multiple colors are present.
+    const hasOr = complexResult.logicalOps.some(op => op.operator === "or");
+    if (colors.length > 1) merged.colorMode = hasOr ? "any" : "all";
+    else merged.colorMode = "any";
   }
 
   return merged;

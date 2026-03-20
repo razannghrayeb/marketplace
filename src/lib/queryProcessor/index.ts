@@ -237,13 +237,17 @@ async function runPipeline(raw: string, opts: PipelineOpts): Promise<QueryAST> {
   }
 
   // 7. Extract entities & filters
-  const extracted = extractFilters(normalized);
+  // Use the same corrected query text for both extraction and searchQuery.
+  // This ensures typo corrections like "hoodi" -> "hoodie" also affect
+  // entity/product-type detection.
+  const extractionText = buildSearchQuery(normalized, corrections);
+  const extracted = extractFilters(extractionText);
   applyLLMEntities(corrections, extracted);
   const entities = toEntities(extracted);
   const filters  = toFilters(extracted);
 
   // 8. Build final search text
-  const searchQuery = buildSearchQuery(normalized, corrections);
+  const searchQuery = extractionText;
 
   // 9. Classify intent
   const intent = opts.useMLIntent
@@ -453,36 +457,114 @@ function extractFilters(query: string): ExtractedFilters {
     burgundy: "burgundy",
   };
 
+  const colorsFound: string[] = [];
+  const addColor = (c: string) => {
+    if (!colorsFound.includes(c)) colorsFound.push(c);
+  };
+
   for (const word of words) {
     const lw = word.toLowerCase();
-    if (COLORS.has(lw)) {
-      f.color = lw;
-      break;
-    }
-    if (COLOR_TYPO_MAP[lw]) {
-      f.color = COLOR_TYPO_MAP[lw];
-      break;
-    }
+    if (COLORS.has(lw)) addColor(lw);
+    else if (COLOR_TYPO_MAP[lw]) addColor(COLOR_TYPO_MAP[lw]);
   }
 
   // If no exact/typo match, check dictionary attributes
-  if (!f.color) {
+  if (colorsFound.length === 0) {
     for (const [, entry] of dict.attributes) {
-      if (entry.normalizedTerm && COLORS.has(entry.normalizedTerm)) {
-        for (const word of words) {
-          if (word === entry.normalizedTerm) {
-            f.color = entry.term;
-            break;
-          }
-          if (entry.aliases?.some(a => a.toLowerCase() === word)) {
-            f.color = entry.term;
-            break;
-          }
-        }
-        if (f.color) break;
+      if (!entry.normalizedTerm || !COLORS.has(entry.normalizedTerm)) continue;
+
+      for (const word of words) {
+        const lw = word.toLowerCase();
+        if (lw === entry.normalizedTerm) addColor(entry.term);
+        else if (entry.aliases?.some(a => a.toLowerCase() === lw)) addColor(entry.term);
       }
     }
   }
+
+  // Determine color conjunction mode for multi-color queries
+  // - `or` => any color
+  // - `and`/`+`/`with`/comma => all colors
+  const hasOrConnector = /\bor\b/i.test(query);
+  const hasAndConnector = /\band\b/i.test(query) || /\bwith\b/i.test(query) || query.includes("+");
+  const hasCommaConnector = query.includes(",");
+  if (colorsFound.length > 0) {
+    f.colors = colorsFound;
+    f.color = colorsFound[0]; // backward compat
+
+    if (hasOrConnector) f.colorMode = "any";
+    else if (colorsFound.length > 1 && (hasAndConnector || hasCommaConnector)) f.colorMode = "all";
+    else if (colorsFound.length > 1) f.colorMode = "any";
+  }
+
+  // Product-type detection (specific garment tokens)
+  // This is used later for strict filtering (Phase 2).
+  const PRODUCT_TYPE_SINGLE: Record<string, string> = {
+    hoodie: "hoodie",
+    hoodies: "hoodie",
+    sweatshirts: "hoodie",
+    sweatshirt: "hoodie",
+    "hooded": "hoodie",
+
+    jogger: "joggers",
+    joggers: "joggers",
+    jogging: "joggers",
+    "track": "joggers", // fallback for "track pants"
+
+    jeans: "jeans",
+    jean: "jeans",
+    denim: "jeans",
+    denims: "jeans",
+
+    tshirt: "tshirt",
+    "t-shirt": "tshirt",
+    tee: "tshirt",
+    tees: "tshirt",
+
+    pants: "pants",
+    pant: "pants",
+    trouser: "pants",
+    trousers: "pants",
+
+    leggings: "leggings",
+    legging: "leggings",
+
+    shorts: "shorts",
+    short: "shorts",
+
+    blazer: "blazer",
+    blazers: "blazer",
+    sweater: "sweater",
+    sweaters: "sweater",
+  };
+
+  const PRODUCT_TYPE_MULTI: Record<string, string> = {
+    "hooded sweatshirt": "hoodie",
+    "pullover hoodie": "hoodie",
+    "jogging pants": "joggers",
+    "track pants": "joggers",
+    "sweat pants": "joggers",
+    "sweatpants": "joggers",
+  };
+
+  const productTypesFound: string[] = [];
+  const addProductType = (t: string) => {
+    if (!productTypesFound.includes(t)) productTypesFound.push(t);
+  };
+
+  for (const word of words) {
+    const lw = word.toLowerCase();
+    const mapped = PRODUCT_TYPE_SINGLE[lw];
+    if (mapped) addProductType(mapped);
+  }
+
+  // Multi-word tokens (bigrams) like "jogging pants", "hooded sweatshirt"
+  for (let i = 0; i < words.length - 1; i++) {
+    const twoWord = `${words[i]} ${words[i + 1]}`.toLowerCase();
+    const mapped = PRODUCT_TYPE_MULTI[twoWord];
+    if (mapped) addProductType(mapped);
+  }
+
+  if (productTypesFound.length > 0) f.productTypes = productTypesFound;
 
   // Brand — check single words and also multi-word combinations
   for (const word of words) {
@@ -560,7 +642,8 @@ function toEntities(f: ExtractedFilters): QueryEntities {
   return {
     brands:     f.brand    ? [f.brand]    : [],
     categories: f.category ? [f.category] : [],
-    colors:     f.color    ? [f.color]    : [],
+    colors:     f.colors && f.colors.length > 0 ? f.colors : (f.color ? [f.color] : []),
+    productTypes: f.productTypes ? [...f.productTypes] : [],
     materials:  f.material ? [f.material] : [],
     patterns:   [],
     sizes:      [],
@@ -574,7 +657,8 @@ function toFilters(f: ExtractedFilters): QueryFilters {
     priceRange: f.priceRange,
     brand:      f.brand    ? [f.brand]    : undefined,
     category:   f.category ? [f.category] : undefined,
-    color:      f.color    ? [f.color]    : undefined,
+    color:      f.colors && f.colors.length > 0 ? [...f.colors] : (f.color ? [f.color] : undefined),
+    colorMode:  f.colorMode,
     material:   f.material ? [f.material] : undefined,
     gender:     f.gender,
   };
