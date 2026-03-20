@@ -71,7 +71,7 @@ export const config = {
     // Auth: gcloud auth application-default login  OR  GOOGLE_APPLICATION_CREDENTIALS=/key.json
     project: process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || "",
     location: process.env.TRYON_LOCATION || "us-central1",
-    model: process.env.TRYON_MODEL || "virtual-try-on@002",
+    model: process.env.TRYON_MODEL || "virtual-try-on-001",
     timeout: Number(process.env.TRYON_TIMEOUT || 60000),
   },
   jwt: {

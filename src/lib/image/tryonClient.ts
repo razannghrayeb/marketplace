@@ -163,21 +163,27 @@ export class TryOnClient {
     const start = Date.now();
     const token = await this.getBearerToken();
 
+    // Vertex AI Virtual Try-On API format (virtual-try-on-001)
+    // https://cloud.google.com/vertex-ai/generative-ai/docs/image/generate-virtual-try-on-images
     const body = {
       instances: [
         {
-          person_image: {
-            bytesBase64Encoded: personBuffer.toString("base64"),
+          personImage: {
+            image: {
+              bytesBase64Encoded: personBuffer.toString("base64"),
+            },
           },
-          product_image: {
-            bytesBase64Encoded: garmentBuffer.toString("base64"),
-          },
+          productImages: [
+            {
+              image: {
+                bytesBase64Encoded: garmentBuffer.toString("base64"),
+              },
+            },
+          ],
         },
       ],
       parameters: {
-        editConfig: {
-          numberOfImages: options.numberOfImages ?? 1,
-        },
+        sampleCount: Math.min(4, Math.max(1, options.numberOfImages ?? 1)),
       },
     };
 

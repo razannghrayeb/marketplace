@@ -298,15 +298,15 @@ export async function textSearch(
       _source: ['product_id', 'title', 'brand', 'price_usd', 'image_cdn', 'category', 'attr_gender', 'attr_color'],
     };
 
-    // ── 6. Optional hybrid kNN boost ───────────────────────────────────────
+    // ── 6. Optional hybrid kNN with similarity threshold ─────────────────────
     //
-    // kNN cosine similarity scores range [0, 1] while BM25 scores can be
-    // 5–50+. Adding raw kNN as a should clause makes it nearly invisible.
-    // We boost the kNN score to bring it into the same magnitude as BM25.
+    // When embedding is available, we require BOTH text match AND embedding
+    // similarity >= threshold. This filters out irrelevant results (e.g., skincare
+    // products that happen to match text) that would otherwise rank high.
     //
-    // Strategy: kNN with boost = 10 puts cosine ~0.3 → score ~3.0, which
-    // meaningfully contributes alongside BM25 ~5–15 for typical queries.
-    // For short/ambiguous queries where BM25 is weak, kNN can rescue.
+    // OpenSearch cosinesimil score = (1 + cosine) / 2, range [0, 1].
+    // min_score enforces acceptable similarity; use min_score (not k) per OpenSearch API.
+    const EMBEDDING_MIN_SIMILARITY = config.clip.similarityThreshold;
     let embedding: number[] | null = null;
     try {
       embedding = await getQueryEmbedding(ast.searchQuery);
@@ -314,18 +314,17 @@ export async function textSearch(
       console.warn('[textSearch] Embedding generation failed, proceeding with BM25-only:', err);
     }
     if (embedding) {
-      searchBody.query.bool.should = [
-        ...shouldClauses,
-        {
-          knn: {
-            embedding: {
-              vector: embedding,
-              k: Math.min(limit * 3, 100),
-              boost: 10.0,
-            },
+      // Require embedding similarity >= threshold (filters low-similarity results)
+      // min_score both filters and contributes to ranking; OpenSearch allows only one of k/min_score per clause
+      searchBody.query.bool.must.push({
+        knn: {
+          embedding: {
+            vector: embedding,
+            min_score: EMBEDDING_MIN_SIMILARITY,
           },
         },
-      ];
+      });
+      searchBody.query.bool.should = shouldClauses;
     }
 
     // ── 7. Execute ─────────────────────────────────────────────────────────
@@ -487,9 +486,8 @@ export async function imageSearch(
 
     // OpenSearch cosinesimil (FAISS) score = (1 + cosine_similarity) / 2
     // Range [0, 1]: 1.0 = identical, 0.5 = orthogonal, 0.0 = opposite.
-    // CLIP visual matches are meaningful above cosine ~0.20 → score ~0.60.
-    // Below 0.55 (cosine < 0.10), results are effectively random.
-    const MIN_SIMILARITY = 0.55;
+    // Filter out results below acceptable similarity (configurable via CLIP_SIMILARITY_THRESHOLD).
+    const MIN_SIMILARITY = config.clip.similarityThreshold;
     const results = response.body.hits.hits
       .filter((hit: any) => (hit._score ?? 0) >= MIN_SIMILARITY)
       .map((hit: any) => ({

@@ -170,7 +170,7 @@ export async function searchByImageWithSimilarity(
     filters = {},
     page = 1,
     limit = 20,
-    similarityThreshold = 0.7, // Default 70% similarity
+    similarityThreshold = config.clip.similarityThreshold,
     includeRelated = true,
     pHash,
   } = params;
