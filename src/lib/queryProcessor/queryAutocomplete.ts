@@ -317,6 +317,7 @@ export async function logSearchQuery(
   try {
     // Single connection + transaction: halves pool usage vs two separate pg.query calls
     // (important for Supabase session mode / tiny pool_size).
+    // Best-effort: 1 retry only — avoid hammering pool when under capacity pressure.
     await queryWithPgCapacityRetry(
       "logSearchQuery",
       async () => {
@@ -352,12 +353,15 @@ export async function logSearchQuery(
           client.release();
         }
       },
-      { attempts: 8, baseDelayMs: 500 },
+      { attempts: 2, baseDelayMs: 300 },
     );
 
     queryTrie.insert(normalized, 1, new Date());
   } catch (err) {
-    console.error("[QueryAutocomplete] Failed to log query:", err);
+    // Silently skip — logging is best-effort; don't spam logs on pool exhaustion
+    if (process.env.NODE_ENV === "development") {
+      console.warn("[QueryAutocomplete] Failed to log query:", (err as Error).message);
+    }
   }
 }
 

@@ -30,7 +30,7 @@
 import "dotenv/config";
 import axios from "axios";
 import { Pool } from "pg";
-import { osClient } from "../src/lib/core";
+import { osClient, ensureIndex } from "../src/lib/core/opensearch";
 import { config } from "../src/config";
 
 /**
@@ -61,6 +61,7 @@ interface ReindexConfig {
   force: boolean;                // Force reindex even if already exists
   failedOnly: boolean;           // Only reindex products not in OpenSearch
   dryRun: boolean;               // Don't actually index, just show what would happen
+  recreate: boolean;             // Delete and recreate the OpenSearch index before starting
   batchSize: number;             // Process N products at a time
   maxRetries: number;            // Retry failed image fetches
   timeoutMs: number;             // Image fetch timeout
@@ -72,6 +73,7 @@ const DEFAULT_CONFIG: ReindexConfig = {
   force: false,
   failedOnly: false,
   dryRun: false,
+  recreate: false,
   batchSize: 50,
   maxRetries: 3,
   timeoutMs: 30000,
@@ -398,6 +400,9 @@ async function main() {
       case "--batch-size":
         reindexConfig.batchSize = parseInt(args[++i], 10);
         break;
+      case "--recreate":
+        reindexConfig.recreate = true;
+        break;
       case "--help":
         console.log(`
 Resumable Product Reindexing
@@ -411,6 +416,7 @@ Options:
   --failed-only           Only reindex products not in OpenSearch
   --dry-run               Show what would be reindexed without doing it
   --batch-size <n>        Process N products at a time (default: 50)
+  --recreate              ⚠️  DELETE and recreate the OpenSearch index before starting
   --help                  Show this help message
 
 Examples:
@@ -425,6 +431,9 @@ Examples:
 
   # Dry run to see what would happen
   npx tsx scripts/resume-reindex.ts --dry-run
+  
+  # FULL REINDEX: Delete index and reindex all products from scratch
+  npx tsx scripts/resume-reindex.ts --recreate --force
         `);
         process.exit(0);
       default:
@@ -440,9 +449,39 @@ Examples:
   console.log(`  Force reindex:      ${reindexConfig.force}`);
   console.log(`  Failed only:        ${reindexConfig.failedOnly}`);
   console.log(`  Dry run:            ${reindexConfig.dryRun}`);
+  console.log(`  Recreate index:     ${reindexConfig.recreate}`);
   console.log(`  Batch size:         ${reindexConfig.batchSize}`);
   console.log(`  Max retries:        ${reindexConfig.maxRetries}`);
   console.log();
+
+  // ── RECREATE INDEX IF REQUESTED ──────────────────────────────────────────────
+  if (reindexConfig.recreate) {
+    console.log("⚠️  --recreate flag set: Deleting and recreating OpenSearch index...");
+    const indexName = config.opensearch.index;
+    try {
+      const exists = await osClient.indices.exists({ index: indexName });
+      if (exists.body) {
+        console.log(`   Deleting existing index: ${indexName}`);
+        await osClient.indices.delete({ index: indexName });
+      }
+      console.log(`   Creating fresh index: ${indexName}`);
+      await ensureIndex();
+      console.log("✅ Index recreated successfully.");
+      
+      // Reset progress file when recreating index
+      console.log("   Resetting progress file...");
+      try {
+        await fs.unlink(reindexConfig.progressFile);
+        console.log("   Progress file deleted.");
+      } catch {
+        // File may not exist
+      }
+    } catch (err: any) {
+      console.error("❌ Failed to recreate index:", err.message);
+      process.exit(1);
+    }
+    console.log();
+  }
 
   await waitForDatabase();
 
