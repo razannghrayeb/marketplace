@@ -137,6 +137,9 @@ export async function textSearch(
     const filterClauses: any[] = [];
     const shouldClauses: any[] = [];
 
+    // Always exclude hidden products from public search.
+    filterClauses.push({ term: { is_hidden: false } });
+
     // Primary text match — use corrected searchQuery against text fields
     if (ast.searchQuery) {
       mustClauses.push({
