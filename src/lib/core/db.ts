@@ -158,6 +158,8 @@ export async function getProductsByIdsOrdered(ids: (number | string)[]): Promise
   );
   
   // Preserve order of input IDs
-  const productMap = new Map(result.rows.map(p => [p.id, p]));
-  return numericIds.map(id => productMap.get(id)).filter(Boolean);
+  // Postgres may return `p.id` as a string (e.g. "8491") while `numericIds`
+  // are numbers. Normalize keys to string to preserve order reliably.
+  const productMap = new Map(result.rows.map(p => [String(p.id), p]));
+  return numericIds.map(id => productMap.get(String(id))).filter(Boolean);
 }
