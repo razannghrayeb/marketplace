@@ -3,7 +3,8 @@ import axios from "axios";
 import { pg, osClient } from "../src/lib/core";
 import { config } from "../src/config";
 import { processImageForEmbedding, computePHash } from "../src/lib/image";
-import { extractAttributesSync } from "../src/lib/search/attributeExtractor";
+import { buildProductSearchDocument } from "../src/lib/search/searchDocument";
+import { extractDominantColorNames } from "../src/lib/color/dominantColor";
 
 async function columnExists(columnName: string) {
   const res = await pg.query(
@@ -71,34 +72,31 @@ async function main() {
 
       // Validate and generate embedding
       try {
-        const embedding = await processImageForEmbedding(buf);
-        const ph = await computePHash(buf);
-        const { attributes } = extractAttributesSync(title);
-        const body = {
-          product_id: String(id),
-          vendor_id: String(vendor_id),
+        const [embedding, ph, dominantColors] = await Promise.all([
+          processImageForEmbedding(buf),
+          computePHash(buf),
+          extractDominantColorNames(buf).catch(() => []),
+        ]);
+        const body = buildProductSearchDocument({
+          productId: id,
+          vendorId: vendor_id,
           title,
+          description: null,
           brand,
           category,
-          price_usd: Math.round(price_cents / 89000),
-          availability: availability ? "in_stock" : "out_of_stock",
-          is_hidden: is_hidden ?? false,
-          canonical_id: canonical_id ? String(canonical_id) : null,
+          priceCents: price_cents,
+          availability: Boolean(availability),
+          isHidden: is_hidden ?? false,
+          canonicalId: canonical_id,
+          imageCdn: image_url,
+          pHash: ph,
+          lastSeenAt: last_seen,
           embedding,
-          image_cdn: image_url,
-          p_hash: ph,
-          last_seen_at: last_seen,
-          attr_color: attributes.color || null,
-          attr_colors: attributes.colors || [],
-          attr_material: attributes.material || null,
-          attr_materials: attributes.materials || [],
-          attr_fit: attributes.fit || null,
-          attr_style: attributes.style || null,
-          attr_gender: attributes.gender || null,
-          attr_pattern: attributes.pattern || null,
-          attr_sleeve: attributes.sleeve || null,
-          attr_neckline: attributes.neckline || null,
-        };
+          detectedColors: dominantColors,
+          images: image_url
+            ? [{ url: image_url, p_hash: ph, is_primary: true }]
+            : [],
+        });
         await osClient.index({ index: config.opensearch.index, id: String(id), body, refresh: true });
         console.log(`Indexed ${id} (${title})`);
       } catch (err) {

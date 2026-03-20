@@ -28,6 +28,7 @@ import {
   getQueryEmbedding,
   type QueryAST,
 } from '../../lib/queryProcessor';
+import { extractAttributesSync } from "../../lib/search/attributeExtractor";
 
 import { getImagesForProducts } from '../products/images.service';
 import type { ProductResult, SearchResultWithRelated } from '../products/types';
@@ -41,6 +42,8 @@ export interface SearchFilters {
   minPrice?: number;
   maxPrice?: number;
   color?: string;
+  colors?: string[];
+  colorMode?: "any" | "all";
   size?: string;
   gender?: string;
   vendorId?: number;
@@ -77,6 +80,43 @@ export interface MultiImageSearchRequest {
   userPrompt: string;
   limit?: number;
   rerankWeights?: RerankOptions | any;
+}
+
+const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
+  black: ["black", "charcoal", "dark gray", "dark grey", "jet", "onyx"],
+  white: ["white", "off white", "off-white", "ivory", "cream", "ecru"],
+  gray: ["gray", "grey", "heather grey", "heather gray", "silver"],
+  blue: ["blue", "navy", "cobalt", "denim", "sky blue", "mid blue", "midnight blue"],
+  red: ["red", "burgundy", "maroon", "wine", "cherry"],
+  green: ["green", "olive", "khaki", "sage", "mint", "forest green", "hunter green"],
+  brown: ["brown", "camel", "tan", "taupe", "mocha", "chocolate", "beige"],
+  purple: ["purple", "violet", "plum", "lavender", "lilac", "mauve"],
+  pink: ["pink", "blush", "fuchsia", "magenta", "rose"],
+  yellow: ["yellow", "mustard", "golden", "gold"],
+  orange: ["orange", "rust", "peach", "coral", "burnt orange"],
+  multicolor: ["multicolor", "multi color", "multi-color", "colour block", "color block"],
+};
+
+const COLOR_ALIAS_TO_CANONICAL = (() => {
+  const map = new Map<string, string>();
+  for (const [canonical, aliases] of Object.entries(COLOR_CANONICAL_ALIASES)) {
+    map.set(canonical, canonical);
+    for (const alias of aliases) map.set(alias.toLowerCase(), canonical);
+  }
+  return map;
+})();
+
+function normalizeColorToken(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const key = raw.toLowerCase().replace(/[_-]/g, " ").replace(/\s+/g, " ").trim();
+  return COLOR_ALIAS_TO_CANONICAL.get(key) ?? null;
+}
+
+function expandColorTermsForFilter(color: string): string[] {
+  const canonical = normalizeColorToken(color) ?? color.toLowerCase();
+  const aliases = COLOR_CANONICAL_ALIASES[canonical] ?? [canonical];
+  const out = new Set<string>([canonical, ...aliases.map((a) => a.toLowerCase())]);
+  return [...out];
 }
 
 // Initialize services
@@ -209,29 +249,58 @@ export async function textSearch(
       const primaryProductType = ast.entities.productTypes[0];
       if (primaryProductType) {
         filterClauses.push({
-          term: { product_types: primaryProductType.toLowerCase() },
+          bool: {
+            _name: "strict_product_type_filter",
+            should: [
+              { term: { product_types: primaryProductType.toLowerCase() } },
+              { match_phrase: { title: primaryProductType.toLowerCase() } },
+            ],
+            minimum_should_match: 1,
+          },
         });
       }
     }
 
-    const callerHasExplicitColor = Boolean(callerFilters?.color);
-    const colorsForFilter = callerHasExplicitColor
-      ? [callerFilters!.color!.toLowerCase()]
-      : ast.entities.colors.map((c) => c.toLowerCase());
+    const explicitColorsRaw = (callerFilters as any)?.colors;
+    const explicitColors =
+      Array.isArray(explicitColorsRaw) && explicitColorsRaw.length > 0
+        ? explicitColorsRaw.map((c: any) => String(c).toLowerCase())
+        : undefined;
+
+    const explicitColorFallback = callerFilters?.color
+      ? [callerFilters.color.toLowerCase()]
+      : undefined;
+
+    const colorsForFilterRaw = explicitColors ?? explicitColorFallback ?? ast.entities.colors.map((c) => c.toLowerCase());
+    const colorsForFilter = [...new Set(
+      colorsForFilterRaw
+        .map((c) => normalizeColorToken(c) ?? c.toLowerCase())
+        .filter(Boolean)
+    )];
     const colorMode =
       (callerFilters as any)?.colorMode ??
       ast.filters?.colorMode ??
       "any";
 
     if (colorsForFilter.length > 0) {
-      if (colorsForFilter.length === 1 || colorMode === "any") {
-        filterClauses.push({ terms: { attr_colors: colorsForFilter } });
-      } else {
+      // Precision rule:
+      // - When the query asks for ONE color token, filter by the product's *primary*
+      //   color (`attr_color`) first. This avoids matches where `attr_colors`
+      //   contains the requested color only as a secondary accent.
+      // - For multi-color queries we keep recall-focused matching on `attr_colors`.
+      if (colorsForFilter.length === 1) {
+        const expanded = expandColorTermsForFilter(colorsForFilter[0]);
+        filterClauses.push({ terms: { attr_color: expanded } });
+      } else if (colorMode === "all") {
         filterClauses.push({
           bool: {
-            must: colorsForFilter.map((c) => ({ term: { attr_colors: c } })),
+            must: colorsForFilter.map((c) => ({ terms: { attr_colors: expandColorTermsForFilter(c) } })),
           },
         });
+      } else {
+        // colorMode === "any"
+        const expanded = [...new Set(colorsForFilter.flatMap((c) => expandColorTermsForFilter(c)))];
+        filterClauses.push({ terms: { attr_colors: expanded } });
       }
     }
 
@@ -292,18 +361,20 @@ export async function textSearch(
     }
     // Color is handled as strict attr_colors filtering above.
     if (merged.gender) {
-      if (callerFilters?.gender) {
-        filterClauses.push({ term: { attr_gender: merged.gender.toLowerCase() } });
-      } else {
-        shouldClauses.push({
-          bool: {
-            should: [
-              { term: { attr_gender: { value: merged.gender.toLowerCase(), boost: 2.5 } } },
-              { match: { title: { query: merged.gender, boost: 1.0 } } },
-            ],
-          },
-        });
-      }
+      const g = merged.gender.toLowerCase();
+      // Treat extracted gender as a hard constraint for determinism.
+      // Titles sometimes include "Men"/"Women" even when attr_gender is missing,
+      // so we match on either attr_gender OR title phrase.
+      filterClauses.push({
+        bool: {
+          _name: "strict_gender_filter",
+          should: [
+            { term: { attr_gender: g } },
+            { match_phrase: { title: g } },
+          ],
+          minimum_should_match: 1,
+        },
+      });
     }
     if (merged.vendorId) {
       filterClauses.push({ term: { vendor_id: String(merged.vendorId) } });
@@ -313,6 +384,28 @@ export async function textSearch(
       if (merged.minPrice !== undefined) range.gte = merged.minPrice;
       if (merged.maxPrice !== undefined) range.lte = merged.maxPrice;
       filterClauses.push({ range: { price_usd: range } });
+    }
+
+    // Color-aware semantic boost: when query contains explicit color tokens,
+    // search over per-item color embeddings (if available in index) to
+    // distinguish e.g. "white hoodie" vs "black hoodie".
+    if (colorsForFilter.length > 0) {
+      try {
+        const colorEmbedding = await attributeEmbeddings.generateTextAttributeEmbedding(
+          colorsForFilter.join(" "),
+          "color"
+        );
+        shouldClauses.push({
+          knn: {
+            embedding_color: {
+              vector: colorEmbedding,
+              k: Math.min(Math.max(limit * 4, 80), 400),
+            },
+          },
+        });
+      } catch (err) {
+        console.warn("[textSearch] color embedding boost failed:", err);
+      }
     }
 
     // If entity extraction consumed the whole query, ensure we still have a
@@ -367,18 +460,29 @@ export async function textSearch(
     //
     // OpenSearch cosinesimil score = (1 + cosine) / 2, range [0, 1].
     // min_score enforces acceptable similarity; use min_score (not k) per OpenSearch API.
-    const EMBEDDING_MIN_SIMILARITY = config.clip.similarityThreshold;
+    const queryTokenCount =
+      ast.tokens?.important?.length && ast.tokens.important.length > 0
+        ? ast.tokens.important.length
+        : ast.searchQuery.trim().split(/\s+/).filter(Boolean).length;
+    let embeddingMinSimilarity = config.clip.similarityThreshold;
+    if (queryTokenCount <= 2) embeddingMinSimilarity = Math.min(embeddingMinSimilarity, 0.58);
+    if (queryTokenCount >= 5) embeddingMinSimilarity = Math.min(embeddingMinSimilarity, 0.52);
+    if (hasProductTypeConstraint || colorsForFilter.length > 0) {
+      embeddingMinSimilarity = Math.min(embeddingMinSimilarity, 0.55);
+    }
+    const EMBEDDING_MIN_SIMILARITY = Math.max(0.35, embeddingMinSimilarity);
     let embedding: number[] | null = null;
     try {
       embedding = await getQueryEmbedding(ast.searchQuery);
     } catch (err) {
       console.warn('[textSearch] Embedding generation failed, proceeding with BM25-only:', err);
     }
+    let mustWithoutKnnForRetry: any[] | null = null;
     if (embedding) {
       // Keep a copy of must-clauses without kNN for "zero-hit fallback".
       // Note: `searchBody.query.bool.must` points at `mustClauses`, so we must
       // not reuse it after we push the kNN clause.
-      const mustWithoutKnn = mustClauses.filter((c: any) => !c?.knn);
+      mustWithoutKnnForRetry = mustClauses.filter((c: any) => !c?.knn);
 
       // Require embedding similarity >= threshold (filters low-similarity results)
       // min_score both filters and contributes to ranking; OpenSearch allows only one of k/min_score per clause
@@ -391,9 +495,6 @@ export async function textSearch(
         },
       });
       searchBody.query.bool.should = shouldClauses;
-
-      // Stash for later usage
-      (searchBody as any).__mustWithoutKnn = mustWithoutKnn;
     }
 
     // ── 7. Execute ─────────────────────────────────────────────────────────
@@ -476,14 +577,13 @@ export async function textSearch(
     const firstTotal = response.body.hits.total?.value ?? response.body.hits.total ?? 0;
     const hadEmbedding = Boolean(embedding);
     if (hadEmbedding && firstTotal === 0) {
-      const mustWithoutKnn = (searchBody as any).__mustWithoutKnn as any[] | undefined;
-      if (mustWithoutKnn && mustWithoutKnn.length > 0) {
+      if (mustWithoutKnnForRetry && mustWithoutKnnForRetry.length > 0) {
         console.warn('[textSearch] Zero hits with embedding; retrying BM25-only.');
         const bm25Body: any = {
           ...searchBody,
           query: {
             bool: {
-              must: mustWithoutKnn,
+              must: mustWithoutKnnForRetry,
               should: shouldClauses,
               filter: filterClauses,
               minimum_should_match: 0,
@@ -492,6 +592,125 @@ export async function textSearch(
         };
         response = await opensearch.search({ index: config.opensearch.index, body: bm25Body });
       }
+    }
+
+    // ── 7.5 Strict filter relaxation (Phase 2 robustness) ────────────────
+    //
+    // If strict constraints (product_types and/or attr_colors) produce 0 hits,
+    // retry without color constraints first (keep product_types), then without
+    // product_types if still zero.
+    let currentTotal = response.body.hits.total?.value ?? response.body.hits.total ?? 0;
+    const hasStrictColor = colorsForFilter.length > 0;
+    const hasStrictProductTypeConstraint = hasProductTypeConstraint;
+
+    const isColorFilterClause = (c: any): boolean => {
+      if (!c) return false;
+      if (c?.term?.attr_color) return true;
+      if (c?.terms?.attr_colors) return true;
+      if (c?.term?.attr_colors) return true;
+      if (c?.bool?.must && Array.isArray(c.bool.must)) {
+        // Our AND-mode filter uses: { bool: { must: [ { term:{attr_colors:...}}, ... ] } }
+        return c.bool.must.every((m: any) => Boolean(m?.term?.attr_colors));
+      }
+      return false;
+    };
+
+    const isProductTypeFilterClause = (c: any): boolean => {
+      if (!c) return false;
+      if (c?.bool?._name === "strict_product_type_filter") return true;
+      return Boolean(c?.term?.product_types) || Boolean(c?.terms?.product_types);
+    };
+
+    const isGenderFilterClause = (c: any): boolean => {
+      if (!c) return false;
+      if (c?.bool?._name === "strict_gender_filter") return true;
+      return Boolean(c?.term?.attr_gender) || Boolean(c?.terms?.attr_gender);
+    };
+
+    const filterWithoutColors = filterClauses.filter((c) => !isColorFilterClause(c));
+    const filterWithoutProductTypes = filterClauses.filter((c) => !isProductTypeFilterClause(c));
+    const filterWithoutGender = filterClauses.filter((c) => !isGenderFilterClause(c));
+
+    let relaxedUsed = false;
+
+    // If single-color strict filter by `attr_color` yields 0 hits,
+    // retry by allowing `attr_colors` (multi-color palette) matches.
+    const usedPrimaryColorOnlyFilter = colorsForFilter.length === 1 && filterClauses.some((c) => Boolean(c?.term?.attr_color));
+    if (currentTotal === 0 && usedPrimaryColorOnlyFilter) {
+      console.warn("[textSearch] 0 hits with primary color; retrying using attr_colors.");
+      const colorOnlyWithoutPrimary = filterWithoutColors;
+      const relaxedBody: any = {
+        ...searchBody,
+        query: {
+          ...searchBody.query,
+          bool: {
+            ...searchBody.query.bool,
+            // Keep everything except remove strict primary-color constraint.
+            filter: [...colorOnlyWithoutPrimary, { terms: { attr_colors: colorsForFilter } }],
+            // Preserve must/should exactly as in the first attempt.
+          },
+        },
+      };
+      response = await opensearch.search({ index: config.opensearch.index, body: relaxedBody });
+      currentTotal =
+        response.body.hits.total?.value ?? response.body.hits.total ?? currentTotal;
+    }
+    if (currentTotal === 0 && hasStrictColor && filterWithoutColors.length > 0) {
+      console.warn("[textSearch] Zero hits with strict colors; retrying without colors.");
+      const relaxedBody: any = {
+        ...searchBody,
+        query: {
+          bool: {
+            must: mustWithoutKnnForRetry ?? mustClauses.filter((c: any) => !c?.knn),
+            should: shouldClauses,
+            filter: filterWithoutColors,
+            minimum_should_match: 0,
+          },
+        },
+      };
+      response = await opensearch.search({ index: config.opensearch.index, body: relaxedBody });
+      relaxedUsed = true;
+    }
+
+    const totalAfterColorRelax =
+      response.body.hits.total?.value ?? response.body.hits.total ?? 0;
+    if (totalAfterColorRelax === 0 && hasStrictProductTypeConstraint && filterWithoutProductTypes.length > 0) {
+      console.warn("[textSearch] Still zero hits; retrying without product_types.");
+      const baseFilter = hasStrictColor ? filterWithoutColors : filterClauses;
+      const relaxedBody: any = {
+        ...searchBody,
+        query: {
+          bool: {
+            must: mustWithoutKnnForRetry ?? mustClauses.filter((c: any) => !c?.knn),
+            should: shouldClauses,
+            filter: baseFilter.filter((c: any) => !isProductTypeFilterClause(c)),
+            minimum_should_match: 0,
+          },
+        },
+      };
+      response = await opensearch.search({ index: config.opensearch.index, body: relaxedBody });
+      relaxedUsed = true;
+    }
+
+    // Final robustness: if strict gender filter produced 0 hits, relax gender.
+    const hasStrictGender = Boolean(ast.entities.gender);
+    const totalAfterAll =
+      response.body.hits.total?.value ?? response.body.hits.total ?? 0;
+    if (totalAfterAll === 0 && hasStrictGender && filterWithoutGender.length > 0) {
+      console.warn("[textSearch] Still zero hits; retrying without gender filter.");
+      const relaxedBody: any = {
+        ...searchBody,
+        query: {
+          bool: {
+            must: mustWithoutKnnForRetry ?? mustClauses.filter((c: any) => !c?.knn),
+            should: shouldClauses,
+            filter: filterWithoutGender,
+            minimum_should_match: 0,
+          },
+        },
+      };
+      response = await opensearch.search({ index: config.opensearch.index, body: relaxedBody });
+      relaxedUsed = true;
     }
 
     const hits = response.body.hits.hits;
@@ -508,7 +727,11 @@ export async function textSearch(
 
     // Deterministic constraint-aware reranking (Phase 3)
     const desiredProductTypes = (ast.entities.productTypes || []).map((t) => t.toLowerCase());
-    const desiredColors = ast.entities.colors.map((c) => c.toLowerCase());
+    const desiredColors = [...new Set(
+      ast.entities.colors
+        .map((c) => normalizeColorToken(c) ?? c.toLowerCase())
+        .filter(Boolean)
+    )];
     const rerankColorMode = ast.filters?.colorMode ?? "any";
     const primaryProductType = desiredProductTypes[0];
 
@@ -520,6 +743,8 @@ export async function textSearch(
         rerankScore: number;
       }
     >();
+
+    const colorById = new Map<string, string | null>();
 
     for (const hit of hits) {
       const idStr = String(hit?._source?.product_id);
@@ -533,13 +758,38 @@ export async function textSearch(
           : [];
 
       const attrColorsRaw = hit?._source?.attr_colors;
-      const productColors: string[] = Array.isArray(attrColorsRaw)
+      let productColors: string[] = Array.isArray(attrColorsRaw)
         ? attrColorsRaw.map((x: any) => String(x).toLowerCase())
         : attrColorsRaw
           ? [String(attrColorsRaw).toLowerCase()]
           : hit?._source?.attr_color
             ? [String(hit._source.attr_color).toLowerCase()]
             : [];
+
+      productColors = [...new Set(productColors
+        .map((c: string) => normalizeColorToken(c) ?? c.toLowerCase())
+        .filter(Boolean))];
+
+      if (productColors.length === 0 && typeof hit?._source?.title === "string") {
+        const inferred = extractAttributesSync(String(hit._source.title));
+        const inferredColors = inferred.attributes.colors && inferred.attributes.colors.length > 0
+          ? inferred.attributes.colors
+          : inferred.attributes.color
+            ? [inferred.attributes.color]
+            : [];
+        if (inferredColors.length > 0) {
+          productColors = inferredColors
+            .map((c: string) => normalizeColorToken(c) ?? c.toLowerCase())
+            .filter(Boolean) as string[];
+        }
+      }
+
+      const primaryColor = hit?._source?.attr_color
+        ? (normalizeColorToken(String(hit._source.attr_color)) ?? String(hit._source.attr_color).toLowerCase())
+        : productColors.length > 0
+          ? productColors[0]
+          : null;
+      colorById.set(idStr, primaryColor);
 
       // Product-type compliance: prioritize the primary type mentioned in the query.
       let productTypeCompliance = 0;
@@ -570,9 +820,23 @@ export async function textSearch(
       complianceById.set(idStr, { productTypeCompliance, colorCompliance, rerankScore });
     }
 
+    // Hard precision gate for explicit color queries:
+    // never return items that fail color compliance, even if fallback search
+    // had to relax color filters to avoid zero OpenSearch hits.
+    let finalProductIds = [...productIds];
+    if (desiredColors.length > 0) {
+      const compliantIds = finalProductIds.filter((id) => (complianceById.get(id)?.colorCompliance ?? 0) > 0);
+      if (compliantIds.length > 0) {
+        finalProductIds = compliantIds;
+      } else {
+        // Keep recall when metadata quality is poor; do not hard-drop to zero.
+        // (Color precision is still enforced when we have compliant candidates.)
+      }
+    }
+
     // Fetch hydrated product + images while preserving OpenSearch ranking order
-    const products = await getProductsByIdsOrdered(productIds);
-    const numericIds = productIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
+    const products = await getProductsByIdsOrdered(finalProductIds);
+    const numericIds = finalProductIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
     const imagesByProduct = await getImagesForProducts(numericIds);
 
     const results: ProductResult[] = products.map((p: any) => {
@@ -583,6 +847,8 @@ export async function textSearch(
 
       return {
         ...p,
+        // Ensure UI color matches the OpenSearch attribute that retrieval used.
+        color: colorById.get(productIdStr) ?? p.color ?? null,
         similarity_score: similarityScore,
         match_type: similarityScore >= 0.8 ? 'exact' : 'similar',
         rerankScore: compliance?.rerankScore ?? undefined,

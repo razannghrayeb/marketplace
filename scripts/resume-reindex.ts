@@ -51,8 +51,9 @@ const reindexPg = new Pool({
   keepAlive: true,
 });
 import { processImageForEmbedding, computePHash } from "../src/lib/image";
-import { extractAttributesSync } from "../src/lib/search/attributeExtractor";
 import { attributeEmbeddings } from "../src/lib/search/attributeEmbeddings";
+import { buildProductSearchDocument } from "../src/lib/search/searchDocument";
+import { extractDominantColorNames } from "../src/lib/color/dominantColor";
 import { promises as fs } from "fs";
 
 // ============================================================================
@@ -103,88 +104,6 @@ const DB_RETRY = {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/**
- * Extract canonical product-type tokens for strict matching.
- *
- * Query side (QueryAST) uses tokens like: hoodie, joggers, jeans, tshirt...
- * We store the same canonical tokens in OpenSearch `product_types`.
- */
-function extractProductTypesFromTitle(title: string): string[] {
-  const normalized = title
-    .toLowerCase()
-    .replace(/[^a-z0-9\\s-]/g, " ")
-    .replace(/\\s+/g, " ")
-    .trim();
-
-  const found: string[] = [];
-  const add = (t: string) => {
-    if (!found.includes(t)) found.push(t);
-  };
-
-  if (!normalized) return found;
-
-  // Multi-word phrases
-  const phrases: Array<[string, string]> = [
-    ["hooded sweatshirt", "hoodie"],
-    ["pullover hoodie", "hoodie"],
-    ["hoodie", "hoodie"], // harmless when single word; keeps logic consistent
-    ["jogging pants", "joggers"],
-    ["track pants", "joggers"],
-    ["sweat pants", "joggers"],
-  ];
-
-  for (const [needle, mapped] of phrases) {
-    if (normalized.includes(needle)) add(mapped);
-  }
-
-  // Single tokens
-  const tokens = normalized.split(" ");
-  const tokenMap: Record<string, string> = {
-    // Tops
-    hoodie: "hoodie",
-    hoodies: "hoodie",
-    hooded: "hoodie",
-    sweatshirt: "hoodie",
-    sweatshirts: "hoodie",
-    sweater: "sweater",
-    sweaters: "sweater",
-    // Joggers / bottoms
-    jogger: "joggers",
-    joggers: "joggers",
-    jogging: "joggers",
-    "track": "joggers",
-    jeans: "jeans",
-    jean: "jeans",
-    denim: "jeans",
-    denims: "jeans",
-    joggin: "joggers", // common typo
-    pants: "pants",
-    pant: "pants",
-    trousers: "pants",
-    trouser: "pants",
-    leggings: "leggings",
-    legging: "leggings",
-    tights: "leggings",
-    shorts: "shorts",
-    short: "shorts",
-    // Tees
-    tshirt: "tshirt",
-    "t-shirt": "tshirt",
-    tee: "tshirt",
-    tees: "tshirt",
-    // Outer / jackets
-    blazer: "blazer",
-    blazers: "blazer",
-  };
-
-  for (const tok of tokens) {
-    const mapped = tokenMap[tok];
-    if (mapped) add(mapped);
-  }
-
-  return found;
-}
 
 function isTransientPgError(err: any): boolean {
   const msg = String(err?.message || "").toLowerCase();
@@ -352,45 +271,42 @@ async function reindexProduct(
     }
 
     // Generate global embedding, attribute embeddings, and hash in parallel
-    const [embedding, attrEmbeddings, ph] = await Promise.all([
+    const [embedding, attrEmbeddings, ph, dominantColors] = await Promise.all([
       processImageForEmbedding(buf),
       attributeEmbeddings.generateAllAttributeEmbeddings(buf).catch((err: any) => {
         console.warn(`  ⚠️  Product ${id}: attribute embeddings failed (${err.message}), using global only`);
         return null;
       }),
       computePHash(buf),
+      extractDominantColorNames(buf).catch(() => []),
     ]);
 
-    // Extract attributes from title
-    const { attributes } = extractAttributesSync(title);
-
-    const body: Record<string, any> = {
-      product_id: String(id),
-      vendor_id: String(vendor_id),
+    const body: Record<string, any> = buildProductSearchDocument({
+      productId: id,
+      vendorId: vendor_id,
       title,
       description: description || null,
       brand,
       category,
-      price_usd: Math.round(price_cents / 89000),
-      availability: availability ? "in_stock" : "out_of_stock",
-      is_hidden: is_hidden ?? false,
-      canonical_id: canonical_id ? String(canonical_id) : null,
-      product_types: extractProductTypesFromTitle(title),
+      priceCents: price_cents,
+      availability: Boolean(availability),
+      isHidden: is_hidden ?? false,
+      canonicalId: canonical_id,
+      imageCdn: image_url,
+      pHash: ph,
+      lastSeenAt: last_seen,
       embedding,
-      image_cdn: image_url,
-      p_hash: ph,
-      last_seen_at: last_seen,
-      attr_color: attributes.color || null,
-      attr_colors: attributes.colors || [],
-      attr_material: attributes.material || null,
-      attr_materials: attributes.materials || [],
-      attr_fit: attributes.fit || null,
-      attr_style: attributes.style || null,
-      attr_gender: attributes.gender || null,
-      attr_pattern: attributes.pattern || null,
-      attr_sleeve: attributes.sleeve || null,
-      attr_neckline: attributes.neckline || null,
-    };
+      detectedColors: dominantColors,
+      images: image_url
+        ? [
+            {
+              url: image_url,
+              p_hash: ph,
+              is_primary: true,
+            },
+          ]
+        : [],
+    });
 
     // Include per-attribute embeddings when available
     if (attrEmbeddings) {

@@ -499,6 +499,10 @@ function extractFilters(query: string): ExtractedFilters {
   // Product-type detection (specific garment tokens)
   // This is used later for strict filtering (Phase 2).
   const PRODUCT_TYPE_SINGLE: Record<string, string> = {
+    // Common typos
+    hoodi: "hoodie",
+    joggin: "joggers",
+
     hoodie: "hoodie",
     hoodies: "hoodie",
     sweatshirts: "hoodie",
