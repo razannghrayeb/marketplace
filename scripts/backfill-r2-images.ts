@@ -15,6 +15,8 @@ import { osClient } from "../src/lib/opensearch";
 import { config } from "../src/config";
 import { uploadImage, generateImageKey } from "../src/lib/r2";
 import { processImageForEmbedding, computePHash, validateImage } from "../src/lib/imageProcessor";
+import { buildProductSearchDocument } from "../src/lib/search/searchDocument";
+import { extractDominantColorNames } from "../src/lib/color/dominantColor";
 import axios from "axios";
 
 async function fetchImageBuffer(url: string): Promise<Buffer | null> {
@@ -86,8 +88,11 @@ async function main() {
       console.log(`  ✓ Uploaded to R2: ${cdnUrl}`);
 
       // 3. Compute embedding and pHash
-      const embedding = await processImageForEmbedding(buffer);
-      const pHash = await computePHash(buffer);
+      const [embedding, pHash, dominantColors] = await Promise.all([
+        processImageForEmbedding(buffer),
+        computePHash(buffer),
+        extractDominantColorNames(buffer).catch(() => []),
+      ]);
       console.log(`  ✓ Computed embedding and pHash`);
 
       // 4. Insert into product_images
@@ -107,19 +112,24 @@ async function main() {
       console.log(`  ✓ Updated product record`);
 
       // 6. Index in OpenSearch
-      const doc: any = {
-        product_id: String(id),
-        vendor_id: String(vendor_id),
+      const doc: any = buildProductSearchDocument({
+        productId: id,
+        vendorId: vendor_id,
         title,
+        description: null,
         brand,
         category,
-        price_usd: price_cents ? Math.round(price_cents / 100) : 0,
-        availability: availability ? "in_stock" : "out_of_stock",
-        image_cdn: cdnUrl,
-        images: [{ url: cdnUrl, p_hash: pHash, is_primary: true }],
+        priceCents: price_cents,
+        availability: Boolean(availability),
+        isHidden: false,
+        canonicalId: null,
+        imageCdn: cdnUrl,
+        pHash,
+        lastSeenAt: last_seen,
         embedding,
-        last_seen_at: last_seen,
-      };
+        detectedColors: dominantColors,
+        images: [{ url: cdnUrl, p_hash: pHash, is_primary: true }],
+      });
 
       await osClient.index({
         index: config.opensearch.index,

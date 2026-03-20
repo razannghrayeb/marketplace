@@ -2,11 +2,13 @@
  * Product Images Service
  * Handles all image business logic, storage, and retrieval
  */
-import { pg } from "../../lib/core/index";
+import { pg, productsTableHasIsHiddenColumn } from "../../lib/core/index";
 import { uploadImage, generateImageKey } from "../../lib/image/index";
 import { processImageForEmbedding, computePHash, validateImage } from "../../lib/image/index";
 import { osClient } from "../../lib/core/index";
 import { config } from "../../config";
+import { buildProductSearchDocument } from "../../lib/search/searchDocument";
+import { extractDominantColorNames } from "../../lib/color/dominantColor";
 
 // ============================================================================
 // Types
@@ -126,7 +128,7 @@ export async function uploadProductImage(
   }
 
   // Sync OpenSearch
-  await updateProductIndex(productId);
+  await updateProductIndex(productId, buffer);
 
   return { image, embedding };
 }
@@ -224,9 +226,11 @@ export async function deleteProductImage(productId: number, imageId: number): Pr
 /**
  * Update product document in OpenSearch with current images
  */
-export async function updateProductIndex(productId: number): Promise<void> {
+export async function updateProductIndex(productId: number, sourceBuffer?: Buffer): Promise<void> {
+  const hasIsHidden = await productsTableHasIsHiddenColumn();
   const productResult = await pg.query(
-    `SELECT id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_cdn
+    `SELECT id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_cdn,
+            ${hasIsHidden ? "is_hidden" : "false AS is_hidden"}
      FROM products WHERE id = $1`,
     [productId]
   );
@@ -245,26 +249,79 @@ export async function updateProductIndex(productId: number): Promise<void> {
   const images = imagesResult.rows;
   let primaryImage = images.find((img: any) => img.is_primary) || images[0];
 
-  const doc: any = {
-    product_id: String(productId),
-    vendor_id: String(product.vendor_id),
+  let dominantColors: string[] = [];
+  if (sourceBuffer && sourceBuffer.length > 0) {
+    dominantColors = await extractDominantColorNames(sourceBuffer).catch(() => []);
+  }
+
+  const doc: any = buildProductSearchDocument({
+    productId,
+    vendorId: product.vendor_id,
     title: product.title,
+    description: null,
     brand: product.brand,
     category: product.category,
-    price_usd: product.price_cents ? Math.round(product.price_cents / 100) : 0,
-    availability: product.availability ? "in_stock" : "out_of_stock",
-    image_cdn: product.image_cdn,
+    priceCents: product.price_cents,
+    availability: Boolean(product.availability),
+    isHidden: Boolean(product.is_hidden),
+    canonicalId: null,
+    imageCdn: product.image_cdn,
+    pHash: primaryImage?.p_hash ?? null,
+    lastSeenAt: product.last_seen,
     images: images.map((img: any) => ({
       url: img.cdn_url,
       p_hash: img.p_hash,
       is_primary: img.is_primary,
     })),
-    last_seen_at: product.last_seen,
-  };
+    embedding: primaryImage?.embedding?.length > 0 ? primaryImage.embedding : null,
+    detectedColors: dominantColors,
+  });
 
-  if (primaryImage?.embedding?.length > 0) {
-    doc.embedding = primaryImage.embedding;
-  } else if (primaryImage) {
+  // If dominant colors weren't provided (e.g. only primary image changed),
+  // fetch the primary image buffer and derive dominant colors so strict
+  // color filters have reliable data.
+  if (dominantColors.length === 0 && primaryImage) {
+    try {
+      let buffer: Buffer | null = null;
+      if (primaryImage.cdn_url) {
+        try {
+          const res = await fetch(primaryImage.cdn_url, { signal: AbortSignal.timeout(20000) });
+          if (res.ok) buffer = Buffer.from(await res.arrayBuffer());
+        } catch {}
+      }
+
+      if (!buffer && primaryImage.r2_key) {
+        try {
+          const { r2Client } = await import("../../lib/image/r2");
+          const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+          const resp: any = await r2Client.send(
+            new GetObjectCommand({ Bucket: config.r2.bucket, Key: primaryImage.r2_key })
+          );
+          const chunks: Uint8Array[] = [];
+          await new Promise<void>((resolve, reject) => {
+            resp.Body.on("data", (chunk: Uint8Array) => chunks.push(chunk));
+            resp.Body.on("end", () => resolve());
+            resp.Body.on("error", (err: any) => reject(err));
+          });
+          buffer = Buffer.concat(chunks);
+        } catch {}
+      }
+
+      if (buffer) {
+        const extractedColors = await extractDominantColorNames(buffer).catch(() => []);
+        if (extractedColors.length > 0) {
+          const current = Array.isArray(doc.attr_colors) ? doc.attr_colors.map((c: any) => String(c).toLowerCase()) : [];
+          const merged = [...new Set([...current, ...extractedColors.map((c) => String(c).toLowerCase())])];
+          doc.attr_colors = merged;
+          doc.attr_color = merged[0] ?? null;
+        }
+      }
+    } catch {
+      // Best-effort only; fallback to title-extracted colors.
+    }
+  }
+
+  if (!doc.embedding && primaryImage) {
     // Attempt to backfill missing embedding by computing it now
     try {
       // Prefer fetching from public CDN URL; fallback to R2 if needed
@@ -295,13 +352,20 @@ export async function updateProductIndex(productId: number): Promise<void> {
 
       if (buffer) {
         const { processImageForEmbedding } = await import("../../lib/image/processor");
-        const embedding = await processImageForEmbedding(buffer);
+        const [embedding, extractedColors] = await Promise.all([
+          processImageForEmbedding(buffer),
+          extractDominantColorNames(buffer).catch(() => []),
+        ]);
         // Update DB for this image row and include in document
         await pg.query(
           `UPDATE product_images SET embedding = $1 WHERE id = $2`,
           [embedding, primaryImage.id]
         );
         doc.embedding = embedding;
+        if ((!doc.attr_colors || doc.attr_colors.length === 0) && extractedColors.length > 0) {
+          doc.attr_colors = extractedColors;
+          doc.attr_color = extractedColors[0];
+        }
         // Refresh local variable for any further usage
         primaryImage = { ...primaryImage, embedding };
       }

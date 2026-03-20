@@ -1,4 +1,6 @@
-import "dotenv/config";
+import fs from "fs";
+import path from "path";
+import dotenv from "dotenv";
 
 type ServiceRole = "all" | "api" | "ml";
 
@@ -9,6 +11,36 @@ function getServiceRole(): ServiceRole {
   }
   return "all";
 }
+
+/**
+ * Load an env file only when it exists.
+ *
+ * Local testing:
+ * - create `.env.local` and set `NODE_ENV=local` (or `ENV_FILE=.env.local`)
+ *
+ * Cloud deploy:
+ * - Cloud Run injects environment variables directly, usually no `.env.*` file exists
+ * - we avoid failing the server if the file isn't present
+ */
+function loadDotEnv(): void {
+  const envFile =
+    process.env.ENV_FILE ||
+    (process.env.NODE_ENV ? `.env.${process.env.NODE_ENV}` : "");
+
+  const candidates: string[] = [];
+  if (envFile) candidates.push(envFile);
+  candidates.push(".env");
+
+  for (const candidate of candidates) {
+    const resolved = path.resolve(process.cwd(), candidate);
+    if (fs.existsSync(resolved)) {
+      dotenv.config({ path: resolved, override: false });
+      return;
+    }
+  }
+}
+
+loadDotEnv();
 
 function getRedisConfig() {
   return {

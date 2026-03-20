@@ -359,12 +359,14 @@ const STYLE_PHRASES: [string, string][] = [
 
 // Gender
 const GENDER_PHRASES: [string, string][] = [
+  ["women", "women"],
   ["women's", "women"],
   ["womens", "women"],
   ["woman's", "women"],
   ["ladies", "women"],
   ["lady's", "women"],
   ["female", "women"],
+  ["men", "men"],
   ["men's", "men"],
   ["mens", "men"],
   ["man's", "men"],

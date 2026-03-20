@@ -44,7 +44,10 @@ function fetchTextFile(url: string): Promise<string> {
     const get = url.startsWith('https') ? https.get : http.get;
     get(url, { headers: { 'User-Agent': 'blip-tokenizer' } }, (res) => {
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        fetchTextFile(res.headers.location).then(resolve, reject);
+        // HuggingFace redirects sometimes return a relative `location`.
+        // Resolve it against the original URL so Node doesn't throw "Invalid URL".
+        const nextUrl = new URL(res.headers.location, url).toString();
+        fetchTextFile(nextUrl).then(resolve, reject);
         return;
       }
       if (res.statusCode && res.statusCode >= 400) {
