@@ -165,8 +165,16 @@ export async function searchImage(
       ? imageEmbedding
       : await processImageForEmbedding(imageBuffer!);
 
-  // Compute pHash only when related-by-pHash is requested.
-  const effectivePHash = includeRelated ? pHash || (await computePHash(imageBuffer!)) : pHash;
+  // Compute pHash only when related-by-pHash is requested and we have raw bytes.
+  // Callers often pass only `imageEmbedding` (e.g. cropped regions); Sharp cannot hash undefined.
+  let effectivePHash = pHash;
+  if (includeRelated && effectivePHash === undefined && imageBuffer && imageBuffer.length > 0) {
+    try {
+      effectivePHash = await computePHash(imageBuffer);
+    } catch (e) {
+      console.warn("[searchImage] pHash skipped (invalid or unreadable image bytes):", (e as Error).message);
+    }
+  }
 
   const res = await legacyImageSearch({
     imageEmbedding: embedding,

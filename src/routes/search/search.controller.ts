@@ -283,13 +283,7 @@ router.get("/", async (req: Request, res: Response) => {
 /**
  * POST /search/image
  *
- * Single image similarity search using Hybrid Search (CLIP + BLIP fusion)
- *
- * Pipeline:
- * 1. CLIP image embed (60% weight) - visual features (shape, texture, style)
- * 2. BLIP caption → enrichment → CLIP text embed (30% weight) - semantic features
- * 3. Fuse embeddings with L2 normalization
- * 4. OpenSearch k-NN vector search
+ * Single image similarity search using CLIP image embeddings (same space as indexed product images).
  *
  * Note: This searches for products similar to the WHOLE image.
  * For per-item detection + search ("shop the look"), use POST /api/images/search instead.

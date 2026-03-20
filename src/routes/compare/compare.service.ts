@@ -182,28 +182,55 @@ export interface ValidationError {
   example?: unknown;
 }
 
+export type CompareIdsValidation =
+  | { ok: true; productIds: number[] }
+  | ({ ok: false } & ValidationError);
+
+function parsePositiveInt(raw: unknown): number | null {
+  if (typeof raw === "number") {
+    return Number.isInteger(raw) && raw > 0 ? raw : null;
+  }
+  if (typeof raw === "string") {
+    const t = raw.trim();
+    if (!/^\d+$/.test(t)) return null;
+    const n = parseInt(t, 10);
+    return n > 0 ? n : null;
+  }
+  return null;
+}
+
 /**
- * Validate product IDs for comparison
+ * Validate and normalize product IDs for comparison.
+ * Accepts numbers or numeric strings (common from JSON/query-driven clients).
  */
-export function validateCompareInput(
-  productIds: unknown
-): ValidationError | null {
+export function validateCompareInput(productIds: unknown): CompareIdsValidation {
   if (!Array.isArray(productIds) || productIds.length < 2) {
-    return { 
+    return {
+      ok: false,
       error: "At least 2 product IDs required",
-      example: { product_ids: [123, 456] }
+      example: { product_ids: [123, 456] },
     };
   }
-  
+
   if (productIds.length > 5) {
-    return { error: "Maximum 5 products can be compared at once" };
+    return { ok: false, error: "Maximum 5 products can be compared at once" };
   }
-  
-  if (!productIds.every(id => typeof id === "number" && id > 0)) {
-    return { error: "Invalid product IDs" };
+
+  const ids: number[] = [];
+  for (const raw of productIds) {
+    const n = parsePositiveInt(raw);
+    if (n === null) {
+      return {
+        ok: false,
+        error:
+          "Invalid product IDs: use positive integers (e.g. [123, 456] or [\"123\", \"456\"])",
+        example: { product_ids: [123, 456] },
+      };
+    }
+    ids.push(n);
   }
-  
-  return null;
+
+  return { ok: true, productIds: ids };
 }
 
 /**

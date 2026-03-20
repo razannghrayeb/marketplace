@@ -7,6 +7,7 @@ import {
 import { config } from "../../config";
 import { getImagesForProducts, ProductImage } from "./images.service";
 import { hammingDistance } from "../../lib/products";
+import { dedupeSearchResults, filterRelatedAgainstMain } from "../../lib/search/resultDedup";
 import { 
   parseQuery, 
   buildSemanticOpenSearchQuery, 
@@ -309,12 +310,12 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
 export async function searchByImageWithSimilarity(
   params: ImageSearchParams
 ): Promise<SearchResultWithRelated> {
-  const { 
-    imageEmbedding, 
-    filters = {}, 
-    page = 1, 
+  const {
+    imageEmbedding,
+    filters = {},
+    page = 1,
     limit = 20,
-    similarityThreshold = 0.7,  // Default 70% similarity
+    similarityThreshold = config.clip.similarityThreshold,
     includeRelated = true,
     pHash,
   } = params;
@@ -323,12 +324,28 @@ export async function searchByImageWithSimilarity(
     return { results: [], meta: { threshold: similarityThreshold, total_results: 0 } };
   }
 
-  // Fetch more results than requested to filter by threshold
-  const fetchLimit = Math.min(limit * 3, 100);
-  
+  /** Map OpenSearch FAISS cosinesimil raw score to [0, 1] visual similarity */
+  const knnScoreToSimilarity01 = (raw: number): number => {
+    if (!Number.isFinite(raw)) return 0;
+    let s = raw;
+    if (s > 1.001) s = (s - 1) / 2;
+    return Math.max(0, Math.min(1, s));
+  };
+
+  // Over-fetch so absolute threshold + later dedup still fill `limit`
+  const fetchLimit = Math.min(Math.max(limit * 5, 80), 200);
+
   // Build filter array
   const filter: any[] = [{ term: { is_hidden: false } }];
-  if (filters.category) filter.push({ term: { category: filters.category } });
+  const cat = (filters as { category?: string | string[] }).category;
+  if (cat) {
+    if (Array.isArray(cat)) {
+      const terms = cat.map((c) => String(c).toLowerCase()).filter(Boolean);
+      if (terms.length > 0) filter.push({ terms: { category: terms } });
+    } else {
+      filter.push({ term: { category: String(cat).toLowerCase() } });
+    }
+  }
   if (filters.brand) filter.push({ term: { brand: filters.brand } });
   if (filters.vendorId) filter.push({ term: { vendor_id: filters.vendorId } });
 
@@ -357,21 +374,18 @@ export async function searchByImageWithSimilarity(
   });
 
   const hits = osResponse.body.hits.hits;
-  
-  // OpenSearch k-NN scores are cosine similarity (0-1 for normalized vectors)
-  // Filter by threshold and normalize scores
-  const maxScore = hits.length > 0 ? hits[0]._score : 1;
-  
+
   const filteredHits = hits.filter((hit: any) => {
-    const normalizedScore = hit._score / maxScore;
-    return normalizedScore >= similarityThreshold;
+    return knnScoreToSimilarity01(hit._score) >= similarityThreshold;
   });
 
-  const productIds = filteredHits.slice(0, limit).map((hit: any) => hit._source.product_id);
+  const maxHydrate = Math.min(filteredHits.length, Math.max(limit * 4, limit));
+  const hitsForHydrate = filteredHits.slice(0, maxHydrate);
+  const productIds = hitsForHydrate.map((hit: any) => hit._source.product_id);
   const scoreMap = new Map<string, number>();
-  filteredHits.forEach((hit: any) => {
-    const normalizedScore = hit._score / maxScore;
-    scoreMap.set(hit._source.product_id, Math.round(normalizedScore * 100) / 100);
+  hitsForHydrate.forEach((hit: any) => {
+    const sim = knnScoreToSimilarity01(hit._score);
+    scoreMap.set(hit._source.product_id, Math.round(sim * 100) / 100);
   });
 
   // Fetch product data
@@ -391,15 +405,20 @@ export async function searchByImageWithSimilarity(
           id: img.id,
           url: img.cdn_url,
           is_primary: img.is_primary,
+          p_hash: img.p_hash ?? undefined,
         })),
       };
     }) as ProductResult[];
   }
 
-  // Find additional related products by pHash if provided
+  results = dedupeSearchResults(results as any, { imageHammingMax: 10 }).slice(0, limit) as ProductResult[];
+
   let related: ProductResult[] = [];
   if (includeRelated && pHash) {
-    related = await findSimilarByPHash(pHash, productIds, limit);
+    const excludeIds = results.map((p) => String(p.id));
+    related = await findSimilarByPHash(pHash, excludeIds, limit);
+    const filteredRel = filterRelatedAgainstMain(results as any, related as any);
+    related = (filteredRel ?? []) as ProductResult[];
   }
 
   return {
@@ -474,6 +493,7 @@ async function findSimilarByPHash(
         id: img.id,
         url: img.cdn_url,
         is_primary: img.is_primary,
+        p_hash: img.p_hash ?? undefined,
       })),
     };
   }) as ProductResult[];

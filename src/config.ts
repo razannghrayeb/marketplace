@@ -99,12 +99,28 @@ export const config = {
     duplicateThreshold: Number(process.env.CLIP_DUPLICATE_THRESHOLD || 0.92),
   },
   tryon: {
-    // Google Cloud Vertex AI Virtual Try-On
-    // Auth: gcloud auth application-default login  OR  GOOGLE_APPLICATION_CREDENTIALS=/key.json
+    // Google Cloud Vertex AI — Virtual Try-On (publishers/google/models/...:predict)
+    // https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/virtual-try-on-api
     project: process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || "",
     location: process.env.TRYON_LOCATION || "us-central1",
     model: process.env.TRYON_MODEL || "virtual-try-on-001",
     timeout: Number(process.env.TRYON_TIMEOUT || 60000),
+    /** Quality vs latency; must be > 0 (Google default 32) */
+    baseSteps: Math.max(1, Number(process.env.TRYON_BASE_STEPS || 32)),
+    addWatermark: process.env.TRYON_ADD_WATERMARK?.trim().toLowerCase() !== "false",
+    personGeneration:
+      (process.env.TRYON_PERSON_GENERATION as "dont_allow" | "allow_adult" | "allow_all") ||
+      "allow_adult",
+    safetySetting:
+      (process.env.TRYON_SAFETY_SETTING as
+        | "block_low_and_above"
+        | "block_medium_and_above"
+        | "block_only_high"
+        | "block_none") || "block_medium_and_above",
+    /** Optional gs://bucket/prefix — when set, API may write outputs there (see Google docs) */
+    storageUri: process.env.TRYON_STORAGE_URI?.trim() || "",
+    /** e.g. image/png or image/jpeg; empty = API default */
+    outputMimeType: process.env.TRYON_OUTPUT_MIME?.trim() || "",
   },
   jwt: {
     secret: process.env.JWT_SECRET || "change-me-in-production",

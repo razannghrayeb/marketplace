@@ -21,6 +21,8 @@ import { config } from "../../config";
 
 export interface TryOnHealthResponse {
   ok: boolean;
+  /** Always Vertex AI Virtual Try-On predict API (managed Imagen model) */
+  backend: "vertex-ai-virtual-try-on";
   model_loaded: boolean;       // always true for managed API
   gpu_available: boolean;      // always false — no local GPU needed
   gpu_name: string | null;
@@ -34,6 +36,7 @@ export interface TryOnHealthResponse {
   project: string;
   location: string;
   model: string;
+  predictPath: string;
   version: string;
 }
 
@@ -87,7 +90,8 @@ export class TryOnClient {
     });
   }
 
-  private get endpoint(): string {
+  /** Vertex AI Generative AI — Virtual Try-On REST `:predict` */
+  private get predictUrl(): string {
     return (
       `https://${this.location}-aiplatform.googleapis.com/v1` +
       `/projects/${this.project}/locations/${this.location}` +
@@ -124,6 +128,7 @@ export class TryOnClient {
     const credentialsOk = await this.isAvailable();
     return {
       ok: credentialsOk,
+      backend: "vertex-ai-virtual-try-on",
       model_loaded: true,           // managed — always loaded
       gpu_available: false,         // no local GPU needed
       gpu_name: null,
@@ -137,6 +142,7 @@ export class TryOnClient {
       project: this.project,
       location: this.location,
       model: this.model,
+      predictPath: `/v1/projects/${this.project}/locations/${this.location}/publishers/google/models/${this.model}:predict`,
       version: "vertex-ai",
     };
   }
@@ -163,8 +169,25 @@ export class TryOnClient {
     const start = Date.now();
     const token = await this.getBearerToken();
 
-    // Vertex AI Virtual Try-On API format (virtual-try-on-001)
-    // https://cloud.google.com/vertex-ai/generative-ai/docs/image/generate-virtual-try-on-images
+    const sampleCount = Math.min(4, Math.max(1, options.numberOfImages ?? 1));
+    const cfg = config.tryon;
+
+    const parameters: Record<string, unknown> = {
+      sampleCount,
+      baseSteps: cfg.baseSteps,
+      addWatermark: cfg.addWatermark,
+      personGeneration: cfg.personGeneration,
+      safetySetting: cfg.safetySetting,
+    };
+    if (cfg.storageUri) {
+      parameters.storageUri = cfg.storageUri;
+    }
+    if (cfg.outputMimeType) {
+      parameters.outputOptions = { mimeType: cfg.outputMimeType };
+    }
+
+    // Vertex AI Virtual Try-On — publishers/google/models/MODEL:predict
+    // https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/virtual-try-on-api
     const body = {
       instances: [
         {
@@ -182,15 +205,13 @@ export class TryOnClient {
           ],
         },
       ],
-      parameters: {
-        sampleCount: Math.min(4, Math.max(1, options.numberOfImages ?? 1)),
-      },
+      parameters,
     };
 
-    const response = await fetch(this.endpoint, {
+    const response = await fetch(this.predictUrl, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify(body),
@@ -200,7 +221,7 @@ export class TryOnClient {
     if (!response.ok) {
       const err = await response.text();
       throw new Error(
-        `Vertex AI Virtual Try-On failed: ${response.status} - ${err}`
+        `Vertex AI Virtual Try-On (predict) failed: ${response.status} — ${err}`
       );
     }
 

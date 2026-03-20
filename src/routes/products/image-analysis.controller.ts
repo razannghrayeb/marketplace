@@ -48,6 +48,26 @@ const upload = multer({
 const analysisService = getImageAnalysisService();
 const yoloClient = getYOLOv8Client();
 
+/** Accept common frontend field names for the outfit / person photo */
+const IMAGE_UPLOAD_FIELDS = [
+  { name: "image", maxCount: 1 },
+  { name: "file", maxCount: 1 },
+  { name: "photo", maxCount: 1 },
+  { name: "outfit", maxCount: 1 },
+] as const;
+
+function pickImageFile(req: Request): Express.Multer.File | undefined {
+  const map = req.files as { [field: string]: Express.Multer.File[] } | undefined;
+  if (map) {
+    for (const { name } of IMAGE_UPLOAD_FIELDS) {
+      const f = map[name]?.[0];
+      if (f?.buffer?.length) return f;
+    }
+  }
+  const f = req.file;
+  return f?.buffer?.length ? f : undefined;
+}
+
 // ============================================================================
 // Routes
 // ============================================================================
@@ -125,13 +145,15 @@ router.get("/labels", async (_req: Request, res: Response, next: NextFunction) =
  */
 router.post(
   "/analyze",
-  upload.single("image"),
+  upload.fields([...IMAGE_UPLOAD_FIELDS]),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      if (!req.file) {
+      const imageFile = pickImageFile(req);
+      if (!imageFile) {
         return res.status(400).json({
           success: false,
-          error: "No image file provided. Use 'image' field in multipart/form-data.",
+          error:
+            "No image file provided. Use multipart field: image, file, photo, or outfit.",
         });
       }
 
@@ -149,8 +171,8 @@ router.post(
       };
 
       const result = await analysisService.analyzeImage(
-        req.file.buffer,
-        req.file.originalname,
+        imageFile.buffer,
+        imageFile.originalname,
         options
       );
 
@@ -218,13 +240,15 @@ router.post(
  */
 router.post(
   "/search",
-  upload.single("image"),
+  upload.fields([...IMAGE_UPLOAD_FIELDS]),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      if (!req.file) {
+      const imageFile = pickImageFile(req);
+      if (!imageFile) {
         return res.status(400).json({
           success: false,
-          error: "No image file provided. Use 'image' field in multipart/form-data.",
+          error:
+            "No image file provided. Use multipart field: image, file, photo, or outfit.",
         });
       }
 
@@ -246,8 +270,8 @@ router.post(
       };
 
       const result = await analysisService.analyzeAndFindSimilar(
-        req.file.buffer,
-        req.file.originalname,
+        imageFile.buffer,
+        imageFile.originalname,
         options
       );
 
@@ -311,13 +335,15 @@ router.post(
  */
 router.post(
   "/search/selective",
-  upload.single("image"),
+  upload.fields([...IMAGE_UPLOAD_FIELDS]),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      if (!req.file) {
+      const imageFile = pickImageFile(req);
+      if (!imageFile) {
         return res.status(400).json({
           success: false,
-          error: "No image file provided. Use 'image' field in multipart/form-data.",
+          error:
+            "No image file provided. Use multipart field: image, file, photo, or outfit.",
         });
       }
 
@@ -364,8 +390,8 @@ router.post(
       };
 
       const result = await analysisService.analyzeWithSelection(
-        req.file.buffer,
-        req.file.originalname,
+        imageFile.buffer,
+        imageFile.originalname,
         options
       );
 
@@ -443,13 +469,15 @@ router.post(
  */
 router.post(
   "/detect",
-  upload.single("image"),
+  upload.fields([...IMAGE_UPLOAD_FIELDS]),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      if (!req.file) {
+      const imageFile = pickImageFile(req);
+      if (!imageFile) {
         return res.status(400).json({
           success: false,
-          error: "No image file provided. Use 'image' field in multipart/form-data.",
+          error:
+            "No image file provided. Use multipart field: image, file, photo, or outfit.",
         });
       }
 
@@ -471,8 +499,8 @@ router.post(
 
       // Use YOLO client directly with preprocessing options
       const result = await yoloClient.detectFromBuffer(
-        req.file.buffer,
-        req.file.originalname,
+        imageFile.buffer,
+        imageFile.originalname,
         { confidence, preprocessing }
       );
 

@@ -539,6 +539,14 @@ function extractFilters(query: string): ExtractedFilters {
     blazers: "blazer",
     sweater: "sweater",
     sweaters: "sweater",
+    top: "tshirt",
+    tops: "tshirt",
+    shirt: "tshirt",
+    shirts: "tshirt",
+    blouse: "tshirt",
+    blouses: "tshirt",
+    camisole: "tshirt",
+    tunic: "tshirt",
   };
 
   const PRODUCT_TYPE_MULTI: Record<string, string> = {

@@ -195,6 +195,7 @@ export async function searchByImageWithSimilarity(
 ): Promise<SearchResultWithRelated> {
   const {
     imageEmbedding,
+    imageBuffer,
     filters = {},
     page = 1,
     limit = 20,
@@ -206,6 +207,7 @@ export async function searchByImageWithSimilarity(
   // Phase 2 alignment: route through the unified canonical facade.
   const unified = await searchImage({
     imageEmbedding,
+    imageBuffer,
     filters,
     limit,
     similarityThreshold,

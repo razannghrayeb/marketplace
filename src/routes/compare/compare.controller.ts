@@ -37,14 +37,13 @@ const router = Router();
 router.post("/", async (req: Request, res: Response) => {
   try {
     const { product_ids } = req.body;
-    
-    // Validate input
-    const validationError = validateCompareInput(product_ids);
-    if (validationError) {
-      return res.status(400).json(validationError);
+
+    const parsed = validateCompareInput(product_ids);
+    if (!parsed.ok) {
+      return res.status(400).json({ error: parsed.error, example: parsed.example });
     }
-    
-    const result = await compareProductsWithVerdict(product_ids);
+
+    const result = await compareProductsWithVerdict(parsed.productIds);
     res.json(result);
   } catch (error) {
     console.error("Compare error:", error);
@@ -231,13 +230,13 @@ router.get("/reviews/:productId", async (req: Request, res: Response) => {
 router.post("/reviews", async (req: Request, res: Response) => {
   try {
     const { product_ids } = req.body;
-    
-    const validationError = validateCompareInput(product_ids);
-    if (validationError) {
-      return res.status(400).json(validationError);
+
+    const parsed = validateCompareInput(product_ids);
+    if (!parsed.ok) {
+      return res.status(400).json({ error: parsed.error, example: parsed.example });
     }
-    
-    const comparison = await compareReviews(product_ids);
+
+    const comparison = await compareReviews(parsed.productIds);
     
     // Convert Map to object for JSON
     const result: Record<number, any> = {};
