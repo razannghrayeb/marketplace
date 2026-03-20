@@ -1,5 +1,6 @@
 import { extractAttributesSync } from "./attributeExtractor";
 import { inferCategoryCanonical } from "./categoryFilter";
+import { expandProductTypesForIndexing } from "./productTypeTaxonomy";
 
 const LBP_TO_USD = 89000;
 
@@ -172,7 +173,7 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
       input.canonicalId !== null && input.canonicalId !== undefined
         ? String(input.canonicalId)
         : null,
-    product_types: extractProductTypesFromTitle(input.title || ""),
+    product_types: expandProductTypesForIndexing(extractProductTypesFromTitle(input.title || "")),
     image_cdn: input.imageCdn ?? null,
     p_hash: input.pHash ?? null,
     last_seen_at: input.lastSeenAt ?? null,

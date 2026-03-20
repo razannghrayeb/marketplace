@@ -11,6 +11,8 @@
     "lint": "eslint .",
     "recreate-index": "npx tsx scripts/recreate-opensearch-index.ts",
     "reindex-embeddings": "npx tsx scripts/reindex-embeddings.ts",
+    "dedupe-products": "npx tsx scripts/dedupe-products.ts",
+    "migrate:product-variants": "npx tsx scripts/migrate-to-product-variants.ts",
     "docs:endpoints": "npx tsx scripts/generate-endpoint-matrix.ts",
     "migrate:run": "npx tsx scripts/run-migration.ts",
     "migrate:bootstrap": "npx tsx scripts/bootstrap-db.ts",
@@ -19,7 +21,9 @@
     "migrate:canonicals": "npx tsx scripts/migrate-canonicals.ts",
     "worker": "npx tsx src/workers/ingest.worker.ts",
     "models:download": "python scripts/download-models.py",
-    "models:list": "python scripts/download-models.py --dry-run"
+    "models:list": "python scripts/download-models.py --dry-run",
+    "search:eval": "npx tsx scripts/search-eval.ts",
+    "os:count": "npx tsx scripts/opensearch-count.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.962.0",

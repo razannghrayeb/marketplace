@@ -46,6 +46,11 @@ export interface ImageSearchParams extends SearchParams {
   pHash?: string; // Optional pHash for visual similarity
   /** When set with `includeRelated`, used to compute pHash if `pHash` is omitted */
   imageBuffer?: Buffer;
+  /**
+   * Aisle-level hints (e.g. bottoms, footwear) for soft category reranking when
+   * `SEARCH_IMAGE_SOFT_CATEGORY=1` — avoids hard OpenSearch category filters.
+   */
+  predictedCategoryAisles?: string[];
 }
 
 export interface TextSearchParams extends SearchParams {

@@ -44,6 +44,7 @@ export interface UnifiedImageSearchParams {
   similarityThreshold?: number;
   includeRelated?: boolean;
   pHash?: string;
+  predictedCategoryAisles?: string[];
 }
 
 export async function searchBrowse(params: {
@@ -152,6 +153,7 @@ export async function searchImage(
     similarityThreshold,
     includeRelated = false,
     pHash,
+    predictedCategoryAisles,
   } = params;
 
   if ((!imageEmbedding || imageEmbedding.length === 0) && !imageBuffer) {
@@ -183,6 +185,7 @@ export async function searchImage(
     similarityThreshold,
     includeRelated,
     pHash: effectivePHash,
+    predictedCategoryAisles,
   } as any);
 
   // Constraint-aware deterministic rerank (limited to what image search exposes)

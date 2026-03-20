@@ -8,6 +8,13 @@ import { config } from "../../config";
 import { getImagesForProducts, ProductImage } from "./images.service";
 import { hammingDistance } from "../../lib/products";
 import { dedupeSearchResults, filterRelatedAgainstMain } from "../../lib/search/resultDedup";
+import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
+import {
+  emitImageSearchEval,
+  searchEvalEnabled,
+  newSearchEvalId,
+  searchEvalVariant,
+} from "../../lib/search/evalHooks";
 import { 
   parseQuery, 
   buildSemanticOpenSearchQuery, 
@@ -56,6 +63,8 @@ export interface ImageSearchParams extends SearchParams {
   similarityThreshold?: number;  // 0-1, default 0.7 (70% similarity)
   includeRelated?: boolean;      // Include related by pHash
   pHash?: string;                // Optional pHash for visual similarity
+  /** Soft rerank hints when SEARCH_IMAGE_SOFT_CATEGORY=1 */
+  predictedCategoryAisles?: string[];
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -303,6 +312,40 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
 // Enhanced Image Search with Similarity Threshold
 // ============================================================================
 
+function imageSoftCategoryEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_SOFT_CATEGORY ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
+function buildDesiredCatalogTermSet(aisles: string[]): Set<string> {
+  const s = new Set<string>();
+  for (const a of aisles) {
+    for (const t of getCategorySearchTerms(a)) {
+      s.add(t.toLowerCase());
+    }
+  }
+  return s;
+}
+
+function categoryMetadataSoft01(
+  source: { category?: string; category_canonical?: string; product_types?: unknown },
+  desired: Set<string>,
+): number {
+  const cat = String(source?.category ?? "").toLowerCase();
+  const cc = String(source?.category_canonical ?? "").toLowerCase();
+  if (desired.has(cat) || desired.has(cc)) return 1;
+  const raw = source?.product_types;
+  const pts: string[] = Array.isArray(raw)
+    ? raw.map((x: unknown) => String(x).toLowerCase())
+    : raw
+      ? [String(raw).toLowerCase()]
+      : [];
+  for (const p of pts) {
+    if (desired.has(p)) return 0.88;
+  }
+  return 0;
+}
+
 /**
  * Search products by image with similarity threshold and optional pHash matching
  * Returns similar images above the threshold, sorted by similarity
@@ -318,11 +361,14 @@ export async function searchByImageWithSimilarity(
     similarityThreshold = config.clip.similarityThreshold,
     includeRelated = true,
     pHash,
+    predictedCategoryAisles,
   } = params;
 
   if (!imageEmbedding || imageEmbedding.length === 0) {
     return { results: [], meta: { threshold: similarityThreshold, total_results: 0 } };
   }
+
+  const evalT0 = Date.now();
 
   /** Map OpenSearch FAISS cosinesimil raw score to [0, 1] visual similarity */
   const knnScoreToSimilarity01 = (raw: number): number => {
@@ -335,15 +381,32 @@ export async function searchByImageWithSimilarity(
   // Over-fetch so absolute threshold + later dedup still fill `limit`
   const fetchLimit = Math.min(Math.max(limit * 5, 80), 200);
 
+  const softCategory = imageSoftCategoryEnv();
+  const aisleHints = predictedCategoryAisles?.length
+    ? predictedCategoryAisles
+    : undefined;
+  const cat = (filters as { category?: string | string[] }).category;
+  const desiredCatalogTerms =
+    softCategory && (aisleHints?.length || cat)
+      ? buildDesiredCatalogTermSet(
+          aisleHints?.length
+            ? aisleHints
+            : Array.isArray(cat)
+              ? cat.map((c) => String(c))
+              : [String(cat)],
+        )
+      : null;
+
   // Build filter array
   const filter: any[] = [{ term: { is_hidden: false } }];
-  const cat = (filters as { category?: string | string[] }).category;
-  if (cat) {
-    if (Array.isArray(cat)) {
-      const terms = cat.map((c) => String(c).toLowerCase()).filter(Boolean);
-      if (terms.length > 0) filter.push({ terms: { category: terms } });
-    } else {
-      filter.push({ term: { category: String(cat).toLowerCase() } });
+  if (!softCategory || !desiredCatalogTerms || desiredCatalogTerms.size === 0) {
+    if (cat) {
+      if (Array.isArray(cat)) {
+        const terms = cat.map((c) => String(c).toLowerCase()).filter(Boolean);
+        if (terms.length > 0) filter.push({ terms: { category: terms } });
+      } else {
+        filter.push({ term: { category: String(cat).toLowerCase() } });
+      }
     }
   }
   if (filters.brand) filter.push({ term: { brand: filters.brand } });
@@ -352,7 +415,14 @@ export async function searchByImageWithSimilarity(
   // k-NN search with score
   const searchBody: any = {
     size: fetchLimit,
-    _source: ["product_id", "title", "brand", "category"],
+    _source: [
+      "product_id",
+      "title",
+      "brand",
+      "category",
+      "category_canonical",
+      "product_types",
+    ],
     query: {
       bool: {
         must: {
@@ -379,8 +449,21 @@ export async function searchByImageWithSimilarity(
     return knnScoreToSimilarity01(hit._score) >= similarityThreshold;
   });
 
-  const maxHydrate = Math.min(filteredHits.length, Math.max(limit * 4, limit));
-  const hitsForHydrate = filteredHits.slice(0, maxHydrate);
+  let orderedHits = filteredHits;
+  if (desiredCatalogTerms && desiredCatalogTerms.size > 0) {
+    orderedHits = [...filteredHits].sort((a: any, b: any) => {
+      const sa = knnScoreToSimilarity01(a._score);
+      const sb = knnScoreToSimilarity01(b._score);
+      const ca = categoryMetadataSoft01(a._source, desiredCatalogTerms);
+      const cb = categoryMetadataSoft01(b._source, desiredCatalogTerms);
+      const ra = sa * 1000 + ca * 220;
+      const rb = sb * 1000 + cb * 220;
+      return rb - ra;
+    });
+  }
+
+  const maxHydrate = Math.min(orderedHits.length, Math.max(limit * 4, limit));
+  const hitsForHydrate = orderedHits.slice(0, maxHydrate);
   const productIds = hitsForHydrate.map((hit: any) => hit._source.product_id);
   const scoreMap = new Map<string, number>();
   hitsForHydrate.forEach((hit: any) => {
@@ -419,6 +502,23 @@ export async function searchByImageWithSimilarity(
     related = await findSimilarByPHash(pHash, excludeIds, limit);
     const filteredRel = filterRelatedAgainstMain(results as any, related as any);
     related = (filteredRel ?? []) as ProductResult[];
+  }
+
+  if (searchEvalEnabled()) {
+    emitImageSearchEval({
+      kind: "image_search",
+      eval_id: newSearchEvalId(),
+      variant: searchEvalVariant(),
+      ts_iso: new Date().toISOString(),
+      took_ms: Date.now() - evalT0,
+      result_count: results.length,
+      hit_ids: results.map((p) => String(p.id)),
+      similarity_scores: results.map((p) =>
+        typeof p.similarity_score === "number" ? p.similarity_score : 0,
+      ),
+      soft_category: Boolean(softCategory && desiredCatalogTerms && desiredCatalogTerms.size > 0),
+      predicted_aisles: aisleHints ? [...aisleHints] : null,
+    });
   }
 
   return {

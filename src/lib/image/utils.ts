@@ -65,8 +65,16 @@ export function normalizeImage(
  * Returns a 16-character hex string (64-bit hash)
  */
 export async function pHash(buffer: Buffer): Promise<string> {
+  if (!buffer?.length) {
+    throw new Error("pHash: empty image buffer");
+  }
+  const input = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as Buffer | Uint8Array);
   // Resize to 32x32 grayscale
-  const resized = await sharp(buffer).resize(32, 32, { fit: "fill" }).greyscale().raw().toBuffer({ resolveWithObject: true });
+  const resized = await sharp(input)
+    .resize(32, 32, { fit: "fill" })
+    .greyscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
   const { data } = resized as any as { data: Uint8Array };
   // `sharp` typings vary across versions/interops; normalize to Uint8Array.
   const pixels: number[] = Array.from(data, (v: number) => v & 0xff);

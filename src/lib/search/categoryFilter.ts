@@ -211,6 +211,23 @@ export function isCategoryDominantQuery(ast: QueryAST, rawQuery: string): boolea
 }
 
 /**
+ * Short, product-type-focused queries (e.g. "jeans", "hoodie", "white sneakers") where the
+ * intent is lexical/type browse. Hybrid search must NOT require CLIP agreement in `must`:
+ * image embeddings and text embeddings for "jeans" are poorly aligned for many valid products,
+ * which collapses recall vs BM25 + DB category matches.
+ */
+export function isProductTypeDominantQuery(ast: QueryAST, rawQuery: string): boolean {
+  const q = rawQuery.trim().toLowerCase();
+  if (!q) return false;
+  const words = q.split(/\s+/).filter(Boolean);
+  if (words.length > 2) return false;
+  if (ast.entities.brands.length > 0) return false;
+  const pts = ast.entities.productTypes;
+  if (!pts || pts.length === 0) return false;
+  return true;
+}
+
+/**
  * Use hard category filter (AST) when caller did not pin category and either env strict mode
  * or heuristics say the query is category-dominant.
  */
