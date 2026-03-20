@@ -84,6 +84,16 @@ export interface ProductResult {
   interaction_count?: number; // Optional interaction signal for ranking/boosting
   similarity_score?: number; // For image search results
   match_type?: "exact" | "similar" | "related"; // How the product matched
+  // Deterministic reranking fields (Phase 3)
+  rerankScore?: number;
+  mlRerankScore?: number;
+  explain?: {
+    productTypeCompliance?: number; // 0..1
+    colorCompliance?: number; // 0..1
+    desiredProductTypes?: string[];
+    desiredColors?: string[];
+    colorMode?: "any" | "all";
+  };
   // Scores from candidate generator
   clipSim?: number; // 0..1 (cosine or normalized)
   textSim?: number; // 0..1 (normalized)

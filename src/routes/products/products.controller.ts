@@ -4,11 +4,9 @@
  */
 import { Request, Response } from "express";
 import {
-  searchProducts,
   SearchFilters,
-  searchByImageWithSimilarity,
-  searchByTextWithRelated,
 } from "./products.service";
+import { searchBrowse, searchImage, searchText } from "../../lib/search/fashionSearchFacade";
 import { validateImage, computePHash } from "../../lib/image/index";
 import { isClipAvailable } from "../../lib/image/index";
 import { hybridSearch } from "../../lib/search";
@@ -60,7 +58,7 @@ export async function listProducts(req: Request, res: Response) {
     const filters = parseFilters(req.query);
     const { page, limit } = parsePagination(req.query);
 
-    const products = await searchProducts({ filters, page, limit });
+    const products = await searchBrowse({ filters, page, limit });
 
     res.json({ success: true, data: products, pagination: { page, limit } });
   } catch (error) {
@@ -89,7 +87,7 @@ export async function searchProductsByTitle(req: Request, res: Response) {
     const includeRelated = req.query.includeRelated !== "false";
     const relatedLimit = parseInt(req.query.relatedLimit as string) || 10;
 
-    const result = await searchByTextWithRelated({
+    const result = await searchText({
       query,
       filters,
       page,
@@ -171,10 +169,9 @@ export async function searchProductsByImage(req: Request, res: Response) {
     }
 
     // Use enhanced search with similarity scoring
-    const result = await searchByImageWithSimilarity({
-      imageEmbedding: embedding,
+      const result = await searchImage({
+        imageEmbedding: embedding,
       filters,
-      page,
       limit,
       similarityThreshold,
       includeRelated,

@@ -25,6 +25,9 @@
  *
  *   # Dry run (show what would be reindexed without doing it)
  *   npx tsx scripts/resume-reindex.ts --dry-run
+ *
+ *   # Disable Redis embedding cache (avoids Upstash quota during bulk reindex)
+ *   npx tsx scripts/resume-reindex.ts --no-cache
  */
 
 import "dotenv/config";
@@ -100,6 +103,88 @@ const DB_RETRY = {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/**
+ * Extract canonical product-type tokens for strict matching.
+ *
+ * Query side (QueryAST) uses tokens like: hoodie, joggers, jeans, tshirt...
+ * We store the same canonical tokens in OpenSearch `product_types`.
+ */
+function extractProductTypesFromTitle(title: string): string[] {
+  const normalized = title
+    .toLowerCase()
+    .replace(/[^a-z0-9\\s-]/g, " ")
+    .replace(/\\s+/g, " ")
+    .trim();
+
+  const found: string[] = [];
+  const add = (t: string) => {
+    if (!found.includes(t)) found.push(t);
+  };
+
+  if (!normalized) return found;
+
+  // Multi-word phrases
+  const phrases: Array<[string, string]> = [
+    ["hooded sweatshirt", "hoodie"],
+    ["pullover hoodie", "hoodie"],
+    ["hoodie", "hoodie"], // harmless when single word; keeps logic consistent
+    ["jogging pants", "joggers"],
+    ["track pants", "joggers"],
+    ["sweat pants", "joggers"],
+  ];
+
+  for (const [needle, mapped] of phrases) {
+    if (normalized.includes(needle)) add(mapped);
+  }
+
+  // Single tokens
+  const tokens = normalized.split(" ");
+  const tokenMap: Record<string, string> = {
+    // Tops
+    hoodie: "hoodie",
+    hoodies: "hoodie",
+    hooded: "hoodie",
+    sweatshirt: "hoodie",
+    sweatshirts: "hoodie",
+    sweater: "sweater",
+    sweaters: "sweater",
+    // Joggers / bottoms
+    jogger: "joggers",
+    joggers: "joggers",
+    jogging: "joggers",
+    "track": "joggers",
+    jeans: "jeans",
+    jean: "jeans",
+    denim: "jeans",
+    denims: "jeans",
+    joggin: "joggers", // common typo
+    pants: "pants",
+    pant: "pants",
+    trousers: "pants",
+    trouser: "pants",
+    leggings: "leggings",
+    legging: "leggings",
+    tights: "leggings",
+    shorts: "shorts",
+    short: "shorts",
+    // Tees
+    tshirt: "tshirt",
+    "t-shirt": "tshirt",
+    tee: "tshirt",
+    tees: "tshirt",
+    // Outer / jackets
+    blazer: "blazer",
+    blazers: "blazer",
+  };
+
+  for (const tok of tokens) {
+    const mapped = tokenMap[tok];
+    if (mapped) add(mapped);
+  }
+
+  return found;
+}
 
 function isTransientPgError(err: any): boolean {
   const msg = String(err?.message || "").toLowerCase();
@@ -290,6 +375,7 @@ async function reindexProduct(
       availability: availability ? "in_stock" : "out_of_stock",
       is_hidden: is_hidden ?? false,
       canonical_id: canonical_id ? String(canonical_id) : null,
+      product_types: extractProductTypesFromTitle(title),
       embedding,
       image_cdn: image_url,
       p_hash: ph,
@@ -403,6 +489,9 @@ async function main() {
       case "--recreate":
         reindexConfig.recreate = true;
         break;
+      case "--no-cache":
+        process.env.DISABLE_EMBEDDING_CACHE = "1";
+        break;
       case "--help":
         console.log(`
 Resumable Product Reindexing
@@ -417,6 +506,7 @@ Options:
   --dry-run               Show what would be reindexed without doing it
   --batch-size <n>        Process N products at a time (default: 50)
   --recreate              ⚠️  DELETE and recreate the OpenSearch index before starting
+  --no-cache              Disable Redis embedding cache (avoids Upstash quota during bulk reindex)
   --help                  Show this help message
 
 Examples:
@@ -434,6 +524,9 @@ Examples:
   
   # FULL REINDEX: Delete index and reindex all products from scratch
   npx tsx scripts/resume-reindex.ts --recreate --force
+
+  # Reindex without filling Redis (avoids Upstash quota exceeded)
+  npx tsx scripts/resume-reindex.ts --no-cache --batch-size 10
         `);
         process.exit(0);
       default:
@@ -450,6 +543,7 @@ Examples:
   console.log(`  Failed only:        ${reindexConfig.failedOnly}`);
   console.log(`  Dry run:            ${reindexConfig.dryRun}`);
   console.log(`  Recreate index:     ${reindexConfig.recreate}`);
+  console.log(`  Embedding cache:    ${process.env.DISABLE_EMBEDDING_CACHE === "1" ? "disabled (--no-cache)" : "enabled"}`);
   console.log(`  Batch size:         ${reindexConfig.batchSize}`);
   console.log(`  Max retries:        ${reindexConfig.maxRetries}`);
   console.log();

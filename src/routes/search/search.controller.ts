@@ -72,7 +72,8 @@
  */
 
 import { Router, Request, Response } from "express";
-import { textSearch, imageSearch, multiImageSearch, multiVectorWeightedSearch } from "./search.service";
+import { multiImageSearch, multiVectorWeightedSearch } from "./search.service";
+import { searchImage, searchText } from "../../lib/search/fashionSearchFacade";
 import {
   getAutocompleteSuggestions,
   getTrendingQueries,
@@ -222,7 +223,15 @@ router.get("/", async (req: Request, res: Response) => {
     };
 
     // Execute search
-    const result = await textSearch(processedQuery, filters, options);
+    const page = Math.floor((offset ?? 0) / (options.limit ?? 20)) + 1;
+    const result = await searchText({
+      query: processedQuery,
+      filters,
+      page,
+      limit: options.limit ?? 20,
+      includeRelated: false,
+      relatedLimit: 10,
+    });
 
     // Log search (async, non-blocking)
     if (useEnhanced && query) {
@@ -293,8 +302,10 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
       return res.status(400).json({ error: validation.error || "Invalid image" });
     }
     
-    const result = await imageSearch(req.file.buffer, {
+    const result = await searchImage({
+      imageBuffer: req.file.buffer,
       limit: req.body.limit ? Number(req.body.limit) : 50,
+      includeRelated: false,
     });
     
     res.json(result);
