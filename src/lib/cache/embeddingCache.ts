@@ -46,6 +46,19 @@ function isCacheDisabled(): boolean {
          process.env.EMBEDDING_CACHE_ENABLED === "false";
 }
 
+/** After Upstash hits max DB size, SET fails — stop trying writes for this process (reindex still works). */
+let redisWritesSuppressedDueToCapacity = false;
+let loggedCapacityNotice = false;
+
+function isQuotaExceededError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    /db_capacity_quota exceeded|capacity quota exceeded|ERR maxmemory|OOM command not allowed/i.test(
+      msg
+    )
+  );
+}
+
 // In-memory stats
 let cacheStats = {
   hits: 0,
@@ -119,11 +132,11 @@ export async function cacheImageEmbedding(
   attribute: SemanticAttribute,
   embedding: number[]
 ): Promise<void> {
-  if (isCacheDisabled() || !isRedisAvailable()) return;
-  
+  if (isCacheDisabled() || !isRedisAvailable() || redisWritesSuppressedDueToCapacity) return;
+
   const redis = getRedis();
   if (!redis) return;
-  
+
   try {
     const key = generateImageCacheKey(imageBuffer, attribute);
     const value: CachedEmbedding = {
@@ -132,9 +145,20 @@ export async function cacheImageEmbedding(
       cachedAt: Date.now(),
       source: "image",
     };
-    
+
     await redis.setex(key, CACHE_CONFIG.ttlSeconds, value);
   } catch (err) {
+    if (isQuotaExceededError(err)) {
+      redisWritesSuppressedDueToCapacity = true;
+      if (!loggedCapacityNotice) {
+        loggedCapacityNotice = true;
+        console.warn(
+          "[EmbeddingCache] Redis/Upstash storage quota exceeded — cache writes disabled for this process (reindex continues). " +
+            "Fix: upgrade plan, flush old keys in Upstash console, or set DISABLE_EMBEDDING_CACHE=1."
+        );
+      }
+      return;
+    }
     console.warn("[EmbeddingCache] Set error:", err);
   }
 }
@@ -176,11 +200,11 @@ export async function cacheTextEmbedding(
   attribute: SemanticAttribute,
   embedding: number[]
 ): Promise<void> {
-  if (isCacheDisabled() || !isRedisAvailable()) return;
-  
+  if (isCacheDisabled() || !isRedisAvailable() || redisWritesSuppressedDueToCapacity) return;
+
   const redis = getRedis();
   if (!redis) return;
-  
+
   try {
     const key = generateTextCacheKey(text, attribute);
     const value: CachedEmbedding = {
@@ -189,9 +213,20 @@ export async function cacheTextEmbedding(
       cachedAt: Date.now(),
       source: "text",
     };
-    
+
     await redis.setex(key, CACHE_CONFIG.ttlSeconds, value);
   } catch (err) {
+    if (isQuotaExceededError(err)) {
+      redisWritesSuppressedDueToCapacity = true;
+      if (!loggedCapacityNotice) {
+        loggedCapacityNotice = true;
+        console.warn(
+          "[EmbeddingCache] Redis/Upstash storage quota exceeded — cache writes disabled for this process (reindex continues). " +
+            "Fix: upgrade plan, flush old keys in Upstash console, or set DISABLE_EMBEDDING_CACHE=1."
+        );
+      }
+      return;
+    }
     console.warn("[EmbeddingCache] Set error:", err);
   }
 }

@@ -36,6 +36,11 @@ import {
   shouldUseAlternatives,
   type CategoryMapping,
 } from "../../lib/detection/categoryMapper";
+
+function imageSoftCategoryEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_SOFT_CATEGORY ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
 import {
   computeOutfitCoherence,
   type OutfitCoherenceResult,
@@ -408,6 +413,7 @@ export class ImageAnalysisService {
         filters: {},
         limit: similarLimitPerItem,
         similarityThreshold,
+        includeRelated: false,
       });
       return {
         ...analysisResult,
@@ -466,10 +472,15 @@ export class ImageAnalysisService {
         : [categoryMapping.productCategory];
 
       const filters: Partial<import("./types").SearchFilters> = {};
+      let predictedCategoryAisles: string[] | undefined;
       if (filterByDetectedCategory) {
-        filters.category = searchCategories.length === 1
-          ? searchCategories[0]
-          : searchCategories;
+        if (imageSoftCategoryEnv()) {
+          predictedCategoryAisles = searchCategories;
+        } else {
+          filters.category = searchCategories.length === 1
+            ? searchCategories[0]
+            : searchCategories;
+        }
       }
 
       const similarResult = await searchByImageWithSimilarity({
@@ -478,6 +489,8 @@ export class ImageAnalysisService {
         filters,
         limit: similarLimitPerItem,
         similarityThreshold,
+        includeRelated: false,
+        predictedCategoryAisles,
       });
 
       if (similarResult.results.length === 0) return null;
@@ -759,8 +772,15 @@ export class ImageAnalysisService {
         const categoryMapping = mapDetectionToCategory(categorySource, detection.confidence);
 
         const filters: Record<string, string> = {};
+        let predictedCategoryAisles: string[] | undefined;
         if (options.filterByDetectedCategory !== false) {
-          filters.category = categoryMapping.productCategory;
+          if (imageSoftCategoryEnv()) {
+            predictedCategoryAisles = shouldUseAlternatives(categoryMapping)
+              ? getSearchCategories(categoryMapping)
+              : [categoryMapping.productCategory];
+          } else {
+            filters.category = categoryMapping.productCategory;
+          }
         }
 
         const similarResult = await searchByImageWithSimilarity({
@@ -769,6 +789,8 @@ export class ImageAnalysisService {
           filters,
           limit: options.similarLimitPerItem || 10,
           similarityThreshold: options.similarityThreshold || 0.7,
+          includeRelated: false,
+          predictedCategoryAisles,
         });
 
         if (similarResult.results.length > 0) {

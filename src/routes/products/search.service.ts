@@ -200,8 +200,12 @@ export async function searchByImageWithSimilarity(
     page = 1,
     limit = 20,
     similarityThreshold = config.clip.similarityThreshold,
-    includeRelated = true,
+    // Image-analysis (/api/images/search) is the only caller; it only uses k-NN `results`,
+    // not pHash "related". Default false avoids an extra Sharp decode that can throw
+    // "Invalid input" on some crops while CLIP embedding still succeeds.
+    includeRelated = false,
     pHash,
+    predictedCategoryAisles,
   } = params;
 
   // Phase 2 alignment: route through the unified canonical facade.
@@ -213,6 +217,7 @@ export async function searchByImageWithSimilarity(
     similarityThreshold,
     includeRelated,
     pHash,
+    predictedCategoryAisles,
   });
   return unified as any;
 

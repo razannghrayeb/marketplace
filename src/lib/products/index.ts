@@ -24,6 +24,13 @@ export {
   type CanonicalMatch,
 } from "./canonical";
 
+// Variants (parent product + SKU rows)
+export {
+  getVariantsByProductIds,
+  getDefaultVariant,
+  type ProductVariantRow,
+} from "./productVariants";
+
 // Price history
 export {
   recordPrice,

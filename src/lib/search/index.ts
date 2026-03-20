@@ -73,5 +73,23 @@ export {
   resolveCategoryTermsForOpensearch,
   shouldHardFilterAstCategory,
   isCategoryDominantQuery,
+  isProductTypeDominantQuery,
   inferCategoryCanonical,
 } from "./categoryFilter";
+
+export {
+  expandProductTypesForQuery,
+  expandProductTypesForIndexing,
+  scoreProductTypeTaxonomyMatch,
+  PRODUCT_TYPE_CLUSTERS,
+} from "./productTypeTaxonomy";
+
+export {
+  emitTextSearchEval,
+  emitImageSearchEval,
+  searchEvalEnabled,
+  searchEvalVariant,
+  newSearchEvalId,
+  type TextSearchEvalPayload,
+  type ImageSearchEvalPayload,
+} from "./evalHooks";

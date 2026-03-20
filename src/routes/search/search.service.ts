@@ -39,7 +39,18 @@ import {
   loadCategoryVocabulary,
   resolveCategoryTermsForOpensearch,
   shouldHardFilterAstCategory,
+  isProductTypeDominantQuery,
 } from '../../lib/search/categoryFilter';
+import {
+  expandProductTypesForQuery,
+  scoreProductTypeTaxonomyMatch,
+} from '../../lib/search/productTypeTaxonomy';
+import {
+  emitTextSearchEval,
+  searchEvalEnabled,
+  newSearchEvalId,
+  searchEvalVariant,
+} from '../../lib/search/evalHooks';
 
 // ─── Shared types ────────────────────────────────────────────────────────────
 
@@ -113,6 +124,11 @@ const COLOR_ALIAS_TO_CANONICAL = (() => {
   return map;
 })();
 
+function strictProductTypeFilterEnv(): boolean {
+  const v = String(process.env.SEARCH_STRICT_PRODUCT_TYPE ?? '').toLowerCase();
+  return v === '1' || v === 'true';
+}
+
 function normalizeColorToken(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const key = raw.toLowerCase().replace(/[_-]/g, " ").replace(/\s+/g, " ").trim();
@@ -151,6 +167,8 @@ export async function textSearch(
     offset?: number;
     includeRelated?: boolean;
     relatedLimit?: number;
+    /** When SEARCH_EVAL_LOG is set, used as eval_id instead of a random UUID */
+    evalCorrelationId?: string;
   },
 ): Promise<UnifiedSearchResult> {
   const startTime = Date.now();
@@ -179,8 +197,12 @@ export async function textSearch(
         mergedCategory,
         hasProductTypeConstraint,
       ) && Boolean(merged.category);
+    const productTypeDominant = isProductTypeDominantQuery(ast, rawQuery);
+    /** kNN in `must` + min_score collapses recall for type browse (e.g. "jeans"); use boost-only like aisle queries */
+    const knnBoostOnly = hardAstCategory || productTypeDominant;
+
     const categoryVocab = hardAstCategory ? await loadCategoryVocabulary() : null;
-    const textMinimumShouldMatch = hardAstCategory ? "30%" : "60%";
+    const textMinimumShouldMatch = hardAstCategory || productTypeDominant ? "30%" : "60%";
 
     // ── 3. Build OpenSearch query ──────────────────────────────────────────
     //
@@ -259,26 +281,48 @@ export async function textSearch(
       });
     }
 
-    // ── 4.5 Strict constraints from QueryAST ───────────────────────────────
+    // ── 4.5 Product-type constraints (QueryAST) ────────────────────────────
     //
-    // Enforce garment-type tokens (hoodie/joggers/...) and multi-color
-    // constraints extracted from the user's *query*.
-    //
-    // This prevents "hoodie" from returning generic "tops" and makes
-    // multi-color queries deterministic.
+    // Default: soft — taxonomy-expanded SHOULD on `product_types` + title so
+    // "pants" recalls "jeans" without hard-intersecting the candidate set.
+    // Opt-in hard filter: SEARCH_STRICT_PRODUCT_TYPE=1 (legacy precision).
     if (hasProductTypeConstraint) {
       const primaryProductType = ast.entities.productTypes[0];
       if (primaryProductType) {
-        filterClauses.push({
-          bool: {
-            _name: "strict_product_type_filter",
-            should: [
-              { term: { product_types: primaryProductType.toLowerCase() } },
-              { match_phrase: { title: primaryProductType.toLowerCase() } },
-            ],
-            minimum_should_match: 1,
-          },
-        });
+        const seeds = ast.entities.productTypes.map((t) => t.toLowerCase());
+        const expandedTypes = expandProductTypesForQuery(seeds);
+
+        if (strictProductTypeFilterEnv()) {
+          filterClauses.push({
+            bool: {
+              _name: 'strict_product_type_filter',
+              should: [
+                { terms: { product_types: expandedTypes } },
+                { match_phrase: { title: primaryProductType.toLowerCase() } },
+              ],
+              minimum_should_match: 1,
+            },
+          });
+        } else {
+          shouldClauses.push({
+            bool: {
+              _name: 'soft_product_type_boost',
+              should: [
+                { terms: { product_types: expandedTypes, boost: 5.0 } },
+                {
+                  multi_match: {
+                    query: expandedTypes.slice(0, 24).join(' '),
+                    fields: ['title^2.5', 'category.search^1.2'],
+                    type: 'best_fields',
+                    operator: 'or',
+                    boost: 1.4,
+                  },
+                },
+              ],
+              minimum_should_match: 0,
+            },
+          });
+        }
       }
     }
 
@@ -519,7 +563,7 @@ export async function textSearch(
     if (embedding) {
       mustWithoutKnnForRetry = mustClauses.filter((c: any) => !c?.knn);
 
-      if (hardAstCategory) {
+      if (knnBoostOnly) {
         shouldClauses.push({
           knn: {
             embedding: {
@@ -549,7 +593,8 @@ export async function textSearch(
       mustCount: mustClauses.length, shouldCount: searchBody.query.bool.should?.length ?? 0,
       filterCount: filterClauses.length, hasEmbedding: !!embedding,
       hardAstCategory,
-      knnMode: embedding ? (hardAstCategory ? "should_boost" : "must_min_score") : "none",
+      productTypeDominant,
+      knnMode: embedding ? (knnBoostOnly ? "should_boost" : "must_min_score") : "none",
     }));
 
     const opensearch = osClient;
@@ -802,7 +847,6 @@ export async function textSearch(
         .filter(Boolean)
     )];
     const rerankColorMode = ast.filters?.colorMode ?? "any";
-    const primaryProductType = desiredProductTypes[0];
 
     const complianceById = new Map<
       string,
@@ -860,15 +904,14 @@ export async function textSearch(
           : null;
       colorById.set(idStr, primaryColor);
 
-      // Product-type compliance: prioritize the primary type mentioned in the query.
+      // Product-type compliance: taxonomy-aware (pants ≈ jeans via cluster / hypernym).
       let productTypeCompliance = 0;
-      if (primaryProductType) {
-        const containsPrimary = productTypes.includes(primaryProductType);
-        if (containsPrimary) productTypeCompliance = 1;
-        else if (desiredProductTypes.length > 1) {
-          const anyDesired = desiredProductTypes.some((t) => productTypes.includes(t));
-          productTypeCompliance = anyDesired ? 0.5 : 0;
-        }
+      if (desiredProductTypes.length > 0) {
+        const expandedDesired = expandProductTypesForQuery(desiredProductTypes);
+        const tax = scoreProductTypeTaxonomyMatch(expandedDesired, productTypes, {
+          sameClusterWeight: 0.82,
+        });
+        productTypeCompliance = tax.score;
       }
 
       // Color compliance: exact behavior depends on colorMode.
@@ -1056,6 +1099,42 @@ export async function textSearch(
       ast.corrections.length > 0 && ast.confidence < 0.85
         ? `Did you mean "${ast.searchQuery}"?`
         : undefined;
+
+    if (searchEvalEnabled()) {
+      const osTotalRaw = response.body.hits.total?.value ?? response.body.hits.total ?? null;
+      emitTextSearchEval({
+        kind: "text_search",
+        eval_id: options?.evalCorrelationId ?? newSearchEvalId(),
+        variant: searchEvalVariant(),
+        ts_iso: new Date().toISOString(),
+        raw_query: rawQuery,
+        took_ms: Date.now() - startTime,
+        open_search_total: typeof osTotalRaw === "number" ? osTotalRaw : null,
+        result_count: results.length,
+        hit_ids: results.map((p) => String(p.id)),
+        similarity_scores: results.map((p) =>
+          typeof p.similarity_score === "number" ? p.similarity_score : 0,
+        ),
+        rerank_scores: results.map((p) =>
+          typeof p.rerankScore === "number" ? p.rerankScore : null,
+        ),
+        ast: {
+          search_query: ast.searchQuery,
+          product_types: ast.entities.productTypes ?? [],
+          categories: ast.entities.categories ?? [],
+          colors: ast.entities.colors ?? [],
+          brands: ast.entities.brands ?? [],
+        },
+        flags: {
+          hard_ast_category: hardAstCategory,
+          product_type_dominant: productTypeDominant,
+          knn_boost_only: knnBoostOnly,
+          has_product_type_constraint: hasProductTypeConstraint,
+          relaxed_pipeline: relaxedUsed,
+          strict_product_type_env: strictProductTypeFilterEnv(),
+        },
+      });
+    }
 
     return {
       results,
