@@ -375,6 +375,11 @@ export async function textSearch(
       console.warn('[textSearch] Embedding generation failed, proceeding with BM25-only:', err);
     }
     if (embedding) {
+      // Keep a copy of must-clauses without kNN for "zero-hit fallback".
+      // Note: `searchBody.query.bool.must` points at `mustClauses`, so we must
+      // not reuse it after we push the kNN clause.
+      const mustWithoutKnn = mustClauses.filter((c: any) => !c?.knn);
+
       // Require embedding similarity >= threshold (filters low-similarity results)
       // min_score both filters and contributes to ranking; OpenSearch allows only one of k/min_score per clause
       searchBody.query.bool.must.push({
@@ -386,6 +391,9 @@ export async function textSearch(
         },
       });
       searchBody.query.bool.should = shouldClauses;
+
+      // Stash for later usage
+      (searchBody as any).__mustWithoutKnn = mustWithoutKnn;
     }
 
     // ── 7. Execute ─────────────────────────────────────────────────────────
@@ -461,6 +469,29 @@ export async function textSearch(
       };
 
       response = await opensearch.search({ index: config.opensearch.index, body: fallbackBody });
+    }
+
+    // If kNN (embedding) caused zero hits for an otherwise valid BM25 query,
+    // retry without embedding constraints to avoid "perfect query => 0 results".
+    const firstTotal = response.body.hits.total?.value ?? response.body.hits.total ?? 0;
+    const hadEmbedding = Boolean(embedding);
+    if (hadEmbedding && firstTotal === 0) {
+      const mustWithoutKnn = (searchBody as any).__mustWithoutKnn as any[] | undefined;
+      if (mustWithoutKnn && mustWithoutKnn.length > 0) {
+        console.warn('[textSearch] Zero hits with embedding; retrying BM25-only.');
+        const bm25Body: any = {
+          ...searchBody,
+          query: {
+            bool: {
+              must: mustWithoutKnn,
+              should: shouldClauses,
+              filter: filterClauses,
+              minimum_should_match: 0,
+            },
+          },
+        };
+        response = await opensearch.search({ index: config.opensearch.index, body: bm25Body });
+      }
     }
 
     const hits = response.body.hits.hits;
@@ -581,6 +612,24 @@ export async function textSearch(
       return (scoreMap.get(String(b.id)) ?? 0) - (scoreMap.get(String(a.id)) ?? 0);
     });
 
+    if (results.length === 0) {
+      const openSearchHitsTotal =
+        response.body.hits.total?.value ?? response.body.hits.total ?? 0;
+      console.warn("[textSearch][zero-results-debug]", {
+        rawQuery,
+        searchQuery: ast.searchQuery,
+        openSearchHitsTotal,
+        openSearchHitsCount: hits.length,
+        productIdsFirst: productIds[0] ?? null,
+        hydratedProductsCount: products.length,
+        hydratedFirstProductId: products[0]?.id ?? null,
+        filterClausesCount: filterClauses.length,
+        hasProductTypeConstraint,
+        colorsForFilter,
+        colorMode,
+      });
+    }
+
     // Optional ML tie-breaker (Phase 3 / optional)
     // Feature-flagged via `SEARCH_USE_XGB_RANKER=true`.
     // Only used as a second-stage tiebreaker after deterministic compliance sorting.
@@ -653,6 +702,8 @@ export async function textSearch(
       related = await findRelatedProducts(productIds, brands, categories, relatedLimit);
     }
 
+    const includeDebug = debug || results.length === 0;
+
     // ── 8. Build response ──────────────────────────────────────────────────
     const total =
       response.body.hits.total?.value ?? response.body.hits.total ?? results.length ?? 0;
@@ -673,7 +724,7 @@ export async function textSearch(
         total_related: related.length,
         processed_query: ast,
         did_you_mean: didYouMean,
-        ...(debug
+        ...(includeDebug
           ? {
               debug: {
                 openSearchHitsTotal:
