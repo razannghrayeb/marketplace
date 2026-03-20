@@ -34,6 +34,18 @@ export default function ProductDetailPage() {
     enabled: !!id,
   })
 
+  const { data: variantsData } = useQuery({
+    queryKey: ['variants', id],
+    queryFn: async () => {
+      const res = await api.post<{ data?: Record<string, { minPriceCents: number; maxPriceCents: number; variants: unknown[] }> }>(
+        endpoints.products.variantsBatch,
+        { productIds: [id] }
+      )
+      return res.data
+    },
+    enabled: !!id && !!data,
+  })
+
   if (isLoading || !data) {
     return (
       <div className="max-w-7xl mx-auto px-4 py-10">
@@ -49,9 +61,16 @@ export default function ProductDetailPage() {
     )
   }
 
-  const product = data as Product
-  const imgUrl = product.image_cdn || product.image_url || 'https://placehold.co/600x800/f5ede4/1a1a1a?text=No+Image'
+  const product = data as Product & { images?: Array<{ url: string; is_primary?: boolean }> }
+  const imgUrl =
+    product.image_cdn ||
+    product.image_url ||
+    (product.images?.length ? product.images.find((i) => i.is_primary)?.url ?? product.images[0]?.url : null) ||
+    'https://placehold.co/600x800/f5ede4/1a1a1a?text=No+Image'
   const hasSale = product.sales_price_cents && product.sales_price_cents < product.price_cents
+
+  const variantInfo = variantsData?.[String(product.id)]
+  const showMinMax = variantInfo && variantInfo.minPriceCents !== variantInfo.maxPriceCents
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
@@ -95,7 +114,11 @@ export default function ProductDetailPage() {
           )}
 
           <div className="mt-6 flex items-center gap-4">
-            {hasSale ? (
+            {showMinMax ? (
+              <span className="text-2xl font-bold text-charcoal-800">
+                {formatPrice(variantInfo!.minPriceCents, product.currency)} – {formatPrice(variantInfo!.maxPriceCents, product.currency)}
+              </span>
+            ) : hasSale ? (
               <>
                 <span className="text-2xl font-bold text-wine-600">
                   {formatPrice(product.sales_price_cents!, product.currency)}

@@ -8,6 +8,7 @@ import {
   SearchFilters,
   searchByImageWithSimilarity,
   searchByTextWithRelated,
+  getProductById,
 } from "./products.service";
 import { validateImage, computePHash } from "../../lib/image/index";
 import { isClipAvailable } from "../../lib/image/index";
@@ -191,6 +192,29 @@ export async function searchProductsByImage(req: Request, res: Response) {
   } catch (error) {
     console.error("Error searching by image:", error);
     res.status(500).json({ success: false, error: "Failed to search by image" });
+  }
+}
+
+/**
+ * GET /products/:id
+ * Get a single product by ID with images
+ */
+export async function getProductByIdHandler(req: Request, res: Response) {
+  try {
+    const productId = req.params.id;
+    if (!productId || isNaN(parseInt(productId, 10))) {
+      return res.status(400).json({ success: false, error: "Invalid product ID" });
+    }
+
+    const product = await getProductById(productId);
+    if (!product) {
+      return res.status(404).json({ success: false, error: "Product not found" });
+    }
+
+    res.json({ success: true, data: product });
+  } catch (error) {
+    console.error("Error fetching product:", error);
+    res.status(500).json({ success: false, error: "Failed to fetch product" });
   }
 }
 

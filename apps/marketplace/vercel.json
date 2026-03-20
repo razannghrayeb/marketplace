@@ -1,5 +1,5 @@
 {
-  "buildCommand": "cd ../.. && pnpm install && pnpm --filter marketplace build",
+  "buildCommand": "cd ../.. && corepack enable && pnpm install && pnpm --filter marketplace build",
   "outputDirectory": ".next",
-  "installCommand": "cd ../.. && pnpm install"
+  "installCommand": "cd ../.. && corepack enable && pnpm install"
 }

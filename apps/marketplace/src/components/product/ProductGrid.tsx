@@ -43,7 +43,15 @@ export function ProductGrid({ limit = 12, category }: ProductGridProps) {
     )
   }
 
-  const products = Array.isArray(data?.data) ? data.data : []
+  const raw = Array.isArray(data?.data) ? data.data : []
+  // Dedupe by id (API may return duplicates from OpenSearch)
+  const seen = new Set<number>()
+  const products = raw.filter((p: { id?: number }) => {
+    const id = p?.id
+    if (id == null || seen.has(id)) return false
+    seen.add(id)
+    return true
+  })
 
   if (products.length === 0) {
     return (
@@ -54,10 +62,40 @@ export function ProductGrid({ limit = 12, category }: ProductGridProps) {
   }
 
   return (
+    <ProductGridWithVariants products={products} />
+  )
+}
+
+function ProductGridWithVariants({ products }: { products: Product[] }) {
+  const ids = products.map((p) => p.id)
+  const { data: variantsData } = useQuery({
+    queryKey: ['variants', ids.join(',')],
+    queryFn: async () => {
+      const res = await api.post<{ data?: Record<string, { minPriceCents: number; maxPriceCents: number }> }>(
+        endpoints.products.variantsBatch,
+        { productIds: ids }
+      )
+      return res.data ?? {}
+    },
+    enabled: ids.length > 0,
+  })
+
+  return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-6">
-      {products.map((product, i) => (
-        <ProductCard key={product.id} product={product} index={i} />
-      ))}
+      {products.map((product, i) => {
+        const v = variantsData?.[String(product.id)]
+        const variantPrice = v && v.minPriceCents !== v.maxPriceCents
+          ? { minPriceCents: v.minPriceCents, maxPriceCents: v.maxPriceCents }
+          : undefined
+        return (
+          <ProductCard
+            key={product.id}
+            product={product}
+            index={i}
+            variantPrice={variantPrice}
+          />
+        )
+      })}
     </div>
   )
 }

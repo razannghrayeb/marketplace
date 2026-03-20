@@ -22,12 +22,11 @@ import { getTryOnClient } from "../../lib/image/tryonClient";
 // Shared helpers
 // ============================================================================
 
-// Matches wardrobe controller pattern for user identity
+// Uses req.user from JWT auth (requireAuth middleware) - matches wardrobe controller
 function getUserId(req: Request): number {
-  const userId =
-    req.headers["x-user-id"] || req.query.user_id || req.body?.user_id;
+  const userId = req.user?.id;
   if (!userId) throw new Error("User ID required");
-  return parseInt(String(userId), 10);
+  return typeof userId === "number" ? userId : parseInt(String(userId), 10);
 }
 
 const ALLOWED_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);

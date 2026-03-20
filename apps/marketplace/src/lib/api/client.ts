@@ -12,10 +12,28 @@ export type ApiResponse<T> = {
   error?: { message: string; code?: string; details?: unknown }
 }
 
+function getUserIdFromStorage(): number | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = localStorage.getItem('auth')
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    const user = parsed?.state?.user
+    const id = user?.id
+    return typeof id === 'number' ? id : null
+  } catch {
+    return null
+  }
+}
+
 async function getAuthHeaders(): Promise<HeadersInit> {
   if (typeof window === 'undefined') return {}
   const token = localStorage.getItem('accessToken')
-  return token ? { Authorization: `Bearer ${token}` } : {}
+  const headers: Record<string, string> = {}
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const userId = getUserIdFromStorage()
+  if (userId != null) headers['x-user-id'] = String(userId)
+  return headers
 }
 
 async function handleResponse<T>(res: Response): Promise<ApiResponse<T>> {

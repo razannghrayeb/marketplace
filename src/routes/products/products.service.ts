@@ -143,6 +143,28 @@ export interface CandidateGeneratorResult {
   };
 }
 /**
+ * Get a single product by ID with images (excludes hidden products)
+ */
+export async function getProductById(productId: number | string): Promise<ProductResult | null> {
+  const products = await getProductsByIdsOrdered([productId]);
+  const product = products[0];
+  if (!product || product.is_hidden) return null;
+
+  const numericId = typeof productId === "string" ? parseInt(productId, 10) : productId;
+  const imagesByProduct = await getImagesForProducts([numericId]);
+  const images: ProductImage[] = imagesByProduct.get(numericId) || [];
+
+  return {
+    ...product,
+    images: images.map((img) => ({
+      id: img.id,
+      url: img.cdn_url,
+      is_primary: img.is_primary,
+    })),
+  } as ProductResult;
+}
+
+/**
  * Search products by title text or image embedding
  * Returns array of products with images
  */
@@ -258,12 +280,21 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
     body: searchBody,
   });
 
-  // Extract product IDs and scores from OpenSearch results
+  // Extract product IDs and scores from OpenSearch results (dedupe by first occurrence)
   const hits = osResponse.body.hits.hits;
-  const productIds: string[] = hits.map((hit: any) => hit._source.product_id);
+  const productIds: string[] = [];
+  const seen = new Set<string>();
+  for (const hit of hits) {
+    const pid = String(hit._source?.product_id ?? hit._id ?? "");
+    if (pid && !seen.has(pid)) {
+      seen.add(pid);
+      productIds.push(pid);
+    }
+  }
   const scoreMap = new Map<string, number>();
   hits.forEach((hit: any) => {
-    scoreMap.set(hit._source.product_id, hit._score);
+    const pid = String(hit._source?.product_id ?? "");
+    if (pid && !scoreMap.has(pid)) scoreMap.set(pid, hit._score);
   });
 
   if (productIds.length === 0) {

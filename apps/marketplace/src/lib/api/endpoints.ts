@@ -23,6 +23,7 @@ export const endpoints = {
     priceDrops: '/products/price-drops',
     images: (id: number | string) => `/products/${id}/images`,
     recommendationsBatch: '/products/recommendations/batch',
+    variantsBatch: '/products/variants/batch',
   },
   // Search
   search: {

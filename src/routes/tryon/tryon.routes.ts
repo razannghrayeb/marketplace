@@ -11,9 +11,14 @@
 import { Router } from "express";
 import multer from "multer";
 import { rateLimit } from "../../middleware/index";
+import { requireAuth } from "../../middleware/auth";
 import * as controller from "./tryon.controller";
 
 const router = Router();
+
+// Service health is public; all other routes require auth
+router.get("/service/health", controller.serviceHealth);
+router.use(requireAuth);
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -22,12 +27,6 @@ const upload = multer({
 
 // Strict rate limiter for Vertex AI calls: 10 requests / 5 minutes per IP
 const tryonRateLimit = rateLimit({ windowMs: 5 * 60 * 1000, maxRequests: 10 });
-
-// ============================================================================
-// Service Status (must be before /:id to avoid route shadowing)
-// ============================================================================
-
-router.get("/service/health", controller.serviceHealth);
 
 // ============================================================================
 // Saved Results (must be before /:id)

@@ -13,6 +13,8 @@ interface ProductCardProps {
   isFavorite?: boolean
   onAddToCompare?: (productId: number) => void
   inCompare?: boolean
+  /** Min–max price from variants (show range when different) */
+  variantPrice?: { minPriceCents: number; maxPriceCents: number }
 }
 
 function formatPrice(cents: number, currency = 'USD') {
@@ -23,9 +25,10 @@ function formatPrice(cents: number, currency = 'USD') {
   }).format(cents / 100)
 }
 
-export function ProductCard({ product, index = 0, onFavorite, isFavorite, onAddToCompare, inCompare }: ProductCardProps) {
+export function ProductCard({ product, index = 0, onFavorite, isFavorite, onAddToCompare, inCompare, variantPrice }: ProductCardProps) {
   const imgUrl = product.image_cdn || product.image_url || '/placeholder-product.jpg'
   const hasSale = product.sales_price_cents && product.sales_price_cents < product.price_cents
+  const showMinMax = variantPrice && variantPrice.minPriceCents !== variantPrice.maxPriceCents
 
   return (
     <motion.article
@@ -88,7 +91,11 @@ export function ProductCard({ product, index = 0, onFavorite, isFavorite, onAddT
             {product.title}
           </h3>
           <div className="mt-1 flex items-center gap-2">
-            {hasSale ? (
+            {showMinMax ? (
+              <span className="font-semibold text-charcoal-700">
+                {formatPrice(variantPrice!.minPriceCents, product.currency)} – {formatPrice(variantPrice!.maxPriceCents, product.currency)}
+              </span>
+            ) : hasSale ? (
               <>
                 <span className="text-wine-600 font-semibold">
                   {formatPrice(product.sales_price_cents!, product.currency)}

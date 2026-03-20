@@ -14,7 +14,8 @@ import "dotenv/config";
 
 import { Router } from "express";
 import multer from "multer";
-import { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory, getProductFacets, getPriceDrops, getSimilarProducts } from "./products.controller";
+import { listProducts, searchProductsByTitle, searchProductsByImage, getProductByIdHandler, getProductPriceHistory, getProductFacets, getPriceDrops, getSimilarProducts } from "./products.controller";
+import { getVariantsBatch } from "./variants.controller";
 import { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
 import { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller";
 import { getRecommendations, getBatchRecommendationsHandler } from "./recommendations.controller";
@@ -65,6 +66,9 @@ router.get("/:id/recommendations", getRecommendations);
 // POST /products/recommendations/batch - Batch recommendations for multiple products
 router.post("/recommendations/batch", getBatchRecommendationsHandler);
 
+// POST /products/variants/batch - Get variants (min–max price) for product IDs
+router.post("/variants/batch", getVariantsBatch);
+
 // ============================================================================
 // Price Drop Tracking
 // ============================================================================
@@ -87,6 +91,9 @@ router.get("/:id/images", listProductImages);
 router.post("/:id/images", upload.single("image"), uploadImage);
 router.put("/:id/images/:imageId/primary", setAsPrimary);
 router.delete("/:id/images/:imageId", removeImage);
+
+// GET /products/:id - single product (must be last so /:id/xxx routes match first)
+router.get("/:id", getProductByIdHandler);
 
 export default router;
 export { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory, getProductFacets, getPriceDrops } from "./products.controller";

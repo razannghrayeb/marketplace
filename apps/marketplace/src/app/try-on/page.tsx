@@ -11,9 +11,11 @@ import { endpoints } from '@/lib/api/endpoints'
 
 export default function TryOnPage() {
   const isAuth = useAuthStore((s) => s.isAuthenticated())
+  const user = useAuthStore((s) => s.user)
   const [personFile, setPersonFile] = useState<File | null>(null)
   const [garmentFile, setGarmentFile] = useState<File | null>(null)
   const [jobId, setJobId] = useState<string | null>(null)
+  const [debugResponse, setDebugResponse] = useState<unknown>(null)
   const personRef = useRef<HTMLInputElement>(null)
   const garmentRef = useRef<HTMLInputElement>(null)
 
@@ -25,6 +27,20 @@ export default function TryOnPage() {
       formData.append('garment_image', garmentFile)
       formData.append('category', 'upper_body')
       const res = await api.postForm(endpoints.tryon.submit, formData)
+      setDebugResponse({
+        raw: res,
+        userFromStore: user ? { id: user.id, email: user.email } : null,
+        jobId: (res as { job?: { id?: string | number } })?.job?.id,
+        success: (res as { success?: boolean }).success,
+      })
+      console.log('[TryOn] Response:', res)
+      console.log('[TryOn] User from store:', user ? { id: user.id } : null)
+      console.log('[TryOn] job.id:', (res as { job?: { id?: string | number } })?.job?.id)
+      const err = (res as { success?: boolean; error?: string | { message?: string } })?.error
+      if ((res as { success?: boolean }).success === false && err) {
+        const msg = typeof err === 'string' ? err : err?.message
+        throw new Error(msg ?? 'Try-on request failed')
+      }
       const job = (res as { job?: { id?: string | number } })?.job
       if (job?.id == null) throw new Error('No job ID returned')
       return String(job.id)
@@ -178,6 +194,11 @@ export default function TryOnPage() {
             </button>
             {submitMutation.isError && (
               <p className="mt-2 text-sm text-wine-600">{(submitMutation.error as Error)?.message}</p>
+            )}
+            {debugResponse && (
+              <pre className="mt-4 p-4 text-xs bg-charcoal-100 rounded-xl overflow-auto max-h-48 font-mono text-charcoal-700">
+                {JSON.stringify(debugResponse, null, 2)}
+              </pre>
             )}
           </div>
         )}

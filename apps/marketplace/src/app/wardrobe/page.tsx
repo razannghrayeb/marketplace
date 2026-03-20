@@ -81,20 +81,25 @@ export default function WardrobePage() {
           onChange={handleFileChange}
           className="hidden"
         />
-        <button
-          onClick={handleAddClick}
-          disabled={addMutation.isPending}
-          className="btn-primary flex items-center gap-2"
-        >
-          {addMutation.isPending ? (
-            <>Uploading...</>
-          ) : (
-            <>
-              <Plus className="w-4 h-4" />
-              Add item
-            </>
+        <div className="flex flex-col items-end gap-2">
+          {addMutation.isError && (
+            <p className="text-sm text-wine-600">{(addMutation.error as Error)?.message ?? 'Upload failed'}</p>
           )}
-        </button>
+          <button
+            onClick={handleAddClick}
+            disabled={addMutation.isPending}
+            className="btn-primary flex items-center gap-2"
+          >
+            {addMutation.isPending ? (
+              <>Uploading...</>
+            ) : (
+              <>
+                <Plus className="w-4 h-4" />
+                Add item
+              </>
+            )}
+          </button>
+        </div>
       </motion.div>
 
       {isLoading ? (
@@ -108,6 +113,11 @@ export default function WardrobePage() {
           <Shirt className="w-16 h-16 text-charcoal-300 mx-auto mb-4" />
           <p className="text-charcoal-600 mb-6">Your wardrobe is empty</p>
           <p className="text-sm text-charcoal-500 mb-6">Upload photos of your clothes to get AI-powered style suggestions.</p>
+          {addMutation.isError && (
+            <p className="text-sm text-wine-600 bg-wine-50 px-4 py-2 rounded-xl mb-4 max-w-md mx-auto">
+              {(addMutation.error as Error)?.message ?? 'Upload failed'}
+            </p>
+          )}
           <button
             onClick={handleAddClick}
             disabled={addMutation.isPending}
