@@ -108,6 +108,13 @@ export const config = {
     modelType: process.env.CLIP_MODEL_TYPE || "fashion-clip",
     // Similarity thresholds (image kNN + text hybrid min_score caps); default 0.6 aligns with SEARCH_FINAL_ACCEPT_MIN
     similarityThreshold: Number(process.env.CLIP_SIMILARITY_THRESHOLD || 0.6),
+    /** Image-only kNN gate; stricter default so loose "fashion similar" matches are dropped. */
+    imageSimilarityThreshold: finiteEnvNumber(
+      process.env.CLIP_IMAGE_SIMILARITY_THRESHOLD,
+      0.68,
+      0.35,
+      0.95,
+    ),
     duplicateThreshold: Number(process.env.CLIP_DUPLICATE_THRESHOLD || 0.92),
   },
   search: {
