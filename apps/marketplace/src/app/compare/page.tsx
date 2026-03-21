@@ -51,7 +51,7 @@ export default function ComparePage() {
       const results: Product[] = []
       for (const id of productIds) {
         const res = await api.get<Product | { data: Product }>(endpoints.products.byId(id))
-        const p = (res as { data?: Product })?.data ?? (res as Product)
+        const p = (res as { data?: Product })?.data ?? (res as unknown as Product)
         if (p && 'id' in p) results.push(p as Product)
       }
       return results
