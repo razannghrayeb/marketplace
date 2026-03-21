@@ -8,7 +8,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'https://marketplace-9337373
 export type ApiResponse<T> = {
   success: boolean
   data?: T
-  meta?: { total?: number; page?: number; limit?: number; pages?: number }
+  meta?: { total?: number; total_results?: number; page?: number; limit?: number; pages?: number }
   error?: { message: string; code?: string; details?: unknown }
 }
 
