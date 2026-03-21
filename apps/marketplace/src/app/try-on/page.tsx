@@ -195,7 +195,7 @@ export default function TryOnPage() {
             {submitMutation.isError && (
               <p className="mt-2 text-sm text-wine-600">{(submitMutation.error as Error)?.message}</p>
             )}
-            {debugResponse && (
+            {debugResponse !== null && debugResponse !== undefined && (
               <pre className="mt-4 p-4 text-xs bg-charcoal-100 rounded-xl overflow-auto max-h-48 font-mono text-charcoal-700">
                 {JSON.stringify(debugResponse, null, 2)}
               </pre>
