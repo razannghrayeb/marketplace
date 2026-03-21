@@ -58,6 +58,8 @@ import {
   cacheEmbedding,
 } from "./cache";
 
+import { parseParameters } from "./parameterParser";
+
 import {
   classifyQueryIntent,
   classifyQueryIntentHybrid,
@@ -187,6 +189,8 @@ async function buildEnsembledEmbedding(query: string): Promise<number[]> {
 // ─── Re-exports (convenience) ────────────────────────────────────────────────
 
 export { detectScript, normalizeArabic, getTransliterationVariants };
+export { parseParameters } from "./parameterParser";
+export type { ParsedParams } from "./parameterParser";
 
 export type {
   QueryAST,
@@ -210,23 +214,26 @@ interface PipelineOpts {
 async function runPipeline(raw: string, opts: PipelineOpts): Promise<QueryAST> {
   const t0 = performance.now();
 
-  // 1. Cache
+  // Stage 0: Parameter extraction — strip control params, output searchText only
+  const { searchText: pipelineInput, controlParams: controlParamsExtracted } = parseParameters(raw);
+
+  // Stage 1: Cache
   const cached = getCachedQueryAST(raw);
   if (cached) return { ...cached, cacheHit: true };
 
-  // 2. Normalize
-  const normalized = normalizeQuery(raw);
+  // Stage 2: Normalize — protected spans (numbers, sizes) preserved
+  const normalized = normalizeQuery(pipelineInput);
 
-  // 3. Script detection
+  // Stage 3: Script detection
   const script = detectScript(normalized);
 
-  // 4. Tokenize
-  const tokens = tokenize(raw, normalized);
+  // Stage 4: Tokenize — input: pipelineInput + normalized
+  const tokens = tokenize(pipelineInput, normalized);
 
-  // 5. Corrections
+  // Stage 5: Corrections — spell/arabizi/brand; numeric tokens skipped in spellCorrector
   const corrections = collectCorrections(normalized, script);
 
-  // 6. LLM rewrite (optional)
+  // Stage 6: LLM rewrite (optional) — gated by shouldUseLLM, semantic validation
   let llmUsed = false;
   if (opts.useLLM) {
     const llmResult = await tryLLMRewrite(normalized, script, corrections);
@@ -236,28 +243,24 @@ async function runPipeline(raw: string, opts: PipelineOpts): Promise<QueryAST> {
     }
   }
 
-  // 7. Extract entities & filters
-  // Use the same corrected query text for both extraction and searchQuery.
-  // This ensures typo corrections like "hoodi" -> "hoodie" also affect
-  // entity/product-type detection.
-  const extractionText = buildSearchQuery(normalized, corrections);
-  const extracted = extractFilters(extractionText);
+  // Stage 7: Build search query — only autoApply corrections affect retrieval
+  const { searchQuery, appliedCorrections, suggestedCorrections } = buildSearchQuery(normalized, corrections);
+
+  // Stage 8: Extract entities & filters — from corrected searchQuery only
+  const extracted = extractFilters(searchQuery);
   applyLLMEntities(corrections, extracted);
   const entities = toEntities(extracted);
   const filters  = toFilters(extracted);
 
-  // 8. Build final search text
-  const searchQuery = extractionText;
-
-  // 9. Classify intent
+  // Stage 9: Classify intent
   const intent = opts.useMLIntent
     ? await classifyIntentHybrid(normalized, entities)
     : classifyIntentRules(normalized, entities);
 
-  // 10. Expansions
+  // Stage 10: Expansions
   const expansions = generateExpansions(normalized, script, entities, corrections);
 
-  // 11. Confidence
+  // Stage 11: Confidence
   const confidence = corrections.length > 0
     ? corrections.reduce((s, c) => s + c.confidence, 0) / corrections.length
     : 1.0;
@@ -272,6 +275,9 @@ async function runPipeline(raw: string, opts: PipelineOpts): Promise<QueryAST> {
     expansions,
     script,
     corrections,
+    suggestedCorrections: suggestedCorrections.length > 0 ? suggestedCorrections : undefined,
+    appliedCorrections: appliedCorrections.length > 0 ? appliedCorrections : undefined,
+    controlParamsExtracted: Object.keys(controlParamsExtracted).length > 0 ? controlParamsExtracted : undefined,
     processingTimeMs: performance.now() - t0,
     llmUsed,
     cacheHit: false,
@@ -285,9 +291,30 @@ async function runPipeline(raw: string, opts: PipelineOpts): Promise<QueryAST> {
 
 // ─── Step helpers ────────────────────────────────────────────────────────────
 
-/** Normalize query text (lowercase, collapse spaces, limit repeats, arabic) */
+/** Protected span patterns: numbers, sizes, percentages — do not corrupt during normalization */
+const PROTECTED_PATTERNS = [
+  /\d+(?:\.\d+)?%?/g,                    // 100, 10.5, 100%
+  /size\s*[=:]?\s*\d+/gi,                // size 10, size=10
+  /\d+\s*(?:us|uk|eu)\b/gi,              // 10 us, 42 uk
+];
+
+const PLACEHOLDER_PREFIX = "\uE000"; // Private-use char for placeholder
+const PLACEHOLDER_SUFFIX = "\uE001";
+
+/** Extract protected spans, replace with placeholders, normalize, then restore */
 export function normalizeQuery(query: string): string {
-  let n = query
+  const preserved: string[] = [];
+  let n = query;
+
+  for (const re of PROTECTED_PATTERNS) {
+    re.lastIndex = 0;
+    n = n.replace(re, (m) => {
+      preserved.push(m.toLowerCase());
+      return `${PLACEHOLDER_PREFIX}${preserved.length - 1}${PLACEHOLDER_SUFFIX}`;
+    });
+  }
+
+  n = n
     .toLowerCase()
     .trim()
     .replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, " ")
@@ -297,7 +324,12 @@ export function normalizeQuery(query: string): string {
     .trim();
 
   if (/[\u0600-\u06FF]/.test(n)) n = normalizeArabic(n);
-  return n;
+
+  for (let i = 0; i < preserved.length; i++) {
+    n = n.replace(`${PLACEHOLDER_PREFIX}${i}${PLACEHOLDER_SUFFIX}`, preserved[i]);
+  }
+
+  return n.replace(/\s+/g, " ").trim();
 }
 
 /** Tokenize into several useful views */
@@ -372,6 +404,22 @@ function collectCorrections(normalized: string, script: ScriptAnalysis): Correct
   return out;
 }
 
+const SEMANTIC_SIMILARITY_THRESHOLD = 0.75;
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom < 1e-10 ? 0 : dot / denom;
+}
+
 /** Attempt LLM rewrite; returns a Correction or null */
 async function tryLLMRewrite(
   normalized: string,
@@ -394,6 +442,14 @@ async function tryLLMRewrite(
   });
 
   if (!result || result.confidence < THRESHOLDS.llm) return null;
+
+  // Optional semantic validation: reject if rewritten query drifts too far from original
+  const embOriginal = await getQueryEmbedding(normalized);
+  const embRewritten = await getQueryEmbedding(result.rewrittenQuery);
+  if (embOriginal && embRewritten) {
+    const sim = cosineSimilarity(embOriginal, embRewritten);
+    if (sim < SEMANTIC_SIMILARITY_THRESHOLD) return null;
+  }
 
   return {
     original: normalized,
@@ -547,6 +603,18 @@ function extractFilters(query: string): ExtractedFilters {
     blouses: "tshirt",
     camisole: "tshirt",
     tunic: "tshirt",
+
+    abaya: "abaya",
+    abayas: "abaya",
+    kaftan: "kaftan",
+    kaftans: "kaftan",
+    caftan: "kaftan",
+    caftans: "kaftan",
+    jalabiya: "abaya",
+    thobe: "abaya",
+    thobes: "abaya",
+    dishdasha: "abaya",
+    bisht: "abaya",
   };
 
   const PRODUCT_TYPE_MULTI: Record<string, string> = {
@@ -556,6 +624,8 @@ function extractFilters(query: string): ExtractedFilters {
     "track pants": "joggers",
     "sweat pants": "joggers",
     "sweatpants": "joggers",
+    "maxi abaya": "abaya",
+    "open abaya": "abaya",
   };
 
   const productTypesFound: string[] = [];
@@ -617,6 +687,9 @@ function extractFilters(query: string): ExtractedFilters {
       sweatshirt: "tops", tank: "tops", tunic: "tops", pullover: "tops",
       dress: "dresses", dresses: "dresses", gown: "dresses", frock: "dresses",
       jumpsuit: "dresses", romper: "dresses",
+      abaya: "dresses", abayas: "dresses", kaftan: "dresses", kaftans: "dresses",
+      caftan: "dresses", jalabiya: "dresses", thobe: "dresses", thobes: "dresses",
+      dishdasha: "dresses", bisht: "dresses",
       jacket: "outerwear", jackets: "outerwear", coat: "outerwear", coats: "outerwear",
       blazer: "outerwear", blazers: "outerwear", cardigan: "outerwear",
       parka: "outerwear", windbreaker: "outerwear",
@@ -676,25 +749,52 @@ function toFilters(f: ExtractedFilters): QueryFilters {
   };
 }
 
-/** Apply corrections to produce the final search text */
-function buildSearchQuery(normalized: string, corrections: Correction[]): string {
-  let q = normalized;
+export interface BuildSearchQueryResult {
+  searchQuery: string;
+  appliedCorrections: Correction[];
+  suggestedCorrections: Correction[];
+}
 
-  const llm = corrections.find(c => c.source === "llm" && c.confidence >= THRESHOLDS.autoApply);
-  if (llm) return llm.corrected.replace(/\s+/g, " ").trim();
+/** Apply only high-confidence corrections; medium confidence → suggest only. */
+function buildSearchQuery(normalized: string, corrections: Correction[]): BuildSearchQueryResult {
+  const applied: Correction[] = [];
+  const suggested: Correction[] = [];
 
   for (const c of corrections) {
-    if (c.confidence >= THRESHOLDS.reject && c.source !== "llm") {
+    if (c.confidence >= THRESHOLDS.autoApply) {
+      applied.push(c);
+    } else if (c.confidence >= THRESHOLDS.suggest) {
+      suggested.push(c);
+    }
+    // confidence < suggest: reject, do not apply or suggest
+  }
+
+  let q = normalized;
+
+  // LLM: only apply when confidence >= autoApply
+  const llm = applied.find(c => c.source === "llm");
+  if (llm) {
+    const result = llm.corrected.replace(/\s+/g, " ").trim();
+    return {
+      searchQuery: result || normalized,
+      appliedCorrections: [llm],
+      suggestedCorrections: suggested.filter(c => c !== llm),
+    };
+  }
+
+  for (const c of applied) {
+    if (c.source !== "llm") {
       q = q.replace(new RegExp(`\\b${escapeRegex(c.original)}\\b`, "gi"), c.corrected);
     }
   }
 
-  // If corrections rewrote all words to category/brand names and the result
-  // lost the product-type meaning, re-inject the important words.
-  // e.g. "whit pant" → corrections may turn "whit" → "white" but not "pant"
-  // — "pant" is a useful search word even if we extracted category = bottoms
+  // If corrections rewrote all words and lost meaning, fall back to normalized
   const result = q.replace(/\s+/g, " ").trim();
-  return result || normalized;
+  return {
+    searchQuery: result || normalized,
+    appliedCorrections: applied,
+    suggestedCorrections: suggested,
+  };
 }
 
 // ─── Intent mapping ──────────────────────────────────────────────────────────

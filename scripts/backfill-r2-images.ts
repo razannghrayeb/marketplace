@@ -14,9 +14,10 @@ import { pg } from "../src/lib/db";
 import { osClient } from "../src/lib/opensearch";
 import { config } from "../src/config";
 import { uploadImage, generateImageKey } from "../src/lib/r2";
-import { processImageForEmbedding, computePHash, validateImage } from "../src/lib/imageProcessor";
+import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash, validateImage } from "../src/lib/image";
 import { buildProductSearchDocument } from "../src/lib/search/searchDocument";
 import { extractDominantColorNames } from "../src/lib/color/dominantColor";
+import { loadProductSearchEnrichmentByIds } from "../src/lib/search/loadProductSearchEnrichment";
 import axios from "axios";
 
 async function fetchImageBuffer(url: string): Promise<Buffer | null> {
@@ -88,11 +89,14 @@ async function main() {
       console.log(`  ✓ Uploaded to R2: ${cdnUrl}`);
 
       // 3. Compute embedding and pHash
-      const [embedding, pHash, dominantColors] = await Promise.all([
+      const [embedding, embeddingGarment, pHash, dominantColors, enrichMap] = await Promise.all([
         processImageForEmbedding(buffer),
+        processImageForGarmentEmbedding(buffer).catch(() => [] as number[]),
         computePHash(buffer),
         extractDominantColorNames(buffer).catch(() => []),
+        loadProductSearchEnrichmentByIds([id]),
       ]);
+      const enrichRow = enrichMap.get(id);
       console.log(`  ✓ Computed embedding and pHash`);
 
       // 4. Insert into product_images
@@ -127,7 +131,16 @@ async function main() {
         pHash,
         lastSeenAt: last_seen,
         embedding,
+        embeddingGarment: embeddingGarment.length > 0 ? embeddingGarment : null,
         detectedColors: dominantColors,
+        enrichment: enrichRow
+          ? {
+              norm_confidence: enrichRow.norm_confidence,
+              category_confidence: enrichRow.category_confidence,
+              brand_confidence: enrichRow.brand_confidence,
+              canonical_type_ids: enrichRow.canonical_type_ids,
+            }
+          : null,
         images: [{ url: cdnUrl, p_hash: pHash, is_primary: true }],
       });
 

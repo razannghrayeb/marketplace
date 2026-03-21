@@ -4,10 +4,11 @@
  */
 import { pg, productsTableHasIsHiddenColumn, productsTableHasCanonicalIdColumn } from "../../lib/core/index";
 import { uploadImage, generateImageKey } from "../../lib/image/index";
-import { processImageForEmbedding, computePHash, validateImage } from "../../lib/image/index";
+import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash, validateImage } from "../../lib/image/index";
 import { osClient } from "../../lib/core/index";
 import { config } from "../../config";
 import { buildProductSearchDocument } from "../../lib/search/searchDocument";
+import { loadProductSearchEnrichmentByIds } from "../../lib/search/loadProductSearchEnrichment";
 import { extractDominantColorNames } from "../../lib/color/dominantColor";
 
 // ============================================================================
@@ -256,6 +257,9 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
     dominantColors = await extractDominantColorNames(sourceBuffer).catch(() => []);
   }
 
+  const enrichMap = await loadProductSearchEnrichmentByIds([productId]);
+  const enrichRow = enrichMap.get(productId);
+
   const doc: any = buildProductSearchDocument({
     productId,
     vendorId: product.vendor_id,
@@ -277,6 +281,14 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
     })),
     embedding: primaryImage?.embedding?.length > 0 ? primaryImage.embedding : null,
     detectedColors: dominantColors,
+    enrichment: enrichRow
+      ? {
+          norm_confidence: enrichRow.norm_confidence,
+          category_confidence: enrichRow.category_confidence,
+          brand_confidence: enrichRow.brand_confidence,
+          canonical_type_ids: enrichRow.canonical_type_ids,
+        }
+      : null,
   });
 
   // If dominant colors weren't provided (e.g. only primary image changed),
@@ -353,9 +365,38 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
       }
 
       if (buffer) {
-        const { processImageForEmbedding } = await import("../../lib/image/processor");
-        const [embedding, extractedColors] = await Promise.all([
+        const { processImageForEmbedding, processImageForGarmentEmbeddingWithOptionalBox } = await import(
+          "../../lib/image/processor"
+        );
+
+        let garmentBox: { x1: number; y1: number; x2: number; y2: number } | null = null;
+        try {
+          const det = await pg.query(
+            `SELECT box_x1, box_y1, box_x2, box_y2, confidence, area_ratio
+             FROM product_image_detections
+             WHERE product_image_id = $1
+               AND box_x1 IS NOT NULL AND box_y2 IS NOT NULL
+               AND COALESCE(confidence, 0) >= 0.22
+             ORDER BY COALESCE(area_ratio, 0) DESC NULLS LAST, id DESC
+             LIMIT 1`,
+            [primaryImage.id],
+          );
+          const r = det.rows[0];
+          if (r) {
+            garmentBox = {
+              x1: Number(r.box_x1),
+              y1: Number(r.box_y1),
+              x2: Number(r.box_x2),
+              y2: Number(r.box_y2),
+            };
+          }
+        } catch {
+          garmentBox = null;
+        }
+
+        const [embedding, embeddingGarment, extractedColors] = await Promise.all([
           processImageForEmbedding(buffer),
+          processImageForGarmentEmbeddingWithOptionalBox(buffer, garmentBox).catch(() => null as unknown as number[]),
           extractDominantColorNames(buffer).catch(() => []),
         ]);
         // Update DB for this image row and include in document
@@ -364,9 +405,14 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
           [embedding, primaryImage.id]
         );
         doc.embedding = embedding;
+        if (Array.isArray(embeddingGarment) && embeddingGarment.length > 0) {
+          doc.embedding_garment = embeddingGarment;
+        }
         if ((!doc.attr_colors || doc.attr_colors.length === 0) && extractedColors.length > 0) {
           doc.attr_colors = extractedColors;
-          doc.attr_color = extractedColors[0];
+          doc.attr_colors_image = extractedColors;
+          doc.attr_color = String(extractedColors[0]).toLowerCase();
+          doc.attr_color_source = "image";
         }
         // Refresh local variable for any further usage
         primaryImage = { ...primaryImage, embedding };

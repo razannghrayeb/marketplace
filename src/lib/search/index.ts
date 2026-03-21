@@ -81,8 +81,24 @@ export {
   expandProductTypesForQuery,
   expandProductTypesForIndexing,
   scoreProductTypeTaxonomyMatch,
+  scoreCrossFamilyTypePenalty,
+  crossFamilyTypePenaltyEnabled,
   PRODUCT_TYPE_CLUSTERS,
+  extractLexicalProductTypeSeeds,
+  getProductTypePhrasesLongestFirst,
 } from "./productTypeTaxonomy";
+
+export { loadProductSearchEnrichmentByIds, canonicalTypeIdsToProductTypeTokens } from "./loadProductSearchEnrichment";
+export { computeEmbeddingFashionScore } from "./fashionDomainSignal";
+export { isExpansionTermAllowed } from "./expansionAllowlist";
+
+export { searchProductsFilteredBrowse } from "./filteredBrowseSearch";
+
+export {
+  buildQueryUnderstanding,
+  searchDomainGateEnabled,
+  type QueryUnderstanding,
+} from "./queryUnderstanding.service";
 
 export {
   emitTextSearchEval,

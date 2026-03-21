@@ -95,6 +95,8 @@ export interface ProductResult {
   match_type?: "exact" | "similar" | "related"; // How the product matched
   // Deterministic reranking fields (Phase 3)
   rerankScore?: number;
+  /** Calibrated 0..1 relevance (text search acceptance gating). */
+  finalRelevance01?: number;
   mlRerankScore?: number;
   explain?: {
     productTypeCompliance?: number; // 0..1
@@ -102,6 +104,7 @@ export interface ProductResult {
     desiredProductTypes?: string[];
     desiredColors?: string[];
     colorMode?: "any" | "all";
+    finalRelevance01?: number;
   };
   // Scores from candidate generator
   clipSim?: number; // 0..1 (cosine or normalized)
@@ -122,6 +125,13 @@ export interface SearchResultWithRelated {
     parsed_query?: ParsedQuery; // Include parsed query info for debugging/transparency
     processed_query?: QueryAST; // Query processing info (corrections, etc.)
     did_you_mean?: string; // Suggestion if not auto-applied
+    /** True when every candidate in the recall window scored below SEARCH_FINAL_ACCEPT_MIN. */
+    below_relevance_threshold?: boolean;
+    recall_size?: number;
+    final_accept_min?: number;
+    /** Count after relevance gate + dedupe (before pagination slice). */
+    total_above_threshold?: number;
+    open_search_total_estimate?: number;
   };
 }
 

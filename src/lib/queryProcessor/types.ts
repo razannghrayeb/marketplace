@@ -136,6 +136,12 @@ export interface QueryAST {
   // ========== PROCESSING METADATA ==========
   script: ScriptAnalysis;
   corrections: Correction[];
+  /** Corrections we suggest but did not apply (confidence < autoApply) */
+  suggestedCorrections?: Correction[];
+  /** Corrections we applied to retrieval (confidence >= autoApply) */
+  appliedCorrections?: Correction[];
+  /** Control params stripped from raw query (limit, page, sort, etc.) */
+  controlParamsExtracted?: Record<string, string | number>;
   processingTimeMs: number;
   llmUsed: boolean;
   cacheHit: boolean;

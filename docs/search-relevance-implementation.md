@@ -221,6 +221,22 @@ score = visualSim * 1000 + categorySoft * 220
 
 ---
 
+## Query understanding layer (`queryUnderstanding.service.ts`)
+
+- **Domain gate:** Lexicon (e.g. `food`) plus **CLIP text vs fashion prototype** blend into `domainConfidence`. High-confidence off-domain still returns empty when `SEARCH_DOMAIN_GATE=true`. Very low embedding alignment with no anchors can also block. **Borderline** queries strip expansions and **disable text kNN** (BM25-only).
+- **Expansion caps:** Per-channel defaults: synonyms ≤5, category ≤3, transliteration ≤3, total cap `SEARCH_EXPANSION_MAX_TERMS` (default 5). Expansions are filtered to an **allowlist** built from taxonomy + category dictionary.
+- **Text kNN default:** Hybrid text search uses **kNN as `should` boost only** unless `SEARCH_KNN_TEXT_IN_MUST=1` (restores `must` + `min_score` for non–category-dominant queries).
+- **Soft AST color:** If color comes only from the AST (not caller) and `ast.confidence < SEARCH_AST_SOFT_COLOR_CONFIDENCE` (default 0.62), color is a **should boost** + rerank signal, not a hard `attr_color` filter. Index also stores `attr_colors_text` / `attr_colors_image` for image-aware boosts and reranking.
+- **Cross-family penalty:** Rerank subtracts `scoreCrossFamilyTypePenalty × SEARCH_CROSS_FAMILY_PENALTY_WEIGHT` (default weight 420). **Lexical taxonomy seeds** from the raw query extend `desiredProductTypes` when the AST misses a type. Disable penalties with `SEARCH_TYPE_CROSS_FAMILY_PENALTY=0`.
+
+Taxonomy: regional/modest clusters in `productTypeTaxonomy.ts`, dictionary category `modest wear`, and `extractProductTypesFromTitle`. Dominant image colors use a **center garment crop** (`dominantColor.ts`). **Garment ROI CLIP** is indexed as `embedding_garment` (see `processImageForGarmentEmbedding`); image kNN field override: `SEARCH_IMAGE_KNN_FIELD`.
+
+### Promoting text kNN to `must` again
+
+Use offline `pnpm run search:eval` + labeled `search-eval-labels.example.json`. Enable `SEARCH_KNN_TEXT_IN_MUST=1` only if nDCG@k and color/type violation rates improve on labeled slices **and** head-query zero-hit rate does not regress. Compare `SEARCH_EVAL_VARIANT` cohorts in logged JSONL.
+
+---
+
 ## Feature flags
 
 | Env | Effect |
@@ -229,6 +245,15 @@ score = visualSim * 1000 + categorySoft * 220
 | `SEARCH_IMAGE_SOFT_CATEGORY=true` | Image search: no hard category filter; soft rerank |
 | `SEARCH_STRICT_CATEGORY_DEFAULT=true` | Existing AST category hard filter behavior |
 | `SEARCH_EVAL_LOG=1` | Emit structured search eval JSON (text + image paths) |
+| `SEARCH_DOMAIN_GATE=true` | Block off-domain text queries (empty results) |
+| `SEARCH_KNN_TEXT_IN_MUST=1` | Use legacy must+min_score CLIP constraint on text search |
+| `SEARCH_TYPE_CROSS_FAMILY_PENALTY=0` | Disable cross-family rerank penalties |
+| `SEARCH_IMAGE_KNN_FIELD` | `embedding` (default) or `embedding_garment` after ROI reindex |
+| `SEARCH_RECALL_WINDOW` / `SEARCH_RECALL_MAX` | Text search: OpenSearch `size` before rerank (default 300, cap 500); pagination is slice after gate |
+| `SEARCH_FINAL_ACCEPT_MIN` | Text + image: drop hits below this calibrated relevance / similarity (default 0.6) |
+| `SEARCH_FILTER_HARD_MIN_CONFIDENCE` | Min AST confidence for hard category filter when not in strict category env |
+| `SEARCH_DOMAIN_EMBEDDING_REJECT_BELOW` | Off-domain if CLIP fashion score below this and no anchors (with `SEARCH_DOMAIN_GATE`) |
+| `SEARCH_EXPANSION_MAX_SYNONYMS` / `_MAX_CATEGORY` / `_MAX_TRANSLIT` | Per-channel expansion caps |
 
 ## Rollout
 

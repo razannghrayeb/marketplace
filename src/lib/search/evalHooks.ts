@@ -23,6 +23,8 @@ export interface TextSearchEvalPayload {
   hit_ids: string[];
   similarity_scores: number[];
   rerank_scores: Array<number | null>;
+  /** Per-hit calibrated relevance on the returned page (same order as hit_ids). */
+  final_relevance_scores?: Array<number | null>;
   ast: {
     search_query: string;
     product_types: string[];
@@ -37,6 +39,17 @@ export interface TextSearchEvalPayload {
     has_product_type_constraint: boolean;
     relaxed_pipeline: boolean;
     strict_product_type_env: boolean;
+    off_domain_blocked?: boolean;
+    domain_confidence?: number;
+    borderline_fashion?: boolean;
+    embedding_fashion_01?: number | null;
+    soft_ast_color?: boolean;
+    hard_color_filter?: boolean;
+    expansion_term_count?: number;
+    recall_size?: number;
+    final_accept_min?: number;
+    below_relevance_threshold?: boolean;
+    total_above_threshold?: number;
   };
 }
 
@@ -51,6 +64,8 @@ export interface ImageSearchEvalPayload {
   similarity_scores: number[];
   soft_category: boolean;
   predicted_aisles: string[] | null;
+  similarity_threshold_used?: number;
+  below_relevance_threshold?: boolean;
 }
 
 export function searchEvalEnabled(): boolean {
