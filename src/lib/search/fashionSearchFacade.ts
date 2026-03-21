@@ -21,6 +21,7 @@ import { searchByImageWithSimilarity as legacyImageSearch } from "../../routes/p
 import { searchProductsFilteredBrowse } from "./filteredBrowseSearch";
 
 import { processImageForEmbedding, computePHash } from "../image";
+import { tieredColorMatchScore } from "../color/colorCanonical";
 
 export interface UnifiedTextSearchParams {
   query: string;
@@ -181,6 +182,7 @@ export async function searchImage(
 
   const res = await legacyImageSearch({
     imageEmbedding: embedding,
+    imageBuffer: imageBuffer ?? undefined,
     filters: filters as any,
     limit,
     similarityThreshold,
@@ -204,8 +206,9 @@ export async function searchImage(
 
     const scoreById = new Map<string, number>();
     res.results.forEach((p: any, idx: number) => {
-      const productColor = p.color ? String(p.color).toLowerCase() : "";
-      const colorCompliance = productColor && desiredColors.includes(productColor) ? 1 : 0;
+      const productPalette = p.color ? [String(p.color).toLowerCase()] : [];
+      const tier = tieredColorMatchScore(desiredColors[0], productPalette);
+      const colorCompliance = tier.score;
       const similarity = typeof p.similarity_score === "number" ? p.similarity_score : 0;
       const rerankScore = colorCompliance * 1000 + similarity * 10;
       p.rerankScore = rerankScore;
@@ -213,6 +216,10 @@ export async function searchImage(
         ...(p.explain || {}),
         productTypeCompliance: p.explain?.productTypeCompliance ?? 0,
         colorCompliance,
+        colorScore: colorCompliance,
+        globalScore: similarity,
+        matchedColor: tier.matchedColor ?? undefined,
+        colorTier: tier.tier,
         desiredProductTypes: p.explain?.desiredProductTypes ?? [],
         desiredColors,
         colorMode,
@@ -223,8 +230,9 @@ export async function searchImage(
     res.results.sort((a: any, b: any) => (scoreById.get(String(b.id)) ?? 0) - (scoreById.get(String(a.id)) ?? 0));
     if (Array.isArray(res.related) && res.related.length > 0) {
       res.related.forEach((p: any) => {
-        const productColor = p.color ? String(p.color).toLowerCase() : "";
-        const colorCompliance = productColor && desiredColors.includes(productColor) ? 1 : 0;
+        const productPalette = p.color ? [String(p.color).toLowerCase()] : [];
+        const tier = tieredColorMatchScore(desiredColors[0], productPalette);
+        const colorCompliance = tier.score;
         const similarity = typeof p.similarity_score === "number" ? p.similarity_score : 0;
         const rerankScore = colorCompliance * 1000 + similarity * 10;
         p.rerankScore = rerankScore;
@@ -232,6 +240,10 @@ export async function searchImage(
           ...(p.explain || {}),
           productTypeCompliance: p.explain?.productTypeCompliance ?? 0,
           colorCompliance,
+          colorScore: colorCompliance,
+          globalScore: similarity,
+          matchedColor: tier.matchedColor ?? undefined,
+          colorTier: tier.tier,
           desiredProductTypes: p.explain?.desiredProductTypes ?? [],
           desiredColors,
           colorMode,

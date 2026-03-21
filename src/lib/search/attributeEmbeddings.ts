@@ -11,7 +11,7 @@
  */
 
 import { getTextEmbedding } from "../image/clip";
-import { processImageForEmbedding } from "../image/processor";
+import { extractGarmentCenterCropBuffer, processImageForEmbedding } from "../image/processor";
 import { getOrComputeImageEmbedding, getOrComputeTextEmbedding } from "../cache/embeddingCache";
 import { fuseEmbeddingsAdaptive, getAdaptiveWeights } from "./attentionFusion";
 import type { SemanticAttribute } from "./multiVectorSearch";
@@ -58,7 +58,11 @@ export class AttributeEmbeddingGenerator {
   ): Promise<number[]> {
     // Try cache first, then compute
     return getOrComputeImageEmbedding(imageBuffer, attribute, async () => {
-      const imageEmbed = await processImageForEmbedding(imageBuffer);
+      const bufForClip =
+        attribute === "color"
+          ? await extractGarmentCenterCropBuffer(imageBuffer).catch(() => imageBuffer)
+          : imageBuffer;
+      const imageEmbed = await processImageForEmbedding(bufForClip);
 
       if (attribute === "global") {
         return imageEmbed;

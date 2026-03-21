@@ -44,9 +44,9 @@ import {
 } from '../../lib/search/categoryFilter';
 import {
   expandProductTypesForQuery,
-  scoreProductTypeTaxonomyMatch,
   scoreCrossFamilyTypePenalty,
   extractLexicalProductTypeSeeds,
+  scoreRerankProductTypeBreakdown,
 } from '../../lib/search/productTypeTaxonomy';
 import {
   buildQueryUnderstanding,
@@ -59,6 +59,8 @@ import {
   newSearchEvalId,
   searchEvalVariant,
 } from '../../lib/search/evalHooks';
+import { tieredColorListCompliance } from '../../lib/color/colorCanonical';
+import { expandColorTermsForFilter, normalizeColorToken } from '../../lib/color/queryColorFilter';
 
 // ─── Shared types ────────────────────────────────────────────────────────────
 
@@ -72,6 +74,8 @@ export interface SearchFilters {
   colorMode?: "any" | "all";
   size?: string;
   gender?: string;
+  /** Canonical: kids | baby | teen | adult */
+  ageGroup?: string;
   vendorId?: number;
 }
 
@@ -101,6 +105,7 @@ export interface QueryASTSummary {
     colors: string[];
     productTypes?: string[];
     gender?: string;
+    ageGroup?: string;
   };
   corrections: Array<{ original: string; corrected: string; source: string }>;
   /** Corrections applied to retrieval (confidence >= 0.85) */
@@ -120,46 +125,14 @@ export interface MultiImageSearchRequest {
   rerankWeights?: RerankOptions | any;
 }
 
-const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
-  black: ["black", "charcoal", "dark gray", "dark grey", "jet", "onyx"],
-  white: ["white", "off white", "off-white", "ivory", "cream", "ecru"],
-  gray: ["gray", "grey", "heather grey", "heather gray", "silver"],
-  blue: ["blue", "navy", "cobalt", "denim", "sky blue", "mid blue", "midnight blue"],
-  red: ["red", "burgundy", "maroon", "wine", "cherry"],
-  green: ["green", "olive", "khaki", "sage", "mint", "forest green", "hunter green"],
-  brown: ["brown", "camel", "tan", "taupe", "mocha", "chocolate", "beige"],
-  purple: ["purple", "violet", "plum", "lavender", "lilac", "mauve"],
-  pink: ["pink", "blush", "fuchsia", "magenta", "rose"],
-  yellow: ["yellow", "mustard", "golden", "gold"],
-  orange: ["orange", "rust", "peach", "coral", "burnt orange"],
-  multicolor: ["multicolor", "multi color", "multi-color", "colour block", "color block"],
-};
-
-const COLOR_ALIAS_TO_CANONICAL = (() => {
-  const map = new Map<string, string>();
-  for (const [canonical, aliases] of Object.entries(COLOR_CANONICAL_ALIASES)) {
-    map.set(canonical, canonical);
-    for (const alias of aliases) map.set(alias.toLowerCase(), canonical);
-  }
-  return map;
-})();
-
 function strictProductTypeFilterEnv(): boolean {
   const v = String(process.env.SEARCH_STRICT_PRODUCT_TYPE ?? '').toLowerCase();
   return v === '1' || v === 'true';
 }
 
-function normalizeColorToken(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  const key = raw.toLowerCase().replace(/[_-]/g, " ").replace(/\s+/g, " ").trim();
-  return COLOR_ALIAS_TO_CANONICAL.get(key) ?? null;
-}
-
-function expandColorTermsForFilter(color: string): string[] {
-  const canonical = normalizeColorToken(color) ?? color.toLowerCase();
-  const aliases = COLOR_CANONICAL_ALIASES[canonical] ?? [canonical];
-  const out = new Set<string>([canonical, ...aliases.map((a) => a.toLowerCase())]);
-  return [...out];
+function genderHardFilterMinConfidence(): number {
+  const n = Number(process.env.SEARCH_GENDER_HARD_MIN_CONFIDENCE ?? '0.55');
+  return Number.isFinite(n) ? Math.min(0.95, Math.max(0.35, n)) : 0.55;
 }
 
 /** OpenSearch fetch size: large enough to rerank meaningfully, capped for latency. */
@@ -167,17 +140,6 @@ function computeTextRecallSize(limit: number, offset: number): number {
   const w = config.search.recallWindow;
   const cap = config.search.recallMax;
   return Math.min(cap, Math.max(w, offset + limit));
-}
-
-function colorListCompliance(
-  desired: string[],
-  productColors: string[],
-  mode: "any" | "all",
-): number {
-  if (desired.length === 0) return 1;
-  if (productColors.length === 0) return 0;
-  if (mode === "all") return desired.every((c) => productColors.includes(c)) ? 1 : 0;
-  return desired.filter((c) => productColors.includes(c)).length / desired.length;
 }
 
 /**
@@ -190,17 +152,104 @@ function colorListCompliance(
 function computeFinalRelevance01(params: {
   hasTypeIntent: boolean;
   productTypeCompliance: number;
+  exactTypeScore?: number;
   hasColorIntent: boolean;
   colorCompliance: number;
   similarity: number;
   crossFamilyPenalty: number;
+  hasAudienceIntent?: boolean;
+  audienceCompliance?: number;
 }): number {
-  const typePart = params.hasTypeIntent ? 0.36 * params.productTypeCompliance : 0.36;
-  const colorPart = params.hasColorIntent ? 0.26 * params.colorCompliance : 0.26;
-  const simPart = 0.38 * params.similarity;
+  const exactBoost =
+    params.hasTypeIntent && typeof params.exactTypeScore === 'number'
+      ? 0.08 * params.exactTypeScore
+      : 0;
+  const typePart = params.hasTypeIntent ? 0.34 * params.productTypeCompliance + exactBoost : 0.36;
+  const colorPart = params.hasColorIntent ? 0.24 * params.colorCompliance : 0.24;
+  const audPart =
+    params.hasAudienceIntent && typeof params.audienceCompliance === 'number'
+      ? 0.12 * params.audienceCompliance
+      : 0.12;
+  const simPart = 0.3 * params.similarity;
   const famPen = Math.min(1, params.crossFamilyPenalty) * 0.22;
-  const raw = typePart + colorPart + simPart - famPen;
+  const raw = typePart + colorPart + audPart + simPart - famPen;
   return Math.max(0, Math.min(1, raw));
+}
+
+function normalizeQueryGender(g: string | undefined): string | null {
+  if (!g) return null;
+  const x = g.toLowerCase();
+  if (x === 'men' || x === 'women' || x === 'unisex') return x;
+  return null;
+}
+
+function docAgeGroup(hit: any): string | null {
+  const raw = hit?._source?.age_group;
+  if (raw === undefined || raw === null) return null;
+  return String(raw).toLowerCase().trim() || null;
+}
+
+function docAudienceGender(hit: any): string | null {
+  const raw = hit?._source?.audience_gender ?? hit?._source?.attr_gender;
+  if (raw === undefined || raw === null) return null;
+  const s = String(raw).toLowerCase().trim();
+  if (s === 'men' || s === 'women' || s === 'unisex') return s;
+  return null;
+}
+
+/**
+ * 0..1: query age_group / audience_gender vs indexed audience fields.
+ */
+function scoreAudienceCompliance(
+  queryAgeGroup: string | undefined,
+  queryGender: string | undefined,
+  hit: any,
+): number {
+  const wantAge = queryAgeGroup?.toLowerCase().trim();
+  const wantG = normalizeQueryGender(queryGender);
+  const docAge = docAgeGroup(hit);
+  const docG = docAudienceGender(hit);
+  const title = typeof hit?._source?.title === 'string' ? hit._source.title.toLowerCase() : '';
+
+  let score = 1;
+  let factors = 0;
+
+  if (wantAge) {
+    factors += 1;
+    if (!docAge) {
+      if (wantAge === 'kids' && /\b(kids?|child|children|boys?|girls?|toddler|baby|youth)\b/.test(title)) {
+        score *= 0.92;
+      } else if (wantAge === 'adult' || wantAge === 'teen') {
+        score *= 0.88;
+      } else {
+        score *= 0.72;
+      }
+    } else if (docAge === wantAge) {
+      score *= 1;
+    } else if (wantAge === 'kids' && (docAge === 'baby' || docAge === 'teen')) {
+      score *= 0.88;
+    } else if (wantAge === 'baby' && docAge === 'kids') {
+      score *= 0.85;
+    } else {
+      score *= 0.38;
+    }
+  }
+
+  if (wantG) {
+    factors += 1;
+    if (!docG) {
+      if (wantG === 'men' && /\b(men|mens|male)\b/.test(title)) score *= 0.9;
+      else if (wantG === 'women' && /\b(women|womens|female|ladies)\b/.test(title)) score *= 0.9;
+      else score *= 0.78;
+    } else if (docG === 'unisex' || docG === wantG) {
+      score *= 1;
+    } else {
+      score *= 0.35;
+    }
+  }
+
+  if (factors === 0) return 1;
+  return Math.max(0, Math.min(1, Math.pow(score, 1 / factors)));
 }
 
 // Initialize services
@@ -440,6 +489,9 @@ export async function textSearch(
       explicitColors ??
       explicitColorFallback ??
       (ast.entities.colors ?? []).map((c) => c.toLowerCase());
+    const rerankDesiredColorsRaw = [...new Set(
+      (rerankColorSourcesRaw ?? []).map((c) => String(c).toLowerCase().trim()).filter(Boolean),
+    )];
     const rerankDesiredColors = [...new Set(
       rerankColorSourcesRaw
         .map((c) => normalizeColorToken(c) ?? c.toLowerCase())
@@ -519,19 +571,26 @@ export async function textSearch(
             },
           });
         }
-      } else if (!hasProductTypeConstraint) {
+      } else if (
+        !hasProductTypeConstraint ||
+        (ast.entities.categories?.length ?? 0) > 0
+      ) {
+        // Keep aisle/category soft signals when AST extracted a category alongside product type
+        // (lexical-only type seeds no longer suppress this after word-boundary fixes).
+        const catBoost =
+          hasProductTypeConstraint && (ast.entities.categories?.length ?? 0) > 0 ? 0.82 : 1;
         const catAliases = getCategorySearchTerms(mergedCategory);
         shouldClauses.push({
           bool: {
             should: [
               ...catAliases.map((alias) => ({
-                term: { category: { value: alias.toLowerCase(), boost: 3.0 } },
+                term: { category: { value: alias.toLowerCase(), boost: 3.0 * catBoost } },
               })),
               {
                 match: {
                   'category.search': {
                     query: catAliases.join(' '),
-                    boost: 2.0,
+                    boost: 2.0 * catBoost,
                     fuzziness: 'AUTO',
                   },
                 },
@@ -541,7 +600,7 @@ export async function textSearch(
                   query: catAliases.join(' '),
                   fields: ['title^2'],
                   fuzziness: 'AUTO',
-                  boost: 1.5,
+                  boost: 1.5 * catBoost,
                 },
               },
             ],
@@ -564,19 +623,67 @@ export async function textSearch(
       }
     }
     // Color is handled as strict attr_colors filtering above.
-    if (merged.gender) {
-      const g = merged.gender.toLowerCase();
-      // Treat extracted gender as a hard constraint for determinism.
-      // Titles sometimes include "Men"/"Women" even when attr_gender is missing,
-      // so we match on either attr_gender OR title phrase.
+    const genderFromCaller = Boolean(callerFilters?.gender);
+    const ageFromCaller = Boolean((callerFilters as SearchFilters | undefined)?.ageGroup);
+    const mergedAgeGroup = (merged as { ageGroup?: string }).ageGroup ?? ast.entities.ageGroup;
+    const useHardAudienceFilter =
+      (Boolean(merged.gender) || Boolean(mergedAgeGroup)) &&
+      (genderFromCaller || ageFromCaller || ast.confidence >= genderHardFilterMinConfidence());
+    const gNorm = merged.gender ? merged.gender.toLowerCase() : "";
+
+    if (merged.gender && useHardAudienceFilter && normalizeQueryGender(merged.gender)) {
+      const g = gNorm;
       filterClauses.push({
         bool: {
           _name: "strict_gender_filter",
           should: [
             { term: { attr_gender: g } },
+            { term: { audience_gender: g } },
             { match_phrase: { title: g } },
           ],
           minimum_should_match: 1,
+        },
+      });
+    } else if (merged.gender && normalizeQueryGender(merged.gender)) {
+      shouldClauses.push({
+        bool: {
+          _name: "soft_gender_boost",
+          should: [
+            { term: { attr_gender: { value: gNorm, boost: 6.0 } } },
+            { term: { audience_gender: { value: gNorm, boost: 6.0 } } },
+            { match_phrase: { title: { query: gNorm, boost: 4.0 } } },
+          ],
+          minimum_should_match: 0,
+        },
+      });
+    }
+
+    if (mergedAgeGroup && useHardAudienceFilter) {
+      const ag = String(mergedAgeGroup).toLowerCase();
+      filterClauses.push({
+        bool: {
+          _name: "strict_age_group_filter",
+          should: [
+            { term: { age_group: ag } },
+            {
+              bool: {
+                must: [{ match_phrase: { title: ag } }],
+              },
+            },
+          ],
+          minimum_should_match: 1,
+        },
+      });
+    } else if (mergedAgeGroup) {
+      const ag = String(mergedAgeGroup).toLowerCase();
+      shouldClauses.push({
+        bool: {
+          _name: "soft_age_group_boost",
+          should: [
+            { term: { age_group: { value: ag, boost: 5.5 } } },
+            { match_phrase: { title: { query: ag, boost: 2.2 } } },
+          ],
+          minimum_should_match: 0,
         },
       });
     }
@@ -662,7 +769,13 @@ export async function textSearch(
         'type_confidence',
         'color_confidence_text',
         'color_confidence_image',
+        'color_palette_canonical',
+        'color_primary_canonical',
+        'color_secondary_canonical',
+        'color_accent_canonical',
         'product_types',
+        'age_group',
+        'audience_gender',
       ],
     };
 
@@ -805,6 +918,8 @@ export async function textSearch(
           "color_confidence_text",
           "color_confidence_image",
           "product_types",
+          "age_group",
+          "audience_gender",
         ],
       };
 
@@ -867,6 +982,9 @@ export async function textSearch(
       return Boolean(c?.term?.attr_gender) || Boolean(c?.terms?.attr_gender);
     };
 
+    const isAgeGroupFilterClause = (c: any): boolean =>
+      Boolean(c?.bool?._name === "strict_age_group_filter");
+
     const isHardAstCategoryClause = (c: any): boolean => c?.bool?._name === "hard_ast_category_filter";
 
     if (currentTotal === 0 && hardAstCategory && mergedCategory) {
@@ -893,7 +1011,9 @@ export async function textSearch(
 
     const filterWithoutColors = filterClauses.filter((c) => !isColorFilterClause(c));
     const filterWithoutProductTypes = filterClauses.filter((c) => !isProductTypeFilterClause(c));
-    const filterWithoutGender = filterClauses.filter((c) => !isGenderFilterClause(c));
+    const filterWithoutAudience = filterClauses.filter(
+      (c) => !isGenderFilterClause(c) && !isAgeGroupFilterClause(c),
+    );
 
     // If single-color strict filter by `attr_color` yields 0 hits,
     // retry by allowing `attr_colors` (multi-color palette) matches.
@@ -962,19 +1082,20 @@ export async function textSearch(
       relaxedUsed = true;
     }
 
-    // Final robustness: if strict gender filter produced 0 hits, relax gender.
-    const hasStrictGender = Boolean(ast.entities.gender);
+    // Final robustness: if strict audience filters produced 0 hits, relax them.
+    const hasStrictAudience =
+      Boolean(ast.entities.gender) || Boolean(ast.entities.ageGroup);
     const totalAfterAll =
       response.body.hits.total?.value ?? response.body.hits.total ?? 0;
-    if (totalAfterAll === 0 && hasStrictGender && filterWithoutGender.length > 0) {
-      console.warn("[textSearch] Still zero hits; retrying without gender filter.");
+    if (totalAfterAll === 0 && hasStrictAudience && filterWithoutAudience.length > 0) {
+      console.warn("[textSearch] Still zero hits; retrying without gender/age filters.");
       const relaxedBody: any = {
         ...searchBody,
         query: {
           bool: {
             must: mustWithoutKnnForRetry ?? mustClauses.filter((c: any) => !c?.knn),
             should: shouldClauses,
-            filter: filterWithoutGender,
+            filter: filterWithoutAudience,
             minimum_should_match: 0,
           },
         },
@@ -985,12 +1106,19 @@ export async function textSearch(
 
     const hits = response.body.hits.hits;
 
-    // Normalize scores into ~[0,1] for `similarity_score`
+    // Normalize scores into ~[0,1] for `similarity_score` (max-of-recall vs tanh of raw OS score)
     const maxScore = hits.length > 0 ? hits[0]._score ?? 1 : 1;
+    const useTanhSim = config.search.similarityNormalize === "tanh";
+    const tanhScale = config.search.similarityTanhScale;
     const scoreMap = new Map<string, number>();
     hits.forEach((hit: any) => {
       const rawScore = hit?._score ?? 0;
-      const normalized = maxScore > 0 ? rawScore / maxScore : 0;
+      const positive = Math.max(0, rawScore);
+      const normalized = useTanhSim
+        ? Math.max(0, Math.min(1, Math.tanh(positive / tanhScale)))
+        : maxScore > 0
+          ? positive / maxScore
+          : 0;
       scoreMap.set(String(hit._source.product_id), Math.round(normalized * 100) / 100);
     });
 
@@ -1000,6 +1128,7 @@ export async function textSearch(
       ...new Set([...astProductTypes, ...lexicalTypeSeeds.map((s) => s.toLowerCase())]),
     ];
     const desiredColors = [...new Set(rerankDesiredColors)];
+    const desiredColorsTier = rerankDesiredColorsRaw.length > 0 ? rerankDesiredColorsRaw : desiredColors;
     const rerankColorMode = ast.filters?.colorMode ?? "any";
     const crossFamilyPenaltyWeight = Math.max(
       0,
@@ -1010,12 +1139,24 @@ export async function textSearch(
       string,
       {
         productTypeCompliance: number;
+        exactTypeScore: number;
+        siblingClusterScore: number;
+        parentHypernymScore: number;
+        intraFamilyPenalty: number;
         colorCompliance: number;
+        matchedColor: string | null;
+        colorTier: "exact" | "family" | "bucket" | "none";
         crossFamilyPenalty: number;
+        audienceCompliance: number;
+        osSimilarity01: number;
         rerankScore: number;
         finalRelevance01: number;
       }
     >();
+
+    const queryAgeGroup = mergedAgeGroup ?? ast.entities.ageGroup;
+    const queryGenderForAudience = normalizeQueryGender(merged.gender);
+    const hasAudienceIntent = Boolean(queryAgeGroup || queryGenderForAudience);
 
     const colorById = new Map<string, string | null>();
 
@@ -1049,67 +1190,73 @@ export async function textSearch(
       const attrText = hit?._source?.attr_colors_text;
       const attrImg = hit?._source?.attr_colors_image;
 
-      const normalizeColorList = (parts: unknown[]): string[] =>
-        [
-          ...new Set(
-            mergeColorArrays(...parts)
-              .map((c: string) => normalizeColorToken(c) ?? c.toLowerCase())
-              .filter(Boolean),
-          ),
-        ];
-
-      let textColors: string[] = normalizeColorList([attrText]);
-      let imgColors: string[] = normalizeColorList([attrImg]);
-      let productColors: string[] = mergeColorArrays(attrColorsRaw, attrText, attrImg);
-      if (productColors.length === 0 && hit?._source?.attr_color) {
-        productColors = mergeColorArrays(hit._source.attr_color);
-      }
-
-      productColors = [
+      const rawColorList = (...parts: unknown[]): string[] => [
         ...new Set(
-          productColors
-            .map((c: string) => normalizeColorToken(c) ?? c.toLowerCase())
+          mergeColorArrays(...parts)
+            .map((c: string) => String(c).toLowerCase().trim())
             .filter(Boolean),
         ),
       ];
 
-      if (textColors.length === 0 && attrColorsRaw) {
-        textColors = normalizeColorList([attrColorsRaw]);
-      }
-      if (imgColors.length === 0 && attrImg === undefined && productColors.length > 0) {
-        imgColors = [];
+      let imgTierRaw = rawColorList(hit?._source?.color_palette_canonical, attrImg);
+      let textTierRaw = rawColorList(attrText);
+      let unionTierRaw = rawColorList(
+        hit?._source?.color_palette_canonical,
+        attrColorsRaw,
+        attrText,
+        attrImg,
+        hit?._source?.color_primary_canonical,
+        hit?._source?.color_secondary_canonical,
+        hit?._source?.color_accent_canonical,
+      );
+
+      if (unionTierRaw.length === 0 && hit?._source?.attr_color) {
+        unionTierRaw = rawColorList(hit._source.attr_color);
       }
 
-      if (productColors.length === 0 && typeof hit?._source?.title === "string") {
+      if (unionTierRaw.length === 0 && typeof hit?._source?.title === "string") {
         const inferred = extractAttributesSync(String(hit._source.title));
-        const inferredColors = inferred.attributes.colors && inferred.attributes.colors.length > 0
-          ? inferred.attributes.colors
-          : inferred.attributes.color
-            ? [inferred.attributes.color]
-            : [];
-        if (inferredColors.length > 0) {
-          productColors = inferredColors
-            .map((c: string) => normalizeColorToken(c) ?? c.toLowerCase())
-            .filter(Boolean) as string[];
-          if (textColors.length === 0) textColors = [...productColors];
+        const inferredColors =
+          inferred.attributes.colors && inferred.attributes.colors.length > 0
+            ? inferred.attributes.colors
+            : inferred.attributes.color
+              ? [inferred.attributes.color]
+              : [];
+        for (const c of inferredColors) {
+          const x = String(c).toLowerCase().trim();
+          if (x && !unionTierRaw.includes(x)) unionTierRaw.push(x);
+        }
+        if (textTierRaw.length === 0 && inferredColors.length > 0) {
+          textTierRaw = rawColorList(inferredColors);
         }
       }
 
-      const primaryColor = hit?._source?.attr_color
-        ? (normalizeColorToken(String(hit._source.attr_color)) ?? String(hit._source.attr_color).toLowerCase())
-        : productColors.length > 0
-          ? productColors[0]
-          : null;
+      const productColors = [
+        ...new Set(unionTierRaw.map((c) => normalizeColorToken(c) ?? c).filter(Boolean)),
+      ];
+
+      const primaryColor = hit?._source?.color_primary_canonical
+        ? String(hit._source.color_primary_canonical).toLowerCase()
+        : hit?._source?.attr_color
+          ? String(hit._source.attr_color).toLowerCase()
+          : productColors.length > 0
+            ? productColors[0]
+            : null;
       colorById.set(idStr, primaryColor);
 
-      // Product-type compliance: taxonomy-aware (pants ≈ jeans via cluster / hypernym).
+      // Product-type: exact seeds vs doc (no query-side cluster expansion in compliance).
       let productTypeCompliance = 0;
+      let exactTypeScore = 0;
+      let siblingClusterScore = 0;
+      let parentHypernymScore = 0;
+      let intraFamilyPenalty = 0;
       if (desiredProductTypes.length > 0) {
-        const expandedDesired = expandProductTypesForQuery(desiredProductTypes);
-        const tax = scoreProductTypeTaxonomyMatch(expandedDesired, productTypes, {
-          sameClusterWeight: 0.82,
-        });
-        productTypeCompliance = tax.score;
+        const typeBreak = scoreRerankProductTypeBreakdown(desiredProductTypes, productTypes);
+        productTypeCompliance = typeBreak.combinedTypeCompliance;
+        exactTypeScore = typeBreak.exactTypeScore;
+        siblingClusterScore = typeBreak.siblingClusterScore;
+        parentHypernymScore = typeBreak.parentHypernymScore;
+        intraFamilyPenalty = typeBreak.intraFamilyPenalty;
       }
 
       const wcText = Number(hit?._source?.color_confidence_text);
@@ -1121,18 +1268,26 @@ export async function textSearch(
       const wtText = wText / wSum;
 
       let colorCompliance = 0;
-      if (desiredColors.length > 0) {
-        const cImg = colorListCompliance(desiredColors, imgColors, rerankColorMode);
-        const cText = colorListCompliance(desiredColors, textColors, rerankColorMode);
-        const cUnion = colorListCompliance(desiredColors, productColors, rerankColorMode);
-        if (imgColors.length > 0 && textColors.length > 0) {
-          colorCompliance = wtImg * cImg + wtText * cText;
-        } else if (imgColors.length > 0) {
-          colorCompliance = cImg;
-        } else if (textColors.length > 0) {
-          colorCompliance = cText;
+      let matchedColor: string | null = null;
+      let colorTier: "exact" | "family" | "bucket" | "none" = "none";
+      if (desiredColorsTier.length > 0) {
+        const tImg = tieredColorListCompliance(desiredColorsTier, imgTierRaw, rerankColorMode);
+        const tText = tieredColorListCompliance(desiredColorsTier, textTierRaw, rerankColorMode);
+        const tUnion = tieredColorListCompliance(desiredColorsTier, unionTierRaw, rerankColorMode);
+        matchedColor = tUnion.bestMatch ?? tImg.bestMatch ?? tText.bestMatch;
+        colorTier = tUnion.tier;
+        if (imgTierRaw.length > 0 && textTierRaw.length > 0) {
+          colorCompliance = wtImg * tImg.compliance + wtText * tText.compliance;
+        } else if (imgTierRaw.length > 0) {
+          colorCompliance = tImg.compliance;
+          matchedColor = tImg.bestMatch ?? matchedColor;
+          colorTier = tImg.tier;
+        } else if (textTierRaw.length > 0) {
+          colorCompliance = tText.compliance;
+          matchedColor = tText.bestMatch ?? matchedColor;
+          colorTier = tText.tier;
         } else {
-          colorCompliance = cUnion;
+          colorCompliance = tUnion.compliance;
         }
       }
 
@@ -1140,6 +1295,12 @@ export async function textSearch(
         desiredProductTypes.length > 0
           ? scoreCrossFamilyTypePenalty(desiredProductTypes, productTypes)
           : 0;
+
+      const audienceCompliance = scoreAudienceCompliance(
+        queryAgeGroup,
+        queryGenderForAudience ?? merged.gender,
+        hit,
+      );
 
       const normDoc = Number(hit?._source?.norm_confidence);
       const docTrustNorm =
@@ -1152,22 +1313,34 @@ export async function textSearch(
       const rerankScore =
         productTypeCompliance * 1000 * docTrust +
         colorCompliance * 100 * docTrust +
+        audienceCompliance * 80 * docTrust +
         similarity * 10 -
         crossFamilyPenalty * crossFamilyPenaltyWeight;
 
       const finalRelevance01 = computeFinalRelevance01({
         hasTypeIntent: desiredProductTypes.length > 0,
         productTypeCompliance,
+        exactTypeScore,
         hasColorIntent: desiredColors.length > 0,
         colorCompliance,
         similarity,
         crossFamilyPenalty,
+        hasAudienceIntent,
+        audienceCompliance,
       });
 
       complianceById.set(idStr, {
         productTypeCompliance,
+        exactTypeScore,
+        siblingClusterScore,
+        parentHypernymScore,
+        intraFamilyPenalty,
         colorCompliance,
+        matchedColor,
+        colorTier,
         crossFamilyPenalty,
+        audienceCompliance,
+        osSimilarity01: similarity,
         rerankScore,
         finalRelevance01,
       });
@@ -1188,14 +1361,25 @@ export async function textSearch(
       .map((h: any) => String(h._source.product_id))
       .filter((id) => (complianceById.get(id)?.finalRelevance01 ?? 0) >= finalAcceptMin);
 
-    const belowRelevanceThreshold = hits.length > 0 && thresholdPassedIds.length === 0;
+    const relevanceGateSoft = config.search.relevanceGateMode === "soft";
+    const sortedIds = sortedByRelevance.map((h: any) => String(h._source.product_id));
+    const belowRelevanceThreshold =
+      hits.length > 0 &&
+      thresholdPassedIds.length === 0 &&
+      !relevanceGateSoft;
 
     // Hard precision gate for explicit color queries (within relevance-threshold set).
-    let finalProductIds = [...thresholdPassedIds];
+    let finalProductIds = [
+      ...(relevanceGateSoft ? sortedIds : thresholdPassedIds),
+    ];
     if (desiredColors.length > 0) {
+      const strictColorPost = String(process.env.SEARCH_COLOR_POSTFILTER_STRICT ?? "1").toLowerCase() !== "0";
+      const maxImgConfHits = Math.max(0, ...hits.map((h: any) => Number(h?._source?.color_confidence_image) || 0));
       const compliantIds = finalProductIds.filter((id) => (complianceById.get(id)?.colorCompliance ?? 0) > 0);
-      if (compliantIds.length > 0) {
+      if (strictColorPost && compliantIds.length > 0) {
         finalProductIds = compliantIds;
+      } else if (strictColorPost && compliantIds.length === 0 && maxImgConfHits < 0.42) {
+        // Weak image color signal — keep full candidate list to avoid false negatives
       }
     }
 
@@ -1220,8 +1404,19 @@ export async function textSearch(
         finalRelevance01: compliance?.finalRelevance01,
         explain: compliance
           ? {
+              exactTypeScore: compliance.exactTypeScore,
+              siblingClusterScore: compliance.siblingClusterScore,
+              parentHypernymScore: compliance.parentHypernymScore,
+              intraFamilyPenalty: compliance.intraFamilyPenalty,
               productTypeCompliance: compliance.productTypeCompliance,
+              lexicalScore: compliance.osSimilarity01,
+              semanticScore: compliance.osSimilarity01,
+              globalScore: compliance.osSimilarity01,
+              colorScore: compliance.colorCompliance,
+              matchedColor: compliance.matchedColor ?? undefined,
+              colorTier: compliance.colorTier,
               colorCompliance: compliance.colorCompliance,
+              audienceCompliance: compliance.audienceCompliance,
               crossFamilyPenalty: compliance.crossFamilyPenalty,
               desiredProductTypes,
               desiredColors,
@@ -1274,72 +1469,85 @@ export async function textSearch(
     results = dedupeSearchResults(results as any, { imageHammingMax: 10 }) as ProductResult[];
 
     const totalAboveThreshold = results.length;
-    results = results.slice(offset, offset + limit);
 
-    // Optional ML tie-breaker (Phase 3 / optional) — runs on the returned page only.
     const useXgbRanker = String(process.env.SEARCH_USE_XGB_RANKER ?? "").toLowerCase() === "true";
-    const constraintsApplied = desiredProductTypes.length > 0 || desiredColors.length > 0;
-    if (useXgbRanker && constraintsApplied && results.length > 3) {
+    const xgbFullRecall = config.search.xgbRerankFullRecall;
+
+    const runXgbTieBreakOnSlice = async (rankSlice: ProductResult[]): Promise<ProductResult[]> => {
+      if (!useXgbRanker || rankSlice.length <= 3) return rankSlice;
       try {
         const rankerOk = await isRankerAvailable();
-        if (rankerOk) {
-          // Use the best candidate as a "base context" for category/color compatibility features.
-          const baseProduct = results[0];
-          const basePriceCents = baseProduct.price_cents || 1;
+        if (!rankerOk) return rankSlice;
 
-          const baseCtx = {
-            id: parseInt(baseProduct.id, 10) || 0,
-            title: baseProduct.title || "",
-            brand: baseProduct.brand,
-            category: baseProduct.category,
-            color: desiredColors[0] ?? baseProduct.color,
-            vendorId: baseProduct.vendor_id,
-            priceCents: basePriceCents,
-          };
+        const baseProduct = rankSlice[0];
+        const basePriceCents = baseProduct.price_cents || 1;
 
-          const candidates = results.map((p: any, idx: number) => ({
-            candidateId: String(p.id),
-            clipSim: 0,
-            textSim: typeof p.similarity_score === "number" ? p.similarity_score : 0,
-            opensearchScore: typeof p.similarity_score === "number" ? p.similarity_score : 0,
-            pHashDist: 64,
-            source: "text" as const,
-            product: p,
-            // `candidate_score` is computed internally in feature builder
-            // (via clipSim/textSim).
-          }));
+        const baseCtx = {
+          id: parseInt(baseProduct.id, 10) || 0,
+          title: baseProduct.title || "",
+          brand: baseProduct.brand,
+          category: baseProduct.category,
+          color: desiredColors[0] ?? baseProduct.color,
+          vendorId: baseProduct.vendor_id,
+          priceCents: basePriceCents,
+        };
 
-          const featureRows = buildFeatureRows(baseCtx as any, candidates as any).map((r: any) => r.featureRow);
-          const rankerResult = await predictWithFallback(featureRows);
-          const mlScores = rankerResult.scores;
+        const candidates = rankSlice.map((p: any) => ({
+          candidateId: String(p.id),
+          clipSim: 0,
+          textSim: typeof p.similarity_score === "number" ? p.similarity_score : 0,
+          opensearchScore: typeof p.similarity_score === "number" ? p.similarity_score : 0,
+          pHashDist: 64,
+          source: "text" as const,
+          product: p,
+        }));
 
-          const mlScoreMap = new Map<string, number>();
-          results.forEach((p: any, i: number) => {
-            const score = mlScores[i] ?? 0;
-            p.mlRerankScore = score;
-            mlScoreMap.set(String(p.id), score);
-          });
+        const featureRows = buildFeatureRows(baseCtx as any, candidates as any).map((r: any) => r.featureRow);
+        const rankerResult = await predictWithFallback(featureRows);
+        const mlScores = rankerResult.scores;
 
-          // Resort within the deterministic compliance buckets.
-          results.sort((a: any, b: any) => {
-            const aPen = a.explain?.crossFamilyPenalty ?? 0;
-            const bPen = b.explain?.crossFamilyPenalty ?? 0;
-            if (aPen !== bPen) return aPen - bPen;
+        const mlScoreMap = new Map<string, number>();
+        rankSlice.forEach((p: any, i: number) => {
+          const score = mlScores[i] ?? 0;
+          p.mlRerankScore = score;
+          mlScoreMap.set(String(p.id), score);
+        });
 
-            const aType = a.explain?.productTypeCompliance ?? 0;
-            const bType = b.explain?.productTypeCompliance ?? 0;
-            if (bType !== aType) return bType - aType;
+        const sorted = [...rankSlice];
+        sorted.sort((a: any, b: any) => {
+          const aPen = a.explain?.crossFamilyPenalty ?? 0;
+          const bPen = b.explain?.crossFamilyPenalty ?? 0;
+          if (aPen !== bPen) return aPen - bPen;
 
-            const aColor = a.explain?.colorCompliance ?? 0;
-            const bColor = b.explain?.colorCompliance ?? 0;
-            if (bColor !== aColor) return bColor - aColor;
+          const aType = a.explain?.productTypeCompliance ?? 0;
+          const bType = b.explain?.productTypeCompliance ?? 0;
+          if (bType !== aType) return bType - aType;
 
-            return (mlScoreMap.get(String(b.id)) ?? 0) - (mlScoreMap.get(String(a.id)) ?? 0);
-          });
-        }
+          const aColor = a.explain?.colorCompliance ?? 0;
+          const bColor = b.explain?.colorCompliance ?? 0;
+          if (bColor !== aColor) return bColor - aColor;
+
+          return (mlScoreMap.get(String(b.id)) ?? 0) - (mlScoreMap.get(String(a.id)) ?? 0);
+        });
+        return sorted;
       } catch (err) {
         console.warn("[textSearch] XGB ranker tie-breaker failed, keeping deterministic order:", err);
+        return rankSlice;
       }
+    };
+
+    if (xgbFullRecall && useXgbRanker && results.length > 3) {
+      const cap = config.search.xgbFullRecallMax;
+      const headEnd = Math.min(results.length, Math.max(cap, offset + limit));
+      const head = results.slice(0, headEnd);
+      const rerankedHead = await runXgbTieBreakOnSlice(head);
+      results = [...rerankedHead, ...results.slice(headEnd)];
+    }
+
+    results = results.slice(offset, offset + limit);
+
+    if (!xgbFullRecall && useXgbRanker && results.length > 3) {
+      results = await runXgbTieBreakOnSlice(results);
     }
 
     // Related products (optional)
@@ -1684,13 +1892,16 @@ export async function multiVectorWeightedSearch(
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Merge caller-supplied filters with QueryAST-extracted entities.
- *  Caller-supplied values always win; AST fills in the blanks. */
+ *  Caller-supplied values always win; AST fills in the blanks.
+ *  Only the first AST category is merged here; additional `ast.entities.categories` are still
+ *  used for soft boosts in `textSearch` when product-type constraints apply. */
 function mergeFilters(caller: SearchFilters | undefined, ast: QueryAST): SearchFilters {
   return {
     brand:    caller?.brand    ?? ast.entities.brands[0],
     category: caller?.category ?? ast.entities.categories[0],
     color:    caller?.color    ?? ast.entities.colors[0],
     gender:   caller?.gender   ?? ast.entities.gender,
+    ageGroup: caller?.ageGroup ?? ast.entities.ageGroup,
     minPrice: caller?.minPrice ?? ast.filters.priceRange?.min,
     maxPrice: caller?.maxPrice ?? ast.filters.priceRange?.max,
     size:     caller?.size,
@@ -1714,6 +1925,7 @@ function summarizeAST(ast: QueryAST): QueryASTSummary {
       colors: ast.entities.colors,
       productTypes: ast.entities.productTypes ?? [],
       gender: ast.entities.gender,
+      ageGroup: ast.entities.ageGroup,
     },
     corrections: ast.corrections.map(mapCorrection),
     appliedCorrections: ast.appliedCorrections?.length

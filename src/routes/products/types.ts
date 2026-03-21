@@ -101,6 +101,10 @@ export interface ProductResult {
   explain?: {
     productTypeCompliance?: number; // 0..1
     colorCompliance?: number; // 0..1
+    colorScore?: number;
+    globalScore?: number;
+    matchedColor?: string;
+    colorTier?: "exact" | "family" | "bucket" | "none";
     desiredProductTypes?: string[];
     desiredColors?: string[];
     colorMode?: "any" | "all";

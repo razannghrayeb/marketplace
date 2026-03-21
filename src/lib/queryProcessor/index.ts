@@ -67,6 +67,7 @@ import {
 } from "./intent";
 
 import { getTextEmbedding, isClipAvailable, isTextSearchAvailable } from "../image";
+import { extractAttributesSync } from "../search/attributeExtractor";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -248,6 +249,7 @@ async function runPipeline(raw: string, opts: PipelineOpts): Promise<QueryAST> {
 
   // Stage 8: Extract entities & filters — from corrected searchQuery only
   const extracted = extractFilters(searchQuery);
+  mergeColorPhrasesFromAttributeRules(searchQuery, extracted);
   applyLLMEntities(corrections, extracted);
   const entities = toEntities(extracted);
   const filters  = toFilters(extracted);
@@ -465,27 +467,53 @@ async function tryLLMRewrite(
   };
 }
 
+/**
+ * Merge multi-word / hyphenated fashion colors from the same rule list as product titles
+ * (e.g. "off-white dress", "navy blue jacket") into filters — complements per-token extractFilters.
+ */
+function mergeColorPhrasesFromAttributeRules(searchQuery: string, extracted: ExtractedFilters): void {
+  const { attributes } = extractAttributesSync(searchQuery);
+  const fromRules = attributes.colors?.length
+    ? attributes.colors.map((c) => String(c).toLowerCase())
+    : attributes.color
+      ? [String(attributes.color).toLowerCase()]
+      : [];
+  if (fromRules.length === 0) return;
+  if (!extracted.colors) extracted.colors = [];
+  for (const c of fromRules) {
+    if (!extracted.colors.includes(c)) extracted.colors.push(c);
+  }
+  if (!extracted.color) extracted.color = extracted.colors[0];
+}
+
 /** Extract gender / color / brand / category from the normalized text */
 function extractFilters(query: string): ExtractedFilters {
   const f: ExtractedFilters = {};
   const dict = getDictionaries();
   const words = query.split(/\s+/);
 
-  // Gender
+  // Age group first so "girls dress" → kids, not women.
+  if (/\b(baby|infant|newborn)\b/gi.test(query)) f.ageGroup = "baby";
+  else if (/\b(toddler)\b/gi.test(query)) f.ageGroup = "kids";
+  else if (/\b(teen|youth)\b/gi.test(query)) f.ageGroup = "teen";
+  else if (/\b(kids?|children|child|boys?|girls?)\b/gi.test(query)) f.ageGroup = "kids";
+  else if (/\b(أطفال|للأطفال)\b/g.test(query)) f.ageGroup = "kids";
+
+  // Adult / unisex gender (do not map boys/girls to men/women — those are age signals)
   const genderRules: Array<{ pattern: RegExp; gender: string }> = [
-    { pattern: /\b(mens?|male|boys?)\b/gi,                  gender: "men"    },
-    { pattern: /\b(womens?|female|ladies|lady|girls?)\b/gi,  gender: "women"  },
-    { pattern: /\b(kids?|children|child)\b/gi,               gender: "kids"   },
-    { pattern: /\b(unisex|gender\s*neutral)\b/gi,            gender: "unisex" },
-    { pattern: /\b(رجالي|للرجال)\b/g,                        gender: "men"    },
-    { pattern: /\b(نسائي|للنساء|حريمي)\b/g,                  gender: "women"  },
-    { pattern: /\b(أطفال|للأطفال)\b/g,                       gender: "kids"   },
-    { pattern: /\b(rijali|rejali)\b/gi,                      gender: "men"    },
-    { pattern: /\b(nisa2i|nisai|nisaei|7arimi)\b/gi,         gender: "women"  },
-    { pattern: /\b(atfal)\b/gi,                              gender: "kids"   },
+    { pattern: /\b(mens?|male|men)\b/gi, gender: "men" },
+    { pattern: /\b(womens?|female|ladies|lady|women)\b/gi, gender: "women" },
+    { pattern: /\b(unisex|gender\s*neutral)\b/gi, gender: "unisex" },
+    { pattern: /\b(رجالي|للرجال)\b/g, gender: "men" },
+    { pattern: /\b(نسائي|للنساء|حريمي)\b/g, gender: "women" },
+    { pattern: /\b(rijali|rejali)\b/gi, gender: "men" },
+    { pattern: /\b(nisa2i|nisai|nisaei|7arimi)\b/gi, gender: "women" },
   ];
   for (const { pattern, gender } of genderRules) {
-    if (pattern.test(query)) { f.gender = gender; break; }
+    if (pattern.test(query)) {
+      f.gender = gender;
+      break;
+    }
   }
 
   // Color — try exact match first, then fuzzy match for typos
@@ -595,8 +623,8 @@ function extractFilters(query: string): ExtractedFilters {
     blazers: "blazer",
     sweater: "sweater",
     sweaters: "sweater",
-    top: "tshirt",
-    tops: "tshirt",
+    top: "top",
+    tops: "tops",
     shirt: "tshirt",
     shirts: "tshirt",
     blouse: "tshirt",
@@ -691,7 +719,7 @@ function extractFilters(query: string): ExtractedFilters {
       caftan: "dresses", jalabiya: "dresses", thobe: "dresses", thobes: "dresses",
       dishdasha: "dresses", bisht: "dresses",
       jacket: "outerwear", jackets: "outerwear", coat: "outerwear", coats: "outerwear",
-      blazer: "outerwear", blazers: "outerwear", cardigan: "outerwear",
+      cardigan: "outerwear",
       parka: "outerwear", windbreaker: "outerwear",
       shoe: "footwear", shoes: "footwear", sneaker: "footwear", sneakers: "footwear",
       boot: "footwear", boots: "footwear", sandal: "footwear", sandals: "footwear",
@@ -733,6 +761,7 @@ function toEntities(f: ExtractedFilters): QueryEntities {
     patterns:   [],
     sizes:      [],
     gender:     f.gender,
+    ageGroup:   f.ageGroup,
   };
 }
 
@@ -746,6 +775,7 @@ function toFilters(f: ExtractedFilters): QueryFilters {
     colorMode:  f.colorMode,
     material:   f.material ? [f.material] : undefined,
     gender:     f.gender,
+    ageGroup:   f.ageGroup,
   };
 }
 
@@ -813,7 +843,7 @@ function mapIntentResult(
     case "outfit_completion": type = "completion";   desc = "Outfit completion";          break;
     case "trending_search":   type = "exploration";  desc = "Trending / popular items";   break;
     case "product_search":
-      if (entities.gender || entities.colors.length || entities.categories.length) {
+      if (entities.gender || entities.ageGroup || entities.colors.length || entities.categories.length) {
         type = "filter"; desc = "Filtered product search";
       } else {
         type = "search"; desc = "General product search";
@@ -862,7 +892,7 @@ const CATEGORY_SYNONYMS: Record<string, string[]> = {
   sneaker: ["sneakers", "trainers", "shoes"],
   boots: ["boot", "ankle boots", "knee boots", "combat boots"],
   bag: ["handbag", "purse", "tote", "backpack", "clutch"],
-  jacket: ["coat", "blazer", "outerwear", "bomber"],
+  jacket: ["coat", "outerwear", "bomber"],
   coat: ["jacket", "outerwear", "parka", "trench"],
   hoodie: ["hooded sweatshirt", "pullover hoodie", "sweatshirt"],
   sweater: ["pullover", "jumper", "knitwear", "cardigan"],

@@ -54,7 +54,8 @@ import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash
 import { attributeEmbeddings } from "../src/lib/search/attributeEmbeddings";
 import { buildProductSearchDocument } from "../src/lib/search/searchDocument";
 import { loadProductSearchEnrichmentByIds } from "../src/lib/search/loadProductSearchEnrichment";
-import { extractDominantColorNames } from "../src/lib/color/dominantColor";
+import { extractGarmentFashionColors } from "../src/lib/color/garmentColorPipeline";
+import type { PixelBox } from "../src/lib/image/processor";
 import { promises as fs } from "fs";
 
 // ============================================================================
@@ -271,8 +272,34 @@ async function reindexProduct(
       return true;
     }
 
+    let garmentBox: PixelBox | null = null;
+    try {
+      const det = await reindexPg.query(
+        `SELECT d.box_x1, d.box_y1, d.box_x2, d.box_y2
+         FROM product_image_detections d
+         INNER JOIN product_images pi ON pi.id = d.product_image_id
+         WHERE pi.product_id = $1 AND pi.is_primary = true
+           AND d.box_x1 IS NOT NULL AND d.box_y2 IS NOT NULL
+           AND COALESCE(d.confidence, 0) >= 0.22
+         ORDER BY COALESCE(d.area_ratio, 0) DESC NULLS LAST, d.id DESC
+         LIMIT 1`,
+        [id],
+      );
+      const r = det.rows[0];
+      if (r) {
+        garmentBox = {
+          x1: Number(r.box_x1),
+          y1: Number(r.box_y1),
+          x2: Number(r.box_x2),
+          y2: Number(r.box_y2),
+        };
+      }
+    } catch {
+      garmentBox = null;
+    }
+
     // Generate global embedding, attribute embeddings, and hash in parallel
-    const [embedding, embeddingGarment, attrEmbeddings, ph, dominantColors, enrichMap] = await Promise.all([
+    const [embedding, embeddingGarment, attrEmbeddings, ph, garmentColorAnalysis, enrichMap] = await Promise.all([
       processImageForEmbedding(buf),
       processImageForGarmentEmbedding(buf).catch(() => [] as number[]),
       attributeEmbeddings.generateAllAttributeEmbeddings(buf).catch((err: any) => {
@@ -280,7 +307,7 @@ async function reindexProduct(
         return null;
       }),
       computePHash(buf),
-      extractDominantColorNames(buf).catch(() => []),
+      extractGarmentFashionColors(buf, { box: garmentBox }).catch(() => null),
       loadProductSearchEnrichmentByIds([id]),
     ]);
     const enrichRow = enrichMap.get(id);
@@ -301,7 +328,8 @@ async function reindexProduct(
       lastSeenAt: last_seen,
       embedding,
       embeddingGarment: embeddingGarment.length > 0 ? embeddingGarment : null,
-      detectedColors: dominantColors,
+      detectedColors: garmentColorAnalysis?.paletteCanonical ?? [],
+      garmentColorAnalysis,
       enrichment: enrichRow
         ? {
             norm_confidence: enrichRow.norm_confidence,

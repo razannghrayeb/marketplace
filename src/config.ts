@@ -116,6 +116,28 @@ export const config = {
     finalAcceptMin: finiteEnvNumber(process.env.SEARCH_FINAL_ACCEPT_MIN, 0.6, 0.35, 0.95),
     filterHardMinConfidence: finiteEnvNumber(process.env.SEARCH_FILTER_HARD_MIN_CONFIDENCE, 0.55, 0.35, 0.95),
     domainEmbeddingRejectBelow: finiteEnvNumber(process.env.SEARCH_DOMAIN_EMBEDDING_REJECT_BELOW, 0.3, 0.15, 0.55),
+    /** max = divide by top hit score (default); tanh = Math.tanh(raw/scale) for calibration across queries */
+    similarityNormalize:
+      String(process.env.SEARCH_SIMILARITY_NORMALIZE ?? "max").toLowerCase() === "tanh"
+        ? ("tanh" as const)
+        : ("max" as const),
+    similarityTanhScale: finiteEnvNumber(process.env.SEARCH_SIMILARITY_TANH_SCALE, 10, 1, 50),
+    /** hard = drop hits below SEARCH_FINAL_ACCEPT_MIN; soft = keep reranked order, no min gate */
+    relevanceGateMode:
+      String(process.env.SEARCH_RELEVANCE_GATE_MODE ?? "hard").toLowerCase() === "soft"
+        ? ("soft" as const)
+        : ("hard" as const),
+    /**
+     * With SEARCH_USE_XGB_RANKER: score a recall prefix before pagination (default on).
+     * Set SEARCH_XGB_RERANK_FULL_RECALL=false for legacy page-only tie-break (after slice).
+     */
+    xgbRerankFullRecall: (() => {
+      const v = String(process.env.SEARCH_XGB_RERANK_FULL_RECALL ?? "").toLowerCase().trim();
+      if (v === "0" || v === "false" || v === "off" || v === "no") return false;
+      return true;
+    })(),
+    /** Hard cap on XGB batch size; head window is at least max(this, offset+limit) when full-recall is on. */
+    xgbFullRecallMax: finiteEnvNumber(process.env.SEARCH_XGB_FULL_RECALL_MAX, 300, 20, 2000),
   },
   tryon: {
     // Google Cloud Vertex AI — Virtual Try-On (publishers/google/models/...:predict)

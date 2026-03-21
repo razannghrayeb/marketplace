@@ -13,6 +13,7 @@
  */
 
 import type { QueryEntities, ExtractedFilters } from "./types";
+import { FASHION_CANONICAL_COLORS } from "../color/colorCanonical";
 
 export interface ComplexConstraint {
   type: "price" | "brand" | "category" | "color" | "style" | "comparison" | "similarity";
@@ -65,24 +66,39 @@ const PATTERNS = {
   },
 };
 
-// Color tokens for complex query extraction
-const KNOWN_COLORS: string[] = [
-  "black",
-  "white",
-  "red",
-  "blue",
-  "green",
-  "yellow",
-  "pink",
-  "purple",
-  "orange",
-  "brown",
-  "gray",
-  "grey",
-  "beige",
-  "navy",
-  "cream",
+// Color tokens for complex query extraction (longest first for word-boundary matches)
+const EXTRA_COMPLEX_QUERY_COLORS = [
+  "multicolour",
+  "violet",
+  "maroon",
+  "wine",
+  "burgundy",
+  "charcoal",
+  "camel",
+  "ivory",
+  "khaki",
+  "sage",
+  "mint",
+  "blush",
+  "rose",
+  "coral",
+  "peach",
+  "plum",
+  "lavender",
+  "lilac",
+  "mauve",
+  "fuchsia",
+  "magenta",
+  "emerald",
+  "jade",
+  "rust",
+  "copper",
+  "bronze",
+  "nude",
 ];
+const KNOWN_COLORS: string[] = [
+  ...new Set([...FASHION_CANONICAL_COLORS, ...EXTRA_COMPLEX_QUERY_COLORS]),
+].sort((a, b) => b.length - a.length);
 
 // ─── Main Parser ─────────────────────────────────────────────────────────────
 
@@ -247,8 +263,9 @@ function extractColorConstraints(query: string): ComplexConstraint[] {
   const constraints: ComplexConstraint[] = [];
 
   for (const color of KNOWN_COLORS) {
+    const escaped = color.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     // Word-boundary match to reduce accidental substring hits
-    const regex = new RegExp(`\\b${color}\\b`, "gi");
+    const regex = new RegExp(`\\b${escaped}\\b`, "gi");
     let match: RegExpExecArray | null;
 
     // Reset lastIndex before each new regex usage

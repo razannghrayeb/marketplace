@@ -1,9 +1,32 @@
 import { extractAttributesSync } from "./attributeExtractor";
+import type { GarmentColorAnalysis } from "../color/garmentColorPipeline";
 import { inferCategoryCanonical } from "./categoryFilter";
 import { expandProductTypesForIndexing } from "./productTypeTaxonomy";
 import { canonicalTypeIdsToProductTypeTokens } from "./loadProductSearchEnrichment";
 
 const LBP_TO_USD = 89000;
+
+/** Indexed audience signals (canonical enums) derived from title + extracted gender. */
+function inferAudienceFromTitle(
+  title: string,
+  attrGender: string | null,
+): { audience_gender: string | null; age_group: string } {
+  const t = (title || "").toLowerCase();
+  let age_group = "adult";
+  if (/\b(baby|infant|newborn)\b/.test(t)) age_group = "baby";
+  else if (/\b(toddler)\b/.test(t)) age_group = "kids";
+  else if (/\b(teen|youth)\b/.test(t)) age_group = "teen";
+  else if (/\b(kids?|children|child|boys?|girls?)\b/.test(t)) age_group = "kids";
+
+  let audience_gender: string | null = null;
+  const ag = attrGender ? String(attrGender).toLowerCase().trim() : "";
+  if (ag === "men" || ag === "women" || ag === "unisex") audience_gender = ag;
+  else if (/\b(men|mens|male)\b/.test(t)) audience_gender = "men";
+  else if (/\b(women|womens|female|ladies)\b/.test(t)) audience_gender = "women";
+  else if (/\b(unisex)\b/.test(t)) audience_gender = "unisex";
+
+  return { audience_gender, age_group };
+}
 
 function toLowerTrim(value: unknown): string | null {
   if (value === null || value === undefined) return null;
@@ -97,9 +120,8 @@ export function extractProductTypesFromTitle(title: string): string[] {
     sweaters: "sweater",
     blazer: "blazer",
     blazers: "blazer",
-    /** Avoid collapsing "tops" into tshirt — too noisy for type matching */
     top: "top",
-    tops: "top",
+    tops: "tops",
     blouse: "tshirt",
     blouses: "tshirt",
     shirt: "tshirt",
@@ -174,6 +196,8 @@ export interface BuildSearchDocumentInput {
   embeddingGarment?: number[] | null;
   images?: Array<{ url?: string | null; p_hash?: string | null; is_primary?: boolean | null }>;
   detectedColors?: string[] | null;
+  /** When set, overrides coarse `detectedColors` for canonical fields and confidence. */
+  garmentColorAnalysis?: GarmentColorAnalysis | null;
   enrichment?: BuildSearchDocumentEnrichmentInput | null;
   attributeEmbeddings?: {
     color?: number[];
@@ -187,18 +211,25 @@ export interface BuildSearchDocumentInput {
 export function buildProductSearchDocument(input: BuildSearchDocumentInput): Record<string, any> {
   const { attributes, confidence: attrConfidence } = extractAttributesSync(input.title || "");
 
-  const normalizedDetectedColors = normalizeArray(input.detectedColors ?? undefined);
+  const analysis = input.garmentColorAnalysis ?? null;
+  const normalizedDetectedFromLegacy = normalizeArray(input.detectedColors ?? undefined);
+  const normalizedDetectedColors = analysis
+    ? normalizeArray(analysis.paletteCanonical)
+    : normalizedDetectedFromLegacy;
   const normalizedTitleColors = normalizeArray(
     attributes.colors && attributes.colors.length > 0
       ? attributes.colors
       : attributes.color
         ? [attributes.color]
-        : []
+        : [],
   );
   const colorConfidenceText =
     normalizedTitleColors.length > 0 ? Math.max(0.35, attrConfidence.color ?? 0.52) : 0;
-  const colorConfidenceImage =
-    normalizedDetectedColors.length > 0 ? Math.min(0.92, 0.58 + 0.12 * normalizedDetectedColors.length) : 0;
+  const colorConfidenceImage = analysis
+    ? Math.max(0.2, Math.min(0.95, analysis.confidencePrimary))
+    : normalizedDetectedColors.length > 0
+      ? Math.min(0.92, 0.58 + 0.12 * normalizedDetectedColors.length)
+      : 0;
 
   // Merge title + image for backward-compatible `attr_colors` / BM25 / legacy filters.
   const normalizedColors: string[] = [];
@@ -258,6 +289,8 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
   const categoryCanonical = inferCategoryCanonical(input.category ?? null, input.title || "");
 
   const primaryAttrColor = toLowerTrim(attrColorPrimary);
+  const attrGenderRaw = toLowerTrim(attributes.gender);
+  const audience = inferAudienceFromTitle(input.title || "", attrGenderRaw);
 
   const doc: Record<string, any> = {
     product_id: String(input.productId),
@@ -289,11 +322,18 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
     attr_colors_text: normalizedTitleColors,
     attr_colors_image: normalizedDetectedColors,
     attr_color_source: attrColorSource,
+    color_primary_canonical: analysis ? analysis.primaryCanonical : toLowerTrim(attrColorPrimary),
+    color_secondary_canonical: analysis?.secondaryCanonical ?? null,
+    color_accent_canonical: analysis?.accentCanonical ?? null,
+    color_palette_canonical: analysis ? analysis.paletteCanonical : normalizedDetectedColors,
+    color_confidence_primary: analysis ? analysis.confidencePrimary : null,
     attr_material: normalizedMaterials[0] ?? null,
     attr_materials: normalizedMaterials,
     attr_fit: toLowerTrim(attributes.fit),
     attr_style: toLowerTrim(attributes.style),
-    attr_gender: toLowerTrim(attributes.gender),
+    attr_gender: attrGenderRaw,
+    audience_gender: audience.audience_gender,
+    age_group: audience.age_group,
     attr_pattern: toLowerTrim(attributes.pattern),
     attr_sleeve: toLowerTrim(attributes.sleeve),
     attr_neckline: toLowerTrim(attributes.neckline),

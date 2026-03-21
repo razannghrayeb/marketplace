@@ -82,10 +82,13 @@ export {
   expandProductTypesForIndexing,
   scoreProductTypeTaxonomyMatch,
   scoreCrossFamilyTypePenalty,
+  scoreRerankProductTypeBreakdown,
+  scoreHypernymDocMatch,
   crossFamilyTypePenaltyEnabled,
   PRODUCT_TYPE_CLUSTERS,
   extractLexicalProductTypeSeeds,
   getProductTypePhrasesLongestFirst,
+  type RerankTypeBreakdown,
 } from "./productTypeTaxonomy";
 
 export { loadProductSearchEnrichmentByIds, canonicalTypeIdsToProductTypeTokens } from "./loadProductSearchEnrichment";
