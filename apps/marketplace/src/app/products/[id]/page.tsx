@@ -37,11 +37,11 @@ export default function ProductDetailPage() {
   const { data: variantsData } = useQuery({
     queryKey: ['variants', id],
     queryFn: async () => {
-      const res = await api.post<{ data?: Record<string, { minPriceCents: number; maxPriceCents: number; variants: unknown[] }> }>(
+      const res = await api.post<Record<string, { minPriceCents: number; maxPriceCents: number; variants: unknown[] }>>(
         endpoints.products.variantsBatch,
         { productIds: [id] }
       )
-      return res.data
+      return (res as { data?: Record<string, { minPriceCents: number; maxPriceCents: number; variants: unknown[] }> }).data
     },
     enabled: !!id && !!data,
   })
