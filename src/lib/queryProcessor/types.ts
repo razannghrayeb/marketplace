@@ -44,6 +44,8 @@ export interface Correction {
 
 export interface ExtractedFilters {
   gender?: string;
+  /** Canonical: kids | baby | teen | adult */
+  ageGroup?: string;
   // Single color (kept for backward compatibility)
   color?: string;
   // Multi-color support
@@ -85,6 +87,8 @@ export interface QueryEntities {
   patterns: string[];
   sizes: string[];
   gender?: string;
+  /** Canonical: kids | baby | teen | adult */
+  ageGroup?: string;
   occasion?: string;
   season?: string;
 }
@@ -100,6 +104,7 @@ export interface QueryFilters {
   colorMode?: "any" | "all";
   material?: string[];
   gender?: string;
+  ageGroup?: string;
 }
 
 export interface QueryTokens {

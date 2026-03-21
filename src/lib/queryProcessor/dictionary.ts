@@ -148,8 +148,8 @@ const ATTRIBUTE_DATA: Array<{
   { name: "loose", type: "fit", aliases: ["loose fit", "relaxed", "oversized"], arabic: "واسع", arabizi: "wase3", popularity: 0.75 },
   
   // Genders
-  { name: "men", type: "gender", aliases: ["mens", "male", "man", "boys", "boy"], arabic: "رجالي", arabizi: "rijali", popularity: 0.90 },
-  { name: "women", type: "gender", aliases: ["womens", "female", "woman", "ladies", "lady", "girls", "girl"], arabic: "نسائي", arabizi: "nisa2i", popularity: 0.90 },
+  { name: "men", type: "gender", aliases: ["mens", "male", "man"], arabic: "رجالي", arabizi: "rijali", popularity: 0.90 },
+  { name: "women", type: "gender", aliases: ["womens", "female", "woman", "ladies", "lady"], arabic: "نسائي", arabizi: "nisa2i", popularity: 0.90 },
   { name: "kids", type: "gender", aliases: ["children", "child", "boys", "girls", "unisex kids"], arabic: "أطفال", arabizi: "atfal", popularity: 0.75 },
   { name: "unisex", type: "gender", aliases: ["gender neutral"], arabic: "للجنسين", arabizi: "liljinsain", popularity: 0.65 },
   

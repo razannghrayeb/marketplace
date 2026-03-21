@@ -252,6 +252,10 @@ export function isProductTypeDominantQuery(ast: QueryAST, rawQuery: string): boo
 /**
  * Use hard category filter (AST) when caller did not pin category and either env strict mode
  * or heuristics say the query is category-dominant.
+ *
+ * When `SEARCH_STRICT_CATEGORY_DEFAULT=1`, any merged AST category becomes a hard filter
+ * (unless caller pinned category or a product-type constraint blocks it) — not only
+ * category-dominant queries. Prefer leaving the env off unless you want that behavior.
  */
 export function shouldHardFilterAstCategory(
   ast: QueryAST,

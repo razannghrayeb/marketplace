@@ -29,6 +29,7 @@ import {
   getQueryEmbedding,
   type QueryAST,
 } from "../../lib/queryProcessor";
+import { expandColorTermsForFilter } from "../../lib/color/queryColorFilter";
 
 // ============================================================================
 // Types
@@ -208,6 +209,11 @@ function imageSoftCategoryEnv(): boolean {
   return v === "1" || v === "true";
 }
 
+function imageGenderSoftEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_GENDER_SOFT ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
 function buildDesiredCatalogTermSet(aisles: string[]): Set<string> {
   const s = new Set<string>();
   for (const a of aisles) {
@@ -246,6 +252,7 @@ export async function searchByImageWithSimilarity(
 ): Promise<SearchResultWithRelated> {
   const {
     imageEmbedding,
+    imageBuffer,
     filters = {},
     page = 1,
     limit = 20,
@@ -304,17 +311,50 @@ export async function searchByImageWithSimilarity(
   if (filters.vendorId) filter.push({ term: { vendor_id: String(filters.vendorId) } });
   const filtersAny = filters as { gender?: string; color?: string };
   if (filtersAny.gender) {
-    filter.push({ term: { attr_gender: String(filtersAny.gender).toLowerCase() } });
+    const g = String(filtersAny.gender).toLowerCase();
+    if (imageGenderSoftEnv()) {
+      filter.push({
+        bool: {
+          should: [{ term: { attr_gender: g } }, { match_phrase: { title: g } }],
+          minimum_should_match: 1,
+        },
+      });
+    } else {
+      filter.push({ term: { attr_gender: g } });
+    }
   }
   if (filtersAny.color) {
-    filter.push({ term: { attr_color: String(filtersAny.color).toLowerCase() } });
+    const expanded = expandColorTermsForFilter(String(filtersAny.color));
+    filter.push({
+      bool: {
+        should: [
+          { terms: { attr_color: expanded } },
+          { terms: { attr_colors: expanded } },
+          { terms: { color_palette_canonical: expanded } },
+        ],
+        minimum_should_match: 1,
+      },
+    });
   }
 
   const embeddingField =
     String(process.env.SEARCH_IMAGE_KNN_FIELD ?? "embedding").trim() || "embedding";
 
-  // k-NN search with score (field defaults to `embedding`; set SEARCH_IMAGE_KNN_FIELD=embedding_garment after ROI reindex)
-  const searchBody: any = {
+  const wGlobal = Math.max(0, Math.min(1, Number(process.env.SEARCH_IMAGE_GLOBAL_KNN_WEIGHT ?? "0.65")));
+  const wColor = Math.max(0, Math.min(1, Number(process.env.SEARCH_IMAGE_COLOR_KNN_WEIGHT ?? "0.35")));
+  const wSum = wGlobal + wColor > 0 ? wGlobal + wColor : 1;
+
+  let colorQueryEmbedding: number[] | null = null;
+  if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
+    try {
+      const { attributeEmbeddings } = await import("../../lib/search/attributeEmbeddings");
+      colorQueryEmbedding = await attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "color");
+    } catch {
+      colorQueryEmbedding = null;
+    }
+  }
+
+  const knnBase = {
     size: fetchLimit,
     _source: [
       "product_id",
@@ -323,28 +363,86 @@ export async function searchByImageWithSimilarity(
       "category",
       "category_canonical",
       "product_types",
+      "attr_color",
+      "attr_colors",
+      "color_palette_canonical",
     ],
     query: {
       bool: {
-        must: {
-          knn: {
-            [embeddingField]: {
-              vector: imageEmbedding,
-              k: fetchLimit,
-            },
-          },
-        },
+        must: {} as any,
         filter: filter,
+      },
+    },
+  };
+
+  knnBase.query.bool.must = {
+    knn: {
+      [embeddingField]: {
+        vector: imageEmbedding,
+        k: fetchLimit,
       },
     },
   };
 
   const osResponse = await osClient.search({
     index: config.opensearch.index,
-    body: searchBody,
+    body: knnBase,
   });
 
-  const hits = osResponse.body.hits.hits;
+  let hits = osResponse.body.hits.hits;
+
+  if (colorQueryEmbedding && colorQueryEmbedding.length > 0 && wColor > 0) {
+    const colorBody = {
+      ...knnBase,
+      query: {
+        bool: {
+          must: {
+            knn: {
+              embedding_color: {
+                vector: colorQueryEmbedding,
+                k: fetchLimit,
+              },
+            },
+          },
+          filter: filter,
+        },
+      },
+    };
+    try {
+      const colorResp = await osClient.search({
+        index: config.opensearch.index,
+        body: colorBody,
+      });
+      const colorHits = colorResp.body.hits.hits || [];
+      const byId = new Map<string, { g: number; c: number; hit: any }>();
+      for (const hit of hits) {
+        const id = String(hit._source.product_id);
+        byId.set(id, { g: knnScoreToSimilarity01(hit._score), c: 0, hit });
+      }
+      for (const hit of colorHits) {
+        const id = String(hit._source.product_id);
+        const sim = knnScoreToSimilarity01(hit._score);
+        const prev = byId.get(id);
+        if (prev) {
+          prev.c = sim;
+        } else {
+          byId.set(id, { g: 0, c: sim, hit });
+        }
+      }
+      const merged = [...byId.values()]
+        .map(({ g, c, hit }) => {
+          const combined = (wGlobal * g + wColor * c) / wSum;
+          return { hit, _score: combined, _combined: combined };
+        })
+        .sort((a, b) => b._score - a._score);
+      hits = merged.map((m) => {
+        (m.hit as any)._score = m._combined;
+        return m.hit;
+      });
+    } catch {
+      // keep global-only hits
+    }
+  }
 
   const filteredHits = hits.filter((hit: any) => {
     return knnScoreToSimilarity01(hit._score) >= similarityThreshold;

@@ -9,7 +9,8 @@ import { osClient } from "../../lib/core/index";
 import { config } from "../../config";
 import { buildProductSearchDocument } from "../../lib/search/searchDocument";
 import { loadProductSearchEnrichmentByIds } from "../../lib/search/loadProductSearchEnrichment";
-import { extractDominantColorNames } from "../../lib/color/dominantColor";
+import { extractGarmentFashionColors } from "../../lib/color/garmentColorPipeline";
+import type { PixelBox } from "../../lib/image/processor";
 
 // ============================================================================
 // Types
@@ -252,9 +253,9 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
   const images = imagesResult.rows;
   let primaryImage = images.find((img: any) => img.is_primary) || images[0];
 
-  let dominantColors: string[] = [];
+  let garmentColorAnalysis: Awaited<ReturnType<typeof extractGarmentFashionColors>> | null = null;
   if (sourceBuffer && sourceBuffer.length > 0) {
-    dominantColors = await extractDominantColorNames(sourceBuffer).catch(() => []);
+    garmentColorAnalysis = await extractGarmentFashionColors(sourceBuffer).catch(() => null);
   }
 
   const enrichMap = await loadProductSearchEnrichmentByIds([productId]);
@@ -280,7 +281,8 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
       is_primary: img.is_primary,
     })),
     embedding: primaryImage?.embedding?.length > 0 ? primaryImage.embedding : null,
-    detectedColors: dominantColors,
+    detectedColors: garmentColorAnalysis?.paletteCanonical ?? [],
+    garmentColorAnalysis,
     enrichment: enrichRow
       ? {
           norm_confidence: enrichRow.norm_confidence,
@@ -294,7 +296,7 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
   // If dominant colors weren't provided (e.g. only primary image changed),
   // fetch the primary image buffer and derive dominant colors so strict
   // color filters have reliable data.
-  if (dominantColors.length === 0 && primaryImage) {
+  if (!garmentColorAnalysis && primaryImage) {
     try {
       let buffer: Buffer | null = null;
       if (primaryImage.cdn_url) {
@@ -322,12 +324,40 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
       }
 
       if (buffer) {
-        const extractedColors = await extractDominantColorNames(buffer).catch(() => []);
-        if (extractedColors.length > 0) {
+        let box: PixelBox | null = null;
+        try {
+          const det = await pg.query(
+            `SELECT box_x1, box_y1, box_x2, box_y2, confidence, area_ratio
+             FROM product_image_detections
+             WHERE product_image_id = $1
+               AND box_x1 IS NOT NULL AND box_y2 IS NOT NULL
+               AND COALESCE(confidence, 0) >= 0.22
+             ORDER BY COALESCE(area_ratio, 0) DESC NULLS LAST, id DESC
+             LIMIT 1`,
+            [primaryImage.id],
+          );
+          const r = det.rows[0];
+          if (r) {
+            box = { x1: Number(r.box_x1), y1: Number(r.box_y1), x2: Number(r.box_x2), y2: Number(r.box_y2) };
+          }
+        } catch {
+          box = null;
+        }
+        const analysis = await extractGarmentFashionColors(buffer, { box }).catch(() => null);
+        if (analysis && analysis.paletteCanonical.length > 0) {
+          const extractedColors = analysis.paletteCanonical;
           const current = Array.isArray(doc.attr_colors) ? doc.attr_colors.map((c: any) => String(c).toLowerCase()) : [];
           const merged = [...new Set([...current, ...extractedColors.map((c) => String(c).toLowerCase())])];
           doc.attr_colors = merged;
           doc.attr_color = merged[0] ?? null;
+          doc.attr_colors_image = extractedColors;
+          doc.attr_color_source = "image";
+          doc.color_primary_canonical = analysis.primaryCanonical;
+          doc.color_secondary_canonical = analysis.secondaryCanonical;
+          doc.color_accent_canonical = analysis.accentCanonical;
+          doc.color_palette_canonical = analysis.paletteCanonical;
+          doc.color_confidence_primary = analysis.confidencePrimary;
+          doc.color_confidence_image = Math.max(0.2, Math.min(0.95, analysis.confidencePrimary));
         }
       }
     } catch {
@@ -394,10 +424,10 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
           garmentBox = null;
         }
 
-        const [embedding, embeddingGarment, extractedColors] = await Promise.all([
+        const [embedding, embeddingGarment, garmentAnalysis] = await Promise.all([
           processImageForEmbedding(buffer),
           processImageForGarmentEmbeddingWithOptionalBox(buffer, garmentBox).catch(() => null as unknown as number[]),
-          extractDominantColorNames(buffer).catch(() => []),
+          extractGarmentFashionColors(buffer, { box: garmentBox }).catch(() => null),
         ]);
         // Update DB for this image row and include in document
         await pg.query(
@@ -408,11 +438,18 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
         if (Array.isArray(embeddingGarment) && embeddingGarment.length > 0) {
           doc.embedding_garment = embeddingGarment;
         }
-        if ((!doc.attr_colors || doc.attr_colors.length === 0) && extractedColors.length > 0) {
+        if ((!doc.attr_colors || doc.attr_colors.length === 0) && garmentAnalysis && garmentAnalysis.paletteCanonical.length > 0) {
+          const extractedColors = garmentAnalysis.paletteCanonical;
           doc.attr_colors = extractedColors;
           doc.attr_colors_image = extractedColors;
           doc.attr_color = String(extractedColors[0]).toLowerCase();
           doc.attr_color_source = "image";
+          doc.color_primary_canonical = garmentAnalysis.primaryCanonical;
+          doc.color_secondary_canonical = garmentAnalysis.secondaryCanonical;
+          doc.color_accent_canonical = garmentAnalysis.accentCanonical;
+          doc.color_palette_canonical = garmentAnalysis.paletteCanonical;
+          doc.color_confidence_primary = garmentAnalysis.confidencePrimary;
+          doc.color_confidence_image = Math.max(0.2, Math.min(0.95, garmentAnalysis.confidencePrimary));
         }
         // Refresh local variable for any further usage
         primaryImage = { ...primaryImage, embedding };

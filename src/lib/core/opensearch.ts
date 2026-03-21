@@ -81,10 +81,11 @@ export async function ensureIndex() {
               product_synonyms: {
                 type: "synonym",
                 synonyms: [
-                  "pant,pants,trousers,bottoms",
+                  "pant,pants,trousers",
                   "shirt,top,blouse,tee",
                   "dress,gown,frock",
-                  "jacket,coat,blazer,outerwear",
+                  "jacket,coat,outerwear",
+                  "blazer,blazers,sportcoat",
                   "shoe,shoes,sneaker,sneakers,footwear,boot,boots",
                   "bag,handbag,purse,tote",
                   "jeans,denim",
@@ -150,9 +151,27 @@ export async function ensureIndex() {
             attr_fit: { type: "keyword" },
             attr_style: { type: "keyword" },
             attr_gender: { type: "keyword" },
+            /** Normalized men | women | unisex from title when detectable */
+            audience_gender: { type: "keyword" },
+            /** adult | kids | baby | teen */
+            age_group: { type: "keyword" },
             attr_pattern: { type: "keyword" },
             attr_sleeve: { type: "keyword" },
             attr_neckline: { type: "keyword" },
+            attr_colors_text: { type: "keyword" },
+            attr_colors_image: { type: "keyword" },
+            attr_color_source: { type: "keyword" },
+            color_primary_canonical: { type: "keyword" },
+            color_secondary_canonical: { type: "keyword" },
+            color_accent_canonical: { type: "keyword" },
+            color_palette_canonical: { type: "keyword" },
+            color_confidence_primary: { type: "float" },
+            color_confidence_text: { type: "float" },
+            color_confidence_image: { type: "float" },
+            norm_confidence: { type: "float" },
+            category_confidence: { type: "float" },
+            brand_confidence: { type: "float" },
+            type_confidence: { type: "float" },
             // Array of product images
             images: {
               type: "nested",
@@ -165,6 +184,20 @@ export async function ensureIndex() {
             last_seen_at: { type: "date" },
             // CLIP image embedding for vector search (primary image)
             embedding: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
+            // Garment ROI CLIP vector (see processImageForGarmentEmbedding); use SEARCH_IMAGE_KNN_FIELD=embedding_garment
+            embedding_garment: {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
