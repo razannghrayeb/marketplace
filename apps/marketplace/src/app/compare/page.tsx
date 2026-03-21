@@ -50,9 +50,9 @@ export default function ComparePage() {
     queryFn: async () => {
       const results: Product[] = []
       for (const id of productIds) {
-        const res = await api.get<Product | { data: Product }>(endpoints.products.byId(id))
-        const p = (res as { data?: Product })?.data ?? (res as unknown as Product)
-        if (p && 'id' in p) results.push(p as Product)
+        const res = await api.get(endpoints.products.byId(id)) as Record<string, unknown>
+        const p = (res?.data ?? res) as Product | undefined
+        if (p && typeof p === 'object' && 'id' in p) results.push(p)
       }
       return results
     },
