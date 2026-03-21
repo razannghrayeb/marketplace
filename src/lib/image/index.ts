@@ -28,6 +28,10 @@ export {
 // Image processor
 export {
   processImageForEmbedding,
+  processImageForGarmentEmbedding,
+  processImageForGarmentEmbeddingWithOptionalBox,
+  type PixelBox,
+  extractGarmentCenterCropBuffer,
   validateImage,
   computePHash,
   loadAndNormalize,

@@ -2,9 +2,10 @@ import "dotenv/config";
 import axios from "axios";
 import { pg, osClient } from "../src/lib/core";
 import { config } from "../src/config";
-import { processImageForEmbedding, computePHash } from "../src/lib/image";
+import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash } from "../src/lib/image";
 import { buildProductSearchDocument } from "../src/lib/search/searchDocument";
 import { extractDominantColorNames } from "../src/lib/color/dominantColor";
+import { loadProductSearchEnrichmentByIds } from "../src/lib/search/loadProductSearchEnrichment";
 
 async function columnExists(columnName: string) {
   const res = await pg.query(
@@ -65,6 +66,9 @@ async function main() {
 
     console.log(`Found ${res.rowCount} products with images`);
 
+    const allIds = res.rows.map((r: { id: number }) => r.id);
+    const enrichMap = await loadProductSearchEnrichmentByIds(allIds);
+
     for (const row of res.rows) {
       const { id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_url, is_hidden, canonical_id } = row;
       const buf = await fetchImage(image_url);
@@ -72,8 +76,10 @@ async function main() {
 
       // Validate and generate embedding
       try {
-        const [embedding, ph, dominantColors] = await Promise.all([
+        const enrichRow = enrichMap.get(id);
+        const [embedding, embeddingGarment, ph, dominantColors] = await Promise.all([
           processImageForEmbedding(buf),
+          processImageForGarmentEmbedding(buf).catch(() => [] as number[]),
           computePHash(buf),
           extractDominantColorNames(buf).catch(() => []),
         ]);
@@ -92,7 +98,16 @@ async function main() {
           pHash: ph,
           lastSeenAt: last_seen,
           embedding,
+          embeddingGarment: embeddingGarment?.length ? embeddingGarment : null,
           detectedColors: dominantColors,
+          enrichment: enrichRow
+            ? {
+                norm_confidence: enrichRow.norm_confidence,
+                category_confidence: enrichRow.category_confidence,
+                brand_confidence: enrichRow.brand_confidence,
+                canonical_type_ids: enrichRow.canonical_type_ids,
+              }
+            : null,
           images: image_url
             ? [{ url: image_url, p_hash: ph, is_primary: true }]
             : [],

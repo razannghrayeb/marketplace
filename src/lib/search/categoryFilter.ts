@@ -46,7 +46,24 @@ const CATEGORY_ALIASES: Record<string, string[]> = {
     "sweatpants",
   ],
   joggers: ["joggers", "jogger", "jogging", "jogging pants", "track pants", "trackpants", "jogging bottoms"],
-  dresses: ["dresses", "dress", "gown", "frock", "maxi dress", "mini dress", "midi dress", "sundress", "jumpsuit", "romper"],
+  dresses: [
+    "dresses",
+    "dress",
+    "gown",
+    "frock",
+    "maxi dress",
+    "mini dress",
+    "midi dress",
+    "sundress",
+    "jumpsuit",
+    "romper",
+    "abaya",
+    "abayas",
+    "kaftan",
+    "kaftans",
+    "jalabiya",
+    "thobe",
+  ],
   outerwear: [
     "outerwear",
     "jacket",
@@ -189,6 +206,11 @@ function strictCategoryEnv(): boolean {
   return v === "1" || v === "true";
 }
 
+function filterHardMinAstConfidence(): number {
+  const n = Number(process.env.SEARCH_FILTER_HARD_MIN_CONFIDENCE ?? "0.55");
+  return Number.isFinite(n) ? Math.min(0.95, Math.max(0.35, n)) : 0.55;
+}
+
 /** True when the query is primarily an aisle / category browse (precision filter). */
 export function isCategoryDominantQuery(ast: QueryAST, rawQuery: string): boolean {
   const q = rawQuery.trim().toLowerCase();
@@ -241,7 +263,8 @@ export function shouldHardFilterAstCategory(
   if (callerCategory || !mergedCategory) return false;
   if (hasProductTypeConstraint) return false;
   if (strictCategoryEnv()) return true;
-  return isCategoryDominantQuery(ast, rawQuery);
+  if (!isCategoryDominantQuery(ast, rawQuery)) return false;
+  return ast.confidence >= filterHardMinAstConfidence();
 }
 
 /**

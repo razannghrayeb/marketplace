@@ -1,6 +1,7 @@
 import { extractAttributesSync } from "./attributeExtractor";
 import { inferCategoryCanonical } from "./categoryFilter";
 import { expandProductTypesForIndexing } from "./productTypeTaxonomy";
+import { canonicalTypeIdsToProductTypeTokens } from "./loadProductSearchEnrichment";
 
 const LBP_TO_USD = 89000;
 
@@ -48,6 +49,17 @@ export function extractProductTypesFromTitle(title: string): string[] {
     ["sweat pants", "joggers"],
     ["crop top", "tshirt"],
     ["tank top", "tshirt"],
+    ["abaya", "abaya"],
+    ["abayas", "abaya"],
+    ["kaftan", "kaftan"],
+    ["caftan", "kaftan"],
+    ["jalabiya", "abaya"],
+    ["thobe", "abaya"],
+    ["dishdasha", "abaya"],
+    ["salwar kameez", "kameez"],
+    ["shalwar kameez", "kameez"],
+    ["lehenga choli", "lengha"],
+    ["sherwani suit", "sherwani"],
   ];
   for (const [needle, mapped] of phrases) {
     if (normalized.includes(needle)) add(mapped);
@@ -85,14 +97,46 @@ export function extractProductTypesFromTitle(title: string): string[] {
     sweaters: "sweater",
     blazer: "blazer",
     blazers: "blazer",
-    top: "tshirt",
-    tops: "tshirt",
+    /** Avoid collapsing "tops" into tshirt — too noisy for type matching */
+    top: "top",
+    tops: "top",
     blouse: "tshirt",
     blouses: "tshirt",
     shirt: "tshirt",
     shirts: "tshirt",
     camisole: "tshirt",
     tunic: "tshirt",
+    abaya: "abaya",
+    abayas: "abaya",
+    kaftan: "kaftan",
+    kaftans: "kaftan",
+    caftan: "kaftan",
+    caftans: "kaftan",
+    jalabiya: "abaya",
+    thobe: "abaya",
+    thobes: "abaya",
+    dishdasha: "abaya",
+    bisht: "abaya",
+    sherwani: "sherwani",
+    kurta: "kurta",
+    kurti: "kurti",
+    kurtis: "kurti",
+    salwar: "salwar",
+    shalwar: "salwar",
+    kameez: "kameez",
+    churidar: "churidar",
+    lengha: "lengha",
+    lehenga: "lengha",
+    sari: "sari",
+    saree: "sari",
+    dupatta: "dupatta",
+    dirac: "dirac",
+    hijab: "hijab",
+    hijabs: "hijab",
+    headscarf: "hijab",
+    niqab: "niqab",
+    burqa: "burqa",
+    headwrap: "hijab",
   };
 
   for (const token of normalized.split(" ")) {
@@ -101,6 +145,14 @@ export function extractProductTypesFromTitle(title: string): string[] {
   }
 
   return found;
+}
+
+/** Optional row from `product_search_enrichment` (Phase 2). */
+export interface BuildSearchDocumentEnrichmentInput {
+  norm_confidence?: number;
+  category_confidence?: number;
+  brand_confidence?: number;
+  canonical_type_ids?: string[];
 }
 
 export interface BuildSearchDocumentInput {
@@ -118,8 +170,11 @@ export interface BuildSearchDocumentInput {
   pHash?: string | null;
   lastSeenAt?: Date | string | null;
   embedding?: number[] | null;
+  /** Garment-focused CLIP embedding (ROI / center crop) — dual-write with `embedding`. */
+  embeddingGarment?: number[] | null;
   images?: Array<{ url?: string | null; p_hash?: string | null; is_primary?: boolean | null }>;
   detectedColors?: string[] | null;
+  enrichment?: BuildSearchDocumentEnrichmentInput | null;
   attributeEmbeddings?: {
     color?: number[];
     texture?: number[];
@@ -130,7 +185,7 @@ export interface BuildSearchDocumentInput {
 }
 
 export function buildProductSearchDocument(input: BuildSearchDocumentInput): Record<string, any> {
-  const { attributes } = extractAttributesSync(input.title || "");
+  const { attributes, confidence: attrConfidence } = extractAttributesSync(input.title || "");
 
   const normalizedDetectedColors = normalizeArray(input.detectedColors ?? undefined);
   const normalizedTitleColors = normalizeArray(
@@ -140,13 +195,57 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
         ? [attributes.color]
         : []
   );
-  // Merge title-based + image-based color signals.
-  // This prevents strict filters from failing when the detector slightly
-  // misclassifies (e.g. "black" vs "charcoal"/"gray").
+  const colorConfidenceText =
+    normalizedTitleColors.length > 0 ? Math.max(0.35, attrConfidence.color ?? 0.52) : 0;
+  const colorConfidenceImage =
+    normalizedDetectedColors.length > 0 ? Math.min(0.92, 0.58 + 0.12 * normalizedDetectedColors.length) : 0;
+
+  // Merge title + image for backward-compatible `attr_colors` / BM25 / legacy filters.
   const normalizedColors: string[] = [];
   for (const c of [...normalizedTitleColors, ...normalizedDetectedColors]) {
     if (!normalizedColors.includes(c)) normalizedColors.push(c);
   }
+
+  const attrColorPrimary =
+    normalizedDetectedColors.length > 0
+      ? normalizedDetectedColors[0]
+      : normalizedTitleColors[0] ?? null;
+  const attrColorSource: "image" | "text" | "none" =
+    normalizedDetectedColors.length > 0 ? "image" : normalizedTitleColors.length > 0 ? "text" : "none";
+
+  const enrich = input.enrichment;
+  const normConfidence =
+    typeof enrich?.norm_confidence === "number" && Number.isFinite(enrich.norm_confidence)
+      ? Math.max(0, Math.min(1, enrich.norm_confidence))
+      : 0.42;
+  const categoryConfidence =
+    typeof enrich?.category_confidence === "number" && Number.isFinite(enrich.category_confidence)
+      ? Math.max(0, Math.min(1, enrich.category_confidence))
+      : 0.48;
+  const brandConfidence =
+    typeof enrich?.brand_confidence === "number" && Number.isFinite(enrich.brand_confidence)
+      ? Math.max(0, Math.min(1, enrich.brand_confidence))
+      : 0;
+
+  const titleTypes = extractProductTypesFromTitle(input.title || "");
+  const enrichTokens = canonicalTypeIdsToProductTypeTokens(enrich?.canonical_type_ids ?? []);
+  const mergedTypeSeeds = [...titleTypes];
+  for (const t of enrichTokens) {
+    if (!mergedTypeSeeds.includes(t)) mergedTypeSeeds.push(t);
+  }
+  const productTypesIndexed = expandProductTypesForIndexing(mergedTypeSeeds);
+  const typeConfidence = (() => {
+    const fromEnrich =
+      enrichTokens.length > 0
+        ? Math.min(0.92, 0.56 + 0.12 * Math.min(enrichTokens.length, 3))
+        : 0;
+    const fromTitle =
+      mergedTypeSeeds.length > 0
+        ? Math.min(0.88, 0.42 + 0.12 * Math.min(mergedTypeSeeds.length, 4))
+        : 0.35;
+    return Math.max(fromEnrich, fromTitle, 0.32);
+  })();
+
   const normalizedMaterials = normalizeArray(
     attributes.materials && attributes.materials.length > 0
       ? attributes.materials
@@ -157,6 +256,8 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
 
   const categoryLower = toLowerTrim(input.category);
   const categoryCanonical = inferCategoryCanonical(input.category ?? null, input.title || "");
+
+  const primaryAttrColor = toLowerTrim(attrColorPrimary);
 
   const doc: Record<string, any> = {
     product_id: String(input.productId),
@@ -173,12 +274,21 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
       input.canonicalId !== null && input.canonicalId !== undefined
         ? String(input.canonicalId)
         : null,
-    product_types: expandProductTypesForIndexing(extractProductTypesFromTitle(input.title || "")),
+    product_types: productTypesIndexed,
+    norm_confidence: normConfidence,
+    category_confidence: categoryConfidence,
+    brand_confidence: brandConfidence,
+    type_confidence: typeConfidence,
+    color_confidence_text: colorConfidenceText,
+    color_confidence_image: colorConfidenceImage,
     image_cdn: input.imageCdn ?? null,
     p_hash: input.pHash ?? null,
     last_seen_at: input.lastSeenAt ?? null,
-    attr_color: normalizedColors[0] ?? null,
+    attr_color: primaryAttrColor,
     attr_colors: normalizedColors,
+    attr_colors_text: normalizedTitleColors,
+    attr_colors_image: normalizedDetectedColors,
+    attr_color_source: attrColorSource,
     attr_material: normalizedMaterials[0] ?? null,
     attr_materials: normalizedMaterials,
     attr_fit: toLowerTrim(attributes.fit),
@@ -198,6 +308,9 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
 
   if (input.embedding && input.embedding.length > 0) {
     doc.embedding = input.embedding;
+  }
+  if (input.embeddingGarment && input.embeddingGarment.length > 0) {
+    doc.embedding_garment = input.embeddingGarment;
   }
 
   if (input.attributeEmbeddings) {

@@ -99,6 +99,7 @@ import {
   getSessionStats,
 } from "../../lib/queryProcessor/conversationalContext";
 import { processQuery } from "../../lib/queryProcessor";
+import { parseParameters } from "../../lib/queryProcessor/parameterParser";
 import {
   PROMPT_TEMPLATES,
   PROMPT_SUGGESTIONS,
@@ -151,12 +152,13 @@ router.get("/", async (req: Request, res: Response) => {
       enhanced,
     } = req.query;
 
-    const query = (q as string) || "";
+    const rawQuery = (q as string) || "";
+    const { searchText: queryForProcessing, controlParams: extractedParams } = parseParameters(rawQuery);
     const sessionId = (session_id as string) || req.headers["x-session-id"] as string;
     const userId = (user_id as string) || (req as any).userId;
     const useEnhanced = enhanced !== "false"; // Default true
 
-    let processedQuery = query;
+    let processedQuery = queryForProcessing;
     let contextual: any = undefined;
     let negations: any = undefined;
     let complexQuery: any = undefined;
@@ -164,10 +166,10 @@ router.get("/", async (req: Request, res: Response) => {
     let suggestions: string[] = [];
 
     // Enhanced processing
-    if (useEnhanced && query) {
+    if (useEnhanced && queryForProcessing) {
       // 1. Conversational Context
       if (sessionId) {
-        contextual = enrichQueryWithContext(query, sessionId);
+        contextual = enrichQueryWithContext(queryForProcessing, sessionId);
         processedQuery = contextual.enriched;
       }
 
@@ -217,8 +219,9 @@ router.get("/", async (req: Request, res: Response) => {
       filters = { ...contextual.inheritedFilters, ...filters };
     }
 
-    const limitNum = Array.isArray(limit) ? Number(limit[0]) : limit ? Number(limit) : 20;
-    const offsetNum = Array.isArray(offset) ? Number(offset[0]) : offset ? Number(offset) : 0;
+    // req.query overrides extracted params from query text
+    const limitNum = Array.isArray(limit) ? Number(limit[0]) : limit ? Number(limit) : (extractedParams.limit as number) ?? 20;
+    const offsetNum = Array.isArray(offset) ? Number(offset[0]) : offset ? Number(offset) : (extractedParams.offset as number) ?? (extractedParams.page ? ((extractedParams.page as number) - 1) * (limitNum || 20) : 0);
 
     const options = {
       limit: limitNum || 20,
@@ -237,19 +240,19 @@ router.get("/", async (req: Request, res: Response) => {
     });
 
     // Log search (async, non-blocking)
-    if (useEnhanced && query) {
-      logSearchQuery(query, userId, category as string, result.total).catch(err =>
+    if (useEnhanced && rawQuery) {
+      logSearchQuery(rawQuery, userId, category as string, result.total).catch(err =>
         console.error("[Search] Failed to log query:", err)
       );
 
       // Add turn to conversation
       if (sessionId) {
         const ast = await processQuery(processedQuery);
-        addTurn(sessionId, query, ast, result.total);
+        addTurn(sessionId, rawQuery, ast, result.total);
       }
 
       // Generate suggestions
-      if (result.total === 0) {
+      if (queryForProcessing && result.total === 0) {
         suggestions.push("Try simpler query or fewer filters");
         if (negations?.hasNegation) {
           suggestions.push("Remove exclusions");

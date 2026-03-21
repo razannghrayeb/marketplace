@@ -63,6 +63,8 @@ export interface ImageSearchParams extends SearchParams {
   similarityThreshold?: number;  // 0-1, default 0.7 (70% similarity)
   includeRelated?: boolean;      // Include related by pHash
   pHash?: string;                // Optional pHash for visual similarity
+  /** Raw bytes when embedding is computed by the callee (unified image search path). */
+  imageBuffer?: Buffer;
   /** Soft rerank hints when SEARCH_IMAGE_SOFT_CATEGORY=1 */
   predictedCategoryAisles?: string[];
 }
@@ -92,6 +94,8 @@ export interface ProductResult {
   images?: Array<{ id: number; url: string; is_primary: boolean }>;
   similarity_score?: number;     // For image search results
   match_type?: "exact" | "similar" | "related";  // How the product matched
+  rerankScore?: number;
+  finalRelevance01?: number;
   clipSim?: number;        // 0..1 (cosine or normalized)
   textSim?: number;        // 0..1 (normalized)
   openSearchScore?: number; // raw or normalized
@@ -110,6 +114,11 @@ export interface SearchResultWithRelated {
     parsed_query?: ParsedQuery;  // Include parsed query info for debugging/transparency
     processed_query?: QueryAST;  // Query processing info (corrections, etc.)
     did_you_mean?: string;  // Suggestion if not auto-applied
+    below_relevance_threshold?: boolean;
+    recall_size?: number;
+    final_accept_min?: number;
+    total_above_threshold?: number;
+    open_search_total_estimate?: number;
   };
 }
 
@@ -157,155 +166,37 @@ export interface CandidateGeneratorResult {
   };
 }
 /**
- * Search products by title text or image embedding
- * Returns array of products with images
+ * Search products by title text, image embedding, or filter-only browse.
+ * Always routes through the unified search facade (QueryAST, domain gate, image pipeline).
  */
 export async function searchProducts(params: SearchParams): Promise<ProductResult[]> {
   const { query, imageEmbedding, filters = {}, page = 1, limit = 20 } = params;
-
-  // Build OpenSearch query
-  const must: any[] = [];
-  const filter: any[] = [];
-
-  // Always exclude hidden products from public search
-  filter.push({ term: { is_hidden: false } });
-
-  // Text search on title
-  if (query) {
-    must.push({
-      multi_match: {
-        query,
-        fields: ["title^3", "brand^2", "category"],
-        fuzziness: "AUTO",
-      },
-    });
-  }
-
-  // Apply filters
-  if (filters.category) {
-    filter.push({ term: { category: filters.category } });
-  }
-  if (filters.brand) {
-    filter.push({ term: { brand: filters.brand } });
-  }
-  if (filters.vendorId) {
-    filter.push({ term: { vendor_id: filters.vendorId } });
-  }
-  if (filters.availability !== undefined) {
-    filter.push({ term: { availability: filters.availability ? "in_stock" : "out_of_stock" } });
-  }
-  if (filters.minPriceCents !== undefined || filters.maxPriceCents !== undefined) {
-    const range: any = {};
-    const currency = filters.currency?.toUpperCase() || 'LBP';
-    const LBP_TO_USD = 89000; // Exchange rate
-
-    if (currency === 'USD') {
-      // Input is already in USD cents, convert to dollars
-      if (filters.minPriceCents !== undefined) range.gte = filters.minPriceCents / 100;
-      if (filters.maxPriceCents !== undefined) range.lte = filters.maxPriceCents / 100;
-    } else {
-      // Input is in LBP cents, convert to USD for OpenSearch
-      if (filters.minPriceCents !== undefined) range.gte = Math.floor(filters.minPriceCents / LBP_TO_USD);
-      if (filters.maxPriceCents !== undefined) range.lte = Math.ceil(filters.maxPriceCents / LBP_TO_USD);
-    }
-    filter.push({ range: { price_usd: range } });
-  }
-
-  // Attribute filters (extracted from titles)
-  if (filters.color) filter.push({ term: { attr_color: filters.color } });
-  if (filters.material) filter.push({ term: { attr_material: filters.material } });
-  if (filters.fit) filter.push({ term: { attr_fit: filters.fit } });
-  if (filters.style) filter.push({ term: { attr_style: filters.style } });
-  if (filters.gender) filter.push({ term: { attr_gender: filters.gender } });
-  if (filters.pattern) filter.push({ term: { attr_pattern: filters.pattern } });
-
-  // Build final query
-  let searchBody: any;
+  const facade = await import("../../lib/search/fashionSearchFacade");
 
   if (imageEmbedding && imageEmbedding.length > 0) {
-    // Image-based search (k-NN) with OpenSearch syntax
-    searchBody = {
-      size: limit,
-      query: {
-        knn: {
-          embedding: {
-            vector: imageEmbedding,
-            k: limit,
-          },
-        },
-      },
-    };
-    
-    // Add filters if present
-    if (filter.length > 0) {
-      searchBody.query = {
-        bool: {
-          must: {
-            knn: {
-              embedding: {
-                vector: imageEmbedding,
-                k: limit,
-              },
-            },
-          },
-          filter: filter,
-        },
-      };
-    }
-  } else {
-    // Text-based search
-    searchBody = {
-      size: limit,
-      from: (page - 1) * limit,
-      query: {
-        bool: {
-          must: must.length > 0 ? must : [{ match_all: {} }],
-          filter: filter.length > 0 ? filter : undefined,
-        },
-      },
-    };
+    const res = await facade.searchImage({
+      imageEmbedding,
+      filters: filters as any,
+      limit,
+      includeRelated: false,
+    });
+    return res.results as ProductResult[];
   }
 
-  // Execute OpenSearch query
-  const osResponse = await osClient.search({
-    index: config.opensearch.index,
-    body: searchBody,
-  });
-
-  // Extract product IDs and scores from OpenSearch results
-  const hits = osResponse.body.hits.hits;
-  const productIds: string[] = hits.map((hit: any) => hit._source.product_id);
-  const scoreMap = new Map<string, number>();
-  hits.forEach((hit: any) => {
-    scoreMap.set(hit._source.product_id, hit._score);
-  });
-
-  if (productIds.length === 0) {
-    return [];
+  const q = query?.trim();
+  if (q) {
+    const res = await facade.searchText({
+      query: q,
+      filters: filters as any,
+      page,
+      limit,
+      includeRelated: false,
+      relatedLimit: 0,
+    });
+    return res.results as ProductResult[];
   }
 
-  // Fetch full product data from Postgres (preserving OpenSearch order/ranking)
-  const products = await getProductsByIdsOrdered(productIds);
-
-  // Fetch images for all products using images.service
-  const numericIds = productIds.map((id) => parseInt(id, 10));
-  const imagesByProduct = await getImagesForProducts(numericIds);
-
-  // Attach images and scores to products (convert to response format)
-  const productsWithImages = products.map((p: any) => {
-    const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
-    return {
-      ...p,
-      similarity_score: scoreMap.get(String(p.id)),
-      images: images.map((img) => ({
-        id: img.id,
-        url: img.cdn_url,
-        is_primary: img.is_primary,
-      })),
-    };
-  });
-
-  return productsWithImages as ProductResult[];
+  return facade.searchBrowse({ filters: filters as any, page, limit });
 }
 
 // ============================================================================
@@ -409,10 +300,20 @@ export async function searchByImageWithSimilarity(
       }
     }
   }
-  if (filters.brand) filter.push({ term: { brand: filters.brand } });
-  if (filters.vendorId) filter.push({ term: { vendor_id: filters.vendorId } });
+  if (filters.brand) filter.push({ term: { brand: String(filters.brand).toLowerCase() } });
+  if (filters.vendorId) filter.push({ term: { vendor_id: String(filters.vendorId) } });
+  const filtersAny = filters as { gender?: string; color?: string };
+  if (filtersAny.gender) {
+    filter.push({ term: { attr_gender: String(filtersAny.gender).toLowerCase() } });
+  }
+  if (filtersAny.color) {
+    filter.push({ term: { attr_color: String(filtersAny.color).toLowerCase() } });
+  }
 
-  // k-NN search with score
+  const embeddingField =
+    String(process.env.SEARCH_IMAGE_KNN_FIELD ?? "embedding").trim() || "embedding";
+
+  // k-NN search with score (field defaults to `embedding`; set SEARCH_IMAGE_KNN_FIELD=embedding_garment after ROI reindex)
   const searchBody: any = {
     size: fetchLimit,
     _source: [
@@ -427,7 +328,7 @@ export async function searchByImageWithSimilarity(
       bool: {
         must: {
           knn: {
-            embedding: {
+            [embeddingField]: {
               vector: imageEmbedding,
               k: fetchLimit,
             },
@@ -448,6 +349,9 @@ export async function searchByImageWithSimilarity(
   const filteredHits = hits.filter((hit: any) => {
     return knnScoreToSimilarity01(hit._score) >= similarityThreshold;
   });
+
+  /** True when kNN returned candidates but none met CLIP threshold (not the text SEARCH_FINAL_ACCEPT_MIN gate). */
+  const belowRelevanceThreshold = hits.length > 0 && filteredHits.length === 0;
 
   let orderedHits = filteredHits;
   if (desiredCatalogTerms && desiredCatalogTerms.size > 0) {
@@ -518,6 +422,8 @@ export async function searchByImageWithSimilarity(
       ),
       soft_category: Boolean(softCategory && desiredCatalogTerms && desiredCatalogTerms.size > 0),
       predicted_aisles: aisleHints ? [...aisleHints] : null,
+      similarity_threshold_used: similarityThreshold,
+      below_relevance_threshold: belowRelevanceThreshold,
     });
   }
 
@@ -528,6 +434,8 @@ export async function searchByImageWithSimilarity(
       threshold: similarityThreshold,
       total_results: results.length,
       total_related: related.length,
+      below_relevance_threshold: belowRelevanceThreshold,
+      final_accept_min: config.search.finalAcceptMin,
     },
   };
 }
@@ -1102,12 +1010,18 @@ export async function getCandidateScoresForProducts(
     const clipPromise = (async () => {
       const clipStart = Date.now();
       const fetchLimit = Math.min(clipLimit, 500);
+      const embeddingField =
+        String(process.env.SEARCH_IMAGE_KNN_FIELD ?? "embedding").trim() || "embedding";
       const clipBody = {
         size: fetchLimit,
         _source: ["product_id"],
         query: {
           bool: {
-            must: { knn: { embedding: { vector: embedding, k: fetchLimit } } },
+            must: {
+              knn: {
+                [embeddingField]: { vector: embedding, k: fetchLimit },
+              },
+            },
             filter: [{ term: { is_hidden: false } }],
           },
         },

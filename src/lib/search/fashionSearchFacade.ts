@@ -17,10 +17,8 @@ import type { QueryAST } from "../../lib/queryProcessor";
 
 import { textSearch as enhancedTextSearch } from "../../routes/search/search.service";
 
-import {
-  searchProducts as legacyBrowseSearch,
-  searchByImageWithSimilarity as legacyImageSearch,
-} from "../../routes/products/products.service";
+import { searchByImageWithSimilarity as legacyImageSearch } from "../../routes/products/products.service";
+import { searchProductsFilteredBrowse } from "./filteredBrowseSearch";
 
 import { processImageForEmbedding, computePHash } from "../image";
 
@@ -54,18 +52,21 @@ export async function searchBrowse(params: {
 }): Promise<ProductResult[]> {
   const { filters = {}, page = 1, limit = 20 } = params;
 
-  // Legacy browse search (`products.service.searchProducts`) expects
-  // `category?: string` (not `string[]`).
   const normalizedFilters: any = {
     ...filters,
-    category: Array.isArray((filters as any).category) ? (filters as any).category[0] : (filters as any).category,
+    vendorId:
+      (filters as any)?.vendorId !== undefined
+        ? typeof (filters as any)?.vendorId === "string"
+          ? Number((filters as any).vendorId)
+          : (filters as any).vendorId
+        : undefined,
   };
 
-  return legacyBrowseSearch({
+  return searchProductsFilteredBrowse({
     filters: normalizedFilters,
     page,
     limit,
-  });
+  }) as Promise<ProductResult[]>;
 }
 
 /**
@@ -136,8 +137,8 @@ export async function searchText(params: UnifiedTextSearchParams): Promise<Searc
 /**
  * Unified image search
  *
- * For now, we reuse the legacy image search (`searchByImageWithSimilarity`)
- * because it already returns:
+ * Delegates to `searchByImageWithSimilarity` in `products.service` (kNN, soft category, rerank).
+ * That implementation returns:
  * - ProductResult hydration
  * - images[]
  * - optional pHash-based related results

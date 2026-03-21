@@ -40,14 +40,29 @@ function hueToColorName(h: number): string {
  */
 export async function extractDominantColorNames(
   imageBuffer: Buffer,
-  opts?: { maxColors?: number; minShare?: number }
+  opts?: { maxColors?: number; minShare?: number; garmentCenterCrop?: boolean }
 ): Promise<string[]> {
   const maxColors = opts?.maxColors ?? 2;
   const minShare = opts?.minShare ?? 0.08;
+  const garmentCenterCrop = opts?.garmentCenterCrop !== false;
 
-  const { data, info } = await sharp(imageBuffer)
+  let pipeline = sharp(imageBuffer).removeAlpha();
+
+  if (garmentCenterCrop) {
+    const meta = await pipeline.metadata();
+    const w = meta.width ?? 0;
+    const h = meta.height ?? 0;
+    if (w > 32 && h > 32) {
+      const left = Math.floor(w * 0.18);
+      const top = Math.floor(h * 0.12);
+      const width = Math.max(1, Math.floor(w * 0.64));
+      const height = Math.max(1, Math.floor(h * 0.62));
+      pipeline = pipeline.extract({ left, top, width, height });
+    }
+  }
+
+  const { data, info } = await pipeline
     .resize(64, 64, { fit: "cover" })
-    .removeAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
 

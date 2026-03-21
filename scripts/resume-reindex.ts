@@ -50,9 +50,10 @@ const reindexPg = new Pool({
   connectionTimeoutMillis: 120000,
   keepAlive: true,
 });
-import { processImageForEmbedding, computePHash } from "../src/lib/image";
+import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash } from "../src/lib/image";
 import { attributeEmbeddings } from "../src/lib/search/attributeEmbeddings";
 import { buildProductSearchDocument } from "../src/lib/search/searchDocument";
+import { loadProductSearchEnrichmentByIds } from "../src/lib/search/loadProductSearchEnrichment";
 import { extractDominantColorNames } from "../src/lib/color/dominantColor";
 import { promises as fs } from "fs";
 
@@ -271,15 +272,18 @@ async function reindexProduct(
     }
 
     // Generate global embedding, attribute embeddings, and hash in parallel
-    const [embedding, attrEmbeddings, ph, dominantColors] = await Promise.all([
+    const [embedding, embeddingGarment, attrEmbeddings, ph, dominantColors, enrichMap] = await Promise.all([
       processImageForEmbedding(buf),
+      processImageForGarmentEmbedding(buf).catch(() => [] as number[]),
       attributeEmbeddings.generateAllAttributeEmbeddings(buf).catch((err: any) => {
         console.warn(`  ⚠️  Product ${id}: attribute embeddings failed (${err.message}), using global only`);
         return null;
       }),
       computePHash(buf),
       extractDominantColorNames(buf).catch(() => []),
+      loadProductSearchEnrichmentByIds([id]),
     ]);
+    const enrichRow = enrichMap.get(id);
 
     const body: Record<string, any> = buildProductSearchDocument({
       productId: id,
@@ -296,7 +300,16 @@ async function reindexProduct(
       pHash: ph,
       lastSeenAt: last_seen,
       embedding,
+      embeddingGarment: embeddingGarment.length > 0 ? embeddingGarment : null,
       detectedColors: dominantColors,
+      enrichment: enrichRow
+        ? {
+            norm_confidence: enrichRow.norm_confidence,
+            category_confidence: enrichRow.category_confidence,
+            brand_confidence: enrichRow.brand_confidence,
+            canonical_type_ids: enrichRow.canonical_type_ids,
+          }
+        : null,
       images: image_url
         ? [
             {

@@ -325,6 +325,16 @@ export async function rewriteWithLLM(request: LLMRewriteRequest): Promise<LLMRew
   }
 }
 
+function isLLMConservativeMode(): boolean {
+  const v = String(process.env.SEARCH_LLM_CONSERVATIVE ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
+function isCommerceMode(): boolean {
+  const v = String(process.env.SEARCH_COMMERCE_MODE ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
 /**
  * Decide if LLM should be called based on query characteristics
  */
@@ -334,37 +344,18 @@ export function shouldUseLLM(
   hasRuleCorrection: boolean,
   ruleConfidence: number
 ): boolean {
-  // Skip LLM if disabled
-  if (!isLLMAvailable()) {
-    return false;
-  }
-  
-  // Skip if rule-based correction has high confidence
-  if (hasRuleCorrection && ruleConfidence >= 0.85) {
-    return false;
-  }
-  
-  // Use LLM for mixed language queries
-  if (script.primary === "mixed") {
-    return true;
-  }
-  
-  // Use LLM for long natural language queries
-  const wordCount = query.split(/\s+/).length;
-  if (wordCount >= 5) {
-    return true;
-  }
-  
-  // Use LLM for Arabizi with no rule correction
-  if (script.hasArabizi && !hasRuleCorrection) {
-    return true;
-  }
-  
-  // Use LLM for Arabic with no rule correction
-  if (script.primary === "ar" && !hasRuleCorrection) {
-    return true;
-  }
-  
-  // Skip LLM for simple queries
+  if (!isLLMAvailable()) return false;
+
+  if (hasRuleCorrection && ruleConfidence >= 0.85) return false;
+
+  const wordCount = query.trim().split(/\s+/).length;
+  const conservative = isLLMConservativeMode() || isCommerceMode();
+  if (conservative && wordCount <= 4 && hasRuleCorrection) return false;
+
+  if (script.primary === "mixed") return true;
+  if (wordCount >= 5) return true;
+  if (script.hasArabizi && !hasRuleCorrection) return true;
+  if (script.primary === "ar" && !hasRuleCorrection) return true;
+
   return false;
 }

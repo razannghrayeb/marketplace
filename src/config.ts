@@ -42,6 +42,18 @@ function loadDotEnv(): void {
 
 loadDotEnv();
 
+function finiteEnvNumber(
+  raw: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (raw === undefined || String(raw).trim() === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
 function getRedisConfig() {
   return {
     restUrl: process.env.UPSTASH_REDIS_REST_URL || "",
@@ -94,9 +106,16 @@ export const config = {
     // Model type: "fashion-clip" (recommended) | "vit-l-14" | "vit-b-32"
     // Fashion-CLIP is fine-tuned for apparel and captures fabric textures, styles better
     modelType: process.env.CLIP_MODEL_TYPE || "fashion-clip",
-    // Similarity thresholds
-    similarityThreshold: Number(process.env.CLIP_SIMILARITY_THRESHOLD || 0.7),
+    // Similarity thresholds (image kNN + text hybrid min_score caps); default 0.6 aligns with SEARCH_FINAL_ACCEPT_MIN
+    similarityThreshold: Number(process.env.CLIP_SIMILARITY_THRESHOLD || 0.6),
     duplicateThreshold: Number(process.env.CLIP_DUPLICATE_THRESHOLD || 0.92),
+  },
+  search: {
+    recallWindow: finiteEnvNumber(process.env.SEARCH_RECALL_WINDOW, 300, 50, 2000),
+    recallMax: finiteEnvNumber(process.env.SEARCH_RECALL_MAX, 500, 100, 2000),
+    finalAcceptMin: finiteEnvNumber(process.env.SEARCH_FINAL_ACCEPT_MIN, 0.6, 0.35, 0.95),
+    filterHardMinConfidence: finiteEnvNumber(process.env.SEARCH_FILTER_HARD_MIN_CONFIDENCE, 0.55, 0.35, 0.95),
+    domainEmbeddingRejectBelow: finiteEnvNumber(process.env.SEARCH_DOMAIN_EMBEDDING_REJECT_BELOW, 0.3, 0.15, 0.55),
   },
   tryon: {
     // Google Cloud Vertex AI — Virtual Try-On (publishers/google/models/...:predict)
