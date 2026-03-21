@@ -71,11 +71,11 @@ function ProductGridWithVariants({ products }: { products: Product[] }) {
   const { data: variantsData } = useQuery({
     queryKey: ['variants', ids.join(',')],
     queryFn: async () => {
-      const res = await api.post<{ data?: Record<string, { minPriceCents: number; maxPriceCents: number }> }>(
+      const res = await api.post<Record<string, { minPriceCents: number; maxPriceCents: number }>>(
         endpoints.products.variantsBatch,
         { productIds: ids }
       )
-      return res.data ?? {}
+      return (res as { data?: Record<string, { minPriceCents: number; maxPriceCents: number }> }).data ?? {}
     },
     enabled: ids.length > 0,
   })
