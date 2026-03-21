@@ -61,9 +61,9 @@ export default function ComparePage() {
 
   const compareMutation = useMutation({
     mutationFn: async () => {
-      const res = await api.post<CompareResult>(endpoints.compare, { product_ids: productIds })
-      if ((res as { success?: boolean }).success === false) throw new Error((res as { error?: { message?: string } }).error?.message)
-      return res as CompareResult
+      const res = await api.post<CompareResult>(endpoints.compare, { product_ids: productIds }) as Record<string, unknown>
+      if (res?.success === false) throw new Error((res?.error as { message?: string })?.message)
+      return (res?.data ?? res) as CompareResult
     },
   })
 
