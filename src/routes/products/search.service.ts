@@ -45,7 +45,7 @@ export async function searchByImageWithSimilarity(
     filters = {},
     page = 1,
     limit = 20,
-    similarityThreshold = config.clip.similarityThreshold,
+    similarityThreshold = config.clip.imageSimilarityThreshold,
     // Image-analysis (/api/images/search) is the only caller; it only uses k-NN `results`,
     // not pHash "related". Default false avoids an extra Sharp decode that can throw
     // "Invalid input" on some crops while CLIP embedding still succeeds.

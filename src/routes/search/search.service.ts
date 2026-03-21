@@ -47,6 +47,7 @@ import {
   scoreCrossFamilyTypePenalty,
   extractLexicalProductTypeSeeds,
   scoreRerankProductTypeBreakdown,
+  downrankSpuriousProductTypeFromCategory,
 } from '../../lib/search/productTypeTaxonomy';
 import {
   buildQueryUnderstanding,
@@ -1257,6 +1258,17 @@ export async function textSearch(
         siblingClusterScore = typeBreak.siblingClusterScore;
         parentHypernymScore = typeBreak.parentHypernymScore;
         intraFamilyPenalty = typeBreak.intraFamilyPenalty;
+
+        const spurious = downrankSpuriousProductTypeFromCategory(
+          desiredProductTypes,
+          productTypes,
+          hit?._source?.category,
+        );
+        if (spurious.forceExactZero) exactTypeScore = 0;
+        productTypeCompliance = Math.max(
+          0,
+          Math.min(1, productTypeCompliance * spurious.complianceScale),
+        );
       }
 
       const wcText = Number(hit?._source?.color_confidence_text);

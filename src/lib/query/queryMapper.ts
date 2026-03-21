@@ -13,12 +13,6 @@ export interface OpenSearchQuery {
       must_not?: any[];
     };
   };
-  knn?: {
-    embedding: {
-      vector: number[];
-      k: number;
-    };
-  };
   size?: number;
   _source?: string[];
 }
@@ -173,22 +167,33 @@ export class QueryMapper {
       });
     }
 
+    // Match kNN shape used by MultiVectorSearchEngine / image similarity: knn lives under
+    // bool.must. A top-level `knn` sibling to `query` is not used elsewhere and can yield
+    // no vector retrieval (empty results while filters/text clauses also match nothing).
+    const embeddingField =
+      String(process.env.SEARCH_IMAGE_KNN_FIELD ?? 'embedding').trim() || 'embedding';
+    const knnMust = {
+      knn: {
+        [embeddingField]: {
+          vector: query.embeddings.global,
+          k: maxResults,
+        },
+      },
+    };
+    const mustClauses = [knnMust, ...must];
+
+    filter.push({ term: { is_hidden: false } });
+
     return {
+      size: maxResults,
       query: {
         bool: {
-          must: must.length > 0 ? must : undefined!,
+          must: mustClauses,
           should: should.length > 0 ? should : undefined,
           filter,
           must_not: must_not.length > 0 ? must_not : undefined,
         },
       },
-      knn: {
-        embedding: {
-          vector: query.embeddings.global,
-          k: maxResults,
-        },
-      },
-      size: maxResults,
       _source: ['product_id', 'title', 'brand', 'price_usd', 'image_cdn', 'category'],
     };
   }

@@ -256,7 +256,7 @@ export async function searchByImageWithSimilarity(
     filters = {},
     page = 1,
     limit = 20,
-    similarityThreshold = config.clip.similarityThreshold,
+    similarityThreshold = config.clip.imageSimilarityThreshold,
     includeRelated = true,
     pHash,
     predictedCategoryAisles,
@@ -340,9 +340,14 @@ export async function searchByImageWithSimilarity(
   const embeddingField =
     String(process.env.SEARCH_IMAGE_KNN_FIELD ?? "embedding").trim() || "embedding";
 
-  const wGlobal = Math.max(0, Math.min(1, Number(process.env.SEARCH_IMAGE_GLOBAL_KNN_WEIGHT ?? "0.65")));
-  const wColor = Math.max(0, Math.min(1, Number(process.env.SEARCH_IMAGE_COLOR_KNN_WEIGHT ?? "0.35")));
+  const wGlobal = Math.max(0, Math.min(1, Number(process.env.SEARCH_IMAGE_GLOBAL_KNN_WEIGHT ?? "0.55")));
+  const wColor = Math.max(0, Math.min(1, Number(process.env.SEARCH_IMAGE_COLOR_KNN_WEIGHT ?? "0.45")));
   const wSum = wGlobal + wColor > 0 ? wGlobal + wColor : 1;
+
+  const categoryBoost = Math.max(
+    100,
+    Math.min(1200, Number(process.env.SEARCH_IMAGE_CATEGORY_BOOST ?? "450") || 450),
+  );
 
   let colorQueryEmbedding: number[] | null = null;
   if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
@@ -458,8 +463,8 @@ export async function searchByImageWithSimilarity(
       const sb = knnScoreToSimilarity01(b._score);
       const ca = categoryMetadataSoft01(a._source, desiredCatalogTerms);
       const cb = categoryMetadataSoft01(b._source, desiredCatalogTerms);
-      const ra = sa * 1000 + ca * 220;
-      const rb = sb * 1000 + cb * 220;
+      const ra = sa * 1000 + ca * categoryBoost;
+      const rb = sb * 1000 + cb * categoryBoost;
       return rb - ra;
     });
   }

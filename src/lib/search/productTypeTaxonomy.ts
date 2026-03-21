@@ -940,3 +940,234 @@ export function scoreRerankProductTypeBreakdown(
     combinedTypeCompliance,
   };
 }
+
+/** Minimum intra-family penalty to treat two bottom/footwear/tops hints as conflicting. */
+const SPURIOUS_CATEGORY_MIN_SAME_FAMILY_PENALTY = 0.38;
+
+type GarmentHint =
+  | { kind: "bottom"; id: string }
+  | { kind: "shorts_skirt"; sk: "shorts" | "skirt" }
+  | { kind: "footwear"; id: string }
+  | { kind: "tops"; id: string }
+  | { kind: "dress"; id: string };
+
+function dedupeGarmentHints(hints: GarmentHint[]): GarmentHint[] {
+  const seen = new Set<string>();
+  const out: GarmentHint[] = [];
+  for (const h of hints) {
+    const key = JSON.stringify(h);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(h);
+  }
+  return out;
+}
+
+function inferGarmentHintsFromQuerySeeds(seeds: string[]): GarmentHint[] {
+  const out: GarmentHint[] = [];
+  for (const raw of seeds) {
+    const t = raw.toLowerCase().trim();
+    if (!t) continue;
+    const b = bottomMicroGroup(t);
+    if (b) out.push({ kind: "bottom", id: BOTTOM_MICRO[b] });
+    const ss = shortsSkirtMicro(t);
+    if (ss) out.push({ kind: "shorts_skirt", sk: ss });
+    const ft = footwearMicroGroup(t);
+    if (ft) out.push({ kind: "footwear", id: FOOTWEAR_MICRO[ft] });
+    const tp = topsMicroGroup(t);
+    if (tp) out.push({ kind: "tops", id: TOPS_MICRO[tp] });
+    const dr = dressMicroGroup(t);
+    if (dr) out.push({ kind: "dress", id: DRESS_MICRO[dr] });
+  }
+  return dedupeGarmentHints(out);
+}
+
+function inferGarmentHintsFromCategoryString(raw: string | undefined): GarmentHint[] {
+  if (!raw) return [];
+  const s = String(raw).toLowerCase();
+  const out: GarmentHint[] = [];
+  const words = s.split(/[^a-z0-9]+/).filter(Boolean);
+  for (const w of words) {
+    const b = bottomMicroGroup(w);
+    if (b) out.push({ kind: "bottom", id: BOTTOM_MICRO[b] });
+    const ss = shortsSkirtMicro(w);
+    if (ss) out.push({ kind: "shorts_skirt", sk: ss });
+    const ft = footwearMicroGroup(w);
+    if (ft) out.push({ kind: "footwear", id: FOOTWEAR_MICRO[ft] });
+    const tp = topsMicroGroup(w);
+    if (tp) out.push({ kind: "tops", id: TOPS_MICRO[tp] });
+    const dr = dressMicroGroup(w);
+    if (dr) out.push({ kind: "dress", id: DRESS_MICRO[dr] });
+  }
+  if (/\bskirts?\b/.test(s)) out.push({ kind: "shorts_skirt", sk: "skirt" });
+  if (/\b(?:board\s+)?shorts\b|\bbermuda\b/.test(s)) out.push({ kind: "shorts_skirt", sk: "shorts" });
+  if (/\b(sweater|cardigan|hoodie|blouse|shirt|tee|knitwear|polo)\b/.test(s)) {
+    const m = s.match(/\b(sweaters?|cardigans?|hoodies?|blouses?|shirts?|tees?|knitwear|polos?)\b/);
+    if (m) {
+      const tp = topsMicroGroup(m[1]);
+      if (tp) out.push({ kind: "tops", id: TOPS_MICRO[tp] });
+    }
+  }
+  if (/\b(dresses?|gowns?|jumpsuits?|rompers?)\b/.test(s)) {
+    const m = s.match(/\b(dresses?|gowns?|jumpsuits?|rompers?)\b/);
+    if (m) {
+      const dr = dressMicroGroup(m[1]);
+      if (dr) out.push({ kind: "dress", id: DRESS_MICRO[dr] });
+    }
+  }
+  return dedupeGarmentHints(out);
+}
+
+function docSupportsGarmentHint(docProductTypes: string[], hint: GarmentHint): boolean {
+  const docs = docProductTypes.map((t) => t.toLowerCase().trim()).filter(Boolean);
+  if (docs.length === 0) return false;
+  switch (hint.kind) {
+    case "bottom":
+      return docs.some((d) => {
+        const g = bottomMicroGroup(d);
+        return g ? BOTTOM_MICRO[g] === hint.id : false;
+      });
+    case "shorts_skirt":
+      return docs.some((d) => shortsSkirtMicro(d) === hint.sk);
+    case "footwear":
+      return docs.some((d) => {
+        const g = footwearMicroGroup(d);
+        return g ? FOOTWEAR_MICRO[g] === hint.id : false;
+      });
+    case "tops":
+      return docs.some((d) => {
+        const g = topsMicroGroup(d);
+        return g ? TOPS_MICRO[g] === hint.id : false;
+      });
+    case "dress":
+      return docs.some((d) => {
+        const g = dressMicroGroup(d);
+        return g ? DRESS_MICRO[g] === hint.id : false;
+      });
+    default:
+      return false;
+  }
+}
+
+function garmentHintsConflict(a: GarmentHint, b: GarmentHint): boolean {
+  if (a.kind === "bottom" && b.kind === "bottom") {
+    return (
+      lookupPairPenalty(BOTTOM_PENALTY_TBL, a.id, b.id) >= SPURIOUS_CATEGORY_MIN_SAME_FAMILY_PENALTY
+    );
+  }
+  if (a.kind === "footwear" && b.kind === "footwear") {
+    return (
+      lookupPairPenalty(FOOTWEAR_PENALTY_TBL, a.id, b.id) >= SPURIOUS_CATEGORY_MIN_SAME_FAMILY_PENALTY
+    );
+  }
+  if (a.kind === "tops" && b.kind === "tops") {
+    return (
+      lookupPairPenalty(TOPS_PENALTY_TBL, a.id, b.id) >= SPURIOUS_CATEGORY_MIN_SAME_FAMILY_PENALTY
+    );
+  }
+  if (a.kind === "dress" && b.kind === "dress") {
+    return (
+      lookupPairPenalty(DRESS_PENALTY_TBL, a.id, b.id) >= SPURIOUS_CATEGORY_MIN_SAME_FAMILY_PENALTY
+    );
+  }
+  if (a.kind === "shorts_skirt" && b.kind === "shorts_skirt") {
+    return (
+      a.sk !== b.sk &&
+      lookupPairPenalty(SHORTS_SKIRT_PENALTY_TBL, a.sk, b.sk) >= 0.5
+    );
+  }
+  if (
+    (a.kind === "shorts_skirt" && b.kind === "bottom") ||
+    (a.kind === "bottom" && b.kind === "shorts_skirt")
+  ) {
+    return true;
+  }
+  if (
+    (a.kind === "tops" && b.kind === "bottom") ||
+    (a.kind === "bottom" && b.kind === "tops")
+  ) {
+    return true;
+  }
+  if (
+    (a.kind === "tops" && b.kind === "shorts_skirt") ||
+    (a.kind === "shorts_skirt" && b.kind === "tops")
+  ) {
+    return true;
+  }
+  if (
+    (a.kind === "dress" && b.kind === "bottom") ||
+    (a.kind === "bottom" && b.kind === "dress")
+  ) {
+    return true;
+  }
+  if (
+    (a.kind === "dress" && b.kind === "tops") ||
+    (a.kind === "tops" && b.kind === "dress")
+  ) {
+    return true;
+  }
+  if (
+    (a.kind === "dress" && b.kind === "shorts_skirt") ||
+    (a.kind === "shorts_skirt" && b.kind === "dress")
+  ) {
+    return true;
+  }
+  if (
+    (a.kind === "footwear" && b.kind === "bottom") ||
+    (a.kind === "bottom" && b.kind === "footwear")
+  ) {
+    return true;
+  }
+  if (
+    (a.kind === "footwear" && b.kind === "shorts_skirt") ||
+    (a.kind === "shorts_skirt" && b.kind === "footwear")
+  ) {
+    return true;
+  }
+  if (
+    (a.kind === "footwear" && b.kind === "tops") ||
+    (a.kind === "tops" && b.kind === "footwear")
+  ) {
+    return true;
+  }
+  if (
+    (a.kind === "footwear" && b.kind === "dress") ||
+    (a.kind === "dress" && b.kind === "footwear")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * When `product_types` match the query (brand bleed, bad tags) but the **category**
+ * string implies a different garment family, taxonomy-based rerank would still score
+ * a false "exact" type match. Down-rank those rows.
+ *
+ * Uses the same micro-groups as `intraFamilySubtypePenalty` plus cross-axis
+ * conflicts (e.g. bottoms vs skirts, tops vs bottoms, footwear vs bottoms).
+ */
+export function downrankSpuriousProductTypeFromCategory(
+  querySeeds: string[],
+  docProductTypes: string[],
+  docCategoryRaw: string | undefined,
+): { complianceScale: number; forceExactZero: boolean } {
+  const seeds = querySeeds.map((s) => s.toLowerCase().trim()).filter(Boolean);
+  const docs = docProductTypes.map((t) => t.toLowerCase().trim()).filter(Boolean);
+  if (seeds.length === 0 || docs.length === 0) return { complianceScale: 1, forceExactZero: false };
+
+  const qHints = inferGarmentHintsFromQuerySeeds(seeds);
+  const catHints = inferGarmentHintsFromCategoryString(docCategoryRaw);
+  if (qHints.length === 0 || catHints.length === 0) return { complianceScale: 1, forceExactZero: false };
+
+  for (const qh of qHints) {
+    for (const ch of catHints) {
+      if (!garmentHintsConflict(qh, ch)) continue;
+      if (!docSupportsGarmentHint(docs, qh)) continue;
+      if (docSupportsGarmentHint(docs, ch)) continue;
+      return { complianceScale: 0.22, forceExactZero: true };
+    }
+  }
+
+  return { complianceScale: 1, forceExactZero: false };
+}
