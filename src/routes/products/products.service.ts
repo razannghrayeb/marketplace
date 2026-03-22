@@ -6,28 +6,7 @@ import {
 } from "../../lib/core/index";
 import { config } from "../../config";
 import { getImagesForProducts, ProductImage } from "./images.service";
-import {
-  hammingDistance,
-  enrichProductsWithVariantSummary,
-  applyVariantSummaryToProduct,
-  getVariantsByProductIds,
-  pickDisplaySkuForSearch,
-  mergeVariantPrimaryImageIntoProductImages,
-  type ProductVariantRow,
-  type ResolveDisplayVariantFn,
-} from "../../lib/products";
-
-function resolveDisplayVariantForImageSearch(
-  colorByHitId: Map<string, string | null>,
-  queryAndFilterColorHints: string[],
-  textQuery: string | undefined,
-): ResolveDisplayVariantFn {
-  return (pid, variants) =>
-    pickDisplaySkuForSearch(variants, {
-      colorHints: [...queryAndFilterColorHints, colorByHitId.get(String(pid))],
-      textQuery: textQuery ?? null,
-    });
-}
+import { hammingDistance } from "../../lib/products";
 import { dedupeSearchResults, filterRelatedAgainstMain } from "../../lib/search/resultDedup";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
 import {
@@ -858,19 +837,7 @@ export async function searchByImageWithSimilarity(
   // Fetch product data
   let results: ProductResult[] = [];
   if (productIds.length > 0) {
-    const imageSearchVariantColorHints = [
-      ...new Set([...desiredColorsForRelevance, ...explicitColorsForRelevance]),
-    ];
-    const products = await enrichProductsWithVariantSummary(
-      await getProductsByIdsOrdered(productIds),
-      {
-        resolveDisplayVariant: resolveDisplayVariantForImageSearch(
-          colorByHitId,
-          imageSearchVariantColorHints,
-          textQueryForRelevance,
-        ),
-      },
-    );
+    const products = await getProductsByIdsOrdered(productIds);
     const numericIds = productIds.map((id: string) => parseInt(id, 10));
     const imagesByProduct = await getImagesForProducts(numericIds);
 
@@ -879,17 +846,12 @@ export async function searchByImageWithSimilarity(
       const idStr = String(p.id);
       const similarityScore = scoreMap.get(idStr) ?? 0;
       const compliance = complianceById.get(idStr);
-      const galleryBase = images.map((img) => ({
+      const imagesOut = images.map((img) => ({
         id: img.id,
         url: img.cdn_url,
         is_primary: img.is_primary,
         p_hash: img.p_hash ?? undefined,
       }));
-      const imagesOut = mergeVariantPrimaryImageIntoProductImages(
-        p.default_variant_id,
-        p.image_cdn || p.image_url,
-        galleryBase,
-      );
       return {
         ...p,
         color: colorByHitId.get(idStr) ?? p.color ?? null,
@@ -1025,7 +987,7 @@ async function findSimilarByPHash(
 
   // Fetch product data
   const productIds = topSimilar.map(s => String(s.id));
-  const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds));
+  const products = await getProductsByIdsOrdered(productIds);
   const numericIds = topSimilar.map(s => s.id);
   const imagesByProduct = await getImagesForProducts(numericIds);
 
@@ -1220,7 +1182,7 @@ export async function searchByTextWithRelated(
   let extractedCategories: string[] = entities.categories;
 
   if (productIds.length > 0) {
-    const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds));
+    const products = await getProductsByIdsOrdered(productIds);
     const numericIds = productIds.map((id: string) => parseInt(id, 10));
     const imagesByProduct = await getImagesForProducts(numericIds);
 
@@ -1329,7 +1291,7 @@ async function findRelatedProducts(
 
   if (productIds.length === 0) return [];
 
-  const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds));
+  const products = await getProductsByIdsOrdered(productIds);
   const numericIds = productIds.map((id: string) => parseInt(id, 10));
   const imagesByProduct = await getImagesForProducts(numericIds);
 
@@ -1348,22 +1310,19 @@ async function findRelatedProducts(
 }
 
 // ============================================================================
-// Product detail (parent listing + SKU rows)
+// Product detail
 // ============================================================================
 
 export async function getProductWithVariants(productId: number): Promise<{
   product: Record<string, unknown>;
-  variants: ProductVariantRow[];
   images: ProductImage[];
 } | null> {
   const rows = await getProductsByIdsOrdered([productId]);
   if (!rows.length) return null;
-  const variantMap = await getVariantsByProductIds([productId]);
-  const variants = variantMap.get(productId) ?? [];
-  const product = applyVariantSummaryToProduct(rows[0], variants);
+  const product = rows[0] as Record<string, unknown>;
   const imagesByProduct = await getImagesForProducts([productId]);
   const images = imagesByProduct.get(productId) ?? [];
-  return { product, variants, images };
+  return { product, images };
 }
 
 // ============================================================================
@@ -1729,7 +1688,7 @@ export async function getCandidateScoresForProducts(
     };
   }
 
-  const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(finalIds));
+  const products = await getProductsByIdsOrdered(finalIds);
   const numericIds = finalIds.map((id) => parseInt(id, 10));
   const imagesByProduct = await getImagesForProducts(numericIds);
 

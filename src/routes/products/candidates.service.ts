@@ -12,7 +12,7 @@ import { osClient } from "../../lib/core";
 import { pg, getProductsByIdsOrdered } from "../../lib/core";
 import { config } from "../../config";
 import { getImagesForProducts } from "./images.service";
-import { hammingDistance, enrichProductsWithVariantSummary } from "../../lib/products";
+import { hammingDistance } from "../../lib/products";
 import { parseQuery, buildSemanticOpenSearchQuery } from "../../lib/search";
 import type {
   CandidateGeneratorParams,
@@ -450,7 +450,7 @@ async function buildCandidateResults(
   pHashDistMap: Map<string, number>,
   sourceMap: Map<string, CandidateSource>
 ): Promise<CandidateResult[]> {
-  const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(finalIds));
+  const products = await getProductsByIdsOrdered(finalIds);
   const numericIds = finalIds.map((id) => parseInt(id, 10));
   const imagesByProduct = await getImagesForProducts(numericIds);
 

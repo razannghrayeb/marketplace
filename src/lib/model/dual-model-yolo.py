@@ -354,6 +354,8 @@ class DualDetector:
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Examples below are comment-only; `pass` keeps this module valid for import (e.g. uvicorn).
+    pass
 
     # ── Example 1: Kaggle notebook / script ──────────────────────────────────
     #

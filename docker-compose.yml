@@ -19,12 +19,8 @@ services:
       - REDIS_URL=redis://redis:6379
       - OPENSEARCH_URL=http://opensearch-node:9200
       - RANKER_API_URL=http://ranker:8000
-      # YOLO: default = embedded uvicorn in api image (loopback). Temporarily offload:
-      #   YOLO_DETECTION_DISABLED=1 in .env — no PyTorch worker, Node skips detection (Shop-the-Look / image analysis boxes off).
-      #   Or external only: build with EMBEDDED_YOLO=0, `docker compose --profile yolo-sidecar up -d yolov8`, set YOLOV8_SERVICE_URL=http://yolov8:8001
-      - YOLO_DETECTION_DISABLED=${YOLO_DETECTION_DISABLED:-}
-      # Bundled YOLO (docker-entrypoint starts uvicorn on 127.0.0.1:8001). Omit or override when using sidecar / disabled.
-      - YOLOV8_SERVICE_URL=${YOLOV8_SERVICE_URL:-http://127.0.0.1:8001}
+      # Bundled YOLO (docker-entrypoint starts uvicorn on 127.0.0.1:8001). Do not point at yolov8 unless you use EMBEDDED_YOLO=0.
+      - YOLOV8_SERVICE_URL=http://127.0.0.1:8001
       - ONNX_API_URL=http://onnx-inference:8000
     depends_on:
       postgres:
