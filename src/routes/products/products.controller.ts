@@ -172,6 +172,7 @@ export async function searchProductsByImage(req: Request, res: Response) {
       const result = await searchImage({
         imageEmbedding: embedding,
         imageEmbeddingGarment: garmentEmbeddingForSearch,
+        imageBuffer: file.buffer,
       filters,
       limit,
       similarityThreshold,

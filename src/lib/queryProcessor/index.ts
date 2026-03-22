@@ -36,6 +36,7 @@ import {
   normalizeArabic,
   getTransliterationVariants,
   expandFashionTerm,
+  hasArabiziPattern,
 } from "./arabizi";
 
 import { correctQuery, confidenceToLevel } from "./spellCorrector";
@@ -57,6 +58,12 @@ import {
   getCachedEmbedding,
   cacheEmbedding,
 } from "./cache";
+import {
+  getQueryAstFromRedis,
+  isQueryAstRedisCacheEnabled,
+  setQueryAstInRedis,
+} from "./queryAstRedisCache";
+import { config } from "../../config";
 
 import { parseParameters } from "./parameterParser";
 
@@ -218,9 +225,17 @@ async function runPipeline(raw: string, opts: PipelineOpts): Promise<QueryAST> {
   // Stage 0: Parameter extraction — strip control params, output searchText only
   const { searchText: pipelineInput, controlParams: controlParamsExtracted } = parseParameters(raw);
 
-  // Stage 1: Cache
-  const cached = getCachedQueryAST(raw);
+  // Stage 1: Cache (memory, then optional Redis — keys include LLM / ML-intent variant)
+  const cached = getCachedQueryAST(raw, opts);
   if (cached) return { ...cached, cacheHit: true };
+
+  if (isQueryAstRedisCacheEnabled()) {
+    const fromRedis = await getQueryAstFromRedis(raw, opts, config.search.queryAstCacheLocale);
+    if (fromRedis) {
+      cacheQueryAST(raw, fromRedis, opts);
+      return { ...fromRedis, cacheHit: true };
+    }
+  }
 
   // Stage 2: Normalize — protected spans (numbers, sizes) preserved
   const normalized = normalizeQuery(pipelineInput);
@@ -287,7 +302,16 @@ async function runPipeline(raw: string, opts: PipelineOpts): Promise<QueryAST> {
     searchQuery,
   };
 
-  cacheQueryAST(raw, ast);
+  cacheQueryAST(raw, ast, opts);
+  if (isQueryAstRedisCacheEnabled()) {
+    void setQueryAstInRedis(
+      raw,
+      ast,
+      opts,
+      config.search.queryAstCacheLocale,
+      config.search.queryAstRedisTtlSec,
+    );
+  }
   return ast;
 }
 
@@ -344,14 +368,28 @@ function tokenize(raw: string, normalized: string): QueryTokens {
   return { original, normalized: norm, stemmed: norm, important, stopwords: stops };
 }
 
+function tokenHasArabicScript(word: string): boolean {
+  return /[\u0600-\u06FF\u0750-\u077F]/.test(word);
+}
+
 /** Gather all rule-based corrections (arabizi → eng, brand aliases, spell) */
 function collectCorrections(normalized: string, script: ScriptAnalysis): Correction[] {
   const out: Correction[] = [];
 
-  // Arabizi
-  if (script.hasArabizi || script.primary === "arabizi") {
+  // Arabizi: run on Latin tokens. For mixed-script queries (e.g. "jeans" + Arabic),
+  // still process Latin fragments that use Arabizi numerals or dictionary hits — not
+  // only when the whole query is labeled arabizi (fixes ordering/gating gaps).
+  const useArabiziOnLatinTokens =
+    script.hasArabizi ||
+    script.primary === "arabizi" ||
+    script.primary === "mixed";
+
+  if (useArabiziOnLatinTokens) {
     for (const word of normalized.split(/\s+/)) {
+      if (!word || tokenHasArabicScript(word)) continue;
       const lw = word.toLowerCase();
+      if (!/[a-z0-9]/i.test(lw)) continue;
+
       const fashion = expandFashionTerm(lw);
       if (fashion?.english && fashion.english !== lw) {
         out.push({
@@ -359,7 +397,17 @@ function collectCorrections(normalized: string, script: ScriptAnalysis): Correct
           source: "arabizi", confidence: 0.95, confidenceLevel: "high",
           alternatives: fashion.arabic ? [fashion.arabic] : undefined,
         });
-      } else if (/[a-z]+[2-9]+[a-z]*/i.test(word) || /[2-9]+[a-z]+/i.test(word)) {
+        continue;
+      }
+
+      const tryDigitArabizi =
+        script.primary === "arabizi" ||
+        script.hasArabizi ||
+        hasArabiziPattern(word) ||
+        /[a-z]+[2-9]+[a-z]*/i.test(word) ||
+        /[2-9]+[a-z]+/i.test(word);
+
+      if (tryDigitArabizi) {
         const arabic = arabiziToArabic(lw);
         if (arabic !== lw) {
           out.push({

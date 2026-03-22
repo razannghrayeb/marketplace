@@ -125,6 +125,23 @@ export interface MultiVectorSearchResult {
     imageCdn?: string;
     [key: string]: any;
   };
+  /** Fusion / OS scores before downstream normalization (for rerank parity with composite path). */
+  _rawScores?: { vectorScore: number; compositeScore?: number };
+}
+
+/**
+ * Map batch scores to [0, 1] by top-hit max so multi-vector and composite fusion scales align for A/B.
+ */
+export function normalizeMultiVectorScoresToUnitRange(
+  results: MultiVectorSearchResult[],
+): MultiVectorSearchResult[] {
+  if (results.length === 0) return results;
+  const maxS = Math.max(...results.map((r) => r.score), 1e-12);
+  return results.map((r) => ({
+    ...r,
+    _rawScores: { vectorScore: r.score },
+    score: Math.max(0, Math.min(1, r.score / maxS)),
+  }));
 }
 
 // ============================================================================

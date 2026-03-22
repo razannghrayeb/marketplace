@@ -1,4 +1,10 @@
 # syntax=docker/dockerfile:1.7
+#
+# Default: embedded YOLO (PyTorch venv + entrypoint uvicorn on loopback) so detection always works in one container.
+#   DOCKER_BUILDKIT=1 docker build .
+#
+# Slim API-only image (you must set YOLOV8_SERVICE_URL to an external detector, e.g. compose profile yolo-sidecar):
+#   docker build --build-arg EMBEDDED_YOLO=0 .
 
 # ============================================================================
 # Fashion Marketplace API
@@ -11,13 +17,17 @@
 FROM python:3.11-slim AS model-downloader
 ARG HF_TOKEN=""
 ENV HF_TOKEN=${HF_TOKEN}
-RUN pip install --no-cache-dir huggingface_hub
-RUN python -c "from huggingface_hub import snapshot_download; import os; token = os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, ignore_patterns=['*.gitattributes', '.gitattributes', 'README.md']); print('Models downloaded successfully to /models')"
+ENV HF_HOME=/root/.cache/huggingface
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir huggingface_hub
+RUN --mount=type=cache,target=/root/.cache/huggingface \
+    python -c "from huggingface_hub import snapshot_download; import os; token = os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, ignore_patterns=['*.gitattributes', '.gitattributes', 'README.md']); print('Models downloaded successfully to /models')"
 
 # Pre-download tokenizer vocab files via huggingface_hub (already installed,
 # handles auth + redirects). CLIP BPE: openai/clip-vit-base-patch32 (public).
 # BLIP WordPiece: google-bert/bert-base-uncased (public, same BERT vocab).
-RUN python3 -c "from huggingface_hub import hf_hub_download; import os, shutil; os.makedirs('/models/.cache', exist_ok=True); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'vocab.json'), '/models/.cache/vocab.json'); print('vocab.json ok'); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'merges.txt'), '/models/.cache/merges.txt'); print('merges.txt ok'); shutil.copy(hf_hub_download('google-bert/bert-base-uncased', 'vocab.txt'), '/models/.cache/blip-vocab.txt'); print('blip-vocab.txt ok')"
+RUN --mount=type=cache,target=/root/.cache/huggingface \
+    python3 -c "from huggingface_hub import hf_hub_download; import os, shutil; os.makedirs('/models/.cache', exist_ok=True); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'vocab.json'), '/models/.cache/vocab.json'); print('vocab.json ok'); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'merges.txt'), '/models/.cache/merges.txt'); print('merges.txt ok'); shutil.copy(hf_hub_download('google-bert/bert-base-uncased', 'vocab.txt'), '/models/.cache/blip-vocab.txt'); print('blip-vocab.txt ok')"
 
 # Stage 1: Build
 FROM node:20-alpine AS builder
@@ -30,8 +40,9 @@ RUN corepack enable && corepack prepare pnpm@9 --activate
 # Copy package files
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
-# Install dependencies
-RUN pnpm install --frozen-lockfile
+# Install dependencies (BuildKit cache: rebuilds skip re-download when lockfile unchanged)
+RUN --mount=type=cache,id=pnpm-marketplace,target=/pnpm/store \
+    pnpm install --frozen-lockfile --store-dir=/pnpm/store
 
 # Copy source
 COPY tsconfig.json tsconfig.base.json ./
@@ -43,17 +54,25 @@ RUN pnpm build
 # Stage 2: Production
 FROM node:20-bookworm-slim AS production
 
+# 1 = install PyTorch + YOLO venv in this image (~1.5GB+). 0 = slim API image; set YOLO_API_URL to external detector.
+ARG EMBEDDED_YOLO=1
+
 WORKDIR /app
 
-# Install pnpm
 RUN corepack enable && corepack prepare pnpm@9 --activate
 
-# Runtime OS packages: wget (health checks), Python + libs for in-container YOLO (OpenCV / ultralytics)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget ca-certificates \
-    python3 python3-venv python3-pip \
-    libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+# Runtime OS packages: full stack only when embedding YOLO
+RUN set -eux; \
+    apt-get update; \
+    if [ "$EMBEDDED_YOLO" = "1" ]; then \
+      apt-get install -y --no-install-recommends \
+        wget ca-certificates \
+        python3 python3-venv python3-pip \
+        libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1; \
+    else \
+      apt-get install -y --no-install-recommends wget ca-certificates; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN groupadd -g 1001 nodejs && \
@@ -63,7 +82,8 @@ RUN groupadd -g 1001 nodejs && \
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
 # Install production dependencies only
-RUN pnpm install --frozen-lockfile --prod
+RUN --mount=type=cache,id=pnpm-marketplace-prod,target=/pnpm/store \
+    pnpm install --frozen-lockfile --prod --store-dir=/pnpm/store
 
 # Copy built files
 COPY --from=builder /app/dist ./dist
@@ -78,16 +98,27 @@ RUN if [ ! -f "./models/fashion-clip-image.onnx" ] || [ ! -f "./models/fashion-c
   fi && \
   echo "✅ ML models present: $(ls -lh ./models/*.onnx | wc -l) ONNX files"
 
-# In-container YOLO FastAPI (shop-the-look); skipped when YOLO_* URL points to external service only
+# YOLO app sources (small); venv is created only when EMBEDDED_YOLO=1
 COPY src/lib/model/yolov8_api.py \
      src/lib/model/dual_model_yolo.py \
      src/lib/model/dual-model-yolo.py \
      src/lib/model/image_preprocessor.py \
      /app/yolo/
-COPY src/lib/model/requirements-yolo.txt /app/yolo/requirements.txt
-RUN python3 -m venv /app/yolo/venv && \
-    /app/yolo/venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /app/yolo/venv/bin/pip install --no-cache-dir -r /app/yolo/requirements.txt
+COPY src/lib/model/requirements-yolo-extras.txt /app/yolo/requirements-extras.txt
+
+# CPU torch wheels from PyTorch index (smaller + faster than default CUDA-capable PyPI wheels)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    set -eux; \
+    if [ "$EMBEDDED_YOLO" = "1" ]; then \
+      python3 -m venv /app/yolo/venv && \
+      /app/yolo/venv/bin/pip install --no-cache-dir --upgrade pip && \
+      /app/yolo/venv/bin/pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cpu \
+        torch torchvision && \
+      /app/yolo/venv/bin/pip install --no-cache-dir -r /app/yolo/requirements-extras.txt; \
+    else \
+      rm -rf /app/yolo && mkdir -p /app/yolo; \
+    fi
 
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh

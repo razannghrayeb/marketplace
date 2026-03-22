@@ -10,7 +10,13 @@ import { pg, getProductsByIdsOrdered } from '../../lib/core/db';
 import { enrichProductsWithVariantSummary } from '../../lib/products';
 import { osClient } from '../../lib/core/opensearch';
 import { config } from '../../config';
-import { IntentParserService, ParsedIntent } from '../../lib/prompt/gemeni';
+import {
+  IntentParserService,
+  ParsedIntent,
+  createClipOnlyParsedIntent,
+} from '../../lib/prompt/gemeni';
+import { preprocessMultiImageBuffers } from '../../lib/search/multiImagePreprocess';
+import { reconcileIntentNegativeCollisions } from '../../lib/search/intentReconciliation';
 import { CompositeQueryBuilder, CompositeQuery } from '../../lib/query/compositeQueryBuilder';
 import { QueryMapper } from '../../lib/query/queryMapper';
 import { processImageForEmbedding } from '../../lib/image/processor';
@@ -66,6 +72,7 @@ import {
   type HybridScoreRecallStats,
   type SearchHitRelevanceIntent,
 } from '../../lib/search/searchHitRelevance';
+import type { NegationConstraint } from '../../lib/queryProcessor/negationHandler';
 
 function buildHybridScoreRecallStats(hits: any[]): HybridScoreRecallStats | undefined {
   if (!hits?.length) return undefined;
@@ -120,6 +127,8 @@ export interface SearchResult {
   query?: QueryASTSummary;
   explanation?: string;
   compositeQuery?: CompositeQuery;
+  /** Text search ships rich telemetry here; multi-image adds gemini_degraded / ast_pipeline_degraded. */
+  meta?: Record<string, unknown>;
 }
 
 export type UnifiedSearchResult = SearchResultWithRelated & {
@@ -169,11 +178,75 @@ function genderHardFilterMinConfidence(): number {
   return Number.isFinite(n) ? Math.min(0.95, Math.max(0.35, n)) : 0.55;
 }
 
+/** When true, hard/soft gender clauses also allow indexed `unisex` (SEARCH_GENDER_UNISEX_OR). */
+function binaryGenderAllowsUnisexFilter(g: string): boolean {
+  if (!config.search.genderUnisexOr) return false;
+  const x = g.toLowerCase();
+  return (
+    x === "men" ||
+    x === "women" ||
+    x === "male" ||
+    x === "female" ||
+    x === "man" ||
+    x === "woman"
+  );
+}
+
 /** OpenSearch fetch size: large enough to rerank meaningfully, capped for latency. */
 function computeTextRecallSize(limit: number, offset: number): number {
   const w = config.search.recallWindow;
   const cap = config.search.recallMax;
   return Math.min(cap, Math.max(w, offset + limit));
+}
+
+/** Map parsed negation constraints to index fields (GET /search enhanced path). */
+function appendNegationsToTextSearchBool(
+  boolQ: { must_not?: any[] },
+  negations: NegationConstraint[] | undefined,
+): void {
+  if (!negations?.length) return;
+  if (!boolQ.must_not) boolQ.must_not = [];
+  for (const n of negations) {
+    const v = String(n.value || "").toLowerCase().trim();
+    if (!v) continue;
+    switch (n.type) {
+      case "color": {
+        const expanded = expandColorTermsForFilter(v);
+        if (expanded.length === 0) continue;
+        boolQ.must_not.push({
+          bool: {
+            should: [{ terms: { attr_color: expanded } }, { terms: { attr_colors: expanded } }],
+            minimum_should_match: 1,
+          },
+        });
+        break;
+      }
+      case "brand":
+        boolQ.must_not.push({
+          bool: {
+            should: [{ term: { brand: v } }, { match: { "brand.search": { query: n.value } } }],
+            minimum_should_match: 1,
+          },
+        });
+        break;
+      case "category":
+        boolQ.must_not.push({
+          bool: {
+            should: [{ term: { category: v } }, { match: { "category.search": { query: n.value } } }],
+            minimum_should_match: 1,
+          },
+        });
+        break;
+      default:
+        boolQ.must_not.push({
+          multi_match: {
+            query: n.value,
+            fields: ["title^2", "description", "category.search", "brand.search"],
+            type: "best_fields",
+          },
+        });
+    }
+  }
 }
 
 // Initialize services
@@ -203,6 +276,8 @@ export async function textSearch(
     relatedLimit?: number;
     /** When SEARCH_EVAL_LOG is set, used as eval_id instead of a random UUID */
     evalCorrelationId?: string;
+    /** From enhanced GET /search negation parse — applied as bool.must_not on the index. */
+    negationConstraints?: NegationConstraint[];
   },
 ): Promise<UnifiedSearchResult> {
   const startTime = Date.now();
@@ -215,8 +290,14 @@ export async function textSearch(
   const debug = String(process.env.SEARCH_DEBUG ?? "").toLowerCase() === "1";
 
   try {
+    const searchRetryTrace: string[] = [];
+    const pipelineStages: { stage: string; msFromStart: number }[] = [];
+    const markStage = (stage: string) =>
+      pipelineStages.push({ stage, msFromStart: Date.now() - startTime });
+
     // ── 1. Process query through the AST pipeline ──────────────────────────
     const ast = await processQueryAST(rawQuery);
+    markStage("after_ast");
 
     const callerPinnedColor =
       Boolean(callerFilters?.color) ||
@@ -225,6 +306,7 @@ export async function textSearch(
     const embeddingFashion01 = await computeEmbeddingFashionScore(
       (ast.searchQuery && ast.searchQuery.trim()) || rawQuery,
     ).catch(() => null);
+    markStage("after_fashion_embedding_signal");
 
     const qu = buildQueryUnderstanding(ast, rawQuery, {
       callerPinnedColor,
@@ -283,7 +365,16 @@ export async function textSearch(
      * Default: text kNN is should-boost only (SEARCH_KNN_TEXT_IN_MUST unset).
      * Legacy must+min_score: set SEARCH_KNN_TEXT_IN_MUST=1, then boost-only only for category/type-dominant queries.
      */
-    const knnBoostOnly = qu.knnTextBoostOnly ? true : hardAstCategory || productTypeDominant;
+    let knnBoostOnly = qu.knnTextBoostOnly ? true : hardAstCategory || productTypeDominant;
+    if (
+      !knnBoostOnly &&
+      config.search.knnDemoteLowFashionEmb &&
+      typeof embeddingFashion01 === "number" &&
+      Number.isFinite(embeddingFashion01) &&
+      embeddingFashion01 < config.search.knnDemoteFashionEmbMax
+    ) {
+      knnBoostOnly = true;
+    }
 
     const categoryVocab = hardAstCategory ? await loadCategoryVocabulary() : null;
     const textMinimumShouldMatch = hardAstCategory || productTypeDominant ? "30%" : "60%";
@@ -570,6 +661,12 @@ export async function textSearch(
 
     if (merged.gender && useHardAudienceFilter && normalizeQueryGender(merged.gender)) {
       const g = gNorm;
+      const unisexOr = binaryGenderAllowsUnisexFilter(g)
+        ? ([
+            { term: { attr_gender: "unisex" } },
+            { term: { audience_gender: "unisex" } },
+          ] as const)
+        : [];
       filterClauses.push({
         bool: {
           _name: "strict_gender_filter",
@@ -577,11 +674,18 @@ export async function textSearch(
             { term: { attr_gender: g } },
             { term: { audience_gender: g } },
             { match_phrase: { title: g } },
+            ...unisexOr,
           ],
           minimum_should_match: 1,
         },
       });
     } else if (merged.gender && normalizeQueryGender(merged.gender)) {
+      const unisexSoft = binaryGenderAllowsUnisexFilter(gNorm)
+        ? ([
+            { term: { attr_gender: { value: "unisex", boost: 4.2 } } },
+            { term: { audience_gender: { value: "unisex", boost: 4.2 } } },
+          ] as const)
+        : [];
       shouldClauses.push({
         bool: {
           _name: "soft_gender_boost",
@@ -589,6 +693,7 @@ export async function textSearch(
             { term: { attr_gender: { value: gNorm, boost: 6.0 } } },
             { term: { audience_gender: { value: gNorm, boost: 6.0 } } },
             { match_phrase: { title: { query: gNorm, boost: 4.0 } } },
+            ...unisexSoft,
           ],
           minimum_should_match: 0,
         },
@@ -743,6 +848,7 @@ export async function textSearch(
         console.warn('[textSearch] Embedding generation failed, proceeding with BM25-only:', err);
       }
     }
+    markStage("after_retrieval_embedding");
     let mustWithoutKnnForRetry: any[] | null = null;
     if (embedding) {
       mustWithoutKnnForRetry = mustClauses.filter((c: any) => !c?.knn);
@@ -768,6 +874,10 @@ export async function textSearch(
       }
       searchBody.query.bool.should = shouldClauses;
     }
+
+    appendNegationsToTextSearchBool(searchBody.query.bool, options?.negationConstraints);
+
+    markStage("before_opensearch_execute");
 
     // ── 7. Execute ─────────────────────────────────────────────────────────
     console.log('[textSearch] Query:', JSON.stringify({
@@ -864,6 +974,9 @@ export async function textSearch(
         ],
       };
 
+      appendNegationsToTextSearchBool(fallbackBody.query.bool, options?.negationConstraints);
+      searchRetryTrace.push("parse_error_safe_bool");
+
       response = await opensearch.search({ index: config.opensearch.index, body: fallbackBody });
     }
 
@@ -885,6 +998,7 @@ export async function textSearch(
             },
           },
         };
+        searchRetryTrace.push("zero_hit_bm25_without_knn");
         response = await opensearch.search({ index: config.opensearch.index, body: bm25Body });
       }
     }
@@ -945,6 +1059,7 @@ export async function textSearch(
           },
         },
       };
+      searchRetryTrace.push("zero_hit_category_filter_widened");
       response = await opensearch.search({ index: config.opensearch.index, body: widenBody });
       currentTotal = response.body.hits.total?.value ?? response.body.hits.total ?? currentTotal;
       relaxedUsed = true;
@@ -982,6 +1097,7 @@ export async function textSearch(
           },
         },
       };
+      searchRetryTrace.push("zero_hit_primary_color_to_attr_colors");
       response = await opensearch.search({ index: config.opensearch.index, body: relaxedBody });
       currentTotal =
         response.body.hits.total?.value ?? response.body.hits.total ?? currentTotal;
@@ -999,6 +1115,7 @@ export async function textSearch(
           },
         },
       };
+      searchRetryTrace.push("zero_hit_drop_strict_colors");
       response = await opensearch.search({ index: config.opensearch.index, body: relaxedBody });
       relaxedUsed = true;
     }
@@ -1019,6 +1136,7 @@ export async function textSearch(
           },
         },
       };
+      searchRetryTrace.push("zero_hit_drop_product_types");
       response = await opensearch.search({ index: config.opensearch.index, body: relaxedBody });
       relaxedUsed = true;
     }
@@ -1041,6 +1159,7 @@ export async function textSearch(
           },
         },
       };
+      searchRetryTrace.push("zero_hit_drop_audience_filters");
       response = await opensearch.search({ index: config.opensearch.index, body: relaxedBody });
       relaxedUsed = true;
     }
@@ -1150,12 +1269,34 @@ export async function textSearch(
       }
     }
 
-    // Fetch hydrated product + images while preserving ranking order above
+    const brandsForRelated = ast.entities.brands.map((b) => b.toLowerCase());
+    const categoriesForRelated = ast.entities.categories.map((c) => c.toLowerCase());
+    const relatedExcludeApprox = finalProductIds.slice(offset, offset + limit).map(String);
+
+    let relatedFetchError: string | undefined;
+    const relatedPromise =
+      includeRelated && relatedExcludeApprox.length > 0
+        ? findRelatedProducts(
+            relatedExcludeApprox,
+            brandsForRelated,
+            categoriesForRelated,
+            relatedLimit,
+          ).catch((e) => {
+            relatedFetchError = e instanceof Error ? e.message : String(e);
+            console.warn("[textSearch] findRelatedProducts failed:", e);
+            return [] as ProductResult[];
+          })
+        : Promise.resolve([] as ProductResult[]);
+
+    // Fetch hydrated product + images; overlap related OpenSearch when requested.
     const products = await enrichProductsWithVariantSummary(
       await getProductsByIdsOrdered(finalProductIds),
     );
     const numericIds = finalProductIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
-    const imagesByProduct = await getImagesForProducts(numericIds);
+    const [imagesByProduct, relatedProducts] = await Promise.all([
+      getImagesForProducts(numericIds),
+      relatedPromise,
+    ]);
 
     let results: ProductResult[] = products.map((p: any) => {
       const productIdStr = String(p.id);
@@ -1325,22 +1466,15 @@ export async function textSearch(
       results = await runXgbTieBreakOnSlice(results);
     }
 
-    // Related products (optional)
     let related: ProductResult[] = [];
     if (includeRelated) {
-      const brands = ast.entities.brands.map((b) => b.toLowerCase());
-      const categories = ast.entities.categories.map((c) => c.toLowerCase());
-      related = await findRelatedProducts(
-        results.map((p) => String(p.id)),
-        brands,
-        categories,
-        relatedLimit,
-      );
-      const relFiltered = filterRelatedAgainstMain(results as any, related as any);
-      related = (relFiltered ?? []) as ProductResult[];
+      related = (filterRelatedAgainstMain(results as any, relatedProducts as any) ?? []) as ProductResult[];
     }
 
     const includeDebug = debug || results.length === 0;
+    const includeRetrievalMeta =
+      includeDebug || belowRelevanceThreshold || results.length === 0;
+    markStage("before_response");
 
     // ── 8. Build response ──────────────────────────────────────────────────
     const osTotal =
@@ -1390,6 +1524,7 @@ export async function textSearch(
           final_accept_min: finalAcceptMin,
           below_relevance_threshold: belowRelevanceThreshold,
           total_above_threshold: totalAboveThreshold,
+          search_retry_trace: searchRetryTrace,
         },
         final_relevance_scores: results.map((p: any) =>
           typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : null,
@@ -1414,6 +1549,21 @@ export async function textSearch(
         final_accept_min: finalAcceptMin,
         total_above_threshold: totalAboveThreshold,
         open_search_total_estimate: typeof osTotal === "number" ? osTotal : undefined,
+        ...(relatedFetchError ? { related_fetch_error: relatedFetchError } : {}),
+        ...(includeRetrievalMeta
+          ? {
+              retrieval: {
+                search_retry_trace: searchRetryTrace,
+                open_search_hits_count: hits.length,
+                open_search_total_raw:
+                  response.body.hits.total?.value ?? response.body.hits.total ?? null,
+                accepted_after_relevance_min: thresholdPassedIds.length,
+                below_relevance_threshold: belowRelevanceThreshold,
+                recall_size: recallSize,
+                final_accept_min: finalAcceptMin,
+              },
+            }
+          : {}),
         ...(includeDebug
           ? {
               debug: {
@@ -1428,6 +1578,7 @@ export async function textSearch(
                 rerankDesiredColors,
                 colorMode,
                 queryUnderstanding: qu,
+                pipeline_stages: pipelineStages,
               },
             }
           : {}),
@@ -1505,14 +1656,15 @@ export async function multiImageSearch(
   const { images, userPrompt, limit = 50, rerankWeights } = request;
 
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
-
-    const intentParser = new IntentParserService({ apiKey });
-    const parsedIntent = await intentParser.parseUserIntent(images, userPrompt);
+    const prepared = await preprocessMultiImageBuffers(images);
+    const { parsedIntent, geminiDegraded } = await parseMultiImageIntentWithGuards(
+      prepared,
+      userPrompt,
+    );
+    reconcileIntentNegativeCollisions(parsedIntent);
 
     const imageEmbeddings = await Promise.all(
-      images.map(img => processImageForEmbedding(img))
+      prepared.map((img) => processImageForEmbedding(img)),
     );
 
     const compositeQuery = await queryBuilder.buildQuery(parsedIntent, imageEmbeddings);
@@ -1536,10 +1688,12 @@ export async function multiImageSearch(
       body: queryBundle.opensearch,
     });
 
+    let astPipelineDegraded = false;
     let ast: QueryAST;
     try {
       ast = await processQueryAST(userPrompt);
     } catch (astErr) {
+      astPipelineDegraded = true;
       console.warn('[multiImageSearch] processQueryAST failed, using processQueryFast:', astErr);
       try {
         ast = await processQueryFast(userPrompt?.trim() || 'fashion');
@@ -1555,7 +1709,12 @@ export async function multiImageSearch(
         ? (response.body.hits.total as { value?: number }).value ?? 0
         : Number(response.body.hits.total) || 0;
 
-    let relevanceIntent = buildMultiImageSearchHitRelevanceIntent(ast, parsedIntent, userPrompt);
+    let relevanceIntent = buildMultiImageSearchHitRelevanceIntent(
+      ast,
+      parsedIntent,
+      userPrompt,
+      astPipelineDegraded,
+    );
     const relevanceById = new Map<string, HitCompliance>();
 
     if (hits.length > 0) {
@@ -1622,35 +1781,57 @@ export async function multiImageSearch(
     const productIds = hits.map((hit: any) => hit._source?.product_id);
     const hydratedResults = await hydrateProductDetails(productIds, queryBundle.sqlFilters);
 
+    const rawScoresByProductId = new Map<
+      string,
+      { vectorScore: number; compositeScore: number }
+    >();
+
     const results = hits
       .map((hit: any) => {
         const hydrated = hydratedResults.find((p: any) => String(p.id) === String(hit._source.product_id));
-        return hydrated
-          ? {
-              ...hydrated,
-              vectorScore: hit._score,
-              compositeScore: calculateCompositeScore(hit._score, hydrated, compositeQuery, queryBundle.hybridScore),
-            }
-          : null;
+        if (!hydrated) return null;
+        const vectorScore = hit._score;
+        const compositeScore = calculateCompositeScore(
+          vectorScore,
+          hydrated,
+          compositeQuery,
+          queryBundle.hybridScore,
+        );
+        rawScoresByProductId.set(String(hit._source.product_id), {
+          vectorScore,
+          compositeScore,
+        });
+        return {
+          ...hydrated,
+          vectorScore,
+          compositeScore,
+        };
       })
       .filter((r: any): r is NonNullable<typeof r> => r !== null);
 
-    const mappedForRerank: MultiVectorSearchResult[] = results.map((r: any) => ({
-      productId: r.id || r.product_id || r.productId,
-      score: normalizeVectorScore(r.vectorScore),
-      product: {
-        vendorId: r.vendor_id || r.vendorId,
-        title: r.name || r.title,
-        brand: r.brand,
-        category: r.category,
-        priceUsd: r.price || r.price_usd || r.priceUsd,
-        availability: r.availability,
-        imageCdn: r.image_url || r.imageCdn,
-        description: r.description,
-        color: r.color,
-      },
-      scoreBreakdown: [],
-    }));
+    const mappedForRerank: MultiVectorSearchResult[] = results.map((r: any) => {
+      const idStr = String(r.id || r.product_id || r.productId);
+      const frozen = rawScoresByProductId.get(idStr);
+      return {
+        productId: idStr,
+        score: normalizeVectorScore(frozen?.vectorScore ?? r.vectorScore),
+        _rawScores: frozen
+          ? { vectorScore: frozen.vectorScore, compositeScore: frozen.compositeScore }
+          : { vectorScore: r.vectorScore },
+        product: {
+          vendorId: r.vendor_id || r.vendorId,
+          title: r.name || r.title,
+          brand: r.brand,
+          category: r.category,
+          priceUsd: r.price || r.price_usd || r.priceUsd,
+          availability: r.availability,
+          imageCdn: r.image_url || r.imageCdn,
+          description: r.description,
+          color: r.color,
+        },
+        scoreBreakdown: [],
+      };
+    });
 
     const defaultRerank: RerankOptions = { vectorWeight: 0.6, attributeWeight: 0.3, priceWeight: 0.1, recencyWeight: 0.0 };
     const rerankOpts = Object.assign({}, defaultRerank, rerankWeights || {});
@@ -1688,12 +1869,35 @@ export async function multiImageSearch(
         return (b.rerankScore ?? 0) - (a.rerankScore ?? 0);
       });
 
+    if (finalResults.length > 0) {
+      const maxVs = Math.max(
+        ...finalResults.map((r: any) => Number(r.vectorScore) || 0),
+        1e-12,
+      );
+      const maxCs = Math.max(
+        ...finalResults.map((r: any) => Number(r.compositeScore) || 0),
+        1e-12,
+      );
+      for (const r of finalResults) {
+        r.vectorScore = Math.max(0, Math.min(1, (Number(r.vectorScore) || 0) / maxVs));
+        r.compositeScore = Math.max(0, Math.min(1, (Number(r.compositeScore) || 0) / maxCs));
+      }
+    }
+
+    const explanationParts = [compositeQuery.explanation].filter(Boolean) as string[];
+    if (geminiDegraded) explanationParts.push("[intent: gemini_degraded]");
+    if (astPipelineDegraded) explanationParts.push("[relevance: ast_fast_path]");
+
     return {
       results: finalResults,
       total: totalHits,
       tookMs: Date.now() - startTime,
-      explanation: compositeQuery.explanation,
+      explanation: explanationParts.join(" "),
       compositeQuery,
+      meta: {
+        ...(geminiDegraded ? { gemini_degraded: true } : {}),
+        ...(astPipelineDegraded ? { ast_pipeline_degraded: true } : {}),
+      },
     };
   } catch (error) {
     console.error('[multiImageSearch] Error:', error);
@@ -1710,22 +1914,28 @@ export async function multiVectorWeightedSearch(
     explainScores?: boolean;
     rerankWeights?: RerankOptions | any;
   }
-): Promise<{ results: MultiVectorSearchResult[]; total: number; tookMs: number }> {
+): Promise<{
+  results: MultiVectorSearchResult[];
+  total: number;
+  tookMs: number;
+  meta?: { gemini_degraded?: boolean };
+}> {
   const startTime = Date.now();
   const { images, userPrompt, limit = 50, attributeWeights, explainScores = false } = request;
 
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
-
-    const intentParser = new IntentParserService({ apiKey });
-    const parsedIntent = await intentParser.parseUserIntent(images, userPrompt);
+    const prepared = await preprocessMultiImageBuffers(images);
+    const { parsedIntent, geminiDegraded } = await parseMultiImageIntentWithGuards(
+      prepared,
+      userPrompt,
+    );
+    reconcileIntentNegativeCollisions(parsedIntent);
 
     const attributeEmbedList: AttributeEmbedding[] = [];
 
     if (parsedIntent.imageIntents && parsedIntent.imageIntents.length > 0) {
       for (const imageIntent of parsedIntent.imageIntents) {
-        const imageBuffer = images[imageIntent.imageIndex];
+        const imageBuffer = prepared[imageIntent.imageIndex];
         if (imageBuffer && imageIntent.primaryAttributes) {
           for (const attr of imageIntent.primaryAttributes) {
             const semanticAttr = attr.toLowerCase() as SemanticAttribute;
@@ -1744,12 +1954,12 @@ export async function multiVectorWeightedSearch(
         }
       }
     } else {
-      for (let i = 0; i < images.length; i++) {
-        const embedding = await processImageForEmbedding(images[i]);
+      for (let i = 0; i < prepared.length; i++) {
+        const embedding = await processImageForEmbedding(prepared[i]);
         attributeEmbedList.push({
           attribute: "global",
           vector: embedding,
-          weight: attributeWeights?.global || 1.0 / images.length,
+          weight: attributeWeights?.global || 1.0 / prepared.length,
         });
       }
     }
@@ -1774,7 +1984,12 @@ export async function multiVectorWeightedSearch(
     const rerankOpts = Object.assign({}, defaultRerank, request.rerankWeights || {});
     const reranked = intentAwareRerank(results, parsedIntent, rerankOpts);
 
-    return { results: reranked, total: reranked.length, tookMs: Date.now() - startTime };
+    return {
+      results: reranked,
+      total: reranked.length,
+      tookMs: Date.now() - startTime,
+      meta: geminiDegraded ? { gemini_degraded: true } : undefined,
+    };
   } catch (error) {
     console.error('[multiVectorWeightedSearch] Error:', error);
     return { results: [], total: 0, tookMs: Date.now() - startTime };
@@ -1868,6 +2083,59 @@ function clampEnv01(raw: string | undefined, fallback: number, max: number): num
   return Math.min(max, Math.max(0, n));
 }
 
+const MULTI_IMAGE_GEMINI_BUDGET_EXCEEDED = "MULTI_IMAGE_GEMINI_BUDGET";
+
+/**
+ * Bounded Gemini intent parse: missing key / outer budget → CLIP-only ParsedIntent (retrieval still runs).
+ */
+async function parseMultiImageIntentWithGuards(
+  prepared: Buffer[],
+  userPrompt: string,
+): Promise<{ parsedIntent: ParsedIntent; geminiDegraded: boolean }> {
+  const geminiBudgetMs = Math.max(
+    1500,
+    Number(process.env.MULTI_IMAGE_GEMINI_BUDGET_MS ?? 3000) || 3000,
+  );
+  const perCallTimeout = Math.max(
+    1000,
+    Number(process.env.MULTI_IMAGE_GEMINI_CALL_TIMEOUT_MS ?? 10000) || 10000,
+  );
+  const maxRetries = Math.max(
+    0,
+    Math.min(5, Number(process.env.GEMINI_INTENT_MAX_RETRIES ?? 2) || 2),
+  );
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) {
+    return {
+      parsedIntent: createClipOnlyParsedIntent(prepared.length, userPrompt),
+      geminiDegraded: true,
+    };
+  }
+  const intentParser = new IntentParserService({
+    apiKey,
+    timeout: Math.min(perCallTimeout, geminiBudgetMs),
+    maxRetries,
+  });
+  try {
+    const parsedIntent = await Promise.race([
+      intentParser.parseUserIntent(prepared, userPrompt),
+      new Promise<never>((_, rej) =>
+        setTimeout(() => rej(new Error(MULTI_IMAGE_GEMINI_BUDGET_EXCEEDED)), geminiBudgetMs),
+      ),
+    ]);
+    return { parsedIntent, geminiDegraded: false };
+  } catch (e: any) {
+    if (e?.message === MULTI_IMAGE_GEMINI_BUDGET_EXCEEDED) {
+      console.warn("[multiImageIntent] Gemini budget exceeded, using CLIP-only intent");
+      return {
+        parsedIntent: createClipOnlyParsedIntent(prepared.length, userPrompt),
+        geminiDegraded: true,
+      };
+    }
+    throw e;
+  }
+}
+
 /** Blend two unit-ish vectors and L2-normalize (CLIP cosine kNN). */
 function blendUnitVectors(a: number[], b: number[], weightB: number): number[] {
   const wa = 1 - weightB;
@@ -1914,7 +2182,16 @@ async function blendPromptClipIntoCompositeGlobal(
   }
   const g = compositeQuery.embeddings.global;
   if (!promptEmb?.length || promptEmb.length !== g.length) return;
-  compositeQuery.embeddings.global = blendUnitVectors(g, promptEmb, w);
+  const nImg = intent.imageIntents?.length ?? 0;
+  const intentTrust = Math.min(
+    1,
+    (intent.confidence ?? 0.5) + 0.12 * Math.min(5, nImg),
+  );
+  const effectiveW = w * Math.max(0.12, 1 - 0.55 * intentTrust);
+  console.info(
+    `[multiImage] CLIP prompt blend: effective=${effectiveW.toFixed(3)} base=${w.toFixed(3)} intentTrust=${intentTrust.toFixed(3)} (down-weights text vs strong Gemini intent)`,
+  );
+  compositeQuery.embeddings.global = blendUnitVectors(g, promptEmb, effectiveW);
 }
 
 /**
@@ -1925,6 +2202,7 @@ function buildMultiImageSearchHitRelevanceIntent(
   ast: QueryAST,
   parsedIntent: ParsedIntent,
   rawPrompt: string,
+  astPipelineDegraded = false,
 ): SearchHitRelevanceIntent {
   const merged = mergeFilters(undefined, ast);
   const searchQ = ast.searchQuery?.trim();
@@ -2008,6 +2286,7 @@ function buildMultiImageSearchHitRelevanceIntent(
     hasAudienceIntent,
     crossFamilyPenaltyWeight,
     lexicalMatchQuery,
+    astPipelineDegraded: astPipelineDegraded ? true : undefined,
   };
 }
 

@@ -8,6 +8,11 @@
  * Provides type-safe methods for detecting fashion items in images.
  */
 
+import {
+  YoloCircuitBreaker,
+  isYoloCircuitOpenError,
+} from "./yoloCircuitBreaker";
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -111,20 +116,44 @@ export interface OutfitComposition {
 
 /**
  * Base URL for the Python YOLO FastAPI service (`yolov8_api.py`), not the Node/ONNX CLIP stack.
- * Weights may come from Hugging Face, but this HTTP service must still be running somewhere.
  *
- * Resolution: `YOLOV8_SERVICE_URL` → `YOLO_API_URL` (docker-compose name) → `http://127.0.0.1:8001`.
- * On split Cloud Run (API + ML), set this on the **ML** service to your YOLO Cloud Run URL.
+ * **Canonical:** `YOLOV8_SERVICE_URL`
+ * **Deprecated alias:** `YOLO_API_URL` (used only when canonical is unset)
+ *
+ * If both are set to different values, canonical wins and a warning is logged once.
  */
+let yoloUrlConflictWarned = false;
+let yoloDeprecatedEnvWarned = false;
+
 export function resolveYoloServiceBaseUrl(override?: string): string {
   const o = override?.trim();
   if (o) return o;
   const v8 = process.env.YOLOV8_SERVICE_URL?.trim();
-  if (v8) return v8;
   const legacy = process.env.YOLO_API_URL?.trim();
-  if (legacy) return legacy;
-  // Servers bind 0.0.0.0; clients should use loopback for local dev.
+  if (v8 && legacy && v8 !== legacy && !yoloUrlConflictWarned) {
+    yoloUrlConflictWarned = true;
+    console.warn(
+      `[YOLOv8] Both YOLOV8_SERVICE_URL and YOLO_API_URL are set to different values. ` +
+        `Using canonical YOLOV8_SERVICE_URL. Remove or align YOLO_API_URL (deprecated alias).`,
+    );
+  }
+  if (v8) return v8;
+  if (legacy) {
+    if (!yoloDeprecatedEnvWarned) {
+      yoloDeprecatedEnvWarned = true;
+      console.warn(
+        `[YOLOv8] Using deprecated YOLO_API_URL for service URL. Prefer YOLOV8_SERVICE_URL.`,
+      );
+    }
+    return legacy;
+  }
   return "http://127.0.0.1:8001";
+}
+
+function yoloDetectTimeoutMs(): number {
+  const raw = Number(process.env.YOLO_DETECT_TIMEOUT_MS);
+  const n = Number.isFinite(raw) && raw > 0 ? raw : 2000;
+  return Math.min(120_000, Math.max(500, n));
 }
 
 /** GET /health and /labels may trigger first-time model load (entrypoint waits up to 180s for same). */
@@ -136,11 +165,18 @@ function yoloReadinessTimeoutMs(): number {
 
 export class YOLOv8Client {
   private baseUrl: string;
+  /** Batch / reload long operations */
   private timeout: number;
+  private detectTimeoutMs: number;
+  private readonly circuit = new YoloCircuitBreaker();
 
   constructor(baseUrl?: string, timeout?: number) {
     this.baseUrl = resolveYoloServiceBaseUrl(baseUrl);
     this.timeout = timeout || 30000;
+    this.detectTimeoutMs = yoloDetectTimeoutMs();
+    console.info(
+      `[YOLOv8] HTTP client: base URL=${this.baseUrl} (YOLOV8_SERVICE_URL canonical; YOLO_API_URL deprecated alias); detect timeout=${this.detectTimeoutMs}ms`,
+    );
   }
 
   /** Base URL used for requests (for logs when health fails). */
@@ -178,7 +214,7 @@ export class YOLOv8Client {
       if (refused) {
         console.warn(
           `[YOLOv8] No process is accepting connections at ${this.baseUrl}. ` +
-            `Local dev: run \`pnpm yolo:dev\` (or \`docker compose up -d yolov8\`) and use YOLO_API_URL=http://127.0.0.1:8001 in .env.`
+            `Local dev: run \`pnpm yolo:dev\` (or \`docker compose up -d yolov8\`) and set YOLOV8_SERVICE_URL=http://127.0.0.1:8001 (or deprecated YOLO_API_URL).`,
         );
       }
       return false;
@@ -228,6 +264,13 @@ export class YOLOv8Client {
     filename: string = "image.jpg",
     options: DetectOptions = {}
   ): Promise<DetectionResponse> {
+    try {
+      this.circuit.beforeRequest();
+    } catch (e) {
+      if (isYoloCircuitOpenError(e)) throw e;
+      throw e;
+    }
+
     const formData = new FormData();
 
     // Create a Blob from the Buffer (convert to Uint8Array for compatibility)
@@ -260,18 +303,28 @@ export class YOLOv8Client {
       url.searchParams.set("bilateral_filter", "true");
     }
 
-    const response = await fetch(url.toString(), {
-      method: "POST",
-      body: formData,
-      signal: AbortSignal.timeout(this.timeout),
-    });
+    let failureCounted = false;
+    try {
+      const response = await fetch(url.toString(), {
+        method: "POST",
+        body: formData,
+        signal: AbortSignal.timeout(this.detectTimeoutMs),
+      });
 
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Detection failed: ${response.status} - ${error}`);
+      if (!response.ok) {
+        const error = await response.text();
+        this.circuit.onFailure();
+        failureCounted = true;
+        throw new Error(`Detection failed: ${response.status} - ${error}`);
+      }
+
+      const data = (await response.json()) as DetectionResponse;
+      this.circuit.onSuccess();
+      return data;
+    } catch (e) {
+      if (!failureCounted) this.circuit.onFailure();
+      throw e;
     }
-
-    return response.json();
   }
 
   /**
@@ -385,6 +438,52 @@ export function getYOLOv8Client(): YOLOv8Client {
 // ============================================================================
 // Utility Functions
 // ============================================================================
+
+/** Intersection-over-union for axis-aligned pixel boxes. */
+export function boundingBoxIou(a: BoundingBox, b: BoundingBox): number {
+  const x1 = Math.max(a.x1, b.x1);
+  const y1 = Math.max(a.y1, b.y1);
+  const x2 = Math.min(a.x2, b.x2);
+  const y2 = Math.min(a.y2, b.y2);
+  const iw = Math.max(0, x2 - x1);
+  const ih = Math.max(0, y2 - y1);
+  const inter = iw * ih;
+  const areaA = Math.max(0, a.x2 - a.x1) * Math.max(0, a.y2 - a.y1);
+  const areaB = Math.max(0, b.x2 - b.x1) * Math.max(0, b.y2 - b.y1);
+  const union = areaA + areaB - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+/**
+ * Same-label dedup by IoU: keeps spatially separate instances (e.g. two dresses).
+ * Within each label, sorts by confidence and drops a detection if it overlaps a kept one with IoU ≥ threshold.
+ */
+export function dedupeDetectionsBySameLabelIou(
+  detections: Detection[],
+  iouThreshold: number,
+): Array<{ detection: Detection; originalIndex: number }> {
+  const withIdx = detections.map((detection, originalIndex) => ({ detection, originalIndex }));
+  const byLabel = new Map<string, typeof withIdx>();
+  for (const row of withIdx) {
+    const k = row.detection.label.toLowerCase();
+    if (!byLabel.has(k)) byLabel.set(k, []);
+    byLabel.get(k)!.push(row);
+  }
+  const kept: typeof withIdx = [];
+  for (const group of byLabel.values()) {
+    const sorted = [...group].sort((a, b) => b.detection.confidence - a.detection.confidence);
+    const groupKept: typeof withIdx = [];
+    for (const row of sorted) {
+      const overlaps = groupKept.some(
+        (k) => boundingBoxIou(row.detection.box, k.detection.box) >= iouThreshold,
+      );
+      if (!overlaps) groupKept.push(row);
+    }
+    kept.push(...groupKept);
+  }
+  kept.sort((a, b) => a.originalIndex - b.originalIndex);
+  return kept;
+}
 
 /**
  * Filter detections by category

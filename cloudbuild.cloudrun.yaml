@@ -29,6 +29,7 @@ steps:
 
         docker build \
           --build-arg HF_TOKEN=${_HF_TOKEN} \
+          --build-arg EMBEDDED_YOLO=${_EMBEDDED_YOLO} \
           --build-arg BUILDKIT_INLINE_CACHE=1 \
           --cache-from "${CACHE_IMAGE}" \
           -t "${IMAGE_BASE}:$BUILD_ID" \
@@ -90,6 +91,8 @@ substitutions:
   _SERVICE: marketplace
 
   _HF_TOKEN: ""
+  # 1 = monolith with in-container YOLO (slower/larger build). 0 = API-only; set YOLO_API_URL to a separate service.
+  _EMBEDDED_YOLO: "1"
 
   _CPU: "4"
   _MEMORY: 4Gi

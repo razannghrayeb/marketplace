@@ -306,27 +306,36 @@ export function warmUpCache(queries: string[], processQuery: (q: string) => Proc
 
 const queryASTCache = new LRUCache<QueryAST>();
 
+export interface QueryAstPipelineCacheOpts {
+  useLLM: boolean;
+  useMLIntent: boolean;
+}
+
+function queryAstPipelineCacheKey(raw: string, opts: QueryAstPipelineCacheOpts): string {
+  return LRUCache.hashQuery(`${raw.trim().toLowerCase()}\x00${opts.useLLM}:${opts.useMLIntent}`);
+}
+
 /**
- * Cache QueryAST result
+ * Cache QueryAST result (key includes LLM / ML-intent path so fast vs full pipeline do not collide).
  */
-export function cacheQueryAST(query: string, result: QueryAST): void {
-  const key = LRUCache.hashQuery(query);
+export function cacheQueryAST(query: string, result: QueryAST, pipelineOpts: QueryAstPipelineCacheOpts): void {
+  const key = queryAstPipelineCacheKey(query, pipelineOpts);
   queryASTCache.set(key, result);
 }
 
 /**
  * Get cached QueryAST result
  */
-export function getCachedQueryAST(query: string): QueryAST | null {
-  const key = LRUCache.hashQuery(query);
+export function getCachedQueryAST(query: string, pipelineOpts: QueryAstPipelineCacheOpts): QueryAST | null {
+  const key = queryAstPipelineCacheKey(query, pipelineOpts);
   return queryASTCache.get(key);
 }
 
 /**
  * Check if QueryAST is cached
  */
-export function isQueryASTCached(query: string): boolean {
-  const key = LRUCache.hashQuery(query);
+export function isQueryASTCached(query: string, pipelineOpts: QueryAstPipelineCacheOpts): boolean {
+  const key = queryAstPipelineCacheKey(query, pipelineOpts);
   return queryASTCache.has(key);
 }
 

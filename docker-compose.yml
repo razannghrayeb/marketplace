@@ -9,6 +9,8 @@ services:
       args:
         # Set HF_TOKEN in .env or CI secrets if razangh/fashion-models is private
         HF_TOKEN: ${HF_TOKEN:-}
+        # Default Dockerfile arg EMBEDDED_YOLO=1: PyTorch+YOLO venv in image (entrypoint starts FastAPI on loopback).
+        # Faster slim build (requires external detector): EMBEDDED_YOLO: "0" + YOLOV8_SERVICE_URL=http://yolov8:8001 + profile yolo-sidecar
     ports:
       - "8080:8080"
     environment:
@@ -17,7 +19,8 @@ services:
       - REDIS_URL=redis://redis:6379
       - OPENSEARCH_URL=http://opensearch-node:9200
       - RANKER_API_URL=http://ranker:8000
-      - YOLO_API_URL=http://yolov8:8001
+      # Bundled YOLO (docker-entrypoint starts uvicorn on 127.0.0.1:8001). Do not point at yolov8 unless you use EMBEDDED_YOLO=0.
+      - YOLOV8_SERVICE_URL=http://127.0.0.1:8001
       - ONNX_API_URL=http://onnx-inference:8000
     depends_on:
       postgres:
@@ -25,8 +28,6 @@ services:
       redis:
         condition: service_started
       opensearch-node:
-        condition: service_healthy
-      yolov8:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://0.0.0.0:8080/health"]
@@ -133,7 +134,11 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # Optional separate detector (e.g. GPU). Default stack uses YOLO inside the api image (loopback).
+  # Start with: docker compose --profile yolo-sidecar up -d yolov8
   yolov8:
+    profiles:
+      - yolo-sidecar
     build:
       context: ./src/lib/model
       dockerfile: Dockerfile.yolo

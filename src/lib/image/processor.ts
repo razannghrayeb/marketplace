@@ -71,9 +71,7 @@ export async function extractPaddedDetectionCropBuffer(
     !Number.isFinite(box.x1) ||
     !Number.isFinite(box.y1) ||
     !Number.isFinite(box.x2) ||
-    !Number.isFinite(box.y2) ||
-    box.x2 <= box.x1 + 2 ||
-    box.y2 <= box.y1 + 2
+    !Number.isFinite(box.y2)
   ) {
     return null;
   }
@@ -81,14 +79,22 @@ export async function extractPaddedDetectionCropBuffer(
   const iw = meta.width ?? 0;
   const ih = meta.height ?? 0;
   if (iw <= 32 || ih <= 32) return null;
-  const bw = box.x2 - box.x1;
-  const bh = box.y2 - box.y1;
+  // Clamp raw box to image bounds before padding (YOLO coords may extend past edges).
+  const bx1 = Math.max(0, Math.min(iw, box.x1));
+  const by1 = Math.max(0, Math.min(ih, box.y1));
+  const bx2 = Math.max(bx1 + 3, Math.min(iw, box.x2));
+  const by2 = Math.max(by1 + 3, Math.min(ih, box.y2));
+  if (bx2 <= bx1 + 2 || by2 <= by1 + 2) {
+    return null;
+  }
+  const bw = bx2 - bx1;
+  const bh = by2 - by1;
   const padX = bw * 0.08;
   const padY = bh * 0.08;
-  const x1 = Math.max(0, Math.floor(box.x1 - padX));
-  const y1 = Math.max(0, Math.floor(box.y1 - padY));
-  const x2 = Math.min(iw, Math.ceil(box.x2 + padX));
-  const y2 = Math.min(ih, Math.ceil(box.y2 + padY));
+  const x1 = Math.max(0, Math.floor(bx1 - padX));
+  const y1 = Math.max(0, Math.floor(by1 - padY));
+  const x2 = Math.min(iw, Math.ceil(bx2 + padX));
+  const y2 = Math.min(ih, Math.ceil(by2 + padY));
   const w = Math.max(1, x2 - x1);
   const h = Math.max(1, y2 - y1);
   if (w < 10 || h < 10) return null;

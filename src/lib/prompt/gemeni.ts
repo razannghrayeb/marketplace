@@ -100,6 +100,34 @@ export function resolveGeminiGenerationModel(explicit?: string): string {
   return DEFAULT_GEMINI_GENERATION_MODEL;
 }
 
+/**
+ * Gemini-free intent: equal image weights, no extracted text attributes or negatives.
+ * Used when the API key is missing, a budget timeout fires, or callers skip vision LLM.
+ */
+export function createClipOnlyParsedIntent(imageCount: number, userPrompt: string): ParsedIntent {
+  const n = Math.max(
+    1,
+    Math.min(Math.max(0, imageCount), MAX_MULTI_IMAGE_UPLOADS),
+  );
+  const w = 1 / n;
+  return {
+    imageIntents: Array.from({ length: n }, (_, i) => ({
+      imageIndex: i,
+      primaryAttributes: ["color", "style", "silhouette", "texture", "material", "pattern"],
+      extractedValues: {},
+      weight: w,
+      reasoning: "CLIP-only fallback (Gemini unavailable, timed out, or skipped)",
+    })),
+    constraints: {
+      mustHave: [],
+      mustNotHave: [],
+    },
+    searchStrategy: "Visual similarity from uploaded images only",
+    confidence: 0.15,
+    rawQuery: userPrompt,
+  };
+}
+
 // ============================================================================
 // IntentParserService - Orchestrates multi-image intent extraction
 // ============================================================================
@@ -522,7 +550,15 @@ Respond ONLY with valid JSON (no markdown, no explanation, no extra text):
         { text: prompt }
       ];
 
-      const result = await model.generateContent(parts);
+      const result = await Promise.race([
+        model.generateContent(parts),
+        new Promise<never>((_, rej) =>
+          setTimeout(
+            () => rej(new Error("GEMINI_CALL_TIMEOUT")),
+            Math.max(1000, this.timeout),
+          ),
+        ),
+      ]);
       const response = result.response;
       const text = response.text();
 

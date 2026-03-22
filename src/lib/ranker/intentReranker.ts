@@ -26,6 +26,20 @@ export interface RerankedResult extends MultiVectorSearchResult {
   };
 }
 
+/** Match OpenSearch / hybrid raw scores to [0,1] for rerank (same as composite multi-image path). */
+function normalizeVectorScore01(s: number): number {
+  if (typeof s !== "number" || !Number.isFinite(s)) return 0;
+  if (s >= 0 && s <= 1) return s;
+  if (s < 0) return 0;
+  return Math.max(0, Math.min(1, 1 - Math.exp(-s / 10)));
+}
+
+function vectorInputForRerank(res: MultiVectorSearchResult): number {
+  const raw = res._rawScores?.vectorScore;
+  if (raw !== undefined && Number.isFinite(raw)) return normalizeVectorScore01(raw);
+  return normalizeVectorScore01(res.score ?? 0);
+}
+
 /**
  * Simple intent-aware reranking function.
  * - Uses the parsed intent to boost attribute matches mentioned in the intent
@@ -118,8 +132,8 @@ export function intentAwareRerank(
     : null;
 
   return results.map(res => {
-    // Vector component: use existing `score` field (expected normalized 0..1)
-    const vectorComp = clamp01(res.score ?? 0);
+    // Prefer frozen OS/fusion scores when provided (pre-hydration / pre-norm snapshot).
+    const vectorComp = clamp01(vectorInputForRerank(res));
 
     // Attribute component: compare scoreBreakdown attributes to intentAttrWeights
     let attributeComp = 0;

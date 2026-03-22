@@ -23,10 +23,12 @@ import {
   YOLOv8Client,
   getYOLOv8Client,
   extractOutfitComposition,
+  dedupeDetectionsBySameLabelIou,
   Detection,
   OutfitComposition,
   BoundingBox,
 } from "../../lib/image/yolov8Client";
+import { isYoloCircuitOpenError } from "../../lib/image/yoloCircuitBreaker";
 import { searchByImageWithSimilarity } from "./search.service";
 import { ProductResult } from "./types";
 import sharpLib from "sharp";
@@ -76,6 +78,47 @@ function shopLookSoftCategoryEnv(): boolean {
   if (raw === undefined || String(raw).trim() === "") return true;
   const v = String(raw).toLowerCase();
   return v === "1" || v === "true";
+}
+
+/** Max concurrent OpenSearch kNN calls per shop-the-look request (default 3). */
+function shopLookPerDetectionConcurrency(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_DETECTION_CONCURRENCY);
+  const n = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 3;
+  return Math.min(16, Math.max(1, n));
+}
+
+/** IoU threshold for merging same-label detections when `groupByDetection` is false (default 0.5). */
+function yoloShopDedupeIouThreshold(): number {
+  const raw = Number(process.env.YOLO_SHOP_DEDUPE_IOU_THRESHOLD);
+  const n = Number.isFinite(raw) ? raw : 0.5;
+  return Math.min(0.95, Math.max(0.05, n));
+}
+
+/**
+ * Run async work on `items` with at most `limit` concurrent executions; per-slot errors become rejected settled results.
+ */
+async function mapPoolSettled<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      try {
+        const value = await fn(items[i], i);
+        results[i] = { status: "fulfilled", value };
+      } catch (reason) {
+        results[i] = { status: "rejected", reason };
+      }
+    }
+  }
+  const n = Math.min(Math.max(1, limit), Math.max(1, items.length));
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return results;
 }
 import {
   computeOutfitCoherence,
@@ -167,6 +210,12 @@ export interface AnalyzeOptions {
   /** Run YOLO detection (default: true) */
   runDetection?: boolean;
 
+  /**
+   * When true with YOLO enabled: skip full-frame CLIP in the initial parallel phase if YOLO may return crops.
+   * Full-frame embedding is computed only when there are zero detections (shop-the-look latency).
+   */
+  deferFullImageEmbedding?: boolean;
+
   /** Detection confidence threshold (default: 0.45 — balances recall vs noise) */
   confidence?: number;
 
@@ -223,6 +272,16 @@ export interface GroupedSimilarProducts {
   threshold: number;
   /** All detected categories */
   detectedCategories: string[];
+  /**
+   * Shop-the-look coverage: how many detections yielded at least one product vs total detection jobs.
+   * Coherence should be read together with `coverageRatio` (see `outfitCoherence`).
+   */
+  shopTheLookStats?: {
+    totalDetections: number;
+    coveredDetections: number;
+    emptyDetections: number;
+    coverageRatio: number;
+  };
 }
 
 export interface AnalyzeAndFindSimilarOptions extends AnalyzeOptions {
@@ -240,7 +299,7 @@ export interface AnalyzeAndFindSimilarOptions extends AnalyzeOptions {
 
   /**
    * When true (default): one similar-product group per YOLO detection instance (same label allowed twice).
-   * When false: at most one group per distinct label (highest-confidence box only) — fewer searches, legacy behavior.
+   * When false: merge same-label boxes only when IoU ≥ `YOLO_SHOP_DEDUPE_IOU_THRESHOLD` (default 0.5); spatially separate instances stay separate.
    */
   groupByDetection?: boolean;
 
@@ -331,6 +390,7 @@ export class ImageAnalysisService {
       store = true,
       generateEmbedding = true,
       runDetection = true,
+      deferFullImageEmbedding = false,
       confidence = 0.45,
       productId,
       isPrimary = false,
@@ -351,29 +411,54 @@ export class ImageAnalysisService {
     const imageHeight = metadata.height || 0;
     const pHash = await computePHash(buffer);
 
+    const deferClip =
+      deferFullImageEmbedding &&
+      generateEmbedding &&
+      services.clip &&
+      runDetection &&
+      services.yolo;
+
     // Run operations in parallel where possible
     const [storageResult, embeddingResult, detectionResult] = await Promise.all([
       // Storage
       store ? this.storeImage(buffer, filename, productId, isPrimary, pHash) : null,
 
-      // CLIP embedding (processImageForEmbedding handles the preprocessing)
-      generateEmbedding && services.clip
+      // Full-frame CLIP (skipped when deferClip — computed only if YOLO finds no instances)
+      generateEmbedding && services.clip && !deferClip
         ? processImageForEmbedding(buffer).catch((err) => {
             console.error("CLIP embedding failed:", err);
             return null;
           })
-        : null,
+        : Promise.resolve(null),
 
       // YOLO detection
       runDetection && services.yolo
         ? this.yoloClient
             .detectFromBuffer(buffer, filename, { confidence })
             .catch((err) => {
-              console.error("YOLO detection failed:", err);
+              if (isYoloCircuitOpenError(err)) {
+                console.warn("[YOLOv8] circuit open, detection skipped:", err.message);
+              } else {
+                console.error("YOLO detection failed:", err);
+              }
               return null;
             })
-        : null,
+        : Promise.resolve(null),
     ]);
+
+    let embeddingFinal = embeddingResult;
+    if (deferClip && generateEmbedding && services.clip) {
+      const hasDetections =
+        detectionResult &&
+        Array.isArray(detectionResult.detections) &&
+        detectionResult.detections.length > 0;
+      if (!hasDetections) {
+        embeddingFinal = await processImageForEmbedding(buffer).catch((err) => {
+          console.error("CLIP embedding failed (deferred full-frame):", err);
+          return null;
+        });
+      }
+    }
 
     // Build response
     const imageInfo = storageResult || {
@@ -424,7 +509,7 @@ export class ImageAnalysisService {
         width: imageWidth,
         height: imageHeight,
       },
-      embedding: embeddingResult,
+      embedding: embeddingFinal,
       detection: detectionResult
         ? {
             items: detectionResult.detections,
@@ -470,6 +555,7 @@ export class ImageAnalysisService {
     const analysisResult = await this.analyzeImage(buffer, filename, {
       ...analyzeOptions,
       generateEmbedding: true, // Force embedding for similarity search
+      deferFullImageEmbedding: findSimilar,
     });
 
     // Similarity search disabled — return early
@@ -527,21 +613,19 @@ export class ImageAnalysisService {
             detection,
             detectionIndex: index,
           }))
-        : (() => {
-            const byLabel = new Map<string, Detection>();
-            for (const detection of analysisResult.detection.items) {
-              const existing = byLabel.get(detection.label);
-              if (!existing || detection.confidence > existing.confidence) {
-                byLabel.set(detection.label, detection);
-              }
-            }
-            return [...byLabel.values()].map((detection) => ({ detection }));
-          })();
+        : dedupeDetectionsBySameLabelIou(
+            analysisResult.detection.items,
+            yoloShopDedupeIouThreshold(),
+          ).map(({ detection, originalIndex }) => ({
+            detection,
+            detectionIndex: originalIndex,
+          }));
 
-    // Process all detections in parallel for significant latency reduction.
-    // CLIP inference serializes at the ONNX level, but cropping, BLIP captions,
-    // and OpenSearch kNN queries all benefit from concurrent execution.
-    const searchTasks = detectionJobs.map(async ({ detection, detectionIndex }) => {
+    // Per-detection work is concurrency-limited to avoid OpenSearch kNN pile-ups; CLIP still serializes in-process.
+    const settled = await mapPoolSettled(
+      detectionJobs,
+      shopLookPerDetectionConcurrency(),
+      async ({ detection, detectionIndex }) => {
       const label = detection.label;
       let croppedBuffer = await extractPaddedDetectionCropBuffer(buffer, detection.box);
       if (!croppedBuffer) {
@@ -596,16 +680,33 @@ export class ImageAnalysisService {
         !imageSoftCategoryEnv() &&
         (filters as { category?: string | string[] }).category
       ) {
+        const { category: _omitCategory, ...filtersSansCategory } = filters as {
+          category?: string | string[];
+          productTypes?: string[];
+        };
         similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
           imageBuffer: croppedBuffer,
-          filters: {},
+          filters: filtersSansCategory,
           limit: similarLimitPerItem,
           similarityThreshold,
           includeRelated: false,
+          predictedCategoryAisles,
           knnField: shopTheLookKnnField(),
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
         });
+        if (similarResult.results.length === 0) {
+          similarResult = await searchByImageWithSimilarity({
+            imageEmbedding: finalEmbedding,
+            imageBuffer: croppedBuffer,
+            filters: {},
+            limit: similarLimitPerItem,
+            similarityThreshold,
+            includeRelated: false,
+            knnField: shopTheLookKnnField(),
+            relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          });
+        }
       }
 
       if (similarResult.results.length === 0 && !includeEmptyDetectionGroups) {
@@ -625,9 +726,9 @@ export class ImageAnalysisService {
         count: similarResult.results.length,
         ...(detectionIndex !== undefined ? { detectionIndex } : {}),
       } as DetectionSimilarProducts;
-    });
+    },
+    );
 
-    const settled = await Promise.allSettled(searchTasks);
     const groupedResults: DetectionSimilarProducts[] = [];
     let totalProducts = 0;
 
@@ -643,10 +744,28 @@ export class ImageAnalysisService {
     // Sort by detection confidence (highest first)
     groupedResults.sort((a, b) => b.detection.confidence - a.detection.confidence);
 
-    // Compute outfit coherence for all detected items
-    const outfitCoherence = analysisResult.detection?.items.length
-      ? computeOutfitCoherence(analysisResult.detection.items as DetectionWithColor[])
-      : undefined;
+    const totalDetectionJobs = detectionJobs.length;
+    let coveredDetections = 0;
+    for (const outcome of settled) {
+      if (outcome.status === "fulfilled" && outcome.value && outcome.value.count > 0) {
+        coveredDetections += 1;
+      }
+    }
+    const emptyDetections = totalDetectionJobs - coveredDetections;
+    const coverageRatio =
+      totalDetectionJobs > 0 ? coveredDetections / totalDetectionJobs : 0;
+
+    const itemsForCoherence = groupedResults
+      .filter((r) => r.count > 0 && r.detectionIndex !== undefined)
+      .map(
+        (r) =>
+          analysisResult.detection!.items[r.detectionIndex!] as DetectionWithColor,
+      );
+
+    const outfitCoherence =
+      itemsForCoherence.length > 0
+        ? computeOutfitCoherence(itemsForCoherence)
+        : undefined;
 
     return {
       ...analysisResult,
@@ -655,6 +774,12 @@ export class ImageAnalysisService {
         totalProducts,
         threshold: similarityThreshold,
         detectedCategories,
+        shopTheLookStats: {
+          totalDetections: totalDetectionJobs,
+          coveredDetections,
+          emptyDetections,
+          coverageRatio,
+        },
       },
       outfitCoherence,
     };
@@ -905,7 +1030,7 @@ export class ImageAnalysisService {
           }
         }
 
-        const similarResult = await searchByImageWithSimilarity({
+        let similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
           imageBuffer: croppedBuffer,
           filters,
@@ -916,6 +1041,42 @@ export class ImageAnalysisService {
           knnField: shopTheLookKnnField(),
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
         });
+
+        if (
+          shopLookCategoryFallbackEnv() &&
+          similarResult.results.length === 0 &&
+          options.filterByDetectedCategory !== false &&
+          !imageSoftCategoryEnv() &&
+          (filters as { category?: string | string[] }).category
+        ) {
+          const { category: _omitCategory, ...filtersSansCategory } = filters as {
+            category?: string | string[];
+            productTypes?: string[];
+          };
+          similarResult = await searchByImageWithSimilarity({
+            imageEmbedding: finalEmbedding,
+            imageBuffer: croppedBuffer,
+            filters: filtersSansCategory,
+            limit: options.similarLimitPerItem || 10,
+            similarityThreshold: options.similarityThreshold || 0.7,
+            includeRelated: false,
+            predictedCategoryAisles,
+            knnField: shopTheLookKnnField(),
+            relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          });
+          if (similarResult.results.length === 0) {
+            similarResult = await searchByImageWithSimilarity({
+              imageEmbedding: finalEmbedding,
+              imageBuffer: croppedBuffer,
+              filters: {},
+              limit: options.similarLimitPerItem || 10,
+              similarityThreshold: options.similarityThreshold || 0.7,
+              includeRelated: false,
+              knnField: shopTheLookKnnField(),
+              relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+            });
+          }
+        }
 
         const includeEmpty = options.includeEmptyDetectionGroups === true;
         if (similarResult.results.length > 0 || includeEmpty) {
@@ -940,10 +1101,37 @@ export class ImageAnalysisService {
       }
     }
 
-    // Compute outfit coherence
-    const outfitCoherence = allItemsToProcess.length
-      ? computeOutfitCoherence(allItemsToProcess as DetectionWithColor[])
-      : undefined;
+    const itemsForCoherence: DetectionWithColor[] = [];
+    for (const r of groupedResults) {
+      if (r.count === 0) continue;
+      if (
+        r.source === "yolo" &&
+        r.originalIndex !== undefined &&
+        fullResult.detection?.items[r.originalIndex]
+      ) {
+        itemsForCoherence.push(
+          fullResult.detection.items[r.originalIndex] as DetectionWithColor,
+        );
+      } else {
+        itemsForCoherence.push({
+          label: r.detection.label,
+          raw_label: r.detection.label,
+          confidence: r.detection.confidence,
+          box: r.detection.box,
+          box_normalized: r.detection.box,
+          area_ratio: r.detection.area_ratio,
+          style: r.detection.style,
+        } as DetectionWithColor);
+      }
+    }
+
+    const outfitCoherence =
+      itemsForCoherence.length > 0
+        ? computeOutfitCoherence(itemsForCoherence)
+        : undefined;
+
+    const coveredSel = groupedResults.filter((r) => r.count > 0).length;
+    const totalSel = allItemsToProcess.length;
 
     return {
       ...fullResult,
@@ -952,6 +1140,12 @@ export class ImageAnalysisService {
         totalProducts,
         threshold: options.similarityThreshold || 0.7,
         detectedCategories: [...new Set(groupedResults.map((r) => r.category))],
+        shopTheLookStats: {
+          totalDetections: totalSel,
+          coveredDetections: coveredSel,
+          emptyDetections: totalSel - coveredSel,
+          coverageRatio: totalSel > 0 ? coveredSel / totalSel : 0,
+        },
       },
       outfitCoherence,
     };

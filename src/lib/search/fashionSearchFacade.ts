@@ -14,6 +14,7 @@
 
 import type { SearchFilters as LegacySearchFilters, ProductResult, SearchResultWithRelated } from "../../routes/products/types";
 import type { QueryAST } from "../../lib/queryProcessor";
+import type { NegationConstraint } from "../../lib/queryProcessor/negationHandler";
 
 import { textSearch as enhancedTextSearch } from "../../routes/search/search.service";
 
@@ -33,6 +34,8 @@ export interface UnifiedTextSearchParams {
   // When true, uses the enhanced query parsing/ranking path.
   // (Currently the enhanced implementation is used by this facade.)
   useEnhanced?: boolean;
+  /** Parsed exclusions ("not red", …) → bool.must_not on the text index. */
+  negationConstraints?: NegationConstraint[];
 }
 
 export interface UnifiedImageSearchParams {
@@ -88,6 +91,7 @@ export async function searchText(params: UnifiedTextSearchParams): Promise<Searc
     limit = 20,
     includeRelated = false,
     relatedLimit = 10,
+    negationConstraints,
   } = params;
 
   // Normalize legacy filter shape to the enhanced pipeline shape.
@@ -130,6 +134,7 @@ export async function searchText(params: UnifiedTextSearchParams): Promise<Searc
     offset: (page - 1) * limit,
     includeRelated,
     relatedLimit,
+    negationConstraints,
   } as any);
 
   return {
@@ -176,7 +181,6 @@ export async function searchImage(
       ? imageEmbedding
       : await processImageForEmbedding(imageBuffer!);
 
-  /** When we only had raw bytes and computed CLIP here, the vector already encodes the full image — skip passing `imageBuffer` downstream so `searchByImageWithSimilarity` does not run global+color fusion (same behavior as `/products/search/image` with embedding-only). */
   const embeddingDerivedFromBufferOnly =
     Boolean(imageBuffer?.length) &&
     (!imageEmbedding || imageEmbedding.length === 0);
@@ -211,7 +215,9 @@ export async function searchImage(
   const res = await legacyImageSearch({
     imageEmbedding: embedding,
     imageEmbeddingGarment,
-    imageBuffer: embeddingDerivedFromBufferOnly ? undefined : imageBuffer ?? undefined,
+    /** Pass raw bytes whenever available so color kNN (`embedding_color`) can run; global similarity still uses `imageEmbedding`. */
+    imageBuffer:
+      imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0 ? imageBuffer : undefined,
     filters: filters as any,
     limit,
     similarityThreshold,
