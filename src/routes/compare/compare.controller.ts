@@ -5,8 +5,10 @@
  */
 
 import { Router, Request, Response } from "express";
+import multer from "multer";
 import {
   compareProductsWithVerdict,
+  coerceCompareProductIdsInput,
   getProductQuality,
   analyzeText,
   getPriceAnalysis,
@@ -19,8 +21,10 @@ import {
   getProductReviewAnalysis,
   compareReviews,
 } from "./compare.service";
+import { InsufficientProductsForCompareError } from "../../lib/compare/compareEngine";
 
 const router = Router();
+const compareBodyMultipart = multer().none();
 
 // ============================================================================
 // Compare Products
@@ -31,12 +35,12 @@ const router = Router();
  * 
  * Compare 2-5 products and get verdict
  * 
- * Body: { product_ids: number[] }
+ * Body: application/json { product_ids: number[] } or multipart/form-data (same field; string JSON array or comma-separated).
  * Returns: FullVerdictResponse
  */
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", compareBodyMultipart, async (req: Request, res: Response) => {
   try {
-    const { product_ids } = req.body;
+    const product_ids = coerceCompareProductIdsInput(req.body);
 
     const parsed = validateCompareInput(product_ids);
     if (!parsed.ok) {
@@ -47,6 +51,12 @@ router.post("/", async (req: Request, res: Response) => {
     res.json(result);
   } catch (error) {
     console.error("Compare error:", error);
+    if (error instanceof InsufficientProductsForCompareError) {
+      return res.status(404).json({
+        error: error.message,
+        missing_product_ids: error.missingProductIds,
+      });
+    }
     res.status(500).json({ error: "Failed to compare products" });
   }
 });
