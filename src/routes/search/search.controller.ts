@@ -108,6 +108,7 @@ import {
   recommendTemplate,
 } from "../../lib/search/promptTemplates";
 import { validateImage } from "../../lib/image";
+import { MAX_MULTI_IMAGE_UPLOADS } from "../../lib/prompt/gemeni";
 import multer from "multer";
 
 const router = Router();
@@ -348,6 +349,13 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
  * │                 │          │  "priceWeight": 0.1, "recencyWeight": 0.0}       │
  * └─────────────────┴──────────┴──────────────────────────────────────────────────┘
  *
+ * Server env: MULTI_IMAGE_PROMPT_EMBED_WEIGHT (0–0.65, default 0.38) blends the same
+ * ensembled CLIP text embedding as text search into the composite image vector for kNN.
+ * Raise for wording-heavy prompts; lower when results should track photos more than words.
+ *
+ * MULTI_IMAGE_HARD_RELEVANCE_GATE=1 — optional: apply SEARCH_FINAL_ACCEPT_MIN + SEARCH_RELEVANCE_GATE_MODE
+ * like text search (can return zero rows if no hit passes). Default is off so kNN neighbors are kept.
+ *
  * 🎨 EXAMPLE REQUESTS:
  *
  * 1️⃣ Cross-Image Color + Texture:
@@ -415,8 +423,9 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
  * - Use GET /search/prompt-templates to see example prompts
  * - Use POST /search/prompt-analyze to get suggestions for your prompt
  * - Use GET /search/prompt-suggestions to get helpful phrases
+ * - Tune MULTI_IMAGE_PROMPT_EMBED_WEIGHT on the server if vector matches ignore the prompt or overfit text
  */
-router.post("/multi-image", upload.array("images", 5), async (req: Request, res: Response) => {
+router.post("/multi-image", upload.array("images", MAX_MULTI_IMAGE_UPLOADS), async (req: Request, res: Response) => {
   try {
     const files = req.files as Express.Multer.File[];
     const { prompt, limit, rerankWeights } = req.body;
@@ -429,8 +438,8 @@ router.post("/multi-image", upload.array("images", 5), async (req: Request, res:
       return res.status(400).json({ error: "Text prompt is required" });
     }
 
-    if (files.length > 5) {
-      return res.status(400).json({ error: "Maximum 5 images allowed" });
+    if (files.length > MAX_MULTI_IMAGE_UPLOADS) {
+      return res.status(400).json({ error: `Maximum ${MAX_MULTI_IMAGE_UPLOADS} images allowed` });
     }
 
     const images = files.map(f => f.buffer);
@@ -534,7 +543,7 @@ router.post("/multi-image", upload.array("images", 5), async (req: Request, res:
  * 
  * 💡 TIP: Use /multi-image for natural language, use /multi-vector for precise control.
  */
-router.post("/multi-vector", upload.array("images", 5), async (req: Request, res: Response) => {
+router.post("/multi-vector", upload.array("images", MAX_MULTI_IMAGE_UPLOADS), async (req: Request, res: Response) => {
   try {
     const files = req.files as Express.Multer.File[];
     const { prompt, attributeWeights, explainScores, limit, rerankWeights } = req.body;
@@ -547,8 +556,8 @@ router.post("/multi-vector", upload.array("images", 5), async (req: Request, res
       return res.status(400).json({ error: "Text prompt is required" });
     }
 
-    if (files.length > 5) {
-      return res.status(400).json({ error: "Maximum 5 images allowed" });
+    if (files.length > MAX_MULTI_IMAGE_UPLOADS) {
+      return res.status(400).json({ error: `Maximum ${MAX_MULTI_IMAGE_UPLOADS} images allowed` });
     }
 
     const images = files.map(f => f.buffer);

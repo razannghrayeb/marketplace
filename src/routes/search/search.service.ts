@@ -25,6 +25,7 @@ import { intentAwareRerank, type RerankOptions } from '../../lib/ranker/intentRe
 import { buildFeatureRows, predictWithFallback, isRankerAvailable } from '../../lib/ranker';
 import {
   processQuery as processQueryAST,
+  processQueryFast,
   getQueryEmbedding,
   type QueryAST,
 } from '../../lib/queryProcessor';
@@ -59,6 +60,7 @@ import { expandColorTermsForFilter, normalizeColorToken } from '../../lib/color/
 import {
   computeHitRelevance,
   normalizeQueryGender,
+  type HitCompliance,
   type SearchHitRelevanceIntent,
 } from '../../lib/search/searchHitRelevance';
 
@@ -1472,23 +1474,108 @@ export async function multiImageSearch(
 
     const compositeQuery = await queryBuilder.buildQuery(parsedIntent, imageEmbeddings);
 
+    // Same CLIP text embedding path as text search: bridges language in the prompt to image-indexed vectors.
+    await blendPromptClipIntoCompositeGlobal(compositeQuery, userPrompt, parsedIntent);
+
     const queryBundle = queryMapper.mapQuery(compositeQuery, {
       maxResults: limit,
+      vectorK: Math.min(Math.max(limit * 5, 100), 400),
       vectorWeight: 0.6,
       filterWeight: 0.3,
       priceWeight: 0.1,
     });
 
     const opensearch = osClient;
+    // Never tie OpenSearch to processQueryAST in Promise.all — LLM/ML failures in the AST
+    // pipeline would reject the whole call and return zero results despite valid kNN hits.
     const response = await opensearch.search({
       index: config.opensearch.index,
       body: queryBundle.opensearch,
     });
 
-    const productIds = response.body.hits.hits.map((hit: any) => hit._source.product_id);
+    let ast: QueryAST;
+    try {
+      ast = await processQueryAST(userPrompt);
+    } catch (astErr) {
+      console.warn('[multiImageSearch] processQueryAST failed, using processQueryFast:', astErr);
+      try {
+        ast = await processQueryFast(userPrompt?.trim() || 'fashion');
+      } catch (fastErr) {
+        console.warn('[multiImageSearch] processQueryFast failed, retrying minimal prompt:', fastErr);
+        ast = await processQueryFast('fashion');
+      }
+    }
+
+    let hits = response.body.hits.hits as any[];
+    const totalHits =
+      typeof response.body.hits.total === "object" && response.body.hits.total != null
+        ? (response.body.hits.total as { value?: number }).value ?? 0
+        : Number(response.body.hits.total) || 0;
+
+    const relevanceIntent = buildMultiImageSearchHitRelevanceIntent(ast, parsedIntent, userPrompt);
+    const relevanceById = new Map<string, HitCompliance>();
+
+    if (hits.length > 0) {
+      const maxScore = hits[0]._score ?? 1;
+      const useTanhSim = config.search.similarityNormalize === "tanh";
+      const tanhScale = config.search.similarityTanhScale;
+      const scoreMap = new Map<string, number>();
+      hits.forEach((hit: any) => {
+        const rawScore = hit?._score ?? 0;
+        const positive = Math.max(0, rawScore);
+        const normalized = useTanhSim
+          ? Math.max(0, Math.min(1, Math.tanh(positive / tanhScale)))
+          : maxScore > 0
+            ? positive / maxScore
+            : 0;
+        scoreMap.set(String(hit._source.product_id), Math.round(normalized * 100) / 100);
+      });
+
+      for (const hit of hits) {
+        const idStr = String(hit?._source?.product_id);
+        const sim = scoreMap.get(idStr) ?? 0;
+        const rel = computeHitRelevance(hit, sim, relevanceIntent);
+        const { primaryColor: _pc, ...compliance } = rel;
+        relevanceById.set(idStr, compliance);
+      }
+
+      hits = [...hits].sort((a: any, b: any) => {
+        const ida = String(a._source.product_id);
+        const idb = String(b._source.product_id);
+        const fa = relevanceById.get(ida)?.finalRelevance01 ?? 0;
+        const fb = relevanceById.get(idb)?.finalRelevance01 ?? 0;
+        if (Math.abs(fb - fa) > 1e-8) return fb - fa;
+        const ra = relevanceById.get(ida)?.rerankScore ?? 0;
+        const rb = relevanceById.get(idb)?.rerankScore ?? 0;
+        return rb - ra;
+      });
+
+      const finalAcceptMin = config.search.finalAcceptMin;
+      // Text-search hard gate often drops every multi-image kNN hit: typeGate/color from
+      // AST+vision can be strict while visual neighbors are still useful. Default soft here;
+      // set MULTI_IMAGE_HARD_RELEVANCE_GATE=1 to apply SEARCH_FINAL_ACCEPT_MIN + relevanceGateMode like text.
+      const multiImageHardGate =
+        String(process.env.MULTI_IMAGE_HARD_RELEVANCE_GATE ?? "").toLowerCase() === "1";
+      const relevanceGateSoft = multiImageHardGate
+        ? config.search.relevanceGateMode === "soft"
+        : true;
+      const thresholdPassedIds = hits
+        .map((h: any) => String(h._source.product_id))
+        .filter((id) => (relevanceById.get(id)?.finalRelevance01 ?? 0) >= finalAcceptMin);
+      if (!relevanceGateSoft) {
+        if (thresholdPassedIds.length > 0) {
+          const allow = new Set(thresholdPassedIds);
+          hits = hits.filter((h: any) => allow.has(String(h._source.product_id)));
+        } else {
+          hits = [];
+        }
+      }
+    }
+
+    const productIds = hits.map((hit: any) => hit._source?.product_id);
     const hydratedResults = await hydrateProductDetails(productIds, queryBundle.sqlFilters);
 
-    const results = response.body.hits.hits
+    const results = hits
       .map((hit: any) => {
         const hydrated = hydratedResults.find((p: any) => String(p.id) === String(hit._source.product_id));
         return hydrated
@@ -1512,6 +1599,8 @@ export async function multiImageSearch(
         priceUsd: r.price || r.price_usd || r.priceUsd,
         availability: r.availability,
         imageCdn: r.image_url || r.imageCdn,
+        description: r.description,
+        color: r.color,
       },
       scoreBreakdown: [],
     }));
@@ -1520,14 +1609,41 @@ export async function multiImageSearch(
     const rerankOpts = Object.assign({}, defaultRerank, rerankWeights || {});
     const reranked = intentAwareRerank(mappedForRerank, parsedIntent, rerankOpts);
 
-    const finalResults = reranked.map((rer: any) => {
-      const original = results.find((o: any) => (o.id || o.product_id || o.productId) === rer.productId);
-      return { ...original, rerankScore: rer.rerankScore, rerankBreakdown: rer.rerankBreakdown };
-    }).sort((a: any, b: any) => (b.rerankScore ?? 0) - (a.rerankScore ?? 0));
+    const finalResults = reranked
+      .map((rer: any) => {
+        const original = results.find((o: any) => (o.id || o.product_id || o.productId) === rer.productId);
+        const rel = relevanceById.get(String(rer.productId));
+        return {
+          ...original,
+          rerankScore: rer.rerankScore,
+          rerankBreakdown: rer.rerankBreakdown,
+          finalRelevance01: rel?.finalRelevance01,
+          textSearchRerankScore: rel?.rerankScore,
+          osSimilarity01: rel?.osSimilarity01,
+          relevanceCompliance: rel
+            ? {
+                productTypeCompliance: rel.productTypeCompliance,
+                colorCompliance: rel.colorCompliance,
+                audienceCompliance: rel.audienceCompliance,
+                categoryRelevance01: rel.categoryRelevance01,
+                crossFamilyPenalty: rel.crossFamilyPenalty,
+              }
+            : undefined,
+        };
+      })
+      .sort((a: any, b: any) => {
+        const fa = a.finalRelevance01 ?? 0;
+        const fb = b.finalRelevance01 ?? 0;
+        if (Math.abs(fb - fa) > 1e-8) return fb - fa;
+        const ta = a.textSearchRerankScore ?? 0;
+        const tb = b.textSearchRerankScore ?? 0;
+        if (Math.abs(tb - ta) > 1e-8) return tb - ta;
+        return (b.rerankScore ?? 0) - (a.rerankScore ?? 0);
+      });
 
     return {
       results: finalResults,
-      total: response.body.hits.total.value,
+      total: totalHits,
       tookMs: Date.now() - startTime,
       explanation: compositeQuery.explanation,
       compositeQuery,
@@ -1698,6 +1814,139 @@ function buildFiltersFromIntent(intent: ParsedIntent): any {
   return filters;
 }
 
+function clampEnv01(raw: string | undefined, fallback: number, max: number): number {
+  if (raw === undefined || String(raw).trim() === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(0, n));
+}
+
+/** Blend two unit-ish vectors and L2-normalize (CLIP cosine kNN). */
+function blendUnitVectors(a: number[], b: number[], weightB: number): number[] {
+  const wa = 1 - weightB;
+  const wb = weightB;
+  const out = new Array<number>(a.length);
+  for (let i = 0; i < a.length; i++) {
+    out[i] = wa * (a[i] ?? 0) + wb * (b[i] ?? 0);
+  }
+  const mag = Math.sqrt(out.reduce((sum, v) => sum + v * v, 0));
+  if (mag === 0) return [...a];
+  return out.map((v) => v / mag);
+}
+
+function buildMultiImageTextForEmbedding(userPrompt: string, intent: ParsedIntent): string {
+  const parts: string[] = [userPrompt.trim()];
+  if (intent.constraints?.category) {
+    parts.push(String(intent.constraints.category));
+  }
+  const strat = intent.searchStrategy?.trim();
+  if (strat && strat.length <= 280) {
+    parts.push(strat);
+  }
+  return parts.filter((p) => p.length > 0).join(". ");
+}
+
+/**
+ * Mix ensembled CLIP text embedding (see getQueryEmbedding) into the composite image vector
+ * so the user's words affect kNN like they do in /search text.
+ */
+async function blendPromptClipIntoCompositeGlobal(
+  compositeQuery: CompositeQuery,
+  userPrompt: string,
+  intent: ParsedIntent,
+): Promise<void> {
+  const w = clampEnv01(process.env.MULTI_IMAGE_PROMPT_EMBED_WEIGHT, 0.38, 0.65);
+  if (w <= 0) return;
+  const text = buildMultiImageTextForEmbedding(userPrompt, intent);
+  if (!text) return;
+  let promptEmb: number[] | null = null;
+  try {
+    promptEmb = await getQueryEmbedding(text);
+  } catch {
+    promptEmb = null;
+  }
+  const g = compositeQuery.embeddings.global;
+  if (!promptEmb?.length || promptEmb.length !== g.length) return;
+  compositeQuery.embeddings.global = blendUnitVectors(g, promptEmb, w);
+}
+
+/**
+ * Maps user prompt (QueryAST) + Gemini image intent into the same SearchHitRelevanceIntent
+ * shape used by text search, so computeHitRelevance applies identical type/color/audience rules.
+ */
+function buildMultiImageSearchHitRelevanceIntent(
+  ast: QueryAST,
+  parsedIntent: ParsedIntent,
+  rawPrompt: string,
+): SearchHitRelevanceIntent {
+  const merged = mergeFilters(undefined, ast);
+  const lexicalTypeSeeds = extractLexicalProductTypeSeeds(rawPrompt);
+  const astProductTypes = (ast.entities.productTypes || []).map((t) => t.toLowerCase());
+  let desiredProductTypes = [...new Set([...astProductTypes, ...lexicalTypeSeeds])];
+
+  const modelCategory = parsedIntent.constraints?.category?.toLowerCase()?.trim();
+  if (desiredProductTypes.length === 0 && modelCategory) {
+    desiredProductTypes = [...new Set(extractLexicalProductTypeSeeds(modelCategory))];
+  }
+
+  const mergedCategory =
+    modelCategory ||
+    (typeof merged.category === "string"
+      ? merged.category
+      : Array.isArray(merged.category)
+        ? merged.category[0]
+        : undefined);
+
+  const fromAstColors = (ast.entities.colors ?? []).map((c) => String(c).toLowerCase());
+  const fromImageColors: string[] = [];
+  for (const ii of parsedIntent.imageIntents || []) {
+    const ev = ii.extractedValues as Record<string, unknown> | undefined;
+    if (!ev) continue;
+    const col = ev.color ?? ev.colour ?? ev.colors;
+    const arr = Array.isArray(col) ? col : col != null ? [col] : [];
+    for (const x of arr) {
+      const s = String(x).toLowerCase().trim();
+      if (s) fromImageColors.push(s);
+    }
+  }
+  const rerankDesiredColorsRaw = [...new Set([...fromAstColors, ...fromImageColors].filter(Boolean))];
+  const rerankDesiredColors = [
+    ...new Set(
+      rerankDesiredColorsRaw
+        .map((c) => normalizeColorToken(c) ?? c.toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
+  const desiredColorsTier =
+    rerankDesiredColorsRaw.length > 0 ? rerankDesiredColorsRaw : rerankDesiredColors;
+
+  const queryGenderFromModel = normalizeQueryGender(parsedIntent.constraints?.gender);
+  const queryGenderFromAst = normalizeQueryGender(merged.gender);
+  const audienceGenderForScoring =
+    queryGenderFromModel ?? queryGenderFromAst ?? (merged.gender ? String(merged.gender) : undefined);
+
+  const queryAgeGroup = merged.ageGroup ?? ast.entities.ageGroup;
+  const hasAudienceIntent = Boolean(queryAgeGroup || audienceGenderForScoring);
+
+  const crossFamilyPenaltyWeight = Math.max(
+    0,
+    Math.min(2000, Number(process.env.SEARCH_CROSS_FAMILY_PENALTY_WEIGHT ?? "420") || 420),
+  );
+
+  return {
+    desiredProductTypes,
+    desiredColors: rerankDesiredColors,
+    desiredColorsTier,
+    rerankColorMode: ast.filters?.colorMode ?? "any",
+    mergedCategory,
+    astCategories: ast.entities.categories ?? [],
+    queryAgeGroup,
+    audienceGenderForScoring,
+    hasAudienceIntent,
+    crossFamilyPenaltyWeight,
+  };
+}
+
 async function hydrateProductDetails(productIds: (string | number)[], sqlFilters: any[]): Promise<any[]> {
   if (productIds.length === 0) return [];
   const pool = pg;
@@ -1715,6 +1964,34 @@ async function hydrateProductDetails(productIds: (string | number)[], sqlFilters
   return result.rows;
 }
 
+function productSearchTextBlob(product: any): string {
+  return [
+    product?.name,
+    product?.title,
+    product?.brand,
+    product?.category,
+    product?.color,
+    product?.description,
+  ]
+    .filter((x) => x != null && String(x).trim() !== "")
+    .map((x) => String(x).toLowerCase())
+    .join(" ");
+}
+
+function productMatchesCompositeFilter(product: any, filter: { attribute: string; values: string[] }): boolean {
+  const blob = productSearchTextBlob(product);
+  const colorField = String(product?.color ?? "").toLowerCase();
+  for (const v of filter.values) {
+    const needle = String(v).toLowerCase().trim();
+    if (!needle) continue;
+    if (blob.includes(needle)) return true;
+    if (filter.attribute === "color" && colorField) {
+      if (colorField.includes(needle) || needle.includes(colorField)) return true;
+    }
+  }
+  return false;
+}
+
 function calculateCompositeScore(
   vectorScore: number,
   product: any,
@@ -1724,13 +2001,17 @@ function calculateCompositeScore(
   let score = weights.vectorWeight * vectorScore;
 
   let filterMatch = 0;
+  let filterCount = 0;
   for (const filter of query.filters) {
-    const val = product.attributes?.[filter.attribute];
-    if (val && filter.values.some((v: string) => val.includes(v))) {
+    if (filter.operator === "exclude") continue;
+    filterCount++;
+    if (productMatchesCompositeFilter(product, filter)) {
       filterMatch += filter.weight || 1.0;
     }
   }
-  score += weights.filterWeight * Math.min(filterMatch, 1.0);
+  if (filterCount > 0) {
+    score += weights.filterWeight * Math.min(filterMatch / filterCount, 1.0);
+  }
 
   if (query.constraints.price && product.price) {
     const { min = 0, max = 10000 } = query.constraints.price;

@@ -78,7 +78,7 @@ RUN if [ ! -f "./models/fashion-clip-image.onnx" ] || [ ! -f "./models/fashion-c
   fi && \
   echo "✅ ML models present: $(ls -lh ./models/*.onnx | wc -l) ONNX files"
 
-# In-container YOLO FastAPI (shop-the-look); not used when SERVICE_ROLE=api
+# In-container YOLO FastAPI (shop-the-look); skipped when YOLO_* URL points to external service only
 COPY src/lib/model/yolov8_api.py \
      src/lib/model/dual_model_yolo.py \
      src/lib/model/dual-model-yolo.py \

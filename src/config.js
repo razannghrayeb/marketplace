@@ -2,13 +2,6 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.config = void 0;
 require("dotenv/config");
-function getServiceRole() {
-    var role = (process.env.SERVICE_ROLE || "all").toLowerCase();
-    if (role === "api" || role === "ml" || role === "all") {
-        return role;
-    }
-    return "all";
-}
 function getRedisConfig() {
     return {
         restUrl: process.env.UPSTASH_REDIS_REST_URL || "",
@@ -18,8 +11,6 @@ function getRedisConfig() {
 exports.config = {
     port: Number(process.env.PORT || 4000),
     corsOrigin: process.env.CORS_ORIGIN || "*",
-    serviceRole: getServiceRole(),
-    mlServiceUrl: process.env.ML_SERVICE_URL || "",
     // used for local data just for testing 
     // postgres: {
     //   host: process.env.PG_HOST || "0.0.0.0",

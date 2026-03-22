@@ -63,6 +63,8 @@ export class QueryMapper {
     compositeQuery: CompositeQuery,
     options: {
       maxResults?: number;
+      /** kNN neighbor count (defaults to a higher recall than maxResults) */
+      vectorK?: number;
       vectorWeight?: number;
       filterWeight?: number;
       priceWeight?: number;
@@ -70,13 +72,14 @@ export class QueryMapper {
   ): SearchQueryBundle {
     const {
       maxResults = 100,
+      vectorK,
       vectorWeight = 0.7,
       filterWeight = 0.2,
       priceWeight = 0.1,
     } = options;
 
     // Build OpenSearch query
-    const opensearch = this.buildOpenSearchQuery(compositeQuery, maxResults);
+    const opensearch = this.buildOpenSearchQuery(compositeQuery, maxResults, vectorK);
 
     // Build SQL filters for additional filtering/hydration
     const sqlFilters = this.buildSQLFilters(compositeQuery);
@@ -97,63 +100,91 @@ export class QueryMapper {
   // -------------------------------------------------------------------------
   private buildOpenSearchQuery(
     query: CompositeQuery,
-    maxResults: number
+    maxResults: number,
+    vectorK?: number
   ): OpenSearchQuery {
     const must: any[] = [];
     const filter: any[] = [];
     const must_not: any[] = [];
     const should: any[] = [];
 
-    // Add attribute filters
+    // Attribute filters: never put exact/fuzzy in bool.filter with kNN — the ANN space is
+    // then intersected with hard term/match filters and often becomes empty (log proof:
+    // hitCount 0 with valid 512-d unit vector). Exclusions stay must_not; lexical hints boost via should.
     for (const attrFilter of query.filters) {
       const clause = this.buildFilterClause(attrFilter);
       if (clause) {
         if (attrFilter.operator === 'exclude') {
           must_not.push(clause);
-        } else if (attrFilter.operator === 'fuzzy') {
+        } else if (
+          attrFilter.operator === 'fuzzy' ||
+          attrFilter.operator === 'exact'
+        ) {
           should.push(clause);
+        } else if (attrFilter.operator === 'range') {
+          const rangeShould = this.buildAttributeRangeShould(attrFilter);
+          if (rangeShould) should.push(rangeShould);
         } else {
           filter.push(clause);
         }
       }
     }
 
-    // Add constraint filters
+    // Category / brand / gender from the model are hints — hard filters here often
+    // produced zero hits (wrong first-pass labels, singular vs plural, etc.) while the
+    // explanation text still looked correct. Prefer soft boosts so kNN recall stays intact.
     if (query.constraints.category) {
-      filter.push({
-        term: { category: query.constraints.category.toLowerCase() },
-      });
+      const c = query.constraints.category.toLowerCase();
+      should.push(
+        { term: { category: { value: c, boost: 2.5 } } },
+        { match: { "category.search": { query: c, boost: 1.2 } } },
+      );
     }
 
     if (query.constraints.brands && query.constraints.brands.length > 0) {
-      filter.push({
-        terms: { brand: query.constraints.brands.map(b => b.toLowerCase()) },
-      });
+      const brands = query.constraints.brands.map((b) => b.toLowerCase());
+      for (const b of brands) {
+        should.push({
+          bool: {
+            should: [
+              { term: { brand: { value: b, boost: 2.0 } } },
+              { match: { "brand.search": { query: b, boost: 1.0 } } },
+            ],
+            minimum_should_match: 1,
+          },
+        });
+      }
     }
 
     if (query.constraints.gender) {
-      filter.push({
-        term: { attr_gender: query.constraints.gender.toLowerCase() },
-      });
+      const g = query.constraints.gender.toLowerCase();
+      should.push(
+        { term: { attr_gender: { value: g, boost: 2.0 } } },
+        { term: { audience_gender: { value: g, boost: 1.5 } } },
+      );
     }
 
     if (query.constraints.price) {
-      const priceFilter: any = { range: { price_usd: {} } };
-      if (query.constraints.price.min !== undefined) {
-        priceFilter.range.price_usd.gte = query.constraints.price.min;
+      const pr = query.constraints.price;
+      if (pr.min !== undefined || pr.max !== undefined) {
+        const range: Record<string, number> = { boost: 2.0 };
+        if (pr.min !== undefined) range.gte = pr.min;
+        if (pr.max !== undefined) range.lte = pr.max;
+        should.push({ range: { price_usd: range } });
       }
-      if (query.constraints.price.max !== undefined) {
-        priceFilter.range.price_usd.lte = query.constraints.price.max;
-      }
-      filter.push(priceFilter);
     }
 
+    // mustHave must NOT live in bool.must: that required every keyword to match at once
+    // (AND), which routinely returned zero documents despite good kNN + explanation.
     for (const term of query.mustHave) {
-      must.push({
+      const t = String(term).trim();
+      if (!t) continue;
+      should.push({
         multi_match: {
-          query: term,
-          fields: ['title', 'category', 'brand'],
-          fuzziness: 'AUTO',
+          query: t,
+          fields: ["title^2", "description", "category", "brand"],
+          fuzziness: "AUTO",
+          boost: 1.0,
         },
       });
     }
@@ -172,11 +203,14 @@ export class QueryMapper {
     // no vector retrieval (empty results while filters/text clauses also match nothing).
     const embeddingField =
       String(process.env.SEARCH_IMAGE_KNN_FIELD ?? 'embedding').trim() || 'embedding';
+    const k =
+      vectorK ??
+      Math.min(Math.max(maxResults * 4, 80), 320);
     const knnMust = {
       knn: {
         [embeddingField]: {
           vector: query.embeddings.global,
-          k: maxResults,
+          k,
         },
       },
     };
@@ -194,7 +228,32 @@ export class QueryMapper {
           must_not: must_not.length > 0 ? must_not : undefined,
         },
       },
-      _source: ['product_id', 'title', 'brand', 'price_usd', 'image_cdn', 'category'],
+      // Fields required by computeHitRelevance (same as text / image kNN ranking)
+      _source: [
+        'product_id',
+        'title',
+        'brand',
+        'price_usd',
+        'image_cdn',
+        'category',
+        'category_canonical',
+        'product_types',
+        'attr_color',
+        'attr_colors',
+        'attr_colors_text',
+        'attr_colors_image',
+        'color_palette_canonical',
+        'color_primary_canonical',
+        'color_secondary_canonical',
+        'color_accent_canonical',
+        'color_confidence_text',
+        'color_confidence_image',
+        'attr_gender',
+        'audience_gender',
+        'age_group',
+        'norm_confidence',
+        'type_confidence',
+      ],
     };
   }
 
@@ -244,6 +303,24 @@ export class QueryMapper {
       default:
         return null;
     }
+  }
+
+  /** Range in bool.should so kNN is not annihilated by bad LLM numeric bounds. */
+  private buildAttributeRangeShould(attrFilter: AttributeFilter): any | null {
+    const field = this.getOpenSearchField(attrFilter.attribute);
+    const r: Record<string, number> = { boost: 1.25 };
+    const v0 = attrFilter.values[0];
+    const v1 = attrFilter.values[1];
+    if (v0 !== undefined && v0 !== null && String(v0).trim() !== '') {
+      const n = Number(v0);
+      if (Number.isFinite(n)) r.gte = n;
+    }
+    if (v1 !== undefined && v1 !== null && String(v1).trim() !== '') {
+      const n = Number(v1);
+      if (Number.isFinite(n)) r.lte = n;
+    }
+    if (!('gte' in r) && !('lte' in r)) return null;
+    return { range: { [field]: r } };
   }
 
   // -------------------------------------------------------------------------

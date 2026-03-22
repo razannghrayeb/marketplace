@@ -14,6 +14,7 @@
  *   variant   — same vendor + same variant_id (only removes true re-ingest duplicates)
  *   parent    — same vendor + same parent listing URL (keeps ONE row per parent_product_url;
  *               DELETES other size/color variants). Requires --ack-destroy-variants with --execute.
+ *   image     — same vendor + identical image_url (different product_url / id, same listing image)
  *
  * Usage:
  *   npx tsx scripts/dedupe-products.ts
@@ -21,6 +22,8 @@
  *   npx tsx scripts/dedupe-products.ts --match=parent --execute --ack-destroy-variants
  *   npx tsx scripts/dedupe-products.ts --execute --keep=latest --vendor-id=8
  *   npx tsx scripts/dedupe-products.ts --execute --skip-opensearch
+ *   npx tsx scripts/dedupe-products.ts --match=image --execute
+ *     (same vendor + identical image_url — when duplicate listings share one CDN image)
  *
  * Legacy: --normalize-url is the same as --match=normalize.
  *
@@ -33,7 +36,7 @@ import { pg, osClient } from "../src/lib/core";
 import { config } from "../src/config";
 
 type KeepStrategy = "min-id" | "latest";
-type MatchMode = "exact" | "normalize" | "variant" | "parent";
+type MatchMode = "exact" | "normalize" | "variant" | "parent" | "image";
 
 interface DupGroupRow {
   vendor_id: string;
@@ -91,6 +94,7 @@ function parseArgs() {
     if (v === "normalize" || v === "normalized") match = "normalize";
     else if (v === "variant") match = "variant";
     else if (v === "parent") match = "parent";
+    else if (v === "image") match = "image";
     else if (v === "exact" || v === "url") match = "exact";
   }
   if (argv.includes("--normalize-url")) match = "normalize";
@@ -180,6 +184,22 @@ async function fetchDuplicateGroups(
         AND btrim(variant_id::text) <> ''
         ${vendorFilter}
       GROUP BY vendor_id, lower(btrim(variant_id))
+      HAVING count(*) > 1
+      ORDER BY cnt DESC, vendor_id, url_key
+    `;
+  } else if (match === "image") {
+    sql = `
+      SELECT
+        vendor_id::text,
+        image_url AS url_key,
+        (array_agg(product_url ORDER BY id))[1] AS sample_url,
+        array_agg(id ORDER BY id) AS ids,
+        count(*)::int AS cnt
+      FROM products
+      WHERE image_url IS NOT NULL
+        AND btrim(image_url) <> ''
+        ${vendorFilter}
+      GROUP BY vendor_id, image_url
       HAVING count(*) > 1
       ORDER BY cnt DESC, vendor_id, url_key
     `;
@@ -507,6 +527,7 @@ async function main() {
     normalize: "normalized URL (merges #variant / ?query — one row per path)",
     variant: "same variant_id (true re-scrape duplicates only)",
     parent: "parent listing URL (ONE row per parent — removes other size/color SKUs)",
+    image: "same vendor + identical image_url (duplicate listings, same primary image)",
   };
   console.log(`Match: ${match} — ${matchLabel[match]}`);
   if (vendorId !== null) console.log(`Vendor filter: ${vendorId}`);

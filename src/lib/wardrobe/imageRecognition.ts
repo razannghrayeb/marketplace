@@ -10,7 +10,7 @@
  * - Style attributes (casual, formal, etc.)
  */
 
-import { IntentParserService } from '../prompt/gemeni';
+import { IntentParserService, resolveGeminiGenerationModel } from '../prompt/gemeni';
 import { getYOLOv8Client, type Detection } from '../image/yolov8Client';
 import { mapDetectionToCategory } from '../detection/categoryMapper';
 import { processImageForEmbedding } from '../image/processor';
@@ -260,7 +260,9 @@ Respond ONLY with valid JSON (no markdown):
   "description": "Navy blue crew neck t-shirt in soft cotton knit with regular fit"
 }`;
 
-    const model = intentParser['client'].getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const model = intentParser['client'].getGenerativeModel({
+      model: resolveGeminiGenerationModel(),
+    });
 
     const parts = [
       {

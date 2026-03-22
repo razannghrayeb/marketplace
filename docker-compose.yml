@@ -26,6 +26,8 @@ services:
         condition: service_started
       opensearch-node:
         condition: service_healthy
+      yolov8:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://0.0.0.0:8080/health"]
       interval: 30s

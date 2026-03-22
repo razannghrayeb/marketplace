@@ -2,16 +2,6 @@ import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
 
-type ServiceRole = "all" | "api" | "ml";
-
-function getServiceRole(): ServiceRole {
-  const role = (process.env.SERVICE_ROLE || "all").toLowerCase();
-  if (role === "api" || role === "ml" || role === "all") {
-    return role;
-  }
-  return "all";
-}
-
 /**
  * Load an env file only when it exists.
  *
@@ -64,8 +54,6 @@ function getRedisConfig() {
 export const config = {
   port: Number(process.env.PORT || 4000),
   corsOrigin: process.env.CORS_ORIGIN || "*",
-  serviceRole: getServiceRole(),
-  mlServiceUrl: process.env.ML_SERVICE_URL || "",
   // used for local data just for testing 
   // postgres: {
   //   host: process.env.PG_HOST || "0.0.0.0",

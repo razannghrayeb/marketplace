@@ -8,6 +8,7 @@
 export {
   IntentParserService,
   createIntentParser,
+  MAX_MULTI_IMAGE_UPLOADS,
   // Types
   type DetectedItem,
   type AttributeMap,
