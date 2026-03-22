@@ -37,6 +37,7 @@ import {
   shouldUseAlternatives,
   type CategoryMapping,
 } from "../../lib/detection/categoryMapper";
+import { extractLexicalProductTypeSeeds } from "../../lib/search/productTypeTaxonomy";
 
 function imageSoftCategoryEnv(): boolean {
   const v = String(process.env.SEARCH_IMAGE_SOFT_CATEGORY ?? "").toLowerCase();
@@ -86,6 +87,42 @@ import {
 // to produce a non-callable object at runtime, so we guard it.
 const sharp: any =
   typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
+
+/**
+ * Single full-frame pseudo-detection when YOLO is down or returns nothing.
+ * Keeps `detection` non-null for clients while `similarProducts.byDetection` uses the same geometry.
+ */
+function syntheticFullImageDetectionBlock(
+  imageWidth: number,
+  imageHeight: number,
+): {
+  items: Detection[];
+  count: number;
+  summary: Record<string, number>;
+  composition: OutfitComposition;
+} {
+  const w = Math.max(0, imageWidth);
+  const h = Math.max(0, imageHeight);
+  const box: BoundingBox = { x1: 0, y1: 0, x2: w, y2: h };
+  const box_normalized: BoundingBox =
+    w > 0 && h > 0
+      ? { x1: 0, y1: 0, x2: 1, y2: 1 }
+      : { x1: 0, y1: 0, x2: 0, y2: 0 };
+  const item: Detection = {
+    label: "full_image",
+    raw_label: "full_image",
+    confidence: 1,
+    box,
+    box_normalized,
+    area_ratio: 1,
+  };
+  return {
+    items: [item],
+    count: 1,
+    summary: { full_image: 1 },
+    composition: extractOutfitComposition([item]),
+  };
+}
 
 // ============================================================================
 // Types
@@ -445,9 +482,11 @@ export class ImageAnalysisService {
 
     // No YOLO detections — fall back to a whole-image embedding search
     if (!analysisResult.detection || analysisResult.detection.items.length === 0) {
+      const fallbackDetection = syntheticFullImageDetectionBlock(imageWidth, imageHeight);
       if (!analysisResult.embedding) {
         return {
           ...analysisResult,
+          detection: fallbackDetection,
           similarProducts: { byDetection: [], totalProducts: 0, threshold: similarityThreshold, detectedCategories: [] },
         };
       }
@@ -462,6 +501,7 @@ export class ImageAnalysisService {
       });
       return {
         ...analysisResult,
+        detection: fallbackDetection,
         similarProducts: {
           byDetection: fallback.results.length > 0 ? [{
             detection: { label: "full_image", confidence: 1.0, box: { x1: 0, y1: 0, x2: imageWidth, y2: imageHeight }, area_ratio: 1.0 },
@@ -522,6 +562,10 @@ export class ImageAnalysisService {
         : [categoryMapping.productCategory];
 
       const filters: Partial<import("./types").SearchFilters> = {};
+      const typeSeeds = extractLexicalProductTypeSeeds(label);
+      if (typeSeeds.length) {
+        filters.productTypes = typeSeeds;
+      }
       let predictedCategoryAisles: string[] | undefined;
       if (filterByDetectedCategory) {
         if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
@@ -845,7 +889,11 @@ export class ImageAnalysisService {
             : detection.label;
         const categoryMapping = mapDetectionToCategory(categorySource, detection.confidence);
 
-        const filters: Record<string, string> = {};
+        const filters: Partial<import("./types").SearchFilters> = {};
+        const browseTypeSeeds = extractLexicalProductTypeSeeds(categorySource);
+        if (browseTypeSeeds.length) {
+          filters.productTypes = browseTypeSeeds;
+        }
         let predictedCategoryAisles: string[] | undefined;
         if (options.filterByDetectedCategory !== false) {
           if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {

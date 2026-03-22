@@ -29,22 +29,32 @@ import {
   getQueryEmbedding,
   type QueryAST,
 } from "../../lib/queryProcessor";
-import { expandColorTermsForFilter } from "../../lib/color/queryColorFilter";
+import { expandColorTermsForFilter, normalizeColorToken } from "../../lib/color/queryColorFilter";
+import {
+  computeHitRelevance,
+  normalizeQueryGender,
+  type HitCompliance,
+  type SearchHitRelevanceIntent,
+} from "../../lib/search/searchHitRelevance";
+import { extractLexicalProductTypeSeeds } from "../../lib/search/productTypeTaxonomy";
 
 // ============================================================================
 // Types
 // ============================================================================
 
 export interface SearchFilters {
-  category?: string;
+  category?: string | string[];
   brand?: string;
   minPriceCents?: number;
   maxPriceCents?: number;
-  currency?: string;  // 'LBP' or 'USD' - defaults to LBP
+  currency?: string; // 'LBP' or 'USD' - defaults to LBP
   availability?: boolean;
   vendorId?: string;
-  // Attribute filters (extracted from titles)
   color?: string;
+  colors?: string[];
+  colorMode?: "any" | "all";
+  productTypes?: string[];
+  ageGroup?: string;
   material?: string;
   fit?: string;
   style?: string;
@@ -125,6 +135,8 @@ export interface SearchResultWithRelated {
     processed_query?: QueryAST;  // Query processing info (corrections, etc.)
     did_you_mean?: string;  // Suggestion if not auto-applied
     below_relevance_threshold?: boolean;
+    below_final_relevance_gate?: boolean;
+    relevance_gate_soft?: boolean;
     threshold_relaxed?: boolean;
     recall_size?: number;
     final_accept_min?: number;
@@ -263,25 +275,6 @@ function buildDesiredCatalogTermSet(aisles: string[]): Set<string> {
   return s;
 }
 
-function categoryMetadataSoft01(
-  source: { category?: string; category_canonical?: string; product_types?: unknown },
-  desired: Set<string>,
-): number {
-  const cat = String(source?.category ?? "").toLowerCase();
-  const cc = String(source?.category_canonical ?? "").toLowerCase();
-  if (desired.has(cat) || desired.has(cc)) return 1;
-  const raw = source?.product_types;
-  const pts: string[] = Array.isArray(raw)
-    ? raw.map((x: unknown) => String(x).toLowerCase())
-    : raw
-      ? [String(raw).toLowerCase()]
-      : [];
-  for (const p of pts) {
-    if (desired.has(p)) return 0.88;
-  }
-  return 0;
-}
-
 /**
  * Search products by image with similarity threshold and optional pHash matching
  * Returns similar images above the threshold, sorted by similarity
@@ -387,11 +380,6 @@ export async function searchByImageWithSimilarity(
   const wColor = Math.max(0, Math.min(1, Number(process.env.SEARCH_IMAGE_COLOR_KNN_WEIGHT ?? "0.45")));
   const wSum = wGlobal + wColor > 0 ? wGlobal + wColor : 1;
 
-  const categoryBoost = Math.max(
-    100,
-    Math.min(1200, Number(process.env.SEARCH_IMAGE_CATEGORY_BOOST ?? "450") || 450),
-  );
-
   let colorQueryEmbedding: number[] | null = null;
   if (
     !skipColorKnnMerge &&
@@ -416,9 +404,21 @@ export async function searchByImageWithSimilarity(
       "category",
       "category_canonical",
       "product_types",
+      "attr_gender",
       "attr_color",
       "attr_colors",
+      "attr_colors_text",
+      "attr_colors_image",
+      "norm_confidence",
+      "type_confidence",
+      "color_confidence_text",
+      "color_confidence_image",
       "color_palette_canonical",
+      "color_primary_canonical",
+      "color_secondary_canonical",
+      "color_accent_canonical",
+      "age_group",
+      "audience_gender",
     ],
     query: {
       bool: {
@@ -585,26 +585,135 @@ export async function searchByImageWithSimilarity(
   const belowRelevanceThreshold =
     hits.length > 0 && filteredHits.length === 0 && !thresholdRelaxed;
 
-  let orderedHits = workingHits;
-  if (desiredCatalogTerms && desiredCatalogTerms.size > 0) {
-    orderedHits = [...workingHits].sort((a: any, b: any) => {
-      const sa = Number(a._score);
-      const sb = Number(b._score);
-      const ca = categoryMetadataSoft01(a._source, desiredCatalogTerms);
-      const cb = categoryMetadataSoft01(b._source, desiredCatalogTerms);
-      const ra = sa * 1000 + ca * categoryBoost;
-      const rb = sb * 1000 + cb * categoryBoost;
-      return rb - ra;
-    });
+  const crossFamilyPenaltyWeight = Math.max(
+    0,
+    Math.min(2000, Number(process.env.SEARCH_CROSS_FAMILY_PENALTY_WEIGHT ?? "420") || 420),
+  );
+  const filtersRecord = filters as Record<string, unknown>;
+  const filterCategory = (filters as { category?: string | string[] }).category;
+  const mergedCategoryForRelevance = Array.isArray(filterCategory)
+    ? filterCategory[0]
+    : filterCategory;
+  const astCategoriesForRelevance = [
+    ...new Set(
+      [
+        ...(predictedCategoryAisles ?? []).map((x) => String(x).toLowerCase().trim()).filter(Boolean),
+        ...(Array.isArray(filterCategory)
+          ? filterCategory
+          : filterCategory
+            ? [String(filterCategory)]
+            : []
+        ).map((x) => String(x).toLowerCase().trim()),
+      ].filter(Boolean),
+    ),
+  ];
+
+  let desiredProductTypes: string[] = [];
+  if (Array.isArray(filtersRecord.productTypes) && filtersRecord.productTypes.length > 0) {
+    desiredProductTypes = [
+      ...new Set(
+        filtersRecord.productTypes.map((t: unknown) => String(t).toLowerCase().trim()).filter(Boolean),
+      ),
+    ];
+  } else if (predictedCategoryAisles?.length) {
+    desiredProductTypes = [
+      ...new Set(
+        predictedCategoryAisles.flatMap((a) => extractLexicalProductTypeSeeds(String(a))),
+      ),
+    ];
   }
 
-  const maxHydrate = Math.min(orderedHits.length, Math.max(limit * 4, limit));
-  const hitsForHydrate = orderedHits.slice(0, maxHydrate);
+  const explicitColorsForRelevance =
+    Array.isArray(filtersRecord.colors) && filtersRecord.colors.length > 0
+      ? filtersRecord.colors.map((c: unknown) => String(c).toLowerCase())
+      : filtersRecord.color
+        ? [String(filtersRecord.color).toLowerCase()]
+        : [];
+  const desiredColorsForRelevance = [
+    ...new Set(
+      explicitColorsForRelevance.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
+    ),
+  ];
+  const rerankColorModeForRelevance = filtersRecord.colorMode === "all" ? "all" : "any";
+  const desiredColorsTierForRelevance =
+    explicitColorsForRelevance.length > 0 ? explicitColorsForRelevance : desiredColorsForRelevance;
+
+  const queryAgeGroupForRelevance =
+    typeof filtersRecord.ageGroup === "string" ? filtersRecord.ageGroup : undefined;
+  const queryGenderNorm = normalizeQueryGender(filtersAny.gender);
+  const hasAudienceIntentForRelevance = Boolean(queryAgeGroupForRelevance || queryGenderNorm);
+
+  const relevanceIntent: SearchHitRelevanceIntent = {
+    desiredProductTypes,
+    desiredColors: desiredColorsForRelevance,
+    desiredColorsTier: desiredColorsTierForRelevance,
+    rerankColorMode: rerankColorModeForRelevance,
+    mergedCategory: mergedCategoryForRelevance
+      ? String(mergedCategoryForRelevance).toLowerCase()
+      : undefined,
+    astCategories: astCategoriesForRelevance,
+    queryAgeGroup: queryAgeGroupForRelevance,
+    audienceGenderForScoring: filtersAny.gender,
+    hasAudienceIntent: hasAudienceIntentForRelevance,
+    crossFamilyPenaltyWeight,
+  };
+
+  const complianceById = new Map<string, HitCompliance>();
+  const colorByHitId = new Map<string, string | null>();
+  for (const hit of workingHits) {
+    const idStr = String(hit._source.product_id);
+    const sim = knnCosinesimilScoreToCosine01(Number(hit._score));
+    const rounded = Math.round(sim * 100) / 100;
+    const rel = computeHitRelevance(hit, rounded, relevanceIntent);
+    const { primaryColor, ...comp } = rel;
+    complianceById.set(idStr, comp);
+    colorByHitId.set(idStr, primaryColor);
+  }
+
+  const sortedByRelevance = [...workingHits].sort((a: any, b: any) => {
+    const ida = String(a._source.product_id);
+    const idb = String(b._source.product_id);
+    const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
+    const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
+    if (Math.abs(fb - fa) > 1e-8) return fb - fa;
+    const ra = complianceById.get(ida)?.rerankScore ?? 0;
+    const rb = complianceById.get(idb)?.rerankScore ?? 0;
+    return rb - ra;
+  });
+
+  const finalAcceptMin = config.search.finalAcceptMin;
+  const relevanceGateSoft = config.search.relevanceGateMode === "soft";
+  const thresholdPassedHits = sortedByRelevance.filter(
+    (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= finalAcceptMin,
+  );
+  let rankedHits = relevanceGateSoft ? sortedByRelevance : thresholdPassedHits;
+
+  const belowFinalRelevanceGate =
+    workingHits.length > 0 && thresholdPassedHits.length === 0 && !relevanceGateSoft;
+
+  if (desiredColorsForRelevance.length > 0) {
+    const strictColorPost = String(process.env.SEARCH_COLOR_POSTFILTER_STRICT ?? "1").toLowerCase() !== "0";
+    const maxImgConfHits = Math.max(
+      0,
+      ...rankedHits.map((h: any) => Number(h?._source?.color_confidence_image) || 0),
+    );
+    const colorCompliantHits = rankedHits.filter(
+      (h: any) => (complianceById.get(String(h._source.product_id))?.colorCompliance ?? 0) > 0,
+    );
+    if (strictColorPost && colorCompliantHits.length > 0) {
+      rankedHits = colorCompliantHits;
+    } else if (strictColorPost && colorCompliantHits.length === 0 && maxImgConfHits < 0.42) {
+      // Weak image color signal — keep ranked list (same as text search)
+    }
+  }
+
+  const maxHydrate = Math.min(rankedHits.length, Math.max(limit * 4, limit));
+  const hitsForHydrate = rankedHits.slice(0, maxHydrate);
   const productIds = hitsForHydrate.map((hit: any) => hit._source.product_id);
   const scoreMap = new Map<string, number>();
   hitsForHydrate.forEach((hit: any) => {
     const sim = knnCosinesimilScoreToCosine01(Number(hit._score));
-    scoreMap.set(hit._source.product_id, Math.round(sim * 100) / 100);
+    scoreMap.set(String(hit._source.product_id), Math.round(sim * 100) / 100);
   });
 
   // Fetch product data
@@ -616,10 +725,39 @@ export async function searchByImageWithSimilarity(
 
     results = products.map((p: any) => {
       const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
+      const idStr = String(p.id);
+      const similarityScore = scoreMap.get(idStr) ?? 0;
+      const compliance = complianceById.get(idStr);
       return {
         ...p,
-        similarity_score: scoreMap.get(String(p.id)),
-        match_type: scoreMap.get(String(p.id))! >= 0.9 ? "exact" : "similar",
+        color: colorByHitId.get(idStr) ?? p.color ?? null,
+        similarity_score: similarityScore,
+        match_type: similarityScore >= 0.8 ? "exact" : "similar",
+        rerankScore: compliance?.rerankScore,
+        finalRelevance01: compliance?.finalRelevance01,
+        explain: compliance
+          ? {
+              exactTypeScore: compliance.exactTypeScore,
+              siblingClusterScore: compliance.siblingClusterScore,
+              parentHypernymScore: compliance.parentHypernymScore,
+              intraFamilyPenalty: compliance.intraFamilyPenalty,
+              productTypeCompliance: compliance.productTypeCompliance,
+              categoryScore: compliance.categoryRelevance01,
+              lexicalScore: compliance.lexicalScore01,
+              semanticScore: compliance.semanticScore01,
+              globalScore: compliance.osSimilarity01,
+              colorScore: compliance.colorCompliance,
+              matchedColor: compliance.matchedColor ?? undefined,
+              colorTier: compliance.colorTier,
+              colorCompliance: compliance.colorCompliance,
+              audienceCompliance: compliance.audienceCompliance,
+              crossFamilyPenalty: compliance.crossFamilyPenalty,
+              desiredProductTypes,
+              desiredColors: desiredColorsForRelevance,
+              colorMode: rerankColorModeForRelevance,
+              finalRelevance01: compliance.finalRelevance01,
+            }
+          : undefined,
         images: images.map((img) => ({
           id: img.id,
           url: img.cdn_url,
@@ -652,12 +790,16 @@ export async function searchByImageWithSimilarity(
       similarity_scores: results.map((p) =>
         typeof p.similarity_score === "number" ? p.similarity_score : 0,
       ),
+      final_relevance_scores: results.map((p) =>
+        typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : null,
+      ),
       soft_category: Boolean(
         useAisleRerank && desiredCatalogTerms && desiredCatalogTerms.size > 0,
       ),
       predicted_aisles: aisleHints ? [...aisleHints] : null,
       similarity_threshold_used: similarityThreshold,
       below_relevance_threshold: belowRelevanceThreshold,
+      below_final_relevance_gate: belowFinalRelevanceGate,
     });
   }
 
@@ -671,6 +813,8 @@ export async function searchByImageWithSimilarity(
       below_relevance_threshold: belowRelevanceThreshold,
       threshold_relaxed: thresholdRelaxed,
       final_accept_min: config.search.finalAcceptMin,
+      below_final_relevance_gate: belowFinalRelevanceGate,
+      relevance_gate_soft: relevanceGateSoft,
     },
   };
 }

@@ -109,14 +109,36 @@ export interface OutfitComposition {
 // Client Class
 // ============================================================================
 
+/**
+ * Base URL for the Python YOLO FastAPI service (`yolov8_api.py`), not the Node/ONNX CLIP stack.
+ * Weights may come from Hugging Face, but this HTTP service must still be running somewhere.
+ *
+ * Resolution: `YOLOV8_SERVICE_URL` → `YOLO_API_URL` (docker-compose name) → `http://127.0.0.1:8001`.
+ * On split Cloud Run (API + ML), set this on the **ML** service to your YOLO Cloud Run URL.
+ */
+export function resolveYoloServiceBaseUrl(override?: string): string {
+  const o = override?.trim();
+  if (o) return o;
+  const v8 = process.env.YOLOV8_SERVICE_URL?.trim();
+  if (v8) return v8;
+  const legacy = process.env.YOLO_API_URL?.trim();
+  if (legacy) return legacy;
+  // Servers bind 0.0.0.0; clients should use loopback for local dev.
+  return "http://127.0.0.1:8001";
+}
+
 export class YOLOv8Client {
   private baseUrl: string;
   private timeout: number;
 
   constructor(baseUrl?: string, timeout?: number) {
-    this.baseUrl =
-      baseUrl || process.env.YOLOV8_SERVICE_URL || "http://0.0.0.0:8001";
+    this.baseUrl = resolveYoloServiceBaseUrl(baseUrl);
     this.timeout = timeout || 30000;
+  }
+
+  /** Base URL used for requests (for logs when health fails). */
+  getBaseUrl(): string {
+    return this.baseUrl;
   }
 
   /**
@@ -125,8 +147,16 @@ export class YOLOv8Client {
   async isAvailable(): Promise<boolean> {
     try {
       const health = await this.health();
-      return health.ok && health.model_loaded;
-    } catch {
+      const ok = Boolean(health.ok && health.model_loaded);
+      if (!ok) {
+        console.warn(
+          `[YOLOv8] service unhealthy at ${this.baseUrl}: ok=${health?.ok} model_loaded=${health?.model_loaded}`
+        );
+      }
+      return ok;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(`[YOLOv8] health check failed at ${this.baseUrl}: ${msg}`);
       return false;
     }
   }

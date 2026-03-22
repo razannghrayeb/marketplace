@@ -62,10 +62,14 @@ export interface ImageSearchEvalPayload {
   result_count: number;
   hit_ids: string[];
   similarity_scores: number[];
+  /** Per-hit calibrated relevance (same order as hit_ids). */
+  final_relevance_scores?: Array<number | null>;
   soft_category: boolean;
   predicted_aisles: string[] | null;
   similarity_threshold_used?: number;
   below_relevance_threshold?: boolean;
+  /** kNN passed threshold but all hits failed SEARCH_FINAL_ACCEPT_MIN (hard gate). */
+  below_final_relevance_gate?: boolean;
 }
 
 export function searchEvalEnabled(): boolean {
