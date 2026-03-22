@@ -1699,7 +1699,6 @@ export async function imageSearch(
     const embedding = await processImageForEmbedding(imageBuffer);
     const unified = await searchByImageWithSimilarity({
       imageEmbedding: embedding,
-      imageBuffer,
       filters: (options?.filters ?? {}) as any,
       page: 1,
       limit,

@@ -59,6 +59,46 @@ export async function processImageForGarmentEmbedding(imageBuffer: Buffer): Prom
 export type PixelBox = { x1: number; y1: number; x2: number; y2: number };
 
 /**
+ * Padded pixel crop for a detection box (same geometry as garment indexing / CLIP).
+ * Returns null when the box is unusable or the crop would be tiny.
+ */
+export async function extractPaddedDetectionCropBuffer(
+  imageBuffer: Buffer,
+  box: PixelBox | null | undefined,
+): Promise<Buffer | null> {
+  if (
+    !box ||
+    !Number.isFinite(box.x1) ||
+    !Number.isFinite(box.y1) ||
+    !Number.isFinite(box.x2) ||
+    !Number.isFinite(box.y2) ||
+    box.x2 <= box.x1 + 2 ||
+    box.y2 <= box.y1 + 2
+  ) {
+    return null;
+  }
+  const meta = await sharp(imageBuffer).metadata();
+  const iw = meta.width ?? 0;
+  const ih = meta.height ?? 0;
+  if (iw <= 32 || ih <= 32) return null;
+  const bw = box.x2 - box.x1;
+  const bh = box.y2 - box.y1;
+  const padX = bw * 0.08;
+  const padY = bh * 0.08;
+  const x1 = Math.max(0, Math.floor(box.x1 - padX));
+  const y1 = Math.max(0, Math.floor(box.y1 - padY));
+  const x2 = Math.min(iw, Math.ceil(box.x2 + padX));
+  const y2 = Math.min(ih, Math.ceil(box.y2 + padY));
+  const w = Math.max(1, x2 - x1);
+  const h = Math.max(1, y2 - y1);
+  if (w < 10 || h < 10) return null;
+  return sharp(imageBuffer)
+    .extract({ left: x1, top: y1, width: w, height: h })
+    .png()
+    .toBuffer();
+}
+
+/**
  * Garment CLIP embedding: prefer YOLO/detector pixel box (padded), else center crop.
  * Boxes are assumed pixel coordinates in the original image space.
  */
@@ -66,35 +106,9 @@ export async function processImageForGarmentEmbeddingWithOptionalBox(
   imageBuffer: Buffer,
   box: PixelBox | null | undefined,
 ): Promise<number[]> {
-  if (
-    box &&
-    Number.isFinite(box.x1) &&
-    Number.isFinite(box.y1) &&
-    Number.isFinite(box.x2) &&
-    Number.isFinite(box.y2) &&
-    box.x2 > box.x1 + 2 &&
-    box.y2 > box.y1 + 2
-  ) {
-    const meta = await sharp(imageBuffer).metadata();
-    const iw = meta.width ?? 0;
-    const ih = meta.height ?? 0;
-    if (iw > 32 && ih > 32) {
-      const bw = box.x2 - box.x1;
-      const bh = box.y2 - box.y1;
-      const padX = bw * 0.08;
-      const padY = bh * 0.08;
-      const x1 = Math.max(0, Math.floor(box.x1 - padX));
-      const y1 = Math.max(0, Math.floor(box.y1 - padY));
-      const x2 = Math.min(iw, Math.ceil(box.x2 + padX));
-      const y2 = Math.min(ih, Math.ceil(box.y2 + padY));
-      const w = Math.max(1, x2 - x1);
-      const h = Math.max(1, y2 - y1);
-      const cropped = await sharp(imageBuffer)
-        .extract({ left: x1, top: y1, width: w, height: h })
-        .png()
-        .toBuffer();
-      return processImageForEmbedding(cropped);
-    }
+  const cropped = await extractPaddedDetectionCropBuffer(imageBuffer, box);
+  if (cropped) {
+    return processImageForEmbedding(cropped);
   }
   return processImageForGarmentEmbedding(imageBuffer);
 }

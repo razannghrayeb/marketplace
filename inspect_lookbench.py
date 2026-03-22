@@ -14,6 +14,7 @@ for cfg in configs:
         print(f"Split: {split_name}  |  #examples: {len(split)}")
         print("Features:", split.features)
         sample = split[0]
+        
         print("Sample keys:", list(sample.keys()))
         # Print first few fields and types
         for k, v in sample.items():

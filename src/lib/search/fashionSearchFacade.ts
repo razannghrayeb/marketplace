@@ -20,7 +20,7 @@ import { textSearch as enhancedTextSearch } from "../../routes/search/search.ser
 import { searchByImageWithSimilarity as legacyImageSearch } from "../../routes/products/products.service";
 import { searchProductsFilteredBrowse } from "./filteredBrowseSearch";
 
-import { processImageForEmbedding, computePHash } from "../image";
+import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash } from "../image";
 import { tieredColorMatchScore } from "../color/colorCanonical";
 
 export interface UnifiedTextSearchParams {
@@ -38,12 +38,16 @@ export interface UnifiedTextSearchParams {
 export interface UnifiedImageSearchParams {
   imageBuffer?: Buffer;
   imageEmbedding?: number[];
+  /** Garment ROI CLIP vector; optional second stage vs index `embedding_garment` (see SEARCH_IMAGE_DUAL_GARMENT_FUSION). */
+  imageEmbeddingGarment?: number[];
   filters?: Partial<LegacySearchFilters>;
   limit?: number;
   similarityThreshold?: number;
   includeRelated?: boolean;
   pHash?: string;
   predictedCategoryAisles?: string[];
+  knnField?: string;
+  relaxThresholdWhenEmpty?: boolean;
 }
 
 export async function searchBrowse(params: {
@@ -150,12 +154,15 @@ export async function searchImage(
   const {
     imageBuffer,
     imageEmbedding,
+    imageEmbeddingGarment: garmentFromCaller,
     filters = {},
     limit = 20,
     similarityThreshold,
     includeRelated = false,
     pHash,
     predictedCategoryAisles,
+    knnField,
+    relaxThresholdWhenEmpty,
   } = params;
 
   if ((!imageEmbedding || imageEmbedding.length === 0) && !imageBuffer) {
@@ -168,6 +175,27 @@ export async function searchImage(
     imageEmbedding && imageEmbedding.length > 0
       ? imageEmbedding
       : await processImageForEmbedding(imageBuffer!);
+
+  /** When we only had raw bytes and computed CLIP here, the vector already encodes the full image — skip passing `imageBuffer` downstream so `searchByImageWithSimilarity` does not run global+color fusion (same behavior as `/products/search/image` with embedding-only). */
+  const embeddingDerivedFromBufferOnly =
+    Boolean(imageBuffer?.length) &&
+    (!imageEmbedding || imageEmbedding.length === 0);
+
+  let imageEmbeddingGarment: number[] | undefined = garmentFromCaller;
+  if (
+    (!imageEmbeddingGarment || imageEmbeddingGarment.length === 0) &&
+    embeddingDerivedFromBufferOnly &&
+    imageBuffer?.length
+  ) {
+    try {
+      imageEmbeddingGarment = await processImageForGarmentEmbedding(imageBuffer);
+    } catch {
+      imageEmbeddingGarment = undefined;
+    }
+  }
+  if (imageEmbeddingGarment && imageEmbeddingGarment.length !== embedding.length) {
+    imageEmbeddingGarment = undefined;
+  }
 
   // Compute pHash only when related-by-pHash is requested and we have raw bytes.
   // Callers often pass only `imageEmbedding` (e.g. cropped regions); Sharp cannot hash undefined.
@@ -182,13 +210,16 @@ export async function searchImage(
 
   const res = await legacyImageSearch({
     imageEmbedding: embedding,
-    imageBuffer: imageBuffer ?? undefined,
+    imageEmbeddingGarment,
+    imageBuffer: embeddingDerivedFromBufferOnly ? undefined : imageBuffer ?? undefined,
     filters: filters as any,
     limit,
     similarityThreshold,
     includeRelated,
     pHash: effectivePHash,
     predictedCategoryAisles,
+    knnField,
+    relaxThresholdWhenEmpty,
   } as any);
 
   // Constraint-aware deterministic rerank (limited to what image search exposes)

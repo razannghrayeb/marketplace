@@ -30,6 +30,7 @@ export {
   processImageForEmbedding,
   processImageForGarmentEmbedding,
   processImageForGarmentEmbeddingWithOptionalBox,
+  extractPaddedDetectionCropBuffer,
   type PixelBox,
   extractGarmentCenterCropBuffer,
   validateImage,
