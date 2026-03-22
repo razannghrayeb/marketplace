@@ -15,6 +15,11 @@ if [ -n "$YOLO_URL" ]; then
     start_embedded=0
   fi
 fi
+# Slim image (EMBEDDED_YOLO=0): no venv — use external YOLOV8_SERVICE_URL / YOLO_API_URL
+if [ "$start_embedded" = "1" ] && [ ! -x /app/yolo/venv/bin/uvicorn ]; then
+  echo "[entrypoint] No embedded YOLO venv; set YOLOV8_SERVICE_URL or YOLO_API_URL to your detector (e.g. http://yolov8:8001)." >&2
+  start_embedded=0
+fi
 
 cleanup() {
   if [ -n "${YOLO_PID:-}" ]; then
