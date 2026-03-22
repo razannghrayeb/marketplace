@@ -13,6 +13,7 @@ export interface DedupSearchResultItem {
   p_hash?: string | null;
   similarity_score?: number;
   rerankScore?: number;
+  finalRelevance01?: number;
 }
 
 export interface DedupOptions {
@@ -53,6 +54,8 @@ function primaryPHash(p: DedupSearchResultItem): string | null {
 }
 
 function scoreOf(p: DedupSearchResultItem): number {
+  const f = p.finalRelevance01;
+  if (typeof f === "number" && Number.isFinite(f)) return f * 1e9 + (p.rerankScore ?? 0);
   const r = p.rerankScore;
   if (typeof r === "number" && Number.isFinite(r)) return r;
   const s = p.similarity_score;

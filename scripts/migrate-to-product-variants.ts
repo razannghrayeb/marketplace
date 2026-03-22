@@ -182,6 +182,30 @@ async function loadProducts(c: PoolClient, ids: number[]): Promise<ProductRow[]>
   return rows;
 }
 
+/**
+ * Same listing can incorrectly have multiple `products` rows with the same Shopify variant_id.
+ * `uq_product_variants_product_variant_id` allows only one row per (parent product_id, variant_id).
+ * Pick one representative per variant_id (prefer keeper, else lowest id); extras remain in `losers` and are deleted.
+ */
+function dedupeProductRowsByVariantId(rows: ProductRow[], keeper: number): ProductRow[] {
+  const buckets = new Map<string, ProductRow[]>();
+  for (const r of rows) {
+    const vid = r.variant_id?.trim();
+    const key = vid && vid.length > 0 ? vid : `__row_${r.id}`;
+    const arr = buckets.get(key);
+    if (arr) arr.push(r);
+    else buckets.set(key, [r]);
+  }
+  const out: ProductRow[] = [];
+  for (const group of buckets.values()) {
+    const rep =
+      group.find((r) => r.id === keeper) ?? group.reduce((a, b) => (a.id < b.id ? a : b));
+    out.push(rep);
+  }
+  out.sort((a, b) => a.id - b.id);
+  return out;
+}
+
 async function mergeCartItems(c: PoolClient, keeper: number, losers: number[]): Promise<void> {
   await c.query(
     `DELETE FROM cart_items x USING cart_items k
@@ -367,9 +391,10 @@ async function migrateGroup(
     keeper,
   ]);
   if (skip.rowCount) {
-    throw new Error(
-      `Keeper product_id=${keeper} already has product_variants rows; skip or resolve manually.`
+    console.warn(
+      `[migrate-to-product-variants] Skip vendor=${group.vendor_id} keeper=${keeper}: already has product_variants (resume-safe).`
     );
+    return { losers: [] };
   }
 
   const rows = await loadProducts(c, group.ids);
@@ -398,7 +423,8 @@ async function migrateGroup(
   await mergePriceHistory(c, keeper, losers);
   await mergePriceDropEvents(c, keeper, losers);
 
-  for (const r of rows) {
+  const variantInsertRows = dedupeProductRowsByVariantId(rows, keeper);
+  for (const r of variantInsertRows) {
     await c.query(
       `INSERT INTO product_variants (
          product_id, vendor_id, variant_id, product_url, size, color, currency,
@@ -422,6 +448,14 @@ async function migrateGroup(
         r.id,
         r.id === keeper,
       ]
+    );
+  }
+
+  // Losers often already use the canonical listing URL; keeper UPDATE would duplicate (vendor_id, product_url).
+  for (const lid of losers) {
+    await c.query(
+      `UPDATE products SET product_url = $2 WHERE id = $1`,
+      [lid, `https://__variant-merge-obsolete.invalid/p/${lid}`]
     );
   }
 

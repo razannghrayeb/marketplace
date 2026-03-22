@@ -222,68 +222,6 @@ export async function searchImage(
     relaxThresholdWhenEmpty,
   } as any);
 
-  // Constraint-aware deterministic rerank (limited to what image search exposes)
-  // - If caller provided an explicit `filters.color`, prioritize products whose
-  //   primary `color` matches.
-  // Note: image similarity search doesn't expose `attr_colors/product_types`
-  // directly in the response, so we only use `ProductResult.color`.
-  const desiredColors: string[] =
-    typeof (filters as any)?.color === "string" && (filters as any)?.color
-      ? [(filters as any).color.toLowerCase()]
-      : [];
-
-  if (desiredColors.length > 0 && Array.isArray(res.results) && res.results.length > 1) {
-    const colorMode: "any" | "all" = "any";
-
-    const scoreById = new Map<string, number>();
-    res.results.forEach((p: any, idx: number) => {
-      const productPalette = p.color ? [String(p.color).toLowerCase()] : [];
-      const tier = tieredColorMatchScore(desiredColors[0], productPalette);
-      const colorCompliance = tier.score;
-      const similarity = typeof p.similarity_score === "number" ? p.similarity_score : 0;
-      const rerankScore = colorCompliance * 1000 + similarity * 10;
-      p.rerankScore = rerankScore;
-      p.explain = {
-        ...(p.explain || {}),
-        productTypeCompliance: p.explain?.productTypeCompliance ?? 0,
-        colorCompliance,
-        colorScore: colorCompliance,
-        globalScore: similarity,
-        matchedColor: tier.matchedColor ?? undefined,
-        colorTier: tier.tier,
-        desiredProductTypes: p.explain?.desiredProductTypes ?? [],
-        desiredColors,
-        colorMode,
-      };
-      scoreById.set(String(p.id), rerankScore);
-    });
-
-    res.results.sort((a: any, b: any) => (scoreById.get(String(b.id)) ?? 0) - (scoreById.get(String(a.id)) ?? 0));
-    if (Array.isArray(res.related) && res.related.length > 0) {
-      res.related.forEach((p: any) => {
-        const productPalette = p.color ? [String(p.color).toLowerCase()] : [];
-        const tier = tieredColorMatchScore(desiredColors[0], productPalette);
-        const colorCompliance = tier.score;
-        const similarity = typeof p.similarity_score === "number" ? p.similarity_score : 0;
-        const rerankScore = colorCompliance * 1000 + similarity * 10;
-        p.rerankScore = rerankScore;
-        p.explain = {
-          ...(p.explain || {}),
-          productTypeCompliance: p.explain?.productTypeCompliance ?? 0,
-          colorCompliance,
-          colorScore: colorCompliance,
-          globalScore: similarity,
-          matchedColor: tier.matchedColor ?? undefined,
-          colorTier: tier.tier,
-          desiredProductTypes: p.explain?.desiredProductTypes ?? [],
-          desiredColors,
-          colorMode,
-        };
-      });
-      res.related.sort((a: any, b: any) => (Number(b.rerankScore) ?? 0) - (Number(a.rerankScore) ?? 0));
-    }
-  }
-
   return {
     ...res,
     total: res.meta.total_results ?? res.results.length,

@@ -26,8 +26,12 @@ COPY requirements-yolo.txt requirements.txt
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY yolov8_api.py .
+# Application code (yolov8_api imports dual_model_yolo + dual-model-yolo.py + image_preprocessor)
+COPY yolov8_api.py \
+    dual_model_yolo.py \
+    dual-model-yolo.py \
+    image_preprocessor.py \
+    ./
 
 # Create models directory and set permissions
 RUN mkdir -p /app/models && chown -R yolo:yolo /app/models

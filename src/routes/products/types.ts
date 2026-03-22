@@ -21,6 +21,13 @@ export interface SearchFilters {
   vendorId?: string;
   // Attribute filters (extracted from titles)
   color?: string;
+  /** Multi-color intent (image / enhanced search). */
+  colors?: string[];
+  colorMode?: "any" | "all";
+  /** Taxonomy product types for relevance (e.g. from vision: `["dress"]`). */
+  productTypes?: string[];
+  /** Canonical: kids | baby | teen | adult */
+  ageGroup?: string;
   material?: string;
   fit?: string;
   style?: string;
@@ -113,12 +120,21 @@ export interface ProductResult {
   finalRelevance01?: number;
   mlRerankScore?: number;
   explain?: {
-    productTypeCompliance?: number; // 0..1
+    exactTypeScore?: number;
+    siblingClusterScore?: number;
+    parentHypernymScore?: number;
+    intraFamilyPenalty?: number;
+    productTypeCompliance?: number;
+    categoryScore?: number;
+    lexicalScore?: number;
+    semanticScore?: number;
     colorCompliance?: number; // 0..1
     colorScore?: number;
     globalScore?: number;
     matchedColor?: string;
     colorTier?: "exact" | "family" | "bucket" | "none";
+    audienceCompliance?: number;
+    crossFamilyPenalty?: number;
     desiredProductTypes?: string[];
     desiredColors?: string[];
     colorMode?: "any" | "all";
@@ -145,6 +161,9 @@ export interface SearchResultWithRelated {
     did_you_mean?: string; // Suggestion if not auto-applied
     /** True when every candidate in the recall window scored below SEARCH_FINAL_ACCEPT_MIN. */
     below_relevance_threshold?: boolean;
+    /** Image search: kNN recall passed CLIP gate but every hit failed final relevance gate (hard mode). */
+    below_final_relevance_gate?: boolean;
+    relevance_gate_soft?: boolean;
     /** Image kNN: strict similarity gate removed all hits; best candidates returned anyway (relaxThresholdWhenEmpty). */
     threshold_relaxed?: boolean;
     recall_size?: number;

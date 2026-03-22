@@ -28,8 +28,6 @@ import {
   getQueryEmbedding,
   type QueryAST,
 } from '../../lib/queryProcessor';
-import { extractAttributesSync } from "../../lib/search/attributeExtractor";
-
 import { getImagesForProducts } from '../products/images.service';
 import { searchByImageWithSimilarity } from '../products/products.service';
 import type { ProductResult, SearchResultWithRelated } from '../products/types';
@@ -44,10 +42,7 @@ import {
 } from '../../lib/search/categoryFilter';
 import {
   expandProductTypesForQuery,
-  scoreCrossFamilyTypePenalty,
   extractLexicalProductTypeSeeds,
-  scoreRerankProductTypeBreakdown,
-  downrankSpuriousProductTypeFromCategory,
 } from '../../lib/search/productTypeTaxonomy';
 import {
   buildQueryUnderstanding,
@@ -60,8 +55,12 @@ import {
   newSearchEvalId,
   searchEvalVariant,
 } from '../../lib/search/evalHooks';
-import { tieredColorListCompliance } from '../../lib/color/colorCanonical';
 import { expandColorTermsForFilter, normalizeColorToken } from '../../lib/color/queryColorFilter';
+import {
+  computeHitRelevance,
+  normalizeQueryGender,
+  type SearchHitRelevanceIntent,
+} from '../../lib/search/searchHitRelevance';
 
 // ─── Shared types ────────────────────────────────────────────────────────────
 
@@ -141,116 +140,6 @@ function computeTextRecallSize(limit: number, offset: number): number {
   const w = config.search.recallWindow;
   const cap = config.search.recallMax;
   return Math.min(cap, Math.max(w, offset + limit));
-}
-
-/**
- * Calibrated 0..1 relevance for acceptance gating (SEARCH_FINAL_ACCEPT_MIN, default 0.6).
- *
- * Uses match quality only (type / color / OS rank / family penalty). Query and document
- * trust already shape `rerankScore`; multiplying them here again collapsed almost all scores
- * below 0.6 so nothing passed the gate.
- */
-function computeFinalRelevance01(params: {
-  hasTypeIntent: boolean;
-  productTypeCompliance: number;
-  exactTypeScore?: number;
-  hasColorIntent: boolean;
-  colorCompliance: number;
-  similarity: number;
-  crossFamilyPenalty: number;
-  hasAudienceIntent?: boolean;
-  audienceCompliance?: number;
-}): number {
-  const exactBoost =
-    params.hasTypeIntent && typeof params.exactTypeScore === 'number'
-      ? 0.08 * params.exactTypeScore
-      : 0;
-  const typePart = params.hasTypeIntent ? 0.34 * params.productTypeCompliance + exactBoost : 0.36;
-  const colorPart = params.hasColorIntent ? 0.24 * params.colorCompliance : 0.24;
-  const audPart =
-    params.hasAudienceIntent && typeof params.audienceCompliance === 'number'
-      ? 0.12 * params.audienceCompliance
-      : 0.12;
-  const simPart = 0.3 * params.similarity;
-  const famPen = Math.min(1, params.crossFamilyPenalty) * 0.22;
-  const raw = typePart + colorPart + audPart + simPart - famPen;
-  return Math.max(0, Math.min(1, raw));
-}
-
-function normalizeQueryGender(g: string | undefined): string | null {
-  if (!g) return null;
-  const x = g.toLowerCase();
-  if (x === 'men' || x === 'women' || x === 'unisex') return x;
-  return null;
-}
-
-function docAgeGroup(hit: any): string | null {
-  const raw = hit?._source?.age_group;
-  if (raw === undefined || raw === null) return null;
-  return String(raw).toLowerCase().trim() || null;
-}
-
-function docAudienceGender(hit: any): string | null {
-  const raw = hit?._source?.audience_gender ?? hit?._source?.attr_gender;
-  if (raw === undefined || raw === null) return null;
-  const s = String(raw).toLowerCase().trim();
-  if (s === 'men' || s === 'women' || s === 'unisex') return s;
-  return null;
-}
-
-/**
- * 0..1: query age_group / audience_gender vs indexed audience fields.
- */
-function scoreAudienceCompliance(
-  queryAgeGroup: string | undefined,
-  queryGender: string | undefined,
-  hit: any,
-): number {
-  const wantAge = queryAgeGroup?.toLowerCase().trim();
-  const wantG = normalizeQueryGender(queryGender);
-  const docAge = docAgeGroup(hit);
-  const docG = docAudienceGender(hit);
-  const title = typeof hit?._source?.title === 'string' ? hit._source.title.toLowerCase() : '';
-
-  let score = 1;
-  let factors = 0;
-
-  if (wantAge) {
-    factors += 1;
-    if (!docAge) {
-      if (wantAge === 'kids' && /\b(kids?|child|children|boys?|girls?|toddler|baby|youth)\b/.test(title)) {
-        score *= 0.92;
-      } else if (wantAge === 'adult' || wantAge === 'teen') {
-        score *= 0.88;
-      } else {
-        score *= 0.72;
-      }
-    } else if (docAge === wantAge) {
-      score *= 1;
-    } else if (wantAge === 'kids' && (docAge === 'baby' || docAge === 'teen')) {
-      score *= 0.88;
-    } else if (wantAge === 'baby' && docAge === 'kids') {
-      score *= 0.85;
-    } else {
-      score *= 0.38;
-    }
-  }
-
-  if (wantG) {
-    factors += 1;
-    if (!docG) {
-      if (wantG === 'men' && /\b(men|mens|male)\b/.test(title)) score *= 0.9;
-      else if (wantG === 'women' && /\b(women|womens|female|ladies)\b/.test(title)) score *= 0.9;
-      else score *= 0.78;
-    } else if (docG === 'unisex' || docG === wantG) {
-      score *= 1;
-    } else {
-      score *= 0.35;
-    }
-  }
-
-  if (factors === 0) return 1;
-  return Math.max(0, Math.min(1, Math.pow(score, 1 / factors)));
 }
 
 // Initialize services
@@ -1150,6 +1039,9 @@ export async function textSearch(
         crossFamilyPenalty: number;
         audienceCompliance: number;
         osSimilarity01: number;
+        categoryRelevance01: number;
+        semanticScore01: number;
+        lexicalScore01: number;
         rerankScore: number;
         finalRelevance01: number;
       }
@@ -1159,203 +1051,28 @@ export async function textSearch(
     const queryGenderForAudience = normalizeQueryGender(merged.gender);
     const hasAudienceIntent = Boolean(queryAgeGroup || queryGenderForAudience);
 
+    const relevanceIntent: SearchHitRelevanceIntent = {
+      desiredProductTypes,
+      desiredColors,
+      desiredColorsTier,
+      rerankColorMode,
+      mergedCategory,
+      astCategories: ast.entities.categories ?? [],
+      queryAgeGroup,
+      audienceGenderForScoring: queryGenderForAudience ?? merged.gender,
+      hasAudienceIntent,
+      crossFamilyPenaltyWeight,
+    };
+
     const colorById = new Map<string, string | null>();
 
     for (const hit of hits) {
       const idStr = String(hit?._source?.product_id);
       const similarity = scoreMap.get(idStr) ?? 0;
-
-      const productTypesRaw = hit?._source?.product_types;
-      const productTypes: string[] = Array.isArray(productTypesRaw)
-        ? productTypesRaw.map((x: any) => String(x).toLowerCase())
-        : productTypesRaw
-          ? [String(productTypesRaw).toLowerCase()]
-          : [];
-
-      const mergeColorArrays = (...parts: unknown[]): string[] => {
-        const out: string[] = [];
-        for (const part of parts) {
-          const arr = Array.isArray(part)
-            ? part.map((x: any) => String(x).toLowerCase())
-            : part
-              ? [String(part).toLowerCase()]
-              : [];
-          for (const c of arr) {
-            if (c && !out.includes(c)) out.push(c);
-          }
-        }
-        return out;
-      };
-
-      const attrColorsRaw = hit?._source?.attr_colors;
-      const attrText = hit?._source?.attr_colors_text;
-      const attrImg = hit?._source?.attr_colors_image;
-
-      const rawColorList = (...parts: unknown[]): string[] => [
-        ...new Set(
-          mergeColorArrays(...parts)
-            .map((c: string) => String(c).toLowerCase().trim())
-            .filter(Boolean),
-        ),
-      ];
-
-      let imgTierRaw = rawColorList(hit?._source?.color_palette_canonical, attrImg);
-      let textTierRaw = rawColorList(attrText);
-      let unionTierRaw = rawColorList(
-        hit?._source?.color_palette_canonical,
-        attrColorsRaw,
-        attrText,
-        attrImg,
-        hit?._source?.color_primary_canonical,
-        hit?._source?.color_secondary_canonical,
-        hit?._source?.color_accent_canonical,
-      );
-
-      if (unionTierRaw.length === 0 && hit?._source?.attr_color) {
-        unionTierRaw = rawColorList(hit._source.attr_color);
-      }
-
-      if (unionTierRaw.length === 0 && typeof hit?._source?.title === "string") {
-        const inferred = extractAttributesSync(String(hit._source.title));
-        const inferredColors =
-          inferred.attributes.colors && inferred.attributes.colors.length > 0
-            ? inferred.attributes.colors
-            : inferred.attributes.color
-              ? [inferred.attributes.color]
-              : [];
-        for (const c of inferredColors) {
-          const x = String(c).toLowerCase().trim();
-          if (x && !unionTierRaw.includes(x)) unionTierRaw.push(x);
-        }
-        if (textTierRaw.length === 0 && inferredColors.length > 0) {
-          textTierRaw = rawColorList(inferredColors);
-        }
-      }
-
-      const productColors = [
-        ...new Set(unionTierRaw.map((c) => normalizeColorToken(c) ?? c).filter(Boolean)),
-      ];
-
-      const primaryColor = hit?._source?.color_primary_canonical
-        ? String(hit._source.color_primary_canonical).toLowerCase()
-        : hit?._source?.attr_color
-          ? String(hit._source.attr_color).toLowerCase()
-          : productColors.length > 0
-            ? productColors[0]
-            : null;
+      const rel = computeHitRelevance(hit, similarity, relevanceIntent);
+      const { primaryColor, ...compliance } = rel;
       colorById.set(idStr, primaryColor);
-
-      // Product-type: exact seeds vs doc (no query-side cluster expansion in compliance).
-      let productTypeCompliance = 0;
-      let exactTypeScore = 0;
-      let siblingClusterScore = 0;
-      let parentHypernymScore = 0;
-      let intraFamilyPenalty = 0;
-      if (desiredProductTypes.length > 0) {
-        const typeBreak = scoreRerankProductTypeBreakdown(desiredProductTypes, productTypes);
-        productTypeCompliance = typeBreak.combinedTypeCompliance;
-        exactTypeScore = typeBreak.exactTypeScore;
-        siblingClusterScore = typeBreak.siblingClusterScore;
-        parentHypernymScore = typeBreak.parentHypernymScore;
-        intraFamilyPenalty = typeBreak.intraFamilyPenalty;
-
-        const spurious = downrankSpuriousProductTypeFromCategory(
-          desiredProductTypes,
-          productTypes,
-          hit?._source?.category,
-        );
-        if (spurious.forceExactZero) exactTypeScore = 0;
-        productTypeCompliance = Math.max(
-          0,
-          Math.min(1, productTypeCompliance * spurious.complianceScale),
-        );
-      }
-
-      const wcText = Number(hit?._source?.color_confidence_text);
-      const wcImg = Number(hit?._source?.color_confidence_image);
-      const wText = Number.isFinite(wcText) && wcText > 0 ? wcText : 0;
-      const wImg = Number.isFinite(wcImg) && wcImg > 0 ? wcImg : 0;
-      const wSum = wText + wImg + 1e-6;
-      const wtImg = wImg / wSum;
-      const wtText = wText / wSum;
-
-      let colorCompliance = 0;
-      let matchedColor: string | null = null;
-      let colorTier: "exact" | "family" | "bucket" | "none" = "none";
-      if (desiredColorsTier.length > 0) {
-        const tImg = tieredColorListCompliance(desiredColorsTier, imgTierRaw, rerankColorMode);
-        const tText = tieredColorListCompliance(desiredColorsTier, textTierRaw, rerankColorMode);
-        const tUnion = tieredColorListCompliance(desiredColorsTier, unionTierRaw, rerankColorMode);
-        matchedColor = tUnion.bestMatch ?? tImg.bestMatch ?? tText.bestMatch;
-        colorTier = tUnion.tier;
-        if (imgTierRaw.length > 0 && textTierRaw.length > 0) {
-          colorCompliance = wtImg * tImg.compliance + wtText * tText.compliance;
-        } else if (imgTierRaw.length > 0) {
-          colorCompliance = tImg.compliance;
-          matchedColor = tImg.bestMatch ?? matchedColor;
-          colorTier = tImg.tier;
-        } else if (textTierRaw.length > 0) {
-          colorCompliance = tText.compliance;
-          matchedColor = tText.bestMatch ?? matchedColor;
-          colorTier = tText.tier;
-        } else {
-          colorCompliance = tUnion.compliance;
-        }
-      }
-
-      const crossFamilyPenalty =
-        desiredProductTypes.length > 0
-          ? scoreCrossFamilyTypePenalty(desiredProductTypes, productTypes)
-          : 0;
-
-      const audienceCompliance = scoreAudienceCompliance(
-        queryAgeGroup,
-        queryGenderForAudience ?? merged.gender,
-        hit,
-      );
-
-      const normDoc = Number(hit?._source?.norm_confidence);
-      const docTrustNorm =
-        Number.isFinite(normDoc) && normDoc >= 0 && normDoc <= 1 ? 0.55 + 0.45 * normDoc : 0.92;
-      const typeDoc = Number(hit?._source?.type_confidence);
-      const typeDocTrust =
-        Number.isFinite(typeDoc) && typeDoc >= 0 && typeDoc <= 1 ? 0.45 + 0.55 * typeDoc : 1;
-      const docTrust = Math.max(0.25, Math.min(1, docTrustNorm * typeDocTrust));
-
-      const rerankScore =
-        productTypeCompliance * 1000 * docTrust +
-        colorCompliance * 100 * docTrust +
-        audienceCompliance * 80 * docTrust +
-        similarity * 10 -
-        crossFamilyPenalty * crossFamilyPenaltyWeight;
-
-      const finalRelevance01 = computeFinalRelevance01({
-        hasTypeIntent: desiredProductTypes.length > 0,
-        productTypeCompliance,
-        exactTypeScore,
-        hasColorIntent: desiredColors.length > 0,
-        colorCompliance,
-        similarity,
-        crossFamilyPenalty,
-        hasAudienceIntent,
-        audienceCompliance,
-      });
-
-      complianceById.set(idStr, {
-        productTypeCompliance,
-        exactTypeScore,
-        siblingClusterScore,
-        parentHypernymScore,
-        intraFamilyPenalty,
-        colorCompliance,
-        matchedColor,
-        colorTier,
-        crossFamilyPenalty,
-        audienceCompliance,
-        osSimilarity01: similarity,
-        rerankScore,
-        finalRelevance01,
-      });
+      complianceById.set(idStr, compliance);
     }
 
     const sortedByRelevance = [...hits].sort((a: any, b: any) => {
@@ -1421,8 +1138,9 @@ export async function textSearch(
               parentHypernymScore: compliance.parentHypernymScore,
               intraFamilyPenalty: compliance.intraFamilyPenalty,
               productTypeCompliance: compliance.productTypeCompliance,
-              lexicalScore: compliance.osSimilarity01,
-              semanticScore: compliance.osSimilarity01,
+              categoryScore: compliance.categoryRelevance01,
+              lexicalScore: compliance.lexicalScore01,
+              semanticScore: compliance.semanticScore01,
               globalScore: compliance.osSimilarity01,
               colorScore: compliance.colorCompliance,
               matchedColor: compliance.matchedColor ?? undefined,

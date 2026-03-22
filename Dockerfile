@@ -48,9 +48,12 @@ WORKDIR /app
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@9 --activate
 
-# Install runtime OS packages required by health checks and native modules
-RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+# Runtime OS packages: wget (health checks), Python + libs for in-container YOLO (OpenCV / ultralytics)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget ca-certificates \
+    python3 python3-venv python3-pip \
+    libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN groupadd -g 1001 nodejs && \
@@ -75,6 +78,20 @@ RUN if [ ! -f "./models/fashion-clip-image.onnx" ] || [ ! -f "./models/fashion-c
   fi && \
   echo "✅ ML models present: $(ls -lh ./models/*.onnx | wc -l) ONNX files"
 
+# In-container YOLO FastAPI (shop-the-look); not used when SERVICE_ROLE=api
+COPY src/lib/model/yolov8_api.py \
+     src/lib/model/dual_model_yolo.py \
+     src/lib/model/dual-model-yolo.py \
+     src/lib/model/image_preprocessor.py \
+     /app/yolo/
+COPY src/lib/model/requirements-yolo.txt /app/yolo/requirements.txt
+RUN python3 -m venv /app/yolo/venv && \
+    /app/yolo/venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /app/yolo/venv/bin/pip install --no-cache-dir -r /app/yolo/requirements.txt
+
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
 # Set ownership
 RUN chown -R nodejs:nodejs /app
 
@@ -84,10 +101,10 @@ USER nodejs
 ENV NODE_ENV=production
 ENV PORT=8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+# YOLO may load PyTorch/HF weights on first boot; Node starts only after entrypoint waits on YOLO health.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://0.0.0.0:${PORT}/health/live || exit 1
 
 EXPOSE 8080
 
-CMD ["node", "dist/index.js"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
