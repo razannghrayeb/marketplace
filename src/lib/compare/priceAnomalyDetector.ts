@@ -246,7 +246,7 @@ export async function computeAllCategoryBaselines(): Promise<{ computed: number;
 interface PriceHistoryRow {
   price_cents: number;
   currency: string;
-  sale_price_cents: number | null;
+  sales_price_cents: number | null;
   recorded_at: Date;
 }
 
@@ -258,7 +258,7 @@ async function getPriceHistoryForAnalysis(
   days: number = 30
 ): Promise<PriceHistoryRow[]> {
   const result = await pg.query(
-    `SELECT price_cents, currency, sale_price_cents, recorded_at
+    `SELECT price_cents, currency, sales_price_cents, recorded_at
      FROM price_history 
      WHERE product_id = $1 
        AND recorded_at > NOW() - INTERVAL '${days} days'
@@ -332,8 +332,10 @@ function analyzeDiscounts(
     const prev = history[i - 1];
     const curr = history[i];
     
-    const prevHasDiscount = prev.sale_price_cents !== null && prev.sale_price_cents < prev.price_cents;
-    const currHasDiscount = curr.sale_price_cents !== null && curr.sale_price_cents < curr.price_cents;
+    const prevHasDiscount =
+      prev.sales_price_cents !== null && prev.sales_price_cents < prev.price_cents;
+    const currHasDiscount =
+      curr.sales_price_cents !== null && curr.sales_price_cents < curr.price_cents;
     
     if (prevHasDiscount !== currHasDiscount) {
       discountChanges++;

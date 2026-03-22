@@ -200,6 +200,36 @@ function parsePositiveInt(raw: unknown): number | null {
 }
 
 /**
+ * Normalize product_ids from JSON body or multipart fields (stringified JSON array, comma-separated, or multer string[]).
+ */
+export function coerceCompareProductIdsInput(body: unknown): unknown {
+  if (!body || typeof body !== "object") return undefined;
+  const b = body as Record<string, unknown>;
+  const raw =
+    b.product_ids !== undefined
+      ? b.product_ids
+      : b.productIds !== undefined
+        ? b.productIds
+        : undefined;
+  if (raw === undefined) return undefined;
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === "string") {
+    const t = raw.trim();
+    if (!t) return undefined;
+    if (t.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(t) as unknown;
+        return Array.isArray(parsed) ? parsed : raw;
+      } catch {
+        return raw;
+      }
+    }
+    return t.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean);
+  }
+  return raw;
+}
+
+/**
  * Validate and normalize product IDs for comparison.
  * Accepts numbers or numeric strings (common from JSON/query-driven clients).
  */

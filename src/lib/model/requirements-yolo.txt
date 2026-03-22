@@ -2,9 +2,8 @@
 # Using kesimeg/yolov8n-clothing-detection from Hugging Face
 # Python 3.10+
 
-# Core
+# Core (HF weights: huggingface_hub + local path to YOLO(); do not use ultralyticsplus — it pins ultralytics<8.1.0)
 ultralytics>=8.1.0
-ultralyticsplus>=0.1.0  # Load YOLO models from HuggingFace Hub
 fastapi>=0.100.0
 uvicorn[standard]>=0.22.0
 python-multipart>=0.0.6
