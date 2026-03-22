@@ -1,10 +1,9 @@
-# syntax=docker/dockerfile:1.7
 #
 # Default: embedded YOLO (PyTorch venv + entrypoint uvicorn on loopback) so detection always works in one container.
-#   DOCKER_BUILDKIT=1 docker build .
 #
-# Slim API-only image (you must set YOLOV8_SERVICE_URL to an external detector, e.g. compose profile yolo-sidecar):
-#   docker build --build-arg EMBEDDED_YOLO=0 .
+# Slim API-only (external detector): docker build --build-arg EMBEDDED_YOLO=0 .
+#
+# Optional faster local rebuilds: DOCKER_BUILDKIT=1 docker build . (works with plain Dockerfile too)
 
 # ============================================================================
 # Fashion Marketplace API
@@ -13,21 +12,17 @@
 
 # Stage 0: Download ML models from HuggingFace
 # Pass HF_TOKEN during build: docker build --build-arg HF_TOKEN=hf_xxx
-# or mount as BuildKit secret: --secret hf_token=/path/to/token.txt
 FROM python:3.11-slim AS model-downloader
 ARG HF_TOKEN=""
 ENV HF_TOKEN=${HF_TOKEN}
 ENV HF_HOME=/root/.cache/huggingface
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir huggingface_hub
-RUN --mount=type=cache,target=/root/.cache/huggingface \
-    python -c "from huggingface_hub import snapshot_download; import os; token = os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, ignore_patterns=['*.gitattributes', '.gitattributes', 'README.md']); print('Models downloaded successfully to /models')"
+RUN pip install --no-cache-dir huggingface_hub
+RUN python -c "from huggingface_hub import snapshot_download; import os; token = os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, ignore_patterns=['*.gitattributes', '.gitattributes', 'README.md']); print('Models downloaded successfully to /models')"
 
 # Pre-download tokenizer vocab files via huggingface_hub (already installed,
 # handles auth + redirects). CLIP BPE: openai/clip-vit-base-patch32 (public).
 # BLIP WordPiece: google-bert/bert-base-uncased (public, same BERT vocab).
-RUN --mount=type=cache,target=/root/.cache/huggingface \
-    python3 -c "from huggingface_hub import hf_hub_download; import os, shutil; os.makedirs('/models/.cache', exist_ok=True); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'vocab.json'), '/models/.cache/vocab.json'); print('vocab.json ok'); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'merges.txt'), '/models/.cache/merges.txt'); print('merges.txt ok'); shutil.copy(hf_hub_download('google-bert/bert-base-uncased', 'vocab.txt'), '/models/.cache/blip-vocab.txt'); print('blip-vocab.txt ok')"
+RUN python3 -c "from huggingface_hub import hf_hub_download; import os, shutil; os.makedirs('/models/.cache', exist_ok=True); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'vocab.json'), '/models/.cache/vocab.json'); print('vocab.json ok'); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'merges.txt'), '/models/.cache/merges.txt'); print('merges.txt ok'); shutil.copy(hf_hub_download('google-bert/bert-base-uncased', 'vocab.txt'), '/models/.cache/blip-vocab.txt'); print('blip-vocab.txt ok')"
 
 # Stage 1: Build
 FROM node:20-alpine AS builder
@@ -40,9 +35,8 @@ RUN corepack enable && corepack prepare pnpm@9 --activate
 # Copy package files
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
-# Install dependencies (BuildKit cache: rebuilds skip re-download when lockfile unchanged)
-RUN --mount=type=cache,id=pnpm-marketplace,target=/pnpm/store \
-    pnpm install --frozen-lockfile --store-dir=/pnpm/store
+# Install dependencies
+RUN pnpm install --frozen-lockfile
 
 # Copy source
 COPY tsconfig.json tsconfig.base.json ./
@@ -82,8 +76,7 @@ RUN groupadd -g 1001 nodejs && \
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
 # Install production dependencies only
-RUN --mount=type=cache,id=pnpm-marketplace-prod,target=/pnpm/store \
-    pnpm install --frozen-lockfile --prod --store-dir=/pnpm/store
+RUN pnpm install --frozen-lockfile --prod
 
 # Copy built files
 COPY --from=builder /app/dist ./dist
@@ -107,8 +100,7 @@ COPY src/lib/model/yolov8_api.py \
 COPY src/lib/model/requirements-yolo-extras.txt /app/yolo/requirements-extras.txt
 
 # CPU torch wheels from PyTorch index (smaller + faster than default CUDA-capable PyPI wheels)
-RUN --mount=type=cache,target=/root/.cache/pip \
-    set -eux; \
+RUN set -eux; \
     if [ "$EMBEDDED_YOLO" = "1" ]; then \
       python3 -m venv /app/yolo/venv && \
       /app/yolo/venv/bin/pip install --no-cache-dir --upgrade pip && \

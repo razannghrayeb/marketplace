@@ -18,12 +18,13 @@ steps:
   - name: gcr.io/cloud-builders/docker
     id: Build image
     entrypoint: bash
-    env:
-      - DOCKER_BUILDKIT=1
     args:
       - -c
       - |
         set -euo pipefail
+        # Required for Dockerfile RUN --mount=type=cache (BuildKit frontend)
+        export DOCKER_BUILDKIT=1
+        export BUILDKIT_PROGRESS=plain
         IMAGE_BASE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}"
         CACHE_IMAGE="${IMAGE_BASE}:latest"
 
@@ -110,3 +111,6 @@ images:
 
 options:
   logging: CLOUD_LOGGING_ONLY
+  # Ensure docker build uses BuildKit (needed for Dockerfile # syntax=docker/dockerfile:1.x and --mount cache)
+  env:
+    - DOCKER_BUILDKIT=1
