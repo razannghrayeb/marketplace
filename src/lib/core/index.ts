@@ -14,6 +14,7 @@ export {
   productsTableHasCanonicalIdColumn,
   isPgCapacityError,
   queryWithPgCapacityRetry,
+  toPgVectorParam,
 } from "./db";
 export { osClient, ensureIndex, recreateIndex, getIndexStats } from "./opensearch";
 export {

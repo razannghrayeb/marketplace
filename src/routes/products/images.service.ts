@@ -2,7 +2,7 @@
  * Product Images Service
  * Handles all image business logic, storage, and retrieval
  */
-import { pg, productsTableHasIsHiddenColumn, productsTableHasCanonicalIdColumn } from "../../lib/core/index";
+import { pg, productsTableHasIsHiddenColumn, productsTableHasCanonicalIdColumn, toPgVectorParam } from "../../lib/core/index";
 import { uploadImage, generateImageKey } from "../../lib/image/index";
 import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash, validateImage } from "../../lib/image/index";
 import { osClient } from "../../lib/core/index";
@@ -114,9 +114,9 @@ export async function uploadProductImage(
   // Insert into database
   const result = await pg.query(
     `INSERT INTO product_images (product_id, r2_key, cdn_url, embedding, p_hash, is_primary)
-     VALUES ($1, $2, $3, $4, $5, $6)
+     VALUES ($1, $2, $3, $4::vector, $5, $6)
      RETURNING id, product_id, r2_key, cdn_url, p_hash, is_primary, created_at`,
-    [productId, key, cdnUrl, embedding, pHash, isPrimary]
+    [productId, key, cdnUrl, toPgVectorParam(embedding), pHash, isPrimary]
   );
 
   const image = result.rows[0] as ProductImage;
@@ -431,8 +431,8 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
         ]);
         // Update DB for this image row and include in document
         await pg.query(
-          `UPDATE product_images SET embedding = $1 WHERE id = $2`,
-          [embedding, primaryImage.id]
+          `UPDATE product_images SET embedding = $1::vector WHERE id = $2`,
+          [toPgVectorParam(embedding), primaryImage.id]
         );
         doc.embedding = embedding;
         if (Array.isArray(embeddingGarment) && embeddingGarment.length > 0) {

@@ -3,7 +3,11 @@ declare const describe: any;
 declare const test: any;
 declare const expect: any;
 
-import { extractLexicalProductTypeSeeds, scoreRerankProductTypeBreakdown } from "./productTypeTaxonomy";
+import {
+  extractFashionTypeNounTokens,
+  extractLexicalProductTypeSeeds,
+  scoreRerankProductTypeBreakdown,
+} from "./productTypeTaxonomy";
 
 describe("scoreRerankProductTypeBreakdown", () => {
   test("joggers vs leggings is not exact-type equivalent", () => {
@@ -64,5 +68,16 @@ describe("extractLexicalProductTypeSeeds", () => {
     expect(j).toContain("jeans");
     const t = extractLexicalProductTypeSeeds("women tops");
     expect(t.some((x) => x === "tops" || x === "top")).toBe(true);
+  });
+});
+
+describe("extractFashionTypeNounTokens", () => {
+  test("finds dress in color + noun queries", () => {
+    expect(extractFashionTypeNounTokens("red dress")).toContain("dress");
+  });
+
+  test("stem plural footwear", () => {
+    const t = extractFashionTypeNounTokens("black boots");
+    expect(t.some((x) => x === "boot" || x === "boots")).toBe(true);
   });
 });

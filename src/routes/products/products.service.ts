@@ -6,7 +6,13 @@ import {
 } from "../../lib/core/index";
 import { config } from "../../config";
 import { getImagesForProducts, ProductImage } from "./images.service";
-import { hammingDistance } from "../../lib/products";
+import {
+  hammingDistance,
+  enrichProductsWithVariantSummary,
+  applyVariantSummaryToProduct,
+  getVariantsByProductIds,
+  type ProductVariantRow,
+} from "../../lib/products";
 import { dedupeSearchResults, filterRelatedAgainstMain } from "../../lib/search/resultDedup";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
 import {
@@ -36,7 +42,10 @@ import {
   type HitCompliance,
   type SearchHitRelevanceIntent,
 } from "../../lib/search/searchHitRelevance";
-import { extractLexicalProductTypeSeeds } from "../../lib/search/productTypeTaxonomy";
+import {
+  extractFashionTypeNounTokens,
+  extractLexicalProductTypeSeeds,
+} from "../../lib/search/productTypeTaxonomy";
 
 // ============================================================================
 // Types
@@ -243,16 +252,21 @@ function imageDualGarmentFusionEnv(): boolean {
 }
 
 /**
- * OpenSearch kNN `space_type: cosinesimil` returns score = (2 − d) / 2 with d = 1 − cos(θ), i.e. score = (1 + cos) / 2.
+ * OpenSearch kNN `space_type: cosinesimil` returns score = (1 + cos θ) / 2 ∈ [0, 1].
  * See https://docs.opensearch.org/latest/mappings/supported-field-types/knn-spaces/
- * Threshold checks use raw `hit._score` (monotonic with cosine); UI uses this for cosine in [0, 1] on L2-normalized CLIP vectors.
+ *
+ * Some older deployments returned a legacy raw score ≈ 1 + cos θ ∈ [0, 2] (values > 1).
+ * For that form, map to the same [0, 1] similarity as cos θ (not (s−1)/2 then 2s−1, which
+ * wrongly drove the bottom half to 0).
  */
 function knnCosinesimilScoreToCosine01(raw: number): number {
   if (!Number.isFinite(raw)) return 0;
-  let s = raw;
-  if (s > 1.001) s = (s - 1) / 2;
-  s = Math.max(0, Math.min(1, s));
-  const cos = 2 * s - 1;
+  const s = raw;
+  if (s > 1.001) {
+    return Math.max(0, Math.min(1, s - 1));
+  }
+  const clamped = Math.max(0, Math.min(1, s));
+  const cos = 2 * clamped - 1;
   return Math.max(0, Math.min(1, cos));
 }
 
@@ -295,6 +309,7 @@ export async function searchByImageWithSimilarity(
     predictedCategoryAisles,
     knnField: knnFieldParam,
     relaxThresholdWhenEmpty = false,
+    query: imageSearchTextQuery,
   } = params;
 
   if (!imageEmbedding || imageEmbedding.length === 0) {
@@ -608,6 +623,11 @@ export async function searchByImageWithSimilarity(
     ),
   ];
 
+  const textQueryForRelevance =
+    typeof imageSearchTextQuery === "string" && imageSearchTextQuery.trim()
+      ? imageSearchTextQuery.trim()
+      : "";
+
   let desiredProductTypes: string[] = [];
   if (Array.isArray(filtersRecord.productTypes) && filtersRecord.productTypes.length > 0) {
     desiredProductTypes = [
@@ -621,6 +641,12 @@ export async function searchByImageWithSimilarity(
         predictedCategoryAisles.flatMap((a) => extractLexicalProductTypeSeeds(String(a))),
       ),
     ];
+  }
+  if (textQueryForRelevance) {
+    const fromText = extractFashionTypeNounTokens(textQueryForRelevance).map((t) => t.toLowerCase());
+    if (fromText.length > 0) {
+      desiredProductTypes = [...new Set([...desiredProductTypes, ...fromText])];
+    }
   }
 
   const explicitColorsForRelevance =
@@ -656,6 +682,7 @@ export async function searchByImageWithSimilarity(
     audienceGenderForScoring: filtersAny.gender,
     hasAudienceIntent: hasAudienceIntentForRelevance,
     crossFamilyPenaltyWeight,
+    lexicalMatchQuery: textQueryForRelevance || undefined,
   };
 
   const complianceById = new Map<string, HitCompliance>();
@@ -719,7 +746,7 @@ export async function searchByImageWithSimilarity(
   // Fetch product data
   let results: ProductResult[] = [];
   if (productIds.length > 0) {
-    const products = await getProductsByIdsOrdered(productIds);
+    const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds));
     const numericIds = productIds.map((id: string) => parseInt(id, 10));
     const imagesByProduct = await getImagesForProducts(numericIds);
 
@@ -732,7 +759,8 @@ export async function searchByImageWithSimilarity(
         ...p,
         color: colorByHitId.get(idStr) ?? p.color ?? null,
         similarity_score: similarityScore,
-        match_type: similarityScore >= 0.8 ? "exact" : "similar",
+        match_type:
+          similarityScore >= config.clip.matchTypeExactMin ? "exact" : "similar",
         rerankScore: compliance?.rerankScore,
         finalRelevance01: compliance?.finalRelevance01,
         explain: compliance
@@ -743,7 +771,7 @@ export async function searchByImageWithSimilarity(
               intraFamilyPenalty: compliance.intraFamilyPenalty,
               productTypeCompliance: compliance.productTypeCompliance,
               categoryScore: compliance.categoryRelevance01,
-              lexicalScore: compliance.lexicalScore01,
+              ...(compliance.lexicalScoreDistinct ? { lexicalScore: compliance.lexicalScore01 } : {}),
               semanticScore: compliance.semanticScore01,
               globalScore: compliance.osSimilarity01,
               colorScore: compliance.colorCompliance,
@@ -752,6 +780,10 @@ export async function searchByImageWithSimilarity(
               colorCompliance: compliance.colorCompliance,
               audienceCompliance: compliance.audienceCompliance,
               crossFamilyPenalty: compliance.crossFamilyPenalty,
+              hasTypeIntent: compliance.hasTypeIntent,
+              hasColorIntent: compliance.hasColorIntent,
+              typeGateFactor: compliance.typeGateFactor,
+              hardBlocked: compliance.hardBlocked,
               desiredProductTypes,
               desiredColors: desiredColorsForRelevance,
               colorMode: rerankColorModeForRelevance,
@@ -863,7 +895,7 @@ async function findSimilarByPHash(
 
   // Fetch product data
   const productIds = topSimilar.map(s => String(s.id));
-  const products = await getProductsByIdsOrdered(productIds);
+  const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds));
   const numericIds = topSimilar.map(s => s.id);
   const imagesByProduct = await getImagesForProducts(numericIds);
 
@@ -1058,7 +1090,7 @@ export async function searchByTextWithRelated(
   let extractedCategories: string[] = entities.categories;
 
   if (productIds.length > 0) {
-    const products = await getProductsByIdsOrdered(productIds);
+    const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds));
     const numericIds = productIds.map((id: string) => parseInt(id, 10));
     const imagesByProduct = await getImagesForProducts(numericIds);
 
@@ -1082,7 +1114,8 @@ export async function searchByTextWithRelated(
       return {
         ...p,
         similarity_score: Math.round(boostedScore * 100) / 100,
-        match_type: boostedScore >= 0.8 ? "exact" : "similar",
+        match_type:
+          boostedScore >= config.clip.matchTypeExactMin ? "exact" : "similar",
         images: images.map((img) => ({
           id: img.id,
           url: img.cdn_url,
@@ -1166,7 +1199,7 @@ async function findRelatedProducts(
 
   if (productIds.length === 0) return [];
 
-  const products = await getProductsByIdsOrdered(productIds);
+  const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds));
   const numericIds = productIds.map((id: string) => parseInt(id, 10));
   const imagesByProduct = await getImagesForProducts(numericIds);
 
@@ -1182,6 +1215,25 @@ async function findRelatedProducts(
       })),
     };
   }) as ProductResult[];
+}
+
+// ============================================================================
+// Product detail (parent listing + SKU rows)
+// ============================================================================
+
+export async function getProductWithVariants(productId: number): Promise<{
+  product: Record<string, unknown>;
+  variants: ProductVariantRow[];
+  images: ProductImage[];
+} | null> {
+  const rows = await getProductsByIdsOrdered([productId]);
+  if (!rows.length) return null;
+  const variantMap = await getVariantsByProductIds([productId]);
+  const variants = variantMap.get(productId) ?? [];
+  const product = applyVariantSummaryToProduct(rows[0], variants);
+  const imagesByProduct = await getImagesForProducts([productId]);
+  const images = imagesByProduct.get(productId) ?? [];
+  return { product, variants, images };
 }
 
 // ============================================================================
@@ -1547,7 +1599,7 @@ export async function getCandidateScoresForProducts(
     };
   }
 
-  const products = await getProductsByIdsOrdered(finalIds);
+  const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(finalIds));
   const numericIds = finalIds.map((id) => parseInt(id, 10));
   const imagesByProduct = await getImagesForProducts(numericIds);
 

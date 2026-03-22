@@ -31,6 +31,8 @@ export {
   type ProductVariantRow,
 } from "./productVariants";
 
+export { enrichProductsWithVariantSummary, applyVariantSummaryToProduct } from "./variantEnrichment";
+
 // Price history
 export {
   recordPrice,

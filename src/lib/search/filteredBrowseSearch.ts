@@ -5,6 +5,7 @@
 
 import { osClient } from "../core/opensearch";
 import { getProductsByIdsOrdered } from "../core/db";
+import { enrichProductsWithVariantSummary } from "../products/variantEnrichment";
 import { config } from "../../config";
 import type { SearchFilters } from "../../routes/products/types";
 import { getImagesForProducts } from "../../routes/products/images.service";
@@ -86,7 +87,7 @@ export async function searchProductsFilteredBrowse(params: {
 
   if (productIds.length === 0) return [];
 
-  const products = await getProductsByIdsOrdered(productIds);
+  const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds));
   const numericIds = productIds.map((id) => parseInt(id, 10));
   const imagesByProduct = await getImagesForProducts(numericIds);
 

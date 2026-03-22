@@ -11,6 +11,17 @@ import { extractAttributesSync } from "./attributeExtractor";
 import { tieredColorListCompliance } from "../color/colorCanonical";
 import { normalizeColorToken } from "../color/queryColorFilter";
 
+/** Visual / hybrid similarity should dominate tie-breaks when type/color intent is absent. */
+function rerankSimilarityWeight(): number {
+  const n = Number(process.env.SEARCH_RERANK_SIM_WEIGHT);
+  return Number.isFinite(n) ? Math.min(120, Math.max(10, n)) : 72;
+}
+
+function rerankAudienceWeight(): number {
+  const n = Number(process.env.SEARCH_RERANK_AUD_WEIGHT);
+  return Number.isFinite(n) ? Math.min(50, Math.max(8, n)) : 24;
+}
+
 /** 0..1: query category hints vs document `category` / `category_canonical` (alias-aware). */
 export function scoreCategoryRelevance01(
   mergedCategory: string | undefined,
@@ -54,7 +65,8 @@ export function scoreCategoryRelevance01(
 
 /**
  * Calibrated 0..1 relevance for acceptance gating (SEARCH_FINAL_ACCEPT_MIN).
- * Multiplicative blend: type gate × text relevance × category boost × attribute factor.
+ * Type intent + cross-family taxonomy penalties gate hard; text similarity and category
+ * boost score compliant hits. Cross-family soft factor applies below the hard block threshold.
  */
 export function computeFinalRelevance01(params: {
   hasTypeIntent: boolean;
@@ -66,15 +78,42 @@ export function computeFinalRelevance01(params: {
   audScore: number;
   hasColorIntent: boolean;
   hasAudienceIntent: boolean;
+  /** From scoreCrossFamilyTypePenalty; strong garment↔footwear mismatches are typically ≥ 0.8 */
+  crossFamilyPenalty: number;
+  /**
+   * When false, the global term is semantic-only (image-only kNN or no lexical query).
+   * Avoids 0.6·sem + 0.4·lex collapsing to sem while still exposing the same number twice in explain.
+   */
+  applyLexicalToGlobal?: boolean;
 }): number {
-  const typeGate = params.hasTypeIntent ? (params.typeScore >= 0.5 ? 1 : 0) : 1;
-  const categoryBoost = 1 + params.catScore * 0.3;
-  const textRelevance = params.semScore * 0.6 + params.lexScore * 0.4;
+  const crossPen = Math.max(0, params.crossFamilyPenalty);
+  if (params.hasTypeIntent && crossPen >= 0.8) {
+    return 0;
+  }
+
+  const typeGateFactor = !params.hasTypeIntent
+    ? 1
+    : params.typeScore >= 0.5
+      ? 1
+      : params.typeScore >= 0.2
+        ? 0.3
+        : 0.05;
+
+  const categoryBoost = 1 + params.catScore * 0.25;
+  const applyLex = params.applyLexicalToGlobal !== false;
+  const globalScore = applyLex
+    ? params.semScore * 0.6 + params.lexScore * 0.4
+    : params.semScore;
+
   const colorPart = params.hasColorIntent ? params.colorScore : 1;
   const audPart = params.hasAudienceIntent ? params.audScore : 1;
-  const attrMultiplier = Math.min(1, colorPart * 0.5 + audPart * 0.5);
-  const attrFactor = 0.5 + attrMultiplier * 0.5;
-  const raw = typeGate * textRelevance * categoryBoost * attrFactor;
+  const attrScore = colorPart * 0.6 + audPart * 0.4;
+  const attrFactor = 0.5 + attrScore * 0.5;
+
+  const crossFamilySoftFactor = Math.max(0, 1 - crossPen * 0.6);
+
+  const raw =
+    globalScore * typeGateFactor * categoryBoost * attrFactor * crossFamilySoftFactor;
   return Math.max(0, Math.min(1, raw));
 }
 
@@ -154,6 +193,15 @@ export function scoreAudienceCompliance(
   return Math.max(0, Math.min(1, Math.pow(score, 1 / factors)));
 }
 
+/** When indexed hits expose separate hybrid components, rerank uses them for sem vs lex. */
+export interface HybridScoreRecallStats {
+  hasSplitScores: boolean;
+  maxClip: number;
+  maxBm25: number;
+  useTanhSim: boolean;
+  tanhScale: number;
+}
+
 export interface SearchHitRelevanceIntent {
   desiredProductTypes: string[];
   desiredColors: string[];
@@ -166,6 +214,12 @@ export interface SearchHitRelevanceIntent {
   audienceGenderForScoring?: string;
   hasAudienceIntent: boolean;
   crossFamilyPenaltyWeight: number;
+  /**
+   * Processed query string for a lexical 0..1 score (title token overlap) when OS does not
+   * return separate BM25 vs vector scores.
+   */
+  lexicalMatchQuery?: string;
+  hybridScoreRecall?: HybridScoreRecallStats;
 }
 
 export interface HitCompliance {
@@ -185,6 +239,53 @@ export interface HitCompliance {
   lexicalScore01: number;
   rerankScore: number;
   finalRelevance01: number;
+  /** Dev / explain: type gate and intent trace */
+  hasTypeIntent?: boolean;
+  hasColorIntent?: boolean;
+  typeGateFactor?: number;
+  hardBlocked?: boolean;
+  /** False when lexical score is not a separate signal (e.g. image-only kNN): omit from API explain. */
+  lexicalScoreDistinct?: boolean;
+}
+
+function normalizeTextForTokenMatch(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function escapeRegexToken(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Lexical proxy when BM25 is not exposed separately (share of query tokens as whole words in title). */
+export function scoreTitleLexicalOverlap01(query: string, title: string): number {
+  const qNorm = normalizeTextForTokenMatch(query);
+  const tokens = qNorm.split(/\s+/).filter((t) => t.length >= 2);
+  if (tokens.length === 0) return 1;
+  const tNorm = normalizeTextForTokenMatch(title);
+  let matched = 0;
+  for (const tok of tokens) {
+    if (new RegExp(`\\b${escapeRegexToken(tok)}\\b`, "i").test(tNorm)) matched++;
+  }
+  return Math.max(0, Math.min(1, matched / tokens.length));
+}
+
+function normalizeRawTo01(
+  raw: number,
+  maxRaw: number,
+  useTanh: boolean,
+  tanhScale: number,
+): number {
+  const positive = Math.max(0, raw);
+  const v = useTanh
+    ? Math.tanh(positive / tanhScale)
+    : maxRaw > 0
+      ? positive / maxRaw
+      : 0;
+  return Math.max(0, Math.min(1, Math.round(v * 100) / 100));
 }
 
 function mergeColorArrays(...parts: unknown[]): string[] {
@@ -231,6 +332,8 @@ export function computeHitRelevance(
     audienceGenderForScoring,
     hasAudienceIntent,
     crossFamilyPenaltyWeight,
+    lexicalMatchQuery,
+    hybridScoreRecall,
   } = intent;
 
   const productTypesRaw = hit?._source?.product_types;
@@ -365,8 +468,44 @@ export function computeHitRelevance(
     hit?._source?.category,
     hit?._source?.category_canonical,
   );
-  const semScore01 = similarity;
-  const lexScore01 = similarity;
+
+  const src = hit?._source ?? {};
+  const recall = hybridScoreRecall;
+  let semScore01 = similarity;
+  let lexScore01 = similarity;
+  if (
+    recall?.hasSplitScores &&
+    recall.maxClip > 0 &&
+    recall.maxBm25 > 0 &&
+    src.clip_score != null &&
+    src.bm25_score != null
+  ) {
+    semScore01 = normalizeRawTo01(
+      Number(src.clip_score),
+      recall.maxClip,
+      recall.useTanhSim,
+      recall.tanhScale,
+    );
+    lexScore01 = normalizeRawTo01(
+      Number(src.bm25_score),
+      recall.maxBm25,
+      recall.useTanhSim,
+      recall.tanhScale,
+    );
+  } else {
+    const qLex = lexicalMatchQuery?.trim();
+    if (qLex) {
+      lexScore01 = scoreTitleLexicalOverlap01(qLex, String(src.title ?? ""));
+    }
+  }
+
+  const hasOsSplitLex =
+    Boolean(recall?.hasSplitScores) &&
+    (recall?.maxClip ?? 0) > 0 &&
+    (recall?.maxBm25 ?? 0) > 0 &&
+    src.clip_score != null &&
+    src.bm25_score != null;
+  const lexicalScoreDistinct = hasOsSplitLex || Boolean(lexicalMatchQuery?.trim());
 
   const normDoc = Number(hit?._source?.norm_confidence);
   const docTrustNorm =
@@ -376,23 +515,39 @@ export function computeHitRelevance(
     Number.isFinite(typeDoc) && typeDoc >= 0 && typeDoc <= 1 ? 0.45 + 0.55 * typeDoc : 1;
   const docTrust = Math.max(0.25, Math.min(1, docTrustNorm * typeDocTrust));
 
+  const wSim = rerankSimilarityWeight();
+  const wAud = rerankAudienceWeight();
   const rerankScore =
     productTypeCompliance * 1000 * docTrust +
     colorCompliance * 100 * docTrust +
-    audienceCompliance * 80 * docTrust +
-    similarity * 10 -
+    audienceCompliance * wAud * docTrust +
+    similarity * wSim -
     crossFamilyPenalty * crossFamilyPenaltyWeight;
 
+  const hasTypeIntent = desiredProductTypes.length > 0;
+  const hasColorIntent = desiredColors.length > 0;
+  const crossPenTrace = Math.max(0, crossFamilyPenalty);
+  const hardBlocked = hasTypeIntent && crossPenTrace >= 0.8;
+  const typeGateFactor = !hasTypeIntent
+    ? 1
+    : productTypeCompliance >= 0.5
+      ? 1
+      : productTypeCompliance >= 0.2
+        ? 0.3
+        : 0.05;
+
   const finalRelevance01 = computeFinalRelevance01({
-    hasTypeIntent: desiredProductTypes.length > 0,
+    hasTypeIntent,
     typeScore: productTypeCompliance,
     catScore: categoryRelevance01,
     semScore: semScore01,
     lexScore: lexScore01,
     colorScore: colorCompliance,
     audScore: audienceCompliance,
-    hasColorIntent: desiredColors.length > 0,
+    hasColorIntent,
     hasAudienceIntent,
+    crossFamilyPenalty,
+    applyLexicalToGlobal: lexicalScoreDistinct,
   });
 
   return {
@@ -413,5 +568,10 @@ export function computeHitRelevance(
     rerankScore,
     finalRelevance01,
     primaryColor,
+    hasTypeIntent,
+    hasColorIntent,
+    typeGateFactor,
+    hardBlocked,
+    lexicalScoreDistinct,
   };
 }

@@ -88,6 +88,46 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
     "dirac",
   ],
   ["hijab", "hijabs", "headscarf", "headscarves", "niqab", "burqa", "headwrap", "sheyla", "shayla"],
+  // Accessories (cross-family vs apparel / footwear)
+  [
+    "bag",
+    "bags",
+    "handbag",
+    "handbags",
+    "tote",
+    "totes",
+    "clutch",
+    "clutches",
+    "purse",
+    "purses",
+    "backpack",
+    "backpacks",
+    "crossbody",
+    "satchel",
+    "satchels",
+    "bucket bag",
+    "shoulder bag",
+  ],
+  [
+    "necklace",
+    "necklaces",
+    "earring",
+    "earrings",
+    "bracelet",
+    "bracelets",
+    "ring",
+    "rings",
+    "jewellery",
+    "jewelry",
+    "pendant",
+    "pendants",
+    "brooch",
+    "brooches",
+    "anklet",
+    "anklets",
+    "choker",
+    "chokers",
+  ],
 ] as const;
 
 /** Map specific surface forms to indexed hypernyms (index-time recall). */
@@ -176,6 +216,41 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   jackets: "outerwear",
   coat: "outerwear",
   coats: "outerwear",
+
+  tote: "bag",
+  totes: "bag",
+  clutch: "bag",
+  clutches: "bag",
+  purse: "bag",
+  purses: "bag",
+  backpack: "bag",
+  backpacks: "bag",
+  satchel: "bag",
+  satchels: "bag",
+  crossbody: "bag",
+  handbag: "bag",
+  handbags: "bag",
+
+  earring: "jewellery",
+  earrings: "jewellery",
+  bracelet: "jewellery",
+  bracelets: "jewellery",
+  pendant: "jewellery",
+  pendants: "jewellery",
+  brooch: "jewellery",
+  brooches: "jewellery",
+  anklet: "jewellery",
+  anklets: "jewellery",
+  choker: "jewellery",
+  chokers: "jewellery",
+  jewelry: "jewellery",
+  necklace: "jewellery",
+  necklaces: "jewellery",
+  ring: "jewellery",
+  rings: "jewellery",
+  jewellery: "jewellery",
+  bag: "bag",
+  bags: "bag",
 };
 
 /**
@@ -209,6 +284,8 @@ const CLUSTER_FAMILY: readonly string[] = [
   "modest_full",
   "modest_full",
   "head_covering",
+  "bags",
+  "jewellery",
 ];
 
 const FAMILY_PAIR_PENALTY: Record<string, Record<string, number>> = {
@@ -220,6 +297,8 @@ const FAMILY_PAIR_PENALTY: Record<string, Record<string, number>> = {
     dress: 0.2,
     outerwear: 0.25,
     head_covering: 0.22,
+    bags: 0.88,
+    jewellery: 0.82,
   },
   head_covering: {
     modest_full: 0.2,
@@ -229,50 +308,88 @@ const FAMILY_PAIR_PENALTY: Record<string, Record<string, number>> = {
     shorts_skirt: 0.8,
     footwear: 0.52,
     outerwear: 0.3,
+    bags: 0.85,
+    jewellery: 0.78,
   },
   dress: {
     bottoms: 0.88,
     shorts_skirt: 0.55,
-    footwear: 0.38,
+    footwear: 1,
     tops: 0.35,
     modest_full: 0.22,
     outerwear: 0.18,
     head_covering: 0.32,
+    bags: 0.9,
+    jewellery: 0.85,
   },
   bottoms: {
     modest_full: 1,
     dress: 0.72,
     tops: 0.2,
     outerwear: 0.12,
-    footwear: 0.15,
+    footwear: 0.92,
     head_covering: 0.88,
+    bags: 0.9,
+    jewellery: 0.85,
   },
   tops: {
     bottoms: 0.22,
     modest_full: 0.55,
     dress: 0.35,
-    footwear: 0.2,
+    footwear: 0.92,
     shorts_skirt: 0.18,
     head_covering: 0.42,
+    bags: 0.9,
+    jewellery: 0.85,
   },
   footwear: {
     modest_full: 0.45,
-    dress: 0.35,
-    bottoms: 0.18,
-    tops: 0.2,
-    shorts_skirt: 0.15,
+    dress: 1,
+    bottoms: 0.92,
+    tops: 0.92,
+    shorts_skirt: 0.88,
+    outerwear: 0.92,
     head_covering: 0.5,
+    bags: 0.9,
+    jewellery: 0.85,
   },
   shorts_skirt: {
     modest_full: 0.85,
     dress: 0.45,
-    footwear: 0.2,
+    footwear: 0.88,
     head_covering: 0.78,
+    bags: 0.9,
+    jewellery: 0.85,
   },
   outerwear: {
     modest_full: 0.22,
     dress: 0.15,
     head_covering: 0.28,
+    footwear: 0.92,
+    bags: 0.9,
+    jewellery: 0.85,
+  },
+  bags: {
+    modest_full: 0.88,
+    head_covering: 0.85,
+    dress: 0.9,
+    bottoms: 0.9,
+    tops: 0.9,
+    footwear: 0.9,
+    shorts_skirt: 0.9,
+    outerwear: 0.9,
+    jewellery: 0.65,
+  },
+  jewellery: {
+    modest_full: 0.82,
+    head_covering: 0.78,
+    dress: 0.85,
+    bottoms: 0.85,
+    tops: 0.85,
+    footwear: 0.85,
+    shorts_skirt: 0.85,
+    outerwear: 0.85,
+    bags: 0.65,
   },
 };
 
@@ -697,7 +814,105 @@ export function extractLexicalProductTypeSeeds(rawQuery: string): string[] {
     if (!phrase || phrase.length < 2) continue;
     if (phraseMatchesWholeWords(qNorm, phrase)) hits.push(phrase);
   }
+  const fam = getTypeToFamily();
+  for (const w of qNorm.split(/\s+/)) {
+    if (w.length < 2) continue;
+    if (fam.has(w)) hits.push(w);
+  }
   return [...new Set(hits)];
+}
+
+/** Whole-word fashion product nouns — backs `hasTypeIntent` when AST misses type entities. */
+const FASHION_TYPE_NOUNS = new Set([
+  "dress",
+  "gown",
+  "top",
+  "blouse",
+  "shirt",
+  "tee",
+  "pants",
+  "jeans",
+  "trousers",
+  "skirt",
+  "jacket",
+  "blazer",
+  "coat",
+  "cardigan",
+  "hoodie",
+  "sweater",
+  "shorts",
+  "suit",
+  "jumpsuit",
+  "romper",
+  "vest",
+  "leggings",
+  "boot",
+  "boots",
+  "shoe",
+  "shoes",
+  "sneaker",
+  "sneakers",
+  "heel",
+  "heels",
+  "sandal",
+  "sandals",
+  "trainer",
+  "trainers",
+  "pump",
+  "pumps",
+  "loafer",
+  "loafers",
+  "mule",
+  "mules",
+  "bag",
+  "handbag",
+  "tote",
+  "clutch",
+  "purse",
+  "backpack",
+  "satchel",
+  "wallet",
+  "belt",
+  "scarf",
+  "hat",
+  "cap",
+  "gloves",
+  "sunglasses",
+]);
+
+function fashionNounStemCandidates(token: string): string[] {
+  const t = token.toLowerCase();
+  const out = new Set<string>([t]);
+  if (t.length > 3 && t.endsWith("ies")) {
+    out.add(t.slice(0, -3) + "y");
+  }
+  if (t.length > 3 && t.endsWith("es")) {
+    out.add(t.slice(0, -2));
+  }
+  if (t.length > 2 && t.endsWith("s") && !t.endsWith("ss")) {
+    out.add(t.slice(0, -1));
+  }
+  return [...out];
+}
+
+/**
+ * Explicit garment/footwear/accessory nouns from tokenized query text.
+ * Complements {@link extractLexicalProductTypeSeeds} when NLP leaves product types out of AST entities.
+ */
+export function extractFashionTypeNounTokens(rawQuery: string): string[] {
+  const qNorm = normalizeForLexicalMatch(rawQuery);
+  if (!qNorm) return [];
+  const found: string[] = [];
+  for (const w of qNorm.split(/\s+/)) {
+    if (w.length < 2) continue;
+    for (const cand of fashionNounStemCandidates(w)) {
+      if (FASHION_TYPE_NOUNS.has(cand)) {
+        found.push(cand);
+        break;
+      }
+    }
+  }
+  return [...new Set(found)];
 }
 
 export function crossFamilyTypePenaltyEnabled(): boolean {

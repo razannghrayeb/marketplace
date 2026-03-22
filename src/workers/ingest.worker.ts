@@ -3,7 +3,7 @@ console.log("Starting ingest worker (Upstash REST)...");
 import { upstashGet, upstashSet } from "../lib/queue";
 import fetch from "node-fetch";
 import sharpLib from "sharp";
-import { pg } from "../lib/core";
+import { pg, toPgVectorParam } from "../lib/core";
 import { config } from "../config";
 import { getImageAnalysisService } from "../routes/products/image-analysis.service";
 import { uploadImage, processImageForEmbedding, computePHash, validateImage } from "../lib/image";
@@ -60,9 +60,9 @@ async function processIngestJobs() {
 
             const insertRes = await pg.query(
               `INSERT INTO wardrobe_items (user_id, source, image_url, image_cdn, r2_key, p_hash, attributes_extracted, extraction_version, extraction_confidence, embedding)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::vector)
                RETURNING id`,
-              [userId, 'uploaded', cropCdn, cropCdn, cropKey, pHash, true, 'auto-ingest-1.0', det.confidence || null, embedding]
+              [userId, 'uploaded', cropCdn, cropCdn, cropKey, pHash, true, 'auto-ingest-1.0', det.confidence || null, toPgVectorParam(embedding)]
             );
 
             if ((insertRes.rowCount ?? 0) > 0) createdItems.push(insertRes.rows[0].id);

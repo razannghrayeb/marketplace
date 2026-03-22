@@ -2,7 +2,7 @@
  * Style Profile Service
  * Computes and maintains user style fingerprints
  */
-import { pg } from "../../lib/core";
+import { pg, toPgVectorParam } from "../../lib/core";
 
 // ============================================================================
 // Types
@@ -170,7 +170,7 @@ export async function computeStyleProfile(userId: number): Promise<StyleProfile>
        user_id, category_histogram, color_palette, pattern_histogram, material_histogram,
        style_centroid, occasion_coverage, season_coverage, total_items, brands_count,
        top_brands, version, computed_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+     ) VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8, $9, $10, $11, $12, NOW())
      ON CONFLICT (user_id) DO UPDATE SET
        category_histogram = EXCLUDED.category_histogram,
        color_palette = EXCLUDED.color_palette,
@@ -192,7 +192,7 @@ export async function computeStyleProfile(userId: number): Promise<StyleProfile>
       JSON.stringify(colorPalette),
       JSON.stringify(patternHistogram),
       JSON.stringify(materialHistogram),
-      styleCentroid,
+      toPgVectorParam(styleCentroid),
       occasionCoverage,
       seasonCoverage,
       items.length,

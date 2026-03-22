@@ -126,6 +126,7 @@ export interface ProductResult {
     intraFamilyPenalty?: number;
     productTypeCompliance?: number;
     categoryScore?: number;
+    /** Omitted when there is no separate lexical signal (e.g. image-only kNN). */
     lexicalScore?: number;
     semanticScore?: number;
     colorCompliance?: number; // 0..1
@@ -135,6 +136,10 @@ export interface ProductResult {
     colorTier?: "exact" | "family" | "bucket" | "none";
     audienceCompliance?: number;
     crossFamilyPenalty?: number;
+    hasTypeIntent?: boolean;
+    hasColorIntent?: boolean;
+    typeGateFactor?: number;
+    hardBlocked?: boolean;
     desiredProductTypes?: string[];
     desiredColors?: string[];
     colorMode?: "any" | "all";
@@ -146,6 +151,14 @@ export interface ProductResult {
   openSearchScore?: number; // raw or normalized
   pHashDist?: number;
   candidateScore?: number;
+  /** Set when `product_variants` rows exist (search / browse enrichment). */
+  variant_count?: number;
+  min_price_cents?: number;
+  max_price_cents?: number;
+  min_sales_price_cents?: number;
+  default_variant_id?: number;
+  /** SKU-level URL (e.g. `#variant=`); parent `product_url` stays the listing. */
+  default_variant_url?: string | null;
 }
 
 export interface SearchResultWithRelated {

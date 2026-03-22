@@ -1,8 +1,8 @@
 {
-  "lastProcessedId": "43884",
-  "totalProcessed": 33210,
-  "totalSuccess": 32666,
-  "totalFailed": 544,
+  "lastProcessedId": "116838",
+  "totalProcessed": 37100,
+  "totalSuccess": 36552,
+  "totalFailed": 548,
   "totalSkipped": 9,
   "failedIds": [
     "8319",
@@ -548,8 +548,12 @@
     "39068",
     "39076",
     "39083",
-    "39091"
+    "39091",
+    "82487",
+    "82527",
+    "105202",
+    "105402"
   ],
   "startedAt": "2026-03-20T13:39:07.197Z",
-  "lastUpdatedAt": "2026-03-22T15:04:16.111Z"
+  "lastUpdatedAt": "2026-03-22T17:57:03.180Z"
 }
