@@ -49,7 +49,7 @@ async function main() {
 
   // Find products with image_url that don't have any images in product_images
   const res = await pg.query(`
-    SELECT p.id, p.vendor_id, p.title, p.brand, p.category, p.price_cents, p.availability, p.last_seen, p.image_url
+    SELECT p.id, p.vendor_id, p.title, p.description, p.brand, p.category, p.price_cents, p.availability, p.last_seen, p.image_url
     FROM products p
     LEFT JOIN product_images pi ON pi.product_id = p.id
     WHERE p.image_url IS NOT NULL AND pi.id IS NULL
@@ -120,7 +120,7 @@ async function main() {
         productId: id,
         vendorId: vendor_id,
         title,
-        description: null,
+        description: description ?? null,
         brand,
         category,
         priceCents: price_cents,

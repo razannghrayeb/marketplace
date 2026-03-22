@@ -5,7 +5,11 @@
 
 import { osClient } from "../core/opensearch";
 import { getProductsByIdsOrdered } from "../core/db";
-import { enrichProductsWithVariantSummary } from "../products/variantEnrichment";
+import {
+  enrichProductsWithVariantSummary,
+  pickDisplaySkuForSearch,
+  mergeVariantPrimaryImageIntoProductImages,
+} from "../products/variantEnrichment";
 import { config } from "../../config";
 import type { SearchFilters } from "../../routes/products/types";
 import { getImagesForProducts } from "../../routes/products/images.service";
@@ -87,20 +91,36 @@ export async function searchProductsFilteredBrowse(params: {
 
   if (productIds.length === 0) return [];
 
-  const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds));
+  const browseColorHints = [
+    ...(filters.color ? [String(filters.color)] : []),
+    ...((filters as { colors?: string[] }).colors ?? []).map(String),
+  ];
+  const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds), {
+    resolveDisplayVariant: (_pid, variants) =>
+      pickDisplaySkuForSearch(variants, {
+        colorHints: browseColorHints.length ? browseColorHints : undefined,
+        textQuery: null,
+      }),
+  });
   const numericIds = productIds.map((id) => parseInt(id, 10));
   const imagesByProduct = await getImagesForProducts(numericIds);
 
   return products.map((p: any) => {
     const images = imagesByProduct.get(parseInt(p.id, 10)) || [];
+    const galleryBase = images.map((img: any) => ({
+      id: img.id,
+      url: img.cdn_url,
+      is_primary: img.is_primary,
+    }));
+    const imagesOut = mergeVariantPrimaryImageIntoProductImages(
+      p.default_variant_id,
+      p.image_cdn || p.image_url,
+      galleryBase,
+    );
     return {
       ...p,
       similarity_score: scoreMap.get(String(p.id)),
-      images: images.map((img) => ({
-        id: img.id,
-        url: img.cdn_url,
-        is_primary: img.is_primary,
-      })),
+      images: imagesOut,
     };
   });
 }

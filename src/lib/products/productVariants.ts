@@ -12,6 +12,8 @@ export interface ProductVariantRow {
   product_url: string;
   size: string | null;
   color: string | null;
+  /** Per-SKU copy when column exists (see db/migrations/010_product_variants_description.sql). */
+  description: string | null;
   currency: string;
   price_cents: string;
   sales_price_cents: string | null;
@@ -32,7 +34,7 @@ export async function getVariantsByProductIds(
   if (productIds.length === 0) return new Map();
 
   const { rows } = await pg.query<ProductVariantRow>(
-    `SELECT id, product_id, vendor_id, variant_id, product_url, size, color, currency,
+    `SELECT id, product_id, vendor_id, variant_id, product_url, size, color, description, currency,
             price_cents::text, sales_price_cents::text, availability, last_seen,
             image_url, image_urls, legacy_product_id::text, is_default
      FROM product_variants
@@ -53,7 +55,7 @@ export async function getVariantsByProductIds(
 
 export async function getDefaultVariant(productId: number): Promise<ProductVariantRow | null> {
   const { rows } = await pg.query<ProductVariantRow>(
-    `SELECT id, product_id, vendor_id, variant_id, product_url, size, color, currency,
+    `SELECT id, product_id, vendor_id, variant_id, product_url, size, color, description, currency,
             price_cents::text, sales_price_cents::text, availability, last_seen,
             image_url, image_urls, legacy_product_id::text, is_default
      FROM product_variants

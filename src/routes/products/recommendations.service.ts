@@ -13,7 +13,8 @@
  * - Recommendations: "Similar items" - suggests alternatives in same/similar categories
  */
 import { getAndRankCandidates, applyMMR, type RankedCandidateResult } from "../../lib/ranker";
-import { pg } from "../../lib/core";
+import { pg, getProductsByIdsOrdered } from "../../lib/core";
+import { enrichProductsWithVariantSummary } from "../../lib/products";
 import { logImpressionBatch, type RecommendationImpression, type LogImpressionBatchParams } from "../../lib/recommendations";
 import { applyExplorationBoost } from "../../lib/recommendations/coldStart";
 
@@ -115,18 +116,12 @@ export async function getSimilarProducts(
 
   const startTime = Date.now();
 
-  // Fetch source product
-  const sourceRes = await pg.query(
-    `SELECT id, title, brand, category, price_cents, currency, image_cdn 
-     FROM products WHERE id = $1`,
-    [productId]
-  );
-
-  if (sourceRes.rows.length === 0) {
+  const sourceRows = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered([productId]));
+  if (sourceRows.length === 0) {
     throw new Error(`Product not found: ${productId}`);
   }
 
-  const source = sourceRes.rows[0];
+  const source = sourceRows[0] as any;
 
   // Run the ranking pipeline (get more candidates for MMR to work with)
   const candidateMultiplier = applyDiversity ? 3 : 1;
@@ -218,7 +213,7 @@ export async function getSimilarProducts(
       title: source.title,
       brand: source.brand,
       category: source.category,
-      image: source.image_cdn,
+      image: source.image_cdn || source.image_url || null,
     },
     recommendations,
     meta: {

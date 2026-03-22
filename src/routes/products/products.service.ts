@@ -11,8 +11,23 @@ import {
   enrichProductsWithVariantSummary,
   applyVariantSummaryToProduct,
   getVariantsByProductIds,
+  pickDisplaySkuForSearch,
+  mergeVariantPrimaryImageIntoProductImages,
   type ProductVariantRow,
+  type ResolveDisplayVariantFn,
 } from "../../lib/products";
+
+function resolveDisplayVariantForImageSearch(
+  colorByHitId: Map<string, string | null>,
+  queryAndFilterColorHints: string[],
+  textQuery: string | undefined,
+): ResolveDisplayVariantFn {
+  return (pid, variants) =>
+    pickDisplaySkuForSearch(variants, {
+      colorHints: [...queryAndFilterColorHints, colorByHitId.get(String(pid))],
+      textQuery: textQuery ?? null,
+    });
+}
 import { dedupeSearchResults, filterRelatedAgainstMain } from "../../lib/search/resultDedup";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
 import {
@@ -843,7 +858,19 @@ export async function searchByImageWithSimilarity(
   // Fetch product data
   let results: ProductResult[] = [];
   if (productIds.length > 0) {
-    const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds));
+    const imageSearchVariantColorHints = [
+      ...new Set([...desiredColorsForRelevance, ...explicitColorsForRelevance]),
+    ];
+    const products = await enrichProductsWithVariantSummary(
+      await getProductsByIdsOrdered(productIds),
+      {
+        resolveDisplayVariant: resolveDisplayVariantForImageSearch(
+          colorByHitId,
+          imageSearchVariantColorHints,
+          textQueryForRelevance,
+        ),
+      },
+    );
     const numericIds = productIds.map((id: string) => parseInt(id, 10));
     const imagesByProduct = await getImagesForProducts(numericIds);
 
@@ -852,6 +879,17 @@ export async function searchByImageWithSimilarity(
       const idStr = String(p.id);
       const similarityScore = scoreMap.get(idStr) ?? 0;
       const compliance = complianceById.get(idStr);
+      const galleryBase = images.map((img) => ({
+        id: img.id,
+        url: img.cdn_url,
+        is_primary: img.is_primary,
+        p_hash: img.p_hash ?? undefined,
+      }));
+      const imagesOut = mergeVariantPrimaryImageIntoProductImages(
+        p.default_variant_id,
+        p.image_cdn || p.image_url,
+        galleryBase,
+      );
       return {
         ...p,
         color: colorByHitId.get(idStr) ?? p.color ?? null,
@@ -887,12 +925,7 @@ export async function searchByImageWithSimilarity(
               finalRelevance01: compliance.finalRelevance01,
             }
           : undefined,
-        images: images.map((img) => ({
-          id: img.id,
-          url: img.cdn_url,
-          is_primary: img.is_primary,
-          p_hash: img.p_hash ?? undefined,
-        })),
+        images: imagesOut,
       };
     }) as ProductResult[];
   }
