@@ -198,6 +198,21 @@ export class QueryMapper {
       });
     }
 
+    for (const sp of query.spatialRequirements || []) {
+      const q = [sp.attribute, sp.location, sp.relationship]
+        .filter((x) => x != null && String(x).trim() !== "")
+        .join(" ")
+        .trim();
+      if (!q) continue;
+      should.push({
+        multi_match: {
+          query: q,
+          fields: ["title^1.2", "description"],
+          boost: 0.45,
+        },
+      });
+    }
+
     // Match kNN shape used by MultiVectorSearchEngine / image similarity: knn lives under
     // bool.must. A top-level `knn` sibling to `query` is not used elsewhere and can yield
     // no vector retrieval (empty results while filters/text clauses also match nothing).

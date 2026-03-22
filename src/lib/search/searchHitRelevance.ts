@@ -220,6 +220,8 @@ export interface SearchHitRelevanceIntent {
    */
   lexicalMatchQuery?: string;
   hybridScoreRecall?: HybridScoreRecallStats;
+  /** True when AST pipeline fell back to processQueryFast (shallower text understanding). */
+  astPipelineDegraded?: boolean;
 }
 
 export interface HitCompliance {

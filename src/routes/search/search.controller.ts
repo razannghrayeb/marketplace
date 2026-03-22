@@ -238,6 +238,10 @@ router.get("/", async (req: Request, res: Response) => {
       limit: options.limit,
       includeRelated: false,
       relatedLimit: 10,
+      negationConstraints:
+        useEnhanced && negations?.hasNegation && negations.negations?.length
+          ? negations.negations
+          : undefined,
     });
 
     // Log search (async, non-blocking)

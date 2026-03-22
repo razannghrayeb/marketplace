@@ -143,6 +143,24 @@ export const config = {
     })(),
     /** Hard cap on XGB batch size; head window is at least max(this, offset+limit) when full-recall is on. */
     xgbFullRecallMax: finiteEnvNumber(process.env.SEARCH_XGB_FULL_RECALL_MAX, 300, 20, 2000),
+    /** Key segment for QueryAST Redis cache (future: per-request locale). */
+    queryAstCacheLocale: process.env.SEARCH_QUERY_AST_LOCALE?.trim() || "default",
+    /** TTL for SEARCH_QUERY_AST_REDIS serialized AST (seconds). */
+    queryAstRedisTtlSec: finiteEnvNumber(process.env.SEARCH_QUERY_AST_REDIS_TTL_SEC, 600, 60, 3600),
+    /**
+     * When SEARCH_KNN_TEXT_IN_MUST would place kNN in must, demote to should-boost if fashion
+     * embedding score vs prototype is below threshold (proactive zero-hit avoidance).
+     */
+    knnDemoteLowFashionEmb: (() => {
+      const v = String(process.env.SEARCH_KNN_DEMOTE_LOW_FASHION_EMB ?? "").toLowerCase().trim();
+      return v === "1" || v === "true";
+    })(),
+    knnDemoteFashionEmbMax: finiteEnvNumber(process.env.SEARCH_KNN_DEMOTE_FASHION_EMB_MAX, 0.52, 0.35, 0.65),
+    /** Hard gender filter also matches unisex audience fields (default on). */
+    genderUnisexOr: (() => {
+      const v = String(process.env.SEARCH_GENDER_UNISEX_OR ?? "1").toLowerCase().trim();
+      return v !== "0" && v !== "false" && v !== "off" && v !== "no";
+    })(),
   },
   tryon: {
     // Google Cloud Vertex AI — Virtual Try-On (publishers/google/models/...:predict)

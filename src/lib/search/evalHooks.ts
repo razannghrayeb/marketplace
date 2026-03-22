@@ -50,6 +50,8 @@ export interface TextSearchEvalPayload {
     final_accept_min?: number;
     below_relevance_threshold?: boolean;
     total_above_threshold?: number;
+    /** OpenSearch retry / fallback steps applied after the primary bool query. */
+    search_retry_trace?: string[];
   };
 }
 

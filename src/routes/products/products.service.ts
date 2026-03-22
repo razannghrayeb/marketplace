@@ -279,6 +279,51 @@ function imageRelaxSimilarityFloor(): number {
   return Math.max(0.35, Math.min(0.92, n));
 }
 
+function imageKnnTimeoutMs(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_KNN_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw >= 500) return Math.min(120_000, Math.floor(raw));
+  return 12_000;
+}
+
+async function opensearchImageKnnHits(
+  body: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<any[]> {
+  const searchPromise = osClient
+    .search({ index: config.opensearch.index, body: body as any })
+    .then((r) => (r.body?.hits?.hits ?? []) as any[])
+    .catch(() => [] as any[]);
+  const timeoutPromise = new Promise<any[]>((resolve) => {
+    setTimeout(() => resolve([]), timeoutMs);
+  });
+  return Promise.race([searchPromise, timeoutPromise]);
+}
+
+/** Min–max cosine-like scores within one kNN result set so fusion weights are not dominated by field scale. */
+function minMaxNormCosine01ById(
+  hits: any[],
+  scoreToCosine01: (raw: number) => number,
+): Map<string, number> {
+  const map = new Map<string, number>();
+  if (!hits?.length) return map;
+  const vals = hits
+    .map((h) => scoreToCosine01(Number(h._score)))
+    .filter((x) => Number.isFinite(x));
+  if (vals.length === 0) return map;
+  const min = Math.min(...vals);
+  const max = Math.max(...vals);
+  const denom = max - min;
+  for (const h of hits) {
+    const id = String(h._source?.product_id ?? "");
+    if (!id) continue;
+    const s = scoreToCosine01(Number(h._score));
+    if (!Number.isFinite(s)) continue;
+    const n = denom <= 1e-12 ? 1 : (s - min) / denom;
+    map.set(id, Math.max(0, Math.min(1, n)));
+  }
+  return map;
+}
+
 function buildDesiredCatalogTermSet(aisles: string[]): Set<string> {
   const s = new Set<string>();
   for (const a of aisles) {
@@ -452,131 +497,168 @@ export async function searchByImageWithSimilarity(
     },
   };
 
-  const osResponse = await osClient.search({
-    index: config.opensearch.index,
-    body: knnBase,
-  });
-
-  let hits = osResponse.body.hits.hits;
-
-  if (
+  const runDualGarment =
     imageDualGarmentFusionEnv() &&
     embeddingField === "embedding" &&
-    imageEmbeddingGarment &&
-    imageEmbeddingGarment.length > 0 &&
-    imageEmbeddingGarment.length === imageEmbedding.length
-  ) {
+    Boolean(imageEmbeddingGarment && imageEmbeddingGarment.length > 0) &&
+    imageEmbeddingGarment!.length === imageEmbedding.length;
+
+  const runColor =
+    Boolean(colorQueryEmbedding && colorQueryEmbedding.length > 0 && wColor > 0);
+
+  const garmentFieldBody = runDualGarment
+    ? {
+        ...knnBase,
+        query: {
+          bool: {
+            must: {
+              knn: {
+                embedding_garment: {
+                  vector: imageEmbeddingGarment!,
+                  k: fetchLimit,
+                },
+              },
+            },
+            filter,
+          },
+        },
+      }
+    : null;
+
+  const colorBody = runColor
+    ? {
+        ...knnBase,
+        query: {
+          bool: {
+            must: {
+              knn: {
+                embedding_color: {
+                  vector: colorQueryEmbedding!,
+                  k: fetchLimit,
+                },
+              },
+            },
+            filter,
+          },
+        },
+      }
+    : null;
+
+  const knnTimeoutMs = imageKnnTimeoutMs();
+  const [primaryHits, garmentHits, colorHits] = await Promise.all([
+    opensearchImageKnnHits(knnBase, knnTimeoutMs),
+    garmentFieldBody ? opensearchImageKnnHits(garmentFieldBody, knnTimeoutMs) : Promise.resolve([]),
+    colorBody ? opensearchImageKnnHits(colorBody, knnTimeoutMs) : Promise.resolve([]),
+  ]);
+
+  const usedMultiBranchFusion = runDualGarment || runColor;
+  let hits: any[];
+
+  if (!usedMultiBranchFusion) {
+    hits = primaryHits;
+  } else {
     const wfRaw = Number(process.env.SEARCH_IMAGE_DUAL_FULL_WEIGHT ?? "0.55");
     const wgRaw = Number(process.env.SEARCH_IMAGE_DUAL_GARMENT_WEIGHT ?? "0.45");
     const wf = Math.max(0, Math.min(1, Number.isFinite(wfRaw) ? wfRaw : 0.55));
     const wg = Math.max(0, Math.min(1, Number.isFinite(wgRaw) ? wgRaw : 0.45));
     const wSumFg = wf + wg > 0 ? wf + wg : 1;
-    const garmentFieldBody = {
-      ...knnBase,
-      query: {
-        bool: {
-          must: {
-            knn: {
-              embedding_garment: {
-                vector: imageEmbeddingGarment,
-                k: fetchLimit,
-              },
-            },
-          },
-          filter: filter,
-        },
-      },
-    };
-    try {
-      const garmentFieldResp = await osClient.search({
-        index: config.opensearch.index,
-        body: garmentFieldBody,
-      });
-      const garmentFieldHits = garmentFieldResp.body.hits.hits || [];
-      const byId = new Map<string, { f: number; g: number; hit: any }>();
-      for (const hit of hits) {
-        const id = String(hit._source.product_id);
-        byId.set(id, { f: Number(hit._score), g: 0, hit });
-      }
-      for (const hit of garmentFieldHits) {
-        const id = String(hit._source.product_id);
-        const sim = Number(hit._score);
-        const prev = byId.get(id);
-        if (prev) {
-          prev.g = sim;
-        } else {
-          byId.set(id, { f: 0, g: sim, hit });
-        }
-      }
-      const merged = [...byId.values()]
-        .map(({ f, g, hit }) => {
-          const combined = (wf * f + wg * g) / wSumFg;
-          return { hit, _score: combined, _combined: combined };
-        })
-        .sort((a, b) => b._combined - a._combined);
-      hits = merged.map((m) => {
-        (m.hit as any)._score = m._combined;
-        return m.hit;
-      });
-    } catch {
-      // keep primary-field hits only
-    }
-  }
 
-  if (colorQueryEmbedding && colorQueryEmbedding.length > 0 && wColor > 0) {
-    const colorBody = {
-      ...knnBase,
-      query: {
-        bool: {
-          must: {
-            knn: {
-              embedding_color: {
-                vector: colorQueryEmbedding,
-                k: fetchLimit,
-              },
-            },
-          },
-          filter: filter,
-        },
-      },
-    };
-    try {
-      const colorResp = await osClient.search({
-        index: config.opensearch.index,
-        body: colorBody,
-      });
-      const colorHits = colorResp.body.hits.hits || [];
-      const byId = new Map<string, { g: number; c: number; hit: any }>();
-      for (const hit of hits) {
-        const id = String(hit._source.product_id);
-        byId.set(id, { g: Number(hit._score), c: 0, hit });
+    let anchor =
+      primaryHits.length > 0
+        ? Math.max(
+            ...primaryHits.map((h: any) => knnCosinesimilScoreToCosine01(Number(h._score))),
+          )
+        : 0;
+    if (anchor <= 0 && (runDualGarment || runColor)) {
+      const fallback: number[] = [];
+      if (runDualGarment && garmentHits.length) {
+        fallback.push(
+          ...garmentHits.map((h: any) => knnCosinesimilScoreToCosine01(Number(h._score))),
+        );
       }
-      for (const hit of colorHits) {
-        const id = String(hit._source.product_id);
-        const sim = Number(hit._score);
-        const prev = byId.get(id);
-        if (prev) {
-          prev.c = sim;
-        } else {
-          byId.set(id, { g: 0, c: sim, hit });
-        }
+      if (runColor && colorHits.length) {
+        fallback.push(
+          ...colorHits.map((h: any) => knnCosinesimilScoreToCosine01(Number(h._score))),
+        );
       }
-      const merged = [...byId.values()]
-        .map(({ g, c, hit }) => {
-          const combined = (wGlobal * g + wColor * c) / wSum;
-          return { hit, _score: combined, _combined: combined };
-        })
-        .sort((a, b) => b._score - a._score);
-      hits = merged.map((m) => {
-        (m.hit as any)._score = m._combined;
-        return m.hit;
-      });
-    } catch {
-      // keep global-only hits
+      anchor = fallback.length > 0 ? Math.max(...fallback) : 0;
     }
+
+    const normP = minMaxNormCosine01ById(primaryHits, knnCosinesimilScoreToCosine01);
+    const normG = runDualGarment
+      ? minMaxNormCosine01ById(garmentHits, knnCosinesimilScoreToCosine01)
+      : new Map<string, number>();
+    const normC = runColor
+      ? minMaxNormCosine01ById(colorHits, knnCosinesimilScoreToCosine01)
+      : new Map<string, number>();
+
+    const ids = new Set<string>();
+    for (const h of primaryHits) {
+      const id = String(h._source?.product_id ?? "");
+      if (id) ids.add(id);
+    }
+    if (runDualGarment) {
+      for (const h of garmentHits) {
+        const id = String(h._source?.product_id ?? "");
+        if (id) ids.add(id);
+      }
+    }
+    if (runColor) {
+      for (const h of colorHits) {
+        const id = String(h._source?.product_id ?? "");
+        if (id) ids.add(id);
+      }
+    }
+
+    const primaryById = new Map<string, any>();
+    for (const h of primaryHits) {
+      const id = String(h._source?.product_id ?? "");
+      if (id) primaryById.set(id, h);
+    }
+    const garmentById = new Map<string, any>();
+    if (runDualGarment) {
+      for (const h of garmentHits) {
+        const id = String(h._source?.product_id ?? "");
+        if (id) garmentById.set(id, h);
+      }
+    }
+    const colorById = new Map<string, any>();
+    if (runColor) {
+      for (const h of colorHits) {
+        const id = String(h._source?.product_id ?? "");
+        if (id) colorById.set(id, h);
+      }
+    }
+
+    const merged: any[] = [];
+    for (const id of ids) {
+      const np = normP.get(id) ?? 0;
+      const ng = runDualGarment ? normG.get(id) ?? 0 : 0;
+      const fg01 = runDualGarment ? (wf * np + wg * ng) / wSumFg : np;
+
+      let final01: number;
+      if (runColor) {
+        const nc = normC.get(id) ?? 0;
+        final01 = (wGlobal * fg01 + wColor * nc) / wSum;
+      } else {
+        final01 = fg01;
+      }
+
+      const calibrated = anchor > 0 ? final01 * anchor : 0;
+      const baseHit = primaryById.get(id) ?? garmentById.get(id) ?? colorById.get(id);
+      if (!baseHit) continue;
+      const sim01 = Math.max(0, Math.min(1, calibrated));
+      (baseHit as any)._score = (sim01 + 1) / 2;
+      merged.push(baseHit);
+    }
+    merged.sort((a: any, b: any) => Number(b._score) - Number(a._score));
+    hits = merged;
   }
 
   const filteredHits = hits.filter((hit: any) => {
+    if (usedMultiBranchFusion) {
+      return knnCosinesimilScoreToCosine01(Number(hit._score)) >= similarityThreshold;
+    }
     return Number(hit._score) >= similarityThreshold;
   });
 
@@ -591,7 +673,11 @@ export async function searchByImageWithSimilarity(
     const floor = imageRelaxSimilarityFloor();
     workingHits = [...hits]
       .sort((a: any, b: any) => Number(b._score) - Number(a._score))
-      .filter((h: any) => Number(h._score) >= floor)
+      .filter((h: any) =>
+        usedMultiBranchFusion
+          ? knnCosinesimilScoreToCosine01(Number(h._score)) >= floor
+          : Number(h._score) >= floor,
+      )
       .slice(0, fetchLimit);
     thresholdRelaxed = workingHits.length > 0;
   }
@@ -635,10 +721,21 @@ export async function searchByImageWithSimilarity(
         filtersRecord.productTypes.map((t: unknown) => String(t).toLowerCase().trim()).filter(Boolean),
       ),
     ];
-  } else if (predictedCategoryAisles?.length) {
+  } else {
+    const fromFilterCat =
+      filterCategory != null
+        ? (Array.isArray(filterCategory) ? filterCategory : [filterCategory]).flatMap((c) =>
+            extractLexicalProductTypeSeeds(String(c)),
+          )
+        : [];
+    const fromPredicted = predictedCategoryAisles?.length
+      ? predictedCategoryAisles.flatMap((a) => extractLexicalProductTypeSeeds(String(a)))
+      : [];
     desiredProductTypes = [
       ...new Set(
-        predictedCategoryAisles.flatMap((a) => extractLexicalProductTypeSeeds(String(a))),
+        [...fromFilterCat, ...fromPredicted]
+          .map((t) => String(t).toLowerCase().trim())
+          .filter(Boolean),
       ),
     ];
   }

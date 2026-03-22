@@ -52,7 +52,7 @@ RUN corepack enable && corepack prepare pnpm@9 --activate
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget ca-certificates \
     python3 python3-venv python3-pip \
-    libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 \
+    libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user

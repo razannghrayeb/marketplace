@@ -1,4 +1,9 @@
-import { ParsedIntent, ImageIntent, SearchConstraints } from '../prompt/gemeni';
+import {
+  ParsedIntent,
+  ImageIntent,
+  SearchConstraints,
+  type SpatialDetail,
+} from '../prompt/gemeni';
 
 // ============================================================================
 // Types & Interfaces
@@ -45,6 +50,8 @@ export interface CompositeQuery {
   searchStrategy: string;
   confidence: number;
   explanation: string;
+  /** Layout / proximity hints from prompt + model (soft retrieval boosts). */
+  spatialRequirements?: SpatialDetail[];
 }
 
 export interface EmbeddingWeightConfig {
@@ -98,6 +105,12 @@ export class CompositeQueryBuilder {
     // Step 4: Build explanation
     const explanation = this.buildExplanation(intent, embeddings);
 
+    const spatialRequirements =
+      intent.constraints.spatialRequirements &&
+      intent.constraints.spatialRequirements.length > 0
+        ? [...intent.constraints.spatialRequirements]
+        : undefined;
+
     return {
       embeddings,
       filters,
@@ -107,6 +120,7 @@ export class CompositeQueryBuilder {
       searchStrategy: intent.searchStrategy,
       confidence: intent.confidence,
       explanation,
+      spatialRequirements,
     };
   }
 
@@ -493,6 +507,14 @@ export class CompositeQueryBuilder {
     const attrList = Object.keys(embeddings.perAttribute);
     if (attrList.length > 0) {
       parts.push(`Attributes optimized: ${attrList.join(', ')}`);
+    }
+
+    const sp = intent.constraints.spatialRequirements;
+    if (sp && sp.length > 0) {
+      const bits = sp
+        .map((s) => [s.attribute, s.location, s.relationship].filter(Boolean).join(" "))
+        .filter(Boolean);
+      if (bits.length) parts.push(`Spatial hints: ${bits.join("; ")}`);
     }
 
     return parts.join(' | ');
