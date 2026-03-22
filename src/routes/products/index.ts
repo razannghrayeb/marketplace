@@ -14,7 +14,7 @@ import "dotenv/config";
 
 import { Router } from "express";
 import multer from "multer";
-import { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory, getProductFacets, getPriceDrops, getSimilarProducts } from "./products.controller";
+import { listProducts, searchProductsByTitle, searchProductsByImage, getProductById, getProductPriceHistory, getProductFacets, getPriceDrops, getSimilarProducts } from "./products.controller";
 import { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
 import { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller";
 import { getRecommendations, getBatchRecommendationsHandler } from "./recommendations.controller";
@@ -88,8 +88,11 @@ router.post("/:id/images", upload.single("image"), uploadImage);
 router.put("/:id/images/:imageId/primary", setAsPrimary);
 router.delete("/:id/images/:imageId", removeImage);
 
+// Single-segment :id last (numeric product id for PDP)
+router.get("/:id", getProductById);
+
 export default router;
-export { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory, getProductFacets, getPriceDrops } from "./products.controller";
+export { listProducts, searchProductsByTitle, searchProductsByImage, getProductById, getProductPriceHistory, getProductFacets, getPriceDrops } from "./products.controller";
 export { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
 export { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller";
 

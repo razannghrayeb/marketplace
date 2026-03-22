@@ -7,6 +7,7 @@
  */
 
 import { pg, getProductsByIdsOrdered } from '../../lib/core/db';
+import { enrichProductsWithVariantSummary } from '../../lib/products';
 import { osClient } from '../../lib/core/opensearch';
 import { config } from '../../config';
 import { IntentParserService, ParsedIntent } from '../../lib/prompt/gemeni';
@@ -43,6 +44,7 @@ import {
 } from '../../lib/search/categoryFilter';
 import {
   expandProductTypesForQuery,
+  extractFashionTypeNounTokens,
   extractLexicalProductTypeSeeds,
 } from '../../lib/search/productTypeTaxonomy';
 import {
@@ -61,8 +63,38 @@ import {
   computeHitRelevance,
   normalizeQueryGender,
   type HitCompliance,
+  type HybridScoreRecallStats,
   type SearchHitRelevanceIntent,
 } from '../../lib/search/searchHitRelevance';
+
+function buildHybridScoreRecallStats(hits: any[]): HybridScoreRecallStats | undefined {
+  if (!hits?.length) return undefined;
+  const hasSplit = hits.some(
+    (h: any) =>
+      h?._source &&
+      "clip_score" in h._source &&
+      "bm25_score" in h._source &&
+      h._source.clip_score != null &&
+      h._source.bm25_score != null,
+  );
+  if (!hasSplit) return undefined;
+  let maxClip = 0;
+  let maxBm25 = 0;
+  for (const h of hits) {
+    const c = Number(h?._source?.clip_score);
+    const b = Number(h?._source?.bm25_score);
+    if (Number.isFinite(c) && c > maxClip) maxClip = c;
+    if (Number.isFinite(b) && b > maxBm25) maxBm25 = b;
+  }
+  if (maxClip <= 0 || maxBm25 <= 0) return undefined;
+  return {
+    hasSplitScores: true,
+    maxClip,
+    maxBm25,
+    useTanhSim: config.search.similarityNormalize === "tanh",
+    tanhScale: config.search.similarityTanhScale,
+  };
+}
 
 // ─── Shared types ────────────────────────────────────────────────────────────
 
@@ -222,7 +254,20 @@ export async function textSearch(
       Array.isArray(callerFilters?.category) ? callerFilters?.category[0] : callerFilters?.category;
     const mergedCategory =
       Array.isArray(merged.category) ? merged.category[0] : merged.category;
-    const lexicalTypeSeeds = extractLexicalProductTypeSeeds(rawQuery);
+    const lexicalTypeSeeds = [
+      ...new Set(
+        [
+          ...extractLexicalProductTypeSeeds(rawQuery),
+          ...extractFashionTypeNounTokens(rawQuery),
+          ...(ast.searchQuery?.trim()
+            ? [
+                ...extractLexicalProductTypeSeeds(ast.searchQuery.trim()),
+                ...extractFashionTypeNounTokens(ast.searchQuery.trim()),
+              ]
+            : []),
+        ].map((s) => s.toLowerCase()),
+      ),
+    ];
     const hasProductTypeConstraint =
       (ast.entities.productTypes?.length ?? 0) > 0 || lexicalTypeSeeds.length > 0;
     const hardAstCategory =
@@ -668,6 +713,8 @@ export async function textSearch(
         'product_types',
         'age_group',
         'audience_gender',
+        'clip_score',
+        'bm25_score',
       ],
     };
 
@@ -812,6 +859,8 @@ export async function textSearch(
           "product_types",
           "age_group",
           "audience_gender",
+          "clip_score",
+          "bm25_score",
         ],
       };
 
@@ -1014,6 +1063,8 @@ export async function textSearch(
       scoreMap.set(String(hit._source.product_id), Math.round(normalized * 100) / 100);
     });
 
+    const hybridScoreRecall = buildHybridScoreRecallStats(hits);
+
     // Deterministic constraint-aware reranking (Phase 3)
     const astProductTypes = (ast.entities.productTypes || []).map((t) => t.toLowerCase());
     const desiredProductTypes = [
@@ -1027,31 +1078,14 @@ export async function textSearch(
       Math.min(2000, Number(process.env.SEARCH_CROSS_FAMILY_PENALTY_WEIGHT ?? "420") || 420),
     );
 
-    const complianceById = new Map<
-      string,
-      {
-        productTypeCompliance: number;
-        exactTypeScore: number;
-        siblingClusterScore: number;
-        parentHypernymScore: number;
-        intraFamilyPenalty: number;
-        colorCompliance: number;
-        matchedColor: string | null;
-        colorTier: "exact" | "family" | "bucket" | "none";
-        crossFamilyPenalty: number;
-        audienceCompliance: number;
-        osSimilarity01: number;
-        categoryRelevance01: number;
-        semanticScore01: number;
-        lexicalScore01: number;
-        rerankScore: number;
-        finalRelevance01: number;
-      }
-    >();
+    const complianceById = new Map<string, HitCompliance>();
 
     const queryAgeGroup = mergedAgeGroup ?? ast.entities.ageGroup;
     const queryGenderForAudience = normalizeQueryGender(merged.gender);
     const hasAudienceIntent = Boolean(queryAgeGroup || queryGenderForAudience);
+
+    const lexicalMatchQuery =
+      (ast.searchQuery && ast.searchQuery.trim()) || rawQuery.trim() || undefined;
 
     const relevanceIntent: SearchHitRelevanceIntent = {
       desiredProductTypes,
@@ -1064,6 +1098,8 @@ export async function textSearch(
       audienceGenderForScoring: queryGenderForAudience ?? merged.gender,
       hasAudienceIntent,
       crossFamilyPenaltyWeight,
+      lexicalMatchQuery,
+      hybridScoreRecall,
     };
 
     const colorById = new Map<string, string | null>();
@@ -1115,7 +1151,9 @@ export async function textSearch(
     }
 
     // Fetch hydrated product + images while preserving ranking order above
-    const products = await getProductsByIdsOrdered(finalProductIds);
+    const products = await enrichProductsWithVariantSummary(
+      await getProductsByIdsOrdered(finalProductIds),
+    );
     const numericIds = finalProductIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
     const imagesByProduct = await getImagesForProducts(numericIds);
 
@@ -1130,7 +1168,8 @@ export async function textSearch(
         // Ensure UI color matches the OpenSearch attribute that retrieval used.
         color: colorById.get(productIdStr) ?? p.color ?? null,
         similarity_score: similarityScore,
-        match_type: similarityScore >= 0.8 ? 'exact' : 'similar',
+        match_type:
+          similarityScore >= config.clip.matchTypeExactMin ? "exact" : "similar",
         rerankScore: compliance?.rerankScore ?? undefined,
         finalRelevance01: compliance?.finalRelevance01,
         explain: compliance
@@ -1141,7 +1180,7 @@ export async function textSearch(
               intraFamilyPenalty: compliance.intraFamilyPenalty,
               productTypeCompliance: compliance.productTypeCompliance,
               categoryScore: compliance.categoryRelevance01,
-              lexicalScore: compliance.lexicalScore01,
+              ...(compliance.lexicalScoreDistinct ? { lexicalScore: compliance.lexicalScore01 } : {}),
               semanticScore: compliance.semanticScore01,
               globalScore: compliance.osSimilarity01,
               colorScore: compliance.colorCompliance,
@@ -1150,6 +1189,10 @@ export async function textSearch(
               colorCompliance: compliance.colorCompliance,
               audienceCompliance: compliance.audienceCompliance,
               crossFamilyPenalty: compliance.crossFamilyPenalty,
+              hasTypeIntent: compliance.hasTypeIntent,
+              hasColorIntent: compliance.hasColorIntent,
+              typeGateFactor: compliance.typeGateFactor,
+              hardBlocked: compliance.hardBlocked,
               desiredProductTypes,
               desiredColors,
               colorMode: rerankColorMode,
@@ -1512,10 +1555,14 @@ export async function multiImageSearch(
         ? (response.body.hits.total as { value?: number }).value ?? 0
         : Number(response.body.hits.total) || 0;
 
-    const relevanceIntent = buildMultiImageSearchHitRelevanceIntent(ast, parsedIntent, userPrompt);
+    let relevanceIntent = buildMultiImageSearchHitRelevanceIntent(ast, parsedIntent, userPrompt);
     const relevanceById = new Map<string, HitCompliance>();
 
     if (hits.length > 0) {
+      const hybridRecallMulti = buildHybridScoreRecallStats(hits);
+      if (hybridRecallMulti) {
+        relevanceIntent = { ...relevanceIntent, hybridScoreRecall: hybridRecallMulti };
+      }
       const maxScore = hits[0]._score ?? 1;
       const useTanhSim = config.search.similarityNormalize === "tanh";
       const tanhScale = config.search.similarityTanhScale;
@@ -1880,7 +1927,21 @@ function buildMultiImageSearchHitRelevanceIntent(
   rawPrompt: string,
 ): SearchHitRelevanceIntent {
   const merged = mergeFilters(undefined, ast);
-  const lexicalTypeSeeds = extractLexicalProductTypeSeeds(rawPrompt);
+  const searchQ = ast.searchQuery?.trim();
+  const lexicalTypeSeeds = [
+    ...new Set(
+      [
+        ...extractLexicalProductTypeSeeds(rawPrompt),
+        ...extractFashionTypeNounTokens(rawPrompt),
+        ...(searchQ
+          ? [
+              ...extractLexicalProductTypeSeeds(searchQ),
+              ...extractFashionTypeNounTokens(searchQ),
+            ]
+          : []),
+      ].map((s) => s.toLowerCase()),
+    ),
+  ];
   const astProductTypes = (ast.entities.productTypes || []).map((t) => t.toLowerCase());
   let desiredProductTypes = [...new Set([...astProductTypes, ...lexicalTypeSeeds])];
 
@@ -1933,6 +1994,8 @@ function buildMultiImageSearchHitRelevanceIntent(
     Math.min(2000, Number(process.env.SEARCH_CROSS_FAMILY_PENALTY_WEIGHT ?? "420") || 420),
   );
 
+  const lexicalMatchQuery = searchQ || rawPrompt.trim() || undefined;
+
   return {
     desiredProductTypes,
     desiredColors: rerankDesiredColors,
@@ -1944,6 +2007,7 @@ function buildMultiImageSearchHitRelevanceIntent(
     audienceGenderForScoring,
     hasAudienceIntent,
     crossFamilyPenaltyWeight,
+    lexicalMatchQuery,
   };
 }
 
@@ -1961,7 +2025,7 @@ async function hydrateProductDetails(productIds: (string | number)[], sqlFilters
     WHERE p.id = ANY($1::bigint[])
   `;
   const result = await pool.query(query, [numericIds]);
-  return result.rows;
+  return enrichProductsWithVariantSummary(result.rows);
 }
 
 function productSearchTextBlob(product: any): string {

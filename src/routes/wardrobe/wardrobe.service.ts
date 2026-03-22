@@ -2,7 +2,7 @@
  * Wardrobe Items Service
  * CRUD operations for user wardrobe items
  */
-import { pg, osClient } from "../../lib/core";
+import { pg, osClient, toPgVectorParam } from "../../lib/core";
 import { processImageForEmbedding, computePHash, uploadImage } from "../../lib/image";
 
 // ============================================================================
@@ -79,7 +79,7 @@ export async function createWardrobeItem(input: CreateWardrobeItemInput): Promis
   const result = await pg.query<WardrobeItem>(
     `INSERT INTO wardrobe_items 
      (user_id, source, product_id, image_url, image_cdn, r2_key, p_hash, name, category_id, brand, pattern_id, material_id, embedding, attributes_extracted)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::vector, $14)
      RETURNING *`,
     [
       input.user_id,
@@ -94,7 +94,7 @@ export async function createWardrobeItem(input: CreateWardrobeItemInput): Promis
       input.brand || null,
       input.pattern_id || null,
       input.material_id || null,
-      embedding,
+      toPgVectorParam(embedding),
       embedding !== null
     ]
   );
@@ -326,8 +326,8 @@ export async function backfillMissingEmbeddings(userId: number, batchSize: numbe
       const embedding = await processImageForEmbedding(buffer);
 
       await pg.query(
-        `UPDATE wardrobe_items SET embedding = $1, attributes_extracted = true WHERE id = $2`,
-        [embedding, row.id]
+        `UPDATE wardrobe_items SET embedding = $1::vector, attributes_extracted = true WHERE id = $2`,
+        [toPgVectorParam(embedding), row.id]
       );
 
       await indexWardrobeItemEmbedding(row.id, userId, embedding);

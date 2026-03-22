@@ -138,6 +138,16 @@ pg.on("error", (err) => {
   console.error("Unexpected database pool error:", err);
 });
 
+/**
+ * Serialize a float embedding for pgvector `vector` columns.
+ * node-pg binds JS arrays as PostgreSQL float8[]; its text form is not valid for the `vector` type.
+ * Use the returned value as a query parameter and cast the placeholder, e.g. `$1::vector`.
+ */
+export function toPgVectorParam(embedding: number[] | null | undefined): string | null {
+  if (embedding == null || embedding.length === 0) return null;
+  return `[${embedding.join(",")}]`;
+}
+
 /** Short hints for common Supabase/pg auth failures (no secrets logged). */
 function databaseConnectionHints(err: unknown): string[] {
   const e = err as { code?: string; message?: string };

@@ -87,6 +87,7 @@ export {
   crossFamilyTypePenaltyEnabled,
   PRODUCT_TYPE_CLUSTERS,
   extractLexicalProductTypeSeeds,
+  extractFashionTypeNounTokens,
   getProductTypePhrasesLongestFirst,
   type RerankTypeBreakdown,
 } from "./productTypeTaxonomy";

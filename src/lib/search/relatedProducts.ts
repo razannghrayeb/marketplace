@@ -1,4 +1,5 @@
 import { osClient, getProductsByIdsOrdered } from "../core";
+import { enrichProductsWithVariantSummary } from "../products/variantEnrichment";
 import { config } from "../../config";
 import { getImagesForProducts } from "../../routes/products/images.service";
 import type { ProductResult } from "../../routes/products/types";
@@ -47,7 +48,7 @@ export async function findRelatedProducts(
 
   if (productIds.length === 0) return [];
 
-  const products = await getProductsByIdsOrdered(productIds);
+  const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds));
   const numericIds = productIds.map((id: string) => parseInt(id, 10));
   const imagesByProduct = await getImagesForProducts(numericIds);
 

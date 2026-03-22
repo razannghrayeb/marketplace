@@ -14,6 +14,7 @@ import {
   processImageForGarmentEmbedding,
 } from "../../lib/image/index";
 import { isClipAvailable } from "../../lib/image/index";
+import { getProductWithVariants } from "./products.service";
 
 // ============================================================================
 // Request Helpers
@@ -188,6 +189,42 @@ export async function searchProductsByImage(req: Request, res: Response) {
   } catch (error) {
     console.error("Error searching by image:", error);
     res.status(500).json({ success: false, error: "Failed to search by image" });
+  }
+}
+
+/**
+ * GET /products/:id
+ * Parent listing + `variants[]` + `images[]` (stable product id for cart/search).
+ */
+export async function getProductById(req: Request, res: Response) {
+  try {
+    const productId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(productId) || productId < 1) {
+      return res.status(400).json({ success: false, error: "Invalid product ID" });
+    }
+
+    const data = await getProductWithVariants(productId);
+    if (!data) {
+      return res.status(404).json({ success: false, error: "Product not found" });
+    }
+
+    const { product, variants, images } = data;
+    res.json({
+      success: true,
+      data: {
+        ...product,
+        images: images.map((img) => ({
+          id: img.id,
+          url: img.cdn_url,
+          is_primary: img.is_primary,
+          p_hash: img.p_hash ?? undefined,
+        })),
+        variants,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching product:", error);
+    res.status(500).json({ success: false, error: "Failed to fetch product" });
   }
 }
 

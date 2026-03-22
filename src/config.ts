@@ -104,6 +104,16 @@ export const config = {
       0.95,
     ),
     duplicateThreshold: Number(process.env.CLIP_DUPLICATE_THRESHOLD || 0.92),
+    /**
+     * `match_type: "exact"` when normalized similarity ≥ this (image + text hybrid UI).
+     * Fashion CLIP scores rarely reach 0.8 unless near-duplicates; tune with prod p85.
+     */
+    matchTypeExactMin: finiteEnvNumber(
+      process.env.CLIP_MATCH_TYPE_EXACT_MIN,
+      0.68,
+      0.5,
+      0.95,
+    ),
   },
   search: {
     recallWindow: finiteEnvNumber(process.env.SEARCH_RECALL_WINDOW, 300, 50, 2000),
