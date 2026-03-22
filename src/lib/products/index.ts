@@ -31,7 +31,15 @@ export {
   type ProductVariantRow,
 } from "./productVariants";
 
-export { enrichProductsWithVariantSummary, applyVariantSummaryToProduct } from "./variantEnrichment";
+export {
+  enrichProductsWithVariantSummary,
+  applyVariantSummaryToProduct,
+  pickVariantForColorHints,
+  pickVariantForTextHints,
+  pickDisplaySkuForSearch,
+  mergeVariantPrimaryImageIntoProductImages,
+  type ResolveDisplayVariantFn,
+} from "./variantEnrichment";
 
 // Price history
 export {

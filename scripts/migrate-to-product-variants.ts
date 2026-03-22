@@ -171,6 +171,32 @@ function pickCanonicalParentUrl(rows: ProductRow[]): string {
   return u.replace(/\/$/, "");
 }
 
+/** Prefer the longest non-empty value — variant rows often carried fuller PDP text than the keeper. */
+function mergeLongestTextField(rows: ProductRow[], pick: (r: ProductRow) => string | null): string | null {
+  let best: string | null = null;
+  let bestLen = 0;
+  for (const r of rows) {
+    const t = pick(r)?.trim();
+    if (t && t.length > bestLen) {
+      best = t;
+      bestLen = t.length;
+    }
+  }
+  return best;
+}
+
+function mergeListingDescription(rows: ProductRow[]): string | null {
+  return mergeLongestTextField(rows, (r) => r.description);
+}
+
+function mergeReturnPolicy(rows: ProductRow[]): string | null {
+  for (const r of rows) {
+    const t = r.return_policy?.trim();
+    if (t) return t;
+  }
+  return null;
+}
+
 async function loadProducts(c: PoolClient, ids: number[]): Promise<ProductRow[]> {
   const { rows } = await c.query<ProductRow>(
     `SELECT id, vendor_id, product_url, parent_product_url, variant_id, title, brand, category,
@@ -460,6 +486,8 @@ async function migrateGroup(
   }
 
   const def = rows.find((r) => r.id === keeper) ?? rows[0];
+  const mergedDescription = mergeListingDescription(rows);
+  const mergedReturnPolicy = mergeReturnPolicy(rows);
   await c.query(
     `UPDATE products SET
        product_url = $2,
@@ -475,7 +503,9 @@ async function migrateGroup(
        image_url = $8,
        image_urls = $9,
        image_cdn = $10,
-       p_hash = $11
+       p_hash = $11,
+       description = $12,
+       return_policy = $13
      WHERE id = $1`,
     [
       keeper,
@@ -489,6 +519,8 @@ async function migrateGroup(
       def.image_urls != null ? JSON.stringify(def.image_urls) : null,
       def.image_cdn,
       def.p_hash,
+      mergedDescription,
+      mergedReturnPolicy,
     ]
   );
 

@@ -232,7 +232,7 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
   const hasIsHidden = await productsTableHasIsHiddenColumn();
   const hasCanonicalId = await productsTableHasCanonicalIdColumn();
   const productResult = await pg.query(
-    `SELECT id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_cdn,
+    `SELECT id, vendor_id, title, description, brand, category, price_cents, availability, last_seen, image_cdn,
             ${hasIsHidden ? "is_hidden" : "false AS is_hidden"},
             ${hasCanonicalId ? "canonical_id" : "NULL::integer AS canonical_id"}
      FROM products WHERE id = $1`,
@@ -265,7 +265,7 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
     productId,
     vendorId: product.vendor_id,
     title: product.title,
-    description: null,
+    description: product.description ?? null,
     brand: product.brand,
     category: product.category,
     priceCents: product.price_cents,

@@ -124,6 +124,13 @@ export interface OutfitComposition {
  */
 let yoloUrlConflictWarned = false;
 let yoloDeprecatedEnvWarned = false;
+let yoloDisabledLogged = false;
+
+/** When true (e.g. Docker offload): no calls to YOLO; `isAvailable` is false without network I/O. */
+export function isYoloDetectionEnvDisabled(): boolean {
+  const v = String(process.env.YOLO_DETECTION_DISABLED ?? "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
 
 export function resolveYoloServiceBaseUrl(override?: string): string {
   const o = override?.trim();
@@ -163,20 +170,40 @@ function yoloReadinessTimeoutMs(): number {
   return Math.min(180_000, Math.max(5_000, n));
 }
 
+function emptyDetectionResponse(): DetectionResponse {
+  return {
+    success: false,
+    detections: [],
+    count: 0,
+    image_size: { width: 0, height: 0 },
+    model: "disabled",
+    summary: {},
+  };
+}
+
 export class YOLOv8Client {
   private baseUrl: string;
   /** Batch / reload long operations */
   private timeout: number;
   private detectTimeoutMs: number;
   private readonly circuit = new YoloCircuitBreaker();
+  private readonly detectionDisabled: boolean;
 
   constructor(baseUrl?: string, timeout?: number) {
+    this.detectionDisabled = isYoloDetectionEnvDisabled();
     this.baseUrl = resolveYoloServiceBaseUrl(baseUrl);
     this.timeout = timeout || 30000;
     this.detectTimeoutMs = yoloDetectTimeoutMs();
-    console.info(
-      `[YOLOv8] HTTP client: base URL=${this.baseUrl} (YOLOV8_SERVICE_URL canonical; YOLO_API_URL deprecated alias); detect timeout=${this.detectTimeoutMs}ms`,
-    );
+    if (this.detectionDisabled && !yoloDisabledLogged) {
+      yoloDisabledLogged = true;
+      console.info(
+        "[YOLOv8] YOLO_DETECTION_DISABLED=1 — fashion detection is off (no HTTP to detector).",
+      );
+    } else if (!this.detectionDisabled) {
+      console.info(
+        `[YOLOv8] HTTP client: base URL=${this.baseUrl} (YOLOV8_SERVICE_URL canonical; YOLO_API_URL deprecated alias); detect timeout=${this.detectTimeoutMs}ms`,
+      );
+    }
   }
 
   /** Base URL used for requests (for logs when health fails). */
@@ -188,6 +215,7 @@ export class YOLOv8Client {
    * Check if the YOLO service is available
    */
   async isAvailable(): Promise<boolean> {
+    if (this.detectionDisabled) return false;
     try {
       const health = await this.health();
       const ok = Boolean(health.ok && health.model_loaded);
@@ -225,6 +253,21 @@ export class YOLOv8Client {
    * Health check endpoint
    */
   async health(): Promise<HealthResponse> {
+    if (this.detectionDisabled) {
+      return {
+        ok: false,
+        model_path: "",
+        model_loaded: false,
+        num_classes: 0,
+        class_names: [],
+        config: {
+          confidence_threshold: 0,
+          iou_threshold: 0,
+          max_detections: 0,
+          min_box_area_ratio: 0,
+        },
+      };
+    }
     const response = await fetch(`${this.baseUrl}/health`, {
       method: "GET",
       signal: AbortSignal.timeout(yoloReadinessTimeoutMs()),
@@ -244,6 +287,9 @@ export class YOLOv8Client {
    * Get all supported fashion categories and their style attributes
    */
   async getLabels(): Promise<LabelsResponse> {
+    if (this.detectionDisabled) {
+      return { fashion_categories: [], category_styles: {}, total: 0 };
+    }
     const response = await fetch(`${this.baseUrl}/labels`, {
       method: "GET",
       signal: AbortSignal.timeout(yoloReadinessTimeoutMs()),
@@ -264,6 +310,9 @@ export class YOLOv8Client {
     filename: string = "image.jpg",
     options: DetectOptions = {}
   ): Promise<DetectionResponse> {
+    if (this.detectionDisabled) {
+      return emptyDetectionResponse();
+    }
     try {
       this.circuit.beforeRequest();
     } catch (e) {
@@ -359,6 +408,12 @@ export class YOLOv8Client {
   ): Promise<
     Array<{ filename: string; result?: DetectionResponse; error?: string }>
   > {
+    if (this.detectionDisabled) {
+      return images.map((img) => ({
+        filename: img.filename,
+        result: emptyDetectionResponse(),
+      }));
+    }
     const formData = new FormData();
 
     for (const img of images) {
@@ -392,6 +447,9 @@ export class YOLOv8Client {
    * Reload the YOLO model
    */
   async reload(): Promise<{ ok: boolean; message: string; num_classes: number }> {
+    if (this.detectionDisabled) {
+      return { ok: false, message: "YOLO_DETECTION_DISABLED", num_classes: 0 };
+    }
     const response = await fetch(`${this.baseUrl}/reload`, {
       method: "POST",
       signal: AbortSignal.timeout(30000),

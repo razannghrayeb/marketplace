@@ -118,7 +118,7 @@ export async function findSimilarByPHash(
 
   // Fetch product data
   const productIds = topSimilar.map((s) => String(s.id));
-  const products = await getProductsByIdsOrdered(productIds);
+  const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds));
   const numericIds = topSimilar.map((s) => s.id);
   const imagesByProduct = await getImagesForProducts(numericIds);
 

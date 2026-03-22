@@ -15,6 +15,14 @@ async function columnExists(columnName: string) {
   return !!res.rowCount && res.rowCount > 0;
 }
 
+async function tableExists(tableName: string) {
+  const res = await pg.query(
+    `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`,
+    [tableName]
+  );
+  return !!res.rowCount && res.rowCount > 0;
+}
+
 async function getProductColumns(): Promise<{ hasIsHidden: boolean; hasCanonicalId: boolean }> {
   const [hasIsHidden, hasCanonicalId] = await Promise.all([
     columnExists("is_hidden"),
@@ -39,26 +47,60 @@ async function fetchImage(url: string): Promise<Buffer | null> {
 
 async function main() {
   try {
-    if (!(await columnExists("image_url"))) {
-      console.error("products.image_url column not found. Add image_url column before reindexing.");
+    const hasProductImageUrl = await columnExists("image_url");
+    const hasProductVariants = await tableExists("product_variants");
+    if (!hasProductImageUrl && !hasProductVariants) {
+      console.error(
+        "Need products.image_url or a product_variants table with images — nothing to reindex.",
+      );
       process.exit(1);
     }
 
     const { hasIsHidden, hasCanonicalId } = await getProductColumns();
 
-    console.log("Fetching products with images...");
     const optionalColumns = [
-      hasIsHidden ? "is_hidden" : "NULL::boolean AS is_hidden",
-      hasCanonicalId ? "canonical_id" : "NULL::text AS canonical_id",
+      hasIsHidden ? "p.is_hidden" : "NULL::boolean AS is_hidden",
+      hasCanonicalId ? "p.canonical_id" : "NULL::text AS canonical_id",
     ].join(", ");
+
+    console.log(
+      hasProductVariants
+        ? "Fetching products (image/price from default product_variants row when present)..."
+        : "Fetching products with images...",
+    );
 
     let res;
     try {
-      res = await pg.query(
-        `SELECT id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_url, ${optionalColumns}
-         FROM products
-         WHERE image_url IS NOT NULL`
-      );
+      if (hasProductVariants) {
+        const imageExpr = hasProductImageUrl
+          ? "COALESCE(pv.image_url, p.image_url)"
+          : "pv.image_url";
+        const priceExpr =
+          "COALESCE(pv.sales_price_cents, pv.price_cents, p.price_cents) AS price_cents";
+        res = await pg.query(
+          `SELECT p.id, p.vendor_id, p.title, p.description, p.brand, p.category,
+                  ${priceExpr},
+                  COALESCE(pv.availability, p.availability) AS availability,
+                  COALESCE(pv.last_seen, p.last_seen) AS last_seen,
+                  ${imageExpr} AS image_url,
+                  ${optionalColumns}
+           FROM products p
+           LEFT JOIN LATERAL (
+             SELECT image_url, price_cents, sales_price_cents, availability, last_seen
+             FROM product_variants
+             WHERE product_id = p.id
+             ORDER BY is_default DESC, id
+             LIMIT 1
+           ) pv ON true
+           WHERE ${imageExpr} IS NOT NULL`,
+        );
+      } else {
+        res = await pg.query(
+          `SELECT id, vendor_id, title, description, brand, category, price_cents, availability, last_seen, image_url, ${optionalColumns.replace(/p\./g, "")}
+           FROM products
+           WHERE image_url IS NOT NULL`,
+        );
+      }
     } catch (queryErr) {
       console.error("Database query failed:", queryErr);
       process.exit(1);
@@ -70,7 +112,20 @@ async function main() {
     const enrichMap = await loadProductSearchEnrichmentByIds(allIds);
 
     for (const row of res.rows) {
-      const { id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_url, is_hidden, canonical_id } = row;
+      const {
+        id,
+        vendor_id,
+        title,
+        description,
+        brand,
+        category,
+        price_cents,
+        availability,
+        last_seen,
+        image_url,
+        is_hidden,
+        canonical_id,
+      } = row;
       const buf = await fetchImage(image_url);
       if (!buf) continue;
 
@@ -87,7 +142,7 @@ async function main() {
           productId: id,
           vendorId: vendor_id,
           title,
-          description: null,
+          description: description ?? null,
           brand,
           category,
           priceCents: price_cents,
