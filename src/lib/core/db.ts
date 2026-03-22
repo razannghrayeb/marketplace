@@ -138,6 +138,41 @@ pg.on("error", (err) => {
   console.error("Unexpected database pool error:", err);
 });
 
+/** Short hints for common Supabase/pg auth failures (no secrets logged). */
+function databaseConnectionHints(err: unknown): string[] {
+  const e = err as { code?: string; message?: string };
+  const code = e?.code ?? "";
+  const msg = String(e?.message ?? "").toLowerCase();
+  const url = process.env.DATABASE_URL?.trim() ?? "";
+  const hints: string[] = [];
+
+  if (!url) {
+    hints.push("DATABASE_URL is missing or empty — set it in .env (Supabase: Settings → Database → connection string).");
+    return hints;
+  }
+
+  if (code === "08006" || msg.includes("authentication") || msg.includes("password")) {
+    hints.push(
+      "Check password: copy the database password from Supabase (not the anon/service API keys).",
+    );
+    hints.push(
+      "If the password has @ # % + etc., URL-encode it inside DATABASE_URL.",
+    );
+    hints.push(
+      "Pooler: use the exact user from the dashboard (often postgres.<project-ref> on pooler hosts). Wrong user causes auth failures.",
+    );
+    hints.push(
+      "Try transaction pooler port 6543 vs direct 5432 if one fails; set PG_POOL_MAX=1 for session pooler (:5432 pooler).",
+    );
+  }
+
+  if (code === "ENOTFOUND" || msg.includes("getaddrinfo")) {
+    hints.push("DNS/host typo in DATABASE_URL, or offline VPN/firewall blocking the DB host.");
+  }
+
+  return hints;
+}
+
 /**
  * Test database connection
  */
@@ -147,6 +182,10 @@ export async function testConnection(): Promise<boolean> {
     return true;
   } catch (error) {
     console.error("Database connection test failed:", error);
+    const hints = databaseConnectionHints(error);
+    if (hints.length > 0) {
+      console.error("[pg] Troubleshooting:\n  - " + hints.join("\n  - "));
+    }
     return false;
   }
 }

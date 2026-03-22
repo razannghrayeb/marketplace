@@ -1,77 +1,17 @@
+# Single web service: full API + ML (same as local monolith).
+# Use a plan with enough RAM/CPU for CLIP + optional YOLO cold start.
 services:
   - type: web
-    name: marketplace-api
-    runtime: node
-    plan: starter
-    autoDeploy: true
-    healthCheckPath: /health/live
-    buildCommand: pnpm install --frozen-lockfile && pnpm build
-    startCommand: pnpm start:api
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: SERVICE_ROLE
-        value: api
-      - key: ML_SERVICE_URL
-        value: https://marketplace-ml.onrender.com
-      - key: CORS_ORIGIN
-        sync: false
-      - key: DATABASE_URL
-        sync: false
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_ANON_KEY
-        sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
-      - key: OS_NODE
-        sync: false
-      - key: OS_INDEX
-        value: products
-      - key: OS_USERNAME
-        sync: false
-      - key: OS_PASSWORD
-        sync: false
-      - key: REDIS_URL
-        sync: false
-      - key: R2_ACCOUNT_ID
-        sync: false
-      - key: R2_ACCESS_KEY_ID
-        sync: false
-      - key: R2_SECRET_ACCESS_KEY
-        sync: false
-      - key: R2_BUCKET
-        sync: false
-      - key: R2_PUBLIC_BASE_URL
-        sync: false
-      - key: JWT_SECRET
-        sync: false
-      - key: JWT_ACCESS_EXPIRES_IN
-        value: 15m
-      - key: JWT_REFRESH_EXPIRES_IN
-        value: 7d
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: GCLOUD_PROJECT
-        sync: false
-      - key: GOOGLE_APPLICATION_CREDENTIALS
-        sync: false
-      - key: RANKER_API_URL
-        sync: false
-
-  - type: web
-    name: marketplace-ml
+    name: marketplace
     runtime: node
     plan: standard
     autoDeploy: true
     healthCheckPath: /health/live
     buildCommand: pnpm install --frozen-lockfile && pnpm build
-    startCommand: pnpm start:ml
+    startCommand: pnpm start
     envVars:
       - key: NODE_ENV
         value: production
-      - key: SERVICE_ROLE
-        value: ml
       - key: CORS_ORIGIN
         sync: false
       - key: DATABASE_URL

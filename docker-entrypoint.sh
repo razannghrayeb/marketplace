@@ -1,15 +1,9 @@
 #!/bin/sh
-# Production entrypoint: Node API + optional in-container YOLO (FastAPI on loopback).
-# - SERVICE_ROLE=api: Node only (ML/YOLO live on the peer ML service).
-# - SERVICE_ROLE=ml|all: start uvicorn on 127.0.0.1:${YOLO_INTERNAL_PORT:-8001} unless
-#   YOLOV8_SERVICE_URL or YOLO_API_URL points at a different host (external YOLO).
+# Production entrypoint: Node + optional in-container YOLO (FastAPI on loopback).
+# Starts uvicorn on 127.0.0.1:${YOLO_INTERNAL_PORT:-8001} unless YOLOV8_SERVICE_URL /
+# YOLO_API_URL points at a different host (external YOLO only).
 
 set -eu
-
-ROLE=$(printf '%s' "${SERVICE_ROLE:-all}" | tr '[:upper:]' '[:lower:]')
-if [ "$ROLE" = "api" ]; then
-  exec node /app/dist/index.js
-fi
 
 YOLO_PORT=${YOLO_INTERNAL_PORT:-8001}
 YOLO_URL="${YOLOV8_SERVICE_URL:-}"

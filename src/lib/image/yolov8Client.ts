@@ -127,6 +127,13 @@ export function resolveYoloServiceBaseUrl(override?: string): string {
   return "http://127.0.0.1:8001";
 }
 
+/** GET /health and /labels may trigger first-time model load (entrypoint waits up to 180s for same). */
+function yoloReadinessTimeoutMs(): number {
+  const raw = Number(process.env.YOLO_READINESS_TIMEOUT_MS);
+  const n = Number.isFinite(raw) && raw > 0 ? raw : 120_000;
+  return Math.min(180_000, Math.max(5_000, n));
+}
+
 export class YOLOv8Client {
   private baseUrl: string;
   private timeout: number;
@@ -156,7 +163,24 @@ export class YOLOv8Client {
       return ok;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      const cause =
+        e instanceof Error && e.cause instanceof Error
+          ? `${e.cause.name}: ${e.cause.message}`
+          : e instanceof Error && e.cause != null
+            ? String(e.cause)
+            : "";
       console.warn(`[YOLOv8] health check failed at ${this.baseUrl}: ${msg}`);
+      const refused =
+        cause.includes("ECONNREFUSED") ||
+        msg.includes("ECONNREFUSED") ||
+        /connection refused/i.test(cause) ||
+        /connection refused/i.test(msg);
+      if (refused) {
+        console.warn(
+          `[YOLOv8] No process is accepting connections at ${this.baseUrl}. ` +
+            `Local dev: run \`pnpm yolo:dev\` (or \`docker compose up -d yolov8\`) and use YOLO_API_URL=http://127.0.0.1:8001 in .env.`
+        );
+      }
       return false;
     }
   }
@@ -167,11 +191,14 @@ export class YOLOv8Client {
   async health(): Promise<HealthResponse> {
     const response = await fetch(`${this.baseUrl}/health`, {
       method: "GET",
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(yoloReadinessTimeoutMs()),
     });
 
     if (!response.ok) {
-      throw new Error(`Health check failed: ${response.status}`);
+      const body = await response.text().catch(() => "");
+      throw new Error(
+        `Health check failed: ${response.status} ${body.slice(0, 200)}`
+      );
     }
 
     return response.json();
@@ -183,7 +210,7 @@ export class YOLOv8Client {
   async getLabels(): Promise<LabelsResponse> {
     const response = await fetch(`${this.baseUrl}/labels`, {
       method: "GET",
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(yoloReadinessTimeoutMs()),
     });
 
     if (!response.ok) {
