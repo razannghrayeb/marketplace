@@ -1,5 +1,4 @@
 import { pg } from "../../lib/core/db";
-import { enrichProductsWithVariantSummary } from "../../lib/products";
 import { CartItemRow } from "../../types";
 
 export interface CartItemWithProduct extends CartItemRow {
@@ -27,41 +26,21 @@ export async function getCart(
     [userId]
   );
 
-  const paired = result.rows.map((r) => ({
-    row: {
-      id: r.id,
-      user_id: r.user_id,
-      product_id: r.product_id,
-      quantity: r.quantity,
-      added_at: r.added_at,
-    },
-    product: {
-      id: r.product_id,
-      title: r.title,
-      brand: r.brand,
-      price_cents: r.price_cents,
-      sales_price_cents: r.sales_price_cents,
-      currency: r.currency,
-      image_url: r.image_url,
-      image_cdn: r.image_cdn,
-      availability: r.availability,
-    },
+  const items: CartItemWithProduct[] = result.rows.map((r) => ({
+    id: r.id,
+    user_id: r.user_id,
+    product_id: r.product_id,
+    quantity: r.quantity,
+    added_at: r.added_at,
+    title: r.title,
+    brand: r.brand,
+    price_cents: r.price_cents,
+    sales_price_cents: r.sales_price_cents,
+    currency: r.currency,
+    image_url: r.image_url,
+    image_cdn: r.image_cdn,
+    availability: r.availability,
   }));
-  const enriched = await enrichProductsWithVariantSummary(paired.map((p) => p.product));
-  const items: CartItemWithProduct[] = paired.map((p, i) => {
-    const e = enriched[i] as any;
-    return {
-      ...p.row,
-      title: e.title,
-      brand: e.brand,
-      price_cents: e.price_cents,
-      sales_price_cents: e.sales_price_cents,
-      currency: e.currency,
-      image_url: e.image_url,
-      image_cdn: e.image_cdn,
-      availability: e.availability,
-    };
-  });
   const total_items = items.reduce((sum, i) => sum + i.quantity, 0);
   const total_price_cents = items.reduce((sum, i) => {
     const price = i.sales_price_cents ?? i.price_cents;

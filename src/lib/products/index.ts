@@ -1,6 +1,6 @@
 /**
  * Products Module Exports
- * 
+ *
  * Product-related business logic: canonical grouping, price history.
  */
 
@@ -23,23 +23,6 @@ export {
   type CanonicalProduct,
   type CanonicalMatch,
 } from "./canonical";
-
-// Variants (parent product + SKU rows)
-export {
-  getVariantsByProductIds,
-  getDefaultVariant,
-  type ProductVariantRow,
-} from "./productVariants";
-
-export {
-  enrichProductsWithVariantSummary,
-  applyVariantSummaryToProduct,
-  pickVariantForColorHints,
-  pickVariantForTextHints,
-  pickDisplaySkuForSearch,
-  mergeVariantPrimaryImageIntoProductImages,
-  type ResolveDisplayVariantFn,
-} from "./variantEnrichment";
 
 // Price history
 export {

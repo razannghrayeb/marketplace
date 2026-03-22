@@ -195,7 +195,7 @@ export async function searchProductsByImage(req: Request, res: Response) {
 
 /**
  * GET /products/:id
- * Parent listing + `variants[]` + `images[]` (stable product id for cart/search).
+ * Single product row + `images[]` (SKU-level fields live on `products`).
  */
 export async function getProductById(req: Request, res: Response) {
   try {
@@ -209,7 +209,7 @@ export async function getProductById(req: Request, res: Response) {
       return res.status(404).json({ success: false, error: "Product not found" });
     }
 
-    const { product, variants, images } = data;
+    const { product, images } = data;
     res.json({
       success: true,
       data: {
@@ -220,7 +220,6 @@ export async function getProductById(req: Request, res: Response) {
           is_primary: img.is_primary,
           p_hash: img.p_hash ?? undefined,
         })),
-        variants,
       },
     });
   } catch (error) {

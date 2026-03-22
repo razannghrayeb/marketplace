@@ -7,12 +7,6 @@
  */
 
 import { pg, getProductsByIdsOrdered } from '../../lib/core/db';
-import {
-  enrichProductsWithVariantSummary,
-  pickDisplaySkuForSearch,
-  mergeVariantPrimaryImageIntoProductImages,
-  type ResolveDisplayVariantFn,
-} from '../../lib/products';
 import { osClient } from '../../lib/core/opensearch';
 import { config } from '../../config';
 import {
@@ -171,28 +165,6 @@ export interface MultiImageSearchRequest {
   userPrompt: string;
   limit?: number;
   rerankWeights?: RerankOptions | any;
-}
-
-/**
- * Pick SKU for search cards: color (filters + per-hit OS color), then query tokens vs variant
- * description / size / URL, then default SKU.
- */
-function resolveDisplayVariantForSearchHits(
-  colorById: Map<string, string | null>,
-  callerFilters: SearchFilters | undefined,
-  queryColorHints: string[],
-  textQuery: string | undefined,
-): ResolveDisplayVariantFn {
-  const filterHints: string[] = [...queryColorHints];
-  if (callerFilters?.color) filterHints.push(String(callerFilters.color));
-  if (Array.isArray(callerFilters?.colors)) {
-    for (const c of callerFilters.colors) filterHints.push(String(c));
-  }
-  return (pid, variants) =>
-    pickDisplaySkuForSearch(variants, {
-      colorHints: [...filterHints, colorById.get(String(pid))],
-      textQuery: textQuery ?? null,
-    });
 }
 
 function strictProductTypeFilterEnv(): boolean {
@@ -1316,17 +1288,7 @@ export async function textSearch(
         : Promise.resolve([] as ProductResult[]);
 
     // Fetch hydrated product + images; overlap related OpenSearch when requested.
-    const products = await enrichProductsWithVariantSummary(
-      await getProductsByIdsOrdered(finalProductIds),
-      {
-        resolveDisplayVariant: resolveDisplayVariantForSearchHits(
-          colorById,
-          callerFilters,
-          desiredColors,
-          lexicalMatchQuery,
-        ),
-      },
-    );
+    const products = await getProductsByIdsOrdered(finalProductIds);
     const numericIds = finalProductIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
     const [imagesByProduct, relatedProducts] = await Promise.all([
       getImagesForProducts(numericIds),
@@ -1338,17 +1300,12 @@ export async function textSearch(
       const images = imagesByProduct.get(parseInt(p.id, 10)) || [];
       const similarityScore = scoreMap.get(productIdStr) ?? 0;
       const compliance = complianceById.get(productIdStr);
-      const galleryBase = images.map((img: any) => ({
+      const imagesOut = images.map((img: any) => ({
         id: img.id,
         url: img.cdn_url,
         is_primary: img.is_primary,
         p_hash: img.p_hash ?? undefined,
       }));
-      const imagesOut = mergeVariantPrimaryImageIntoProductImages(
-        p.default_variant_id,
-        p.image_cdn || p.image_url,
-        galleryBase,
-      );
 
       return {
         ...p,
@@ -2365,15 +2322,10 @@ async function hydrateProductDetails(
   `;
   const result = await pool.query(query, [numericIds]);
   const colorMap = variantOptions?.primaryColorByProductId;
-  const staticHints = variantOptions?.queryColorHints ?? [];
-  const textQ = variantOptions?.textQuery ?? null;
-  return enrichProductsWithVariantSummary(result.rows, {
-    resolveDisplayVariant: (pid, variants) =>
-      pickDisplaySkuForSearch(variants, {
-        colorHints: [...staticHints, colorMap?.get(String(pid))],
-        textQuery: textQ,
-      }),
-  });
+  return result.rows.map((row: any) => ({
+    ...row,
+    color: colorMap?.get(String(row.id)) ?? row.color ?? null,
+  }));
 }
 
 function productSearchTextBlob(product: any): string {

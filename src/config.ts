@@ -129,7 +129,7 @@ export const config = {
     similarityTanhScale: finiteEnvNumber(process.env.SEARCH_SIMILARITY_TANH_SCALE, 10, 1, 50),
     /** hard = drop hits below SEARCH_FINAL_ACCEPT_MIN; soft = keep reranked order, no min gate */
     relevanceGateMode:
-      String(process.env.SEARCH_RELEVANCE_GATE_MODE ?? "hard").toLowerCase() === "soft"
+      String(process.env.SEARCH_RELEVANCE_GATE_MODE ?? "soft").toLowerCase() === "soft"
         ? ("soft" as const)
         : ("hard" as const),
     /**

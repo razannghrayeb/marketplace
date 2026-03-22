@@ -16,7 +16,7 @@ import {
 } from "../../lib/core";
 import { config } from "../../config";
 import { getImagesForProducts } from "./images.service";
-import { hammingDistance, enrichProductsWithVariantSummary } from "../../lib/products";
+import { hammingDistance } from "../../lib/products";
 import { searchImage, searchText } from "../../lib/search/fashionSearchFacade";
 import type {
   ImageSearchParams,
@@ -118,7 +118,7 @@ export async function findSimilarByPHash(
 
   // Fetch product data
   const productIds = topSimilar.map((s) => String(s.id));
-  const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds));
+  const products = await getProductsByIdsOrdered(productIds);
   const numericIds = topSimilar.map((s) => s.id);
   const imagesByProduct = await getImagesForProducts(numericIds);
 
@@ -234,7 +234,7 @@ export async function findRelatedProducts(
 
   if (productIds.length === 0) return [];
 
-  const products = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered(productIds));
+  const products = await getProductsByIdsOrdered(productIds);
   const numericIds = productIds.map((id: string) => parseInt(id, 10));
   const imagesByProduct = await getImagesForProducts(numericIds);
 

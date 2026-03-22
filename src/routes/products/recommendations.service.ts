@@ -14,7 +14,6 @@
  */
 import { getAndRankCandidates, applyMMR, type RankedCandidateResult } from "../../lib/ranker";
 import { pg, getProductsByIdsOrdered } from "../../lib/core";
-import { enrichProductsWithVariantSummary } from "../../lib/products";
 import { logImpressionBatch, type RecommendationImpression, type LogImpressionBatchParams } from "../../lib/recommendations";
 import { applyExplorationBoost } from "../../lib/recommendations/coldStart";
 
@@ -116,12 +115,18 @@ export async function getSimilarProducts(
 
   const startTime = Date.now();
 
-  const sourceRows = await enrichProductsWithVariantSummary(await getProductsByIdsOrdered([productId]));
-  if (sourceRows.length === 0) {
+  // Fetch source product
+  const sourceRes = await pg.query(
+    `SELECT id, title, brand, category, price_cents, currency, image_cdn 
+     FROM products WHERE id = $1`,
+    [productId]
+  );
+
+  if (sourceRes.rows.length === 0) {
     throw new Error(`Product not found: ${productId}`);
   }
 
-  const source = sourceRows[0] as any;
+  const source = sourceRes.rows[0] as any;
 
   // Run the ranking pipeline (get more candidates for MMR to work with)
   const candidateMultiplier = applyDiversity ? 3 : 1;

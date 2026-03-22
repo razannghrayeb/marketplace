@@ -1,5 +1,4 @@
 import { pg } from "../../lib/core/db";
-import { enrichProductsWithVariantSummary } from "../../lib/products";
 import { FavoriteRow } from "../../types";
 
 export interface FavoriteWithProduct extends FavoriteRow {
@@ -34,33 +33,19 @@ export async function getFavorites(
     [userId, limit, offset]
   );
 
-  const paired = result.rows.map((r) => ({
-    fav: { id: r.id, user_id: r.user_id, product_id: r.product_id, created_at: r.created_at },
-    product: {
-      id: r.product_id,
-      title: r.title,
-      brand: r.brand,
-      price_cents: r.price_cents,
-      sales_price_cents: r.sales_price_cents,
-      currency: r.currency,
-      image_url: r.image_url,
-      image_cdn: r.image_cdn,
-    },
+  const items: FavoriteWithProduct[] = result.rows.map((r) => ({
+    id: r.id,
+    user_id: r.user_id,
+    product_id: r.product_id,
+    created_at: r.created_at,
+    title: r.title,
+    brand: r.brand,
+    price_cents: r.price_cents,
+    sales_price_cents: r.sales_price_cents,
+    currency: r.currency,
+    image_url: r.image_url,
+    image_cdn: r.image_cdn,
   }));
-  const enriched = await enrichProductsWithVariantSummary(paired.map((p) => p.product));
-  const items: FavoriteWithProduct[] = paired.map((p, i) => {
-    const e = enriched[i] as any;
-    return {
-      ...p.fav,
-      title: e.title,
-      brand: e.brand,
-      price_cents: e.price_cents,
-      sales_price_cents: e.sales_price_cents,
-      currency: e.currency,
-      image_url: e.image_url,
-      image_cdn: e.image_cdn,
-    };
-  });
 
   return {
     items,
