@@ -64,10 +64,19 @@ export interface ImageSearchParams extends SearchParams {
   similarityThreshold?: number;  // 0-1, default 0.7 (70% similarity)
   includeRelated?: boolean;      // Include related by pHash
   pHash?: string;                // Optional pHash for visual similarity
+  /**
+   * Garment-centered CLIP vector (same model/dim as `imageEmbedding`); merged with primary kNN
+   * on `embedding` when `SEARCH_IMAGE_DUAL_GARMENT_FUSION` is on (see `embedding_garment` index field).
+   */
+  imageEmbeddingGarment?: number[];
   /** Raw bytes when embedding is computed by the callee (unified image search path). */
   imageBuffer?: Buffer;
   /** Soft rerank hints when SEARCH_IMAGE_SOFT_CATEGORY=1 */
   predictedCategoryAisles?: string[];
+  /** Override kNN field (`embedding` vs `embedding_garment`, etc.) */
+  knnField?: string;
+  /** Return best kNN hits when none pass similarityThreshold (Shop-the-Look). */
+  relaxThresholdWhenEmpty?: boolean;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -116,6 +125,7 @@ export interface SearchResultWithRelated {
     processed_query?: QueryAST;  // Query processing info (corrections, etc.)
     did_you_mean?: string;  // Suggestion if not auto-applied
     below_relevance_threshold?: boolean;
+    threshold_relaxed?: boolean;
     recall_size?: number;
     final_accept_min?: number;
     total_above_threshold?: number;
@@ -214,6 +224,35 @@ function imageGenderSoftEnv(): boolean {
   return v === "1" || v === "true";
 }
 
+/** Fuse primary `embedding` kNN with `embedding_garment` kNN when a garment query vector is supplied. */
+function imageDualGarmentFusionEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_DUAL_GARMENT_FUSION ?? "1").toLowerCase();
+  return v !== "0" && v !== "false" && v !== "off";
+}
+
+/**
+ * OpenSearch kNN `space_type: cosinesimil` returns score = (2 − d) / 2 with d = 1 − cos(θ), i.e. score = (1 + cos) / 2.
+ * See https://docs.opensearch.org/latest/mappings/supported-field-types/knn-spaces/
+ * Threshold checks use raw `hit._score` (monotonic with cosine); UI uses this for cosine in [0, 1] on L2-normalized CLIP vectors.
+ */
+function knnCosinesimilScoreToCosine01(raw: number): number {
+  if (!Number.isFinite(raw)) return 0;
+  let s = raw;
+  if (s > 1.001) s = (s - 1) / 2;
+  s = Math.max(0, Math.min(1, s));
+  const cos = 2 * s - 1;
+  return Math.max(0, Math.min(1, cos));
+}
+
+/** When relaxThresholdWhenEmpty is used, drop hits below this normalized similarity (reduces irrelevant junk). */
+function imageRelaxSimilarityFloor(): number {
+  const raw = String(process.env.SEARCH_IMAGE_RELAX_FLOOR ?? "").trim();
+  if (raw === "") return 0.58;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0.58;
+  return Math.max(0.35, Math.min(0.92, n));
+}
+
 function buildDesiredCatalogTermSet(aisles: string[]): Set<string> {
   const s = new Set<string>();
   for (const a of aisles) {
@@ -252,6 +291,7 @@ export async function searchByImageWithSimilarity(
 ): Promise<SearchResultWithRelated> {
   const {
     imageEmbedding,
+    imageEmbeddingGarment,
     imageBuffer,
     filters = {},
     page = 1,
@@ -260,6 +300,8 @@ export async function searchByImageWithSimilarity(
     includeRelated = true,
     pHash,
     predictedCategoryAisles,
+    knnField: knnFieldParam,
+    relaxThresholdWhenEmpty = false,
   } = params;
 
   if (!imageEmbedding || imageEmbedding.length === 0) {
@@ -267,14 +309,6 @@ export async function searchByImageWithSimilarity(
   }
 
   const evalT0 = Date.now();
-
-  /** Map OpenSearch FAISS cosinesimil raw score to [0, 1] visual similarity */
-  const knnScoreToSimilarity01 = (raw: number): number => {
-    if (!Number.isFinite(raw)) return 0;
-    let s = raw;
-    if (s > 1.001) s = (s - 1) / 2;
-    return Math.max(0, Math.min(1, s));
-  };
 
   // Over-fetch so absolute threshold + later dedup still fill `limit`
   const fetchLimit = Math.min(Math.max(limit * 5, 80), 200);
@@ -284,8 +318,10 @@ export async function searchByImageWithSimilarity(
     ? predictedCategoryAisles
     : undefined;
   const cat = (filters as { category?: string | string[] }).category;
+  /** Aisle rerank when global soft category is on, or when caller passes predictedCategoryAisles (e.g. Shop-the-Look). */
+  const useAisleRerank = softCategory || Boolean(aisleHints?.length);
   const desiredCatalogTerms =
-    softCategory && (aisleHints?.length || cat)
+    useAisleRerank && (aisleHints?.length || cat)
       ? buildDesiredCatalogTermSet(
           aisleHints?.length
             ? aisleHints
@@ -338,7 +374,14 @@ export async function searchByImageWithSimilarity(
   }
 
   const embeddingField =
-    String(process.env.SEARCH_IMAGE_KNN_FIELD ?? "embedding").trim() || "embedding";
+    String(
+      knnFieldParam ?? process.env.SEARCH_IMAGE_KNN_FIELD ?? "embedding",
+    ).trim() || "embedding";
+
+  /** Index `embedding_color` is computed on full product images; query color vectors from detection crops misalign — skip merge when searching `embedding_garment`. */
+  const skipColorKnnMerge =
+    embeddingField === "embedding_garment" &&
+    !/^(1|true)$/i.test(String(process.env.SEARCH_IMAGE_GARMENT_COLOR_MERGE ?? "").trim());
 
   const wGlobal = Math.max(0, Math.min(1, Number(process.env.SEARCH_IMAGE_GLOBAL_KNN_WEIGHT ?? "0.55")));
   const wColor = Math.max(0, Math.min(1, Number(process.env.SEARCH_IMAGE_COLOR_KNN_WEIGHT ?? "0.45")));
@@ -350,7 +393,12 @@ export async function searchByImageWithSimilarity(
   );
 
   let colorQueryEmbedding: number[] | null = null;
-  if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
+  if (
+    !skipColorKnnMerge &&
+    imageBuffer &&
+    Buffer.isBuffer(imageBuffer) &&
+    imageBuffer.length > 0
+  ) {
     try {
       const { attributeEmbeddings } = await import("../../lib/search/attributeEmbeddings");
       colorQueryEmbedding = await attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "color");
@@ -396,6 +444,70 @@ export async function searchByImageWithSimilarity(
 
   let hits = osResponse.body.hits.hits;
 
+  if (
+    imageDualGarmentFusionEnv() &&
+    embeddingField === "embedding" &&
+    imageEmbeddingGarment &&
+    imageEmbeddingGarment.length > 0 &&
+    imageEmbeddingGarment.length === imageEmbedding.length
+  ) {
+    const wfRaw = Number(process.env.SEARCH_IMAGE_DUAL_FULL_WEIGHT ?? "0.55");
+    const wgRaw = Number(process.env.SEARCH_IMAGE_DUAL_GARMENT_WEIGHT ?? "0.45");
+    const wf = Math.max(0, Math.min(1, Number.isFinite(wfRaw) ? wfRaw : 0.55));
+    const wg = Math.max(0, Math.min(1, Number.isFinite(wgRaw) ? wgRaw : 0.45));
+    const wSumFg = wf + wg > 0 ? wf + wg : 1;
+    const garmentFieldBody = {
+      ...knnBase,
+      query: {
+        bool: {
+          must: {
+            knn: {
+              embedding_garment: {
+                vector: imageEmbeddingGarment,
+                k: fetchLimit,
+              },
+            },
+          },
+          filter: filter,
+        },
+      },
+    };
+    try {
+      const garmentFieldResp = await osClient.search({
+        index: config.opensearch.index,
+        body: garmentFieldBody,
+      });
+      const garmentFieldHits = garmentFieldResp.body.hits.hits || [];
+      const byId = new Map<string, { f: number; g: number; hit: any }>();
+      for (const hit of hits) {
+        const id = String(hit._source.product_id);
+        byId.set(id, { f: Number(hit._score), g: 0, hit });
+      }
+      for (const hit of garmentFieldHits) {
+        const id = String(hit._source.product_id);
+        const sim = Number(hit._score);
+        const prev = byId.get(id);
+        if (prev) {
+          prev.g = sim;
+        } else {
+          byId.set(id, { f: 0, g: sim, hit });
+        }
+      }
+      const merged = [...byId.values()]
+        .map(({ f, g, hit }) => {
+          const combined = (wf * f + wg * g) / wSumFg;
+          return { hit, _score: combined, _combined: combined };
+        })
+        .sort((a, b) => b._combined - a._combined);
+      hits = merged.map((m) => {
+        (m.hit as any)._score = m._combined;
+        return m.hit;
+      });
+    } catch {
+      // keep primary-field hits only
+    }
+  }
+
   if (colorQueryEmbedding && colorQueryEmbedding.length > 0 && wColor > 0) {
     const colorBody = {
       ...knnBase,
@@ -422,11 +534,11 @@ export async function searchByImageWithSimilarity(
       const byId = new Map<string, { g: number; c: number; hit: any }>();
       for (const hit of hits) {
         const id = String(hit._source.product_id);
-        byId.set(id, { g: knnScoreToSimilarity01(hit._score), c: 0, hit });
+        byId.set(id, { g: Number(hit._score), c: 0, hit });
       }
       for (const hit of colorHits) {
         const id = String(hit._source.product_id);
-        const sim = knnScoreToSimilarity01(hit._score);
+        const sim = Number(hit._score);
         const prev = byId.get(id);
         if (prev) {
           prev.c = sim;
@@ -450,17 +562,34 @@ export async function searchByImageWithSimilarity(
   }
 
   const filteredHits = hits.filter((hit: any) => {
-    return knnScoreToSimilarity01(hit._score) >= similarityThreshold;
+    return Number(hit._score) >= similarityThreshold;
   });
 
-  /** True when kNN returned candidates but none met CLIP threshold (not the text SEARCH_FINAL_ACCEPT_MIN gate). */
-  const belowRelevanceThreshold = hits.length > 0 && filteredHits.length === 0;
+  /** kNN had candidates but strict gate removed all; optional relax for Shop-the-Look. */
+  let thresholdRelaxed = false;
+  let workingHits = filteredHits;
+  if (
+    relaxThresholdWhenEmpty &&
+    filteredHits.length === 0 &&
+    hits.length > 0
+  ) {
+    const floor = imageRelaxSimilarityFloor();
+    workingHits = [...hits]
+      .sort((a: any, b: any) => Number(b._score) - Number(a._score))
+      .filter((h: any) => Number(h._score) >= floor)
+      .slice(0, fetchLimit);
+    thresholdRelaxed = workingHits.length > 0;
+  }
 
-  let orderedHits = filteredHits;
+  /** True when kNN returned candidates but none met CLIP threshold (not the text SEARCH_FINAL_ACCEPT_MIN gate). */
+  const belowRelevanceThreshold =
+    hits.length > 0 && filteredHits.length === 0 && !thresholdRelaxed;
+
+  let orderedHits = workingHits;
   if (desiredCatalogTerms && desiredCatalogTerms.size > 0) {
-    orderedHits = [...filteredHits].sort((a: any, b: any) => {
-      const sa = knnScoreToSimilarity01(a._score);
-      const sb = knnScoreToSimilarity01(b._score);
+    orderedHits = [...workingHits].sort((a: any, b: any) => {
+      const sa = Number(a._score);
+      const sb = Number(b._score);
       const ca = categoryMetadataSoft01(a._source, desiredCatalogTerms);
       const cb = categoryMetadataSoft01(b._source, desiredCatalogTerms);
       const ra = sa * 1000 + ca * categoryBoost;
@@ -474,7 +603,7 @@ export async function searchByImageWithSimilarity(
   const productIds = hitsForHydrate.map((hit: any) => hit._source.product_id);
   const scoreMap = new Map<string, number>();
   hitsForHydrate.forEach((hit: any) => {
-    const sim = knnScoreToSimilarity01(hit._score);
+    const sim = knnCosinesimilScoreToCosine01(Number(hit._score));
     scoreMap.set(hit._source.product_id, Math.round(sim * 100) / 100);
   });
 
@@ -490,7 +619,7 @@ export async function searchByImageWithSimilarity(
       return {
         ...p,
         similarity_score: scoreMap.get(String(p.id)),
-        match_type: scoreMap.get(String(p.id))! >= 0.95 ? "exact" : "similar",
+        match_type: scoreMap.get(String(p.id))! >= 0.9 ? "exact" : "similar",
         images: images.map((img) => ({
           id: img.id,
           url: img.cdn_url,
@@ -523,7 +652,9 @@ export async function searchByImageWithSimilarity(
       similarity_scores: results.map((p) =>
         typeof p.similarity_score === "number" ? p.similarity_score : 0,
       ),
-      soft_category: Boolean(softCategory && desiredCatalogTerms && desiredCatalogTerms.size > 0),
+      soft_category: Boolean(
+        useAisleRerank && desiredCatalogTerms && desiredCatalogTerms.size > 0,
+      ),
       predicted_aisles: aisleHints ? [...aisleHints] : null,
       similarity_threshold_used: similarityThreshold,
       below_relevance_threshold: belowRelevanceThreshold,
@@ -538,6 +669,7 @@ export async function searchByImageWithSimilarity(
       total_results: results.length,
       total_related: related.length,
       below_relevance_threshold: belowRelevanceThreshold,
+      threshold_relaxed: thresholdRelaxed,
       final_accept_min: config.search.finalAcceptMin,
     },
   };

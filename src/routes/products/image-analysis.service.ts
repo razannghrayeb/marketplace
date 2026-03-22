@@ -14,6 +14,7 @@ import {
   uploadImage,
   getCdnUrl,
   processImageForEmbedding,
+  extractPaddedDetectionCropBuffer,
   computePHash,
   validateImage,
   isClipAvailable,
@@ -39,6 +40,40 @@ import {
 
 function imageSoftCategoryEnv(): boolean {
   const v = String(process.env.SEARCH_IMAGE_SOFT_CATEGORY ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
+/**
+ * kNN field for per-detection Shop-the-Look searches (query vector = padded detection crop).
+ * When `SEARCH_IMAGE_DETECTION_KNN_FIELD` is unset, defaults to `embedding_garment` so query
+ * vectors match the index field built with `processImageForGarmentEmbedding` on catalog images.
+ * Set to `embedding` only if your index omits garment vectors or you intentionally compare crops to full-frame vectors.
+ */
+function shopTheLookKnnField(): string {
+  const v = String(process.env.SEARCH_IMAGE_DETECTION_KNN_FIELD ?? "").trim();
+  return v || "embedding_garment";
+}
+
+/** When true: allow best kNN matches below threshold if they still pass SEARCH_IMAGE_RELAX_FLOOR (default off). */
+function shopLookRelaxEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_SHOP_RELAX ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
+/** When true: if category-filtered search returns nothing, retry without category (default off — can look irrelevant). */
+function shopLookCategoryFallbackEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_SHOP_CATEGORY_FALLBACK ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
+/**
+ * Shop-the-Look: use aisle-level rerank (predictedCategoryAisles) without hard OpenSearch category filter.
+ * Default true when unset — pairs with products.service useAisleRerank when aisle hints are sent.
+ */
+function shopLookSoftCategoryEnv(): boolean {
+  const raw = process.env.SEARCH_IMAGE_SHOP_SOFT_CATEGORY;
+  if (raw === undefined || String(raw).trim() === "") return true;
+  const v = String(raw).toLowerCase();
   return v === "1" || v === "true";
 }
 import {
@@ -137,6 +172,8 @@ export interface DetectionSimilarProducts {
   products: ProductResult[];
   /** Number of similar products found */
   count: number;
+  /** Index into `detection.items` for this row (when multiple instances share a label). */
+  detectionIndex?: number;
 }
 
 /** Grouped similar products by detection */
@@ -164,8 +201,14 @@ export interface AnalyzeAndFindSimilarOptions extends AnalyzeOptions {
   /** Filter similar products by detected category */
   filterByDetectedCategory?: boolean;
 
-  /** Group results by detection (default: true) */
+  /**
+   * When true (default): one similar-product group per YOLO detection instance (same label allowed twice).
+   * When false: at most one group per distinct label (highest-confidence box only) — fewer searches, legacy behavior.
+   */
   groupByDetection?: boolean;
+
+  /** When true, include each detection in `byDetection` even if similarity search returns no products (products may be []). */
+  includeEmptyDetectionGroups?: boolean;
 }
 
 export interface FullAnalysisResult extends ImageAnalysisResult {
@@ -377,6 +420,7 @@ export class ImageAnalysisService {
       similarLimitPerItem = 10,
       filterByDetectedCategory = true,
       groupByDetection = true,
+      includeEmptyDetectionGroups = false,
       ...analyzeOptions
     } = options;
 
@@ -414,6 +458,7 @@ export class ImageAnalysisService {
         limit: similarLimitPerItem,
         similarityThreshold,
         includeRelated: false,
+        relaxThresholdWhenEmpty: shopLookRelaxEnv(),
       });
       return {
         ...analysisResult,
@@ -436,33 +481,38 @@ export class ImageAnalysisService {
       analysisResult.detection.items.map((item) => item.label)
     )];
 
-    // Group detections by label (to avoid duplicate searches for same category)
-    const detectionsByLabel = new Map<string, Detection>();
-    for (const detection of analysisResult.detection.items) {
-      // Keep only the detection with highest confidence for each label
-      const existing = detectionsByLabel.get(detection.label);
-      if (!existing || detection.confidence > existing.confidence) {
-        detectionsByLabel.set(detection.label, detection);
-      }
-    }
+    const detectionJobs: Array<{ detection: Detection; detectionIndex?: number }> =
+      groupByDetection
+        ? analysisResult.detection.items.map((detection, index) => ({
+            detection,
+            detectionIndex: index,
+          }))
+        : (() => {
+            const byLabel = new Map<string, Detection>();
+            for (const detection of analysisResult.detection.items) {
+              const existing = byLabel.get(detection.label);
+              if (!existing || detection.confidence > existing.confidence) {
+                byLabel.set(detection.label, detection);
+              }
+            }
+            return [...byLabel.values()].map((detection) => ({ detection }));
+          })();
 
     // Process all detections in parallel for significant latency reduction.
     // CLIP inference serializes at the ONNX level, but cropping, BLIP captions,
     // and OpenSearch kNN queries all benefit from concurrent execution.
-    const searchTasks = [...detectionsByLabel].map(async ([label, detection]) => {
-      const box = detection.box;
-      const cropWidth = Math.max(1, Math.round(box.x2 - box.x1));
-      const cropHeight = Math.max(1, Math.round(box.y2 - box.y1));
-      const cropLeft = Math.max(0, Math.round(box.x1));
-      const cropTop = Math.max(0, Math.round(box.y1));
-      const safeWidth = Math.min(cropWidth, imageWidth - cropLeft);
-      const safeHeight = Math.min(cropHeight, imageHeight - cropTop);
-
-      if (safeWidth < 10 || safeHeight < 10) return null;
-
-      const croppedBuffer = await sharp(buffer)
-        .extract({ left: cropLeft, top: cropTop, width: safeWidth, height: safeHeight })
-        .toBuffer();
+    const searchTasks = detectionJobs.map(async ({ detection, detectionIndex }) => {
+      const label = detection.label;
+      let croppedBuffer = await extractPaddedDetectionCropBuffer(buffer, detection.box);
+      if (!croppedBuffer) {
+        croppedBuffer = await this.cropDetection(
+          buffer,
+          detection.box,
+          imageWidth,
+          imageHeight
+        );
+      }
+      if (!croppedBuffer) return null;
 
       const finalEmbedding = await processImageForEmbedding(croppedBuffer);
 
@@ -474,7 +524,7 @@ export class ImageAnalysisService {
       const filters: Partial<import("./types").SearchFilters> = {};
       let predictedCategoryAisles: string[] | undefined;
       if (filterByDetectedCategory) {
-        if (imageSoftCategoryEnv()) {
+        if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
           predictedCategoryAisles = searchCategories;
         } else {
           filters.category = searchCategories.length === 1
@@ -483,7 +533,7 @@ export class ImageAnalysisService {
         }
       }
 
-      const similarResult = await searchByImageWithSimilarity({
+      let similarResult = await searchByImageWithSimilarity({
         imageEmbedding: finalEmbedding,
         imageBuffer: croppedBuffer,
         filters,
@@ -491,9 +541,32 @@ export class ImageAnalysisService {
         similarityThreshold,
         includeRelated: false,
         predictedCategoryAisles,
+        knnField: shopTheLookKnnField(),
+        relaxThresholdWhenEmpty: shopLookRelaxEnv(),
       });
 
-      if (similarResult.results.length === 0) return null;
+      if (
+        shopLookCategoryFallbackEnv() &&
+        similarResult.results.length === 0 &&
+        filterByDetectedCategory &&
+        !imageSoftCategoryEnv() &&
+        (filters as { category?: string | string[] }).category
+      ) {
+        similarResult = await searchByImageWithSimilarity({
+          imageEmbedding: finalEmbedding,
+          imageBuffer: croppedBuffer,
+          filters: {},
+          limit: similarLimitPerItem,
+          similarityThreshold,
+          includeRelated: false,
+          knnField: shopTheLookKnnField(),
+          relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+        });
+      }
+
+      if (similarResult.results.length === 0 && !includeEmptyDetectionGroups) {
+        return null;
+      }
 
       return {
         detection: {
@@ -506,6 +579,7 @@ export class ImageAnalysisService {
         category: categoryMapping.productCategory,
         products: similarResult.results,
         count: similarResult.results.length,
+        ...(detectionIndex !== undefined ? { detectionIndex } : {}),
       } as DetectionSimilarProducts;
     });
 
@@ -774,7 +848,7 @@ export class ImageAnalysisService {
         const filters: Record<string, string> = {};
         let predictedCategoryAisles: string[] | undefined;
         if (options.filterByDetectedCategory !== false) {
-          if (imageSoftCategoryEnv()) {
+          if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
             predictedCategoryAisles = shouldUseAlternatives(categoryMapping)
               ? getSearchCategories(categoryMapping)
               : [categoryMapping.productCategory];
@@ -791,9 +865,12 @@ export class ImageAnalysisService {
           similarityThreshold: options.similarityThreshold || 0.7,
           includeRelated: false,
           predictedCategoryAisles,
+          knnField: shopTheLookKnnField(),
+          relaxThresholdWhenEmpty: shopLookRelaxEnv(),
         });
 
-        if (similarResult.results.length > 0) {
+        const includeEmpty = options.includeEmptyDetectionGroups === true;
+        if (similarResult.results.length > 0 || includeEmpty) {
           groupedResults.push({
             detection: {
               label: detection.label,

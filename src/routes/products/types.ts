@@ -41,9 +41,12 @@ export interface SearchParams {
 }
 
 export interface ImageSearchParams extends SearchParams {
-  similarityThreshold?: number; // 0-1, default 0.7 (70% similarity)
+  /** Minimum OpenSearch kNN `cosinesimil` score (0–1). Same as raw `hit._score`; monotonic with cosine similarity. */
+  similarityThreshold?: number;
   includeRelated?: boolean; // Include related by pHash
   pHash?: string; // Optional pHash for visual similarity
+  /** Garment ROI CLIP vector; fused with primary `embedding` kNN when `SEARCH_IMAGE_DUAL_GARMENT_FUSION` is on. */
+  imageEmbeddingGarment?: number[];
   /** When set with `includeRelated`, used to compute pHash if `pHash` is omitted */
   imageBuffer?: Buffer;
   /**
@@ -51,6 +54,16 @@ export interface ImageSearchParams extends SearchParams {
    * `SEARCH_IMAGE_SOFT_CATEGORY=1` — avoids hard OpenSearch category filters.
    */
   predictedCategoryAisles?: string[];
+  /**
+   * OpenSearch kNN vector field name (e.g. `embedding` vs `embedding_garment`).
+   * Shop-the-Look / detection crops often match `embedding_garment` when the index is built with garment ROI vectors.
+   */
+  knnField?: string;
+  /**
+   * When true: if kNN returns hits but none pass `similarityThreshold`, still return the best-scoring candidates
+   * (used for Shop-the-Look where crop↔catalog scores are often below a strict gate).
+   */
+  relaxThresholdWhenEmpty?: boolean;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -91,7 +104,8 @@ export interface ProductResult {
   embedding?: number[]; // Optional vector payload when returned from vector search
   created_at?: string | Date; // Optional for exploration/cold-start logic
   interaction_count?: number; // Optional interaction signal for ranking/boosting
-  similarity_score?: number; // For image search results
+  /** Cosine similarity in [0, 1] (from OpenSearch score via 2·score−1). */
+  similarity_score?: number;
   match_type?: "exact" | "similar" | "related"; // How the product matched
   // Deterministic reranking fields (Phase 3)
   rerankScore?: number;
@@ -131,6 +145,8 @@ export interface SearchResultWithRelated {
     did_you_mean?: string; // Suggestion if not auto-applied
     /** True when every candidate in the recall window scored below SEARCH_FINAL_ACCEPT_MIN. */
     below_relevance_threshold?: boolean;
+    /** Image kNN: strict similarity gate removed all hits; best candidates returned anyway (relaxThresholdWhenEmpty). */
+    threshold_relaxed?: boolean;
     recall_size?: number;
     final_accept_min?: number;
     /** Count after relevance gate + dedupe (before pagination slice). */

@@ -262,11 +262,13 @@ router.post(
           : 0.25,
         similarityThreshold: req.query.threshold
           ? parseFloat(req.query.threshold as string)
-          : 0.7,
+          : 0.63,
         similarLimitPerItem: req.query.limit_per_item
           ? parseInt(req.query.limit_per_item as string, 10)
           : 10,
         filterByDetectedCategory: req.query.filter_category !== "false",
+        groupByDetection: req.query.group_by_detection !== "false",
+        includeEmptyDetectionGroups: req.query.include_empty_groups === "true",
       };
 
       const result = await analysisService.analyzeAndFindSimilar(
@@ -380,7 +382,7 @@ router.post(
           : 0.25,
         similarityThreshold: req.query.threshold
           ? parseFloat(req.query.threshold as string)
-          : 0.7,
+          : 0.63,
         similarLimitPerItem: req.query.limit_per_item
           ? parseInt(req.query.limit_per_item as string, 10)
           : 10,
@@ -436,7 +438,7 @@ router.post(
       const result = await analysisService.findSimilarFromUrl(url, {
         similarityThreshold: req.query.threshold
           ? parseFloat(req.query.threshold as string)
-          : 0.7,
+          : 0.63,
         limitPerItem: req.query.limit_per_item
           ? parseInt(req.query.limit_per_item as string, 10)
           : 10,

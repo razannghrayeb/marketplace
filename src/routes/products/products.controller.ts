@@ -7,7 +7,12 @@ import {
   SearchFilters,
 } from "./products.service";
 import { searchBrowse, searchImage, searchText } from "../../lib/search/fashionSearchFacade";
-import { validateImage, computePHash, processImageForEmbedding } from "../../lib/image/index";
+import {
+  validateImage,
+  computePHash,
+  processImageForEmbedding,
+  processImageForGarmentEmbedding,
+} from "../../lib/image/index";
 import { isClipAvailable } from "../../lib/image/index";
 
 // ============================================================================
@@ -127,6 +132,7 @@ export async function searchProductsByImage(req: Request, res: Response) {
     const file = (req as any).file;
     let embedding: number[];
     let pHash: string | undefined;
+    let garmentEmbeddingForSearch: number[] | undefined;
 
     if (file) {
       // Image file uploaded
@@ -142,12 +148,14 @@ export async function searchProductsByImage(req: Request, res: Response) {
         return res.status(400).json({ success: false, error: validation.error });
       }
 
-      const [emb, pHashResult] = await Promise.all([
+      const [emb, garmentEmb, pHashResult] = await Promise.all([
         processImageForEmbedding(file.buffer),
+        processImageForGarmentEmbedding(file.buffer).catch(() => [] as number[]),
         computePHash(file.buffer),
       ]);
       embedding = emb;
       pHash = pHashResult;
+      garmentEmbeddingForSearch = garmentEmb.length === emb.length ? garmentEmb : undefined;
     } else if (req.body.embedding && Array.isArray(req.body.embedding)) {
       // Client-provided vector (expected: same CLIP image space as the index)
       embedding = req.body.embedding;
@@ -162,6 +170,7 @@ export async function searchProductsByImage(req: Request, res: Response) {
     // Use enhanced search with similarity scoring
       const result = await searchImage({
         imageEmbedding: embedding,
+        imageEmbeddingGarment: garmentEmbeddingForSearch,
       filters,
       limit,
       similarityThreshold,

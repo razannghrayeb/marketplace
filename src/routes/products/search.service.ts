@@ -41,6 +41,7 @@ export async function searchByImageWithSimilarity(
 ): Promise<SearchResultWithRelated> {
   const {
     imageEmbedding,
+    imageEmbeddingGarment,
     imageBuffer,
     filters = {},
     page = 1,
@@ -52,11 +53,14 @@ export async function searchByImageWithSimilarity(
     includeRelated = false,
     pHash,
     predictedCategoryAisles,
+    knnField,
+    relaxThresholdWhenEmpty,
   } = params;
 
   // Phase 2 alignment: route through the unified canonical facade.
   return searchImage({
     imageEmbedding,
+    imageEmbeddingGarment,
     imageBuffer,
     filters,
     limit,
@@ -64,6 +68,8 @@ export async function searchByImageWithSimilarity(
     includeRelated,
     pHash,
     predictedCategoryAisles,
+    knnField,
+    relaxThresholdWhenEmpty,
   }) as Promise<SearchResultWithRelated>;
 }
 
