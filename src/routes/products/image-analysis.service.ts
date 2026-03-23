@@ -275,6 +275,36 @@ function inferAudienceFromCaption(caption: string): { gender?: string; ageGroup?
   return { gender, ageGroup };
 }
 
+function inferColorFromCaption(caption: string): { topColor?: string | null; jeansColor?: string | null } {
+  const s = String(caption || "").toLowerCase();
+
+  // Canonicalize a few common color words expected by our color pipeline.
+  const mapColorWord = (w: string): string | null => {
+    const x = w.toLowerCase().trim();
+    if (!x) return null;
+    if (x === "navy" || x === "dark-blue" || x === "dark blue" || x === "midnight-blue" || x === "midnight blue") return "navy";
+    if (x === "blue" || x === "denim") return "blue";
+    if (x === "black") return "black";
+    if (x === "grey" || x === "gray") return "gray";
+    if (x === "white" || x === "ivory" || x === "cream" || x === "off-white" || x === "off white") return "off-white";
+    if (x === "tan" || x === "camel" || x === "brown") return "tan";
+    if (x === "green" || x === "olive") return "green";
+    return null;
+  };
+
+  // Example: "a blue velvet top"
+  let topColor: string | null = null;
+  const topMatch = s.match(/\b(black|navy|blue|denim|grey|gray|white|ivory|cream|off[- ]white|tan|camel|brown|green|olive)\b[^.]{0,40}\b(top|shirt|blouse|tee|t-shirt|t shirt|tunic)\b/);
+  if (topMatch?.[1]) topColor = mapColorWord(topMatch[1]);
+
+  // Example: "dark jeans" / "blue jeans" (optional; many captions omit explicit color)
+  let jeansColor: string | null = null;
+  const jeansMatch = s.match(/\b(black|navy|blue|denim|grey|gray)\b[^.]{0,20}\bjeans\b/);
+  if (jeansMatch?.[1]) jeansColor = mapColorWord(jeansMatch[1]);
+
+  return { topColor, jeansColor };
+}
+
 function ensureStyleAndMask(detection: Detection, imageWidth: number, imageHeight: number): Detection {
   const next: Detection = { ...detection };
 
@@ -590,6 +620,12 @@ export interface DetectionSimilarProducts {
   count: number;
   /** Index into `detection.items` for this row (when multiple instances share a label). */
   detectionIndex?: number;
+
+  /**
+   * Debug: which inferred attributes were applied to the OpenSearch search.
+   * Helps validate that `color` / `style` / `gender` are actually affecting retrieval.
+   */
+  appliedFilters?: Partial<import("./types").SearchFilters>;
 }
 
 /** Grouped similar products by detection */
@@ -1045,7 +1081,7 @@ export class ImageAnalysisService {
     // Infer audience gender (men/women/boys/girls/etc.) and optionally dominant color once per image.
     // This helps prevent cross-gender recommendations.
     let blipCaption: string | null = null;
-    const inferredAudience =
+    const inferredAudience: ReturnType<typeof inferAudienceFromCaption> =
       analysisResult.services?.blip && imageInferAudienceGenderEnv()
         ? await blip
             .caption(buffer)
@@ -1053,9 +1089,11 @@ export class ImageAnalysisService {
               blipCaption = caption;
               return inferAudienceFromCaption(caption);
             })
-            .catch(() => ({}))
-        : {};
+            .catch(() => ({} as ReturnType<typeof inferAudienceFromCaption>))
+        : ({} as ReturnType<typeof inferAudienceFromCaption>);
 
+    const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
+    // Fallback only: if per-detection crop color is unavailable, use a coarse full-image color.
     const inferredPrimaryColor =
       imageInferDominantColorEnv() && analysisResult.services?.blip
         ? await extractDominantColorNames(buffer, { maxColors: 2, minShare: 0.12 })
@@ -1104,11 +1142,14 @@ export class ImageAnalysisService {
       const filters: Partial<import("./types").SearchFilters> = {};
       // Avoid taxonomy pollution for labels like "short sleeve top" where the word "short"
       // may incorrectly map to shorts/shorts_skirt micro-types.
+      const captionWantsJeans = blipCaption ? /\bjeans\b/.test(blipCaption.toLowerCase()) : false;
       const typeSeedSource =
-        categoryMapping.productCategory === "tops" &&
-        categoryMapping.attributes.sleeveLength === "short"
-          ? "tshirt tee"
-          : label;
+        categoryMapping.productCategory === "bottoms" && captionWantsJeans
+          ? "jeans"
+          : categoryMapping.productCategory === "tops" &&
+            categoryMapping.attributes.sleeveLength === "short"
+            ? "tshirt tee"
+            : label;
       const typeSeeds = extractLexicalProductTypeSeeds(typeSeedSource);
       if (typeSeeds.length) {
         filters.productTypes = typeSeeds;
@@ -1119,20 +1160,33 @@ export class ImageAnalysisService {
       if (inferredAudience.ageGroup) filters.ageGroup = inferredAudience.ageGroup;
 
       const inferredStyle = inferStyleForDetectionLabel(label);
-      const shouldApplyStyleFilter =
-        (detection.confidence ?? 0) >= imageMinStyleConfidenceEnv() &&
-        (detection.area_ratio ?? 0) >= imageMinStyleAreaRatioEnv();
-      if (shouldApplyStyleFilter && inferredStyle.attrStyle) {
-        filters.style = inferredStyle.attrStyle;
+      // Apply style intent whenever we have an inference token; the ranking layer
+      // will score it softly (so we avoid going fully empty).
+      if (inferredStyle.attrStyle) {
+        filters.softStyle = inferredStyle.attrStyle;
       }
 
-      const shouldApplyColorFilter =
-        Boolean(inferredPrimaryColor) &&
+      // Prefer per-detection crop color (aligned with the detected item).
+      // Fall back to caption inferred color / coarse full-image dominant color.
+      let inferredColorForDetection: string | null = null;
+      const shouldInferColorForDetection =
+        imageInferDominantColorEnv() &&
         (detection.confidence ?? 0) >= imageMinColorConfidenceEnv() &&
         (detection.area_ratio ?? 0) >= imageMinColorAreaRatioEnv();
-      if (shouldApplyColorFilter && inferredPrimaryColor) {
-        filters.color = inferredPrimaryColor;
+
+      if (shouldInferColorForDetection) {
+        inferredColorForDetection = await extractDominantColorNames(croppedBuffer, { maxColors: 1, minShare: 0.12 }).then(
+          (c) => c[0] ?? null,
+        );
       }
+
+      if (!inferredColorForDetection) {
+        if (categoryMapping.productCategory === "tops") inferredColorForDetection = captionColors.topColor ?? null;
+        if (categoryMapping.productCategory === "bottoms") inferredColorForDetection = captionColors.jeansColor ?? null;
+      }
+
+      if (!inferredColorForDetection) inferredColorForDetection = inferredPrimaryColor;
+      if (inferredColorForDetection) filters.softColor = inferredColorForDetection;
       let predictedCategoryAisles: string[] | undefined;
       const shouldHardCategory =
         filterByDetectedCategory &&
@@ -1140,9 +1194,11 @@ export class ImageAnalysisService {
         (detection.area_ratio ?? 0) >= shopLookHardCategoryAreaRatioThreshold();
       const forceHardCategoryFilterUsed = Boolean(shouldHardCategory);
       if (filterByDetectedCategory) {
+        const hardLabelForTerms =
+          categoryMapping.productCategory === "bottoms" && captionWantsJeans ? "jeans" : label;
         if (shouldHardCategory) {
           // Apply hard OpenSearch category filtering, even when global soft-category is enabled.
-          const terms = hardCategoryTermsForDetection(label, categoryMapping);
+          const terms = hardCategoryTermsForDetection(hardLabelForTerms, categoryMapping);
           filters.category = terms.length === 1 ? terms[0] : terms;
         } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
           predictedCategoryAisles = searchCategories;
@@ -1246,6 +1302,14 @@ export class ImageAnalysisService {
         products: similarResult.results,
         count: similarResult.results.length,
         ...(detectionIndex !== undefined ? { detectionIndex } : {}),
+        appliedFilters: {
+          category: filters.category,
+          productTypes: filters.productTypes,
+          gender: filters.gender,
+          ageGroup: filters.ageGroup,
+          softStyle: filters.softStyle,
+          softColor: filters.softColor,
+        },
       } as DetectionSimilarProducts;
     },
     );
@@ -1548,7 +1612,7 @@ export class ImageAnalysisService {
 
     // Infer audience & dominant color once for the full image.
     let blipCaption: string | null = null;
-    const inferredAudience =
+    const inferredAudience: ReturnType<typeof inferAudienceFromCaption> =
       fullResult.services?.blip && imageInferAudienceGenderEnv()
         ? await blip
             .caption(buffer)
@@ -1556,8 +1620,8 @@ export class ImageAnalysisService {
               blipCaption = caption;
               return inferAudienceFromCaption(caption);
             })
-            .catch(() => ({}))
-        : {};
+            .catch(() => ({} as ReturnType<typeof inferAudienceFromCaption>))
+        : ({} as ReturnType<typeof inferAudienceFromCaption>);
 
     const inferredPrimaryColor =
       imageInferDominantColorEnv() && fullResult.services?.blip
@@ -1565,6 +1629,9 @@ export class ImageAnalysisService {
             .then((c) => c[0] ?? null)
             .catch(() => null)
         : null;
+    const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
+    // Avoid TS "never" narrowing when caption inference is type-proved unreachable.
+    const captionWantsJeans = /\bjeans\b/.test((blipCaption ?? "").toLowerCase());
 
     for (let i = 0; i < allItemsToProcess.length; i++) {
       const detection = allItemsToProcess[i];
@@ -1590,7 +1657,9 @@ export class ImageAnalysisService {
         const categoryMapping = mapDetectionToCategory(categorySource, detection.confidence);
 
         const filters: Partial<import("./types").SearchFilters> = {};
-        const browseTypeSeeds = extractLexicalProductTypeSeeds(categorySource);
+        const typeSeedSourceForSelection =
+          categoryMapping.productCategory === "bottoms" && captionWantsJeans ? "jeans" : categorySource;
+        const browseTypeSeeds = extractLexicalProductTypeSeeds(typeSeedSourceForSelection);
         if (browseTypeSeeds.length) {
           filters.productTypes = browseTypeSeeds;
         }
@@ -1600,20 +1669,29 @@ export class ImageAnalysisService {
         if (inferredAudience.ageGroup) filters.ageGroup = inferredAudience.ageGroup;
 
         const inferredStyle = inferStyleForDetectionLabel(categorySource);
-        const shouldApplyStyleFilter =
-          (detection.confidence ?? 0) >= imageMinStyleConfidenceEnv() &&
-          (detection.area_ratio ?? 0) >= imageMinStyleAreaRatioEnv();
-        if (shouldApplyStyleFilter && inferredStyle.attrStyle) {
-          filters.style = inferredStyle.attrStyle;
+        if (inferredStyle.attrStyle) {
+          filters.softStyle = inferredStyle.attrStyle;
         }
 
-        const shouldApplyColorFilter =
-          Boolean(inferredPrimaryColor) &&
+        // Prefer per-detection crop color (aligned with the detected item) for selection too.
+        let inferredColorForDetection: string | null = null;
+        const shouldInferColorForDetection =
+          imageInferDominantColorEnv() &&
           (detection.confidence ?? 0) >= imageMinColorConfidenceEnv() &&
           (detection.area_ratio ?? 0) >= imageMinColorAreaRatioEnv();
-        if (shouldApplyColorFilter && inferredPrimaryColor) {
-          filters.color = inferredPrimaryColor;
+
+        if (shouldInferColorForDetection) {
+          inferredColorForDetection = await extractDominantColorNames(croppedBuffer, { maxColors: 1, minShare: 0.12 }).then(
+            (c) => c[0] ?? null,
+          );
         }
+
+        if (!inferredColorForDetection) {
+          if (categoryMapping.productCategory === "tops") inferredColorForDetection = captionColors.topColor ?? null;
+          if (categoryMapping.productCategory === "bottoms") inferredColorForDetection = captionColors.jeansColor ?? null;
+        }
+        if (!inferredColorForDetection) inferredColorForDetection = inferredPrimaryColor;
+        if (inferredColorForDetection) filters.softColor = inferredColorForDetection;
         let predictedCategoryAisles: string[] | undefined;
         if (options.filterByDetectedCategory !== false) {
           if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
@@ -1621,7 +1699,11 @@ export class ImageAnalysisService {
               ? getSearchCategories(categoryMapping)
               : [categoryMapping.productCategory];
           } else {
-            const terms = hardCategoryTermsForDetection(categorySource, categoryMapping);
+            const hardLabelForTerms =
+              categoryMapping.productCategory === "bottoms" && captionWantsJeans
+                ? "jeans"
+                : categorySource;
+            const terms = hardCategoryTermsForDetection(hardLabelForTerms, categoryMapping);
             filters.category = terms.length === 1 ? terms[0] : terms;
           }
         }
@@ -1711,6 +1793,14 @@ export class ImageAnalysisService {
             category: categoryMapping.productCategory,
             products: similarResult.results,
             count: similarResult.results.length,
+            appliedFilters: {
+              category: filters.category,
+              productTypes: filters.productTypes,
+              gender: filters.gender,
+              ageGroup: filters.ageGroup,
+              softStyle: filters.softStyle,
+              softColor: filters.softColor,
+            },
             source: isUserDefined ? "user_defined" : "yolo",
             originalIndex: isUserDefined ? undefined : originalIndices[i],
           });

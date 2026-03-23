@@ -76,7 +76,9 @@ export function computeFinalRelevance01(params: {
   lexScore: number;
   colorScore: number;
   audScore: number;
+  styleScore: number;
   hasColorIntent: boolean;
+  hasStyleIntent: boolean;
   hasAudienceIntent: boolean;
   /** From scoreCrossFamilyTypePenalty; strong garment↔footwear mismatches are typically ≥ 0.8 */
   crossFamilyPenalty: number;
@@ -107,7 +109,9 @@ export function computeFinalRelevance01(params: {
 
   const colorPart = params.hasColorIntent ? params.colorScore : 1;
   const audPart = params.hasAudienceIntent ? params.audScore : 1;
-  const attrScore = colorPart * 0.6 + audPart * 0.4;
+  const stylePart = params.hasStyleIntent ? params.styleScore : 1;
+  // Attribute blend: keep color dominant, but allow style to influence as well.
+  const attrScore = colorPart * 0.5 + stylePart * 0.3 + audPart * 0.2;
   const attrFactor = 0.5 + attrScore * 0.5;
 
   const crossFamilySoftFactor = Math.max(0, 1 - crossPen * 0.6);
@@ -206,6 +210,8 @@ export interface SearchHitRelevanceIntent {
   desiredProductTypes: string[];
   desiredColors: string[];
   desiredColorsTier: string[];
+  /** Canonical attr_style token (e.g. "casual", "formal", "smart-casual"). */
+  desiredStyle?: string;
   rerankColorMode: "any" | "all";
   mergedCategory?: string;
   astCategories: string[];
@@ -235,6 +241,7 @@ export interface HitCompliance {
   colorTier: "exact" | "family" | "bucket" | "none";
   crossFamilyPenalty: number;
   audienceCompliance: number;
+  styleCompliance: number;
   osSimilarity01: number;
   categoryRelevance01: number;
   semanticScore01: number;
@@ -327,6 +334,7 @@ export function computeHitRelevance(
     desiredProductTypes,
     desiredColors,
     desiredColorsTier,
+    desiredStyle,
     rerankColorMode,
     mergedCategory,
     astCategories,
@@ -458,6 +466,21 @@ export function computeHitRelevance(
       ? scoreCrossFamilyTypePenalty(desiredProductTypes, productTypes)
       : 0;
 
+  // Style compliance: keyword match on indexed `attr_style`.
+  // We keep this intentionally simple so it works well with `keyword` fields.
+  const normalizedDesiredStyle = desiredStyle ? String(desiredStyle).toLowerCase().trim() : "";
+  const hitStyleRaw = hit?._source?.attr_style;
+  const hitStyle = typeof hitStyleRaw === "string" ? hitStyleRaw.toLowerCase().trim() : "";
+  const title = typeof hit?._source?.title === "string" ? hit._source.title.toLowerCase() : "";
+
+  let styleCompliance = 0;
+  if (normalizedDesiredStyle) {
+    if (hitStyle === normalizedDesiredStyle) styleCompliance = 1;
+    else if (hitStyle && (hitStyle.includes(normalizedDesiredStyle) || normalizedDesiredStyle.includes(hitStyle))) styleCompliance = 0.7;
+    else if (title.includes(normalizedDesiredStyle)) styleCompliance = 0.6;
+    else styleCompliance = 0;
+  }
+
   const audienceCompliance = scoreAudienceCompliance(
     queryAgeGroup,
     audienceGenderForScoring,
@@ -581,6 +604,7 @@ export function computeHitRelevance(
   const rerankScore =
     productTypeCompliance * 1000 * docTrust +
     colorCompliance * 100 * docTrust +
+    styleCompliance * 75 * docTrust +
     audienceCompliance * wAud * docTrust +
     similarity * wSim -
     crossFamilyPenalty * crossFamilyPenaltyWeight;
@@ -605,7 +629,9 @@ export function computeHitRelevance(
     lexScore: lexScore01,
     colorScore: colorCompliance,
     audScore: audienceCompliance,
+    styleScore: styleCompliance,
     hasColorIntent,
+    hasStyleIntent: Boolean(normalizedDesiredStyle),
     hasAudienceIntent,
     crossFamilyPenalty,
     applyLexicalToGlobal: lexicalScoreDistinct,
@@ -622,6 +648,7 @@ export function computeHitRelevance(
     colorTier,
     crossFamilyPenalty,
     audienceCompliance,
+    styleCompliance,
     osSimilarity01: similarity,
     categoryRelevance01,
     semanticScore01: semScore01,
