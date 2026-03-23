@@ -107,7 +107,13 @@ RUN set -eux; \
       /app/yolo/venv/bin/pip install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cpu \
         torch torchvision && \
-      /app/yolo/venv/bin/pip install --no-cache-dir -r /app/yolo/requirements-extras.txt; \
+      /app/yolo/venv/bin/pip install --no-cache-dir -r /app/yolo/requirements-extras.txt && \
+      \
+      # Pre-download YOLO detector weights during the image build so deploys don't
+      # pay the cold-start download cost on every revision.
+      export HF_HOME=/app/yolo/.cache/huggingface; \
+      export TRANSFORMERS_CACHE=/app/yolo/.cache/huggingface; \
+      /app/yolo/venv/bin/python3 -c "import sys; sys.path.insert(0,'/app/yolo'); from yolov8_api import get_detector; get_detector(); print('✅ YOLO dual-detector warmed (weights cached)')" ; \
     else \
       rm -rf /app/yolo && mkdir -p /app/yolo; \
     fi
@@ -123,6 +129,8 @@ USER nodejs
 # Environment
 ENV NODE_ENV=production
 ENV PORT=8080
+ENV HF_HOME=/app/yolo/.cache/huggingface
+ENV TRANSFORMERS_CACHE=/app/yolo/.cache/huggingface
 
 # YOLO may load PyTorch/HF weights on first boot; Node starts only after entrypoint waits on YOLO health.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \

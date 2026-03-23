@@ -53,7 +53,8 @@ if [ "$start_embedded" = "1" ]; then
 
   i=0
   while [ "$i" -lt 180 ]; do
-    if wget -q -O- --timeout=3 "http://127.0.0.1:${YOLO_PORT}/health" >/dev/null 2>&1; then
+    if wget -q -O- --timeout=3 "http://127.0.0.1:${YOLO_PORT}/health" 2>/dev/null \
+      | grep -Eq '"model_loaded"[[:space:]]*:[[:space:]]*true'; then
       break
     fi
     i=$((i + 1))
