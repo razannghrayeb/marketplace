@@ -71,6 +71,7 @@ export {
   type HealthResponse,
   type LabelsResponse,
   type DetectOptions,
+  type YoloHealthSnapshot,
 } from "./yolov8Client";
 
 // Vertex AI Virtual Try-On

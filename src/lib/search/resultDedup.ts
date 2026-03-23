@@ -2,6 +2,7 @@
  * Post-retrieval deduplication for search results (product id, canonical group,
  * same primary image URL, near-duplicate pHash).
  */
+import { config } from "../../config";
 import { hammingDistance } from "../products/canonical";
 
 export interface DedupSearchResultItem {
@@ -67,7 +68,7 @@ function scoreOf(p: DedupSearchResultItem): number {
  * Keep highest-scoring item per duplicate key (id → canonical → image URL → pHash neighborhood).
  */
 export function dedupeSearchResults<T extends DedupSearchResultItem>(items: T[], opts?: DedupOptions): T[] {
-  const hammingMax = opts?.imageHammingMax ?? 10;
+  const hammingMax = opts?.imageHammingMax ?? config.search.dedupeImageHammingMax;
   const sorted = [...items].sort((a, b) => scoreOf(b) - scoreOf(a));
   const seenIds = new Set<string>();
   const seenCanonical = new Set<string>();

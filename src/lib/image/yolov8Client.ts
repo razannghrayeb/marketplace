@@ -83,6 +83,15 @@ export interface LabelsResponse {
   total: number;
 }
 
+/** Result of a single YOLO /health probe (used by status APIs and `isAvailable`). */
+export interface YoloHealthSnapshot {
+  available: boolean;
+  /** Present when `available` is false — local dev / ops guidance */
+  hint?: string;
+  healthOk?: boolean;
+  modelLoaded?: boolean;
+}
+
 export interface DetectOptions {
   confidence?: number;
   includePerson?: boolean;
@@ -185,18 +194,51 @@ export class YOLOv8Client {
   }
 
   /**
-   * Check if the YOLO service is available
+   * Probe YOLO /health once (availability + optional hint for status endpoints).
    */
-  async isAvailable(): Promise<boolean> {
+  async getHealthSnapshot(): Promise<YoloHealthSnapshot> {
     try {
       const health = await this.health();
-      const ok = Boolean(health.ok && health.model_loaded);
-      if (!ok) {
+      const available = Boolean(health.ok && health.model_loaded);
+      let hint: string | undefined;
+      if (!available) {
+        if (health.ok && !health.model_loaded) {
+          hint =
+            "YOLO is still loading models; wait ~30–60s after container start, then retry GET /api/images/status.";
+        } else {
+          hint =
+            "YOLO reported unhealthy (ok=false or error). Check the yolov8 / detector container logs.";
+        }
         console.warn(
           `[YOLOv8] service unhealthy at ${this.baseUrl}: ok=${health?.ok} model_loaded=${health?.model_loaded}`
         );
       }
-      return ok;
+      // #region agent log
+      fetch("http://127.0.0.1:7383/ingest/ccea0d1b-4b26-441e-9797-fbae444c347a", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "00a194" },
+        body: JSON.stringify({
+          sessionId: "00a194",
+          runId: "post-fix-verify",
+          hypothesisId: "H2-H3-H5",
+          location: "yolov8Client.ts:getHealthSnapshot:success",
+          message: "YOLO health parsed",
+          data: {
+            baseUrl: this.baseUrl,
+            healthOk: health.ok,
+            modelLoaded: health.model_loaded,
+            available,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      return {
+        available,
+        hint,
+        healthOk: health.ok,
+        modelLoaded: health.model_loaded,
+      };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const cause =
@@ -211,14 +253,44 @@ export class YOLOv8Client {
         msg.includes("ECONNREFUSED") ||
         /connection refused/i.test(cause) ||
         /connection refused/i.test(msg);
+      const hint = refused
+        ? `Nothing is listening at ${this.baseUrl}. Run \`pnpm dev:with-yolo\` (starts Docker yolov8 then the API) or \`pnpm yolo:dev\` in another terminal, then use \`pnpm dev\`. You can also set YOLOV8_SERVICE_URL to a running detector.`
+        : `YOLO unreachable: ${msg.slice(0, 160)}`;
       if (refused) {
         console.warn(
           `[YOLOv8] No process is accepting connections at ${this.baseUrl}. ` +
-            `Local dev: run \`pnpm yolo:dev\` (or \`docker compose up -d yolov8\`) and set YOLOV8_SERVICE_URL=http://127.0.0.1:8001 (or deprecated YOLO_API_URL).`,
+            `Local dev: \`pnpm dev:with-yolo\` or \`pnpm yolo:dev\` + \`pnpm dev\`; set YOLOV8_SERVICE_URL if the detector is elsewhere.`,
         );
       }
-      return false;
+      // #region agent log
+      fetch("http://127.0.0.1:7383/ingest/ccea0d1b-4b26-441e-9797-fbae444c347a", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "00a194" },
+        body: JSON.stringify({
+          sessionId: "00a194",
+          runId: "post-fix-verify",
+          hypothesisId: "H1-H4",
+          location: "yolov8Client.ts:getHealthSnapshot:catch",
+          message: "YOLO health fetch failed",
+          data: {
+            baseUrl: this.baseUrl,
+            errMsg: msg.slice(0, 200),
+            refused,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      return { available: false, hint };
     }
+  }
+
+  /**
+   * Check if the YOLO service is available
+   */
+  async isAvailable(): Promise<boolean> {
+    const s = await this.getHealthSnapshot();
+    return s.available;
   }
 
   /**

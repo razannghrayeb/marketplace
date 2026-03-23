@@ -197,6 +197,8 @@ export interface ImageAnalysisResult {
     clip: boolean;
     yolo: boolean;
     blip: boolean;
+    /** Set when `yolo` is false — why detection is off and how to fix it locally */
+    yoloHint?: string;
   };
 }
 
@@ -362,16 +364,49 @@ export class ImageAnalysisService {
   /**
    * Check which services are available
    */
-  async getServiceStatus(): Promise<{ clip: boolean; yolo: boolean; blip: boolean }> {
-    const [clipAvailable, yoloAvailable] = await Promise.all([
+  async getServiceStatus(): Promise<{
+    clip: boolean;
+    yolo: boolean;
+    blip: boolean;
+    yoloHint?: string;
+  }> {
+    const [clipAvailable, yoloSnap] = await Promise.all([
       Promise.resolve(isClipAvailable()),
-      this.yoloClient.isAvailable().catch(() => false),
+      this.yoloClient.getHealthSnapshot().catch(() => ({
+        available: false as const,
+        hint: "YOLO health check failed unexpectedly.",
+      })),
     ]);
+
+    const yoloAvailable = yoloSnap.available;
+    const yoloHint = !yoloAvailable && yoloSnap.hint ? yoloSnap.hint : undefined;
+
+    // #region agent log
+    fetch("http://127.0.0.1:7383/ingest/ccea0d1b-4b26-441e-9797-fbae444c347a", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "00a194" },
+      body: JSON.stringify({
+        sessionId: "00a194",
+        runId: "post-fix-verify",
+        hypothesisId: "H-aggregate",
+        location: "image-analysis.service.ts:getServiceStatus",
+        message: "service status",
+        data: {
+          yolo: yoloAvailable,
+          clip: clipAvailable,
+          yoloBaseUrl: this.yoloClient.getBaseUrl(),
+          hasYoloHint: Boolean(yoloHint),
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
 
     return {
       clip: clipAvailable,
       yolo: yoloAvailable,
       blip: true,
+      ...(yoloHint ? { yoloHint } : {}),
     };
   }
 

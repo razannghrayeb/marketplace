@@ -225,7 +225,7 @@ export async function searchImage(
     pHash: effectivePHash,
     predictedCategoryAisles,
     knnField,
-    relaxThresholdWhenEmpty,
+    relaxThresholdWhenEmpty: relaxThresholdWhenEmpty ?? true,
   } as any);
 
   return {

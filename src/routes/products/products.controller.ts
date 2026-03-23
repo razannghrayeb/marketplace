@@ -15,10 +15,18 @@ import {
 } from "../../lib/image/index";
 import { isClipAvailable } from "../../lib/image/index";
 import { getProductWithVariants } from "./products.service";
+import { config } from "../../config";
 
 // ============================================================================
 // Request Helpers
 // ============================================================================
+
+/** Staging / tuning: `SEARCH_RANKING_DEBUG=1` or `?rankingDebug=1` enriches `meta` for explain + finalRelevance01 review. */
+function wantsRankingDebug(req: Request): boolean {
+  if (config.search.searchRankingDebug) return true;
+  const v = req.query.rankingDebug ?? req.query.ranking_debug;
+  return v === "1" || v === "true";
+}
 
 function parseFilters(query: any): SearchFilters {
   const filters: SearchFilters = {};
@@ -79,6 +87,7 @@ export async function listProducts(req: Request, res: Response) {
  *   - q: search query (required)
  *   - includeRelated: boolean, default true
  *   - relatedLimit: number, default 10
+ *   - rankingDebug=1: extra `meta` (final_accept_min, recall, gate) for staging; per-hit `explain` / `finalRelevance01` unchanged
  */
 export async function searchProductsByTitle(req: Request, res: Response) {
   try {
@@ -101,12 +110,23 @@ export async function searchProductsByTitle(req: Request, res: Response) {
       relatedLimit,
     });
 
-    res.json({ 
-      success: true, 
+    const rankingMeta = wantsRankingDebug(req)
+      ? {
+          ranking_debug: true as const,
+          final_accept_min: config.search.finalAcceptMin,
+          relevance_gate_mode: config.search.relevanceGateMode,
+          similarity_normalize: config.search.similarityNormalize,
+          recall_window: config.search.recallWindow,
+          recall_max: config.search.recallMax,
+        }
+      : {};
+
+    res.json({
+      success: true,
       data: result.results,
       related: result.related,
-      meta: result.meta,
-      pagination: { page, limit } 
+      meta: { ...result.meta, ...rankingMeta },
+      pagination: { page, limit },
     });
   } catch (error) {
     console.error("Error searching products:", error);
@@ -127,7 +147,8 @@ export async function searchProductsByImage(req: Request, res: Response) {
   try {
     const filters = parseFilters(req.query);
     const { page, limit } = parsePagination(req.query);
-    const similarityThreshold = parseFloat(req.query.threshold as string) || 0.7;
+    const similarityThreshold =
+      parseFloat(req.query.threshold as string) || config.clip.imageSimilarityThreshold;
     const includeRelated = req.query.includeRelated !== "false";
 
     const file = (req as any).file;
@@ -180,12 +201,21 @@ export async function searchProductsByImage(req: Request, res: Response) {
       pHash,
     });
 
+    const rankingMeta = wantsRankingDebug(req)
+      ? {
+          ranking_debug: true as const,
+          clip_image_similarity_threshold_applied: similarityThreshold,
+          clip_image_similarity_threshold_config_default: config.clip.imageSimilarityThreshold,
+          search_image_relax_floor: config.search.searchImageRelaxFloor,
+        }
+      : {};
+
     res.json({
       success: true,
       data: result.results,
       related: result.related,
-      meta: result.meta,
-      pagination: { page, limit }
+      meta: { ...result.meta, ...rankingMeta },
+      pagination: { page, limit },
     });
   } catch (error) {
     console.error("Error searching by image:", error);

@@ -1380,7 +1380,7 @@ export async function textSearch(
       });
     }
 
-    results = dedupeSearchResults(results as any, { imageHammingMax: 10 }) as ProductResult[];
+    results = dedupeSearchResults(results as any) as ProductResult[];
 
     const totalAboveThreshold = results.length;
 

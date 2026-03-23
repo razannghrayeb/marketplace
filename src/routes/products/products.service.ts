@@ -264,13 +264,9 @@ function knnCosinesimilScoreToCosine01(raw: number): number {
   return Math.max(0, Math.min(1, cos));
 }
 
-/** When relaxThresholdWhenEmpty is used, drop hits below this normalized similarity (reduces irrelevant junk). */
+/** When relaxThresholdWhenEmpty is used, drop hits below this normalized cosine (see config.search.searchImageRelaxFloor). */
 function imageRelaxSimilarityFloor(): number {
-  const raw = String(process.env.SEARCH_IMAGE_RELAX_FLOOR ?? "").trim();
-  if (raw === "") return 0.58;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return 0.58;
-  return Math.max(0.35, Math.min(0.92, n));
+  return config.search.searchImageRelaxFloor;
 }
 
 function imageKnnTimeoutMs(): number {
@@ -347,7 +343,8 @@ export async function searchByImageWithSimilarity(
     pHash,
     predictedCategoryAisles,
     knnField: knnFieldParam,
-    relaxThresholdWhenEmpty = false,
+    /** When strict similarity removes all kNN hits, fall back to best candidates above SEARCH_IMAGE_RELAX_FLOOR (default on). */
+    relaxThresholdWhenEmpty = true,
     query: imageSearchTextQuery,
   } = params;
 
@@ -357,8 +354,8 @@ export async function searchByImageWithSimilarity(
 
   const evalT0 = Date.now();
 
-  // Over-fetch so absolute threshold + later dedup still fill `limit`
-  const fetchLimit = Math.min(Math.max(limit * 5, 80), 200);
+  // Over-fetch so absolute threshold + later dedup still fill `limit` (cap raised for broader kNN recall).
+  const fetchLimit = Math.min(Math.max(limit * 5, 100), 300);
 
   const softCategory = imageSoftCategoryEnv();
   const aisleHints = predictedCategoryAisles?.length
@@ -649,12 +646,11 @@ export async function searchByImageWithSimilarity(
     hits = merged;
   }
 
-  const filteredHits = hits.filter((hit: any) => {
-    if (usedMultiBranchFusion) {
-      return knnCosinesimilScoreToCosine01(Number(hit._score)) >= similarityThreshold;
-    }
-    return Number(hit._score) >= similarityThreshold;
-  });
+  /** Always compare cosine similarity in [0,1] to threshold (same semantics as fusion vs primary-only kNN). */
+  const passesImageSimilarityThreshold = (hit: any, thresh: number): boolean =>
+    knnCosinesimilScoreToCosine01(Number(hit._score)) >= thresh;
+
+  const filteredHits = hits.filter((hit: any) => passesImageSimilarityThreshold(hit, similarityThreshold));
 
   /** kNN had candidates but strict gate removed all; optional relax for Shop-the-Look. */
   let thresholdRelaxed = false;
@@ -667,13 +663,26 @@ export async function searchByImageWithSimilarity(
     const floor = imageRelaxSimilarityFloor();
     workingHits = [...hits]
       .sort((a: any, b: any) => Number(b._score) - Number(a._score))
-      .filter((h: any) =>
-        usedMultiBranchFusion
-          ? knnCosinesimilScoreToCosine01(Number(h._score)) >= floor
-          : Number(h._score) >= floor,
-      )
+      .filter((h: any) => passesImageSimilarityThreshold(h, floor))
       .slice(0, fetchLimit);
     thresholdRelaxed = workingHits.length > 0;
+  }
+
+  /**
+   * Sparse strict gate: fusion + high CLIP threshold often leaves very few hits though kNN recall is large.
+   * When strict filter yields fewer candidates than we need, widen to SEARCH_IMAGE_RELAX_FLOOR (same as zero-hit relax).
+   */
+  const minWantCandidates = Math.min(fetchLimit, Math.max(limit, 15));
+  if (workingHits.length < minWantCandidates && hits.length > workingHits.length) {
+    const floor = imageRelaxSimilarityFloor();
+    const loose = [...hits]
+      .sort((a: any, b: any) => Number(b._score) - Number(a._score))
+      .filter((h: any) => passesImageSimilarityThreshold(h, floor))
+      .slice(0, fetchLimit);
+    if (loose.length > workingHits.length) {
+      workingHits = loose;
+      thresholdRelaxed = true;
+    }
   }
 
   /** True when kNN returned candidates but none met CLIP threshold (not the text SEARCH_FINAL_ACCEPT_MIN gate). */
@@ -892,7 +901,7 @@ export async function searchByImageWithSimilarity(
     }) as ProductResult[];
   }
 
-  results = dedupeSearchResults(results as any, { imageHammingMax: 10 }).slice(0, limit) as ProductResult[];
+  results = dedupeSearchResults(results as any).slice(0, limit) as ProductResult[];
 
   let related: ProductResult[] = [];
   if (includeRelated && pHash) {
