@@ -54,6 +54,8 @@ export interface SearchFilters {
   availability?: boolean;
   vendorId?: string;
   color?: string;
+  /** Bias ranking without hard filtering (image search). */
+  softColor?: string;
   colors?: string[];
   colorMode?: "any" | "all";
   productTypes?: string[];
@@ -61,6 +63,8 @@ export interface SearchFilters {
   material?: string;
   fit?: string;
   style?: string;
+  /** Bias ranking without hard filtering (image search). */
+  softStyle?: string;
   gender?: string;
   pattern?: string;
 }
@@ -405,7 +409,7 @@ export async function searchByImageWithSimilarity(
   }
   if (filters.brand) filter.push({ term: { brand: String(filters.brand).toLowerCase() } });
   if (filters.vendorId) filter.push({ term: { vendor_id: String(filters.vendorId) } });
-  const filtersAny = filters as { gender?: string; color?: string; style?: string };
+  const filtersAny = filters as { gender?: string; color?: string; softColor?: string; style?: string; softStyle?: string };
   if (filtersAny.gender) {
     const g = String(filtersAny.gender).toLowerCase();
     // For image-search we need to be resilient to occasional index attribute mistakes.
@@ -819,6 +823,8 @@ export async function searchByImageWithSimilarity(
       ? filtersRecord.colors.map((c: unknown) => String(c).toLowerCase())
       : filtersRecord.color
         ? [String(filtersRecord.color).toLowerCase()]
+        : filtersRecord.softColor
+          ? [String(filtersRecord.softColor).toLowerCase()]
         : [];
   const desiredColorsForRelevance = [
     ...new Set(
@@ -834,11 +840,19 @@ export async function searchByImageWithSimilarity(
   const queryGenderNorm = normalizeQueryGender(filtersAny.gender);
   const hasAudienceIntentForRelevance = Boolean(queryAgeGroupForRelevance || queryGenderNorm);
 
+  const desiredStyleForRelevance =
+    typeof filtersRecord.style === "string"
+      ? String(filtersRecord.style).toLowerCase().trim()
+      : typeof filtersRecord.softStyle === "string"
+        ? String(filtersRecord.softStyle).toLowerCase().trim()
+        : undefined;
+
   const relevanceIntent: SearchHitRelevanceIntent = {
     desiredProductTypes,
     desiredColors: desiredColorsForRelevance,
     desiredColorsTier: desiredColorsTierForRelevance,
     rerankColorMode: rerankColorModeForRelevance,
+    desiredStyle: desiredStyleForRelevance,
     mergedCategory: mergedCategoryForRelevance
       ? String(mergedCategoryForRelevance).toLowerCase()
       : undefined,
@@ -873,12 +887,56 @@ export async function searchByImageWithSimilarity(
     return rb - ra;
   });
 
+  // Post-filter by gender using both indexed gender and title keywords.
+  // This is a safety net for index mislabeling (so "women" caption doesn't return "men" products).
+  // We only apply it when caller explicitly requested gender.
+  const rankedHitsCandidates = (() => {
+    if (!filtersAny.gender) return sortedByRelevance;
+    const wantG = normalizeQueryGender(filtersAny.gender);
+    if (!wantG) return sortedByRelevance;
+
+    const title = (t: any) => (typeof t === "string" ? t.toLowerCase() : "");
+    const docGender = (hit: any) => {
+      const raw = hit?._source?.audience_gender ?? hit?._source?.attr_gender;
+      const s = typeof raw === "string" ? raw.toLowerCase() : "";
+      if (s === "men" || s === "women" || s === "unisex") return s;
+      return null;
+    };
+
+    const wantKw =
+      wantG === "women"
+        ? ["women", "womens", "female", "ladies", "woman"]
+        : wantG === "men"
+          ? ["men", "mens", "male", "boy", "boys", "man"]
+          : ["unisex"];
+
+    const oppKw =
+      wantG === "women"
+        ? ["men", "mens", "male", "boy", "boys", "man"]
+        : wantG === "men"
+          ? ["women", "womens", "female", "ladies", "woman", "girl", "girls"]
+          : [];
+
+    const matches = (hit: any) => {
+      const dg = docGender(hit);
+      const t = title(hit?._source?.title);
+      if (dg === wantG) return true;
+      const hasWant = wantKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(t));
+      if (!hasWant) return false;
+      if (oppKw.length > 0 && oppKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(t))) return false;
+      return true;
+    };
+
+    const filtered = sortedByRelevance.filter((h: any) => matches(h));
+    return filtered.length > 0 ? filtered : sortedByRelevance;
+  })();
+
   const finalAcceptMin = config.search.finalAcceptMin;
   const relevanceGateSoft = !imageHardRelevanceGateEnv();
-  const thresholdPassedHits = sortedByRelevance.filter(
+  const thresholdPassedHits = rankedHitsCandidates.filter(
     (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= finalAcceptMin,
   );
-  let rankedHits = relevanceGateSoft ? sortedByRelevance : thresholdPassedHits;
+  let rankedHits = relevanceGateSoft ? rankedHitsCandidates : thresholdPassedHits;
 
   const belowFinalRelevanceGate =
     workingHits.length > 0 && thresholdPassedHits.length === 0 && !relevanceGateSoft;
@@ -949,6 +1007,8 @@ export async function searchByImageWithSimilarity(
               matchedColor: compliance.matchedColor ?? undefined,
               colorTier: compliance.colorTier,
               colorCompliance: compliance.colorCompliance,
+            styleCompliance: compliance.styleCompliance,
+            hasStyleIntent: Boolean(desiredStyleForRelevance),
               audienceCompliance: compliance.audienceCompliance,
               crossFamilyPenalty: compliance.crossFamilyPenalty,
               hasTypeIntent: compliance.hasTypeIntent,
@@ -957,6 +1017,7 @@ export async function searchByImageWithSimilarity(
               hardBlocked: compliance.hardBlocked,
               desiredProductTypes,
               desiredColors: desiredColorsForRelevance,
+            desiredStyle: desiredStyleForRelevance,
               colorMode: rerankColorModeForRelevance,
               finalRelevance01: compliance.finalRelevance01,
             }

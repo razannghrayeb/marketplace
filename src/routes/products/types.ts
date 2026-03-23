@@ -21,6 +21,8 @@ export interface SearchFilters {
   vendorId?: string;
   // Attribute filters (extracted from titles)
   color?: string;
+  /** Used to bias ranking without hard filtering (image search "closet similar"). */
+  softColor?: string;
   /** Multi-color intent (image / enhanced search). */
   colors?: string[];
   colorMode?: "any" | "all";
@@ -31,6 +33,8 @@ export interface SearchFilters {
   material?: string;
   fit?: string;
   style?: string;
+  /** Used to bias ranking without hard filtering (image search "closet similar"). */
+  softStyle?: string;
   gender?: string;
   pattern?: string;
 }
