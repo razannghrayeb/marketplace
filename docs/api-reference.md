@@ -289,6 +289,31 @@ GET /products?category=shoes&brand=nike&min_price=5000&max_price=20000&page=1&li
 }
 ```
 
+### Get product by ID
+Returns one product (Postgres + images). Used by the storefront product detail page.
+
+```http
+GET /products/{id}
+```
+
+#### Example Response
+```json
+{
+  "success": true,
+  "data": {
+    "id": 37755,
+    "title": "Example item",
+    "brand": "Brand",
+    "price_cents": 1999,
+    "sales_price_cents": null,
+    "image_cdn": "https://…",
+    "images": [{ "id": 1, "url": "https://…", "is_primary": true }]
+  }
+}
+```
+
+**Note:** On `SERVICE_ROLE=api` hosts, this route is mounted locally (same as `SERVICE_ROLE=all` / `ml`). The storefront should call `{API_BASE}/products/{id}` — same base URL as `GET /products`.
+
 ### Get Product Facets
 Retrieve available filter options for products.
 

@@ -22,10 +22,12 @@ export default function TryOnPage() {
   const submitMutation = useMutation({
     mutationFn: async () => {
       if (!personFile || !garmentFile) throw new Error('Both photos required')
+      if (!user?.id) throw new Error('You must be signed in to use try-on')
       const formData = new FormData()
       formData.append('person_image', personFile)
       formData.append('garment_image', garmentFile)
       formData.append('category', 'upper_body')
+      formData.append('user_id', String(user.id))
       const res = await api.postForm(endpoints.tryon.submit, formData)
       setDebugResponse({
         raw: res,
@@ -66,9 +68,9 @@ export default function TryOnPage() {
   if (!isAuth) {
     return (
       <div className="max-w-2xl mx-auto px-4 py-20 text-center">
-        <Shirt className="w-16 h-16 text-charcoal-300 mx-auto mb-4" />
-        <h2 className="font-display text-2xl font-bold text-charcoal-800 mb-2">Sign in to try on</h2>
-        <p className="text-charcoal-500 mb-6">Virtual try-on requires an account.</p>
+        <Shirt className="w-16 h-16 text-neutral-300 mx-auto mb-4" />
+        <h2 className="font-display text-2xl font-bold text-neutral-800 mb-2">Sign in to try on</h2>
+        <p className="text-neutral-500 mb-6">Virtual try-on requires an account.</p>
         <a href="/login" className="btn-primary">
           Sign in
         </a>
@@ -82,15 +84,15 @@ export default function TryOnPage() {
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
       >
-        <h1 className="font-display text-3xl font-bold text-charcoal-800 mb-2">Virtual Try-On</h1>
-        <p className="text-charcoal-500 mb-10">
+        <h1 className="font-display text-3xl font-bold text-neutral-800 mb-2">Virtual Try-On</h1>
+        <p className="text-neutral-500 mb-10">
           Upload a photo of yourself and a garment to see how it looks on you. Powered by AI.
         </p>
 
         {job?.status === 'completed' && job?.result_image_url ? (
           <div className="space-y-6">
             <p className="text-green-600 font-medium">Try-on complete!</p>
-            <div className="relative aspect-[3/4] max-w-md rounded-2xl overflow-hidden bg-cream-200">
+            <div className="relative aspect-[3/4] max-w-md rounded-2xl overflow-hidden bg-neutral-100">
               <Image
                 src={job.result_image_url}
                 alt="Try-on result"
@@ -111,7 +113,7 @@ export default function TryOnPage() {
             </button>
           </div>
         ) : job?.status === 'failed' ? (
-          <div className="p-6 rounded-2xl bg-wine-50 border border-wine-200 text-wine-700">
+          <div className="p-6 rounded-2xl bg-neutral-100 border border-neutral-200 text-neutral-800">
             <p className="font-medium">Try-on failed</p>
             <p className="text-sm mt-1">{job?.error_message ?? 'Unknown error'}</p>
             <button
@@ -122,10 +124,10 @@ export default function TryOnPage() {
             </button>
           </div>
         ) : jobId && (polling || job?.status === 'processing' || job?.status === 'pending') ? (
-          <div className="p-12 rounded-2xl bg-cream-100 border border-cream-300 text-center">
-            <Loader2 className="w-12 h-12 text-wine-600 animate-spin mx-auto mb-4" />
-            <p className="font-medium text-charcoal-800">Processing your try-on...</p>
-            <p className="text-sm text-charcoal-500 mt-1">This may take 30–60 seconds</p>
+          <div className="p-12 rounded-2xl bg-neutral-50 border border-neutral-200 text-center">
+            <Loader2 className="w-12 h-12 text-violet-600 animate-spin mx-auto mb-4" />
+            <p className="font-medium text-neutral-800">Processing your try-on...</p>
+            <p className="text-sm text-neutral-500 mt-1">This may take 30–60 seconds</p>
           </div>
         ) : (
           <div className="grid md:grid-cols-2 gap-8">
@@ -145,30 +147,30 @@ export default function TryOnPage() {
             />
             <div
               onClick={() => personRef.current?.click()}
-              className="p-8 rounded-2xl bg-cream-100 border-2 border-dashed border-cream-300 text-center cursor-pointer hover:border-wine-300 transition-colors"
+              className="p-8 rounded-2xl bg-neutral-50 border-2 border-dashed border-neutral-200 text-center cursor-pointer hover:border-violet-300 transition-colors"
             >
               {personFile ? (
-                <p className="font-medium text-charcoal-800">{personFile.name}</p>
+                <p className="font-medium text-neutral-800">{personFile.name}</p>
               ) : (
                 <>
-                  <Upload className="w-12 h-12 text-charcoal-400 mx-auto mb-4" />
-                  <h3 className="font-medium text-charcoal-800 mb-2">Your photo</h3>
-                  <p className="text-sm text-charcoal-500 mb-4">Upload a full-body or upper-body photo</p>
+                  <Upload className="w-12 h-12 text-neutral-400 mx-auto mb-4" />
+                  <h3 className="font-medium text-neutral-800 mb-2">Your photo</h3>
+                  <p className="text-sm text-neutral-500 mb-4">Upload a full-body or upper-body photo</p>
                   <span className="btn-secondary inline-block">Choose file</span>
                 </>
               )}
             </div>
             <div
               onClick={() => garmentRef.current?.click()}
-              className="p-8 rounded-2xl bg-cream-100 border-2 border-dashed border-cream-300 text-center cursor-pointer hover:border-wine-300 transition-colors"
+              className="p-8 rounded-2xl bg-neutral-50 border-2 border-dashed border-neutral-200 text-center cursor-pointer hover:border-violet-300 transition-colors"
             >
               {garmentFile ? (
-                <p className="font-medium text-charcoal-800">{garmentFile.name}</p>
+                <p className="font-medium text-neutral-800">{garmentFile.name}</p>
               ) : (
                 <>
-                  <Shirt className="w-12 h-12 text-charcoal-400 mx-auto mb-4" />
-                  <h3 className="font-medium text-charcoal-800 mb-2">Garment</h3>
-                  <p className="text-sm text-charcoal-500 mb-4">Upload a photo of the garment</p>
+                  <Shirt className="w-12 h-12 text-neutral-400 mx-auto mb-4" />
+                  <h3 className="font-medium text-neutral-800 mb-2">Garment</h3>
+                  <p className="text-sm text-neutral-500 mb-4">Upload a photo of the garment</p>
                   <span className="btn-secondary inline-block">Choose file</span>
                 </>
               )}
@@ -193,10 +195,10 @@ export default function TryOnPage() {
               )}
             </button>
             {submitMutation.isError && (
-              <p className="mt-2 text-sm text-wine-600">{(submitMutation.error as Error)?.message}</p>
+              <p className="mt-2 text-sm text-neutral-700">{(submitMutation.error as Error)?.message}</p>
             )}
             {debugResponse !== null && debugResponse !== undefined && (
-              <pre className="mt-4 p-4 text-xs bg-charcoal-100 rounded-xl overflow-auto max-h-48 font-mono text-charcoal-700">
+              <pre className="mt-4 p-4 text-xs bg-neutral-100 rounded-xl overflow-auto max-h-48 font-mono text-neutral-700">
                 {JSON.stringify(debugResponse, null, 2)}
               </pre>
             )}

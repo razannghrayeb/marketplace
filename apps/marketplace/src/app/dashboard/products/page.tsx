@@ -64,28 +64,28 @@ export default function DashboardProductsPage() {
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
       >
-        <h1 className="font-display text-3xl font-bold text-charcoal-800 mb-2">
+        <h1 className="font-display text-3xl font-bold text-neutral-800 mb-2">
           Products
         </h1>
-        <p className="text-charcoal-500 mb-6">
+        <p className="text-neutral-500 mb-6">
           {total > 0 ? `${total} products in catalog` : 'Manage your product catalog'}
         </p>
 
         <div className="flex flex-col sm:flex-row gap-4 mb-8">
           <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-charcoal-400" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-400" />
             <input
               type="text"
               placeholder="Search products..."
               value={search}
               onChange={(e) => { setSearch(e.target.value); setPage(1) }}
-              className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-cream-300 bg-white focus:outline-none focus:ring-2 focus:ring-wine-500/30 focus:border-wine-500"
+              className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-neutral-200 bg-white focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-500"
             />
           </div>
           <select
             value={category}
             onChange={(e) => { setCategory(e.target.value); setPage(1) }}
-            className="px-4 py-2.5 rounded-xl border border-cream-300 bg-white focus:outline-none focus:ring-2 focus:ring-wine-500/30"
+            className="px-4 py-2.5 rounded-xl border border-neutral-200 bg-white focus:outline-none focus:ring-2 focus:ring-violet-500/30"
           >
             <option value="">All categories</option>
             {categories.map((c) => (
@@ -95,7 +95,7 @@ export default function DashboardProductsPage() {
           <select
             value={brand}
             onChange={(e) => { setBrand(e.target.value); setPage(1) }}
-            className="px-4 py-2.5 rounded-xl border border-cream-300 bg-white focus:outline-none focus:ring-2 focus:ring-wine-500/30"
+            className="px-4 py-2.5 rounded-xl border border-neutral-200 bg-white focus:outline-none focus:ring-2 focus:ring-violet-500/30"
           >
             <option value="">All brands</option>
             {brands.map((b) => (
@@ -115,7 +115,7 @@ export default function DashboardProductsPage() {
         {isLoading ? (
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-6">
             {Array.from({ length: 8 }).map((_, i) => (
-              <div key={i} className="aspect-[3/4] rounded-2xl bg-cream-200 animate-pulse" />
+              <div key={i} className="aspect-[3/4] rounded-2xl bg-neutral-100 animate-pulse" />
             ))}
           </div>
         ) : products.length > 0 ? (
@@ -126,7 +126,7 @@ export default function DashboardProductsPage() {
                   <ProductCard product={product} index={i} />
                   <Link
                     href={`/products/${product.id}`}
-                    className="mt-2 block text-center text-sm text-wine-700 hover:underline"
+                    className="mt-2 block text-center text-sm text-violet-600 hover:underline"
                   >
                     View details
                   </Link>
@@ -142,7 +142,7 @@ export default function DashboardProductsPage() {
                 >
                   Previous
                 </button>
-                <span className="flex items-center px-4 text-charcoal-600">
+                <span className="flex items-center px-4 text-neutral-600">
                   Page {page} of {totalPages}
                 </span>
                 <button
@@ -156,11 +156,11 @@ export default function DashboardProductsPage() {
             )}
           </>
         ) : (
-          <div className="text-center py-20 bg-cream-100 rounded-2xl border border-cream-300">
-            <p className="text-charcoal-600 mb-4">
+          <div className="text-center py-20 bg-neutral-50 rounded-2xl border border-neutral-200">
+            <p className="text-neutral-600 mb-4">
               {hasFilters ? 'No products match your filters.' : 'No products in catalog yet.'}
             </p>
-            <p className="text-sm text-charcoal-500">
+            <p className="text-sm text-neutral-500">
               {hasFilters ? 'Try adjusting your search or filters.' : 'Products will appear here once the catalog is populated.'}
             </p>
             {hasFilters && (

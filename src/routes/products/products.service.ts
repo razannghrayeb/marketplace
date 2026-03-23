@@ -1,5 +1,6 @@
 import { osClient } from "../../lib/core/index";
 import { pg, getProductsByIdsOrdered } from "../../lib/core/index";
+import { attrGenderFilterClause } from "./opensearchFilters";
 import { config } from "../../config";
 import { getImagesForProducts, ProductImage } from "./images.service";
 import { hammingDistance } from "../../lib/products";
@@ -39,12 +40,16 @@ export interface SearchFilters {
   pattern?: string;
 }
 
+export type ProductListSort = "new" | "price_asc" | "price_desc";
+
 export interface SearchParams {
   query?: string;           // Text search (title)
   imageEmbedding?: number[]; // Vector search (image embedding)
   filters?: SearchFilters;
   page?: number;
   limit?: number;
+  /** Browse / list ordering (OpenSearch) */
+  sort?: ProductListSort;
 }
 
 export interface ImageSearchParams extends SearchParams {
@@ -91,7 +96,10 @@ export interface SearchResultWithRelated {
   meta: {
     query?: string;
     threshold?: number;
+    /** OpenSearch total hit count (pagination) */
+    total?: number;
     total_results: number;
+    page_results?: number;
     total_related?: number;
     parsed_query?: ParsedQuery;  // Include parsed query info for debugging/transparency
     processed_query?: QueryAST;  // Query processing info (corrections, etc.)
@@ -164,12 +172,25 @@ export async function getProductById(productId: number | string): Promise<Produc
   } as ProductResult;
 }
 
+export interface ProductListResult {
+  products: ProductResult[];
+  /** Total matching documents from OpenSearch (for pagination UI) */
+  total: number;
+}
+
+function extractOpenSearchTotal(osResponse: { body?: { hits?: { total?: number | { value?: number } } } }): number {
+  const t = osResponse?.body?.hits?.total;
+  if (typeof t === "number") return t;
+  if (t && typeof t === "object" && typeof t.value === "number") return t.value;
+  return 0;
+}
+
 /**
  * Search products by title text or image embedding
- * Returns array of products with images
+ * Returns products with images and total hit count for pagination
  */
-export async function searchProducts(params: SearchParams): Promise<ProductResult[]> {
-  const { query, imageEmbedding, filters = {}, page = 1, limit = 20 } = params;
+export async function searchProducts(params: SearchParams): Promise<ProductListResult> {
+  const { query, imageEmbedding, filters = {}, page = 1, limit = 20, sort } = params;
 
   // Build OpenSearch query
   const must: any[] = [];
@@ -204,7 +225,7 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
   }
   if (filters.minPriceCents !== undefined || filters.maxPriceCents !== undefined) {
     const range: any = {};
-    const currency = filters.currency?.toUpperCase() || 'LBP';
+    const currency = filters.currency?.toUpperCase() || 'USD';
     const LBP_TO_USD = 89000; // Exchange rate
 
     if (currency === 'USD') {
@@ -224,7 +245,7 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
   if (filters.material) filter.push({ term: { attr_material: filters.material } });
   if (filters.fit) filter.push({ term: { attr_fit: filters.fit } });
   if (filters.style) filter.push({ term: { attr_style: filters.style } });
-  if (filters.gender) filter.push({ term: { attr_gender: filters.gender } });
+  if (filters.gender) filter.push(attrGenderFilterClause(filters.gender));
   if (filters.pattern) filter.push({ term: { attr_pattern: filters.pattern } });
 
   // Build final query
@@ -261,8 +282,9 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
       };
     }
   } else {
-    // Text-based search
+    // Text-based search — track_total_hits so pagination totals are exact (not capped)
     searchBody = {
+      track_total_hits: true,
       size: limit,
       from: (page - 1) * limit,
       query: {
@@ -272,6 +294,13 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
         },
       },
     };
+    if (sort === "new") {
+      searchBody.sort = [{ last_seen_at: { order: "desc" } }, { product_id: { order: "asc" } }];
+    } else if (sort === "price_asc") {
+      searchBody.sort = [{ price_usd: { order: "asc" } }, { product_id: { order: "asc" } }];
+    } else if (sort === "price_desc") {
+      searchBody.sort = [{ price_usd: { order: "desc" } }, { product_id: { order: "asc" } }];
+    }
   }
 
   // Execute OpenSearch query
@@ -279,6 +308,8 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
     index: config.opensearch.index,
     body: searchBody,
   });
+
+  const total = extractOpenSearchTotal(osResponse);
 
   // Extract product IDs and scores from OpenSearch results (dedupe by first occurrence)
   const hits = osResponse.body.hits.hits;
@@ -298,7 +329,7 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
   });
 
   if (productIds.length === 0) {
-    return [];
+    return { products: [], total };
   }
 
   // Fetch full product data from Postgres (preserving OpenSearch order/ranking)
@@ -322,7 +353,7 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
     };
   });
 
-  return productsWithImages as ProductResult[];
+  return { products: productsWithImages as ProductResult[], total };
 }
 
 // ============================================================================
@@ -517,10 +548,11 @@ export async function searchByTextWithRelated(
     includeRelated = true,
     relatedLimit = 10,
     useLLM = false,
+    sort,
   } = params;
 
   if (!query) {
-    return { results: [], meta: { total_results: 0 } };
+    return { results: [], meta: { total: 0, total_results: 0 } };
   }
 
   // Step 1: Process query (spelling, arabizi, normalization)
@@ -556,13 +588,13 @@ export async function searchByTextWithRelated(
   if (mergedFilters.vendorId) filter.push({ term: { vendor_id: mergedFilters.vendorId } });
   
   // Apply extracted attribute filters
-  if (mergedFilters.gender) filter.push({ term: { attr_gender: mergedFilters.gender } });
+  if (mergedFilters.gender) filter.push(attrGenderFilterClause(mergedFilters.gender));
   if (mergedFilters.color) filter.push({ term: { attr_color: mergedFilters.color } });
 
   // Apply price filter from explicit params or extracted entities
   if (mergedFilters.minPriceCents !== undefined || mergedFilters.maxPriceCents !== undefined) {
     const range: any = {};
-    const currency = mergedFilters.currency?.toUpperCase() || 'LBP';
+    const currency = mergedFilters.currency?.toUpperCase() || 'USD';
     const LBP_TO_USD = 89000;
     if (currency === 'USD') {
       if (mergedFilters.minPriceCents !== undefined) range.gte = mergedFilters.minPriceCents / 100;
@@ -634,7 +666,8 @@ export async function searchByTextWithRelated(
     });
   }
 
-  const searchBody = {
+  const searchBody: Record<string, unknown> = {
+    track_total_hits: true,
     size: limit,
     from: (page - 1) * limit,
     query: {
@@ -646,11 +679,31 @@ export async function searchByTextWithRelated(
     },
   };
 
+  if (sort === "new") {
+    searchBody.sort = [
+      { last_seen_at: { order: "desc" } },
+      { _score: { order: "desc" } },
+    ];
+  } else if (sort === "price_asc") {
+    searchBody.sort = [
+      { price_usd: { order: "asc" } },
+      { _score: { order: "desc" } },
+    ];
+  } else if (sort === "price_desc") {
+    searchBody.sort = [
+      { price_usd: { order: "desc" } },
+      { _score: { order: "desc" } },
+    ];
+  } else {
+    searchBody.sort = [{ _score: { order: "desc" } }];
+  }
+
   const osResponse = await osClient.search({
     index: config.opensearch.index,
     body: searchBody,
   });
 
+  const totalHits = extractOpenSearchTotal(osResponse);
   const hits = osResponse.body.hits.hits;
   const productIds = hits.map((hit: any) => hit._source.product_id);
   const maxScore = hits.length > 0 ? hits[0]._score : 1;
@@ -716,7 +769,11 @@ export async function searchByTextWithRelated(
     related: related.length > 0 ? related : undefined,
     meta: {
       query: effectiveQuery,
-      total_results: results.length,
+      /** Total matching documents (OpenSearch), for pagination */
+      total: totalHits,
+      /** @deprecated use total — kept for older clients; was incorrectly page size */
+      total_results: totalHits,
+      page_results: results.length,
       total_related: related.length,
       parsed_query: parsedQuery,
       processed_query: processed,
@@ -821,7 +878,7 @@ export async function getAttributeFacets(filters: SearchFilters = {}): Promise<A
   if (filters.material) filter.push({ term: { attr_material: filters.material } });
   if (filters.fit) filter.push({ term: { attr_fit: filters.fit } });
   if (filters.style) filter.push({ term: { attr_style: filters.style } });
-  if (filters.gender) filter.push({ term: { attr_gender: filters.gender } });
+  if (filters.gender) filter.push(attrGenderFilterClause(filters.gender));
   if (filters.pattern) filter.push({ term: { attr_pattern: filters.pattern } });
 
   const searchBody = {

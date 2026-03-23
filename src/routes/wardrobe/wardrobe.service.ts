@@ -138,7 +138,7 @@ export async function getUserWardrobeItems(
   }
 
   const countResult = await pg.query(
-    `SELECT COUNT(*) FROM wardrobe_items ${whereClause}`,
+    `SELECT COUNT(*) as count FROM wardrobe_items ${whereClause}`,
     params
   );
 
@@ -147,9 +147,12 @@ export async function getUserWardrobeItems(
     [...params, limit, offset]
   );
 
+  const countRow = countResult.rows[0] as { count?: string | number } | undefined;
+  const total = countRow?.count != null ? parseInt(String(countRow.count), 10) : 0;
+
   return {
     items: result.rows,
-    total: parseInt(countResult.rows[0].count, 10)
+    total: isNaN(total) ? 0 : total
   };
 }
 

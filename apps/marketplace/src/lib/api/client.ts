@@ -9,7 +9,10 @@ export type ApiResponse<T> = {
   success: boolean
   data?: T
   meta?: { total?: number; total_results?: number; page?: number; limit?: number; pages?: number }
+  pagination?: { page?: number; limit?: number; total?: number; pages?: number }
   error?: { message: string; code?: string; details?: unknown }
+  /** Some endpoints (e.g. POST /search/multi-image) return top-level fields */
+  results?: unknown
 }
 
 function getUserIdFromStorage(): number | null {
@@ -20,7 +23,12 @@ function getUserIdFromStorage(): number | null {
     const parsed = JSON.parse(raw)
     const user = parsed?.state?.user
     const id = user?.id
-    return typeof id === 'number' ? id : null
+    if (typeof id === 'number' && Number.isFinite(id)) return id
+    if (typeof id === 'string') {
+      const n = parseInt(id, 10)
+      if (Number.isFinite(n)) return n
+    }
+    return null
   } catch {
     return null
   }
@@ -110,6 +118,36 @@ export const api = {
       body: body ? JSON.stringify(body) : undefined,
     })
     return handleResponse<T>(res)
+  },
+
+  async put<T>(path: string, body?: unknown): Promise<ApiResponse<T>> {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders()) },
+      body: body ? JSON.stringify(body) : undefined,
+    })
+    return handleResponse<T>(res)
+  },
+
+  /** For Prometheus `/metrics` and other non-JSON responses */
+  async getRaw(path: string, params?: Record<string, string | number | undefined>): Promise<{
+    ok: boolean
+    status: number
+    contentType: string
+    body: string | Record<string, unknown>
+  }> {
+    const url = new URL(path, API_BASE)
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => v != null && url.searchParams.set(k, String(v)))
+    }
+    const res = await fetch(url.toString(), { headers: await getAuthHeaders() })
+    const contentType = res.headers.get('content-type') || ''
+    if (contentType.includes('application/json')) {
+      const body = (await res.json().catch(() => ({}))) as Record<string, unknown>
+      return { ok: res.ok, status: res.status, contentType, body }
+    }
+    const text = await res.text()
+    return { ok: res.ok, status: res.status, contentType, body: text }
   },
 
   async delete<T>(path: string): Promise<ApiResponse<T>> {

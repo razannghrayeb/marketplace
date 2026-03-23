@@ -161,6 +161,18 @@ export async function createServer() {
     app.use("/products/price-drops", productsRouter);
   }
 
+  // API-only deployments (SERVICE_ROLE=api) do not load ML routes above, so /products and
+  // /search would otherwise hit the proxy → 404 if ML_SERVICE_URL is wrong/unset.
+  // Mount the same routers here so GET /products/:id, list, search, etc. work on the API host.
+  if (isApiRole && !isMlRole) {
+    const [{ default: productsRouterApi }, { searchRouter }] = await Promise.all([
+      import("./routes/products"),
+      import("./routes/search/index"),
+    ]);
+    app.use("/products", productsRouterApi);
+    app.use("/search", searchRouter);
+  }
+
   if (isApiRole) {
     app.use("/admin", adminRouter);
     app.use("/api/compare", compareRouter);

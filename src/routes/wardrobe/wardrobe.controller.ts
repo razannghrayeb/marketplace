@@ -47,7 +47,18 @@ export async function listItems(req: Request, res: Response, next: NextFunction)
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
     const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
 
-    const result = await getUserWardrobeItems(userId, { categoryId, limit, offset });
+    let result: { items: unknown[]; total: number };
+    try {
+      result = await getUserWardrobeItems(userId, { categoryId, limit, offset });
+    } catch (dbErr: unknown) {
+      const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
+      if (msg.includes('relation "wardrobe_items" does not exist') || msg.includes('does not exist')) {
+        console.warn("Wardrobe: wardrobe_items table missing. Run migrations (e.g. db/migrations/003_digital_twin_phase0.sql). Returning empty.");
+        result = { items: [], total: 0 };
+      } else {
+        throw dbErr;
+      }
+    }
 
     res.json({
       success: true,

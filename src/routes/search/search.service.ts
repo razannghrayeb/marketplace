@@ -510,8 +510,8 @@ async function hydrateProductDetails(productIds: number[], sqlFilters: any[]): P
   if (productIds.length === 0) return [];
   const pool = pg;
   const query = `
-    SELECT p.id, p.name, p.brand, p.price, p.image_url, p.category,
-           p.attributes, p.description, p.vendor_id, p.size, p.gender
+    SELECT p.id, p.title, p.brand, p.price_cents, p.sales_price_cents, p.image_url, p.image_cdn, p.category,
+           p.description, p.vendor_id, p.size, p.color, p.currency, p.availability
     FROM products p
     WHERE p.id = ANY($1)
   `;

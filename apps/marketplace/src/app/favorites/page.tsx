@@ -1,7 +1,6 @@
 'use client'
 
-import { useEffect } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { Heart } from 'lucide-react'
 import { api } from '@/lib/api/client'
@@ -11,7 +10,13 @@ import { useAuthStore } from '@/store/auth'
 import type { Product } from '@/types/product'
 
 export default function FavoritesPage() {
+  const qc = useQueryClient()
   const isAuth = useAuthStore((s) => s.isAuthenticated())
+
+  const toggleFavorite = useMutation({
+    mutationFn: (productId: number) => api.post(endpoints.favorites.toggle, { product_id: productId }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['favorites'] }),
+  })
 
   const { data, isLoading } = useQuery({
     queryKey: ['favorites'],
@@ -25,9 +30,9 @@ export default function FavoritesPage() {
   if (!isAuth) {
     return (
       <div className="max-w-2xl mx-auto px-4 py-20 text-center">
-        <Heart className="w-16 h-16 text-charcoal-300 mx-auto mb-4" />
-        <h2 className="font-display text-2xl font-bold text-charcoal-800 mb-2">Sign in to view favorites</h2>
-        <p className="text-charcoal-500 mb-6">Save your favorite items when you're signed in.</p>
+        <Heart className="w-16 h-16 text-neutral-300 mx-auto mb-4" />
+        <h2 className="font-display text-2xl font-bold text-neutral-800 mb-2">Sign in to view favorites</h2>
+        <p className="text-neutral-500 mb-6">Save your favorite items when you're signed in.</p>
         <a href="/login" className="btn-primary">
           Sign in
         </a>
@@ -44,7 +49,7 @@ export default function FavoritesPage() {
       <motion.h1
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
-        className="font-display text-3xl font-bold text-charcoal-800 mb-8"
+        className="font-display text-3xl font-bold text-neutral-800 mb-8"
       >
         Favorites
       </motion.h1>
@@ -52,19 +57,25 @@ export default function FavoritesPage() {
       {isLoading ? (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-6">
           {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="aspect-[3/4] rounded-2xl bg-cream-200 animate-pulse" />
+            <div key={i} className="aspect-[3/4] rounded-2xl bg-neutral-100 animate-pulse" />
           ))}
         </div>
       ) : isEmpty ? (
-        <div className="text-center py-20 bg-cream-100 rounded-2xl border border-cream-300">
-          <Heart className="w-16 h-16 text-charcoal-300 mx-auto mb-4" />
-          <p className="text-charcoal-600 mb-6">No favorites yet</p>
-          <p className="text-sm text-charcoal-500">Click the heart on any product to save it here.</p>
+        <div className="text-center py-20 bg-neutral-50 rounded-2xl border border-neutral-200">
+          <Heart className="w-16 h-16 text-neutral-300 mx-auto mb-4" />
+          <p className="text-neutral-600 mb-6">No favorites yet</p>
+          <p className="text-sm text-neutral-500">Click the heart on any product to save it here.</p>
         </div>
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-6">
           {products.map((product, i) => (
-            <ProductCard key={product.id} product={product} index={i} isFavorite />
+            <ProductCard
+              key={product.id}
+              product={product}
+              index={i}
+              isFavorite
+              onFavorite={(id) => toggleFavorite.mutate(id)}
+            />
           ))}
         </div>
       )}

@@ -12,7 +12,7 @@ type FacetData = {
   brands?: Array<{ value: string; count: number }>
 }
 
-const CHART_COLORS = ['#722F37', '#8B3A42', '#A44B54', '#C9A86C', '#D4B87A', '#E8DDD2', '#9CA3AF', '#6B7280']
+const CHART_COLORS = ['#6d28d9', '#7c3aed', '#8b5cf6', '#a78bfa', '#525252', '#737373', '#a3a3a3', '#d4d4d4']
 
 function CategoryChart() {
   const { data } = useQuery({
@@ -26,9 +26,9 @@ function CategoryChart() {
   if (chartData.length === 0) return null
 
   return (
-    <div className="rounded-2xl border border-cream-300 bg-white p-6">
-      <h3 className="font-display font-semibold text-charcoal-800 mb-4 flex items-center gap-2">
-        <Tag className="w-5 h-5 text-wine-600" />
+    <div className="rounded-2xl border border-neutral-200 bg-white p-6">
+      <h3 className="font-display font-semibold text-neutral-800 mb-4 flex items-center gap-2">
+        <Tag className="w-5 h-5 text-violet-600" />
         Products by category
       </h3>
       <div className="h-64 w-full">
@@ -44,7 +44,7 @@ function CategoryChart() {
           </BarChart>
         </ResponsiveContainer>
       </div>
-      <p className="text-sm text-charcoal-500 mt-2">{totalProducts} products across {chartData.length} categories</p>
+      <p className="text-sm text-neutral-500 mt-2">{totalProducts} products across {chartData.length} categories</p>
     </div>
   )
 }
@@ -60,9 +60,9 @@ function BrandChart() {
   if (chartData.length === 0) return null
 
   return (
-    <div className="rounded-2xl border border-cream-300 bg-white p-6">
-      <h3 className="font-display font-semibold text-charcoal-800 mb-4 flex items-center gap-2">
-        <BarChart3 className="w-5 h-5 text-gold-600" />
+    <div className="rounded-2xl border border-neutral-200 bg-white p-6">
+      <h3 className="font-display font-semibold text-neutral-800 mb-4 flex items-center gap-2">
+        <BarChart3 className="w-5 h-5 text-violet-600" />
         Top brands
       </h3>
       <div className="h-64 w-full">
@@ -98,10 +98,10 @@ export default function DashboardAnalyticsPage() {
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
       >
-        <h1 className="font-display text-3xl font-bold text-charcoal-800 mb-2">
+        <h1 className="font-display text-3xl font-bold text-neutral-800 mb-2">
           Analytics
         </h1>
-        <p className="text-charcoal-500 mb-8">
+        <p className="text-neutral-500 mb-8">
           Catalog insights and marketplace distribution
         </p>
 
@@ -113,13 +113,13 @@ export default function DashboardAnalyticsPage() {
           ].map((stat) => (
             <div
               key={stat.label}
-              className="p-6 rounded-2xl border border-cream-300 bg-white"
+              className="p-6 rounded-2xl border border-neutral-200 bg-white"
             >
-              <div className="flex items-center gap-2 text-charcoal-500 text-sm mb-2">
+              <div className="flex items-center gap-2 text-neutral-500 text-sm mb-2">
                 <stat.icon className="w-4 h-4" />
                 {stat.label}
               </div>
-              <p className="text-2xl font-bold text-charcoal-800">{stat.value}</p>
+              <p className="text-2xl font-bold text-neutral-800">{stat.value}</p>
             </div>
           ))}
         </div>

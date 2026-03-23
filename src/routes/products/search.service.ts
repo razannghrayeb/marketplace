@@ -12,6 +12,7 @@ import { osClient } from "../../lib/core";
 import { pg, getProductsByIdsOrdered } from "../../lib/core";
 import { config } from "../../config";
 import { getImagesForProducts } from "./images.service";
+import { attrGenderFilterClause } from "./opensearchFilters";
 import { hammingDistance } from "../../lib/products";
 import {
   parseQuery,
@@ -391,7 +392,7 @@ export async function searchByTextWithRelated(
   if (mergedFilters.vendorId) filter.push({ term: { vendor_id: mergedFilters.vendorId } });
 
   // Apply extracted attribute filters (these are from explicit params, not query extraction)
-  if (mergedFilters.gender) filter.push({ term: { attr_gender: mergedFilters.gender } });
+  if (mergedFilters.gender) filter.push(attrGenderFilterClause(mergedFilters.gender));
   if (mergedFilters.color) filter.push({ term: { attr_color: mergedFilters.color } });
 
   // Apply price filter from explicit params or extracted entities
@@ -607,7 +608,7 @@ function applySearchFilters(filter: any[], filters: SearchFilters): void {
   if (filters.material) filter.push({ term: { attr_material: filters.material } });
   if (filters.fit) filter.push({ term: { attr_fit: filters.fit } });
   if (filters.style) filter.push({ term: { attr_style: filters.style } });
-  if (filters.gender) filter.push({ term: { attr_gender: filters.gender } });
+  if (filters.gender) filter.push(attrGenderFilterClause(filters.gender));
   if (filters.pattern) filter.push({ term: { attr_pattern: filters.pattern } });
 }
 

@@ -7,6 +7,7 @@ import { motion } from 'framer-motion'
 import { Store, ShoppingBag } from 'lucide-react'
 import { api } from '@/lib/api/client'
 import { endpoints } from '@/lib/api/endpoints'
+import { mapApiUser } from '@/lib/auth/mapUser'
 import { useAuthStore } from '@/store/auth'
 import type { UserType } from '@/store/auth'
 
@@ -30,12 +31,21 @@ export default function SignupPage() {
       )
       const token = (res as any).access_token ?? (res as any).accessToken
       const refresh = (res as any).refresh_token ?? (res as any).refreshToken
-      const user = (res as any).user
-      if (res.success && user && token) {
-        const userWithType = { ...user, user_type: user.user_type ?? userType }
-        setAuth(userWithType, token, refresh || token)
-        const isBusiness = (user.user_type ?? userType) === 'business'
-        router.push(isBusiness ? '/dashboard' : '/')
+      const rawUser = (res as any).user
+      if (res.success && rawUser && token) {
+        let user = mapApiUser(rawUser, userType)
+        setAuth(user, token, refresh || token)
+        const meRes = (await api.get<unknown>(endpoints.auth.me)) as {
+          success?: boolean
+          user?: Parameters<typeof mapApiUser>[0]
+        }
+        if (meRes.success && meRes.user) {
+          user = mapApiUser(meRes.user, userType)
+          setAuth(user, token, refresh || token)
+        }
+        if (user.is_admin) router.push('/admin')
+        else if ((user.user_type ?? userType) === 'business') router.push('/dashboard')
+        else router.push('/')
         router.refresh()
       } else {
         const err = (res as any).error
@@ -55,20 +65,20 @@ export default function SignupPage() {
         animate={{ opacity: 1, y: 0 }}
         className="w-full max-w-md"
       >
-        <div className="bg-white rounded-3xl shadow-elevated border border-cream-300 p-8">
-          <h1 className="font-display text-2xl font-bold text-charcoal-800 text-center">Create account</h1>
-          <p className="text-charcoal-500 text-center mt-2">Join StyleAI to save favorites and use your wardrobe</p>
+        <div className="bg-white rounded-3xl shadow-elevated border border-neutral-200 p-8">
+          <h1 className="font-display text-2xl font-bold text-neutral-800 text-center">Create account</h1>
+          <p className="text-neutral-500 text-center mt-2">Join StyleAI to save favorites and use your wardrobe</p>
 
           <div className="mt-6">
-            <label className="block text-sm font-medium text-charcoal-700 mb-2">I am a</label>
+            <label className="block text-sm font-medium text-neutral-700 mb-2">I am a</label>
             <div className="flex gap-3">
               <button
                 type="button"
                 onClick={() => setUserType('customer')}
                 className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl border-2 font-medium transition-colors ${
                   userType === 'customer'
-                    ? 'border-wine-700 bg-wine-50 text-wine-800'
-                    : 'border-cream-300 bg-cream-50 text-charcoal-600 hover:border-cream-400'
+                    ? 'border-neutral-900 bg-neutral-50 text-neutral-900'
+                    : 'border-neutral-200 bg-neutral-50 text-neutral-600 hover:border-neutral-300'
                 }`}
               >
                 <ShoppingBag className="w-5 h-5" />
@@ -79,22 +89,22 @@ export default function SignupPage() {
                 onClick={() => setUserType('business')}
                 className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl border-2 font-medium transition-colors ${
                   userType === 'business'
-                    ? 'border-wine-700 bg-wine-50 text-wine-800'
-                    : 'border-cream-300 bg-cream-50 text-charcoal-600 hover:border-cream-400'
+                    ? 'border-neutral-900 bg-neutral-50 text-neutral-900'
+                    : 'border-neutral-200 bg-neutral-50 text-neutral-600 hover:border-neutral-300'
                 }`}
               >
                 <Store className="w-5 h-5" />
                 Business / Seller
               </button>
             </div>
-            <p className="text-xs text-charcoal-400 mt-2">
+            <p className="text-xs text-neutral-400 mt-2">
               {userType === 'customer' ? 'Browse and buy fashion. Save favorites, use your wardrobe.' : 'Sell your products. Manage inventory and catalog.'}
             </p>
           </div>
 
           <form onSubmit={handleSubmit} className="mt-6 space-y-4">
             <div>
-              <label className="block text-sm font-medium text-charcoal-700 mb-1">Email</label>
+              <label className="block text-sm font-medium text-neutral-700 mb-1">Email</label>
               <input
                 type="email"
                 value={email}
@@ -105,7 +115,7 @@ export default function SignupPage() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-charcoal-700 mb-1">Password</label>
+              <label className="block text-sm font-medium text-neutral-700 mb-1">Password</label>
               <input
                 type="password"
                 value={password}
@@ -115,18 +125,18 @@ export default function SignupPage() {
                 className="input-field"
                 placeholder="••••••••"
               />
-              <p className="text-xs text-charcoal-400 mt-1">At least 8 characters</p>
+              <p className="text-xs text-neutral-400 mt-1">At least 8 characters</p>
             </div>
             {error && (
-              <p className="text-sm text-wine-600 bg-wine-50 px-4 py-2 rounded-xl">{error}</p>
+              <p className="text-sm text-neutral-800 bg-neutral-50 px-4 py-2 rounded-xl">{error}</p>
             )}
             <button type="submit" disabled={loading} className="btn-primary w-full">
               {loading ? 'Creating account...' : 'Sign up'}
             </button>
           </form>
-          <p className="mt-6 text-center text-sm text-charcoal-500">
+          <p className="mt-6 text-center text-sm text-neutral-500">
             Already have an account?{' '}
-            <Link href="/login" className="text-wine-700 font-medium hover:underline">
+            <Link href="/login" className="text-neutral-900 font-medium hover:underline">
               Sign in
             </Link>
           </p>

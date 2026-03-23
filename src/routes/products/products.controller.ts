@@ -6,6 +6,7 @@ import { Request, Response } from "express";
 import {
   searchProducts,
   SearchFilters,
+  type ProductListSort,
   searchByImageWithSimilarity,
   searchByTextWithRelated,
   getProductById,
@@ -39,6 +40,14 @@ function parseFilters(query: any): SearchFilters {
   if (query.gender) filters.gender = String(query.gender).toLowerCase();
   if (query.pattern) filters.pattern = String(query.pattern).toLowerCase();
 
+  // Shop sends min/max in USD cents; default currency so OpenSearch range uses price_usd correctly
+  if (
+    (filters.minPriceCents !== undefined || filters.maxPriceCents !== undefined) &&
+    !filters.currency
+  ) {
+    filters.currency = "USD";
+  }
+
   return filters;
 }
 
@@ -47,6 +56,16 @@ function parsePagination(query: any): { page: number; limit: number } {
     page: Math.max(1, Number(query.page) || 1),
     limit: Math.min(Math.max(1, Number(query.limit) || 20), 100),
   };
+}
+
+function parseListSort(query: any): ProductListSort | undefined {
+  const s = String(query.sort || "")
+    .toLowerCase()
+    .replace(/-/g, "_");
+  if (s === "new" || s === "recent") return "new";
+  if (s === "price_asc" || s === "price_low" || s === "priceasc") return "price_asc";
+  if (s === "price_desc" || s === "price_high" || s === "pricedesc") return "price_desc";
+  return undefined;
 }
 
 // ============================================================================
@@ -60,10 +79,24 @@ export async function listProducts(req: Request, res: Response) {
   try {
     const filters = parseFilters(req.query);
     const { page, limit } = parsePagination(req.query);
+    const qRaw = req.query.q;
+    const q = typeof qRaw === "string" ? qRaw.trim() : "";
 
-    const products = await searchProducts({ filters, page, limit });
+    const { products, total } = await searchProducts({
+      filters,
+      page,
+      limit,
+      query: q || undefined,
+      sort: parseListSort(req.query),
+    });
+    const pages = Math.max(1, Math.ceil(total / limit));
 
-    res.json({ success: true, data: products, pagination: { page, limit } });
+    res.json({
+      success: true,
+      data: products,
+      meta: { total, page, limit, pages },
+      pagination: { page, limit, total, pages },
+    });
   } catch (error) {
     console.error("Error listing products:", error);
     res.status(500).json({ success: false, error: "Failed to fetch products" });
@@ -97,14 +130,18 @@ export async function searchProductsByTitle(req: Request, res: Response) {
       limit,
       includeRelated,
       relatedLimit,
+      sort: parseListSort(req.query),
     });
 
-    res.json({ 
-      success: true, 
+    const total = typeof result.meta.total === "number" ? result.meta.total : 0;
+    const pages = Math.max(1, Math.ceil(total / limit));
+
+    res.json({
+      success: true,
       data: result.results,
       related: result.related,
-      meta: result.meta,
-      pagination: { page, limit } 
+      meta: { ...result.meta, total, page, limit, pages },
+      pagination: { page, limit, total, pages },
     });
   } catch (error) {
     console.error("Error searching products:", error);
