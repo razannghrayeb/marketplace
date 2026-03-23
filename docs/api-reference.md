@@ -899,54 +899,62 @@ POST /products/recommendations/batch
 Get complementary items to complete an outfit or style.
 
 ```http
-POST /products/{id}/complete-style
+GET /products/{id}/complete-style
+POST /products/complete-style
 ```
 
-#### Request Body
-```json
-{
-  "context": {
-    "occasion": "casual",
-    "season": "summer",
-    "style_preference": "minimalist"
-  },
-  "exclude_categories": ["shoes"],
-  "price_range": {
-    "min_cents": 2000,
-    "max_cents": 15000
-  },
-  "limit": 8
-}
-```
+Authentication: `Authorization: Bearer <jwt>` is optional.
+
+If you are authenticated, the completions are wardrobe-aware and may include user-owned products. Those products will be marked with `owned: true`.
+
+#### Query Parameters (GET)
+- `maxPerCategory` (default `5`)
+- `maxTotal` (default `20`)
+- `minPrice` / `maxPrice` (in cents, optional)
+- `preferSameBrand` (`"true"` / `"false"`, default `"false"`)
+- `excludeBrands` (comma-separated string, optional)
 
 #### Example Response
 ```json
 {
   "success": true,
   "data": {
-    "base_product": {
+    "sourceProduct": {
       "id": 12345,
       "title": "White T-Shirt",
-      "category": "tops"
+      "brand": "SomeBrand"
     },
-    "completions": [
+    "detectedCategory": "tshirt",
+    "style": {
+      "occasion": "casual",
+      "aesthetic": "classic",
+      "season": "fall",
+      "formality": 4,
+      "colorProfile": { "primary": "purple", "type": "cool" }
+    },
+    "outfitSuggestion": "For your purple sweater, great for everyday wear.",
+    "recommendations": [
       {
         "category": "bottoms",
-        "suggestions": [
+        "reason": "Casual tops go well with bottoms",
+        "priority": 1,
+        "priorityLabel": "Essential",
+        "products": [
           {
             "id": 12350,
             "title": "Blue Jeans",
-            "compatibility_score": 0.91,
-            "style_match": "casual",
-            "color_harmony": 0.88
+            "brand": "DenimCo",
+            "price": 3900,
+            "currency": "USD",
+            "image": "https://.../image.webp",
+            "matchScore": 87,
+            "matchReasons": ["Color harmony match", "Matches formality level"],
+            "owned": true
           }
         ]
-      },
-      {
-        "category": "accessories",
-        "suggestions": [...]
       }
-    ]
+    ],
+    "totalRecommendations": 8
   }
 }
 ```
@@ -1233,11 +1241,12 @@ Example response:
 POST /api/wardrobe/complete-look
 ```
 
+Authentication: `Authorization: Bearer <jwt>` is required (the `userId` is taken from the token).
+
 Example request:
 
 ```json
 {
-  "user_id": 42,
   "item_ids": [901, 910],
   "limit": 10
 }
@@ -1251,10 +1260,31 @@ Example response:
   "suggestions": [
     {
       "product_id": 7788,
+      "title": "Chelsea Boots",
+      "brand": "BootCo",
+      "category": "footwear",
+      "price_cents": 12900,
+      "image_url": "https://.../image.webp",
       "score": 0.86,
-      "slot": "footwear"
+      "reason": "Completes your current outfit",
+      "reason_type": "gap",
+      "fitBreakdown": {
+        "embeddingNorm": 0.62,
+        "categoryCompat": 0.74,
+        "colorHarmony": 0.81
+      }
     }
-  ]
+  ],
+  "outfitSets": [
+    {
+      "productIds": [10001, 10022, 7788],
+      "categories": ["tops", "bottoms", "footwear"],
+      "coherenceScore": 0.83,
+      "totalScore": 0.79,
+      "reasons": ["Matches wardrobe color family", "Good category compatibility"]
+    }
+  ],
+  "missingCategories": ["footwear", "bags"]
 }
 ```
 

@@ -50,6 +50,12 @@ export interface UnifiedImageSearchParams {
   pHash?: string;
   predictedCategoryAisles?: string[];
   knnField?: string;
+  /**
+   * Forces image search into hard category mode for this call.
+   * When enabled, the OpenSearch `filters.category` terms are applied even if
+   * `SEARCH_IMAGE_SOFT_CATEGORY=1`.
+   */
+  forceHardCategoryFilter?: boolean;
   relaxThresholdWhenEmpty?: boolean;
 }
 
@@ -167,6 +173,7 @@ export async function searchImage(
     pHash,
     predictedCategoryAisles,
     knnField,
+    forceHardCategoryFilter,
     relaxThresholdWhenEmpty,
   } = params;
 
@@ -225,6 +232,7 @@ export async function searchImage(
     pHash: effectivePHash,
     predictedCategoryAisles,
     knnField,
+    forceHardCategoryFilter,
     relaxThresholdWhenEmpty: relaxThresholdWhenEmpty ?? true,
   } as any);
 

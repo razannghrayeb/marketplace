@@ -12,6 +12,7 @@ import {
   YoloCircuitBreaker,
   isYoloCircuitOpenError,
 } from "./yoloCircuitBreaker";
+import { mapDetectionToCategory } from "../detection/categoryMapper";
 
 // ============================================================================
 // Types
@@ -161,8 +162,11 @@ export function resolveYoloServiceBaseUrl(override?: string): string {
 
 function yoloDetectTimeoutMs(): number {
   const raw = Number(process.env.YOLO_DETECT_TIMEOUT_MS);
-  const n = Number.isFinite(raw) && raw > 0 ? raw : 2000;
-  return Math.min(120_000, Math.max(500, n));
+  // YOLO inference can take longer than a couple seconds (CPU warmup, model IO, first run),
+  // so the default needs to be higher than 2s to avoid spurious empty detections.
+  const n = Number.isFinite(raw) && raw > 0 ? raw : 120_000;
+  // Allow longer timeouts for slow inference / warmups.
+  return Math.min(600_000, Math.max(500, n));
 }
 
 /** GET /health and /labels may trigger first-time model load (entrypoint waits up to 180s for same). */
@@ -613,74 +617,32 @@ export function groupByCategory(
 export function extractOutfitComposition(
   detections: Detection[]
 ): OutfitComposition {
-  const tops = filterByCategory(detections, [
-    "shirt",
-    "tshirt",
-    "blouse",
-    "sweater",
-    "hoodie",
-    "sweatshirt",
-    "cardigan",
-    "tank_top",
-    "crop_top",
-    "top",
-  ]);
+  const tops: Detection[] = [];
+  const bottoms: Detection[] = [];
+  const dresses: Detection[] = [];
+  const outerwear: Detection[] = [];
+  const footwear: Detection[] = [];
+  const bags: Detection[] = [];
+  const accessories: Detection[] = [];
 
-  const bottoms = filterByCategory(detections, [
-    "jeans",
-    "pants",
-    "shorts",
-    "skirt",
-    "leggings",
-  ]);
-
-  const dresses = filterByCategory(detections, [
-    "dress",
-    "gown",
-    "maxi_dress",
-    "mini_dress",
-    "midi_dress",
-  ]);
-
-  const outerwear = filterByCategory(detections, [
-    "jacket",
-    "coat",
-    "blazer",
-    "parka",
-    "bomber",
-  ]);
-
-  const footwear = filterByCategory(detections, [
-    "sneakers",
-    "boots",
-    "heels",
-    "sandals",
-    "loafers",
-    "flats",
-  ]);
-
-  const bags = filterByCategory(detections, [
-    "bag",
-    "backpack",
-    "clutch",
-    "tote",
-    "crossbody",
-  ]);
-
-  const accessories = filterByCategory(detections, [
-    "hat",
-    "sunglasses",
-    "watch",
-    "belt",
-    "tie",
-    "scarf",
-    "gloves",
-    "necklace",
-    "bracelet",
-    "earrings",
-    "ring",
-    "jewelry",
-  ]);
+  for (const detection of detections) {
+    const mapped = mapDetectionToCategory(detection.label, detection.confidence).productCategory;
+    if (mapped === "tops") {
+      tops.push(detection);
+    } else if (mapped === "bottoms") {
+      bottoms.push(detection);
+    } else if (mapped === "dresses") {
+      dresses.push(detection);
+    } else if (mapped === "outerwear") {
+      outerwear.push(detection);
+    } else if (mapped === "footwear") {
+      footwear.push(detection);
+    } else if (mapped === "bags") {
+      bags.push(detection);
+    } else if (mapped === "accessories") {
+      accessories.push(detection);
+    }
+  }
 
   return { tops, bottoms, dresses, outerwear, footwear, bags, accessories };
 }

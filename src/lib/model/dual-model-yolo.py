@@ -193,7 +193,7 @@ class DualDetector:
 
     # ── public: predict ───────────────────────────────────────────────────────
 
-    def predict(self, image) -> dict:
+    def predict(self, image, conf: float | None = None) -> dict:
         """
         Run both models on `image` and return merged predictions.
 
@@ -210,13 +210,15 @@ class DualDetector:
             "orig_rgb"    : np.ndarray HxWx3 RGB original image
             "a_plot"      : np.ndarray HxWx3 RGB Model A annotated frame
         """
+        effective_conf = float(conf) if conf is not None else self.conf
+
         # Resolve to a file path for Model A (YOLO needs a path or array)
         pil_img, tmp = self._to_pil(image)
         img_source   = tmp if tmp else (image if isinstance(image, str) else pil_img)
 
         # --- Model A: clothing ---
         res_a    = self._model_a.predict(source=img_source,
-                                         conf=self.conf, verbose=False)[0]
+                                         conf=effective_conf, verbose=False)[0]
         orig_rgb = cv2.cvtColor(res_a.orig_img, cv2.COLOR_BGR2RGB)
         a_plot   = cv2.cvtColor(res_a.plot(),   cv2.COLOR_BGR2RGB)
 
@@ -225,7 +227,7 @@ class DualDetector:
             for box in res_a.boxes:
                 raw   = self._model_a.names[int(box.cls[0])]
                 score = float(box.conf[0])
-                if score < self.conf: continue
+                if score < effective_conf: continue
                 clothing.append({
                     "label":  self._LABEL_MAP_A.get(raw, raw),
                     "score":  score,
@@ -239,7 +241,7 @@ class DualDetector:
         for det in raw_b:
             lbl, score = det["label"], det["score"]
             if lbl not in self._KEEP_B: continue
-            if score < self.conf:       continue
+            if score < effective_conf:       continue
             b = det["box"]
             acc.append({
                 "label":  lbl,

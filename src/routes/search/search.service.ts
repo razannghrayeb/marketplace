@@ -1247,6 +1247,47 @@ export async function textSearch(
       .filter((id) => (complianceById.get(id)?.finalRelevance01 ?? 0) >= finalAcceptMin);
 
     const relevanceGateSoft = config.search.relevanceGateMode === "soft";
+    const softFloorMin = config.search.softFinalRelevanceFloorMin;
+
+    // #region agent log
+    (() => {
+      let minFinalRelevance01 = Number.POSITIVE_INFINITY;
+      let softFloorPassedIdsCount = 0;
+      for (const h of sortedByRelevance) {
+        const id = String(h?._source?.product_id);
+        const v = complianceById.get(id)?.finalRelevance01 ?? 0;
+        if (v < minFinalRelevance01) minFinalRelevance01 = v;
+        if (v >= softFloorMin) softFloorPassedIdsCount++;
+      }
+      if (!Number.isFinite(minFinalRelevance01)) minFinalRelevance01 = 0;
+      const belowCount = Math.max(0, sortedByRelevance.length - thresholdPassedIds.length);
+      fetch("http://127.0.0.1:7383/ingest/ccea0d1b-4b26-441e-9797-fbae444c347a", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "00a194" },
+        body: JSON.stringify({
+          sessionId: "00a194",
+          runId: "relevance-gate-debug",
+          hypothesisId: "H1",
+          location: "search.service.ts:textSearchGateDecision",
+          message: "text search relevance gate decision",
+          data: {
+            finalAcceptMin,
+            relevanceGateMode: config.search.relevanceGateMode,
+            relevanceGateSoft,
+            hitsCount: hits.length,
+            sortedByRelevanceCount: sortedByRelevance.length,
+            thresholdPassedIdsCount: thresholdPassedIds.length,
+            belowFinalAcceptMinCount: belowCount,
+            softFloorMin,
+            softFloorPassedIdsCount,
+            minFinalRelevance01: minFinalRelevance01,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+    })();
+    // #endregion
+
     const sortedIds = sortedByRelevance.map((h: any) => String(h._source.product_id));
     const belowRelevanceThreshold =
       hits.length > 0 &&
@@ -1254,9 +1295,18 @@ export async function textSearch(
       !relevanceGateSoft;
 
     // Hard precision gate for explicit color queries (within relevance-threshold set).
-    let finalProductIds = [
-      ...(relevanceGateSoft ? sortedIds : thresholdPassedIds),
-    ];
+    const softFloorPassedIds = relevanceGateSoft
+      ? sortedByRelevance
+          .map((h: any) => String(h._source.product_id))
+          .filter((id) => (complianceById.get(id)?.finalRelevance01 ?? 0) >= softFloorMin)
+      : [];
+
+    let finalProductIds = relevanceGateSoft
+      ? softFloorPassedIds.length > 0
+        ? softFloorPassedIds
+        : sortedIds
+      : thresholdPassedIds;
+
     if (desiredColors.length > 0) {
       const strictColorPost = String(process.env.SEARCH_COLOR_POSTFILTER_STRICT ?? "1").toLowerCase() !== "0";
       const maxImgConfHits = Math.max(0, ...hits.map((h: any) => Number(h?._source?.color_confidence_image) || 0));
@@ -1765,9 +1815,63 @@ export async function multiImageSearch(
       const relevanceGateSoft = multiImageHardGate
         ? config.search.relevanceGateMode === "soft"
         : true;
+      const softFloorMin = config.search.softFinalRelevanceFloorMin;
       const thresholdPassedIds = hits
         .map((h: any) => String(h._source.product_id))
         .filter((id) => (relevanceById.get(id)?.finalRelevance01 ?? 0) >= finalAcceptMin);
+
+      // #region agent log
+      (() => {
+        let minFinalRelevance01 = Number.POSITIVE_INFINITY;
+        let softFloorPassedIdsCount = 0;
+        for (const h of hits) {
+          const id = String(h?._source?.product_id);
+          const v = relevanceById.get(id)?.finalRelevance01 ?? 0;
+          if (v < minFinalRelevance01) minFinalRelevance01 = v;
+          if (v >= softFloorMin) softFloorPassedIdsCount++;
+        }
+        if (!Number.isFinite(minFinalRelevance01)) minFinalRelevance01 = 0;
+        const belowCount = Math.max(0, hits.length - thresholdPassedIds.length);
+        fetch("http://127.0.0.1:7383/ingest/ccea0d1b-4b26-441e-9797-fbae444c347a", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "00a194" },
+          body: JSON.stringify({
+            sessionId: "00a194",
+            runId: "relevance-gate-debug",
+            hypothesisId: "H2",
+            location: "search.service.ts:multiImageGateDecision",
+            message: "multi-image relevance gate decision",
+            data: {
+              finalAcceptMin,
+              multiImageHardGate,
+              relevanceGateMode: config.search.relevanceGateMode,
+              relevanceGateSoft,
+              softFloorMin,
+              softFloorPassedIdsCount,
+              hitsCount: hits.length,
+              thresholdPassedIdsCount: thresholdPassedIds.length,
+              belowFinalAcceptMinCount: belowCount,
+              minFinalRelevance01: minFinalRelevance01,
+            },
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {});
+      })();
+      // #endregion
+
+      if (relevanceGateSoft) {
+        // In soft mode, avoid extremely low relevance by applying a low "floor" first.
+        // If that would remove every hit, fall back to the original candidate set.
+        const softFloorPassedIds = hits
+          .map((h: any) => String(h._source.product_id))
+          .filter((id) => (relevanceById.get(id)?.finalRelevance01 ?? 0) >= softFloorMin);
+
+        if (softFloorPassedIds.length > 0) {
+          const allow = new Set(softFloorPassedIds);
+          hits = hits.filter((h: any) => allow.has(String(h._source.product_id)));
+        }
+      }
+
       if (!relevanceGateSoft) {
         if (thresholdPassedIds.length > 0) {
           const allow = new Set(thresholdPassedIds);

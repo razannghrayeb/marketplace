@@ -329,8 +329,13 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
       return res.status(400).json({ success: false, error: "item_ids array required" });
     }
 
-    const suggestions = await completeLookSuggestions(userId, itemIds, limit);
-    res.json({ success: true, suggestions });
+    const result = await completeLookSuggestions(userId, itemIds, limit);
+    res.json({
+      success: true,
+      suggestions: result.suggestions,
+      outfitSets: result.outfitSets,
+      missingCategories: result.missingCategories,
+    });
   } catch (err) {
     next(err);
   }

@@ -18,6 +18,7 @@ import { listProducts, searchProductsByTitle, searchProductsByImage, getProductB
 import { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
 import { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller";
 import { getRecommendations, getBatchRecommendationsHandler } from "./recommendations.controller";
+import { optionalAuth } from "../../middleware/auth";
 
 const router = Router();
 
@@ -75,9 +76,9 @@ router.get("/price-drops", getPriceDrops);
 // Complete My Style - Outfit Recommendations
 // ============================================================================
 
-router.get("/:id/complete-style", completeStyle);
+router.get("/:id/complete-style", optionalAuth, completeStyle);
 router.get("/:id/style-profile", getStyleProfile);
-router.post("/complete-style", completeStyleFromBody);
+router.post("/complete-style", optionalAuth, completeStyleFromBody);
 
 // ============================================================================
 // Product Image Routes
