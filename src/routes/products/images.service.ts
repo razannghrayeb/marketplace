@@ -107,9 +107,12 @@ export async function uploadProductImage(
   const key = generateImageKey(buffer, contentType.includes("png") ? ".png" : ".jpg");
   const { cdnUrl } = await uploadImage(buffer, key, contentType);
 
-  // Compute embedding and pHash
-  const embedding = await processImageForEmbedding(buffer);
-  const pHash = await computePHash(buffer);
+  // Compute both embeddings and pHash in parallel (embedding_garment for kNN on garment ROI)
+  const [embedding, garmentEmbedding, pHash] = await Promise.all([
+    processImageForEmbedding(buffer),
+    processImageForGarmentEmbedding(buffer).catch(() => null),
+    computePHash(buffer),
+  ]);
 
   // Insert into database
   const result = await pg.query(
@@ -129,8 +132,8 @@ export async function uploadProductImage(
     );
   }
 
-  // Sync OpenSearch
-  await updateProductIndex(productId, buffer);
+  // Sync OpenSearch (pass both embeddings so embedding_garment is populated)
+  await updateProductIndex(productId, buffer, { embedding, garmentEmbedding });
 
   return { image, embedding };
 }
@@ -225,10 +228,15 @@ export async function deleteProductImage(productId: number, imageId: number): Pr
 // OpenSearch Sync
 // ============================================================================
 
+export interface UpdateProductIndexOpts {
+  embedding?: number[];
+  garmentEmbedding?: number[] | null;
+}
+
 /**
  * Update product document in OpenSearch with current images
  */
-export async function updateProductIndex(productId: number, sourceBuffer?: Buffer): Promise<void> {
+export async function updateProductIndex(productId: number, sourceBuffer?: Buffer, opts?: UpdateProductIndexOpts): Promise<void> {
   const hasIsHidden = await productsTableHasIsHiddenColumn();
   const hasCanonicalId = await productsTableHasCanonicalIdColumn();
   const productResult = await pg.query(
@@ -261,6 +269,8 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
   const enrichMap = await loadProductSearchEnrichmentByIds([productId]);
   const enrichRow = enrichMap.get(productId);
 
+  const providedEmbedding = opts?.embedding?.length ? opts.embedding : null;
+  const providedGarmentEmbedding = opts?.garmentEmbedding?.length ? opts.garmentEmbedding : null;
   const doc: any = buildProductSearchDocument({
     productId,
     vendorId: product.vendor_id,
@@ -280,7 +290,8 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
       p_hash: img.p_hash,
       is_primary: img.is_primary,
     })),
-    embedding: primaryImage?.embedding?.length > 0 ? primaryImage.embedding : null,
+    embedding: providedEmbedding ?? (primaryImage?.embedding?.length > 0 ? primaryImage.embedding : null),
+    embeddingGarment: providedGarmentEmbedding,
     detectedColors: garmentColorAnalysis?.paletteCanonical ?? [],
     garmentColorAnalysis,
     enrichment: enrichRow
@@ -395,7 +406,7 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
       }
 
       if (buffer) {
-        const { processImageForEmbedding, processImageForGarmentEmbeddingWithOptionalBox } = await import(
+        const { processImageForEmbedding, processImageForGarmentEmbedding } = await import(
           "../../lib/image/processor"
         );
 
@@ -424,9 +435,10 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
           garmentBox = null;
         }
 
+        // Use processImageForGarmentEmbedding (no box) to match query-time preprocessing
         const [embedding, embeddingGarment, garmentAnalysis] = await Promise.all([
           processImageForEmbedding(buffer),
-          processImageForGarmentEmbeddingWithOptionalBox(buffer, garmentBox).catch(() => null as unknown as number[]),
+          processImageForGarmentEmbedding(buffer).catch(() => null as unknown as number[]),
           extractGarmentFashionColors(buffer, { box: garmentBox }).catch(() => null),
         ]);
         // Update DB for this image row and include in document

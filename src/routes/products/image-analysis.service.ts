@@ -42,7 +42,10 @@ import {
   shouldUseAlternatives,
   type CategoryMapping,
 } from "../../lib/detection/categoryMapper";
-import { extractLexicalProductTypeSeeds } from "../../lib/search/productTypeTaxonomy";
+import {
+  extractLexicalProductTypeSeeds,
+  expandProductTypesForQuery,
+} from "../../lib/search/productTypeTaxonomy";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
 
 function imageSoftCategoryEnv(): boolean {
@@ -399,6 +402,12 @@ function hardCategoryTermsForDetection(
   }
 
   return baseTerms;
+}
+
+function expandPredictedTypeHints(seeds: string[]): string[] {
+  const normalized = seeds.map((s) => String(s).toLowerCase().trim()).filter(Boolean);
+  if (normalized.length === 0) return [];
+  return expandProductTypesForQuery(normalized);
 }
 
 /** IoU threshold for merging same-label detections when `groupByDetection` is false (default 0.5). */
@@ -1138,6 +1147,11 @@ export class ImageAnalysisService {
       const searchCategories = shouldUseAlternatives(categoryMapping)
         ? getSearchCategories(categoryMapping)
         : [categoryMapping.productCategory];
+      const expandedTypeHints = expandPredictedTypeHints([
+        label,
+        ...searchCategories,
+        ...extractLexicalProductTypeSeeds(label),
+      ]);
 
       const filters: Partial<import("./types").SearchFilters> = {};
       // Avoid taxonomy pollution for labels like "short sleeve top" where the word "short"
@@ -1201,7 +1215,7 @@ export class ImageAnalysisService {
           const terms = hardCategoryTermsForDetection(hardLabelForTerms, categoryMapping);
           filters.category = terms.length === 1 ? terms[0] : terms;
         } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
-          predictedCategoryAisles = searchCategories;
+          predictedCategoryAisles = expandedTypeHints.length ? expandedTypeHints : searchCategories;
         } else {
           filters.category =
             searchCategories.length === 1 ? searchCategories[0] : searchCategories;
@@ -1694,10 +1708,16 @@ export class ImageAnalysisService {
         if (inferredColorForDetection) filters.softColor = inferredColorForDetection;
         let predictedCategoryAisles: string[] | undefined;
         if (options.filterByDetectedCategory !== false) {
+          const softCategories = shouldUseAlternatives(categoryMapping)
+            ? getSearchCategories(categoryMapping)
+            : [categoryMapping.productCategory];
+          const expandedTypeHints = expandPredictedTypeHints([
+            categorySource,
+            ...softCategories,
+            ...browseTypeSeeds,
+          ]);
           if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
-            predictedCategoryAisles = shouldUseAlternatives(categoryMapping)
-              ? getSearchCategories(categoryMapping)
-              : [categoryMapping.productCategory];
+            predictedCategoryAisles = expandedTypeHints.length ? expandedTypeHints : softCategories;
           } else {
             const hardLabelForTerms =
               categoryMapping.productCategory === "bottoms" && captionWantsJeans
