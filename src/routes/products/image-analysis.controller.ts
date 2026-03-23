@@ -83,7 +83,8 @@ function pickImageFile(req: Request): Express.Multer.File | undefined {
  *   "services": {
  *     "clip": true,
  *     "yolo": true,
- *     "blip": true
+ *     "blip": true,
+ *     "yoloHint": "optional when yolo is false — local dev / ops guidance"
  *   }
  * }
  */

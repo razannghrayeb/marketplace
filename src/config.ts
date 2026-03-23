@@ -99,7 +99,7 @@ export const config = {
     /** Image-only kNN gate; stricter default so loose "fashion similar" matches are dropped. */
     imageSimilarityThreshold: finiteEnvNumber(
       process.env.CLIP_IMAGE_SIMILARITY_THRESHOLD,
-      0.68,
+      0.65,
       0.35,
       0.95,
     ),
@@ -116,9 +116,10 @@ export const config = {
     ),
   },
   search: {
-    recallWindow: finiteEnvNumber(process.env.SEARCH_RECALL_WINDOW, 300, 50, 2000),
-    recallMax: finiteEnvNumber(process.env.SEARCH_RECALL_MAX, 500, 100, 2000),
-    finalAcceptMin: finiteEnvNumber(process.env.SEARCH_FINAL_ACCEPT_MIN, 0.6, 0.35, 0.95),
+    /** OpenSearch candidates before rerank (tune with SEARCH_RECALL_WINDOW). */
+    recallWindow: finiteEnvNumber(process.env.SEARCH_RECALL_WINDOW, 500, 50, 2000),
+    recallMax: finiteEnvNumber(process.env.SEARCH_RECALL_MAX, 600, 100, 2000),
+    finalAcceptMin: finiteEnvNumber(process.env.SEARCH_FINAL_ACCEPT_MIN, 0.55, 0.35, 0.95),
     filterHardMinConfidence: finiteEnvNumber(process.env.SEARCH_FILTER_HARD_MIN_CONFIDENCE, 0.55, 0.35, 0.95),
     domainEmbeddingRejectBelow: finiteEnvNumber(process.env.SEARCH_DOMAIN_EMBEDDING_REJECT_BELOW, 0.3, 0.15, 0.55),
     /** max = divide by top hit score (default); tanh = Math.tanh(raw/scale) for calibration across queries */
@@ -142,7 +143,12 @@ export const config = {
       return true;
     })(),
     /** Hard cap on XGB batch size; head window is at least max(this, offset+limit) when full-recall is on. */
-    xgbFullRecallMax: finiteEnvNumber(process.env.SEARCH_XGB_FULL_RECALL_MAX, 300, 20, 2000),
+    xgbFullRecallMax: finiteEnvNumber(process.env.SEARCH_XGB_FULL_RECALL_MAX, 500, 20, 2000),
+    /**
+     * pHash Hamming max for treating two primary images as near-duplicates (lower = keep more distinct listings).
+     * SEARCH_DEDUPE_IMAGE_HAMMING_MAX (default 7; was 10).
+     */
+    dedupeImageHammingMax: finiteEnvNumber(process.env.SEARCH_DEDUPE_IMAGE_HAMMING_MAX, 7, 4, 14),
     /** Key segment for QueryAST Redis cache (future: per-request locale). */
     queryAstCacheLocale: process.env.SEARCH_QUERY_AST_LOCALE?.trim() || "default",
     /** TTL for SEARCH_QUERY_AST_REDIS serialized AST (seconds). */
@@ -161,6 +167,16 @@ export const config = {
       const v = String(process.env.SEARCH_GENDER_UNISEX_OR ?? "1").toLowerCase().trim();
       return v !== "0" && v !== "false" && v !== "off" && v !== "no";
     })(),
+    /**
+     * When true (or client sends ?rankingDebug=1), product search responses include `meta.ranking_debug`
+     * and per-item `explain` / `finalRelevance01` remain populated for staging analysis.
+     */
+    searchRankingDebug: (() => {
+      const v = String(process.env.SEARCH_RANKING_DEBUG ?? "").toLowerCase().trim();
+      return v === "1" || v === "true";
+    })(),
+    /** Lower bound for image kNN relax paths; must match products.service `imageRelaxSimilarityFloor`. */
+    searchImageRelaxFloor: finiteEnvNumber(process.env.SEARCH_IMAGE_RELAX_FLOOR, 0.58, 0.35, 0.92),
   },
   tryon: {
     // Google Cloud Vertex AI — Virtual Try-On (publishers/google/models/...:predict)
