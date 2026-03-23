@@ -1,7 +1,7 @@
 import { extractAttributesSync } from "./attributeExtractor";
 import type { GarmentColorAnalysis } from "../color/garmentColorPipeline";
 import { inferCategoryCanonical } from "./categoryFilter";
-import { expandProductTypesForIndexing } from "./productTypeTaxonomy";
+import { expandProductTypesForIndexing, extractLexicalProductTypeSeeds } from "./productTypeTaxonomy";
 import { canonicalTypeIdsToProductTypeTokens } from "./loadProductSearchEnrichment";
 
 const LBP_TO_USD = 89000;
@@ -259,8 +259,24 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
       : 0;
 
   const titleTypes = extractProductTypesFromTitle(input.title || "");
+  const descriptionSeedsLexical = input.description
+    ? extractLexicalProductTypeSeeds(input.description)
+    : [];
+
+  // Keep precision: description is noisier than title, so cap how many
+  // description-derived type seeds we merge in.
+  const extraSeedsFromDescriptionMax = titleTypes.length > 0 ? 2 : 4;
+  const descriptionSeedsLimited = descriptionSeedsLexical
+    .filter((t) => t && t.length >= 2)
+    .slice()
+    .sort((a, b) => b.length - a.length) // prefer longer phrases like "mini dress"
+    .slice(0, extraSeedsFromDescriptionMax);
+
   const enrichTokens = canonicalTypeIdsToProductTypeTokens(enrich?.canonical_type_ids ?? []);
   const mergedTypeSeeds = [...titleTypes];
+  for (const t of descriptionSeedsLimited) {
+    if (!mergedTypeSeeds.includes(t)) mergedTypeSeeds.push(t);
+  }
   for (const t of enrichTokens) {
     if (!mergedTypeSeeds.includes(t)) mergedTypeSeeds.push(t);
   }

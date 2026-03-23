@@ -61,6 +61,7 @@ export interface StyleRecommendationResponse {
       image?: string;
       matchScore: number;
       matchReasons: string[];
+      owned?: boolean;
     }>;
   }>;
   totalRecommendations: number;
@@ -101,7 +102,8 @@ export interface StyleProfileResponse {
  */
 export async function getOutfitRecommendations(
   productId: number,
-  options: CompleteStyleOptions = {}
+  options: CompleteStyleOptions = {},
+  userId?: number
 ): Promise<StyleRecommendationResponse | null> {
   const result = await completeOutfitFromProductId(productId, {
     maxPerCategory: options.maxPerCategory,
@@ -116,7 +118,9 @@ export async function getOutfitRecommendations(
     return null;
   }
 
-  const response = formatOutfitCompletion(result);
+  const response = formatOutfitCompletion(
+    userId ? await mergeWardrobeOwnedIntoCompletion(result, userId, options) : result
+  );
 
   // Log impressions for training data (async, non-blocking)
   logOutfitImpressions(productId, result).catch((err) =>
@@ -131,7 +135,8 @@ export async function getOutfitRecommendations(
  */
 export async function getOutfitRecommendationsFromProduct(
   product: Product,
-  options: CompleteStyleOptions = {}
+  options: CompleteStyleOptions = {},
+  userId?: number
 ): Promise<StyleRecommendationResponse> {
   const result = await completeMyStyle(product, {
     maxPerCategory: options.maxPerCategory,
@@ -142,7 +147,9 @@ export async function getOutfitRecommendationsFromProduct(
     disablePriceFilter: options.disablePriceFilter,
   });
 
-  return formatOutfitCompletion(result);
+  return formatOutfitCompletion(
+    userId ? await mergeWardrobeOwnedIntoCompletion(result, userId, options) : result
+  );
 }
 
 /**
@@ -248,10 +255,134 @@ function formatOutfitCompletion(result: OutfitCompletion): StyleRecommendationRe
         image: p.image_cdn || p.image_url,
         matchScore: Math.round(p.matchScore),
         matchReasons: p.matchReasons,
+        owned: (p as any).owned === true ? true : undefined,
       })),
     })),
     totalRecommendations: result.recommendations.reduce((sum, r) => sum + r.products.length, 0),
   };
+}
+
+async function mergeWardrobeOwnedIntoCompletion(
+  completion: OutfitCompletion,
+  userId: number,
+  options: CompleteStyleOptions
+): Promise<OutfitCompletion> {
+  const ownedMaxPerCategory = Math.max(1, options.maxPerCategory ?? 5);
+
+  // Fetch products the user already owns (wardrobe-backed).
+  // We only return website products, but we merge in owned products and mark them.
+  const ownedRows = await pg.query<Product>(`
+    SELECT
+      p.id,
+      p.title,
+      p.brand,
+      p.category,
+      p.color,
+      p.price_cents,
+      p.currency,
+      p.image_url,
+      p.image_cdn,
+      p.description
+    FROM wardrobe_items wi
+    JOIN products p ON p.id = wi.product_id
+    WHERE wi.user_id = $1
+      AND wi.product_id IS NOT NULL
+      AND p.availability = true
+  `, [userId]);
+
+  if (!ownedRows.rows.length) {
+    return completion;
+  }
+
+  const ownedProducts = ownedRows.rows.slice(0, 50);
+
+  // Detect product categories for owned items so they can be merged into the right rec buckets.
+  const ownedWithDetected = await Promise.all(
+    ownedProducts.map(async (p) => {
+      const cat = await detectCategory(p.title, p.description);
+      return { product: p, detectedCategory: cat.category as ProductCategory };
+    })
+  );
+
+  for (const rec of completion.recommendations) {
+    const tokens = rec.category
+      .split(" / ")
+      .map(t => t.trim())
+      .filter(Boolean);
+
+    const ownedForRec = ownedWithDetected.filter(o =>
+      tokens.includes(o.detectedCategory)
+    );
+    if (ownedForRec.length === 0) continue;
+
+    const ownedIdSet = new Set<number>(ownedForRec.map(o => o.product.id));
+
+    // Mark existing website products that are also owned.
+    for (const p of rec.products) {
+      if (ownedIdSet.has(p.id)) {
+        (p as any).owned = true;
+      }
+    }
+
+    // Add owned products that weren’t present in the website engine output.
+    const existingIds = new Set<number>(rec.products.map(p => p.id));
+    const ownedExtras = ownedForRec
+      .map(o => o.product)
+      .filter(p => !existingIds.has(p.id));
+
+    if (ownedExtras.length > 0) {
+      const baseStyle = completion.detectedStyle;
+      const stylePrimary = baseStyle.colorProfile.primary.toLowerCase();
+
+      const extras = ownedExtras.map((p) => {
+        const candidateColor = (p.color || "").toLowerCase();
+
+        // Basic color-based score so owned items feel relevant (without breaking website scoring).
+        let colorHarmony = 0.6;
+        if (!candidateColor) {
+          colorHarmony = 0.6;
+        } else if (stylePrimary === "neutral") {
+          colorHarmony = 0.9;
+        } else if (candidateColor === stylePrimary) {
+          colorHarmony = 0.85;
+        } else if (baseStyle.colorProfile.harmonies.some(h => h.colors.includes(candidateColor))) {
+          colorHarmony = 0.8;
+        }
+
+        const matchScore = Math.round(60 + colorHarmony * 40); // 84-100 range typical
+
+        const matchReasons: string[] = ["In your wardrobe"];
+        if (baseStyle.colorProfile.primary && baseStyle.colorProfile.primary !== "neutral") {
+          matchReasons.push(
+            colorHarmony >= 0.8 ? "Color aligns with your style" : "Good color harmony"
+          );
+        } else {
+          matchReasons.push("Neutral base matches your style");
+        }
+
+        return {
+          ...p,
+          matchScore,
+          matchReasons,
+          owned: true,
+        } as any;
+      });
+
+      rec.products = [...extras, ...rec.products];
+    }
+
+    // Put owned items first, then keep best matchScore order.
+    rec.products = rec.products
+      .sort((a: any, b: any) => {
+        const aOwned = a.owned === true ? 1 : 0;
+        const bOwned = b.owned === true ? 1 : 0;
+        if (aOwned !== bOwned) return bOwned - aOwned;
+        return (b.matchScore ?? 0) - (a.matchScore ?? 0);
+      })
+      .slice(0, ownedMaxPerCategory);
+  }
+
+  return completion;
 }
 
 /**

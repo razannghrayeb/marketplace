@@ -51,9 +51,6 @@ def get_detector(conf: float | None = None) -> DualDetector:
         if _detector is None:
             _detector = DualDetector(conf=conf or 0.6)
             _detector_error = None
-        elif conf is not None and abs(_detector.conf - conf) > 1e-6:  # type: ignore[attr-defined]
-            _detector = DualDetector(conf=conf)
-            _detector_error = None
         return _detector
 
 
@@ -148,8 +145,8 @@ class LabelsResponse(BaseModel):
 
 
 def _run_dual_detector(image: Image.Image, conf: float) -> DetectionResponse:
-    detector = get_detector(conf=conf)
-    result = detector.predict(image)
+    detector = get_detector()
+    result = detector.predict(image, conf=conf)
 
     width, height = image.size
 

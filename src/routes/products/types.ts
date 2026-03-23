@@ -67,6 +67,12 @@ export interface ImageSearchParams extends SearchParams {
    */
   knnField?: string;
   /**
+   * Forces image search into "hard category" mode for this call.
+   * When enabled, the OpenSearch `filters.category` terms are applied even if
+   * `SEARCH_IMAGE_SOFT_CATEGORY=1` (global soft category).
+   */
+  forceHardCategoryFilter?: boolean;
+  /**
    * When true: if kNN returns hits but none pass `similarityThreshold`, still return the best-scoring candidates
    * (used for Shop-the-Look where crop↔catalog scores are often below a strict gate).
    */

@@ -88,6 +88,12 @@ export interface ImageSearchParams extends SearchParams {
   predictedCategoryAisles?: string[];
   /** Override kNN field (`embedding` vs `embedding_garment`, etc.) */
   knnField?: string;
+  /**
+   * Forces image search into "hard category" mode for this call.
+   * When enabled, OpenSearch `filters.category` is applied even if the
+   * global SEARCH_IMAGE_SOFT_CATEGORY enables soft category reranking.
+   */
+  forceHardCategoryFilter?: boolean;
   /** Return best kNN hits when none pass similarityThreshold (Shop-the-Look). */
   relaxThresholdWhenEmpty?: boolean;
 }
@@ -239,6 +245,15 @@ function imageGenderSoftEnv(): boolean {
   return v === "1" || v === "true";
 }
 
+/**
+ * Image search should default to soft final-relevance gating.
+ * Hard gating can be re-enabled with SEARCH_IMAGE_HARD_RELEVANCE_GATE=1.
+ */
+function imageHardRelevanceGateEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_HARD_RELEVANCE_GATE ?? "").toLowerCase().trim();
+  return v === "1" || v === "true";
+}
+
 /** Fuse primary `embedding` kNN with `embedding_garment` kNN when a garment query vector is supplied. */
 function imageDualGarmentFusionEnv(): boolean {
   const v = String(process.env.SEARCH_IMAGE_DUAL_GARMENT_FUSION ?? "1").toLowerCase();
@@ -343,6 +358,7 @@ export async function searchByImageWithSimilarity(
     pHash,
     predictedCategoryAisles,
     knnField: knnFieldParam,
+    forceHardCategoryFilter = false,
     /** When strict similarity removes all kNN hits, fall back to best candidates above SEARCH_IMAGE_RELAX_FLOOR (default on). */
     relaxThresholdWhenEmpty = true,
     query: imageSearchTextQuery,
@@ -357,13 +373,13 @@ export async function searchByImageWithSimilarity(
   // Over-fetch so absolute threshold + later dedup still fill `limit` (cap raised for broader kNN recall).
   const fetchLimit = Math.min(Math.max(limit * 5, 100), 300);
 
-  const softCategory = imageSoftCategoryEnv();
+  const softCategory = forceHardCategoryFilter ? false : imageSoftCategoryEnv();
   const aisleHints = predictedCategoryAisles?.length
     ? predictedCategoryAisles
     : undefined;
   const cat = (filters as { category?: string | string[] }).category;
   /** Aisle rerank when global soft category is on, or when caller passes predictedCategoryAisles (e.g. Shop-the-Look). */
-  const useAisleRerank = softCategory || Boolean(aisleHints?.length);
+  const useAisleRerank = !forceHardCategoryFilter && (softCategory || Boolean(aisleHints?.length));
   const desiredCatalogTerms =
     useAisleRerank && (aisleHints?.length || cat)
       ? buildDesiredCatalogTermSet(
@@ -389,19 +405,64 @@ export async function searchByImageWithSimilarity(
   }
   if (filters.brand) filter.push({ term: { brand: String(filters.brand).toLowerCase() } });
   if (filters.vendorId) filter.push({ term: { vendor_id: String(filters.vendorId) } });
-  const filtersAny = filters as { gender?: string; color?: string };
+  const filtersAny = filters as { gender?: string; color?: string; style?: string };
   if (filtersAny.gender) {
     const g = String(filtersAny.gender).toLowerCase();
+    // For image-search we need to be resilient to occasional index attribute mistakes.
+    // We therefore:
+    // - allow either `attr_gender` match OR title keyword match for the desired gender
+    // - but explicitly exclude the opposite gender keyword in title.
+    const titleGenderShould =
+      g === "women"
+        ? ["women", "womens", "female", "ladies", "woman"]
+        : g === "men"
+          ? ["men", "mens", "male", "boys", "boy", "man"]
+          : ["unisex"];
+
+    const titleOppShould =
+      g === "women"
+        ? ["men", "mens", "male", "boys", "boy", "man"]
+        : g === "men"
+          ? ["women", "womens", "female", "ladies", "woman", "girls", "girl"]
+          : [];
+
+    const shouldClauses: any[] = [{ term: { attr_gender: g } }];
     if (imageGenderSoftEnv()) {
-      filter.push({
-        bool: {
-          should: [{ term: { attr_gender: g } }, { match_phrase: { title: g } }],
-          minimum_should_match: 1,
-        },
-      });
+      // In "soft gender" mode, we also allow a title keyword match.
+      for (const kw of titleGenderShould) {
+        shouldClauses.push({ match: { title: kw } });
+      }
     } else {
-      filter.push({ term: { attr_gender: g } });
+      // In hard mode, title match is still useful as a correction signal when `attr_gender`
+      // is occasionally wrong. (We still exclude opposite title keywords below.)
+      for (const kw of titleGenderShould) {
+        shouldClauses.push({ match: { title: kw } });
+      }
     }
+
+    const mustNot: any[] =
+      titleOppShould.length > 0
+        ? [
+            {
+              bool: {
+                should: titleOppShould.map((kw) => ({ match: { title: kw } })),
+                minimum_should_match: 1,
+              },
+            },
+          ]
+        : [];
+
+    filter.push({
+      bool: {
+        should: shouldClauses,
+        minimum_should_match: 1,
+        must_not: mustNot.length ? mustNot : undefined,
+      },
+    });
+  }
+  if (filtersAny.style) {
+    const s = String(filtersAny.style).toLowerCase();
+    if (s.length > 0) filter.push({ term: { attr_style: s } });
   }
   if (filtersAny.color) {
     const expanded = expandColorTermsForFilter(String(filtersAny.color));
@@ -655,12 +716,15 @@ export async function searchByImageWithSimilarity(
   /** kNN had candidates but strict gate removed all; optional relax for Shop-the-Look. */
   let thresholdRelaxed = false;
   let workingHits = filteredHits;
+
+  let relaxFloorUsed: number | null = null;
   if (
     relaxThresholdWhenEmpty &&
     filteredHits.length === 0 &&
     hits.length > 0
   ) {
     const floor = imageRelaxSimilarityFloor();
+    relaxFloorUsed = floor;
     workingHits = [...hits]
       .sort((a: any, b: any) => Number(b._score) - Number(a._score))
       .filter((h: any) => passesImageSimilarityThreshold(h, floor))
@@ -675,6 +739,7 @@ export async function searchByImageWithSimilarity(
   const minWantCandidates = Math.min(fetchLimit, Math.max(limit, 15));
   if (workingHits.length < minWantCandidates && hits.length > workingHits.length) {
     const floor = imageRelaxSimilarityFloor();
+    relaxFloorUsed = floor;
     const loose = [...hits]
       .sort((a: any, b: any) => Number(b._score) - Number(a._score))
       .filter((h: any) => passesImageSimilarityThreshold(h, floor))
@@ -809,7 +874,7 @@ export async function searchByImageWithSimilarity(
   });
 
   const finalAcceptMin = config.search.finalAcceptMin;
-  const relevanceGateSoft = config.search.relevanceGateMode === "soft";
+  const relevanceGateSoft = !imageHardRelevanceGateEnv();
   const thresholdPassedHits = sortedByRelevance.filter(
     (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= finalAcceptMin,
   );

@@ -134,6 +134,17 @@ export const config = {
         ? ("soft" as const)
         : ("hard" as const),
     /**
+     * In `soft` mode, we still want to avoid extremely low `finalRelevance01`
+     * products. If there are any candidates above this floor, prefer them;
+     * otherwise fall back to the full candidate set to avoid returning zero results.
+     */
+    softFinalRelevanceFloorMin: finiteEnvNumber(
+      process.env.SEARCH_SOFT_FINAL_RELEVANCE_FLOOR_MIN,
+      0.03,
+      0,
+      1,
+    ),
+    /**
      * With SEARCH_USE_XGB_RANKER: score a recall prefix before pagination (default on).
      * Set SEARCH_XGB_RERANK_FULL_RECALL=false for legacy page-only tie-break (after slice).
      */

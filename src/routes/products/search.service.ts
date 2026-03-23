@@ -54,6 +54,7 @@ export async function searchByImageWithSimilarity(
     pHash,
     predictedCategoryAisles,
     knnField,
+    forceHardCategoryFilter,
     relaxThresholdWhenEmpty,
   } = params;
 
@@ -69,6 +70,7 @@ export async function searchByImageWithSimilarity(
     pHash,
     predictedCategoryAisles,
     knnField,
+    forceHardCategoryFilter,
     relaxThresholdWhenEmpty,
   }) as Promise<SearchResultWithRelated>;
 }
