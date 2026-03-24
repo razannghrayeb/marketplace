@@ -13,6 +13,7 @@
  * - Garment validation before submission
  * - Usage tracking for cost analytics
  */
+import { config } from "../../config";
 import { pg } from "../../lib/core/db";
 import { getTryOnClient } from "../../lib/image/tryonClient";
 import type { TryOnOptions } from "../../lib/image/tryonClient";
@@ -326,6 +327,15 @@ async function scheduleTryOnProcessing(
 // ============================================================================
 
 export async function performTryOn(input: PerformTryOnInput): Promise<TryOnJobRow> {
+  const project = config.tryon.project?.trim();
+  if (!project) {
+    const err = new Error(
+      "Virtual try-on is not configured: set GCLOUD_PROJECT or GOOGLE_CLOUD_PROJECT on the API server and grant Vertex AI access to the runtime service account."
+    );
+    (err as any).statusCode = 503;
+    throw err;
+  }
+
   await checkRateLimit(input.userId);
 
   const { buffer: garmentBuffer, imageUrl: garmentImageUrl, description: garmentDescription } =
@@ -386,6 +396,15 @@ export async function performTryOn(input: PerformTryOnInput): Promise<TryOnJobRo
 export async function performBatchTryOn(
   input: PerformBatchTryOnInput
 ): Promise<TryOnJobRow[]> {
+  const project = config.tryon.project?.trim();
+  if (!project) {
+    const err = new Error(
+      "Virtual try-on is not configured: set GCLOUD_PROJECT or GOOGLE_CLOUD_PROJECT on the API server."
+    );
+    (err as any).statusCode = 503;
+    throw err;
+  }
+
   if (input.garments.length === 0) {
     const err = new Error("At least one garment is required");
     (err as any).statusCode = 400;
