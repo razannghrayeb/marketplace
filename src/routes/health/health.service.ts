@@ -6,12 +6,19 @@
 
 import { osClient } from "../../lib/core/index";
 import { pg } from "../../lib/core/index";
+import { getAllCircuitStats, type CircuitStats } from "../../lib/core/circuitBreaker";
+import { getCacheStats, type CacheStats } from "../../lib/cache/embeddingCache";
 
 export interface HealthStatus {
   ok: boolean;
   search?: string;
   db?: string;
   error?: string;
+}
+
+export interface DetailedHealthStatus extends HealthStatus {
+  circuits?: Record<string, CircuitStats>;
+  cache?: CacheStats;
 }
 
 /**
@@ -42,4 +49,17 @@ export async function checkReadiness(): Promise<HealthStatus> {
  */
 export function checkLiveness(): HealthStatus {
   return { ok: true };
+}
+
+/**
+ * Get detailed health status including circuit breakers and cache
+ */
+export async function getDetailedHealth(): Promise<DetailedHealthStatus> {
+  const base = await checkReadiness();
+  
+  return {
+    ...base,
+    circuits: getAllCircuitStats(),
+    cache: getCacheStats(),
+  };
 }

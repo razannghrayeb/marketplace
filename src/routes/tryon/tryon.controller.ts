@@ -17,16 +17,91 @@ import {
   deleteSavedResult,
 } from "./tryon.service";
 import { getTryOnClient } from "../../lib/image/tryonClient";
+import {
+  registerWebhook,
+  getWebhookConfig,
+  disableWebhook,
+  deleteWebhook,
+} from "../../lib/tryon/webhooks";
+import {
+  getDeadLetterEntries,
+  retryFromDeadLetter,
+  processRetryQueue,
+} from "../../lib/tryon/retryQueue";
+import { validateGarment } from "../../lib/tryon/garmentValidation";
 
 // ============================================================================
 // Shared helpers
 // ============================================================================
 
-// Uses req.user from JWT auth (requireAuth middleware) - matches wardrobe controller
+function httpError(statusCode: number, message: string): Error {
+  const err = new Error(message);
+  (err as any).statusCode = statusCode;
+  return err;
+}
+
+/**
+ * Resolves the signed-in user for try-on quotas and job ownership.
+ * Without this, Postgres rejects the job row and the client only sees a generic 500.
+ *
+ * Prefer `x-user-id` (or `user_id` in form/query). For demos, set TRYON_DEMO_USER_ID
+ * on the server when the app has no auth yet.
+ */
 function getUserId(req: Request): number {
-  const userId = req.user?.id;
-  if (!userId) throw new Error("User ID required");
-  return typeof userId === "number" ? userId : parseInt(String(userId), 10);
+  const rawHeader =
+    req.headers["x-user-id"] ?? req.query.user_id ?? req.body?.user_id;
+  const trimmed =
+    rawHeader !== undefined && rawHeader !== null && String(rawHeader).trim() !== ""
+      ? String(rawHeader).trim()
+      : "";
+  const demo = process.env.TRYON_DEMO_USER_ID?.trim();
+  const raw =
+    trimmed ||
+    (demo && /^\d+$/.test(demo) ? demo : "");
+
+  if (!raw) {
+    throw httpError(
+      400,
+      "User ID required: send x-user-id header or user_id in the form body. " +
+        "For unauthenticated demos, set TRYON_DEMO_USER_ID on the server.",
+    );
+  }
+
+  const id = parseInt(raw, 10);
+  if (!Number.isFinite(id) || id < 1) {
+    throw httpError(400, "Invalid user_id: must be a positive integer");
+  }
+  return id;
+}
+
+const PERSON_FIELD_ORDER = [
+  "person_image",
+  "person",
+  "model",
+  "model_image",
+] as const;
+const GARMENT_FIELD_ORDER = [
+  "garment_image",
+  "garment",
+  "clothing",
+] as const;
+
+function filesMap(
+  req: Request,
+): { [fieldname: string]: Express.Multer.File[] } | undefined {
+  return req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+}
+
+function pickFirstUploadedFile(
+  req: Request,
+  names: readonly string[],
+): Express.Multer.File | undefined {
+  const files = filesMap(req);
+  for (const n of names) {
+    const f = files?.[n]?.[0];
+    if (f) return f;
+  }
+  return (req as Express.Request & { file?: Express.Multer.File }).file;
 }
 
 const ALLOWED_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -59,17 +134,18 @@ export async function createTryOn(
 ) {
   try {
     const userId = getUserId(req);
-    const files = req.files as
-      | { [fieldname: string]: Express.Multer.File[] }
-      | undefined;
 
-    const personFile  = files?.person_image?.[0];
-    const garmentFile = files?.garment_image?.[0];
+    const personFile = pickFirstUploadedFile(req, PERSON_FIELD_ORDER);
+    const garmentFile = pickFirstUploadedFile(req, GARMENT_FIELD_ORDER);
 
     if (!personFile) {
-      return res.status(400).json({ success: false, error: "person_image is required" });
+      return res.status(400).json({
+        success: false,
+        error:
+          "Person image required (multipart field: person_image, person, model, or model_image)",
+      });
     }
-    validateImageFile(personFile,  "person_image");
+    validateImageFile(personFile, "person_image");
     validateImageFile(garmentFile, "garment_image");
 
     const garmentId = req.body.garment_id
@@ -95,7 +171,7 @@ export async function createTryOn(
       garmentDescription: req.body.garment_description,
     });
 
-    res.status(202).json({ success: true, job });
+    res.status(202).json({ success: true, job, jobId: job.id });
   } catch (err) {
     next(err);
   }
@@ -112,10 +188,14 @@ export async function tryOnFromWardrobe(
   next: NextFunction
 ) {
   try {
-    const userId     = getUserId(req);
-    const personFile = req.file;
+    const userId = getUserId(req);
+    const personFile = pickFirstUploadedFile(req, PERSON_FIELD_ORDER);
     if (!personFile) {
-      return res.status(400).json({ success: false, error: "person_image is required" });
+      return res.status(400).json({
+        success: false,
+        error:
+          "Person image required (multipart field: person_image, person, model, or model_image)",
+      });
     }
     validateImageFile(personFile, "person_image");
 
@@ -153,10 +233,14 @@ export async function tryOnFromProduct(
   next: NextFunction
 ) {
   try {
-    const userId     = getUserId(req);
-    const personFile = req.file;
+    const userId = getUserId(req);
+    const personFile = pickFirstUploadedFile(req, PERSON_FIELD_ORDER);
     if (!personFile) {
-      return res.status(400).json({ success: false, error: "person_image is required" });
+      return res.status(400).json({
+        success: false,
+        error:
+          "Person image required (multipart field: person_image, person, model, or model_image)",
+      });
     }
     validateImageFile(personFile, "person_image");
 
@@ -177,7 +261,7 @@ export async function tryOnFromProduct(
       garmentDescription: req.body.garment_description,
     });
 
-    res.status(202).json({ success: true, job });
+    res.status(202).json({ success: true, job, jobId: job.id });
   } catch (err) {
     next(err);
   }
@@ -197,12 +281,16 @@ export async function batchTryOn(
   next: NextFunction
 ) {
   try {
-    const userId     = getUserId(req);
-    const files      = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
-    const personFile = files?.person_image?.[0];
+    const userId = getUserId(req);
+    const personFile = pickFirstUploadedFile(req, PERSON_FIELD_ORDER);
+    const files = filesMap(req);
 
     if (!personFile) {
-      return res.status(400).json({ success: false, error: "person_image is required" });
+      return res.status(400).json({
+        success: false,
+        error:
+          "Person image required (multipart field: person_image, person, model, or model_image)",
+      });
     }
     validateImageFile(personFile, "person_image");
 
@@ -474,6 +562,187 @@ export async function serviceHealth(
     const available = await client.isAvailable();
     const health    = await client.health();
     res.json({ success: true, available, ...health });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ============================================================================
+// Webhook Management
+// ============================================================================
+
+/**
+ * POST /api/tryon/webhooks
+ * Body: { url: string, secret: string, events?: string[] }
+ */
+export async function createWebhook(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = getUserId(req);
+    const { url, secret, events } = req.body;
+    
+    if (!url || !secret) {
+      return res.status(400).json({ 
+        success: false, 
+        error: "url and secret are required" 
+      });
+    }
+    
+    const webhook = await registerWebhook(userId, url, secret, events);
+    res.status(201).json({ success: true, webhook });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/tryon/webhooks
+ */
+export async function getWebhook(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = getUserId(req);
+    const config = await getWebhookConfig(userId);
+    
+    if (!config) {
+      return res.status(404).json({ 
+        success: false, 
+        error: "No webhook configured" 
+      });
+    }
+    
+    res.json({ success: true, webhook: config });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * DELETE /api/tryon/webhooks
+ */
+export async function removeWebhook(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = getUserId(req);
+    await deleteWebhook(userId);
+    res.json({ success: true, message: "Webhook removed" });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/tryon/webhooks/disable
+ */
+export async function pauseWebhook(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = getUserId(req);
+    await disableWebhook(userId);
+    res.json({ success: true, message: "Webhook disabled" });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ============================================================================
+// Garment Validation (pre-check before submission)
+// ============================================================================
+
+/**
+ * POST /api/tryon/validate
+ * Body: { title: string, description?: string, category?: string }
+ */
+export async function validateGarmentEndpoint(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const { title, description, category } = req.body;
+    
+    if (!title) {
+      return res.status(400).json({
+        success: false,
+        error: "title is required",
+      });
+    }
+    
+    const result = validateGarment(title, description, category);
+    res.json({ success: true, validation: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ============================================================================
+// Dead Letter Queue Management (Admin)
+// ============================================================================
+
+/**
+ * GET /api/tryon/admin/dlq
+ * Query: limit? (default: 50)
+ */
+export async function getDLQ(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+    const entries = await getDeadLetterEntries(limit);
+    res.json({ success: true, entries, count: entries.length });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/tryon/admin/dlq/:jobId/retry
+ */
+export async function retryDLQJob(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const jobId = parseInt(req.params.jobId, 10);
+    const success = await retryFromDeadLetter(jobId);
+    
+    if (success) {
+      res.json({ success: true, message: "Job queued for retry" });
+    } else {
+      res.status(404).json({ success: false, error: "Job not found in DLQ" });
+    }
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/tryon/admin/process-retries
+ * Manually trigger retry queue processing
+ */
+export async function processRetries(
+  _req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const result = await processRetryQueue();
+    res.json({ success: true, ...result });
   } catch (err) {
     next(err);
   }

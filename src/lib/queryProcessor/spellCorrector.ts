@@ -311,6 +311,73 @@ export function confidenceToLevel(confidence: number): ConfidenceLevel {
 }
 
 /**
+ * Words that are valid search terms and should NOT be spell-corrected
+ * even if they're similar to dictionary entries.
+ */
+const VALID_SEARCH_TERMS = new Set([
+  // Product types
+  "jogging", "running", "walking", "hiking", "training", "workout",
+  "hoodie", "hoodies", "joggers", "leggings", "sneakers", "boots",
+  "sandals", "heels", "flats", "blazer", "cardigan", "sweater",
+  "casual", "formal", "vintage", "modern", "classic", "trendy",
+  "summer", "winter", "spring", "autumn", "fall",
+  "party", "wedding", "office", "beach", "gym", "sport", "sports",
+  "everyday", "daily", "weekend",
+  // Sizes (letter codes)
+  "xs", "s", "m", "l", "xl", "xxs", "xxl", "xxxl",
+  // Size descriptors
+  "small", "medium", "large", "one", "size",
+]);
+
+function isSpellConservativeMode(): boolean {
+  const v = String(process.env.SEARCH_SPELL_CONSERVATIVE ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
+function isCommerceMode(): boolean {
+  const v = String(process.env.SEARCH_COMMERCE_MODE ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
+/** Skip spell-check for tokens that should never be corrected */
+function shouldSkipSpellCheck(word: string): boolean {
+  const normalized = word.toLowerCase();
+  if (VALID_SEARCH_TERMS.has(normalized)) return true;
+  // Purely numeric tokens (sizes, prices, etc.)
+  if (/^\d+(\.\d+)?%?$/.test(normalized)) return true;
+  return false;
+}
+
+/**
+ * Check if a word is an exact match (or alias) in any dictionary.
+ * If so, it shouldn't be "corrected" to something else.
+ */
+function isExactDictionaryMatch(
+  word: string,
+  dictionaries: {
+    brands: Map<string, DictionaryEntry>;
+    categories: Map<string, DictionaryEntry>;
+    attributes: Map<string, DictionaryEntry>;
+    commonQueries: Map<string, DictionaryEntry>;
+  },
+): boolean {
+  const normalized = word.toLowerCase();
+  
+  for (const dict of [dictionaries.brands, dictionaries.categories, dictionaries.attributes, dictionaries.commonQueries]) {
+    // Check if it's a key
+    if (dict.has(normalized)) return true;
+    
+    // Check if it's an alias of any entry
+    for (const entry of dict.values()) {
+      if (entry.aliases?.some(a => a.toLowerCase() === normalized)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Find corrections for all words in a query
  */
 export function correctQuery(
@@ -326,36 +393,43 @@ export function correctQuery(
   const words = query.split(/\s+/).filter(w => w.length > 0);
   const corrections: Correction[] = [];
   
+  const conservative = isSpellConservativeMode() || isCommerceMode();
+  const brandMinConf = conservative ? 0.85 : 0.8;
+  const categoryAttrMinConf = conservative ? 0.80 : 0.7;
+  const commonQueryMinConf = conservative ? 0.75 : 0.6;
+
   for (const word of words) {
-    // Try each dictionary in order of priority
+    const normalizedWord = word.toLowerCase();
+
+    if (shouldSkipSpellCheck(word)) continue;
+
+    // Skip words that are exact matches in any dictionary (including aliases)
+    if (isExactDictionaryMatch(word, dictionaries)) continue;
+
     let bestCorrection: SpellCorrection | null = null;
-    
-    // Brands are highest priority (exact or near-exact matches)
+
     const brandCorrection = findCorrection(word, dictionaries.brands, Math.min(maxDistance, 2));
-    if (brandCorrection && brandCorrection.confidence >= 0.8) {
+    if (brandCorrection && brandCorrection.confidence >= brandMinConf) {
       bestCorrection = brandCorrection;
     }
-    
-    // Try categories
+
     if (!bestCorrection) {
       const categoryCorrection = findCorrection(word, dictionaries.categories, maxDistance);
-      if (categoryCorrection && categoryCorrection.confidence >= 0.7) {
+      if (categoryCorrection && categoryCorrection.confidence >= categoryAttrMinConf) {
         bestCorrection = categoryCorrection;
       }
     }
-    
-    // Try attributes (colors, materials, etc.)
+
     if (!bestCorrection) {
       const attrCorrection = findCorrection(word, dictionaries.attributes, maxDistance);
-      if (attrCorrection && attrCorrection.confidence >= 0.7) {
+      if (attrCorrection && attrCorrection.confidence >= categoryAttrMinConf) {
         bestCorrection = attrCorrection;
       }
     }
-    
-    // Try common queries
+
     if (!bestCorrection) {
       const queryCorrection = findCorrection(word, dictionaries.commonQueries, maxDistance);
-      if (queryCorrection && queryCorrection.confidence >= 0.6) {
+      if (queryCorrection && queryCorrection.confidence >= commonQueryMinConf) {
         bestCorrection = queryCorrection;
       }
     }

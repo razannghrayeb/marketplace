@@ -359,12 +359,14 @@ const STYLE_PHRASES: [string, string][] = [
 
 // Gender
 const GENDER_PHRASES: [string, string][] = [
+  ["women", "women"],
   ["women's", "women"],
   ["womens", "women"],
   ["woman's", "women"],
   ["ladies", "women"],
   ["lady's", "women"],
   ["female", "women"],
+  ["men", "men"],
   ["men's", "men"],
   ["mens", "men"],
   ["man's", "men"],
@@ -688,23 +690,14 @@ async function initML(): Promise<boolean> {
   }
 
   mlInitPromise = (async () => {
-    try {
-      const { pipeline: createPipeline } = await import("@xenova/transformers");
-      
-      // Use a small, fast zero-shot model
-      pipeline = await createPipeline(
-        "zero-shot-classification",
-        "Xenova/mobilebert-uncased-mnli",
-        { quantized: true }
-      );
-      
-      mlInitialized = true;
-      console.log("ML attribute extractor initialized");
-    } catch (err) {
-      console.warn("ML attribute extractor not available:", err);
-      mlInitialized = true;
-      pipeline = null;
-    }
+    // @xenova/transformers bundles onnxruntime-web which conflicts with
+    // onnxruntime-node at runtime (registers an incompatible backend and
+    // causes "TypeError: not a valid backend" globally). The ML zero-shot
+    // classifier is a nice-to-have fallback — disable it to keep the ONNX
+    // runtime healthy for CLIP and BLIP.
+    console.warn("[attributeExtractor] ML pipeline disabled — @xenova/transformers conflicts with onnxruntime-node");
+    mlInitialized = true;
+    pipeline = null;
   })();
 
   await mlInitPromise;

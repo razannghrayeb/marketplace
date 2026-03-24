@@ -8,6 +8,7 @@
 export {
   initClip,
   isClipAvailable,
+  isTextSearchAvailable,
   preprocessImage,
   getImageEmbedding,
   getImageEmbeddingFromBuffer,
@@ -27,6 +28,11 @@ export {
 // Image processor
 export {
   processImageForEmbedding,
+  processImageForGarmentEmbedding,
+  processImageForGarmentEmbeddingWithOptionalBox,
+  extractPaddedDetectionCropBuffer,
+  type PixelBox,
+  extractGarmentCenterCropBuffer,
   validateImage,
   computePHash,
   loadAndNormalize,
@@ -65,6 +71,7 @@ export {
   type HealthResponse,
   type LabelsResponse,
   type DetectOptions,
+  type YoloHealthSnapshot,
 } from "./yolov8Client";
 
 // Vertex AI Virtual Try-On

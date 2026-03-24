@@ -1,11 +1,23 @@
 # Deploy to Google Cloud Run
 
-This runbook deploys the backend as **two Cloud Run services** from the same image:
+The root **`Dockerfile`** builds **one image**: Node + ONNX (CLIP/BLIP) and, when the container starts with **`SERVICE_ROLE=all`** or **`ml`**, an embedded **YOLO** API on loopback. You can run it as **one Cloud Run service** (recommended simple setup) or split it into two.
+
+### Option A — Single service (`SERVICE_ROLE=all`)  ← you chose this
+- One Cloud Run revision serves **both** “API” routes (`/api/auth`, cart, …) and **ML** routes (`/search`, `/products`, `/api/images`, …).
+- **Do not set** `ML_SERVICE_URL` (leave it unset or empty). If it is set, `SERVICE_ROLE=api` would proxy ML routes elsewhere; with `SERVICE_ROLE=all` the app serves ML in-process and does not need a peer URL.
+- Set **`SERVICE_ROLE=all`** (or omit it — the default in `config.ts` is `"all"` when unset).
+- Use the same secrets as in §3 (database, OpenSearch, Redis, R2, JWT, etc.).
+- **YOLO (shop-the-look):** the root **`Dockerfile`** starts an in-container YOLO API on **`127.0.0.1:8001`** when **`SERVICE_ROLE=all`** (or **`ml`**). You normally **do not** set `YOLOV8_SERVICE_URL`. Set it only if you use a **separate** YOLO service (see §7).
+
+**Minimal env shape (Option A)**  
+`NODE_ENV=production`, `SERVICE_ROLE=all`, no `ML_SERVICE_URL`, plus your DB/OpenSearch/Redis/Supabase/R2/JWT/Gemini secrets as usual.
+
+### Option B — Two services (same image, `cloudbuild.cloudrun.yaml` default)
 - `marketplace-ml` with `SERVICE_ROLE=ml`
 - `marketplace-api` with `SERVICE_ROLE=api` and `ML_SERVICE_URL=<ml-service-url>`
 
-## Why two services
-The app already supports split roles in `src/config.ts` and `src/server.ts`.
+## Why two services (when you use option B)
+The app supports split roles in `src/config.ts` and `src/server.ts`.
 - API routes can proxy ML endpoints through `ML_SERVICE_URL`.
 - ML endpoints (search, image processing, indexing paths) run on the ML service.
 
@@ -87,8 +99,35 @@ for s in database-url supabase-url supabase-anon-key supabase-service-role-key o
 done
 ```
 
-## 4) Deploy both services with Cloud Build
-From repo root:
+## 4a) Option A: deploy one Cloud Run service
+
+Build the root image (same as local production), then deploy **one** service.
+
+```bash
+# From repo root — adjust REGION / PROJECT / REPO / SERVICE_NAME
+export REGION=us-central1
+export PROJECT_ID=<PROJECT_ID>
+export IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/marketplace/marketplace:latest"
+
+docker build -t "$IMAGE" .
+docker push "$IMAGE"
+
+gcloud run deploy marketplace \
+  --project "$PROJECT_ID" \
+  --region "$REGION" \
+  --image "$IMAGE" \
+  --port 8080 \
+  --memory 4Gi \
+  --set-env-vars "NODE_ENV=production,SERVICE_ROLE=all"
+```
+
+Use **at least 4 GiB** memory so **Node + ONNX + YOLO (PyTorch)** fit in one revision. Add **Secret Manager** bindings in the console or with repeated `--update-secrets` / `--set-secrets` so env vars like `DATABASE_URL`, `OS_NODE`, etc. match what `src/config.ts` expects. Omit **`ML_SERVICE_URL`** entirely for Option A. You usually **omit `YOLOV8_SERVICE_URL`** so the entrypoint starts YOLO on loopback (§7).
+
+**Cloud Build without the two-service YAML:** you can use a minimal `cloudbuild.yaml` that only builds/pushes the image, then run `gcloud run deploy` once with `SERVICE_ROLE=all`, or run the `docker` + `gcloud run deploy` steps from your laptop/CI.
+
+## 4b) Option B: deploy both services with Cloud Build
+
+From repo root (two Cloud Run services, API proxies to ML):
 
 ```bash
 gcloud builds submit \
@@ -112,14 +151,26 @@ gcloud builds submit \
 
 ## 5) Verify rollout
 
+**Option A (single URL):**
+
+```bash
+gcloud run services describe marketplace --region us-central1 --format='value(status.url)'
+```
+
+```bash
+curl https://<SERVICE_URL>/health/live
+curl "https://<SERVICE_URL>/products/search?q=blazer&limit=24&page=1"
+curl https://<SERVICE_URL>/   # shows serviceRole and routes.ml / routes.api
+```
+
+**Option B (two URLs):**
+
 ```bash
 gcloud run services list --region us-central1
 
 gcloud run services describe marketplace-ml --region us-central1 --format='value(status.url)'
 gcloud run services describe marketplace-api --region us-central1 --format='value(status.url)'
 ```
-
-Check health endpoints:
 
 ```bash
 curl https://<ML_URL>/health/live
@@ -130,10 +181,25 @@ curl "https://<API_URL>/products/search?q=blazer&limit=24&page=1"
 ## 6) Recommended production hardening
 - Restrict ingress to internal + load balancer if public exposure is not required.
 - Use a dedicated runtime service account instead of default compute service account.
-- Configure custom domain + managed SSL on API service.
-- Add min instances for reduced cold starts on `marketplace-api`.
+- Configure custom domain + managed SSL on the Cloud Run service (Option A: one hostname; Option B: often API public, ML internal).
+- Add min instances for reduced cold starts on the service that takes user traffic (`marketplace` or `marketplace-api`).
 - Add Cloud Monitoring alerting on 5xx rate and latency.
 
+## 7) Shop-the-look: YOLO in the root Docker image
+
+The production **`Dockerfile`** ships **Node + ONNX** (CLIP/BLIP) and a **Python venv** under `/app/yolo` with **`yolov8_api.py`** (dual-model detector). **`docker-entrypoint.sh`** does the following:
+
+- **`SERVICE_ROLE=api`**: runs **Node only** (same as before). Image/ML routes are proxied to **`ML_SERVICE_URL`**; that **ML** revision should use `ml` or `all` so YOLO runs there.
+- **`SERVICE_ROLE=all`** or **`SERVICE_ROLE=ml`**: starts **uvicorn** on **`127.0.0.1:${YOLO_INTERNAL_PORT:-8001}`**, waits for **`GET /health`**, sets **`YOLOV8_SERVICE_URL=http://127.0.0.1:…`**, then starts Node on **`$PORT`**.
+
+**Sizing:** YOLO loads **PyTorch** in-process. Use at least **4 GiB memory** (and enough CPU) on the Cloud Run revision that runs **`ml`** or **`all`**. The sample **`cloudbuild.cloudrun.yaml`** already uses **`_MEMORY_ML: 4Gi`** for **`marketplace-ml`**.
+
+**External YOLO instead:** set **`YOLOV8_SERVICE_URL`** (or **`YOLO_API_URL`**) to a URL that is **not** loopback (for example another Cloud Run service). The entrypoint will **not** start the embedded server in that case.
+
+**Cold starts:** First request may download Hugging Face weights; **`docker-entrypoint.sh`** waits up to **~180s** for YOLO **`/health`**. Optionally set **`HF_TOKEN`** at runtime if those repos are private.
+
+If YOLO is unreachable, routes **fall back** to whole-image embedding search.
+
 ## Notes
-- Container listens on `PORT=3000` and Cloud Run deploy uses `--port 3000`.
+- The production image sets **`PORT=8080`** (`Dockerfile`); align Cloud Run **`--port`** with the port your process listens on (the included `cloudbuild.cloudrun.yaml` uses **8080** for API/ML services).
 - Keep `.env` local only. Use Secret Manager for all production secrets.

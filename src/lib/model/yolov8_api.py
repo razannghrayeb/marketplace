@@ -20,8 +20,12 @@ combines:
 
 from __future__ import annotations
 
+import asyncio
 import io
-from typing import List, Literal, Optional
+import logging
+import threading
+from contextlib import asynccontextmanager
+from typing import List, Optional
 
 import numpy as np
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
@@ -32,8 +36,45 @@ from PIL import Image
 from dual_model_yolo import DualDetector
 from image_preprocessor import preprocess_for_detection, PreprocessingConfig
 
+log = logging.getLogger("uvicorn.error")
 
-app = FastAPI(title="Dual-Model Fashion Detection API", version="1.0.0")
+# Singleton detector instance -------------------------------------------------
+
+_detector: Optional[DualDetector] = None
+_detector_error: Optional[str] = None
+_detector_lock = threading.Lock()
+
+
+def get_detector(conf: float | None = None) -> DualDetector:
+    global _detector, _detector_error
+    with _detector_lock:
+        if _detector is None:
+            _detector = DualDetector(conf=conf or 0.6)
+            _detector_error = None
+        return _detector
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Warm models in a thread so GET /health returns immediately (Docker healthchecks)."""
+
+    async def _preload():
+        global _detector_error
+        try:
+            await asyncio.to_thread(get_detector)
+        except Exception as e:
+            _detector_error = repr(e)
+            log.exception("YOLO dual-model preload failed")
+
+    asyncio.create_task(_preload())
+    yield
+
+
+app = FastAPI(
+    title="Dual-Model Fashion Detection API",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,21 +83,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# Singleton detector instance -------------------------------------------------
-
-_detector: Optional[DualDetector] = None
-
-
-def get_detector(conf: float | None = None) -> DualDetector:
-    global _detector
-    if _detector is None:
-        _detector = DualDetector(conf=conf or 0.6)
-    elif conf is not None and abs(_detector.conf - conf) > 1e-6:  # type: ignore[attr-defined]
-        # Re-create with new confidence threshold
-        _detector = DualDetector(conf=conf)
-    return _detector
 
 
 # Pydantic models -------------------------------------------------------------
@@ -119,8 +145,8 @@ class LabelsResponse(BaseModel):
 
 
 def _run_dual_detector(image: Image.Image, conf: float) -> DetectionResponse:
-    detector = get_detector(conf=conf)
-    result = detector.predict(image)
+    detector = get_detector()
+    result = detector.predict(image, conf=conf)
 
     width, height = image.size
 
@@ -169,13 +195,29 @@ def _run_dual_detector(image: Image.Image, conf: float) -> DetectionResponse:
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    # We lazily create the detector here if needed
-    det = get_detector()
+    """Liveness: always fast. `model_loaded` becomes true after background preload (or first detect)."""
+    model_path = "dual-model-yolo (deepfashion2_yolov8s-seg + yolos-fashionpedia)"
+    if _detector is None:
+        return HealthResponse(
+            ok=_detector_error is None,
+            model_path=model_path,
+            model_loaded=False,
+            num_classes=0,
+            class_names=[],
+            config={
+                "confidence_threshold": 0.6,
+                "iou_threshold": 0.45,
+                "max_detections": 300,
+                "min_box_area_ratio": 0.0,
+            },
+        )
+
+    det = _detector
     class_names = sorted({p for p in [c for c in det._LABEL_MAP_A.values()]})  # type: ignore[attr-defined]
 
     return HealthResponse(
         ok=True,
-        model_path="dual-model-yolo (deepfashion2_yolov8s-seg + yolos-fashionpedia)",
+        model_path=model_path,
         model_loaded=True,
         num_classes=len(class_names),
         class_names=class_names,
@@ -262,8 +304,10 @@ async def detect_batch(
 
 @app.post("/reload")
 def reload(confidence: float = Query(0.6)):
-    global _detector
-    _detector = DualDetector(conf=confidence)
+    global _detector, _detector_error
+    with _detector_lock:
+        _detector = DualDetector(conf=confidence)
+        _detector_error = None
     return {"ok": True, "message": "Model reloaded", "num_classes": len(_detector._LABEL_MAP_A)}  # type: ignore[attr-defined]
 
 

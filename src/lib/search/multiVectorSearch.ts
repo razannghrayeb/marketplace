@@ -125,6 +125,23 @@ export interface MultiVectorSearchResult {
     imageCdn?: string;
     [key: string]: any;
   };
+  /** Fusion / OS scores before downstream normalization (for rerank parity with composite path). */
+  _rawScores?: { vectorScore: number; compositeScore?: number };
+}
+
+/**
+ * Map batch scores to [0, 1] by top-hit max so multi-vector and composite fusion scales align for A/B.
+ */
+export function normalizeMultiVectorScoresToUnitRange(
+  results: MultiVectorSearchResult[],
+): MultiVectorSearchResult[] {
+  if (results.length === 0) return results;
+  const maxS = Math.max(...results.map((r) => r.score), 1e-12);
+  return results.map((r) => ({
+    ...r,
+    _rawScores: { vectorScore: r.score },
+    score: Math.max(0, Math.min(1, r.score / maxS)),
+  }));
 }
 
 // ============================================================================
@@ -297,17 +314,30 @@ export class MultiVectorSearchEngine {
       unified.ranks[candidate.attribute] = candidate.rank;
     }
 
-    // Compute combined score for each candidate
+    // Compute combined score for each candidate.
+    //
+    // OpenSearch cosinesimil (FAISS engine) returns scores in [0, 1] where
+    // 1.0 = identical vectors.  No further normalization needed — using the
+    // raw score preserves the full dynamic range for ranking.
     const weightMap = new Map(embeddings.map(e => [e.attribute, e.weight]));
+    const numAttributes = embeddings.length;
 
     for (const unified of candidateMap.values()) {
       let combinedScore = 0;
+      const matchedAttributes = Object.keys(unified.attributeScores).length;
 
       for (const [attr, score] of Object.entries(unified.attributeScores)) {
         const weight = weightMap.get(attr as SemanticAttribute) || 0;
-        // Normalize cosine similarity to [0, 1] range: (score + 1) / 2
-        const normalizedScore = (score + 1) / 2;
-        combinedScore += weight * normalizedScore;
+        combinedScore += weight * score;
+      }
+
+      // Penalize candidates that only appeared in a subset of attribute
+      // searches — they are likely partial matches.  A candidate that
+      // matched 1/4 attributes gets its score multiplied by 0.625.
+      if (matchedAttributes < numAttributes) {
+        const coverage = matchedAttributes / numAttributes;
+        const coveragePenalty = 0.5 + 0.5 * coverage;
+        combinedScore *= coveragePenalty;
       }
 
       unified.combinedScore = combinedScore;
@@ -334,23 +364,25 @@ export class MultiVectorSearchEngine {
     }
 
     const productIds = candidates.map(c => c.productId);
+    const numericIds = productIds.map(id => Number(id)).filter(id => !isNaN(id));
 
     // Batch fetch from DB
+    // PG table uses `id` (not `product_id`) and `price_cents` (not `price_usd`)
     const query = `
       SELECT 
-        p.product_id,
-        p.vendor_id,
+        p.id::text AS product_id,
+        p.vendor_id::text AS vendor_id,
         p.title,
         p.brand,
         p.category,
-        p.price_usd,
-        p.availability,
-        p.image_cdn
+        ROUND(p.price_cents / 100.0, 2) AS price_usd,
+        CASE WHEN p.availability THEN 'in_stock' ELSE 'out_of_stock' END AS availability,
+        COALESCE(p.image_cdn, p.image_url) AS image_cdn
       FROM products p
-      WHERE p.product_id = ANY($1)
+      WHERE p.id = ANY($1::bigint[])
     `;
 
-    const dbResult = await pg.query(query, [productIds]);
+    const dbResult = await pg.query(query, [numericIds]);
     const productMap = new Map(
       dbResult.rows.map((row: any) => [row.product_id, row])
     );
@@ -375,17 +407,15 @@ export class MultiVectorSearchEngine {
         } : undefined,
       };
 
-      // Add score breakdown for explainability
       if (explainScores) {
         result.scoreBreakdown = Object.entries(candidate.attributeScores).map(
           ([attr, similarity]) => {
             const weight = weightMap.get(attr as SemanticAttribute) || 0;
-            const normalizedSim = (similarity + 1) / 2;
             return {
               attribute: attr as SemanticAttribute,
               weight,
               similarity,
-              contribution: weight * normalizedSim,
+              contribution: weight * similarity,
             };
           }
         );

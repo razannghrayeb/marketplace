@@ -1,4 +1,4 @@
-import { osClient, ensureIndex } from "../src/lib/opensearch";
+import { osClient, ensureIndex } from "../src/lib/core/opensearch";
 import { config } from "../src/config";
 
 async function main() {

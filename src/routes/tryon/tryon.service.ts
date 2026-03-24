@@ -6,12 +6,28 @@
  *
  * All create operations are non-blocking: job is inserted as 'pending'
  * and returned immediately; Vertex AI processing runs in the background.
- * Clients should poll GET /:id until status is 'completed' or 'failed'.
+ * 
+ * New features:
+ * - Exponential backoff retry with dead letter queue
+ * - Webhook/push notifications (removes need for polling)
+ * - Garment validation before submission
+ * - Usage tracking for cost analytics
  */
 import { pg } from "../../lib/core/db";
 import { getTryOnClient } from "../../lib/image/tryonClient";
 import type { TryOnOptions } from "../../lib/image/tryonClient";
 import { uploadImage, deleteImage } from "../../lib/image/r2";
+import { 
+  isRetryableError, 
+  scheduleRetry, 
+  trackTryOnUsage 
+} from "../../lib/tryon/retryQueue";
+import { 
+  notifyJobCompleted, 
+  notifyJobFailed, 
+  notifyJobStarted 
+} from "../../lib/tryon/webhooks";
+import { validateGarment } from "../../lib/tryon/garmentValidation";
 
 // ============================================================================
 // Types
@@ -185,7 +201,7 @@ interface JobProcessOpts {
   tryonOpts: TryOnOptions & { category: string };
 }
 
-async function processJobInBackground(opts: JobProcessOpts): Promise<void> {
+async function processJobInBackground(opts: JobProcessOpts, attempt: number = 1): Promise<void> {
   const {
     jobId, userId, personBuffer, personMimeType,
     garmentBuffer, garmentSource, tryonOpts,
@@ -193,11 +209,12 @@ async function processJobInBackground(opts: JobProcessOpts): Promise<void> {
 
   const client = getTryOnClient();
 
-  // Mark processing
+  // Mark processing and notify
   await pg.query(
     `UPDATE tryon_jobs SET status = 'processing' WHERE id = $1`,
     [jobId]
   );
+  await notifyJobStarted(jobId, userId);
 
   try {
     // 1. Upload garment image to R2 for permanent reference
@@ -246,13 +263,30 @@ async function processJobInBackground(opts: JobProcessOpts): Promise<void> {
         jobId,
       ]
     );
+    
+    // Track usage and notify success
+    await trackTryOnUsage(userId, tryonResult.processing_time_ms, true);
+    await notifyJobCompleted(jobId, userId, resultUpload.cdnUrl);
+    
   } catch (err: any) {
+    console.error(`[TryOn] Job ${jobId} failed (attempt ${attempt}):`, err.message);
+    
+    // Check if error is retryable
+    if (isRetryableError(err) && attempt < 3) {
+      // Schedule retry with exponential backoff
+      await scheduleRetry(jobId, userId, err.message, attempt);
+      return;
+    }
+    
+    // Permanent failure
     await pg.query(
       `UPDATE tryon_jobs SET status = 'failed', error_message = $1 WHERE id = $2`,
       [err.message?.slice(0, 500), jobId]
     );
-    // Re-log so server logs capture Vertex AI errors
-    console.error(`[TryOn] Job ${jobId} failed:`, err.message);
+    
+    // Track usage and notify failure
+    await trackTryOnUsage(userId, 0, false);
+    await notifyJobFailed(jobId, userId, err.message);
   }
 }
 
@@ -265,6 +299,15 @@ export async function performTryOn(input: PerformTryOnInput): Promise<TryOnJobRo
 
   const { buffer: garmentBuffer, imageUrl: garmentImageUrl, description: garmentDescription } =
     await resolveGarment(input);
+  
+  // Validate garment category before submitting to Vertex AI
+  const validation = validateGarment(garmentDescription, undefined, input.category);
+  if (!validation.valid) {
+    const err = new Error(validation.error || "Unsupported garment type for virtual try-on");
+    (err as any).statusCode = 400;
+    (err as any).suggestion = validation.suggestion;
+    throw err;
+  }
 
   // Insert as pending — return immediately; processing happens in background
   const jobRow = await pg.query<TryOnJobRow>(

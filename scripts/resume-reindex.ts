@@ -25,14 +25,37 @@
  *
  *   # Dry run (show what would be reindexed without doing it)
  *   npx tsx scripts/resume-reindex.ts --dry-run
+ *
+ *   # Disable Redis embedding cache (avoids Upstash quota during bulk reindex)
+ *   npx tsx scripts/resume-reindex.ts --no-cache
  */
 
 import "dotenv/config";
 import axios from "axios";
-import { pg, osClient } from "../src/lib/core";
+import { Pool } from "pg";
+import { osClient, ensureIndex } from "../src/lib/core/opensearch";
 import { config } from "../src/config";
-import { processImageForEmbedding, computePHash } from "../src/lib/image";
-import { extractAttributesSync } from "../src/lib/search/attributeExtractor";
+
+/**
+ * Dedicated pool for this script only — max 1 by default so PgBouncer "session"
+ * mode is not starved by the shared app pool (default max 10). Other services
+ * using the same DATABASE_URL still consume slots; stop them or wait for retries.
+ */
+const REINDEX_PG_MAX = Math.max(1, parseInt(process.env.REINDEX_PG_POOL_MAX || "1", 10));
+const reindexPg = new Pool({
+  connectionString: config.database.url,
+  ssl: { rejectUnauthorized: false },
+  max: REINDEX_PG_MAX,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 120000,
+  keepAlive: true,
+});
+import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash } from "../src/lib/image";
+import { attributeEmbeddings } from "../src/lib/search/attributeEmbeddings";
+import { buildProductSearchDocument } from "../src/lib/search/searchDocument";
+import { loadProductSearchEnrichmentByIds } from "../src/lib/search/loadProductSearchEnrichment";
+import { extractGarmentFashionColors } from "../src/lib/color/garmentColorPipeline";
+import type { PixelBox } from "../src/lib/image/processor";
 import { promises as fs } from "fs";
 
 // ============================================================================
@@ -44,6 +67,7 @@ interface ReindexConfig {
   force: boolean;                // Force reindex even if already exists
   failedOnly: boolean;           // Only reindex products not in OpenSearch
   dryRun: boolean;               // Don't actually index, just show what would happen
+  recreate: boolean;             // Delete and recreate the OpenSearch index before starting
   batchSize: number;             // Process N products at a time
   maxRetries: number;            // Retry failed image fetches
   timeoutMs: number;             // Image fetch timeout
@@ -55,6 +79,7 @@ const DEFAULT_CONFIG: ReindexConfig = {
   force: false,
   failedOnly: false,
   dryRun: false,
+  recreate: false,
   batchSize: 50,
   maxRetries: 3,
   timeoutMs: 30000,
@@ -73,23 +98,74 @@ interface Progress {
   lastUpdatedAt: string;
 }
 
+const DB_RETRY = {
+  attempts: 8,
+  baseDelayMs: 2000,
+} as const;
+
 // ============================================================================
 // Helpers
 // ============================================================================
 
+function isTransientPgError(err: any): boolean {
+  const msg = String(err?.message || "").toLowerCase();
+  return (
+    msg.includes("maxclientsinsessionmode") ||
+    msg.includes("max clients reached") ||
+    msg.includes("connection terminated unexpectedly") ||
+    msg.includes("terminating connection") ||
+    msg.includes("connection reset") ||
+    msg.includes("econnreset") ||
+    msg.includes("etimedout") ||
+    msg.includes("timeout") ||
+    msg.includes("server closed the connection unexpectedly")
+  );
+}
+
+async function queryWithRetry<T = any>(
+  sql: string,
+  params: any[] = [],
+  label: string = "query"
+): Promise<T> {
+  let lastErr: any;
+
+  for (let attempt = 1; attempt <= DB_RETRY.attempts; attempt++) {
+    try {
+      return (await reindexPg.query(sql, params)) as T;
+    } catch (err: any) {
+      lastErr = err;
+      const transient = isTransientPgError(err);
+      if (!transient || attempt === DB_RETRY.attempts) {
+        throw err;
+      }
+
+      const delayMs = DB_RETRY.baseDelayMs * attempt;
+      console.warn(
+        `⚠️  DB ${label} failed (attempt ${attempt}/${DB_RETRY.attempts}): ${err.message}. ` +
+          `Retrying in ${delayMs}ms...`
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  throw lastErr;
+}
+
 async function columnExists(columnName: string): Promise<boolean> {
-  const res = await pg.query(
+  const res = await queryWithRetry(
     `SELECT 1 FROM information_schema.columns WHERE table_name='products' AND column_name=$1`,
-    [columnName]
+    [columnName],
+    "columnExists"
   );
   return res.rowCount! > 0;
 }
 
 async function getProductColumns(): Promise<{ hasIsHidden: boolean; hasCanonicalId: boolean }> {
-  const [hasIsHidden, hasCanonicalId] = await Promise.all([
-    columnExists("is_hidden"),
-    columnExists("canonical_id"),
-  ]);
+  // Run sequentially to minimize concurrent DB sessions when PgBouncer
+  // session mode limits clients aggressively.
+  const hasIsHidden = await columnExists("is_hidden");
+  const hasCanonicalId = await columnExists("canonical_id");
   return { hasIsHidden, hasCanonicalId };
 }
 
@@ -181,7 +257,7 @@ async function reindexProduct(
   product: any,
   reindexConfig: ReindexConfig
 ): Promise<boolean> {
-  const { id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_url, is_hidden, canonical_id } = product;
+  const { id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_url, is_hidden, canonical_id, description } = product;
 
   try {
     // Fetch image
@@ -196,46 +272,97 @@ async function reindexProduct(
       return true;
     }
 
-    // Generate embedding and hash
-    const embedding = await processImageForEmbedding(buf);
-    const ph = await computePHash(buf);
+    let garmentBox: PixelBox | null = null;
+    try {
+      const det = await reindexPg.query(
+        `SELECT d.box_x1, d.box_y1, d.box_x2, d.box_y2
+         FROM product_image_detections d
+         INNER JOIN product_images pi ON pi.id = d.product_image_id
+         WHERE pi.product_id = $1 AND pi.is_primary = true
+           AND d.box_x1 IS NOT NULL AND d.box_y2 IS NOT NULL
+           AND COALESCE(d.confidence, 0) >= 0.22
+         ORDER BY COALESCE(d.area_ratio, 0) DESC NULLS LAST, d.id DESC
+         LIMIT 1`,
+        [id],
+      );
+      const r = det.rows[0];
+      if (r) {
+        garmentBox = {
+          x1: Number(r.box_x1),
+          y1: Number(r.box_y1),
+          x2: Number(r.box_x2),
+          y2: Number(r.box_y2),
+        };
+      }
+    } catch {
+      garmentBox = null;
+    }
 
-    // Extract attributes
-    const { attributes } = extractAttributesSync(title);
+    // Generate global embedding, attribute embeddings, and hash in parallel
+    const [embedding, embeddingGarment, attrEmbeddings, ph, garmentColorAnalysis, enrichMap] = await Promise.all([
+      processImageForEmbedding(buf),
+      processImageForGarmentEmbedding(buf).catch(() => [] as number[]),
+      attributeEmbeddings.generateAllAttributeEmbeddings(buf).catch((err: any) => {
+        console.warn(`  ⚠️  Product ${id}: attribute embeddings failed (${err.message}), using global only`);
+        return null;
+      }),
+      computePHash(buf),
+      extractGarmentFashionColors(buf, { box: garmentBox }).catch(() => null),
+      loadProductSearchEnrichmentByIds([id]),
+    ]);
+    const enrichRow = enrichMap.get(id);
 
-    // Index into OpenSearch
-    const body = {
-      product_id: String(id),
-      vendor_id: String(vendor_id),
+    const body: Record<string, any> = buildProductSearchDocument({
+      productId: id,
+      vendorId: vendor_id,
       title,
+      description: description || null,
       brand,
       category,
-      price_usd: Math.round(price_cents / 89000),
-      availability: availability ? "in_stock" : "out_of_stock",
-      is_hidden: is_hidden ?? false,
-      canonical_id: canonical_id ? String(canonical_id) : null,
+      priceCents: price_cents,
+      availability: Boolean(availability),
+      isHidden: is_hidden ?? false,
+      canonicalId: canonical_id,
+      imageCdn: image_url,
+      pHash: ph,
+      lastSeenAt: last_seen,
       embedding,
-      image_cdn: image_url,
-      p_hash: ph,
-      last_seen_at: last_seen,
-      // Extracted attributes
-      attr_color: attributes.color || null,
-      attr_colors: attributes.colors || [],
-      attr_material: attributes.material || null,
-      attr_materials: attributes.materials || [],
-      attr_fit: attributes.fit || null,
-      attr_style: attributes.style || null,
-      attr_gender: attributes.gender || null,
-      attr_pattern: attributes.pattern || null,
-      attr_sleeve: attributes.sleeve || null,
-      attr_neckline: attributes.neckline || null,
-    };
+      embeddingGarment: embeddingGarment.length > 0 ? embeddingGarment : null,
+      detectedColors: garmentColorAnalysis?.paletteCanonical ?? [],
+      garmentColorAnalysis,
+      enrichment: enrichRow
+        ? {
+            norm_confidence: enrichRow.norm_confidence,
+            category_confidence: enrichRow.category_confidence,
+            brand_confidence: enrichRow.brand_confidence,
+            canonical_type_ids: enrichRow.canonical_type_ids,
+          }
+        : null,
+      images: image_url
+        ? [
+            {
+              url: image_url,
+              p_hash: ph,
+              is_primary: true,
+            },
+          ]
+        : [],
+    });
+
+    // Include per-attribute embeddings when available
+    if (attrEmbeddings) {
+      body.embedding_color    = attrEmbeddings.color;
+      body.embedding_texture  = attrEmbeddings.texture;
+      body.embedding_material = attrEmbeddings.material;
+      body.embedding_style    = attrEmbeddings.style;
+      body.embedding_pattern  = attrEmbeddings.pattern;
+    }
 
     await osClient.index({
       index: config.opensearch.index,
       id: String(id),
       body,
-      refresh: false, // Don't refresh immediately for performance
+      refresh: false,
     });
 
     console.log(`  ✅ Product ${id}: ${title.substring(0, 60)}`);
@@ -243,6 +370,53 @@ async function reindexProduct(
   } catch (err: any) {
     console.error(`  ❌ Product ${id}: ${err.message || err}`);
     return false;
+  }
+}
+
+function isMaxClientsError(err: unknown): boolean {
+  const m = String((err as Error)?.message || "").toLowerCase();
+  return m.includes("maxclientsinsessionmode") || m.includes("max clients reached");
+}
+
+/**
+ * Wait until a PgBouncer slot is free. Session pools are tiny; production + local
+ * API often fill them — many retries with backoff is required.
+ */
+async function waitForDatabase(): Promise<void> {
+  const maxAttempts = parseInt(process.env.REINDEX_DB_WAIT_ATTEMPTS || "40", 10);
+  const baseDelayMs = parseInt(process.env.REINDEX_DB_WAIT_MS || "8000", 10);
+
+  console.log(
+    `🔌 Reindex DB pool: max ${REINDEX_PG_MAX} connection(s). ` +
+      `If you see max-clients errors, stop other apps using DATABASE_URL or increase PgBouncer pool.\n`
+  );
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      console.log(`🔌 Connecting to database (attempt ${attempt}/${maxAttempts})...`);
+      await reindexPg.query("SELECT 1");
+      console.log("✅ Database connected\n");
+      return;
+    } catch (err: any) {
+      console.warn(`   ⚠️  Attempt ${attempt} failed: ${err.message}`);
+      if (attempt >= maxAttempts) break;
+      const mult = isMaxClientsError(err) ? Math.min(attempt, 6) : 1;
+      const delayMs = Math.min(120_000, baseDelayMs * mult);
+      console.log(`   Retrying in ${Math.round(delayMs / 1000)}s...`);
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw new Error(
+    "Could not connect to database after all retries. " +
+      "Free a slot: stop Cloud Run / local server, or use Aiven direct (non-pooler) URL for reindex only."
+  );
+}
+
+async function closeReindexPool(): Promise<void> {
+  try {
+    await reindexPg.end();
+  } catch {
+    /* ignore */
   }
 }
 
@@ -269,6 +443,12 @@ async function main() {
       case "--batch-size":
         reindexConfig.batchSize = parseInt(args[++i], 10);
         break;
+      case "--recreate":
+        reindexConfig.recreate = true;
+        break;
+      case "--no-cache":
+        process.env.DISABLE_EMBEDDING_CACHE = "1";
+        break;
       case "--help":
         console.log(`
 Resumable Product Reindexing
@@ -282,6 +462,8 @@ Options:
   --failed-only           Only reindex products not in OpenSearch
   --dry-run               Show what would be reindexed without doing it
   --batch-size <n>        Process N products at a time (default: 50)
+  --recreate              ⚠️  DELETE and recreate the OpenSearch index before starting
+  --no-cache              Disable Redis embedding cache (avoids Upstash quota during bulk reindex)
   --help                  Show this help message
 
 Examples:
@@ -296,6 +478,12 @@ Examples:
 
   # Dry run to see what would happen
   npx tsx scripts/resume-reindex.ts --dry-run
+  
+  # FULL REINDEX: Delete index and reindex all products from scratch
+  npx tsx scripts/resume-reindex.ts --recreate --force
+
+  # Reindex without filling Redis (avoids Upstash quota exceeded)
+  npx tsx scripts/resume-reindex.ts --no-cache --batch-size 10
         `);
         process.exit(0);
       default:
@@ -311,9 +499,42 @@ Examples:
   console.log(`  Force reindex:      ${reindexConfig.force}`);
   console.log(`  Failed only:        ${reindexConfig.failedOnly}`);
   console.log(`  Dry run:            ${reindexConfig.dryRun}`);
+  console.log(`  Recreate index:     ${reindexConfig.recreate}`);
+  console.log(`  Embedding cache:    ${process.env.DISABLE_EMBEDDING_CACHE === "1" ? "disabled (--no-cache)" : "enabled"}`);
   console.log(`  Batch size:         ${reindexConfig.batchSize}`);
   console.log(`  Max retries:        ${reindexConfig.maxRetries}`);
   console.log();
+
+  // ── RECREATE INDEX IF REQUESTED ──────────────────────────────────────────────
+  if (reindexConfig.recreate) {
+    console.log("⚠️  --recreate flag set: Deleting and recreating OpenSearch index...");
+    const indexName = config.opensearch.index;
+    try {
+      const exists = await osClient.indices.exists({ index: indexName });
+      if (exists.body) {
+        console.log(`   Deleting existing index: ${indexName}`);
+        await osClient.indices.delete({ index: indexName });
+      }
+      console.log(`   Creating fresh index: ${indexName}`);
+      await ensureIndex();
+      console.log("✅ Index recreated successfully.");
+      
+      // Reset progress file when recreating index
+      console.log("   Resetting progress file...");
+      try {
+        await fs.unlink(reindexConfig.progressFile);
+        console.log("   Progress file deleted.");
+      } catch {
+        // File may not exist
+      }
+    } catch (err: any) {
+      console.error("❌ Failed to recreate index:", err.message);
+      process.exit(1);
+    }
+    console.log();
+  }
+
+  await waitForDatabase();
 
   // Check columns
   if (!(await columnExists("image_url"))) {
@@ -337,38 +558,53 @@ Examples:
 
   const startFromId = reindexConfig.startFromId || progress.lastProcessedId;
 
-  console.log("📊 Loading products...");
+  console.log("📊 Preparing product pagination...");
   const optionalColumns = [
     columns.hasIsHidden ? "is_hidden" : "NULL::boolean AS is_hidden",
     columns.hasCanonicalId ? "canonical_id" : "NULL::text AS canonical_id",
   ].join(", ");
 
-  const whereClause = startFromId > 0 ? `WHERE image_url IS NOT NULL AND id > ${startFromId}` : `WHERE image_url IS NOT NULL`;
-
-  const res = await pg.query(
-    `SELECT id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_url, ${optionalColumns}
+  // Estimate total for progress reporting (streaming/paged fetch avoids one huge query).
+  const totalRes = await queryWithRetry<{ rowCount: number; rows: Array<{ count: string }> }>(
+    `SELECT COUNT(*)::text AS count
      FROM products
-     ${whereClause}
-     ORDER BY id ASC`
+     WHERE image_url IS NOT NULL
+       AND ($1::bigint = 0 OR id >= $1::bigint)`,
+    [startFromId],
+    "count products"
   );
+  const totalProducts = parseInt(totalRes.rows[0]?.count || "0", 10);
 
-  console.log(`Found ${res.rowCount} products to process`);
+  console.log(`Found ${totalProducts} products to process`);
   console.log();
 
-  if (res.rowCount === 0) {
+  if (totalProducts === 0) {
     console.log("✅ No products to reindex. All done!");
     process.exit(0);
   }
 
-  // Process in batches
-  const products = res.rows;
-  const totalProducts = products.length;
   let processed = 0;
+  let lastSeenId = startFromId > 0 ? startFromId - 1 : 0;
 
-  for (let batchStart = 0; batchStart < products.length; batchStart += reindexConfig.batchSize) {
-    const batch = products.slice(batchStart, batchStart + reindexConfig.batchSize);
-    const batchNum = Math.floor(batchStart / reindexConfig.batchSize) + 1;
-    const totalBatches = Math.ceil(products.length / reindexConfig.batchSize);
+  // Stream products in ID order to avoid long-running, memory-heavy full-table reads.
+  while (true) {
+    const batchRes = await queryWithRetry<any>(
+      `SELECT id, vendor_id, title, description, brand, category, price_cents, availability, last_seen, image_url, ${optionalColumns}
+       FROM products
+       WHERE image_url IS NOT NULL
+         AND id > $1::bigint
+       ORDER BY id ASC
+       LIMIT $2`,
+      [lastSeenId, reindexConfig.batchSize],
+      "load product batch"
+    );
+
+    const batch = batchRes.rows as any[];
+    if (batch.length === 0) break;
+
+    lastSeenId = Number(batch[batch.length - 1].id);
+    const batchNum = Math.floor(processed / reindexConfig.batchSize) + 1;
+    const totalBatches = Math.max(1, Math.ceil(totalProducts / reindexConfig.batchSize));
 
     console.log(`\n📦 Batch ${batchNum}/${totalBatches} (${batch.length} products)`);
 
@@ -443,10 +679,15 @@ Examples:
   console.log(`Progress saved to: ${reindexConfig.progressFile}`);
   console.log();
 
-  process.exit(0);
 }
 
-main().catch((e) => {
-  console.error("❌ Fatal error:", e);
-  process.exit(1);
-});
+main()
+  .then(async () => {
+    await closeReindexPool();
+    process.exit(0);
+  })
+  .catch(async (e) => {
+    console.error("❌ Fatal error:", e);
+    await closeReindexPool();
+    process.exit(1);
+  });

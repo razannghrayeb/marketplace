@@ -14,7 +14,10 @@ import { pg } from "../src/lib/db";
 import { osClient } from "../src/lib/opensearch";
 import { config } from "../src/config";
 import { uploadImage, generateImageKey } from "../src/lib/r2";
-import { processImageForEmbedding, computePHash, validateImage } from "../src/lib/imageProcessor";
+import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash, validateImage } from "../src/lib/image";
+import { buildProductSearchDocument } from "../src/lib/search/searchDocument";
+import { extractDominantColorNames } from "../src/lib/color/dominantColor";
+import { loadProductSearchEnrichmentByIds } from "../src/lib/search/loadProductSearchEnrichment";
 import axios from "axios";
 
 async function fetchImageBuffer(url: string): Promise<Buffer | null> {
@@ -46,7 +49,7 @@ async function main() {
 
   // Find products with image_url that don't have any images in product_images
   const res = await pg.query(`
-    SELECT p.id, p.vendor_id, p.title, p.brand, p.category, p.price_cents, p.availability, p.last_seen, p.image_url
+    SELECT p.id, p.vendor_id, p.title, p.description, p.brand, p.category, p.price_cents, p.availability, p.last_seen, p.image_url
     FROM products p
     LEFT JOIN product_images pi ON pi.product_id = p.id
     WHERE p.image_url IS NOT NULL AND pi.id IS NULL
@@ -86,8 +89,14 @@ async function main() {
       console.log(`  ✓ Uploaded to R2: ${cdnUrl}`);
 
       // 3. Compute embedding and pHash
-      const embedding = await processImageForEmbedding(buffer);
-      const pHash = await computePHash(buffer);
+      const [embedding, embeddingGarment, pHash, dominantColors, enrichMap] = await Promise.all([
+        processImageForEmbedding(buffer),
+        processImageForGarmentEmbedding(buffer).catch(() => [] as number[]),
+        computePHash(buffer),
+        extractDominantColorNames(buffer).catch(() => []),
+        loadProductSearchEnrichmentByIds([id]),
+      ]);
+      const enrichRow = enrichMap.get(id);
       console.log(`  ✓ Computed embedding and pHash`);
 
       // 4. Insert into product_images
@@ -107,19 +116,33 @@ async function main() {
       console.log(`  ✓ Updated product record`);
 
       // 6. Index in OpenSearch
-      const doc: any = {
-        product_id: String(id),
-        vendor_id: String(vendor_id),
+      const doc: any = buildProductSearchDocument({
+        productId: id,
+        vendorId: vendor_id,
         title,
+        description: description ?? null,
         brand,
         category,
-        price_usd: price_cents ? Math.round(price_cents / 100) : 0,
-        availability: availability ? "in_stock" : "out_of_stock",
-        image_cdn: cdnUrl,
-        images: [{ url: cdnUrl, p_hash: pHash, is_primary: true }],
+        priceCents: price_cents,
+        availability: Boolean(availability),
+        isHidden: false,
+        canonicalId: null,
+        imageCdn: cdnUrl,
+        pHash,
+        lastSeenAt: last_seen,
         embedding,
-        last_seen_at: last_seen,
-      };
+        embeddingGarment: embeddingGarment.length > 0 ? embeddingGarment : null,
+        detectedColors: dominantColors,
+        enrichment: enrichRow
+          ? {
+              norm_confidence: enrichRow.norm_confidence,
+              category_confidence: enrichRow.category_confidence,
+              brand_confidence: enrichRow.brand_confidence,
+              canonical_type_ids: enrichRow.canonical_type_ids,
+            }
+          : null,
+        images: [{ url: cdnUrl, p_hash: pHash, is_primary: true }],
+      });
 
       await osClient.index({
         index: config.opensearch.index,

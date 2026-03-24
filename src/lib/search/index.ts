@@ -59,3 +59,57 @@ export {
   hybridSearch,
   type SearchVectors,
 } from "./hybridsearch";
+
+export {
+  dedupeSearchResults,
+  filterRelatedAgainstMain,
+  type DedupSearchResultItem,
+  type DedupOptions,
+} from "./resultDedup";
+
+export {
+  getCategorySearchTerms,
+  loadCategoryVocabulary,
+  resolveCategoryTermsForOpensearch,
+  shouldHardFilterAstCategory,
+  isCategoryDominantQuery,
+  isProductTypeDominantQuery,
+  inferCategoryCanonical,
+} from "./categoryFilter";
+
+export {
+  expandProductTypesForQuery,
+  expandProductTypesForIndexing,
+  scoreProductTypeTaxonomyMatch,
+  scoreCrossFamilyTypePenalty,
+  scoreRerankProductTypeBreakdown,
+  scoreHypernymDocMatch,
+  crossFamilyTypePenaltyEnabled,
+  PRODUCT_TYPE_CLUSTERS,
+  extractLexicalProductTypeSeeds,
+  extractFashionTypeNounTokens,
+  getProductTypePhrasesLongestFirst,
+  type RerankTypeBreakdown,
+} from "./productTypeTaxonomy";
+
+export { loadProductSearchEnrichmentByIds, canonicalTypeIdsToProductTypeTokens } from "./loadProductSearchEnrichment";
+export { computeEmbeddingFashionScore } from "./fashionDomainSignal";
+export { isExpansionTermAllowed } from "./expansionAllowlist";
+
+export { searchProductsFilteredBrowse } from "./filteredBrowseSearch";
+
+export {
+  buildQueryUnderstanding,
+  searchDomainGateEnabled,
+  type QueryUnderstanding,
+} from "./queryUnderstanding.service";
+
+export {
+  emitTextSearchEval,
+  emitImageSearchEval,
+  searchEvalEnabled,
+  searchEvalVariant,
+  newSearchEvalId,
+  type TextSearchEvalPayload,
+  type ImageSearchEvalPayload,
+} from "./evalHooks";

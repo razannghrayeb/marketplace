@@ -30,7 +30,10 @@ import {
 import {
   getRecommendations,
   getOutfitSuggestions,
-  completeLookSuggestions
+  completeLookSuggestions,
+  getOnboardingRecommendationsForUser,
+  getAdaptedEssentialsForUser,
+  getUserPriceTier
 } from "./recommendations.service";
 
 // ============================================================================
@@ -337,8 +340,13 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
       return res.status(400).json({ success: false, error: "item_ids array required" });
     }
 
-    const suggestions = await completeLookSuggestions(userId, itemIds, limit);
-    res.json({ success: true, suggestions });
+    const result = await completeLookSuggestions(userId, itemIds, limit);
+    res.json({
+      success: true,
+      suggestions: result.suggestions,
+      outfitSets: result.outfitSets,
+      missingCategories: result.missingCategories,
+    });
   } catch (err) {
     next(err);
   }
@@ -771,6 +779,56 @@ export async function triggerCompatibilityLearning(req: Request, res: Response, 
     const rules = await learnCompatibilityRules();
 
     res.json({ success: true, rulesLearned: rules.length });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ============================================================================
+// 🆕 Onboarding & Lifestyle Adaptation
+// ============================================================================
+
+/**
+ * GET /api/wardrobe/onboarding - Get onboarding recommendations for new users
+ */
+export async function getOnboarding(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = req.user!.id;
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 20;
+
+    const recommendations = await getOnboardingRecommendationsForUser(userId, limit);
+
+    res.json({ success: true, recommendations });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/wardrobe/essentials - Get adapted essential categories for user
+ */
+export async function getEssentials(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = req.user!.id;
+
+    const essentials = await getAdaptedEssentialsForUser(userId);
+
+    res.json({ success: true, essentials });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/wardrobe/price-tier - Get user's inferred price tier
+ */
+export async function getPriceTier(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = req.user!.id;
+
+    const priceTier = await getUserPriceTier(userId);
+
+    res.json({ success: true, priceTier });
   } catch (err) {
     next(err);
   }

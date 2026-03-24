@@ -15,7 +15,45 @@
  * - Redis-ready for production scaling
  */
 
-import { pg } from "../core";
+import { pg, queryWithPgCapacityRetry } from "../core";
+
+// ─── Lazy startup (avoids competing with traffic on module import) ─────────
+
+let autocompleteBootstrap: Promise<void> | null = null;
+let periodicRefreshStarted = false;
+
+/**
+ * Run once: create tables if needed, prime caches, start periodic refresh.
+ * Retries on Supabase session-pooler "max clients" errors.
+ */
+function ensureAutocompleteBootstrapped(): Promise<void> {
+  if (!autocompleteBootstrap) {
+    autocompleteBootstrap = (async () => {
+      await queryWithPgCapacityRetry(
+        "queryAutocompleteBootstrap",
+        async () => {
+          await initializeDatabase();
+          await refreshCacheIfNeededInternal();
+        },
+        { attempts: 12, baseDelayMs: 800 },
+      );
+      console.log("[QueryAutocomplete] Initialized successfully");
+
+      if (!periodicRefreshStarted) {
+        periodicRefreshStarted = true;
+        setInterval(() => {
+          refreshCacheIfNeededInternal().catch((err) =>
+            console.error("[QueryAutocomplete] Periodic refresh failed:", err),
+          );
+        }, CONFIG.cacheRefreshInterval);
+      }
+    })().catch((err) => {
+      autocompleteBootstrap = null;
+      throw err;
+    });
+  }
+  return autocompleteBootstrap;
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -140,6 +178,10 @@ let lastCacheRefresh: number = 0;
 export async function getAutocompleteSuggestions(
   request: AutocompleteRequest
 ): Promise<QuerySuggestion[]> {
+  await ensureAutocompleteBootstrapped().catch(() => {
+    /* suggestions still work from empty trie if DB unavailable */
+  });
+
   const {
     prefix,
     limit = CONFIG.maxSuggestions,
@@ -224,6 +266,7 @@ export async function getTrendingQueries(
   limit: number = 10,
   category?: string
 ): Promise<QuerySuggestion[]> {
+  await ensureAutocompleteBootstrapped().catch(() => {});
   await refreshCacheIfNeeded();
 
   let trending = [...trendingCache];
@@ -246,6 +289,7 @@ export async function getTrendingQueries(
  * Get popular queries (all-time)
  */
 export async function getPopularQueries(limit: number = 10): Promise<QuerySuggestion[]> {
+  await ensureAutocompleteBootstrapped().catch(() => {});
   await refreshCacheIfNeeded();
   return popularCache.slice(0, limit);
 }
@@ -264,41 +308,71 @@ export async function logSearchQuery(
   if (normalized.length < CONFIG.minQueryLength) return;
 
   try {
-    // Insert or update in database
-    await pg.query(
-      `
-      INSERT INTO search_queries (query, search_count, last_searched, user_id, category, result_count)
-      VALUES ($1, 1, NOW(), $2, $3, $4)
-      ON CONFLICT (query)
-      DO UPDATE SET
-        search_count = search_queries.search_count + 1,
-        last_searched = NOW(),
-        result_count = COALESCE($4, search_queries.result_count)
-      `,
-      [normalized, userId || null, category || null, resultCount || null]
+    await ensureAutocompleteBootstrapped();
+  } catch (err) {
+    console.warn("[QueryAutocomplete] Skip query log — DB bootstrap failed:", err);
+    return;
+  }
+
+  try {
+    // Single connection + transaction: halves pool usage vs two separate pg.query calls
+    // (important for Supabase session mode / tiny pool_size).
+    // Best-effort: 1 retry only — avoid hammering pool when under capacity pressure.
+    await queryWithPgCapacityRetry(
+      "logSearchQuery",
+      async () => {
+        const client = await pg.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(
+            `
+            INSERT INTO search_queries (query, search_count, last_searched, user_id, category, result_count)
+            VALUES ($1, 1, NOW(), $2, $3, $4)
+            ON CONFLICT (query)
+            DO UPDATE SET
+              search_count = search_queries.search_count + 1,
+              last_searched = NOW(),
+              result_count = COALESCE($4, search_queries.result_count)
+            `,
+            [normalized, userId || null, category || null, resultCount ?? null],
+          );
+          if (userId) {
+            await client.query(
+              `
+              INSERT INTO user_search_history (user_id, query, searched_at, category, result_count)
+              VALUES ($1, $2, NOW(), $3, $4)
+              `,
+              [userId, normalized, category || null, resultCount ?? null],
+            );
+          }
+          await client.query("COMMIT");
+        } catch (e) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw e;
+        } finally {
+          client.release();
+        }
+      },
+      { attempts: 2, baseDelayMs: 300 },
     );
 
-    // Also log per-user history
-    if (userId) {
-      await pg.query(
-        `
-        INSERT INTO user_search_history (user_id, query, searched_at, category, result_count)
-        VALUES ($1, $2, NOW(), $3, $4)
-        `,
-        [userId, normalized, category || null, resultCount || null]
-      );
-    }
-
-    // Update trie (async, non-blocking)
     queryTrie.insert(normalized, 1, new Date());
   } catch (err) {
-    console.error("[QueryAutocomplete] Failed to log query:", err);
+    // Silently skip — logging is best-effort; don't spam logs on pool exhaustion
+    if (process.env.NODE_ENV === "development") {
+      console.warn("[QueryAutocomplete] Failed to log query:", (err as Error).message);
+    }
   }
 }
 
 // ─── Cache Management ────────────────────────────────────────────────────────
 
 async function refreshCacheIfNeeded(): Promise<void> {
+  await ensureAutocompleteBootstrapped().catch(() => {});
+  await refreshCacheIfNeededInternal();
+}
+
+async function refreshCacheIfNeededInternal(): Promise<void> {
   const now = Date.now();
 
   if (now - lastCacheRefresh < CONFIG.cacheRefreshInterval) {
@@ -306,16 +380,16 @@ async function refreshCacheIfNeeded(): Promise<void> {
   }
 
   try {
-    // Refresh trending queries
-    trendingCache = await computeTrendingQueries();
-
-    // Refresh popular queries
-    popularCache = await computePopularQueries();
-
-    // Rebuild trie from top queries
-    await rebuildTrie();
-
-    lastCacheRefresh = now;
+    await queryWithPgCapacityRetry(
+      "autocompleteCacheRefresh",
+      async () => {
+        trendingCache = await computeTrendingQueries();
+        popularCache = await computePopularQueries();
+        await rebuildTrie();
+        lastCacheRefresh = Date.now();
+      },
+      { attempts: 8, baseDelayMs: 600 },
+    );
   } catch (err) {
     console.error("[QueryAutocomplete] Cache refresh failed:", err);
   }
@@ -507,21 +581,6 @@ export async function initializeDatabase(): Promise<void> {
 }
 
 // ─── Startup ─────────────────────────────────────────────────────────────────
-
-// Initialize on module load
-(async () => {
-  try {
-    await initializeDatabase();
-    await refreshCacheIfNeeded();
-    console.log("[QueryAutocomplete] Initialized successfully");
-  } catch (err) {
-    console.error("[QueryAutocomplete] Initialization failed:", err);
-  }
-})();
-
-// Refresh cache periodically
-setInterval(() => {
-  refreshCacheIfNeeded().catch(err =>
-    console.error("[QueryAutocomplete] Periodic refresh failed:", err)
-  );
-}, CONFIG.cacheRefreshInterval);
+// DB work is deferred to first autocomplete / search-log request via
+// ensureAutocompleteBootstrapped() so cold starts do not spike connections
+// against Supabase session pooler alongside other routes.

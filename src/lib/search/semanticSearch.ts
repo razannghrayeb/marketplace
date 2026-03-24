@@ -351,41 +351,77 @@ function buildSemanticQuery(query: string, entities: QueryEntities, intent: Quer
 // Dynamic Entity Learning
 // ============================================================================
 
-/**
- * Load brands from database to extend knowledge base
- */
-export async function loadBrandsFromDB(): Promise<void> {
-  try {
-    const result = await pg.query(
-      `SELECT DISTINCT LOWER(brand) as brand FROM products WHERE brand IS NOT NULL`
-    );
-    for (const row of result.rows) {
-      KNOWN_BRANDS.add(row.brand);
+let _dbEntitiesLoaded = false;
+
+function isDbCapacityError(err: unknown): boolean {
+  const msg = String((err as Error)?.message || "").toLowerCase();
+  return (
+    msg.includes("maxclientsinsessionmode") ||
+    msg.includes("max clients reached") ||
+    msg.includes("too many connections")
+  );
+}
+
+async function queryWithCapacityRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  const attempts = 6;
+  const baseMs = 1500;
+  let lastErr: unknown;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isDbCapacityError(err) || i === attempts) throw err;
+      const delay = baseMs * i;
+      console.warn(
+        `[SemanticSearch] DB ${label} capacity wait (attempt ${i}/${attempts}): ${(err as Error).message}. Retrying in ${delay}ms...`
+      );
+      await new Promise((r) => setTimeout(r, delay));
     }
-    console.log(`Loaded ${result.rowCount} brands from database`);
-  } catch (err) {
-    console.warn("Could not load brands from DB:", err);
   }
+  throw lastErr;
 }
 
 /**
- * Load categories from database
+ * One-time DB enrichment — safe to call multiple times (no-op after first).
+ * Call once at startup before serving traffic.
+ *
+ * Uses sequential queries (not Promise.all) so PgBouncer "session" mode only
+ * needs one connection at a time for this step; retries on max-clients errors.
  */
-export async function loadCategoriesFromDB(): Promise<void> {
+export async function loadEntitiesFromDB(): Promise<void> {
+  if (_dbEntitiesLoaded) return;
+
   try {
-    const result = await pg.query(
-      `SELECT DISTINCT LOWER(category) as category FROM products WHERE category IS NOT NULL`
+    const brandsResult = await queryWithCapacityRetry("brands", () =>
+      pg.query(`SELECT DISTINCT LOWER(brand) as brand FROM products WHERE brand IS NOT NULL`)
     );
-    for (const row of result.rows) {
+
+    const categoriesResult = await queryWithCapacityRetry("categories", () =>
+      pg.query(`SELECT DISTINCT LOWER(category) as category FROM products WHERE category IS NOT NULL`)
+    );
+
+    for (const row of brandsResult.rows) {
+      KNOWN_BRANDS.add(row.brand);
+    }
+
+    for (const row of categoriesResult.rows) {
       if (!CATEGORY_MAP[row.category]) {
         CATEGORY_MAP[row.category] = [row.category];
       }
     }
-    console.log(`Loaded ${result.rowCount} categories from database`);
+
+    _dbEntitiesLoaded = true;
+    console.log(`[SemanticSearch] Loaded ${brandsResult.rowCount} brands + ${categoriesResult.rowCount} categories from DB`);
   } catch (err) {
-    console.warn("Could not load categories from DB:", err);
+    console.warn("[SemanticSearch] Could not load entities from DB:", err);
   }
 }
+
+/** @deprecated Use loadEntitiesFromDB() instead */
+export const loadBrandsFromDB = loadEntitiesFromDB;
+/** @deprecated Use loadEntitiesFromDB() instead */
+export const loadCategoriesFromDB = loadEntitiesFromDB;
 
 // ============================================================================
 // Hybrid Search Scoring
@@ -493,13 +529,11 @@ export function buildSemanticOpenSearchQuery(
 
   // Build query based on available data
   if (embedding && embedding.length > 0) {
-    // Hybrid: k-NN + text
     return {
       size: limit,
       query: {
         bool: {
           should: [
-            // Semantic vector search
             {
               knn: {
                 embedding: {
@@ -508,11 +542,10 @@ export function buildSemanticOpenSearchQuery(
                 },
               },
             },
-            // Text search with expanded terms
             {
               multi_match: {
                 query: [semanticQuery, ...expandedTerms].join(" "),
-                fields: ["title^3", "brand^2", "category", "description"],
+                fields: ["title^4", "title.raw^2", "brand.search^2", "category.search^2", "description"],
                 fuzziness: "AUTO",
                 operator: "or",
               },
@@ -524,41 +557,45 @@ export function buildSemanticOpenSearchQuery(
       },
     };
   } else {
-    // Text-only search with semantic understanding
     const should: any[] = [
-      // Main query
       {
         multi_match: {
           query: semanticQuery,
-          fields: ["title^3", "brand^2", "category", "description"],
+          fields: ["title^4", "title.raw^2", "brand.search^2", "category.search^2", "description"],
           fuzziness: "AUTO",
           type: "best_fields",
           boost: 2,
         },
       },
+      {
+        multi_match: {
+          query: semanticQuery,
+          fields: ["title^5", "category.search^3"],
+          type: "phrase",
+          boost: 3,
+        },
+      },
     ];
 
-    // Add expanded term matches
     if (expandedTerms.length > 0) {
       should.push({
         multi_match: {
           query: expandedTerms.join(" "),
-          fields: ["title", "description"],
+          fields: ["title^2", "category.search", "description"],
           fuzziness: "AUTO",
           operator: "or",
-          boost: 0.5,
+          boost: 0.8,
         },
       });
     }
 
-    // Boost color matches
     for (const color of entities.colors) {
-      should.push({
-        match: { title: { query: color, boost: 1.5 } },
-      });
+      should.push(
+        { term: { attr_color: { value: color, boost: 3.0 } } },
+        { match: { title: { query: color, boost: 1.5 } } },
+      );
     }
 
-    // Boost style matches
     for (const attr of entities.attributes) {
       should.push({
         match: { title: { query: attr, boost: 1.3 } },

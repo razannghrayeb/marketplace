@@ -52,3 +52,13 @@ export {
   type RankingOptions,
   type RankingResult,
 } from "./pipeline";
+
+// MMR (Maximal Marginal Relevance)
+export {
+  applyMMR,
+  applyCategoryAwareMMR,
+  computeAdaptiveLambda,
+  cosineSimilarity,
+  type MMROptions,
+  type MMRResult,
+} from "./mmr";

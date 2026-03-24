@@ -1,4 +1,9 @@
-import { ParsedIntent, ImageIntent, SearchConstraints } from '../prompt/gemeni';
+import {
+  ParsedIntent,
+  ImageIntent,
+  SearchConstraints,
+  type SpatialDetail,
+} from '../prompt/gemeni';
 
 // ============================================================================
 // Types & Interfaces
@@ -45,6 +50,8 @@ export interface CompositeQuery {
   searchStrategy: string;
   confidence: number;
   explanation: string;
+  /** Layout / proximity hints from prompt + model (soft retrieval boosts). */
+  spatialRequirements?: SpatialDetail[];
 }
 
 export interface EmbeddingWeightConfig {
@@ -98,6 +105,12 @@ export class CompositeQueryBuilder {
     // Step 4: Build explanation
     const explanation = this.buildExplanation(intent, embeddings);
 
+    const spatialRequirements =
+      intent.constraints.spatialRequirements &&
+      intent.constraints.spatialRequirements.length > 0
+        ? [...intent.constraints.spatialRequirements]
+        : undefined;
+
     return {
       embeddings,
       filters,
@@ -107,6 +120,7 @@ export class CompositeQueryBuilder {
       searchStrategy: intent.searchStrategy,
       confidence: intent.confidence,
       explanation,
+      spatialRequirements,
     };
   }
 
@@ -125,7 +139,20 @@ export class CompositeQueryBuilder {
     }
 
     const dimensions = embeddings[0].length;
-    const contributingImages = imageIntents.map(intent => intent.imageIndex);
+
+    // Gemini occasionally returns no image rows; fall back to equal blend of all uploads.
+    let effectiveIntents = imageIntents;
+    if (!effectiveIntents || effectiveIntents.length === 0) {
+      const w = 1 / embeddings.length;
+      effectiveIntents = embeddings.map((_, idx) => ({
+        imageIndex: idx,
+        primaryAttributes: ['color', 'style', 'silhouette', 'texture', 'material', 'pattern'],
+        weight: w,
+        reasoning: 'Fallback: equal weight over all images',
+      }));
+    }
+
+    const contributingImages = effectiveIntents.map(intent => intent.imageIndex);
 
     // Initialize global embedding
     const globalEmbedding = new Array(dimensions).fill(0);
@@ -135,7 +162,7 @@ export class CompositeQueryBuilder {
     const attributeCounts: Record<string, number> = {};
 
     // Compute weighted global embedding: E_global = Σ(w_i · e_i)
-    for (const intent of imageIntents) {
+    for (const intent of effectiveIntents) {
       const embedding = embeddings[intent.imageIndex];
       if (!embedding) {
         console.warn(`Missing embedding for image ${intent.imageIndex}`);
@@ -257,25 +284,51 @@ export class CompositeQueryBuilder {
 
   private createAttributeFilter(
     attribute: string,
-    value: string | string[],
+    value: string | string[] | unknown,
     weight: number
   ): AttributeFilter | null {
-    const values = Array.isArray(value) ? value : [value];
-    
-    // Map to canonical attribute names
-    const canonicalAttr = this.canonicalizeAttribute(attribute);
-    if (!canonicalAttr) return null;
+    const values = this.flattenExtractedValues(value).map((v) =>
+      this.normalizeFilterString(v),
+    ).filter((v) => v.length > 0);
 
-    // Determine operator based on attribute type and values
+    const canonicalAttr = this.canonicalizeAttribute(attribute);
+    if (!canonicalAttr || values.length === 0) return null;
+
     const operator = this.determineOperator(canonicalAttr, values);
 
     return {
       attribute: canonicalAttr,
-      values: values.map(v => this.canonicalizeValue(canonicalAttr, v)),
+      values,
       operator,
       weight,
       source: 'extracted',
     };
+  }
+
+  /** Gemini may return numbers, booleans, objects, or nested arrays in extractedValues. */
+  private flattenExtractedValues(value: unknown): string[] {
+    if (value === null || value === undefined) return [];
+    if (Array.isArray(value)) {
+      return value.flatMap((v) => this.flattenExtractedValues(v));
+    }
+    if (typeof value === 'object') {
+      const o = value as Record<string, unknown>;
+      if (typeof o.label === 'string') return [o.label];
+      if (typeof o.name === 'string') return [o.name];
+      if (typeof o.value === 'string' || typeof o.value === 'number') {
+        return [String(o.value)];
+      }
+      if (Array.isArray(o.values)) return this.flattenExtractedValues(o.values);
+      return [];
+    }
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return [String(value)];
+    }
+    return [];
+  }
+
+  private normalizeFilterString(value: string): string {
+    return String(value ?? '').trim().toLowerCase();
   }
 
   private inferAttributeFilter(
@@ -307,6 +360,11 @@ export class CompositeQueryBuilder {
   }
 
   private canonicalizeAttribute(attr: string): string | null {
+    const key = String(attr ?? '')
+      .toLowerCase()
+      .trim();
+    if (!key) return null;
+
     const mapping: Record<string, string> = {
       colour: 'color',
       colors: 'color',
@@ -320,29 +378,26 @@ export class CompositeQueryBuilder {
       aesthetic: 'style',
     };
 
-    return mapping[attr.toLowerCase()] || attr.toLowerCase();
-  }
-
-  private canonicalizeValue(attribute: string, value: string): string {
-    // Normalize value format
-    return value.trim().toLowerCase();
+    return mapping[key] || key;
   }
 
   private determineOperator(
     attribute: string,
     values: string[]
   ): 'exact' | 'fuzzy' | 'range' | 'exclude' {
-    // Color and material often benefit from fuzzy matching
-    if (['color', 'material', 'texture'].includes(attribute)) {
+    // LLM-extracted tokens rarely match catalog keywords exactly; prefer soft match.
+    if (
+      ['color', 'material', 'texture', 'pattern', 'style', 'fit', 'silhouette'].includes(
+        attribute,
+      )
+    ) {
       return 'fuzzy';
     }
 
-    // Numeric or size attributes might use ranges
     if (attribute === 'size' || attribute === 'length') {
       return 'range';
     }
 
-    // Default to exact matching
     return 'exact';
   }
 
@@ -452,6 +507,14 @@ export class CompositeQueryBuilder {
     const attrList = Object.keys(embeddings.perAttribute);
     if (attrList.length > 0) {
       parts.push(`Attributes optimized: ${attrList.join(', ')}`);
+    }
+
+    const sp = intent.constraints.spatialRequirements;
+    if (sp && sp.length > 0) {
+      const bits = sp
+        .map((s) => [s.attribute, s.location, s.relationship].filter(Boolean).join(" "))
+        .filter(Boolean);
+      if (bits.length) parts.push(`Spatial hints: ${bits.join("; ")}`);
     }
 
     return parts.join(' | ');

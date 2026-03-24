@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "nodemon",
+    "dev:with-yolo": "docker compose --profile yolo-sidecar up -d yolov8 && nodemon",
+    "yolo:dev": "docker compose --profile yolo-sidecar up -d yolov8",
     "build": "tsc -p .",
     "start": "node dist/index.js",
     "start:api": "node dist/index.js",
@@ -11,6 +13,11 @@
     "lint": "eslint .",
     "recreate-index": "npx tsx scripts/recreate-opensearch-index.ts",
     "reindex-embeddings": "npx tsx scripts/reindex-embeddings.ts",
+    "resume-reindex": "npx tsx scripts/resume-reindex.ts",
+    "dedupe-products": "npx tsx scripts/dedupe-products.ts",
+    "migrate:product-variants": "npx tsx scripts/migrate-to-product-variants.ts",
+    "verify:product-variants": "npx tsx scripts/verify-product-variants.ts",
+    "backfill:parent-descriptions": "npx tsx scripts/backfill-parent-descriptions.ts",
     "docs:endpoints": "npx tsx scripts/generate-endpoint-matrix.ts",
     "migrate:run": "npx tsx scripts/run-migration.ts",
     "migrate:bootstrap": "npx tsx scripts/bootstrap-db.ts",
@@ -19,7 +26,9 @@
     "migrate:canonicals": "npx tsx scripts/migrate-canonicals.ts",
     "worker": "npx tsx src/workers/ingest.worker.ts",
     "models:download": "python scripts/download-models.py",
-    "models:list": "python scripts/download-models.py --dry-run"
+    "models:list": "python scripts/download-models.py --dry-run",
+    "search:eval": "npx tsx scripts/search-eval.ts",
+    "os:count": "npx tsx scripts/opensearch-count.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.962.0",
@@ -51,6 +60,12 @@
     "sharp": "^0.33.5",
     "zod": "^3.23.8"
   },
+  "pnpm": {
+    "overrides": {
+      "onnxruntime-node": "$onnxruntime-node",
+      "onnxruntime-common": "1.23.2"
+    }
+  },
   "devDependencies": {
     "@types/bcryptjs": "^3.0.0",
     "@types/cors": "^2.8.17",
@@ -63,6 +78,5 @@
     "ts-node": "^10.9.2",
     "tsx": "^4.21.0",
     "typescript": "^5.6.3"
-  },
-  "type": "module"
+  }
 }

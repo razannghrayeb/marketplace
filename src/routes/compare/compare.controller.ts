@@ -5,8 +5,10 @@
  */
 
 import { Router, Request, Response } from "express";
+import multer from "multer";
 import {
   compareProductsWithVerdict,
+  coerceCompareProductIdsInput,
   getProductQuality,
   analyzeText,
   getPriceAnalysis,
@@ -16,9 +18,13 @@ import {
   validateCompareInput,
   validateProductId,
   validateTextInput,
+  getProductReviewAnalysis,
+  compareReviews,
 } from "./compare.service";
+import { InsufficientProductsForCompareError } from "../../lib/compare/compareEngine";
 
 const router = Router();
+const compareBodyMultipart = multer().none();
 
 // ============================================================================
 // Compare Products
@@ -29,23 +35,28 @@ const router = Router();
  * 
  * Compare 2-5 products and get verdict
  * 
- * Body: { product_ids: number[] }
+ * Body: application/json { product_ids: number[] } or multipart/form-data (same field; string JSON array or comma-separated).
  * Returns: FullVerdictResponse
  */
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", compareBodyMultipart, async (req: Request, res: Response) => {
   try {
-    const { product_ids } = req.body;
-    
-    // Validate input
-    const validationError = validateCompareInput(product_ids);
-    if (validationError) {
-      return res.status(400).json(validationError);
+    const product_ids = coerceCompareProductIdsInput(req.body);
+
+    const parsed = validateCompareInput(product_ids);
+    if (!parsed.ok) {
+      return res.status(400).json({ error: parsed.error, example: parsed.example });
     }
-    
-    const result = await compareProductsWithVerdict(product_ids);
+
+    const result = await compareProductsWithVerdict(parsed.productIds);
     res.json(result);
   } catch (error) {
     console.error("Compare error:", error);
+    if (error instanceof InsufficientProductsForCompareError) {
+      return res.status(404).json({
+        error: error.message,
+        missing_product_ids: error.missingProductIds,
+      });
+    }
     res.status(500).json({ error: "Failed to compare products" });
   }
 });
@@ -193,6 +204,61 @@ router.post("/admin/compute-baselines", async (req: Request, res: Response) => {
 router.get("/tooltips", async (_req: Request, res: Response) => {
   const tooltips = getAllTooltips();
   res.json(tooltips);
+});
+
+// ============================================================================
+// Review Analysis
+// ============================================================================
+
+/**
+ * GET /api/compare/reviews/:productId
+ * 
+ * Get review analysis for a product
+ */
+router.get("/reviews/:productId", async (req: Request, res: Response) => {
+  try {
+    const productId = validateProductId(req.params.productId);
+    
+    if (!productId) {
+      return res.status(400).json({ error: "Invalid product ID" });
+    }
+    
+    const analysis = await getProductReviewAnalysis(productId);
+    res.json(analysis);
+  } catch (error) {
+    console.error("Review analysis error:", error);
+    res.status(500).json({ error: "Failed to analyze reviews" });
+  }
+});
+
+/**
+ * POST /api/compare/reviews
+ * 
+ * Compare reviews across multiple products
+ * Body: { product_ids: number[] }
+ */
+router.post("/reviews", async (req: Request, res: Response) => {
+  try {
+    const { product_ids } = req.body;
+
+    const parsed = validateCompareInput(product_ids);
+    if (!parsed.ok) {
+      return res.status(400).json({ error: parsed.error, example: parsed.example });
+    }
+
+    const comparison = await compareReviews(parsed.productIds);
+    
+    // Convert Map to object for JSON
+    const result: Record<number, any> = {};
+    comparison.forEach((analysis, id) => {
+      result[id] = analysis;
+    });
+    
+    res.json({ reviews: result });
+  } catch (error) {
+    console.error("Review comparison error:", error);
+    res.status(500).json({ error: "Failed to compare reviews" });
+  }
 });
 
 export default router;

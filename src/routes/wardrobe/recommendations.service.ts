@@ -8,6 +8,11 @@ import { config } from "../../config";
 import { getStyleProfile } from "./styleProfile.service";
 import { analyzeWardrobeGaps } from "./gaps.service";
 import { getTopCompatibleItems } from "./compatibility.service";
+import { 
+  getOnboardingRecommendations as getColdStartOnboarding,
+  isUserColdStart 
+} from "../../lib/recommendations/coldStart";
+import { getAdaptedEssentials, inferPriceTier } from "../../lib/wardrobe/lifestyleAdapter";
 
 // ============================================================================
 // Types
@@ -33,6 +38,28 @@ export interface RecommendationOptions {
   priceMin?: number;
   priceMax?: number;
   categories?: string[];
+}
+
+export interface CompleteLookSuggestion extends ProductRecommendation {
+  fitBreakdown?: {
+    embeddingNorm: number;
+    categoryCompat: number;
+    colorHarmony: number;
+  };
+}
+
+export interface OutfitSetSuggestion {
+  productIds: number[];
+  categories: string[];
+  coherenceScore: number;
+  totalScore: number;
+  reasons: string[];
+}
+
+export interface CompleteLookSuggestionsResult {
+  suggestions: CompleteLookSuggestion[];
+  outfitSets: OutfitSetSuggestion[];
+  missingCategories: string[];
 }
 
 // ============================================================================
@@ -326,62 +353,468 @@ export async function completeLookSuggestions(
   userId: number,
   currentItemIds: number[],
   limit: number = 10
-): Promise<ProductRecommendation[]> {
-  // Get categories of current items
-  const currentItems = await pg.query(
-    `SELECT wi.id, c.name as category_name
+): Promise<CompleteLookSuggestionsResult> {
+  const currentItemsResult = await pg.query(
+    `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, c.name as category_name
      FROM wardrobe_items wi
      LEFT JOIN categories c ON wi.category_id = c.id
      WHERE wi.id = ANY($1) AND wi.user_id = $2`,
     [currentItemIds, userId]
   );
 
-  const currentCategories = new Set(
-    currentItems.rows.map((r: any) => r.category_name).filter(Boolean)
-  );
+  const currentItems = currentItemsResult.rows as Array<{
+    id: number;
+    product_id?: number | null;
+    embedding?: unknown;
+    dominant_colors?: Array<{ hex?: string }>;
+    category_name?: string | null;
+  }>;
 
-  // Determine missing categories for a complete outfit
-  const essentialForOutfit = ["tops", "bottoms", "shoes"];
-  const missingCategories = essentialForOutfit.filter(c => !currentCategories.has(c));
-
-  if (missingCategories.length === 0) {
-    missingCategories.push("accessories", "bags"); // Suggest extras
+  const currentCategories = new Set<string>();
+  const currentCategoryList: string[] = [];
+  for (const row of currentItems) {
+    const normalized = normalizeWardrobeCategory(row.category_name);
+    if (!normalized) continue;
+    currentCategories.add(normalized);
+    currentCategoryList.push(normalized);
   }
 
-  const suggestions: ProductRecommendation[] = [];
+  const hasDress = currentCategoryList.some((c) => c === "dresses");
+  const essentialForOutfit = hasDress ? ["shoes", "outerwear"] : ["tops", "bottoms", "shoes"];
+  const missingCategories = essentialForOutfit.filter((c) => !currentCategories.has(c));
+  if (missingCategories.length === 0) {
+    missingCategories.push("accessories", "bags");
+  }
 
-  for (const category of missingCategories) {
-    try {
-      const response = await osClient.search({
-        index: config.opensearch.index,
-        body: {
-          size: Math.ceil(limit / missingCategories.length),
-          query: {
-            bool: {
-              must: { match: { category } },
-              filter: [{ term: { availability: "in_stock" } }]
-            }
-          }
-        }
-      });
+  const currentEmbeddings = currentItems
+    .map((row) => parseVector(row.embedding))
+    .filter((vec): vec is number[] => Array.isArray(vec) && vec.length > 0);
 
-      for (const hit of response.body.hits.hits) {
-        suggestions.push({
-          product_id: parseInt(hit._source.product_id, 10),
-          title: hit._source.title,
-          brand: hit._source.brand,
-          category: hit._source.category,
-          price_cents: hit._source.price_usd ? hit._source.price_usd * 100 : undefined,
-          image_url: hit._source.image_cdn,
-          score: hit._score,
-          reason: `Add ${category} to complete the look`,
-          reason_type: "compatible"
-        });
-      }
-    } catch (err) {
-      console.error(`Error fetching ${category} suggestions:`, err);
+  let centroid = meanEmbedding(currentEmbeddings);
+  if (!centroid) {
+    const styleProfile = await getStyleProfile(userId);
+    if (styleProfile?.style_centroid && styleProfile.style_centroid.length > 0) {
+      centroid = styleProfile.style_centroid;
     }
   }
 
-  return suggestions.slice(0, limit);
+  const userPriceTier = await inferPriceTier(userId).catch(() => null);
+  const ownedProductIds = new Set<string>(
+    currentItems
+      .map((r) => (r.product_id !== null && r.product_id !== undefined ? String(r.product_id) : ""))
+      .filter(Boolean)
+  );
+
+  const wardrobeColorFamilies = extractWardrobeColorFamilies(currentItems);
+  const suggestionsByCategory = new Map<string, CompleteLookSuggestion[]>();
+
+  for (const category of missingCategories) {
+    try {
+      const perCategoryPool = Math.max(12, Math.ceil(limit / Math.max(missingCategories.length, 1)) * 4);
+      const filters: any[] = [
+        { term: { availability: "in_stock" } },
+        { term: { category } },
+      ];
+
+      if (userPriceTier) {
+        filters.push({
+          range: {
+            price_usd: {
+              gte: Math.max(0, userPriceTier.min / 100),
+              lte: Math.max(userPriceTier.max / 100, userPriceTier.min / 100),
+            },
+          },
+        });
+      }
+
+      if (ownedProductIds.size > 0) {
+        filters.push({ bool: { must_not: [{ terms: { product_id: Array.from(ownedProductIds) } }] } });
+      }
+
+      const queryBody: any = centroid
+        ? {
+            size: perCategoryPool,
+            query: {
+              bool: {
+                must: {
+                  knn: {
+                    embedding: {
+                      vector: centroid,
+                      k: perCategoryPool * 2,
+                    },
+                  },
+                },
+                filter: filters,
+              },
+            },
+            _source: [
+              "product_id",
+              "title",
+              "brand",
+              "category",
+              "price_usd",
+              "image_cdn",
+              "color_primary_canonical",
+              "attr_color",
+            ],
+          }
+        : {
+            size: perCategoryPool,
+            query: {
+              bool: {
+                filter: filters,
+              },
+            },
+            sort: [{ last_seen_at: { order: "desc", missing: "_last" } }],
+            _source: [
+              "product_id",
+              "title",
+              "brand",
+              "category",
+              "price_usd",
+              "image_cdn",
+              "color_primary_canonical",
+              "attr_color",
+            ],
+          };
+
+      const response = await osClient.search({
+        index: config.opensearch.index,
+        body: queryBody,
+      });
+
+      const hits = response.body.hits.hits || [];
+      const maxRawScore = Math.max(
+        1,
+        ...hits.map((h: any) => (Number.isFinite(h._score) ? h._score : 0))
+      );
+
+      const scored: CompleteLookSuggestion[] = [];
+      for (const hit of hits) {
+        const source = hit._source || {};
+        const productId = parseInt(source.product_id, 10);
+        if (!productId || ownedProductIds.has(String(productId))) continue;
+
+        const embeddingNorm = Number.isFinite(hit._score) ? Math.min(1, hit._score / maxRawScore) : 0.35;
+        const categoryCompat = computeCategoryCompatibility(
+          category,
+          currentCategoryList.length > 0 ? currentCategoryList : ["other"]
+        );
+        const candidateColor = normalizeColorName(source.color_primary_canonical || source.attr_color);
+        const colorHarmony = computeColorHarmonyWithWardrobe(wardrobeColorFamilies, candidateColor);
+        const finalScore = embeddingNorm * 0.55 + categoryCompat * 0.25 + colorHarmony * 0.2;
+
+        const reasons: string[] = [];
+        if (embeddingNorm >= 0.75) reasons.push("strong style similarity");
+        if (categoryCompat >= 0.8) reasons.push("high category compatibility");
+        if (colorHarmony >= 0.75) reasons.push("good color harmony");
+        if (reasons.length === 0) reasons.push("balances the current outfit");
+
+        scored.push({
+          product_id: productId,
+          title: source.title,
+          brand: source.brand,
+          category: source.category,
+          price_cents: source.price_usd ? Math.round(source.price_usd * 100) : undefined,
+          image_url: source.image_cdn,
+          score: Math.round(finalScore * 1000) / 1000,
+          reason: `Add ${category} to complete the look (${reasons.join(", ")})`,
+          reason_type: "compatible",
+          fitBreakdown: {
+            embeddingNorm: Math.round(embeddingNorm * 1000) / 1000,
+            categoryCompat: Math.round(categoryCompat * 1000) / 1000,
+            colorHarmony: Math.round(colorHarmony * 1000) / 1000,
+          },
+        });
+      }
+
+      scored.sort((a, b) => b.score - a.score);
+      suggestionsByCategory.set(category, scored.slice(0, Math.max(3, Math.ceil(limit / Math.max(1, missingCategories.length)))));
+    } catch (err) {
+      console.error(`Error fetching ${category} suggestions:`, err);
+      suggestionsByCategory.set(category, []);
+    }
+  }
+
+  const mergedSuggestions = Array.from(suggestionsByCategory.values())
+    .flat()
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+
+  const outfitSets = buildOutfitSets(suggestionsByCategory, missingCategories);
+
+  return {
+    suggestions: mergedSuggestions,
+    outfitSets,
+    missingCategories,
+  };
+}
+
+const COLOR_FAMILIES_BY_NAME: Record<string, string> = {
+  black: "neutral",
+  white: "neutral",
+  gray: "neutral",
+  grey: "neutral",
+  beige: "neutral",
+  navy: "neutral",
+  brown: "earth",
+  tan: "earth",
+  camel: "earth",
+  blue: "blue",
+  teal: "blue",
+  cyan: "blue",
+  aqua: "blue",
+  red: "red",
+  maroon: "red",
+  burgundy: "red",
+  pink: "pink",
+  fuchsia: "pink",
+  magenta: "pink",
+  green: "green",
+  olive: "green",
+  emerald: "green",
+  yellow: "earth",
+  orange: "earth",
+  gold: "earth",
+  purple: "pink",
+  violet: "pink",
+  lavender: "pink",
+};
+
+const GOOD_PAIRINGS: Record<string, string[]> = {
+  tops: ["bottoms", "skirts", "outerwear", "accessories"],
+  bottoms: ["tops", "outerwear", "shoes", "accessories"],
+  dresses: ["outerwear", "shoes", "bags", "accessories"],
+  outerwear: ["tops", "bottoms", "dresses", "shoes"],
+  shoes: ["bottoms", "dresses", "outerwear"],
+  bags: ["dresses", "tops", "outerwear"],
+  accessories: ["tops", "bottoms", "dresses", "outerwear"],
+};
+
+function normalizeWardrobeCategory(value?: string | null): string | null {
+  if (!value) return null;
+  const raw = value.toLowerCase().trim();
+  if (!raw) return null;
+  if (raw.includes("dress") || raw.includes("gown")) return "dresses";
+  if (raw.includes("top") || raw.includes("shirt") || raw.includes("blouse") || raw.includes("hoodie") || raw.includes("sweater")) return "tops";
+  if (raw.includes("bottom") || raw.includes("pant") || raw.includes("trouser") || raw.includes("jeans") || raw.includes("skirt") || raw.includes("short")) return "bottoms";
+  if (raw.includes("shoe") || raw.includes("sneaker") || raw.includes("heel") || raw.includes("boot") || raw.includes("sandal") || raw.includes("loafer") || raw.includes("flat")) return "shoes";
+  if (raw.includes("outerwear") || raw.includes("coat") || raw.includes("jacket") || raw.includes("blazer") || raw.includes("cardigan")) return "outerwear";
+  if (raw.includes("bag") || raw.includes("tote") || raw.includes("clutch") || raw.includes("wallet")) return "bags";
+  if (raw.includes("accessor") || raw.includes("watch") || raw.includes("scarf") || raw.includes("hat") || raw.includes("sunglass") || raw.includes("jewelry")) return "accessories";
+  return raw;
+}
+
+function parseVector(value: unknown): number[] | null {
+  if (Array.isArray(value) && value.every((n) => typeof n === "number")) return value as number[];
+  if (typeof value === "string" && value.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed) && parsed.every((n) => typeof n === "number")) return parsed;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function meanEmbedding(vectors: number[][]): number[] | null {
+  if (vectors.length === 0) return null;
+  const dim = vectors[0].length;
+  if (dim === 0) return null;
+  const out = new Array(dim).fill(0);
+  for (const vec of vectors) {
+    if (vec.length !== dim) continue;
+    for (let i = 0; i < dim; i++) out[i] += vec[i];
+  }
+  for (let i = 0; i < dim; i++) out[i] /= vectors.length;
+  const norm = Math.sqrt(out.reduce((sum, v) => sum + v * v, 0));
+  if (norm > 0) {
+    for (let i = 0; i < dim; i++) out[i] /= norm;
+  }
+  return out;
+}
+
+function normalizeColorName(value?: string): string | null {
+  if (!value) return null;
+  const token = value.toLowerCase().replace(/[_-]/g, " ").trim();
+  if (!token) return null;
+  const parts = token.split(/\s+/);
+  for (const part of parts) {
+    if (COLOR_FAMILIES_BY_NAME[part]) return part;
+  }
+  return parts[0] || null;
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  const cleaned = hex.replace("#", "").trim();
+  if (cleaned.length !== 6) return null;
+  const n = Number.parseInt(cleaned, 16);
+  if (!Number.isFinite(n)) return null;
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+function rgbToFamily(r: number, g: number, b: number): string {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const chroma = max - min;
+  if (chroma < 20) return "neutral";
+  if (max === r && g > b) return "earth";
+  if (max === r) return "red";
+  if (max === g) return "green";
+  return "blue";
+}
+
+function extractWardrobeColorFamilies(items: Array<{ dominant_colors?: Array<{ hex?: string }> }>): Set<string> {
+  const families = new Set<string>();
+  for (const item of items) {
+    if (!item.dominant_colors || !Array.isArray(item.dominant_colors)) continue;
+    for (const c of item.dominant_colors) {
+      if (!c?.hex) continue;
+      const rgb = hexToRgb(c.hex);
+      if (!rgb) continue;
+      families.add(rgbToFamily(rgb.r, rgb.g, rgb.b));
+    }
+  }
+  return families;
+}
+
+function computeCategoryCompatibility(targetCategory: string, currentCategories: string[]): number {
+  if (currentCategories.length === 0) return 0.6;
+  const target = normalizeWardrobeCategory(targetCategory) || targetCategory;
+  let best = 0.45;
+  for (const raw of currentCategories) {
+    const current = normalizeWardrobeCategory(raw) || raw;
+    if (target === current) {
+      best = Math.max(best, target === "accessories" ? 0.75 : 0.3);
+      continue;
+    }
+    const pairs = GOOD_PAIRINGS[current] || [];
+    if (pairs.includes(target)) {
+      best = Math.max(best, 0.9);
+      continue;
+    }
+    if ((GOOD_PAIRINGS[target] || []).includes(current)) {
+      best = Math.max(best, 0.85);
+    }
+  }
+  return best;
+}
+
+function computeColorHarmonyWithWardrobe(wardrobeFamilies: Set<string>, candidateColor: string | null): number {
+  if (!candidateColor || wardrobeFamilies.size === 0) return 0.6;
+  const candidateFamily = COLOR_FAMILIES_BY_NAME[candidateColor] || "other";
+  if (candidateFamily === "neutral" || wardrobeFamilies.has("neutral")) return 0.9;
+  if (wardrobeFamilies.has(candidateFamily)) return 0.82;
+  const complementary: Record<string, string[]> = {
+    blue: ["earth", "red"],
+    green: ["pink", "red"],
+    red: ["blue", "green"],
+    earth: ["blue"],
+    pink: ["green"],
+  };
+  const comp = complementary[candidateFamily] || [];
+  for (const fam of wardrobeFamilies) {
+    if (comp.includes(fam)) return 0.75;
+  }
+  return 0.5;
+}
+
+function buildOutfitSets(
+  suggestionsByCategory: Map<string, CompleteLookSuggestion[]>,
+  missingCategories: string[]
+): OutfitSetSuggestion[] {
+  if (missingCategories.length < 2 || missingCategories.length > 3) return [];
+
+  const pools = missingCategories.map((cat) => ({
+    category: cat,
+    items: (suggestionsByCategory.get(cat) || []).slice(0, 3),
+  }));
+
+  if (pools.some((p) => p.items.length === 0)) return [];
+
+  const results: OutfitSetSuggestion[] = [];
+  const current: CompleteLookSuggestion[] = [];
+
+  const walk = (idx: number) => {
+    if (idx >= pools.length) {
+      const scored = scoreOutfitSet(current, pools.map((p) => p.category));
+      results.push(scored);
+      return;
+    }
+    for (const item of pools[idx].items) {
+      current.push(item);
+      walk(idx + 1);
+      current.pop();
+    }
+  };
+
+  walk(0);
+  return results.sort((a, b) => b.totalScore - a.totalScore).slice(0, 5);
+}
+
+function scoreOutfitSet(items: CompleteLookSuggestion[], categories: string[]): OutfitSetSuggestion {
+  const avgItemScore = items.reduce((sum, item) => sum + item.score, 0) / Math.max(items.length, 1);
+  const avgColorHarmony =
+    items.reduce((sum, i) => sum + (i.fitBreakdown?.colorHarmony ?? 0.6), 0) /
+    Math.max(items.length, 1);
+
+  const coherenceScore = Math.round((avgItemScore * 0.75 + avgColorHarmony * 0.25) * 1000) / 1000;
+  const reasons = [`balanced across ${categories.join(", ")}`, "ranked by style+compatibility+color"];
+
+  return {
+    productIds: items.map((i) => i.product_id),
+    categories,
+    coherenceScore,
+    totalScore: coherenceScore,
+    reasons,
+  };
+}
+
+// ============================================================================
+// Cold Start / Onboarding Recommendations
+// ============================================================================
+
+/**
+ * Get onboarding recommendations for new users with empty/small wardrobes
+ */
+export async function getOnboardingRecommendationsForUser(
+  userId: number,
+  limit: number = 20
+): Promise<ProductRecommendation[]> {
+  const isColdStart = await isUserColdStart(userId);
+  
+  if (!isColdStart) {
+    // User has enough wardrobe items, use regular recommendations
+    return getRecommendations(userId, { limit });
+  }
+  
+  // Use cold start onboarding logic
+  const onboardingRecs = await getColdStartOnboarding(userId, limit);
+  
+  return onboardingRecs.map(rec => ({
+    product_id: rec.productId,
+    title: rec.title,
+    brand: rec.brand,
+    category: rec.category,
+    price_cents: rec.priceCents,
+    image_url: rec.imageUrl,
+    score: rec.score,
+    reason: rec.reason,
+    reason_type: rec.reasonType as "gap" | "style_match" | "compatible" | "trending",
+  }));
+}
+
+/**
+ * Get user's adapted essential categories based on their lifestyle
+ */
+export async function getAdaptedEssentialsForUser(userId: number) {
+  return getAdaptedEssentials(userId);
+}
+
+/**
+ * Get user's inferred price tier
+ */
+export async function getUserPriceTier(userId: number) {
+  return inferPriceTier(userId);
 }

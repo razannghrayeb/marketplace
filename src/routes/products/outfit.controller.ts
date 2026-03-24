@@ -66,7 +66,8 @@ export async function completeStyle(req: Request, res: Response) {
     }
 
     const options = parseCompleteStyleOptions(req.query);
-    const result = await getOutfitRecommendations(productId, options);
+    const userId = req.user?.id;
+    const result = await getOutfitRecommendations(productId, options, userId);
 
     if (!result) {
       return res.status(404).json({ error: "Product not found" });
@@ -117,7 +118,8 @@ export async function completeStyleFromBody(req: Request, res: Response) {
       excludeBrands: bodyOptions?.excludeBrands,
     };
 
-    const result = await getOutfitRecommendationsFromProduct(productInput, options);
+    const userId = req.user?.id;
+    const result = await getOutfitRecommendationsFromProduct(productInput, options, userId);
 
     return res.json({ success: true, data: result });
   } catch (error) {

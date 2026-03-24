@@ -5,5 +5,24 @@
  */
 import "dotenv/config";
 
-export { pg, testConnection, closePool, getProductsByIdsOrdered } from "./db";
+export {
+  pg,
+  testConnection,
+  closePool,
+  getProductsByIdsOrdered,
+  productsTableHasIsHiddenColumn,
+  productsTableHasCanonicalIdColumn,
+  isPgCapacityError,
+  queryWithPgCapacityRetry,
+  toPgVectorParam,
+} from "./db";
 export { osClient, ensureIndex, recreateIndex, getIndexStats } from "./opensearch";
+export {
+  CircuitBreaker,
+  CircuitOpenError,
+  getCircuit,
+  withCircuitBreaker,
+  getAllCircuitStats,
+  isCircuitHealthy,
+  CIRCUIT_CONFIGS,
+} from "./circuitBreaker";

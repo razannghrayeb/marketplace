@@ -1,109 +1,217 @@
 // src/lib/image/blip.ts
+//
+// BLIP image captioning with a standalone BERT WordPiece tokenizer.
+// No @xenova/transformers — that package pulls in onnxruntime-web which
+// conflicts with onnxruntime-node at runtime and poisons the ONNX backend.
+
 import * as ort from 'onnxruntime-node';
-import sharp from 'sharp';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as https from 'https';
+import * as http from 'http';
+import sharpLib from 'sharp';
+
+// See `src/lib/image/processor.ts` / `utils.ts` for why we guard this.
+const sharp: any =
+  typeof sharpLib === 'function' ? sharpLib : (sharpLib as any).default;
 
 const BLIP_MEAN    = [0.48145466, 0.4578275,  0.40821073];
 const BLIP_STD     = [0.26862954, 0.26130258, 0.27577711];
 const INPUT_SIZE   = 384;
 const MAX_NEW_TOKENS = 30;
 
-// BLIP tokenizer special tokens (BERT-based)
 const BOS_TOKEN_ID = 101;  // [CLS]
 const EOS_TOKEN_ID = 102;  // [SEP]
-const PAD_TOKEN_ID = 0;
+const UNK_TOKEN_ID = 100;  // [UNK]
+
+const MODEL_DIR = path.join(process.cwd(), 'models');
+const CACHE_DIR = path.join(MODEL_DIR, '.cache');
+
+// BLIP uses standard BERT WordPiece vocab. google-bert/bert-base-uncased is
+// public and doesn't require authentication (unlike the Xenova repo).
+const BLIP_VOCAB_URL =
+  'https://huggingface.co/google-bert/bert-base-uncased/resolve/main/vocab.txt';
+
+// ============================================================================
+// Standalone BERT WordPiece tokenizer
+// ============================================================================
+
+let vocab: Map<string, number> | null = null;
+let inverseVocab: Map<number, string> | null = null;
+
+function fetchTextFile(url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const get = url.startsWith('https') ? https.get : http.get;
+    get(url, { headers: { 'User-Agent': 'blip-tokenizer' } }, (res) => {
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        // HuggingFace redirects sometimes return a relative `location`.
+        // Resolve it against the original URL so Node doesn't throw "Invalid URL".
+        const nextUrl = new URL(res.headers.location, url).toString();
+        fetchTextFile(nextUrl).then(resolve, reject);
+        return;
+      }
+      if (res.statusCode && res.statusCode >= 400) {
+        reject(new Error(`HTTP ${res.statusCode} fetching ${url}`));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+      res.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
+async function loadVocab(): Promise<void> {
+  if (vocab) return;
+
+  if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+
+  const vocabPath = path.join(CACHE_DIR, 'blip-vocab.txt');
+  let vocabText: string;
+
+  if (fs.existsSync(vocabPath)) {
+    vocabText = fs.readFileSync(vocabPath, 'utf-8');
+    console.log('[BLIP] WordPiece vocab loaded from cache');
+  } else {
+    console.log('[BLIP] Downloading WordPiece vocab from HuggingFace...');
+    vocabText = await fetchTextFile(BLIP_VOCAB_URL);
+    fs.writeFileSync(vocabPath, vocabText);
+    console.log('[BLIP] WordPiece vocab downloaded and cached');
+  }
+
+  vocab = new Map<string, number>();
+  inverseVocab = new Map<number, string>();
+  const lines = vocabText.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const token = lines[i].trimEnd();
+    if (token.length === 0 && i > 0) continue;
+    vocab.set(token, i);
+    inverseVocab.set(i, token);
+  }
+  console.log(`[BLIP] WordPiece vocab ready (${vocab.size} tokens)`);
+}
+
+function wordPieceTokenize(text: string): number[] {
+  if (!vocab) return [];
+  const tokens: number[] = [];
+  const words = text.toLowerCase().replace(/[^\w\s']/g, ' ').trim().split(/\s+/);
+
+  for (const word of words) {
+    let start = 0;
+    let matched = false;
+    const subTokens: number[] = [];
+
+    while (start < word.length) {
+      let end = word.length;
+      let found = false;
+
+      while (start < end) {
+        const substr = (start > 0 ? '##' : '') + word.slice(start, end);
+        const id = vocab.get(substr);
+        if (id !== undefined) {
+          subTokens.push(id);
+          start = end;
+          found = true;
+          break;
+        }
+        end--;
+      }
+
+      if (!found) {
+        subTokens.push(UNK_TOKEN_ID);
+        start++;
+      }
+      matched = true;
+    }
+
+    if (matched) tokens.push(...subTokens);
+  }
+
+  return tokens;
+}
+
+function decodeTokenIds(ids: number[]): string {
+  if (!inverseVocab) return '';
+  const pieces: string[] = [];
+  for (const id of ids) {
+    if (id === BOS_TOKEN_ID || id === EOS_TOKEN_ID || id === 0) continue;
+    const token = inverseVocab.get(id) ?? '[UNK]';
+    if (token.startsWith('##')) {
+      pieces.push(token.slice(2));
+    } else {
+      pieces.push((pieces.length > 0 ? ' ' : '') + token);
+    }
+  }
+  return pieces.join('');
+}
+
+// ============================================================================
+// BLIP Service
+// ============================================================================
 
 export class BlipService {
   private visionSession:  ort.InferenceSession | null = null;
   private decoderSession: ort.InferenceSession | null = null;
-  private tokenizer: any = null;
 
   async init() {
-    // Load both ONNX models in parallel
+    await loadVocab();
+
     [this.visionSession, this.decoderSession] = await Promise.all([
-      ort.InferenceSession.create('models/blip-vision.onnx',       { executionProviders: ['cpu'] }),
-      ort.InferenceSession.create('models/blip-text-decoder.onnx', { executionProviders: ['cpu'] }),
+      ort.InferenceSession.create(path.join(MODEL_DIR, 'blip-vision.onnx'),       { executionProviders: ['cpu'] }),
+      ort.InferenceSession.create(path.join(MODEL_DIR, 'blip-text-decoder.onnx'), { executionProviders: ['cpu'] }),
     ]);
 
-    // Load tokenizer from HuggingFace hub (BERT tokenizer)
-    const { AutoTokenizer } = await import('@xenova/transformers');
-    this.tokenizer = await AutoTokenizer.from_pretrained(
-      'Xenova/blip-image-captioning-base'
-    );
-
-    console.log('✅ BLIP vision + decoder ready');
+    console.log('[BLIP] vision + decoder ready');
   }
 
-  // ── Main entry point ─────────────────────────────────────────────────
   async caption(imageBuffer: Buffer): Promise<string> {
     if (!this.visionSession || !this.decoderSession) {
       throw new Error('BlipService not initialized — call init() first');
     }
 
-    // 1. Encode image → hidden states
     const imageHiddenStates = await this.encodeImage(imageBuffer);
-
-    // 2. Autoregressively generate token ids
     const tokenIds = await this.generate(imageHiddenStates);
-
-    // 3. Decode token ids → string
-    const caption = await this.tokenizer.decode(tokenIds, {
-      skip_special_tokens: true,
-    });
-
-    return caption.trim();
+    return decodeTokenIds(tokenIds).trim();
   }
 
-  // ── Step 1: Vision Encoder ───────────────────────────────────────────
   private async encodeImage(imageBuffer: Buffer): Promise<ort.Tensor> {
     const pixels = await this.preprocessImage(imageBuffer);
     const tensor = new ort.Tensor('float32', pixels, [1, 3, INPUT_SIZE, INPUT_SIZE]);
-
     const output = await this.visionSession!.run({ pixel_values: tensor });
-    return output['last_hidden_state']; // shape: (1, 577, 768)
+    return output['last_hidden_state'];
   }
 
-  // ── Step 2: Autoregressive Decode Loop ───────────────────────────────
   private async generate(imageHiddenStates: ort.Tensor): Promise<number[]> {
-    // Start with [BOS] token
     const generatedIds: number[] = [BOS_TOKEN_ID];
 
     for (let step = 0; step < MAX_NEW_TOKENS; step++) {
-      // Build input_ids tensor from tokens generated so far
       const inputIdsTensor = new ort.Tensor(
         'int64',
         BigInt64Array.from(generatedIds.map(BigInt)),
         [1, generatedIds.length]
       );
 
-      // Run decoder — get logits for all positions
       const output = await this.decoderSession!.run({
         input_ids:           inputIdsTensor,
         image_hidden_states: imageHiddenStates,
       });
 
       const logits = output['logits'].data as Float32Array;
-      // logits shape: (1, seq_len, vocab_size)
-      // We only care about the LAST position (next token prediction)
       const vocabSize = logits.length / generatedIds.length;
       const lastLogits = logits.slice(
         (generatedIds.length - 1) * vocabSize,
          generatedIds.length      * vocabSize
       );
 
-      // Greedy: pick highest logit
       const nextTokenId = this.argmax(lastLogits);
-
-      // Stop if EOS
       if (nextTokenId === EOS_TOKEN_ID) break;
-
       generatedIds.push(nextTokenId);
     }
 
-    // Strip BOS from output
     return generatedIds.slice(1);
   }
 
-  // ── Helpers ──────────────────────────────────────────────────────────
   private argmax(arr: Float32Array): number {
     let maxIdx = 0;
     let maxVal = -Infinity;
@@ -121,14 +229,12 @@ export class BlipService {
       .toBuffer({ resolveWithObject: true });
 
     const float32 = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
-
     for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
       for (let c = 0; c < 3; c++) {
         float32[c * INPUT_SIZE * INPUT_SIZE + i] =
           (data[i * 3 + c] / 255.0 - BLIP_MEAN[c]) / BLIP_STD[c];
       }
     }
-
     return float32;
   }
 }

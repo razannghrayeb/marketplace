@@ -72,7 +72,8 @@
  */
 
 import { Router, Request, Response } from "express";
-import { textSearch, imageSearch, multiImageSearch, multiVectorWeightedSearch } from "./search.service";
+import { multiImageSearch, multiVectorWeightedSearch } from "./search.service";
+import { searchImage, searchText } from "../../lib/search/fashionSearchFacade";
 import {
   getAutocompleteSuggestions,
   getTrendingQueries,
@@ -98,6 +99,7 @@ import {
   getSessionStats,
 } from "../../lib/queryProcessor/conversationalContext";
 import { processQuery } from "../../lib/queryProcessor";
+import { parseParameters } from "../../lib/queryProcessor/parameterParser";
 import {
   PROMPT_TEMPLATES,
   PROMPT_SUGGESTIONS,
@@ -105,6 +107,8 @@ import {
   suggestPromptImprovements,
   recommendTemplate,
 } from "../../lib/search/promptTemplates";
+import { validateImage } from "../../lib/image";
+import { MAX_MULTI_IMAGE_UPLOADS } from "../../lib/prompt/gemeni";
 import multer from "multer";
 
 const router = Router();
@@ -149,12 +153,13 @@ router.get("/", async (req: Request, res: Response) => {
       enhanced,
     } = req.query;
 
-    const query = (q as string) || "";
+    const rawQuery = (q as string) || "";
+    const { searchText: queryForProcessing, controlParams: extractedParams } = parseParameters(rawQuery);
     const sessionId = (session_id as string) || req.headers["x-session-id"] as string;
     const userId = (user_id as string) || (req as any).userId;
     const useEnhanced = enhanced !== "false"; // Default true
 
-    let processedQuery = query;
+    let processedQuery = queryForProcessing;
     let contextual: any = undefined;
     let negations: any = undefined;
     let complexQuery: any = undefined;
@@ -162,10 +167,10 @@ router.get("/", async (req: Request, res: Response) => {
     let suggestions: string[] = [];
 
     // Enhanced processing
-    if (useEnhanced && query) {
+    if (useEnhanced && queryForProcessing) {
       // 1. Conversational Context
       if (sessionId) {
-        contextual = enrichQueryWithContext(query, sessionId);
+        contextual = enrichQueryWithContext(queryForProcessing, sessionId);
         processedQuery = contextual.enriched;
       }
 
@@ -215,28 +220,44 @@ router.get("/", async (req: Request, res: Response) => {
       filters = { ...contextual.inheritedFilters, ...filters };
     }
 
+    // req.query overrides extracted params from query text
+    const limitNum = Array.isArray(limit) ? Number(limit[0]) : limit ? Number(limit) : (extractedParams.limit as number) ?? 20;
+    const offsetNum = Array.isArray(offset) ? Number(offset[0]) : offset ? Number(offset) : (extractedParams.offset as number) ?? (extractedParams.page ? ((extractedParams.page as number) - 1) * (limitNum || 20) : 0);
+
     const options = {
-      limit: limit ? Number(limit) : 20,
-      offset: offset ? Number(offset) : 0,
+      limit: limitNum || 20,
+      offset: offsetNum || 0,
     };
 
     // Execute search
-    const result = await textSearch(processedQuery, filters, options);
+    const page = Math.floor(options.offset / options.limit) + 1;
+    const result = await searchText({
+      query: processedQuery,
+      filters,
+      page,
+      limit: options.limit,
+      includeRelated: false,
+      relatedLimit: 10,
+      negationConstraints:
+        useEnhanced && negations?.hasNegation && negations.negations?.length
+          ? negations.negations
+          : undefined,
+    });
 
     // Log search (async, non-blocking)
-    if (useEnhanced && query) {
-      logSearchQuery(query, userId, category as string, result.total).catch(err =>
+    if (useEnhanced && rawQuery) {
+      logSearchQuery(rawQuery, userId, category as string, result.total).catch(err =>
         console.error("[Search] Failed to log query:", err)
       );
 
       // Add turn to conversation
       if (sessionId) {
         const ast = await processQuery(processedQuery);
-        addTurn(sessionId, query, ast, result.total);
+        addTurn(sessionId, rawQuery, ast, result.total);
       }
 
       // Generate suggestions
-      if (result.total === 0) {
+      if (queryForProcessing && result.total === 0) {
         suggestions.push("Try simpler query or fewer filters");
         if (negations?.hasNegation) {
           suggestions.push("Remove exclusions");
@@ -270,13 +291,7 @@ router.get("/", async (req: Request, res: Response) => {
 /**
  * POST /search/image
  *
- * Single image similarity search using Hybrid Search (CLIP + BLIP fusion)
- *
- * Pipeline:
- * 1. CLIP image embed (60% weight) - visual features (shape, texture, style)
- * 2. BLIP caption → enrichment → CLIP text embed (30% weight) - semantic features
- * 3. Fuse embeddings with L2 normalization
- * 4. OpenSearch k-NN vector search
+ * Single image similarity search using CLIP image embeddings (same space as indexed product images).
  *
  * Note: This searches for products similar to the WHOLE image.
  * For per-item detection + search ("shop the look"), use POST /api/images/search instead.
@@ -286,9 +301,16 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
     if (!req.file) {
       return res.status(400).json({ error: "Image file is required" });
     }
+
+    const validation = await validateImage(req.file.buffer);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error || "Invalid image" });
+    }
     
-    const result = await imageSearch(req.file.buffer, {
+    const result = await searchImage({
+      imageBuffer: req.file.buffer,
       limit: req.body.limit ? Number(req.body.limit) : 50,
+      includeRelated: false,
     });
     
     res.json(result);
@@ -331,10 +353,17 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
  * │                 │          │  "priceWeight": 0.1, "recencyWeight": 0.0}       │
  * └─────────────────┴──────────┴──────────────────────────────────────────────────┘
  *
+ * Server env: MULTI_IMAGE_PROMPT_EMBED_WEIGHT (0–0.65, default 0.38) blends the same
+ * ensembled CLIP text embedding as text search into the composite image vector for kNN.
+ * Raise for wording-heavy prompts; lower when results should track photos more than words.
+ *
+ * MULTI_IMAGE_HARD_RELEVANCE_GATE=1 — optional: apply SEARCH_FINAL_ACCEPT_MIN + SEARCH_RELEVANCE_GATE_MODE
+ * like text search (can return zero rows if no hit passes). Default is off so kNN neighbors are kept.
+ *
  * 🎨 EXAMPLE REQUESTS:
  *
  * 1️⃣ Cross-Image Color + Texture:
- * curl -X POST http://localhost:3000/api/search/multi-image \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-image \
  *   -F "images=@red_dress.jpg" \
  *   -F "images=@leather_jacket.jpg" \
  *   -F "prompt=I want the red color from the first image with the leather texture from the second" \
@@ -344,23 +373,23 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
  *   -F "limit=20"
  *
  * 2️⃣ Style Mixing with Negatives:
- * curl -X POST http://localhost:3000/api/search/multi-image \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-image \
  *   -F "images=@vintage_coat.jpg" \
  *   -F "prompt=Vintage style from first but NOT too formal and without buttons"
  *
  * 3️⃣ Pattern + Silhouette:
- * curl -X POST http://localhost:3000/api/search/multi-image \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-image \
  *   -F "images=@floral_dress.jpg" \
  *   -F "images=@aline_skirt.jpg" \
  *   -F "prompt=Floral pattern from image 1 with A-line silhouette from image 2"
  *
  * 4️⃣ Spatial Relationships:
- * curl -X POST http://localhost:3000/api/search/multi-image \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-image \
  *   -F "images=@striped_shirt.jpg" \
  *   -F "prompt=Looking for shirts with stripes on the sleeves but solid on the body"
  *
  * 5️⃣ Complex Multi-Constraint:
- * curl -X POST http://localhost:3000/api/search/multi-image \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-image \
  *   -F "images=@jacket.jpg" \
  *   -F "prompt=Like this but with zipper on the front, not too shiny, avoid leather"
  *
@@ -398,8 +427,9 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
  * - Use GET /search/prompt-templates to see example prompts
  * - Use POST /search/prompt-analyze to get suggestions for your prompt
  * - Use GET /search/prompt-suggestions to get helpful phrases
+ * - Tune MULTI_IMAGE_PROMPT_EMBED_WEIGHT on the server if vector matches ignore the prompt or overfit text
  */
-router.post("/multi-image", upload.array("images", 5), async (req: Request, res: Response) => {
+router.post("/multi-image", upload.array("images", MAX_MULTI_IMAGE_UPLOADS), async (req: Request, res: Response) => {
   try {
     const files = req.files as Express.Multer.File[];
     const { prompt, limit, rerankWeights } = req.body;
@@ -412,8 +442,8 @@ router.post("/multi-image", upload.array("images", 5), async (req: Request, res:
       return res.status(400).json({ error: "Text prompt is required" });
     }
 
-    if (files.length > 5) {
-      return res.status(400).json({ error: "Maximum 5 images allowed" });
+    if (files.length > MAX_MULTI_IMAGE_UPLOADS) {
+      return res.status(400).json({ error: `Maximum ${MAX_MULTI_IMAGE_UPLOADS} images allowed` });
     }
 
     const images = files.map(f => f.buffer);
@@ -473,7 +503,7 @@ router.post("/multi-image", upload.array("images", 5), async (req: Request, res:
  * 🎨 EXAMPLE REQUESTS:
  * 
  * 1️⃣ Explicit Attribute Weights:
- * curl -X POST http://localhost:3000/api/search/multi-vector \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-vector \
  *   -F "images=@dress1.jpg" \
  *   -F "images=@dress2.jpg" \
  *   -F "prompt=Elegant evening wear" \
@@ -481,13 +511,13 @@ router.post("/multi-image", upload.array("images", 5), async (req: Request, res:
  *   -F "explainScores=true"
  * 
  * 2️⃣ Heavy Color Focus:
- * curl -X POST http://localhost:3000/api/search/multi-vector \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-vector \
  *   -F "images=@reference.jpg" \
  *   -F "prompt=Find similar colors" \
  *   -F "attributeWeights={\"color\":0.8,\"global\":0.2}"
  * 
  * 3️⃣ Pattern + Material Priority:
- * curl -X POST http://localhost:3000/api/search/multi-vector \
+ * curl -X POST http://0.0.0.0:3000/api/search/multi-vector \
  *   -F "images=@shirt.jpg" \
  *   -F "prompt=Striped linen shirts" \
  *   -F "attributeWeights={\"pattern\":0.5,\"material\":0.5}"
@@ -517,7 +547,7 @@ router.post("/multi-image", upload.array("images", 5), async (req: Request, res:
  * 
  * 💡 TIP: Use /multi-image for natural language, use /multi-vector for precise control.
  */
-router.post("/multi-vector", upload.array("images", 5), async (req: Request, res: Response) => {
+router.post("/multi-vector", upload.array("images", MAX_MULTI_IMAGE_UPLOADS), async (req: Request, res: Response) => {
   try {
     const files = req.files as Express.Multer.File[];
     const { prompt, attributeWeights, explainScores, limit, rerankWeights } = req.body;
@@ -530,8 +560,8 @@ router.post("/multi-vector", upload.array("images", 5), async (req: Request, res
       return res.status(400).json({ error: "Text prompt is required" });
     }
 
-    if (files.length > 5) {
-      return res.status(400).json({ error: "Maximum 5 images allowed" });
+    if (files.length > MAX_MULTI_IMAGE_UPLOADS) {
+      return res.status(400).json({ error: `Maximum ${MAX_MULTI_IMAGE_UPLOADS} images allowed` });
     }
 
     const images = files.map(f => f.buffer);

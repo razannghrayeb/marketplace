@@ -28,7 +28,7 @@
 
 **Basic Usage:**
 ```bash
-curl -X POST http://localhost:4000/search/image \
+curl -X POST http://0.0.0.0:4000/search/image \
   -F "image=@dress.jpg" \
   -F "limit=20"
 ```
@@ -72,7 +72,7 @@ curl -X POST http://localhost:4000/search/image \
 
 **Basic Usage:**
 ```bash
-curl -X POST http://localhost:4000/api/images/search \
+curl -X POST http://0.0.0.0:4000/api/images/search \
   -F "image=@outfit.jpg" \
   -F "confidence=0.25" \
   -F "limit_per_item=10"
@@ -131,7 +131,7 @@ curl -X POST http://localhost:4000/api/images/search \
 
 **Basic Usage:**
 ```bash
-curl -X POST http://localhost:4000/search/multi-image \
+curl -X POST http://0.0.0.0:4000/search/multi-image \
   -F "images=@red_dress.jpg" \
   -F "images=@leather_jacket.jpg" \
   -F "prompt=Red color from first, leather texture from second, under $150" \
@@ -170,7 +170,7 @@ curl -X POST http://localhost:4000/search/multi-image \
 
 **Advanced: Explicit Weights**
 ```bash
-curl -X POST http://localhost:4000/search/multi-vector \
+curl -X POST http://0.0.0.0:4000/search/multi-vector \
   -F "images=@image1.jpg" \
   -F "images=@image2.jpg" \
   -F "prompt=Elegant evening wear" \
@@ -411,13 +411,13 @@ GEMINI_API_KEY=...
 **Manual Testing:**
 ```bash
 # Normal search
-curl -X POST http://localhost:4000/search/image -F "image=@test.jpg"
+curl -X POST http://0.0.0.0:4000/search/image -F "image=@test.jpg"
 
 # YOLO detection
-curl -X POST http://localhost:4000/api/images/search -F "image=@outfit.jpg"
+curl -X POST http://0.0.0.0:4000/api/images/search -F "image=@outfit.jpg"
 
 # Multi-image
-curl -X POST http://localhost:4000/search/multi-image \
+curl -X POST http://0.0.0.0:4000/search/multi-image \
   -F "images=@img1.jpg" \
   -F "images=@img2.jpg" \
   -F "prompt=Red color from first, modern style from second"
@@ -439,7 +439,7 @@ npx tsx scripts/generate-attribute-embeddings.ts --batch-size=100
 npx tsx scripts/test-multi-vector-search.ts
 
 # 4. Monitor
-curl http://localhost:4000/api/images/status
+curl http://0.0.0.0:4000/api/images/status
 ```
 
 ---
@@ -459,9 +459,9 @@ curl http://localhost:4000/api/images/status
 ### Troubleshooting
 
 **Problem: Search returns no results**
-- Check OpenSearch is running: `curl http://localhost:9200`
-- Verify index exists: `curl http://localhost:9200/_cat/indices`
-- Check embedding generation: `curl http://localhost:4000/api/images/status`
+- Check OpenSearch is running: `curl http://0.0.0.0:9200`
+- Verify index exists: `curl http://0.0.0.0:9200/_cat/indices`
+- Check embedding generation: `curl http://0.0.0.0:4000/api/images/status`
 
 **Problem: Multi-image search is slow**
 - Currently ~200ms; if >500ms, check Gemini API latency

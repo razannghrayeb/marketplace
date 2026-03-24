@@ -14,11 +14,12 @@ import "dotenv/config";
 
 import { Router } from "express";
 import multer from "multer";
-import { listProducts, searchProductsByTitle, searchProductsByImage, getProductByIdHandler, getProductPriceHistory, getProductFacets, getPriceDrops, getSimilarProducts } from "./products.controller";
-import { getVariantsBatch } from "./variants.controller";
+import { listProducts, searchProductsByTitle, searchProductsByImage, getProductById, getProductPriceHistory, getProductFacets, getPriceDrops, getSimilarProducts } from "./products.controller";
 import { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
 import { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller";
 import { getRecommendations, getBatchRecommendationsHandler } from "./recommendations.controller";
+import { getVariantsBatch } from "./variants.controller";
+import { optionalAuth } from "../../middleware/auth";
 
 const router = Router();
 
@@ -79,9 +80,9 @@ router.get("/price-drops", getPriceDrops);
 // Complete My Style - Outfit Recommendations
 // ============================================================================
 
-router.get("/:id/complete-style", completeStyle);
+router.get("/:id/complete-style", optionalAuth, completeStyle);
 router.get("/:id/style-profile", getStyleProfile);
-router.post("/complete-style", completeStyleFromBody);
+router.post("/complete-style", optionalAuth, completeStyleFromBody);
 
 // ============================================================================
 // Product Image Routes
@@ -92,11 +93,11 @@ router.post("/:id/images", upload.single("image"), uploadImage);
 router.put("/:id/images/:imageId/primary", setAsPrimary);
 router.delete("/:id/images/:imageId", removeImage);
 
-// GET /products/:id - single product (must be last so /:id/xxx routes match first)
-router.get("/:id", getProductByIdHandler);
+// Single-segment :id last (numeric product id for PDP)
+router.get("/:id", getProductById);
 
 export default router;
-export { listProducts, searchProductsByTitle, searchProductsByImage, getProductPriceHistory, getProductFacets, getPriceDrops } from "./products.controller";
+export { listProducts, searchProductsByTitle, searchProductsByImage, getProductById, getProductPriceHistory, getProductFacets, getPriceDrops } from "./products.controller";
 export { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
 export { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller";
 

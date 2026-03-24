@@ -7,18 +7,20 @@
  * Supports:
  * - OpenAI API (GPT-3.5-turbo/GPT-4)
  * - Anthropic Claude
+ * - Google Gemini (GEMINI_API_KEY — same as multi-image intent)
  * - Local Ollama
  */
 
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { LLMRewriteRequest, LLMRewriteResponse, ScriptAnalysis } from "./types";
-import { config } from "../../config";
+import { resolveGeminiGenerationModel } from "../prompt/gemeni";
 
 // ============================================================================
 // Configuration
 // ============================================================================
 
 interface LLMConfig {
-  provider: "openai" | "anthropic" | "ollama" | "none";
+  provider: "openai" | "anthropic" | "gemini" | "ollama" | "none";
   model: string;
   apiKey?: string;
   baseUrl?: string;
@@ -30,6 +32,7 @@ function getLLMConfig(): LLMConfig {
   // Check environment variables
   const openaiKey = process.env.OPENAI_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  const geminiKey = process.env.GEMINI_API_KEY?.trim();
   const ollamaUrl = process.env.OLLAMA_URL;
   
   if (openaiKey) {
@@ -48,6 +51,16 @@ function getLLMConfig(): LLMConfig {
       model: process.env.ANTHROPIC_MODEL || "claude-3-haiku-20240307",
       apiKey: anthropicKey,
       timeout: 5000,
+      maxRetries: 1,
+    };
+  }
+
+  if (geminiKey) {
+    return {
+      provider: "gemini",
+      model: resolveGeminiGenerationModel(),
+      apiKey: geminiKey,
+      timeout: 8000,
       maxRetries: 1,
     };
   }
@@ -217,6 +230,35 @@ async function callOllama(
   return data.response;
 }
 
+async function callGemini(
+  systemPrompt: string,
+  userPrompt: string,
+  config: LLMConfig
+): Promise<string> {
+  const genAI = new GoogleGenerativeAI(config.apiKey!);
+  const model = genAI.getGenerativeModel({
+    model: config.model,
+    systemInstruction: systemPrompt,
+  });
+  const run = model.generateContent({
+    contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: 256,
+      responseMimeType: "application/json",
+    },
+  });
+  const result = await Promise.race([
+    run,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Gemini rewriter timeout")), config.timeout),
+    ),
+  ]);
+  const text = result.response.text();
+  if (!text) throw new Error("Empty Gemini response");
+  return text;
+}
+
 // ============================================================================
 // Main LLM Rewrite Function
 // ============================================================================
@@ -268,6 +310,9 @@ export async function rewriteWithLLM(request: LLMRewriteRequest): Promise<LLMRew
         break;
       case "ollama":
         rawResponse = await callOllama(systemPrompt, userPrompt, llmConfig);
+        break;
+      case "gemini":
+        rawResponse = await callGemini(systemPrompt, userPrompt, llmConfig);
         break;
       default:
         return null;
@@ -325,6 +370,16 @@ export async function rewriteWithLLM(request: LLMRewriteRequest): Promise<LLMRew
   }
 }
 
+function isLLMConservativeMode(): boolean {
+  const v = String(process.env.SEARCH_LLM_CONSERVATIVE ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
+function isCommerceMode(): boolean {
+  const v = String(process.env.SEARCH_COMMERCE_MODE ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
 /**
  * Decide if LLM should be called based on query characteristics
  */
@@ -334,37 +389,18 @@ export function shouldUseLLM(
   hasRuleCorrection: boolean,
   ruleConfidence: number
 ): boolean {
-  // Skip LLM if disabled
-  if (!isLLMAvailable()) {
-    return false;
-  }
-  
-  // Skip if rule-based correction has high confidence
-  if (hasRuleCorrection && ruleConfidence >= 0.85) {
-    return false;
-  }
-  
-  // Use LLM for mixed language queries
-  if (script.primary === "mixed") {
-    return true;
-  }
-  
-  // Use LLM for long natural language queries
-  const wordCount = query.split(/\s+/).length;
-  if (wordCount >= 5) {
-    return true;
-  }
-  
-  // Use LLM for Arabizi with no rule correction
-  if (script.hasArabizi && !hasRuleCorrection) {
-    return true;
-  }
-  
-  // Use LLM for Arabic with no rule correction
-  if (script.primary === "ar" && !hasRuleCorrection) {
-    return true;
-  }
-  
-  // Skip LLM for simple queries
+  if (!isLLMAvailable()) return false;
+
+  if (hasRuleCorrection && ruleConfidence >= 0.85) return false;
+
+  const wordCount = query.trim().split(/\s+/).length;
+  const conservative = isLLMConservativeMode() || isCommerceMode();
+  if (conservative && wordCount <= 4 && hasRuleCorrection) return false;
+
+  if (script.primary === "mixed") return true;
+  if (wordCount >= 5) return true;
+  if (script.hasArabizi && !hasRuleCorrection) return true;
+  if (script.primary === "ar" && !hasRuleCorrection) return true;
+
   return false;
 }

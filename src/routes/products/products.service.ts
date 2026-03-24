@@ -1,9 +1,20 @@
 import { osClient } from "../../lib/core/index";
-import { pg, getProductsByIdsOrdered } from "../../lib/core/index";
-import { attrGenderFilterClause } from "./opensearchFilters";
+import {
+  pg,
+  getProductsByIdsOrdered,
+  productsTableHasIsHiddenColumn,
+} from "../../lib/core/index";
 import { config } from "../../config";
 import { getImagesForProducts, ProductImage } from "./images.service";
 import { hammingDistance } from "../../lib/products";
+import { dedupeSearchResults, filterRelatedAgainstMain } from "../../lib/search/resultDedup";
+import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
+import {
+  emitImageSearchEval,
+  searchEvalEnabled,
+  newSearchEvalId,
+  searchEvalVariant,
+} from "../../lib/search/evalHooks";
 import { 
   parseQuery, 
   buildSemanticOpenSearchQuery, 
@@ -18,29 +29,45 @@ import {
   getQueryEmbedding,
   type QueryAST,
 } from "../../lib/queryProcessor";
+import { expandColorTermsForFilter, normalizeColorToken } from "../../lib/color/queryColorFilter";
+import {
+  computeHitRelevance,
+  normalizeQueryGender,
+  type HitCompliance,
+  type SearchHitRelevanceIntent,
+} from "../../lib/search/searchHitRelevance";
+import {
+  extractFashionTypeNounTokens,
+  extractLexicalProductTypeSeeds,
+} from "../../lib/search/productTypeTaxonomy";
 
 // ============================================================================
 // Types
 // ============================================================================
 
 export interface SearchFilters {
-  category?: string;
+  category?: string | string[];
   brand?: string;
   minPriceCents?: number;
   maxPriceCents?: number;
-  currency?: string;  // 'LBP' or 'USD' - defaults to LBP
+  currency?: string; // 'LBP' or 'USD' - defaults to LBP
   availability?: boolean;
   vendorId?: string;
-  // Attribute filters (extracted from titles)
   color?: string;
+  /** Bias ranking without hard filtering (image search). */
+  softColor?: string;
+  colors?: string[];
+  colorMode?: "any" | "all";
+  productTypes?: string[];
+  ageGroup?: string;
   material?: string;
   fit?: string;
   style?: string;
+  /** Bias ranking without hard filtering (image search). */
+  softStyle?: string;
   gender?: string;
   pattern?: string;
 }
-
-export type ProductListSort = "new" | "price_asc" | "price_desc";
 
 export interface SearchParams {
   query?: string;           // Text search (title)
@@ -48,14 +75,31 @@ export interface SearchParams {
   filters?: SearchFilters;
   page?: number;
   limit?: number;
-  /** Browse / list ordering (OpenSearch) */
-  sort?: ProductListSort;
 }
 
 export interface ImageSearchParams extends SearchParams {
   similarityThreshold?: number;  // 0-1, default 0.7 (70% similarity)
   includeRelated?: boolean;      // Include related by pHash
   pHash?: string;                // Optional pHash for visual similarity
+  /**
+   * Garment-centered CLIP vector (same model/dim as `imageEmbedding`); merged with primary kNN
+   * on `embedding` when `SEARCH_IMAGE_DUAL_GARMENT_FUSION` is on (see `embedding_garment` index field).
+   */
+  imageEmbeddingGarment?: number[];
+  /** Raw bytes when embedding is computed by the callee (unified image search path). */
+  imageBuffer?: Buffer;
+  /** Soft rerank hints when SEARCH_IMAGE_SOFT_CATEGORY=1 */
+  predictedCategoryAisles?: string[];
+  /** Override kNN field (`embedding` vs `embedding_garment`, etc.) */
+  knnField?: string;
+  /**
+   * Forces image search into "hard category" mode for this call.
+   * When enabled, OpenSearch `filters.category` is applied even if the
+   * global SEARCH_IMAGE_SOFT_CATEGORY enables soft category reranking.
+   */
+  forceHardCategoryFilter?: boolean;
+  /** Return best kNN hits when none pass similarityThreshold (Shop-the-Look). */
+  relaxThresholdWhenEmpty?: boolean;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -83,6 +127,8 @@ export interface ProductResult {
   images?: Array<{ id: number; url: string; is_primary: boolean }>;
   similarity_score?: number;     // For image search results
   match_type?: "exact" | "similar" | "related";  // How the product matched
+  rerankScore?: number;
+  finalRelevance01?: number;
   clipSim?: number;        // 0..1 (cosine or normalized)
   textSim?: number;        // 0..1 (normalized)
   openSearchScore?: number; // raw or normalized
@@ -96,14 +142,19 @@ export interface SearchResultWithRelated {
   meta: {
     query?: string;
     threshold?: number;
-    /** OpenSearch total hit count (pagination) */
-    total?: number;
     total_results: number;
-    page_results?: number;
     total_related?: number;
     parsed_query?: ParsedQuery;  // Include parsed query info for debugging/transparency
     processed_query?: QueryAST;  // Query processing info (corrections, etc.)
     did_you_mean?: string;  // Suggestion if not auto-applied
+    below_relevance_threshold?: boolean;
+    below_final_relevance_gate?: boolean;
+    relevance_gate_soft?: boolean;
+    threshold_relaxed?: boolean;
+    recall_size?: number;
+    final_accept_min?: number;
+    total_above_threshold?: number;
+    open_search_total_estimate?: number;
   };
 }
 
@@ -151,214 +202,146 @@ export interface CandidateGeneratorResult {
   };
 }
 /**
- * Get a single product by ID with images (excludes hidden products)
+ * Search products by title text, image embedding, or filter-only browse.
+ * Always routes through the unified search facade (QueryAST, domain gate, image pipeline).
  */
-export async function getProductById(productId: number | string): Promise<ProductResult | null> {
-  const products = await getProductsByIdsOrdered([productId]);
-  const product = products[0];
-  if (!product || product.is_hidden) return null;
-
-  const numericId = typeof productId === "string" ? parseInt(productId, 10) : productId;
-  const imagesByProduct = await getImagesForProducts([numericId]);
-  const images: ProductImage[] = imagesByProduct.get(numericId) || [];
-
-  return {
-    ...product,
-    images: images.map((img) => ({
-      id: img.id,
-      url: img.cdn_url,
-      is_primary: img.is_primary,
-    })),
-  } as ProductResult;
-}
-
-export interface ProductListResult {
-  products: ProductResult[];
-  /** Total matching documents from OpenSearch (for pagination UI) */
-  total: number;
-}
-
-function extractOpenSearchTotal(osResponse: { body?: { hits?: { total?: number | { value?: number } } } }): number {
-  const t = osResponse?.body?.hits?.total;
-  if (typeof t === "number") return t;
-  if (t && typeof t === "object" && typeof t.value === "number") return t.value;
-  return 0;
-}
-
-/**
- * Search products by title text or image embedding
- * Returns products with images and total hit count for pagination
- */
-export async function searchProducts(params: SearchParams): Promise<ProductListResult> {
-  const { query, imageEmbedding, filters = {}, page = 1, limit = 20, sort } = params;
-
-  // Build OpenSearch query
-  const must: any[] = [];
-  const filter: any[] = [];
-
-  // Always exclude hidden products from public search
-  filter.push({ term: { is_hidden: false } });
-
-  // Text search on title
-  if (query) {
-    must.push({
-      multi_match: {
-        query,
-        fields: ["title^3", "brand^2", "category"],
-        fuzziness: "AUTO",
-      },
-    });
-  }
-
-  // Apply filters
-  if (filters.category) {
-    filter.push({ term: { category: filters.category } });
-  }
-  if (filters.brand) {
-    filter.push({ term: { brand: filters.brand } });
-  }
-  if (filters.vendorId) {
-    filter.push({ term: { vendor_id: filters.vendorId } });
-  }
-  if (filters.availability !== undefined) {
-    filter.push({ term: { availability: filters.availability ? "in_stock" : "out_of_stock" } });
-  }
-  if (filters.minPriceCents !== undefined || filters.maxPriceCents !== undefined) {
-    const range: any = {};
-    const currency = filters.currency?.toUpperCase() || 'USD';
-    const LBP_TO_USD = 89000; // Exchange rate
-
-    if (currency === 'USD') {
-      // Input is already in USD cents, convert to dollars
-      if (filters.minPriceCents !== undefined) range.gte = filters.minPriceCents / 100;
-      if (filters.maxPriceCents !== undefined) range.lte = filters.maxPriceCents / 100;
-    } else {
-      // Input is in LBP cents, convert to USD for OpenSearch
-      if (filters.minPriceCents !== undefined) range.gte = Math.floor(filters.minPriceCents / LBP_TO_USD);
-      if (filters.maxPriceCents !== undefined) range.lte = Math.ceil(filters.maxPriceCents / LBP_TO_USD);
-    }
-    filter.push({ range: { price_usd: range } });
-  }
-
-  // Attribute filters (extracted from titles)
-  if (filters.color) filter.push({ term: { attr_color: filters.color } });
-  if (filters.material) filter.push({ term: { attr_material: filters.material } });
-  if (filters.fit) filter.push({ term: { attr_fit: filters.fit } });
-  if (filters.style) filter.push({ term: { attr_style: filters.style } });
-  if (filters.gender) filter.push(attrGenderFilterClause(filters.gender));
-  if (filters.pattern) filter.push({ term: { attr_pattern: filters.pattern } });
-
-  // Build final query
-  let searchBody: any;
+export async function searchProducts(params: SearchParams): Promise<ProductResult[]> {
+  const { query, imageEmbedding, filters = {}, page = 1, limit = 20 } = params;
+  const facade = await import("../../lib/search/fashionSearchFacade");
 
   if (imageEmbedding && imageEmbedding.length > 0) {
-    // Image-based search (k-NN) with OpenSearch syntax
-    searchBody = {
-      size: limit,
-      query: {
-        knn: {
-          embedding: {
-            vector: imageEmbedding,
-            k: limit,
-          },
-        },
-      },
-    };
-    
-    // Add filters if present
-    if (filter.length > 0) {
-      searchBody.query = {
-        bool: {
-          must: {
-            knn: {
-              embedding: {
-                vector: imageEmbedding,
-                k: limit,
-              },
-            },
-          },
-          filter: filter,
-        },
-      };
-    }
-  } else {
-    // Text-based search — track_total_hits so pagination totals are exact (not capped)
-    searchBody = {
-      track_total_hits: true,
-      size: limit,
-      from: (page - 1) * limit,
-      query: {
-        bool: {
-          must: must.length > 0 ? must : [{ match_all: {} }],
-          filter: filter.length > 0 ? filter : undefined,
-        },
-      },
-    };
-    if (sort === "new") {
-      searchBody.sort = [{ last_seen_at: { order: "desc" } }, { product_id: { order: "asc" } }];
-    } else if (sort === "price_asc") {
-      searchBody.sort = [{ price_usd: { order: "asc" } }, { product_id: { order: "asc" } }];
-    } else if (sort === "price_desc") {
-      searchBody.sort = [{ price_usd: { order: "desc" } }, { product_id: { order: "asc" } }];
-    }
+    const res = await facade.searchImage({
+      imageEmbedding,
+      filters: filters as any,
+      limit,
+      includeRelated: false,
+    });
+    return res.results as ProductResult[];
   }
 
-  // Execute OpenSearch query
-  const osResponse = await osClient.search({
-    index: config.opensearch.index,
-    body: searchBody,
-  });
-
-  const total = extractOpenSearchTotal(osResponse);
-
-  // Extract product IDs and scores from OpenSearch results (dedupe by first occurrence)
-  const hits = osResponse.body.hits.hits;
-  const productIds: string[] = [];
-  const seen = new Set<string>();
-  for (const hit of hits) {
-    const pid = String(hit._source?.product_id ?? hit._id ?? "");
-    if (pid && !seen.has(pid)) {
-      seen.add(pid);
-      productIds.push(pid);
-    }
-  }
-  const scoreMap = new Map<string, number>();
-  hits.forEach((hit: any) => {
-    const pid = String(hit._source?.product_id ?? "");
-    if (pid && !scoreMap.has(pid)) scoreMap.set(pid, hit._score);
-  });
-
-  if (productIds.length === 0) {
-    return { products: [], total };
+  const q = query?.trim();
+  if (q) {
+    const res = await facade.searchText({
+      query: q,
+      filters: filters as any,
+      page,
+      limit,
+      includeRelated: false,
+      relatedLimit: 0,
+    });
+    return res.results as ProductResult[];
   }
 
-  // Fetch full product data from Postgres (preserving OpenSearch order/ranking)
-  const products = await getProductsByIdsOrdered(productIds);
-
-  // Fetch images for all products using images.service
-  const numericIds = productIds.map((id) => parseInt(id, 10));
-  const imagesByProduct = await getImagesForProducts(numericIds);
-
-  // Attach images and scores to products (convert to response format)
-  const productsWithImages = products.map((p: any) => {
-    const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
-    return {
-      ...p,
-      similarity_score: scoreMap.get(String(p.id)),
-      images: images.map((img) => ({
-        id: img.id,
-        url: img.cdn_url,
-        is_primary: img.is_primary,
-      })),
-    };
-  });
-
-  return { products: productsWithImages as ProductResult[], total };
+  return facade.searchBrowse({ filters: filters as any, page, limit });
 }
 
 // ============================================================================
 // Enhanced Image Search with Similarity Threshold
 // ============================================================================
+
+function imageSoftCategoryEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_SOFT_CATEGORY ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
+function imageGenderSoftEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_GENDER_SOFT ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
+/**
+ * Image search should default to soft final-relevance gating.
+ * Hard gating can be re-enabled with SEARCH_IMAGE_HARD_RELEVANCE_GATE=1.
+ */
+function imageHardRelevanceGateEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_HARD_RELEVANCE_GATE ?? "").toLowerCase().trim();
+  return v === "1" || v === "true";
+}
+
+/** Fuse primary `embedding` kNN with `embedding_garment` kNN when a garment query vector is supplied. */
+function imageDualGarmentFusionEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_DUAL_GARMENT_FUSION ?? "1").toLowerCase();
+  return v !== "0" && v !== "false" && v !== "off";
+}
+
+/**
+ * OpenSearch kNN `space_type: cosinesimil` returns score = (1 + cos θ) / 2 ∈ [0, 1].
+ * See https://docs.opensearch.org/latest/mappings/supported-field-types/knn-spaces/
+ *
+ * Some older deployments returned a legacy raw score ≈ 1 + cos θ ∈ [0, 2] (values > 1).
+ * For that form, map to the same [0, 1] similarity as cos θ (not (s−1)/2 then 2s−1, which
+ * wrongly drove the bottom half to 0).
+ */
+function knnCosinesimilScoreToCosine01(raw: number): number {
+  if (!Number.isFinite(raw)) return 0;
+  const s = raw;
+  if (s > 1.001) {
+    return Math.max(0, Math.min(1, s - 1));
+  }
+  const clamped = Math.max(0, Math.min(1, s));
+  const cos = 2 * clamped - 1;
+  return Math.max(0, Math.min(1, cos));
+}
+
+/** When relaxThresholdWhenEmpty is used, drop hits below this normalized cosine (see config.search.searchImageRelaxFloor). */
+function imageRelaxSimilarityFloor(): number {
+  return config.search.searchImageRelaxFloor;
+}
+
+function imageKnnTimeoutMs(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_KNN_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw >= 500) return Math.min(120_000, Math.floor(raw));
+  return 12_000;
+}
+
+async function opensearchImageKnnHits(
+  body: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<any[]> {
+  const searchPromise = osClient
+    .search({ index: config.opensearch.index, body: body as any })
+    .then((r) => (r.body?.hits?.hits ?? []) as any[])
+    .catch(() => [] as any[]);
+  const timeoutPromise = new Promise<any[]>((resolve) => {
+    setTimeout(() => resolve([]), timeoutMs);
+  });
+  return Promise.race([searchPromise, timeoutPromise]);
+}
+
+/** Min–max cosine-like scores within one kNN result set so fusion weights are not dominated by field scale. */
+function minMaxNormCosine01ById(
+  hits: any[],
+  scoreToCosine01: (raw: number) => number,
+): Map<string, number> {
+  const map = new Map<string, number>();
+  if (!hits?.length) return map;
+  const vals = hits
+    .map((h) => scoreToCosine01(Number(h._score)))
+    .filter((x) => Number.isFinite(x));
+  if (vals.length === 0) return map;
+  const min = Math.min(...vals);
+  const max = Math.max(...vals);
+  const denom = max - min;
+  for (const h of hits) {
+    const id = String(h._source?.product_id ?? "");
+    if (!id) continue;
+    const s = scoreToCosine01(Number(h._score));
+    if (!Number.isFinite(s)) continue;
+    const n = denom <= 1e-12 ? 1 : (s - min) / denom;
+    map.set(id, Math.max(0, Math.min(1, n)));
+  }
+  return map;
+}
+
+function buildDesiredCatalogTermSet(aisles: string[]): Set<string> {
+  const s = new Set<string>();
+  for (const a of aisles) {
+    for (const t of getCategorySearchTerms(a)) {
+      s.add(t.toLowerCase());
+    }
+  }
+  return s;
+}
 
 /**
  * Search products by image with similarity threshold and optional pHash matching
@@ -367,69 +350,620 @@ export async function searchProducts(params: SearchParams): Promise<ProductListR
 export async function searchByImageWithSimilarity(
   params: ImageSearchParams
 ): Promise<SearchResultWithRelated> {
-  const { 
-    imageEmbedding, 
-    filters = {}, 
-    page = 1, 
+  const {
+    imageEmbedding,
+    imageEmbeddingGarment,
+    imageBuffer,
+    filters = {},
+    page = 1,
     limit = 20,
-    similarityThreshold = 0.7,  // Default 70% similarity
+    similarityThreshold = config.clip.imageSimilarityThreshold,
     includeRelated = true,
     pHash,
+    predictedCategoryAisles,
+    knnField: knnFieldParam,
+    forceHardCategoryFilter = false,
+    /** When strict similarity removes all kNN hits, fall back to best candidates above SEARCH_IMAGE_RELAX_FLOOR (default on). */
+    relaxThresholdWhenEmpty = true,
+    query: imageSearchTextQuery,
   } = params;
 
   if (!imageEmbedding || imageEmbedding.length === 0) {
     return { results: [], meta: { threshold: similarityThreshold, total_results: 0 } };
   }
 
-  // Fetch more results than requested to filter by threshold
-  const fetchLimit = Math.min(limit * 3, 100);
-  
+  const evalT0 = Date.now();
+
+  // Over-fetch so absolute threshold + later dedup still fill `limit` (cap raised for broader kNN recall).
+  const fetchLimit = Math.min(Math.max(limit * 5, 100), 300);
+
+  const softCategory = forceHardCategoryFilter ? false : imageSoftCategoryEnv();
+  const aisleHints = predictedCategoryAisles?.length
+    ? predictedCategoryAisles
+    : undefined;
+  const cat = (filters as { category?: string | string[] }).category;
+  /** Aisle rerank when global soft category is on, or when caller passes predictedCategoryAisles (e.g. Shop-the-Look). */
+  const useAisleRerank = !forceHardCategoryFilter && (softCategory || Boolean(aisleHints?.length));
+  const desiredCatalogTerms =
+    useAisleRerank && (aisleHints?.length || cat)
+      ? buildDesiredCatalogTermSet(
+          aisleHints?.length
+            ? aisleHints
+            : Array.isArray(cat)
+              ? cat.map((c) => String(c))
+              : [String(cat)],
+        )
+      : null;
+
   // Build filter array
   const filter: any[] = [{ term: { is_hidden: false } }];
-  if (filters.category) filter.push({ term: { category: filters.category } });
-  if (filters.brand) filter.push({ term: { brand: filters.brand } });
-  if (filters.vendorId) filter.push({ term: { vendor_id: filters.vendorId } });
+  if (!softCategory || !desiredCatalogTerms || desiredCatalogTerms.size === 0) {
+    if (cat) {
+      if (Array.isArray(cat)) {
+        const terms = cat.map((c) => String(c).toLowerCase()).filter(Boolean);
+        if (terms.length > 0) filter.push({ terms: { category: terms } });
+      } else {
+        filter.push({ term: { category: String(cat).toLowerCase() } });
+      }
+    }
+  }
+  if (filters.brand) filter.push({ term: { brand: String(filters.brand).toLowerCase() } });
+  if (filters.vendorId) filter.push({ term: { vendor_id: String(filters.vendorId) } });
+  const filtersAny = filters as { gender?: string; color?: string; softColor?: string; style?: string; softStyle?: string };
+  if (filtersAny.gender) {
+    const g = String(filtersAny.gender).toLowerCase();
+    // For image-search we need to be resilient to occasional index attribute mistakes.
+    // We therefore:
+    // - allow either `attr_gender` match OR title keyword match for the desired gender
+    // - but explicitly exclude the opposite gender keyword in title.
+    const titleGenderShould =
+      g === "women"
+        ? ["women", "womens", "female", "ladies", "woman"]
+        : g === "men"
+          ? ["men", "mens", "male", "boys", "boy", "man"]
+          : ["unisex"];
 
-  // k-NN search with score
-  const searchBody: any = {
+    const titleOppShould =
+      g === "women"
+        ? ["men", "mens", "male", "boys", "boy", "man"]
+        : g === "men"
+          ? ["women", "womens", "female", "ladies", "woman", "girls", "girl"]
+          : [];
+
+    const shouldClauses: any[] = [{ term: { attr_gender: g } }];
+    if (imageGenderSoftEnv()) {
+      // In "soft gender" mode, we also allow a title keyword match.
+      for (const kw of titleGenderShould) {
+        shouldClauses.push({ match: { title: kw } });
+      }
+    } else {
+      // In hard mode, title match is still useful as a correction signal when `attr_gender`
+      // is occasionally wrong. (We still exclude opposite title keywords below.)
+      for (const kw of titleGenderShould) {
+        shouldClauses.push({ match: { title: kw } });
+      }
+    }
+
+    const mustNot: any[] =
+      titleOppShould.length > 0
+        ? [
+            {
+              bool: {
+                should: titleOppShould.map((kw) => ({ match: { title: kw } })),
+                minimum_should_match: 1,
+              },
+            },
+          ]
+        : [];
+
+    filter.push({
+      bool: {
+        should: shouldClauses,
+        minimum_should_match: 1,
+        must_not: mustNot.length ? mustNot : undefined,
+      },
+    });
+  }
+  if (filtersAny.style) {
+    const s = String(filtersAny.style).toLowerCase();
+    if (s.length > 0) filter.push({ term: { attr_style: s } });
+  }
+  if (filtersAny.color) {
+    const expanded = expandColorTermsForFilter(String(filtersAny.color));
+    filter.push({
+      bool: {
+        should: [
+          { terms: { attr_color: expanded } },
+          { terms: { attr_colors: expanded } },
+          { terms: { color_palette_canonical: expanded } },
+        ],
+        minimum_should_match: 1,
+      },
+    });
+  }
+
+  const embeddingField =
+    String(
+      knnFieldParam ?? process.env.SEARCH_IMAGE_KNN_FIELD ?? "embedding",
+    ).trim() || "embedding";
+
+  /** Index `embedding_color` is computed on full product images; query color vectors from detection crops misalign — skip merge when searching `embedding_garment`. */
+  const skipColorKnnMerge =
+    embeddingField === "embedding_garment" &&
+    !/^(1|true)$/i.test(String(process.env.SEARCH_IMAGE_GARMENT_COLOR_MERGE ?? "").trim());
+
+  const wGlobal = Math.max(0, Math.min(1, Number(process.env.SEARCH_IMAGE_GLOBAL_KNN_WEIGHT ?? "0.55")));
+  const wColor = Math.max(0, Math.min(1, Number(process.env.SEARCH_IMAGE_COLOR_KNN_WEIGHT ?? "0.45")));
+  const wSum = wGlobal + wColor > 0 ? wGlobal + wColor : 1;
+
+  let colorQueryEmbedding: number[] | null = null;
+  if (
+    !skipColorKnnMerge &&
+    imageBuffer &&
+    Buffer.isBuffer(imageBuffer) &&
+    imageBuffer.length > 0
+  ) {
+    try {
+      const { attributeEmbeddings } = await import("../../lib/search/attributeEmbeddings");
+      colorQueryEmbedding = await attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "color");
+    } catch {
+      colorQueryEmbedding = null;
+    }
+  }
+
+  const knnBase = {
     size: fetchLimit,
-    _source: ["product_id", "title", "brand", "category"],
+    _source: [
+      "product_id",
+      "title",
+      "brand",
+      "category",
+      "category_canonical",
+      "product_types",
+      "attr_gender",
+      "attr_color",
+      "attr_colors",
+      "attr_colors_text",
+      "attr_colors_image",
+      "norm_confidence",
+      "type_confidence",
+      "color_confidence_text",
+      "color_confidence_image",
+      "color_palette_canonical",
+      "color_primary_canonical",
+      "color_secondary_canonical",
+      "color_accent_canonical",
+      "age_group",
+      "audience_gender",
+    ],
     query: {
       bool: {
-        must: {
-          knn: {
-            embedding: {
-              vector: imageEmbedding,
-              k: fetchLimit,
-            },
-          },
-        },
+        must: {} as any,
         filter: filter,
       },
     },
   };
 
-  const osResponse = await osClient.search({
-    index: config.opensearch.index,
-    body: searchBody,
+  knnBase.query.bool.must = {
+    knn: {
+      [embeddingField]: {
+        vector: imageEmbedding,
+        k: fetchLimit,
+      },
+    },
+  };
+
+  const runDualGarment =
+    imageDualGarmentFusionEnv() &&
+    embeddingField === "embedding" &&
+    Boolean(imageEmbeddingGarment && imageEmbeddingGarment.length > 0) &&
+    imageEmbeddingGarment!.length === imageEmbedding.length;
+
+  const runColor =
+    Boolean(colorQueryEmbedding && colorQueryEmbedding.length > 0 && wColor > 0);
+
+  const garmentFieldBody = runDualGarment
+    ? {
+        ...knnBase,
+        query: {
+          bool: {
+            must: {
+              knn: {
+                embedding_garment: {
+                  vector: imageEmbeddingGarment!,
+                  k: fetchLimit,
+                },
+              },
+            },
+            filter,
+          },
+        },
+      }
+    : null;
+
+  const colorBody = runColor
+    ? {
+        ...knnBase,
+        query: {
+          bool: {
+            must: {
+              knn: {
+                embedding_color: {
+                  vector: colorQueryEmbedding!,
+                  k: fetchLimit,
+                },
+              },
+            },
+            filter,
+          },
+        },
+      }
+    : null;
+
+  const knnTimeoutMs = imageKnnTimeoutMs();
+  const [primaryHits, garmentHits, colorHits] = await Promise.all([
+    opensearchImageKnnHits(knnBase, knnTimeoutMs),
+    garmentFieldBody ? opensearchImageKnnHits(garmentFieldBody, knnTimeoutMs) : Promise.resolve([]),
+    colorBody ? opensearchImageKnnHits(colorBody, knnTimeoutMs) : Promise.resolve([]),
+  ]);
+
+  const usedMultiBranchFusion = runDualGarment || runColor;
+  let hits: any[];
+
+  if (!usedMultiBranchFusion) {
+    hits = primaryHits;
+  } else {
+    const wfRaw = Number(process.env.SEARCH_IMAGE_DUAL_FULL_WEIGHT ?? "0.55");
+    const wgRaw = Number(process.env.SEARCH_IMAGE_DUAL_GARMENT_WEIGHT ?? "0.45");
+    const wf = Math.max(0, Math.min(1, Number.isFinite(wfRaw) ? wfRaw : 0.55));
+    const wg = Math.max(0, Math.min(1, Number.isFinite(wgRaw) ? wgRaw : 0.45));
+    const wSumFg = wf + wg > 0 ? wf + wg : 1;
+
+    let anchor =
+      primaryHits.length > 0
+        ? Math.max(
+            ...primaryHits.map((h: any) => knnCosinesimilScoreToCosine01(Number(h._score))),
+          )
+        : 0;
+    if (anchor <= 0 && (runDualGarment || runColor)) {
+      const fallback: number[] = [];
+      if (runDualGarment && garmentHits.length) {
+        fallback.push(
+          ...garmentHits.map((h: any) => knnCosinesimilScoreToCosine01(Number(h._score))),
+        );
+      }
+      if (runColor && colorHits.length) {
+        fallback.push(
+          ...colorHits.map((h: any) => knnCosinesimilScoreToCosine01(Number(h._score))),
+        );
+      }
+      anchor = fallback.length > 0 ? Math.max(...fallback) : 0;
+    }
+
+    const normP = minMaxNormCosine01ById(primaryHits, knnCosinesimilScoreToCosine01);
+    const normG = runDualGarment
+      ? minMaxNormCosine01ById(garmentHits, knnCosinesimilScoreToCosine01)
+      : new Map<string, number>();
+    const normC = runColor
+      ? minMaxNormCosine01ById(colorHits, knnCosinesimilScoreToCosine01)
+      : new Map<string, number>();
+
+    const ids = new Set<string>();
+    for (const h of primaryHits) {
+      const id = String(h._source?.product_id ?? "");
+      if (id) ids.add(id);
+    }
+    if (runDualGarment) {
+      for (const h of garmentHits) {
+        const id = String(h._source?.product_id ?? "");
+        if (id) ids.add(id);
+      }
+    }
+    if (runColor) {
+      for (const h of colorHits) {
+        const id = String(h._source?.product_id ?? "");
+        if (id) ids.add(id);
+      }
+    }
+
+    const primaryById = new Map<string, any>();
+    for (const h of primaryHits) {
+      const id = String(h._source?.product_id ?? "");
+      if (id) primaryById.set(id, h);
+    }
+    const garmentById = new Map<string, any>();
+    if (runDualGarment) {
+      for (const h of garmentHits) {
+        const id = String(h._source?.product_id ?? "");
+        if (id) garmentById.set(id, h);
+      }
+    }
+    const colorById = new Map<string, any>();
+    if (runColor) {
+      for (const h of colorHits) {
+        const id = String(h._source?.product_id ?? "");
+        if (id) colorById.set(id, h);
+      }
+    }
+
+    const merged: any[] = [];
+    for (const id of ids) {
+      const np = normP.get(id) ?? 0;
+      const ng = runDualGarment ? normG.get(id) ?? 0 : 0;
+      const fg01 = runDualGarment ? (wf * np + wg * ng) / wSumFg : np;
+
+      let final01: number;
+      if (runColor) {
+        const nc = normC.get(id) ?? 0;
+        final01 = (wGlobal * fg01 + wColor * nc) / wSum;
+      } else {
+        final01 = fg01;
+      }
+
+      const calibrated = anchor > 0 ? final01 * anchor : 0;
+      const baseHit = primaryById.get(id) ?? garmentById.get(id) ?? colorById.get(id);
+      if (!baseHit) continue;
+      const sim01 = Math.max(0, Math.min(1, calibrated));
+      (baseHit as any)._score = (sim01 + 1) / 2;
+      merged.push(baseHit);
+    }
+    merged.sort((a: any, b: any) => Number(b._score) - Number(a._score));
+    hits = merged;
+  }
+
+  /** Always compare cosine similarity in [0,1] to threshold (same semantics as fusion vs primary-only kNN). */
+  const passesImageSimilarityThreshold = (hit: any, thresh: number): boolean =>
+    knnCosinesimilScoreToCosine01(Number(hit._score)) >= thresh;
+
+  const filteredHits = hits.filter((hit: any) => passesImageSimilarityThreshold(hit, similarityThreshold));
+
+  /** kNN had candidates but strict gate removed all; optional relax for Shop-the-Look. */
+  let thresholdRelaxed = false;
+  let workingHits = filteredHits;
+
+  let relaxFloorUsed: number | null = null;
+  if (
+    relaxThresholdWhenEmpty &&
+    filteredHits.length === 0 &&
+    hits.length > 0
+  ) {
+    const floor = imageRelaxSimilarityFloor();
+    relaxFloorUsed = floor;
+    workingHits = [...hits]
+      .sort((a: any, b: any) => Number(b._score) - Number(a._score))
+      .filter((h: any) => passesImageSimilarityThreshold(h, floor))
+      .slice(0, fetchLimit);
+    thresholdRelaxed = workingHits.length > 0;
+  }
+
+  /**
+   * Sparse strict gate: fusion + high CLIP threshold often leaves very few hits though kNN recall is large.
+   * When strict filter yields fewer candidates than we need, widen to SEARCH_IMAGE_RELAX_FLOOR (same as zero-hit relax).
+   */
+  const minWantCandidates = Math.min(fetchLimit, Math.max(limit, 15));
+  if (workingHits.length < minWantCandidates && hits.length > workingHits.length) {
+    const floor = imageRelaxSimilarityFloor();
+    relaxFloorUsed = floor;
+    const loose = [...hits]
+      .sort((a: any, b: any) => Number(b._score) - Number(a._score))
+      .filter((h: any) => passesImageSimilarityThreshold(h, floor))
+      .slice(0, fetchLimit);
+    if (loose.length > workingHits.length) {
+      workingHits = loose;
+      thresholdRelaxed = true;
+    }
+  }
+
+  /** True when kNN returned candidates but none met CLIP threshold (not the text SEARCH_FINAL_ACCEPT_MIN gate). */
+  const belowRelevanceThreshold =
+    hits.length > 0 && filteredHits.length === 0 && !thresholdRelaxed;
+
+  const crossFamilyPenaltyWeight = Math.max(
+    0,
+    Math.min(2000, Number(process.env.SEARCH_CROSS_FAMILY_PENALTY_WEIGHT ?? "420") || 420),
+  );
+  const filtersRecord = filters as Record<string, unknown>;
+  const filterCategory = (filters as { category?: string | string[] }).category;
+  const mergedCategoryForRelevance = Array.isArray(filterCategory)
+    ? filterCategory[0]
+    : filterCategory;
+  const astCategoriesForRelevance = [
+    ...new Set(
+      [
+        ...(predictedCategoryAisles ?? []).map((x) => String(x).toLowerCase().trim()).filter(Boolean),
+        ...(Array.isArray(filterCategory)
+          ? filterCategory
+          : filterCategory
+            ? [String(filterCategory)]
+            : []
+        ).map((x) => String(x).toLowerCase().trim()),
+      ].filter(Boolean),
+    ),
+  ];
+
+  const textQueryForRelevance =
+    typeof imageSearchTextQuery === "string" && imageSearchTextQuery.trim()
+      ? imageSearchTextQuery.trim()
+      : "";
+
+  let desiredProductTypes: string[] = [];
+  if (Array.isArray(filtersRecord.productTypes) && filtersRecord.productTypes.length > 0) {
+    desiredProductTypes = [
+      ...new Set(
+        filtersRecord.productTypes.map((t: unknown) => String(t).toLowerCase().trim()).filter(Boolean),
+      ),
+    ];
+  } else {
+    const fromFilterCat =
+      filterCategory != null
+        ? (Array.isArray(filterCategory) ? filterCategory : [filterCategory]).flatMap((c) =>
+            extractLexicalProductTypeSeeds(String(c)),
+          )
+        : [];
+    const fromPredicted = predictedCategoryAisles?.length
+      ? predictedCategoryAisles.flatMap((a) => extractLexicalProductTypeSeeds(String(a)))
+      : [];
+    desiredProductTypes = [
+      ...new Set(
+        [...fromFilterCat, ...fromPredicted]
+          .map((t) => String(t).toLowerCase().trim())
+          .filter(Boolean),
+      ),
+    ];
+  }
+  if (textQueryForRelevance) {
+    const fromText = extractFashionTypeNounTokens(textQueryForRelevance).map((t) => t.toLowerCase());
+    if (fromText.length > 0) {
+      desiredProductTypes = [...new Set([...desiredProductTypes, ...fromText])];
+    }
+  }
+
+  const explicitColorsForRelevance =
+    Array.isArray(filtersRecord.colors) && filtersRecord.colors.length > 0
+      ? filtersRecord.colors.map((c: unknown) => String(c).toLowerCase())
+      : filtersRecord.color
+        ? [String(filtersRecord.color).toLowerCase()]
+        : filtersRecord.softColor
+          ? [String(filtersRecord.softColor).toLowerCase()]
+        : [];
+  const desiredColorsForRelevance = [
+    ...new Set(
+      explicitColorsForRelevance.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
+    ),
+  ];
+  const rerankColorModeForRelevance = filtersRecord.colorMode === "all" ? "all" : "any";
+  const desiredColorsTierForRelevance =
+    explicitColorsForRelevance.length > 0 ? explicitColorsForRelevance : desiredColorsForRelevance;
+
+  const queryAgeGroupForRelevance =
+    typeof filtersRecord.ageGroup === "string" ? filtersRecord.ageGroup : undefined;
+  const queryGenderNorm = normalizeQueryGender(filtersAny.gender);
+  const hasAudienceIntentForRelevance = Boolean(queryAgeGroupForRelevance || queryGenderNorm);
+
+  const desiredStyleForRelevance =
+    typeof filtersRecord.style === "string"
+      ? String(filtersRecord.style).toLowerCase().trim()
+      : typeof filtersRecord.softStyle === "string"
+        ? String(filtersRecord.softStyle).toLowerCase().trim()
+        : undefined;
+
+  const relevanceIntent: SearchHitRelevanceIntent = {
+    desiredProductTypes,
+    desiredColors: desiredColorsForRelevance,
+    desiredColorsTier: desiredColorsTierForRelevance,
+    rerankColorMode: rerankColorModeForRelevance,
+    desiredStyle: desiredStyleForRelevance,
+    mergedCategory: mergedCategoryForRelevance
+      ? String(mergedCategoryForRelevance).toLowerCase()
+      : undefined,
+    astCategories: astCategoriesForRelevance,
+    queryAgeGroup: queryAgeGroupForRelevance,
+    audienceGenderForScoring: filtersAny.gender,
+    hasAudienceIntent: hasAudienceIntentForRelevance,
+    crossFamilyPenaltyWeight,
+    lexicalMatchQuery: textQueryForRelevance || undefined,
+  };
+
+  const complianceById = new Map<string, HitCompliance>();
+  const colorByHitId = new Map<string, string | null>();
+  for (const hit of workingHits) {
+    const idStr = String(hit._source.product_id);
+    const sim = knnCosinesimilScoreToCosine01(Number(hit._score));
+    const rounded = Math.round(sim * 100) / 100;
+    const rel = computeHitRelevance(hit, rounded, relevanceIntent);
+    const { primaryColor, ...comp } = rel;
+    complianceById.set(idStr, comp);
+    colorByHitId.set(idStr, primaryColor);
+  }
+
+  const sortedByRelevance = [...workingHits].sort((a: any, b: any) => {
+    const ida = String(a._source.product_id);
+    const idb = String(b._source.product_id);
+    const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
+    const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
+    if (Math.abs(fb - fa) > 1e-8) return fb - fa;
+    const ra = complianceById.get(ida)?.rerankScore ?? 0;
+    const rb = complianceById.get(idb)?.rerankScore ?? 0;
+    return rb - ra;
   });
 
-  const hits = osResponse.body.hits.hits;
-  
-  // OpenSearch k-NN scores are cosine similarity (0-1 for normalized vectors)
-  // Filter by threshold and normalize scores
-  const maxScore = hits.length > 0 ? hits[0]._score : 1;
-  
-  const filteredHits = hits.filter((hit: any) => {
-    const normalizedScore = hit._score / maxScore;
-    return normalizedScore >= similarityThreshold;
-  });
+  // Post-filter by gender using both indexed gender and title keywords.
+  // This is a safety net for index mislabeling (so "women" caption doesn't return "men" products).
+  // We only apply it when caller explicitly requested gender.
+  const rankedHitsCandidates = (() => {
+    if (!filtersAny.gender) return sortedByRelevance;
+    const wantG = normalizeQueryGender(filtersAny.gender);
+    if (!wantG) return sortedByRelevance;
 
-  const productIds = filteredHits.slice(0, limit).map((hit: any) => hit._source.product_id);
+    const title = (t: any) => (typeof t === "string" ? t.toLowerCase() : "");
+    const docGender = (hit: any) => {
+      const raw = hit?._source?.audience_gender ?? hit?._source?.attr_gender;
+      const s = typeof raw === "string" ? raw.toLowerCase() : "";
+      if (s === "men" || s === "women" || s === "unisex") return s;
+      return null;
+    };
+
+    const wantKw =
+      wantG === "women"
+        ? ["women", "womens", "female", "ladies", "woman"]
+        : wantG === "men"
+          ? ["men", "mens", "male", "boy", "boys", "man"]
+          : ["unisex"];
+
+    const oppKw =
+      wantG === "women"
+        ? ["men", "mens", "male", "boy", "boys", "man"]
+        : wantG === "men"
+          ? ["women", "womens", "female", "ladies", "woman", "girl", "girls"]
+          : [];
+
+    const matches = (hit: any) => {
+      const dg = docGender(hit);
+      const t = title(hit?._source?.title);
+      if (dg === wantG) return true;
+      const hasWant = wantKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(t));
+      if (!hasWant) return false;
+      if (oppKw.length > 0 && oppKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(t))) return false;
+      return true;
+    };
+
+    const filtered = sortedByRelevance.filter((h: any) => matches(h));
+    return filtered.length > 0 ? filtered : sortedByRelevance;
+  })();
+
+  const finalAcceptMin = config.search.finalAcceptMin;
+  const relevanceGateSoft = !imageHardRelevanceGateEnv();
+  const thresholdPassedHits = rankedHitsCandidates.filter(
+    (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= finalAcceptMin,
+  );
+  let rankedHits = relevanceGateSoft ? rankedHitsCandidates : thresholdPassedHits;
+
+  const belowFinalRelevanceGate =
+    workingHits.length > 0 && thresholdPassedHits.length === 0 && !relevanceGateSoft;
+
+  if (desiredColorsForRelevance.length > 0) {
+    const strictColorPost = String(process.env.SEARCH_COLOR_POSTFILTER_STRICT ?? "1").toLowerCase() !== "0";
+    const maxImgConfHits = Math.max(
+      0,
+      ...rankedHits.map((h: any) => Number(h?._source?.color_confidence_image) || 0),
+    );
+    const colorCompliantHits = rankedHits.filter(
+      (h: any) => (complianceById.get(String(h._source.product_id))?.colorCompliance ?? 0) > 0,
+    );
+    if (strictColorPost && colorCompliantHits.length > 0) {
+      rankedHits = colorCompliantHits;
+    } else if (strictColorPost && colorCompliantHits.length === 0 && maxImgConfHits < 0.42) {
+      // Weak image color signal — keep ranked list (same as text search)
+    }
+  }
+
+  const maxHydrate = Math.min(rankedHits.length, Math.max(limit * 4, limit));
+  const hitsForHydrate = rankedHits.slice(0, maxHydrate);
+  const productIds = hitsForHydrate.map((hit: any) => hit._source.product_id);
   const scoreMap = new Map<string, number>();
-  filteredHits.forEach((hit: any) => {
-    const normalizedScore = hit._score / maxScore;
-    scoreMap.set(hit._source.product_id, Math.round(normalizedScore * 100) / 100);
+  hitsForHydrate.forEach((hit: any) => {
+    const sim = knnCosinesimilScoreToCosine01(Number(hit._score));
+    scoreMap.set(String(hit._source.product_id), Math.round(sim * 100) / 100);
   });
 
   // Fetch product data
@@ -441,23 +975,91 @@ export async function searchByImageWithSimilarity(
 
     results = products.map((p: any) => {
       const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
+      const idStr = String(p.id);
+      const similarityScore = scoreMap.get(idStr) ?? 0;
+      const compliance = complianceById.get(idStr);
+      const imagesOut = images.map((img) => ({
+        id: img.id,
+        url: img.cdn_url,
+        is_primary: img.is_primary,
+        p_hash: img.p_hash ?? undefined,
+      }));
       return {
         ...p,
-        similarity_score: scoreMap.get(String(p.id)),
-        match_type: scoreMap.get(String(p.id))! >= 0.95 ? "exact" : "similar",
-        images: images.map((img) => ({
-          id: img.id,
-          url: img.cdn_url,
-          is_primary: img.is_primary,
-        })),
+        color: colorByHitId.get(idStr) ?? p.color ?? null,
+        similarity_score: similarityScore,
+        match_type:
+          similarityScore >= config.clip.matchTypeExactMin ? "exact" : "similar",
+        rerankScore: compliance?.rerankScore,
+        finalRelevance01: compliance?.finalRelevance01,
+        explain: compliance
+          ? {
+              exactTypeScore: compliance.exactTypeScore,
+              siblingClusterScore: compliance.siblingClusterScore,
+              parentHypernymScore: compliance.parentHypernymScore,
+              intraFamilyPenalty: compliance.intraFamilyPenalty,
+              productTypeCompliance: compliance.productTypeCompliance,
+              categoryScore: compliance.categoryRelevance01,
+              ...(compliance.lexicalScoreDistinct ? { lexicalScore: compliance.lexicalScore01 } : {}),
+              semanticScore: compliance.semanticScore01,
+              globalScore: compliance.osSimilarity01,
+              colorScore: compliance.colorCompliance,
+              matchedColor: compliance.matchedColor ?? undefined,
+              colorTier: compliance.colorTier,
+              colorCompliance: compliance.colorCompliance,
+            styleCompliance: compliance.styleCompliance,
+            hasStyleIntent: Boolean(desiredStyleForRelevance),
+              audienceCompliance: compliance.audienceCompliance,
+              crossFamilyPenalty: compliance.crossFamilyPenalty,
+              hasTypeIntent: compliance.hasTypeIntent,
+              hasColorIntent: compliance.hasColorIntent,
+              typeGateFactor: compliance.typeGateFactor,
+              hardBlocked: compliance.hardBlocked,
+              desiredProductTypes,
+              desiredColors: desiredColorsForRelevance,
+            desiredStyle: desiredStyleForRelevance,
+              colorMode: rerankColorModeForRelevance,
+              finalRelevance01: compliance.finalRelevance01,
+            }
+          : undefined,
+        images: imagesOut,
       };
     }) as ProductResult[];
   }
 
-  // Find additional related products by pHash if provided
+  results = dedupeSearchResults(results as any).slice(0, limit) as ProductResult[];
+
   let related: ProductResult[] = [];
   if (includeRelated && pHash) {
-    related = await findSimilarByPHash(pHash, productIds, limit);
+    const excludeIds = results.map((p) => String(p.id));
+    related = await findSimilarByPHash(pHash, excludeIds, limit);
+    const filteredRel = filterRelatedAgainstMain(results as any, related as any);
+    related = (filteredRel ?? []) as ProductResult[];
+  }
+
+  if (searchEvalEnabled()) {
+    emitImageSearchEval({
+      kind: "image_search",
+      eval_id: newSearchEvalId(),
+      variant: searchEvalVariant(),
+      ts_iso: new Date().toISOString(),
+      took_ms: Date.now() - evalT0,
+      result_count: results.length,
+      hit_ids: results.map((p) => String(p.id)),
+      similarity_scores: results.map((p) =>
+        typeof p.similarity_score === "number" ? p.similarity_score : 0,
+      ),
+      final_relevance_scores: results.map((p) =>
+        typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : null,
+      ),
+      soft_category: Boolean(
+        useAisleRerank && desiredCatalogTerms && desiredCatalogTerms.size > 0,
+      ),
+      predicted_aisles: aisleHints ? [...aisleHints] : null,
+      similarity_threshold_used: similarityThreshold,
+      below_relevance_threshold: belowRelevanceThreshold,
+      below_final_relevance_gate: belowFinalRelevanceGate,
+    });
   }
 
   return {
@@ -467,6 +1069,11 @@ export async function searchByImageWithSimilarity(
       threshold: similarityThreshold,
       total_results: results.length,
       total_related: related.length,
+      below_relevance_threshold: belowRelevanceThreshold,
+      threshold_relaxed: thresholdRelaxed,
+      final_accept_min: config.search.finalAcceptMin,
+      below_final_relevance_gate: belowFinalRelevanceGate,
+      relevance_gate_soft: relevanceGateSoft,
     },
   };
 }
@@ -479,12 +1086,24 @@ async function findSimilarByPHash(
   excludeIds: string[],
   limit: number = 10
 ): Promise<ProductResult[]> {
-  // Get all products with pHash
-  const result = await pg.query(
-    `SELECT id, p_hash FROM products 
-     WHERE p_hash IS NOT NULL AND is_hidden = false 
-     ${excludeIds.length > 0 ? `AND id NOT IN (${excludeIds.map(id => parseInt(id, 10)).join(",")})` : ""}`
-  );
+  const hasIsHidden = await productsTableHasIsHiddenColumn();
+  const hiddenClause = hasIsHidden ? "AND is_hidden = false" : "";
+  const excludeNumeric = excludeIds
+    .map((id) => parseInt(id, 10))
+    .filter(Number.isFinite);
+
+  const result =
+    excludeNumeric.length > 0
+      ? await pg.query(
+          `SELECT id, p_hash FROM products
+           WHERE p_hash IS NOT NULL ${hiddenClause}
+           AND id != ALL($1::int[])`,
+          [excludeNumeric]
+        )
+      : await pg.query(
+          `SELECT id, p_hash FROM products
+           WHERE p_hash IS NOT NULL ${hiddenClause}`
+        );
 
   // Calculate Hamming distance and filter similar
   const similar: Array<{ id: number; distance: number }> = [];
@@ -520,6 +1139,7 @@ async function findSimilarByPHash(
         id: img.id,
         url: img.cdn_url,
         is_primary: img.is_primary,
+        p_hash: img.p_hash ?? undefined,
       })),
     };
   }) as ProductResult[];
@@ -548,11 +1168,10 @@ export async function searchByTextWithRelated(
     includeRelated = true,
     relatedLimit = 10,
     useLLM = false,
-    sort,
   } = params;
 
   if (!query) {
-    return { results: [], meta: { total: 0, total_results: 0 } };
+    return { results: [], meta: { total_results: 0 } };
   }
 
   // Step 1: Process query (spelling, arabizi, normalization)
@@ -588,13 +1207,13 @@ export async function searchByTextWithRelated(
   if (mergedFilters.vendorId) filter.push({ term: { vendor_id: mergedFilters.vendorId } });
   
   // Apply extracted attribute filters
-  if (mergedFilters.gender) filter.push(attrGenderFilterClause(mergedFilters.gender));
+  if (mergedFilters.gender) filter.push({ term: { attr_gender: mergedFilters.gender } });
   if (mergedFilters.color) filter.push({ term: { attr_color: mergedFilters.color } });
 
   // Apply price filter from explicit params or extracted entities
   if (mergedFilters.minPriceCents !== undefined || mergedFilters.maxPriceCents !== undefined) {
     const range: any = {};
-    const currency = mergedFilters.currency?.toUpperCase() || 'USD';
+    const currency = mergedFilters.currency?.toUpperCase() || 'LBP';
     const LBP_TO_USD = 89000;
     if (currency === 'USD') {
       if (mergedFilters.minPriceCents !== undefined) range.gte = mergedFilters.minPriceCents / 100;
@@ -666,8 +1285,7 @@ export async function searchByTextWithRelated(
     });
   }
 
-  const searchBody: Record<string, unknown> = {
-    track_total_hits: true,
+  const searchBody = {
     size: limit,
     from: (page - 1) * limit,
     query: {
@@ -679,31 +1297,11 @@ export async function searchByTextWithRelated(
     },
   };
 
-  if (sort === "new") {
-    searchBody.sort = [
-      { last_seen_at: { order: "desc" } },
-      { _score: { order: "desc" } },
-    ];
-  } else if (sort === "price_asc") {
-    searchBody.sort = [
-      { price_usd: { order: "asc" } },
-      { _score: { order: "desc" } },
-    ];
-  } else if (sort === "price_desc") {
-    searchBody.sort = [
-      { price_usd: { order: "desc" } },
-      { _score: { order: "desc" } },
-    ];
-  } else {
-    searchBody.sort = [{ _score: { order: "desc" } }];
-  }
-
   const osResponse = await osClient.search({
     index: config.opensearch.index,
     body: searchBody,
   });
 
-  const totalHits = extractOpenSearchTotal(osResponse);
   const hits = osResponse.body.hits.hits;
   const productIds = hits.map((hit: any) => hit._source.product_id);
   const maxScore = hits.length > 0 ? hits[0]._score : 1;
@@ -743,7 +1341,8 @@ export async function searchByTextWithRelated(
       return {
         ...p,
         similarity_score: Math.round(boostedScore * 100) / 100,
-        match_type: boostedScore >= 0.8 ? "exact" : "similar",
+        match_type:
+          boostedScore >= config.clip.matchTypeExactMin ? "exact" : "similar",
         images: images.map((img) => ({
           id: img.id,
           url: img.cdn_url,
@@ -769,11 +1368,7 @@ export async function searchByTextWithRelated(
     related: related.length > 0 ? related : undefined,
     meta: {
       query: effectiveQuery,
-      /** Total matching documents (OpenSearch), for pagination */
-      total: totalHits,
-      /** @deprecated use total — kept for older clients; was incorrectly page size */
-      total_results: totalHits,
-      page_results: results.length,
+      total_results: results.length,
       total_related: related.length,
       parsed_query: parsedQuery,
       processed_query: processed,
@@ -850,6 +1445,22 @@ async function findRelatedProducts(
 }
 
 // ============================================================================
+// Product detail
+// ============================================================================
+
+export async function getProductWithVariants(productId: number): Promise<{
+  product: Record<string, unknown>;
+  images: ProductImage[];
+} | null> {
+  const rows = await getProductsByIdsOrdered([productId]);
+  if (!rows.length) return null;
+  const product = rows[0] as Record<string, unknown>;
+  const imagesByProduct = await getImagesForProducts([productId]);
+  const images = imagesByProduct.get(productId) ?? [];
+  return { product, images };
+}
+
+// ============================================================================
 // Facets / Aggregations
 // ============================================================================
 
@@ -878,7 +1489,7 @@ export async function getAttributeFacets(filters: SearchFilters = {}): Promise<A
   if (filters.material) filter.push({ term: { attr_material: filters.material } });
   if (filters.fit) filter.push({ term: { attr_fit: filters.fit } });
   if (filters.style) filter.push({ term: { attr_style: filters.style } });
-  if (filters.gender) filter.push(attrGenderFilterClause(filters.gender));
+  if (filters.gender) filter.push({ term: { attr_gender: filters.gender } });
   if (filters.pattern) filter.push({ term: { attr_pattern: filters.pattern } });
 
   const searchBody = {
@@ -1054,12 +1665,18 @@ export async function getCandidateScoresForProducts(
     const clipPromise = (async () => {
       const clipStart = Date.now();
       const fetchLimit = Math.min(clipLimit, 500);
+      const embeddingField =
+        String(process.env.SEARCH_IMAGE_KNN_FIELD ?? "embedding").trim() || "embedding";
       const clipBody = {
         size: fetchLimit,
         _source: ["product_id"],
         query: {
           bool: {
-            must: { knn: { embedding: { vector: embedding, k: fetchLimit } } },
+            must: {
+              knn: {
+                [embeddingField]: { vector: embedding, k: fetchLimit },
+              },
+            },
             filter: [{ term: { is_hidden: false } }],
           },
         },

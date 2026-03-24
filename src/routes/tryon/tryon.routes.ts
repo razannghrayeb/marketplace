@@ -11,14 +11,9 @@
 import { Router } from "express";
 import multer from "multer";
 import { rateLimit } from "../../middleware/index";
-import { requireAuth } from "../../middleware/auth";
 import * as controller from "./tryon.controller";
 
 const router = Router();
-
-// Service health is public; all other routes require auth
-router.get("/service/health", controller.serviceHealth);
-router.use(requireAuth);
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -27,6 +22,35 @@ const upload = multer({
 
 // Strict rate limiter for Vertex AI calls: 10 requests / 5 minutes per IP
 const tryonRateLimit = rateLimit({ windowMs: 5 * 60 * 1000, maxRequests: 10 });
+
+// ============================================================================
+// Service Status (must be before /:id to avoid route shadowing)
+// ============================================================================
+
+router.get("/service/health", controller.serviceHealth);
+
+// ============================================================================
+// Garment Validation (pre-check)
+// ============================================================================
+
+router.post("/validate", controller.validateGarmentEndpoint);
+
+// ============================================================================
+// Webhook Management
+// ============================================================================
+
+router.post("/webhooks", controller.createWebhook);
+router.get("/webhooks", controller.getWebhook);
+router.delete("/webhooks", controller.removeWebhook);
+router.post("/webhooks/disable", controller.pauseWebhook);
+
+// ============================================================================
+// Admin: Dead Letter Queue & Retry Management
+// ============================================================================
+
+router.get("/admin/dlq", controller.getDLQ);
+router.post("/admin/dlq/:jobId/retry", controller.retryDLQJob);
+router.post("/admin/process-retries", controller.processRetries);
 
 // ============================================================================
 // Saved Results (must be before /:id)
@@ -41,13 +65,23 @@ router.delete("/saved/:savedId",      controller.deleteSaved);
 // ============================================================================
 
 // Generic: person photo + garment image or garment_id
+const personUploadFields = [
+  { name: "person_image", maxCount: 1 },
+  { name: "person", maxCount: 1 },
+  { name: "model", maxCount: 1 },
+  { name: "model_image", maxCount: 1 },
+] as const;
+
+const garmentSingleFields = [
+  { name: "garment_image", maxCount: 1 },
+  { name: "garment", maxCount: 1 },
+  { name: "clothing", maxCount: 1 },
+] as const;
+
 router.post(
   "/",
   tryonRateLimit,
-  upload.fields([
-    { name: "person_image",  maxCount: 1 },
-    { name: "garment_image", maxCount: 1 },
-  ]),
+  upload.fields([...personUploadFields, ...garmentSingleFields]),
   controller.createTryOn
 );
 
@@ -55,7 +89,7 @@ router.post(
 router.post(
   "/from-wardrobe",
   tryonRateLimit,
-  upload.single("person_image"),
+  upload.fields([...personUploadFields]),
   controller.tryOnFromWardrobe
 );
 
@@ -63,7 +97,7 @@ router.post(
 router.post(
   "/from-product",
   tryonRateLimit,
-  upload.single("person_image"),
+  upload.fields([...personUploadFields]),
   controller.tryOnFromProduct
 );
 
@@ -72,7 +106,7 @@ router.post(
   "/batch",
   tryonRateLimit,
   upload.fields([
-    { name: "person_image",   maxCount: 1 },
+    ...personUploadFields,
     { name: "garment_images", maxCount: 5 },
   ]),
   controller.batchTryOn

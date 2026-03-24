@@ -5,7 +5,7 @@
  */
 
 import { Router, Request, Response } from "express";
-import { checkReadiness, checkLiveness } from "./health.service";
+import { checkReadiness, checkLiveness, getDetailedHealth } from "./health.service";
 
 const router = Router();
 
@@ -31,6 +31,16 @@ router.get("/ready", async (_req: Request, res: Response) => {
  */
 router.get("/live", (_req: Request, res: Response) => {
   const status = checkLiveness();
+  res.json(status);
+});
+
+/**
+ * GET /health/detailed
+ * 
+ * Detailed health including circuit breakers, cache stats
+ */
+router.get("/detailed", async (_req: Request, res: Response) => {
+  const status = await getDetailedHealth();
   res.json(status);
 });
 

@@ -1,8 +1,7 @@
-import express, { NextFunction, Request, Response } from "express";
+import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import path from "path";
-import axios from "axios";
 import { config } from "./config";
 import { healthRouter } from "./routes/health/index";
 import adminRouter from "./routes/admin";
@@ -20,98 +19,12 @@ import {
   rateLimit,
 } from "./middleware/index";
 import { metricsMiddleware } from "./middleware/metrics";
-
-const ML_ROUTE_PREFIXES = [
-  "/search",
-  "/products",
-  "/api/images",
-  "/api/ingest",
-  "/api/wardrobe",
-  "/api/labeling",
-];
-
-function isMlRoute(pathname: string): boolean {
-  return ML_ROUTE_PREFIXES.some(
-    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
-  );
-}
-
-async function proxyMlRequest(req: Request, res: Response, next: NextFunction) {
-  if (!config.mlServiceUrl) {
-    return res.status(503).json({
-      ok: false,
-      error:
-        "ML_SERVICE_URL is not configured for SERVICE_ROLE=api. Cannot proxy ML routes.",
-    });
-  }
-
-  const targetUrl = new URL(req.originalUrl, config.mlServiceUrl).toString();
-  const headers: Record<string, string | string[] | undefined> = {
-    ...req.headers,
-    "x-forwarded-host": req.get("host") || "",
-    "x-forwarded-proto": req.protocol,
-    "x-forwarded-for": req.ip,
-  };
-
-  delete headers.host;
-  delete headers.connection;
-  delete headers["content-length"];
-
-  const method = req.method.toUpperCase();
-  const hasBody = method !== "GET" && method !== "HEAD";
-
-  let data: unknown;
-  if (hasBody) {
-    if (req.is("application/json") && req.body && Object.keys(req.body).length > 0) {
-      data = req.body;
-    } else {
-      data = req;
-    }
-  }
-
-  try {
-    const upstream = await axios({
-      url: targetUrl,
-      method: method as any,
-      headers,
-      data,
-      responseType: "stream",
-      validateStatus: () => true,
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity,
-      timeout: 120000,
-    });
-
-    const hopByHop = new Set([
-      "connection",
-      "keep-alive",
-      "proxy-authenticate",
-      "proxy-authorization",
-      "te",
-      "trailer",
-      "transfer-encoding",
-      "upgrade",
-    ]);
-
-    for (const [key, value] of Object.entries(upstream.headers)) {
-      if (hopByHop.has(key.toLowerCase()) || value === undefined) {
-        continue;
-      }
-      res.setHeader(key, value as any);
-    }
-
-    res.status(upstream.status);
-    upstream.data.pipe(res);
-  } catch (error) {
-    next(error);
-  }
-}
+import { initClip } from "./lib/image/clip";
+import { blip } from "./lib/image/blip";
+import { loadEntitiesFromDB } from "./lib/search/semanticSearch";
 
 export async function createServer() {
-  const isMlRole = config.serviceRole === "ml" || config.serviceRole === "all";
-  const isApiRole = config.serviceRole === "api" || config.serviceRole === "all";
-
-  if (process.env.NODE_ENV !== "test" && isMlRole) {
+  if (process.env.NODE_ENV !== "test") {
     try {
       await ensureIndex();
     } catch (err) {
@@ -135,61 +48,70 @@ export async function createServer() {
   app.use("/metrics", metricsRouter);
   app.use("/health", healthRouter);
 
-  if (isMlRole) {
-    const [
-      { searchRouter },
-      { default: productsRouter },
-      { default: imageAnalysisRouter },
-      { default: ingestRouter },
-      { wardrobeRouter },
-      { labelingRouter },
-    ] = await Promise.all([
-      import("./routes/search/index"),
-      import("./routes/products"),
-      import("./routes/products/image-analysis.controller"),
-      import("./routes/ingest/ingest.routes"),
-      import("./routes/wardrobe/index"),
-      import("./routes/labeling/index"),
-    ]);
+  const [
+    { searchRouter },
+    { default: productsRouter },
+    { default: imageAnalysisRouter },
+    { default: ingestRouter },
+    { wardrobeRouter },
+    { labelingRouter },
+  ] = await Promise.all([
+    import("./routes/search/index"),
+    import("./routes/products"),
+    import("./routes/products/image-analysis.controller"),
+    import("./routes/ingest/ingest.routes"),
+    import("./routes/wardrobe/index"),
+    import("./routes/labeling/index"),
+  ]);
 
-    app.use("/search", searchRouter);
-    app.use("/products", productsRouter);
-    app.use("/api/images", imageAnalysisRouter);
-    app.use("/api/ingest", ingestRouter);
-    app.use("/api/wardrobe", wardrobeRouter);
-    app.use("/api/labeling", labelingRouter);
-    app.use("/products/price-drops", productsRouter);
+  app.use("/search", searchRouter);
+  app.use("/products", productsRouter);
+  app.use("/api/images", imageAnalysisRouter);
+  app.use("/api/ingest", ingestRouter);
+  app.use("/api/wardrobe", wardrobeRouter);
+  app.use("/api/labeling", labelingRouter);
+  app.use("/products/price-drops", productsRouter);
+
+  app.use("/admin", adminRouter);
+  app.use("/api/compare", compareRouter);
+  app.use("/api/tryon", tryonRouter);
+  app.use("/api/auth", authRouter);
+  app.use("/api/cart", cartRouter);
+  app.use("/api/favorites", favoritesRouter);
+
+  // =========================================================================
+  // FIX: Initialize CLIP models at startup before serving any traffic.
+  //
+  // Previously initClip() was never called, so imageSession and textSession
+  // remained null. The first search request would hit getTextEmbedding()
+  // which immediately threw: "CLIP text model not loaded."
+  //
+  // We call it here (after routes are registered but before app.listen in
+  // index.ts) so both sessions are fully loaded and ready.
+  // =========================================================================
+  try {
+    console.log("[server] Initializing CLIP models...");
+    await initClip();
+    console.log("[server] ✅ CLIP models ready");
+  } catch (err) {
+    console.error("[server] ❌ FATAL: CLIP model initialization failed:", err);
+    process.exit(1);
   }
 
-  // API-only deployments (SERVICE_ROLE=api) do not load ML routes above, so /products and
-  // /search would otherwise hit the proxy → 404 if ML_SERVICE_URL is wrong/unset.
-  // Mount the same routers here so GET /products/:id, list, search, etc. work on the API host.
-  if (isApiRole && !isMlRole) {
-    const [{ default: productsRouterApi }, { searchRouter }] = await Promise.all([
-      import("./routes/products"),
-      import("./routes/search/index"),
-    ]);
-    app.use("/products", productsRouterApi);
-    app.use("/search", searchRouter);
+  // BLIP is optional — hybrid search degrades gracefully without it,
+  // but when models are present captions significantly improve image search.
+  try {
+    console.log("[server] Initializing BLIP captioning model...");
+    await blip.init();
+    console.log("[server] ✅ BLIP captioning ready");
+  } catch (err) {
+    console.warn("[server] ⚠️ BLIP init failed — image search will use image-only embeddings:", (err as Error).message);
   }
 
-  if (isApiRole) {
-    app.use("/admin", adminRouter);
-    app.use("/api/compare", compareRouter);
-    app.use("/api/tryon", tryonRouter);
-    app.use("/api/auth", authRouter);
-    app.use("/api/cart", cartRouter);
-    app.use("/api/favorites", favoritesRouter);
-  }
-
-  if (config.serviceRole === "api") {
-    app.use((req, res, next) => {
-      if (!isMlRoute(req.path)) {
-        return next();
-      }
-      return proxyMlRequest(req, res, next);
-    });
-  }
+  // Pre-load brand/category knowledge base from DB for semantic search
+  loadEntitiesFromDB().catch((err) =>
+    console.warn("[server] ⚠️ Entity loading failed:", err)
+  );
 
   // Serve static files (labeling UI)
   app.use(express.static(path.join(process.cwd(), "public")));
@@ -197,11 +119,7 @@ export async function createServer() {
   app.get("/", (_req, res) =>
     res.json({
       ok: true,
-      serviceRole: config.serviceRole,
-      routes: {
-        api: isApiRole,
-        ml: isMlRole,
-      },
+      mode: "monolith",
     })
   );
 

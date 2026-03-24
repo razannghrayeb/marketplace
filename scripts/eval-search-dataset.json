@@ -1,0 +1,48 @@
+[
+  {
+    "id": "hoodie_typo",
+    "query": "hoodi",
+    "expected": {
+      "productTypes": ["hoodie"],
+      "colors": [],
+      "colorMode": "any"
+    }
+  },
+  {
+    "id": "jogging_type",
+    "query": "jogging",
+    "expected": {
+      "productTypes": ["joggers"],
+      "colors": [],
+      "colorMode": "any"
+    }
+  },
+  {
+    "id": "multi_red_black_all",
+    "query": "red and black hoodie",
+    "expected": {
+      "productTypes": ["hoodie"],
+      "colors": ["red", "black"],
+      "colorMode": "all"
+    }
+  },
+  {
+    "id": "multi_or_any",
+    "query": "orange or blue jogging pants",
+    "expected": {
+      "productTypes": ["joggers"],
+      "colors": ["orange", "blue"],
+      "colorMode": "any"
+    }
+  },
+  {
+    "id": "multi_comma_all",
+    "query": "beige, navy hoodie",
+    "expected": {
+      "productTypes": ["hoodie"],
+      "colors": ["beige", "navy"],
+      "colorMode": "all"
+    }
+  }
+]
+

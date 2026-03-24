@@ -1,6 +1,7 @@
 import { pg } from "../src/lib/db";
 import { osClient } from "../src/lib/opensearch";
 import { config } from "../src/config";
+import { buildProductSearchDocument } from "../src/lib/search/searchDocument";
 
 
 async function main() {
@@ -27,17 +28,21 @@ async function main() {
             await osClient.index({
                 index: config.opensearch.index,
                 id: String(product.id),
-                body: {
-                product_id: String(product.id),
-                vendor_id: String(vendorId),
-                title: p.title,
-                brand: p.brand,
-                category: p.category,
-                price_usd: Math.round(p.price_cents / 89000),
-                availability: p.availability ? "in_stock" : "out_of_stock",
-                image_cdn: null,
-                last_seen_at: product.last_seen
-                },
+                body: buildProductSearchDocument({
+                  productId: product.id,
+                  vendorId,
+                  title: p.title,
+                  description: null,
+                  brand: p.brand,
+                  category: p.category,
+                  priceCents: p.price_cents,
+                  availability: p.availability,
+                  isHidden: false,
+                  canonicalId: null,
+                  imageCdn: null,
+                  pHash: null,
+                  lastSeenAt: product.last_seen,
+                }),
                 refresh: true
                 });
         }

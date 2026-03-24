@@ -2,6 +2,9 @@ import { GoogleGenerativeAI, Part } from '@google/generative-ai';
 import { parseNegations, type NegationConstraint } from '../queryProcessor/negationHandler';
 import { parseSpatialRelationships, type SpatialConstraint } from '../queryProcessor/spatialRelationships';
 
+/** Max images per multi-image search; ordinal rules and regex cover imageIndex 0..4. */
+export const MAX_MULTI_IMAGE_UPLOADS = 5;
+
 // ============================================================================
 // Types & Interfaces
 // ============================================================================
@@ -85,6 +88,46 @@ export interface IntentParserConfig {
   timeout?: number;
 }
 
+/** Stable default for Google AI Studio generateContent; 1.5 short names often 404 on v1beta. */
+export const DEFAULT_GEMINI_GENERATION_MODEL = 'gemini-2.5-flash';
+
+/** Resolve model id: explicit config → GEMINI_MODEL env → default. */
+export function resolveGeminiGenerationModel(explicit?: string): string {
+  const a = explicit?.trim();
+  if (a) return a;
+  const b = process.env.GEMINI_MODEL?.trim();
+  if (b) return b;
+  return DEFAULT_GEMINI_GENERATION_MODEL;
+}
+
+/**
+ * Gemini-free intent: equal image weights, no extracted text attributes or negatives.
+ * Used when the API key is missing, a budget timeout fires, or callers skip vision LLM.
+ */
+export function createClipOnlyParsedIntent(imageCount: number, userPrompt: string): ParsedIntent {
+  const n = Math.max(
+    1,
+    Math.min(Math.max(0, imageCount), MAX_MULTI_IMAGE_UPLOADS),
+  );
+  const w = 1 / n;
+  return {
+    imageIntents: Array.from({ length: n }, (_, i) => ({
+      imageIndex: i,
+      primaryAttributes: ["color", "style", "silhouette", "texture", "material", "pattern"],
+      extractedValues: {},
+      weight: w,
+      reasoning: "CLIP-only fallback (Gemini unavailable, timed out, or skipped)",
+    })),
+    constraints: {
+      mustHave: [],
+      mustNotHave: [],
+    },
+    searchStrategy: "Visual similarity from uploaded images only",
+    confidence: 0.15,
+    rawQuery: userPrompt,
+  };
+}
+
 // ============================================================================
 // IntentParserService - Orchestrates multi-image intent extraction
 // ============================================================================
@@ -97,7 +140,7 @@ export class IntentParserService {
 
   constructor(config: IntentParserConfig) {
     this.client = new GoogleGenerativeAI(config.apiKey);
-    this.model = config.model || 'gemini-1.5-flash';
+    this.model = resolveGeminiGenerationModel(config.model);
     this.maxRetries = config.maxRetries || 3;
     this.timeout = config.timeout || 30000;
   }
@@ -110,6 +153,8 @@ export class IntentParserService {
     userPrompt: string,
     imageAnalyses?: ImageAnalysisResult[]
   ): Promise<ParsedIntent> {
+    // Keep analyses for fallback if Gemini or JSON parse fails after vision succeeds.
+    let analyses: ImageAnalysisResult[] = imageAnalyses ?? [];
     try {
       // Step 0: Pre-parse negations and spatial relationships
       const negationResult = parseNegations(userPrompt);
@@ -125,7 +170,9 @@ export class IntentParserService {
       }
 
       // Step 1: If no pre-analysis provided, analyze images first
-      const analyses = imageAnalyses || await this.analyzeImages(images);
+      if (analyses.length === 0) {
+        analyses = await this.analyzeImages(images);
+      }
 
       // Step 2: Build the intent extraction prompt (with negations/spatial context)
       const prompt = this.buildIntentPrompt(
@@ -139,7 +186,7 @@ export class IntentParserService {
       const response = await this.callGeminiWithRetry(images, prompt);
 
       // Step 4: Parse and validate the response
-      const parsedIntent = this.parseIntentResponse(response);
+      const parsedIntent = this.parseIntentResponse(response, analyses.length);
       parsedIntent.rawQuery = userPrompt;
 
       // Step 5: Merge pre-parsed constraints into the result
@@ -149,13 +196,35 @@ export class IntentParserService {
         spatialResult.spatialConstraints
       );
 
+      this.reconcileOrdinalImageIntents(parsedIntent, userPrompt, analyses);
+
       return parsedIntent;
 
     } catch (error) {
       console.error('[IntentParserService] Error parsing intent:', error);
-      // Return fallback intent on failure
-      return this.createFallbackIntent(imageAnalyses || [], userPrompt);
+      return this.createFallbackIntent(
+        this.ensureAnalysesForFallback(analyses, images.length),
+        userPrompt,
+      );
     }
+  }
+
+  /**
+   * When vision never produced rows (e.g. Gemini error before analyzeImages returns JSON),
+   * emit one stub per uploaded image so multi-image prompt parsing and reconcile can use indices.
+   */
+  private ensureAnalysesForFallback(
+    analyses: ImageAnalysisResult[],
+    uploadCount: number,
+  ): ImageAnalysisResult[] {
+    if (analyses.length > 0) return analyses;
+    const n = Math.max(1, Math.min(uploadCount, MAX_MULTI_IMAGE_UPLOADS));
+    return Array.from({ length: n }, (_, idx) => ({
+      imageIndex: idx,
+      detected: [],
+      attributes: {},
+      description: 'Vision unavailable',
+    }));
   }
 
   // -------------------------------------------------------------------------
@@ -256,6 +325,28 @@ Respond ONLY with valid JSON array (no markdown, no explanation):
       return `- Image ${idx} ("${ordinal} image", "image ${idx + 1}"): ${analysis.description || analysis.detected?.[0]?.category || 'fashion item'}`;
     }).join('\n');
 
+    const n = imageAnalyses.length;
+    const uploadRule =
+      n >= 2
+        ? `
+## UPLOAD ORDER (NON-NEGOTIABLE)
+The user uploaded **${n} images** in **fixed order** as separate image parts above: part 1 = **imageIndex 0**, part 2 = **imageIndex 1**, … part ${n} = **imageIndex ${n - 1}**.
+- "first / 1st / image 1" → **imageIndex 0**
+- "second / 2nd / image 2" → **imageIndex 1**
+- "third / 3rd / image 3" → **imageIndex 2**
+- "fourth / 4th / image 4" → **imageIndex 3**
+- "fifth / 5th / image 5" → **imageIndex 4**
+- "last / final image" → **imageIndex ${n - 1}**
+
+**If the user asks for color (or texture, style, pattern, fit) FROM A SPECIFIC IMAGE (e.g. third, fifth, last), you MUST use that **imageIndex** for that attribute — never collapse everything onto imageIndex 0.**
+When different attributes come from different images, output **one imageIntents object per image index that is referenced** (works for 2–${MAX_MULTI_IMAGE_UPLOADS} uploads: you may have several rows, each for a different imageIndex).
+
+### COMMON MISTAKE TO AVOID
+Wrong: one row with imageIndex 0 and primaryAttributes ["color","style"] when the user said color from the **second** (or third / last) image.
+Right: separate rows — e.g. imageIndex 1 with ["color", ...] and imageIndex 0 with ["style", ...] when the user split attributes across images (same idea for third=2, fourth=3, fifth=4, last=${n - 1}).
+`
+        : '';
+
     return `You are an expert fashion search AI specializing in understanding cross-image attribute requests.
 
 ## USER REQUEST
@@ -266,7 +357,7 @@ ${imageGuide}
 
 ## DETAILED IMAGE ANALYSES
 ${JSON.stringify(imageAnalyses, null, 2)}
-
+${uploadRule}
 ## CRITICAL: Understanding Image References
 Users refer to images in various ways. Map them correctly:
 | User Says | Maps To |
@@ -274,8 +365,10 @@ Users refer to images in various ways. Map them correctly:
 | "first image", "1st", "image 1", "the first one" | imageIndex: 0 |
 | "second image", "2nd", "image 2", "the second one" | imageIndex: 1 |
 | "third image", "3rd", "image 3", "the third one" | imageIndex: 2 |
+| "fourth image", "4th", "image 4" | imageIndex: 3 |
+| "fifth image", "5th", "image 5" | imageIndex: 4 |
 | "this one" (with single image) | imageIndex: 0 |
-| "last image", "the last one" | highest imageIndex |
+| "last image", "the last one", "final picture" | highest imageIndex (${n - 1} for ${n} uploads) |
 
 ## ATTRIBUTE EXTRACTION RULES
 
@@ -356,6 +449,17 @@ ${spatialConstraints.map(s => `- ${s.attribute} ${s.relationship} ${s.location}:
 → Image 0: primaryAttributes: ["material", "texture", "color"], weight: 0.7
 → Image 1: primaryAttributes: ["fit", "silhouette"], weight: 0.3
 
+**User (2 of N uploads):** "Use the color from the second image and the style from the first"
+→ Image 0: primaryAttributes: ["style"], extractedValues from analyses[0].attributes.style — weight: 0.5
+→ Image 1: primaryAttributes: ["color", "colorTone"], extractedValues colors from analyses[1] — weight: 0.5
+→ Do NOT assign both color and style to imageIndex 0.
+
+**User (3+ uploads):** "Style from the first, color from the third, pattern like the last"
+→ Image 0: primaryAttributes: ["style"], …
+→ Image 2: primaryAttributes: ["color", "colorTone"], …
+→ Image ${n - 1}: primaryAttributes: ["pattern"], … (last upload = imageIndex ${n - 1})
+→ Use one row per referenced imageIndex; omit images the user did not mention unless needed for weights.
+
 Respond ONLY with valid JSON (no markdown, no explanation, no extra text):
 {
   "imageIntents": [
@@ -401,6 +505,30 @@ Respond ONLY with valid JSON (no markdown, no explanation, no extra text):
   // -------------------------------------------------------------------------
   // Step 3: Call Gemini API with retry logic
   // -------------------------------------------------------------------------
+  /** Detect MIME for Gemini inlineData (PNG/WebP uploads were mislabeled as JPEG). */
+  private sniffImageMime(buffer: Buffer): 'image/jpeg' | 'image/png' | 'image/webp' {
+    if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8) return 'image/jpeg';
+    if (
+      buffer.length >= 8 &&
+      buffer[0] === 0x89 &&
+      buffer[1] === 0x50 &&
+      buffer[2] === 0x4e &&
+      buffer[3] === 0x47
+    ) {
+      return 'image/png';
+    }
+    if (
+      buffer.length >= 12 &&
+      buffer[8] === 0x57 &&
+      buffer[9] === 0x45 &&
+      buffer[10] === 0x42 &&
+      buffer[11] === 0x50
+    ) {
+      return 'image/webp';
+    }
+    return 'image/jpeg';
+  }
+
   private async callGeminiWithRetry(
     images: Buffer[],
     prompt: string,
@@ -414,7 +542,7 @@ Respond ONLY with valid JSON (no markdown, no explanation, no extra text):
         // Add images first
         ...images.map((img) => ({
           inlineData: {
-            mimeType: 'image/jpeg' as const,
+            mimeType: this.sniffImageMime(img),
             data: img.toString('base64')
           }
         })),
@@ -422,7 +550,15 @@ Respond ONLY with valid JSON (no markdown, no explanation, no extra text):
         { text: prompt }
       ];
 
-      const result = await model.generateContent(parts);
+      const result = await Promise.race([
+        model.generateContent(parts),
+        new Promise<never>((_, rej) =>
+          setTimeout(
+            () => rej(new Error("GEMINI_CALL_TIMEOUT")),
+            Math.max(1000, this.timeout),
+          ),
+        ),
+      ]);
       const response = result.response;
       const text = response.text();
 
@@ -449,12 +585,12 @@ Respond ONLY with valid JSON (no markdown, no explanation, no extra text):
   // -------------------------------------------------------------------------
   // Step 4: Parse and validate the intent response
   // -------------------------------------------------------------------------
-  private parseIntentResponse(response: string): ParsedIntent {
+  private parseIntentResponse(response: string, uploadCount: number): ParsedIntent {
     const cleaned = this.cleanJsonResponse(response);
     const parsed = JSON.parse(cleaned);
 
     // Validate and normalize
-    this.validateParsedIntent(parsed);
+    this.validateParsedIntent(parsed, uploadCount);
 
     return parsed as ParsedIntent;
   }
@@ -480,20 +616,33 @@ Respond ONLY with valid JSON (no markdown, no explanation, no extra text):
     return cleaned.trim();
   }
 
-  private validateParsedIntent(parsed: any): void {
+  private validateParsedIntent(parsed: any, uploadCount?: number): void {
     // Validate imageIntents exists
     if (!parsed.imageIntents || !Array.isArray(parsed.imageIntents)) {
       throw new Error('Missing or invalid imageIntents array');
     }
+
+    if (parsed.imageIntents.length === 0) {
+      throw new Error('Empty imageIntents array');
+    }
+
+    const maxIdx =
+      uploadCount !== undefined
+        ? Math.max(0, Math.min(uploadCount, MAX_MULTI_IMAGE_UPLOADS) - 1)
+        : MAX_MULTI_IMAGE_UPLOADS - 1;
 
     // Validate each intent
     for (const intent of parsed.imageIntents) {
       if (typeof intent.imageIndex !== 'number') {
         throw new Error('Invalid imageIndex in intent');
       }
+      intent.imageIndex = Math.max(0, Math.min(maxIdx, Math.trunc(intent.imageIndex)));
       if (!Array.isArray(intent.primaryAttributes)) {
         intent.primaryAttributes = [];
       }
+      intent.primaryAttributes = intent.primaryAttributes.map((a: string) =>
+        String(a || '').toLowerCase().trim()
+      ).filter(Boolean);
       if (typeof intent.weight !== 'number') {
         intent.weight = 1.0 / parsed.imageIntents.length;
       }
@@ -531,6 +680,367 @@ Respond ONLY with valid JSON (no markdown, no explanation, no extra text):
     }
     if (typeof parsed.confidence !== 'number') {
       parsed.confidence = 0.5;
+    }
+  }
+
+  /**
+   * Upload-order fragment for `imageIndex` (0 = first, …, 4 = fifth). Beyond 5, use generic image N.
+   */
+  private static ordinalFragmentForImageIndex(imageIndex: number): string {
+    const frags = [
+      '(?:first|1st|image\\s*1|pic\\s*1|picture\\s*1|photo\\s*1)',
+      '(?:second|2nd|image\\s*2|pic\\s*2|picture\\s*2|photo\\s*2)',
+      '(?:third|3rd|image\\s*3|pic\\s*3|picture\\s*3|photo\\s*3)',
+      '(?:fourth|4th|image\\s*4|pic\\s*4|picture\\s*4|photo\\s*4)',
+      '(?:fifth|5th|image\\s*5|pic\\s*5|picture\\s*5|photo\\s*5)',
+    ];
+    if (imageIndex >= 0 && imageIndex < frags.length) return frags[imageIndex];
+    const n = imageIndex + 1;
+    return `(?:image\\s*${n}|pic\\s*${n}|picture\\s*${n}|photo\\s*${n})`;
+  }
+
+  /**
+   * True if the prompt ties `kind` to this upload slot (including "last/final" when `imageIndex` is the last upload).
+   */
+  private promptLinksAttributeToImage(
+    prompt: string,
+    kind: 'color' | 'style' | 'texture' | 'pattern' | 'silhouette',
+    imageIndex: number,
+    nImg: number,
+  ): boolean {
+    const o = IntentParserService.ordinalFragmentForImageIndex(imageIndex);
+    const p = prompt;
+    /** Between ordinal and attribute word, do not span " and " (avoids "X from first … and color from second" linking color to first). */
+    const bridgeToAttr = '(?:(?!\\s+and\\s+)[^.!?\n]){0,80}';
+
+    if (nImg >= 2 && imageIndex === nImg - 1) {
+      if (kind === 'color') {
+        if (
+          /(?:colour|color)s?\s+(?:from|of|in)\s+(?:the\s+)?(?:last|final)(?:\s+(?:image|one|pic|picture|photo))?/i.test(
+            p,
+          ) ||
+          new RegExp(
+            `(?:from|of)\\s+(?:the\\s+)?(?:last|final)(?:\\s+(?:image|one|pic|picture|photo))?${bridgeToAttr}(?:colour|color)`,
+            'i',
+          ).test(p) ||
+          new RegExp(
+            `(?:last|final)(?:\\s+(?:image|one|pic|picture|photo))?${bridgeToAttr}(?:colour|color)`,
+            'i',
+          ).test(p)
+        ) {
+          return true;
+        }
+      } else if (kind === 'style') {
+        if (
+          /(?:style|vibe|aesthetic)s?\s+(?:from|of)\s+(?:the\s+)?(?:last|final)(?:\s+(?:image|one|pic|picture|photo))?/i.test(
+            p,
+          ) ||
+          new RegExp(
+            `(?:from|of)\\s+(?:the\\s+)?(?:last|final)(?:\\s+(?:image|one|pic|picture|photo))?${bridgeToAttr}(?:style|vibe|aesthetic)`,
+            'i',
+          ).test(p) ||
+          new RegExp(
+            `(?:last|final)(?:\\s+(?:image|one|pic|picture|photo))?${bridgeToAttr}(?:style|vibe|aesthetic)`,
+            'i',
+          ).test(p)
+        ) {
+          return true;
+        }
+      } else if (kind === 'texture') {
+        if (
+          /(?:texture|material|fabric)\s+(?:from|of)\s+(?:the\s+)?(?:last|final)(?:\s+(?:image|one|pic|picture|photo))?/i.test(
+            p,
+          ) ||
+          new RegExp(
+            `(?:from|of)\\s+(?:the\\s+)?(?:last|final)(?:\\s+(?:image|one|pic|picture|photo))?${bridgeToAttr}(?:texture|material|fabric)`,
+            'i',
+          ).test(p) ||
+          new RegExp(
+            `(?:last|final)(?:\\s+(?:image|one|pic|picture|photo))?${bridgeToAttr}(?:texture|material|fabric)`,
+            'i',
+          ).test(p)
+        ) {
+          return true;
+        }
+      } else if (kind === 'pattern') {
+        if (
+          /(?:pattern|print)\s+(?:from|of)\s+(?:the\s+)?(?:last|final)(?:\s+(?:image|one|pic|picture|photo))?/i.test(
+            p,
+          ) ||
+          new RegExp(
+            `(?:from|of)\\s+(?:the\\s+)?(?:last|final)(?:\\s+(?:image|one|pic|picture|photo))?${bridgeToAttr}(?:pattern|print)`,
+            'i',
+          ).test(p) ||
+          new RegExp(
+            `(?:last|final)(?:\\s+(?:image|one|pic|picture|photo))?${bridgeToAttr}(?:pattern|print)`,
+            'i',
+          ).test(p)
+        ) {
+          return true;
+        }
+      } else if (kind === 'silhouette') {
+        if (
+          /(?:fit|silhouette|shape|cut)\s+(?:from|of|like|in)\s+(?:the\s+)?(?:last|final)(?:\s+(?:image|one|pic|picture|photo))?/i.test(
+            p,
+          ) ||
+          new RegExp(
+            `(?:from|of|like|in)\\s+(?:the\\s+)?(?:last|final)(?:\\s+(?:image|one|pic|picture|photo))?${bridgeToAttr}(?:fit|silhouette|shape|cut)`,
+            'i',
+          ).test(p) ||
+          new RegExp(
+            `(?:last|final)(?:\\s+(?:image|one|pic|picture|photo))?${bridgeToAttr}(?:fit|silhouette|shape|cut)`,
+            'i',
+          ).test(p)
+        ) {
+          return true;
+        }
+      }
+    }
+
+    if (kind === 'color') {
+      return (
+        new RegExp(`(?:colour|color)s?\\s+(?:from|of|in)\\s+(?:the\\s+)?${o}`, 'i').test(p) ||
+        new RegExp(`(?:from|of)\\s+(?:the\\s+)?${o}${bridgeToAttr}(?:colour|color)`, 'i').test(p) ||
+        new RegExp(`${o}${bridgeToAttr}(?:colour|color)`, 'i').test(p)
+      );
+    }
+    if (kind === 'style') {
+      return (
+        new RegExp(`(?:style|vibe|aesthetic)s?\\s+(?:from|of)\\s+(?:the\\s+)?${o}`, 'i').test(p) ||
+        new RegExp(`(?:from|of)\\s+(?:the\\s+)?${o}${bridgeToAttr}(?:style|vibe|aesthetic)`, 'i').test(p) ||
+        new RegExp(`${o}${bridgeToAttr}(?:style|vibe|aesthetic)`, 'i').test(p)
+      );
+    }
+    if (kind === 'texture') {
+      return new RegExp(`(?:texture|material|fabric)\\s+(?:from|of)\\s+(?:the\\s+)?${o}`, 'i').test(p);
+    }
+    if (kind === 'pattern') {
+      return new RegExp(`(?:pattern|print)\\s+(?:from|of)\\s+(?:the\\s+)?${o}`, 'i').test(p);
+    }
+    return (
+      new RegExp(`(?:fit|silhouette|shape|cut)\\s+(?:from|of|like|in)\\s+(?:the\\s+)?${o}`, 'i').test(
+        p,
+      ) ||
+      new RegExp(`(?:from|of|like|in)\\s+(?:the\\s+)?${o}${bridgeToAttr}(?:fit|silhouette|shape|cut)`, 'i').test(
+        p,
+      ) ||
+      new RegExp(`${o}${bridgeToAttr}(?:fit|silhouette|shape|cut)`, 'i').test(p)
+    );
+  }
+
+  /**
+   * Gemini often collapses multi-image requests onto imageIndex 0. Repair when the user
+   * clearly ties an attribute to an ordinal (supports up to 5 uploads + "last image").
+   */
+  private reconcileOrdinalImageIntents(
+    parsed: ParsedIntent,
+    rawPrompt: string,
+    analyses: ImageAnalysisResult[],
+  ): void {
+    if (!analyses?.length || analyses.length < 2 || !parsed.imageIntents?.length) return;
+
+    const p = rawPrompt;
+
+    const analysisAt = (idx: number): ImageAnalysisResult | undefined =>
+      analyses.find((a) => a.imageIndex === idx) ?? analyses[idx];
+
+    const ensureIntent = (imageIndex: number): ImageIntent => {
+      let row = parsed.imageIntents.find((ii) => ii.imageIndex === imageIndex);
+      if (!row) {
+        row = {
+          imageIndex,
+          primaryAttributes: [],
+          weight: 1 / Math.max(parsed.imageIntents.length + 1, analyses.length),
+          reasoning: `Reconciled from user ordinal → imageIndex ${imageIndex}`,
+        };
+        parsed.imageIntents.push(row);
+      }
+      if (!row.primaryAttributes) row.primaryAttributes = [];
+      return row;
+    };
+
+    const copyColorsFromAnalysis = (target: ImageIntent, analysis: ImageAnalysisResult) => {
+      const attrs = analysis.attributes || {};
+      target.extractedValues = target.extractedValues || {};
+      if (attrs.color) {
+        target.extractedValues.color = Array.isArray(attrs.color)
+          ? attrs.color.map(String)
+          : [String(attrs.color)];
+      }
+      if (attrs.colorTone) target.extractedValues.colorTone = String(attrs.colorTone);
+      for (const key of ['colour', 'colors'] as const) {
+        const v = (attrs as Record<string, unknown>)[key];
+        if (v != null && !target.extractedValues.color) {
+          target.extractedValues.color = Array.isArray(v)
+            ? (v as unknown[]).map(String)
+            : [String(v)];
+        }
+      }
+      for (const a of ['color', 'colortone'] as const) {
+        if (!target.primaryAttributes.includes(a)) target.primaryAttributes.push(a);
+      }
+    };
+
+    const stripAttributeFromIndex = (imageIndex: number, attrs: string[]) => {
+      const row = parsed.imageIntents.find((ii) => ii.imageIndex === imageIndex);
+      if (!row) return;
+      const strip = new Set(attrs.map((a) => String(a).toLowerCase()));
+      if (strip.has('color') || strip.has('colortone') || strip.has('colour')) {
+        strip.add('color');
+        strip.add('colour');
+        strip.add('colors');
+        strip.add('colortone');
+      }
+      row.primaryAttributes = (row.primaryAttributes || []).filter(
+        (x) => !strip.has(String(x).toLowerCase()),
+      );
+      if (row.extractedValues) {
+        const ev = row.extractedValues as Record<string, unknown>;
+        if (strip.has('color')) {
+          delete ev.color;
+          delete ev.colour;
+          delete ev.colors;
+          delete ev.colorTone;
+        }
+        if (strip.has('style')) delete ev.style;
+        if (strip.has('texture')) delete ev.texture;
+        if (strip.has('material')) delete ev.material;
+        if (strip.has('pattern')) delete ev.pattern;
+        if (strip.has('silhouette') || strip.has('fit')) {
+          delete ev.silhouette;
+          delete ev.fit;
+        }
+      }
+    };
+
+    const copyStyleFromAnalysis = (target: ImageIntent, analysis: ImageAnalysisResult) => {
+      const st = analysis.attributes?.style;
+      target.extractedValues = target.extractedValues || {};
+      if (Array.isArray(st)) target.extractedValues.style = st.map(String);
+      else if (st) target.extractedValues.style = String(st);
+      if (!target.primaryAttributes.includes('style')) target.primaryAttributes.push('style');
+    };
+
+    const copyTextureFromAnalysis = (target: ImageIntent, analysis: ImageAnalysisResult) => {
+      const attrs = analysis.attributes || {};
+      target.extractedValues = target.extractedValues || {};
+      if (attrs.material) target.extractedValues.material = String(attrs.material);
+      if (attrs.texture) target.extractedValues.texture = String(attrs.texture);
+      for (const t of ['texture', 'material'] as const) {
+        if (!target.primaryAttributes.includes(t)) target.primaryAttributes.push(t);
+      }
+    };
+
+    const copyPatternFromAnalysis = (target: ImageIntent, analysis: ImageAnalysisResult) => {
+      const pat = analysis.attributes?.pattern;
+      target.extractedValues = target.extractedValues || {};
+      if (pat) target.extractedValues.pattern = String(pat);
+      if (!target.primaryAttributes.includes('pattern')) target.primaryAttributes.push('pattern');
+    };
+
+    const copySilhouetteFromAnalysis = (target: ImageIntent, analysis: ImageAnalysisResult) => {
+      const attrs = analysis.attributes || {};
+      target.extractedValues = target.extractedValues || {};
+      if (attrs.silhouette) target.extractedValues.silhouette = String(attrs.silhouette);
+      if (attrs.fit) target.extractedValues.fit = String(attrs.fit);
+      for (const t of ['silhouette', 'fit'] as const) {
+        if (attrs[t] != null && !target.primaryAttributes.includes(t)) target.primaryAttributes.push(t);
+      }
+    };
+
+    const nImg = analyses.length;
+
+    type OrdinalAttrKind = 'color' | 'style' | 'texture' | 'pattern' | 'silhouette';
+
+    const soleSourceIndices = (kind: OrdinalAttrKind): number[] => {
+      const out: number[] = [];
+      for (let i = 0; i < nImg; i++) {
+        if (this.promptLinksAttributeToImage(p, kind, i, nImg)) out.push(i);
+      }
+      return out;
+    };
+
+    const applyExclusiveAttribute = (kind: OrdinalAttrKind, label: string) => {
+      const sources = soleSourceIndices(kind);
+      if (sources.length !== 1) return;
+      const sole = sources[0];
+      const a = analysisAt(sole);
+      if (!a) return;
+
+      const tag = `${label} (imageIndex ${sole}, reconciled)`;
+
+      if (kind === 'color') {
+        for (let j = 0; j < nImg; j++) {
+          if (j !== sole) stripAttributeFromIndex(j, ['color', 'colortone', 'colour']);
+        }
+        const row = ensureIntent(sole);
+        copyColorsFromAnalysis(row, a);
+        row.reasoning = (row.reasoning ? row.reasoning + ' | ' : '') + tag;
+      } else if (kind === 'style') {
+        for (let j = 0; j < nImg; j++) {
+          if (j !== sole) stripAttributeFromIndex(j, ['style']);
+        }
+        const row = ensureIntent(sole);
+        copyStyleFromAnalysis(row, a);
+        row.reasoning = (row.reasoning ? row.reasoning + ' | ' : '') + tag;
+      } else if (kind === 'texture') {
+        for (let j = 0; j < nImg; j++) {
+          if (j !== sole) stripAttributeFromIndex(j, ['texture', 'material']);
+        }
+        const row = ensureIntent(sole);
+        copyTextureFromAnalysis(row, a);
+        row.reasoning = (row.reasoning ? row.reasoning + ' | ' : '') + tag;
+      } else if (kind === 'pattern') {
+        for (let j = 0; j < nImg; j++) {
+          if (j !== sole) stripAttributeFromIndex(j, ['pattern']);
+        }
+        const row = ensureIntent(sole);
+        copyPatternFromAnalysis(row, a);
+        row.reasoning = (row.reasoning ? row.reasoning + ' | ' : '') + tag;
+      } else {
+        for (let j = 0; j < nImg; j++) {
+          if (j !== sole) stripAttributeFromIndex(j, ['silhouette', 'fit']);
+        }
+        const row = ensureIntent(sole);
+        copySilhouetteFromAnalysis(row, a);
+        row.reasoning = (row.reasoning ? row.reasoning + ' | ' : '') + tag;
+      }
+    };
+
+    applyExclusiveAttribute('color', 'User tied color to one upload');
+    applyExclusiveAttribute('style', 'User tied style to one upload');
+    applyExclusiveAttribute('texture', 'User tied texture/material to one upload');
+    applyExclusiveAttribute('pattern', 'User tied pattern to one upload');
+    applyExclusiveAttribute('silhouette', 'User tied fit/silhouette to one upload');
+
+    parsed.imageIntents = parsed.imageIntents.filter((ii) => {
+      const pa = ii.primaryAttributes || [];
+      const ev = ii.extractedValues;
+      const hasVals = ev && Object.keys(ev).length > 0;
+      return pa.length > 0 || Boolean(hasVals);
+    });
+    if (parsed.imageIntents.length === 0) return;
+
+    const tw = parsed.imageIntents.reduce((s, ii) => s + (ii.weight || 0), 0);
+    if (tw <= 0) {
+      const w = 1 / parsed.imageIntents.length;
+      parsed.imageIntents.forEach((ii) => {
+        ii.weight = w;
+      });
+    } else {
+      parsed.imageIntents.forEach((ii) => {
+        ii.weight = (ii.weight || 0) / tw;
+      });
+    }
+
+    const parts: string[] = [];
+    for (const ii of parsed.imageIntents) {
+      const attrs = (ii.primaryAttributes || []).join(', ');
+      const pct = Math.round((ii.weight || 0) * 100);
+      parts.push(`Image ${ii.imageIndex}: ${attrs} (${pct}% weight)`);
+    }
+    if (parts.length) {
+      parsed.searchStrategy = parts.join(' | ');
     }
   }
 
@@ -595,45 +1105,98 @@ Respond ONLY with valid JSON (no markdown, no explanation, no extra text):
   ): ParsedIntent {
     const numImages = Math.max(imageAnalyses.length, 1);
     const weight = 1.0 / numImages;
-    
-    // Try to extract image references from prompt
+
     const imageRefs = this.extractImageReferences(userPrompt);
     const attributeRefs = this.extractAttributeReferences(userPrompt);
 
-    return {
-      imageIntents: imageAnalyses.length > 0
-        ? imageAnalyses.map((analysis, idx) => {
-            // Check if this image was specifically referenced
+    const defaultAttrs = ['color', 'style', 'silhouette', 'texture'] as const;
+    const hasAnyOrdinalRef = imageRefs.length > 0;
+
+    let imageIntents: ImageIntent[] =
+      imageAnalyses.length > 0
+        ? imageAnalyses.map((analysis) => {
+            const idx = analysis.imageIndex;
             const referencedAttrs = imageRefs
-              .filter(ref => ref.imageIndex === idx)
-              .flatMap(ref => ref.attributes);
-            
+              .filter((ref) => ref.imageIndex === idx)
+              .flatMap((ref) => ref.attributes);
+
+            const primaryAttributes: string[] =
+              referencedAttrs.length > 0
+                ? referencedAttrs
+                : hasAnyOrdinalRef
+                  ? []
+                  : [...defaultAttrs];
+
+            const rawAttrs = (analysis.attributes || {}) as Record<string, string | string[]>;
+            let extractedValues: Record<string, string | string[]>;
+            if (!hasAnyOrdinalRef) {
+              extractedValues = rawAttrs;
+            } else if (primaryAttributes.length === 0) {
+              extractedValues = {};
+            } else {
+              extractedValues = {};
+              for (const a of primaryAttributes) {
+                const canon = a === 'colour' ? 'color' : a;
+                const v = rawAttrs[canon] ?? rawAttrs[a];
+                if (v !== undefined) extractedValues[canon] = v;
+              }
+            }
+
             return {
               imageIndex: idx,
-              primaryAttributes: referencedAttrs.length > 0 
-                ? referencedAttrs 
-                : ['color', 'style', 'silhouette', 'texture'],
-              extractedValues: analysis.attributes as Record<string, string | string[]>,
-              weight: referencedAttrs.length > 0 ? 0.6 : weight,
-              reasoning: referencedAttrs.length > 0 
-                ? `Fallback: User referenced ${referencedAttrs.join(', ')} from this image`
-                : 'Fallback: Equal weight distribution'
+              primaryAttributes,
+              extractedValues,
+              weight: hasAnyOrdinalRef ? 1 : weight,
+              reasoning:
+                referencedAttrs.length > 0
+                  ? `Fallback: User referenced ${referencedAttrs.join(', ')} from this image`
+                  : hasAnyOrdinalRef
+                    ? 'Fallback: No per-attribute mix for this image (global embedding only)'
+                    : 'Fallback: Equal weight distribution',
             };
           })
-        : [{
-            imageIndex: 0,
-            primaryAttributes: attributeRefs.length > 0 ? attributeRefs : ['color', 'style', 'silhouette'],
-            weight: 1.0,
-            reasoning: 'Fallback: Single image default'
-          }],
+        : [
+            {
+              imageIndex: 0,
+              primaryAttributes:
+                attributeRefs.length > 0 ? attributeRefs : ['color', 'style', 'silhouette'],
+              weight: 1.0,
+              reasoning: 'Fallback: Single image default',
+            },
+          ];
+
+    imageIntents.sort((a, b) => a.imageIndex - b.imageIndex);
+
+    const tw = imageIntents.reduce((s, ii) => s + (ii.weight || 0), 0);
+    if (tw > 0) {
+      imageIntents.forEach((ii) => {
+        ii.weight = (ii.weight || 0) / tw;
+      });
+    }
+
+    const parsed: ParsedIntent = {
+      imageIntents,
       constraints: {
         mustHave: this.extractKeywordsFromPrompt(userPrompt),
-        mustNotHave: []
+        mustNotHave: [],
       },
       searchStrategy: 'Balanced search using detected attributes from referenced images',
       confidence: 0.3,
-      rawQuery: userPrompt
+      rawQuery: userPrompt,
     };
+
+    if (imageAnalyses.length >= 2) {
+      this.reconcileOrdinalImageIntents(parsed, userPrompt, imageAnalyses);
+    } else {
+      const parts = imageIntents.map((ii) => {
+        const attrs = (ii.primaryAttributes || []).join(', ');
+        const pct = Math.round((ii.weight || 0) * 100);
+        return `Image ${ii.imageIndex}: ${attrs} (${pct}% weight)`;
+      });
+      if (parts.length) parsed.searchStrategy = parts.join(' | ');
+    }
+
+    return parsed;
   }
 
   // -------------------------------------------------------------------------
@@ -642,25 +1205,34 @@ Respond ONLY with valid JSON (no markdown, no explanation, no extra text):
   private extractImageReferences(prompt: string): Array<{imageIndex: number; attributes: string[]}> {
     const refs: Array<{imageIndex: number; attributes: string[]}> = [];
     const lowerPrompt = prompt.toLowerCase();
-    
-    // Pattern: "color/texture/etc from/of first/second/1st/2nd/image 1/etc"
-    const patterns = [
-      { regex: /(?:color|colour)s?\s+(?:from|of)\s+(?:the\s+)?(?:first|1st|image\s*1)/gi, idx: 0, attr: 'color' },
-      { regex: /(?:color|colour)s?\s+(?:from|of)\s+(?:the\s+)?(?:second|2nd|image\s*2)/gi, idx: 1, attr: 'color' },
-      { regex: /(?:color|colour)s?\s+(?:from|of)\s+(?:the\s+)?(?:third|3rd|image\s*3)/gi, idx: 2, attr: 'color' },
-      { regex: /(?:texture|material|fabric)\s+(?:from|of)\s+(?:the\s+)?(?:first|1st|image\s*1)/gi, idx: 0, attr: 'texture' },
-      { regex: /(?:texture|material|fabric)\s+(?:from|of)\s+(?:the\s+)?(?:second|2nd|image\s*2)/gi, idx: 1, attr: 'texture' },
-      { regex: /(?:texture|material|fabric)\s+(?:from|of)\s+(?:the\s+)?(?:third|3rd|image\s*3)/gi, idx: 2, attr: 'texture' },
-      { regex: /(?:style|vibe|aesthetic)\s+(?:from|of)\s+(?:the\s+)?(?:first|1st|image\s*1)/gi, idx: 0, attr: 'style' },
-      { regex: /(?:style|vibe|aesthetic)\s+(?:from|of)\s+(?:the\s+)?(?:second|2nd|image\s*2)/gi, idx: 1, attr: 'style' },
-      { regex: /(?:style|vibe|aesthetic)\s+(?:from|of)\s+(?:the\s+)?(?:third|3rd|image\s*3)/gi, idx: 2, attr: 'style' },
-      { regex: /(?:fit|silhouette|shape|cut)\s+(?:from|of|like)\s+(?:the\s+)?(?:first|1st|image\s*1)/gi, idx: 0, attr: 'silhouette' },
-      { regex: /(?:fit|silhouette|shape|cut)\s+(?:from|of|like)\s+(?:the\s+)?(?:second|2nd|image\s*2)/gi, idx: 1, attr: 'silhouette' },
-      { regex: /(?:fit|silhouette|shape|cut)\s+(?:from|of|like)\s+(?:the\s+)?(?:third|3rd|image\s*3)/gi, idx: 2, attr: 'silhouette' },
-      { regex: /(?:pattern|print)\s+(?:from|of)\s+(?:the\s+)?(?:first|1st|image\s*1)/gi, idx: 0, attr: 'pattern' },
-      { regex: /(?:pattern|print)\s+(?:from|of)\s+(?:the\s+)?(?:second|2nd|image\s*2)/gi, idx: 1, attr: 'pattern' },
-      { regex: /(?:pattern|print)\s+(?:from|of)\s+(?:the\s+)?(?:third|3rd|image\s*3)/gi, idx: 2, attr: 'pattern' },
+
+    const ordinals = [
+      String.raw`(?:first|1st|image\s*1|pic\s*1|picture\s*1|photo\s*1)`,
+      String.raw`(?:second|2nd|image\s*2|pic\s*2|picture\s*2|photo\s*2)`,
+      String.raw`(?:third|3rd|image\s*3|pic\s*3|picture\s*3|photo\s*3)`,
+      String.raw`(?:fourth|4th|image\s*4|pic\s*4|picture\s*4|photo\s*4)`,
+      String.raw`(?:fifth|5th|image\s*5|pic\s*5|picture\s*5|photo\s*5)`,
     ];
+    const link = String.raw`(?:from|of|in)\s+(?:the\s+)?`;
+
+    const patterns: { regex: RegExp; idx: number; attr: string }[] = [];
+    for (let idx = 0; idx < ordinals.length; idx++) {
+      const o = ordinals[idx];
+      patterns.push(
+        { regex: new RegExp(`(?:color|colour)s?\\s+${link}${o}`, 'gi'), idx, attr: 'color' },
+        { regex: new RegExp(`(?:texture|material|fabric)\\s+${link}${o}`, 'gi'), idx, attr: 'texture' },
+        { regex: new RegExp(`(?:style|vibe|aesthetic)s?\\s+${link}${o}`, 'gi'), idx, attr: 'style' },
+        {
+          regex: new RegExp(
+            `(?:fit|silhouette|shape|cut)\\s+(?:from|of|like|in)\\s+(?:the\\s+)?${o}`,
+            'gi',
+          ),
+          idx,
+          attr: 'silhouette',
+        },
+        { regex: new RegExp(`(?:pattern|print)\\s+${link}${o}`, 'gi'), idx, attr: 'pattern' },
+      );
+    }
 
     for (const pattern of patterns) {
       if (pattern.regex.test(lowerPrompt)) {

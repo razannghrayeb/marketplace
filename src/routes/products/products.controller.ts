@@ -4,20 +4,29 @@
  */
 import { Request, Response } from "express";
 import {
-  searchProducts,
   SearchFilters,
-  type ProductListSort,
-  searchByImageWithSimilarity,
-  searchByTextWithRelated,
-  getProductById,
 } from "./products.service";
-import { validateImage, computePHash } from "../../lib/image/index";
+import { searchBrowse, searchImage, searchText } from "../../lib/search/fashionSearchFacade";
+import {
+  validateImage,
+  computePHash,
+  processImageForEmbedding,
+  processImageForGarmentEmbedding,
+} from "../../lib/image/index";
 import { isClipAvailable } from "../../lib/image/index";
-import { hybridSearch } from "../../lib/search";
+import { getProductWithVariants } from "./products.service";
+import { config } from "../../config";
 
 // ============================================================================
 // Request Helpers
 // ============================================================================
+
+/** Staging / tuning: `SEARCH_RANKING_DEBUG=1` or `?rankingDebug=1` enriches `meta` for explain + finalRelevance01 review. */
+function wantsRankingDebug(req: Request): boolean {
+  if (config.search.searchRankingDebug) return true;
+  const v = req.query.rankingDebug ?? req.query.ranking_debug;
+  return v === "1" || v === "true";
+}
 
 function parseFilters(query: any): SearchFilters {
   const filters: SearchFilters = {};
@@ -40,14 +49,6 @@ function parseFilters(query: any): SearchFilters {
   if (query.gender) filters.gender = String(query.gender).toLowerCase();
   if (query.pattern) filters.pattern = String(query.pattern).toLowerCase();
 
-  // Shop sends min/max in USD cents; default currency so OpenSearch range uses price_usd correctly
-  if (
-    (filters.minPriceCents !== undefined || filters.maxPriceCents !== undefined) &&
-    !filters.currency
-  ) {
-    filters.currency = "USD";
-  }
-
   return filters;
 }
 
@@ -56,16 +57,6 @@ function parsePagination(query: any): { page: number; limit: number } {
     page: Math.max(1, Number(query.page) || 1),
     limit: Math.min(Math.max(1, Number(query.limit) || 20), 100),
   };
-}
-
-function parseListSort(query: any): ProductListSort | undefined {
-  const s = String(query.sort || "")
-    .toLowerCase()
-    .replace(/-/g, "_");
-  if (s === "new" || s === "recent") return "new";
-  if (s === "price_asc" || s === "price_low" || s === "priceasc") return "price_asc";
-  if (s === "price_desc" || s === "price_high" || s === "pricedesc") return "price_desc";
-  return undefined;
 }
 
 // ============================================================================
@@ -79,24 +70,10 @@ export async function listProducts(req: Request, res: Response) {
   try {
     const filters = parseFilters(req.query);
     const { page, limit } = parsePagination(req.query);
-    const qRaw = req.query.q;
-    const q = typeof qRaw === "string" ? qRaw.trim() : "";
 
-    const { products, total } = await searchProducts({
-      filters,
-      page,
-      limit,
-      query: q || undefined,
-      sort: parseListSort(req.query),
-    });
-    const pages = Math.max(1, Math.ceil(total / limit));
+    const products = await searchBrowse({ filters, page, limit });
 
-    res.json({
-      success: true,
-      data: products,
-      meta: { total, page, limit, pages },
-      pagination: { page, limit, total, pages },
-    });
+    res.json({ success: true, data: products, pagination: { page, limit } });
   } catch (error) {
     console.error("Error listing products:", error);
     res.status(500).json({ success: false, error: "Failed to fetch products" });
@@ -110,6 +87,7 @@ export async function listProducts(req: Request, res: Response) {
  *   - q: search query (required)
  *   - includeRelated: boolean, default true
  *   - relatedLimit: number, default 10
+ *   - rankingDebug=1: extra `meta` (final_accept_min, recall, gate) for staging; per-hit `explain` / `finalRelevance01` unchanged
  */
 export async function searchProductsByTitle(req: Request, res: Response) {
   try {
@@ -123,25 +101,32 @@ export async function searchProductsByTitle(req: Request, res: Response) {
     const includeRelated = req.query.includeRelated !== "false";
     const relatedLimit = parseInt(req.query.relatedLimit as string) || 10;
 
-    const result = await searchByTextWithRelated({
+    const result = await searchText({
       query,
       filters,
       page,
       limit,
       includeRelated,
       relatedLimit,
-      sort: parseListSort(req.query),
     });
 
-    const total = typeof result.meta.total === "number" ? result.meta.total : 0;
-    const pages = Math.max(1, Math.ceil(total / limit));
+    const rankingMeta = wantsRankingDebug(req)
+      ? {
+          ranking_debug: true as const,
+          final_accept_min: config.search.finalAcceptMin,
+          relevance_gate_mode: config.search.relevanceGateMode,
+          similarity_normalize: config.search.similarityNormalize,
+          recall_window: config.search.recallWindow,
+          recall_max: config.search.recallMax,
+        }
+      : {};
 
     res.json({
       success: true,
       data: result.results,
       related: result.related,
-      meta: { ...result.meta, total, page, limit, pages },
-      pagination: { page, limit, total, pages },
+      meta: { ...result.meta, ...rankingMeta },
+      pagination: { page, limit },
     });
   } catch (error) {
     console.error("Error searching products:", error);
@@ -151,13 +136,7 @@ export async function searchProductsByTitle(req: Request, res: Response) {
 
 /**
  * POST /products/search/image
- * Enhanced image search using Hybrid Search (CLIP image + BLIP caption fusion)
- *
- * Pipeline:
- * 1. CLIP image embed (60% weight) - visual features
- * 2. BLIP caption → enrichment → CLIP text embed (30% weight) - semantic features
- * 3. Fuse embeddings with L2 normalization
- * 4. OpenSearch k-NN vector search
+ * CLIP image embedding k-NN search (matches indexed primary-image vectors).
  *
  * Accepts: multipart/form-data with 'image' field OR JSON with 'embedding' array
  * Query params:
@@ -168,12 +147,14 @@ export async function searchProductsByImage(req: Request, res: Response) {
   try {
     const filters = parseFilters(req.query);
     const { page, limit } = parsePagination(req.query);
-    const similarityThreshold = parseFloat(req.query.threshold as string) || 0.7;
+    const similarityThreshold =
+      parseFloat(req.query.threshold as string) || config.clip.imageSimilarityThreshold;
     const includeRelated = req.query.includeRelated !== "false";
 
     const file = (req as any).file;
     let embedding: number[];
     let pHash: string | undefined;
+    let garmentEmbeddingForSearch: number[] | undefined;
 
     if (file) {
       // Image file uploaded
@@ -189,16 +170,16 @@ export async function searchProductsByImage(req: Request, res: Response) {
         return res.status(400).json({ success: false, error: validation.error });
       }
 
-      // Use hybrid search: CLIP image + BLIP caption fusion
-      const [vectors, pHashResult] = await Promise.all([
-        hybridSearch.buildQueryVectors(file.buffer),
+      const [emb, garmentEmb, pHashResult] = await Promise.all([
+        processImageForEmbedding(file.buffer),
+        processImageForGarmentEmbedding(file.buffer).catch(() => [] as number[]),
         computePHash(file.buffer),
       ]);
-
-      embedding = hybridSearch.fuseVectors(vectors);
+      embedding = emb;
       pHash = pHashResult;
+      garmentEmbeddingForSearch = garmentEmb.length === emb.length ? garmentEmb : undefined;
     } else if (req.body.embedding && Array.isArray(req.body.embedding)) {
-      // Embedding provided directly (already fused)
+      // Client-provided vector (expected: same CLIP image space as the index)
       embedding = req.body.embedding;
       pHash = req.body.pHash; // Optional pHash if provided
     } else {
@@ -209,22 +190,32 @@ export async function searchProductsByImage(req: Request, res: Response) {
     }
 
     // Use enhanced search with similarity scoring
-    const result = await searchByImageWithSimilarity({
-      imageEmbedding: embedding,
+      const result = await searchImage({
+        imageEmbedding: embedding,
+        imageEmbeddingGarment: garmentEmbeddingForSearch,
+        imageBuffer: file.buffer,
       filters,
-      page,
       limit,
       similarityThreshold,
       includeRelated,
       pHash,
     });
 
+    const rankingMeta = wantsRankingDebug(req)
+      ? {
+          ranking_debug: true as const,
+          clip_image_similarity_threshold_applied: similarityThreshold,
+          clip_image_similarity_threshold_config_default: config.clip.imageSimilarityThreshold,
+          search_image_relax_floor: config.search.searchImageRelaxFloor,
+        }
+      : {};
+
     res.json({
       success: true,
       data: result.results,
       related: result.related,
-      meta: result.meta,
-      pagination: { page, limit }
+      meta: { ...result.meta, ...rankingMeta },
+      pagination: { page, limit },
     });
   } catch (error) {
     console.error("Error searching by image:", error);
@@ -234,21 +225,33 @@ export async function searchProductsByImage(req: Request, res: Response) {
 
 /**
  * GET /products/:id
- * Get a single product by ID with images
+ * Single product row + `images[]` (SKU-level fields live on `products`).
  */
-export async function getProductByIdHandler(req: Request, res: Response) {
+export async function getProductById(req: Request, res: Response) {
   try {
-    const productId = req.params.id;
-    if (!productId || isNaN(parseInt(productId, 10))) {
+    const productId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(productId) || productId < 1) {
       return res.status(400).json({ success: false, error: "Invalid product ID" });
     }
 
-    const product = await getProductById(productId);
-    if (!product) {
+    const data = await getProductWithVariants(productId);
+    if (!data) {
       return res.status(404).json({ success: false, error: "Product not found" });
     }
 
-    res.json({ success: true, data: product });
+    const { product, images } = data;
+    res.json({
+      success: true,
+      data: {
+        ...product,
+        images: images.map((img) => ({
+          id: img.id,
+          url: img.cdn_url,
+          is_primary: img.is_primary,
+          p_hash: img.p_hash ?? undefined,
+        })),
+      },
+    });
   } catch (error) {
     console.error("Error fetching product:", error);
     res.status(500).json({ success: false, error: "Failed to fetch product" });

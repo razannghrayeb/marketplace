@@ -13,7 +13,7 @@
 import { pg } from "../core";
 import { analyzeTextQuality, QualityAnalysis, getQualityReasons } from "./textQualityAnalyzer";
 import { analyzePriceAnomalies, PriceAnalysis, getPriceReasons } from "./priceAnomalyDetector";
-import { hammingDistance } from "../products/canonical";
+import { analyzeImageSignalsFast } from "../image/lsh";
 
 // ============================================================================
 // Types
@@ -88,6 +88,22 @@ export type CompareReason =
   | "generic_images"
   | "red_flag_content";
 
+/** Thrown when fewer than two requested products exist in the database. */
+export class InsufficientProductsForCompareError extends Error {
+  readonly missingProductIds: number[];
+
+  constructor(requestedIds: number[], foundIds: number[]) {
+    const foundSet = new Set(foundIds);
+    const missing = requestedIds.filter((id) => !foundSet.has(id));
+    const uniqueMissing = [...new Set(missing)];
+    super(
+      `Not all products found for comparison. Missing product id(s): ${uniqueMissing.join(", ")}.`
+    );
+    this.name = "InsufficientProductsForCompareError";
+    this.missingProductIds = uniqueMissing;
+  }
+}
+
 export interface CompareVerdict {
   winner_product_id: number | null;  // null = tie
   confidence: "high" | "medium" | "low" | "tie";
@@ -110,42 +126,15 @@ export interface CompareVerdict {
 // ============================================================================
 
 /**
- * Analyze image originality using pHash
+ * Analyze image originality using LSH (fast O(1) lookup)
+ * Replaced O(N) full table scan with LSH bucket index lookup
  */
 async function analyzeImageSignals(
   productId: number,
   pHash: string | null
 ): Promise<ComparisonSignals["image_signals"]> {
-  if (!pHash) {
-    return {
-      has_image: false,
-      is_original: true,
-      similar_image_count: 0,
-      image_quality: "unknown",
-    };
-  }
-  
-  // Find similar images in database
-  const result = await pg.query(
-    `SELECT p_hash FROM product_images 
-     WHERE p_hash IS NOT NULL AND product_id != $1`,
-    [productId]
-  );
-  
-  let similarCount = 0;
-  for (const row of result.rows) {
-    const distance = hammingDistance(pHash, row.p_hash);
-    if (distance <= 10) { // Very similar (< 16% different)
-      similarCount++;
-    }
-  }
-  
-  return {
-    has_image: true,
-    is_original: similarCount === 0,
-    similar_image_count: similarCount,
-    image_quality: similarCount > 5 ? "low" : similarCount > 0 ? "medium" : "high",
-  };
+  // Use the new LSH-based fast analysis
+  return analyzeImageSignalsFast(productId, pHash);
 }
 
 /**
@@ -360,6 +349,20 @@ function generateTradeoff(
 // ============================================================================
 
 /**
+ * products.id is BIGSERIAL; node-pg often returns BIGINT as string (or bigint).
+ * Validated request IDs are numbers — Map keys must match.
+ */
+function coerceDbProductId(raw: unknown): number {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "bigint") return Number(raw);
+  const n = parseInt(String(raw), 10);
+  if (!Number.isFinite(n)) {
+    throw new Error(`Invalid product id from database: ${String(raw)}`);
+  }
+  return n;
+}
+
+/**
  * Compare two or more products
  */
 export async function compareProducts(productIds: number[]): Promise<CompareVerdict> {
@@ -380,7 +383,8 @@ export async function compareProducts(productIds: number[]): Promise<CompareVerd
   
   const productsMap = new Map<number, ProductForComparison>();
   for (const row of result.rows) {
-    productsMap.set(row.id, row);
+    const id = coerceDbProductId(row.id);
+    productsMap.set(id, { ...row, id });
   }
   
   // Analyze each product
@@ -434,6 +438,11 @@ export async function compareProducts(productIds: number[]): Promise<CompareVerd
       image_score: imageScore,
       policy_score: policyScore,
     });
+  }
+  
+  const foundIds = comparisons.map((c) => c.product_id);
+  if (comparisons.length < 2) {
+    throw new InsufficientProductsForCompareError(productIds, foundIds);
   }
   
   // Sort by overall score (highest first)

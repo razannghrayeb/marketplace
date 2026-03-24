@@ -1,4 +1,9 @@
-# syntax=docker/dockerfile:1.7
+#
+# Default: embedded YOLO (PyTorch venv + entrypoint uvicorn on loopback) so detection always works in one container.
+#
+# Slim API-only (external detector): docker build --build-arg EMBEDDED_YOLO=0 .
+#
+# Optional faster local rebuilds: DOCKER_BUILDKIT=1 docker build . (works with plain Dockerfile too)
 
 # ============================================================================
 # Fashion Marketplace API
@@ -7,12 +12,17 @@
 
 # Stage 0: Download ML models from HuggingFace
 # Pass HF_TOKEN during build: docker build --build-arg HF_TOKEN=hf_xxx
-# or mount as BuildKit secret: --secret hf_token=/path/to/token.txt
 FROM python:3.11-slim AS model-downloader
 ARG HF_TOKEN=""
 ENV HF_TOKEN=${HF_TOKEN}
+ENV HF_HOME=/root/.cache/huggingface
 RUN pip install --no-cache-dir huggingface_hub
 RUN python -c "from huggingface_hub import snapshot_download; import os; token = os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, ignore_patterns=['*.gitattributes', '.gitattributes', 'README.md']); print('Models downloaded successfully to /models')"
+
+# Pre-download tokenizer vocab files via huggingface_hub (already installed,
+# handles auth + redirects). CLIP BPE: openai/clip-vit-base-patch32 (public).
+# BLIP WordPiece: google-bert/bert-base-uncased (public, same BERT vocab).
+RUN python3 -c "from huggingface_hub import hf_hub_download; import os, shutil; os.makedirs('/models/.cache', exist_ok=True); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'vocab.json'), '/models/.cache/vocab.json'); print('vocab.json ok'); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'merges.txt'), '/models/.cache/merges.txt'); print('merges.txt ok'); shutil.copy(hf_hub_download('google-bert/bert-base-uncased', 'vocab.txt'), '/models/.cache/blip-vocab.txt'); print('blip-vocab.txt ok')"
 
 # Stage 1: Build
 FROM node:20-alpine AS builder
@@ -38,13 +48,24 @@ RUN pnpm build
 # Stage 2: Production
 FROM node:20-bookworm-slim AS production
 
+# 1 = install PyTorch + YOLO venv in this image (~1.5GB+). 0 = slim API image; set YOLO_API_URL to external detector.
+ARG EMBEDDED_YOLO=1
+
 WORKDIR /app
 
-# Install pnpm
 RUN corepack enable && corepack prepare pnpm@9 --activate
 
-# Install runtime OS packages required by health checks and native modules
-RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates && \
+# Runtime OS packages: full stack only when embedding YOLO
+RUN set -eux; \
+    apt-get update; \
+    if [ "$EMBEDDED_YOLO" = "1" ]; then \
+      apt-get install -y --no-install-recommends \
+        wget ca-certificates \
+        python3 python3-venv python3-pip \
+        libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1; \
+    else \
+      apt-get install -y --no-install-recommends wget ca-certificates; \
+    fi; \
     rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -70,6 +91,36 @@ RUN if [ ! -f "./models/fashion-clip-image.onnx" ] || [ ! -f "./models/fashion-c
   fi && \
   echo "✅ ML models present: $(ls -lh ./models/*.onnx | wc -l) ONNX files"
 
+# YOLO app sources (small); venv is created only when EMBEDDED_YOLO=1
+COPY src/lib/model/yolov8_api.py \
+     src/lib/model/dual_model_yolo.py \
+     src/lib/model/dual-model-yolo.py \
+     src/lib/model/image_preprocessor.py \
+     /app/yolo/
+COPY src/lib/model/requirements-yolo-extras.txt /app/yolo/requirements-extras.txt
+
+# CPU torch wheels from PyTorch index (smaller + faster than default CUDA-capable PyPI wheels)
+RUN set -eux; \
+    if [ "$EMBEDDED_YOLO" = "1" ]; then \
+      python3 -m venv /app/yolo/venv && \
+      /app/yolo/venv/bin/pip install --no-cache-dir --upgrade pip && \
+      /app/yolo/venv/bin/pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cpu \
+        torch torchvision && \
+      /app/yolo/venv/bin/pip install --no-cache-dir -r /app/yolo/requirements-extras.txt && \
+      \
+      # Pre-download YOLO detector weights during the image build so deploys don't
+      # pay the cold-start download cost on every revision.
+      export HF_HOME=/app/yolo/.cache/huggingface; \
+      export TRANSFORMERS_CACHE=/app/yolo/.cache/huggingface; \
+      /app/yolo/venv/bin/python3 -c "import sys; sys.path.insert(0,'/app/yolo'); from yolov8_api import get_detector; get_detector(); print('✅ YOLO dual-detector warmed (weights cached)')" ; \
+    else \
+      rm -rf /app/yolo && mkdir -p /app/yolo; \
+    fi
+
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
 # Set ownership
 RUN chown -R nodejs:nodejs /app
 
@@ -78,11 +129,13 @@ USER nodejs
 # Environment
 ENV NODE_ENV=production
 ENV PORT=8080
+ENV HF_HOME=/app/yolo/.cache/huggingface
+ENV TRANSFORMERS_CACHE=/app/yolo/.cache/huggingface
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/health/live || exit 1
+# YOLO may load PyTorch/HF weights on first boot; Node starts only after entrypoint waits on YOLO health.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://0.0.0.0:${PORT}/health/live || exit 1
 
 EXPOSE 8080
 
-CMD ["node", "dist/index.js"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

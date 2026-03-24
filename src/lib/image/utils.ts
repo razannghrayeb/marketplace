@@ -1,9 +1,15 @@
 /**
  * Image Utilities
- * 
+ *
  * Low-level image manipulation: loading, normalization, pHash computation.
  */
-import sharp from "sharp";
+import sharpLib from "sharp";
+
+// `sharp` is published as a CommonJS callable function.
+// Depending on TS/Node module interop settings, `import sharp from "sharp"`
+// may produce a non-callable object. This guards against that at runtime.
+const sharp: any =
+  typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
 
 export interface ImageData {
   data: Buffer;
@@ -59,10 +65,19 @@ export function normalizeImage(
  * Returns a 16-character hex string (64-bit hash)
  */
 export async function pHash(buffer: Buffer): Promise<string> {
+  if (!buffer?.length) {
+    throw new Error("pHash: empty image buffer");
+  }
+  const input = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as Buffer | Uint8Array);
   // Resize to 32x32 grayscale
-  const resized = await sharp(buffer).resize(32, 32, { fit: "fill" }).greyscale().raw().toBuffer({ resolveWithObject: true });
-  const { data } = resized;
-  const pixels: number[] = Array.from(data).map((v) => v & 0xff);
+  const resized = await sharp(input)
+    .resize(32, 32, { fit: "fill" })
+    .greyscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const { data } = resized as any as { data: Uint8Array };
+  // `sharp` typings vary across versions/interops; normalize to Uint8Array.
+  const pixels: number[] = Array.from(data, (v: number) => v & 0xff);
 
   const N = 32;
   // build 32x32 matrix

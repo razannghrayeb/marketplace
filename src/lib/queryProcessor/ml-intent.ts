@@ -115,7 +115,8 @@ except Exception as e:
   }
 
   /**
-   * Predict intent using ML model
+   * Predict intent using ML model.
+   * Passes query via stdin to avoid shell injection risks.
    */
   async predict(query: string): Promise<MLIntentResult | null> {
     if (!this.isLoaded) {
@@ -123,25 +124,12 @@ except Exception as e:
     }
 
     try {
-      // For scikit-learn models, use Python subprocess
       if (["random_forest", "logistic", "naive_bayes"].includes(this.config.modelType)) {
-        const predictionScript = `
-import pickle
-import sys
-import os
-sys.path.append('${process.cwd()}/scripts')
-from train_intent_simplified import IntentClassifierTrainer
-
-try:
-    trainer = IntentClassifierTrainer("data/intent_training_dataset_lebanese.txt")
-    trainer.load_model("${this.config.modelPath}")
-    intent, confidence = trainer.predict("${query.replace(/"/g, '\\"')}")
-    print(f"{intent}|{confidence}")
-except Exception as e:
-    print(f"ERROR: {e}")
-`;
-
-        const result = await this.runPython(predictionScript);
+        const result = await this.runPythonWithStdin(
+          `${process.cwd()}/scripts`,
+          this.config.modelPath!,
+          query
+        );
 
         if (result.includes("ERROR:")) {
           console.warn(`ML prediction failed: ${result}`);
@@ -165,6 +153,55 @@ except Exception as e:
       console.error("ML intent prediction failed:", error);
       return null;
     }
+  }
+
+  /**
+   * Run prediction via Python subprocess, passing the query via stdin
+   * instead of string interpolation (prevents injection).
+   */
+  private async runPythonWithStdin(
+    scriptsDir: string,
+    modelPath: string,
+    query: string
+  ): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const { spawn } = require('child_process');
+      const script = [
+        `import sys, json`,
+        `sys.path.insert(0, ${JSON.stringify(scriptsDir)})`,
+        `from train_intent_simplified import IntentClassifierTrainer`,
+        `query = sys.stdin.readline().strip()`,
+        `trainer = IntentClassifierTrainer("data/intent_training_dataset_lebanese.txt")`,
+        `trainer.load_model(${JSON.stringify(modelPath)})`,
+        `intent, confidence = trainer.predict(query)`,
+        `print(f"{intent}|{confidence}")`,
+      ].join('\n');
+
+      const python = spawn('python', ['-c', script]);
+
+      let output = '';
+      let error = '';
+
+      python.stdout.on('data', (data: Buffer) => { output += data.toString(); });
+      python.stderr.on('data', (data: Buffer) => { error += data.toString(); });
+
+      python.on('close', (code: number) => {
+        if (code === 0) {
+          resolve(output.trim());
+        } else {
+          reject(new Error(`Python script failed (exit ${code}): ${error}`));
+        }
+      });
+
+      // Send query via stdin — safe from shell injection
+      python.stdin.write(query + '\n');
+      python.stdin.end();
+
+      setTimeout(() => {
+        python.kill();
+        reject(new Error('Python script timeout (5s)'));
+      }, 5000);
+    });
   }
 
   /**

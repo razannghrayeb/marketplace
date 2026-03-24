@@ -36,7 +36,7 @@ A sophisticated fashion marketplace API that aggregates products from multiple v
 - **Layering Analysis**: 6-layer system with weather validation
 
 ### Virtual Try-On
-- **Vertex AI Try-On**: Google Cloud `virtual-try-on@002`, fully managed, no GPU needed
+- **Vertex AI Try-On**: Google Cloud `virtual-try-on-001` (`:predict` on Vertex AI), fully managed, no GPU
 - **Async Job Pattern**: 202 Accepted immediately; background processing; client polls until complete
 - **Multiple Input Modes**: File upload, from wardrobe item, from product catalog, batch (up to 5 garments)
 - **Full Job Lifecycle**: Pending → processing → completed/failed; cancel, delete, save/bookmark results
@@ -161,7 +161,8 @@ POST                   /api/wardrobe/layering/analyze    # layering order analys
 GET                    /api/wardrobe/compatibility/graph  # learned compat graph
 ```
 
-### Virtual Try-On (`/api/tryon`, JWT required)
+### Virtual Try-On (`/api/tryon`)
+Submit routes expect a numeric **`x-user-id`** header and/or **`user_id`** in the multipart body (same value). Browser example: `examples/styleai-web/marketplaceTryOn.ts`; dashboard helper: `apps/dashboard-admin/src/lib/api/tryon.ts`.
 ```
 POST /api/tryon/                     # file upload; returns 202
 POST /api/tryon/from-wardrobe        # from wardrobe item
@@ -253,11 +254,11 @@ SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
 
 # OpenSearch
-OS_NODE=http://localhost:9200
+OS_NODE=http://0.0.0.0:9200
 OS_INDEX=products
 
 # Redis
-REDIS_URL=redis://localhost:6379
+REDIS_URL=redis://0.0.0.0:6379
 
 # Cloudflare R2
 R2_ACCOUNT_ID=
@@ -282,7 +283,7 @@ GCLOUD_PROJECT=
 GOOGLE_APPLICATION_CREDENTIALS=   # path to service account key (or use ADC)
 
 # XGBoost Ranker (Python FastAPI)
-RANKER_API_URL=http://localhost:8000
+RANKER_API_URL=http://0.0.0.0:8000
 ```
 
 ---

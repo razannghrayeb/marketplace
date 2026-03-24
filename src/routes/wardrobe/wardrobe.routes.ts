@@ -95,5 +95,12 @@ router.get("/compatibility/:category/learned", controller.getLearnedCompatibilit
 router.get("/compatibility/graph", controller.getCompatibilityGraph);
 router.post("/compatibility/learn", controller.triggerCompatibilityLearning);
 
+// ============================================================================
+// 🆕 Onboarding & Lifestyle Adaptation
+// ============================================================================
+router.get("/onboarding", controller.getOnboarding);
+router.get("/essentials", controller.getEssentials);
+router.get("/price-tier", controller.getPriceTier);
+
 export default router;
 export { router as wardrobeRouter };

@@ -33,8 +33,22 @@ export async function getFavorites(
     [userId, limit, offset]
   );
 
+  const items: FavoriteWithProduct[] = result.rows.map((r) => ({
+    id: r.id,
+    user_id: r.user_id,
+    product_id: r.product_id,
+    created_at: r.created_at,
+    title: r.title,
+    brand: r.brand,
+    price_cents: r.price_cents,
+    sales_price_cents: r.sales_price_cents,
+    currency: r.currency,
+    image_url: r.image_url,
+    image_cdn: r.image_cdn,
+  }));
+
   return {
-    items: result.rows,
+    items,
     total: parseInt(countResult.rows[0].count, 10),
   };
 }

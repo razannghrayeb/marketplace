@@ -26,11 +26,90 @@ export interface RerankedResult extends MultiVectorSearchResult {
   };
 }
 
+/** Match OpenSearch / hybrid raw scores to [0,1] for rerank (same as composite multi-image path). */
+function normalizeVectorScore01(s: number): number {
+  if (typeof s !== "number" || !Number.isFinite(s)) return 0;
+  if (s >= 0 && s <= 1) return s;
+  if (s < 0) return 0;
+  return Math.max(0, Math.min(1, 1 - Math.exp(-s / 10)));
+}
+
+function vectorInputForRerank(res: MultiVectorSearchResult): number {
+  const raw = res._rawScores?.vectorScore;
+  if (raw !== undefined && Number.isFinite(raw)) return normalizeVectorScore01(raw);
+  return normalizeVectorScore01(res.score ?? 0);
+}
+
 /**
  * Simple intent-aware reranking function.
  * - Uses the parsed intent to boost attribute matches mentioned in the intent
  * - Combines existing vector score with attribute breakdown and price proximity
  */
+function productBlobForRerank(p: MultiVectorSearchResult["product"]): string {
+  if (!p) return "";
+  const any = p as Record<string, unknown>;
+  return [p.title, p.brand, p.category, any.color, any.description, any.name]
+    .filter((x) => x != null && String(x).trim() !== "")
+    .map((x) => String(x).toLowerCase())
+    .join(" ");
+}
+
+/**
+ * When scoreBreakdown is empty (e.g. composite /multi-image path), approximate
+ * attribute relevance from extracted intent strings vs product text.
+ */
+function lexicalIntentMatchScore(
+  product: MultiVectorSearchResult["product"] | undefined,
+  intent: ParsedIntent
+): number {
+  if (!product) return 0;
+  const blob = productBlobForRerank(product);
+  if (!blob) return 0;
+
+  let hits = 0;
+  let total = 0;
+
+  for (const ii of intent.imageIntents || []) {
+    const ev = ii.extractedValues;
+    if (!ev) continue;
+    for (const val of Object.values(ev)) {
+      const arr = Array.isArray(val) ? val : [val];
+      for (const s of arr) {
+        const t = String(s).toLowerCase().trim();
+        if (t.length < 2) continue;
+        total++;
+        if (blob.includes(t)) hits++;
+      }
+    }
+  }
+
+  for (const t of intent.constraints?.mustHave || []) {
+    const x = String(t).toLowerCase().trim();
+    if (x.length < 2) continue;
+    total++;
+    if (blob.includes(x)) hits++;
+  }
+
+  if (intent.constraints?.category) {
+    const c = String(intent.constraints.category).toLowerCase().trim();
+    if (c.length >= 2) {
+      total++;
+      const cat = String(product.category || "").toLowerCase();
+      if (blob.includes(c) || cat.includes(c) || c.includes(cat)) hits++;
+    }
+  }
+
+  for (const t of intent.constraints?.mustNotHave || []) {
+    const x = String(t).toLowerCase().trim();
+    if (x.length >= 2 && blob.includes(x)) {
+      hits = Math.max(0, hits - 1);
+    }
+  }
+
+  if (total === 0) return 0;
+  return clamp01(hits / total);
+}
+
 export function intentAwareRerank(
   results: MultiVectorSearchResult[],
   intent: ParsedIntent,
@@ -53,8 +132,8 @@ export function intentAwareRerank(
     : null;
 
   return results.map(res => {
-    // Vector component: use existing `score` field (expected normalized 0..1)
-    const vectorComp = clamp01(res.score ?? 0);
+    // Prefer frozen OS/fusion scores when provided (pre-hydration / pre-norm snapshot).
+    const vectorComp = clamp01(vectorInputForRerank(res));
 
     // Attribute component: compare scoreBreakdown attributes to intentAttrWeights
     let attributeComp = 0;
@@ -68,6 +147,8 @@ export function intentAwareRerank(
       // Normalize by total intent weight (if any) to keep in [0,1]
       const totalIntentWeight = Object.values(intentAttrWeights).reduce((a,b) => a+b, 0) || 1;
       attributeComp = attributeComp / totalIntentWeight;
+    } else {
+      attributeComp = lexicalIntentMatchScore(res.product, intent);
     }
 
     // Price component: closer to mid-range is better

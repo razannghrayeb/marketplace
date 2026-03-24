@@ -2,11 +2,15 @@
  * Product Images Service
  * Handles all image business logic, storage, and retrieval
  */
-import { pg } from "../../lib/core/index";
+import { pg, productsTableHasIsHiddenColumn, productsTableHasCanonicalIdColumn, toPgVectorParam } from "../../lib/core/index";
 import { uploadImage, generateImageKey } from "../../lib/image/index";
-import { processImageForEmbedding, computePHash, validateImage } from "../../lib/image/index";
+import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash, validateImage } from "../../lib/image/index";
 import { osClient } from "../../lib/core/index";
 import { config } from "../../config";
+import { buildProductSearchDocument } from "../../lib/search/searchDocument";
+import { loadProductSearchEnrichmentByIds } from "../../lib/search/loadProductSearchEnrichment";
+import { extractGarmentFashionColors } from "../../lib/color/garmentColorPipeline";
+import type { PixelBox } from "../../lib/image/processor";
 
 // ============================================================================
 // Types
@@ -110,9 +114,9 @@ export async function uploadProductImage(
   // Insert into database
   const result = await pg.query(
     `INSERT INTO product_images (product_id, r2_key, cdn_url, embedding, p_hash, is_primary)
-     VALUES ($1, $2, $3, $4, $5, $6)
+     VALUES ($1, $2, $3, $4::vector, $5, $6)
      RETURNING id, product_id, r2_key, cdn_url, p_hash, is_primary, created_at`,
-    [productId, key, cdnUrl, embedding, pHash, isPrimary]
+    [productId, key, cdnUrl, toPgVectorParam(embedding), pHash, isPrimary]
   );
 
   const image = result.rows[0] as ProductImage;
@@ -126,7 +130,7 @@ export async function uploadProductImage(
   }
 
   // Sync OpenSearch
-  await updateProductIndex(productId);
+  await updateProductIndex(productId, buffer);
 
   return { image, embedding };
 }
@@ -224,9 +228,13 @@ export async function deleteProductImage(productId: number, imageId: number): Pr
 /**
  * Update product document in OpenSearch with current images
  */
-export async function updateProductIndex(productId: number): Promise<void> {
+export async function updateProductIndex(productId: number, sourceBuffer?: Buffer): Promise<void> {
+  const hasIsHidden = await productsTableHasIsHiddenColumn();
+  const hasCanonicalId = await productsTableHasCanonicalIdColumn();
   const productResult = await pg.query(
-    `SELECT id, vendor_id, title, brand, category, price_cents, availability, last_seen, image_cdn
+    `SELECT id, vendor_id, title, description, brand, category, price_cents, availability, last_seen, image_cdn,
+            ${hasIsHidden ? "is_hidden" : "false AS is_hidden"},
+            ${hasCanonicalId ? "canonical_id" : "NULL::integer AS canonical_id"}
      FROM products WHERE id = $1`,
     [productId]
   );
@@ -245,26 +253,119 @@ export async function updateProductIndex(productId: number): Promise<void> {
   const images = imagesResult.rows;
   let primaryImage = images.find((img: any) => img.is_primary) || images[0];
 
-  const doc: any = {
-    product_id: String(productId),
-    vendor_id: String(product.vendor_id),
+  let garmentColorAnalysis: Awaited<ReturnType<typeof extractGarmentFashionColors>> | null = null;
+  if (sourceBuffer && sourceBuffer.length > 0) {
+    garmentColorAnalysis = await extractGarmentFashionColors(sourceBuffer).catch(() => null);
+  }
+
+  const enrichMap = await loadProductSearchEnrichmentByIds([productId]);
+  const enrichRow = enrichMap.get(productId);
+
+  const doc: any = buildProductSearchDocument({
+    productId,
+    vendorId: product.vendor_id,
     title: product.title,
+    description: product.description ?? null,
     brand: product.brand,
     category: product.category,
-    price_usd: product.price_cents ? Math.round(product.price_cents / 100) : 0,
-    availability: product.availability ? "in_stock" : "out_of_stock",
-    image_cdn: product.image_cdn,
+    priceCents: product.price_cents,
+    availability: Boolean(product.availability),
+    isHidden: Boolean(product.is_hidden),
+    canonicalId: hasCanonicalId ? product.canonical_id : null,
+    imageCdn: product.image_cdn,
+    pHash: primaryImage?.p_hash ?? null,
+    lastSeenAt: product.last_seen,
     images: images.map((img: any) => ({
       url: img.cdn_url,
       p_hash: img.p_hash,
       is_primary: img.is_primary,
     })),
-    last_seen_at: product.last_seen,
-  };
+    embedding: primaryImage?.embedding?.length > 0 ? primaryImage.embedding : null,
+    detectedColors: garmentColorAnalysis?.paletteCanonical ?? [],
+    garmentColorAnalysis,
+    enrichment: enrichRow
+      ? {
+          norm_confidence: enrichRow.norm_confidence,
+          category_confidence: enrichRow.category_confidence,
+          brand_confidence: enrichRow.brand_confidence,
+          canonical_type_ids: enrichRow.canonical_type_ids,
+        }
+      : null,
+  });
 
-  if (primaryImage?.embedding?.length > 0) {
-    doc.embedding = primaryImage.embedding;
-  } else if (primaryImage) {
+  // If dominant colors weren't provided (e.g. only primary image changed),
+  // fetch the primary image buffer and derive dominant colors so strict
+  // color filters have reliable data.
+  if (!garmentColorAnalysis && primaryImage) {
+    try {
+      let buffer: Buffer | null = null;
+      if (primaryImage.cdn_url) {
+        try {
+          const res = await fetch(primaryImage.cdn_url, { signal: AbortSignal.timeout(20000) });
+          if (res.ok) buffer = Buffer.from(await res.arrayBuffer());
+        } catch {}
+      }
+
+      if (!buffer && primaryImage.r2_key) {
+        try {
+          const { r2Client } = await import("../../lib/image/r2");
+          const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+          const resp: any = await r2Client.send(
+            new GetObjectCommand({ Bucket: config.r2.bucket, Key: primaryImage.r2_key })
+          );
+          const chunks: Uint8Array[] = [];
+          await new Promise<void>((resolve, reject) => {
+            resp.Body.on("data", (chunk: Uint8Array) => chunks.push(chunk));
+            resp.Body.on("end", () => resolve());
+            resp.Body.on("error", (err: any) => reject(err));
+          });
+          buffer = Buffer.concat(chunks);
+        } catch {}
+      }
+
+      if (buffer) {
+        let box: PixelBox | null = null;
+        try {
+          const det = await pg.query(
+            `SELECT box_x1, box_y1, box_x2, box_y2, confidence, area_ratio
+             FROM product_image_detections
+             WHERE product_image_id = $1
+               AND box_x1 IS NOT NULL AND box_y2 IS NOT NULL
+               AND COALESCE(confidence, 0) >= 0.22
+             ORDER BY COALESCE(area_ratio, 0) DESC NULLS LAST, id DESC
+             LIMIT 1`,
+            [primaryImage.id],
+          );
+          const r = det.rows[0];
+          if (r) {
+            box = { x1: Number(r.box_x1), y1: Number(r.box_y1), x2: Number(r.box_x2), y2: Number(r.box_y2) };
+          }
+        } catch {
+          box = null;
+        }
+        const analysis = await extractGarmentFashionColors(buffer, { box }).catch(() => null);
+        if (analysis && analysis.paletteCanonical.length > 0) {
+          const extractedColors = analysis.paletteCanonical;
+          const current = Array.isArray(doc.attr_colors) ? doc.attr_colors.map((c: any) => String(c).toLowerCase()) : [];
+          const merged = [...new Set([...current, ...extractedColors.map((c) => String(c).toLowerCase())])];
+          doc.attr_colors = merged;
+          doc.attr_color = merged[0] ?? null;
+          doc.attr_colors_image = extractedColors;
+          doc.attr_color_source = "image";
+          doc.color_primary_canonical = analysis.primaryCanonical;
+          doc.color_secondary_canonical = analysis.secondaryCanonical;
+          doc.color_accent_canonical = analysis.accentCanonical;
+          doc.color_palette_canonical = analysis.paletteCanonical;
+          doc.color_confidence_primary = analysis.confidencePrimary;
+          doc.color_confidence_image = Math.max(0.2, Math.min(0.95, analysis.confidencePrimary));
+        }
+      }
+    } catch {
+      // Best-effort only; fallback to title-extracted colors.
+    }
+  }
+
+  if (!doc.embedding && primaryImage) {
     // Attempt to backfill missing embedding by computing it now
     try {
       // Prefer fetching from public CDN URL; fallback to R2 if needed
@@ -294,14 +395,62 @@ export async function updateProductIndex(productId: number): Promise<void> {
       }
 
       if (buffer) {
-        const { processImageForEmbedding } = await import("../../lib/image/processor");
-        const embedding = await processImageForEmbedding(buffer);
+        const { processImageForEmbedding, processImageForGarmentEmbeddingWithOptionalBox } = await import(
+          "../../lib/image/processor"
+        );
+
+        let garmentBox: { x1: number; y1: number; x2: number; y2: number } | null = null;
+        try {
+          const det = await pg.query(
+            `SELECT box_x1, box_y1, box_x2, box_y2, confidence, area_ratio
+             FROM product_image_detections
+             WHERE product_image_id = $1
+               AND box_x1 IS NOT NULL AND box_y2 IS NOT NULL
+               AND COALESCE(confidence, 0) >= 0.22
+             ORDER BY COALESCE(area_ratio, 0) DESC NULLS LAST, id DESC
+             LIMIT 1`,
+            [primaryImage.id],
+          );
+          const r = det.rows[0];
+          if (r) {
+            garmentBox = {
+              x1: Number(r.box_x1),
+              y1: Number(r.box_y1),
+              x2: Number(r.box_x2),
+              y2: Number(r.box_y2),
+            };
+          }
+        } catch {
+          garmentBox = null;
+        }
+
+        const [embedding, embeddingGarment, garmentAnalysis] = await Promise.all([
+          processImageForEmbedding(buffer),
+          processImageForGarmentEmbeddingWithOptionalBox(buffer, garmentBox).catch(() => null as unknown as number[]),
+          extractGarmentFashionColors(buffer, { box: garmentBox }).catch(() => null),
+        ]);
         // Update DB for this image row and include in document
         await pg.query(
-          `UPDATE product_images SET embedding = $1 WHERE id = $2`,
-          [embedding, primaryImage.id]
+          `UPDATE product_images SET embedding = $1::vector WHERE id = $2`,
+          [toPgVectorParam(embedding), primaryImage.id]
         );
         doc.embedding = embedding;
+        if (Array.isArray(embeddingGarment) && embeddingGarment.length > 0) {
+          doc.embedding_garment = embeddingGarment;
+        }
+        if ((!doc.attr_colors || doc.attr_colors.length === 0) && garmentAnalysis && garmentAnalysis.paletteCanonical.length > 0) {
+          const extractedColors = garmentAnalysis.paletteCanonical;
+          doc.attr_colors = extractedColors;
+          doc.attr_colors_image = extractedColors;
+          doc.attr_color = String(extractedColors[0]).toLowerCase();
+          doc.attr_color_source = "image";
+          doc.color_primary_canonical = garmentAnalysis.primaryCanonical;
+          doc.color_secondary_canonical = garmentAnalysis.secondaryCanonical;
+          doc.color_accent_canonical = garmentAnalysis.accentCanonical;
+          doc.color_palette_canonical = garmentAnalysis.paletteCanonical;
+          doc.color_confidence_primary = garmentAnalysis.confidencePrimary;
+          doc.color_confidence_image = Math.max(0.2, Math.min(0.95, garmentAnalysis.confidencePrimary));
+        }
         // Refresh local variable for any further usage
         primaryImage = { ...primaryImage, embedding };
       }

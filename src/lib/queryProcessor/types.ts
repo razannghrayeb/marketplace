@@ -27,6 +27,7 @@ export type CorrectionSource =
   | "spell_check"      // Edit distance correction
   | "arabizi"          // Arabizi transliteration
   | "brand_alias"      // Brand alias expansion
+  | "common_query"     // Matched a known common query pattern
   | "llm"              // LLM rewrite
   | "none";            // No correction needed
 
@@ -43,13 +44,20 @@ export interface Correction {
 
 export interface ExtractedFilters {
   gender?: string;
+  /** Canonical: kids | baby | teen | adult */
+  ageGroup?: string;
+  // Single color (kept for backward compatibility)
   color?: string;
+  // Multi-color support
+  colors?: string[];
+  colorMode?: "any" | "all";
   material?: string;
   category?: string;
   brand?: string;
   priceRange?: { min?: number; max?: number };
   style?: string[];
   similarityReference?: string;
+  productTypes?: string[];
 }
 
 // ============================================================================
@@ -74,10 +82,13 @@ export interface QueryEntities {
   brands: string[];
   categories: string[];
   colors: string[];
+  productTypes: string[];
   materials: string[];
   patterns: string[];
   sizes: string[];
   gender?: string;
+  /** Canonical: kids | baby | teen | adult */
+  ageGroup?: string;
   occasion?: string;
   season?: string;
 }
@@ -90,8 +101,10 @@ export interface QueryFilters {
   brand?: string[];
   category?: string[];
   color?: string[];
+  colorMode?: "any" | "all";
   material?: string[];
   gender?: string;
+  ageGroup?: string;
 }
 
 export interface QueryTokens {
@@ -128,6 +141,12 @@ export interface QueryAST {
   // ========== PROCESSING METADATA ==========
   script: ScriptAnalysis;
   corrections: Correction[];
+  /** Corrections we suggest but did not apply (confidence < autoApply) */
+  suggestedCorrections?: Correction[];
+  /** Corrections we applied to retrieval (confidence >= autoApply) */
+  appliedCorrections?: Correction[];
+  /** Control params stripped from raw query (limit, page, sort, etc.) */
+  controlParamsExtracted?: Record<string, string | number>;
   processingTimeMs: number;
   llmUsed: boolean;
   cacheHit: boolean;

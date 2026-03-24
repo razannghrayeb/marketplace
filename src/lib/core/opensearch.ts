@@ -2,25 +2,53 @@
  * OpenSearch Client & Index Management
  * 
  * Manages OpenSearch connection and index configuration.
+ * 
+ * EMBEDDING_DIM is derived from the same env var (EXPECTED_EMBEDDING_DIM)
+ * that clip.ts validates against, ensuring model ↔ index consistency.
  */
 import { Client } from "@opensearch-project/opensearch";
 import { config } from "../../config";
-console.log("OS config:", config.opensearch.node, config.opensearch.username, config.opensearch.password?.length);
 
-export const osClient = new Client({
-  node: config.opensearch.node,
-  auth: {
-    username: config.opensearch.username,
-    password: config.opensearch.password,
-  },
-  ssl: { rejectUnauthorized: false },
-  // Resilience: retry on ECONNRESET/ETIMEDOUT (common with Aiven/Cloud Run idle connections)
-  maxRetries: 5,
-  requestTimeout: 60000,
-});
+/**
+ * Extract auth from URL if separate username/password are not provided.
+ * Aiven connection strings embed creds: https://user:pass@host:port
+ */
+function buildOsClientConfig() {
+  const nodeUrl = config.opensearch.node;
+  let username = config.opensearch.username;
+  let password = config.opensearch.password;
 
-// CLIP ViT-B/32 embedding dimension
-const EMBEDDING_DIM = 512;
+  if (!username || !password) {
+    try {
+      const parsed = new URL(nodeUrl);
+      if (parsed.username && parsed.password) {
+        username = decodeURIComponent(parsed.username);
+        password = decodeURIComponent(parsed.password);
+      }
+    } catch {
+      // URL parsing failed — proceed without extracted creds
+    }
+  }
+
+  console.log("OS config:", nodeUrl, username, password?.length);
+
+  return {
+    node: nodeUrl,
+    ...(username && password ? { auth: { username, password } } : {}),
+    ssl: { rejectUnauthorized: false },
+    maxRetries: 5,
+    requestTimeout: 60000,
+  };
+}
+
+export const osClient = new Client(buildOsClientConfig());
+
+/**
+ * Single source of truth for embedding dimension.
+ * Shared with clip.ts via the EXPECTED_EMBEDDING_DIM env var.
+ * Defaults to 512 (CLIP ViT-B/32).
+ */
+const EMBEDDING_DIM = parseInt(process.env.EXPECTED_EMBEDDING_DIM || "512", 10);
 
 /**
  * Ensure the products index exists with proper mapping
@@ -35,16 +63,81 @@ export async function ensureIndex() {
         settings: {
           index: {
             knn: true,
-            "knn.algo_param.ef_search": 100,
+            "knn.algo_param.ef_search": 256,
+          },
+          analysis: {
+            analyzer: {
+              product_analyzer: {
+                type: "custom",
+                tokenizer: "standard",
+                filter: ["lowercase", "product_stemmer", "product_synonyms"],
+              },
+            },
+            filter: {
+              product_stemmer: {
+                type: "stemmer",
+                language: "light_english",
+              },
+              product_synonyms: {
+                type: "synonym",
+                synonyms: [
+                  "pant,pants,trousers",
+                  "shirt,top,blouse,tee",
+                  "dress,gown,frock",
+                  "jacket,coat,outerwear",
+                  "blazer,blazers,sportcoat",
+                  "shoe,shoes,sneaker,sneakers,footwear,boot,boots",
+                  "bag,handbag,purse,tote",
+                  "jeans,denim",
+                  "hoodie,hooded sweatshirt,pullover",
+                  "tshirt,t-shirt,tee",
+                  "sweater,pullover,jumper,knitwear",
+                  "skirt,mini skirt,maxi skirt",
+                  "shorts,short pants",
+                  "sandal,sandals,flip flops",
+                  "heel,heels,pumps,stilettos",
+                  "cap,hat,beanie",
+                  "scarf,scarves,shawl",
+                  "cardigan,knit jacket",
+                  "vest,waistcoat,gilet",
+                  "legging,leggings,tights",
+                ],
+              },
+            },
           },
         },
         mappings: {
           properties: {
             product_id: { type: "keyword" },
             vendor_id: { type: "keyword" },
-            title: { type: "text" },
-            brand: { type: "keyword" },
-            category: { type: "keyword" },
+            title: {
+              type: "text",
+              analyzer: "product_analyzer",
+              fields: {
+                keyword: { type: "keyword", ignore_above: 256 },
+                raw: { type: "text", analyzer: "standard" },
+              },
+            },
+            description: {
+              type: "text",
+              analyzer: "product_analyzer",
+            },
+            brand: {
+              type: "keyword",
+              fields: {
+                search: { type: "text", analyzer: "standard" },
+              },
+            },
+            category: {
+              type: "keyword",
+              fields: {
+                search: { type: "text", analyzer: "product_analyzer" },
+              },
+            },
+            category_canonical: { type: "keyword" },
+            // Canonical product-type tokens used for strict garment matching
+            // (e.g. hoodie, joggers). Stored as multi-value keyword.
+            product_types: { type: "keyword" },
             price_usd: { type: "float" },
             availability: { type: "keyword" },
             is_hidden: { type: "boolean" },
@@ -58,9 +151,27 @@ export async function ensureIndex() {
             attr_fit: { type: "keyword" },
             attr_style: { type: "keyword" },
             attr_gender: { type: "keyword" },
+            /** Normalized men | women | unisex from title when detectable */
+            audience_gender: { type: "keyword" },
+            /** adult | kids | baby | teen */
+            age_group: { type: "keyword" },
             attr_pattern: { type: "keyword" },
             attr_sleeve: { type: "keyword" },
             attr_neckline: { type: "keyword" },
+            attr_colors_text: { type: "keyword" },
+            attr_colors_image: { type: "keyword" },
+            attr_color_source: { type: "keyword" },
+            color_primary_canonical: { type: "keyword" },
+            color_secondary_canonical: { type: "keyword" },
+            color_accent_canonical: { type: "keyword" },
+            color_palette_canonical: { type: "keyword" },
+            color_confidence_primary: { type: "float" },
+            color_confidence_text: { type: "float" },
+            color_confidence_image: { type: "float" },
+            norm_confidence: { type: "float" },
+            category_confidence: { type: "float" },
+            brand_confidence: { type: "float" },
+            type_confidence: { type: "float" },
             // Array of product images
             images: {
               type: "nested",
@@ -73,6 +184,20 @@ export async function ensureIndex() {
             last_seen_at: { type: "date" },
             // CLIP image embedding for vector search (primary image)
             embedding: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
+            // Garment ROI CLIP vector (see processImageForGarmentEmbedding); use SEARCH_IMAGE_KNN_FIELD=embedding_garment
+            embedding_garment: {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {

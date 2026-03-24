@@ -9,7 +9,7 @@
  * 4. Generates CLIP embeddings for similarity search
  */
 
-import { pg } from '../core/db';
+import { pg, toPgVectorParam } from '../core/db';
 import { getYOLOv8Client, type Detection } from '../image/yolov8Client';
 import { mapDetectionToCategory } from '../detection/categoryMapper';
 import { processImageForEmbedding } from '../image/processor';
@@ -344,7 +344,7 @@ async function createWardrobeEntry(data: {
       user_id, product_id, order_id, name, brand, category,
       image_url, purchase_price, purchased_at, embedding,
       source, auto_detection_confidence, created_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::vector, $11, $12, NOW())
     RETURNING id`,
     [
       data.userId,
@@ -356,7 +356,7 @@ async function createWardrobeEntry(data: {
       data.imageUrl || null,
       data.purchasePrice || null,
       data.purchasedAt || null,
-      data.embedding ? JSON.stringify(data.embedding) : null,
+      toPgVectorParam(data.embedding ?? null),
       data.source,
       data.autoDetectionConfidence || null,
     ]

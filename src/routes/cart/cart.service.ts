@@ -26,7 +26,21 @@ export async function getCart(
     [userId]
   );
 
-  const items = result.rows;
+  const items: CartItemWithProduct[] = result.rows.map((r) => ({
+    id: r.id,
+    user_id: r.user_id,
+    product_id: r.product_id,
+    quantity: r.quantity,
+    added_at: r.added_at,
+    title: r.title,
+    brand: r.brand,
+    price_cents: r.price_cents,
+    sales_price_cents: r.sales_price_cents,
+    currency: r.currency,
+    image_url: r.image_url,
+    image_cdn: r.image_cdn,
+    availability: r.availability,
+  }));
   const total_items = items.reduce((sum, i) => sum + i.quantity, 0);
   const total_price_cents = items.reduce((sum, i) => {
     const price = i.sales_price_cents ?? i.price_cents;

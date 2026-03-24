@@ -4,13 +4,18 @@
  * Business logic for similar product recommendations.
  * Uses the ML ranker pipeline to find and rank similar items.
  * 
+ * New features:
+ * - MMR (Maximal Marginal Relevance) for diversity
+ * - Cold start handling with exploration boost
+ * 
  * Different from Outfit Service:
  * - Outfit: "Complete my look" - suggests complementary categories (dress → shoes, bag)
  * - Recommendations: "Similar items" - suggests alternatives in same/similar categories
  */
-import { getAndRankCandidates, type RankedCandidateResult } from "../../lib/ranker";
-import { pg } from "../../lib/core";
+import { getAndRankCandidates, applyMMR, type RankedCandidateResult } from "../../lib/ranker";
+import { pg, getProductsByIdsOrdered } from "../../lib/core";
 import { logImpressionBatch, type RecommendationImpression, type LogImpressionBatchParams } from "../../lib/recommendations";
+import { applyExplorationBoost } from "../../lib/recommendations/coldStart";
 
 // ============================================================================
 // Types
@@ -29,6 +34,12 @@ export interface RecommendationOptions {
   userId?: string;
   /** Session ID for impression logging */
   sessionId?: string;
+  /** MMR lambda parameter for diversity (0-1, default: 0.7) */
+  diversityLambda?: number;
+  /** Apply MMR diversity ranking (default: true) */
+  applyDiversity?: boolean;
+  /** Apply cold start exploration boost (default: true) */
+  applyColdStartBoost?: boolean;
 }
 
 export interface RecommendedProduct {
@@ -97,6 +108,9 @@ export async function getSimilarProducts(
     debug = false,
     userId,
     sessionId,
+    diversityLambda = 0.7,
+    applyDiversity = true,
+    applyColdStartBoost = true,
   } = options;
 
   const startTime = Date.now();
@@ -112,24 +126,46 @@ export async function getSimilarProducts(
     throw new Error(`Product not found: ${productId}`);
   }
 
-  const source = sourceRes.rows[0];
+  const source = sourceRes.rows[0] as any;
 
-  // Run the ranking pipeline
+  // Run the ranking pipeline (get more candidates for MMR to work with)
+  const candidateMultiplier = applyDiversity ? 3 : 1;
   const result = await getAndRankCandidates(String(productId), {
-    candidateLimit: Math.max(limit * 3, 100),
+    candidateLimit: Math.max(limit * candidateMultiplier, 100),
     clipLimit: 200,
     textLimit: 200,
     usePHashDedup: true,
     useModel,
-    finalLimit: limit,
+    finalLimit: limit * candidateMultiplier, // Get more for diversity selection
     minScore,
     debug,
   });
 
+  let candidates = result.candidates;
+  
+  // Apply cold start exploration boost for new products
+  if (applyColdStartBoost) {
+    candidates = applyExplorationBoost(candidates);
+  }
+  
+  // Apply MMR for diversity
+  if (applyDiversity && candidates.length > limit) {
+    const mmrResult = applyMMR(candidates, {
+      lambda: diversityLambda,
+      targetCount: limit,
+      minScore,
+    });
+    candidates = mmrResult.candidates;
+    
+    if (debug) {
+      console.log(`[RecommendationsService] MMR diversity applied: λ=${diversityLambda}, avgPenalty=${mmrResult.meta.averageDiversityPenalty.toFixed(3)}`);
+    }
+  }
+
   const totalMs = Date.now() - startTime;
 
   // Transform candidates to response format
-  const recommendations: RecommendedProduct[] = result.candidates.map((c: RankedCandidateResult) => ({
+  const recommendations: RecommendedProduct[] = candidates.map((c: RankedCandidateResult) => ({
     id: parseInt(c.candidateId, 10),
     title: c.product.title,
     brand: c.product.brand,
@@ -182,7 +218,7 @@ export async function getSimilarProducts(
       title: source.title,
       brand: source.brand,
       category: source.category,
-      image: source.image_cdn,
+      image: source.image_cdn || source.image_url || null,
     },
     recommendations,
     meta: {

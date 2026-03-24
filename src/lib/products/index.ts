@@ -1,6 +1,6 @@
 /**
  * Products Module Exports
- * 
+ *
  * Product-related business logic: canonical grouping, price history.
  */
 
