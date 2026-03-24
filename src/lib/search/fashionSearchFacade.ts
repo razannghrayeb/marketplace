@@ -33,6 +33,7 @@ import {
   expandProductTypesForQuery,
   extractLexicalProductTypeSeeds,
 } from "./productTypeTaxonomy";
+import { config } from "../../config";
 
 export interface UnifiedTextSearchParams {
   query: string;
@@ -62,21 +63,22 @@ export interface UnifiedImageSearchParams {
   knnField?: string;
   /**
    * Forces image search into hard category mode for this call.
-   * When enabled, the OpenSearch `filters.category` terms are applied even if
-   * `SEARCH_IMAGE_SOFT_CATEGORY=1`.
+   * When enabled, the OpenSearch `filters.category` terms are applied even when
+   * soft category is the default (`SEARCH_IMAGE_SOFT_CATEGORY` on or unset).
    */
   forceHardCategoryFilter?: boolean;
   relaxThresholdWhenEmpty?: boolean;
 }
 
-const MIN_FINAL_RELEVANCE = 0.6;
-
-function filterByFinalRelevance<T extends { finalRelevance01?: number }>(items: T[] | undefined): T[] | undefined {
+function filterByFinalRelevance<T extends { finalRelevance01?: number }>(
+  items: T[] | undefined,
+  min: number,
+): T[] | undefined {
   if (!items) return items;
   return items.filter((item) => {
     const rel = item?.finalRelevance01;
     // Keep items without calibrated relevance; enforce only when score exists.
-    return typeof rel !== "number" || rel >= MIN_FINAL_RELEVANCE;
+    return typeof rel !== "number" || rel >= min;
   });
 }
 
@@ -140,7 +142,7 @@ export async function searchBrowse(params: {
     page,
     limit,
   })) as ProductResult[];
-  return filterByFinalRelevance(results) ?? [];
+  return filterByFinalRelevance(results, config.search.finalAcceptMinText) ?? [];
 }
 
 /**
@@ -204,8 +206,8 @@ export async function searchText(params: UnifiedTextSearchParams): Promise<Searc
   } as any);
 
   const output = rest as SearchResultWithRelated;
-  const filteredResults = filterByFinalRelevance(output.results) ?? [];
-  const filteredRelated = filterByFinalRelevance(output.related);
+  const filteredResults = filterByFinalRelevance(output.results, config.search.finalAcceptMinText) ?? [];
+  const filteredRelated = filterByFinalRelevance(output.related, config.search.finalAcceptMinText);
   const meta = {
     ...(output.meta ?? {}),
     total_results: filteredResults.length,
@@ -312,8 +314,8 @@ export async function searchImage(
     relaxThresholdWhenEmpty: relaxThresholdWhenEmpty ?? true,
   } as any);
 
-  const filteredResults = filterByFinalRelevance(res.results) ?? [];
-  const filteredRelated = filterByFinalRelevance(res.related);
+  const filteredResults = filterByFinalRelevance(res.results, config.search.finalAcceptMinImage) ?? [];
+  const filteredRelated = filterByFinalRelevance(res.related, config.search.finalAcceptMinImage);
   const meta = {
     ...(res.meta ?? {}),
     total_results: filteredResults.length,

@@ -94,7 +94,7 @@ export const config = {
     // Model type: "fashion-clip" (recommended) | "vit-l-14" | "vit-b-32"
     // Fashion-CLIP is fine-tuned for apparel and captures fabric textures, styles better
     modelType: process.env.CLIP_MODEL_TYPE || "fashion-clip",
-    // Similarity thresholds (image kNN + text hybrid min_score caps); default 0.6 aligns with SEARCH_FINAL_ACCEPT_MIN
+    // Similarity thresholds (image kNN + text hybrid min_score caps); text gate default aligns with SEARCH_FINAL_ACCEPT_MIN_TEXT
     similarityThreshold: Number(process.env.CLIP_SIMILARITY_THRESHOLD || 0.6),
     /** Image-only kNN gate; stricter default so loose "fashion similar" matches are dropped. */
     imageSimilarityThreshold: finiteEnvNumber(
@@ -148,7 +148,7 @@ export const config = {
         ? ("tanh" as const)
         : ("max" as const),
     similarityTanhScale: finiteEnvNumber(process.env.SEARCH_SIMILARITY_TANH_SCALE, 10, 1, 50),
-    /** hard = drop hits below SEARCH_FINAL_ACCEPT_MIN; soft = keep reranked order, no min gate */
+    /** hard = drop hits below text gate (SEARCH_FINAL_ACCEPT_MIN_TEXT); soft = keep reranked order, no min gate */
     relevanceGateMode:
       String(process.env.SEARCH_RELEVANCE_GATE_MODE ?? "soft").toLowerCase() === "soft"
         ? ("soft" as const)

@@ -242,13 +242,26 @@ export async function searchProducts(params: SearchParams): Promise<ProductResul
 // Enhanced Image Search with Similarity Threshold
 // ============================================================================
 
+/** Default on when unset (production soft-category path). Set to 0/false for hard category filter. */
 function imageSoftCategoryEnv(): boolean {
-  const v = String(process.env.SEARCH_IMAGE_SOFT_CATEGORY ?? "").toLowerCase();
+  const raw = process.env.SEARCH_IMAGE_SOFT_CATEGORY;
+  if (raw === undefined || String(raw).trim() === "") return true;
+  const v = String(raw).toLowerCase();
+  if (v === "0" || v === "false" || v === "off" || v === "no") return false;
   return v === "1" || v === "true";
 }
 
 function imageGenderSoftEnv(): boolean {
   const v = String(process.env.SEARCH_IMAGE_GENDER_SOFT ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
+/**
+ * Image search defaults to soft final-relevance gating.
+ * Set SEARCH_IMAGE_HARD_RELEVANCE_GATE=1 to drop hits below SEARCH_FINAL_ACCEPT_MIN_IMAGE when gate is hard.
+ */
+function imageHardRelevanceGateEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_HARD_RELEVANCE_GATE ?? "").toLowerCase().trim();
   return v === "1" || v === "true";
 }
 
@@ -312,36 +325,90 @@ async function opensearchImageKnnHits(
   body: Record<string, unknown>,
   timeoutMs: number,
 ): Promise<any[]> {
-  if (process.env.NODE_ENV !== "production") {
-    const boolQ = (body as any)?.query?.bool;
-    const knnObj = boolQ?.must?.knn;
-    const knnField = knnObj ? Object.keys(knnObj)[0] : undefined;
-    const queryVectorRaw = knnField ? knnObj?.[knnField]?.vector : undefined;
-    const queryVector =
-      Array.isArray(queryVectorRaw)
-        ? queryVectorRaw
-        : ArrayBuffer.isView(queryVectorRaw)
-          ? Array.from(queryVectorRaw as any)
-          : null;
-    if (knnField && queryVector) {
-      console.log("[DEBUG] query vector stats:", {
-        field: knnField,
-        vectorLength: queryVector.length,
-        hasNaN: queryVector.some((v: number) => Number.isNaN(v)),
-        allZero: queryVector.every((v: number) => v === 0),
-        magnitude: Math.sqrt(queryVector.reduce((s: number, v: number) => s + v * v, 0)),
-        first3: queryVector.slice(0, 3),
+  const startedAt = Date.now();
+
+  const boolQ = (body as any)?.query?.bool;
+  const knnObj = boolQ?.must?.knn;
+  const knnField = knnObj ? Object.keys(knnObj)[0] : undefined;
+  const queryVectorRaw = knnField ? knnObj?.[knnField]?.vector : undefined;
+  const queryVector =
+    Array.isArray(queryVectorRaw)
+      ? queryVectorRaw
+      : ArrayBuffer.isView(queryVectorRaw)
+        ? Array.from(queryVectorRaw as any)
+        : null;
+
+  if (process.env.NODE_ENV !== "production" && knnField && queryVector) {
+    console.log("[DEBUG] query vector stats:", {
+      index: config.opensearch.index,
+      field: knnField,
+      vectorLength: queryVector.length,
+      hasNaN: queryVector.some((v: number) => Number.isNaN(v)),
+      allZero: queryVector.every((v: number) => v === 0),
+      magnitude: Math.sqrt(
+        queryVector.reduce((s: number, v: number) => s + v * v, 0),
+      ),
+      first3: queryVector.slice(0, 3),
+      timeoutMs,
+    });
+  }
+
+  try {
+    // Do not pass `signal` on the first arg — the client forwards unknown keys as URL query
+    // params and OpenSearch rejects `?signal=...`. Use Transport `requestTimeout` instead.
+    const r = await osClient.search(
+      {
+        index: config.opensearch.index,
+        body: body as any,
+        timeout: `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`,
+      },
+      { requestTimeout: timeoutMs },
+    );
+
+    const hits = (r.body?.hits?.hits ?? []) as any[];
+
+    if (process.env.NODE_ENV !== "production") {
+      console.log("[image-knn] search ok", {
+        index: config.opensearch.index,
+        field: knnField ?? null,
+        vectorLength: queryVector?.length ?? null,
+        hits: hits.length,
+        elapsedMs: Date.now() - startedAt,
+        took: r.body?.took ?? null,
       });
     }
+
+    return hits;
+  } catch (err: any) {
+    const timedOut =
+      err?.name === "TimeoutError" ||
+      err?.message?.includes?.("timeout") ||
+      err?.meta?.statusCode === 408;
+
+    if (timedOut) {
+      console.error("[image-knn] request timeout", {
+        index: config.opensearch.index,
+        field: knnField ?? null,
+        vectorLength: queryVector?.length ?? null,
+        timeoutMs,
+        elapsedMs: Date.now() - startedAt,
+      });
+      return [];
+    }
+
+    console.error("[image-knn] opensearch error", {
+      index: config.opensearch.index,
+      field: knnField ?? null,
+      vectorLength: queryVector?.length ?? null,
+      elapsedMs: Date.now() - startedAt,
+      message: err?.message ?? null,
+      name: err?.name ?? null,
+      statusCode: err?.meta?.statusCode ?? null,
+      responseBody: err?.meta?.body ?? null,
+    });
+
+    return [];
   }
-  const searchPromise = osClient
-    .search({ index: config.opensearch.index, body: body as any })
-    .then((r) => (r.body?.hits?.hits ?? []) as any[])
-    .catch(() => [] as any[]);
-  const timeoutPromise = new Promise<any[]>((resolve) => {
-    setTimeout(() => resolve([]), timeoutMs);
-  });
-  return Promise.race([searchPromise, timeoutPromise]);
 }
 
 function buildDesiredCatalogTermSet(aisles: string[]): Set<string> {
@@ -616,6 +683,49 @@ export async function searchByImageWithSimilarity(
     .map((x) => x.hit)
     .slice(0, fetchLimit);
 
+  /** Per-hit soft signals for ranking + explain (visual + category + optional attribute embeddings). */
+  const imageCompositeById = new Map<string, number>();
+  const styleSimById = new Map<string, number>();
+  const colorSimById = new Map<string, number>();
+  const patternSimById = new Map<string, number>();
+  const taxonomyMatchById = new Map<string, number>();
+
+  const wColor = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_COLOR_WEIGHT ?? "80") || 80);
+  const wStyle = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_STYLE_WEIGHT ?? "60") || 60);
+  const wPattern = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_PATTERN_WEIGHT ?? "40") || 40);
+
+  for (const hit of baseCandidates) {
+    const idStr = String(hit._source.product_id);
+    const visualSim = knnCosinesimilScoreToCosine01(Number(hit._score));
+    const categorySoft =
+      useAisleRerank && !forceHardCategoryFilter
+        ? categorySoftScoreForHit(hit, desiredCatalogTerms)
+        : 0;
+
+    const colorSim = runColor
+      ? cosineSimilarity01(colorQueryEmbedding ?? undefined, hit._source?.embedding_color)
+      : 0;
+    const styleSim = runStyle
+      ? cosineSimilarity01(styleQueryEmbedding ?? undefined, hit._source?.embedding_style)
+      : 0;
+    const patternSim = runPattern
+      ? cosineSimilarity01(patternQueryEmbedding ?? undefined, hit._source?.embedding_pattern)
+      : 0;
+
+    styleSimById.set(idStr, Math.round(styleSim * 1000) / 1000);
+    colorSimById.set(idStr, Math.round(colorSim * 1000) / 1000);
+    patternSimById.set(idStr, Math.round(patternSim * 1000) / 1000);
+    taxonomyMatchById.set(idStr, categorySoft);
+
+    const composite =
+      visualSim * 1000 +
+      categorySoft * 220 +
+      colorSim * wColor +
+      styleSim * wStyle +
+      patternSim * wPattern;
+    imageCompositeById.set(idStr, composite);
+  }
+
   const crossFamilyPenaltyWeight = Math.max(
     0,
     Math.min(2000, Number(process.env.SEARCH_CROSS_FAMILY_PENALTY_WEIGHT ?? "420") || 420),
@@ -852,7 +962,10 @@ export async function searchByImageWithSimilarity(
     }
   }
 
-  const maxHydrate = Math.min(rankedHits.length, Math.max(limit * 4, limit));
+  const maxHydrate = Math.min(
+    rankedHits.length,
+    Math.max(limit * 10, 150),
+  );
   const hitsForHydrate = rankedHits.slice(0, maxHydrate);
   const productIds = hitsForHydrate.map((hit: any) => hit._source.product_id);
   const scoreMap = new Map<string, number>();
@@ -942,7 +1055,9 @@ export async function searchByImageWithSimilarity(
   if (includeRelated && pHash) {
     const excludeIds = results.map((p) => String(p.id));
     related = await findSimilarByPHash(pHash, excludeIds, limit);
-    const filteredRel = filterRelatedAgainstMain(results as any, related as any);
+    const filteredRel = filterRelatedAgainstMain(results as any, related as any, {
+      imageSearch: true,
+    });
     related = (filteredRel ?? []) as ProductResult[];
   }
 

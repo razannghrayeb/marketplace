@@ -25,7 +25,7 @@ export interface CategoryMapping {
 
 export interface CategoryAttributes {
   sleeveLength?: "short" | "long" | "sleeveless";
-  dressLength?: "mini" | "midi" | "maxi";
+  dressLength?: "mini" | "midi" | "maxi" | "long";
   formalityHint?: number;
 }
 
@@ -245,6 +245,12 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
     confidence: 0.95,
     alternativeCategories: [],
     attributes: { dressLength: "maxi" },
+  },
+  long_dress: {
+    productCategory: "dresses",
+    confidence: 0.95,
+    alternativeCategories: [],
+    attributes: { dressLength: "long" },
   },
   mini_dress: {
     productCategory: "dresses",

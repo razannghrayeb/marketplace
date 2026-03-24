@@ -48,8 +48,12 @@ import {
 } from "../../lib/search/productTypeTaxonomy";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
 
+/** Default on when unset — soft category + aisle rerank is the normal image path. */
 function imageSoftCategoryEnv(): boolean {
-  const v = String(process.env.SEARCH_IMAGE_SOFT_CATEGORY ?? "").toLowerCase();
+  const raw = process.env.SEARCH_IMAGE_SOFT_CATEGORY;
+  if (raw === undefined || String(raw).trim() === "") return true;
+  const v = String(raw).toLowerCase();
+  if (v === "0" || v === "false" || v === "off" || v === "no") return false;
   return v === "1" || v === "true";
 }
 
@@ -87,17 +91,17 @@ function shopLookSoftCategoryEnv(): boolean {
   return v === "1" || v === "true";
 }
 
-/** Per-detection "hard category" confidence threshold (default 0.75). */
+/** Per-detection auto hard-category min confidence (default high — opt-in strict or env). */
 function shopLookHardCategoryConfThreshold(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_HARD_CAT_CONF ?? "0.93");
-  if (!Number.isFinite(raw)) return 0.93;
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_HARD_CAT_CONF ?? "0.97");
+  if (!Number.isFinite(raw)) return 0.97;
   return Math.max(0, Math.min(1, raw));
 }
 
-/** Per-detection minimum area ratio for hard category (default 0.005). */
+/** Per-detection min bbox area ratio for auto hard category (default — large detections only). */
 function shopLookHardCategoryAreaRatioThreshold(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_HARD_CAT_AREA_RATIO ?? "0.2");
-  if (!Number.isFinite(raw)) return 0.2;
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_HARD_CAT_AREA_RATIO ?? "0.38");
+  if (!Number.isFinite(raw)) return 0.38;
   return Math.max(0, Math.min(1, raw));
 }
 
@@ -105,6 +109,38 @@ function shopLookHardCategoryAreaRatioThreshold(): number {
 function shopLookHardCategoryStrictEnv(): boolean {
   const v = String(process.env.SEARCH_IMAGE_SHOP_HARD_CATEGORY_STRICT ?? "").toLowerCase();
   return v === "1" || v === "true";
+}
+
+/**
+ * Ranked result cap per detection for Shop-the-Look (backend); UI may request fewer.
+ * Override with SEARCH_IMAGE_SHOP_LIMIT_PER_DETECTION (1–80).
+ */
+function defaultShopLookResultBudget(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_LIMIT_PER_DETECTION);
+  if (Number.isFinite(raw) && raw >= 1 && raw <= 80) return Math.floor(raw);
+  return 22;
+}
+
+function resolveShopLookLimit(explicit?: number): number {
+  if (typeof explicit === "number" && Number.isFinite(explicit) && explicit >= 1) {
+    return Math.min(80, Math.floor(explicit));
+  }
+  return defaultShopLookResultBudget();
+}
+
+/**
+ * Skip auto hard-category for accessory/bag noise and ambiguous top silhouettes.
+ * `SEARCH_IMAGE_SHOP_HARD_CATEGORY_STRICT` still forces hard filtering when needed.
+ */
+function isNoisyCategoryForAutoHardCategory(mapping: CategoryMapping, detectionLabel: string): boolean {
+  const pc = String(mapping.productCategory || "").toLowerCase();
+  if (pc === "accessories" || pc === "bags") return true;
+  const lb = String(detectionLabel || "").toLowerCase();
+  if (pc === "tops") {
+    if (lb.includes("sling") || lb.includes("crop") || lb.includes("tank")) return true;
+    if (lb.includes("short sleeve top") || lb.includes("long sleeve top")) return true;
+  }
+  return false;
 }
 
 /** Infer audience gender via BLIP caption (default: enabled). */
@@ -333,6 +369,17 @@ function inferColorFromCaption(caption: string): {
   if (garmentMatch?.[1]) garmentColor = mapColorWord(garmentMatch[1]);
 
   return { topColor, jeansColor, garmentColor };
+}
+
+/** BLIP slot color for this catalog category (top vs jeans vs dress), if the caption named one explicitly. */
+function captionColorForProductCategory(
+  productCategory: string,
+  captionColors: { topColor?: string | null; jeansColor?: string | null; garmentColor?: string | null },
+): string | null {
+  if (productCategory === "tops") return captionColors.topColor ?? null;
+  if (productCategory === "bottoms") return captionColors.jeansColor ?? null;
+  if (productCategory === "dresses") return captionColors.garmentColor ?? null;
+  return null;
 }
 
 function ensureStyleAndMask(detection: Detection, imageWidth: number, imageHeight: number): Detection {
@@ -693,7 +740,7 @@ export interface AnalyzeAndFindSimilarOptions extends AnalyzeOptions {
   /** Similarity threshold 0-1 (default: 0.7) */
   similarityThreshold?: number;
 
-  /** Max similar products per detection (default: 10) */
+  /** Max similar products per detection (default from SEARCH_IMAGE_SHOP_LIMIT_PER_DETECTION or 22) */
   similarLimitPerItem?: number;
 
   /** Filter similar products by detected category */
@@ -1045,7 +1092,7 @@ export class ImageAnalysisService {
     const {
       findSimilar = true,
       similarityThreshold = 0.7,
-      similarLimitPerItem = 10,
+      similarLimitPerItem = defaultShopLookResultBudget(),
       filterByDetectedCategory = true,
       groupByDetection = true,
       includeEmptyDetectionGroups = false,
@@ -1210,36 +1257,33 @@ export class ImageAnalysisService {
         filters.softStyle = inferredStyle.attrStyle;
       }
 
-      // Prefer per-detection crop color (aligned with the detected item).
-      // Fall back to caption inferred color / coarse full-image dominant color.
-      let inferredColorForDetection: string | null = null;
+      // Prefer caption color when BLIP named this garment (e.g. "blue velvet top"); crop histograms
+      // often misread navy/velvet/shadows as black. Use per-crop dominant only when caption is silent.
+      let inferredColorForDetection = captionColorForProductCategory(
+        categoryMapping.productCategory,
+        captionColors,
+      );
       const shouldInferColorForDetection =
         imageInferDominantColorEnv() &&
         (detection.confidence ?? 0) >= imageMinColorConfidenceEnv() &&
         (detection.area_ratio ?? 0) >= imageMinColorAreaRatioEnv();
 
-      if (shouldInferColorForDetection) {
+      if (!inferredColorForDetection && shouldInferColorForDetection) {
         inferredColorForDetection = await extractDominantColorNames(croppedBuffer, { maxColors: 1, minShare: 0.12 }).then(
           (c) => c[0] ?? null,
         );
       }
 
-      if (!inferredColorForDetection) {
-        if (categoryMapping.productCategory === "tops") inferredColorForDetection = captionColors.topColor ?? null;
-        if (categoryMapping.productCategory === "bottoms")
-          inferredColorForDetection = captionColors.jeansColor ?? null;
-        if (categoryMapping.productCategory === "dresses")
-          inferredColorForDetection = captionColors.garmentColor ?? null;
-      }
-
       if (!inferredColorForDetection) inferredColorForDetection = inferredPrimaryColor;
       if (inferredColorForDetection) filters.softColor = inferredColorForDetection;
       let predictedCategoryAisles: string[] | undefined;
+      const detectionMeetsAutoHardHeuristics =
+        categoryMapping.confidence >= shopLookHardCategoryConfThreshold() &&
+        (detection.area_ratio ?? 0) >= shopLookHardCategoryAreaRatioThreshold() &&
+        !isNoisyCategoryForAutoHardCategory(categoryMapping, label);
       const shouldHardCategory =
         filterByDetectedCategory &&
-        (shopLookHardCategoryStrictEnv() ||
-          (categoryMapping.confidence >= shopLookHardCategoryConfThreshold() &&
-            (detection.area_ratio ?? 0) >= shopLookHardCategoryAreaRatioThreshold()));
+        (shopLookHardCategoryStrictEnv() || detectionMeetsAutoHardHeuristics);
       const forceHardCategoryFilterUsed = Boolean(shouldHardCategory);
       if (filterByDetectedCategory) {
         const hardLabelForTerms =
@@ -1436,7 +1480,7 @@ export class ImageAnalysisService {
       filterByCategory?: string;
     } = {}
   ): Promise<GroupedSimilarProducts> {
-    const { similarityThreshold = 0.7, limitPerItem = 10, filterByCategory } = options;
+    const { similarityThreshold = 0.7, limitPerItem = defaultShopLookResultBudget(), filterByCategory } = options;
 
     // Download image
     const response = await fetch(imageUrl, {
@@ -1724,26 +1768,21 @@ export class ImageAnalysisService {
           filters.softStyle = inferredStyle.attrStyle;
         }
 
-        // Prefer per-detection crop color (aligned with the detected item) for selection too.
-        let inferredColorForDetection: string | null = null;
+        let inferredColorForDetection = captionColorForProductCategory(
+          categoryMapping.productCategory,
+          captionColors,
+        );
         const shouldInferColorForDetection =
           imageInferDominantColorEnv() &&
           (detection.confidence ?? 0) >= imageMinColorConfidenceEnv() &&
           (detection.area_ratio ?? 0) >= imageMinColorAreaRatioEnv();
 
-        if (shouldInferColorForDetection) {
+        if (!inferredColorForDetection && shouldInferColorForDetection) {
           inferredColorForDetection = await extractDominantColorNames(croppedBuffer, { maxColors: 1, minShare: 0.12 }).then(
             (c) => c[0] ?? null,
           );
         }
 
-        if (!inferredColorForDetection) {
-          if (categoryMapping.productCategory === "tops") inferredColorForDetection = captionColors.topColor ?? null;
-          if (categoryMapping.productCategory === "bottoms")
-            inferredColorForDetection = captionColors.jeansColor ?? null;
-          if (categoryMapping.productCategory === "dresses")
-            inferredColorForDetection = captionColors.garmentColor ?? null;
-        }
         if (!inferredColorForDetection) inferredColorForDetection = inferredPrimaryColor;
         if (inferredColorForDetection) filters.softColor = inferredColorForDetection;
         let predictedCategoryAisles: string[] | undefined;
@@ -1772,7 +1811,7 @@ export class ImageAnalysisService {
           imageEmbedding: finalEmbedding,
           imageBuffer: croppedBuffer,
           filters,
-          limit: options.similarLimitPerItem || 10,
+          limit: resolveShopLookLimit(options.similarLimitPerItem),
           similarityThreshold: options.similarityThreshold || 0.7,
           includeRelated: false,
           predictedCategoryAisles,
@@ -1794,7 +1833,7 @@ export class ImageAnalysisService {
             imageEmbedding: finalEmbedding,
             imageBuffer: croppedBuffer,
             filters: filtersRetry,
-            limit: options.similarLimitPerItem || 10,
+            limit: resolveShopLookLimit(options.similarLimitPerItem),
             similarityThreshold: options.similarityThreshold || 0.7,
             includeRelated: false,
             predictedCategoryAisles,
@@ -1818,7 +1857,7 @@ export class ImageAnalysisService {
             imageEmbedding: finalEmbedding,
             imageBuffer: croppedBuffer,
             filters: filtersSansCategory,
-            limit: options.similarLimitPerItem || 10,
+            limit: resolveShopLookLimit(options.similarLimitPerItem),
             similarityThreshold: options.similarityThreshold || 0.7,
             includeRelated: false,
             predictedCategoryAisles,
@@ -1830,7 +1869,7 @@ export class ImageAnalysisService {
               imageEmbedding: finalEmbedding,
               imageBuffer: croppedBuffer,
               filters: {},
-              limit: options.similarLimitPerItem || 10,
+              limit: resolveShopLookLimit(options.similarLimitPerItem),
               similarityThreshold: options.similarityThreshold || 0.7,
               includeRelated: false,
               knnField: shopTheLookKnnField(),

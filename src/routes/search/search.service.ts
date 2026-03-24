@@ -1849,7 +1849,7 @@ export async function multiImageSearch(
       const finalAcceptMin = config.search.finalAcceptMinImage;
       // Text-search hard gate often drops every multi-image kNN hit: typeGate/color from
       // AST+vision can be strict while visual neighbors are still useful. Default soft here;
-      // set MULTI_IMAGE_HARD_RELEVANCE_GATE=1 to apply SEARCH_FINAL_ACCEPT_MIN + relevanceGateMode like text.
+      // set MULTI_IMAGE_HARD_RELEVANCE_GATE=1 to apply SEARCH_FINAL_ACCEPT_MIN_IMAGE + relevanceGateMode like text.
       const multiImageHardGate =
         String(process.env.MULTI_IMAGE_HARD_RELEVANCE_GATE ?? "").toLowerCase() === "1";
       const relevanceGateSoft = multiImageHardGate

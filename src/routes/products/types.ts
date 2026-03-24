@@ -179,7 +179,7 @@ export interface SearchResultWithRelated {
     parsed_query?: ParsedQuery; // Include parsed query info for debugging/transparency
     processed_query?: QueryAST; // Query processing info (corrections, etc.)
     did_you_mean?: string; // Suggestion if not auto-applied
-    /** True when every candidate in the recall window scored below SEARCH_FINAL_ACCEPT_MIN. */
+    /** True when every candidate in the recall window scored below the path final-accept gate (text vs image env). */
     below_relevance_threshold?: boolean;
     /** Image search: kNN recall passed CLIP gate but every hit failed final relevance gate (hard mode). */
     below_final_relevance_gate?: boolean;

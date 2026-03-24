@@ -242,7 +242,7 @@ Use offline `pnpm run search:eval` + labeled `search-eval-labels.example.json`. 
 | Env | Effect |
 |-----|--------|
 | `SEARCH_STRICT_PRODUCT_TYPE=true` | Legacy hard filter on product type |
-| `SEARCH_IMAGE_SOFT_CATEGORY=true` | Image search: no hard category filter; soft rerank |
+| `SEARCH_IMAGE_SOFT_CATEGORY` | Image search: soft category + aisle rerank (**default on** if unset; set `false` to hard-filter) |
 | `SEARCH_STRICT_CATEGORY_DEFAULT=true` | Existing AST category hard filter behavior |
 | `SEARCH_EVAL_LOG=1` | Emit structured search eval JSON (text + image paths) |
 | `SEARCH_DOMAIN_GATE=true` | Block off-domain text queries (empty results) |
@@ -250,7 +250,11 @@ Use offline `pnpm run search:eval` + labeled `search-eval-labels.example.json`. 
 | `SEARCH_TYPE_CROSS_FAMILY_PENALTY=0` | Disable cross-family rerank penalties |
 | `SEARCH_IMAGE_KNN_FIELD` | `embedding` (default) or `embedding_garment` after ROI reindex |
 | `SEARCH_RECALL_WINDOW` / `SEARCH_RECALL_MAX` | Text search: OpenSearch `size` before rerank (default 300, cap 500); pagination is slice after gate |
-| `SEARCH_FINAL_ACCEPT_MIN` | Text + image: drop hits below this calibrated relevance / similarity (default 0.6) |
+| `SEARCH_FINAL_ACCEPT_MIN_TEXT` | Text: drop hits below this after rerank (falls back to `SEARCH_FINAL_ACCEPT_MIN`) |
+| `SEARCH_FINAL_ACCEPT_MIN_IMAGE` | Image: separate gate after rerank (default 0.45 if unset; does not inherit legacy `SEARCH_FINAL_ACCEPT_MIN`) |
+| `SEARCH_FINAL_ACCEPT_MIN` | Legacy alias for **text** gate when `SEARCH_FINAL_ACCEPT_MIN_TEXT` is unset |
+| `SEARCH_IMAGE_SHOP_LIMIT_PER_DETECTION` | Shop-the-Look: max similar products ranked per detection (default 22, max 80) |
+| `SEARCH_IMAGE_DETECTION_HARD_CAT_CONF` / `_AREA_RATIO` | Auto hard category only for very confident, large detections (defaults 0.97 / 0.38) |
 | `SEARCH_FILTER_HARD_MIN_CONFIDENCE` | Min AST confidence for hard category filter when not in strict category env |
 | `SEARCH_DOMAIN_EMBEDDING_REJECT_BELOW` | Off-domain if CLIP fashion score below this and no anchors (with `SEARCH_DOMAIN_GATE`) |
 | `SEARCH_EXPANSION_MAX_SYNONYMS` / `_MAX_CATEGORY` / `_MAX_TRANSLIT` | Per-channel expansion caps |

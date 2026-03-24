@@ -141,12 +141,18 @@ export function dedupeImageSearchResults<T extends DedupSearchResultItem>(items:
   return out;
 }
 
+export type FilterRelatedAgainstMainOpts = {
+  /** Use narrow image dedupe (id / same URL / same pHash only); default text dedupe. */
+  imageSearch?: boolean;
+};
+
 /**
  * Drop related items that duplicate main list by id or primary image URL, then dedupe related.
  */
 export function filterRelatedAgainstMain<T extends DedupSearchResultItem>(
   main: T[],
   related: T[] | undefined | null,
+  opts?: FilterRelatedAgainstMainOpts,
 ): T[] | undefined {
   if (related == null) return undefined;
   if (related.length === 0) return [];
@@ -161,5 +167,5 @@ export function filterRelatedAgainstMain<T extends DedupSearchResultItem>(
     return true;
   });
 
-  return dedupeSearchResults(filtered);
+  return opts?.imageSearch ? dedupeImageSearchResults(filtered) : dedupeSearchResults(filtered);
 }
