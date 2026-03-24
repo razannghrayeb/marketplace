@@ -62,6 +62,7 @@ export {
 
 export {
   dedupeSearchResults,
+  dedupeImageSearchResults,
   filterRelatedAgainstMain,
   type DedupSearchResultItem,
   type DedupOptions,
