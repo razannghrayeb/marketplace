@@ -12,7 +12,9 @@ import {
   computePHash,
   processImageForEmbedding,
   processImageForGarmentEmbedding,
+  blip,
 } from "../../lib/image/index";
+import { extractLexicalProductTypeSeeds } from "../../lib/search/productTypeTaxonomy";
 import { isClipAvailable } from "../../lib/image/index";
 import { getProductWithVariants } from "./products.service";
 import { config } from "../../config";
@@ -170,14 +172,21 @@ export async function searchProductsByImage(req: Request, res: Response) {
         return res.status(400).json({ success: false, error: validation.error });
       }
 
-      const [emb, garmentEmb, pHashResult] = await Promise.all([
+      const [emb, garmentEmb, pHashResult, caption] = await Promise.all([
         processImageForEmbedding(file.buffer),
         processImageForGarmentEmbedding(file.buffer).catch(() => [] as number[]),
         computePHash(file.buffer),
+        blip.caption(file.buffer).catch(() => ""),
       ]);
       embedding = emb;
       pHash = pHashResult;
       garmentEmbeddingForSearch = garmentEmb.length === emb.length ? garmentEmb : undefined;
+
+      // BLIP caption + taxonomy extraction for productTypes (BM25 soft boost in hybrid search)
+      const typeSeeds = extractLexicalProductTypeSeeds(caption);
+      if (typeSeeds.length) {
+        filters.productTypes = typeSeeds;
+      }
     } else if (req.body.embedding && Array.isArray(req.body.embedding)) {
       // Client-provided vector (expected: same CLIP image space as the index)
       embedding = req.body.embedding;

@@ -139,6 +139,11 @@ export interface ProductResult {
     /** Omitted when there is no separate lexical signal (e.g. image-only kNN). */
     lexicalScore?: number;
     semanticScore?: number;
+    styleSim?: number;
+    colorSim?: number;
+    patternSim?: number;
+    taxonomyMatch?: number;
+    imageCompositeScore?: number;
     colorCompliance?: number; // 0..1
     colorScore?: number;
     globalScore?: number;
