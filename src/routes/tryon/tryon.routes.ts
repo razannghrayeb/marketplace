@@ -7,6 +7,7 @@
  * All create/submit routes return 202 Accepted immediately.
  * The job starts as 'pending' and processes in the background.
  * Poll GET /:id until status is 'completed' or 'failed'.
+ * On Cloud Run, jobs are processed inline before 202 returns (see TRYON_INLINE_PROCESSING / K_SERVICE in tryon.service) so polling often completes on the first GET.
  */
 import { Router } from "express";
 import multer from "multer";

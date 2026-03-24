@@ -21,11 +21,12 @@ interface WardrobeItem {
 }
 
 interface CompleteLookSuggestion {
-  id: number
+  id?: number
+  product_id: number
   title: string
   brand?: string
   category?: string
-  price_cents: number
+  price_cents?: number
   image_url?: string
   image_cdn?: string
   score?: number
@@ -100,8 +101,13 @@ export default function WardrobePage() {
     e.target.value = ''
   }
 
-  const formatPrice = (cents: number) =>
-    new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0 }).format(cents / 100)
+  const formatPrice = (cents: number, currency = 'USD') =>
+    new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 0 }).format(cents / 100)
+
+  const suggestionProductId = (s: CompleteLookSuggestion) => {
+    const n = Number(s.id ?? s.product_id)
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : null
+  }
 
   if (!isAuth) {
     return (
@@ -402,13 +408,22 @@ export default function WardrobePage() {
                     variants={{ visible: { transition: { staggerChildren: 0.06 } }, hidden: {} }}
                     className="grid grid-cols-2 gap-4"
                   >
-                    {(completeStyleQuery.data as CompleteLookSuggestion[]).map((s) => (
+                    {(completeStyleQuery.data as CompleteLookSuggestion[])
+                      .filter((s) => suggestionProductId(s) != null)
+                      .map((s) => {
+                        const pid = suggestionProductId(s)!
+                        const cents = s.price_cents
+                        const priceLabel =
+                          typeof cents === 'number' && Number.isFinite(cents) && cents > 0
+                            ? formatPrice(Math.round(cents))
+                            : '—'
+                        return (
                       <motion.div
-                        key={s.id}
+                        key={pid}
                         variants={{ hidden: { opacity: 0, y: 12 }, visible: { opacity: 1, y: 0 } }}
                       >
                         <Link
-                          href={`/products/${s.id}`}
+                          href={`/products/${pid}`}
                           className="block group rounded-2xl border border-neutral-200/60 bg-white overflow-hidden hover:shadow-lg hover:shadow-violet-500/10 hover:-translate-y-0.5 transition-all duration-300"
                         >
                           <div className="aspect-[3/4] relative bg-neutral-100 overflow-hidden">
@@ -421,8 +436,8 @@ export default function WardrobePage() {
                             />
                             {s.reason && (
                               <div className="absolute top-2 left-2 right-2">
-                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-white/90 backdrop-blur-sm text-[10px] font-semibold text-violet-700 shadow-sm">
-                                  <Sparkles className="w-3 h-3" />
+                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-white/90 backdrop-blur-sm text-[10px] font-semibold text-violet-700 shadow-sm line-clamp-2">
+                                  <Sparkles className="w-3 h-3 shrink-0" />
                                   {s.reason}
                                 </span>
                               </div>
@@ -430,17 +445,18 @@ export default function WardrobePage() {
                           </div>
                           <div className="p-3">
                             <p className="text-[10px] font-semibold text-violet-600 uppercase tracking-wider">{s.brand || s.category || ''}</p>
-                            <p className="text-sm font-semibold text-neutral-900 line-clamp-1 mt-0.5">{s.title}</p>
-                            <div className="flex items-center justify-between mt-1.5">
-                              <p className="text-sm font-bold text-violet-700">{formatPrice(s.price_cents)}</p>
-                              <span className="text-xs text-violet-600 font-semibold flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <p className="text-sm font-semibold text-neutral-900 line-clamp-2 mt-0.5">{s.title}</p>
+                            <div className="flex items-center justify-between mt-1.5 gap-2">
+                              <p className="text-sm font-bold text-violet-700 tabular-nums">{priceLabel}</p>
+                              <span className="text-xs text-violet-600 font-semibold flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
                                 View <ChevronRight className="w-3 h-3" />
                               </span>
                             </div>
                           </div>
                         </Link>
                       </motion.div>
-                    ))}
+                        )
+                      })}
                   </motion.div>
                 ) : (
                   <div className="text-center py-12">

@@ -290,6 +290,37 @@ async function processJobInBackground(opts: JobProcessOpts, attempt: number = 1)
   }
 }
 
+/**
+ * Fire-and-forget after HTTP response works on a long-running Node server, but on
+ * Google Cloud Run the instance often loses CPU as soon as the response is sent,
+ * so `setImmediate` jobs never run and jobs stay `pending` forever.
+ *
+ * - Set TRYON_INLINE_PROCESSING=true to always await Vertex processing before returning.
+ * - Set TRYON_INLINE_PROCESSING=false to force async (worker / local dev with background CPU).
+ * - If unset, defaults to inline on Cloud Run (`K_SERVICE`) or Render (`RENDER`).
+ */
+function shouldProcessTryOnInline(): boolean {
+  const v = process.env.TRYON_INLINE_PROCESSING?.trim().toLowerCase();
+  if (v === "true" || v === "1" || v === "yes") return true;
+  if (v === "false" || v === "0" || v === "no") return false;
+  return Boolean(process.env.K_SERVICE || process.env.RENDER);
+}
+
+async function scheduleTryOnProcessing(
+  opts: JobProcessOpts,
+  inline: boolean
+): Promise<void> {
+  if (inline) {
+    await processJobInBackground(opts);
+    return;
+  }
+  setImmediate(() => {
+    processJobInBackground(opts).catch(() => {
+      /* logged inside processJobInBackground */
+    });
+  });
+}
+
 // ============================================================================
 // Core try-on logic
 // ============================================================================
@@ -326,13 +357,13 @@ export async function performTryOn(input: PerformTryOnInput): Promise<TryOnJobRo
     ]
   );
   const job = jobRow.rows[0];
+  const inline = shouldProcessTryOnInline();
 
-  // Fire-and-forget — process asynchronously
-  setImmediate(() => {
-    processJobInBackground({
-      jobId:         job.id,
-      userId:        input.userId,
-      personBuffer:  input.personImageBuffer,
+  await scheduleTryOnProcessing(
+    {
+      jobId: job.id,
+      userId: input.userId,
+      personBuffer: input.personImageBuffer,
       personMimeType: input.personMimeType ?? detectMimeType(input.personImageBuffer),
       garmentBuffer,
       garmentSource: input.garmentSource,
@@ -340,10 +371,14 @@ export async function performTryOn(input: PerformTryOnInput): Promise<TryOnJobRo
         garmentDescription,
         category: input.category,
       },
-    }).catch(() => {
-      // Error already logged inside processJobInBackground
-    });
-  });
+    },
+    inline
+  );
+
+  if (inline) {
+    const refreshed = await getTryOnJob(job.id, input.userId);
+    return refreshed ?? job;
+  }
 
   return job;
 }
@@ -367,6 +402,7 @@ export async function performBatchTryOn(
 
   const personMimeType =
     input.personMimeType ?? detectMimeType(input.personImageBuffer);
+  const inline = shouldProcessTryOnInline();
 
   const jobs = await Promise.all(
     input.garments.map(async (g) => {
@@ -401,11 +437,11 @@ export async function performBatchTryOn(
       );
       const job = row.rows[0];
 
-      setImmediate(() => {
-        processJobInBackground({
-          jobId:         job.id,
-          userId:        input.userId,
-          personBuffer:  input.personImageBuffer,
+      await scheduleTryOnProcessing(
+        {
+          jobId: job.id,
+          userId: input.userId,
+          personBuffer: input.personImageBuffer,
           personMimeType,
           garmentBuffer,
           garmentSource: g.garmentSource,
@@ -413,9 +449,14 @@ export async function performBatchTryOn(
             garmentDescription,
             category: g.category ?? "upper_body",
           },
-        }).catch(() => {});
-      });
+        },
+        inline
+      );
 
+      if (inline) {
+        const refreshed = await getTryOnJob(job.id, input.userId);
+        return refreshed ?? job;
+      }
       return job;
     })
   );

@@ -25,6 +25,7 @@ export interface ProductRecommendation {
   category?: string;
   price_cents?: number;
   image_url?: string;
+  image_cdn?: string;
   score: number;
   reason: string;
   reason_type: "gap" | "style_match" | "compatible" | "trending";
@@ -411,9 +412,10 @@ export async function completeLookSuggestions(
   for (const category of missingCategories) {
     try {
       const perCategoryPool = Math.max(12, Math.ceil(limit / Math.max(missingCategories.length, 1)) * 4);
+      const canonical = wardrobeSlotToCategoryCanonical(category);
       const filters: any[] = [
         { term: { availability: "in_stock" } },
-        { term: { category } },
+        { term: { category_canonical: canonical } },
       ];
 
       if (userPriceTier) {
@@ -515,8 +517,11 @@ export async function completeLookSuggestions(
           title: source.title,
           brand: source.brand,
           category: source.category,
-          price_cents: source.price_usd ? Math.round(source.price_usd * 100) : undefined,
+          price_cents: source.price_usd != null && Number.isFinite(Number(source.price_usd))
+            ? Math.round(Number(source.price_usd) * 100)
+            : undefined,
           image_url: source.image_cdn,
+          image_cdn: source.image_cdn,
           score: Math.round(finalScore * 1000) / 1000,
           reason: `Add ${category} to complete the look (${reasons.join(", ")})`,
           reason_type: "compatible",
@@ -590,6 +595,20 @@ const GOOD_PAIRINGS: Record<string, string[]> = {
   bags: ["dresses", "tops", "outerwear"],
   accessories: ["tops", "bottoms", "dresses", "outerwear"],
 };
+
+/** Wardrobe "missing slot" labels → OpenSearch `category_canonical` (see searchDocument + categoryFilter). */
+function wardrobeSlotToCategoryCanonical(slot: string): string {
+  const map: Record<string, string> = {
+    shoes: "footwear",
+    bags: "accessories",
+    tops: "tops",
+    bottoms: "bottoms",
+    outerwear: "outerwear",
+    dresses: "dresses",
+    accessories: "accessories",
+  };
+  return map[slot] ?? slot;
+}
 
 function normalizeWardrobeCategory(value?: string | null): string | null {
   if (!value) return null;
