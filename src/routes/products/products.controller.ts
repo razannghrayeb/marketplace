@@ -113,7 +113,7 @@ export async function searchProductsByTitle(req: Request, res: Response) {
     const rankingMeta = wantsRankingDebug(req)
       ? {
           ranking_debug: true as const,
-          final_accept_min: config.search.finalAcceptMin,
+          final_accept_min: config.search.finalAcceptMinText,
           relevance_gate_mode: config.search.relevanceGateMode,
           similarity_normalize: config.search.similarityNormalize,
           recall_window: config.search.recallWindow,

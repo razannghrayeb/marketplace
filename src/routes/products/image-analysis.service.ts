@@ -86,16 +86,22 @@ function shopLookSoftCategoryEnv(): boolean {
 
 /** Per-detection "hard category" confidence threshold (default 0.75). */
 function shopLookHardCategoryConfThreshold(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_HARD_CAT_CONF ?? "0.75");
-  if (!Number.isFinite(raw)) return 0.75;
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_HARD_CAT_CONF ?? "0.93");
+  if (!Number.isFinite(raw)) return 0.93;
   return Math.max(0, Math.min(1, raw));
 }
 
 /** Per-detection minimum area ratio for hard category (default 0.005). */
 function shopLookHardCategoryAreaRatioThreshold(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_HARD_CAT_AREA_RATIO ?? "0.005");
-  if (!Number.isFinite(raw)) return 0.005;
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_HARD_CAT_AREA_RATIO ?? "0.2");
+  if (!Number.isFinite(raw)) return 0.2;
   return Math.max(0, Math.min(1, raw));
+}
+
+/** Explicit strict mode: hard category as first pass for Shop-the-Look. */
+function shopLookHardCategoryStrictEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_SHOP_HARD_CATEGORY_STRICT ?? "").toLowerCase();
+  return v === "1" || v === "true";
 }
 
 /** Infer audience gender via BLIP caption (default: enabled). */
@@ -1190,8 +1196,9 @@ export class ImageAnalysisService {
       let predictedCategoryAisles: string[] | undefined;
       const shouldHardCategory =
         filterByDetectedCategory &&
-        categoryMapping.confidence >= shopLookHardCategoryConfThreshold() &&
-        (detection.area_ratio ?? 0) >= shopLookHardCategoryAreaRatioThreshold();
+        (shopLookHardCategoryStrictEnv() ||
+          (categoryMapping.confidence >= shopLookHardCategoryConfThreshold() &&
+            (detection.area_ratio ?? 0) >= shopLookHardCategoryAreaRatioThreshold()));
       const forceHardCategoryFilterUsed = Boolean(shouldHardCategory);
       if (filterByDetectedCategory) {
         const hardLabelForTerms =

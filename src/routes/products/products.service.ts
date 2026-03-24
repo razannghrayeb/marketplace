@@ -7,7 +7,10 @@ import {
 import { config } from "../../config";
 import { getImagesForProducts, ProductImage } from "./images.service";
 import { hammingDistance } from "../../lib/products";
-import { dedupeSearchResults, filterRelatedAgainstMain } from "../../lib/search/resultDedup";
+import {
+  dedupeImageSearchResults,
+  filterRelatedAgainstMain,
+} from "../../lib/search/resultDedup";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
 import {
   emitImageSearchEval,
@@ -343,6 +346,25 @@ function buildDesiredCatalogTermSet(aisles: string[]): Set<string> {
   return s;
 }
 
+function categorySoftScoreForHit(hit: any, desiredCatalogTerms: Set<string> | null): number {
+  if (!desiredCatalogTerms || desiredCatalogTerms.size === 0) return 0;
+  const category = String(hit?._source?.category ?? "").toLowerCase().trim();
+  const categoryCanonical = String(hit?._source?.category_canonical ?? "")
+    .toLowerCase()
+    .trim();
+  const productTypes = Array.isArray(hit?._source?.product_types)
+    ? hit._source.product_types.map((t: unknown) => String(t).toLowerCase().trim())
+    : [];
+
+  if ((category && desiredCatalogTerms.has(category)) || (categoryCanonical && desiredCatalogTerms.has(categoryCanonical))) {
+    return 1;
+  }
+  if (productTypes.some((t: string) => t && desiredCatalogTerms.has(t))) {
+    return 0.88;
+  }
+  return 0;
+}
+
 /**
  * Search products by image with similarity threshold and optional pHash matching
  * Returns similar images above the threshold, sorted by similarity
@@ -356,7 +378,7 @@ export async function searchByImageWithSimilarity(
     imageBuffer,
     filters = {},
     page = 1,
-    limit = 20,
+    limit = 500,
     similarityThreshold = config.clip.imageSimilarityThreshold,
     includeRelated = true,
     pHash,
@@ -373,9 +395,12 @@ export async function searchByImageWithSimilarity(
   }
 
   const evalT0 = Date.now();
+  const breakdownDebug =
+    String(process.env.SEARCH_DEBUG ?? "").toLowerCase() === "1" ||
+    String(process.env.SEARCH_TRACE_BREAKDOWN ?? "").toLowerCase() === "1";
 
   // Over-fetch so absolute threshold + later dedup still fill `limit` (cap raised for broader kNN recall).
-  const fetchLimit = Math.min(Math.max(limit * 5, 100), 300);
+  const fetchLimit = Math.min(Math.max(limit * 5, 500), 500);
 
   const softCategory = forceHardCategoryFilter ? false : imageSoftCategoryEnv();
   const aisleHints = predictedCategoryAisles?.length
@@ -715,48 +740,21 @@ export async function searchByImageWithSimilarity(
   const passesImageSimilarityThreshold = (hit: any, thresh: number): boolean =>
     knnCosinesimilScoreToCosine01(Number(hit._score)) >= thresh;
 
-  const filteredHits = hits.filter((hit: any) => passesImageSimilarityThreshold(hit, similarityThreshold));
-
-  /** kNN had candidates but strict gate removed all; optional relax for Shop-the-Look. */
-  let thresholdRelaxed = false;
-  let workingHits = filteredHits;
-
-  let relaxFloorUsed: number | null = null;
-  if (
-    relaxThresholdWhenEmpty &&
-    filteredHits.length === 0 &&
-    hits.length > 0
-  ) {
-    const floor = imageRelaxSimilarityFloor();
-    relaxFloorUsed = floor;
-    workingHits = [...hits]
-      .sort((a: any, b: any) => Number(b._score) - Number(a._score))
-      .filter((h: any) => passesImageSimilarityThreshold(h, floor))
-      .slice(0, fetchLimit);
-    thresholdRelaxed = workingHits.length > 0;
-  }
-
-  /**
-   * Sparse strict gate: fusion + high CLIP threshold often leaves very few hits though kNN recall is large.
-   * When strict filter yields fewer candidates than we need, widen to SEARCH_IMAGE_RELAX_FLOOR (same as zero-hit relax).
-   */
-  const minWantCandidates = Math.min(fetchLimit, Math.max(limit, 15));
-  if (workingHits.length < minWantCandidates && hits.length > workingHits.length) {
-    const floor = imageRelaxSimilarityFloor();
-    relaxFloorUsed = floor;
-    const loose = [...hits]
-      .sort((a: any, b: any) => Number(b._score) - Number(a._score))
-      .filter((h: any) => passesImageSimilarityThreshold(h, floor))
-      .slice(0, fetchLimit);
-    if (loose.length > workingHits.length) {
-      workingHits = loose;
-      thresholdRelaxed = true;
-    }
-  }
-
-  /** True when kNN returned candidates but none met CLIP threshold (not the text SEARCH_FINAL_ACCEPT_MIN gate). */
-  const belowRelevanceThreshold =
-    hits.length > 0 && filteredHits.length === 0 && !thresholdRelaxed;
+  const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
+  // Broad retrieval first, then soft rerank (visual + category), then threshold gate.
+  const baseCandidates = [...hits]
+    .map((hit: any) => {
+      const visualSim = knnCosinesimilScoreToCosine01(Number(hit._score));
+      const categorySoft =
+        useAisleRerank && !forceHardCategoryFilter
+          ? categorySoftScoreForHit(hit, desiredCatalogTerms)
+          : 0;
+      const softScore = visualSim * 1000 + categorySoft * 220;
+      return { hit, softScore };
+    })
+    .sort((a, b) => b.softScore - a.softScore)
+    .map((x) => x.hit)
+    .slice(0, fetchLimit);
 
   const crossFamilyPenaltyWeight = Math.max(
     0,
@@ -866,7 +864,7 @@ export async function searchByImageWithSimilarity(
 
   const complianceById = new Map<string, HitCompliance>();
   const colorByHitId = new Map<string, string | null>();
-  for (const hit of workingHits) {
+  for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
     const sim = knnCosinesimilScoreToCosine01(Number(hit._score));
     const rounded = Math.round(sim * 100) / 100;
@@ -876,7 +874,7 @@ export async function searchByImageWithSimilarity(
     colorByHitId.set(idStr, primaryColor);
   }
 
-  const sortedByRelevance = [...workingHits].sort((a: any, b: any) => {
+  const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
     const idb = String(b._source.product_id);
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
@@ -931,15 +929,49 @@ export async function searchByImageWithSimilarity(
     return filtered.length > 0 ? filtered : sortedByRelevance;
   })();
 
-  const finalAcceptMin = config.search.finalAcceptMin;
+  // Late visual gate (after soft rerank).
+  const thresholdPassedByVisual = rankedHitsCandidates.filter((h: any) =>
+    passesImageSimilarityThreshold(h, similarityThreshold),
+  );
+  let thresholdRelaxed = false;
+  let relaxFloorUsed: number | null = null;
+  let visualGatedHits = thresholdPassedByVisual;
+  if (relaxThresholdWhenEmpty && thresholdPassedByVisual.length === 0 && rankedHitsCandidates.length > 0) {
+    const floor = imageRelaxSimilarityFloor();
+    relaxFloorUsed = floor;
+    visualGatedHits = rankedHitsCandidates.filter((h: any) =>
+      passesImageSimilarityThreshold(h, floor),
+    );
+    thresholdRelaxed = visualGatedHits.length > 0;
+  }
+
+  const minWantCandidates = Math.min(fetchLimit, Math.max(limit, 15));
+  if (visualGatedHits.length < minWantCandidates && rankedHitsCandidates.length > visualGatedHits.length) {
+    const floor = imageRelaxSimilarityFloor();
+    relaxFloorUsed = floor;
+    const loose = rankedHitsCandidates.filter((h: any) =>
+      passesImageSimilarityThreshold(h, floor),
+    );
+    if (loose.length > visualGatedHits.length) {
+      visualGatedHits = loose;
+      thresholdRelaxed = true;
+    }
+  }
+
+  /** True when reranked candidates exist but visual gate removed all (without relaxation). */
+  const belowRelevanceThreshold =
+    rankedHitsCandidates.length > 0 && thresholdPassedByVisual.length === 0 && !thresholdRelaxed;
+
+  const finalAcceptMin = config.search.finalAcceptMinImage;
   const relevanceGateSoft = !imageHardRelevanceGateEnv();
-  const thresholdPassedHits = rankedHitsCandidates.filter(
+  const thresholdPassedHits = visualGatedHits.filter(
     (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= finalAcceptMin,
   );
-  let rankedHits = relevanceGateSoft ? rankedHitsCandidates : thresholdPassedHits;
+  const countAfterFinalAcceptMin = thresholdPassedHits.length;
+  let rankedHits = relevanceGateSoft ? visualGatedHits : thresholdPassedHits;
 
   const belowFinalRelevanceGate =
-    workingHits.length > 0 && thresholdPassedHits.length === 0 && !relevanceGateSoft;
+    visualGatedHits.length > 0 && thresholdPassedHits.length === 0 && !relevanceGateSoft;
 
   if (desiredColorsForRelevance.length > 0) {
     const strictColorPost = String(process.env.SEARCH_COLOR_POSTFILTER_STRICT ?? "1").toLowerCase() !== "0";
@@ -1026,8 +1058,12 @@ export async function searchByImageWithSimilarity(
       };
     }) as ProductResult[];
   }
+  const countAfterHydration = results.length;
 
-  results = dedupeSearchResults(results as any).slice(0, limit) as ProductResult[];
+  const dedupedResults = dedupeImageSearchResults(results as any) as ProductResult[];
+  const countAfterDedupe = dedupedResults.length;
+  results = dedupedResults.slice(0, limit) as ProductResult[];
+  const finalReturnedCount = results.length;
 
   let related: ProductResult[] = [];
   if (includeRelated && pHash) {
@@ -1062,6 +1098,31 @@ export async function searchByImageWithSimilarity(
     });
   }
 
+  if (breakdownDebug) {
+    const hasHardCategoryFilter =
+      !softCategory || !desiredCatalogTerms || desiredCatalogTerms.size === 0;
+    console.warn("[search-breakdown][image]", {
+      query: imageSearchTextQuery ?? null,
+      raw_open_search_hits: rawOpenSearchHitCount,
+      hits_after_final_accept_min: countAfterFinalAcceptMin,
+      hits_after_dedupe: countAfterDedupe,
+      hits_after_hydration: countAfterHydration,
+      final_returned_count: finalReturnedCount,
+      SEARCH_FINAL_ACCEPT_MIN_IMAGE: finalAcceptMin,
+      CLIP_SIMILARITY_THRESHOLD: config.clip.imageSimilarityThreshold,
+      category_filter_mode: hasHardCategoryFilter ? "hard" : "soft",
+      product_type_filter_mode: "none",
+      text_knn_mode: "none",
+      recall_window: fetchLimit,
+      candidate_k: fetchLimit,
+      endpoint_limit: limit,
+      limit_per_item: null,
+      image_similarity_threshold_used: similarityThreshold,
+      threshold_relaxed: thresholdRelaxed,
+      relax_floor_used: relaxFloorUsed,
+    });
+  }
+
   return {
     results,
     related: related.length > 0 ? related : undefined,
@@ -1071,7 +1132,7 @@ export async function searchByImageWithSimilarity(
       total_related: related.length,
       below_relevance_threshold: belowRelevanceThreshold,
       threshold_relaxed: thresholdRelaxed,
-      final_accept_min: config.search.finalAcceptMin,
+      final_accept_min: config.search.finalAcceptMinImage,
       below_final_relevance_gate: belowFinalRelevanceGate,
       relevance_gate_soft: relevanceGateSoft,
     },

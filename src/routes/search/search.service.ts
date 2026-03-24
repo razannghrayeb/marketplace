@@ -283,10 +283,12 @@ export async function textSearch(
   const limit  = options?.limit  ?? 20;
   const offset = options?.offset ?? 0;
   const recallSize = computeTextRecallSize(limit, offset);
-  const finalAcceptMin = config.search.finalAcceptMin;
+  const finalAcceptMin = config.search.finalAcceptMinText;
   const includeRelated = options?.includeRelated ?? false;
   const relatedLimit = options?.relatedLimit ?? 10;
   const debug = String(process.env.SEARCH_DEBUG ?? "").toLowerCase() === "1";
+  const breakdownDebug =
+    debug || String(process.env.SEARCH_TRACE_BREAKDOWN ?? "").toLowerCase() === "1";
 
   try {
     const searchRetryTrace: string[] = [];
@@ -1164,6 +1166,7 @@ export async function textSearch(
     }
 
     const hits = response.body.hits.hits;
+    const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
 
     // Normalize scores into ~[0,1] for `similarity_score` (max-of-recall vs tanh of raw OS score)
     const maxScore = hits.length > 0 ? hits[0]._score ?? 1 : 1;
@@ -1245,6 +1248,7 @@ export async function textSearch(
     const thresholdPassedIds = sortedByRelevance
       .map((h: any) => String(h._source.product_id))
       .filter((id) => (complianceById.get(id)?.finalRelevance01 ?? 0) >= finalAcceptMin);
+    const countAfterFinalAcceptMin = thresholdPassedIds.length;
 
     const relevanceGateSoft = config.search.relevanceGateMode === "soft";
     const softFloorMin = config.search.softFinalRelevanceFloorMin;
@@ -1430,7 +1434,9 @@ export async function textSearch(
       });
     }
 
+    const preDedupeCount = results.length;
     results = dedupeSearchResults(results as any) as ProductResult[];
+    const countAfterDedupe = results.length;
 
     const totalAboveThreshold = results.length;
 
@@ -1509,6 +1515,7 @@ export async function textSearch(
     }
 
     results = results.slice(offset, offset + limit);
+    const finalReturnedCount = results.length;
 
     if (!xgbFullRecall && useXgbRanker && results.length > 3) {
       results = await runXgbTieBreakOnSlice(results);
@@ -1577,6 +1584,39 @@ export async function textSearch(
         final_relevance_scores: results.map((p: any) =>
           typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : null,
         ),
+      });
+    }
+
+    if (breakdownDebug) {
+      const categoryFilterMode = callerFilters?.category
+        ? "hard"
+        : hardAstCategory
+          ? "hard"
+          : mergedCategory
+            ? "soft"
+            : "none";
+      const productTypeFilterMode = hasProductTypeConstraint
+        ? strictProductTypeFilterEnv()
+          ? "hard"
+          : "soft"
+        : "none";
+      const textKnnMode = embedding ? (knnBoostOnly ? "should" : "must") : "none";
+      console.warn("[search-breakdown][text]", {
+        query: rawQuery,
+        raw_open_search_hits: rawOpenSearchHitCount,
+        hits_after_final_accept_min: countAfterFinalAcceptMin,
+        hits_after_dedupe: countAfterDedupe,
+        hits_after_hydration: preDedupeCount,
+        final_returned_count: finalReturnedCount,
+        SEARCH_FINAL_ACCEPT_MIN: finalAcceptMin,
+        CLIP_SIMILARITY_THRESHOLD: config.clip.similarityThreshold,
+        category_filter_mode: categoryFilterMode,
+        product_type_filter_mode: productTypeFilterMode,
+        text_knn_mode: textKnnMode,
+        recall_window: config.search.recallWindow,
+        candidate_k: recallSize,
+        endpoint_limit: limit,
+        limit_per_item: null,
       });
     }
 
@@ -1806,7 +1846,7 @@ export async function multiImageSearch(
         return rb - ra;
       });
 
-      const finalAcceptMin = config.search.finalAcceptMin;
+      const finalAcceptMin = config.search.finalAcceptMinImage;
       // Text-search hard gate often drops every multi-image kNN hit: typeGate/color from
       // AST+vision can be strict while visual neighbors are still useful. Default soft here;
       // set MULTI_IMAGE_HARD_RELEVANCE_GATE=1 to apply SEARCH_FINAL_ACCEPT_MIN + relevanceGateMode like text.

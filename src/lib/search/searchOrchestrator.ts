@@ -149,9 +149,6 @@ export async function executeSearch(ctx: SearchRequestContext): Promise<BaseSear
         attributeWeights: ctx.attributeWeights,
         explainScores: opts.explainScores,
         rerankWeights: opts.rerankWeights as any,
-        useExplicitAttributeWeightsOnly: Boolean(
-          ctx.attributeWeights && Object.keys(ctx.attributeWeights).length > 0,
-        ),
       });
       return {
         mode: "multi_vector",

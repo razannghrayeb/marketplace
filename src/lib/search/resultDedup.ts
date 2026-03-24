@@ -108,6 +108,40 @@ export function dedupeSearchResults<T extends DedupSearchResultItem>(items: T[],
 }
 
 /**
+ * Image-search dedupe keeps recall high:
+ * - always remove exact duplicate product IDs
+ * - optionally remove exact same primary image URL
+ * - optionally remove exact same primary pHash
+ *
+ * Unlike text dedupe, this does NOT collapse by canonical group or near-pHash.
+ */
+export function dedupeImageSearchResults<T extends DedupSearchResultItem>(items: T[]): T[] {
+  const sorted = [...items].sort((a, b) => scoreOf(b) - scoreOf(a));
+  const seenIds = new Set<string>();
+  const seenUrls = new Set<string>();
+  const seenPhashes = new Set<string>();
+  const out: T[] = [];
+
+  for (const p of sorted) {
+    const idStr = p.id != null ? String(p.id) : "";
+    if (idStr && seenIds.has(idStr)) continue;
+
+    const url = primaryImageUrl(p);
+    if (url && seenUrls.has(url)) continue;
+
+    const ph = primaryPHash(p);
+    if (ph && ph.length >= 8 && seenPhashes.has(ph)) continue;
+
+    if (idStr) seenIds.add(idStr);
+    if (url) seenUrls.add(url);
+    if (ph && ph.length >= 8) seenPhashes.add(ph);
+    out.push(p);
+  }
+
+  return out;
+}
+
+/**
  * Drop related items that duplicate main list by id or primary image URL, then dedupe related.
  */
 export function filterRelatedAgainstMain<T extends DedupSearchResultItem>(
