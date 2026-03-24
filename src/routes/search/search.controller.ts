@@ -465,7 +465,7 @@ router.post("/multi-image", upload.array("images", MAX_MULTI_IMAGE_UPLOADS), asy
       rerankWeights: parsedRerank,
     });
 
-    res.json(result);
+    res.json({ success: true, ...result });
   } catch (error) {
     console.error("Multi-image search error:", error);
     res.status(500).json({ error: "Multi-image search failed" });

@@ -89,13 +89,23 @@ export async function createServer() {
   // We call it here (after routes are registered but before app.listen in
   // index.ts) so both sessions are fully loaded and ready.
   // =========================================================================
+  const clipInitOptional =
+    process.env.CLIP_INIT_OPTIONAL === "1" ||
+    process.env.CLIP_INIT_OPTIONAL === "true";
   try {
     console.log("[server] Initializing CLIP models...");
     await initClip();
     console.log("[server] ✅ CLIP models ready");
   } catch (err) {
-    console.error("[server] ❌ FATAL: CLIP model initialization failed:", err);
-    process.exit(1);
+    if (clipInitOptional) {
+      console.warn(
+        "[server] ⚠️ CLIP init skipped (CLIP_INIT_OPTIONAL) — place ONNX files under MODEL_DIR for image search / embeddings:",
+        err,
+      );
+    } else {
+      console.error("[server] ❌ FATAL: CLIP model initialization failed:", err);
+      process.exit(1);
+    }
   }
 
   // BLIP is optional — hybrid search degrades gracefully without it,

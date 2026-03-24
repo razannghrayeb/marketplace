@@ -3,7 +3,16 @@
  * Backend uses snake_case: access_token, refresh_token
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'https://marketplace-933737368483.europe-west1.run.app'
+/** Backend origin only (no trailing slash). Same join rules for GET and POST so paths stay consistent. */
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'https://marketplace-933737368483.europe-west1.run.app').replace(
+  /\/+$/,
+  '',
+)
+
+function joinApiUrl(path: string): string {
+  const p = path.startsWith('/') ? path : `/${path}`
+  return `${API_BASE}${p}`
+}
 
 export type ApiResponse<T> = {
   success: boolean
@@ -66,7 +75,7 @@ async function handleResponse<T>(res: Response): Promise<ApiResponse<T>> {
 }
 
 export async function refreshTokens(refreshToken: string): Promise<boolean> {
-  const res = await fetch(`${API_BASE}/api/auth/refresh`, {
+  const res = await fetch(joinApiUrl('/api/auth/refresh'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ refresh_token: refreshToken }),
@@ -84,7 +93,7 @@ export async function refreshTokens(refreshToken: string): Promise<boolean> {
 
 export const api = {
   async get<T>(path: string, params?: Record<string, string | number | undefined>): Promise<ApiResponse<T>> {
-    const url = new URL(path, API_BASE)
+    const url = new URL(joinApiUrl(path))
     if (params) {
       Object.entries(params).forEach(([k, v]) => v != null && url.searchParams.set(k, String(v)))
     }
@@ -93,7 +102,7 @@ export const api = {
   },
 
   async post<T>(path: string, body?: unknown): Promise<ApiResponse<T>> {
-    const res = await fetch(`${API_BASE}${path}`, {
+    const res = await fetch(joinApiUrl(path), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders()) },
       body: body ? JSON.stringify(body) : undefined,
@@ -103,7 +112,7 @@ export const api = {
 
   async postForm<T>(path: string, formData: FormData): Promise<ApiResponse<T>> {
     const headers = await getAuthHeaders()
-    const res = await fetch(`${API_BASE}${path}`, {
+    const res = await fetch(joinApiUrl(path), {
       method: 'POST',
       headers: { ...headers },
       body: formData,
@@ -112,7 +121,7 @@ export const api = {
   },
 
   async patch<T>(path: string, body?: unknown): Promise<ApiResponse<T>> {
-    const res = await fetch(`${API_BASE}${path}`, {
+    const res = await fetch(joinApiUrl(path), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders()) },
       body: body ? JSON.stringify(body) : undefined,
@@ -121,7 +130,7 @@ export const api = {
   },
 
   async put<T>(path: string, body?: unknown): Promise<ApiResponse<T>> {
-    const res = await fetch(`${API_BASE}${path}`, {
+    const res = await fetch(joinApiUrl(path), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders()) },
       body: body ? JSON.stringify(body) : undefined,
@@ -136,7 +145,7 @@ export const api = {
     contentType: string
     body: string | Record<string, unknown>
   }> {
-    const url = new URL(path, API_BASE)
+    const url = new URL(joinApiUrl(path))
     if (params) {
       Object.entries(params).forEach(([k, v]) => v != null && url.searchParams.set(k, String(v)))
     }
@@ -151,7 +160,7 @@ export const api = {
   },
 
   async delete<T>(path: string): Promise<ApiResponse<T>> {
-    const res = await fetch(`${API_BASE}${path}`, {
+    const res = await fetch(joinApiUrl(path), {
       method: 'DELETE',
       headers: await getAuthHeaders(),
     })

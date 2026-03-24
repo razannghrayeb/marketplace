@@ -49,7 +49,9 @@ export function optionalAuth(req: Request, res: Response, next: NextFunction) {
     }
     next();
   } catch {
-    return res.status(401).json({ success: false, error: "Invalid token" });
+    // Expired/invalid access token must not block public catalog endpoints (e.g. complete-style).
+    // Client still sends x-user-id for try-on / wardrobe hints when JWT is stale.
+    next();
   }
 }
 

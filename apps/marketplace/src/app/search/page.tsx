@@ -364,13 +364,23 @@ function SearchContent() {
         body.files.forEach((f) => formData.append('images', f))
         formData.append('prompt', body.prompt.trim())
         const res = await api.postForm<unknown>(endpoints.search.multiImage, formData)
-        const raw = res as { results?: unknown[]; data?: unknown; error?: string; success?: boolean }
-        if (raw?.success === false || raw?.error) {
-          throw new Error(typeof raw.error === 'string' ? raw.error : 'Mix & match search failed')
+        const raw = res as {
+          results?: unknown[]
+          data?: unknown
+          error?: string | { message?: string }
+          success?: boolean
         }
+        if (raw?.success === false || raw?.error) {
+          const err = raw.error
+          const msg =
+            typeof err === 'string' ? err : err && typeof err === 'object' && 'message' in err ? String((err as { message?: string }).message) : ''
+          throw new Error(msg || 'Mix & match search failed')
+        }
+        const nested = raw?.data && typeof raw.data === 'object' ? (raw.data as { results?: unknown[] }) : null
         const results =
           raw?.results ??
-          (Array.isArray(raw?.data) ? raw.data : (raw?.data as { results?: unknown[] })?.results) ??
+          nested?.results ??
+          (Array.isArray(raw?.data) ? raw.data : undefined) ??
           []
         return { results: Array.isArray(results) ? results : [], query: { mixMatch: true } }
       }

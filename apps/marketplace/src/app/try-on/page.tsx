@@ -38,14 +38,20 @@ export default function TryOnPage() {
       console.log('[TryOn] Response:', res)
       console.log('[TryOn] User from store:', user ? { id: user.id } : null)
       console.log('[TryOn] job.id:', (res as { job?: { id?: string | number } })?.job?.id)
-      const err = (res as { success?: boolean; error?: string | { message?: string } })?.error
-      if ((res as { success?: boolean }).success === false && err) {
+      const payload = res as {
+        success?: boolean
+        job?: { id?: string | number }
+        jobId?: string | number
+        error?: string | { message?: string }
+      }
+      const err = payload.error
+      if (payload.success === false && err) {
         const msg = typeof err === 'string' ? err : err?.message
         throw new Error(msg ?? 'Try-on request failed')
       }
-      const job = (res as { job?: { id?: string | number } })?.job
-      if (job?.id == null) throw new Error('No job ID returned')
-      return String(job.id)
+      const jid = payload.job?.id ?? payload.jobId
+      if (jid == null || jid === '') throw new Error('No job ID returned from try-on API')
+      return String(jid)
     },
     onSuccess: (id) => setJobId(String(id)),
   })
@@ -53,10 +59,15 @@ export default function TryOnPage() {
   const { data: job, isLoading: polling } = useQuery({
     queryKey: ['tryon-job', jobId],
     queryFn: async () => {
-      const res = await api.get<{ job?: { status?: string; result_image_url?: string; error_message?: string } }>(
+      const res = await api.get<{ status?: string; result_image_url?: string; error_message?: string }>(
         endpoints.tryon.job(jobId!)
       )
-      return (res as { job?: { status?: string; result_image_url?: string; error_message?: string } })?.job
+      if (res.success === false) {
+        throw new Error(res.error?.message ?? 'Could not load try-on status')
+      }
+      const job = (res as { job?: { status?: string; result_image_url?: string; error_message?: string } }).job
+      if (!job) throw new Error('Invalid try-on response')
+      return job
     },
     enabled: !!jobId,
     refetchInterval: (query) => {

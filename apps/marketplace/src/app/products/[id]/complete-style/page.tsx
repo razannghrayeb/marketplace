@@ -65,12 +65,15 @@ export default function CompleteStylePage() {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['complete-style', id],
     queryFn: async () => {
-      const res = await api.get<{ success?: boolean; data?: CompleteStyleData }>(
+      const res = await api.get<CompleteStyleData>(
         endpoints.products.completeStyle(id),
         { maxPerCategory: 6, maxTotal: 24 }
       )
-      const d = (res as { data?: CompleteStyleData })?.data
-      if (!d) throw new Error('No data')
+      if (res.success === false) {
+        throw new Error(res.error?.message ?? 'Could not load outfit suggestions')
+      }
+      const d = res.data
+      if (!d) throw new Error('No outfit data returned')
       return d
     },
     enabled: !!id,

@@ -17,6 +17,15 @@ import { type Product } from "../../lib/outfit";
 // Request Helpers
 // ============================================================================
 
+/** Prefer JWT user; fall back to storefront header for wardrobe merge when token is missing/stale. */
+function getOptionalUserId(req: Request): number | undefined {
+  if (req.user?.id != null) return req.user.id;
+  const raw = req.headers["x-user-id"];
+  if (raw === undefined || raw === null || String(raw).trim() === "") return undefined;
+  const n = parseInt(String(raw).trim(), 10);
+  return Number.isFinite(n) && n >= 1 ? n : undefined;
+}
+
 function parseCompleteStyleOptions(query: any): CompleteStyleOptions {
   const options: CompleteStyleOptions = {
     maxPerCategory: Math.min(parseInt(query.maxPerCategory) || 5, 20),
@@ -66,7 +75,7 @@ export async function completeStyle(req: Request, res: Response) {
     }
 
     const options = parseCompleteStyleOptions(req.query);
-    const userId = req.user?.id;
+    const userId = getOptionalUserId(req);
     const result = await getOutfitRecommendations(productId, options, userId);
 
     if (!result) {
@@ -118,7 +127,7 @@ export async function completeStyleFromBody(req: Request, res: Response) {
       excludeBrands: bodyOptions?.excludeBrands,
     };
 
-    const userId = req.user?.id;
+    const userId = getOptionalUserId(req);
     const result = await getOutfitRecommendationsFromProduct(productInput, options, userId);
 
     return res.json({ success: true, data: result });
