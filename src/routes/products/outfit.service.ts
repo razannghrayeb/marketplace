@@ -246,17 +246,25 @@ function formatOutfitCompletion(result: OutfitCompletion): StyleRecommendationRe
       reason: rec.reason,
       priority: rec.priority,
       priorityLabel: getPriorityLabel(rec.priority),
-      products: rec.products.map(p => ({
-        id: p.id,
-        title: p.title,
-        brand: p.brand,
-        price: p.price_cents,
-        currency: p.currency,
-        image: p.image_cdn || p.image_url,
-        matchScore: Math.round(p.matchScore),
-        matchReasons: p.matchReasons,
-        owned: (p as any).owned === true ? true : undefined,
-      })),
+      products: rec.products.map(p => {
+        const raw = p as Product & { product_id?: number };
+        const id = raw.id ?? raw.product_id;
+        const priceCents =
+          typeof raw.price_cents === "number" && Number.isFinite(raw.price_cents)
+            ? Math.round(raw.price_cents)
+            : 0;
+        return {
+          id: typeof id === "number" && Number.isFinite(id) ? id : 0,
+          title: p.title,
+          brand: p.brand,
+          price: priceCents,
+          currency: p.currency || "USD",
+          image: p.image_cdn || p.image_url,
+          matchScore: Math.round(p.matchScore),
+          matchReasons: p.matchReasons,
+          owned: (p as any).owned === true ? true : undefined,
+        };
+      }).filter((row) => row.id >= 1),
     })),
     totalRecommendations: result.recommendations.reduce((sum, r) => sum + r.products.length, 0),
   };

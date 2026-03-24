@@ -341,9 +341,13 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
     }
 
     const result = await completeLookSuggestions(userId, itemIds, limit);
+    const suggestions = result.suggestions.map((s) => ({
+      ...s,
+      id: s.product_id,
+    }));
     res.json({
       success: true,
-      suggestions: result.suggestions,
+      suggestions,
       outfitSets: result.outfitSets,
       missingCategories: result.missingCategories,
     });

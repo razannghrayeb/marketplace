@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import Image from 'next/image'
@@ -56,25 +56,62 @@ export default function TryOnPage() {
     onSuccess: (id) => setJobId(String(id)),
   })
 
-  const { data: job, isLoading: polling } = useQuery({
+  type TryOnJobPayload = {
+    status?: string
+    result_image_url?: string
+    error_message?: string
+  }
+
+  function extractJobPayload(res: unknown): TryOnJobPayload | null {
+    if (!res || typeof res !== 'object') return null
+    const r = res as Record<string, unknown>
+    if (r.job && typeof r.job === 'object') return r.job as TryOnJobPayload
+    const data = r.data
+    if (data && typeof data === 'object') {
+      const d = data as Record<string, unknown>
+      if (d.job && typeof d.job === 'object') return d.job as TryOnJobPayload
+    }
+    return null
+  }
+
+  const {
+    data: job,
+    isLoading: polling,
+    isError: jobPollError,
+    error: jobPollErr,
+  } = useQuery({
     queryKey: ['tryon-job', jobId],
     queryFn: async () => {
-      const res = await api.get<{ status?: string; result_image_url?: string; error_message?: string }>(
-        endpoints.tryon.job(jobId!)
-      )
+      const res = await api.get<TryOnJobPayload>(endpoints.tryon.job(jobId!))
       if (res.success === false) {
         throw new Error(res.error?.message ?? 'Could not load try-on status')
       }
-      const job = (res as { job?: { status?: string; result_image_url?: string; error_message?: string } }).job
-      if (!job) throw new Error('Invalid try-on response')
-      return job
+      const jobPayload = extractJobPayload(res)
+      if (!jobPayload?.status) throw new Error('Invalid try-on response')
+      return jobPayload
     },
     enabled: !!jobId,
+    retry: 2,
+    retryDelay: 1500,
     refetchInterval: (query) => {
-      const status = query.state.data?.status
-      return status === 'completed' || status === 'failed' ? false : 2000
+      const status = query.state.data?.status?.toLowerCase()
+      if (status === 'completed' || status === 'failed') return false
+      return 2500
     },
   })
+
+  const [stuckNotice, setStuckNotice] = useState(false)
+  useEffect(() => {
+    const s = job?.status?.toLowerCase()
+    if (!jobId || !job || s === 'completed' || s === 'failed') {
+      setStuckNotice(false)
+      return
+    }
+    const t = window.setTimeout(() => setStuckNotice(true), 120_000)
+    return () => window.clearTimeout(t)
+  }, [jobId, job?.status])
+
+  const jobStatus = job?.status?.toLowerCase()
 
   if (!isAuth) {
     return (
@@ -100,7 +137,7 @@ export default function TryOnPage() {
           Upload a photo of yourself and a garment to see how it looks on you. Powered by AI.
         </p>
 
-        {job?.status === 'completed' && job?.result_image_url ? (
+        {jobStatus === 'completed' && job?.result_image_url ? (
           <div className="space-y-6">
             <p className="text-green-600 font-medium">Try-on complete!</p>
             <div className="relative aspect-[3/4] max-w-md rounded-2xl overflow-hidden bg-neutral-100">
@@ -123,7 +160,7 @@ export default function TryOnPage() {
               Try another
             </button>
           </div>
-        ) : job?.status === 'failed' ? (
+        ) : jobStatus === 'failed' ? (
           <div className="p-6 rounded-2xl bg-neutral-100 border border-neutral-200 text-neutral-800">
             <p className="font-medium">Try-on failed</p>
             <p className="text-sm mt-1">{job?.error_message ?? 'Unknown error'}</p>
@@ -134,11 +171,31 @@ export default function TryOnPage() {
               Try again
             </button>
           </div>
-        ) : jobId && (polling || job?.status === 'processing' || job?.status === 'pending') ? (
+        ) : jobPollError && jobId ? (
+          <div className="p-6 rounded-2xl bg-rose-50 border border-rose-200 text-neutral-800">
+            <p className="font-medium text-rose-900">Could not load try-on status</p>
+            <p className="text-sm mt-1 text-rose-800">
+              {(jobPollErr as Error)?.message ?? 'Check your connection and try again.'}
+            </p>
+            <p className="text-xs mt-2 text-neutral-600">
+              If this keeps happening, the job may belong to a different account (user id must match) or the server may be misconfigured.
+            </p>
+            <div className="flex flex-wrap gap-3 mt-4">
+              <button type="button" onClick={() => setJobId(null)} className="btn-secondary">
+                Start over
+              </button>
+            </div>
+          </div>
+        ) : jobId && (polling || jobStatus === 'processing' || jobStatus === 'pending') ? (
           <div className="p-12 rounded-2xl bg-neutral-50 border border-neutral-200 text-center">
             <Loader2 className="w-12 h-12 text-violet-600 animate-spin mx-auto mb-4" />
             <p className="font-medium text-neutral-800">Processing your try-on...</p>
             <p className="text-sm text-neutral-500 mt-1">This may take 30–60 seconds</p>
+            {stuckNotice && (
+              <p className="text-sm text-amber-800 mt-4 max-w-md mx-auto">
+                Still working after a few minutes? The server may need an update (background jobs on Cloud Run require inline processing). Try starting over or contact support.
+              </p>
+            )}
           </div>
         ) : (
           <div className="grid md:grid-cols-2 gap-8">

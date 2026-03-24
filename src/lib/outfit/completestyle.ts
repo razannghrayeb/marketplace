@@ -1175,16 +1175,21 @@ async function findProductsForCategory(
         })),
         minimum_should_match: 1,
         filter: [
-          { term: { availability: true } }
+          // Index uses string enum (see searchDocument.ts); boolean true matches nothing.
+          { term: { availability: "in_stock" } },
         ]
       }
     };
     
-    // Add price filter
+    // Add price filter (indexed field is price_usd float; options.priceRange is cents)
     if (options.priceRange) {
-      const priceFilter: any = { range: { price_cents: {} } };
-      if (options.priceRange.min) priceFilter.range.price_cents.gte = options.priceRange.min;
-      if (options.priceRange.max) priceFilter.range.price_cents.lte = options.priceRange.max;
+      const priceFilter: any = { range: { price_usd: {} } };
+      if (options.priceRange.min != null) {
+        priceFilter.range.price_usd.gte = options.priceRange.min / 100;
+      }
+      if (options.priceRange.max != null) {
+        priceFilter.range.price_usd.lte = options.priceRange.max / 100;
+      }
       query.bool.filter.push(priceFilter);
     }
     
@@ -1221,7 +1226,18 @@ async function findProductsForCategory(
       body: {
         query,
         size: options.maxResults * 2,  // Get more to filter
-        _source: ["id", "title", "brand", "category", "color", "price_cents", "currency", "image_url", "image_cdn", "description"],
+        _source: [
+          "product_id",
+          "title",
+          "brand",
+          "category",
+          "color",
+          "price_usd",
+          "currency",
+          "image_url",
+          "image_cdn",
+          "description",
+        ],
       }
     });
     
@@ -1238,7 +1254,35 @@ async function findProductsForCategory(
     }
     
     for (const hit of hits) {
-      const product = hit._source as Product;
+      const raw = (hit._source || {}) as Record<string, unknown>;
+      const pid = parseInt(String(raw.product_id ?? raw.id ?? ""), 10);
+      if (!Number.isFinite(pid) || pid < 1) continue;
+
+      const priceCents =
+        typeof raw.price_cents === "number" && Number.isFinite(raw.price_cents)
+          ? Math.round(raw.price_cents)
+          : typeof raw.price_usd === "number" && Number.isFinite(raw.price_usd)
+            ? Math.round(raw.price_usd * 100)
+            : 0;
+
+      const product: Product = {
+        id: pid,
+        title: String(raw.title ?? ""),
+        brand: raw.brand != null ? String(raw.brand) : undefined,
+        category: raw.category != null ? String(raw.category) : undefined,
+        color: raw.color != null ? String(raw.color) : undefined,
+        price_cents: priceCents,
+        currency: raw.currency != null ? String(raw.currency) : "USD",
+        image_url: raw.image_url != null ? String(raw.image_url) : undefined,
+        image_cdn:
+          raw.image_cdn != null
+            ? String(raw.image_cdn)
+            : raw.image_url != null
+              ? String(raw.image_url)
+              : undefined,
+        description: raw.description != null ? String(raw.description) : undefined,
+      };
+
       const matchReasons: string[] = [];
       let baseScore = hit._score || 0;
       

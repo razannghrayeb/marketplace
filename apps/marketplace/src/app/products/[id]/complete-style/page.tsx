@@ -11,11 +11,14 @@ import { endpoints } from '@/lib/api/endpoints'
 import { ProductCard } from '@/components/product/ProductCard'
 
 interface CompleteStyleProduct {
-  id: number
+  id?: number
+  product_id?: number
   title: string
   brand?: string
-  price: number
-  currency: string
+  /** API sends cents as `price` */
+  price?: number
+  price_cents?: number
+  currency?: string
   image?: string
   matchScore?: number
   matchReasons?: string[]
@@ -30,7 +33,15 @@ interface CategoryRec {
 }
 
 interface CompleteStyleData {
-  sourceProduct: { id: number; title: string; image_cdn?: string; image_url?: string; category?: string }
+  sourceProduct: {
+    id: number
+    title: string
+    image_cdn?: string
+    image_url?: string
+    category?: string
+    price_cents?: number
+    currency?: string
+  }
   detectedCategory: string
   style?: { occasion?: string; aesthetic?: string; season?: string; formality?: number }
   outfitSuggestion?: string
@@ -46,12 +57,20 @@ function formatPrice(cents: number, currency = 'USD') {
   }).format(cents / 100)
 }
 
+function resolveNumericId(p: CompleteStyleProduct): number | null {
+  const n = Number(p.id ?? p.product_id)
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : null
+}
+
 function toProduct(p: CompleteStyleProduct) {
+  const id = resolveNumericId(p) ?? 0
+  const cents = typeof p.price === 'number' && Number.isFinite(p.price) ? p.price : p.price_cents
+  const price_cents = typeof cents === 'number' && Number.isFinite(cents) ? Math.round(cents) : 0
   return {
-    id: p.id,
+    id,
     title: p.title,
     brand: p.brand,
-    price_cents: p.price,
+    price_cents,
     currency: p.currency || 'USD',
     image_cdn: p.image,
     image_url: p.image,
@@ -141,6 +160,11 @@ export default function CompleteStylePage() {
               />
             </div>
             <p className="mt-2 font-medium text-neutral-800">{source.title}</p>
+            {typeof source.price_cents === 'number' && source.price_cents > 0 && (
+              <p className="mt-1 text-sm font-semibold text-violet-700">
+                {formatPrice(source.price_cents, source.currency || 'USD')}
+              </p>
+            )}
           </div>
 
           <div className="lg:col-span-3 space-y-10">
@@ -161,9 +185,11 @@ export default function CompleteStylePage() {
                 </div>
                 <p className="text-sm text-neutral-500 mb-4">{rec.reason}</p>
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-                  {rec.products.map((p, i) => (
-                    <ProductCard key={p.id} product={toProduct(p)} index={i} />
-                  ))}
+                  {rec.products
+                    .filter((p) => resolveNumericId(p) != null)
+                    .map((p, i) => (
+                      <ProductCard key={resolveNumericId(p)!} product={toProduct(p)} index={i} />
+                    ))}
                 </div>
               </section>
             ))}
