@@ -19,6 +19,46 @@ import { withCircuitBreaker } from "../core/circuitBreaker";
 
 const MODEL_DIR = path.join(process.cwd(), "models");
 
+/**
+ * ONNX Runtime execution providers for CLIP sessions.
+ * - `CLIP_EXECUTION_PROVIDERS=cuda,cpu` — try CUDA first (Linux GPU / Cloud Run GPU), then CPU.
+ * - `CLIP_EXECUTION_PROVIDERS=dml,cpu` — DirectML on Windows with GPU.
+ * - `CLIP_USE_GPU=true` — shorthand for `cuda,cpu`.
+ * - Default: `cpu` (safe for Cloud Run without GPU).
+ *
+ * Requires a GPU-capable onnxruntime build where deployed; otherwise creation falls back to CPU.
+ */
+export function getClipExecutionProviders(): string[] {
+  const raw = process.env.CLIP_EXECUTION_PROVIDERS?.trim();
+  if (raw) {
+    return raw.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  const gpu = process.env.CLIP_USE_GPU?.trim().toLowerCase();
+  if (gpu === "true" || gpu === "1" || gpu === "yes") {
+    return ["cuda", "cpu"];
+  }
+  return ["cpu"];
+}
+
+async function createClipInferenceSession(modelPath: string): Promise<ort.InferenceSession> {
+  const providers = getClipExecutionProviders();
+  try {
+    return await ort.InferenceSession.create(modelPath, { executionProviders: providers });
+  } catch (err) {
+    const first = providers[0]?.toLowerCase();
+    if (first && first !== "cpu") {
+      console.warn(
+        "[CLIP] executionProviders",
+        providers.join(","),
+        "failed; falling back to CPU:",
+        (err as Error).message
+      );
+      return await ort.InferenceSession.create(modelPath, { executionProviders: ["cpu"] });
+    }
+    throw err;
+  }
+}
+
 // ============================================================================
 // CLIP BPE Tokenizer (standalone implementation — no @xenova/transformers
 // dependency, which conflicts with onnxruntime-node)
@@ -429,6 +469,7 @@ async function _doInit(modelType?: ClipModelType): Promise<void> {
   const textModelPath = getTextModelPath();
 
   console.log(`[CLIP] Selected model type : ${activeModelType}`);
+  console.log(`[CLIP] ONNX executionProviders : ${getClipExecutionProviders().join(", ")}`);
   console.log(`[CLIP] Model embedding dim : ${EMBEDDING_DIM}`);
   console.log(`[CLIP] Index expected dim  : ${EXPECTED_INDEX_DIM}`);
   console.log(`[CLIP] Image model path    : ${imageModelPath}`);
@@ -466,20 +507,14 @@ async function _doInit(modelType?: ClipModelType): Promise<void> {
   console.log(`[CLIP] Loading image model: ${activeConfig.name}...`);
   console.log(`[CLIP]   Embedding dim: ${EMBEDDING_DIM}`);
   console.log(`[CLIP]   ${activeConfig.description}`);
-  // Force CPU in Cloud Run: avoid ONNX Runtime selecting unsupported GPU/DML devices.
-  imageSession = await ort.InferenceSession.create(imageModelPath, {
-    executionProviders: ["cpu"],
-  });
+  imageSession = await createClipInferenceSession(imageModelPath);
   console.log(`[CLIP] ✅ Image model loaded`);
 
   // ── Load text model ───────────────────────────────────────────────────────
   // FIX: use isUsableModelFile (size-aware) instead of just fs.existsSync
   if (isUsableModelFile(textModelPath)) {
     console.log(`[CLIP] Loading text model: ${activeConfig.name}...`);
-    // Force CPU in Cloud Run: avoid ONNX Runtime selecting unsupported GPU/DML devices.
-    textSession = await ort.InferenceSession.create(textModelPath, {
-      executionProviders: ["cpu"],
-    });
+    textSession = await createClipInferenceSession(textModelPath);
     console.log(`[CLIP] ✅ Text model loaded`);
 
     // Pre-load BPE tokenizer so the first text embedding is fast
