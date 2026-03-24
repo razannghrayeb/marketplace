@@ -28,6 +28,12 @@
  *
  *   # Disable Redis embedding cache (avoids Upstash quota during bulk reindex)
  *   npx tsx scripts/resume-reindex.ts --no-cache
+ *
+ *   # Delete index and recreate from scratch (full refresh)
+ *   npx tsx scripts/resume-reindex.ts --recreate --force
+ *
+ * Home decor products (category: home decor, candles & holders, pots & plants;
+ * or title/description containing "home decor") are always skipped.
  */
 
 import "dotenv/config";
@@ -102,6 +108,28 @@ const DB_RETRY = {
   attempts: 8,
   baseDelayMs: 2000,
 } as const;
+
+/** Categories excluded from reindex (home decor, etc. — same as search filter). */
+const HOME_DECOR_EXCLUDED_CATEGORIES = [
+  "home decor",
+  "candles & holders",
+  "pots & plants",
+];
+
+function isHomeDecorProduct(product: { category?: string | null; title?: string | null; description?: string | null }): boolean {
+  const cat = (product.category ?? "").toLowerCase().trim();
+  if (HOME_DECOR_EXCLUDED_CATEGORIES.some((c) => c === cat)) return true;
+  const text = `${product.title ?? ""} ${product.description ?? ""}`.toLowerCase();
+  if (text.includes("home decor")) return true;
+  return false;
+}
+
+/** SQL fragment to exclude home decor products (category + title/description). */
+const EXCLUDE_HOME_DECOR_SQL = `
+  AND COALESCE(LOWER(TRIM(category)), '') NOT IN (${HOME_DECOR_EXCLUDED_CATEGORIES.map((c) => `'${c.replace(/'/g, "''")}'`).join(", ")})
+  AND LOWER(COALESCE(title, '')) NOT LIKE '%home decor%'
+  AND LOWER(COALESCE(description, '')) NOT LIKE '%home decor%'
+`;
 
 // ============================================================================
 // Helpers
@@ -569,13 +597,14 @@ Examples:
     `SELECT COUNT(*)::text AS count
      FROM products
      WHERE image_url IS NOT NULL
-       AND ($1::bigint = 0 OR id >= $1::bigint)`,
+       AND ($1::bigint = 0 OR id >= $1::bigint)
+       ${EXCLUDE_HOME_DECOR_SQL}`,
     [startFromId],
     "count products"
   );
   const totalProducts = parseInt(totalRes.rows[0]?.count || "0", 10);
 
-  console.log(`Found ${totalProducts} products to process`);
+  console.log(`Found ${totalProducts} products to process (home decor excluded)`);
   console.log();
 
   if (totalProducts === 0) {
@@ -593,6 +622,7 @@ Examples:
        FROM products
        WHERE image_url IS NOT NULL
          AND id > $1::bigint
+         ${EXCLUDE_HOME_DECOR_SQL}
        ORDER BY id ASC
        LIMIT $2`,
       [lastSeenId, reindexConfig.batchSize],
@@ -626,6 +656,13 @@ Examples:
 
     // Process each product
     for (const product of productsToIndex) {
+      if (isHomeDecorProduct(product)) {
+        progress.totalSkipped++;
+        progress.lastProcessedId = product.id;
+        processed++;
+        continue;
+      }
+
       const success = await reindexProduct(product, reindexConfig);
 
       processed++;

@@ -64,7 +64,8 @@ export function scoreCategoryRelevance01(
 }
 
 /**
- * Calibrated 0..1 relevance for acceptance gating (SEARCH_FINAL_ACCEPT_MIN).
+ * Calibrated 0..1 relevance for acceptance gating (text: SEARCH_FINAL_ACCEPT_MIN_TEXT;
+ * image: SEARCH_FINAL_ACCEPT_MIN_IMAGE — see config.search).
  * Type intent + cross-family taxonomy penalties gate hard; text similarity and category
  * boost score compliant hits. Cross-family soft factor applies below the hard block threshold.
  */

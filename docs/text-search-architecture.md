@@ -95,4 +95,4 @@ flowchart TB
 
 ## Environment variables (partial)
 
-See `.env.example` for full list. Text search often uses: `SEARCH_DEBUG`, `SEARCH_RECALL_WINDOW`, `SEARCH_FINAL_ACCEPT_MIN`, `SEARCH_EVAL_LOG`, `SEARCH_KNN_TEXT_IN_MUST`, domain gate flags in `queryUnderstanding.service.ts`.
+See `.env.example` for full list. Text search often uses: `SEARCH_DEBUG`, `SEARCH_RECALL_WINDOW`, `SEARCH_FINAL_ACCEPT_MIN_TEXT` (or legacy `SEARCH_FINAL_ACCEPT_MIN`), `SEARCH_EVAL_LOG`, `SEARCH_KNN_TEXT_IN_MUST`, domain gate flags in `queryUnderstanding.service.ts`. Image search uses `SEARCH_FINAL_ACCEPT_MIN_IMAGE` separately.

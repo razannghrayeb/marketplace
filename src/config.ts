@@ -94,7 +94,7 @@ export const config = {
     // Model type: "fashion-clip" (recommended) | "vit-l-14" | "vit-b-32"
     // Fashion-CLIP is fine-tuned for apparel and captures fabric textures, styles better
     modelType: process.env.CLIP_MODEL_TYPE || "fashion-clip",
-    // Similarity thresholds (image kNN + text hybrid min_score caps); default 0.6 aligns with SEARCH_FINAL_ACCEPT_MIN
+    // Similarity thresholds (image kNN + text hybrid min_score caps); text gate default aligns with SEARCH_FINAL_ACCEPT_MIN_TEXT
     similarityThreshold: Number(process.env.CLIP_SIMILARITY_THRESHOLD || 0.6),
     /** Image-only kNN gate; stricter default so loose "fashion similar" matches are dropped. */
     imageSimilarityThreshold: finiteEnvNumber(
@@ -119,7 +119,27 @@ export const config = {
     /** OpenSearch candidates before rerank (tune with SEARCH_RECALL_WINDOW). */
     recallWindow: finiteEnvNumber(process.env.SEARCH_RECALL_WINDOW, 500, 50, 2000),
     recallMax: finiteEnvNumber(process.env.SEARCH_RECALL_MAX, 600, 100, 2000),
-    finalAcceptMin: finiteEnvNumber(process.env.SEARCH_FINAL_ACCEPT_MIN, 0.55, 0.35, 0.95),
+    /** Text acceptance gate (defaults to legacy SEARCH_FINAL_ACCEPT_MIN when set). */
+    finalAcceptMinText: finiteEnvNumber(
+      process.env.SEARCH_FINAL_ACCEPT_MIN_TEXT ?? process.env.SEARCH_FINAL_ACCEPT_MIN,
+      0.6,
+      0.35,
+      0.95,
+    ),
+    /** Image acceptance gate (defaults lower than text after soft-category rerank). */
+    finalAcceptMinImage: finiteEnvNumber(
+      process.env.SEARCH_FINAL_ACCEPT_MIN_IMAGE,
+      0.45,
+      0.3,
+      0.95,
+    ),
+    /** Backward-compat alias used by older call sites; maps to text gate. */
+    finalAcceptMin: finiteEnvNumber(
+      process.env.SEARCH_FINAL_ACCEPT_MIN_TEXT ?? process.env.SEARCH_FINAL_ACCEPT_MIN,
+      0.6,
+      0.35,
+      0.95,
+    ),
     filterHardMinConfidence: finiteEnvNumber(process.env.SEARCH_FILTER_HARD_MIN_CONFIDENCE, 0.55, 0.35, 0.95),
     domainEmbeddingRejectBelow: finiteEnvNumber(process.env.SEARCH_DOMAIN_EMBEDDING_REJECT_BELOW, 0.3, 0.15, 0.55),
     /** max = divide by top hit score (default); tanh = Math.tanh(raw/scale) for calibration across queries */
@@ -128,7 +148,7 @@ export const config = {
         ? ("tanh" as const)
         : ("max" as const),
     similarityTanhScale: finiteEnvNumber(process.env.SEARCH_SIMILARITY_TANH_SCALE, 10, 1, 50),
-    /** hard = drop hits below SEARCH_FINAL_ACCEPT_MIN; soft = keep reranked order, no min gate */
+    /** hard = drop hits below text gate (SEARCH_FINAL_ACCEPT_MIN_TEXT); soft = keep reranked order, no min gate */
     relevanceGateMode:
       String(process.env.SEARCH_RELEVANCE_GATE_MODE ?? "soft").toLowerCase() === "soft"
         ? ("soft" as const)

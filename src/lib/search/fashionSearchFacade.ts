@@ -23,6 +23,17 @@ import { searchProductsFilteredBrowse } from "./filteredBrowseSearch";
 
 import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash } from "../image";
 import { tieredColorMatchScore } from "../color/colorCanonical";
+import { getYOLOv8Client } from "../image/yolov8Client";
+import {
+  mapDetectionToCategory,
+  getSearchCategories,
+  shouldUseAlternatives,
+} from "../detection/categoryMapper";
+import {
+  expandProductTypesForQuery,
+  extractLexicalProductTypeSeeds,
+} from "./productTypeTaxonomy";
+import { config } from "../../config";
 
 export interface UnifiedTextSearchParams {
   query: string;
@@ -52,11 +63,61 @@ export interface UnifiedImageSearchParams {
   knnField?: string;
   /**
    * Forces image search into hard category mode for this call.
-   * When enabled, the OpenSearch `filters.category` terms are applied even if
-   * `SEARCH_IMAGE_SOFT_CATEGORY=1`.
+   * When enabled, the OpenSearch `filters.category` terms are applied even when
+   * soft category is the default (`SEARCH_IMAGE_SOFT_CATEGORY` on or unset).
    */
   forceHardCategoryFilter?: boolean;
   relaxThresholdWhenEmpty?: boolean;
+}
+
+function filterByFinalRelevance<T extends { finalRelevance01?: number }>(
+  items: T[] | undefined,
+  min: number,
+): T[] | undefined {
+  if (!items) return items;
+  return items.filter((item) => {
+    const rel = item?.finalRelevance01;
+    // Keep items without calibrated relevance; enforce only when score exists.
+    return typeof rel !== "number" || rel >= min;
+  });
+}
+
+function expandPredictedTypeHints(seeds: string[]): string[] {
+  const normalized = seeds.map((s) => String(s).toLowerCase().trim()).filter(Boolean);
+  if (normalized.length === 0) return [];
+  return expandProductTypesForQuery(normalized);
+}
+
+async function inferPredictedCategoryAislesFromImage(
+  imageBuffer: Buffer | undefined,
+): Promise<string[] | undefined> {
+  if (!imageBuffer || imageBuffer.length === 0) return undefined;
+  try {
+    const yolo = getYOLOv8Client();
+    const detected = await yolo.detectFromBuffer(imageBuffer, "search-image.jpg", { confidence: 0.4 });
+    const items = Array.isArray(detected?.detections) ? detected.detections : [];
+    if (items.length === 0) return undefined;
+    const ranked = [...items].sort((a: any, b: any) => {
+      const wa = (Number(a?.confidence) || 0) * (Number(a?.area_ratio) || 0);
+      const wb = (Number(b?.confidence) || 0) * (Number(b?.area_ratio) || 0);
+      return wb - wa;
+    });
+    const top = ranked[0];
+    const label = String(top?.label ?? "").toLowerCase().trim();
+    if (!label) return undefined;
+    const categoryMapping = mapDetectionToCategory(label, Number(top?.confidence) || 0);
+    const searchCategories = shouldUseAlternatives(categoryMapping)
+      ? getSearchCategories(categoryMapping)
+      : [categoryMapping.productCategory];
+    const expanded = expandPredictedTypeHints([
+      label,
+      ...searchCategories,
+      ...extractLexicalProductTypeSeeds(label),
+    ]);
+    return expanded.length > 0 ? expanded : searchCategories;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function searchBrowse(params: {
@@ -76,11 +137,12 @@ export async function searchBrowse(params: {
         : undefined,
   };
 
-  return searchProductsFilteredBrowse({
+  const results = (await searchProductsFilteredBrowse({
     filters: normalizedFilters,
     page,
     limit,
-  }) as Promise<ProductResult[]>;
+  })) as ProductResult[];
+  return filterByFinalRelevance(results, config.search.finalAcceptMinText) ?? [];
 }
 
 /**
@@ -143,9 +205,20 @@ export async function searchText(params: UnifiedTextSearchParams): Promise<Searc
     negationConstraints,
   } as any);
 
+  const output = rest as SearchResultWithRelated;
+  const filteredResults = filterByFinalRelevance(output.results, config.search.finalAcceptMinText) ?? [];
+  const filteredRelated = filterByFinalRelevance(output.related, config.search.finalAcceptMinText);
+  const meta = {
+    ...(output.meta ?? {}),
+    total_results: filteredResults.length,
+  };
+
   return {
-    ...(rest as SearchResultWithRelated),
-    total,
+    ...output,
+    results: filteredResults,
+    related: filteredRelated,
+    meta,
+    total: filteredResults.length,
     tookMs,
   };
 }
@@ -187,6 +260,11 @@ export async function searchImage(
     imageEmbedding && imageEmbedding.length > 0
       ? imageEmbedding
       : await processImageForEmbedding(imageBuffer!);
+
+  const derivedAisleHints =
+    predictedCategoryAisles && predictedCategoryAisles.length > 0
+      ? predictedCategoryAisles
+      : await inferPredictedCategoryAislesFromImage(imageBuffer);
 
   const embeddingDerivedFromBufferOnly =
     Boolean(imageBuffer?.length) &&
@@ -230,15 +308,25 @@ export async function searchImage(
     similarityThreshold,
     includeRelated,
     pHash: effectivePHash,
-    predictedCategoryAisles,
+    predictedCategoryAisles: derivedAisleHints,
     knnField,
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty: relaxThresholdWhenEmpty ?? true,
   } as any);
 
+  const filteredResults = filterByFinalRelevance(res.results, config.search.finalAcceptMinImage) ?? [];
+  const filteredRelated = filterByFinalRelevance(res.related, config.search.finalAcceptMinImage);
+  const meta = {
+    ...(res.meta ?? {}),
+    total_results: filteredResults.length,
+  };
+
   return {
     ...res,
-    total: res.meta.total_results ?? res.results.length,
+    results: filteredResults,
+    related: filteredRelated,
+    meta,
+    total: meta.total_results,
     tookMs: Date.now() - start,
   };
 }

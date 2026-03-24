@@ -70,7 +70,7 @@ export interface ImageSearchEvalPayload {
   predicted_aisles: string[] | null;
   similarity_threshold_used?: number;
   below_relevance_threshold?: boolean;
-  /** kNN passed threshold but all hits failed SEARCH_FINAL_ACCEPT_MIN (hard gate). */
+  /** kNN passed threshold but all hits failed final accept min (image: SEARCH_FINAL_ACCEPT_MIN_IMAGE when hard gate). */
   below_final_relevance_gate?: boolean;
 }
 
