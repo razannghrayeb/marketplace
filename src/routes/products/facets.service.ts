@@ -12,6 +12,7 @@ import { osClient } from "../../lib/core";
 import { pg } from "../../lib/core";
 import { config } from "../../config";
 import type { SearchFilters, AttributeFacets, PriceDropEvent } from "./types";
+import { attrGenderFilterClause } from "./opensearchFilters";
 
 // ============================================================================
 // Facets / Aggregations
@@ -31,7 +32,7 @@ export async function getAttributeFacets(filters: SearchFilters = {}): Promise<A
   if (filters.material) filter.push({ term: { attr_material: filters.material } });
   if (filters.fit) filter.push({ term: { attr_fit: filters.fit } });
   if (filters.style) filter.push({ term: { attr_style: filters.style } });
-  if (filters.gender) filter.push({ term: { attr_gender: filters.gender } });
+  if (filters.gender) filter.push(attrGenderFilterClause(filters.gender));
   if (filters.pattern) filter.push({ term: { attr_pattern: filters.pattern } });
 
   const searchBody = {

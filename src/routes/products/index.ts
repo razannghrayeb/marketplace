@@ -18,6 +18,7 @@ import { listProducts, searchProductsByTitle, searchProductsByImage, getProductB
 import { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
 import { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller";
 import { getRecommendations, getBatchRecommendationsHandler } from "./recommendations.controller";
+import { getVariantsBatch } from "./variants.controller";
 import { optionalAuth } from "../../middleware/auth";
 
 const router = Router();
@@ -65,6 +66,9 @@ router.get("/:id/recommendations", getRecommendations);
 
 // POST /products/recommendations/batch - Batch recommendations for multiple products
 router.post("/recommendations/batch", getBatchRecommendationsHandler);
+
+// POST /products/variants/batch - Get variants (min–max price) for product IDs
+router.post("/variants/batch", getVariantsBatch);
 
 // ============================================================================
 // Price Drop Tracking

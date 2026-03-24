@@ -1,2 +1,0 @@
-{"sessionId":"76076a","runId":"post-fix","hypothesisId":"H4","location":"products.service.ts:image_knn_gate","message":"image kNN filter","data":{"hitsLen":147,"filteredLen":3,"workingLen":5,"thresholdRelaxed":true,"fetchLimit":100,"similarityThreshold":0.63,"usedMultiBranchFusion":true,"minWantCandidates":15},"timestamp":1774221062302}
-{"sessionId":"76076a","runId":"debug-quality","hypothesisId":"H3","location":"products.service.ts:image_dedupe","message":"image dedupe","data":{"preDedupe":4,"postDedupe":4,"limit":10},"timestamp":1774221064220}
