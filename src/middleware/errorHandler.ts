@@ -23,6 +23,12 @@ export function errorHandler(
     code = "TRYON_DB_NOT_MIGRATED";
     message =
       "Try-on database is not initialized. Apply migration db/migrations/007_virtual_tryon.sql on your Postgres database.";
+  } else if (
+    /Virtual try-on is not configured/i.test(message) &&
+    /GCLOUD_PROJECT|GOOGLE_CLOUD_PROJECT/i.test(message)
+  ) {
+    status = 503;
+    code = "TRYON_NOT_CONFIGURED";
   }
 
   console.error("Error:", message);

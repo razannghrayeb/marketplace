@@ -603,9 +603,14 @@ export async function searchByImageWithSimilarity(
   if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
     try {
       const { attributeEmbeddings } = await import("../../lib/search/attributeEmbeddings");
-      colorQueryEmbedding = await attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "color");
-      styleQueryEmbedding = await attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "style");
-      patternQueryEmbedding = await attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "pattern");
+      const [cEmb, sEmb, pEmb] = await Promise.all([
+        attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "color").catch(() => [] as number[]),
+        attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "style").catch(() => [] as number[]),
+        attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "pattern").catch(() => [] as number[]),
+      ]);
+      colorQueryEmbedding = cEmb.length > 0 ? cEmb : null;
+      styleQueryEmbedding = sEmb.length > 0 ? sEmb : null;
+      patternQueryEmbedding = pEmb.length > 0 ? pEmb : null;
     } catch {
       colorQueryEmbedding = null;
       styleQueryEmbedding = null;
@@ -690,7 +695,7 @@ export async function searchByImageWithSimilarity(
   const patternSimById = new Map<string, number>();
   const taxonomyMatchById = new Map<string, number>();
 
-  const wColor = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_COLOR_WEIGHT ?? "80") || 80);
+  const wColor = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_COLOR_WEIGHT ?? "220") || 220);
   const wStyle = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_STYLE_WEIGHT ?? "60") || 60);
   const wPattern = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_PATTERN_WEIGHT ?? "40") || 40);
 
