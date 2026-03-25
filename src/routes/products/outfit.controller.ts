@@ -71,7 +71,7 @@ export async function completeStyle(req: Request, res: Response) {
     const productId = parseInt(req.params.id, 10);
 
     if (isNaN(productId)) {
-      return res.status(400).json({ error: "Invalid product ID" });
+      return res.status(400).json({ success: false, error: { message: "Invalid product ID" } });
     }
 
     const options = parseCompleteStyleOptions(req.query);
@@ -79,13 +79,15 @@ export async function completeStyle(req: Request, res: Response) {
     const result = await getOutfitRecommendations(productId, options, userId);
 
     if (!result) {
-      return res.status(404).json({ error: "Product not found" });
+      return res.status(404).json({ success: false, error: { message: "Product not found" } });
     }
 
     return res.json({ success: true, data: result });
   } catch (error) {
     console.error("Error in completeStyle:", error);
-    return res.status(500).json({ error: "Failed to generate outfit recommendations" });
+    return res
+      .status(500)
+      .json({ success: false, error: { message: "Failed to generate outfit recommendations" } });
   }
 }
 
@@ -104,7 +106,7 @@ export async function completeStyleFromBody(req: Request, res: Response) {
     const { product, options: bodyOptions } = req.body;
 
     if (!product || !product.title) {
-      return res.status(400).json({ error: "Product with title is required" });
+      return res.status(400).json({ success: false, error: { message: "Product with title is required" } });
     }
 
     const productInput: Product = {
@@ -133,7 +135,9 @@ export async function completeStyleFromBody(req: Request, res: Response) {
     return res.json({ success: true, data: result });
   } catch (error) {
     console.error("Error in completeStyleFromBody:", error);
-    return res.status(500).json({ error: "Failed to generate outfit recommendations" });
+    return res
+      .status(500)
+      .json({ success: false, error: { message: "Failed to generate outfit recommendations" } });
   }
 }
 
@@ -147,18 +151,18 @@ export async function getStyleProfile(req: Request, res: Response) {
     const productId = parseInt(req.params.id, 10);
 
     if (isNaN(productId)) {
-      return res.status(400).json({ error: "Invalid product ID" });
+      return res.status(400).json({ success: false, error: { message: "Invalid product ID" } });
     }
 
     const result = await getProductStyleProfile(productId);
 
     if (!result) {
-      return res.status(404).json({ error: "Product not found" });
+      return res.status(404).json({ success: false, error: { message: "Product not found" } });
     }
 
     return res.json({ success: true, data: result });
   } catch (error) {
     console.error("Error in getStyleProfile:", error);
-    return res.status(500).json({ error: "Failed to get style profile" });
+    return res.status(500).json({ success: false, error: { message: "Failed to get style profile" } });
   }
 }

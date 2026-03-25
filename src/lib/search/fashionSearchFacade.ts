@@ -92,32 +92,56 @@ async function inferPredictedCategoryAislesFromImage(
   imageBuffer: Buffer | undefined,
 ): Promise<string[] | undefined> {
   if (!imageBuffer || imageBuffer.length === 0) return undefined;
+  const timeoutMs = finiteEnvNumber(
+    process.env.SEARCH_IMAGE_YOLO_TIMEOUT_MS,
+    1200,
+    200,
+    8000,
+  );
   try {
-    const yolo = getYOLOv8Client();
-    const detected = await yolo.detectFromBuffer(imageBuffer, "search-image.jpg", { confidence: 0.4 });
-    const items = Array.isArray(detected?.detections) ? detected.detections : [];
-    if (items.length === 0) return undefined;
-    const ranked = [...items].sort((a: any, b: any) => {
-      const wa = (Number(a?.confidence) || 0) * (Number(a?.area_ratio) || 0);
-      const wb = (Number(b?.confidence) || 0) * (Number(b?.area_ratio) || 0);
-      return wb - wa;
-    });
-    const top = ranked[0];
-    const label = String(top?.label ?? "").toLowerCase().trim();
-    if (!label) return undefined;
-    const categoryMapping = mapDetectionToCategory(label, Number(top?.confidence) || 0);
-    const searchCategories = shouldUseAlternatives(categoryMapping)
-      ? getSearchCategories(categoryMapping)
-      : [categoryMapping.productCategory];
-    const expanded = expandPredictedTypeHints([
-      label,
-      ...searchCategories,
-      ...extractLexicalProductTypeSeeds(label),
+    const inner = async (): Promise<string[] | undefined> => {
+      const yolo = getYOLOv8Client();
+      const detected = await yolo.detectFromBuffer(imageBuffer, "search-image.jpg", { confidence: 0.4 });
+      const items = Array.isArray(detected?.detections) ? detected.detections : [];
+      if (items.length === 0) return undefined;
+      const ranked = [...items].sort((a: any, b: any) => {
+        const wa = (Number(a?.confidence) || 0) * (Number(a?.area_ratio) || 0);
+        const wb = (Number(b?.confidence) || 0) * (Number(b?.area_ratio) || 0);
+        return wb - wa;
+      });
+      const top = ranked[0];
+      const label = String(top?.label ?? "").toLowerCase().trim();
+      if (!label) return undefined;
+      const categoryMapping = mapDetectionToCategory(label, Number(top?.confidence) || 0);
+      const searchCategories = shouldUseAlternatives(categoryMapping)
+        ? getSearchCategories(categoryMapping)
+        : [categoryMapping.productCategory];
+      const expanded = expandPredictedTypeHints([
+        label,
+        ...searchCategories,
+        ...extractLexicalProductTypeSeeds(label),
+      ]);
+      return expanded.length > 0 ? expanded : searchCategories;
+    };
+    return await Promise.race([
+      inner(),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), timeoutMs)),
     ]);
-    return expanded.length > 0 ? expanded : searchCategories;
   } catch {
     return undefined;
   }
+}
+
+function finiteEnvNumber(
+  raw: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (raw === undefined || String(raw).trim() === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
 }
 
 export async function searchBrowse(params: {
