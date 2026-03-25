@@ -208,6 +208,8 @@ export const config = {
     })(),
     /** Lower bound for image kNN relax paths; must match products.service `imageRelaxSimilarityFloor`. */
     searchImageRelaxFloor: finiteEnvNumber(process.env.SEARCH_IMAGE_RELAX_FLOOR, 0.58, 0.35, 0.92),
+    /** Cap BLIP caption wait for POST /products/search/image (ms). */
+    blipCaptionTimeoutMs: finiteEnvNumber(process.env.SEARCH_BLIP_CAPTION_TIMEOUT_MS, 900, 200, 8000),
   },
   tryon: {
     // Google Cloud Vertex AI — Virtual Try-On (publishers/google/models/...:predict)

@@ -10,7 +10,7 @@
  * - Fashion industry best practices
  */
 
-import { pg, osClient } from "../core";
+import { pg, osClient, productsTableHasIsHiddenColumn } from "../core";
 import { config } from "../../config";
 import { getTextEmbedding, getImageEmbedding, cosineSimilarity, initClip, preprocessImage, loadImage } from "../image";
 import { buildLookupMaps, FABRICS, OCCASIONS, type OccasionEntry } from "../compare";
@@ -1589,14 +1589,16 @@ function generateOutfitSuggestion(
  */
 export async function getProductForOutfit(productId: number): Promise<Product | null> {
   try {
+    const hasIsHidden = await productsTableHasIsHiddenColumn();
+    const hiddenClause = hasIsHidden ? "AND (p.is_hidden IS NOT TRUE)" : "";
     const result = await pg.query<Product>(`
       SELECT 
-        id, title, brand, category, color, 
-        price_cents, currency, image_url, image_cdn, description
-      FROM products 
-      WHERE id = $1 AND availability = true
+        p.id, p.title, p.brand, p.category, p.color, 
+        p.price_cents, p.currency, p.image_url, p.image_cdn, p.description
+      FROM products p
+      WHERE p.id = $1 ${hiddenClause}
     `, [productId]);
-    
+
     return result.rows[0] || null;
   } catch (error) {
     console.error("Error fetching product for outfit:", error);

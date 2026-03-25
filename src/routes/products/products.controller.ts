@@ -18,6 +18,7 @@ import { extractLexicalProductTypeSeeds } from "../../lib/search/productTypeTaxo
 import { isClipAvailable } from "../../lib/image/index";
 import { getProductWithVariants } from "./products.service";
 import { config } from "../../config";
+import { extractQuickFashionColorHints } from "../../lib/color/quickImageColor";
 
 // ============================================================================
 // Request Helpers
@@ -172,15 +173,35 @@ export async function searchProductsByImage(req: Request, res: Response) {
         return res.status(400).json({ success: false, error: validation.error });
       }
 
-      const [emb, garmentEmb, pHashResult, caption] = await Promise.all([
+      const quickHints = await extractQuickFashionColorHints(file.buffer);
+      const blipPromise = blip.caption(file.buffer).catch(() => "");
+      const caption = await Promise.race([
+        blipPromise,
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve(""), config.search.blipCaptionTimeoutMs),
+        ),
+      ]);
+
+      const [emb, garmentEmb, pHashResult] = await Promise.all([
         processImageForEmbedding(file.buffer),
         processImageForGarmentEmbedding(file.buffer).catch(() => [] as number[]),
         computePHash(file.buffer),
-        blip.caption(file.buffer).catch(() => ""),
       ]);
       embedding = emb;
       pHash = pHashResult;
       garmentEmbeddingForSearch = garmentEmb.length === emb.length ? garmentEmb : undefined;
+
+      if (quickHints.length > 0) {
+        const existing: string[] =
+          Array.isArray(filters.colors) && filters.colors.length > 0
+            ? filters.colors.map((c) => String(c).toLowerCase())
+            : filters.color
+              ? [String(filters.color).toLowerCase()]
+              : filters.softColor
+                ? [String(filters.softColor).toLowerCase()]
+                : [];
+        filters.colors = [...new Set([...existing, ...quickHints.map((c) => c.toLowerCase())])];
+      }
 
       // BLIP caption + taxonomy extraction for productTypes (BM25 soft boost in hybrid search)
       const typeSeeds = extractLexicalProductTypeSeeds(caption);
