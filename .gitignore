@@ -17,4 +17,7 @@ build/
 # ML models are stored on HuggingFace: razangh/fashion-models
 # Run `pnpm models:download` (or `python scripts/download-models.py`) to restore them locally.
 /models
+.reindex-progress.json
+
+
 

@@ -63,7 +63,7 @@ export async function ensureIndex() {
         settings: {
           index: {
             knn: true,
-            "knn.algo_param.ef_search": 256,
+            "knn.algo_param.ef_search": 384,
           },
           analysis: {
             analyzer: {
