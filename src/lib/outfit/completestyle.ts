@@ -76,7 +76,7 @@ export type ProductCategory =
   | "bag" | "clutch" | "tote" | "backpack" | "crossbody"
   | "watch" | "jewelry" | "necklace" | "bracelet" | "earrings" | "ring"
   | "belt" | "scarf" | "hat" | "sunglasses" | "wallet"
-  | "activewear" | "sportswear" | "swimwear"
+  | "activewear" | "sportswear" | "swimwear" | "long_dress"
   | "unknown";
 
 export interface StyleProfile {
@@ -109,6 +109,7 @@ export const CATEGORY_KEYWORDS: Record<ProductCategory, string[]> = {
   maxi_dress: ["maxi dress", "maxi", "long dress"],
   mini_dress: ["mini dress", "mini", "short dress"],
   midi_dress: ["midi dress", "midi"],
+  long_dress: ["long dress", "long dress", "long"],
   
   // Tops - Casual
   hoodie: ["hoodie", "hooded", "هودي", "kapuchon"],
@@ -315,6 +316,7 @@ export const CATEGORY_STYLE_MAP: Record<ProductCategory, Partial<StyleProfile>> 
   maxi_dress: { occasion: "semi-formal", aesthetic: "bohemian", formality: 5 },
   mini_dress: { occasion: "party", aesthetic: "modern", formality: 5 },
   midi_dress: { occasion: "semi-formal", aesthetic: "classic", formality: 6 },
+  long_dress: { occasion: "semi-formal", aesthetic: "classic", formality: 6 },
   
   // Casual Tops
   hoodie: { occasion: "casual", aesthetic: "streetwear", formality: 2 },
@@ -407,6 +409,13 @@ export const CATEGORY_PAIRINGS: Record<ProductCategory, CategoryPairing[]> = {
     { categories: ["ring"], priority: 3, reason: "Subtle jewelry accents" },
   ],
   maxi_dress: [
+    { categories: ["sandals", "flats", "heels"], priority: 1, reason: "Footwear to complement the length" },
+    { categories: ["tote", "crossbody", "clutch"], priority: 1, reason: "A bag for your belongings" },
+    { categories: ["earrings", "bracelet", "necklace"], priority: 2, reason: "Bohemian jewelry pieces" },
+    { categories: ["hat", "sunglasses"], priority: 2, reason: "Sun protection with style" },
+    { categories: ["cardigan", "jacket"], priority: 3, reason: "Light layering option" },
+  ],
+  long_dress: [
     { categories: ["sandals", "flats", "heels"], priority: 1, reason: "Footwear to complement the length" },
     { categories: ["tote", "crossbody", "clutch"], priority: 1, reason: "A bag for your belongings" },
     { categories: ["earrings", "bracelet", "necklace"], priority: 2, reason: "Bohemian jewelry pieces" },
@@ -789,7 +798,7 @@ export async function detectCategory(title: string, description?: string): Promi
  */
 function mapStyleToCategory(style: string, text: string): ProductCategory {
   const styleMap: Record<string, ProductCategory[]> = {
-    "dress": ["dress", "gown", "maxi_dress", "mini_dress", "midi_dress"],
+    "dress": ["dress", "gown", "maxi_dress", "mini_dress", "midi_dress", "long_dress"],
     "formal": ["gown", "blazer", "heels", "dress"],
     "casual": ["tshirt", "jeans", "sneakers", "hoodie"],
     "athletic": ["activewear", "sneakers", "leggings"],
@@ -836,6 +845,7 @@ function detectCategoryFallback(text: string): { category: ProductCategory; conf
     watch: 0, jewelry: 0, necklace: 0, bracelet: 0, earrings: 0, ring: 0,
     belt: 0, scarf: 0, hat: 0, sunglasses: 0, wallet: 0,
     activewear: 0, sportswear: 0, swimwear: 0, unknown: 0,
+    long_dress: 0,
   };
   
   // Score based on exact keyword matches

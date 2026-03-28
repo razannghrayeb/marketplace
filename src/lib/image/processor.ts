@@ -30,24 +30,24 @@ export async function processImageForEmbedding(imageBuffer: Buffer): Promise<num
     throw new Error("CLIP model not available. Run 'npx tsx scripts/download-clip.ts' first.");
   }
 
-  // Use sharp to decode and resize image
   const { data, info } = await sharp(imageBuffer)
-    .resize(224, 224, { fit: "cover" })
+    .normalize()
+    .resize(224, 224, {
+      fit: "contain",
+      background: { r: 255, g: 255, b: 255 },
+    })
     .removeAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
 
-  // Preprocess for CLIP
   const preprocessed = preprocessImage(
     new Uint8Array(data),
     info.width,
     info.height,
-    info.channels
+    info.channels,
   );
 
-  // Generate embedding
-  const embedding = await getImageEmbedding(preprocessed);
-  return embedding;
+  return getImageEmbedding(preprocessed);
 }
 
 /** CLIP embedding on garment-centered crop (for `embedding_garment` in OpenSearch). */
@@ -109,14 +109,86 @@ export async function extractPaddedDetectionCropBuffer(
  * Boxes are assumed pixel coordinates in the original image space.
  */
 export async function processImageForGarmentEmbeddingWithOptionalBox(
-  imageBuffer: Buffer,
+  rawBuf: Buffer,
+  processBuf: Buffer,
   box: PixelBox | null | undefined,
 ): Promise<number[]> {
-  const cropped = await extractPaddedDetectionCropBuffer(imageBuffer, box);
-  if (cropped) {
-    return processImageForEmbedding(cropped);
+
+  // ── Step 1: determine the best buffer to embed ────────────────────────────
+  let embedBuf: Buffer;
+
+  if (box &&
+    Number.isFinite(box.x1) && Number.isFinite(box.y1) &&
+    Number.isFinite(box.x2) && Number.isFinite(box.y2)
+  ) {
+    // Crop from the rembg-cleaned image using YOLO box + 10% padding
+    try {
+      const meta = await sharp(processBuf).metadata();
+      const iw = meta.width ?? 0;
+      const ih = meta.height ?? 0;
+
+      if (iw > 32 && ih > 32) {
+        // Clamp raw box to image bounds first
+        const bx1 = Math.max(0, Math.min(iw, box.x1));
+        const by1 = Math.max(0, Math.min(ih, box.y1));
+        const bx2 = Math.max(bx1 + 4, Math.min(iw, box.x2));
+        const by2 = Math.max(by1 + 4, Math.min(ih, box.y2));
+
+        const bw = bx2 - bx1;
+        const bh = by2 - by1;
+
+        // 10% padding on each side
+        const padX = Math.round(bw * 0.10);
+        const padY = Math.round(bh * 0.10);
+
+        const left   = Math.max(0, bx1 - padX);
+        const top    = Math.max(0, by1 - padY);
+        const right  = Math.min(iw, bx2 + padX);
+        const bottom = Math.min(ih, by2 + padY);
+
+        const cropW = Math.max(1, right - left);
+        const cropH = Math.max(1, bottom - top);
+
+        if (cropW >= 10 && cropH >= 10) {
+          embedBuf = await sharp(processBuf)
+            .extract({ left: Math.round(left), top: Math.round(top), width: cropW, height: cropH })
+            .png()
+            .toBuffer();
+        } else {
+          // Box too small after clamping — use full clean image
+          embedBuf = processBuf;
+        }
+      } else {
+        embedBuf = processBuf;
+      }
+    } catch {
+      // Crop failed — use full clean image
+      embedBuf = processBuf;
+    }
+  } else {
+    // No box — use full rembg-cleaned image
+    embedBuf = processBuf;
   }
-  return processImageForGarmentEmbedding(imageBuffer);
+
+  // ── Step 2: decode, normalize exposure, resize with contain, embed ─────────
+  const { data, info } = await sharp(embedBuf)
+    .normalize()                                                   // equalize vendor exposure variance
+    .resize(224, 224, {
+      fit: "contain",
+      background: { r: 255, g: 255, b: 255 },                     // white letterbox — preserves aspect ratio
+    })
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const preprocessed = preprocessImage(
+    new Uint8Array(data),
+    info.width,
+    info.height,
+    info.channels,
+  );
+
+  return getImageEmbedding(preprocessed);
 }
 
 /**
@@ -166,7 +238,7 @@ export async function computePHash(buffer: Buffer): Promise<string> {
  * Load and normalize image into Float32Array CHW format
  */
 export async function loadAndNormalize(buffer: Buffer, targetWidth = 224, targetHeight = 224) {
-  const sharpImg = sharp(buffer).resize(targetWidth, targetHeight, { fit: "cover" }).removeAlpha().raw();
+  const sharpImg = sharp(buffer).resize(targetWidth, targetHeight, { fit: "contain", background: { r: 255, g: 255, b: 255 } })
   const { data, info } = await sharpImg.toBuffer({ resolveWithObject: true });
   const normalized = normalizeImage(data, info.width, info.height, info.channels, {
     mean: [0.48145466, 0.4578275, 0.40821073],
