@@ -105,9 +105,15 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
     "crossbody",
     "satchel",
     "satchels",
+    "wallet",
+    "wallets",
     "bucket bag",
     "shoulder bag",
   ],
+  ["hat", "hats", "cap", "caps", "beanie", "beanies", "beret", "berets"],
+  ["scarf", "scarves", "shawl", "shawls", "wrap", "wraps", "stole", "stoles"],
+  ["belt", "belts"],
+  ["sock", "socks", "hosiery", "stocking", "stockings"],
   [
     "necklace",
     "necklaces",
@@ -230,6 +236,31 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   crossbody: "bag",
   handbag: "bag",
   handbags: "bag",
+  wallet: "bag",
+  wallets: "bag",
+  hat: "hat",
+  hats: "hat",
+  cap: "hat",
+  caps: "hat",
+  beanie: "hat",
+  beanies: "hat",
+  beret: "hat",
+  berets: "hat",
+  scarf: "scarf",
+  scarves: "scarf",
+  shawl: "scarf",
+  shawls: "scarf",
+  wrap: "scarf",
+  wraps: "scarf",
+  stole: "scarf",
+  stoles: "scarf",
+  belt: "belt",
+  belts: "belt",
+  sock: "sock",
+  socks: "sock",
+  hosiery: "sock",
+  stocking: "sock",
+  stockings: "sock",
 
   earring: "jewellery",
   earrings: "jewellery",
@@ -1164,7 +1195,11 @@ type GarmentHint =
   | { kind: "shorts_skirt"; sk: "shorts" | "skirt" }
   | { kind: "footwear"; id: string }
   | { kind: "tops"; id: string }
-  | { kind: "dress"; id: string };
+  | { kind: "dress"; id: string }
+  | {
+      kind: "accessory";
+      id: "bag" | "headwear" | "scarf" | "belt" | "jewelry" | "hosiery";
+    };
 
 function dedupeGarmentHints(hints: GarmentHint[]): GarmentHint[] {
   const seen = new Set<string>();
@@ -1193,6 +1228,8 @@ function inferGarmentHintsFromQuerySeeds(seeds: string[]): GarmentHint[] {
     if (tp) out.push({ kind: "tops", id: TOPS_MICRO[tp] });
     const dr = dressMicroGroup(t);
     if (dr) out.push({ kind: "dress", id: DRESS_MICRO[dr] });
+    const ax = accessoryMicroGroup(t);
+    if (ax) out.push({ kind: "accessory", id: ax });
   }
   return dedupeGarmentHints(out);
 }
@@ -1213,6 +1250,8 @@ function inferGarmentHintsFromCategoryString(raw: string | undefined): GarmentHi
     if (tp) out.push({ kind: "tops", id: TOPS_MICRO[tp] });
     const dr = dressMicroGroup(w);
     if (dr) out.push({ kind: "dress", id: DRESS_MICRO[dr] });
+    const ax = accessoryMicroGroup(w);
+    if (ax) out.push({ kind: "accessory", id: ax });
   }
   if (/\bskirts?\b/.test(s)) out.push({ kind: "shorts_skirt", sk: "skirt" });
   if (/\b(?:board\s+)?shorts\b|\bbermuda\b/.test(s)) out.push({ kind: "shorts_skirt", sk: "shorts" });
@@ -1230,7 +1269,82 @@ function inferGarmentHintsFromCategoryString(raw: string | undefined): GarmentHi
       if (dr) out.push({ kind: "dress", id: DRESS_MICRO[dr] });
     }
   }
+  if (/\b(bag|bags|handbag|handbags|tote|totes|clutch|clutches|purse|purses|backpack|backpacks|satchel|satchels|crossbody|wallet|wallets)\b/.test(s)) {
+    out.push({ kind: "accessory", id: "bag" });
+  }
+  if (/\b(hat|hats|cap|caps|beanie|beanies|beret|berets)\b/.test(s)) {
+    out.push({ kind: "accessory", id: "headwear" });
+  }
+  if (/\b(scarf|scarves|shawl|shawls|stole|stoles|wrap|wraps)\b/.test(s)) {
+    out.push({ kind: "accessory", id: "scarf" });
+  }
+  if (/\b(belt|belts)\b/.test(s)) {
+    out.push({ kind: "accessory", id: "belt" });
+  }
+  if (/\b(necklace|necklaces|earring|earrings|bracelet|bracelets|ring|rings|jewelry|jewellery|brooch|brooches|anklet|anklets|choker|chokers)\b/.test(s)) {
+    out.push({ kind: "accessory", id: "jewelry" });
+  }
+  if (/\b(sock|socks|hosiery|stocking|stockings)\b/.test(s)) {
+    out.push({ kind: "accessory", id: "hosiery" });
+  }
   return dedupeGarmentHints(out);
+}
+
+function accessoryMicroGroup(
+  token: string,
+): "bag" | "headwear" | "scarf" | "belt" | "jewelry" | "hosiery" | null {
+  const t = token.toLowerCase().trim();
+  if (
+    new Set([
+      "bag",
+      "bags",
+      "handbag",
+      "handbags",
+      "tote",
+      "totes",
+      "clutch",
+      "clutches",
+      "purse",
+      "purses",
+      "backpack",
+      "backpacks",
+      "satchel",
+      "satchels",
+      "crossbody",
+      "wallet",
+      "wallets",
+    ]).has(t)
+  )
+    return "bag";
+  if (new Set(["hat", "hats", "cap", "caps", "beanie", "beanies", "beret", "berets"]).has(t))
+    return "headwear";
+  if (new Set(["scarf", "scarves", "shawl", "shawls", "stole", "stoles", "wrap", "wraps"]).has(t))
+    return "scarf";
+  if (new Set(["belt", "belts"]).has(t)) return "belt";
+  if (
+    new Set([
+      "necklace",
+      "necklaces",
+      "earring",
+      "earrings",
+      "bracelet",
+      "bracelets",
+      "ring",
+      "rings",
+      "jewelry",
+      "jewellery",
+      "brooch",
+      "brooches",
+      "anklet",
+      "anklets",
+      "choker",
+      "chokers",
+    ]).has(t)
+  )
+    return "jewelry";
+  if (new Set(["sock", "socks", "hosiery", "stocking", "stockings"]).has(t))
+    return "hosiery";
+  return null;
 }
 
 function docSupportsGarmentHint(docProductTypes: string[], hint: GarmentHint): boolean {
@@ -1259,6 +1373,8 @@ function docSupportsGarmentHint(docProductTypes: string[], hint: GarmentHint): b
         const g = dressMicroGroup(d);
         return g ? DRESS_MICRO[g] === hint.id : false;
       });
+    case "accessory":
+      return docs.some((d) => accessoryMicroGroup(d) === hint.id);
     default:
       return false;
   }
@@ -1349,6 +1465,12 @@ function garmentHintsConflict(a: GarmentHint, b: GarmentHint): boolean {
     (a.kind === "footwear" && b.kind === "dress") ||
     (a.kind === "dress" && b.kind === "footwear")
   ) {
+    return true;
+  }
+  if (a.kind === "accessory" && b.kind === "accessory") {
+    return a.id !== b.id;
+  }
+  if (a.kind === "accessory" || b.kind === "accessory") {
     return true;
   }
   return false;
