@@ -128,8 +128,8 @@ export function computeFinalRelevance01(params: {
     params.hasTypeIntent || params.hasColorIntent || params.hasStyleIntent || params.hasAudienceIntent;
   const capBonus = params.tightSemanticCap
     ? hasIntent
-      ? 0.035
-      : 0.07
+      ? 0.055
+      : 0.09
     : hasIntent
       ? 0.08
       : 0.15;

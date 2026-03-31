@@ -1754,6 +1754,7 @@ export async function multiImageSearch(
   const { images, userPrompt, limit = 50, rerankWeights } = request;
 
   try {
+    let multiImageEffectiveFinalMin = config.search.finalAcceptMinImage;
     const prepared = await preprocessMultiImageBuffers(images);
     const { parsedIntent, geminiDegraded } = await parseMultiImageIntentWithGuards(
       prepared,
@@ -1879,9 +1880,32 @@ export async function multiImageSearch(
       });
 
       const finalAcceptMin = config.search.finalAcceptMinImage;
-      hits = hits.filter(
-        (h: any) => (relevanceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= finalAcceptMin,
+      let effectiveFinalAcceptMin = finalAcceptMin;
+      let relFiltered = hits.filter(
+        (h: any) =>
+          (relevanceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= effectiveFinalAcceptMin,
       );
+      const imageMinResultsTarget = config.search.imageSearchMinResults;
+      const relevanceRelaxDelta = config.search.imageSearchRelevanceRelaxDelta;
+      if (
+        imageMinResultsTarget > 0 &&
+        relFiltered.length < imageMinResultsTarget &&
+        hits.length > relFiltered.length
+      ) {
+        const relaxedMin = Math.max(0.4, finalAcceptMin - relevanceRelaxDelta);
+        if (relaxedMin < finalAcceptMin) {
+          const expanded = hits.filter(
+            (h: any) =>
+              (relevanceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= relaxedMin,
+          );
+          if (expanded.length > relFiltered.length) {
+            relFiltered = expanded;
+            effectiveFinalAcceptMin = relaxedMin;
+          }
+        }
+      }
+      hits = relFiltered;
+      multiImageEffectiveFinalMin = effectiveFinalAcceptMin;
     }
 
     const productIds = hits.map((hit: any) => hit._source?.product_id);
@@ -1984,9 +2008,9 @@ export async function multiImageSearch(
         return (b.rerankScore ?? 0) - (a.rerankScore ?? 0);
       });
 
-    const minImgRel = config.search.finalAcceptMinImage;
     finalResults = finalResults.filter(
-      (r: any) => typeof r.finalRelevance01 === "number" && r.finalRelevance01 >= minImgRel,
+      (r: any) =>
+        typeof r.finalRelevance01 === "number" && r.finalRelevance01 >= multiImageEffectiveFinalMin,
     );
     finalResults.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
 
