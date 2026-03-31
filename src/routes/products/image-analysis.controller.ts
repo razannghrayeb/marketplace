@@ -202,7 +202,7 @@ router.post(
  * @query
  *   - store: boolean (default: false) - Store image in R2
  *   - threshold: number (default: 0.7) - Similarity threshold 0-1
- *   - limit_per_item: number (default: 10) - Max similar products per detection
+ *   - limit_per_item: number (optional) - Max similar products per detection (backend default when omitted)
  *   - filter_category: boolean (default: true) - Filter by detected category
  *   - confidence: number (default: 0.25) - Detection confidence
  *   - enhance_contrast: boolean (default: false) - Preprocess: enhance contrast
@@ -266,7 +266,7 @@ router.post(
           : 0.63,
         similarLimitPerItem: req.query.limit_per_item
           ? parseInt(req.query.limit_per_item as string, 10)
-          : 10,
+          : undefined,
         filterByDetectedCategory: req.query.filter_category !== "false",
         groupByDetection: req.query.group_by_detection !== "false",
         includeEmptyDetectionGroups: req.query.include_empty_groups === "true",
@@ -308,7 +308,7 @@ router.post(
  * @query
  *   - store: boolean (default: false)
  *   - threshold: number (default: 0.7)
- *   - limit_per_item: number (default: 10)
+ *   - limit_per_item: number (optional, backend default when omitted)
  *   - confidence: number (default: 0.25)
  *   - enhance_contrast: boolean (default: false)
  *   - enhance_sharpness: boolean (default: false)
@@ -386,7 +386,7 @@ router.post(
           : 0.63,
         similarLimitPerItem: req.query.limit_per_item
           ? parseInt(req.query.limit_per_item as string, 10)
-          : 10,
+          : undefined,
         filterByDetectedCategory: req.query.filter_category !== "false",
         preprocessing,
         ...selectionOptions,
@@ -420,7 +420,7 @@ router.post(
  *
  * @query
  *   - threshold: number (default: 0.7) - Similarity threshold
- *   - limit_per_item: number (default: 10) - Max products per detection
+ *   - limit_per_item: number (optional) - Max products per detection (backend default when omitted)
  *   - category: string (optional) - Filter by category
  */
 router.post(
@@ -442,7 +442,7 @@ router.post(
           : 0.63,
         limitPerItem: req.query.limit_per_item
           ? parseInt(req.query.limit_per_item as string, 10)
-          : 10,
+          : undefined,
         filterByCategory: req.query.category as string,
       });
 
