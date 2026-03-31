@@ -738,12 +738,13 @@ export async function searchByImageWithSimilarity(
     patternSimById.set(idStr, Math.round(patternSim * 1000) / 1000);
     taxonomyMatchById.set(idStr, categorySoft);
 
+    // Prevent color/style/pattern from overpowering poor visual matches.
+    // When visual similarity is low, attribute boosts are softened.
+    // Keep style/color impactful while still reducing dominance on weak visual matches.
+    const attrGate = 0.4 + 0.6 * visualSim;
     const composite =
       visualSim * 1000 +
-      categorySoft * 220 +
-      colorSim * wColor +
-      styleSim * wStyle +
-      patternSim * wPattern;
+      (categorySoft * 220 + colorSim * wColor + styleSim * wStyle + patternSim * wPattern) * attrGate;
     imageCompositeById.set(idStr, composite);
   }
 
@@ -862,8 +863,8 @@ export async function searchByImageWithSimilarity(
   for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
     const sim = knnCosinesimilScoreToCosine01(Number(hit._score));
-    const rounded = Math.round(sim * 100) / 100;
-    const rel = computeHitRelevance(hit, rounded, relevanceIntent);
+    // Keep full precision for relevance calibration; only round for display later.
+    const rel = computeHitRelevance(hit, sim, relevanceIntent);
     const { primaryColor, ...comp } = rel;
     complianceById.set(idStr, comp);
     colorByHitId.set(idStr, primaryColor);
@@ -872,12 +873,12 @@ export async function searchByImageWithSimilarity(
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
     const idb = String(b._source.product_id);
-    const ia = imageCompositeById.get(ida) ?? 0;
-    const ib = imageCompositeById.get(idb) ?? 0;
-    if (Math.abs(ib - ia) > 1e-8) return ib - ia;
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
     const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
     if (Math.abs(fb - fa) > 1e-8) return fb - fa;
+    const ia = imageCompositeById.get(ida) ?? 0;
+    const ib = imageCompositeById.get(idb) ?? 0;
+    if (Math.abs(ib - ia) > 1e-8) return ib - ia;
     const ra = complianceById.get(ida)?.rerankScore ?? 0;
     const rb = complianceById.get(idb)?.rerankScore ?? 0;
     return rb - ra;
@@ -1049,6 +1050,10 @@ export async function searchByImageWithSimilarity(
               patternSim,
               taxonomyMatch,
               imageCompositeScore,
+              visual_component: compliance.visualComponent,
+              type_component: compliance.typeComponent,
+              attr_component: compliance.attrComponent,
+              penalty_component: compliance.penaltyComponent,
               colorScore: compliance.colorCompliance,
               matchedColor: compliance.matchedColor ?? undefined,
               colorTier: compliance.colorTier,
