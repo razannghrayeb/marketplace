@@ -2,11 +2,43 @@
  * Product Images Service
  * Handles all image business logic, storage, and retrieval
  */
-import { pg, productsTableHasIsHiddenColumn, productsTableHasCanonicalIdColumn, toPgVectorParam } from "../../lib/core/index";
+import {
+  pg,
+  productsTableHasIsHiddenColumn,
+  productsTableHasCanonicalIdColumn,
+  productsTableHasGenderColumn,
+  toPgVectorParam,
+} from "../../lib/core/index";
 import { uploadImage, generateImageKey } from "../../lib/image/index";
-import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash, validateImage } from "../../lib/image/index";
+import {
+  processImageForEmbedding,
+  processImageForGarmentEmbedding,
+  computePHash,
+  validateImage,
+  blip,
+} from "../../lib/image/index";
+import { applyBlipCaptionToMissingProductFields } from "../../lib/image/blipCatalogBackfill";
 import { osClient } from "../../lib/core/index";
 import { config } from "../../config";
+
+/**
+ * BLIP caption → fill only empty `products.description`, `color`, `gender` (helps search + listing quality).
+ * Runs on primary image upload only; gated by `PRODUCT_IMAGE_BLIP_FILL_MISSING` (default on).
+ */
+async function maybeBlipBackfillMissingCatalogFields(productId: number, buffer: Buffer): Promise<void> {
+  if (!config.search.blipFillMissingOnImageUpload) return;
+  try {
+    const caption = await Promise.race([
+      blip.caption(buffer),
+      new Promise<never>((_, rej) =>
+        setTimeout(() => rej(new Error("blip_timeout")), config.search.blipCaptionTimeoutMs),
+      ),
+    ]).catch(() => "");
+    await applyBlipCaptionToMissingProductFields(productId, caption);
+  } catch (e) {
+    console.warn("[uploadProductImage] BLIP catalog backfill skipped:", (e as Error).message);
+  }
+}
 import { buildProductSearchDocument } from "../../lib/search/searchDocument";
 import { loadProductSearchEnrichmentByIds } from "../../lib/search/loadProductSearchEnrichment";
 import { extractGarmentFashionColors } from "../../lib/color/garmentColorPipeline";
@@ -130,6 +162,7 @@ export async function uploadProductImage(
       `UPDATE products SET primary_image_id = $1, image_cdn = $2 WHERE id = $3`,
       [image.id, cdnUrl, productId]
     );
+    await maybeBlipBackfillMissingCatalogFields(productId, buffer);
   }
 
   // Sync OpenSearch (pass both embeddings so embedding_garment is populated)
@@ -239,8 +272,10 @@ export interface UpdateProductIndexOpts {
 export async function updateProductIndex(productId: number, sourceBuffer?: Buffer, opts?: UpdateProductIndexOpts): Promise<void> {
   const hasIsHidden = await productsTableHasIsHiddenColumn();
   const hasCanonicalId = await productsTableHasCanonicalIdColumn();
+  const hasGender = await productsTableHasGenderColumn();
   const productResult = await pg.query(
-    `SELECT id, vendor_id, title, description, brand, category, price_cents, availability, last_seen, image_cdn,
+    `SELECT id, vendor_id, title, description, brand, category, price_cents, availability, last_seen, image_cdn, color,
+            ${hasGender ? "gender" : "NULL::text AS gender"},
             ${hasIsHidden ? "is_hidden" : "false AS is_hidden"},
             ${hasCanonicalId ? "canonical_id" : "NULL::integer AS canonical_id"}
      FROM products WHERE id = $1`,
@@ -276,6 +311,8 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
     vendorId: product.vendor_id,
     title: product.title,
     description: product.description ?? null,
+    catalogColor: product.color ?? null,
+    catalogGender: hasGender ? (product.gender ?? null) : null,
     brand: product.brand,
     category: product.category,
     priceCents: product.price_cents,

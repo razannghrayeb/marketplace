@@ -286,6 +286,8 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
 
 /**
  * Macro family per cluster — order must match `PRODUCT_TYPE_CLUSTERS` exactly.
+ * (Length must equal `PRODUCT_TYPE_CLUSTERS.length`; a past off-by-one here mapped
+ * `dress` → `outerwear` and broke `filterProductTypeSeedsByMappedCategory`.)
  */
 const CLUSTER_FAMILY: readonly string[] = [
   "bottoms",
@@ -294,7 +296,6 @@ const CLUSTER_FAMILY: readonly string[] = [
   "bottoms",
   "shorts_skirt",
   "shorts_skirt",
-  "footwear",
   "footwear",
   "footwear",
   "footwear",
@@ -316,6 +317,10 @@ const CLUSTER_FAMILY: readonly string[] = [
   "modest_full",
   "head_covering",
   "bags",
+  "head_covering",
+  "head_covering",
+  "jewellery",
+  "jewellery",
   "jewellery",
 ];
 

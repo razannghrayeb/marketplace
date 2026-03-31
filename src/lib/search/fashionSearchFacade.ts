@@ -21,7 +21,7 @@ import { textSearch as enhancedTextSearch } from "../../routes/search/search.ser
 import { searchByImageWithSimilarity as legacyImageSearch } from "../../routes/products/products.service";
 import { searchProductsFilteredBrowse } from "./filteredBrowseSearch";
 
-import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash } from "../image";
+import { processImageForEmbedding, processImageForGarmentEmbedding, removeBackgroundForQuery, computePHash } from "../image";
 import { tieredColorMatchScore } from "../color/colorCanonical";
 import { getYOLOv8Client } from "../image/yolov8Client";
 import {
@@ -286,28 +286,37 @@ export async function searchImage(
 
   const start = Date.now();
 
+  // Match index-time preprocessing: try background removal on user uploads so
+  // query embeddings occupy the same CLIP region as the rembg-cleaned catalog
+  // vectors. Falls back to raw image if the sidecar is unavailable or slow.
+  const embeddingDerivedFromBufferOnly =
+    Boolean(imageBuffer?.length) &&
+    (!imageEmbedding || imageEmbedding.length === 0);
+
+  let cleanedBuffer: Buffer | undefined;
+  if (embeddingDerivedFromBufferOnly && imageBuffer?.length) {
+    cleanedBuffer = (await removeBackgroundForQuery(imageBuffer)) ?? undefined;
+  }
+  const bufForEmbedding = cleanedBuffer ?? imageBuffer;
+
   const embedding =
     imageEmbedding && imageEmbedding.length > 0
       ? imageEmbedding
-      : await processImageForEmbedding(imageBuffer!);
+      : await processImageForEmbedding(bufForEmbedding!);
 
   const derivedAisleHints =
     predictedCategoryAisles && predictedCategoryAisles.length > 0
       ? predictedCategoryAisles
       : await inferPredictedCategoryAislesFromImage(imageBuffer);
 
-  const embeddingDerivedFromBufferOnly =
-    Boolean(imageBuffer?.length) &&
-    (!imageEmbedding || imageEmbedding.length === 0);
-
   let imageEmbeddingGarment: number[] | undefined = garmentFromCaller;
   if (
     (!imageEmbeddingGarment || imageEmbeddingGarment.length === 0) &&
     embeddingDerivedFromBufferOnly &&
-    imageBuffer?.length
+    bufForEmbedding?.length
   ) {
     try {
-      imageEmbeddingGarment = await processImageForGarmentEmbedding(imageBuffer);
+      imageEmbeddingGarment = await processImageForGarmentEmbedding(bufForEmbedding);
     } catch {
       imageEmbeddingGarment = undefined;
     }
@@ -349,9 +358,12 @@ export async function searchImage(
     typeof metaAny?.final_accept_min_effective === "number"
       ? (metaAny.final_accept_min_effective as number)
       : config.search.finalAcceptMinImage;
-  const filteredResults = filterByFinalRelevance(res.results, effectiveMin, "strict") ?? [];
-  // Same floor as main results (sparse recall may lower `final_accept_min_effective`; related was wrongly using strict config-only min).
-  const filteredRelated = filterByFinalRelevance(res.related, effectiveMin, "strict");
+  // Use "lenient" mode: keep items that have no finalRelevance01 score (rather
+  // than dropping them) and let the upstream kNN + composite ordering dominate.
+  // "strict" was silently discarding all hits whose relevance layer hadn't run
+  // or whose score was depressed by threshold/preprocessing mismatches.
+  const filteredResults = filterByFinalRelevance(res.results, effectiveMin, "lenient") ?? [];
+  const filteredRelated = filterByFinalRelevance(res.related, effectiveMin, "lenient");
   const meta = {
     ...(res.meta ?? {}),
     total_results: filteredResults.length,

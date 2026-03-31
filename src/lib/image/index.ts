@@ -33,6 +33,7 @@ export {
   extractPaddedDetectionCropBuffer,
   type PixelBox,
   extractGarmentCenterCropBuffer,
+  removeBackgroundForQuery,
   validateImage,
   computePHash,
   loadAndNormalize,
@@ -53,6 +54,17 @@ export {
 
 // BLIP image captioning
 export { BlipService, blip } from "./blip";
+export {
+  inferAudienceFromCaption,
+  inferColorFromCaption,
+  primaryColorHintFromCaption,
+  productDescriptionFromCaption,
+  catalogGenderFromCaption,
+} from "./captionAttributeInference";
+export {
+  applyBlipCaptionToMissingProductFields,
+  isCatalogFieldBlank,
+} from "./blipCatalogBackfill";
 
 // Dual-Model Fashion Detection
 export {

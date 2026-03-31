@@ -34,7 +34,7 @@ import axios from "axios";
 import { Pool } from "pg";
 import sharp from "sharp";
 import { osClient, ensureIndex } from "../src/lib/core/opensearch";
-import { config } from "../src/config";
+import { config } from "../src/config"; 
 import { 
   processImageForEmbedding,
   processImageForGarmentEmbeddingWithOptionalBox,

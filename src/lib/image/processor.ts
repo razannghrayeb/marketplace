@@ -9,6 +9,61 @@ import { loadImage, normalizeImage, pHash } from "./utils";
 import sharpLib from "sharp";
 const sharp = typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
 
+// ── Background removal (rembg sidecar) ─────────────────────────────────────
+
+let rembgHealthy: boolean | null = null;
+let rembgLastCheck = 0;
+const REMBG_HEALTH_TTL_MS = 30_000;
+const REMBG_QUERY_TIMEOUT_MS = 3_000;
+
+function rembgUrl(): string {
+  return process.env.REMBG_SERVICE_URL || "http://127.0.0.1:7788";
+}
+
+async function isRembgAvailable(): Promise<boolean> {
+  if (rembgHealthy !== null && Date.now() - rembgLastCheck < REMBG_HEALTH_TTL_MS) {
+    return rembgHealthy;
+  }
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 1500);
+    const res = await fetch(`${rembgUrl()}/health`, { signal: ctrl.signal });
+    clearTimeout(timer);
+    rembgHealthy = res.ok;
+  } catch {
+    rembgHealthy = false;
+  }
+  rembgLastCheck = Date.now();
+  return rembgHealthy;
+}
+
+/**
+ * Remove background via the rembg sidecar with a tight timeout.
+ * Returns the cleaned buffer flattened onto white, or null on any failure.
+ */
+export async function removeBackgroundForQuery(imageBuffer: Buffer): Promise<Buffer | null> {
+  if (!(await isRembgAvailable())) return null;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REMBG_QUERY_TIMEOUT_MS);
+    const res = await fetch(`${rembgUrl()}/remove-bg`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: imageBuffer,
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const pngWithAlpha = Buffer.from(await res.arrayBuffer());
+    return sharp(pngWithAlpha)
+      .flatten({ background: { r: 255, g: 255, b: 255 } })
+      .jpeg({ quality: 92 })
+      .toBuffer();
+  } catch {
+    return null;
+  }
+}
+
 /** Center-weighted crop aligned with `extractDominantColorNames` — reduces model/background in embeddings. */
 export async function extractGarmentCenterCropBuffer(imageBuffer: Buffer): Promise<Buffer> {
   const meta = await sharp(imageBuffer).metadata();
@@ -23,7 +78,12 @@ export async function extractGarmentCenterCropBuffer(imageBuffer: Buffer): Promi
 }
 
 /**
- * Process an uploaded image and generate CLIP embedding
+ * Process an uploaded image and generate CLIP embedding.
+ *
+ * Uses `fit: "cover"` (center-crop to fill) to match CLIP's training
+ * distribution.  Previous `fit: "contain"` added white letterbox padding
+ * which diluted the garment signal and shifted embeddings away from the
+ * model's learned manifold.
  */
 export async function processImageForEmbedding(imageBuffer: Buffer): Promise<number[]> {
   if (!isClipAvailable()) {
@@ -31,10 +91,8 @@ export async function processImageForEmbedding(imageBuffer: Buffer): Promise<num
   }
 
   const { data, info } = await sharp(imageBuffer)
-    .normalize()
     .resize(224, 224, {
-      fit: "contain",
-      background: { r: 255, g: 255, b: 255 },
+      fit: "cover",
     })
     .removeAlpha()
     .raw()
@@ -170,25 +228,10 @@ export async function processImageForGarmentEmbeddingWithOptionalBox(
     embedBuf = processBuf;
   }
 
-  // ── Step 2: decode, normalize exposure, resize with contain, embed ─────────
-  const { data, info } = await sharp(embedBuf)
-    .normalize()                                                   // equalize vendor exposure variance
-    .resize(224, 224, {
-      fit: "contain",
-      background: { r: 255, g: 255, b: 255 },                     // white letterbox — preserves aspect ratio
-    })
-    .removeAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-
-  const preprocessed = preprocessImage(
-    new Uint8Array(data),
-    info.width,
-    info.height,
-    info.channels,
-  );
-
-  return getImageEmbedding(preprocessed);
+  // ── Step 2: resize with cover (matching CLIP training) and embed ────────
+  // Must match processImageForEmbedding so query-time and index-time
+  // embeddings live in the same region of CLIP's latent space.
+  return processImageForEmbedding(embedBuf);
 }
 
 /**
@@ -238,7 +281,7 @@ export async function computePHash(buffer: Buffer): Promise<string> {
  * Load and normalize image into Float32Array CHW format
  */
 export async function loadAndNormalize(buffer: Buffer, targetWidth = 224, targetHeight = 224) {
-  const sharpImg = sharp(buffer).resize(targetWidth, targetHeight, { fit: "contain", background: { r: 255, g: 255, b: 255 } })
+  const sharpImg = sharp(buffer).resize(targetWidth, targetHeight, { fit: "cover" }).removeAlpha();
   const { data, info } = await sharpImg.toBuffer({ resolveWithObject: true });
   const normalized = normalizeImage(data, info.width, info.height, info.channels, {
     mean: [0.48145466, 0.4578275, 0.40821073],

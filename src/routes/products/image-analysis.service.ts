@@ -22,6 +22,10 @@ import {
   validateImage,
   isClipAvailable,
 } from "../../lib/image";
+import {
+  inferAudienceFromCaption,
+  inferColorFromCaption,
+} from "../../lib/image/captionAttributeInference";
 import { extractDominantColorNames } from "../../lib/color/dominantColor";
 import {
   YOLOv8Client,
@@ -291,87 +295,6 @@ function inferStyleForDetectionLabel(label: string): {
   const occasion = formality >= 7 ? "formal" : "casual";
   const aesthetic = formality >= 8 ? "elegant" : undefined;
   return { formality, attrStyle, style: { occasion, aesthetic, formality } };
-}
-
-function inferAudienceFromCaption(caption: string): { gender?: string; ageGroup?: string } {
-  const s = String(caption || "").toLowerCase();
-  const hasUnisex = /\b(unisex|universal)\b/.test(s);
-  const hasWomen = /\b(women|womens|female|ladies|woman|girl|girls)\b/.test(s);
-  const hasMen = /\b(men|mens|male|man)\b/.test(s);
-
-  // Map to the same `attr_gender` values used by `attributeExtractor.ts`.
-  // (It indexes: `men|women|unisex|boys|girls|kids|baby|infant|toddler` etc.)
-  const gender =
-    hasUnisex
-      ? "unisex"
-      : /\b(girl|girls|girl's)\b/.test(s)
-        ? "girls"
-        : /\b(boy|boys|boy's)\b/.test(s)
-          ? "boys"
-          : /\b(ladies|women|womens|female|woman)\b/.test(s)
-            ? "women"
-            : hasMen
-              ? "men"
-              : undefined;
-
-  let ageGroup: string | undefined;
-  if (/\b(baby|infant|newborn)\b/.test(s)) ageGroup = "baby";
-  else if (/\b(toddler)\b/.test(s)) ageGroup = "kids";
-  else if (/\b(teen|youth|teenager)\b/.test(s)) ageGroup = "teen";
-  else if (/\b(kid|kids|child|children|boys|girls|toddler)\b/.test(s)) ageGroup = "kids";
-
-  return { gender, ageGroup };
-}
-
-function inferColorFromCaption(caption: string): {
-  topColor?: string | null;
-  jeansColor?: string | null;
-  /** Color from dress/skirt/jacket etc. (e.g. "white dress", "red skirt") — used when full-image dominant picks up background. */
-  garmentColor?: string | null;
-} {
-  const s = String(caption || "").toLowerCase();
-
-  // Canonicalize a few common color words expected by our color pipeline.
-  const mapColorWord = (w: string): string | null => {
-    const x = w.toLowerCase().trim();
-    if (!x) return null;
-    if (x === "navy" || x === "dark-blue" || x === "dark blue" || x === "midnight-blue" || x === "midnight blue") return "navy";
-    if (x === "blue" || x === "denim") return "blue";
-    if (x === "black") return "black";
-    if (x === "grey" || x === "gray") return "gray";
-    if (x === "white" || x === "ivory" || x === "cream" || x === "off-white" || x === "off white") return "off-white";
-    if (x === "tan" || x === "camel" || x === "brown") return "tan";
-    if (x === "green" || x === "olive") return "green";
-    if (x === "red" || x === "burgundy") return "red";
-    if (x === "pink") return "pink";
-    return null;
-  };
-
-  const colorTokens =
-    "black|navy|blue|denim|grey|gray|white|ivory|cream|off[- ]white|tan|camel|brown|green|olive|red|pink";
-
-  // Example: "a blue velvet top"
-  let topColor: string | null = null;
-  const topMatch = s.match(
-    new RegExp(`\\b(${colorTokens})\\b[^.]{0,40}\\b(top|shirt|blouse|tee|t-shirt|t shirt|tunic)\\b`),
-  );
-  if (topMatch?.[1]) topColor = mapColorWord(topMatch[1]);
-
-  // Example: "dark jeans" / "blue jeans" (optional; many captions omit explicit color)
-  let jeansColor: string | null = null;
-  const jeansMatch = s.match(/\b(black|navy|blue|denim|grey|gray)\b[^.]{0,20}\bjeans\b/);
-  if (jeansMatch?.[1]) jeansColor = mapColorWord(jeansMatch[1]);
-
-  // Example: "a woman wearing a white dress and sandals" — dress/skirt/jacket often missed by topColor
-  let garmentColor: string | null = null;
-  const garmentMatch = s.match(
-    new RegExp(
-      `\\b(${colorTokens})\\b[^.]{0,40}\\b(dress|dresses|skirt|skirts|jacket|coat|blazer|sweater|gown)\\b`,
-    ),
-  );
-  if (garmentMatch?.[1]) garmentColor = mapColorWord(garmentMatch[1]);
-
-  return { topColor, jeansColor, garmentColor };
 }
 
 /** BLIP slot color for this catalog category (top vs jeans vs dress), if the caption named one explicitly. */
@@ -1222,10 +1145,13 @@ export class ImageAnalysisService {
       }
       if (!croppedBuffer) return null;
 
-      const [finalEmbedding, finalGarmentEmbedding] = await Promise.all([
-        processImageForEmbedding(croppedBuffer),
-        processImageForGarmentEmbedding(croppedBuffer).catch(() => [] as number[]),
-      ]);
+      // Detection crops are already tightly cropped to the garment region via
+      // YOLO bounding box.  Applying `processImageForGarmentEmbedding` (which adds
+      // a *second* center crop) discards garment edges and degrades similarity.
+      // Use processImageForEmbedding for both global and "garment" vectors; the
+      // crop IS the garment.
+      const finalEmbedding = await processImageForEmbedding(croppedBuffer);
+      const finalGarmentEmbedding = finalEmbedding;
 
       const categoryMapping = mapDetectionToCategory(label, detection.confidence);
       const searchCategories = shouldUseAlternatives(categoryMapping)
@@ -1781,10 +1707,10 @@ export class ImageAnalysisService {
         );
         if (!croppedBuffer) continue;
 
-        const [finalEmbedding, finalGarmentEmbedding] = await Promise.all([
-          processImageForEmbedding(croppedBuffer),
-          processImageForGarmentEmbedding(croppedBuffer).catch(() => [] as number[]),
-        ]);
+        // Detection crops are already tightly cropped; skip the redundant
+        // center crop in processImageForGarmentEmbedding.
+        const finalEmbedding = await processImageForEmbedding(croppedBuffer);
+        const finalGarmentEmbedding = finalEmbedding;
 
         // Get category from user hint or detection
         const categorySource =
