@@ -186,11 +186,29 @@ export interface SearchResultWithRelated {
     relevance_gate_soft?: boolean;
     /** Image kNN: strict similarity gate removed all hits; best candidates returned anyway (relaxThresholdWhenEmpty). */
     threshold_relaxed?: boolean;
+    /** OpenSearch kNN field used for retrieval (`embedding` | `embedding_garment`). */
+    image_knn_field?: string;
     recall_size?: number;
     final_accept_min?: number;
+    /** Floor used after sparse recall when strict gate yields too few hits (≤ `image_min_results_target`). */
+    final_accept_min_effective?: number;
+    relevance_relaxed_for_min_count?: boolean;
+    image_min_results_target?: number;
     /** Count after relevance gate + dedupe (before pagination slice). */
     total_above_threshold?: number;
     open_search_total_estimate?: number;
+    pipeline_counts?: {
+      raw_open_search_hits: number;
+      base_candidates: number;
+      ranked_candidates: number;
+      threshold_passed_visual: number;
+      visual_gated_hits: number;
+      hits_after_final_accept_min: number;
+      hits_after_color_postfilter: number;
+      hits_after_hydration: number;
+      hits_after_dedupe: number;
+      final_returned_count: number;
+    };
   };
 }
 

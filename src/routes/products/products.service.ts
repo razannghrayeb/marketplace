@@ -43,10 +43,13 @@ import {
   extractFashionTypeNounTokens,
   extractLexicalProductTypeSeeds,
 } from "../../lib/search/productTypeTaxonomy";
+import type { SearchResultWithRelated } from "./types";
 
 // ============================================================================
 // Types
 // ============================================================================
+
+export type { SearchResultWithRelated };
 
 export interface SearchFilters {
   category?: string | string[];
@@ -137,42 +140,6 @@ export interface ProductResult {
   openSearchScore?: number; // raw or normalized
   pHashDist?: number;  
   candidateScore?: number;
-}
-
-export interface SearchResultWithRelated {
-  results: ProductResult[];
-  related?: ProductResult[];
-  meta: {
-    query?: string;
-    threshold?: number;
-    total_results: number;
-    total_related?: number;
-    parsed_query?: ParsedQuery;  // Include parsed query info for debugging/transparency
-    processed_query?: QueryAST;  // Query processing info (corrections, etc.)
-    did_you_mean?: string;  // Suggestion if not auto-applied
-    below_relevance_threshold?: boolean;
-    below_final_relevance_gate?: boolean;
-    relevance_gate_soft?: boolean;
-    threshold_relaxed?: boolean;
-    /** OpenSearch kNN field used for retrieval (`embedding` | `embedding_garment`). */
-    image_knn_field?: string;
-    recall_size?: number;
-    final_accept_min?: number;
-    total_above_threshold?: number;
-    open_search_total_estimate?: number;
-    pipeline_counts?: {
-      raw_open_search_hits: number;
-      base_candidates: number;
-      ranked_candidates: number;
-      threshold_passed_visual: number;
-      visual_gated_hits: number;
-      hits_after_final_accept_min: number;
-      hits_after_color_postfilter: number;
-      hits_after_hydration: number;
-      hits_after_dedupe: number;
-      final_returned_count: number;
-    };
-  };
 }
 
 // ============================================================================
