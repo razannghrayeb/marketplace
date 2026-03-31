@@ -284,19 +284,26 @@ function imageDualGarmentFusionEnv(): boolean {
 }
 
 /**
- * Normalize OpenSearch kNN score to a stable [0, 1] "similarity01" scale.
- *
- * `space_type: cosinesimil` currently returns `(1 + cosθ) / 2` in [0, 1].
- * Some older setups returned `1 + cosθ` in [0, 2].
- *
- * We keep threshold/ranking semantics in the [0, 1] OpenSearch scale:
- * - modern score: similarity01 = raw
- * - legacy score: similarity01 = raw / 2
+ * Normalize OpenSearch kNN score to OpenSearch cosinesimil [0,1] scale.
+ * - Modern OpenSearch returns `(1 + cosθ) / 2` in [0,1]
+ * - Some legacy setups returned `1 + cosθ` in [0,2]
  */
-function knnCosinesimilScoreToCosine01(raw: number): number {
+function knnCosinesimilScoreToOpenSearch01(raw: number): number {
   if (!Number.isFinite(raw)) return 0;
   const s = raw > 1.001 ? raw / 2 : raw;
   return Math.max(0, Math.min(1, s));
+}
+
+/**
+ * Convert OpenSearch cosinesimil score to cosine-derived similarity [0,1].
+ * This is stricter for visual quality:
+ * - 0   => orthogonal/opposite (after clamp)
+ * - 1   => identical direction
+ */
+function knnCosinesimilScoreToCosine01(raw: number): number {
+  const os01 = knnCosinesimilScoreToOpenSearch01(raw);
+  const cos = 2 * os01 - 1;
+  return Math.max(0, Math.min(1, cos));
 }
 
 /** Cosine similarity between two vectors, mapped to [0,1] (same scale as OpenSearch cosinesimil). */
