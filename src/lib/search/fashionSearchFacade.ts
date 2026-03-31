@@ -350,7 +350,8 @@ export async function searchImage(
       ? (metaAny.final_accept_min_effective as number)
       : config.search.finalAcceptMinImage;
   const filteredResults = filterByFinalRelevance(res.results, effectiveMin, "strict") ?? [];
-  const filteredRelated = filterByFinalRelevance(res.related, config.search.finalAcceptMinImage, "strict");
+  // Same floor as main results (sparse recall may lower `final_accept_min_effective`; related was wrongly using strict config-only min).
+  const filteredRelated = filterByFinalRelevance(res.related, effectiveMin, "strict");
   const meta = {
     ...(res.meta ?? {}),
     total_results: filteredResults.length,

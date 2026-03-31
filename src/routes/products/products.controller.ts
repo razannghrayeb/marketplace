@@ -198,7 +198,7 @@ export async function searchProductsByImage(req: Request, res: Response) {
         }
       }
 
-      // BLIP caption + taxonomy extraction for productTypes (BM25 soft boost in hybrid search)
+      // BLIP caption describes image content; seeds align type relevance with what the model sees (same path as vision-derived types).
       const typeSeeds = extractLexicalProductTypeSeeds(caption);
       if (typeSeeds.length) {
         filters.productTypes = typeSeeds;

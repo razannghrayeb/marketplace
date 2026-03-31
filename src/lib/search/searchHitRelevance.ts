@@ -128,8 +128,8 @@ export function computeFinalRelevance01(params: {
     params.hasTypeIntent || params.hasColorIntent || params.hasStyleIntent || params.hasAudienceIntent;
   const capBonus = params.tightSemanticCap
     ? hasIntent
-      ? 0.055
-      : 0.09
+      ? 0.035
+      : 0.07
     : hasIntent
       ? 0.08
       : 0.15;
@@ -260,6 +260,12 @@ export interface SearchHitRelevanceIntent {
   promptAnchoredTypeIntent?: boolean;
   /** Image kNN: cap final relevance near cosine similarity (see computeFinalRelevance01). */
   tightSemanticCap?: boolean;
+  /**
+   * When true, colors in `desiredColors*` come only from soft hints (e.g. auto dominant color on upload).
+   * They still affect `colorCompliance` / rerankScore, but must not set `hasColorIntent` in
+   * `computeFinalRelevance01` — otherwise a wrong auto-color nukes `finalRelevance01` for visually close items.
+   */
+  softColorBiasOnly?: boolean;
 }
 
 export interface HitCompliance {
@@ -385,6 +391,7 @@ export function computeHitRelevance(
     promptAnchoredColorIntent,
     promptAnchoredTypeIntent,
     tightSemanticCap,
+    softColorBiasOnly,
   } = intent;
 
   const productTypesRaw = hit?._source?.product_types;
@@ -539,8 +546,14 @@ export function computeHitRelevance(
 
   // General fallback: if the index misses/undercounts `product_types`, recover
   // type compliance from lexical evidence in title+description.
-  // This prevents `typeGateFactor` from collapsing relevance to ~0.05.
-  if (desiredProductTypes.length > 0 && productTypeCompliance < 0.2) {
+  // Only when there is an actual user/search lexical query: for pure image search
+  // (vision-derived type seeds, no text), title overlap creates false type matches
+  // and floats irrelevant products above true kNN neighbors.
+  if (
+    desiredProductTypes.length > 0 &&
+    productTypeCompliance < 0.2 &&
+    lexicalMatchQuery?.trim()
+  ) {
     const typeTextFallbackWeightRaw = Number(
       process.env.SEARCH_TYPE_TEXT_FALLBACK_WEIGHT ?? "0.25",
     );
@@ -564,33 +577,6 @@ export function computeHitRelevance(
       productTypeCompliance,
       candidateTypeCompliance * typeTextFallbackWeight,
     );
-
-    // #region agent log
-    if (effectiveTypeCompliance > productTypeCompliance) {
-      fetch("http://127.0.0.1:7383/ingest/ccea0d1b-4b26-441e-9797-fbae444c347a", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "00a194" },
-        body: JSON.stringify({
-          sessionId: "00a194",
-          runId: "type-fallback-verify",
-          hypothesisId: "H-type-fallback",
-          location: "searchHitRelevance.ts:productTypeFallback",
-          message: "Recovered type compliance from title+description",
-          data: {
-            productId: src.product_id ?? null,
-            desiredTypesText,
-            typeTextOverlap01,
-            categoryRelevance01,
-            oldProductTypeCompliance: productTypeCompliance,
-            candidateTypeCompliance,
-            typeTextFallbackWeight,
-            effectiveTypeCompliance,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-    }
-    // #endregion
 
     productTypeCompliance = effectiveTypeCompliance;
   }
@@ -655,6 +641,8 @@ export function computeHitRelevance(
 
   const hasTypeIntent = desiredProductTypes.length > 0;
   const hasColorIntent = desiredColors.length > 0;
+  /** Soft-only auto colors must not gate final acceptance the same as user `filters.color`. */
+  const hasColorIntentForFinalRelevance = hasColorIntent && !softColorBiasOnly;
   const crossPenTrace = Math.max(0, crossFamilyPenalty);
   const hardBlocked = hasTypeIntent && crossPenTrace >= 0.8;
   const typeGateFactor = !hasTypeIntent
@@ -674,7 +662,7 @@ export function computeHitRelevance(
     colorScore: colorCompliance,
     audScore: audienceCompliance,
     styleScore: styleCompliance,
-    hasColorIntent,
+    hasColorIntent: hasColorIntentForFinalRelevance,
     hasStyleIntent: Boolean(normalizedDesiredStyle),
     hasAudienceIntent,
     crossFamilyPenalty,

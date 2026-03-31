@@ -26,7 +26,7 @@ export interface SearchFilters {
   /** Multi-color intent (image / enhanced search). */
   colors?: string[];
   colorMode?: "any" | "all";
-  /** Taxonomy product types for relevance (e.g. from vision: `["dress"]`). */
+  /** Taxonomy product types for relevance (e.g. from vision: `["dress"]`, BLIP caption seeds on image upload). */
   productTypes?: string[];
   /** Canonical: kids | baby | teen | adult */
   ageGroup?: string;
