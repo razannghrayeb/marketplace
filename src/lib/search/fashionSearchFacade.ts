@@ -32,6 +32,7 @@ import {
 import {
   expandProductTypesForQuery,
   extractLexicalProductTypeSeeds,
+  filterProductTypeSeedsByMappedCategory,
 } from "./productTypeTaxonomy";
 import { config } from "../../config";
 
@@ -73,13 +74,18 @@ export interface UnifiedImageSearchParams {
 function filterByFinalRelevance<T extends { finalRelevance01?: number }>(
   items: T[] | undefined,
   min: number,
+  mode: "lenient" | "strict" = "lenient",
 ): T[] | undefined {
   if (!items) return items;
-  return items.filter((item) => {
+  const filtered = items.filter((item) => {
     const rel = item?.finalRelevance01;
-    // Keep items without calibrated relevance; enforce only when score exists.
+    if (mode === "strict") return typeof rel === "number" && rel >= min;
     return typeof rel !== "number" || rel >= min;
   });
+  if (mode === "strict") {
+    return [...filtered].sort((a, b) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
+  }
+  return filtered;
 }
 
 function expandPredictedTypeHints(seeds: string[]): string[] {
@@ -116,11 +122,11 @@ async function inferPredictedCategoryAislesFromImage(
       const searchCategories = shouldUseAlternatives(categoryMapping)
         ? getSearchCategories(categoryMapping)
         : [categoryMapping.productCategory];
-      const expanded = expandPredictedTypeHints([
-        label,
-        ...searchCategories,
-        ...extractLexicalProductTypeSeeds(label),
-      ]);
+      const lexical = filterProductTypeSeedsByMappedCategory(
+        extractLexicalProductTypeSeeds(label),
+        categoryMapping.productCategory,
+      );
+      const expanded = expandPredictedTypeHints([label, ...searchCategories, ...lexical]);
       return expanded.length > 0 ? expanded : searchCategories;
     };
     return await Promise.race([
@@ -335,11 +341,12 @@ export async function searchImage(
     predictedCategoryAisles: derivedAisleHints,
     knnField,
     forceHardCategoryFilter,
-    relaxThresholdWhenEmpty: relaxThresholdWhenEmpty ?? true,
+    relaxThresholdWhenEmpty: relaxThresholdWhenEmpty ?? false,
   } as any);
 
-  const filteredResults = filterByFinalRelevance(res.results, config.search.finalAcceptMinImage) ?? [];
-  const filteredRelated = filterByFinalRelevance(res.related, config.search.finalAcceptMinImage);
+  const filteredResults =
+    filterByFinalRelevance(res.results, config.search.finalAcceptMinImage, "strict") ?? [];
+  const filteredRelated = filterByFinalRelevance(res.related, config.search.finalAcceptMinImage, "strict");
   const meta = {
     ...(res.meta ?? {}),
     total_results: filteredResults.length,

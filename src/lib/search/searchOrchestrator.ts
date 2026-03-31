@@ -3,6 +3,7 @@
  * HTTP controllers parse input only; they delegate here for the full pipeline.
  */
 
+import { config } from "../../config";
 import { validateImage } from "../image";
 import { searchImage } from "./fashionSearchFacade";
 import {
@@ -79,7 +80,7 @@ export async function executeSearch(ctx: SearchRequestContext): Promise<BaseSear
         predictedCategoryAisles: opts.predictedCategoryAisles,
         knnField: opts.knnField,
         forceHardCategoryFilter: opts.forceHardCategoryFilter,
-        relaxThresholdWhenEmpty: opts.relaxThresholdWhenEmpty ?? true,
+        relaxThresholdWhenEmpty: opts.relaxThresholdWhenEmpty ?? false,
       });
       const results = (unified.results ?? []) as unknown as RankedProductResult[];
       return {
@@ -173,7 +174,7 @@ export async function executeSearch(ctx: SearchRequestContext): Promise<BaseSear
         store: opts.storeImage === true,
         findSimilar: true as const,
         confidence: opts.detectionConfidence ?? 0.25,
-        similarityThreshold: opts.similarityThreshold ?? 0.63,
+        similarityThreshold: opts.similarityThreshold ?? config.clip.imageSimilarityThreshold,
         similarLimitPerItem: opts.limitPerDetection ?? opts.limit ?? 10,
         filterByDetectedCategory: opts.filterByDetectedCategory !== false,
         groupByDetection: opts.groupByDetection !== false,

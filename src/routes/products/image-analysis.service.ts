@@ -10,6 +10,7 @@
  */
 
 import { pg } from "../../lib/core";
+import { config } from "../../config";
 import {
   uploadImage,
   getCdnUrl,
@@ -45,6 +46,7 @@ import {
 import {
   extractLexicalProductTypeSeeds,
   expandProductTypesForQuery,
+  filterProductTypeSeedsByMappedCategory,
 } from "../../lib/search/productTypeTaxonomy";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
 
@@ -737,7 +739,7 @@ export interface AnalyzeAndFindSimilarOptions extends AnalyzeOptions {
   /** Find similar products after analysis (default: true) */
   findSimilar?: boolean;
 
-  /** Similarity threshold 0-1 (default: 0.7) */
+  /** Similarity threshold 0-1 (default: CLIP_IMAGE_SIMILARITY_THRESHOLD / config) */
   similarityThreshold?: number;
 
   /** Max similar products per detection (default from SEARCH_IMAGE_SHOP_LIMIT_PER_DETECTION or 22) */
@@ -1091,7 +1093,7 @@ export class ImageAnalysisService {
   ): Promise<FullAnalysisResult> {
     const {
       findSimilar = true,
-      similarityThreshold = 0.7,
+      similarityThreshold = config.clip.imageSimilarityThreshold,
       similarLimitPerItem = defaultShopLookResultBudget(),
       filterByDetectedCategory = true,
       groupByDetection = true,
@@ -1224,10 +1226,14 @@ export class ImageAnalysisService {
       const searchCategories = shouldUseAlternatives(categoryMapping)
         ? getSearchCategories(categoryMapping)
         : [categoryMapping.productCategory];
+      const lexicalHints = filterProductTypeSeedsByMappedCategory(
+        extractLexicalProductTypeSeeds(label),
+        categoryMapping.productCategory,
+      );
       const expandedTypeHints = expandPredictedTypeHints([
         label,
         ...searchCategories,
-        ...extractLexicalProductTypeSeeds(label),
+        ...lexicalHints,
       ]);
 
       const filters: Partial<import("./types").SearchFilters> = {};
@@ -1241,7 +1247,8 @@ export class ImageAnalysisService {
             categoryMapping.attributes.sleeveLength === "short"
             ? "tshirt tee"
             : label;
-      const typeSeeds = extractLexicalProductTypeSeeds(typeSeedSource);
+      let typeSeeds = extractLexicalProductTypeSeeds(typeSeedSource);
+      typeSeeds = filterProductTypeSeedsByMappedCategory(typeSeeds, categoryMapping.productCategory);
       if (typeSeeds.length) {
         filters.productTypes = typeSeeds;
       } else if (expandedTypeHints.length > 0) {
@@ -1281,10 +1288,16 @@ export class ImageAnalysisService {
       if (!inferredColorForDetection) inferredColorForDetection = inferredPrimaryColor;
       if (inferredColorForDetection) filters.softColor = inferredColorForDetection;
       let predictedCategoryAisles: string[] | undefined;
-      const detectionMeetsAutoHardHeuristics =
+      const noisyCat = isNoisyCategoryForAutoHardCategory(categoryMapping, label);
+      const baseHardAuto =
         categoryMapping.confidence >= shopLookHardCategoryConfThreshold() &&
-        (detection.area_ratio ?? 0) >= shopLookHardCategoryAreaRatioThreshold() &&
-        !isNoisyCategoryForAutoHardCategory(categoryMapping, label);
+        (detection.area_ratio ?? 0) >= shopLookHardCategoryAreaRatioThreshold();
+      const relaxedGarmentHardAuto =
+        categoryMapping.confidence >= 0.85 &&
+        (detection.area_ratio ?? 0) >= 0.12 &&
+        (detection.confidence ?? 0) >= 0.75;
+      const detectionMeetsAutoHardHeuristics =
+        !noisyCat && (baseHardAuto || relaxedGarmentHardAuto);
       const shouldHardCategory =
         filterByDetectedCategory &&
         (shopLookHardCategoryStrictEnv() || detectionMeetsAutoHardHeuristics);
@@ -1493,7 +1506,11 @@ export class ImageAnalysisService {
       filterByCategory?: string;
     } = {}
   ): Promise<GroupedSimilarProducts> {
-    const { similarityThreshold = 0.7, limitPerItem = defaultShopLookResultBudget(), filterByCategory } = options;
+    const {
+      similarityThreshold = config.clip.imageSimilarityThreshold,
+      limitPerItem = defaultShopLookResultBudget(),
+      filterByCategory,
+    } = options;
 
     // Download image
     const response = await fetch(imageUrl, {
@@ -1767,7 +1784,11 @@ export class ImageAnalysisService {
         const filters: Partial<import("./types").SearchFilters> = {};
         const typeSeedSourceForSelection =
           categoryMapping.productCategory === "bottoms" && captionWantsJeans ? "jeans" : categorySource;
-        const browseTypeSeeds = extractLexicalProductTypeSeeds(typeSeedSourceForSelection);
+        let browseTypeSeeds = extractLexicalProductTypeSeeds(typeSeedSourceForSelection);
+        browseTypeSeeds = filterProductTypeSeedsByMappedCategory(
+          browseTypeSeeds,
+          categoryMapping.productCategory,
+        );
         if (browseTypeSeeds.length) {
           filters.productTypes = browseTypeSeeds;
         }
@@ -1825,7 +1846,7 @@ export class ImageAnalysisService {
           imageBuffer: croppedBuffer,
           filters,
           limit: resolveShopLookLimit(options.similarLimitPerItem),
-          similarityThreshold: options.similarityThreshold || 0.7,
+          similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
           includeRelated: false,
           predictedCategoryAisles,
           knnField: shopTheLookKnnField(),
@@ -1856,7 +1877,7 @@ export class ImageAnalysisService {
             imageBuffer: croppedBuffer,
             filters: filtersRetry,
             limit: resolveShopLookLimit(options.similarLimitPerItem),
-            similarityThreshold: options.similarityThreshold || 0.7,
+            similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
             includeRelated: false,
             predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
@@ -1880,7 +1901,7 @@ export class ImageAnalysisService {
             imageBuffer: croppedBuffer,
             filters: filtersSansCategory,
             limit: resolveShopLookLimit(options.similarLimitPerItem),
-            similarityThreshold: options.similarityThreshold || 0.7,
+            similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
             includeRelated: false,
             predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
@@ -1892,7 +1913,7 @@ export class ImageAnalysisService {
               imageBuffer: croppedBuffer,
               filters: {},
               limit: resolveShopLookLimit(options.similarLimitPerItem),
-              similarityThreshold: options.similarityThreshold || 0.7,
+              similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
               includeRelated: false,
               knnField: shopTheLookKnnField(),
               relaxThresholdWhenEmpty: shopLookRelaxEnv(),
@@ -1972,7 +1993,7 @@ export class ImageAnalysisService {
       similarProducts: {
         byDetection: groupedResults,
         totalProducts,
-        threshold: options.similarityThreshold || 0.7,
+        threshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
         detectedCategories: [...new Set(groupedResults.map((r) => r.category))],
         shopTheLookStats: {
           totalDetections: totalSel,

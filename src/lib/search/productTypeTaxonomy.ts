@@ -853,6 +853,58 @@ export function extractLexicalProductTypeSeeds(rawQuery: string): string[] {
   return [...new Set(hits)];
 }
 
+/** Map vision/catalog aisle strings to taxonomy macro families (tops, dress, outerwear, …). */
+export function intentFamiliesForProductCategory(productCategory: string): Set<string> | null {
+  const c = String(productCategory || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[\s_-]+/g, " ");
+  const m: Record<string, readonly string[]> = {
+    dresses: ["dress"],
+    tops: ["tops"],
+    bottoms: ["bottoms", "shorts_skirt"],
+    outerwear: ["outerwear"],
+    footwear: ["footwear"],
+    bags: ["bags"],
+    accessories: ["head_covering", "bags", "jewellery"],
+  };
+  const list = m[c];
+  if (!list) return null;
+  return new Set(list);
+}
+
+function familiesForExpandedSeed(seed: string): Set<string> {
+  const t = String(seed || "")
+    .toLowerCase()
+    .trim();
+  if (!t) return new Set();
+  return familiesForTokens(expandProductTypesForQuery([t]));
+}
+
+/**
+ * Drop lexical type seeds whose taxonomy macro-family does not match the mapped product aisle.
+ * Prevents compound labels (e.g. "vest dress" → dress + vest tokens) from pulling in sibling
+ * clusters in another family (vest ↔ coat/jacket), and the same class of bug for tops/bottoms/etc.
+ */
+export function filterProductTypeSeedsByMappedCategory(
+  seeds: string[],
+  productCategory: string,
+): string[] {
+  const allowed = intentFamiliesForProductCategory(productCategory);
+  if (!allowed || seeds.length === 0) return seeds;
+
+  const kept = seeds.filter((seed) => {
+    const fams = familiesForExpandedSeed(String(seed));
+    if (fams.size === 0) return true;
+    for (const f of fams) {
+      if (allowed.has(f)) return true;
+    }
+    return false;
+  });
+
+  return kept.length > 0 ? kept : seeds;
+}
+
 /** Whole-word fashion product nouns — backs `hasTypeIntent` when AST misses type entities. */
 const FASHION_TYPE_NOUNS = new Set([
   "dress",

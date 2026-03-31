@@ -88,6 +88,8 @@ export function computeFinalRelevance01(params: {
    * Avoids 0.6·sem + 0.4·lex collapsing to sem while still exposing the same number twice in explain.
    */
   applyLexicalToGlobal?: boolean;
+  /** Image similar-search: keep final relevance closer to raw cosine so weak visuals cannot rank as strong matches. */
+  tightSemanticCap?: boolean;
 }): number {
   const crossPen = Math.max(0, params.crossFamilyPenalty);
   if (params.hasTypeIntent && crossPen >= 0.8) {
@@ -124,7 +126,14 @@ export function computeFinalRelevance01(params: {
   // This keeps type/category/attribute boosts important but not dominant enough to mask bad similarity.
   const hasIntent =
     params.hasTypeIntent || params.hasColorIntent || params.hasStyleIntent || params.hasAudienceIntent;
-  const softCap = Math.min(1, params.semScore + (hasIntent ? 0.08 : 0.15));
+  const capBonus = params.tightSemanticCap
+    ? hasIntent
+      ? 0.035
+      : 0.07
+    : hasIntent
+      ? 0.08
+      : 0.15;
+  const softCap = Math.min(1, params.semScore + capBonus);
   return Math.min(bounded, softCap);
 }
 
@@ -235,6 +244,22 @@ export interface SearchHitRelevanceIntent {
   hybridScoreRecall?: HybridScoreRecallStats;
   /** True when AST pipeline fell back to processQueryFast (shallower text understanding). */
   astPipelineDegraded?: boolean;
+  /**
+   * Lowercased substrings; if any appear in title/category/brand, relevance is forced to 0.
+   * Used for mix-and-match: user "no leather", "without stripes", etc.
+   */
+  negationExcludeTerms?: string[];
+  /**
+   * When true, prompt-derived type/color requirements cap relevance for non-compliant hits
+   * (mix-and-match: text instructions must restrict what appears).
+   */
+  enforcePromptConstraints?: boolean;
+  /** Colors in desired* came from the text query (AST), not from image extraction alone. */
+  promptAnchoredColorIntent?: boolean;
+  /** Product types came from prompt/AST/lexical seeds, not only from vision model category fallback. */
+  promptAnchoredTypeIntent?: boolean;
+  /** Image kNN: cap final relevance near cosine similarity (see computeFinalRelevance01). */
+  tightSemanticCap?: boolean;
 }
 
 export interface HitCompliance {
@@ -355,6 +380,11 @@ export function computeHitRelevance(
     crossFamilyPenaltyWeight,
     lexicalMatchQuery,
     hybridScoreRecall,
+    negationExcludeTerms,
+    enforcePromptConstraints,
+    promptAnchoredColorIntent,
+    promptAnchoredTypeIntent,
+    tightSemanticCap,
   } = intent;
 
   const productTypesRaw = hit?._source?.product_types;
@@ -635,7 +665,7 @@ export function computeHitRelevance(
         ? 0.3
         : 0.05;
 
-  const finalRelevance01 = computeFinalRelevance01({
+  let finalRelevance01 = computeFinalRelevance01({
     hasTypeIntent,
     typeScore: productTypeCompliance,
     catScore: categoryRelevance01,
@@ -649,7 +679,33 @@ export function computeHitRelevance(
     hasAudienceIntent,
     crossFamilyPenalty,
     applyLexicalToGlobal: lexicalScoreDistinct,
+    tightSemanticCap,
   });
+
+  let negationBlocked = false;
+  if (negationExcludeTerms && negationExcludeTerms.length > 0) {
+    const desc = typeof src.description === "string" ? src.description : "";
+    const blob = [src.title, src.category, src.brand, desc]
+      .filter((x) => x != null && String(x).trim() !== "")
+      .join(" ")
+      .toLowerCase();
+    negationBlocked = negationExcludeTerms.some((term) => {
+      const t = String(term).toLowerCase().trim();
+      return t.length >= 2 && blob.includes(t);
+    });
+    if (negationBlocked) {
+      finalRelevance01 = 0;
+    }
+  }
+
+  if (!negationBlocked && enforcePromptConstraints) {
+    if (promptAnchoredColorIntent && hasColorIntent && colorTier === "none") {
+      finalRelevance01 = Math.min(finalRelevance01, 0.03);
+    }
+    if (promptAnchoredTypeIntent && hasTypeIntent && productTypeCompliance < 0.3) {
+      finalRelevance01 = Math.min(finalRelevance01, 0.04);
+    }
+  }
 
   return {
     productTypeCompliance,
@@ -677,7 +733,7 @@ export function computeHitRelevance(
     hasTypeIntent,
     hasColorIntent,
     typeGateFactor,
-    hardBlocked,
+    hardBlocked: hardBlocked || negationBlocked,
     lexicalScoreDistinct,
   };
 }
