@@ -15,6 +15,7 @@ import {
   uploadImage,
   getCdnUrl,
   processImageForEmbedding,
+  processImageForGarmentEmbedding,
   blip,
   extractPaddedDetectionCropBuffer,
   computePHash,
@@ -1139,6 +1140,7 @@ export class ImageAnalysisService {
         limit: similarLimitPerItem,
         similarityThreshold,
         includeRelated: false,
+        knnField: shopTheLookKnnField(),
         relaxThresholdWhenEmpty: shopLookRelaxEnv(),
       });
       return {
@@ -1220,7 +1222,10 @@ export class ImageAnalysisService {
       }
       if (!croppedBuffer) return null;
 
-      const finalEmbedding = await processImageForEmbedding(croppedBuffer);
+      const [finalEmbedding, finalGarmentEmbedding] = await Promise.all([
+        processImageForEmbedding(croppedBuffer),
+        processImageForGarmentEmbedding(croppedBuffer).catch(() => [] as number[]),
+      ]);
 
       const categoryMapping = mapDetectionToCategory(label, detection.confidence);
       const searchCategories = shouldUseAlternatives(categoryMapping)
@@ -1321,6 +1326,10 @@ export class ImageAnalysisService {
 
       let similarResult = await searchByImageWithSimilarity({
         imageEmbedding: finalEmbedding,
+        imageEmbeddingGarment:
+          Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+            ? finalGarmentEmbedding
+            : undefined,
         imageBuffer: croppedBuffer,
         filters,
         limit: similarLimitPerItem,
@@ -1772,7 +1781,10 @@ export class ImageAnalysisService {
         );
         if (!croppedBuffer) continue;
 
-        const finalEmbedding = await processImageForEmbedding(croppedBuffer);
+        const [finalEmbedding, finalGarmentEmbedding] = await Promise.all([
+          processImageForEmbedding(croppedBuffer),
+          processImageForGarmentEmbedding(croppedBuffer).catch(() => [] as number[]),
+        ]);
 
         // Get category from user hint or detection
         const categorySource =
@@ -1843,6 +1855,10 @@ export class ImageAnalysisService {
 
         let similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
+          imageEmbeddingGarment:
+            Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+              ? finalGarmentEmbedding
+              : undefined,
           imageBuffer: croppedBuffer,
           filters,
           limit: resolveShopLookLimit(options.similarLimitPerItem),
