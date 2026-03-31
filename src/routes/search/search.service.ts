@@ -1892,7 +1892,7 @@ export async function multiImageSearch(
         relFiltered.length < imageMinResultsTarget &&
         hits.length > relFiltered.length
       ) {
-        const relaxedMin = Math.max(0.4, finalAcceptMin - relevanceRelaxDelta);
+        const relaxedMin = Math.max(0.45, finalAcceptMin - relevanceRelaxDelta);
         if (relaxedMin < finalAcceptMin) {
           const expanded = hits.filter(
             (h: any) =>

@@ -680,8 +680,14 @@ export async function searchByImageWithSimilarity(
     0,
     Math.min(400, Number(process.env.SEARCH_IMAGE_AISLE_SOFT_WEIGHT ?? "130") || 130),
   );
-  // Broad retrieval first, then soft rerank (visual + category), then threshold gate.
-  const baseCandidates = [...hits]
+  // Keep the fetch window aligned with true kNN order first: aisle/category boosts must not
+  // evict higher-similarity neighbors when recall size exceeds fetchLimit (or env tweaks diverge).
+  const hitsByKnnScore = [...hits].sort(
+    (a: any, b: any) => Number(b._score) - Number(a._score),
+  );
+  const hitsWithinFetch = hitsByKnnScore.slice(0, fetchLimit);
+  // Broad retrieval, then soft rerank (visual + category) within that visual slice, then gates.
+  const baseCandidates = hitsWithinFetch
     .map((hit: any) => {
       const visualSim = knnCosinesimilScoreToCosine01(Number(hit._score));
       const categorySoft =
@@ -692,8 +698,7 @@ export async function searchByImageWithSimilarity(
       return { hit, softScore };
     })
     .sort((a, b) => b.softScore - a.softScore)
-    .map((x) => x.hit)
-    .slice(0, fetchLimit);
+    .map((x) => x.hit);
 
   /** Per-hit soft signals for ranking + explain (visual + category + optional attribute embeddings). */
   const imageCompositeById = new Map<string, number>();
@@ -833,6 +838,8 @@ export async function searchByImageWithSimilarity(
         ? String(filtersRecord.softStyle).toLowerCase().trim()
         : undefined;
 
+  const softColorBiasOnly = !hasExplicitColorIntent && softColorsForRelevance.length > 0;
+
   const relevanceIntent: SearchHitRelevanceIntent = {
     desiredProductTypes,
     desiredColors: desiredColorsForRelevance,
@@ -849,6 +856,7 @@ export async function searchByImageWithSimilarity(
     crossFamilyPenaltyWeight,
     lexicalMatchQuery: textQueryForRelevance || undefined,
     tightSemanticCap: true,
+    softColorBiasOnly,
   };
 
   const complianceById = new Map<string, HitCompliance>();
@@ -969,7 +977,7 @@ export async function searchByImageWithSimilarity(
     rankedHits.length < imageMinResultsTarget &&
     visualGatedHits.length > rankedHits.length
   ) {
-    const relaxedMin = Math.max(0.4, finalAcceptMin - relevanceRelaxDelta);
+    const relaxedMin = Math.max(0.45, finalAcceptMin - relevanceRelaxDelta);
     if (relaxedMin < finalAcceptMin) {
       const expanded = visualGatedHits.filter(
         (h: any) =>
