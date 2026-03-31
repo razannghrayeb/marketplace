@@ -69,6 +69,17 @@ steps:
           SECRET_FLAGS=(--update-secrets "$$SECRET_MAPPINGS")
         fi
 
+        GPU_FLAGS=()
+        GPU_TYPE_LOWER="$(echo "${_GPU_TYPE}" | tr '[:upper:]' '[:lower:]')"
+        if [ -n "${_GPU_COUNT}" ] && [ "${_GPU_COUNT}" != "0" ] && [ "$$GPU_TYPE_LOWER" != "none" ]; then
+          # Cloud Run GPU requires Gen2 execution environment.
+          GPU_FLAGS=(
+            --execution-environment gen2
+            --gpu "${_GPU_COUNT}"
+            --gpu-type "${_GPU_TYPE}"
+          )
+        fi
+
         gcloud run deploy "${_SERVICE}" \
           --project "$PROJECT_ID" \
           --region "${_REGION}" \
@@ -83,6 +94,7 @@ steps:
           --min-instances "${_MIN_INSTANCES}" \
           --max-instances "${_MAX_INSTANCES}" \
           --set-env-vars "$$ENV_VARS" \
+          "$${GPU_FLAGS[@]}" \
           "$${SECRET_FLAGS[@]}"
 
 substitutions:
@@ -97,10 +109,13 @@ substitutions:
 
   _CPU: "4"
   _MEMORY: 4Gi
-  _TIMEOUT: "900"
+  _TIMEOUT: "3600"
   _CONCURRENCY: "20"
   _MIN_INSTANCES: "0"
-  _MAX_INSTANCES: "10"
+  _MAX_INSTANCES: "3"
+  # Set GPU only when needed (example: _GPU_COUNT=1,_GPU_TYPE=nvidia-l4)
+  _GPU_COUNT: "0"
+  _GPU_TYPE: "none"
 
   _COMMON_ENV_VARS: "OS_INDEX=products,CORS_ORIGIN=*"
 
@@ -114,3 +129,6 @@ options:
   # Ensure docker build uses BuildKit (needed for Dockerfile # syntax=docker/dockerfile:1.x and --mount cache)
   env:
     - DOCKER_BUILDKIT=1
+
+# Global Cloud Build timeout (covers long image pushes).
+timeout: "3600s"
