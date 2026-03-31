@@ -1,6 +1,6 @@
 # Documentation Index
 
-Complete navigation guide for Fashion Aggregator API documentation (12 files, organized by topic).
+Complete navigation guide for Fashion Aggregator API documentation (organized by topic).
 
 ---
 
@@ -10,31 +10,33 @@ Complete navigation guide for Fashion Aggregator API documentation (12 files, or
 
 | Role | Start With | Duration |
 |------|-----------|----------|
-| **Executive/PM** | `../EXECUTIVE_SUMMARY.md` | 5 min |
+| **Executive/PM** | `../EXECUTIVE_SUMMARY.md` or **`FEATURES.md`** | 5–10 min |
 | **Engineer** | `../README.md` | 10 min |
 | **Tech Lead** | `../AUDIT_REPORT_MARCH_17_2026.md` | 20 min |
 | **DevOps/Ops** | `../ACTION_PLAN_30_DAYS.md` | 30 min |
-| **Feature Dev** | `SEARCH_API_COMPLETE.md` or `api-reference.md` | 5-15 min |
+| **Feature Dev** | `embeddings-and-search-pipelines.md` or `SEARCH_API_COMPLETE.md` or `api-reference.md` | 10-20 min |
 
 ---
 
 ## 📖 Complete Documentation Map
 
-### Core Reference (4 files)
+### Core Reference (5 files)
 
 | File | Purpose | Audience |
 |------|---------|----------|
 | **INDEX.md** | This file — navigation hub | Everyone |
+| **FEATURES.md** | **Product features → endpoints & integration checklist** | PM, frontend, full-stack |
 | **IMPLEMENTATION_STATUS.md** | What's implemented, bugs, gaps | Tech leads |
 | **architecture.md** | Module structure & patterns | Backend engineers |
 | **api-reference.md** | Complete API specification | API consumers |
 
 ---
 
-### Search & Discovery (3 files)
+### Search & Discovery (4 files)
 
 | File | Purpose | Audience |
 |------|---------|----------|
+| **embeddings-and-search-pipelines.md** | **Embeddings, OpenSearch fields, ingest vs query paths (text + image)** | Backend, ML, search engineers |
 | **SEARCH_API_COMPLETE.md** | All search features (user guide + technical) | Everyone |
 | **multi-vector-search.md** | Multi-vector kNN deep-dive | ML engineers |
 | **composite-query-system.md** | Advanced composite query details | Architecture |
@@ -66,9 +68,10 @@ Complete navigation guide for Fashion Aggregator API documentation (12 files, or
 
 | Question | Read |
 |----------|------|
-| ...the whole system | `../README.md` → `SEARCH_API_COMPLETE.md` |
+| ...the whole system | `../README.md` → **`FEATURES.md`** → `SEARCH_API_COMPLETE.md` |
 | ...all API endpoints | `api-reference.md` (full spec) or `SEARCH_API_COMPLETE.md` |
 | ...search capabilities | `SEARCH_API_COMPLETE.md` (user guide + technical) |
+| ...embeddings & how search uses vectors | **`embeddings-and-search-pipelines.md`** |
 | ...recommendations | `ml-models.md` → section on XGBoost Ranker |
 | ...virtual try-on | `../EXECUTIVE_SUMMARY.md` → Feature #7 section |
 | ...wardrobe | `../FEATURE_ANALYSIS.md` → Feature #6 section |
@@ -85,7 +88,7 @@ Complete navigation guide for Fashion Aggregator API documentation (12 files, or
 
 | Task | Read |
 |------|------|
-| Implement a new search feature | `SEARCH_API_COMPLETE.md` (architecture) + `api-reference.md` |
+| Implement a new search feature | **`embeddings-and-search-pipelines.md`** + `SEARCH_API_COMPLETE.md` + `api-reference.md` |
 | Add a new API endpoint | `architecture.md` (patterns) + `api-reference.md` (reference) |
 | Fix a bug | `../IMPLEMENTATION_STATUS.md` (known bugs) |
 | Deploy to production | `deployment.md` + `database.md` |
@@ -103,9 +106,8 @@ Complete navigation guide for Fashion Aggregator API documentation (12 files, or
 
 | Metric | Value |
 |--------|-------|
-| **Total files** | 17 (was 21 → 19% reduction) |
-| **Total size** | ~180 KB |
-| **Search-related** | 5 files (consolidated from 7) |
+| **Total files** | 13+ in `docs/` (see table above) |
+| **Search-related** | Includes **`embeddings-and-search-pipelines.md`** + text / multi-vector / composite |
 | **API reference** | 1 file |
 | **ML/Models** | 3 files |
 | **Operations** | 3 files |
@@ -113,17 +115,11 @@ Complete navigation guide for Fashion Aggregator API documentation (12 files, or
 
 ---
 
-## 🔄 Recent Changes (March 17, 2026 - Updated)
+## 🔄 Recent Changes
 
-**Consolidation Completed:**
-- ✅ Merged SEARCH_FEATURES_GUIDE + SEARCH_IMPLEMENTATION_SUMMARY → `SEARCH_API_COMPLETE.md`
-- ✅ Merged model-evaluation-results metrics → `ml-models.md` (Intent Classification Evaluation section)
-- ✅ Consolidated documentation from 17 → 12 files (-29% reduction)
-- ✅ Removed redundant search guides (ENHANCED_SEARCH_GUIDE.md, COMPOSITE_QUERY_QUICKSTART.md)
-- ✅ Removed duplicate image analysis content (content preserved in search API)
-- ✅ Removed QUICK_REFERENCE.md (inaccurate endpoints; content in SEARCH_API_COMPLETE.md)
+**March 2026:** Added **`embeddings-and-search-pipelines.md`** — canonical map of OpenSearch vector fields, ingestion vs image/text query pipelines, and env vars.
 
-**Result:** 17 docs → 12 docs (-29%), focused and non-redundant documentation
+**Earlier consolidation:** legacy standalone search guides were merged into `SEARCH_API_COMPLETE.md`. **Current docs hub:** `FEATURES.md`, `embeddings-and-search-pipelines.md`, `IMPLEMENTATION_STATUS.md`.
 
 ---
 
@@ -132,8 +128,11 @@ Complete navigation guide for Fashion Aggregator API documentation (12 files, or
 ### INDEX.md
 This file. Master navigation hub for all documentation.
 
+### FEATURES.md
+User- and integrator-oriented map of **Discover, search, complete style, wardrobe, try-on**, etc., with **correct path prefixes** (`/search` vs `/products` vs `/api/...`) and links to deeper docs.
+
 ### IMPLEMENTATION_STATUS.md
-**Latest:** March 17, 2026 (Full code audit)
+**Latest:** March 2026 (periodic doc sync; verify routes in `src/server.ts`)
 Status of all 14 features, 5 critical bugs, and gaps. Authoritative source for "what's done/missing."
 
 ### architecture.md
@@ -146,13 +145,16 @@ Complete API specification for all endpoints with examples and parameters.
 Consolidated comprehensive guide covering:
 - Part 1: User Guide & Examples (Normal, YOLO, Multi-Image search)
 - Part 2: Technical Deep-Dive (5-phase pipeline, performance, tuning)
-Merges content from SEARCH_FEATURES_GUIDE + SEARCH_IMPLEMENTATION_SUMMARY.
+Consolidated from older search guides; use **`FEATURES.md`** for endpoint paths.
 
 ### multi-vector-search.md
 Specialized deep-dive on multi-vector kNN architecture and weighting strategies.
 
 ### composite-query-system.md
 Technical documentation on composite query system, attribute extraction, reranking logic.
+
+### embeddings-and-search-pipelines.md
+How **CLIP (and related) embeddings** land in **OpenSearch**, and how **image** vs **text** search **pipelines** call kNN, BM25, reranking, and supporting services.
 
 ### ml-models.md
 Overview of all ML models: CLIP, YOLOv8, XGBoost, Gemini, Vertex AI.
@@ -178,7 +180,7 @@ XGBoost ranker operations: training, serving, fallback behavior, health checks.
 4. `../IMPLEMENTATION_STATUS.md` ← referenced for bugs/gaps
 
 ### Good Starting Points by Interest
-- **Search enthusiasts** → `SEARCH_API_COMPLETE.md`
+- **Search enthusiasts** → **`embeddings-and-search-pipelines.md`** → `SEARCH_API_COMPLETE.md`
 - **ML engineers** → `ml-models.md`
 - **Ops/DevOps** → `deployment.md` + `ranker-runbook.md`
 - **Full-stack devs** → `api-reference.md` + `database.md`
@@ -188,9 +190,9 @@ XGBoost ranker operations: training, serving, fallback behavior, health checks.
 ## 📝 Maintenance Notes
 
 ### When to Update Which Docs
-- **API changes** → Update `api-reference.md` and `SEARCH_API_COMPLETE.md`
+- **API changes** → Update `api-reference.md`, `SEARCH_API_COMPLETE.md`, and **`FEATURES.md`** when user-facing behavior or paths change
 - **Bug fixes/features** → Update `../IMPLEMENTATION_STATUS.md`
-- **Search improvements** → Update `SEARCH_API_COMPLETE.md`
+- **Search improvements** → Update `SEARCH_API_COMPLETE.md` and **`embeddings-and-search-pipelines.md`** (if vectors / pipelines change)
 - **ML model updates** → Update `ml-models.md`
 - **Deployment changes** → Update `deployment.md`
 - **Code patterns** → Update `architecture.md`
@@ -199,7 +201,7 @@ XGBoost ranker operations: training, serving, fallback behavior, health checks.
 - `ENDPOINT_MATRIX.md` — Auto-generate via `pnpm docs:endpoints` (not in version control)
 
 ### Docs to Deprecate/Remove
-- None currently (all 12 docs are active and non-redundant)
+- Audit quarterly; **`embeddings-and-search-pipelines.md`** should stay aligned with `opensearch.ts` and `fashionSearchFacade.ts`
 
 ---
 
@@ -216,6 +218,5 @@ Documentation is considered complete when:
 
 ---
 
-**Last Updated:** March 17, 2026 (Consolidation Pass 2)
-**Docs Status:** ✅ Clean, consolidated, non-redundant
-**Total Files:** 12 (down from 21, -43% reduction)
+**Last Updated:** March 2026
+**Docs Status:** Search pipeline architecture documented in **`embeddings-and-search-pipelines.md`**

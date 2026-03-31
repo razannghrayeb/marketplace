@@ -1,7 +1,9 @@
 # Senior Engineering Audit & Documentation Cleanup Report
 
-**Date:** March 17, 2026
-**Auditor:** Claude Code (Team Lead Mode)
+> **Historical document (March 17, 2026).** Several “critical” items (e.g. hardcoded `NODE_ENV`, unprotected admin) have since been fixed in code. For **current** status use **`docs/IMPLEMENTATION_STATUS.md`** and **`docs/FEATURES.md`**.
+
+**Date:** March 17, 2026  
+**Auditor:** Claude Code (Team Lead Mode)  
 **Scope:** Full code review + documentation audit
 
 ---

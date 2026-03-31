@@ -2,6 +2,10 @@
 
 **Purpose:** Complete reference for all search features (user guide + technical deep-dive)
 
+**Product features (everyone):** **`FEATURES.md`** — Discover, complete style, wardrobe, try-on, compare, and **correct URL paths** (`/search` vs `/products` vs `/api/...`).
+
+**Embeddings & pipelines (maintainers):** **`embeddings-and-search-pipelines.md`** — OpenSearch vector fields, ingestion vs query-time CLIP/BLIP/YOLO. The storefront typically uses **`POST /products/search/image`** and **`GET /search?q=`**; Part 1 examples may still cite `/search/image` only.
+
 ---
 
 ## 📋 Quick Overview
@@ -500,5 +504,5 @@ curl http://0.0.0.0:4000/api/images/status
 
 ---
 
-**Last Updated:** March 17, 2026
+**Last Updated:** March 2026 (paths: use `/search`, `/products/search/image`; see `FEATURES.md`)
 **Status:** ✅ All features production-ready

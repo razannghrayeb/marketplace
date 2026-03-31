@@ -39,6 +39,7 @@ Testing and linting
 Notes
 - If a service becomes shared across multiple modules, consider extracting it into `src/lib/` and updating imports.
 - Maintain consistent error handling via the middleware in `src/middleware/errorHandler.ts`.
+- Search and embeddings: **`docs/embeddings-and-search-pipelines.md`** (vectors); **`docs/FEATURES.md`** (which feature calls which route).
 
 This guideline helps keep the codebase modular, testable, and easy to navigate for new contributors.
 

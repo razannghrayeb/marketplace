@@ -1,13 +1,15 @@
 # Text search architecture
 
-This document is the canonical flow for **enhanced** product text search (`textSearch` in `src/routes/search/search.service.ts`, exposed via `searchText` in `src/lib/search/fashionSearchFacade.ts` and `GET /api/search`).
+**Companion:** **`embeddings-and-search-pipelines.md`** — OpenSearch **vector fields**, **image search**, and **ingestion** (how catalog embeddings are produced and stored). This file stays focused on the **QueryAST → bool query → hybrid kNN** path for **text**.
+
+This document is the canonical flow for **enhanced** product text search (`textSearch` in `src/routes/search/search.service.ts`, exposed via `searchText` in `src/lib/search/fashionSearchFacade.ts` and **`GET /search`** — mounted at `/search`, not `/api/search`).
 
 ## End-to-end flow (Mermaid)
 
 ```mermaid
 flowchart TB
   subgraph ingress["Ingress"]
-    REQ["GET /api/search q + filters"]
+    REQ["GET /search q + filters"]
     PARSE["parseParameters\n(control params strip)"]
     NEGP["parseNegations (enhanced)\ncleaned query"]
     FACADE["searchText / textSearch"]

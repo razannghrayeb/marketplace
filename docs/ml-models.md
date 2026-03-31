@@ -2,6 +2,8 @@
 
 This guide covers the machine learning components of the Fashion Aggregator API, including model architectures, training procedures, and integration details.
 
+**How CLIP / vectors plug into search:** see **`docs/embeddings-and-search-pipelines.md`** (OpenSearch `embedding` / `embedding_*` fields, image vs text request flow, reindex). This `ml-models.md` file goes deeper on individual models and historical training notes.
+
 For ranker operations (training, startup, fallback behavior, deployment checks), see `docs/ranker-runbook.md`.
 
 ## Overview

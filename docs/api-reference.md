@@ -523,9 +523,10 @@ For YOLO-based product detection ("shop the look"), see [Image Analysis API](#im
 | **Text Search** | `GET /search` | Query + filters | Keyword search, filtering |
 | **Image Search** | `POST /search/image` | 1 image | "Find similar to this" |
 | **Multi-Image** | `POST /search/multi-image` | 1-5 images + prompt | "Color from first, style from second" |
-| **YOLO Detection** | `POST /images/search` | 1 image | "Shop this outfit" |
+| **YOLO Detection** | `POST /api/images/search` | 1 image | "Shop this outfit" |
+| **Discover (storefront)** | `POST /products/search/image` | 1 image | Same CLIP pipeline as `/search/image` |
 
-📚 **See [SEARCH_FEATURES_GUIDE.md](./SEARCH_FEATURES_GUIDE.md) for comprehensive comparison and examples.**
+📚 **See [SEARCH_API_COMPLETE.md](./SEARCH_API_COMPLETE.md) and [FEATURES.md](./FEATURES.md) for guides and examples.**
 
 ---
 
@@ -552,7 +553,7 @@ GET /search
 
 #### Example Request
 ```bash
-curl "http://0.0.0.0:3000/api/search?q=red+dress&brand=Nike&maxPrice=15000&limit=10"
+curl "http://0.0.0.0:4000/search?q=red+dress&brand=Nike&maxPrice=15000&limit=10"
 ```
 
 ---
@@ -575,7 +576,7 @@ POST /search/image
 
 #### Example Request
 ```bash
-curl -X POST http://0.0.0.0:3000/api/search/image \
+curl -X POST http://0.0.0.0:4000/search/image \
   -F "image=@dress.jpg" \
   -F "limit=20"
 ```
@@ -622,7 +623,7 @@ This is the **unique feature** that enables cross-image attribute mixing with AI
 
 **Basic Cross-Image Attributes:**
 ```bash
-curl -X POST http://0.0.0.0:3000/api/search/multi-image \
+curl -X POST http://0.0.0.0:4000/search/multi-image \
   -F "images=@red_dress.jpg" \
   -F "images=@leather_jacket.jpg" \
   -F "prompt=I want the red color from the first image with the leather texture from the second" \
@@ -631,7 +632,7 @@ curl -X POST http://0.0.0.0:3000/api/search/multi-image \
 
 **With Custom Ranking Weights:**
 ```bash
-curl -X POST http://0.0.0.0:3000/api/search/multi-image \
+curl -X POST http://0.0.0.0:4000/search/multi-image \
   -F "images=@vintage_coat.jpg" \
   -F "images=@modern_blazer.jpg" \
   -F "prompt=Vintage style from first with modern fit like second, under $200" \
@@ -699,7 +700,7 @@ POST /search/multi-vector
 
 #### Example Request
 ```bash
-curl -X POST http://0.0.0.0:3000/api/search/multi-vector \
+curl -X POST http://0.0.0.0:4000/search/multi-vector \
   -F "images=@dress1.jpg" \
   -F "images=@dress2.jpg" \
   -F "prompt=Elegant evening wear" \
