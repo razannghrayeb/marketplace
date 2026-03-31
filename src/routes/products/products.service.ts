@@ -85,15 +85,15 @@ export interface ImageSearchParams extends SearchParams {
   includeRelated?: boolean;      // Include related by pHash
   pHash?: string;                // Optional pHash for visual similarity
   /**
-   * Garment-centered CLIP vector (same model/dim as `imageEmbedding`); merged with primary kNN
-   * on `embedding` when `SEARCH_IMAGE_DUAL_GARMENT_FUSION` is on (see `embedding_garment` index field).
+   * Garment-focused CLIP vector (`processImageForGarmentEmbedding`). Required for accurate kNN when
+   * `knnField` / `SEARCH_IMAGE_KNN_FIELD` is `embedding_garment` (shop-the-look detection crops vs catalog).
    */
   imageEmbeddingGarment?: number[];
   /** Raw bytes when embedding is computed by the callee (unified image search path). */
   imageBuffer?: Buffer;
   /** Soft rerank hints when SEARCH_IMAGE_SOFT_CATEGORY=1 */
   predictedCategoryAisles?: string[];
-  /** Override kNN field (`embedding` vs `embedding_garment`, etc.) */
+  /** OpenSearch kNN field: `embedding` (default) or `embedding_garment` (see index + docs). */
   knnField?: string;
   /**
    * Forces image search into "hard category" mode for this call.
@@ -154,6 +154,8 @@ export interface SearchResultWithRelated {
     below_final_relevance_gate?: boolean;
     relevance_gate_soft?: boolean;
     threshold_relaxed?: boolean;
+    /** OpenSearch kNN field used for retrieval (`embedding` | `embedding_garment`). */
+    image_knn_field?: string;
     recall_size?: number;
     final_accept_min?: number;
     total_above_threshold?: number;
@@ -268,10 +270,12 @@ function imageGenderSoftEnv(): boolean {
   return v === "1" || v === "true";
 }
 
-/** Fuse primary `embedding` kNN with `embedding_garment` kNN when a garment query vector is supplied. */
-function imageDualGarmentFusionEnv(): boolean {
-  const v = String(process.env.SEARCH_IMAGE_DUAL_GARMENT_FUSION ?? "1").toLowerCase();
-  return v !== "0" && v !== "false" && v !== "off";
+/** OpenSearch kNN field for image search: `embedding` (full-frame CLIP) or `embedding_garment` (garment-focused). */
+function resolveImageSearchKnnField(explicit?: string): "embedding" | "embedding_garment" {
+  const fromCaller = explicit != null ? String(explicit).trim().toLowerCase() : "";
+  const fromEnv = String(process.env.SEARCH_IMAGE_KNN_FIELD ?? "").trim().toLowerCase();
+  const raw = fromCaller || fromEnv || "embedding";
+  return raw === "embedding_garment" ? "embedding_garment" : "embedding";
 }
 
 /**
@@ -629,6 +633,31 @@ export async function searchByImageWithSimilarity(
   const runStyle = Boolean(styleQueryEmbedding && styleQueryEmbedding.length > 0);
   const runPattern = Boolean(patternQueryEmbedding && patternQueryEmbedding.length > 0);
 
+  let knnFieldResolved = resolveImageSearchKnnField(knnFieldParam);
+  let queryVector: number[] = imageEmbedding;
+  if (knnFieldResolved === "embedding_garment") {
+    let gv =
+      imageEmbeddingGarment && imageEmbeddingGarment.length > 0 ? imageEmbeddingGarment : null;
+    if (!gv && imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
+      try {
+        const { processImageForGarmentEmbedding } = await import("../../lib/image");
+        const out = await processImageForGarmentEmbedding(imageBuffer);
+        gv = out?.length ? out : null;
+      } catch {
+        gv = null;
+      }
+    }
+    if (gv) {
+      queryVector = gv;
+    } else {
+      knnFieldResolved = "embedding";
+      queryVector = imageEmbedding;
+      if (breakdownDebug) {
+        console.warn("[image-knn] embedding_garment vector missing; using embedding field + global query vector");
+      }
+    }
+  }
+
   const knnBody = {
     size: retrievalK,
     _source: [
@@ -661,8 +690,8 @@ export async function searchByImageWithSimilarity(
       bool: {
         must: {
           knn: {
-            embedding: {
-              vector: imageEmbedding,
+            [knnFieldResolved]: {
+              vector: queryVector,
               k: retrievalK,
             },
           },
@@ -739,7 +768,8 @@ export async function searchByImageWithSimilarity(
     const attrGate = 0.4 + 0.6 * visualSim;
     const composite =
       visualSim * 1000 +
-      (categorySoft * 220 + colorSim * wColor + styleSim * wStyle + patternSim * wPattern) * attrGate;
+      (categorySoft * aisleSoftWeight + colorSim * wColor + styleSim * wStyle + patternSim * wPattern) *
+        attrGate;
     imageCompositeById.set(idStr, composite);
   }
 
@@ -1131,6 +1161,7 @@ export async function searchByImageWithSimilarity(
       !softCategory || !desiredCatalogTerms || desiredCatalogTerms.size === 0;
     console.warn("[search-breakdown][image]", {
       query: imageSearchTextQuery ?? null,
+      image_knn_field: knnFieldResolved,
       raw_open_search_hits: rawOpenSearchHitCount,
       hits_after_final_accept_min: countAfterFinalAcceptMin,
       hits_after_dedupe: countAfterDedupe,
@@ -1163,6 +1194,7 @@ export async function searchByImageWithSimilarity(
       final_accept_min: config.search.finalAcceptMinImage,
       below_final_relevance_gate: belowFinalRelevanceGate,
       relevance_gate_soft: false,
+      image_knn_field: knnFieldResolved,
       pipeline_counts: {
         raw_open_search_hits: rawOpenSearchHitCount,
         base_candidates: baseCandidates.length,
