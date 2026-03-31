@@ -119,7 +119,13 @@ export function computeFinalRelevance01(params: {
 
   const raw =
     globalScore * typeGateFactor * categoryBoost * attrFactor * crossFamilySoftFactor;
-  return Math.max(0, Math.min(1, raw));
+  const bounded = Math.max(0, Math.min(1, raw));
+  // Prevent final relevance from being unrealistically higher than visual/semantic evidence.
+  // This keeps type/category/attribute boosts important but not dominant enough to mask bad similarity.
+  const hasIntent =
+    params.hasTypeIntent || params.hasColorIntent || params.hasStyleIntent || params.hasAudienceIntent;
+  const softCap = Math.min(1, params.semScore + (hasIntent ? 0.08 : 0.15));
+  return Math.min(bounded, softCap);
 }
 
 export function normalizeQueryGender(g: string | undefined): string | null {
