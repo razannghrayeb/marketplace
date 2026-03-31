@@ -1244,6 +1244,10 @@ export class ImageAnalysisService {
       const typeSeeds = extractLexicalProductTypeSeeds(typeSeedSource);
       if (typeSeeds.length) {
         filters.productTypes = typeSeeds;
+      } else if (expandedTypeHints.length > 0) {
+        // Fallback when lexical extraction misses labels like "hat" or "bag, wallet":
+        // keep type intent so cross-family products (e.g. jeans for hats) are penalized.
+        filters.productTypes = expandedTypeHints.slice(0, 8);
       }
 
       // "Closet similar" constraints: enforce audience gender + add optional style/color.

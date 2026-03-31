@@ -158,6 +158,18 @@ export interface SearchResultWithRelated {
     final_accept_min?: number;
     total_above_threshold?: number;
     open_search_total_estimate?: number;
+    pipeline_counts?: {
+      raw_open_search_hits: number;
+      base_candidates: number;
+      ranked_candidates: number;
+      threshold_passed_visual: number;
+      visual_gated_hits: number;
+      hits_after_final_accept_min: number;
+      hits_after_color_postfilter: number;
+      hits_after_hydration: number;
+      hits_after_dedupe: number;
+      final_returned_count: number;
+    };
   };
 }
 
@@ -272,22 +284,19 @@ function imageDualGarmentFusionEnv(): boolean {
 }
 
 /**
- * OpenSearch kNN `space_type: cosinesimil` returns score = (1 + cos θ) / 2 ∈ [0, 1].
- * See https://docs.opensearch.org/latest/mappings/supported-field-types/knn-spaces/
+ * Normalize OpenSearch kNN score to a stable [0, 1] "similarity01" scale.
  *
- * Some older deployments returned a legacy raw score ≈ 1 + cos θ ∈ [0, 2] (values > 1).
- * For that form, map to the same [0, 1] similarity as cos θ (not (s−1)/2 then 2s−1, which
- * wrongly drove the bottom half to 0).
+ * `space_type: cosinesimil` currently returns `(1 + cosθ) / 2` in [0, 1].
+ * Some older setups returned `1 + cosθ` in [0, 2].
+ *
+ * We keep threshold/ranking semantics in the [0, 1] OpenSearch scale:
+ * - modern score: similarity01 = raw
+ * - legacy score: similarity01 = raw / 2
  */
 function knnCosinesimilScoreToCosine01(raw: number): number {
   if (!Number.isFinite(raw)) return 0;
-  const s = raw;
-  if (s > 1.001) {
-    return Math.max(0, Math.min(1, s - 1));
-  }
-  const clamped = Math.max(0, Math.min(1, s));
-  const cos = 2 * clamped - 1;
-  return Math.max(0, Math.min(1, cos));
+  const s = raw > 1.001 ? raw / 2 : raw;
+  return Math.max(0, Math.min(1, s));
 }
 
 /** Cosine similarity between two vectors, mapped to [0,1] (same scale as OpenSearch cosinesimil). */
@@ -796,17 +805,21 @@ export async function searchByImageWithSimilarity(
       ? filtersRecord.colors.map((c: unknown) => String(c).toLowerCase())
       : filtersRecord.color
         ? [String(filtersRecord.color).toLowerCase()]
-        : filtersRecord.softColor
-          ? [String(filtersRecord.softColor).toLowerCase()]
         : [];
+  const softColorsForRelevance =
+    typeof filtersRecord.softColor === "string" && filtersRecord.softColor.trim().length > 0
+      ? [String(filtersRecord.softColor).toLowerCase()]
+      : [];
+  const allColorsForRelevance = [...explicitColorsForRelevance, ...softColorsForRelevance];
+  const hasExplicitColorIntent = explicitColorsForRelevance.length > 0;
   const desiredColorsForRelevance = [
     ...new Set(
-      explicitColorsForRelevance.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
+      allColorsForRelevance.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
     ),
   ];
   const rerankColorModeForRelevance = filtersRecord.colorMode === "all" ? "all" : "any";
   const desiredColorsTierForRelevance =
-    explicitColorsForRelevance.length > 0 ? explicitColorsForRelevance : desiredColorsForRelevance;
+    allColorsForRelevance.length > 0 ? allColorsForRelevance : desiredColorsForRelevance;
 
   const queryAgeGroupForRelevance =
     typeof filtersRecord.ageGroup === "string" ? filtersRecord.ageGroup : undefined;
@@ -951,7 +964,7 @@ export async function searchByImageWithSimilarity(
   const belowFinalRelevanceGate =
     visualGatedHits.length > 0 && thresholdPassedHits.length === 0 && !relevanceGateSoft;
 
-  if (desiredColorsForRelevance.length > 0) {
+  if (hasExplicitColorIntent && desiredColorsForRelevance.length > 0) {
     const strictColorPost = String(process.env.SEARCH_COLOR_POSTFILTER_STRICT ?? "1").toLowerCase() !== "0";
     const maxImgConfHits = Math.max(
       0,
@@ -966,6 +979,7 @@ export async function searchByImageWithSimilarity(
       // Weak image color signal — keep ranked list (same as text search)
     }
   }
+  const countAfterColorPostfilter = rankedHits.length;
 
   const maxHydrate = Math.min(
     rankedHits.length,
@@ -1004,7 +1018,9 @@ export async function searchByImageWithSimilarity(
       }));
       return {
         ...p,
-        color: colorByHitId.get(idStr) ?? p.color ?? null,
+        // Never overwrite canonical catalog color with query-time matched color.
+        // Keep matched color in `explain.matchedColor` only.
+        color: p.color ?? null,
         similarity_score: similarityScore,
         match_type:
           similarityScore >= config.clip.matchTypeExactMin ? "exact" : "similar",
@@ -1128,6 +1144,18 @@ export async function searchByImageWithSimilarity(
       final_accept_min: config.search.finalAcceptMinImage,
       below_final_relevance_gate: belowFinalRelevanceGate,
       relevance_gate_soft: relevanceGateSoft,
+      pipeline_counts: {
+        raw_open_search_hits: rawOpenSearchHitCount,
+        base_candidates: baseCandidates.length,
+        ranked_candidates: rankedHitsCandidates.length,
+        threshold_passed_visual: thresholdPassedByVisual.length,
+        visual_gated_hits: visualGatedHits.length,
+        hits_after_final_accept_min: countAfterFinalAcceptMin,
+        hits_after_color_postfilter: countAfterColorPostfilter,
+        hits_after_hydration: countAfterHydration,
+        hits_after_dedupe: countAfterDedupe,
+        final_returned_count: finalReturnedCount,
+      },
     },
   };
 }

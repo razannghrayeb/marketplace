@@ -192,15 +192,10 @@ export async function searchProductsByImage(req: Request, res: Response) {
       garmentEmbeddingForSearch = garmentEmb.length === emb.length ? garmentEmb : undefined;
 
       if (quickHints.length > 0) {
-        const existing: string[] =
-          Array.isArray(filters.colors) && filters.colors.length > 0
-            ? filters.colors.map((c) => String(c).toLowerCase())
-            : filters.color
-              ? [String(filters.color).toLowerCase()]
-              : filters.softColor
-                ? [String(filters.softColor).toLowerCase()]
-                : [];
-        filters.colors = [...new Set([...existing, ...quickHints.map((c) => c.toLowerCase())])];
+        // Query-image color hints are soft signals for reranking, not hard filters.
+        if (!filters.color && !Array.isArray(filters.colors)) {
+          filters.softColor = String(quickHints[0]).toLowerCase();
+        }
       }
 
       // BLIP caption + taxonomy extraction for productTypes (BM25 soft boost in hybrid search)
