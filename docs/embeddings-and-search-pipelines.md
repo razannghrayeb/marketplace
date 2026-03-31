@@ -1,6 +1,6 @@
 # Embeddings & search pipelines
 
-**Last updated:** March 2026  
+**Last updated:** April 2026  
 
 This document is the **architecture reference** for how **vector embeddings** are produced, stored in **OpenSearch**, and consumed by **text** and **image** search. It complements:
 
@@ -135,6 +135,7 @@ At index time, **attribute vectors** (`embedding_color`, …) are included when 
 1. After changing **CLIP model** or **dimension**: recreate or migrate index (`recreateIndex` / migrations), set `EXPECTED_EMBEDDING_DIM`, **reindex** all products.
 2. If **image search** is slow: check BLIP cap, YOLO timeout, attribute embedding cache (`src/lib/cache/embeddingCache.ts`), and OpenSearch latency.
 3. If **results ignore color**: ensure **query** passes color intent or quick hints run; confirm index has `attr_colors` / `color_*` and rerank weights; verify `embedding_color` backfill for older docs.
+4. **After April 2026 preprocessing fix**: run a **full reindex** (`npx tsx scripts/resume-reindex.ts`) to regenerate all embeddings with the corrected `fit: "cover"` + raw-image pipeline. Without reindexing, stored vectors use the old `fit: "contain"` (letterbox) + rembg preprocessing and will have poor cosine similarity against new query-time vectors.
 
 ---
 

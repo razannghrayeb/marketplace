@@ -98,6 +98,7 @@ export const pg = new Pool({
 
 let cachedProductsHasIsHidden: boolean | undefined;
 let cachedProductsHasCanonicalId: boolean | undefined;
+let cachedProductsHasGender: boolean | undefined;
 
 /** Cached once per process; avoids 42703 when prod DB is behind migrations. */
 export async function productsTableHasIsHiddenColumn(): Promise<boolean> {
@@ -131,6 +132,23 @@ export async function productsTableHasCanonicalIdColumn(): Promise<boolean> {
   );
   cachedProductsHasCanonicalId = (r.rowCount ?? 0) > 0;
   return cachedProductsHasCanonicalId;
+}
+
+/** Cached once per process; `gender` added in migration 013_products_gender.sql. */
+export async function productsTableHasGenderColumn(): Promise<boolean> {
+  if (cachedProductsHasGender !== undefined) {
+    return cachedProductsHasGender;
+  }
+  const r = await pg.query(
+    `SELECT 1
+     FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = 'products'
+       AND column_name = 'gender'
+     LIMIT 1`
+  );
+  cachedProductsHasGender = (r.rowCount ?? 0) > 0;
+  return cachedProductsHasGender;
 }
 
 // Handle pool errors

@@ -268,7 +268,14 @@ function knnCosinesimilScoreToCosine01(raw: number): number {
   return Math.max(0, Math.min(1, cos));
 }
 
-/** Cosine similarity between two vectors, mapped to [0,1] (same scale as OpenSearch cosinesimil). */
+/**
+ * Cosine similarity between two vectors, clamped to [0,1].
+ *
+ * Returns raw cosine clamped at 0 — same scale as `knnCosinesimilScoreToCosine01`
+ * so visual and attribute scores are comparable in the composite ranking.
+ * L2-normalized CLIP vectors always produce cos >= 0 in practice;
+ * clamping negative values avoids artifacts from zero/degenerate vectors.
+ */
 function cosineSimilarity01(a: number[] | undefined, b: number[] | undefined): number {
   if (!a?.length || !b?.length || a.length !== b.length) return 0;
   let dot = 0;
@@ -284,8 +291,8 @@ function cosineSimilarity01(a: number[] | undefined, b: number[] | undefined): n
   }
   const denom = Math.sqrt(na) * Math.sqrt(nb);
   if (denom <= 1e-12) return 0;
-  const cos = Math.max(-1, Math.min(1, dot / denom));
-  return (cos + 1) / 2;
+  const cos = dot / denom;
+  return Math.max(0, Math.min(1, cos));
 }
 
 /** When relaxThresholdWhenEmpty is used, drop hits below this normalized cosine (see config.search.searchImageRelaxFloor). */
@@ -977,7 +984,7 @@ export async function searchByImageWithSimilarity(
     rankedHits.length < imageMinResultsTarget &&
     visualGatedHits.length > rankedHits.length
   ) {
-    const relaxedMin = Math.max(0.45, finalAcceptMin - relevanceRelaxDelta);
+    const relaxedMin = Math.max(finalAcceptMin * 0.6, finalAcceptMin - relevanceRelaxDelta);
     if (relaxedMin < finalAcceptMin) {
       const expanded = visualGatedHits.filter(
         (h: any) =>

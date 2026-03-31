@@ -67,10 +67,12 @@ if (metadata.width > 8000 || metadata.height > 8000) return invalid;
 ```typescript
 // From processImageForEmbedding()
 await sharp(imageBuffer)
-  .resize(224, 224, { fit: "cover" })  // Resize to CLIP input size
+  .resize(224, 224, { fit: "cover" })  // Center-crop to CLIP input size (matches CLIP training)
   .removeAlpha()                         // Convert RGBA → RGB
   .raw()                                // Output raw pixels
   .toBuffer();
+// NOTE: fit:"cover" is critical — fit:"contain" adds white letterbox that shifts
+// embeddings away from CLIP's training distribution and degrades kNN recall.
 ```
 
 #### Garment Center Crop (`src/lib/image/processor.ts:13-23`)

@@ -6,6 +6,7 @@ declare const expect: any;
 import {
   extractFashionTypeNounTokens,
   extractLexicalProductTypeSeeds,
+  filterProductTypeSeedsByMappedCategory,
   scoreRerankProductTypeBreakdown,
 } from "./productTypeTaxonomy";
 
@@ -68,6 +69,13 @@ describe("extractLexicalProductTypeSeeds", () => {
     expect(j).toContain("jeans");
     const t = extractLexicalProductTypeSeeds("women tops");
     expect(t.some((x) => x === "tops" || x === "top")).toBe(true);
+  });
+
+  test("vest dress: outerwear vest token dropped when aisle is dresses", () => {
+    const seeds = extractLexicalProductTypeSeeds("vest dress");
+    expect(seeds).toContain("vest");
+    expect(seeds).toContain("dress");
+    expect(filterProductTypeSeedsByMappedCategory(seeds, "dresses")).toEqual(["dress"]);
   });
 });
 

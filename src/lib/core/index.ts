@@ -12,6 +12,7 @@ export {
   getProductsByIdsOrdered,
   productsTableHasIsHiddenColumn,
   productsTableHasCanonicalIdColumn,
+  productsTableHasGenderColumn,
   isPgCapacityError,
   queryWithPgCapacityRetry,
   toPgVectorParam,

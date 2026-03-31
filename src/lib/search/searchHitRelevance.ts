@@ -92,17 +92,28 @@ export function computeFinalRelevance01(params: {
   tightSemanticCap?: boolean;
 }): number {
   const crossPen = Math.max(0, params.crossFamilyPenalty);
+  // Hard block for cross-family mismatch (e.g. footwear query returning dresses).
+  // For image search (tightSemanticCap), type intent comes from YOLO which can be
+  // wrong — don't hard-zero, just heavily penalize so visual similarity can still
+  // rescue genuinely similar products.
   if (params.hasTypeIntent && crossPen >= 0.8) {
+    if (params.tightSemanticCap) {
+      return Math.max(0, params.semScore * 0.15);
+    }
     return 0;
   }
 
+  // For image search (tightSemanticCap), type intent often comes from noisy YOLO
+  // predictions. Use softer gates so a wrong category prediction doesn't nuke all
+  // visually similar results. For text search, keep the strict gates since the user
+  // explicitly typed the product type.
   const typeGateFactor = !params.hasTypeIntent
     ? 1
     : params.typeScore >= 0.5
       ? 1
       : params.typeScore >= 0.2
-        ? 0.3
-        : 0.05;
+        ? (params.tightSemanticCap ? 0.65 : 0.3)
+        : (params.tightSemanticCap ? 0.4 : 0.05);
 
   const categoryBoost = 1 + params.catScore * 0.25;
   const applyLex = params.applyLexicalToGlobal !== false;
@@ -123,16 +134,19 @@ export function computeFinalRelevance01(params: {
     globalScore * typeGateFactor * categoryBoost * attrFactor * crossFamilySoftFactor;
   const bounded = Math.max(0, Math.min(1, raw));
   // Prevent final relevance from being unrealistically higher than visual/semantic evidence.
-  // This keeps type/category/attribute boosts important but not dominant enough to mask bad similarity.
+  // With tightSemanticCap (image search), allow a wider bonus so that products with
+  // strong attribute/type compliance can surface above pure visual similarity.
+  // Previous 0.035/0.07 caps were too restrictive and collapsed all image search
+  // results into a narrow band near raw cosine, making the relevance layer useless.
   const hasIntent =
     params.hasTypeIntent || params.hasColorIntent || params.hasStyleIntent || params.hasAudienceIntent;
   const capBonus = params.tightSemanticCap
     ? hasIntent
-      ? 0.035
-      : 0.07
+      ? 0.18
+      : 0.25
     : hasIntent
-      ? 0.08
-      : 0.15;
+      ? 0.12
+      : 0.2;
   const softCap = Math.min(1, params.semScore + capBonus);
   return Math.min(bounded, softCap);
 }

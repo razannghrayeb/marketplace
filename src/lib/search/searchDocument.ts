@@ -21,7 +21,10 @@ function inferAudienceFromTitle(
   let audience_gender: string | null = null;
   const ag = attrGender ? String(attrGender).toLowerCase().trim() : "";
   if (ag === "men" || ag === "women" || ag === "unisex") audience_gender = ag;
-  else if (/\b(men|mens|male)\b/.test(t)) audience_gender = "men";
+  else if (ag === "boys" || ag === "girls") {
+    audience_gender = ag;
+    age_group = "kids";
+  } else if (/\b(men|mens|male)\b/.test(t)) audience_gender = "men";
   else if (/\b(women|womens|female|ladies)\b/.test(t)) audience_gender = "women";
   else if (/\b(unisex)\b/.test(t)) audience_gender = "unisex";
 
@@ -198,6 +201,10 @@ export interface BuildSearchDocumentInput {
   detectedColors?: string[] | null;
   /** When set, overrides coarse `detectedColors` for canonical fields and confidence. */
   garmentColorAnalysis?: GarmentColorAnalysis | null;
+  /** From `products.color` when title/image did not yield color (e.g. BLIP backfill). */
+  catalogColor?: string | null;
+  /** From `products.gender` when title did not yield gender (e.g. BLIP backfill). */
+  catalogGender?: string | null;
   enrichment?: BuildSearchDocumentEnrichmentInput | null;
   attributeEmbeddings?: {
     color?: number[];
@@ -216,13 +223,17 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
   const normalizedDetectedColors = analysis
     ? normalizeArray(analysis.paletteCanonical)
     : normalizedDetectedFromLegacy;
-  const normalizedTitleColors = normalizeArray(
+  let normalizedTitleColors = normalizeArray(
     attributes.colors && attributes.colors.length > 0
       ? attributes.colors
       : attributes.color
         ? [attributes.color]
         : [],
   );
+  const catalogColorHint = toLowerTrim(input.catalogColor ?? null);
+  if (normalizedTitleColors.length === 0 && catalogColorHint) {
+    normalizedTitleColors = normalizeArray([catalogColorHint]);
+  }
   const colorConfidenceText =
     normalizedTitleColors.length > 0 ? Math.max(0.35, attrConfidence.color ?? 0.52) : 0;
   const colorConfidenceImage = analysis
@@ -305,7 +316,8 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
   const categoryCanonical = inferCategoryCanonical(input.category ?? null, input.title || "");
 
   const primaryAttrColor = toLowerTrim(attrColorPrimary);
-  const attrGenderRaw = toLowerTrim(attributes.gender);
+  const attrGenderRaw =
+    toLowerTrim(attributes.gender) || toLowerTrim(input.catalogGender ?? null);
   const audience = inferAudienceFromTitle(input.title || "", attrGenderRaw);
 
   const doc: Record<string, any> = {
