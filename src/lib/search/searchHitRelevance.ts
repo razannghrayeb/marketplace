@@ -249,6 +249,10 @@ export interface HitCompliance {
   lexicalScore01: number;
   rerankScore: number;
   finalRelevance01: number;
+  visualComponent?: number;
+  typeComponent?: number;
+  attrComponent?: number;
+  penaltyComponent?: number;
   /** Dev / explain: type gate and intent trace */
   hasTypeIntent?: boolean;
   hasColorIntent?: boolean;
@@ -602,13 +606,16 @@ export function computeHitRelevance(
 
   const wSim = rerankSimilarityWeight();
   const wAud = rerankAudienceWeight();
-  const rerankScore =
-    productTypeCompliance * 1000 * docTrust +
-    colorCompliance * 100 * docTrust +
-    styleCompliance * 75 * docTrust +
-    audienceCompliance * wAud * docTrust +
-    similarity * wSim -
-    crossFamilyPenalty * crossFamilyPenaltyWeight;
+  const typeComponent = productTypeCompliance * 420 * docTrust;
+  const attrComponent =
+    colorCompliance * 90 * docTrust +
+    styleCompliance * 65 * docTrust +
+    audienceCompliance * wAud * docTrust;
+  // Similarity term strengthened and modulated by type compliance.
+  const visualComponent =
+    similarity * (wSim + 120 * (0.35 + 0.65 * productTypeCompliance));
+  const penaltyComponent = crossFamilyPenalty * crossFamilyPenaltyWeight;
+  const rerankScore = typeComponent + attrComponent + visualComponent - penaltyComponent;
 
   const hasTypeIntent = desiredProductTypes.length > 0;
   const hasColorIntent = desiredColors.length > 0;
@@ -656,6 +663,10 @@ export function computeHitRelevance(
     lexicalScore01: lexScore01,
     rerankScore,
     finalRelevance01,
+    visualComponent,
+    typeComponent,
+    attrComponent,
+    penaltyComponent,
     primaryColor,
     hasTypeIntent,
     hasColorIntent,
