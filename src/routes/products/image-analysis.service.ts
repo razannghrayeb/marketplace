@@ -1323,13 +1323,22 @@ export class ImageAnalysisService {
       // retry once without those attribute filters (but keep category/productTypes).
       if (
         similarResult.results.length === 0 &&
-        (filters.gender || filters.style || filters.color)
+        (
+          filters.gender ||
+          filters.ageGroup ||
+          (filters as any).style ||
+          (filters as any).color ||
+          (filters as any).softStyle ||
+          (filters as any).softColor
+        )
       ) {
         const filtersRetry = { ...filters } as typeof filters;
         delete (filtersRetry as any).gender;
         delete (filtersRetry as any).ageGroup;
         delete (filtersRetry as any).style;
         delete (filtersRetry as any).color;
+        delete (filtersRetry as any).softStyle;
+        delete (filtersRetry as any).softColor;
         similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
           imageBuffer: croppedBuffer,
@@ -1826,13 +1835,22 @@ export class ImageAnalysisService {
         // Retry without inferred attribute filters if they removed all hits.
         if (
           similarResult.results.length === 0 &&
-          (filters.gender || filters.style || filters.color)
+          (
+            filters.gender ||
+            filters.ageGroup ||
+            (filters as any).style ||
+            (filters as any).color ||
+            (filters as any).softStyle ||
+            (filters as any).softColor
+          )
         ) {
           const filtersRetry = { ...filters } as typeof filters;
           delete (filtersRetry as any).gender;
           delete (filtersRetry as any).ageGroup;
           delete (filtersRetry as any).style;
           delete (filtersRetry as any).color;
+          delete (filtersRetry as any).softStyle;
+          delete (filtersRetry as any).softColor;
           similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalEmbedding,
             imageBuffer: croppedBuffer,
