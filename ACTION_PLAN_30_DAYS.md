@@ -1,6 +1,6 @@
 # 🎯 Action Plan — Next 30 Days
 
-**Updated:** March 17, 2026 (Per Full Code Audit)
+**Updated:** March 17, 2026 (Per Full Code Audit) — **note (March 2026):** items below reflect the audit snapshot. **`src/server.ts` no longer forces `NODE_ENV=test`**, and **`/admin` uses `requireAuth` + `requireAdmin`**. Treat Week 1 priorities 1–2 as **done** in current mainline; use **`docs/IMPLEMENTATION_STATUS.md`** for live gaps.
 
 This tactical implementation plan prioritizes **production-critical fixes** and **high-impact missing features**.
 
@@ -10,20 +10,12 @@ This tactical implementation plan prioritizes **production-critical fixes** and 
 
 ### Must Complete Before Any Deployment
 
-**Status:** All 5 bugs are quick fixes. Estimated: **90 minutes total**
+**Status (historical):** Remaining items (migrations, JWT secret, etc.) still worth tracking — see **`docs/IMPLEMENTATION_STATUS.md`**.
 
 ```
-Priority 1 (1 min): Fix hardcoded NODE_ENV
-├─ File: src/server.ts:36
-├─ Remove: process.env.NODE_ENV = "test"
-├─ Issue: OpenSearch index never initializes
-└─ Impact: Search/recommendations completely broken without fix
+Priority 1 ~~(1 min): Fix hardcoded NODE_ENV~~ — RESOLVED in current `server.ts` (ensureIndex when NODE_ENV !== "test")
 
-Priority 2 (5 min): Protect admin routes
-├─ File: src/routes/admin/index.ts
-├─ Add: requireAuth + requireAdmin middleware to all routes
-├─ Issue: Any user can hide/delete/merge products
-└─ Impact: Data integrity, moderation bypass
+Priority 2 ~~(5 min): Protect admin routes~~ — RESOLVED (`requireAuth` + `requireAdmin` on admin router)
 
 Priority 3 (10 min): Create missing cart migration
 ├─ File: db/migrations/005a_cart_items.sql
@@ -56,8 +48,8 @@ curl http://0.0.0.0:4000/health  # Should respond
 ## Week 1: Bug Fixes + Validation
 
 ### Day 1: Fix Critical Bugs (90 mins)
-- [ ] Remove hardcoded NODE_ENV from server.ts
-- [ ] Add auth middleware to /admin routes
+- [x] Remove hardcoded NODE_ENV from server.ts *(done in mainline)*
+- [x] Add auth middleware to /admin routes *(done: `requireAuth` + `requireAdmin`)*
 - [ ] Create cart_items migration (005a)
 - [ ] Fix migration naming (006a, 006b, 006c)
 - [ ] Generate + set JWT_SECRET in .env
@@ -81,36 +73,14 @@ curl http://0.0.0.0:4000/health  # Should respond
 
 ## Week 2: High-Priority Missing Features
 
-### Feature 1: User Logout + Token Revocation (4 hours)
+### Feature 1: User Logout + Token Revocation ~~(4 hours)~~
 
-**Why:** Currently stolen re Fresh tokens are valid for 7 days with no revocation
-
-**Implementation:**
-```sql
--- Create refresh_token_blacklist table
-CREATE TABLE refresh_token_blacklist (
-  id SERIAL PRIMARY KEY,
-  user_id INT NOT NULL REFERENCES users(id),
-  token_jti VARCHAR(255) NOT NULL UNIQUE,  -- JWT ID
-  expires_at TIMESTAMPTZ NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX idx_blacklist_expires ON refresh_token_blacklist(expires_at);
-```
-
-**API Changes:**
-- `POST /api/auth/logout` — Add refresh token to blacklist
-- Update `refreshTokens()` to check blacklist
-- Clear blacklist entries daily (cron job)
-
-**Files to Create:**
-- Migration: `db/migrations/008_refresh_token_blacklist.sql`
-- Service: `src/lib/auth/tokenBlacklist.ts`
+**Status (March 2026):** Implemented in codebase — `POST /api/auth/logout`, blacklist helpers, migration **`008_refresh_token_blacklist.sql`**. Remaining work: confirm migration applied in prod, refresh path rejects blacklisted tokens, optional cron to prune expired rows.
 
 **Testing:**
 - [ ] Login → get tokens
-- [ ] Logout → refresh token fails
-- [ ] Verify 401 Unauthorized on logout
+- [ ] Logout → refresh with that token fails
+- [ ] Verify blacklist row exists / expires as expected
 
 ---
 

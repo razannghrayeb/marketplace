@@ -1,5 +1,7 @@
 # Image Processing, Embedding & OpenSearch Pipeline Documentation
 
+> **Architecture overview (ingest + search wiring):** see **`embeddings-and-search-pipelines.md`** for how indexed vectors connect to **text vs image** search, OpenSearch field names, and request-time pipelines. This file focuses on **preprocessing and ONNX/CLIP internals**. Line references into `processor.ts` / `clip.ts` may drift as code changes—prefer symbol search in-repo.
+
 ## Table of Contents
 
 1. [Overview](#overview)

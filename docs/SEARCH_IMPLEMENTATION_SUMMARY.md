@@ -6,9 +6,9 @@ The Fashion Aggregator API now has **THREE complete search systems**, each servi
 
 | # | Feature | Status | Endpoint | Description |
 |---|---------|--------|----------|-------------|
-| 1 | **Normal Search** | ✅ Live | `POST /api/search/image` | Single-image similarity search |
+| 1 | **Normal Search** | ✅ Live | `POST /search/image` or `POST /products/search/image` | Single-image similarity search |
 | 2 | **YOLO Detection** | ✅ Live | `POST /api/images/search` | Shop-the-look with automatic item detection |
-| 3 | **Multi-Image Composite** | ✅ Live | `POST /api/search/multi-image` | Mix attributes from multiple images (NEW) |
+| 3 | **Multi-Image Composite** | ✅ Live | `POST /search/multi-image` | Mix attributes from multiple images (NEW) |
 
 ---
 
@@ -238,7 +238,7 @@ curl -X POST http://0.0.0.0:4000/search/multi-image \
 ## Documentation
 
 ### Primary Documents
-- **[SEARCH_FEATURES_GUIDE.md](./SEARCH_FEATURES_GUIDE.md)** - Comprehensive guide with examples
+- **[SEARCH_API_COMPLETE.md](./SEARCH_API_COMPLETE.md)** — Comprehensive guide with examples
 - **[api-reference.md](./api-reference.md#search-api)** - API reference
 - **[multi-vector-search.md](./multi-vector-search.md)** - Technical deep dive
 - **[image-analysis-api.md](./image-analysis-api.md)** - YOLO detection docs
@@ -290,7 +290,7 @@ curl -X POST http://0.0.0.0:4000/search/multi-image \
 - Includes real image tests
 
 ### Manual Testing
-See [SEARCH_FEATURES_GUIDE.md](./SEARCH_FEATURES_GUIDE.md#quick-start-examples) for curl examples.
+See [SEARCH_API_COMPLETE.md](./SEARCH_API_COMPLETE.md) for curl examples.
 
 ---
 
@@ -421,7 +421,7 @@ GET  /api/images/status       - Service health
 ## Support & Resources
 
 ### Getting Help
-- **Full Guide**: See [SEARCH_FEATURES_GUIDE.md](./SEARCH_FEATURES_GUIDE.md)
+- **Full Guide**: See [SEARCH_API_COMPLETE.md](./SEARCH_API_COMPLETE.md)
 - **API Docs**: See [api-reference.md](./api-reference.md)
 - **Technical Details**: See [multi-vector-search.md](./multi-vector-search.md)
 - **Architecture**: See [architecture.md](./architecture.md)

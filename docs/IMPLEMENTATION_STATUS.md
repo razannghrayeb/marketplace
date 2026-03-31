@@ -1,18 +1,15 @@
-# Implementation Status — Updated March 17, 2026
+# Implementation Status — Updated March 2026
 
 > **Purpose:** Authoritative ground-truth of what is implemented in code, what is missing, and known issues.
-> Last audited by reviewing every route file, service file, migration, and config in the repository.
+> Re-audit routes when adding major features.
 
 ---
 
 ## Runtime & Routing
 
 - Default port: `4000` (`PORT` env var, fallback in `src/config.ts`)
-- Docker Compose API mapping: `http://0.0.0.0:3000`
-- **Known bug:** `src/server.ts:36` contains `process.env.NODE_ENV = "test"` hardcoded
-  inside `createServer()`. This forces the OpenSearch index initialization block to be
-  skipped in **every environment** — not just tests. This is a leftover debug line that
-  must be removed before production deployment.
+- **OpenSearch:** `ensureIndex()` runs when `NODE_ENV !== "test"` (see `src/server.ts`). Tests skip index creation.
+- **Feature overview (user-facing):** **`docs/FEATURES.md`**
 
 ### Active route mounts in `src/server.ts`
 
@@ -44,12 +41,11 @@ Implemented in `src/routes/auth/`.
 | POST | `/api/auth/signup` | bcrypt (12 rounds), returns access + refresh JWTs |
 | POST | `/api/auth/login` | validates `is_active`, updates `last_login` |
 | POST | `/api/auth/refresh` | validates refresh token type; returns new token pair |
+| POST | `/api/auth/logout` | body `{ refresh_token }` — blacklists refresh token until expiry |
 | GET | `/api/auth/me` | requires `requireAuth` middleware |
 | PATCH | `/api/auth/me` | update email or password; prevents duplicate emails |
 
 **Missing / gaps:**
-- No `POST /api/auth/logout` endpoint — refresh tokens cannot be revoked
-- No refresh token blacklist/db storage — a stolen refresh token remains valid until expiry
 - No email verification flow
 - No password reset / forgot-password flow
 - JWT secret defaults to `"change-me-in-production"` — must be overridden in env
@@ -207,7 +203,7 @@ Mounted at `/api/tryon`. Full async Vertex AI job lifecycle.
 **Required env vars:**
 - `GCLOUD_PROJECT` (required)
 - `TRYON_LOCATION` (default: `us-central1`)
-- `TRYON_MODEL` (default: `virtual-try-on@002`)
+- `TRYON_MODEL` (default: `virtual-try-on-001` in `config.ts`; override per Google model ID)
 - `TRYON_TIMEOUT` (default: `60000` ms)
 - `GOOGLE_APPLICATION_CREDENTIALS` (if not using ADC)
 
@@ -223,10 +219,9 @@ Key endpoints: `POST /api/compare`, `GET /quality/:id`, `POST /analyze-text`,
 
 ---
 
-## Admin — COMPLETE ✓ (but UNPROTECTED)
+## Admin — COMPLETE ✓ (protected)
 
-Mounted at `/admin`. **No `requireAuth` or `requireAdmin` middleware applied.**
-Any unauthenticated request can reach all admin endpoints. This must be fixed before production.
+Mounted at `/admin`. **`requireAuth` + `requireAdmin`** are applied in `src/routes/admin/index.ts`.
 
 Covers: product moderation (hide/unhide/flag/unflag/batch), canonical groups,
 job queue management, stats, recommendation labeling.
@@ -290,31 +285,27 @@ to `005b_` or `006a_` to resolve.
 
 | # | Issue | File | Description |
 |---|-------|------|-------------|
-| 1 | Hardcoded `NODE_ENV=test` | `src/server.ts:36` | Forces OpenSearch init skip in all envs. Remove this line. |
-| 2 | Unprotected admin routes | `src/routes/admin/index.ts` | No auth middleware. Any user can call moderation endpoints. |
-| 3 | Weak JWT default secret | `src/config.ts:65` | `"change-me-in-production"` is the fallback. Set `JWT_SECRET` in env. |
-| 4 | No refresh token revocation | `src/routes/auth/` | No logout endpoint, no blacklist. Stolen tokens remain valid for 7d. |
-| 5 | Missing `cart_items` migration | `db/migrations/` | Table used in code but no migration file exists. |
+| 1 | Weak JWT default secret | `src/config.ts` | `"change-me-in-production"` is the fallback. Set `JWT_SECRET` in env. |
+| 2 | Missing `cart_items` migration | `db/migrations/` | Table used in code but no migration file may exist on fresh deploys. |
 
 ### High Priority (affect functionality)
 
 | # | Issue | Description |
 |---|-------|-------------|
-| 6 | No checkout / order flow | Cart is complete but no checkout, payment, or order tables. |
-| 7 | No email verification | Users can register with unverified emails. |
-| 8 | Migration `006_` numbering conflict | Three files share the same numeric prefix. |
-| 9 | `ensureIndex()` always skipped | Due to issue #1, OpenSearch index is never auto-created. |
+| 3 | No checkout / order flow | Cart is complete but no checkout, payment, or order tables. |
+| 4 | No email verification | Users can register with unverified emails. |
+| 5 | Migration `006_` numbering conflict | Three files share the same numeric prefix — fix ordering for automated runners. |
 
 ### Medium Priority (UX / feature gaps)
 
 | # | Issue | Description |
 |---|-------|-------------|
-| 10 | No try-on frontend UI | Try-on API is complete; no frontend page exists. |
-| 11 | No price-drop user alerts | Price history tracked but no notification system. |
-| 12 | No A/B testing framework | Ranking experiments can't be measured. |
-| 13 | No automated model retraining | XGBoost model is static once trained. |
-| 14 | No test suite | Only manual test scripts. No jest/vitest automated tests. |
-| 15 | No password-reset flow | Users cannot recover a forgotten password. |
+| 6 | Try-on env / DB setup | Vertex project, R2, and `007_virtual_tryon.sql` must be correct or users see 503 / errors (see `FEATURES.md`). |
+| 7 | No price-drop user alerts | Price history tracked but no notification system. |
+| 8 | No A/B testing framework | Ranking experiments can't be measured. |
+| 9 | No automated model retraining | XGBoost model is static once trained. |
+| 10 | Thin automated test coverage | Prefer integration tests for search and auth paths. |
+| 11 | No password-reset flow | Users cannot recover a forgotten password. |
 
 ---
 
@@ -365,7 +356,7 @@ CLIP_DUPLICATE_THRESHOLD=0.92
 # Vertex AI (Virtual Try-On)
 GCLOUD_PROJECT=
 TRYON_LOCATION=us-central1
-TRYON_MODEL=virtual-try-on@002
+TRYON_MODEL=virtual-try-on-001
 TRYON_TIMEOUT=60000
 GOOGLE_APPLICATION_CREDENTIALS=
 
@@ -390,4 +381,4 @@ user management, auth, order management.
 
 ---
 
-*Last updated: March 17, 2026 — full code audit*
+*Last updated: March 2026 — aligned with `FEATURES.md` and current `server.ts`*

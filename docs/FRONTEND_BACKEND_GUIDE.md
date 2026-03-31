@@ -1,25 +1,19 @@
 # Frontend–Backend Connection Guide
 
-> **Purpose:** Reference for building a frontend that connects to the Fashion Marketplace API deployed on Render.  
-> Last updated: March 17, 2026
+> **Purpose:** Reference for building a frontend against the Fashion Marketplace API.  
+> Last updated: March 2026
 
 ---
 
-## Render Deployment Architecture
+## Deployment & base URL
 
-The backend is split into **two Render Web Services**:
+Use a **single API origin** (e.g. Cloud Run, Render, or local `http://localhost:4000`). Set your frontend env to that origin only:
 
-| Service | Name | Base URL | Role |
-|---------|------|----------|------|
-| **API Service** | `marketplace-api` | `https://marketplace-api.onrender.com` | Auth, cart, favorites, compare, try-on |
-| **ML Service** | `marketplace-ml` | `https://marketplace-ml.onrender.com` | Search, products, images, wardrobe, ingest |
+- **Next.js:** `NEXT_PUBLIC_API_URL` (no trailing slash)
 
-**Important:** When `SERVICE_ROLE=api`, the API service **proxies** ML routes to the ML service. So your frontend can use a **single base URL** (the API service) for all endpoints. The API service forwards `/search`, `/products`, `/api/images`, `/api/wardrobe`, etc. to the ML service.
+The server mounts routes as in `src/server.ts`: **`/search`**, **`/products`**, **`/api/*`**, etc. There is no `/api` prefix on text search—use **`GET /search`**, not `GET /api/search`.
 
-**Recommended frontend base URL:**
-```
-https://marketplace-main.onrender.com
-```
+**Feature → endpoint map:** see **`docs/FEATURES.md`** for Discover (`POST /products/search/image`), complete style, try-on, and wardrobe.
 
 ---
 
@@ -32,6 +26,7 @@ https://marketplace-main.onrender.com
 | `/api/auth/signup` | POST | `{ email, password }` | `{ accessToken, refreshToken, user }` |
 | `/api/auth/login` | POST | `{ email, password }` | `{ accessToken, refreshToken, user }` |
 | `/api/auth/refresh` | POST | `{ refreshToken }` | `{ accessToken, refreshToken }` |
+| `/api/auth/logout` | POST | `{ refreshToken }` | Blacklists refresh token (invalidate session) |
 | `/api/auth/me` | GET | — | `{ user }` (requires `Authorization: Bearer <accessToken>`) |
 | `/api/auth/me` | PATCH | `{ email? }` or `{ password }` | Updated user |
 
@@ -49,7 +44,8 @@ https://marketplace-main.onrender.com
 |--------|----------|-------------|
 | GET | `/products` | List products (pagination, filters: category, brand, min_price, max_price) |
 | GET | `/products/facets` | Get filter options (categories, brands, price ranges) |
-| GET | `/products/search?q=` | Text search by title |
+| GET | `/products/search?q=` | Catalog/title search (browse pipeline) |
+| POST | **`/products/search/image`** | **Discover visual search** — multipart `image`, CLIP kNN + rerank |
 | GET | `/products/:id` | Get single product by ID |
 | GET | `/products/:id/recommendations` | ML-ranked similar products |
 | GET | `/products/:id/complete-style` | Outfit completion suggestions |
@@ -60,15 +56,19 @@ https://marketplace-main.onrender.com
 
 ### 2. Search (Public)
 
+Mounted at **`/search`** (root, not under `/api`).
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/search?q=` | Semantic text search (NLP, intent, entities) |
-| POST | `/search/image` | Single-image CLIP search (multipart: `image`) |
+| GET | **`/search?q=`** | **Semantic text search** (QueryAST, hybrid BM25 + optional kNN) |
+| POST | `/search/image` | Single-image CLIP search (same engine as `/products/search/image`; pick one base path) |
 | POST | `/search/multi-image` | Multi-image + prompt composite search |
 | POST | `/search/multi-vector` | Explicit attribute weights |
 | GET | `/search/autocomplete?q=` | Autocomplete suggestions |
 | GET | `/search/trending` | Trending queries |
 | GET | `/search/popular` | Popular queries |
+
+**Storefront convention:** implement Discover uploads against **`POST /products/search/image`** so all catalog routes stay under `/products`.
 
 ### 3. Image Analysis (Shop-the-Look)
 
@@ -117,6 +117,8 @@ https://marketplace-main.onrender.com
 | POST | `/api/wardrobe/outfit-coherence` | 6-dim outfit quality score |
 
 ### 7. Virtual Try-On (Auth Required)
+
+Send **`x-user-id`** (or `user_id` in the multipart body) unless the server sets **`TRYON_DEMO_USER_ID`**. Apply Postgres migration **`007_virtual_tryon.sql`** and set **`GCLOUD_PROJECT`** (Vertex + R2). Otherwise the API returns **503** with `error.code` such as **`TRYON_DB_NOT_MIGRATED`** or **`TRYON_NOT_CONFIGURED`**.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -222,7 +224,8 @@ Import `postman_collection.json` and set `baseUrl` to your Render API URL for qu
 ## Known Gaps (No Backend Support Yet)
 
 - No checkout/payment flow
-- No `POST /api/auth/logout`
 - No email verification
 - No password reset
-- Admin routes have no auth (internal use only)
+- Admin routes must be protected before production (`requireAuth` / `requireAdmin`)
+
+See **`IMPLEMENTATION_STATUS.md`** for the full gap list.

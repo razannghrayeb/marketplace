@@ -1,5 +1,7 @@
 # Multi-Vector Weighted Search
 
+> **Production wiring:** see **`embeddings-and-search-pipelines.md`** for the current **catalog index fields** (`embedding`, `embedding_color`, …) and how **`searchByImageWithSimilarity`** blends global kNN with attribute cosine scores. This document describes the **weighted multi-vector** design and `MultiVectorSearchEngine` usage in depth; not every diagram path is enabled for every endpoint.
+
 ## Overview
 
 The multi-vector weighted search system implements **Option B**: parallel per-attribute kNN retrieval with weighted re-ranking. This architecture enables fine-grained control over semantic attributes in visual search queries.
@@ -108,13 +110,13 @@ OpenSearch index now includes per-attribute vector fields:
 
 ## API Endpoints
 
-### POST /api/search/multi-vector
+### POST /search/multi-vector
 
 Advanced multi-vector weighted search with per-attribute control.
 
 **Request:**
 ```bash
-curl -X POST http://0.0.0.0:4000/api/search/multi-vector \
+curl -X POST http://0.0.0.0:4000/search/multi-vector \
   -F "images=@dress1.jpg" \
   -F "images=@dress2.jpg" \
   -F "prompt=I want the color from the first image with the style from the second" \
@@ -311,7 +313,7 @@ To enable multi-vector search on an existing index:
 
 4. **Test endpoint**:
    ```bash
-   curl -X POST http://0.0.0.0:4000/api/search/multi-vector \
+   curl -X POST http://0.0.0.0:4000/search/multi-vector \
      -F "images=@test.jpg" \
      -F "prompt=test query"
    ```

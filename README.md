@@ -415,13 +415,9 @@ DRY_RUN=1 pnpm migrate:bootstrap
 
 ---
 
-## Known Issues (see `docs/IMPLEMENTATION_STATUS.md` for full list)
+## Known issues & gaps
 
-1. `src/server.ts:36` has `process.env.NODE_ENV = "test"` hardcoded — must be removed before production
-2. Admin routes have **no authentication middleware** — any unauthenticated user can call them
-3. No `POST /api/auth/logout` endpoint — refresh tokens cannot be revoked
-4. No checkout/payment/order flow — cart exists but stops before checkout
-5. Missing `cart_items` table migration file
+See **`docs/IMPLEMENTATION_STATUS.md`** for the current list (checkout flow, email verification, migration ordering, etc.). Admin routes use **`requireAuth` + `requireAdmin`** (`src/routes/admin/index.ts`). **`POST /api/auth/logout`** blacklists refresh tokens server-side.
 
 ---
 
@@ -429,6 +425,8 @@ DRY_RUN=1 pnpm migrate:bootstrap
 
 | File | Contents |
 |------|---------|
+| `docs/FEATURES.md` | Feature → endpoint map (Discover, try-on, complete style, …) |
+| `docs/embeddings-and-search-pipelines.md` | Embeddings, OpenSearch fields, search request flow |
 | `docs/IMPLEMENTATION_STATUS.md` | Full audit of what is done, missing, and known issues |
 | `docs/api-reference.md` | Detailed endpoint documentation |
 | `docs/architecture.md` | Architecture deep-dive |

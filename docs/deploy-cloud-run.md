@@ -200,6 +200,18 @@ The production **`Dockerfile`** ships **Node + ONNX** (CLIP/BLIP) and a **Python
 
 If YOLO is unreachable, routes **fall back** to whole-image embedding search.
 
+## 8) Optional: GPU for CLIP text/image search (faster embeddings)
+
+Text and image search embeddings use **ONNX Runtime** in `src/lib/image/clip.ts`. By default the server uses **CPU** only. On a **GPU** machine or **[Cloud Run with GPU](https://cloud.google.com/run/docs/configuring/services/gpu)** (where available in your region), you can enable CUDA:
+
+1. Deploy a revision with **GPU** attached (NVIDIA L4, etc.) and a **CUDA-capable** ONNX Runtime stack. The stock `onnxruntime-node` wheel on Linux is often **CPU-only**; for production GPU you may need a custom base image or build that ships **`onnxruntime-gpu`**-compatible native libraries — validate in a staging revision first.
+2. Set runtime env:
+   - **`CLIP_USE_GPU=true`** — tries `cuda` then `cpu`, or  
+   - **`CLIP_EXECUTION_PROVIDERS=cuda,cpu`** — explicit order (also supports **`dml,cpu`** on Windows with DirectML).
+3. If GPU session creation fails, the code **falls back to CPU** automatically and logs a warning.
+
+**Concurrency:** Try-on, search, and other API routes are independent HTTP requests; the storefront **React Query** client runs multiple queries in parallel. Try-on state is kept in a **global provider** so polling continues while users navigate (see marketplace `TryOnProvider`).
+
 ## Notes
 - The production image sets **`PORT=8080`** (`Dockerfile`); align Cloud Run **`--port`** with the port your process listens on (the included `cloudbuild.cloudrun.yaml` uses **8080** for API/ML services).
 - Keep `.env` local only. Use Secret Manager for all production secrets.
