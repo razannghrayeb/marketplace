@@ -344,8 +344,12 @@ export async function searchImage(
     relaxThresholdWhenEmpty: relaxThresholdWhenEmpty ?? false,
   } as any);
 
-  const filteredResults =
-    filterByFinalRelevance(res.results, config.search.finalAcceptMinImage, "strict") ?? [];
+  const metaAny = res.meta as Record<string, unknown> | undefined;
+  const effectiveMin =
+    typeof metaAny?.final_accept_min_effective === "number"
+      ? (metaAny.final_accept_min_effective as number)
+      : config.search.finalAcceptMinImage;
+  const filteredResults = filterByFinalRelevance(res.results, effectiveMin, "strict") ?? [];
   const filteredRelated = filterByFinalRelevance(res.related, config.search.finalAcceptMinImage, "strict");
   const meta = {
     ...(res.meta ?? {}),

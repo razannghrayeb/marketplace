@@ -990,9 +990,31 @@ export async function searchByImageWithSimilarity(
     rankedHitsCandidates.length > 0 && thresholdPassedByVisual.length === 0 && !thresholdRelaxed;
 
   const finalAcceptMin = config.search.finalAcceptMinImage;
+  let effectiveFinalAcceptMin = finalAcceptMin;
   let rankedHits = visualGatedHits.filter(
-    (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= finalAcceptMin,
+    (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= effectiveFinalAcceptMin,
   );
+  let relevanceRelaxedForMinCount = false;
+  const imageMinResultsTarget = config.search.imageSearchMinResults;
+  const relevanceRelaxDelta = config.search.imageSearchRelevanceRelaxDelta;
+  if (
+    imageMinResultsTarget > 0 &&
+    rankedHits.length < imageMinResultsTarget &&
+    visualGatedHits.length > rankedHits.length
+  ) {
+    const relaxedMin = Math.max(0.4, finalAcceptMin - relevanceRelaxDelta);
+    if (relaxedMin < finalAcceptMin) {
+      const expanded = visualGatedHits.filter(
+        (h: any) =>
+          (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= relaxedMin,
+      );
+      if (expanded.length > rankedHits.length) {
+        rankedHits = expanded;
+        effectiveFinalAcceptMin = relaxedMin;
+        relevanceRelaxedForMinCount = true;
+      }
+    }
+  }
   const countAfterFinalAcceptMin = rankedHits.length;
 
   const belowFinalRelevanceGate = visualGatedHits.length > 0 && rankedHits.length === 0;
@@ -1112,7 +1134,8 @@ export async function searchByImageWithSimilarity(
   const countAfterHydration = results.length;
 
   results = results.filter(
-    (p: any) => typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= finalAcceptMin,
+    (p: any) =>
+      typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalAcceptMin,
   ) as ProductResult[];
   results.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
 
@@ -1168,6 +1191,8 @@ export async function searchByImageWithSimilarity(
       hits_after_hydration: countAfterHydration,
       final_returned_count: finalReturnedCount,
       SEARCH_FINAL_ACCEPT_MIN_IMAGE: finalAcceptMin,
+      effective_final_accept_min: effectiveFinalAcceptMin,
+      relevance_relaxed_for_min_count: relevanceRelaxedForMinCount,
       CLIP_SIMILARITY_THRESHOLD: config.clip.imageSimilarityThreshold,
       category_filter_mode: hasHardCategoryFilter ? "hard" : "soft",
       product_type_filter_mode: "none",
@@ -1192,6 +1217,9 @@ export async function searchByImageWithSimilarity(
       below_relevance_threshold: belowRelevanceThreshold,
       threshold_relaxed: thresholdRelaxed,
       final_accept_min: config.search.finalAcceptMinImage,
+      final_accept_min_effective: effectiveFinalAcceptMin,
+      relevance_relaxed_for_min_count: relevanceRelaxedForMinCount,
+      image_min_results_target: imageMinResultsTarget,
       below_final_relevance_gate: belowFinalRelevanceGate,
       relevance_gate_soft: false,
       image_knn_field: knnFieldResolved,
