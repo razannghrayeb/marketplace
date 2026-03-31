@@ -71,7 +71,10 @@ import {
   type HybridScoreRecallStats,
   type SearchHitRelevanceIntent,
 } from '../../lib/search/searchHitRelevance';
-import type { NegationConstraint } from '../../lib/queryProcessor/negationHandler';
+import {
+  parseNegations,
+  type NegationConstraint,
+} from '../../lib/queryProcessor/negationHandler';
 
 function buildHybridScoreRecallStats(hits: any[]): HybridScoreRecallStats | undefined {
   if (!hits?.length) return undefined;
@@ -1366,8 +1369,15 @@ export async function textSearch(
         // Ensure UI color matches the OpenSearch attribute that retrieval used.
         color: colorById.get(productIdStr) ?? p.color ?? null,
         similarity_score: similarityScore,
-        match_type:
-          similarityScore >= config.clip.matchTypeExactMin ? "exact" : "similar",
+        match_type: (() => {
+          const visualOk = similarityScore >= config.clip.matchTypeExactMin;
+          if (!visualOk) return "similar" as const;
+          if (!compliance) return "exact" as const;
+          const typeAligned =
+            (compliance.exactTypeScore ?? 0) >= 1 ||
+            (compliance.productTypeCompliance ?? 0) >= 0.82;
+          return typeAligned ? ("exact" as const) : ("similar" as const);
+        })(),
         rerankScore: compliance?.rerankScore ?? undefined,
         finalRelevance01: compliance?.finalRelevance01,
         explain: compliance
@@ -1760,22 +1770,7 @@ export async function multiImageSearch(
     // Same CLIP text embedding path as text search: bridges language in the prompt to image-indexed vectors.
     await blendPromptClipIntoCompositeGlobal(compositeQuery, userPrompt, parsedIntent);
 
-    const queryBundle = queryMapper.mapQuery(compositeQuery, {
-      maxResults: limit,
-      vectorK: Math.min(Math.max(limit * 5, 100), 400),
-      vectorWeight: 0.6,
-      filterWeight: 0.3,
-      priceWeight: 0.1,
-    });
-
-    const opensearch = osClient;
-    // Never tie OpenSearch to processQueryAST in Promise.all — LLM/ML failures in the AST
-    // pipeline would reject the whole call and return zero results despite valid kNN hits.
-    const response = await opensearch.search({
-      index: config.opensearch.index,
-      body: queryBundle.opensearch,
-    });
-
+    // Parse the text prompt before kNN so constraints can widen recall and strict gating can use the same AST.
     let astPipelineDegraded = false;
     let ast: QueryAST;
     try {
@@ -1790,6 +1785,27 @@ export async function multiImageSearch(
         ast = await processQueryFast('fashion');
       }
     }
+
+    const strictRecall =
+      multiImageStrictPromptEnabled() &&
+      multiImageHasStrictPromptSignals(ast, userPrompt);
+    const vectorK = strictRecall
+      ? Math.min(Math.max(limit * 8, 160), 650)
+      : Math.min(Math.max(limit * 5, 100), 400);
+
+    const queryBundle = queryMapper.mapQuery(compositeQuery, {
+      maxResults: limit,
+      vectorK,
+      vectorWeight: 0.6,
+      filterWeight: 0.3,
+      priceWeight: 0.1,
+    });
+
+    const opensearch = osClient;
+    const response = await opensearch.search({
+      index: config.opensearch.index,
+      body: queryBundle.opensearch,
+    });
 
     let hits = response.body.hits.hits as any[];
     const totalHits =
@@ -1835,6 +1851,22 @@ export async function multiImageSearch(
         relevanceById.set(idStr, compliance);
       }
 
+      if (
+        multiImageStrictPromptEnabled() &&
+        userPrompt.trim().length >= 12 &&
+        ast.filters?.priceRange &&
+        (ast.filters.priceRange.min != null || ast.filters.priceRange.max != null)
+      ) {
+        const pr = ast.filters.priceRange;
+        hits = hits.filter((h: any) => {
+          const p = Number(h?._source?.price_usd);
+          if (!Number.isFinite(p)) return true;
+          if (pr.min != null && p < pr.min) return false;
+          if (pr.max != null && p > pr.max) return false;
+          return true;
+        });
+      }
+
       hits = [...hits].sort((a: any, b: any) => {
         const ida = String(a._source.product_id);
         const idb = String(b._source.product_id);
@@ -1847,79 +1879,9 @@ export async function multiImageSearch(
       });
 
       const finalAcceptMin = config.search.finalAcceptMinImage;
-      // Text-search hard gate often drops every multi-image kNN hit: typeGate/color from
-      // AST+vision can be strict while visual neighbors are still useful. Default soft here;
-      // set MULTI_IMAGE_HARD_RELEVANCE_GATE=1 to apply SEARCH_FINAL_ACCEPT_MIN_IMAGE + relevanceGateMode like text.
-      const multiImageHardGate =
-        String(process.env.MULTI_IMAGE_HARD_RELEVANCE_GATE ?? "").toLowerCase() === "1";
-      const relevanceGateSoft = multiImageHardGate
-        ? config.search.relevanceGateMode === "soft"
-        : true;
-      const softFloorMin = config.search.softFinalRelevanceFloorMin;
-      const thresholdPassedIds = hits
-        .map((h: any) => String(h._source.product_id))
-        .filter((id) => (relevanceById.get(id)?.finalRelevance01 ?? 0) >= finalAcceptMin);
-
-      // #region agent log
-      (() => {
-        let minFinalRelevance01 = Number.POSITIVE_INFINITY;
-        let softFloorPassedIdsCount = 0;
-        for (const h of hits) {
-          const id = String(h?._source?.product_id);
-          const v = relevanceById.get(id)?.finalRelevance01 ?? 0;
-          if (v < minFinalRelevance01) minFinalRelevance01 = v;
-          if (v >= softFloorMin) softFloorPassedIdsCount++;
-        }
-        if (!Number.isFinite(minFinalRelevance01)) minFinalRelevance01 = 0;
-        const belowCount = Math.max(0, hits.length - thresholdPassedIds.length);
-        fetch("http://127.0.0.1:7383/ingest/ccea0d1b-4b26-441e-9797-fbae444c347a", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "00a194" },
-          body: JSON.stringify({
-            sessionId: "00a194",
-            runId: "relevance-gate-debug",
-            hypothesisId: "H2",
-            location: "search.service.ts:multiImageGateDecision",
-            message: "multi-image relevance gate decision",
-            data: {
-              finalAcceptMin,
-              multiImageHardGate,
-              relevanceGateMode: config.search.relevanceGateMode,
-              relevanceGateSoft,
-              softFloorMin,
-              softFloorPassedIdsCount,
-              hitsCount: hits.length,
-              thresholdPassedIdsCount: thresholdPassedIds.length,
-              belowFinalAcceptMinCount: belowCount,
-              minFinalRelevance01: minFinalRelevance01,
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-      })();
-      // #endregion
-
-      if (relevanceGateSoft) {
-        // In soft mode, avoid extremely low relevance by applying a low "floor" first.
-        // If that would remove every hit, fall back to the original candidate set.
-        const softFloorPassedIds = hits
-          .map((h: any) => String(h._source.product_id))
-          .filter((id) => (relevanceById.get(id)?.finalRelevance01 ?? 0) >= softFloorMin);
-
-        if (softFloorPassedIds.length > 0) {
-          const allow = new Set(softFloorPassedIds);
-          hits = hits.filter((h: any) => allow.has(String(h._source.product_id)));
-        }
-      }
-
-      if (!relevanceGateSoft) {
-        if (thresholdPassedIds.length > 0) {
-          const allow = new Set(thresholdPassedIds);
-          hits = hits.filter((h: any) => allow.has(String(h._source.product_id)));
-        } else {
-          hits = [];
-        }
-      }
+      hits = hits.filter(
+        (h: any) => (relevanceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= finalAcceptMin,
+      );
     }
 
     const productIds = hits.map((hit: any) => hit._source?.product_id);
@@ -1990,7 +1952,7 @@ export async function multiImageSearch(
     const rerankOpts = Object.assign({}, defaultRerank, rerankWeights || {});
     const reranked = intentAwareRerank(mappedForRerank, parsedIntent, rerankOpts);
 
-    const finalResults = reranked
+    let finalResults = reranked
       .map((rer: any) => {
         const original = results.find((o: any) => (o.id || o.product_id || o.productId) === rer.productId);
         const rel = relevanceById.get(String(rer.productId));
@@ -2021,6 +1983,12 @@ export async function multiImageSearch(
         if (Math.abs(tb - ta) > 1e-8) return tb - ta;
         return (b.rerankScore ?? 0) - (a.rerankScore ?? 0);
       });
+
+    const minImgRel = config.search.finalAcceptMinImage;
+    finalResults = finalResults.filter(
+      (r: any) => typeof r.finalRelevance01 === "number" && r.finalRelevance01 >= minImgRel,
+    );
+    finalResults.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
 
     if (finalResults.length > 0) {
       const maxVs = Math.max(
@@ -2323,7 +2291,7 @@ async function blendPromptClipIntoCompositeGlobal(
   userPrompt: string,
   intent: ParsedIntent,
 ): Promise<void> {
-  const w = clampEnv01(process.env.MULTI_IMAGE_PROMPT_EMBED_WEIGHT, 0.38, 0.65);
+  const w = clampEnv01(process.env.MULTI_IMAGE_PROMPT_EMBED_WEIGHT, 0.45, 0.65);
   if (w <= 0) return;
   const text = buildMultiImageTextForEmbedding(userPrompt, intent);
   if (!text) return;
@@ -2340,9 +2308,15 @@ async function blendPromptClipIntoCompositeGlobal(
     1,
     (intent.confidence ?? 0.5) + 0.12 * Math.min(5, nImg),
   );
-  const effectiveW = w * Math.max(0.12, 1 - 0.55 * intentTrust);
+  // User instructions must move the kNN query: do not let high Gemini confidence erase the prompt vector.
+  const promptChars = Math.min(500, userPrompt.trim().length);
+  const substance01 = Math.min(1, promptChars / 72);
+  const effectiveW = Math.min(
+    0.56,
+    w * (0.48 + 0.52 * substance01) * (1 - 0.12 * intentTrust),
+  );
   console.info(
-    `[multiImage] CLIP prompt blend: effective=${effectiveW.toFixed(3)} base=${w.toFixed(3)} intentTrust=${intentTrust.toFixed(3)} (down-weights text vs strong Gemini intent)`,
+    `[multiImage] CLIP prompt blend: effective=${effectiveW.toFixed(3)} base=${w.toFixed(3)} intentTrust=${intentTrust.toFixed(3)} substance01=${substance01.toFixed(3)}`,
   );
   compositeQuery.embeddings.global = blendUnitVectors(g, promptEmb, effectiveW);
 }
@@ -2351,6 +2325,45 @@ async function blendPromptClipIntoCompositeGlobal(
  * Maps user prompt (QueryAST) + Gemini image intent into the same SearchHitRelevanceIntent
  * shape used by text search, so computeHitRelevance applies identical type/color/audience rules.
  */
+function multiImageStrictPromptEnabled(): boolean {
+  const v = String(process.env.MULTI_IMAGE_STRICT_PROMPT ?? "1").toLowerCase();
+  return v !== "0" && v !== "false" && v !== "off";
+}
+
+function multiImageHasStrictPromptSignals(ast: QueryAST, rawPrompt: string): boolean {
+  const t = rawPrompt?.trim() ?? "";
+  if (t.length < 10) return false;
+  if (parseNegations(t).negations.length > 0) return true;
+  if ((ast.entities?.colors ?? []).length > 0) return true;
+  if ((ast.entities?.productTypes ?? []).length > 0) return true;
+  if ((ast.entities?.categories ?? []).length > 0) return true;
+  const pr = ast.filters?.priceRange;
+  return Boolean(pr && (pr.min != null || pr.max != null));
+}
+
+function collectMultiImageNegationTerms(parsedIntent: ParsedIntent, rawPrompt: string): string[] {
+  const fromNeg = parseNegations(rawPrompt).negations
+    .map((n) => String(n.value).toLowerCase().trim())
+    .filter((s) => s.length >= 2);
+  const extras: string[] = [];
+  const na = parsedIntent.constraints?.negativeAttributes;
+  if (na) {
+    for (const k of ["colors", "patterns", "materials", "textures", "styles", "details"] as const) {
+      const arr = na[k];
+      if (!Array.isArray(arr)) continue;
+      for (const v of arr) {
+        const s = String(v).toLowerCase().trim();
+        if (s.length >= 2) extras.push(s);
+      }
+    }
+  }
+  for (const m of parsedIntent.constraints?.mustNotHave ?? []) {
+    const s = String(m).toLowerCase().trim();
+    if (s.length >= 2) extras.push(s);
+  }
+  return [...new Set([...fromNeg, ...extras])];
+}
+
 function buildMultiImageSearchHitRelevanceIntent(
   ast: QueryAST,
   parsedIntent: ParsedIntent,
@@ -2375,6 +2388,9 @@ function buildMultiImageSearchHitRelevanceIntent(
   ];
   const astProductTypes = (ast.entities.productTypes || []).map((t) => t.toLowerCase());
   let desiredProductTypes = [...new Set([...astProductTypes, ...lexicalTypeSeeds])];
+
+  const promptAnchoredTypeIntent =
+    astProductTypes.length > 0 || lexicalTypeSeeds.length > 0;
 
   const modelCategory = parsedIntent.constraints?.category?.toLowerCase()?.trim();
   if (desiredProductTypes.length === 0 && modelCategory) {
@@ -2401,7 +2417,13 @@ function buildMultiImageSearchHitRelevanceIntent(
       if (s) fromImageColors.push(s);
     }
   }
-  const rerankDesiredColorsRaw = [...new Set([...fromAstColors, ...fromImageColors].filter(Boolean))];
+
+  // When the user names colors in the prompt, those are restrictions — do not dilute with hues from uploads.
+  const promptAnchoredColorIntent = fromAstColors.length > 0;
+  const rerankDesiredColorsRaw = promptAnchoredColorIntent
+    ? [...new Set(fromAstColors.filter(Boolean))]
+    : [...new Set([...fromAstColors, ...fromImageColors].filter(Boolean))];
+
   const rerankDesiredColors = [
     ...new Set(
       rerankDesiredColorsRaw
@@ -2427,6 +2449,19 @@ function buildMultiImageSearchHitRelevanceIntent(
 
   const lexicalMatchQuery = searchQ || rawPrompt.trim() || undefined;
 
+  const negationExcludeTerms = collectMultiImageNegationTerms(parsedIntent, rawPrompt);
+  const hasPriceIntent =
+    ast.filters?.priceRange != null &&
+    (ast.filters.priceRange.min != null || ast.filters.priceRange.max != null);
+
+  const enforcePromptConstraints =
+    multiImageStrictPromptEnabled() &&
+    rawPrompt.trim().length >= 12 &&
+    (promptAnchoredColorIntent ||
+      promptAnchoredTypeIntent ||
+      negationExcludeTerms.length > 0 ||
+      hasPriceIntent);
+
   return {
     desiredProductTypes,
     desiredColors: rerankDesiredColors,
@@ -2440,6 +2475,10 @@ function buildMultiImageSearchHitRelevanceIntent(
     crossFamilyPenaltyWeight,
     lexicalMatchQuery,
     astPipelineDegraded: astPipelineDegraded ? true : undefined,
+    negationExcludeTerms: negationExcludeTerms.length > 0 ? negationExcludeTerms : undefined,
+    enforcePromptConstraints: enforcePromptConstraints ? true : undefined,
+    promptAnchoredColorIntent: promptAnchoredColorIntent ? true : undefined,
+    promptAnchoredTypeIntent: promptAnchoredTypeIntent ? true : undefined,
   };
 }
 

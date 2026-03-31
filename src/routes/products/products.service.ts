@@ -268,15 +268,6 @@ function imageGenderSoftEnv(): boolean {
   return v === "1" || v === "true";
 }
 
-/**
- * Image search defaults to soft final-relevance gating.
- * Set SEARCH_IMAGE_HARD_RELEVANCE_GATE=1 to drop hits below SEARCH_FINAL_ACCEPT_MIN_IMAGE when gate is hard.
- */
-function imageHardRelevanceGateEnv(): boolean {
-  const v = String(process.env.SEARCH_IMAGE_HARD_RELEVANCE_GATE ?? "").toLowerCase().trim();
-  return v === "1" || v === "true";
-}
-
 /** Fuse primary `embedding` kNN with `embedding_garment` kNN when a garment query vector is supplied. */
 function imageDualGarmentFusionEnv(): boolean {
   const v = String(process.env.SEARCH_IMAGE_DUAL_GARMENT_FUSION ?? "1").toLowerCase();
@@ -476,8 +467,8 @@ export async function searchByImageWithSimilarity(
     predictedCategoryAisles,
     knnField: knnFieldParam,
     forceHardCategoryFilter = false,
-    /** When strict similarity removes all kNN hits, fall back to best candidates above SEARCH_IMAGE_RELAX_FLOOR (default on). */
-    relaxThresholdWhenEmpty = true,
+    /** When strict similarity yields no hits, fall back to best candidates above SEARCH_IMAGE_RELAX_FLOOR. Default off for closer visual matches. */
+    relaxThresholdWhenEmpty = false,
     query: imageSearchTextQuery,
   } = params;
 
@@ -689,6 +680,10 @@ export async function searchByImageWithSimilarity(
     knnCosinesimilScoreToCosine01(Number(hit._score)) >= thresh;
 
   const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
+  const aisleSoftWeight = Math.max(
+    0,
+    Math.min(400, Number(process.env.SEARCH_IMAGE_AISLE_SOFT_WEIGHT ?? "130") || 130),
+  );
   // Broad retrieval first, then soft rerank (visual + category), then threshold gate.
   const baseCandidates = [...hits]
     .map((hit: any) => {
@@ -697,7 +692,7 @@ export async function searchByImageWithSimilarity(
         useAisleRerank && !forceHardCategoryFilter
           ? categorySoftScoreForHit(hit, desiredCatalogTerms)
           : 0;
-      const softScore = visualSim * 1000 + categorySoft * 220;
+      const softScore = visualSim * 1000 + categorySoft * aisleSoftWeight;
       return { hit, softScore };
     })
     .sort((a, b) => b.softScore - a.softScore)
@@ -856,6 +851,7 @@ export async function searchByImageWithSimilarity(
     hasAudienceIntent: hasAudienceIntentForRelevance,
     crossFamilyPenaltyWeight,
     lexicalMatchQuery: textQueryForRelevance || undefined,
+    tightSemanticCap: true,
   };
 
   const complianceById = new Map<string, HitCompliance>();
@@ -944,16 +940,18 @@ export async function searchByImageWithSimilarity(
     thresholdRelaxed = visualGatedHits.length > 0;
   }
 
-  const minWantCandidates = Math.min(fetchLimit, Math.max(limit, 15));
-  if (visualGatedHits.length < minWantCandidates && rankedHitsCandidates.length > visualGatedHits.length) {
-    const floor = imageRelaxSimilarityFloor();
-    relaxFloorUsed = floor;
-    const loose = rankedHitsCandidates.filter((h: any) =>
-      passesImageSimilarityThreshold(h, floor),
-    );
-    if (loose.length > visualGatedHits.length) {
-      visualGatedHits = loose;
-      thresholdRelaxed = true;
+  if (relaxThresholdWhenEmpty) {
+    const minWantCandidates = Math.min(fetchLimit, Math.max(limit, 15));
+    if (visualGatedHits.length < minWantCandidates && rankedHitsCandidates.length > visualGatedHits.length) {
+      const floor = imageRelaxSimilarityFloor();
+      relaxFloorUsed = floor;
+      const loose = rankedHitsCandidates.filter((h: any) =>
+        passesImageSimilarityThreshold(h, floor),
+      );
+      if (loose.length > visualGatedHits.length) {
+        visualGatedHits = loose;
+        thresholdRelaxed = true;
+      }
     }
   }
 
@@ -962,15 +960,12 @@ export async function searchByImageWithSimilarity(
     rankedHitsCandidates.length > 0 && thresholdPassedByVisual.length === 0 && !thresholdRelaxed;
 
   const finalAcceptMin = config.search.finalAcceptMinImage;
-  const relevanceGateSoft = !imageHardRelevanceGateEnv();
-  const thresholdPassedHits = visualGatedHits.filter(
+  let rankedHits = visualGatedHits.filter(
     (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= finalAcceptMin,
   );
-  const countAfterFinalAcceptMin = thresholdPassedHits.length;
-  let rankedHits = relevanceGateSoft ? visualGatedHits : thresholdPassedHits;
+  const countAfterFinalAcceptMin = rankedHits.length;
 
-  const belowFinalRelevanceGate =
-    visualGatedHits.length > 0 && thresholdPassedHits.length === 0 && !relevanceGateSoft;
+  const belowFinalRelevanceGate = visualGatedHits.length > 0 && rankedHits.length === 0;
 
   if (hasExplicitColorIntent && desiredColorsForRelevance.length > 0) {
     const strictColorPost = String(process.env.SEARCH_COLOR_POSTFILTER_STRICT ?? "1").toLowerCase() !== "0";
@@ -1030,8 +1025,15 @@ export async function searchByImageWithSimilarity(
         // Keep matched color in `explain.matchedColor` only.
         color: p.color ?? null,
         similarity_score: similarityScore,
-        match_type:
-          similarityScore >= config.clip.matchTypeExactMin ? "exact" : "similar",
+        match_type: (() => {
+          const visualOk = similarityScore >= config.clip.matchTypeExactMin;
+          if (!visualOk) return "similar" as const;
+          if (!compliance) return "exact" as const;
+          const typeAligned =
+            (compliance.exactTypeScore ?? 0) >= 1 ||
+            (compliance.productTypeCompliance ?? 0) >= 0.82;
+          return typeAligned ? ("exact" as const) : ("similar" as const);
+        })(),
         rerankScore: compliance?.rerankScore,
         finalRelevance01: compliance?.finalRelevance01,
         explain: compliance
@@ -1078,6 +1080,11 @@ export async function searchByImageWithSimilarity(
     }) as ProductResult[];
   }
   const countAfterHydration = results.length;
+
+  results = results.filter(
+    (p: any) => typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= finalAcceptMin,
+  ) as ProductResult[];
+  results.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
 
   const dedupedResults = dedupeImageSearchResults(results as any) as ProductResult[];
   const countAfterDedupe = dedupedResults.length;
@@ -1155,7 +1162,7 @@ export async function searchByImageWithSimilarity(
       threshold_relaxed: thresholdRelaxed,
       final_accept_min: config.search.finalAcceptMinImage,
       below_final_relevance_gate: belowFinalRelevanceGate,
-      relevance_gate_soft: relevanceGateSoft,
+      relevance_gate_soft: false,
       pipeline_counts: {
         raw_open_search_hits: rawOpenSearchHitCount,
         base_candidates: baseCandidates.length,

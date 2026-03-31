@@ -88,6 +88,8 @@ export {
   crossFamilyTypePenaltyEnabled,
   PRODUCT_TYPE_CLUSTERS,
   extractLexicalProductTypeSeeds,
+  filterProductTypeSeedsByMappedCategory,
+  intentFamiliesForProductCategory,
   extractFashionTypeNounTokens,
   getProductTypePhrasesLongestFirst,
   type RerankTypeBreakdown,

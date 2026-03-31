@@ -357,8 +357,8 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
  * ensembled CLIP text embedding as text search into the composite image vector for kNN.
  * Raise for wording-heavy prompts; lower when results should track photos more than words.
  *
- * MULTI_IMAGE_HARD_RELEVANCE_GATE=1 — optional: apply SEARCH_FINAL_ACCEPT_MIN_IMAGE + SEARCH_RELEVANCE_GATE_MODE
- * like text search (can return zero rows if no hit passes). Default is off so kNN neighbors are kept.
+ * Multi-image results omit products with finalRelevance01 below SEARCH_FINAL_ACCEPT_MIN_IMAGE (default 0.6)
+ * and are sorted by finalRelevance01 descending.
  *
  * 🎨 EXAMPLE REQUESTS:
  *

@@ -99,7 +99,7 @@ export const config = {
     /** Image-only kNN gate; stricter default so loose "fashion similar" matches are dropped. */
     imageSimilarityThreshold: finiteEnvNumber(
       process.env.CLIP_IMAGE_SIMILARITY_THRESHOLD,
-      0.65,
+      0.72,
       0.35,
       0.95,
     ),
@@ -126,10 +126,10 @@ export const config = {
       0.35,
       0.95,
     ),
-    /** Image acceptance gate (defaults lower than text after soft-category rerank). */
+    /** Image / vision acceptance gate — products below this `finalRelevance01` are omitted. */
     finalAcceptMinImage: finiteEnvNumber(
       process.env.SEARCH_FINAL_ACCEPT_MIN_IMAGE,
-      0.45,
+      0.6,
       0.3,
       0.95,
     ),
@@ -207,7 +207,7 @@ export const config = {
       return v === "1" || v === "true";
     })(),
     /** Lower bound for image kNN relax paths; must match products.service `imageRelaxSimilarityFloor`. */
-    searchImageRelaxFloor: finiteEnvNumber(process.env.SEARCH_IMAGE_RELAX_FLOOR, 0.58, 0.35, 0.92),
+    searchImageRelaxFloor: finiteEnvNumber(process.env.SEARCH_IMAGE_RELAX_FLOOR, 0.66, 0.35, 0.92),
     /** Cap BLIP caption wait for POST /products/search/image (ms). */
     blipCaptionTimeoutMs: finiteEnvNumber(process.env.SEARCH_BLIP_CAPTION_TIMEOUT_MS, 900, 200, 8000),
   },
