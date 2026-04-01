@@ -14,7 +14,6 @@ import {
   processImageForGarmentEmbedding,
   blip,
 } from "../../lib/image/index";
-import { prepareBufferForPrimaryCatalogEmbedding } from "../../lib/image/embeddingPrep";
 import { extractLexicalProductTypeSeeds } from "../../lib/search/productTypeTaxonomy";
 import { isClipAvailable } from "../../lib/image/index";
 import { getProductWithVariants } from "./products.service";
@@ -184,12 +183,9 @@ export async function searchProductsByImage(req: Request, res: Response) {
         ),
       ]);
 
-      const { buffer: catalogAlignedBuf } = await prepareBufferForPrimaryCatalogEmbedding(
-        file.buffer,
-      );
       const [emb, garmentEmb, pHashResult] = await Promise.all([
-        processImageForEmbedding(catalogAlignedBuf),
-        processImageForGarmentEmbedding(catalogAlignedBuf).catch(() => [] as number[]),
+        processImageForEmbedding(file.buffer),
+        processImageForGarmentEmbedding(file.buffer).catch(() => [] as number[]),
         computePHash(file.buffer),
       ]);
       embedding = emb;
