@@ -118,14 +118,17 @@ export interface PrepareBufferResult {
  * Prepare raw upload bytes the same way bulk indexing prepares `processBuf` before
  * `processImageForEmbedding` (conditional rembg on visually complex backgrounds).
  *
- * Set `SEARCH_IMAGE_BG_REMOVAL=0` to always use the raw buffer (legacy / debugging).
+ * Default **off**: most live index updates use raw CDN bytes (`updateProductIndex`), not
+ * bulk reindex rembg. Turning this on without a fully aligned index hurts similarity.
+ * Set `SEARCH_IMAGE_BG_REMOVAL=1` only when your OpenSearch docs were built with the
+ * same conditional rembg as `scripts/resume-reindex.ts`.
  */
 export async function prepareBufferForPrimaryCatalogEmbedding(
   rawBuffer: Buffer,
 ): Promise<PrepareBufferResult> {
   const disabled =
-    String(process.env.SEARCH_IMAGE_BG_REMOVAL ?? "1").toLowerCase() === "0" ||
-    String(process.env.SEARCH_IMAGE_BG_REMOVAL ?? "1").toLowerCase() === "false";
+    String(process.env.SEARCH_IMAGE_BG_REMOVAL ?? "0").toLowerCase() === "0" ||
+    String(process.env.SEARCH_IMAGE_BG_REMOVAL ?? "0").toLowerCase() === "false";
   if (disabled) {
     return { buffer: rawBuffer, bgRemoved: false };
   }

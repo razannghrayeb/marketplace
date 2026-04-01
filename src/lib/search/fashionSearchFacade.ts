@@ -21,12 +21,7 @@ import { textSearch as enhancedTextSearch } from "../../routes/search/search.ser
 import { searchByImageWithSimilarity as legacyImageSearch } from "../../routes/products/products.service";
 import { searchProductsFilteredBrowse } from "./filteredBrowseSearch";
 
-import {
-  processImageForEmbedding,
-  processImageForGarmentEmbedding,
-  computePHash,
-} from "../image";
-import { prepareBufferForPrimaryCatalogEmbedding } from "../image/embeddingPrep";
+import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash } from "../image";
 import { tieredColorMatchScore } from "../color/colorCanonical";
 import { getYOLOv8Client } from "../image/yolov8Client";
 import {
@@ -298,11 +293,7 @@ export async function searchImage(
     Boolean(imageBuffer?.length) &&
     (!imageEmbedding || imageEmbedding.length === 0);
 
-  let bufForEmbedding: Buffer | undefined = imageBuffer;
-  if (embeddingDerivedFromBufferOnly && imageBuffer?.length) {
-    const { buffer } = await prepareBufferForPrimaryCatalogEmbedding(imageBuffer);
-    bufForEmbedding = buffer;
-  }
+  const bufForEmbedding = imageBuffer;
 
   const embedding =
     imageEmbedding && imageEmbedding.length > 0
@@ -310,8 +301,8 @@ export async function searchImage(
       : await processImageForEmbedding(bufForEmbedding!);
 
   const inferAislesEnv = () => {
-    const v = String(process.env.SEARCH_IMAGE_INFER_YOLO_AISLES ?? "0").toLowerCase();
-    return v === "1" || v === "true";
+    const v = String(process.env.SEARCH_IMAGE_INFER_YOLO_AISLES ?? "1").toLowerCase();
+    return v !== "0" && v !== "false";
   };
   const derivedAisleHints =
     predictedCategoryAisles && predictedCategoryAisles.length > 0

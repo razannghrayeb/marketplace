@@ -336,6 +336,16 @@ function imageKnnTimeoutMs(): number {
   return 12_000;
 }
 
+/**
+ * Recompute cosine(query, doc_vector) in-app for kNN hits. HNSW/ANN ordering is approximate;
+ * exact dot products fix ranking within the retrieved set (helps self-search and near-duplicates).
+ * Disable with SEARCH_IMAGE_EXACT_COSINE_RERANK=0.
+ */
+function imageExactCosineRerankEnabled(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_EXACT_COSINE_RERANK ?? "1").toLowerCase();
+  return v !== "0" && v !== "false";
+}
+
 async function opensearchImageKnnHits(
   body: Record<string, unknown>,
   timeoutMs: number,
@@ -494,31 +504,17 @@ export async function searchByImageWithSimilarity(
   const fetchLimit = Math.min(Math.max(limit * 5, 500), 500);
 
   const softCategory = forceHardCategoryFilter ? false : imageSoftCategoryEnv();
-  const filtersEarly = filters as Record<string, unknown>;
-  const filterCategoryEarly = (filters as { category?: string | string[] }).category;
-  const hasExplicitCategoryEarly = filterCategoryEarly != null;
-  const hasExplicitTypeEarly =
-    Array.isArray(filtersEarly.productTypes) && filtersEarly.productTypes.length > 0;
-  const hasTextIntentEarly =
-    typeof imageSearchTextQuery === "string" && imageSearchTextQuery.trim().length > 0;
-  /** User/query constraints — not vision-only inference (YOLO/BLIP). */
-  const explicitUserRelevanceConstraintsEarly =
-    hasExplicitCategoryEarly || hasExplicitTypeEarly || hasTextIntentEarly;
-
-  const aisleHints = predictedCategoryAisles?.length ? predictedCategoryAisles : undefined;
-  /** Vision-predicted aisles: only influence soft rerank when user/query already constrained (avoids YOLO-only noise on pure image search). */
-  const aisleHintsForRerank =
-    explicitUserRelevanceConstraintsEarly && aisleHints?.length ? aisleHints : undefined;
+  const aisleHints = predictedCategoryAisles?.length
+    ? predictedCategoryAisles
+    : undefined;
   const cat = (filters as { category?: string | string[] }).category;
   /** Aisle rerank when global soft category is on, or when caller passes predictedCategoryAisles (e.g. Shop-the-Look). */
-  const useAisleRerank =
-    !forceHardCategoryFilter &&
-    (softCategory || Boolean(aisleHintsForRerank?.length || cat));
+  const useAisleRerank = !forceHardCategoryFilter && (softCategory || Boolean(aisleHints?.length));
   const desiredCatalogTerms =
-    useAisleRerank && (aisleHintsForRerank?.length || cat)
+    useAisleRerank && (aisleHints?.length || cat)
       ? buildDesiredCatalogTermSet(
-          aisleHintsForRerank?.length
-            ? aisleHintsForRerank
+          aisleHints?.length
+            ? aisleHints
             : Array.isArray(cat)
               ? cat.map((c) => String(c))
               : [String(cat)],
@@ -705,6 +701,7 @@ export async function searchByImageWithSimilarity(
       "embedding_color",
       "embedding_style",
       "embedding_pattern",
+      ...(imageExactCosineRerankEnabled() ? [knnFieldResolved] : []),
     ],
     query: {
       bool: {
@@ -724,25 +721,38 @@ export async function searchByImageWithSimilarity(
   const knnTimeoutMs = imageKnnTimeoutMs();
   const hits = await opensearchImageKnnHits(knnBody, knnTimeoutMs);
 
-  /** Always compare cosine similarity in [0,1] to threshold (same semantics as fusion vs primary-only kNN). */
+  const exactCosineRerank = imageExactCosineRerankEnabled();
+  if (exactCosineRerank && Array.isArray(hits)) {
+    for (const hit of hits) {
+      const docVec = hit?._source?.[knnFieldResolved] as number[] | undefined;
+      if (Array.isArray(docVec) && docVec.length === queryVector.length) {
+        (hit as any)._exactCosine01 = cosineSimilarity01(queryVector, docVec);
+      }
+    }
+  }
+  const visualSimFromHit = (hit: any): number =>
+    exactCosineRerank && typeof hit?._exactCosine01 === "number"
+      ? hit._exactCosine01
+      : knnCosinesimilScoreToCosine01(Number(hit._score));
+
+  /** Compare using exact cosine when available (same [0,1] scale as fusion). */
   const passesImageSimilarityThreshold = (hit: any, thresh: number): boolean =>
-    knnCosinesimilScoreToCosine01(Number(hit._score)) >= thresh;
+    visualSimFromHit(hit) >= thresh;
 
   const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
   const aisleSoftWeight = Math.max(
     0,
     Math.min(400, Number(process.env.SEARCH_IMAGE_AISLE_SOFT_WEIGHT ?? "130") || 130),
   );
-  // Keep the fetch window aligned with true kNN order first: aisle/category boosts must not
-  // evict higher-similarity neighbors when recall size exceeds fetchLimit (or env tweaks diverge).
+  // Re-sort by exact cosine when available; otherwise approximate kNN score (HNSW order can drift).
   const hitsByKnnScore = [...hits].sort(
-    (a: any, b: any) => Number(b._score) - Number(a._score),
+    (a: any, b: any) => visualSimFromHit(b) - visualSimFromHit(a),
   );
   const hitsWithinFetch = hitsByKnnScore.slice(0, fetchLimit);
   // Broad retrieval, then soft rerank (visual + category) within that visual slice, then gates.
   const baseCandidates = hitsWithinFetch
     .map((hit: any) => {
-      const visualSim = knnCosinesimilScoreToCosine01(Number(hit._score));
+      const visualSim = visualSimFromHit(hit);
       const categorySoft =
         useAisleRerank && !forceHardCategoryFilter
           ? categorySoftScoreForHit(hit, desiredCatalogTerms)
@@ -766,7 +776,7 @@ export async function searchByImageWithSimilarity(
 
   for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
-    const visualSim = knnCosinesimilScoreToCosine01(Number(hit._score));
+    const visualSim = visualSimFromHit(hit);
     const categorySoft =
       useAisleRerank && !forceHardCategoryFilter
         ? categorySoftScoreForHit(hit, desiredCatalogTerms)
@@ -818,36 +828,19 @@ export async function searchByImageWithSimilarity(
     Array.isArray(filtersRecord.productTypes) && filtersRecord.productTypes.length > 0;
   const hasExplicitCategoryFilter = filterCategory != null;
   const hasTextTypeIntent = Boolean(textQueryForRelevance);
-  const explicitUserRelevanceConstraints =
-    hasExplicitCategoryFilter || hasExplicitTypeFilter || hasTextTypeIntent;
-  const astCategoriesForRelevance = explicitUserRelevanceConstraints
-    ? [
-        ...new Set(
-          [
-            ...(predictedCategoryAisles ?? [])
-              .map((x) => String(x).toLowerCase().trim())
-              .filter(Boolean),
-            ...(Array.isArray(filterCategory)
-              ? filterCategory
-              : filterCategory
-                ? [String(filterCategory)]
-                : []
-            ).map((x) => String(x).toLowerCase().trim()),
-          ].filter(Boolean),
-        ),
-      ]
-    : [
-        ...new Set(
-          (Array.isArray(filterCategory)
-            ? filterCategory
-            : filterCategory
-              ? [String(filterCategory)]
-              : []
-          )
-            .map((x) => String(x).toLowerCase().trim())
-            .filter(Boolean),
-        ),
-      ];
+  const astCategoriesForRelevance = [
+    ...new Set(
+      [
+        ...(predictedCategoryAisles ?? []).map((x) => String(x).toLowerCase().trim()).filter(Boolean),
+        ...(Array.isArray(filterCategory)
+          ? filterCategory
+          : filterCategory
+            ? [String(filterCategory)]
+            : []
+        ).map((x) => String(x).toLowerCase().trim()),
+      ].filter(Boolean),
+    ),
+  ];
   if (Array.isArray(filtersRecord.productTypes) && filtersRecord.productTypes.length > 0) {
     desiredProductTypes = [
       ...new Set(
@@ -861,10 +854,9 @@ export async function searchByImageWithSimilarity(
             extractLexicalProductTypeSeeds(String(c)),
           )
         : [];
-    const fromPredicted =
-      explicitUserRelevanceConstraints && predictedCategoryAisles?.length
-        ? predictedCategoryAisles.flatMap((a) => extractLexicalProductTypeSeeds(String(a)))
-        : [];
+    const fromPredicted = predictedCategoryAisles?.length
+      ? predictedCategoryAisles.flatMap((a) => extractLexicalProductTypeSeeds(String(a)))
+      : [];
     desiredProductTypes = [
       ...new Set(
         [...fromFilterCat, ...fromPredicted]
@@ -876,7 +868,7 @@ export async function searchByImageWithSimilarity(
   const softHintsMerged = (softProductTypeHintsParam ?? [])
     .map((t) => String(t).toLowerCase().trim())
     .filter(Boolean);
-  if (softHintsMerged.length > 0 && explicitUserRelevanceConstraints) {
+  if (softHintsMerged.length > 0) {
     desiredProductTypes = [...new Set([...desiredProductTypes, ...softHintsMerged])];
   }
   if (textQueryForRelevance) {
@@ -952,7 +944,7 @@ export async function searchByImageWithSimilarity(
   const colorByHitId = new Map<string, string | null>();
   for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
-    const sim = knnCosinesimilScoreToCosine01(Number(hit._score));
+    const sim = visualSimFromHit(hit);
     // Keep full precision for relevance calibration; only round for display later.
     const rel = computeHitRelevance(hit, sim, relevanceIntent);
     const { primaryColor, ...comp } = rel;
@@ -963,13 +955,6 @@ export async function searchByImageWithSimilarity(
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
     const idb = String(b._source.product_id);
-    // Pure visual search: kNN cosine is the authoritative ordering; metadata relevance
-    // must not reorder weaker visuals above stronger ones (fixes self-search + near-duplicates).
-    if (!explicitUserRelevanceConstraints) {
-      const va = knnCosinesimilScoreToCosine01(Number(a._score));
-      const vb = knnCosinesimilScoreToCosine01(Number(b._score));
-      if (Math.abs(vb - va) > 1e-6) return vb - va;
-    }
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
     const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
     if (Math.abs(fb - fa) > 1e-8) return fb - fa;
@@ -1078,7 +1063,7 @@ export async function searchByImageWithSimilarity(
       .filter((h: any) => !existingIds.has(String(h._source.product_id)))
       .map((h: any) => {
         const id = String(h._source.product_id);
-        const visualSim = knnCosinesimilScoreToCosine01(Number(h._score));
+        const visualSim = visualSimFromHit(h);
         const comp = complianceById.get(id);
         const aud = comp?.audienceCompliance ?? 1;
         return { h, visualSim, aud };
@@ -1146,7 +1131,7 @@ export async function searchByImageWithSimilarity(
   const productIds = hitsForHydrate.map((hit: any) => hit._source.product_id);
   const scoreMap = new Map<string, number>();
   hitsForHydrate.forEach((hit: any) => {
-    const sim = knnCosinesimilScoreToCosine01(Number(hit._score));
+    const sim = visualSimFromHit(hit);
     scoreMap.set(String(hit._source.product_id), Math.round(sim * 100) / 100);
   });
 
@@ -1242,9 +1227,7 @@ export async function searchByImageWithSimilarity(
     (p: any) =>
       typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalAcceptMin,
   ) as ProductResult[];
-  if (explicitUserRelevanceConstraints) {
-    results.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
-  }
+  results.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
 
   const dedupedResults = dedupeImageSearchResults(results as any) as ProductResult[];
   const countAfterDedupe = dedupedResults.length;
@@ -1331,6 +1314,7 @@ export async function searchByImageWithSimilarity(
     console.warn("[search-breakdown][image]", {
       query: imageSearchTextQuery ?? null,
       image_knn_field: knnFieldResolved,
+      exact_cosine_rerank: exactCosineRerank,
       raw_open_search_hits: rawOpenSearchHitCount,
       hits_after_final_accept_min: countAfterFinalAcceptMin,
       hits_after_dedupe: countAfterDedupe,
@@ -1370,6 +1354,7 @@ export async function searchByImageWithSimilarity(
       relevance_gate_soft: false,
       image_knn_field: knnFieldResolved,
       pipeline_counts: {
+        exact_cosine_rerank: exactCosineRerank,
         raw_open_search_hits: rawOpenSearchHitCount,
         base_candidates: baseCandidates.length,
         ranked_candidates: rankedHitsCandidates.length,
