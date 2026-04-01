@@ -288,6 +288,20 @@ function knnCosinesimilScoreToCosine01(raw: number): number {
  * L2-normalized CLIP vectors always produce cos >= 0 in practice;
  * clamping negative values avoids artifacts from zero/degenerate vectors.
  */
+/** OpenSearch may return knn_vector as number[] or TypedArray after JSON parse. */
+function asFloatVector(v: unknown, dim: number): number[] | null {
+  if (v == null) return null;
+  if (Array.isArray(v)) {
+    if (v.length !== dim) return null;
+    return v.every((x) => typeof x === "number" && Number.isFinite(x)) ? (v as number[]) : null;
+  }
+  if (ArrayBuffer.isView(v)) {
+    const arr = Array.from(v as unknown as ArrayLike<number>);
+    return arr.length === dim ? arr : null;
+  }
+  return null;
+}
+
 function cosineSimilarity01(a: number[] | undefined, b: number[] | undefined): number {
   if (!a?.length || !b?.length || a.length !== b.length) return 0;
   let dot = 0;
@@ -307,18 +321,18 @@ function cosineSimilarity01(a: number[] | undefined, b: number[] | undefined): n
   return Math.max(0, Math.min(1, cos));
 }
 
-/** Parallel kNN on `embedding` + `embedding_garment`, merged by max exact cosine (better recall than single field). */
+/** Parallel kNN on `embedding` + `embedding_garment` (opt-in — requires both fields populated in the index). */
 function imageDualKnnFusionEnabled(): boolean {
-  const v = String(process.env.SEARCH_IMAGE_DUAL_KNN ?? "1").toLowerCase();
-  return v !== "0" && v !== "false";
+  const v = String(process.env.SEARCH_IMAGE_DUAL_KNN ?? "0").toLowerCase();
+  return v === "1" || v === "true";
 }
 
-/** HNSW ef_search for image kNN (higher = better recall, slower). 0 = omit (index default). */
+/** HNSW ef_search for image kNN. Default 0 = omit (some clusters reject per-query ef_search). */
 function imageKnnEfSearch(): number {
   const raw = Number(process.env.SEARCH_IMAGE_EF_SEARCH);
   if (Number.isFinite(raw) && raw === 0) return 0;
   if (Number.isFinite(raw) && raw > 0) return Math.max(64, Math.min(512, Math.floor(raw)));
-  return 256;
+  return 0;
 }
 
 function knnQueryInner(vector: number[], k: number, ef: number): Record<string, unknown> {
@@ -360,14 +374,17 @@ function mergeDualKnnHitsForImageSearch(
       _source: src,
       _score: Math.max(Number(hg?._score ?? 0), Number(hgar?._score ?? 0)),
     };
-    const emb = src.embedding as number[] | undefined;
-    const embG = src.embedding_garment as number[] | undefined;
-    let g = 0;
-    let gr = 0;
-    if (Array.isArray(emb) && emb.length === qGlobal.length) g = cosineSimilarity01(qGlobal, emb);
-    if (Array.isArray(embG) && embG.length === qGarment.length) gr = cosineSimilarity01(qGarment, embG);
-    mergedHit._exactCosine01 = Math.max(g, gr);
-    mergedHit._score = (mergedHit._exactCosine01 + 1) / 2;
+    const emb = asFloatVector(src.embedding, qGlobal.length);
+    const embG = asFloatVector(src.embedding_garment, qGarment.length);
+    const hadGlobalVec = emb !== null;
+    const hadGarmentVec = embG !== null;
+    if (hadGlobalVec || hadGarmentVec) {
+      const g = hadGlobalVec ? cosineSimilarity01(qGlobal, emb!) : 0;
+      const gr = hadGarmentVec ? cosineSimilarity01(qGarment, embG!) : 0;
+      mergedHit._exactCosine01 = Math.max(g, gr);
+      mergedHit._score = (mergedHit._exactCosine01 + 1) / 2;
+    }
+    // If vectors missing/unparseable, keep OpenSearch _score — do NOT set _exactCosine01=0 or visualSim collapses.
     out.push(mergedHit);
   }
   return out;
@@ -842,8 +859,50 @@ export async function searchByImageWithSimilarity(
 
     if (imageExactCosineRerankEnabled() && Array.isArray(hits)) {
       for (const hit of hits) {
-        const docVec = hit?._source?.[knnFieldResolved] as number[] | undefined;
-        if (Array.isArray(docVec) && docVec.length === queryVector.length) {
+        const docVec = asFloatVector(hit?._source?.[knnFieldResolved], queryVector.length);
+        if (docVec) {
+          (hit as any)._exactCosine01 = cosineSimilarity01(queryVector, docVec);
+        }
+      }
+    }
+  }
+
+  if (useDualKnn && (!Array.isArray(hits) || hits.length === 0)) {
+    if (breakdownDebug) {
+      console.warn("[image-knn] dual kNN returned no hits; falling back to single-field kNN");
+    }
+    knnFieldResolved = resolveImageSearchKnnField(knnFieldParam);
+    queryVector = imageEmbedding;
+    if (knnFieldResolved === "embedding_garment") {
+      if (garmentQueryVector) {
+        queryVector = garmentQueryVector;
+      } else {
+        knnFieldResolved = "embedding";
+        queryVector = imageEmbedding;
+      }
+    }
+    const knnBodyFallback = {
+      size: retrievalK,
+      _source: [
+        ...baseImageKnnSourceFields,
+        ...(imageExactCosineRerankEnabled() ? [knnFieldResolved] : []),
+      ],
+      query: {
+        bool: {
+          must: {
+            knn: {
+              [knnFieldResolved]: knnQueryInner(queryVector, retrievalK, imageKnnEfSearch()),
+            },
+          },
+          filter,
+        },
+      },
+    };
+    hits = await opensearchImageKnnHits(knnBodyFallback, knnTimeoutMs);
+    if (imageExactCosineRerankEnabled() && Array.isArray(hits)) {
+      for (const hit of hits) {
+        const docVec = asFloatVector(hit?._source?.[knnFieldResolved], queryVector.length);
+        if (docVec) {
           (hit as any)._exactCosine01 = cosineSimilarity01(queryVector, docVec);
         }
       }
