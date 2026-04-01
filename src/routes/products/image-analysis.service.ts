@@ -388,6 +388,9 @@ function hardCategoryTermsForDetection(
 
   // Prefer hat/cap-family over generic `accessories`.
   if (categoryMapping.productCategory === "accessories") {
+    if (/\b(headband|head covering|hair accessory|hairband|headwear)\b/.test(l)) {
+      return baseTerms.filter((t) => /\b(headband|headwear|hair|hairband|hat|hats|cap)\b/.test(t));
+    }
     if (/\b(hat|hats|cap)\b/.test(l)) {
       return baseTerms.filter((t) => /\b(hat|hats|cap)\b/.test(t));
     }
@@ -429,11 +432,34 @@ function imageMinFootwearConfidence(): number {
   return Math.max(0, Math.min(1, raw));
 }
 
+function imageMinAccessoryAreaRatio(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_AREA_RATIO ?? "0.01");
+  if (!Number.isFinite(raw)) return 0.01;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function imageMinAccessoryConfidence(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_CONFIDENCE ?? "0.8");
+  if (!Number.isFinite(raw)) return 0.8;
+  return Math.max(0, Math.min(1, raw));
+}
+
 function shouldKeepDetectionForShopTheLook(detection: Detection): boolean {
   const mapped = mapDetectionToCategory(detection.label, detection.confidence).productCategory;
-  if (mapped !== "footwear") return true;
   const areaRatio = Number.isFinite(detection.area_ratio) ? detection.area_ratio : 0;
   const confidence = Number.isFinite(detection.confidence) ? detection.confidence : 0;
+  if (mapped === "accessories") {
+    const label = String(detection.label || "").toLowerCase();
+    const isHeadAccessory = /\b(headband|head covering|hair accessory|hairband|headwear)\b/.test(label);
+    // Tiny accessory detections are often noisy and lead to irrelevant bag-heavy retrieval.
+    if (
+      areaRatio < imageMinAccessoryAreaRatio() &&
+      (confidence < imageMinAccessoryConfidence() || isHeadAccessory)
+    ) {
+      return false;
+    }
+  }
+  if (mapped !== "footwear") return true;
   // Tiny, low-confidence footwear boxes are often false positives near image edges.
   if (areaRatio < imageMinFootwearAreaRatio() && confidence < imageMinFootwearConfidence()) {
     return false;
@@ -1020,7 +1046,7 @@ export class ImageAnalysisService {
       similarityThreshold = config.clip.imageSimilarityThreshold,
       similarLimitPerItem = defaultShopLookResultBudget(),
       filterByDetectedCategory = true,
-      groupByDetection = true,
+      groupByDetection = false,
       includeEmptyDetectionGroups = false,
       ...analyzeOptions
     } = options;
@@ -1182,7 +1208,7 @@ export class ImageAnalysisService {
       typeSeeds = filterProductTypeSeedsByMappedCategory(typeSeeds, categoryMapping.productCategory);
       if (typeSeeds.length) {
         filters.productTypes = typeSeeds;
-      } else if (expandedTypeHints.length > 0) {
+      } else if (expandedTypeHints.length > 0 && categoryMapping.productCategory !== "accessories") {
         // Fallback when lexical extraction misses labels like "hat" or "bag, wallet":
         // keep type intent so cross-family products (e.g. jeans for hats) are penalized.
         filters.productTypes = expandedTypeHints.slice(0, 8);
@@ -1197,6 +1223,9 @@ export class ImageAnalysisService {
       // will score it softly (so we avoid going fully empty).
       if (inferredStyle.attrStyle) {
         filters.softStyle = inferredStyle.attrStyle;
+      }
+      if (categoryMapping.attributes.sleeveLength) {
+        filters.sleeve = categoryMapping.attributes.sleeveLength;
       }
 
       // Prefer caption color when BLIP named this garment (e.g. "blue velvet top"); crop histograms
@@ -1241,7 +1270,12 @@ export class ImageAnalysisService {
           const terms = hardCategoryTermsForDetection(hardLabelForTerms, categoryMapping);
           filters.category = terms.length === 1 ? terms[0] : terms;
         } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
-          predictedCategoryAisles = expandedTypeHints.length ? expandedTypeHints : searchCategories;
+          const typeHints = Array.isArray(filters.productTypes) ? filters.productTypes : [];
+          predictedCategoryAisles = typeHints.length
+            ? typeHints
+            : expandedTypeHints.length
+              ? expandedTypeHints
+              : searchCategories;
         } else {
           filters.category =
             searchCategories.length === 1 ? searchCategories[0] : searchCategories;

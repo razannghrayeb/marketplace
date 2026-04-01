@@ -89,3 +89,11 @@ describe("extractFashionTypeNounTokens", () => {
     expect(t.some((x) => x === "boot" || x === "boots")).toBe(true);
   });
 });
+
+describe("filterProductTypeSeedsByMappedCategory - accessory isolation", () => {
+  test("head accessory seeds do not drift into bag family", () => {
+    const seeds = ["headband, head covering, hair accessory", "bag", "hat", "accessories"];
+    const filtered = filterProductTypeSeedsByMappedCategory(seeds, "accessories");
+    expect(filtered).not.toContain("bag");
+  });
+});

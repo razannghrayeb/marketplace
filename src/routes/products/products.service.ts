@@ -71,6 +71,8 @@ export interface SearchFilters {
   style?: string;
   /** Bias ranking without hard filtering (image search). */
   softStyle?: string;
+  /** Sleeve intent (short | long | sleeveless) for ranking. */
+  sleeve?: string;
   gender?: string;
   pattern?: string;
 }
@@ -664,6 +666,7 @@ export async function searchByImageWithSimilarity(
       "attr_colors",
       "attr_colors_text",
       "attr_colors_image",
+      "attr_sleeve",
       "norm_confidence",
       "type_confidence",
       "color_confidence_text",
@@ -862,6 +865,8 @@ export async function searchByImageWithSimilarity(
       : typeof filtersRecord.softStyle === "string"
         ? String(filtersRecord.softStyle).toLowerCase().trim()
         : undefined;
+  const desiredSleeveForRelevance =
+    typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
 
   const softColorBiasOnly = !hasExplicitColorIntent && softColorsForRelevance.length > 0;
 
@@ -871,6 +876,7 @@ export async function searchByImageWithSimilarity(
     desiredColorsTier: desiredColorsTierForRelevance,
     rerankColorMode: rerankColorModeForRelevance,
     desiredStyle: desiredStyleForRelevance,
+    desiredSleeve: desiredSleeveForRelevance,
     mergedCategory: mergedCategoryForRelevance
       ? String(mergedCategoryForRelevance).toLowerCase()
       : undefined,
@@ -1144,7 +1150,9 @@ export async function searchByImageWithSimilarity(
               colorTier: compliance.colorTier,
               colorCompliance: compliance.colorCompliance,
             styleCompliance: compliance.styleCompliance,
+              sleeveCompliance: compliance.sleeveCompliance,
             hasStyleIntent: Boolean(desiredStyleForRelevance),
+            hasSleeveIntent: Boolean(desiredSleeveForRelevance),
               audienceCompliance: compliance.audienceCompliance,
               crossFamilyPenalty: compliance.crossFamilyPenalty,
               hasTypeIntent: compliance.hasTypeIntent,
@@ -1154,6 +1162,7 @@ export async function searchByImageWithSimilarity(
               desiredProductTypes,
               desiredColors: desiredColorsForRelevance,
             desiredStyle: desiredStyleForRelevance,
+            desiredSleeve: desiredSleeveForRelevance,
               colorMode: rerankColorModeForRelevance,
               finalRelevance01: compliance.finalRelevance01,
             }
@@ -1183,6 +1192,45 @@ export async function searchByImageWithSimilarity(
       imageSearch: true,
     });
     related = (filteredRel ?? []) as ProductResult[];
+  }
+
+  // If the query image already exists in catalog (exact pHash match), make sure it is not
+  // lost due to metadata/rerank gates. This is a strong identity signal.
+  if (pHash && /^[0-9a-f]+$/i.test(pHash)) {
+    const existing = new Set(results.map((p) => String(p.id)));
+    const exactPhashRows = await pg.query(
+      `SELECT id
+         FROM products
+        WHERE p_hash = $1
+          AND is_hidden = false
+        LIMIT 3`,
+      [String(pHash).toLowerCase()],
+    );
+    const rescueIds = (exactPhashRows.rows ?? [])
+      .map((r: any) => String(r.id))
+      .filter((id: string) => !existing.has(id));
+    if (rescueIds.length > 0) {
+      const rescueProducts = await getProductsByIdsOrdered(rescueIds);
+      const rescueNumericIds = rescueIds.map((id: string) => parseInt(id, 10)).filter(Number.isFinite);
+      const rescueImages = await getImagesForProducts(rescueNumericIds);
+      const rescued: ProductResult[] = rescueProducts.map((p: any) => {
+        const imgs: ProductImage[] = rescueImages.get(parseInt(p.id, 10)) || [];
+        return {
+          ...p,
+          similarity_score: 1,
+          match_type: "exact" as const,
+          rerankScore: 999,
+          finalRelevance01: 1,
+          images: imgs.map((img) => ({
+            id: img.id,
+            url: img.cdn_url,
+            is_primary: img.is_primary,
+            p_hash: img.p_hash ?? undefined,
+          })),
+        };
+      }) as ProductResult[];
+      results = [...rescued, ...results].slice(0, limit);
+    }
   }
 
   if (searchEvalEnabled()) {
