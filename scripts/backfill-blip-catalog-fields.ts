@@ -14,7 +14,6 @@
 import "dotenv/config";
 import { pg } from "../src/lib/core/db";
 import { productsTableHasGenderColumn } from "../src/lib/core/db";
-import { config } from "../src/config";
 import { blip, validateImage } from "../src/lib/image";
 import { applyBlipCaptionToMissingProductFields } from "../src/lib/image/blipCatalogBackfill";
 import { updateProductIndex } from "../src/routes/products/images.service";
@@ -33,6 +32,7 @@ function parseArgs() {
     dryRun: argv.includes("--dry-run"),
     reindexOs: argv.includes("--reindex-os"),
     fetchTimeoutMs: Math.max(5000, Number(get("--fetch-timeout-ms", "45000")) || 45000),
+    captionTimeoutMs: Math.max(1500, Number(get("--caption-timeout-ms", "7000")) || 7000),
   };
 }
 
@@ -163,7 +163,8 @@ async function main() {
   let skipBufferSmall = 0;
   let skipValidate = 0;
   let skipNoExtractedFields = 0;
-  const blipMs = config.search.blipCaptionTimeoutMs;
+  const blipMs = opts.captionTimeoutMs;
+  console.log("[backfill-blip-catalog] caption timeout ms:", blipMs);
 
   while (true) {
     if (opts.limit != null && processed >= opts.limit) break;
@@ -192,11 +193,14 @@ async function main() {
           try {
             const buf = await fetchImageBuffer(row.cdn_url, opts.fetchTimeoutMs);
             if (!buf || buf.length < 2048) {
+              if (!buf) skipFetchFail++;
+              else skipBufferSmall++;
               skipped++;
               return;
             }
             const v = await validateImage(buf);
             if (!v.valid) {
+              skipValidate++;
               skipped++;
               return;
             }

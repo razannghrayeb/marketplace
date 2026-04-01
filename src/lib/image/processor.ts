@@ -49,7 +49,7 @@ export async function removeBackgroundForQuery(imageBuffer: Buffer): Promise<Buf
     const res = await fetch(`${rembgUrl()}/remove-bg`, {
       method: "POST",
       headers: { "Content-Type": "application/octet-stream" },
-      body: imageBuffer,
+      body: new Uint8Array(imageBuffer),
       signal: ctrl.signal,
     });
     clearTimeout(timer);
