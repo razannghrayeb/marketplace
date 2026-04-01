@@ -91,7 +91,8 @@ export async function createServer() {
   // =========================================================================
   const clipInitOptional =
     process.env.CLIP_INIT_OPTIONAL === "1" ||
-    process.env.CLIP_INIT_OPTIONAL === "true";
+    process.env.CLIP_INIT_OPTIONAL === "true" ||
+    process.env.K_SERVICE != null; // Cloud Run: never block container startup on model warmup
   try {
     console.log("[server] Initializing CLIP models...");
     await initClip();
@@ -103,8 +104,9 @@ export async function createServer() {
         err,
       );
     } else {
-      console.error("[server] ❌ FATAL: CLIP model initialization failed:", err);
-      process.exit(1);
+      // Keep service bootable even when model artifacts are missing.
+      // Search/image endpoints can still respond with graceful degradation.
+      console.error("[server] ❌ CLIP model initialization failed (continuing):", err);
     }
   }
 
