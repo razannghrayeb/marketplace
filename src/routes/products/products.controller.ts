@@ -14,6 +14,7 @@ import {
   processImageForGarmentEmbedding,
   blip,
 } from "../../lib/image/index";
+import { prepareBufferForPrimaryCatalogEmbedding } from "../../lib/image/embeddingPrep";
 import { extractLexicalProductTypeSeeds } from "../../lib/search/productTypeTaxonomy";
 import { isClipAvailable } from "../../lib/image/index";
 import { getProductWithVariants } from "./products.service";
@@ -158,6 +159,7 @@ export async function searchProductsByImage(req: Request, res: Response) {
     let embedding: number[];
     let pHash: string | undefined;
     let garmentEmbeddingForSearch: number[] | undefined;
+    let softProductTypeHints: string[] | undefined;
 
     if (file) {
       // Image file uploaded
@@ -182,9 +184,12 @@ export async function searchProductsByImage(req: Request, res: Response) {
         ),
       ]);
 
+      const { buffer: catalogAlignedBuf } = await prepareBufferForPrimaryCatalogEmbedding(
+        file.buffer,
+      );
       const [emb, garmentEmb, pHashResult] = await Promise.all([
-        processImageForEmbedding(file.buffer),
-        processImageForGarmentEmbedding(file.buffer).catch(() => [] as number[]),
+        processImageForEmbedding(catalogAlignedBuf),
+        processImageForGarmentEmbedding(catalogAlignedBuf).catch(() => [] as number[]),
         computePHash(file.buffer),
       ]);
       embedding = emb;
@@ -198,11 +203,8 @@ export async function searchProductsByImage(req: Request, res: Response) {
         }
       }
 
-      // BLIP caption describes image content; seeds align type relevance with what the model sees (same path as vision-derived types).
       const typeSeeds = extractLexicalProductTypeSeeds(caption);
-      if (typeSeeds.length) {
-        filters.productTypes = typeSeeds;
-      }
+      softProductTypeHints = typeSeeds.length > 0 ? typeSeeds : undefined;
     } else if (req.body.embedding && Array.isArray(req.body.embedding)) {
       // Client-provided vector (expected: same CLIP image space as the index)
       embedding = req.body.embedding;
@@ -224,6 +226,7 @@ export async function searchProductsByImage(req: Request, res: Response) {
       similarityThreshold,
       includeRelated,
       pHash,
+      softProductTypeHints,
     });
 
     const rankingMeta = wantsRankingDebug(req)
