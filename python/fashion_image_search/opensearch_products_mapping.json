@@ -1,0 +1,37 @@
+{
+  "settings": {
+    "index": {
+      "knn": true,
+      "knn.algo_param.ef_search": 1024
+    }
+  },
+  "mappings": {
+    "properties": {
+      "product_id": { "type": "keyword" },
+      "vendor_id": { "type": "keyword" },
+      "title": { "type": "text" },
+      "is_hidden": { "type": "boolean" },
+      "category": { "type": "keyword" },
+      "embedding": {
+        "type": "knn_vector",
+        "dimension": 512,
+        "method": {
+          "name": "hnsw",
+          "space_type": "cosinesimil",
+          "engine": "faiss",
+          "parameters": { "ef_construction": 256, "m": 48 }
+        }
+      },
+      "embedding_garment": {
+        "type": "knn_vector",
+        "dimension": 512,
+        "method": {
+          "name": "hnsw",
+          "space_type": "cosinesimil",
+          "engine": "faiss",
+          "parameters": { "ef_construction": 128, "m": 16 }
+        }
+      }
+    }
+  }
+}

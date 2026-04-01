@@ -43,7 +43,10 @@ export {
 
 export {
   prepareBufferForPrimaryCatalogEmbedding,
+  prepareBufferForImageSearchQuery,
+  preparePrimaryImageBufferForCatalogEmbedding,
   computeBgComplexityScore,
+  catalogBgRemovalThresholdFromEnv,
 } from "./embeddingPrep";
 
 // R2 storage
