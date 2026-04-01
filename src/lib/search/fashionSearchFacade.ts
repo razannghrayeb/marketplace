@@ -297,12 +297,26 @@ export async function searchImage(
     Boolean(imageBuffer?.length) &&
     (!imageEmbedding || imageEmbedding.length === 0);
 
-  const bufForEmbedding = imageBuffer;
+  /** Query pixels aligned to embedded catalog (default: always rembg user photo when sidecar up). */
+  let catalogAlignedBuffer: Buffer | undefined;
+  if (embeddingDerivedFromBufferOnly && imageBuffer?.length) {
+    const { prepareBufferForImageSearchQuery } = await import("../image/embeddingPrep");
+    const prep = await prepareBufferForImageSearchQuery(imageBuffer);
+    catalogAlignedBuffer = prep.buffer;
+    if (String(process.env.SEARCH_IMAGE_PIPELINE_DEBUG ?? "").trim() === "1") {
+      console.log("[searchImage] query image prep", {
+        bgRemoved: prep.bgRemoved,
+        inBytes: imageBuffer.length,
+        outBytes: prep.buffer.length,
+        SEARCH_IMAGE_QUERY_REMBG: process.env.SEARCH_IMAGE_QUERY_REMBG ?? "(default always)",
+      });
+    }
+  }
 
   const embedding =
     imageEmbedding && imageEmbedding.length > 0
       ? imageEmbedding
-      : await processImageForEmbedding(bufForEmbedding!);
+      : await processImageForEmbedding(catalogAlignedBuffer!);
 
   const inferAislesEnv = () => {
     const v = String(process.env.SEARCH_IMAGE_INFER_YOLO_AISLES ?? "1").toLowerCase();
@@ -319,10 +333,10 @@ export async function searchImage(
   if (
     (!imageEmbeddingGarment || imageEmbeddingGarment.length === 0) &&
     embeddingDerivedFromBufferOnly &&
-    bufForEmbedding?.length
+    catalogAlignedBuffer?.length
   ) {
     try {
-      imageEmbeddingGarment = await computeImageSearchGarmentQueryEmbedding(bufForEmbedding);
+      imageEmbeddingGarment = await computeImageSearchGarmentQueryEmbedding(catalogAlignedBuffer);
     } catch {
       imageEmbeddingGarment = undefined;
     }
@@ -346,9 +360,16 @@ export async function searchImage(
   const res = await legacyImageSearch({
     imageEmbedding: embedding,
     imageEmbeddingGarment,
-    /** Pass raw bytes whenever available so color kNN (`embedding_color`) can run; global similarity still uses `imageEmbedding`. */
+    /**
+     * Query-prepared bytes (default always-rembg) for primary + attribute + garment CLIP.
+     * pHash / YOLO aisles still use the original upload above.
+     */
     imageBuffer:
-      imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0 ? imageBuffer : undefined,
+      catalogAlignedBuffer && catalogAlignedBuffer.length > 0
+        ? catalogAlignedBuffer
+        : imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0
+          ? imageBuffer
+          : undefined,
     filters: filters as any,
     limit,
     similarityThreshold,

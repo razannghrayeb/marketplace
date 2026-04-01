@@ -237,7 +237,7 @@ export async function processImageForGarmentEmbeddingWithOptionalBox(
 /**
  * Garment query vector for image search, aligned with `scripts/resume-reindex.ts` →
  * `processImageForGarmentEmbeddingWithOptionalBox(raw, processBuf, garmentBox)`:
- * - `processBuf` from `prepareBufferForPrimaryCatalogEmbedding` (conditional rembg vs index)
+ * - `processBuf` from `prepareBufferForImageSearchQuery` (same as single-image + shop-the-look query prep)
  * - optional YOLO box on `processBuf` (confidence ≥ 0.45, largest area), same idea as stored `product_image_detections`
  *
  * **Why**: `processImageForGarmentEmbedding` (center crop only) does **not** match bulk-indexed
@@ -253,8 +253,8 @@ export async function computeImageSearchGarmentQueryEmbedding(imageBuffer: Buffe
     return processImageForGarmentEmbedding(imageBuffer);
   }
 
-  const { prepareBufferForPrimaryCatalogEmbedding } = await import("./embeddingPrep");
-  const { buffer: processBuf } = await prepareBufferForPrimaryCatalogEmbedding(imageBuffer);
+  const { prepareBufferForImageSearchQuery } = await import("./embeddingPrep");
+  const { buffer: processBuf } = await prepareBufferForImageSearchQuery(imageBuffer);
   const rawBuf = imageBuffer;
 
   const useYolo = String(process.env.SEARCH_IMAGE_QUERY_GARMENT_USE_YOLO ?? "1").toLowerCase() !== "0";

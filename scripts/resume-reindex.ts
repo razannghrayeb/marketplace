@@ -35,11 +35,12 @@ import { Pool } from "pg";
 import sharp from "sharp";
 import { osClient, ensureIndex } from "../src/lib/core/opensearch";
 import { config } from "../src/config"; 
-import { 
+import {
   processImageForEmbedding,
   processImageForGarmentEmbeddingWithOptionalBox,
   computePHash,
 } from "../src/lib/image";
+import { preparePrimaryImageBufferForCatalogEmbedding } from "../src/lib/image/embeddingPrep";
 import { attributeEmbeddings } from "../src/lib/search/attributeEmbeddings";
 import { buildProductSearchDocument } from "../src/lib/search/searchDocument";
 import { loadProductSearchEnrichmentByIds } from "../src/lib/search/loadProductSearchEnrichment";
@@ -208,68 +209,6 @@ async function checkBgRemovalSidecar(): Promise<boolean> {
     bgRemovalSidecarAvailable = false;
   }
   return bgRemovalSidecarAvailable;
-}
-
-async function removeBackground(imageBuffer: Buffer): Promise<Buffer> {
-  const url = process.env.REMBG_SERVICE_URL || "http://127.0.0.1:7788";
-  const res = await axios.post(`${url}/remove-bg`, imageBuffer, {
-    headers: { "Content-Type": "application/octet-stream" },
-    responseType: "arraybuffer",
-    timeout: 30_000,
-  });
-  // Composite over white background so CLIP doesn't see transparency artifacts
-  const pngWithAlpha = Buffer.from(res.data);
-  return sharp(pngWithAlpha)
-    .flatten({ background: { r: 255, g: 255, b: 255 } })
-    .jpeg({ quality: 92 })
-    .toBuffer();
-}
-
-// ============================================================================
-// Background complexity scoring
-// ============================================================================
-
-/**
- * Samples corner and edge pixels to estimate how "complex" the background is.
- * Returns 0 for pure white studio shots, higher values for busy backgrounds.
- * Cheap — just a few pixel reads on a 64×64 downsample.
- */
-async function computeBgComplexityScore(imageBuffer: Buffer): Promise<number> {
-  try {
-    const { data, info } = await sharp(imageBuffer)
-      .resize(64, 64, { fit: "fill" })
-      .removeAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    const ch = info.channels as number;
-
-    // Sample corners + midpoints of each edge
-    const sampleCoords: [number, number][] = [
-      [0, 0],   [63, 0],  [0, 63],  [63, 63],
-      [31, 0],  [0, 31],  [63, 31], [31, 63],
-      [8, 8],   [55, 8],  [8, 55],  [55, 55],
-    ];
-
-    let totalDist = 0;
-    for (const [x, y] of sampleCoords) {
-      const idx = (y * 64 + x) * ch;
-      const r = data[idx] ?? 255;
-      const g = data[idx + 1] ?? 255;
-      const b = data[idx + 2] ?? 255;
-      // Euclidean distance from pure white
-      totalDist += Math.sqrt(
-        Math.pow(255 - r, 2) +
-        Math.pow(255 - g, 2) +
-        Math.pow(255 - b, 2)
-      );
-    }
-
-    return totalDist / sampleCoords.length;
-  } catch {
-    // If scoring fails, assume complex background → apply removal
-    return 999;
-  }
 }
 
 // ============================================================================
@@ -489,22 +428,13 @@ async function generateEmbeddings(
   cfg: ReindexConfig,
   sidecarAvailable: boolean
 ): Promise<EmbeddingResult> {
-  let processBuf = rawBuf;
-  let bgWasRemoved = false;
-
-  // ── Background removal decision ───────────────────────────────────────────
-  if (cfg.bgRemoval && sidecarAvailable && !cfg.noBgRemovalSidecar) {
-    const score = await computeBgComplexityScore(rawBuf);
-    if (score >= cfg.bgRemovalThreshold) {
-      try {
-        processBuf = await removeBackground(rawBuf);
-        bgWasRemoved = true;
-      } catch (err: any) {
-        console.warn(`    ⚠️  Product ${productId}: bg removal failed (${err.message}), using raw image`);
-        processBuf = rawBuf;
-      }
-    }
-  }
+  const prep = await preparePrimaryImageBufferForCatalogEmbedding(rawBuf, {
+    enableBgRemoval: Boolean(cfg.bgRemoval && sidecarAvailable && !cfg.noBgRemovalSidecar),
+    threshold: cfg.bgRemovalThreshold,
+    rembgTimeoutMs: 30_000,
+  });
+  const processBuf = prep.buffer;
+  const bgWasRemoved = prep.bgRemoved;
 
   // ── Garment buffer for garment-specific embedding ─────────────────────────
   // Use YOLO bounding box if available (real segmentation),

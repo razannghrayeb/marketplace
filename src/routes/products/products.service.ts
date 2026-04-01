@@ -385,12 +385,19 @@ function imageDualKnnFusionEnabled(): boolean {
   return v === "1" || v === "true";
 }
 
-/** HNSW ef_search for image kNN. Default 0 = omit (some clusters reject per-query ef_search). */
+/**
+ * HNSW ef_search for image kNN. Improves recall vs default index ef_search for hard self-match queries.
+ * Set SEARCH_IMAGE_EF_SEARCH=0 to omit (some managed clusters reject per-query ef_search).
+ */
 function imageKnnEfSearch(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_EF_SEARCH);
+  const rawEnv = process.env.SEARCH_IMAGE_EF_SEARCH;
+  if (rawEnv === undefined || String(rawEnv).trim() === "") {
+    return 128;
+  }
+  const raw = Number(rawEnv);
   if (Number.isFinite(raw) && raw === 0) return 0;
   if (Number.isFinite(raw) && raw > 0) return Math.max(64, Math.min(512, Math.floor(raw)));
-  return 0;
+  return 128;
 }
 
 function knnQueryInner(vector: number[], k: number, ef: number): Record<string, unknown> {
@@ -469,6 +476,21 @@ function imageVisualRescueAudienceMin(): number {
   const raw = Number(process.env.SEARCH_IMAGE_VISUAL_RESCUE_AUDIENCE_MIN);
   if (Number.isFinite(raw)) return Math.max(0, Math.min(1, raw));
   return 0.45;
+}
+
+/**
+ * Raw CLIP cosine (exact when SEARCH_IMAGE_EXACT_COSINE_RERANK=1) at/above this → treat as a near-duplicate:
+ * visual gate + sort + composite use **raw** cosine (not merchandise-bound), and `finalRelevance01` is floored.
+ * Stops aisle/YOLO/type binding from hiding the same catalog photo. Disable: SEARCH_IMAGE_NEAR_IDENTICAL_RAW_MIN=0
+ */
+function imageSearchNearIdenticalRawCosineMin(): number {
+  const raw = process.env.SEARCH_IMAGE_NEAR_IDENTICAL_RAW_MIN;
+  if (raw === undefined || String(raw).trim() === "") return 0.87;
+  const s = String(raw).toLowerCase().trim();
+  if (s === "0" || s === "off" || s === "false") return Number.POSITIVE_INFINITY;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0.87;
+  return Math.max(0.55, Math.min(0.999, n));
 }
 
 function imageKnnTimeoutMs(): number {
@@ -1140,6 +1162,8 @@ export async function searchByImageWithSimilarity(
       hasTextTypeIntent,
   };
 
+  const nearIdenticalRawMin = imageSearchNearIdenticalRawCosineMin();
+
   const complianceById = new Map<string, HitCompliance>();
   const colorByHitId = new Map<string, string | null>();
   for (const hit of baseCandidates) {
@@ -1163,6 +1187,11 @@ export async function searchByImageWithSimilarity(
       merchAlignmentById.set(idStr, 1);
       continue;
     }
+    if (raw >= nearIdenticalRawMin) {
+      merchandiseSimById.set(idStr, raw);
+      merchAlignmentById.set(idStr, 1);
+      continue;
+    }
     const comp = complianceById.get(idStr);
     const m = merchandiseVisualSimilarity01({
       rawClip01: raw,
@@ -1177,13 +1206,31 @@ export async function searchByImageWithSimilarity(
     merchAlignmentById.set(idStr, m.alignmentFactor);
   }
 
-  const passesImageSimilarityThreshold = (hit: any, thresh: number): boolean =>
-    (merchandiseSimById.get(String(hit._source.product_id)) ?? visualSimFromHit(hit)) >= thresh;
+  for (const hit of baseCandidates) {
+    const raw = visualSimFromHit(hit);
+    if (raw < nearIdenticalRawMin) continue;
+    const idStr = String(hit._source.product_id);
+    const comp = complianceById.get(idStr);
+    if (comp) {
+      comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, raw));
+      comp.osSimilarity01 = Math.max(comp.osSimilarity01 ?? 0, raw);
+    }
+  }
 
-  const rankedVisualForSort = (hit: any): number =>
-    useMerchSim
-      ? (merchandiseSimById.get(String(hit._source.product_id)) ?? visualSimFromHit(hit))
-      : visualSimFromHit(hit);
+  const passesImageSimilarityThreshold = (hit: any, thresh: number): boolean => {
+    const raw = visualSimFromHit(hit);
+    const eff =
+      raw >= nearIdenticalRawMin ? raw : (merchandiseSimById.get(String(hit._source.product_id)) ?? raw);
+    return eff >= thresh;
+  };
+
+  const rankedVisualForSort = (hit: any): number => {
+    const raw = visualSimFromHit(hit);
+    if (raw >= nearIdenticalRawMin) return raw;
+    return useMerchSim
+      ? (merchandiseSimById.get(String(hit._source.product_id)) ?? raw)
+      : raw;
+  };
 
   // After compliance + merchandise sim: composite tie-break uses the same catalog-bound visual
   // as the gate and visual-first sort (not raw CLIP alone).

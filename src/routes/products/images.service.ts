@@ -139,10 +139,13 @@ export async function uploadProductImage(
   const key = generateImageKey(buffer, contentType.includes("png") ? ".png" : ".jpg");
   const { cdnUrl } = await uploadImage(buffer, key, contentType);
 
+  const { prepareBufferForPrimaryCatalogEmbedding } = await import("../../lib/image/embeddingPrep");
+  const { buffer: clipBuf } = await prepareBufferForPrimaryCatalogEmbedding(buffer);
+
   // Compute both embeddings and pHash in parallel (embedding_garment for kNN on garment ROI)
   const [embedding, garmentEmbedding, pHash] = await Promise.all([
-    processImageForEmbedding(buffer),
-    processImageForGarmentEmbedding(buffer).catch(() => null),
+    processImageForEmbedding(clipBuf),
+    processImageForGarmentEmbedding(clipBuf).catch(() => null),
     computePHash(buffer),
   ]);
 
@@ -443,6 +446,9 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
       }
 
       if (buffer) {
+        const { prepareBufferForPrimaryCatalogEmbedding } = await import("../../lib/image/embeddingPrep");
+        const { buffer: clipBuf } = await prepareBufferForPrimaryCatalogEmbedding(buffer);
+
         const { processImageForEmbedding, processImageForGarmentEmbedding } = await import(
           "../../lib/image/processor"
         );
@@ -472,10 +478,10 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
           garmentBox = null;
         }
 
-        // Use processImageForGarmentEmbedding (no box) to match query-time preprocessing
+        // Garment colors from original pixels; CLIP from catalog-aligned buffer (matches search + reindex)
         const [embedding, embeddingGarment, garmentAnalysis] = await Promise.all([
-          processImageForEmbedding(buffer),
-          processImageForGarmentEmbedding(buffer).catch(() => null as unknown as number[]),
+          processImageForEmbedding(clipBuf),
+          processImageForGarmentEmbedding(clipBuf).catch(() => null as unknown as number[]),
           extractGarmentFashionColors(buffer, { box: garmentBox }).catch(() => null),
         ]);
         // Update DB for this image row and include in document

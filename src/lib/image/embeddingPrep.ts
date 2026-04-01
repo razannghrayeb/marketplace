@@ -1,7 +1,10 @@
 /**
- * Align query-time image bytes with catalog indexing (`resume-reindex` / bulk embed).
- * Root issue addressed: primary CLIP vectors must see the same pixels as indexed docs
- * (conditional background removal on busy scenes), not a mix of raw vs cleaned.
+ * Catalog vs image-search query preparation before CLIP (`processImageForEmbedding`).
+ *
+ * - **Catalog** (`prepareBufferForPrimaryCatalogEmbedding`, reindex/upload/backfill): conditional
+ *   rembg on busy backgrounds (matches `resume-reindex` defaults).
+ * - **Image search** (`prepareBufferForImageSearchQuery`): default **always** rembg when sidecar is
+ *   up, so user photos resemble cutout catalog embeddings.
  */
 import sharpLib from "sharp";
 const sharp = typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
@@ -31,7 +34,7 @@ async function isRembgAvailable(): Promise<boolean> {
   return rembgHealthy;
 }
 
-/** Samples corners/edges (64²) — same heuristic as `scripts/resume-reindex.ts`. */
+/** Samples corners/edges (64²) — shared with `scripts/resume-reindex.ts`. */
 export async function computeBgComplexityScore(imageBuffer: Buffer): Promise<number> {
   try {
     const { data, info } = await sharp(imageBuffer)
@@ -71,7 +74,7 @@ export async function computeBgComplexityScore(imageBuffer: Buffer): Promise<num
   }
 }
 
-function bgRemovalThreshold(): number {
+export function catalogBgRemovalThresholdFromEnv(): number {
   const raw = Number(process.env.SEARCH_IMAGE_BG_REMOVAL_THRESHOLD ?? "35");
   return Number.isFinite(raw) ? Math.max(0, Math.min(200, raw)) : 35;
 }
@@ -83,13 +86,16 @@ function rembgIndexTimeoutMs(): number {
 }
 
 /**
- * Remove background using the same flatten-to-JPEG output as indexing (matches `resume-reindex`).
+ * Remove background — flatten to white JPEG @ quality 92 (same as bulk reindex).
  */
-async function removeBackgroundCatalogAligned(imageBuffer: Buffer): Promise<Buffer | null> {
+async function removeBackgroundCatalogAligned(
+  imageBuffer: Buffer,
+  timeoutMs: number,
+): Promise<Buffer | null> {
   if (!(await isRembgAvailable())) return null;
   try {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), rembgIndexTimeoutMs());
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     const res = await fetch(`${rembgUrl()}/remove-bg`, {
       method: "POST",
       headers: { "Content-Type": "application/octet-stream" },
@@ -110,35 +116,87 @@ async function removeBackgroundCatalogAligned(imageBuffer: Buffer): Promise<Buff
 
 export interface PrepareBufferResult {
   buffer: Buffer;
-  /** True when rembg ran successfully and replaced the input. */
   bgRemoved: boolean;
 }
 
+export interface CatalogImagePrepOptions {
+  /** When false, input is passed through (no rembg). */
+  enableBgRemoval: boolean;
+  /** Run rembg when `computeBgComplexityScore` >= threshold. */
+  threshold: number;
+  rembgTimeoutMs: number;
+}
+
 /**
- * Prepare raw upload bytes the same way bulk indexing prepares `processBuf` before
- * `processImageForEmbedding` (conditional rembg on visually complex backgrounds).
- *
- * Default **off**: most live index updates use raw CDN bytes (`updateProductIndex`), not
- * bulk reindex rembg. Turning this on without a fully aligned index hurts similarity.
- * Set `SEARCH_IMAGE_BG_REMOVAL=1` only when your OpenSearch docs were built with the
- * same conditional rembg as `scripts/resume-reindex.ts`.
+ * Explicit-options entry point (used by `resume-reindex` and tests).
+ * Upload/backfill use `prepareBufferForPrimaryCatalogEmbedding` (env-driven).
  */
-export async function prepareBufferForPrimaryCatalogEmbedding(
+export async function preparePrimaryImageBufferForCatalogEmbedding(
   rawBuffer: Buffer,
+  options: CatalogImagePrepOptions,
 ): Promise<PrepareBufferResult> {
-  const disabled =
-    String(process.env.SEARCH_IMAGE_BG_REMOVAL ?? "0").toLowerCase() === "0" ||
-    String(process.env.SEARCH_IMAGE_BG_REMOVAL ?? "0").toLowerCase() === "false";
-  if (disabled) {
+  if (!options.enableBgRemoval) {
     return { buffer: rawBuffer, bgRemoved: false };
   }
 
   const score = await computeBgComplexityScore(rawBuffer);
-  if (score < bgRemovalThreshold()) {
+  if (score < options.threshold) {
     return { buffer: rawBuffer, bgRemoved: false };
   }
 
-  const cleaned = await removeBackgroundCatalogAligned(rawBuffer);
+  const cleaned = await removeBackgroundCatalogAligned(rawBuffer, options.rembgTimeoutMs);
+  if (cleaned && cleaned.length > 0) {
+    return { buffer: cleaned, bgRemoved: true };
+  }
+  return { buffer: rawBuffer, bgRemoved: false };
+}
+
+/**
+ * Env-driven preparation for API paths (image search, upload, OpenSearch backfill).
+ *
+ * Default **on** (`SEARCH_IMAGE_BG_REMOVAL=1`): matches `scripts/resume-reindex.ts` default
+ * (`bgRemoval: true`). Set `SEARCH_IMAGE_BG_REMOVAL=0` only if every indexed document was
+ * built with `--no-bg-removal` (raw pixels only).
+ */
+export async function prepareBufferForPrimaryCatalogEmbedding(
+  rawBuffer: Buffer,
+): Promise<PrepareBufferResult> {
+  const flag = String(process.env.SEARCH_IMAGE_BG_REMOVAL ?? "1").toLowerCase().trim();
+  const disabled = flag === "0" || flag === "false" || flag === "off";
+  if (disabled) {
+    return { buffer: rawBuffer, bgRemoved: false };
+  }
+
+  return preparePrimaryImageBufferForCatalogEmbedding(rawBuffer, {
+    enableBgRemoval: true,
+    threshold: catalogBgRemovalThresholdFromEnv(),
+    rembgTimeoutMs: rembgIndexTimeoutMs(),
+  });
+}
+
+/**
+ * Query-time prep for `POST /products/search/image` (and facade image search).
+ *
+ * - **`always`** (default): if rembg sidecar is healthy, always remove background (then flatten
+ *   to white JPEG like indexing). Matches embedded catalog style for user street/room photos.
+ * - **`conditional`**: same heuristic as catalog (`SEARCH_IMAGE_BG_REMOVAL` + complexity threshold).
+ * - **`off`**: raw bytes.
+ */
+export async function prepareBufferForImageSearchQuery(
+  rawBuffer: Buffer,
+): Promise<PrepareBufferResult> {
+  const mode = String(process.env.SEARCH_IMAGE_QUERY_REMBG ?? "always").toLowerCase().trim();
+
+  if (mode === "off" || mode === "0" || mode === "false") {
+    return { buffer: rawBuffer, bgRemoved: false };
+  }
+
+  if (mode === "conditional" || mode === "catalog") {
+    return prepareBufferForPrimaryCatalogEmbedding(rawBuffer);
+  }
+
+  // always (default) — try rembg whenever sidecar is up
+  const cleaned = await removeBackgroundCatalogAligned(rawBuffer, rembgIndexTimeoutMs());
   if (cleaned && cleaned.length > 0) {
     return { buffer: cleaned, bgRemoved: true };
   }

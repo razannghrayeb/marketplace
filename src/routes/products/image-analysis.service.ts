@@ -38,6 +38,7 @@ import {
   type SegmentationMask,
 } from "../../lib/image/yolov8Client";
 import { isYoloCircuitOpenError } from "../../lib/image/yoloCircuitBreaker";
+import { prepareBufferForImageSearchQuery } from "../../lib/image/embeddingPrep";
 import { searchByImageWithSimilarity } from "./search.service";
 import { ProductResult } from "./types";
 import sharpLib from "sharp";
@@ -761,6 +762,16 @@ export class ImageAnalysisService {
   }
 
   /**
+   * Aligns shop-the-look CLIP input with `POST /products/search/image` (default: always rembg when sidecar up).
+   * Passing raw `processImageForEmbedding` vectors into `searchByImageWithSimilarity` bypasses the facade prep
+   * when both `imageEmbedding` and `imageBuffer` are set — embeddings must be computed on this buffer.
+   */
+  private async prepareShopTheLookClipBuffer(regionBuffer: Buffer): Promise<Buffer> {
+    const { buffer } = await prepareBufferForImageSearchQuery(regionBuffer);
+    return buffer;
+  }
+
+  /**
    * Check which services are available
    */
   async getServiceStatus(): Promise<{
@@ -1075,7 +1086,9 @@ export class ImageAnalysisService {
     if (!analysisResult.detection || analysisResult.detection.items.length === 0) {
       const fallbackDetection = syntheticFullImageDetectionBlock(imageWidth, imageHeight);
       const fallbackDetectedCategories = [...new Set(fallbackDetection.items.map((item) => item.label))];
-      if (!analysisResult.embedding) {
+      const fullClipBuffer = await this.prepareShopTheLookClipBuffer(buffer);
+      const fallbackEmbedding = await processImageForEmbedding(fullClipBuffer).catch(() => null);
+      if (!fallbackEmbedding || fallbackEmbedding.length === 0) {
         return {
           ...analysisResult,
           detection: fallbackDetection,
@@ -1083,8 +1096,8 @@ export class ImageAnalysisService {
         };
       }
       const fallback = await searchByImageWithSimilarity({
-        imageEmbedding: analysisResult.embedding,
-        imageBuffer: buffer,
+        imageEmbedding: fallbackEmbedding,
+        imageBuffer: fullClipBuffer,
         filters: {},
         limit: similarLimitPerItem,
         similarityThreshold,
@@ -1171,12 +1184,14 @@ export class ImageAnalysisService {
       }
       if (!croppedBuffer) return null;
 
+      const clipBuffer = await this.prepareShopTheLookClipBuffer(croppedBuffer);
+
       // Detection crops are already tightly cropped to the garment region via
       // YOLO bounding box.  Applying `processImageForGarmentEmbedding` (which adds
       // a *second* center crop) discards garment edges and degrades similarity.
       // Use processImageForEmbedding for both global and "garment" vectors; the
-      // crop IS the garment.
-      const finalEmbedding = await processImageForEmbedding(croppedBuffer);
+      // crop IS the garment. CLIP bytes must go through the same query prep as single-image search.
+      const finalEmbedding = await processImageForEmbedding(clipBuffer);
       const finalGarmentEmbedding = finalEmbedding;
 
       const categoryMapping = mapDetectionToCategory(label, detection.confidence);
@@ -1290,7 +1305,7 @@ export class ImageAnalysisService {
           Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
             ? finalGarmentEmbedding
             : undefined,
-        imageBuffer: croppedBuffer,
+        imageBuffer: clipBuffer,
         filters,
         limit: similarLimitPerItem,
         similarityThreshold,
@@ -1323,7 +1338,7 @@ export class ImageAnalysisService {
         delete (filtersRetry as any).softColor;
         similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
-          imageBuffer: croppedBuffer,
+          imageBuffer: clipBuffer,
           filters: filtersRetry,
           limit: similarLimitPerItem,
           similarityThreshold,
@@ -1347,7 +1362,7 @@ export class ImageAnalysisService {
         };
         similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
-          imageBuffer: croppedBuffer,
+          imageBuffer: clipBuffer,
           filters: filtersSansCategory,
           limit: similarLimitPerItem,
           similarityThreshold,
@@ -1360,7 +1375,7 @@ export class ImageAnalysisService {
         if (similarResult.results.length === 0) {
           similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalEmbedding,
-            imageBuffer: croppedBuffer,
+            imageBuffer: clipBuffer,
             filters: {},
             limit: similarLimitPerItem,
             similarityThreshold,
@@ -1741,9 +1756,11 @@ export class ImageAnalysisService {
         );
         if (!croppedBuffer) continue;
 
+        const clipBuffer = await this.prepareShopTheLookClipBuffer(croppedBuffer);
+
         // Detection crops are already tightly cropped; skip the redundant
         // center crop in processImageForGarmentEmbedding.
-        const finalEmbedding = await processImageForEmbedding(croppedBuffer);
+        const finalEmbedding = await processImageForEmbedding(clipBuffer);
         const finalGarmentEmbedding = finalEmbedding;
 
         // Get category from user hint or detection
@@ -1819,7 +1836,7 @@ export class ImageAnalysisService {
             Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
               ? finalGarmentEmbedding
               : undefined,
-          imageBuffer: croppedBuffer,
+          imageBuffer: clipBuffer,
           filters,
           limit: resolveShopLookLimit(options.similarLimitPerItem),
           similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
@@ -1850,7 +1867,7 @@ export class ImageAnalysisService {
           delete (filtersRetry as any).softColor;
           similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalEmbedding,
-            imageBuffer: croppedBuffer,
+            imageBuffer: clipBuffer,
             filters: filtersRetry,
             limit: resolveShopLookLimit(options.similarLimitPerItem),
             similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
@@ -1874,7 +1891,7 @@ export class ImageAnalysisService {
           };
           similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalEmbedding,
-            imageBuffer: croppedBuffer,
+            imageBuffer: clipBuffer,
             filters: filtersSansCategory,
             limit: resolveShopLookLimit(options.similarLimitPerItem),
             similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
@@ -1886,7 +1903,7 @@ export class ImageAnalysisService {
           if (similarResult.results.length === 0) {
             similarResult = await searchByImageWithSimilarity({
               imageEmbedding: finalEmbedding,
-              imageBuffer: croppedBuffer,
+              imageBuffer: clipBuffer,
               filters: {},
               limit: resolveShopLookLimit(options.similarLimitPerItem),
               similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
