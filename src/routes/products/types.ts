@@ -188,6 +188,8 @@ export interface SearchResultWithRelated {
     relevance_gate_soft?: boolean;
     /** Image kNN: strict similarity gate removed all hits; best candidates returned anyway (relaxThresholdWhenEmpty). */
     threshold_relaxed?: boolean;
+    /** Image kNN: returned best available neighbors after visual/relevance gates would have produced zero results. */
+    image_search_pipeline_degraded?: boolean;
     /** OpenSearch kNN field used for retrieval (`embedding` | `embedding_garment`). */
     image_knn_field?: string;
     recall_size?: number;

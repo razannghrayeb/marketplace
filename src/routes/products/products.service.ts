@@ -682,8 +682,9 @@ export async function searchByImageWithSimilarity(
       : null;
 
   // Build filter array
+  // Use must_not is_hidden:true so docs **without** the field still match (term:false excludes missing).
   const filter: any[] = [
-    { term: { is_hidden: false } },
+    { bool: { must_not: [{ term: { is_hidden: true } }] } },
     {
       bool: {
         must_not: [
@@ -1359,15 +1360,63 @@ export async function searchByImageWithSimilarity(
     }
   }
 
+  const acceptMinImage = config.search.finalAcceptMinImage;
+  /** When strict CLIP threshold + merchandise binding drop every hit, keep best raw-visual neighbors (always on). */
+  let imageSearchPipelineDegraded = false;
+  if (visualGatedHits.length === 0 && rankedHitsCandidates.length > 0) {
+    imageSearchPipelineDegraded = true;
+    thresholdRelaxed = true;
+    const relFloor = imageRelaxSimilarityFloor();
+    let pool = rankedHitsCandidates.filter((h: any) => visualSimFromHit(h) >= relFloor);
+    if (pool.length === 0) {
+      pool = rankedHitsCandidates.filter((h: any) => visualSimFromHit(h) >= 0.2);
+    }
+    if (pool.length === 0) {
+      pool = [...rankedHitsCandidates]
+        .sort((a: any, b: any) => visualSimFromHit(b) - visualSimFromHit(a))
+        .slice(0, Math.max(limit, 20));
+    }
+    visualGatedHits = pool;
+    for (const h of visualGatedHits) {
+      const idStr = String(h._source.product_id);
+      const comp = complianceById.get(idStr);
+      if (comp) {
+        const v = visualSimFromHit(h);
+        comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, Math.max(v, acceptMinImage)));
+        comp.osSimilarity01 = Math.max(comp.osSimilarity01 ?? 0, v);
+      }
+    }
+  }
+
   /** True when reranked candidates exist but visual gate removed all (without relaxation). */
   const belowRelevanceThreshold =
     rankedHitsCandidates.length > 0 && thresholdPassedByVisual.length === 0 && !thresholdRelaxed;
 
-  const finalAcceptMin = config.search.finalAcceptMinImage;
+  const finalAcceptMin = acceptMinImage;
   let effectiveFinalAcceptMin = finalAcceptMin;
   let rankedHits = visualGatedHits.filter(
     (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= effectiveFinalAcceptMin,
   );
+
+  if (rankedHits.length === 0 && visualGatedHits.length > 0) {
+    imageSearchPipelineDegraded = true;
+    for (const h of visualGatedHits) {
+      const comp = complianceById.get(String(h._source.product_id));
+      if (comp) {
+        comp.finalRelevance01 = Math.max(comp.finalRelevance01 ?? 0, effectiveFinalAcceptMin);
+      }
+    }
+    rankedHits = visualGatedHits.filter(
+      (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= effectiveFinalAcceptMin,
+    );
+    if (rankedHits.length === 0) {
+      rankedHits = visualGatedHits.slice(0, Math.max(limit, 20));
+      for (const h of rankedHits) {
+        const comp = complianceById.get(String(h._source.product_id));
+        if (comp) comp.finalRelevance01 = effectiveFinalAcceptMin;
+      }
+    }
+  }
 
   // Keep a small high-visual slice even when metadata-based relevance is noisy.
   // This prevents true visual neighbors (including the same catalog item) from being
@@ -1549,10 +1598,23 @@ export async function searchByImageWithSimilarity(
   }
   const countAfterHydration = results.length;
 
+  const resultsBeforeFinalRelevanceFilter = results;
   results = results.filter(
     (p: any) =>
       typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalAcceptMin,
   ) as ProductResult[];
+  if (results.length === 0 && resultsBeforeFinalRelevanceFilter.length > 0) {
+    imageSearchPipelineDegraded = true;
+    results = resultsBeforeFinalRelevanceFilter
+      .map((p: any) => ({
+        ...p,
+        finalRelevance01: Math.max(
+          typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : 0,
+          effectiveFinalAcceptMin,
+        ),
+      }))
+      .slice(0, limit) as ProductResult[];
+  }
   if (imageSearchVisualPrimaryRanking) {
     results.sort((a: any, b: any) => {
       const vs = (b.similarity_score ?? 0) - (a.similarity_score ?? 0);
@@ -1685,6 +1747,7 @@ export async function searchByImageWithSimilarity(
       image_similarity_threshold_used: similarityThreshold,
       threshold_relaxed: thresholdRelaxed,
       relax_floor_used: relaxFloorUsed,
+      image_search_pipeline_degraded: imageSearchPipelineDegraded,
     });
   }
 
@@ -1695,6 +1758,7 @@ export async function searchByImageWithSimilarity(
       threshold: similarityThreshold,
       total_results: results.length,
       total_related: related.length,
+      image_search_pipeline_degraded: imageSearchPipelineDegraded,
       below_relevance_threshold: belowRelevanceThreshold,
       threshold_relaxed: thresholdRelaxed,
       final_accept_min: config.search.finalAcceptMinImage,
