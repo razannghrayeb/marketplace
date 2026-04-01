@@ -39,6 +39,7 @@ import {
   type HitCompliance,
   type SearchHitRelevanceIntent,
 } from "../../lib/search/searchHitRelevance";
+import { merchandiseVisualSimilarity01 } from "../../lib/search/merchandiseVisualSimilarity";
 import {
   extractFashionTypeNounTokens,
   extractLexicalProductTypeSeeds,
@@ -247,6 +248,40 @@ function imageGenderSoftEnv(): boolean {
 function forceStrictInferredTypeIntentEnv(): boolean {
   const v = String(process.env.SEARCH_IMAGE_FORCE_STRICT_INFERRED_TYPE_INTENT ?? "").toLowerCase();
   return v === "1" || v === "true";
+}
+
+/**
+ * When on (default), image search `similarity_score` and the visual gate use **catalog-bound**
+ * similarity (CLIP cosine × type/category alignment), not raw embedding cosine alone.
+ * Set `SEARCH_IMAGE_MERCHANDISE_SIMILARITY=0` to restore legacy raw-cosine behavior.
+ */
+function imageMerchandiseSimilarityBindingEnabled(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_MERCHANDISE_SIMILARITY ?? "1").toLowerCase();
+  return v !== "0" && v !== "false";
+}
+
+/**
+ * How many kNN neighbors to retrieve and run through relevance/merchandise binding.
+ * With catalog-bound similarity, strong matches can sit below mediocre raw-CLIP neighbors; a wider
+ * pool improves recall before the final resort (capped for latency). Legacy path stays at 500 max.
+ */
+function imageSearchKnnPoolLimit(): number {
+  const envK = Number(process.env.SEARCH_IMAGE_RETRIEVAL_K);
+  const baseFromEnv =
+    Number.isFinite(envK) && envK >= 200 ? Math.floor(envK) : 500;
+
+  if (!imageMerchandiseSimilarityBindingEnabled()) {
+    return Math.min(500, Math.max(200, baseFromEnv));
+  }
+
+  const merchCapEnv = Number(process.env.SEARCH_IMAGE_MERCH_CANDIDATE_CAP);
+  const hardCap = 1200;
+  const defaultMerch = Math.min(hardCap, Math.max(700, baseFromEnv));
+  const cap =
+    Number.isFinite(merchCapEnv) && merchCapEnv >= 200
+      ? Math.min(hardCap, Math.floor(merchCapEnv))
+      : defaultMerch;
+  return Math.max(200, cap);
 }
 
 /** OpenSearch kNN field for image search: `embedding` (full-frame CLIP) or `embedding_garment` (garment-focused). */
@@ -606,9 +641,6 @@ export async function searchByImageWithSimilarity(
     String(process.env.SEARCH_DEBUG ?? "").toLowerCase() === "1" ||
     String(process.env.SEARCH_TRACE_BREAKDOWN ?? "").toLowerCase() === "1";
 
-  // Over-fetch so absolute threshold + later dedup still fill `limit` (cap raised for broader kNN recall).
-  const fetchLimit = Math.min(Math.max(limit * 5, 500), 500);
-
   const softCategory = forceHardCategoryFilter ? false : imageSoftCategoryEnv();
   const aisleHints = predictedCategoryAisles?.length
     ? predictedCategoryAisles
@@ -724,11 +756,8 @@ export async function searchByImageWithSimilarity(
     });
   }
 
-  /** Always retrieve via embedding; attribute fields used only for reranking. k=500 for broad catalog recall. */
-  const retrievalK = Math.min(
-    500,
-    Math.max(200, Number(process.env.SEARCH_IMAGE_RETRIEVAL_K) || 500),
-  );
+  /** kNN size — wider when SEARCH_IMAGE_MERCHANDISE_SIMILARITY is on (see imageSearchKnnPoolLimit). */
+  const retrievalK = imageSearchKnnPoolLimit();
 
   let colorQueryEmbedding: number[] | null = null;
   let styleQueryEmbedding: number[] | null = null;
@@ -939,10 +968,6 @@ export async function searchByImageWithSimilarity(
       ? hit._exactCosine01
       : knnCosinesimilScoreToCosine01(Number(hit._score));
 
-  /** Compare using exact cosine when available (same [0,1] scale as fusion). */
-  const passesImageSimilarityThreshold = (hit: any, thresh: number): boolean =>
-    visualSimFromHit(hit) >= thresh;
-
   const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
   const aisleSoftWeightBase = Math.max(
     0,
@@ -955,20 +980,14 @@ export async function searchByImageWithSimilarity(
   const hitsByKnnScore = [...hits].sort(
     (a: any, b: any) => visualSimFromHit(b) - visualSimFromHit(a),
   );
-  const hitsWithinFetch = hitsByKnnScore.slice(0, fetchLimit);
-  // Broad retrieval, then soft rerank (visual + category) within that visual slice, then gates.
-  const baseCandidates = hitsWithinFetch
-    .map((hit: any) => {
-      const visualSim = visualSimFromHit(hit);
-      const categorySoft =
-        useAisleRerank && !forceHardCategoryFilter
-          ? categorySoftScoreForHit(hit, desiredCatalogTerms)
-          : 0;
-      const softScore = visualSim * 1000 + categorySoft * aisleSoftWeight;
-      return { hit, softScore };
-    })
-    .sort((a, b) => b.softScore - a.softScore)
-    .map((x) => x.hit);
+  // Score at least max(limit*5, 500) when possible; cap by pool + actual hit count (redundant aisle pre-sort
+  // removed — sortedByRelevance + composite use catalog-bound visual after compliance).
+  const fetchLimit = Math.min(
+    retrievalK,
+    hitsByKnnScore.length,
+    Math.max(limit * 5, 500),
+  );
+  const baseCandidates = hitsByKnnScore.slice(0, fetchLimit);
 
   /** Per-hit soft signals for ranking + explain (visual + category + optional attribute embeddings). */
   const imageCompositeById = new Map<string, number>();
@@ -980,40 +999,6 @@ export async function searchByImageWithSimilarity(
   const wColor = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_COLOR_WEIGHT ?? "220") || 220);
   const wStyle = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_STYLE_WEIGHT ?? "60") || 60);
   const wPattern = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_PATTERN_WEIGHT ?? "40") || 40);
-
-  for (const hit of baseCandidates) {
-    const idStr = String(hit._source.product_id);
-    const visualSim = visualSimFromHit(hit);
-    const categorySoft =
-      useAisleRerank && !forceHardCategoryFilter
-        ? categorySoftScoreForHit(hit, desiredCatalogTerms)
-        : 0;
-
-    const colorSim = runColor
-      ? cosineSimilarity01(colorQueryEmbedding ?? undefined, hit._source?.embedding_color)
-      : 0;
-    const styleSim = runStyle
-      ? cosineSimilarity01(styleQueryEmbedding ?? undefined, hit._source?.embedding_style)
-      : 0;
-    const patternSim = runPattern
-      ? cosineSimilarity01(patternQueryEmbedding ?? undefined, hit._source?.embedding_pattern)
-      : 0;
-
-    styleSimById.set(idStr, Math.round(styleSim * 1000) / 1000);
-    colorSimById.set(idStr, Math.round(colorSim * 1000) / 1000);
-    patternSimById.set(idStr, Math.round(patternSim * 1000) / 1000);
-    taxonomyMatchById.set(idStr, categorySoft);
-
-    // Prevent color/style/pattern from overpowering poor visual matches.
-    // When visual similarity is low, attribute boosts are softened.
-    // Keep style/color impactful while still reducing dominance on weak visual matches.
-    const attrGate = 0.4 + 0.6 * visualSim;
-    const composite =
-      visualSim * 1000 +
-      (categorySoft * aisleSoftWeight + colorSim * wColor + styleSim * wStyle + patternSim * wPattern) *
-        attrGate;
-    imageCompositeById.set(idStr, composite);
-  }
 
   const crossFamilyPenaltyWeight = Math.max(
     0,
@@ -1124,8 +1109,8 @@ export async function searchByImageWithSimilarity(
 
   /**
    * When the user did not narrow the search (category / productTypes / text / explicit color),
-   * rank by raw visual similarity first so CLIP drives ordering — metadata relevance is
-   * tie-break and gating only (fixes “looks nothing like the image” from category boosts).
+   * rank by visual similarity first (catalog-bound when SEARCH_IMAGE_MERCHANDISE_SIMILARITY=1),
+   * then metadata relevance, then composite tie-break (composite uses the same bound visual).
    * Disable: SEARCH_IMAGE_RANK_VISUAL_FIRST=0
    */
   const imageSearchVisualPrimaryRanking = visualPrimaryBroad;
@@ -1167,12 +1152,78 @@ export async function searchByImageWithSimilarity(
     colorByHitId.set(idStr, primaryColor);
   }
 
+  const useMerchSim = imageMerchandiseSimilarityBindingEnabled();
+  const merchandiseSimById = new Map<string, number>();
+  const merchAlignmentById = new Map<string, number>();
+  for (const hit of baseCandidates) {
+    const idStr = String(hit._source.product_id);
+    const raw = visualSimFromHit(hit);
+    if (!useMerchSim) {
+      merchandiseSimById.set(idStr, raw);
+      merchAlignmentById.set(idStr, 1);
+      continue;
+    }
+    const comp = complianceById.get(idStr);
+    const m = merchandiseVisualSimilarity01({
+      rawClip01: raw,
+      productTypeCompliance: comp?.productTypeCompliance ?? 0,
+      categoryRelevance01: comp?.categoryRelevance01 ?? 0,
+      hasProductTypeSeeds: relevanceIntent.desiredProductTypes.length > 0,
+      hasStructuredCategoryHints:
+        (relevanceIntent.astCategories?.length ?? 0) > 0 ||
+        Boolean(relevanceIntent.mergedCategory),
+    });
+    merchandiseSimById.set(idStr, m.effective01);
+    merchAlignmentById.set(idStr, m.alignmentFactor);
+  }
+
+  const passesImageSimilarityThreshold = (hit: any, thresh: number): boolean =>
+    (merchandiseSimById.get(String(hit._source.product_id)) ?? visualSimFromHit(hit)) >= thresh;
+
+  const rankedVisualForSort = (hit: any): number =>
+    useMerchSim
+      ? (merchandiseSimById.get(String(hit._source.product_id)) ?? visualSimFromHit(hit))
+      : visualSimFromHit(hit);
+
+  // After compliance + merchandise sim: composite tie-break uses the same catalog-bound visual
+  // as the gate and visual-first sort (not raw CLIP alone).
+  for (const hit of baseCandidates) {
+    const idStr = String(hit._source.product_id);
+    const visualSim = merchandiseSimById.get(idStr) ?? visualSimFromHit(hit);
+    const categorySoft =
+      useAisleRerank && !forceHardCategoryFilter
+        ? categorySoftScoreForHit(hit, desiredCatalogTerms)
+        : 0;
+
+    const colorSim = runColor
+      ? cosineSimilarity01(colorQueryEmbedding ?? undefined, hit._source?.embedding_color)
+      : 0;
+    const styleSim = runStyle
+      ? cosineSimilarity01(styleQueryEmbedding ?? undefined, hit._source?.embedding_style)
+      : 0;
+    const patternSim = runPattern
+      ? cosineSimilarity01(patternQueryEmbedding ?? undefined, hit._source?.embedding_pattern)
+      : 0;
+
+    styleSimById.set(idStr, Math.round(styleSim * 1000) / 1000);
+    colorSimById.set(idStr, Math.round(colorSim * 1000) / 1000);
+    patternSimById.set(idStr, Math.round(patternSim * 1000) / 1000);
+    taxonomyMatchById.set(idStr, categorySoft);
+
+    const attrGate = 0.4 + 0.6 * visualSim;
+    const composite =
+      visualSim * 1000 +
+      (categorySoft * aisleSoftWeight + colorSim * wColor + styleSim * wStyle + patternSim * wPattern) *
+        attrGate;
+    imageCompositeById.set(idStr, composite);
+  }
+
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
     const idb = String(b._source.product_id);
     if (imageSearchVisualPrimaryRanking) {
-      const va = visualSimFromHit(a);
-      const vb = visualSimFromHit(b);
+      const va = rankedVisualForSort(a);
+      const vb = rankedVisualForSort(b);
       if (Math.abs(vb - va) > 1e-6) return vb - va;
     }
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
@@ -1355,8 +1406,9 @@ export async function searchByImageWithSimilarity(
   const productIds = hitsForHydrate.map((hit: any) => hit._source.product_id);
   const scoreMap = new Map<string, number>();
   hitsForHydrate.forEach((hit: any) => {
-    const sim = visualSimFromHit(hit);
-    scoreMap.set(String(hit._source.product_id), Math.round(sim * 100) / 100);
+    const id = String(hit._source.product_id);
+    const sim = merchandiseSimById.get(id) ?? visualSimFromHit(hit);
+    scoreMap.set(id, Math.round(sim * 100) / 100);
   });
 
   // Fetch product data
@@ -1410,6 +1462,9 @@ export async function searchByImageWithSimilarity(
               ...(compliance.lexicalScoreDistinct ? { lexicalScore: compliance.lexicalScore01 } : {}),
               semanticScore: compliance.semanticScore01,
               globalScore: compliance.osSimilarity01,
+              embedding_cosine_01: compliance.osSimilarity01,
+              merchandise_similarity_01: merchandiseSimById.get(idStr) ?? compliance.osSimilarity01,
+              catalog_similarity_alignment: merchAlignmentById.get(idStr) ?? 1,
               styleSim,
               colorSim,
               patternSim,
@@ -1576,6 +1631,8 @@ export async function searchByImageWithSimilarity(
       text_knn_mode: "none",
       recall_window: fetchLimit,
       candidate_k: fetchLimit,
+      knn_retrieval_k: retrievalK,
+      merchandise_similarity_binding: imageMerchandiseSimilarityBindingEnabled(),
       endpoint_limit: limit,
       limit_per_item: null,
       image_similarity_threshold_used: similarityThreshold,
