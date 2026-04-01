@@ -204,6 +204,8 @@ export interface SearchResultWithRelated {
       exact_cosine_rerank: boolean;
       /** True when parallel global + garment kNN were merged (max cosine). */
       dual_knn_fusion: boolean;
+      /** Unconstrained image search: order by CLIP similarity before metadata relevance. */
+      image_rank_visual_first: boolean;
       raw_open_search_hits: number;
       base_candidates: number;
       ranked_candidates: number;

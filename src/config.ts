@@ -212,13 +212,33 @@ export const config = {
      * When image search returns fewer than this many hits after the strict relevance gate,
      * widen the relevance floor once (still within visual-gated candidates). Default 0 = off (quality-first).
      */
-    imageSearchMinResults: finiteEnvNumber(process.env.SEARCH_IMAGE_MIN_RESULTS, 8, 0, 80),
+    imageSearchMinResults: finiteEnvNumber(process.env.SEARCH_IMAGE_MIN_RESULTS, 0, 0, 80),
     /** Subtracted from finalAcceptMinImage when sparse recall is enabled (floored at 0.45). */
     imageSearchRelevanceRelaxDelta: finiteEnvNumber(
       process.env.SEARCH_IMAGE_RELEVANCE_RELAX_DELTA,
       0.08,
       0.04,
       0.28,
+    ),
+    /**
+     * Floor for relevance when SEARCH_IMAGE_MIN_RESULTS widens the gate: max(finalAcceptMin * fraction, finalAcceptMin - delta).
+     * Higher = stricter (fewer weak metadata matches). Default 0.78 (was 0.6 in code).
+     */
+    imageSearchRelevanceRelaxMinFraction: finiteEnvNumber(
+      process.env.SEARCH_IMAGE_RELEVANCE_RELAX_MIN_FRACTION,
+      0.78,
+      0.55,
+      0.95,
+    ),
+    /**
+     * On broad image search (no category/type/color/text), multiply SEARCH_IMAGE_AISLE_SOFT_WEIGHT by this
+     * so YOLO/aisle hints do not reorder above stronger CLIP neighbors. Set 1 to disable reduction.
+     */
+    imageSearchVisualPrimaryAisleMult: finiteEnvNumber(
+      process.env.SEARCH_IMAGE_VISUAL_PRIMARY_AISLE_MULT,
+      0.52,
+      0.15,
+      1,
     ),
     /** Cap BLIP caption wait for POST /products/search/image (ms). */
     blipCaptionTimeoutMs: finiteEnvNumber(process.env.SEARCH_BLIP_CAPTION_TIMEOUT_MS, 900, 200, 8000),

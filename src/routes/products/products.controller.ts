@@ -11,7 +11,7 @@ import {
   validateImage,
   computePHash,
   processImageForEmbedding,
-  processImageForGarmentEmbedding,
+  computeImageSearchGarmentQueryEmbedding,
   blip,
 } from "../../lib/image/index";
 import { extractLexicalProductTypeSeeds } from "../../lib/search/productTypeTaxonomy";
@@ -185,7 +185,7 @@ export async function searchProductsByImage(req: Request, res: Response) {
 
       const [emb, garmentEmb, pHashResult] = await Promise.all([
         processImageForEmbedding(file.buffer),
-        processImageForGarmentEmbedding(file.buffer).catch(() => [] as number[]),
+        computeImageSearchGarmentQueryEmbedding(file.buffer).catch(() => [] as number[]),
         computePHash(file.buffer),
       ]);
       embedding = emb;

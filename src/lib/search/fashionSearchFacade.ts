@@ -21,7 +21,11 @@ import { textSearch as enhancedTextSearch } from "../../routes/search/search.ser
 import { searchByImageWithSimilarity as legacyImageSearch } from "../../routes/products/products.service";
 import { searchProductsFilteredBrowse } from "./filteredBrowseSearch";
 
-import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash } from "../image";
+import {
+  processImageForEmbedding,
+  computeImageSearchGarmentQueryEmbedding,
+  computePHash,
+} from "../image";
 import { tieredColorMatchScore } from "../color/colorCanonical";
 import { getYOLOv8Client } from "../image/yolov8Client";
 import {
@@ -318,7 +322,7 @@ export async function searchImage(
     bufForEmbedding?.length
   ) {
     try {
-      imageEmbeddingGarment = await processImageForGarmentEmbedding(bufForEmbedding);
+      imageEmbeddingGarment = await computeImageSearchGarmentQueryEmbedding(bufForEmbedding);
     } catch {
       imageEmbeddingGarment = undefined;
     }
@@ -327,10 +331,11 @@ export async function searchImage(
     imageEmbeddingGarment = undefined;
   }
 
-  // Compute pHash only when related-by-pHash is requested and we have raw bytes.
-  // Callers often pass only `imageEmbedding` (e.g. cropped regions); Sharp cannot hash undefined.
+  // When we have raw bytes but no caller-supplied hash, compute pHash once. Used for
+  // related-by-pHash, Postgres identity rescue (same catalog image), and self-search — not only when includeRelated is on.
+  // Callers that pass only `imageEmbedding` (no buffer) cannot be hashed here.
   let effectivePHash = pHash;
-  if (includeRelated && effectivePHash === undefined && imageBuffer && imageBuffer.length > 0) {
+  if (effectivePHash === undefined && imageBuffer && imageBuffer.length > 0) {
     try {
       effectivePHash = await computePHash(imageBuffer);
     } catch (e) {
