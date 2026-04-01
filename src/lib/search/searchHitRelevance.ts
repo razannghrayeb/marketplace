@@ -153,7 +153,7 @@ export function computeFinalRelevance01(params: {
 
 export function normalizeQueryGender(g: string | undefined): string | null {
   if (!g) return null;
-  const x = g.toLowerCase();
+  const x = g.toLowerCase().trim();
   if (x === "men" || x === "women" || x === "unisex") return x;
   return null;
 }
@@ -213,9 +213,17 @@ export function scoreAudienceCompliance(
   if (wantG) {
     factors += 1;
     if (!docG) {
-      if (wantG === "men" && /\b(men|mens|male)\b/.test(title)) score *= 0.9;
-      else if (wantG === "women" && /\b(women|womens|female|ladies)\b/.test(title)) score *= 0.9;
-      else score *= 0.78;
+      if (wantG === "men") {
+        if (/\b(men|mens|male)\b/.test(title)) score *= 0.9;
+        else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(title)) score *= 0.28;
+        else score *= 0.78;
+      } else if (wantG === "women") {
+        if (/\b(women|womens|female|ladies|woman)\b/.test(title)) score *= 0.9;
+        else if (/\b(men|mens|male|man|boy|boys)\b/.test(title)) score *= 0.28;
+        else score *= 0.78;
+      } else {
+        score *= 0.85;
+      }
     } else if (docG === "unisex" || docG === wantG) {
       score *= 1;
     } else {

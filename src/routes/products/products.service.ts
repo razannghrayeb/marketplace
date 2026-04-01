@@ -300,6 +300,24 @@ function imageRelaxSimilarityFloor(): number {
   return config.search.searchImageRelaxFloor;
 }
 
+function imageVisualRescueMinSimilarity(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_VISUAL_RESCUE_MIN_SIM);
+  if (Number.isFinite(raw)) return Math.max(0.45, Math.min(0.99, raw));
+  return 0.72;
+}
+
+function imageVisualRescueMaxCount(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_VISUAL_RESCUE_MAX_COUNT);
+  if (Number.isFinite(raw)) return Math.max(0, Math.min(40, Math.floor(raw)));
+  return 8;
+}
+
+function imageVisualRescueAudienceMin(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_VISUAL_RESCUE_AUDIENCE_MIN);
+  if (Number.isFinite(raw)) return Math.max(0, Math.min(1, raw));
+  return 0.45;
+}
+
 function imageKnnTimeoutMs(): number {
   const raw = Number(process.env.SEARCH_IMAGE_KNN_TIMEOUT_MS);
   if (Number.isFinite(raw) && raw >= 500) return Math.min(120_000, Math.floor(raw));
@@ -505,7 +523,7 @@ export async function searchByImageWithSimilarity(
   if (filters.vendorId) filter.push({ term: { vendor_id: String(filters.vendorId) } });
   const filtersAny = filters as { gender?: string; color?: string; softColor?: string; style?: string; softStyle?: string };
   if (filtersAny.gender) {
-    const g = String(filtersAny.gender).toLowerCase();
+    const g = String(filtersAny.gender).toLowerCase().trim();
     // For image-search we need to be resilient to occasional index attribute mistakes.
     // We therefore:
     // - allow either `attr_gender` match OR title keyword match for the desired gender
@@ -976,6 +994,37 @@ export async function searchByImageWithSimilarity(
   let rankedHits = visualGatedHits.filter(
     (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= effectiveFinalAcceptMin,
   );
+
+  // Keep a small high-visual slice even when metadata-based relevance is noisy.
+  // This prevents true visual neighbors (including the same catalog item) from being
+  // dropped solely due to weak/missing type/color fields.
+  const rescueMinSim = imageVisualRescueMinSimilarity();
+  const rescueMaxCount = imageVisualRescueMaxCount();
+  if (rescueMaxCount > 0) {
+    const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
+    const rescueAudienceMin = imageVisualRescueAudienceMin();
+    const rescue: any[] = visualGatedHits
+      .filter((h: any) => !existingIds.has(String(h._source.product_id)))
+      .map((h: any) => {
+        const id = String(h._source.product_id);
+        const visualSim = knnCosinesimilScoreToCosine01(Number(h._score));
+        const comp = complianceById.get(id);
+        const aud = comp?.audienceCompliance ?? 1;
+        return { h, visualSim, aud };
+      })
+      .filter(({ visualSim, aud }) => {
+        if (visualSim < rescueMinSim) return false;
+        if (hasAudienceIntentForRelevance && aud < rescueAudienceMin) return false;
+        return true;
+      })
+      .sort((a, b) => b.visualSim - a.visualSim)
+      .slice(0, rescueMaxCount)
+      .map((x) => x.h);
+    if (rescue.length > 0) {
+      rankedHits = [...rankedHits, ...rescue];
+    }
+  }
+
   let relevanceRelaxedForMinCount = false;
   const imageMinResultsTarget = config.search.imageSearchMinResults;
   const relevanceRelaxDelta = config.search.imageSearchRelevanceRelaxDelta;
