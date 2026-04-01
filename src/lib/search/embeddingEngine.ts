@@ -3,7 +3,7 @@
  * Route and service layers should not call low-level CLIP helpers directly for search flows.
  */
 
-import { processImageForEmbedding, processImageForGarmentEmbedding } from "../image";
+import { processImageForEmbedding, computeImageSearchGarmentQueryEmbedding } from "../image";
 import { attributeEmbeddings } from "./attributeEmbeddings";
 import { getOrComputeImageEmbedding } from "../cache/embeddingCache";
 import type { SemanticAttribute } from "./multiVectorSearch";
@@ -14,7 +14,7 @@ export async function generateGlobalEmbedding(image: Buffer): Promise<number[]> 
 }
 
 export async function generateGarmentRoiEmbedding(image: Buffer): Promise<number[]> {
-  return processImageForGarmentEmbedding(image);
+  return computeImageSearchGarmentQueryEmbedding(image);
 }
 
 export async function generateAttributeEmbedding(

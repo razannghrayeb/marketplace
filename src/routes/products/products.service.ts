@@ -258,6 +258,29 @@ function resolveImageSearchKnnField(explicit?: string): "embedding" | "embedding
 }
 
 /**
+ * Broad query: no category / productTypes / text / explicit color — CLIP should drive ordering
+ * (same conditions as SEARCH_IMAGE_RANK_VISUAL_FIRST).
+ */
+function isBroadImageSearchVisualPrimaryRanking(
+  filters: SearchFilters,
+  imageSearchTextQuery: string | undefined,
+): boolean {
+  const v = String(process.env.SEARCH_IMAGE_RANK_VISUAL_FIRST ?? "1").toLowerCase();
+  if (v === "0" || v === "false") return false;
+  const frec = filters as Record<string, unknown>;
+  const fcat = (filters as { category?: string | string[] }).category;
+  const explicitColor =
+    (Array.isArray(frec.colors) && frec.colors.length > 0) ||
+    (typeof frec.color === "string" && String(frec.color).trim().length > 0);
+  return (
+    fcat == null &&
+    !(Array.isArray(frec.productTypes) && frec.productTypes.length > 0) &&
+    !(typeof imageSearchTextQuery === "string" && imageSearchTextQuery.trim().length > 0) &&
+    !explicitColor
+  );
+}
+
+/**
  * Normalize OpenSearch kNN score to OpenSearch cosinesimil [0,1] scale.
  * - Modern OpenSearch returns `(1 + cosθ) / 2` in [0,1]
  * - Some legacy setups returned `1 + cosθ` in [0,2]
@@ -628,6 +651,7 @@ export async function searchByImageWithSimilarity(
   if (filters.brand) filter.push({ term: { brand: String(filters.brand).toLowerCase() } });
   if (filters.vendorId) filter.push({ term: { vendor_id: String(filters.vendorId) } });
   const filtersAny = filters as { gender?: string; color?: string; softColor?: string; style?: string; softStyle?: string };
+  const visualPrimaryBroad = isBroadImageSearchVisualPrimaryRanking(filters, imageSearchTextQuery);
   if (filtersAny.gender) {
     const g = String(filtersAny.gender).toLowerCase().trim();
     // For image-search we need to be resilient to occasional index attribute mistakes.
@@ -764,8 +788,8 @@ export async function searchByImageWithSimilarity(
     garmentQueryVector = imageEmbeddingGarment;
   } else if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
     try {
-      const { processImageForGarmentEmbedding } = await import("../../lib/image");
-      const out = await processImageForGarmentEmbedding(imageBuffer);
+      const { computeImageSearchGarmentQueryEmbedding } = await import("../../lib/image");
+      const out = await computeImageSearchGarmentQueryEmbedding(imageBuffer);
       if (out?.length === imageEmbedding.length) garmentQueryVector = out;
     } catch {
       garmentQueryVector = null;
@@ -920,10 +944,13 @@ export async function searchByImageWithSimilarity(
     visualSimFromHit(hit) >= thresh;
 
   const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
-  const aisleSoftWeight = Math.max(
+  const aisleSoftWeightBase = Math.max(
     0,
     Math.min(400, Number(process.env.SEARCH_IMAGE_AISLE_SOFT_WEIGHT ?? "130") || 130),
   );
+  const aisleSoftWeight =
+    aisleSoftWeightBase *
+    (visualPrimaryBroad ? config.search.imageSearchVisualPrimaryAisleMult : 1);
   // Re-sort by exact cosine when available; otherwise approximate kNN score (HNSW order can drift).
   const hitsByKnnScore = [...hits].sort(
     (a: any, b: any) => visualSimFromHit(b) - visualSimFromHit(a),
@@ -1095,6 +1122,14 @@ export async function searchByImageWithSimilarity(
 
   const softColorBiasOnly = !hasExplicitColorIntent && softColorsForRelevance.length > 0;
 
+  /**
+   * When the user did not narrow the search (category / productTypes / text / explicit color),
+   * rank by raw visual similarity first so CLIP drives ordering — metadata relevance is
+   * tie-break and gating only (fixes “looks nothing like the image” from category boosts).
+   * Disable: SEARCH_IMAGE_RANK_VISUAL_FIRST=0
+   */
+  const imageSearchVisualPrimaryRanking = visualPrimaryBroad;
+
   const relevanceIntent: SearchHitRelevanceIntent = {
     desiredProductTypes,
     desiredColors: desiredColorsForRelevance,
@@ -1135,6 +1170,11 @@ export async function searchByImageWithSimilarity(
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
     const idb = String(b._source.product_id);
+    if (imageSearchVisualPrimaryRanking) {
+      const va = visualSimFromHit(a);
+      const vb = visualSimFromHit(b);
+      if (Math.abs(vb - va) > 1e-6) return vb - va;
+    }
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
     const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
     if (Math.abs(fb - fa) > 1e-8) return fb - fa;
@@ -1269,7 +1309,11 @@ export async function searchByImageWithSimilarity(
     rankedHits.length < imageMinResultsTarget &&
     visualGatedHits.length > rankedHits.length
   ) {
-    const relaxedMin = Math.max(finalAcceptMin * 0.6, finalAcceptMin - relevanceRelaxDelta);
+    const relaxFloorFrac = config.search.imageSearchRelevanceRelaxMinFraction;
+    const relaxedMin = Math.max(
+      finalAcceptMin * relaxFloorFrac,
+      finalAcceptMin - relevanceRelaxDelta,
+    );
     if (relaxedMin < finalAcceptMin) {
       const expanded = visualGatedHits.filter(
         (h: any) =>
@@ -1407,7 +1451,15 @@ export async function searchByImageWithSimilarity(
     (p: any) =>
       typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalAcceptMin,
   ) as ProductResult[];
-  results.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
+  if (imageSearchVisualPrimaryRanking) {
+    results.sort((a: any, b: any) => {
+      const vs = (b.similarity_score ?? 0) - (a.similarity_score ?? 0);
+      if (Math.abs(vs) > 1e-6) return vs;
+      return (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0);
+    });
+  } else {
+    results.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
+  }
 
   const dedupedResults = dedupeImageSearchResults(results as any) as ProductResult[];
   const countAfterDedupe = dedupedResults.length;
@@ -1426,15 +1478,28 @@ export async function searchByImageWithSimilarity(
 
   // If the query image already exists in catalog (exact pHash match), make sure it is not
   // lost due to metadata/rerank gates. This is a strong identity signal.
+  // pHash is often stored on product_images (primary row) while products.p_hash is unset — union both.
   if (pHash && /^[0-9a-f]+$/i.test(pHash)) {
     const existing = new Set(results.map((p) => String(p.id)));
+    const hasIsHidden = await productsTableHasIsHiddenColumn();
+    const hiddenClause = hasIsHidden ? "AND p.is_hidden = false" : "";
+    const ph = String(pHash).toLowerCase();
     const exactPhashRows = await pg.query(
-      `SELECT id
-         FROM products
-        WHERE p_hash = $1
-          AND is_hidden = false
-        LIMIT 3`,
-      [String(pHash).toLowerCase()],
+      `SELECT id FROM (
+         SELECT p.id
+           FROM products p
+          WHERE LOWER(p.p_hash) = $1
+            ${hiddenClause}
+         UNION
+         SELECT p.id
+           FROM product_images pi
+           INNER JOIN products p ON p.id = pi.product_id
+          WHERE pi.p_hash IS NOT NULL
+            AND LOWER(pi.p_hash) = $1
+            ${hiddenClause}
+       ) x
+       LIMIT 10`,
+      [ph],
     );
     const rescueIds = (exactPhashRows.rows ?? [])
       .map((r: any) => String(r.id))
@@ -1496,6 +1561,7 @@ export async function searchByImageWithSimilarity(
       image_knn_field: knnFieldResolved,
       exact_cosine_rerank: exactCosineRerank,
       dual_knn_fusion: useDualKnn,
+      image_rank_visual_first: imageSearchVisualPrimaryRanking,
       raw_open_search_hits: rawOpenSearchHitCount,
       hits_after_final_accept_min: countAfterFinalAcceptMin,
       hits_after_dedupe: countAfterDedupe,
@@ -1537,6 +1603,7 @@ export async function searchByImageWithSimilarity(
       pipeline_counts: {
         exact_cosine_rerank: exactCosineRerank,
         dual_knn_fusion: useDualKnn,
+        image_rank_visual_first: imageSearchVisualPrimaryRanking,
         raw_open_search_hits: rawOpenSearchHitCount,
         base_candidates: baseCandidates.length,
         ranked_candidates: rankedHitsCandidates.length,

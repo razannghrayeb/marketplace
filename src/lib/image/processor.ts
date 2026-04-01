@@ -235,6 +235,60 @@ export async function processImageForGarmentEmbeddingWithOptionalBox(
 }
 
 /**
+ * Garment query vector for image search, aligned with `scripts/resume-reindex.ts` →
+ * `processImageForGarmentEmbeddingWithOptionalBox(raw, processBuf, garmentBox)`:
+ * - `processBuf` from `prepareBufferForPrimaryCatalogEmbedding` (conditional rembg vs index)
+ * - optional YOLO box on `processBuf` (confidence ≥ 0.45, largest area), same idea as stored `product_image_detections`
+ *
+ * **Why**: `processImageForGarmentEmbedding` (center crop only) does **not** match bulk-indexed
+ * `embedding_garment` when the index used YOLO crops — threshold tuning cannot fix that mismatch.
+ *
+ * Modes (`SEARCH_IMAGE_GARMENT_QUERY_MODE`):
+ * - `aligned` (default): rembg + optional YOLO, then `WithOptionalBox` (matches most `resume-reindex` docs)
+ * - `legacy`: `processImageForGarmentEmbedding` only (center crop; closest to **upload** path that never ran YOLO)
+ */
+export async function computeImageSearchGarmentQueryEmbedding(imageBuffer: Buffer): Promise<number[]> {
+  const mode = String(process.env.SEARCH_IMAGE_GARMENT_QUERY_MODE ?? "aligned").toLowerCase();
+  if (mode === "legacy" || mode === "center" || mode === "center_crop") {
+    return processImageForGarmentEmbedding(imageBuffer);
+  }
+
+  const { prepareBufferForPrimaryCatalogEmbedding } = await import("./embeddingPrep");
+  const { buffer: processBuf } = await prepareBufferForPrimaryCatalogEmbedding(imageBuffer);
+  const rawBuf = imageBuffer;
+
+  const useYolo = String(process.env.SEARCH_IMAGE_QUERY_GARMENT_USE_YOLO ?? "1").toLowerCase() !== "0";
+  let box: PixelBox | null = null;
+  if (useYolo) {
+    try {
+      const { getYOLOv8Client } = await import("./yolov8Client");
+      const yolo = getYOLOv8Client();
+      if (await yolo.isAvailable()) {
+        const res = await yolo.detectFromBuffer(processBuf, "query.jpg", { confidence: 0.45 });
+        const dets = (res.detections ?? []).filter((d) => (d.confidence ?? 0) >= 0.45);
+        if (dets.length > 0) {
+          const best = [...dets].sort((a, b) => (b.area_ratio ?? 0) - (a.area_ratio ?? 0))[0];
+          if (best?.box) {
+            box = {
+              x1: best.box.x1,
+              y1: best.box.y1,
+              x2: best.box.x2,
+              y2: best.box.y2,
+            };
+          }
+        }
+      }
+    } catch {
+      // no box — fall through to full-frame garment embed on processBuf
+    }
+  }
+
+  const emb = await processImageForGarmentEmbeddingWithOptionalBox(rawBuf, processBuf, box);
+  if (Array.isArray(emb) && emb.length > 0) return emb;
+  return processImageForGarmentEmbedding(imageBuffer);
+}
+
+/**
  * Validate image buffer
  */
 export async function validateImage(buffer: Buffer): Promise<{ valid: boolean; error?: string }> {
