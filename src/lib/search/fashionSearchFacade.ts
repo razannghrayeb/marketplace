@@ -21,7 +21,12 @@ import { textSearch as enhancedTextSearch } from "../../routes/search/search.ser
 import { searchByImageWithSimilarity as legacyImageSearch } from "../../routes/products/products.service";
 import { searchProductsFilteredBrowse } from "./filteredBrowseSearch";
 
-import { processImageForEmbedding, processImageForGarmentEmbedding, removeBackgroundForQuery, computePHash } from "../image";
+import {
+  processImageForEmbedding,
+  processImageForGarmentEmbedding,
+  computePHash,
+} from "../image";
+import { prepareBufferForPrimaryCatalogEmbedding } from "../image/embeddingPrep";
 import { tieredColorMatchScore } from "../color/colorCanonical";
 import { getYOLOv8Client } from "../image/yolov8Client";
 import {
@@ -69,6 +74,8 @@ export interface UnifiedImageSearchParams {
    */
   forceHardCategoryFilter?: boolean;
   relaxThresholdWhenEmpty?: boolean;
+  /** Caption/BLIP-derived type tokens — taxonomy soft signal only (see `searchByImageWithSimilarity`). */
+  softProductTypeHints?: string[];
 }
 
 function filterByFinalRelevance<T extends { finalRelevance01?: number }>(
@@ -278,6 +285,7 @@ export async function searchImage(
     knnField,
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty,
+    softProductTypeHints,
   } = params;
 
   if ((!imageEmbedding || imageEmbedding.length === 0) && !imageBuffer) {
@@ -286,28 +294,31 @@ export async function searchImage(
 
   const start = Date.now();
 
-  // Match index-time preprocessing: try background removal on user uploads so
-  // query embeddings occupy the same CLIP region as the rembg-cleaned catalog
-  // vectors. Falls back to raw image if the sidecar is unavailable or slow.
   const embeddingDerivedFromBufferOnly =
     Boolean(imageBuffer?.length) &&
     (!imageEmbedding || imageEmbedding.length === 0);
 
-  let cleanedBuffer: Buffer | undefined;
+  let bufForEmbedding: Buffer | undefined = imageBuffer;
   if (embeddingDerivedFromBufferOnly && imageBuffer?.length) {
-    cleanedBuffer = (await removeBackgroundForQuery(imageBuffer)) ?? undefined;
+    const { buffer } = await prepareBufferForPrimaryCatalogEmbedding(imageBuffer);
+    bufForEmbedding = buffer;
   }
-  const bufForEmbedding = cleanedBuffer ?? imageBuffer;
 
   const embedding =
     imageEmbedding && imageEmbedding.length > 0
       ? imageEmbedding
       : await processImageForEmbedding(bufForEmbedding!);
 
+  const inferAislesEnv = () => {
+    const v = String(process.env.SEARCH_IMAGE_INFER_YOLO_AISLES ?? "0").toLowerCase();
+    return v === "1" || v === "true";
+  };
   const derivedAisleHints =
     predictedCategoryAisles && predictedCategoryAisles.length > 0
       ? predictedCategoryAisles
-      : await inferPredictedCategoryAislesFromImage(imageBuffer);
+      : inferAislesEnv() && imageBuffer
+        ? await inferPredictedCategoryAislesFromImage(imageBuffer)
+        : undefined;
 
   let imageEmbeddingGarment: number[] | undefined = garmentFromCaller;
   if (
@@ -351,6 +362,7 @@ export async function searchImage(
     knnField,
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty: relaxThresholdWhenEmpty ?? false,
+    softProductTypeHints,
   } as any);
 
   const metaAny = res.meta as Record<string, unknown> | undefined;

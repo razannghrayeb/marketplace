@@ -40,6 +40,11 @@ export {
   initImageProcessing,
 } from "./processor";
 
+export {
+  prepareBufferForPrimaryCatalogEmbedding,
+  computeBgComplexityScore,
+} from "./embeddingPrep";
+
 // R2 storage
 export {
   r2Client,

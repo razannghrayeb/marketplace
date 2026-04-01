@@ -108,6 +108,11 @@ export interface ImageSearchParams extends SearchParams {
   forceHardCategoryFilter?: boolean;
   /** Return best kNN hits when none pass similarityThreshold (Shop-the-Look). */
   relaxThresholdWhenEmpty?: boolean;
+  /**
+   * BLIP / caption-derived product-type tokens: affect taxonomy scoring only.
+   * Must not be treated as explicit user filters (would enable strict type gates).
+   */
+  softProductTypeHints?: string[];
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -473,6 +478,7 @@ export async function searchByImageWithSimilarity(
     /** When strict similarity yields no hits, fall back to best candidates above SEARCH_IMAGE_RELAX_FLOOR. Default off for closer visual matches. */
     relaxThresholdWhenEmpty = false,
     query: imageSearchTextQuery,
+    softProductTypeHints: softProductTypeHintsParam,
   } = params;
 
   if (!imageEmbedding || imageEmbedding.length === 0) {
@@ -488,17 +494,31 @@ export async function searchByImageWithSimilarity(
   const fetchLimit = Math.min(Math.max(limit * 5, 500), 500);
 
   const softCategory = forceHardCategoryFilter ? false : imageSoftCategoryEnv();
-  const aisleHints = predictedCategoryAisles?.length
-    ? predictedCategoryAisles
-    : undefined;
+  const filtersEarly = filters as Record<string, unknown>;
+  const filterCategoryEarly = (filters as { category?: string | string[] }).category;
+  const hasExplicitCategoryEarly = filterCategoryEarly != null;
+  const hasExplicitTypeEarly =
+    Array.isArray(filtersEarly.productTypes) && filtersEarly.productTypes.length > 0;
+  const hasTextIntentEarly =
+    typeof imageSearchTextQuery === "string" && imageSearchTextQuery.trim().length > 0;
+  /** User/query constraints — not vision-only inference (YOLO/BLIP). */
+  const explicitUserRelevanceConstraintsEarly =
+    hasExplicitCategoryEarly || hasExplicitTypeEarly || hasTextIntentEarly;
+
+  const aisleHints = predictedCategoryAisles?.length ? predictedCategoryAisles : undefined;
+  /** Vision-predicted aisles: only influence soft rerank when user/query already constrained (avoids YOLO-only noise on pure image search). */
+  const aisleHintsForRerank =
+    explicitUserRelevanceConstraintsEarly && aisleHints?.length ? aisleHints : undefined;
   const cat = (filters as { category?: string | string[] }).category;
   /** Aisle rerank when global soft category is on, or when caller passes predictedCategoryAisles (e.g. Shop-the-Look). */
-  const useAisleRerank = !forceHardCategoryFilter && (softCategory || Boolean(aisleHints?.length));
+  const useAisleRerank =
+    !forceHardCategoryFilter &&
+    (softCategory || Boolean(aisleHintsForRerank?.length || cat));
   const desiredCatalogTerms =
-    useAisleRerank && (aisleHints?.length || cat)
+    useAisleRerank && (aisleHintsForRerank?.length || cat)
       ? buildDesiredCatalogTermSet(
-          aisleHints?.length
-            ? aisleHints
+          aisleHintsForRerank?.length
+            ? aisleHintsForRerank
             : Array.isArray(cat)
               ? cat.map((c) => String(c))
               : [String(cat)],
@@ -787,19 +807,6 @@ export async function searchByImageWithSimilarity(
   const mergedCategoryForRelevance = Array.isArray(filterCategory)
     ? filterCategory[0]
     : filterCategory;
-  const astCategoriesForRelevance = [
-    ...new Set(
-      [
-        ...(predictedCategoryAisles ?? []).map((x) => String(x).toLowerCase().trim()).filter(Boolean),
-        ...(Array.isArray(filterCategory)
-          ? filterCategory
-          : filterCategory
-            ? [String(filterCategory)]
-            : []
-        ).map((x) => String(x).toLowerCase().trim()),
-      ].filter(Boolean),
-    ),
-  ];
 
   const textQueryForRelevance =
     typeof imageSearchTextQuery === "string" && imageSearchTextQuery.trim()
@@ -811,6 +818,36 @@ export async function searchByImageWithSimilarity(
     Array.isArray(filtersRecord.productTypes) && filtersRecord.productTypes.length > 0;
   const hasExplicitCategoryFilter = filterCategory != null;
   const hasTextTypeIntent = Boolean(textQueryForRelevance);
+  const explicitUserRelevanceConstraints =
+    hasExplicitCategoryFilter || hasExplicitTypeFilter || hasTextTypeIntent;
+  const astCategoriesForRelevance = explicitUserRelevanceConstraints
+    ? [
+        ...new Set(
+          [
+            ...(predictedCategoryAisles ?? [])
+              .map((x) => String(x).toLowerCase().trim())
+              .filter(Boolean),
+            ...(Array.isArray(filterCategory)
+              ? filterCategory
+              : filterCategory
+                ? [String(filterCategory)]
+                : []
+            ).map((x) => String(x).toLowerCase().trim()),
+          ].filter(Boolean),
+        ),
+      ]
+    : [
+        ...new Set(
+          (Array.isArray(filterCategory)
+            ? filterCategory
+            : filterCategory
+              ? [String(filterCategory)]
+              : []
+          )
+            .map((x) => String(x).toLowerCase().trim())
+            .filter(Boolean),
+        ),
+      ];
   if (Array.isArray(filtersRecord.productTypes) && filtersRecord.productTypes.length > 0) {
     desiredProductTypes = [
       ...new Set(
@@ -824,9 +861,10 @@ export async function searchByImageWithSimilarity(
             extractLexicalProductTypeSeeds(String(c)),
           )
         : [];
-    const fromPredicted = predictedCategoryAisles?.length
-      ? predictedCategoryAisles.flatMap((a) => extractLexicalProductTypeSeeds(String(a)))
-      : [];
+    const fromPredicted =
+      explicitUserRelevanceConstraints && predictedCategoryAisles?.length
+        ? predictedCategoryAisles.flatMap((a) => extractLexicalProductTypeSeeds(String(a)))
+        : [];
     desiredProductTypes = [
       ...new Set(
         [...fromFilterCat, ...fromPredicted]
@@ -834,6 +872,12 @@ export async function searchByImageWithSimilarity(
           .filter(Boolean),
       ),
     ];
+  }
+  const softHintsMerged = (softProductTypeHintsParam ?? [])
+    .map((t) => String(t).toLowerCase().trim())
+    .filter(Boolean);
+  if (softHintsMerged.length > 0 && explicitUserRelevanceConstraints) {
+    desiredProductTypes = [...new Set([...desiredProductTypes, ...softHintsMerged])];
   }
   if (textQueryForRelevance) {
     const fromText = extractFashionTypeNounTokens(textQueryForRelevance).map((t) => t.toLowerCase());
@@ -919,6 +963,13 @@ export async function searchByImageWithSimilarity(
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
     const idb = String(b._source.product_id);
+    // Pure visual search: kNN cosine is the authoritative ordering; metadata relevance
+    // must not reorder weaker visuals above stronger ones (fixes self-search + near-duplicates).
+    if (!explicitUserRelevanceConstraints) {
+      const va = knnCosinesimilScoreToCosine01(Number(a._score));
+      const vb = knnCosinesimilScoreToCosine01(Number(b._score));
+      if (Math.abs(vb - va) > 1e-6) return vb - va;
+    }
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
     const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
     if (Math.abs(fb - fa) > 1e-8) return fb - fa;
@@ -1191,7 +1242,9 @@ export async function searchByImageWithSimilarity(
     (p: any) =>
       typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalAcceptMin,
   ) as ProductResult[];
-  results.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
+  if (explicitUserRelevanceConstraints) {
+    results.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
+  }
 
   const dedupedResults = dedupeImageSearchResults(results as any) as ProductResult[];
   const countAfterDedupe = dedupedResults.length;
