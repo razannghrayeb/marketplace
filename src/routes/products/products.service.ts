@@ -260,6 +260,30 @@ function imageMerchandiseSimilarityBindingEnabled(): boolean {
   return v !== "0" && v !== "false";
 }
 
+/**
+ * How many kNN neighbors to retrieve and run through relevance/merchandise binding.
+ * With catalog-bound similarity, strong matches can sit below mediocre raw-CLIP neighbors; a wider
+ * pool improves recall before the final resort (capped for latency). Legacy path stays at 500 max.
+ */
+function imageSearchKnnPoolLimit(): number {
+  const envK = Number(process.env.SEARCH_IMAGE_RETRIEVAL_K);
+  const baseFromEnv =
+    Number.isFinite(envK) && envK >= 200 ? Math.floor(envK) : 500;
+
+  if (!imageMerchandiseSimilarityBindingEnabled()) {
+    return Math.min(500, Math.max(200, baseFromEnv));
+  }
+
+  const merchCapEnv = Number(process.env.SEARCH_IMAGE_MERCH_CANDIDATE_CAP);
+  const hardCap = 1200;
+  const defaultMerch = Math.min(hardCap, Math.max(700, baseFromEnv));
+  const cap =
+    Number.isFinite(merchCapEnv) && merchCapEnv >= 200
+      ? Math.min(hardCap, Math.floor(merchCapEnv))
+      : defaultMerch;
+  return Math.max(200, cap);
+}
+
 /** OpenSearch kNN field for image search: `embedding` (full-frame CLIP) or `embedding_garment` (garment-focused). */
 function resolveImageSearchKnnField(explicit?: string): "embedding" | "embedding_garment" {
   const fromCaller = explicit != null ? String(explicit).trim().toLowerCase() : "";
@@ -617,9 +641,6 @@ export async function searchByImageWithSimilarity(
     String(process.env.SEARCH_DEBUG ?? "").toLowerCase() === "1" ||
     String(process.env.SEARCH_TRACE_BREAKDOWN ?? "").toLowerCase() === "1";
 
-  // Over-fetch so absolute threshold + later dedup still fill `limit` (cap raised for broader kNN recall).
-  const fetchLimit = Math.min(Math.max(limit * 5, 500), 500);
-
   const softCategory = forceHardCategoryFilter ? false : imageSoftCategoryEnv();
   const aisleHints = predictedCategoryAisles?.length
     ? predictedCategoryAisles
@@ -735,11 +756,8 @@ export async function searchByImageWithSimilarity(
     });
   }
 
-  /** Always retrieve via embedding; attribute fields used only for reranking. k=500 for broad catalog recall. */
-  const retrievalK = Math.min(
-    500,
-    Math.max(200, Number(process.env.SEARCH_IMAGE_RETRIEVAL_K) || 500),
-  );
+  /** kNN size — wider when SEARCH_IMAGE_MERCHANDISE_SIMILARITY is on (see imageSearchKnnPoolLimit). */
+  const retrievalK = imageSearchKnnPoolLimit();
 
   let colorQueryEmbedding: number[] | null = null;
   let styleQueryEmbedding: number[] | null = null;
@@ -962,20 +980,14 @@ export async function searchByImageWithSimilarity(
   const hitsByKnnScore = [...hits].sort(
     (a: any, b: any) => visualSimFromHit(b) - visualSimFromHit(a),
   );
-  const hitsWithinFetch = hitsByKnnScore.slice(0, fetchLimit);
-  // Broad retrieval, then soft rerank (visual + category) within that visual slice, then gates.
-  const baseCandidates = hitsWithinFetch
-    .map((hit: any) => {
-      const visualSim = visualSimFromHit(hit);
-      const categorySoft =
-        useAisleRerank && !forceHardCategoryFilter
-          ? categorySoftScoreForHit(hit, desiredCatalogTerms)
-          : 0;
-      const softScore = visualSim * 1000 + categorySoft * aisleSoftWeight;
-      return { hit, softScore };
-    })
-    .sort((a, b) => b.softScore - a.softScore)
-    .map((x) => x.hit);
+  // Score at least max(limit*5, 500) when possible; cap by pool + actual hit count (redundant aisle pre-sort
+  // removed — sortedByRelevance + composite use catalog-bound visual after compliance).
+  const fetchLimit = Math.min(
+    retrievalK,
+    hitsByKnnScore.length,
+    Math.max(limit * 5, 500),
+  );
+  const baseCandidates = hitsByKnnScore.slice(0, fetchLimit);
 
   /** Per-hit soft signals for ranking + explain (visual + category + optional attribute embeddings). */
   const imageCompositeById = new Map<string, number>();
@@ -1619,6 +1631,8 @@ export async function searchByImageWithSimilarity(
       text_knn_mode: "none",
       recall_window: fetchLimit,
       candidate_k: fetchLimit,
+      knn_retrieval_k: retrievalK,
+      merchandise_similarity_binding: imageMerchandiseSimilarityBindingEnabled(),
       endpoint_limit: limit,
       limit_per_item: null,
       image_similarity_threshold_used: similarityThreshold,
