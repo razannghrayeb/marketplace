@@ -202,6 +202,8 @@ export interface SearchResultWithRelated {
     pipeline_counts?: {
       /** True when kNN hits were re-scored with exact cosine(query, stored vector). */
       exact_cosine_rerank: boolean;
+      /** True when parallel global + garment kNN were merged (max cosine). */
+      dual_knn_fusion: boolean;
       raw_open_search_hits: number;
       base_candidates: number;
       ranked_candidates: number;

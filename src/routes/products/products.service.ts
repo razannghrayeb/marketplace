@@ -307,6 +307,72 @@ function cosineSimilarity01(a: number[] | undefined, b: number[] | undefined): n
   return Math.max(0, Math.min(1, cos));
 }
 
+/** Parallel kNN on `embedding` + `embedding_garment`, merged by max exact cosine (better recall than single field). */
+function imageDualKnnFusionEnabled(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_DUAL_KNN ?? "1").toLowerCase();
+  return v !== "0" && v !== "false";
+}
+
+/** HNSW ef_search for image kNN (higher = better recall, slower). 0 = omit (index default). */
+function imageKnnEfSearch(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_EF_SEARCH);
+  if (Number.isFinite(raw) && raw === 0) return 0;
+  if (Number.isFinite(raw) && raw > 0) return Math.max(64, Math.min(512, Math.floor(raw)));
+  return 256;
+}
+
+function knnQueryInner(vector: number[], k: number, ef: number): Record<string, unknown> {
+  const inner: Record<string, unknown> = { vector, k };
+  if (ef > 0) inner.ef_search = ef;
+  return inner;
+}
+
+/**
+ * Union global + garment kNN hits; visual score = max(cos(q_global, emb), cos(q_garment, emb_garment)).
+ */
+function mergeDualKnnHitsForImageSearch(
+  hitsGlobal: any[],
+  hitsGarment: any[],
+  qGlobal: number[],
+  qGarment: number[],
+): any[] {
+  const gMap = new Map<string, any>();
+  for (const h of hitsGlobal) {
+    const id = String(h?._source?.product_id ?? "");
+    if (id) gMap.set(id, h);
+  }
+  const garMap = new Map<string, any>();
+  for (const h of hitsGarment) {
+    const id = String(h?._source?.product_id ?? "");
+    if (id) garMap.set(id, h);
+  }
+  const out: any[] = [];
+  for (const id of new Set([...gMap.keys(), ...garMap.keys()])) {
+    const hg = gMap.get(id);
+    const hgar = garMap.get(id);
+    const base = hg ?? hgar;
+    if (!base) continue;
+    const src: Record<string, unknown> = { ...(base._source ?? {}) };
+    if (hg?._source) Object.assign(src, hg._source);
+    if (hgar?._source?.embedding_garment != null) src.embedding_garment = hgar._source.embedding_garment;
+    const mergedHit = {
+      ...base,
+      _source: src,
+      _score: Math.max(Number(hg?._score ?? 0), Number(hgar?._score ?? 0)),
+    };
+    const emb = src.embedding as number[] | undefined;
+    const embG = src.embedding_garment as number[] | undefined;
+    let g = 0;
+    let gr = 0;
+    if (Array.isArray(emb) && emb.length === qGlobal.length) g = cosineSimilarity01(qGlobal, emb);
+    if (Array.isArray(embG) && embG.length === qGarment.length) gr = cosineSimilarity01(qGarment, embG);
+    mergedHit._exactCosine01 = Math.max(g, gr);
+    mergedHit._score = (mergedHit._exactCosine01 + 1) / 2;
+    out.push(mergedHit);
+  }
+  return out;
+}
+
 /** When relaxThresholdWhenEmpty is used, drop hits below this normalized cosine (see config.search.searchImageRelaxFloor). */
 function imageRelaxSimilarityFloor(): number {
   return config.search.searchImageRelaxFloor;
@@ -648,90 +714,145 @@ export async function searchByImageWithSimilarity(
   const runStyle = Boolean(styleQueryEmbedding && styleQueryEmbedding.length > 0);
   const runPattern = Boolean(patternQueryEmbedding && patternQueryEmbedding.length > 0);
 
-  let knnFieldResolved = resolveImageSearchKnnField(knnFieldParam);
-  let queryVector: number[] = imageEmbedding;
-  if (knnFieldResolved === "embedding_garment") {
-    let gv =
-      imageEmbeddingGarment && imageEmbeddingGarment.length > 0 ? imageEmbeddingGarment : null;
-    if (!gv && imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
-      try {
-        const { processImageForGarmentEmbedding } = await import("../../lib/image");
-        const out = await processImageForGarmentEmbedding(imageBuffer);
-        gv = out?.length ? out : null;
-      } catch {
-        gv = null;
-      }
-    }
-    if (gv) {
-      queryVector = gv;
-    } else {
-      knnFieldResolved = "embedding";
-      queryVector = imageEmbedding;
-      if (breakdownDebug) {
-        console.warn("[image-knn] embedding_garment vector missing; using embedding field + global query vector");
-      }
+  const baseImageKnnSourceFields = [
+    "product_id",
+    "title",
+    "brand",
+    "category",
+    "category_canonical",
+    "product_types",
+    "attr_gender",
+    "attr_color",
+    "attr_colors",
+    "attr_colors_text",
+    "attr_colors_image",
+    "attr_sleeve",
+    "norm_confidence",
+    "type_confidence",
+    "color_confidence_text",
+    "color_confidence_image",
+    "color_palette_canonical",
+    "color_primary_canonical",
+    "color_secondary_canonical",
+    "color_accent_canonical",
+    "age_group",
+    "audience_gender",
+    "embedding_color",
+    "embedding_style",
+    "embedding_pattern",
+  ];
+
+  let garmentQueryVector: number[] | null = null;
+  if (imageEmbeddingGarment && imageEmbeddingGarment.length === imageEmbedding.length) {
+    garmentQueryVector = imageEmbeddingGarment;
+  } else if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
+    try {
+      const { processImageForGarmentEmbedding } = await import("../../lib/image");
+      const out = await processImageForGarmentEmbedding(imageBuffer);
+      if (out?.length === imageEmbedding.length) garmentQueryVector = out;
+    } catch {
+      garmentQueryVector = null;
     }
   }
 
-  const knnBody = {
-    size: retrievalK,
-    _source: [
-      "product_id",
-      "title",
-      "brand",
-      "category",
-      "category_canonical",
-      "product_types",
-      "attr_gender",
-      "attr_color",
-      "attr_colors",
-      "attr_colors_text",
-      "attr_colors_image",
-      "attr_sleeve",
-      "norm_confidence",
-      "type_confidence",
-      "color_confidence_text",
-      "color_confidence_image",
-      "color_palette_canonical",
-      "color_primary_canonical",
-      "color_secondary_canonical",
-      "color_accent_canonical",
-      "age_group",
-      "audience_gender",
-      "embedding_color",
-      "embedding_style",
-      "embedding_pattern",
-      ...(imageExactCosineRerankEnabled() ? [knnFieldResolved] : []),
-    ],
-    query: {
-      bool: {
-        must: {
-          knn: {
-            [knnFieldResolved]: {
-              vector: queryVector,
-              k: retrievalK,
+  const useDualKnn =
+    imageDualKnnFusionEnabled() &&
+    garmentQueryVector !== null &&
+    garmentQueryVector.length === imageEmbedding.length;
+
+  const ef = imageKnnEfSearch();
+  const knnTimeoutMs = imageKnnTimeoutMs();
+
+  let knnFieldResolved: string;
+  let hits: any[];
+  /** Query vector for the active single kNN field (dual fusion uses global + garment separately). */
+  let queryVector: number[] = imageEmbedding;
+
+  if (useDualKnn) {
+    knnFieldResolved = "embedding+embedding_garment";
+    const bodyGlobal = {
+      size: retrievalK,
+      _source: [...baseImageKnnSourceFields, "embedding", "embedding_garment"],
+      query: {
+        bool: {
+          must: {
+            knn: {
+              embedding: knnQueryInner(imageEmbedding, retrievalK, ef),
             },
           },
+          filter,
         },
-        filter,
       },
-    },
-  };
+    };
+    const bodyGarment = {
+      size: retrievalK,
+      _source: [...baseImageKnnSourceFields, "embedding", "embedding_garment"],
+      query: {
+        bool: {
+          must: {
+            knn: {
+              embedding_garment: knnQueryInner(garmentQueryVector!, retrievalK, ef),
+            },
+          },
+          filter,
+        },
+      },
+    };
+    const [hg, hgr] = await Promise.all([
+      opensearchImageKnnHits(bodyGlobal, knnTimeoutMs),
+      opensearchImageKnnHits(bodyGarment, knnTimeoutMs),
+    ]);
+    hits = mergeDualKnnHitsForImageSearch(hg, hgr, imageEmbedding, garmentQueryVector!);
+  } else {
+    knnFieldResolved = resolveImageSearchKnnField(knnFieldParam);
+    queryVector = imageEmbedding;
+    if (knnFieldResolved === "embedding_garment") {
+      if (garmentQueryVector) {
+        queryVector = garmentQueryVector;
+      } else {
+        knnFieldResolved = "embedding";
+        queryVector = imageEmbedding;
+        if (breakdownDebug) {
+          console.warn(
+            "[image-knn] embedding_garment vector missing; using embedding field + global query vector",
+          );
+        }
+      }
+    }
 
-  const knnTimeoutMs = imageKnnTimeoutMs();
-  const hits = await opensearchImageKnnHits(knnBody, knnTimeoutMs);
+    const knnBody = {
+      size: retrievalK,
+      _source: [
+        ...baseImageKnnSourceFields,
+        ...(imageExactCosineRerankEnabled() ? [knnFieldResolved] : []),
+      ],
+      query: {
+        bool: {
+          must: {
+            knn: {
+              [knnFieldResolved]: knnQueryInner(queryVector, retrievalK, ef),
+            },
+          },
+          filter,
+        },
+      },
+    };
 
-  const exactCosineRerank = imageExactCosineRerankEnabled();
-  if (exactCosineRerank && Array.isArray(hits)) {
-    for (const hit of hits) {
-      const docVec = hit?._source?.[knnFieldResolved] as number[] | undefined;
-      if (Array.isArray(docVec) && docVec.length === queryVector.length) {
-        (hit as any)._exactCosine01 = cosineSimilarity01(queryVector, docVec);
+    hits = await opensearchImageKnnHits(knnBody, knnTimeoutMs);
+
+    if (imageExactCosineRerankEnabled() && Array.isArray(hits)) {
+      for (const hit of hits) {
+        const docVec = hit?._source?.[knnFieldResolved] as number[] | undefined;
+        if (Array.isArray(docVec) && docVec.length === queryVector.length) {
+          (hit as any)._exactCosine01 = cosineSimilarity01(queryVector, docVec);
+        }
       }
     }
   }
+
+  const exactCosineRerank = imageExactCosineRerankEnabled();
   const visualSimFromHit = (hit: any): number =>
-    exactCosineRerank && typeof hit?._exactCosine01 === "number"
+    typeof hit?._exactCosine01 === "number"
       ? hit._exactCosine01
       : knnCosinesimilScoreToCosine01(Number(hit._score));
 
@@ -1315,6 +1436,7 @@ export async function searchByImageWithSimilarity(
       query: imageSearchTextQuery ?? null,
       image_knn_field: knnFieldResolved,
       exact_cosine_rerank: exactCosineRerank,
+      dual_knn_fusion: useDualKnn,
       raw_open_search_hits: rawOpenSearchHitCount,
       hits_after_final_accept_min: countAfterFinalAcceptMin,
       hits_after_dedupe: countAfterDedupe,
@@ -1355,6 +1477,7 @@ export async function searchByImageWithSimilarity(
       image_knn_field: knnFieldResolved,
       pipeline_counts: {
         exact_cosine_rerank: exactCosineRerank,
+        dual_knn_fusion: useDualKnn,
         raw_open_search_hits: rawOpenSearchHitCount,
         base_candidates: baseCandidates.length,
         ranked_candidates: rankedHitsCandidates.length,
