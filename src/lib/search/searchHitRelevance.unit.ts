@@ -64,3 +64,51 @@ describe("computeHitRelevance - sleeve intent", () => {
     expect(rel.finalRelevance01).toBeGreaterThan(0.75);
   });
 });
+
+describe("computeHitRelevance - type intent reliability", () => {
+  const footwearHit = {
+    _source: {
+      title: "Running Sneaker",
+      category: "shoes",
+      category_canonical: "footwear",
+      product_types: ["sneaker", "shoes"],
+      attr_sleeve: null,
+    },
+  } as any;
+
+  test("weak inferred type hints do not hard-zero high visual matches", () => {
+    const rel = computeHitRelevance(footwearHit, 0.92, {
+      desiredProductTypes: ["dress"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "dresses",
+      astCategories: ["dresses"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: false,
+    });
+
+    expect(rel.crossFamilyPenalty).toBeGreaterThanOrEqual(0.8);
+    expect(rel.finalRelevance01).toBeGreaterThan(0.45);
+  });
+
+  test("reliable type intent still enforces strict cross-family blocking", () => {
+    const rel = computeHitRelevance(footwearHit, 0.92, {
+      desiredProductTypes: ["dress"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "dresses",
+      astCategories: ["dresses"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.crossFamilyPenalty).toBeGreaterThanOrEqual(0.8);
+    expect(rel.finalRelevance01).toBeLessThan(0.2);
+  });
+});
