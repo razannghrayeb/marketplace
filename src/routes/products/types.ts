@@ -200,6 +200,8 @@ export interface SearchResultWithRelated {
     total_above_threshold?: number;
     open_search_total_estimate?: number;
     pipeline_counts?: {
+      /** True when kNN hits were re-scored with exact cosine(query, stored vector). */
+      exact_cosine_rerank: boolean;
       raw_open_search_hits: number;
       base_candidates: number;
       ranked_candidates: number;
