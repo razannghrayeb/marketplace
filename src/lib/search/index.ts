@@ -79,6 +79,11 @@ export {
 } from "./categoryFilter";
 
 export {
+  merchandiseVisualSimilarity01,
+  type MerchandiseVisualSimilarityResult,
+} from "./merchandiseVisualSimilarity";
+
+export {
   expandProductTypesForQuery,
   expandProductTypesForIndexing,
   scoreProductTypeTaxonomyMatch,

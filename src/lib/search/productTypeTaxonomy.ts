@@ -798,6 +798,35 @@ function familiesForTokens(tokens: string[]): Set<string> {
   return out;
 }
 
+const GARMENT_LIKE_FAMILIES = new Set<string>([
+  "footwear",
+  "dress",
+  "bottoms",
+  "tops",
+  "shorts_skirt",
+  "outerwear",
+  "modest_full",
+  "activewear",
+  "swimwear",
+  "underwear",
+]);
+
+/**
+ * True when product-type seeds (BLIP/YOLO/user) map to garment/footwear families — used to
+ * downrank beauty listings that only match on palette/texture in CLIP space.
+ */
+export function hasGarmentLikeFamilyFromProductTypeSeeds(seeds: string[]): boolean {
+  if (!seeds.length) return false;
+  const expanded = expandProductTypesForQuery(
+    seeds.map((s) => String(s).toLowerCase().trim()).filter(Boolean),
+  );
+  const fams = familiesForTokens(expanded);
+  for (const f of fams) {
+    if (GARMENT_LIKE_FAMILIES.has(f)) return true;
+  }
+  return false;
+}
+
 function pairPenalty(a: string, b: string): number {
   if (a === b) return 0;
   const row = FAMILY_PAIR_PENALTY[a];

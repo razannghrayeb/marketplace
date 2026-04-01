@@ -5,9 +5,11 @@ import { getCategorySearchTerms } from "./categoryFilter";
 import {
   downrankSpuriousProductTypeFromCategory,
   filterProductTypeSeedsByMappedCategory,
+  hasGarmentLikeFamilyFromProductTypeSeeds,
   scoreCrossFamilyTypePenalty,
   scoreRerankProductTypeBreakdown,
 } from "./productTypeTaxonomy";
+import { isBeautyRetailListingFromFields } from "./categoryFilter";
 import { extractAttributesSync } from "./attributeExtractor";
 import { tieredColorListCompliance } from "../color/colorCanonical";
 import { normalizeColorToken } from "../color/queryColorFilter";
@@ -567,7 +569,7 @@ export function computeHitRelevance(
     }
   }
 
-  const crossFamilyPenalty =
+  let crossFamilyPenalty =
     desiredProductTypes.length > 0
       ? scoreCrossFamilyTypePenalty(desiredProductTypes, productTypes)
       : 0;
@@ -617,6 +619,18 @@ export function computeHitRelevance(
   );
 
   const src = hit?._source ?? {};
+
+  /** Garment/footwear image intent vs makeup/skincare listing — CLIP is often high on shared skintone/packaging cues. */
+  const garmentVersusBeautyPenalty = (() => {
+    const raw = Number(process.env.SEARCH_BEAUTY_APPAREL_CROSS_PENALTY ?? "0.92");
+    const p = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0.92;
+    if (p <= 0) return 0;
+    if (!desiredProductTypes.length) return 0;
+    if (!hasGarmentLikeFamilyFromProductTypeSeeds(desiredProductTypes)) return 0;
+    if (!isBeautyRetailListingFromFields(src.category, src.category_canonical)) return 0;
+    return p;
+  })();
+  crossFamilyPenalty = Math.max(crossFamilyPenalty, garmentVersusBeautyPenalty);
 
   // General fallback: if the index misses/undercounts `product_types`, recover
   // type compliance from lexical evidence in title+description.
@@ -748,6 +762,10 @@ export function computeHitRelevance(
     applyLexicalToGlobal: lexicalScoreDistinct,
     tightSemanticCap,
   });
+
+  if (garmentVersusBeautyPenalty >= 0.85) {
+    finalRelevance01 = Math.min(finalRelevance01, semScore01 * 0.22);
+  }
 
   let negationBlocked = false;
   if (negationExcludeTerms && negationExcludeTerms.length > 0) {
