@@ -1,7 +1,11 @@
 import { extractAttributesSync } from "./attributeExtractor";
 import type { GarmentColorAnalysis } from "../color/garmentColorPipeline";
 import { inferCategoryCanonical } from "./categoryFilter";
-import { expandProductTypesForIndexing, extractLexicalProductTypeSeeds } from "./productTypeTaxonomy";
+import {
+  expandProductTypesForIndexing,
+  extractLexicalProductTypeSeeds,
+  filterProductTypeSeedsByMappedCategory,
+} from "./productTypeTaxonomy";
 import { canonicalTypeIdsToProductTypeTokens } from "./loadProductSearchEnrichment";
 
 const LBP_TO_USD = 89000;
@@ -117,7 +121,6 @@ export function extractProductTypesFromTitle(title: string): string[] {
     trousers: "pants",
     leggings: "leggings",
     legging: "leggings",
-    short: "shorts",
     shorts: "shorts",
     sweater: "sweater",
     sweaters: "sweater",
@@ -125,12 +128,12 @@ export function extractProductTypesFromTitle(title: string): string[] {
     blazers: "blazer",
     top: "top",
     tops: "tops",
-    blouse: "tshirt",
-    blouses: "tshirt",
-    shirt: "tshirt",
-    shirts: "tshirt",
+    blouse: "blouse",
+    blouses: "blouse",
+    shirt: "shirt",
+    shirts: "shirt",
     camisole: "tshirt",
-    tunic: "tshirt",
+    tunic: "top",
     abaya: "abaya",
     abayas: "abaya",
     kaftan: "kaftan",
@@ -269,10 +272,17 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
       ? Math.max(0, Math.min(1, enrich.brand_confidence))
       : 0;
 
+  const categoryLower = toLowerTrim(input.category);
+  const categoryCanonical = inferCategoryCanonical(input.category ?? null, input.title || "");
+
   const titleTypes = extractProductTypesFromTitle(input.title || "");
-  const descriptionSeedsLexical = input.description
+  const descriptionSeedsLexicalRaw = input.description
     ? extractLexicalProductTypeSeeds(input.description)
     : [];
+  const descriptionSeedsLexical =
+    categoryCanonical && categoryCanonical !== "all"
+      ? filterProductTypeSeedsByMappedCategory(descriptionSeedsLexicalRaw, categoryCanonical)
+      : descriptionSeedsLexicalRaw;
 
   // Keep precision: description is noisier than title, so cap how many
   // description-derived type seeds we merge in.
@@ -311,9 +321,6 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
         ? [attributes.material]
         : []
   );
-
-  const categoryLower = toLowerTrim(input.category);
-  const categoryCanonical = inferCategoryCanonical(input.category ?? null, input.title || "");
 
   const primaryAttrColor = toLowerTrim(attrColorPrimary);
   const attrGenderRaw =

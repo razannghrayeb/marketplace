@@ -871,7 +871,9 @@ export function intentFamiliesForProductCategory(productCategory: string): Set<s
     outerwear: ["outerwear"],
     footwear: ["footwear"],
     bags: ["bags"],
-    accessories: ["head_covering", "bags", "jewellery"],
+    // Keep "accessories" separate from bags to avoid headwear/hair labels
+    // drifting into handbags during type-seed filtering.
+    accessories: ["head_covering", "jewellery"],
   };
   const list = m[c];
   if (!list) return null;

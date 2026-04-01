@@ -35,6 +35,8 @@ export interface SearchFilters {
   style?: string;
   /** Used to bias ranking without hard filtering (image search "closet similar"). */
   softStyle?: string;
+  /** Sleeve intent (short | long | sleeveless) used by reranking. */
+  sleeve?: string;
   gender?: string;
   pattern?: string;
 }

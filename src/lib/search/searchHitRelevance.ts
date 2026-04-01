@@ -78,8 +78,10 @@ export function computeFinalRelevance01(params: {
   colorScore: number;
   audScore: number;
   styleScore: number;
+  sleeveScore: number;
   hasColorIntent: boolean;
   hasStyleIntent: boolean;
+  hasSleeveIntent: boolean;
   hasAudienceIntent: boolean;
   /** From scoreCrossFamilyTypePenalty; strong garment↔footwear mismatches are typically ≥ 0.8 */
   crossFamilyPenalty: number;
@@ -124,8 +126,9 @@ export function computeFinalRelevance01(params: {
   const colorPart = params.hasColorIntent ? params.colorScore : 1;
   const audPart = params.hasAudienceIntent ? params.audScore : 1;
   const stylePart = params.hasStyleIntent ? params.styleScore : 1;
+  const sleevePart = params.hasSleeveIntent ? params.sleeveScore : 1;
   // Attribute blend: keep color dominant, but allow style to influence as well.
-  const attrScore = colorPart * 0.5 + stylePart * 0.3 + audPart * 0.2;
+  const attrScore = colorPart * 0.45 + stylePart * 0.2 + sleevePart * 0.2 + audPart * 0.15;
   const attrFactor = 0.5 + attrScore * 0.5;
 
   const crossFamilySoftFactor = Math.max(0, 1 - crossPen * 0.6);
@@ -250,6 +253,8 @@ export interface SearchHitRelevanceIntent {
   desiredColorsTier: string[];
   /** Canonical attr_style token (e.g. "casual", "formal", "smart-casual"). */
   desiredStyle?: string;
+  /** short | long | sleeveless */
+  desiredSleeve?: string;
   rerankColorMode: "any" | "all";
   mergedCategory?: string;
   astCategories: string[];
@@ -302,6 +307,7 @@ export interface HitCompliance {
   crossFamilyPenalty: number;
   audienceCompliance: number;
   styleCompliance: number;
+  sleeveCompliance: number;
   osSimilarity01: number;
   categoryRelevance01: number;
   semanticScore01: number;
@@ -376,6 +382,16 @@ function mergeColorArrays(...parts: unknown[]): string[] {
   return out;
 }
 
+function normalizeSleeveToken(raw: string | undefined): "short" | "long" | "sleeveless" | null {
+  if (!raw) return null;
+  const s = String(raw).toLowerCase().trim();
+  if (!s) return null;
+  if (s.includes("sleeveless")) return "sleeveless";
+  if (s.includes("short")) return "short";
+  if (s.includes("long")) return "long";
+  return null;
+}
+
 function rawColorList(...parts: unknown[]): string[] {
   return [
     ...new Set(
@@ -399,6 +415,7 @@ export function computeHitRelevance(
     desiredColors,
     desiredColorsTier,
     desiredStyle,
+    desiredSleeve,
     rerankColorMode,
     mergedCategory,
     astCategories,
@@ -551,6 +568,22 @@ export function computeHitRelevance(
     else styleCompliance = 0;
   }
 
+  let sleeveCompliance = 0;
+  const wantedSleeve = normalizeSleeveToken(desiredSleeve);
+  if (wantedSleeve) {
+    const docSleeveRaw = typeof hit?._source?.attr_sleeve === "string" ? hit._source.attr_sleeve : "";
+    const docSleeve = normalizeSleeveToken(docSleeveRaw);
+    const titleSleeve = normalizeSleeveToken(title);
+    const observed = docSleeve ?? titleSleeve;
+    if (!observed) {
+      sleeveCompliance = 0.72;
+    } else if (observed === wantedSleeve) {
+      sleeveCompliance = 1;
+    } else {
+      sleeveCompliance = 0.18;
+    }
+  }
+
   const audienceCompliance = scoreAudienceCompliance(
     queryAgeGroup,
     audienceGenderForScoring,
@@ -654,6 +687,7 @@ export function computeHitRelevance(
   const attrComponent =
     colorCompliance * 90 * docTrust +
     styleCompliance * 65 * docTrust +
+    sleeveCompliance * 52 * docTrust +
     audienceCompliance * wAud * docTrust;
   // Similarity term strengthened and modulated by type compliance.
   const visualComponent =
@@ -684,8 +718,10 @@ export function computeHitRelevance(
     colorScore: colorCompliance,
     audScore: audienceCompliance,
     styleScore: styleCompliance,
+    sleeveScore: sleeveCompliance,
     hasColorIntent: hasColorIntentForFinalRelevance,
     hasStyleIntent: Boolean(normalizedDesiredStyle),
+    hasSleeveIntent: Boolean(wantedSleeve),
     hasAudienceIntent,
     crossFamilyPenalty,
     applyLexicalToGlobal: lexicalScoreDistinct,
@@ -729,6 +765,7 @@ export function computeHitRelevance(
     crossFamilyPenalty,
     audienceCompliance,
     styleCompliance,
+    sleeveCompliance,
     osSimilarity01: similarity,
     categoryRelevance01,
     semanticScore01: semScore01,
