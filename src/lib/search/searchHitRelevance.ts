@@ -4,6 +4,7 @@
 import { getCategorySearchTerms } from "./categoryFilter";
 import {
   downrankSpuriousProductTypeFromCategory,
+  filterProductTypeSeedsByMappedCategory,
   scoreCrossFamilyTypePenalty,
   scoreRerankProductTypeBreakdown,
 } from "./productTypeTaxonomy";
@@ -71,6 +72,7 @@ export function scoreCategoryRelevance01(
  */
 export function computeFinalRelevance01(params: {
   hasTypeIntent: boolean;
+  hasReliableTypeIntent?: boolean;
   typeScore: number;
   catScore: number;
   semScore: number;
@@ -98,7 +100,8 @@ export function computeFinalRelevance01(params: {
   // For image search (tightSemanticCap), type intent comes from YOLO which can be
   // wrong — don't hard-zero, just heavily penalize so visual similarity can still
   // rescue genuinely similar products.
-  if (params.hasTypeIntent && crossPen >= 0.8) {
+  const gateTypeIntent = params.hasTypeIntent && params.hasReliableTypeIntent !== false;
+  if (gateTypeIntent && crossPen >= 0.8) {
     if (params.tightSemanticCap) {
       return Math.max(0, params.semScore * 0.15);
     }
@@ -109,7 +112,7 @@ export function computeFinalRelevance01(params: {
   // predictions. Use softer gates so a wrong category prediction doesn't nuke all
   // visually similar results. For text search, keep the strict gates since the user
   // explicitly typed the product type.
-  const typeGateFactor = !params.hasTypeIntent
+  const typeGateFactor = !gateTypeIntent
     ? 1
     : params.typeScore >= 0.5
       ? 1
@@ -293,6 +296,12 @@ export interface SearchHitRelevanceIntent {
    * `computeFinalRelevance01` — otherwise a wrong auto-color nukes `finalRelevance01` for visually close items.
    */
   softColorBiasOnly?: boolean;
+  /**
+   * Whether type intent is reliable enough to act as a hard gate in final relevance.
+   * False for weak inferred hints (e.g. image-only predicted aisle); true for explicit
+   * text/filter/product-type constraints.
+   */
+  reliableTypeIntent?: boolean;
 }
 
 export interface HitCompliance {
@@ -434,11 +443,21 @@ export function computeHitRelevance(
   } = intent;
 
   const productTypesRaw = hit?._source?.product_types;
-  const productTypes: string[] = Array.isArray(productTypesRaw)
+  let productTypes: string[] = Array.isArray(productTypesRaw)
     ? productTypesRaw.map((x: unknown) => String(x).toLowerCase())
     : productTypesRaw
       ? [String(productTypesRaw).toLowerCase()]
       : [];
+  if (productTypes.length > 0) {
+    const mappedDocCategory =
+      typeof hit?._source?.category_canonical === "string"
+        ? String(hit._source.category_canonical).toLowerCase().trim()
+        : typeof hit?._source?.category === "string"
+          ? String(hit._source.category).toLowerCase().trim()
+          : "";
+    const filtered = filterProductTypeSeedsByMappedCategory(productTypes, mappedDocCategory);
+    if (filtered.length > 0) productTypes = filtered;
+  }
 
   const attrColorsRaw = hit?._source?.attr_colors;
   const attrText = hit?._source?.attr_colors_text;
@@ -696,12 +715,13 @@ export function computeHitRelevance(
   const rerankScore = typeComponent + attrComponent + visualComponent - penaltyComponent;
 
   const hasTypeIntent = desiredProductTypes.length > 0;
+  const hasReliableTypeIntent = hasTypeIntent && intent.reliableTypeIntent !== false;
   const hasColorIntent = desiredColors.length > 0;
   /** Soft-only auto colors must not gate final acceptance the same as user `filters.color`. */
   const hasColorIntentForFinalRelevance = hasColorIntent && !softColorBiasOnly;
   const crossPenTrace = Math.max(0, crossFamilyPenalty);
-  const hardBlocked = hasTypeIntent && crossPenTrace >= 0.8;
-  const typeGateFactor = !hasTypeIntent
+  const hardBlocked = hasReliableTypeIntent && crossPenTrace >= 0.8;
+  const typeGateFactor = !hasReliableTypeIntent
     ? 1
     : productTypeCompliance >= 0.5
       ? 1
@@ -711,6 +731,7 @@ export function computeHitRelevance(
 
   let finalRelevance01 = computeFinalRelevance01({
     hasTypeIntent,
+    hasReliableTypeIntent,
     typeScore: productTypeCompliance,
     catScore: categoryRelevance01,
     semScore: semScore01,

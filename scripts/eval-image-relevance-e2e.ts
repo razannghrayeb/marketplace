@@ -1,15 +1,12 @@
 /**
- * System-level image-search relevance evaluation.
+ * End-to-end image-search relevance evaluation.
  *
- * Measures broad quality across categories:
- * - selfRecallAtK: query product appears in top-K
- * - sameCategoryRateAtK: share of top-K with same category_canonical
- * - typeConsistencyRateAtK: share of top-K with product_type overlap
- * - unrelatedRateAtK: share of top-K with neither category nor type overlap
+ * Unlike raw kNN eval, this exercises the full `searchByImageWithSimilarity`
+ * pipeline (relevance gating, rerank, filters, rescue rules).
  *
  * Usage:
- *   npx tsx scripts/eval-image-relevance.ts
- *   npx tsx scripts/eval-image-relevance.ts --k 20 --per-category 8 --max-queries 48 --out tmp-image-eval.json
+ *   npx tsx scripts/eval-image-relevance-e2e.ts
+ *   npx tsx scripts/eval-image-relevance-e2e.ts --k 20 --per-category 8 --max-queries 48 --out tmp-image-eval-e2e.json
  */
 
 import fs from "fs";
@@ -17,6 +14,7 @@ import path from "path";
 import dotenv from "dotenv";
 import { osClient } from "../src/lib/core";
 import { config } from "../src/config";
+import { searchByImageWithSimilarity } from "../src/routes/products/products.service";
 
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
@@ -96,45 +94,6 @@ async function collectQueries(perCategory: number, maxQueries: number): Promise<
   return out.slice(0, maxQueries);
 }
 
-function knnCosinesimilScoreToCosine01(raw: number): number {
-  if (!Number.isFinite(raw)) return 0;
-  const os01 = Math.max(0, Math.min(1, raw > 1.001 ? raw / 2 : raw));
-  const cos = 2 * os01 - 1;
-  return Math.max(0, Math.min(1, cos));
-}
-
-async function searchByEmbeddingKnn(embedding: number[], k: number): Promise<string[]> {
-  const embeddingField =
-    String(process.env.SEARCH_IMAGE_KNN_FIELD ?? "embedding").trim() || "embedding";
-  const fetchLimit = Math.min(Math.max(k * 3, k), 300);
-  const body = {
-    size: fetchLimit,
-    _source: ["product_id"],
-    query: {
-      bool: {
-        must: {
-          knn: {
-            [embeddingField]: { vector: embedding, k: fetchLimit },
-          },
-        },
-        filter: [{ term: { is_hidden: false } }],
-      },
-    },
-  };
-
-  const resp = await osClient.search({ index: config.opensearch.index, body });
-  const hits = (resp.body?.hits?.hits ?? []) as any[];
-  return hits
-    .map((h) => ({
-      id: String(h?._source?.product_id ?? ""),
-      visualSim: knnCosinesimilScoreToCosine01(Number(h?._score ?? 0)),
-    }))
-    .filter((x) => x.id)
-    .sort((a, b) => b.visualSim - a.visualSim)
-    .slice(0, k)
-    .map((x) => x.id);
-}
-
 async function toEvalHits(ids: string[]): Promise<EvalHit[]> {
   if (!ids.length) return [];
   const r = await osClient.search({
@@ -159,6 +118,19 @@ async function toEvalHits(ids: string[]): Promise<EvalHit[]> {
   return ids.map((id) => byId.get(id)).filter(Boolean) as EvalHit[];
 }
 
+async function e2eSearchIds(embedding: number[], k: number): Promise<string[]> {
+  const res = await searchByImageWithSimilarity({
+    imageEmbedding: embedding,
+    filters: {},
+    limit: k,
+    includeRelated: false,
+    similarityThreshold: config.clip.imageSimilarityThreshold,
+    relaxThresholdWhenEmpty: true,
+  } as any);
+
+  return (res.results ?? []).map((p: any) => String(p.id)).slice(0, k);
+}
+
 async function main(): Promise<void> {
   const k = Math.max(5, Math.min(50, toNum(parseArg("--k", "20"), 20)));
   const perCategory = Math.max(2, Math.min(30, toNum(parseArg("--per-category", "8"), 8)));
@@ -181,7 +153,7 @@ async function main(): Promise<void> {
   const perQuery: any[] = [];
 
   for (const q of queries) {
-    const ids = await searchByEmbeddingKnn(q.embedding, k);
+    const ids = await e2eSearchIds(q.embedding, k);
     const hits = await toEvalHits(ids);
     if (ids.includes(q.id)) selfHit += 1;
     if (ids[0] === q.id) selfAt1 += 1;

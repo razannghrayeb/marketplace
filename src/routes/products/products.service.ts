@@ -239,6 +239,11 @@ function imageGenderSoftEnv(): boolean {
   return v === "1" || v === "true";
 }
 
+function forceStrictInferredTypeIntentEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_FORCE_STRICT_INFERRED_TYPE_INTENT ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
 /** OpenSearch kNN field for image search: `embedding` (full-frame CLIP) or `embedding_garment` (garment-focused). */
 function resolveImageSearchKnnField(explicit?: string): "embedding" | "embedding_garment" {
   const fromCaller = explicit != null ? String(explicit).trim().toLowerCase() : "";
@@ -802,6 +807,10 @@ export async function searchByImageWithSimilarity(
       : "";
 
   let desiredProductTypes: string[] = [];
+  const hasExplicitTypeFilter =
+    Array.isArray(filtersRecord.productTypes) && filtersRecord.productTypes.length > 0;
+  const hasExplicitCategoryFilter = filterCategory != null;
+  const hasTextTypeIntent = Boolean(textQueryForRelevance);
   if (Array.isArray(filtersRecord.productTypes) && filtersRecord.productTypes.length > 0) {
     desiredProductTypes = [
       ...new Set(
@@ -888,6 +897,11 @@ export async function searchByImageWithSimilarity(
     lexicalMatchQuery: textQueryForRelevance || undefined,
     tightSemanticCap: true,
     softColorBiasOnly,
+    reliableTypeIntent:
+      forceStrictInferredTypeIntentEnv() ||
+      hasExplicitTypeFilter ||
+      hasExplicitCategoryFilter ||
+      hasTextTypeIntent,
   };
 
   const complianceById = new Map<string, HitCompliance>();
@@ -1925,13 +1939,14 @@ export async function getCandidateScoresForProducts(
       try {
         const resp = await osClient.search({ index: config.opensearch.index, body: clipBody });
         const hits = resp.body.hits.hits || [];
-        const maxScore = hits.length > 0 ? hits[0]._score : 1;
 
         for (const hit of hits) {
           const id = String(hit._source.product_id);
           if (id === String(base.id)) continue;
-          clipRawMap.set(id, hit._score);
-          clipScoreMap.set(id, Math.round(Math.min(1, hit._score / maxScore) * 1000) / 1000);
+          const rawScore = Number(hit._score) || 0;
+          const visualSim = knnCosinesimilScoreToCosine01(rawScore);
+          clipRawMap.set(id, rawScore);
+          clipScoreMap.set(id, Math.round(visualSim * 1000) / 1000);
         }
       } catch (err) {
         console.warn(`[CandidateGenerator] CLIP search failed for ${baseProductId}:`, err);
@@ -2099,14 +2114,12 @@ export async function getCandidateScoresForProducts(
     };
   });
 
-  // Sort: both > clip > text, then by combined score
+  // Sort by combined similarity score first; source is metadata only.
   candidates.sort((a, b) => {
-    const sourceOrder = { both: 0, clip: 1, text: 2 };
-    const srcDiff = sourceOrder[a.source] - sourceOrder[b.source];
-    if (srcDiff !== 0) return srcDiff;
     const scoreA = a.clipSim * 0.6 + a.textSim * 0.4;
     const scoreB = b.clipSim * 0.6 + b.textSim * 0.4;
-    return scoreB - scoreA;
+    if (Math.abs(scoreB - scoreA) > 1e-8) return scoreB - scoreA;
+    return b.clipSim - a.clipSim;
   });
 
   const finalCandidates = candidates.slice(0, limit);
