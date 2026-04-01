@@ -25,10 +25,24 @@ import { loadEntitiesFromDB } from "./lib/search/semanticSearch";
 
 export async function createServer() {
   if (process.env.NODE_ENV !== "test") {
-    try {
-      await ensureIndex();
-    } catch (err) {
-      console.error("Warning: Could not ensure OpenSearch index:", err);
+    const isCloudRun = Boolean(process.env.K_SERVICE);
+    const ensureIndexOnBoot =
+      process.env.SEARCH_ENSURE_INDEX_ON_BOOT === "1" ||
+      process.env.SEARCH_ENSURE_INDEX_ON_BOOT === "true";
+
+    // Do not block Cloud Run startup on OpenSearch checks/index creation.
+    // Cloud Run only cares that the app binds PORT quickly.
+    if (!isCloudRun || ensureIndexOnBoot) {
+      try {
+        await ensureIndex();
+      } catch (err) {
+        console.error("Warning: Could not ensure OpenSearch index:", err);
+      }
+    } else {
+      // Best-effort in background when running on Cloud Run.
+      ensureIndex().catch((err) =>
+        console.error("Warning: Could not ensure OpenSearch index (background):", err),
+      );
     }
   }
 
