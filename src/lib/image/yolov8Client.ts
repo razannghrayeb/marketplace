@@ -217,26 +217,6 @@ export class YOLOv8Client {
           `[YOLOv8] service unhealthy at ${this.baseUrl}: ok=${health?.ok} model_loaded=${health?.model_loaded}`
         );
       }
-      // #region agent log
-      fetch("http://127.0.0.1:7383/ingest/ccea0d1b-4b26-441e-9797-fbae444c347a", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "00a194" },
-        body: JSON.stringify({
-          sessionId: "00a194",
-          runId: "post-fix-verify",
-          hypothesisId: "H2-H3-H5",
-          location: "yolov8Client.ts:getHealthSnapshot:success",
-          message: "YOLO health parsed",
-          data: {
-            baseUrl: this.baseUrl,
-            healthOk: health.ok,
-            modelLoaded: health.model_loaded,
-            available,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       return {
         available,
         hint,
@@ -266,25 +246,6 @@ export class YOLOv8Client {
             `Local dev: \`pnpm dev:with-yolo\` or \`pnpm yolo:dev\` + \`pnpm dev\`; set YOLOV8_SERVICE_URL if the detector is elsewhere.`,
         );
       }
-      // #region agent log
-      fetch("http://127.0.0.1:7383/ingest/ccea0d1b-4b26-441e-9797-fbae444c347a", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "00a194" },
-        body: JSON.stringify({
-          sessionId: "00a194",
-          runId: "post-fix-verify",
-          hypothesisId: "H1-H4",
-          location: "yolov8Client.ts:getHealthSnapshot:catch",
-          message: "YOLO health fetch failed",
-          data: {
-            baseUrl: this.baseUrl,
-            errMsg: msg.slice(0, 200),
-            refused,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       return { available: false, hint };
     }
   }
