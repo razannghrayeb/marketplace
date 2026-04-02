@@ -2194,28 +2194,25 @@ export async function searchByImageWithSimilarity(
   /** When strict CLIP threshold + merchandise binding drop every hit, keep best raw-visual neighbors (always on). */
   let imageSearchPipelineDegraded = false;
   if (visualGatedHits.length === 0 && rankedHitsCandidates.length > 0) {
-    imageSearchPipelineDegraded = true;
-    thresholdRelaxed = true;
     const relFloor = imageRelaxSimilarityFloor();
-    let pool = rankedHitsCandidates.filter((h: any) => visualSimFromHit(h) >= relFloor);
-    if (pool.length === 0) {
-      pool = rankedHitsCandidates.filter((h: any) => visualSimFromHit(h) >= 0.2);
-    }
-    if (pool.length === 0) {
-      pool = [...rankedHitsCandidates]
-        .sort((a: any, b: any) => visualSimFromHit(b) - visualSimFromHit(a))
-        .slice(0, Math.max(limit, 20));
-    }
-    visualGatedHits = pool;
-    for (const h of visualGatedHits) {
-      const idStr = String(h._source.product_id);
-      const comp = complianceById.get(idStr);
-      if (comp) {
-        const v = visualSimFromHit(h);
-        // Use visual similarity as rescue signal instead of flat acceptMinImage.
-        // This preserves relative ordering among rescued candidates.
-        comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, v * 0.9));
-        comp.osSimilarity01 = Math.max(comp.osSimilarity01 ?? 0, v);
+    const relaxedHits = rankedHitsCandidates.filter((h: any) => visualSimFromHit(h) >= relFloor);
+
+    // Only relax when the caller explicitly opts in. Returning distant neighbors by default
+    // makes image search look broken because it surfaces products that are visually unrelated.
+    if (relaxThresholdWhenEmpty && relaxedHits.length > 0) {
+      imageSearchPipelineDegraded = true;
+      thresholdRelaxed = true;
+      visualGatedHits = relaxedHits;
+      for (const h of visualGatedHits) {
+        const idStr = String(h._source.product_id);
+        const comp = complianceById.get(idStr);
+        if (comp) {
+          const v = visualSimFromHit(h);
+          // Use visual similarity as rescue signal instead of flat acceptMinImage.
+          // This preserves relative ordering among rescued candidates.
+          comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, v * 0.9));
+          comp.osSimilarity01 = Math.max(comp.osSimilarity01 ?? 0, v);
+        }
       }
     }
   }
