@@ -30,14 +30,30 @@ export {
   processImageForEmbedding,
   processImageForGarmentEmbedding,
   processImageForGarmentEmbeddingWithOptionalBox,
+  computeImageSearchGarmentQueryEmbedding,
+  computeShopTheLookGarmentEmbeddingFromDetection,
+  extractGarmentPaddedRoiFromPreparedImage,
   extractPaddedDetectionCropBuffer,
+  GARMENT_DETECTION_PAD_RATIO,
+  pickBestYoloDetectionForGarmentEmbedding,
+  scalePixelBoxToImageDims,
   type PixelBox,
+  type YoloLikeDetection,
   extractGarmentCenterCropBuffer,
+  removeBackgroundForQuery,
   validateImage,
   computePHash,
   loadAndNormalize,
   initImageProcessing,
 } from "./processor";
+
+export {
+  prepareBufferForPrimaryCatalogEmbedding,
+  prepareBufferForImageSearchQuery,
+  preparePrimaryImageBufferForCatalogEmbedding,
+  computeBgComplexityScore,
+  catalogBgRemovalThresholdFromEnv,
+} from "./embeddingPrep";
 
 // R2 storage
 export {
@@ -53,6 +69,17 @@ export {
 
 // BLIP image captioning
 export { BlipService, blip } from "./blip";
+export {
+  inferAudienceFromCaption,
+  inferColorFromCaption,
+  primaryColorHintFromCaption,
+  productDescriptionFromCaption,
+  catalogGenderFromCaption,
+} from "./captionAttributeInference";
+export {
+  applyBlipCaptionToMissingProductFields,
+  isCatalogFieldBlank,
+} from "./blipCatalogBackfill";
 
 // Dual-Model Fashion Detection
 export {

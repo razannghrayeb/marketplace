@@ -2,15 +2,53 @@
  * Product Images Service
  * Handles all image business logic, storage, and retrieval
  */
-import { pg, productsTableHasIsHiddenColumn, productsTableHasCanonicalIdColumn, toPgVectorParam } from "../../lib/core/index";
-import { uploadImage, generateImageKey } from "../../lib/image/index";
-import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash, validateImage } from "../../lib/image/index";
+import {
+  pg,
+  productsTableHasIsHiddenColumn,
+  productsTableHasCanonicalIdColumn,
+  productsTableHasGenderColumn,
+  toPgVectorParam,
+} from "../../lib/core/index";
+import { uploadImage, generateImageKey, getYOLOv8Client } from "../../lib/image/index";
+import {
+  processImageForEmbedding,
+  processImageForGarmentEmbedding,
+  processImageForGarmentEmbeddingWithOptionalBox,
+  pickBestYoloDetectionForGarmentEmbedding,
+  scalePixelBoxToImageDims,
+  computePHash,
+  validateImage,
+  blip,
+} from "../../lib/image/index";
+import { applyBlipCaptionToMissingProductFields } from "../../lib/image/blipCatalogBackfill";
 import { osClient } from "../../lib/core/index";
 import { config } from "../../config";
+
+/**
+ * BLIP caption → fill only empty `products.description`, `color`, `gender` (helps search + listing quality).
+ * Runs on primary image upload only; gated by `PRODUCT_IMAGE_BLIP_FILL_MISSING` (default on).
+ */
+async function maybeBlipBackfillMissingCatalogFields(productId: number, buffer: Buffer): Promise<void> {
+  if (!config.search.blipFillMissingOnImageUpload) return;
+  try {
+    const caption = await Promise.race([
+      blip.caption(buffer),
+      new Promise<never>((_, rej) =>
+        setTimeout(() => rej(new Error("blip_timeout")), config.search.blipCaptionTimeoutMs),
+      ),
+    ]).catch(() => "");
+    await applyBlipCaptionToMissingProductFields(productId, caption);
+  } catch (e) {
+    console.warn("[uploadProductImage] BLIP catalog backfill skipped:", (e as Error).message);
+  }
+}
 import { buildProductSearchDocument } from "../../lib/search/searchDocument";
 import { loadProductSearchEnrichmentByIds } from "../../lib/search/loadProductSearchEnrichment";
 import { extractGarmentFashionColors } from "../../lib/color/garmentColorPipeline";
-import type { PixelBox } from "../../lib/image/processor";
+import type { PixelBox } from "../../lib/image";
+import sharpLib from "sharp";
+
+const sharp = typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
 
 // ============================================================================
 // Types
@@ -107,12 +145,46 @@ export async function uploadProductImage(
   const key = generateImageKey(buffer, contentType.includes("png") ? ".png" : ".jpg");
   const { cdnUrl } = await uploadImage(buffer, key, contentType);
 
-  // Compute both embeddings and pHash in parallel (embedding_garment for kNN on garment ROI)
-  const [embedding, garmentEmbedding, pHash] = await Promise.all([
-    processImageForEmbedding(buffer),
-    processImageForGarmentEmbedding(buffer).catch(() => null),
+  const { prepareBufferForPrimaryCatalogEmbedding } = await import("../../lib/image/embeddingPrep");
+  const { buffer: clipBuf } = await prepareBufferForPrimaryCatalogEmbedding(buffer);
+
+  const [embedding, pHash] = await Promise.all([
+    processImageForEmbedding(clipBuf),
     computePHash(buffer),
   ]);
+
+  let garmentEmbedding: number[] | null = null;
+  try {
+    const yolo = getYOLOv8Client();
+    if (await yolo.isAvailable()) {
+      const res = await yolo.detectFromBuffer(buffer, "catalog-upload.jpg", { confidence: 0.45 });
+      const dets = (res.detections ?? []).filter((d) => (d.confidence ?? 0) >= 0.45);
+      const best = pickBestYoloDetectionForGarmentEmbedding(dets);
+      if (best?.box) {
+        const [rawMeta, procMeta] = await Promise.all([sharp(buffer).metadata(), sharp(clipBuf).metadata()]);
+        const rw = rawMeta.width ?? 0;
+        const rh = rawMeta.height ?? 0;
+        const pw = procMeta.width ?? 0;
+        const ph = procMeta.height ?? 0;
+        let box: PixelBox = {
+          x1: best.box.x1,
+          y1: best.box.y1,
+          x2: best.box.x2,
+          y2: best.box.y2,
+        };
+        if (rw > 0 && rh > 0 && pw > 0 && ph > 0 && (rw !== pw || rh !== ph)) {
+          box = scalePixelBoxToImageDims(box, rw, rh, pw, ph);
+        }
+        const ge = await processImageForGarmentEmbeddingWithOptionalBox(buffer, clipBuf, box);
+        if (Array.isArray(ge) && ge.length > 0) garmentEmbedding = ge;
+      }
+    }
+  } catch {
+    /* YOLO optional on upload */
+  }
+  if (!garmentEmbedding || garmentEmbedding.length === 0) {
+    garmentEmbedding = await processImageForGarmentEmbedding(clipBuf).catch(() => null);
+  }
 
   // Insert into database
   const result = await pg.query(
@@ -130,6 +202,7 @@ export async function uploadProductImage(
       `UPDATE products SET primary_image_id = $1, image_cdn = $2 WHERE id = $3`,
       [image.id, cdnUrl, productId]
     );
+    await maybeBlipBackfillMissingCatalogFields(productId, buffer);
   }
 
   // Sync OpenSearch (pass both embeddings so embedding_garment is populated)
@@ -239,8 +312,10 @@ export interface UpdateProductIndexOpts {
 export async function updateProductIndex(productId: number, sourceBuffer?: Buffer, opts?: UpdateProductIndexOpts): Promise<void> {
   const hasIsHidden = await productsTableHasIsHiddenColumn();
   const hasCanonicalId = await productsTableHasCanonicalIdColumn();
+  const hasGender = await productsTableHasGenderColumn();
   const productResult = await pg.query(
-    `SELECT id, vendor_id, title, description, brand, category, price_cents, availability, last_seen, image_cdn,
+    `SELECT id, vendor_id, title, description, brand, category, price_cents, availability, last_seen, image_cdn, color,
+            ${hasGender ? "gender" : "NULL::text AS gender"},
             ${hasIsHidden ? "is_hidden" : "false AS is_hidden"},
             ${hasCanonicalId ? "canonical_id" : "NULL::integer AS canonical_id"}
      FROM products WHERE id = $1`,
@@ -276,6 +351,8 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
     vendorId: product.vendor_id,
     title: product.title,
     description: product.description ?? null,
+    catalogColor: product.color ?? null,
+    catalogGender: hasGender ? (product.gender ?? null) : null,
     brand: product.brand,
     category: product.category,
     priceCents: product.price_cents,
@@ -406,6 +483,9 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
       }
 
       if (buffer) {
+        const { prepareBufferForPrimaryCatalogEmbedding } = await import("../../lib/image/embeddingPrep");
+        const { buffer: clipBuf } = await prepareBufferForPrimaryCatalogEmbedding(buffer);
+
         const { processImageForEmbedding, processImageForGarmentEmbedding } = await import(
           "../../lib/image/processor"
         );
@@ -435,10 +515,10 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
           garmentBox = null;
         }
 
-        // Use processImageForGarmentEmbedding (no box) to match query-time preprocessing
+        // Garment colors from original pixels; CLIP from catalog-aligned buffer (matches search + reindex)
         const [embedding, embeddingGarment, garmentAnalysis] = await Promise.all([
-          processImageForEmbedding(buffer),
-          processImageForGarmentEmbedding(buffer).catch(() => null as unknown as number[]),
+          processImageForEmbedding(clipBuf),
+          processImageForGarmentEmbedding(clipBuf).catch(() => null as unknown as number[]),
           extractGarmentFashionColors(buffer, { box: garmentBox }).catch(() => null),
         ]);
         // Update DB for this image row and include in document

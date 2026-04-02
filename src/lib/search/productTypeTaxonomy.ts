@@ -105,9 +105,15 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
     "crossbody",
     "satchel",
     "satchels",
+    "wallet",
+    "wallets",
     "bucket bag",
     "shoulder bag",
   ],
+  ["hat", "hats", "cap", "caps", "beanie", "beanies", "beret", "berets"],
+  ["scarf", "scarves", "shawl", "shawls", "wrap", "wraps", "stole", "stoles"],
+  ["belt", "belts"],
+  ["sock", "socks", "hosiery", "stocking", "stockings"],
   [
     "necklace",
     "necklaces",
@@ -230,6 +236,31 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   crossbody: "bag",
   handbag: "bag",
   handbags: "bag",
+  wallet: "bag",
+  wallets: "bag",
+  hat: "hat",
+  hats: "hat",
+  cap: "hat",
+  caps: "hat",
+  beanie: "hat",
+  beanies: "hat",
+  beret: "hat",
+  berets: "hat",
+  scarf: "scarf",
+  scarves: "scarf",
+  shawl: "scarf",
+  shawls: "scarf",
+  wrap: "scarf",
+  wraps: "scarf",
+  stole: "scarf",
+  stoles: "scarf",
+  belt: "belt",
+  belts: "belt",
+  sock: "sock",
+  socks: "sock",
+  hosiery: "sock",
+  stocking: "sock",
+  stockings: "sock",
 
   earring: "jewellery",
   earrings: "jewellery",
@@ -255,6 +286,8 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
 
 /**
  * Macro family per cluster — order must match `PRODUCT_TYPE_CLUSTERS` exactly.
+ * (Length must equal `PRODUCT_TYPE_CLUSTERS.length`; a past off-by-one here mapped
+ * `dress` → `outerwear` and broke `filterProductTypeSeedsByMappedCategory`.)
  */
 const CLUSTER_FAMILY: readonly string[] = [
   "bottoms",
@@ -263,7 +296,6 @@ const CLUSTER_FAMILY: readonly string[] = [
   "bottoms",
   "shorts_skirt",
   "shorts_skirt",
-  "footwear",
   "footwear",
   "footwear",
   "footwear",
@@ -285,6 +317,10 @@ const CLUSTER_FAMILY: readonly string[] = [
   "modest_full",
   "head_covering",
   "bags",
+  "head_covering",
+  "head_covering",
+  "jewellery",
+  "jewellery",
   "jewellery",
 ];
 
@@ -762,6 +798,35 @@ function familiesForTokens(tokens: string[]): Set<string> {
   return out;
 }
 
+const GARMENT_LIKE_FAMILIES = new Set<string>([
+  "footwear",
+  "dress",
+  "bottoms",
+  "tops",
+  "shorts_skirt",
+  "outerwear",
+  "modest_full",
+  "activewear",
+  "swimwear",
+  "underwear",
+]);
+
+/**
+ * True when product-type seeds (BLIP/YOLO/user) map to garment/footwear families — used to
+ * downrank beauty listings that only match on palette/texture in CLIP space.
+ */
+export function hasGarmentLikeFamilyFromProductTypeSeeds(seeds: string[]): boolean {
+  if (!seeds.length) return false;
+  const expanded = expandProductTypesForQuery(
+    seeds.map((s) => String(s).toLowerCase().trim()).filter(Boolean),
+  );
+  const fams = familiesForTokens(expanded);
+  for (const f of fams) {
+    if (GARMENT_LIKE_FAMILIES.has(f)) return true;
+  }
+  return false;
+}
+
 function pairPenalty(a: string, b: string): number {
   if (a === b) return 0;
   const row = FAMILY_PAIR_PENALTY[a];
@@ -820,6 +885,60 @@ export function extractLexicalProductTypeSeeds(rawQuery: string): string[] {
     if (fam.has(w)) hits.push(w);
   }
   return [...new Set(hits)];
+}
+
+/** Map vision/catalog aisle strings to taxonomy macro families (tops, dress, outerwear, …). */
+export function intentFamiliesForProductCategory(productCategory: string): Set<string> | null {
+  const c = String(productCategory || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[\s_-]+/g, " ");
+  const m: Record<string, readonly string[]> = {
+    dresses: ["dress"],
+    tops: ["tops"],
+    bottoms: ["bottoms", "shorts_skirt"],
+    outerwear: ["outerwear"],
+    footwear: ["footwear"],
+    bags: ["bags"],
+    // Keep "accessories" separate from bags to avoid headwear/hair labels
+    // drifting into handbags during type-seed filtering.
+    accessories: ["head_covering", "jewellery"],
+  };
+  const list = m[c];
+  if (!list) return null;
+  return new Set(list);
+}
+
+function familiesForExpandedSeed(seed: string): Set<string> {
+  const t = String(seed || "")
+    .toLowerCase()
+    .trim();
+  if (!t) return new Set();
+  return familiesForTokens(expandProductTypesForQuery([t]));
+}
+
+/**
+ * Drop lexical type seeds whose taxonomy macro-family does not match the mapped product aisle.
+ * Prevents compound labels (e.g. "vest dress" → dress + vest tokens) from pulling in sibling
+ * clusters in another family (vest ↔ coat/jacket), and the same class of bug for tops/bottoms/etc.
+ */
+export function filterProductTypeSeedsByMappedCategory(
+  seeds: string[],
+  productCategory: string,
+): string[] {
+  const allowed = intentFamiliesForProductCategory(productCategory);
+  if (!allowed || seeds.length === 0) return seeds;
+
+  const kept = seeds.filter((seed) => {
+    const fams = familiesForExpandedSeed(String(seed));
+    if (fams.size === 0) return true;
+    for (const f of fams) {
+      if (allowed.has(f)) return true;
+    }
+    return false;
+  });
+
+  return kept.length > 0 ? kept : seeds;
 }
 
 /** Whole-word fashion product nouns — backs `hasTypeIntent` when AST misses type entities. */
@@ -999,10 +1118,78 @@ function intraFamilySubtypePenalty(querySeeds: string[], docTypes: string[]): nu
   return maxPen;
 }
 
+/**
+ * When indexed `product_types` is empty or does not map to taxonomy families, infer
+ * macro families from `category` / `category_canonical` so cross-family penalties
+ * still apply (e.g. tops query vs footwear listing that lacks `product_types`).
+ */
+export function inferMacroFamiliesFromListingCategoryFields(
+  categoryCanonical: unknown,
+  category: unknown,
+): Set<string> {
+  const parts: string[] = [];
+  if (categoryCanonical != null && String(categoryCanonical).trim()) {
+    parts.push(String(categoryCanonical));
+  }
+  if (category != null && String(category).trim()) {
+    parts.push(String(category));
+  }
+  const combined = parts.join(" ").toLowerCase().replace(/[\s_-]+/g, " ").trim();
+  if (!combined) return new Set();
+
+  const direct = intentFamiliesForProductCategory(combined);
+  if (direct && direct.size > 0) return direct;
+
+  for (const seg of combined.split(/\s+/)) {
+    const d = intentFamiliesForProductCategory(seg);
+    if (d && d.size > 0) return d;
+  }
+
+  const out = new Set<string>();
+  if (
+    /\b(footwear|sneaker|sneakers|boot|boots|sandal|sandals|loafer|loafers|heel|heels|slipper|slippers|mule|mules|clog|clogs|trainer|trainers|flipflop|flip-flop|flip flops|crocs?|shoe|shoes)\b/.test(
+      combined,
+    )
+  ) {
+    out.add("footwear");
+  }
+  if (
+    /\b(shirt|shirts|blouse|blouses|tee|tees|t-?shirt|tshirt|polos?|sweater|sweaters|hoodie|hoodies|cardigan|cardigans|tank|tanks|camisole|bodysuit)\b/.test(
+      combined,
+    )
+  ) {
+    out.add("tops");
+  }
+  if (/\b(pants?|jeans?|trousers?|leggings?|joggers?|chinos?|cargos?)\b/.test(combined)) {
+    out.add("bottoms");
+  }
+  if (/\b(shorts?|skirt|skirts)\b/.test(combined)) {
+    out.add("shorts_skirt");
+  }
+  if (/\b(dresses?|gown|gowns)\b/.test(combined)) {
+    out.add("dress");
+  }
+  if (/\b(coat|coats|jacket|jackets|blazer|blazers|parka|parkas|puffer|vests?)\b/.test(combined)) {
+    out.add("outerwear");
+  }
+  if (/\b(bag|bags|handbag|handbags|tote|totes|backpack|backpacks)\b/.test(combined)) {
+    out.add("bags");
+  }
+  return out;
+}
+
+export interface ScoreCrossFamilyTypePenaltyOpts {
+  /** Indexed listing category (human-readable). */
+  category?: string;
+  /** Indexed `category_canonical` aisle key when present. */
+  categoryCanonical?: string;
+  sameClusterWeight?: number;
+}
+
 export function scoreCrossFamilyTypePenalty(
   querySeeds: string[],
   docProductTypes: string[],
-  _opts?: { sameClusterWeight?: number },
+  opts?: ScoreCrossFamilyTypePenaltyOpts,
 ): number {
   if (!crossFamilyTypePenaltyEnabled()) return 0;
   const seeds = querySeeds.map((s) => s.toLowerCase().trim()).filter(Boolean);
@@ -1010,8 +1197,17 @@ export function scoreCrossFamilyTypePenalty(
 
   const expandedQuery = expandProductTypesForQuery(seeds);
   const qFam = familiesForTokens(expandedQuery);
-  const dFam = familiesForTokens(docProductTypes.map((t) => t.toLowerCase().trim()).filter(Boolean));
-  if (qFam.size === 0 || dFam.size === 0) return 0;
+  if (qFam.size === 0) return 0;
+
+  let dFam = familiesForTokens(docProductTypes.map((t) => t.toLowerCase().trim()).filter(Boolean));
+  const dFromCategory = inferMacroFamiliesFromListingCategoryFields(
+    opts?.categoryCanonical,
+    opts?.category,
+  );
+  if (dFromCategory.size > 0) {
+    dFam = new Set([...dFam, ...dFromCategory]);
+  }
+  if (dFam.size === 0) return 0;
 
   let max = 0;
   for (const qf of qFam) {
@@ -1112,6 +1308,16 @@ export interface RerankTypeBreakdown {
 
 const DEFAULT_SIBLING_CLUSTER_WEIGHT = 0.64;
 
+function isBroadExactToken(token: string): boolean {
+  const t = String(token || "").toLowerCase().trim();
+  if (!t) return false;
+  // "top/tops/cami" is intentionally a broad catch-all; treat as non-exact for rerank.
+  if (topsMicroGroup(t) === "generic_top") return true;
+  // Hypernym-level labels are too broad for "exact" matching (e.g. shoes/pants/outerwear/bag).
+  const hyperValues = new Set(Object.values(TYPE_TO_HYPERNYM).map((x) => String(x).toLowerCase().trim()));
+  return hyperValues.has(t);
+}
+
 export function scoreRerankProductTypeBreakdown(
   querySeeds: string[],
   docTypes: string[],
@@ -1133,7 +1339,8 @@ export function scoreRerankProductTypeBreakdown(
   const wIntra = opts?.intraPenaltyWeight ?? 0.62;
 
   const exactTax = scoreProductTypeTaxonomyMatch(seeds, docs, { sameClusterWeight: 0 });
-  const exactTypeScore = exactTax.score >= 1 ? 1 : 0;
+  const exactToken = exactTax.bestQueryType ?? exactTax.bestDocType ?? "";
+  const exactTypeScore = exactTax.score >= 1 && !isBroadExactToken(exactToken) ? 1 : 0;
 
   const clusterTax = scoreProductTypeTaxonomyMatch(seeds, docs, { sameClusterWeight: wSib });
   const siblingClusterScore = exactTypeScore >= 1 ? 1 : clusterTax.score;
@@ -1164,7 +1371,11 @@ type GarmentHint =
   | { kind: "shorts_skirt"; sk: "shorts" | "skirt" }
   | { kind: "footwear"; id: string }
   | { kind: "tops"; id: string }
-  | { kind: "dress"; id: string };
+  | { kind: "dress"; id: string }
+  | {
+      kind: "accessory";
+      id: "bag" | "headwear" | "scarf" | "belt" | "jewelry" | "hosiery";
+    };
 
 function dedupeGarmentHints(hints: GarmentHint[]): GarmentHint[] {
   const seen = new Set<string>();
@@ -1193,6 +1404,8 @@ function inferGarmentHintsFromQuerySeeds(seeds: string[]): GarmentHint[] {
     if (tp) out.push({ kind: "tops", id: TOPS_MICRO[tp] });
     const dr = dressMicroGroup(t);
     if (dr) out.push({ kind: "dress", id: DRESS_MICRO[dr] });
+    const ax = accessoryMicroGroup(t);
+    if (ax) out.push({ kind: "accessory", id: ax });
   }
   return dedupeGarmentHints(out);
 }
@@ -1213,6 +1426,8 @@ function inferGarmentHintsFromCategoryString(raw: string | undefined): GarmentHi
     if (tp) out.push({ kind: "tops", id: TOPS_MICRO[tp] });
     const dr = dressMicroGroup(w);
     if (dr) out.push({ kind: "dress", id: DRESS_MICRO[dr] });
+    const ax = accessoryMicroGroup(w);
+    if (ax) out.push({ kind: "accessory", id: ax });
   }
   if (/\bskirts?\b/.test(s)) out.push({ kind: "shorts_skirt", sk: "skirt" });
   if (/\b(?:board\s+)?shorts\b|\bbermuda\b/.test(s)) out.push({ kind: "shorts_skirt", sk: "shorts" });
@@ -1230,7 +1445,82 @@ function inferGarmentHintsFromCategoryString(raw: string | undefined): GarmentHi
       if (dr) out.push({ kind: "dress", id: DRESS_MICRO[dr] });
     }
   }
+  if (/\b(bag|bags|handbag|handbags|tote|totes|clutch|clutches|purse|purses|backpack|backpacks|satchel|satchels|crossbody|wallet|wallets)\b/.test(s)) {
+    out.push({ kind: "accessory", id: "bag" });
+  }
+  if (/\b(hat|hats|cap|caps|beanie|beanies|beret|berets)\b/.test(s)) {
+    out.push({ kind: "accessory", id: "headwear" });
+  }
+  if (/\b(scarf|scarves|shawl|shawls|stole|stoles|wrap|wraps)\b/.test(s)) {
+    out.push({ kind: "accessory", id: "scarf" });
+  }
+  if (/\b(belt|belts)\b/.test(s)) {
+    out.push({ kind: "accessory", id: "belt" });
+  }
+  if (/\b(necklace|necklaces|earring|earrings|bracelet|bracelets|ring|rings|jewelry|jewellery|brooch|brooches|anklet|anklets|choker|chokers)\b/.test(s)) {
+    out.push({ kind: "accessory", id: "jewelry" });
+  }
+  if (/\b(sock|socks|hosiery|stocking|stockings)\b/.test(s)) {
+    out.push({ kind: "accessory", id: "hosiery" });
+  }
   return dedupeGarmentHints(out);
+}
+
+function accessoryMicroGroup(
+  token: string,
+): "bag" | "headwear" | "scarf" | "belt" | "jewelry" | "hosiery" | null {
+  const t = token.toLowerCase().trim();
+  if (
+    new Set([
+      "bag",
+      "bags",
+      "handbag",
+      "handbags",
+      "tote",
+      "totes",
+      "clutch",
+      "clutches",
+      "purse",
+      "purses",
+      "backpack",
+      "backpacks",
+      "satchel",
+      "satchels",
+      "crossbody",
+      "wallet",
+      "wallets",
+    ]).has(t)
+  )
+    return "bag";
+  if (new Set(["hat", "hats", "cap", "caps", "beanie", "beanies", "beret", "berets"]).has(t))
+    return "headwear";
+  if (new Set(["scarf", "scarves", "shawl", "shawls", "stole", "stoles", "wrap", "wraps"]).has(t))
+    return "scarf";
+  if (new Set(["belt", "belts"]).has(t)) return "belt";
+  if (
+    new Set([
+      "necklace",
+      "necklaces",
+      "earring",
+      "earrings",
+      "bracelet",
+      "bracelets",
+      "ring",
+      "rings",
+      "jewelry",
+      "jewellery",
+      "brooch",
+      "brooches",
+      "anklet",
+      "anklets",
+      "choker",
+      "chokers",
+    ]).has(t)
+  )
+    return "jewelry";
+  if (new Set(["sock", "socks", "hosiery", "stocking", "stockings"]).has(t))
+    return "hosiery";
+  return null;
 }
 
 function docSupportsGarmentHint(docProductTypes: string[], hint: GarmentHint): boolean {
@@ -1259,6 +1549,8 @@ function docSupportsGarmentHint(docProductTypes: string[], hint: GarmentHint): b
         const g = dressMicroGroup(d);
         return g ? DRESS_MICRO[g] === hint.id : false;
       });
+    case "accessory":
+      return docs.some((d) => accessoryMicroGroup(d) === hint.id);
     default:
       return false;
   }
@@ -1349,6 +1641,12 @@ function garmentHintsConflict(a: GarmentHint, b: GarmentHint): boolean {
     (a.kind === "footwear" && b.kind === "dress") ||
     (a.kind === "dress" && b.kind === "footwear")
   ) {
+    return true;
+  }
+  if (a.kind === "accessory" && b.kind === "accessory") {
+    return a.id !== b.id;
+  }
+  if (a.kind === "accessory" || b.kind === "accessory") {
     return true;
   }
   return false;

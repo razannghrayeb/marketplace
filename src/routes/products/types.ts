@@ -23,10 +23,12 @@ export interface SearchFilters {
   color?: string;
   /** Used to bias ranking without hard filtering (image search "closet similar"). */
   softColor?: string;
+  /** Promote softColor into final relevance gating when inference is strong and slot-specific. */
+  softColorStrict?: boolean;
   /** Multi-color intent (image / enhanced search). */
   colors?: string[];
   colorMode?: "any" | "all";
-  /** Taxonomy product types for relevance (e.g. from vision: `["dress"]`). */
+  /** Taxonomy product types for relevance (e.g. from vision: `["dress"]`, BLIP caption seeds on image upload). */
   productTypes?: string[];
   /** Canonical: kids | baby | teen | adult */
   ageGroup?: string;
@@ -35,8 +37,18 @@ export interface SearchFilters {
   style?: string;
   /** Used to bias ranking without hard filtering (image search "closet similar"). */
   softStyle?: string;
+  /** Sleeve intent (short | long | sleeveless) used by reranking. */
+  sleeve?: string;
+  /** Length intent (mini | midi | maxi | long) used by reranking. */
+  length?: string;
   gender?: string;
   pattern?: string;
+  /** K-means dominant colors on garment crop (image analysis). */
+  cropDominantColors?: string[];
+  /** Caption / vision primary color token merged with crop for soft tier matching. */
+  inferredPrimaryColor?: string | null;
+  /** Per-slot caption colors (e.g. topColor, jeansColor). */
+  inferredColorsByItem?: Record<string, string | null>;
 }
 
 // ============================================================================
@@ -81,6 +93,23 @@ export interface ImageSearchParams extends SearchParams {
    * (used for Shop-the-Look where crop↔catalog scores are often below a strict gate).
    */
   relaxThresholdWhenEmpty?: boolean;
+  /**
+   * Structured BLIP signal from query image/crop (used for rerank alignment, not hard filtering).
+   */
+  blipSignal?: {
+    productType?: string | null;
+    gender?: string;
+    ageGroup?: string;
+    primaryColor?: string | null;
+    secondaryColor?: string | null;
+    style?: string | null;
+    material?: string | null;
+    occasion?: string | null;
+    confidence?: number;
+  };
+  /** Merged with crop k-means into soft color tier intent (Shop-the-Look / caption). */
+  inferredPrimaryColor?: string | null;
+  inferredColorsByItem?: Record<string, string | null>;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -130,35 +159,124 @@ export interface ProductResult {
   finalRelevance01?: number;
   mlRerankScore?: number;
   explain?: {
+    // ── Raw signals ──────────────────────────────────────────
+    /** Raw CLIP cosine similarity [0,1]. */
+    clipCosine?: number;
+    /** CLIP cosine modulated by catalog type/category alignment. */
+    merchandiseSimilarity?: number;
+    /** typeFactor * categoryFactor from merchandise binding. */
+    catalogAlignment?: number;
+    /** Raw cosine of color embedding channel [0,1]. */
+    colorEmbeddingSim?: number;
+    /** Raw cosine of style embedding channel [0,1]. */
+    styleEmbeddingSim?: number;
+    /** Raw cosine of pattern embedding channel [0,1]. */
+    patternEmbeddingSim?: number;
+
+    // ── Blended effective similarities ───────────────────────
+    /** Color embedding blended with keyword compliance (attenuated when intent conflicts). */
+    colorSimEffective?: number;
+    /** Style embedding blended with keyword compliance. */
+    styleSimEffective?: number;
+
+    // ── Type taxonomy ────────────────────────────────────────
     exactTypeScore?: number;
     siblingClusterScore?: number;
     parentHypernymScore?: number;
     intraFamilyPenalty?: number;
     productTypeCompliance?: number;
     categoryScore?: number;
-    /** Omitted when there is no separate lexical signal (e.g. image-only kNN). */
-    lexicalScore?: number;
-    semanticScore?: number;
-    styleSim?: number;
-    colorSim?: number;
-    patternSim?: number;
-    taxonomyMatch?: number;
-    imageCompositeScore?: number;
-    colorCompliance?: number; // 0..1
-    colorScore?: number;
-    globalScore?: number;
+
+    // ── Metadata compliance (0-1) ────────────────────────────
+    colorCompliance?: number;
     matchedColor?: string;
     colorTier?: "exact" | "family" | "bucket" | "none";
+    styleCompliance?: number;
+    sleeveCompliance?: number;
+    lengthCompliance?: number;
     audienceCompliance?: number;
+
+    // ── Penalties ────────────────────────────────────────────
     crossFamilyPenalty?: number;
+    hardBlocked?: boolean;
+
+    // ── Multi-signal reranking ───────────────────────────────
+    taxonomyMatch?: number;
+    blipAlignment?: number;
+    /** BLIP primary vs catalog palette dampening on color embedding (1 = no dampening). */
+    blipColorConflictFactor?: number;
+    imageCompositeScore?: number;
+    imageCompositeScore01?: number;
+
+    // ── Fused scores (directly used in finalRelevance01) ─────
+    /** Multi-channel visual score (CLIP + color + style + pattern stretched & fused). */
+    fusedVisual?: number;
+    /** Weighted metadata compliance blend used in final formula. */
+    metadataCompliance?: number;
+
+    // ── Intent flags ─────────────────────────────────────────
     hasTypeIntent?: boolean;
     hasColorIntent?: boolean;
-    typeGateFactor?: number;
-    hardBlocked?: boolean;
+    colorIntentGatesFinalRelevance?: boolean;
+    hasStyleIntent?: boolean;
+    hasSleeveIntent?: boolean;
+    hasLengthIntent?: boolean;
+
+    // ── Intent context ───────────────────────────────────────
     desiredProductTypes?: string[];
     desiredColors?: string[];
+    desiredColorsExplicit?: string[];
+    desiredColorsEffective?: string[];
+    colorIntentSource?: "explicit" | "crop" | "inferred" | "crop+inferred" | "none";
+    desiredStyle?: string;
+    desiredSleeve?: string;
+    desiredLength?: string;
     colorMode?: "any" | "all";
+    /** Same payload as `meta.relevance_intent` on image search responses. */
+    relevanceIntentDebug?: ImageSearchRelevanceIntentDebug;
+
+    // ── Final score ──────────────────────────────────────────
     finalRelevance01?: number;
+
+    // ── Legacy / text-search fields (omitted in image results) ─
+    /** @deprecated Use clipCosine. Omitted when there is no separate lexical signal. */
+    lexicalScore?: number;
+    /** @deprecated Use clipCosine. */
+    semanticScore?: number;
+    /** @deprecated Use clipCosine. */
+    globalScore?: number;
+    /** @deprecated Use clipCosine. */
+    embedding_cosine_01?: number;
+    /** @deprecated Use merchandiseSimilarity. */
+    merchandise_similarity_01?: number;
+    /** @deprecated Use catalogAlignment. */
+    catalog_similarity_alignment?: number;
+    /** @deprecated Use styleEmbeddingSim. */
+    styleSim?: number;
+    /** @deprecated Use colorEmbeddingSim. */
+    colorSim?: number;
+    /** @deprecated Use styleEmbeddingSim. */
+    styleSimRaw?: number;
+    /** @deprecated Use colorEmbeddingSim. */
+    colorSimRaw?: number;
+    /** @deprecated Use styleSimEffective. */
+    styleSimEff?: number;
+    /** @deprecated Use colorSimEffective. */
+    colorSimEff?: number;
+    /** @deprecated Use patternEmbeddingSim. */
+    patternSim?: number;
+    /** @deprecated Use colorCompliance. */
+    colorScore?: number;
+    /** @deprecated Removed — no longer used in image scoring. */
+    typeGateFactor?: number;
+    /** @deprecated Removed — dead field from text search pipeline. */
+    visual_component?: number;
+    /** @deprecated Removed — dead field from text search pipeline. */
+    type_component?: number;
+    /** @deprecated Removed — dead field from text search pipeline. */
+    attr_component?: number;
+    /** @deprecated Removed — dead field from text search pipeline. */
+    penalty_component?: number;
   };
   // Scores from candidate generator
   clipSim?: number; // 0..1 (cosine or normalized)
@@ -166,6 +284,26 @@ export interface ProductResult {
   openSearchScore?: number; // raw or normalized
   pHashDist?: number;
   candidateScore?: number;
+}
+
+/** Image search: snapshot of how style/color/type intent was built (debugging). */
+export interface ImageSearchRelevanceIntentDebug {
+  style: {
+    gatesFinalRelevance01: boolean;
+    usedInCompositeRerank: boolean;
+    explicitFilter?: string;
+    softHint?: string;
+  };
+  color: {
+    gatesFinalRelevance01: boolean;
+    cropDominantTokens?: string[];
+    /** Caption / vision inferred tokens merged into tier matching with crop. */
+    inferredTokens?: string[];
+    softBiasOnly: boolean;
+    explicitFilters: string[];
+    effectiveDesired: string[];
+  };
+  types: { desiredProductTypes: string[] };
 }
 
 export interface SearchResultWithRelated {
@@ -186,11 +324,42 @@ export interface SearchResultWithRelated {
     relevance_gate_soft?: boolean;
     /** Image kNN: strict similarity gate removed all hits; best candidates returned anyway (relaxThresholdWhenEmpty). */
     threshold_relaxed?: boolean;
+    /** Image kNN: returned best available neighbors after visual/relevance gates would have produced zero results. */
+    image_search_pipeline_degraded?: boolean;
+    blip_signal_applied?: boolean;
+    /** Effective weight of batch-normalized composite in `finalRelevance01` (adaptive by spread & pool size). */
+    batch_composite_influence?: number;
+    /** Image search: how style/color/type intent was built; see `ImageSearchRelevanceIntentDebug`. */
+    relevance_intent?: ImageSearchRelevanceIntentDebug;
+    /** OpenSearch kNN field used for retrieval (`embedding` | `embedding_garment`). */
+    image_knn_field?: string;
     recall_size?: number;
     final_accept_min?: number;
+    /** Floor used after sparse recall when strict gate yields too few hits (≤ `image_min_results_target`). */
+    final_accept_min_effective?: number;
+    relevance_relaxed_for_min_count?: boolean;
+    image_min_results_target?: number;
     /** Count after relevance gate + dedupe (before pagination slice). */
     total_above_threshold?: number;
     open_search_total_estimate?: number;
+    pipeline_counts?: {
+      /** True when kNN hits were re-scored with exact cosine(query, stored vector). */
+      exact_cosine_rerank: boolean;
+      /** True when parallel global + garment kNN were merged (max cosine). */
+      dual_knn_fusion: boolean;
+      /** Unconstrained image search: order by CLIP similarity before metadata relevance. */
+      image_rank_visual_first: boolean;
+      raw_open_search_hits: number;
+      base_candidates: number;
+      ranked_candidates: number;
+      threshold_passed_visual: number;
+      visual_gated_hits: number;
+      hits_after_final_accept_min: number;
+      hits_after_color_postfilter: number;
+      hits_after_hydration: number;
+      hits_after_dedupe: number;
+      final_returned_count: number;
+    };
   };
 }
 

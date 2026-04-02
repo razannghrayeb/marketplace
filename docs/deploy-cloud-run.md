@@ -200,7 +200,53 @@ The production **`Dockerfile`** ships **Node + ONNX** (CLIP/BLIP) and a **Python
 
 If YOLO is unreachable, routes **fall back** to whole-image embedding search.
 
-## 8) Optional: GPU for CLIP text/image search (faster embeddings)
+## 8) Optional: BLIP external service (HF model baked at build time)
+
+The API supports two BLIP modes:
+
+1. **Local ONNX BLIP in Node** (default) — `BLIP_API_URL` unset.
+2. **External BLIP service** (recommended for large HF instruct BLIP models) — set `BLIP_API_URL` and run the dedicated service built from `src/lib/model/Dockerfile.blip`.
+
+### Build and deploy BLIP service (Cloud Run GPU)
+
+```bash
+# Build image with model baked into image layers
+gcloud builds submit src/lib/model \
+  --tag us-central1-docker.pkg.dev/<PROJECT_ID>/marketplace/blip-service:latest \
+  --substitutions=_HF_TOKEN=<HF_TOKEN>,_BLIP_HF_REPO=Salesforce/instructblip-flan-t5-xl
+```
+
+Then deploy:
+
+```bash
+gcloud run deploy blip-service \
+  --image us-central1-docker.pkg.dev/<PROJECT_ID>/marketplace/blip-service:latest \
+  --region us-central1 \
+  --gpu 1 \
+  --gpu-type nvidia-l4 \
+  --cpu 4 \
+  --memory 16Gi \
+  --concurrency 4 \
+  --min-instances 1 \
+  --max-instances 5 \
+  --no-cpu-throttling \
+  --timeout 120
+```
+
+Finally point API at BLIP:
+
+```bash
+gcloud run services update marketplace \
+  --region us-central1 \
+  --set-env-vars BLIP_API_URL=https://blip-service-<hash>-uc.a.run.app,BLIP_API_TIMEOUT_MS=8000
+```
+
+Notes:
+- BLIP service image is offline at runtime (`HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`).
+- HF token is used at build time only.
+- API automatically falls back to local ONNX BLIP when `BLIP_API_URL` is unset.
+
+## 9) Optional: GPU for CLIP text/image search (faster embeddings)
 
 Text and image search embeddings use **ONNX Runtime** in `src/lib/image/clip.ts`. By default the server uses **CPU** only. On a **GPU** machine or **[Cloud Run with GPU](https://cloud.google.com/run/docs/configuring/services/gpu)** (where available in your region), you can enable CUDA:
 

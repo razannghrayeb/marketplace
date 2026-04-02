@@ -10,16 +10,25 @@
  */
 
 import { pg } from "../../lib/core";
+import { config } from "../../config";
 import {
   uploadImage,
   getCdnUrl,
   processImageForEmbedding,
+  processImageForGarmentEmbeddingWithOptionalBox,
+  computeShopTheLookGarmentEmbeddingFromDetection,
   blip,
-  extractPaddedDetectionCropBuffer,
   computePHash,
   validateImage,
   isClipAvailable,
 } from "../../lib/image";
+import { getTextEmbedding, cosineSimilarity } from "../../lib/image/clip";
+import { getRedis } from "../../lib/redis";
+import {
+  inferAudienceFromCaption,
+  inferColorFromCaption,
+} from "../../lib/image/captionAttributeInference";
+import { buildStructuredBlipOutput } from "../../lib/image/blipStructured";
 import { extractDominantColorNames } from "../../lib/color/dominantColor";
 import {
   YOLOv8Client,
@@ -32,6 +41,7 @@ import {
   type SegmentationMask,
 } from "../../lib/image/yolov8Client";
 import { isYoloCircuitOpenError } from "../../lib/image/yoloCircuitBreaker";
+import { prepareBufferForImageSearchQuery } from "../../lib/image/embeddingPrep";
 import { searchByImageWithSimilarity } from "./search.service";
 import { ProductResult } from "./types";
 import sharpLib from "sharp";
@@ -45,8 +55,21 @@ import {
 import {
   extractLexicalProductTypeSeeds,
   expandProductTypesForQuery,
+  filterProductTypeSeedsByMappedCategory,
 } from "../../lib/search/productTypeTaxonomy";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
+
+type BlipSignal = {
+  productType?: string | null;
+  gender?: string;
+  ageGroup?: string;
+  primaryColor?: string | null;
+  secondaryColor?: string | null;
+  style?: string | null;
+  material?: string | null;
+  occasion?: string | null;
+  confidence?: number;
+};
 
 /** Default on when unset — soft category + aisle rerank is the normal image path. */
 function imageSoftCategoryEnv(): boolean {
@@ -58,10 +81,9 @@ function imageSoftCategoryEnv(): boolean {
 }
 
 /**
- * kNN field for per-detection Shop-the-Look searches (query vector = padded detection crop).
- * When `SEARCH_IMAGE_DETECTION_KNN_FIELD` is unset, defaults to `embedding_garment` so query
- * vectors match the index field built with `processImageForGarmentEmbedding` on catalog images.
- * Set to `embedding` only if your index omits garment vectors or you intentionally compare crops to full-frame vectors.
+ * kNN field for per-detection Shop-the-Look searches (query = `computeShopTheLookGarmentEmbeddingFromDetection`,
+ * aligned with `processImageForGarmentEmbeddingWithOptionalBox` / `resume-reindex` on `embedding_garment`).
+ * Defaults to `embedding_garment`. Set to `embedding` only if the index omits garment vectors or you compare to full-frame vectors.
  */
 function shopTheLookKnnField(): string {
   const v = String(process.env.SEARCH_IMAGE_DETECTION_KNN_FIELD ?? "").trim();
@@ -181,6 +203,207 @@ function imageMinColorAreaRatioEnv(): number {
   return Math.max(0, raw);
 }
 
+function imageBlipSoftHintConfidenceMin(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_SOFT_HINT_CONF_MIN ?? "0.52");
+  if (!Number.isFinite(raw)) return 0.52;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function imageBlipSoftHintConfidenceStrong(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_SOFT_HINT_CONF_STRONG ?? "0.7");
+  if (!Number.isFinite(raw)) return 0.7;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function imageBlipClipConsistencyMin(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_CLIP_CONSISTENCY_MIN ?? "0.18");
+  if (!Number.isFinite(raw)) return 0.18;
+  return Math.max(-1, Math.min(1, raw));
+}
+
+function imageBlipCacheTtlSec(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_CACHE_TTL_SEC ?? "21600");
+  if (!Number.isFinite(raw)) return 21600;
+  return Math.max(60, Math.min(7 * 24 * 3600, Math.floor(raw)));
+}
+
+function stableBufferHash(buffer: Buffer): string {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+const inMemoryBlipCache = new Map<string, { expiresAt: number; value: string }>();
+
+async function getCachedCaption(buffer: Buffer, scope: "full" | "det"): Promise<string> {
+  const hash = stableBufferHash(buffer);
+  const key = `blip:caption:v2:${scope}:${hash}`;
+  const now = Date.now();
+  const mem = inMemoryBlipCache.get(key);
+  if (mem && mem.expiresAt > now) return mem.value;
+  if (mem && mem.expiresAt <= now) inMemoryBlipCache.delete(key);
+
+  const redis = getRedis();
+  if (redis) {
+    try {
+      const cached = (await redis.get(key)) as string | null;
+      if (cached && String(cached).trim().length > 0) {
+        const ttlMs = imageBlipCacheTtlSec() * 1000;
+        inMemoryBlipCache.set(key, { expiresAt: now + ttlMs, value: String(cached) });
+        return String(cached);
+      }
+    } catch {
+      // Cache is optional; continue to model inference.
+    }
+  }
+
+  const caption = await captionWithTimeout(buffer);
+  if (caption.trim().length > 0) {
+    const ttlSec = imageBlipCacheTtlSec();
+    const ttlMs = ttlSec * 1000;
+    inMemoryBlipCache.set(key, { expiresAt: now + ttlMs, value: caption });
+    if (redis) {
+      try {
+        await redis.setex(key, ttlSec, caption);
+      } catch {
+        // Ignore cache-set failures.
+      }
+    }
+  }
+  return caption;
+}
+
+function buildBlipSignal(
+  structured: ReturnType<typeof buildStructuredBlipOutput>,
+  confidence: number,
+): BlipSignal {
+  return {
+    productType: structured.mainItem ?? undefined,
+    gender: structured.audience.gender,
+    ageGroup: structured.audience.ageGroup,
+    primaryColor: structured.colors[0] ?? undefined,
+    secondaryColor: structured.colors[1] ?? undefined,
+    style: structured.style.attrStyle,
+    occasion: structured.style.occasion,
+    confidence,
+  };
+}
+
+function pickConservativeFullImagePrimaryColor(
+  captionColors: ReturnType<typeof inferColorFromCaption>,
+  structured: ReturnType<typeof buildStructuredBlipOutput>,
+): string | null {
+  const top = captionColors.topColor ?? null;
+  const jeans = captionColors.jeansColor ?? null;
+  const garment = captionColors.garmentColor ?? null;
+
+  const mentionsMultipleItems =
+    (Array.isArray(structured.secondaryItems) && structured.secondaryItems.length > 0) ||
+    (top && jeans && top !== jeans);
+
+  // Full-image caption can mix top/bottom/accessories; keep global color only when unambiguous.
+  if (mentionsMultipleItems) return garment;
+  return garment ?? top ?? jeans ?? null;
+}
+
+function shouldUseDominantColorFallback(
+  captionColors: ReturnType<typeof inferColorFromCaption>,
+  structured: ReturnType<typeof buildStructuredBlipOutput>,
+): boolean {
+  const top = captionColors.topColor ?? null;
+  const jeans = captionColors.jeansColor ?? null;
+  const garment = captionColors.garmentColor ?? null;
+  const hasAnySlotColor = Boolean(top || jeans || garment);
+  if (!hasAnySlotColor) return true;
+  const mentionsMultipleItems =
+    (Array.isArray(structured.secondaryItems) && structured.secondaryItems.length > 0) ||
+    (top && jeans && top !== jeans);
+  // If caption already has slot-level color cues for a multi-item scene, avoid
+  // replacing them with a single global dominant color.
+  if (mentionsMultipleItems) return false;
+  return false;
+}
+
+function imageBlipConsistencySuppressionEnabled(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_BLIP_CONS_SUPPRESS_ENABLED ?? "1").toLowerCase();
+  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
+}
+
+function imageBlipConsistencySuppressionOff(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_CONS_SUPPRESS_OFF ?? "0.1");
+  if (!Number.isFinite(raw)) return 0.1;
+  return Math.max(-1, Math.min(1, raw));
+}
+
+function imageBlipConsistencySuppressionOn(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_CONS_SUPPRESS_ON ?? "0.28");
+  if (!Number.isFinite(raw)) return 0.28;
+  return Math.max(-1, Math.min(1, raw));
+}
+
+function imageBlipConsistencySuppressionGamma(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_CONS_SUPPRESS_GAMMA ?? "1.6");
+  if (!Number.isFinite(raw)) return 1.6;
+  return Math.max(0.5, Math.min(5, raw));
+}
+
+function suppressionMultiplier(consistency: number): number {
+  if (!imageBlipConsistencySuppressionEnabled()) {
+    const norm = Math.max(0, Math.min(1, (consistency + 1) / 2));
+    return Math.max(0, Math.min(1, 0.55 + 0.45 * norm));
+  }
+  const off = imageBlipConsistencySuppressionOff();
+  const on = imageBlipConsistencySuppressionOn();
+  const gamma = imageBlipConsistencySuppressionGamma();
+  if (on <= off) {
+    return consistency >= on ? 1 : 0;
+  }
+  if (consistency < off) return 0;
+  if (consistency >= on) return 1;
+  const t = (consistency - off) / (on - off);
+  return Math.max(0, Math.min(1, Math.pow(t, gamma)));
+}
+
+function combineConfidenceFromConsistency(base: number, consistency: number): number {
+  return Math.max(0, Math.min(1, base * suppressionMultiplier(consistency)));
+}
+
+async function captionWithTimeout(buf: Buffer): Promise<string> {
+  const startedAt = Date.now();
+  const timeoutMs = config.search.blipCaptionTimeoutMs;
+  let timedOut = false;
+  const timeoutPromise = new Promise<string>((resolve) =>
+    setTimeout(() => {
+      timedOut = true;
+      resolve("");
+    }, timeoutMs),
+  );
+  try {
+    const out = await Promise.race([blip.caption(buf), timeoutPromise]);
+    const caption = String(out || "").trim();
+    if (!caption && timedOut) {
+      console.warn("[BLIP] caption timeout", { timeoutMs, elapsedMs: Date.now() - startedAt });
+    }
+    return caption;
+  } catch (err) {
+    console.warn("[BLIP] caption failed", {
+      timeoutMs,
+      elapsedMs: Date.now() - startedAt,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return "";
+  }
+}
+
+async function clipCaptionConsistency01(imageEmbedding: number[], caption: string): Promise<number> {
+  const c = String(caption || "").trim();
+  if (!c) return 0;
+  try {
+    const textEmb = await getTextEmbedding(c);
+    return cosineSimilarity(imageEmbedding, textEmb);
+  } catch {
+    return 0;
+  }
+}
+
 /** Formality scores by detection label (1-10 scale). */
 const FORMALITY_MAP: Record<string, number> = {
   // Dresses
@@ -290,87 +513,6 @@ function inferStyleForDetectionLabel(label: string): {
   return { formality, attrStyle, style: { occasion, aesthetic, formality } };
 }
 
-function inferAudienceFromCaption(caption: string): { gender?: string; ageGroup?: string } {
-  const s = String(caption || "").toLowerCase();
-  const hasUnisex = /\b(unisex|universal)\b/.test(s);
-  const hasWomen = /\b(women|womens|female|ladies|woman|girl|girls)\b/.test(s);
-  const hasMen = /\b(men|mens|male|man)\b/.test(s);
-
-  // Map to the same `attr_gender` values used by `attributeExtractor.ts`.
-  // (It indexes: `men|women|unisex|boys|girls|kids|baby|infant|toddler` etc.)
-  const gender =
-    hasUnisex
-      ? "unisex"
-      : /\b(girl|girls|girl's)\b/.test(s)
-        ? "girls"
-        : /\b(boy|boys|boy's)\b/.test(s)
-          ? "boys"
-          : /\b(ladies|women|womens|female|woman)\b/.test(s)
-            ? "women"
-            : hasMen
-              ? "men"
-              : undefined;
-
-  let ageGroup: string | undefined;
-  if (/\b(baby|infant|newborn)\b/.test(s)) ageGroup = "baby";
-  else if (/\b(toddler)\b/.test(s)) ageGroup = "kids";
-  else if (/\b(teen|youth|teenager)\b/.test(s)) ageGroup = "teen";
-  else if (/\b(kid|kids|child|children|boys|girls|toddler)\b/.test(s)) ageGroup = "kids";
-
-  return { gender, ageGroup };
-}
-
-function inferColorFromCaption(caption: string): {
-  topColor?: string | null;
-  jeansColor?: string | null;
-  /** Color from dress/skirt/jacket etc. (e.g. "white dress", "red skirt") — used when full-image dominant picks up background. */
-  garmentColor?: string | null;
-} {
-  const s = String(caption || "").toLowerCase();
-
-  // Canonicalize a few common color words expected by our color pipeline.
-  const mapColorWord = (w: string): string | null => {
-    const x = w.toLowerCase().trim();
-    if (!x) return null;
-    if (x === "navy" || x === "dark-blue" || x === "dark blue" || x === "midnight-blue" || x === "midnight blue") return "navy";
-    if (x === "blue" || x === "denim") return "blue";
-    if (x === "black") return "black";
-    if (x === "grey" || x === "gray") return "gray";
-    if (x === "white" || x === "ivory" || x === "cream" || x === "off-white" || x === "off white") return "off-white";
-    if (x === "tan" || x === "camel" || x === "brown") return "tan";
-    if (x === "green" || x === "olive") return "green";
-    if (x === "red" || x === "burgundy") return "red";
-    if (x === "pink") return "pink";
-    return null;
-  };
-
-  const colorTokens =
-    "black|navy|blue|denim|grey|gray|white|ivory|cream|off[- ]white|tan|camel|brown|green|olive|red|pink";
-
-  // Example: "a blue velvet top"
-  let topColor: string | null = null;
-  const topMatch = s.match(
-    new RegExp(`\\b(${colorTokens})\\b[^.]{0,40}\\b(top|shirt|blouse|tee|t-shirt|t shirt|tunic)\\b`),
-  );
-  if (topMatch?.[1]) topColor = mapColorWord(topMatch[1]);
-
-  // Example: "dark jeans" / "blue jeans" (optional; many captions omit explicit color)
-  let jeansColor: string | null = null;
-  const jeansMatch = s.match(/\b(black|navy|blue|denim|grey|gray)\b[^.]{0,20}\bjeans\b/);
-  if (jeansMatch?.[1]) jeansColor = mapColorWord(jeansMatch[1]);
-
-  // Example: "a woman wearing a white dress and sandals" — dress/skirt/jacket often missed by topColor
-  let garmentColor: string | null = null;
-  const garmentMatch = s.match(
-    new RegExp(
-      `\\b(${colorTokens})\\b[^.]{0,40}\\b(dress|dresses|skirt|skirts|jacket|coat|blazer|sweater|gown)\\b`,
-    ),
-  );
-  if (garmentMatch?.[1]) garmentColor = mapColorWord(garmentMatch[1]);
-
-  return { topColor, jeansColor, garmentColor };
-}
-
 /** BLIP slot color for this catalog category (top vs jeans vs dress), if the caption named one explicitly. */
 function captionColorForProductCategory(
   productCategory: string,
@@ -380,6 +522,10 @@ function captionColorForProductCategory(
   if (productCategory === "bottoms") return captionColors.jeansColor ?? null;
   if (productCategory === "dresses") return captionColors.garmentColor ?? null;
   return null;
+}
+
+function requiresSlotSpecificColor(productCategory: string): boolean {
+  return productCategory === "tops" || productCategory === "bottoms" || productCategory === "dresses";
 }
 
 function ensureStyleAndMask(detection: Detection, imageWidth: number, imageHeight: number): Detection {
@@ -462,6 +608,9 @@ function hardCategoryTermsForDetection(
 
   // Prefer hat/cap-family over generic `accessories`.
   if (categoryMapping.productCategory === "accessories") {
+    if (/\b(headband|head covering|hair accessory|hairband|headwear)\b/.test(l)) {
+      return baseTerms.filter((t) => /\b(headband|headwear|hair|hairband|hat|hats|cap)\b/.test(t));
+    }
     if (/\b(hat|hats|cap)\b/.test(l)) {
       return baseTerms.filter((t) => /\b(hat|hats|cap)\b/.test(t));
     }
@@ -503,16 +652,62 @@ function imageMinFootwearConfidence(): number {
   return Math.max(0, Math.min(1, raw));
 }
 
+function imageMinAccessoryAreaRatio(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_AREA_RATIO ?? "0.01");
+  if (!Number.isFinite(raw)) return 0.01;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function imageMinAccessoryConfidence(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_CONFIDENCE ?? "0.8");
+  if (!Number.isFinite(raw)) return 0.8;
+  return Math.max(0, Math.min(1, raw));
+}
+
 function shouldKeepDetectionForShopTheLook(detection: Detection): boolean {
   const mapped = mapDetectionToCategory(detection.label, detection.confidence).productCategory;
-  if (mapped !== "footwear") return true;
   const areaRatio = Number.isFinite(detection.area_ratio) ? detection.area_ratio : 0;
   const confidence = Number.isFinite(detection.confidence) ? detection.confidence : 0;
+  if (mapped === "accessories") {
+    const label = String(detection.label || "").toLowerCase();
+    const isHeadAccessory = /\b(headband|head covering|hair accessory|hairband|headwear)\b/.test(label);
+    // Tiny accessory detections are often noisy and lead to irrelevant bag-heavy retrieval.
+    if (
+      areaRatio < imageMinAccessoryAreaRatio() &&
+      (confidence < imageMinAccessoryConfidence() || isHeadAccessory)
+    ) {
+      return false;
+    }
+  }
+  if (mapped !== "footwear") return true;
   // Tiny, low-confidence footwear boxes are often false positives near image edges.
   if (areaRatio < imageMinFootwearAreaRatio() && confidence < imageMinFootwearConfidence()) {
     return false;
   }
   return true;
+}
+
+function shouldForceHardCategoryForDetection(
+  detection: Detection,
+  categoryMapping: CategoryMapping,
+): boolean {
+  const confidence = Number.isFinite(detection.confidence) ? detection.confidence : 0;
+  const areaRatio = Number.isFinite(detection.area_ratio) ? detection.area_ratio : 0;
+  const category = String(categoryMapping.productCategory || "").toLowerCase();
+
+  // Exact accessory detections are often small, but when they are high-confidence we must
+  // treat them as hard retrieval constraints or the visual search drifts into unrelated items.
+  if (category === "footwear") {
+    return confidence >= 0.8;
+  }
+  if (category === "bags") {
+    return confidence >= 0.85 && areaRatio >= 0.003;
+  }
+  if (category === "accessories") {
+    return confidence >= 0.88 && areaRatio >= 0.0025;
+  }
+
+  return false;
 }
 
 function summarizeDetectionsByLabel(detections: Detection[]): Record<string, number> {
@@ -523,6 +718,100 @@ function summarizeDetectionsByLabel(detections: Detection[]): Record<string, num
     summary[key] = (summary[key] || 0) + 1;
   }
   return summary;
+}
+
+function imagePrimaryDetectionBoost(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_PRIMARY_GROUP_BOOST ?? "1.2");
+  if (!Number.isFinite(raw)) return 1.2;
+  return Math.max(1, Math.min(2, raw));
+}
+
+function imageSecondaryDetectionWeight(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_SECONDARY_GROUP_WEIGHT ?? "0.6");
+  if (!Number.isFinite(raw)) return 0.6;
+  return Math.max(0.2, Math.min(1, raw));
+}
+
+function imageCrossGroupDedupeEnabled(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_CROSS_GROUP_DEDUPE ?? "1").toLowerCase();
+  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
+}
+
+function inferLengthIntentFromCaption(caption: string): "mini" | "midi" | "maxi" | "long" | null {
+  const s = String(caption || "").toLowerCase();
+  if (!s) return null;
+  if (/\bmini\b/.test(s)) return "mini";
+  if (/\bmidi\b/.test(s)) return "midi";
+  if (/\bmaxi\b/.test(s)) return "maxi";
+  if (/\blong\b/.test(s)) return "long";
+  return null;
+}
+
+function inferLengthIntentFromDetection(
+  detection: Detection,
+  imageHeight: number,
+): "mini" | "midi" | "maxi" | "long" | null {
+  const label = String(detection.label || "").toLowerCase();
+  if (!label.includes("dress")) return null;
+  const y1 = detection.box?.y1 ?? 0;
+  const y2 = detection.box?.y2 ?? 0;
+  const h = Math.max(1, imageHeight);
+  const ratio = Math.max(0, Math.min(1, (y2 - y1) / h));
+  if (ratio >= 0.8) return "maxi";
+  if (ratio >= 0.62) return "long";
+  if (ratio >= 0.45) return "midi";
+  return "mini";
+}
+
+function applyGroupedPostRanking(
+  groupedResults: DetectionSimilarProducts[],
+  includeCrossGroupDedupe: boolean,
+): { rows: DetectionSimilarProducts[]; totalProducts: number } {
+  if (groupedResults.length === 0) return { rows: groupedResults, totalProducts: 0 };
+  const weighted = groupedResults.map((row) => {
+    const base = (row.detection.confidence ?? 0) * (Number.isFinite(row.detection.area_ratio) ? row.detection.area_ratio : 0);
+    return { row, base };
+  });
+  const dominantIdx = weighted.reduce((best, cur, idx, arr) => (cur.base > arr[best].base ? idx : best), 0);
+  const primaryBoost = imagePrimaryDetectionBoost();
+  const secondaryWeight = imageSecondaryDetectionWeight();
+  const ranked = weighted
+    .map((x, idx) => ({ ...x, score: x.base * (idx === dominantIdx ? primaryBoost : secondaryWeight) }))
+    .sort((a, b) => b.score - a.score)
+    .map((x) => x.row);
+
+  const rows = includeCrossGroupDedupe
+    ? ranked.map((row, rowIdx) => {
+        const seen = new Set<string>();
+        const deduped = row.products.filter((p) => {
+          const id = String((p as any).id ?? "");
+          if (!id || seen.has(id)) return false;
+          // Keep first seen in ranked group order; dominant group wins ties.
+          seen.add(id);
+          return true;
+        });
+        if (rowIdx === 0) return { ...row, products: deduped, count: deduped.length };
+        return { ...row, products: deduped, count: deduped.length };
+      })
+    : ranked;
+
+  if (includeCrossGroupDedupe) {
+    const globalSeen = new Set<string>();
+    const globalRows = rows.map((row) => {
+      const products = row.products.filter((p) => {
+        const id = String((p as any).id ?? "");
+        if (!id || globalSeen.has(id)) return false;
+        globalSeen.add(id);
+        return true;
+      });
+      return { ...row, products, count: products.length };
+    });
+    const totalProducts = globalRows.reduce((acc, row) => acc + row.count, 0);
+    return { rows: globalRows, totalProducts };
+  }
+
+  const totalProducts = rows.reduce((acc, row) => acc + row.count, 0);
+  return { rows, totalProducts };
 }
 
 /**
@@ -623,6 +912,12 @@ export interface ImageAnalysisResult {
 
   /** Dominant color inference derived from image (canonical token). */
   inferredPrimaryColor?: string | null;
+  /** Slot-aware colors parsed from BLIP caption to avoid single-color ambiguity on multi-item outfits. */
+  inferredColorsByItem?: {
+    topColor?: string | null;
+    jeansColor?: string | null;
+    garmentColor?: string | null;
+  } | null;
 
   /** Fashion detection results */
   detection: {
@@ -737,7 +1032,7 @@ export interface AnalyzeAndFindSimilarOptions extends AnalyzeOptions {
   /** Find similar products after analysis (default: true) */
   findSimilar?: boolean;
 
-  /** Similarity threshold 0-1 (default: 0.7) */
+  /** Similarity threshold 0-1 (default: CLIP_IMAGE_SIMILARITY_THRESHOLD / config) */
   similarityThreshold?: number;
 
   /** Max similar products per detection (default from SEARCH_IMAGE_SHOP_LIMIT_PER_DETECTION or 22) */
@@ -827,27 +1122,6 @@ export class ImageAnalysisService {
 
     const yoloAvailable = yoloSnap.available;
     const yoloHint = !yoloAvailable && yoloSnap.hint ? yoloSnap.hint : undefined;
-
-    // #region agent log
-    fetch("http://127.0.0.1:7383/ingest/ccea0d1b-4b26-441e-9797-fbae444c347a", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "00a194" },
-      body: JSON.stringify({
-        sessionId: "00a194",
-        runId: "post-fix-verify",
-        hypothesisId: "H-aggregate",
-        location: "image-analysis.service.ts:getServiceStatus",
-        message: "service status",
-        data: {
-          yolo: yoloAvailable,
-          clip: clipAvailable,
-          yoloBaseUrl: this.yoloClient.getBaseUrl(),
-          hasYoloHint: Boolean(yoloHint),
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
 
     return {
       clip: clipAvailable,
@@ -1091,10 +1365,10 @@ export class ImageAnalysisService {
   ): Promise<FullAnalysisResult> {
     const {
       findSimilar = true,
-      similarityThreshold = 0.7,
+      similarityThreshold = config.clip.imageSimilarityThreshold,
       similarLimitPerItem = defaultShopLookResultBudget(),
       filterByDetectedCategory = true,
-      groupByDetection = true,
+      groupByDetection = false,
       includeEmptyDetectionGroups = false,
       ...analyzeOptions
     } = options;
@@ -1123,7 +1397,13 @@ export class ImageAnalysisService {
     if (!analysisResult.detection || analysisResult.detection.items.length === 0) {
       const fallbackDetection = syntheticFullImageDetectionBlock(imageWidth, imageHeight);
       const fallbackDetectedCategories = [...new Set(fallbackDetection.items.map((item) => item.label))];
-      if (!analysisResult.embedding) {
+      const { buffer: fullProcessBuf } = await prepareBufferForImageSearchQuery(buffer);
+      const fallbackEmbedding = await processImageForGarmentEmbeddingWithOptionalBox(
+        buffer,
+        fullProcessBuf,
+        null,
+      ).catch(() => null);
+      if (!fallbackEmbedding || fallbackEmbedding.length === 0) {
         return {
           ...analysisResult,
           detection: fallbackDetection,
@@ -1131,12 +1411,13 @@ export class ImageAnalysisService {
         };
       }
       const fallback = await searchByImageWithSimilarity({
-        imageEmbedding: analysisResult.embedding,
-        imageBuffer: buffer,
+        imageEmbedding: fallbackEmbedding,
+        imageBuffer: fullProcessBuf,
         filters: {},
         limit: similarLimitPerItem,
         similarityThreshold,
         includeRelated: false,
+        knnField: shopTheLookKnnField(),
         relaxThresholdWhenEmpty: shopLookRelaxEnv(),
       });
       return {
@@ -1161,27 +1442,47 @@ export class ImageAnalysisService {
       analysisResult.detection.items.map((item) => item.label)
     )];
 
-    // Infer audience gender (men/women/boys/girls/etc.) and optionally dominant color once per image.
-    // This helps prevent cross-gender recommendations.
+    // Structured BLIP on full image once: schema + normalized taxonomy hints.
+    const obs = {
+      fullCaptionHit: false,
+      detectionCaptionHits: 0,
+      detectionCaptionMisses: 0,
+      detectionCaptionAccepted: 0,
+      detectionCaptionRejected: 0,
+    };
     let blipCaption: string | null = null;
+    let blipStructured = buildStructuredBlipOutput("");
+    let blipStructuredConfidence = 0;
+    let fullBlipSignal: BlipSignal | undefined = undefined;
+    if (analysisResult.services?.blip) {
+      blipCaption = await getCachedCaption(buffer, "full");
+      obs.fullCaptionHit = Boolean(blipCaption && blipCaption.trim().length > 0);
+      blipStructured = buildStructuredBlipOutput(blipCaption);
+      blipStructuredConfidence = blipStructured.confidence;
+      fullBlipSignal = buildBlipSignal(blipStructured, blipStructuredConfidence);
+    }
     const inferredAudience: ReturnType<typeof inferAudienceFromCaption> =
-      analysisResult.services?.blip && imageInferAudienceGenderEnv()
-        ? await blip
-            .caption(buffer)
-            .then((caption) => {
-              blipCaption = caption;
-              return inferAudienceFromCaption(caption);
-            })
-            .catch(() => ({} as ReturnType<typeof inferAudienceFromCaption>))
+      imageInferAudienceGenderEnv() && blipCaption
+        ? blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()
+          ? {
+              gender: blipStructured.audience.gender,
+              ageGroup: blipStructured.audience.ageGroup,
+            }
+          : inferAudienceFromCaption(blipCaption)
         : ({} as ReturnType<typeof inferAudienceFromCaption>);
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
+    const inferredColorsByItem = {
+      topColor: captionColors.topColor ?? null,
+      jeansColor: captionColors.jeansColor ?? null,
+      garmentColor: captionColors.garmentColor ?? null,
+    };
     // Prefer BLIP caption color when explicit (e.g. "white dress") — full-image dominant can pick up sky/background.
-    const captionPrimaryColor =
-      captionColors.topColor ?? captionColors.jeansColor ?? captionColors.garmentColor ?? null;
+    const captionPrimaryColor = pickConservativeFullImagePrimaryColor(captionColors, blipStructured);
+    const allowDominantFallback = shouldUseDominantColorFallback(captionColors, blipStructured);
     const inferredPrimaryColor =
       captionPrimaryColor ??
-      (imageInferDominantColorEnv() && analysisResult.services?.blip
+      (allowDominantFallback && imageInferDominantColorEnv() && analysisResult.services?.blip
         ? await extractDominantColorNames(buffer, { maxColors: 2, minShare: 0.12 })
             .then((c) => c[0] ?? null)
             .catch(() => null)
@@ -1207,33 +1508,35 @@ export class ImageAnalysisService {
       shopLookPerDetectionConcurrency(),
       async ({ detection, detectionIndex }) => {
       const label = detection.label;
-      let croppedBuffer = await extractPaddedDetectionCropBuffer(buffer, detection.box);
-      if (!croppedBuffer) {
-        croppedBuffer = await this.cropDetection(
-          buffer,
-          detection.box,
-          imageWidth,
-          imageHeight
-        );
+      let clipBuffer: Buffer;
+      let finalEmbedding: number[];
+      try {
+        const aligned = await computeShopTheLookGarmentEmbeddingFromDetection(buffer, detection.box);
+        finalEmbedding = aligned.embedding;
+        clipBuffer = aligned.clipBufferForAttributes;
+      } catch {
+        return null;
       }
-      if (!croppedBuffer) return null;
-
-      const finalEmbedding = await processImageForEmbedding(croppedBuffer);
+      const finalGarmentEmbedding = finalEmbedding;
 
       const categoryMapping = mapDetectionToCategory(label, detection.confidence);
       const searchCategories = shouldUseAlternatives(categoryMapping)
         ? getSearchCategories(categoryMapping)
         : [categoryMapping.productCategory];
+      const lexicalHints = filterProductTypeSeedsByMappedCategory(
+        extractLexicalProductTypeSeeds(label),
+        categoryMapping.productCategory,
+      );
       const expandedTypeHints = expandPredictedTypeHints([
         label,
         ...searchCategories,
-        ...extractLexicalProductTypeSeeds(label),
+        ...lexicalHints,
       ]);
 
       const filters: Partial<import("./types").SearchFilters> = {};
       // Avoid taxonomy pollution for labels like "short sleeve top" where the word "short"
       // may incorrectly map to shorts/shorts_skirt micro-types.
-      const captionWantsJeans = blipCaption ? /\bjeans\b/.test(blipCaption.toLowerCase()) : false;
+      const captionWantsJeans = blipStructured.productTypeHints.includes("jeans");
       const typeSeedSource =
         categoryMapping.productCategory === "bottoms" && captionWantsJeans
           ? "jeans"
@@ -1241,49 +1544,67 @@ export class ImageAnalysisService {
             categoryMapping.attributes.sleeveLength === "short"
             ? "tshirt tee"
             : label;
-      const typeSeeds = extractLexicalProductTypeSeeds(typeSeedSource);
+      let typeSeeds = extractLexicalProductTypeSeeds(typeSeedSource);
+      if (blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
+        typeSeeds = [...new Set([...typeSeeds, ...blipStructured.productTypeHints])];
+      }
+      typeSeeds = filterProductTypeSeedsByMappedCategory(typeSeeds, categoryMapping.productCategory);
       if (typeSeeds.length) {
         filters.productTypes = typeSeeds;
+      } else if (expandedTypeHints.length > 0 && categoryMapping.productCategory !== "accessories") {
+        // Fallback when lexical extraction misses labels like "hat" or "bag, wallet":
+        // keep type intent so cross-family products (e.g. jeans for hats) are penalized.
+        filters.productTypes = expandedTypeHints.slice(0, 8);
       }
 
       // "Closet similar" constraints: enforce audience gender + add optional style/color.
-      if (inferredAudience.gender) filters.gender = inferredAudience.gender;
-      if (inferredAudience.ageGroup) filters.ageGroup = inferredAudience.ageGroup;
+      if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
+        filters.gender = inferredAudience.gender;
+      }
+      if (inferredAudience.ageGroup && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
+        filters.ageGroup = inferredAudience.ageGroup;
+      }
 
       const inferredStyle = inferStyleForDetectionLabel(label);
+      const useBlipSoftHints = blipStructuredConfidence >= imageBlipSoftHintConfidenceMin();
+      const useStrongBlipSoftHints = blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
       // Apply style intent whenever we have an inference token; the ranking layer
       // will score it softly (so we avoid going fully empty).
-      if (inferredStyle.attrStyle) {
+      if (useStrongBlipSoftHints && blipStructured.style.attrStyle) {
+        filters.softStyle = blipStructured.style.attrStyle;
+      } else if (inferredStyle.attrStyle) {
         filters.softStyle = inferredStyle.attrStyle;
       }
-
-      // Prefer caption color when BLIP named this garment (e.g. "blue velvet top"); crop histograms
-      // often misread navy/velvet/shadows as black. Use per-crop dominant only when caption is silent.
-      let inferredColorForDetection = captionColorForProductCategory(
-        categoryMapping.productCategory,
-        captionColors,
-      );
-      const shouldInferColorForDetection =
-        imageInferDominantColorEnv() &&
-        (detection.confidence ?? 0) >= imageMinColorConfidenceEnv() &&
-        (detection.area_ratio ?? 0) >= imageMinColorAreaRatioEnv();
-
-      if (!inferredColorForDetection && shouldInferColorForDetection) {
-        inferredColorForDetection = await extractDominantColorNames(croppedBuffer, { maxColors: 1, minShare: 0.12 }).then(
-          (c) => c[0] ?? null,
-        );
+      if (categoryMapping.attributes.sleeveLength) {
+        filters.sleeve = categoryMapping.attributes.sleeveLength;
       }
+      const detectionLength = inferLengthIntentFromDetection(detection, imageHeight);
+      if (detectionLength) (filters as any).length = detectionLength;
 
-      if (!inferredColorForDetection) inferredColorForDetection = inferredPrimaryColor;
-      if (inferredColorForDetection) filters.softColor = inferredColorForDetection;
+      // Extract dominant colors from the garment crop pixels via k-means + LAB.
+      // clipBuffer is the padded ROI of the detected garment — already isolated
+      // from background/other items. These colors feed into soft color compliance
+      // (rerankScore boost) but do not hard-gate final relevance.
+      try {
+        const cropColors = await extractDominantColorNames(clipBuffer, { maxColors: 2, minShare: 0.15 });
+        if (cropColors.length > 0) {
+          (filters as any).cropDominantColors = cropColors;
+        }
+      } catch { /* non-critical: color embedding channel still works */ }
       let predictedCategoryAisles: string[] | undefined;
-      const detectionMeetsAutoHardHeuristics =
+      const noisyCat = isNoisyCategoryForAutoHardCategory(categoryMapping, label);
+      const baseHardAuto =
         categoryMapping.confidence >= shopLookHardCategoryConfThreshold() &&
-        (detection.area_ratio ?? 0) >= shopLookHardCategoryAreaRatioThreshold() &&
-        !isNoisyCategoryForAutoHardCategory(categoryMapping, label);
+        (detection.area_ratio ?? 0) >= shopLookHardCategoryAreaRatioThreshold();
+      const relaxedGarmentHardAuto =
+        categoryMapping.confidence >= 0.85 &&
+        (detection.area_ratio ?? 0) >= 0.12 &&
+        (detection.confidence ?? 0) >= 0.75;
+      const detectionMeetsAutoHardHeuristics =
+        !noisyCat && (baseHardAuto || relaxedGarmentHardAuto);
       const shouldHardCategory =
         filterByDetectedCategory &&
-        (shopLookHardCategoryStrictEnv() || detectionMeetsAutoHardHeuristics);
+        (shopLookHardCategoryStrictEnv() || detectionMeetsAutoHardHeuristics || shouldForceHardCategoryForDetection(detection, categoryMapping));
       const forceHardCategoryFilterUsed = Boolean(shouldHardCategory);
       if (filterByDetectedCategory) {
         const hardLabelForTerms =
@@ -1293,7 +1614,12 @@ export class ImageAnalysisService {
           const terms = hardCategoryTermsForDetection(hardLabelForTerms, categoryMapping);
           filters.category = terms.length === 1 ? terms[0] : terms;
         } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
-          predictedCategoryAisles = expandedTypeHints.length ? expandedTypeHints : searchCategories;
+          const typeHints = Array.isArray(filters.productTypes) ? filters.productTypes : [];
+          predictedCategoryAisles = typeHints.length
+            ? typeHints
+            : expandedTypeHints.length
+              ? expandedTypeHints
+              : searchCategories;
         } else {
           filters.category =
             searchCategories.length === 1 ? searchCategories[0] : searchCategories;
@@ -1302,9 +1628,46 @@ export class ImageAnalysisService {
 
       const knnFieldUsed = shopTheLookKnnField();
 
+      // Per-detection BLIP captioning + CLIP consistency gate.
+      const detCaption = analysisResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
+      let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
+      if (detCaption.trim().length > 0) {
+        const captionLength = inferLengthIntentFromCaption(detCaption);
+        if (captionLength) (filters as any).length = captionLength;
+      }
+      if (detCaption.trim().length > 0) {
+        obs.detectionCaptionHits += 1;
+        const detStruct = buildStructuredBlipOutput(detCaption);
+        const consistency = await clipCaptionConsistency01(finalEmbedding, detCaption);
+        const detConfidence = combineConfidenceFromConsistency(detStruct.confidence, consistency);
+        if (
+          detConfidence >= imageBlipSoftHintConfidenceMin() &&
+          consistency >= imageBlipClipConsistencyMin()
+        ) {
+          obs.detectionCaptionAccepted += 1;
+          detectionBlipSignal = buildBlipSignal(detStruct, detConfidence);
+          if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
+          if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
+          if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
+          const mergedTypes = [...new Set([...(filters.productTypes ?? []), ...detStruct.productTypeHints])];
+          filters.productTypes = filterProductTypeSeedsByMappedCategory(
+            mergedTypes,
+            categoryMapping.productCategory,
+          ).slice(0, 10);
+        } else {
+          obs.detectionCaptionRejected += 1;
+        }
+      } else {
+        obs.detectionCaptionMisses += 1;
+      }
+
       let similarResult = await searchByImageWithSimilarity({
         imageEmbedding: finalEmbedding,
-        imageBuffer: croppedBuffer,
+        imageEmbeddingGarment:
+          Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+            ? finalGarmentEmbedding
+            : undefined,
+        imageBuffer: clipBuffer,
         filters,
         limit: similarLimitPerItem,
         similarityThreshold,
@@ -1313,22 +1676,34 @@ export class ImageAnalysisService {
         knnField: knnFieldUsed,
         forceHardCategoryFilter: forceHardCategoryFilterUsed,
         relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+        blipSignal: detectionBlipSignal,
+        inferredPrimaryColor,
+        inferredColorsByItem,
       });
 
-      // If BLIP-derived audience/style/color filters are too strict and remove all hits,
+      // If BLIP-derived audience/style filters are too strict and remove all hits,
       // retry once without those attribute filters (but keep category/productTypes).
       if (
         similarResult.results.length === 0 &&
-        (filters.gender || filters.style || filters.color)
+        (
+          filters.gender ||
+          filters.ageGroup ||
+          (filters as any).style ||
+          (filters as any).softStyle
+        )
       ) {
         const filtersRetry = { ...filters } as typeof filters;
         delete (filtersRetry as any).gender;
         delete (filtersRetry as any).ageGroup;
         delete (filtersRetry as any).style;
-        delete (filtersRetry as any).color;
+        delete (filtersRetry as any).softStyle;
         similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
-          imageBuffer: croppedBuffer,
+          imageEmbeddingGarment:
+            Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+              ? finalGarmentEmbedding
+              : undefined,
+          imageBuffer: clipBuffer,
           filters: filtersRetry,
           limit: similarLimitPerItem,
           similarityThreshold,
@@ -1337,6 +1712,9 @@ export class ImageAnalysisService {
           knnField: knnFieldUsed,
           forceHardCategoryFilter: forceHardCategoryFilterUsed,
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          blipSignal: detectionBlipSignal,
+          inferredPrimaryColor,
+          inferredColorsByItem,
         });
       }
 
@@ -1352,7 +1730,11 @@ export class ImageAnalysisService {
         };
         similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
-          imageBuffer: croppedBuffer,
+          imageEmbeddingGarment:
+            Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+              ? finalGarmentEmbedding
+              : undefined,
+          imageBuffer: clipBuffer,
           filters: filtersSansCategory,
           limit: similarLimitPerItem,
           similarityThreshold,
@@ -1361,18 +1743,32 @@ export class ImageAnalysisService {
           knnField: shopTheLookKnnField(),
           forceHardCategoryFilter: false,
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          blipSignal: detectionBlipSignal,
+          inferredPrimaryColor,
+          inferredColorsByItem,
         });
         if (similarResult.results.length === 0) {
           similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalEmbedding,
-            imageBuffer: croppedBuffer,
-            filters: {},
+            imageEmbeddingGarment:
+              Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+                ? finalGarmentEmbedding
+                : undefined,
+            imageBuffer: clipBuffer,
+              // Keep crop-derived structural intent even in last-resort fallback.
+              filters: {
+                productTypes: filters.productTypes,
+                length: (filters as any).length,
+              } as any,
             limit: similarLimitPerItem,
             similarityThreshold,
             includeRelated: false,
             knnField: shopTheLookKnnField(),
             forceHardCategoryFilter: false,
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+            blipSignal: detectionBlipSignal,
+            inferredPrimaryColor,
+            inferredColorsByItem,
           });
         }
       }
@@ -1400,7 +1796,7 @@ export class ImageAnalysisService {
           gender: filters.gender,
           ageGroup: filters.ageGroup,
           softStyle: filters.softStyle,
-          softColor: filters.softColor,
+          length: (filters as any).length,
         },
       } as DetectionSimilarProducts;
     },
@@ -1418,12 +1814,9 @@ export class ImageAnalysisService {
       }
     }
 
-    // Sort by detection "importance" = confidence * visible area ratio (highest first)
-    groupedResults.sort((a, b) => {
-      const wA = (a.detection.confidence ?? 0) * (Number.isFinite(a.detection.area_ratio) ? a.detection.area_ratio : 0);
-      const wB = (b.detection.confidence ?? 0) * (Number.isFinite(b.detection.area_ratio) ? b.detection.area_ratio : 0);
-      return wB - wA;
-    });
+    const postRanked = applyGroupedPostRanking(groupedResults, imageCrossGroupDedupeEnabled());
+    const finalGroupedResults = postRanked.rows;
+    totalProducts = postRanked.totalProducts;
 
     const totalDetectionJobs = detectionJobs.length;
     let coveredDetections = 0;
@@ -1436,7 +1829,7 @@ export class ImageAnalysisService {
     const coverageRatio =
       totalDetectionJobs > 0 ? coveredDetections / totalDetectionJobs : 0;
 
-    const itemsForCoherence = groupedResults
+    const itemsForCoherence = finalGroupedResults
       .filter((r) => r.count > 0 && r.detectionIndex !== undefined)
       .map(
         (r) =>
@@ -1448,13 +1841,22 @@ export class ImageAnalysisService {
         ? computeOutfitCoherence(itemsForCoherence)
         : undefined;
 
+    if (process.env.NODE_ENV !== "production" || String(process.env.SEARCH_DEBUG ?? "") === "1") {
+      console.info("[image-search][blip-enrichment]", {
+        stage: "analyzeAndFindSimilar",
+        fullStructuredConfidence: Math.round(blipStructuredConfidence * 1000) / 1000,
+        ...obs,
+      });
+    }
+
     return {
       ...analysisResult,
       blipCaption,
       inferredAudience,
       inferredPrimaryColor,
+      inferredColorsByItem,
       similarProducts: {
-        byDetection: groupedResults,
+        byDetection: finalGroupedResults,
         totalProducts,
         threshold: similarityThreshold,
         detectedCategories,
@@ -1480,7 +1882,11 @@ export class ImageAnalysisService {
       filterByCategory?: string;
     } = {}
   ): Promise<GroupedSimilarProducts> {
-    const { similarityThreshold = 0.7, limitPerItem = defaultShopLookResultBudget(), filterByCategory } = options;
+    const {
+      similarityThreshold = config.clip.imageSimilarityThreshold,
+      limitPerItem = defaultShopLookResultBudget(),
+      filterByCategory,
+    } = options;
 
     // Download image
     const response = await fetch(imageUrl, {
@@ -1703,46 +2109,65 @@ export class ImageAnalysisService {
     let totalProducts = 0;
 
     // Infer audience & dominant color once for the full image.
+    const obs = {
+      fullCaptionHit: false,
+      detectionCaptionHits: 0,
+      detectionCaptionMisses: 0,
+      detectionCaptionAccepted: 0,
+      detectionCaptionRejected: 0,
+    };
     let blipCaption: string | null = null;
+    let blipStructured = buildStructuredBlipOutput("");
+    let blipStructuredConfidence = 0;
+    let fullBlipSignal: BlipSignal | undefined = undefined;
+    if (fullResult.services?.blip) {
+      blipCaption = await getCachedCaption(buffer, "full");
+      obs.fullCaptionHit = Boolean(blipCaption && blipCaption.trim().length > 0);
+      blipStructured = buildStructuredBlipOutput(blipCaption);
+      blipStructuredConfidence = blipStructured.confidence;
+      fullBlipSignal = buildBlipSignal(blipStructured, blipStructuredConfidence);
+    }
     const inferredAudience: ReturnType<typeof inferAudienceFromCaption> =
-      fullResult.services?.blip && imageInferAudienceGenderEnv()
-        ? await blip
-            .caption(buffer)
-            .then((caption) => {
-              blipCaption = caption;
-              return inferAudienceFromCaption(caption);
-            })
-            .catch(() => ({} as ReturnType<typeof inferAudienceFromCaption>))
+      imageInferAudienceGenderEnv() && blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()
+        ? {
+            gender: blipStructured.audience.gender,
+            ageGroup: blipStructured.audience.ageGroup,
+          }
         : ({} as ReturnType<typeof inferAudienceFromCaption>);
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
-    const captionPrimaryColor =
-      captionColors.topColor ?? captionColors.jeansColor ?? captionColors.garmentColor ?? null;
+    const inferredColorsByItem = {
+      topColor: captionColors.topColor ?? null,
+      jeansColor: captionColors.jeansColor ?? null,
+      garmentColor: captionColors.garmentColor ?? null,
+    };
+    const captionPrimaryColor = pickConservativeFullImagePrimaryColor(captionColors, blipStructured);
+    const allowDominantFallback = shouldUseDominantColorFallback(captionColors, blipStructured);
     const inferredPrimaryColor =
       captionPrimaryColor ??
-      (imageInferDominantColorEnv() && fullResult.services?.blip
+      (allowDominantFallback && imageInferDominantColorEnv() && fullResult.services?.blip
         ? await extractDominantColorNames(buffer, { maxColors: 2, minShare: 0.12 })
             .then((c) => c[0] ?? null)
             .catch(() => null)
         : null);
     // Avoid TS "never" narrowing when caption inference is type-proved unreachable.
-    const captionWantsJeans = /\bjeans\b/.test((blipCaption ?? "").toLowerCase());
+    const captionWantsJeans = blipStructured.productTypeHints.includes("jeans");
 
     for (let i = 0; i < allItemsToProcess.length; i++) {
       const detection = allItemsToProcess[i];
       const isUserDefined = i >= itemsToProcess.length;
 
       try {
-        // Crop detected region
-        const croppedBuffer = await this.cropDetection(
-          buffer,
-          detection.box,
-          imageWidth,
-          imageHeight
-        );
-        if (!croppedBuffer) continue;
-
-        const finalEmbedding = await processImageForEmbedding(croppedBuffer);
+        let clipBuffer: Buffer;
+        let finalEmbedding: number[];
+        try {
+          const aligned = await computeShopTheLookGarmentEmbeddingFromDetection(buffer, detection.box);
+          finalEmbedding = aligned.embedding;
+          clipBuffer = aligned.clipBufferForAttributes;
+        } catch {
+          continue;
+        }
+        const finalGarmentEmbedding = finalEmbedding;
 
         // Get category from user hint or detection
         const categorySource =
@@ -1754,37 +2179,47 @@ export class ImageAnalysisService {
         const filters: Partial<import("./types").SearchFilters> = {};
         const typeSeedSourceForSelection =
           categoryMapping.productCategory === "bottoms" && captionWantsJeans ? "jeans" : categorySource;
-        const browseTypeSeeds = extractLexicalProductTypeSeeds(typeSeedSourceForSelection);
+        let browseTypeSeeds = extractLexicalProductTypeSeeds(typeSeedSourceForSelection);
+        if (blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
+          browseTypeSeeds = [...new Set([...browseTypeSeeds, ...blipStructured.productTypeHints])];
+        }
+        browseTypeSeeds = filterProductTypeSeedsByMappedCategory(
+          browseTypeSeeds,
+          categoryMapping.productCategory,
+        );
         if (browseTypeSeeds.length) {
           filters.productTypes = browseTypeSeeds;
         }
 
         // "Closet similar" constraints: enforce audience gender + add optional style/color.
-        if (inferredAudience.gender) filters.gender = inferredAudience.gender;
-        if (inferredAudience.ageGroup) filters.ageGroup = inferredAudience.ageGroup;
+        if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
+          filters.gender = inferredAudience.gender;
+        }
+        if (inferredAudience.ageGroup && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
+          filters.ageGroup = inferredAudience.ageGroup;
+        }
 
         const inferredStyle = inferStyleForDetectionLabel(categorySource);
-        if (inferredStyle.attrStyle) {
+        const useBlipSoftHints = blipStructuredConfidence >= imageBlipSoftHintConfidenceMin();
+        const useStrongBlipSoftHints = blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
+        if (useStrongBlipSoftHints && blipStructured.style.attrStyle) {
+          filters.softStyle = blipStructured.style.attrStyle;
+        } else if (inferredStyle.attrStyle) {
           filters.softStyle = inferredStyle.attrStyle;
         }
+        const detectionLength = inferLengthIntentFromDetection(detection, imageHeight);
+        if (detectionLength) (filters as any).length = detectionLength;
 
-        let inferredColorForDetection = captionColorForProductCategory(
-          categoryMapping.productCategory,
-          captionColors,
-        );
-        const shouldInferColorForDetection =
-          imageInferDominantColorEnv() &&
-          (detection.confidence ?? 0) >= imageMinColorConfidenceEnv() &&
-          (detection.area_ratio ?? 0) >= imageMinColorAreaRatioEnv();
-
-        if (!inferredColorForDetection && shouldInferColorForDetection) {
-          inferredColorForDetection = await extractDominantColorNames(croppedBuffer, { maxColors: 1, minShare: 0.12 }).then(
-            (c) => c[0] ?? null,
-          );
-        }
-
-        if (!inferredColorForDetection) inferredColorForDetection = inferredPrimaryColor;
-        if (inferredColorForDetection) filters.softColor = inferredColorForDetection;
+        // Extract dominant colors from the garment crop pixels via k-means + LAB.
+        // clipBuffer is the padded ROI of the detected garment — already isolated
+        // from background/other items. These colors feed into soft color compliance
+        // (rerankScore boost) but do not hard-gate final relevance.
+        try {
+          const cropColors = await extractDominantColorNames(clipBuffer, { maxColors: 2, minShare: 0.15 });
+          if (cropColors.length > 0) {
+            (filters as any).cropDominantColors = cropColors;
+          }
+        } catch { /* non-critical: color embedding channel still works */ }
         let predictedCategoryAisles: string[] | undefined;
         if (options.filterByDetectedCategory !== false) {
           const softCategories = shouldUseAlternatives(categoryMapping)
@@ -1807,38 +2242,89 @@ export class ImageAnalysisService {
           }
         }
 
+        const detCaption = fullResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
+        let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
+        if (detCaption.trim().length > 0) {
+          const captionLength = inferLengthIntentFromCaption(detCaption);
+          if (captionLength) (filters as any).length = captionLength;
+        }
+        if (detCaption.trim().length > 0) {
+          obs.detectionCaptionHits += 1;
+          const detStruct = buildStructuredBlipOutput(detCaption);
+          const consistency = await clipCaptionConsistency01(finalEmbedding, detCaption);
+          const detConfidence = combineConfidenceFromConsistency(detStruct.confidence, consistency);
+          if (
+            detConfidence >= imageBlipSoftHintConfidenceMin() &&
+            consistency >= imageBlipClipConsistencyMin()
+          ) {
+            obs.detectionCaptionAccepted += 1;
+            detectionBlipSignal = buildBlipSignal(detStruct, detConfidence);
+            if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
+            if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
+            if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
+            const mergedTypes = [...new Set([...(filters.productTypes ?? []), ...detStruct.productTypeHints])];
+            filters.productTypes = filterProductTypeSeedsByMappedCategory(
+              mergedTypes,
+              categoryMapping.productCategory,
+            ).slice(0, 10);
+          } else {
+            obs.detectionCaptionRejected += 1;
+          }
+        } else {
+          obs.detectionCaptionMisses += 1;
+        }
+
         let similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
-          imageBuffer: croppedBuffer,
+          imageEmbeddingGarment:
+            Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+              ? finalGarmentEmbedding
+              : undefined,
+          imageBuffer: clipBuffer,
           filters,
           limit: resolveShopLookLimit(options.similarLimitPerItem),
-          similarityThreshold: options.similarityThreshold || 0.7,
+          similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
           includeRelated: false,
           predictedCategoryAisles,
           knnField: shopTheLookKnnField(),
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          blipSignal: detectionBlipSignal,
+          inferredPrimaryColor,
+          inferredColorsByItem,
         });
 
         // Retry without inferred attribute filters if they removed all hits.
         if (
           similarResult.results.length === 0 &&
-          (filters.gender || filters.style || filters.color)
+          (
+            filters.gender ||
+            filters.ageGroup ||
+            (filters as any).style ||
+            (filters as any).softStyle
+          )
         ) {
           const filtersRetry = { ...filters } as typeof filters;
           delete (filtersRetry as any).gender;
           delete (filtersRetry as any).ageGroup;
           delete (filtersRetry as any).style;
-          delete (filtersRetry as any).color;
+          delete (filtersRetry as any).softStyle;
           similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalEmbedding,
-            imageBuffer: croppedBuffer,
+            imageEmbeddingGarment:
+              Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+                ? finalGarmentEmbedding
+                : undefined,
+            imageBuffer: clipBuffer,
             filters: filtersRetry,
             limit: resolveShopLookLimit(options.similarLimitPerItem),
-            similarityThreshold: options.similarityThreshold || 0.7,
+            similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
             includeRelated: false,
             predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+            blipSignal: detectionBlipSignal,
+            inferredPrimaryColor,
+            inferredColorsByItem,
           });
         }
 
@@ -1855,25 +2341,43 @@ export class ImageAnalysisService {
           };
           similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalEmbedding,
-            imageBuffer: croppedBuffer,
+            imageEmbeddingGarment:
+              Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+                ? finalGarmentEmbedding
+                : undefined,
+            imageBuffer: clipBuffer,
             filters: filtersSansCategory,
             limit: resolveShopLookLimit(options.similarLimitPerItem),
-            similarityThreshold: options.similarityThreshold || 0.7,
+            similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
             includeRelated: false,
             predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+            blipSignal: detectionBlipSignal,
+            inferredPrimaryColor,
+            inferredColorsByItem,
           });
           if (similarResult.results.length === 0) {
             similarResult = await searchByImageWithSimilarity({
               imageEmbedding: finalEmbedding,
-              imageBuffer: croppedBuffer,
-              filters: {},
+              imageEmbeddingGarment:
+                Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+                  ? finalGarmentEmbedding
+                  : undefined,
+              imageBuffer: clipBuffer,
+              // Keep crop-derived structural intent even in last-resort fallback.
+              filters: {
+                productTypes: filters.productTypes,
+                length: (filters as any).length,
+              } as any,
               limit: resolveShopLookLimit(options.similarLimitPerItem),
-              similarityThreshold: options.similarityThreshold || 0.7,
+              similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
               includeRelated: false,
               knnField: shopTheLookKnnField(),
               relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+              blipSignal: detectionBlipSignal,
+              inferredPrimaryColor,
+              inferredColorsByItem,
             });
           }
         }
@@ -1898,7 +2402,7 @@ export class ImageAnalysisService {
               gender: filters.gender,
               ageGroup: filters.ageGroup,
               softStyle: filters.softStyle,
-              softColor: filters.softColor,
+              length: (filters as any).length,
             },
             source: isUserDefined ? "user_defined" : "yolo",
             originalIndex: isUserDefined ? undefined : originalIndices[i],
@@ -1910,8 +2414,12 @@ export class ImageAnalysisService {
       }
     }
 
+    const postRankedSel = applyGroupedPostRanking(groupedResults, imageCrossGroupDedupeEnabled());
+    const finalGroupedResults = postRankedSel.rows as SelectiveDetectionResult[];
+    totalProducts = postRankedSel.totalProducts;
+
     const itemsForCoherence: DetectionWithColor[] = [];
-    for (const r of groupedResults) {
+    for (const r of finalGroupedResults) {
       if (r.count === 0) continue;
       if (
         r.source === "yolo" &&
@@ -1939,7 +2447,15 @@ export class ImageAnalysisService {
         ? computeOutfitCoherence(itemsForCoherence)
         : undefined;
 
-    const coveredSel = groupedResults.filter((r) => r.count > 0).length;
+    if (process.env.NODE_ENV !== "production" || String(process.env.SEARCH_DEBUG ?? "") === "1") {
+      console.info("[image-search][blip-enrichment]", {
+        stage: "analyzeWithSelection",
+        fullStructuredConfidence: Math.round(blipStructuredConfidence * 1000) / 1000,
+        ...obs,
+      });
+    }
+
+    const coveredSel = finalGroupedResults.filter((r) => r.count > 0).length;
     const totalSel = allItemsToProcess.length;
 
     return {
@@ -1947,11 +2463,12 @@ export class ImageAnalysisService {
       blipCaption,
       inferredAudience,
       inferredPrimaryColor,
+      inferredColorsByItem,
       similarProducts: {
-        byDetection: groupedResults,
+        byDetection: finalGroupedResults,
         totalProducts,
-        threshold: options.similarityThreshold || 0.7,
-        detectedCategories: [...new Set(groupedResults.map((r) => r.category))],
+        threshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
+        detectedCategories: [...new Set(finalGroupedResults.map((r) => r.category))],
         shopTheLookStats: {
           totalDetections: totalSel,
           coveredDetections: coveredSel,

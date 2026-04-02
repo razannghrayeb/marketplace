@@ -9,6 +9,12 @@
 
 set -eu
 
+# Ensure Ultralytics/HF cache paths are writable in Cloud Run/container sandboxes.
+export ULTRALYTICS_SETTINGS_DIR="${ULTRALYTICS_SETTINGS_DIR:-/tmp/ultralytics}"
+export YOLO_CONFIG_DIR="${YOLO_CONFIG_DIR:-$ULTRALYTICS_SETTINGS_DIR}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/.cache}"
+mkdir -p "$ULTRALYTICS_SETTINGS_DIR" "$YOLO_CONFIG_DIR" "$XDG_CACHE_HOME" 2>/dev/null || true
+
 yolo_detection_disabled() {
   v=$(printf '%s' "${YOLO_DETECTION_DISABLED:-}" | tr '[:upper:]' '[:lower:]')
   [ "$v" = "1" ] || [ "$v" = "true" ] || [ "$v" = "yes" ]

@@ -34,17 +34,18 @@ import axios from "axios";
 import { Pool } from "pg";
 import sharp from "sharp";
 import { osClient, ensureIndex } from "../src/lib/core/opensearch";
-import { config } from "../src/config";
-import { 
+import { config } from "../src/config"; 
+import {
   processImageForEmbedding,
   processImageForGarmentEmbeddingWithOptionalBox,
   computePHash,
 } from "../src/lib/image";
+import { preparePrimaryImageBufferForCatalogEmbedding } from "../src/lib/image/embeddingPrep";
 import { attributeEmbeddings } from "../src/lib/search/attributeEmbeddings";
 import { buildProductSearchDocument } from "../src/lib/search/searchDocument";
 import { loadProductSearchEnrichmentByIds } from "../src/lib/search/loadProductSearchEnrichment";
 import { extractGarmentFashionColors } from "../src/lib/color/garmentColorPipeline";
-import type { PixelBox } from "../src/lib/image/processor";
+import { scalePixelBoxToImageDims, type PixelBox } from "../src/lib/image/processor";
 import { promises as fs } from "fs";
 import { execSync } from "child_process";
 
@@ -208,68 +209,6 @@ async function checkBgRemovalSidecar(): Promise<boolean> {
     bgRemovalSidecarAvailable = false;
   }
   return bgRemovalSidecarAvailable;
-}
-
-async function removeBackground(imageBuffer: Buffer): Promise<Buffer> {
-  const url = process.env.REMBG_SERVICE_URL || "http://127.0.0.1:7788";
-  const res = await axios.post(`${url}/remove-bg`, imageBuffer, {
-    headers: { "Content-Type": "application/octet-stream" },
-    responseType: "arraybuffer",
-    timeout: 30_000,
-  });
-  // Composite over white background so CLIP doesn't see transparency artifacts
-  const pngWithAlpha = Buffer.from(res.data);
-  return sharp(pngWithAlpha)
-    .flatten({ background: { r: 255, g: 255, b: 255 } })
-    .jpeg({ quality: 92 })
-    .toBuffer();
-}
-
-// ============================================================================
-// Background complexity scoring
-// ============================================================================
-
-/**
- * Samples corner and edge pixels to estimate how "complex" the background is.
- * Returns 0 for pure white studio shots, higher values for busy backgrounds.
- * Cheap — just a few pixel reads on a 64×64 downsample.
- */
-async function computeBgComplexityScore(imageBuffer: Buffer): Promise<number> {
-  try {
-    const { data, info } = await sharp(imageBuffer)
-      .resize(64, 64, { fit: "fill" })
-      .removeAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    const ch = info.channels as number;
-
-    // Sample corners + midpoints of each edge
-    const sampleCoords: [number, number][] = [
-      [0, 0],   [63, 0],  [0, 63],  [63, 63],
-      [31, 0],  [0, 31],  [63, 31], [31, 63],
-      [8, 8],   [55, 8],  [8, 55],  [55, 55],
-    ];
-
-    let totalDist = 0;
-    for (const [x, y] of sampleCoords) {
-      const idx = (y * 64 + x) * ch;
-      const r = data[idx] ?? 255;
-      const g = data[idx + 1] ?? 255;
-      const b = data[idx + 2] ?? 255;
-      // Euclidean distance from pure white
-      totalDist += Math.sqrt(
-        Math.pow(255 - r, 2) +
-        Math.pow(255 - g, 2) +
-        Math.pow(255 - b, 2)
-      );
-    }
-
-    return totalDist / sampleCoords.length;
-  } catch {
-    // If scoring fails, assume complex background → apply removal
-    return 999;
-  }
 }
 
 // ============================================================================
@@ -489,20 +428,24 @@ async function generateEmbeddings(
   cfg: ReindexConfig,
   sidecarAvailable: boolean
 ): Promise<EmbeddingResult> {
-  let processBuf = rawBuf;
-  let bgWasRemoved = false;
+  const prep = await preparePrimaryImageBufferForCatalogEmbedding(rawBuf, {
+    enableBgRemoval: Boolean(cfg.bgRemoval && sidecarAvailable && !cfg.noBgRemovalSidecar),
+    threshold: cfg.bgRemovalThreshold,
+    rembgTimeoutMs: 30_000,
+  });
+  const processBuf = prep.buffer;
+  const bgWasRemoved = prep.bgRemoved;
 
-  // ── Background removal decision ───────────────────────────────────────────
-  if (cfg.bgRemoval && sidecarAvailable && !cfg.noBgRemovalSidecar) {
-    const score = await computeBgComplexityScore(rawBuf);
-    if (score >= cfg.bgRemovalThreshold) {
-      try {
-        processBuf = await removeBackground(rawBuf);
-        bgWasRemoved = true;
-      } catch (err: any) {
-        console.warn(`    ⚠️  Product ${productId}: bg removal failed (${err.message}), using raw image`);
-        processBuf = rawBuf;
-      }
+  /** DB boxes are in raw-image pixels; map to `processBuf` when rembg/resizing changed geometry (matches catalog upload). */
+  let garmentBoxForProcess: PixelBox | null = garmentBox;
+  if (garmentBox) {
+    const [rawMeta, procMeta] = await Promise.all([sharp(rawBuf).metadata(), sharp(processBuf).metadata()]);
+    const rw = rawMeta.width ?? 0;
+    const rh = rawMeta.height ?? 0;
+    const pw = procMeta.width ?? 0;
+    const ph = procMeta.height ?? 0;
+    if (rw > 0 && rh > 0 && pw > 0 && ph > 0 && (rw !== pw || rh !== ph)) {
+      garmentBoxForProcess = scalePixelBoxToImageDims(garmentBox, rw, rh, pw, ph);
     }
   }
 
@@ -511,15 +454,15 @@ async function generateEmbeddings(
   // otherwise fall back to the bg-removed image if available,
   // otherwise fall back to center crop (old behavior).
   let garmentBuf = processBuf;
-  if (garmentBox) {
+  if (garmentBoxForProcess) {
     try {
       // Crop tightly to the detected garment region
       garmentBuf = await sharp(processBuf)
         .extract({
-          left: Math.round(garmentBox.x1),
-          top: Math.round(garmentBox.y1),
-          width: Math.max(1, Math.round(garmentBox.x2 - garmentBox.x1)),
-          height: Math.max(1, Math.round(garmentBox.y2 - garmentBox.y1)),
+          left: Math.round(garmentBoxForProcess.x1),
+          top: Math.round(garmentBoxForProcess.y1),
+          width: Math.max(1, Math.round(garmentBoxForProcess.x2 - garmentBoxForProcess.x1)),
+          height: Math.max(1, Math.round(garmentBoxForProcess.y2 - garmentBoxForProcess.y1)),
         })
         .jpeg({ quality: 90 })
         .toBuffer();
@@ -533,7 +476,7 @@ async function generateEmbeddings(
   let attrEmbFailed = false;
   const [embedding, embeddingGarment, attrEmbs, pHash, garmentColorAnalysis] = await Promise.all([
     processImageForEmbedding(processBuf),
-    processImageForGarmentEmbeddingWithOptionalBox(rawBuf, processBuf, garmentBox).catch(() => null),
+    processImageForGarmentEmbeddingWithOptionalBox(rawBuf, processBuf, garmentBoxForProcess).catch(() => null),
     attributeEmbeddings.generateAllAttributeEmbeddings(processBuf).catch((err: any) => {
       attrEmbFailed = true;
       console.warn(`    ⚠️  Product ${productId}: attribute embeddings failed (${err.message})`);

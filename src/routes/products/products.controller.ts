@@ -11,7 +11,7 @@ import {
   validateImage,
   computePHash,
   processImageForEmbedding,
-  processImageForGarmentEmbedding,
+  computeImageSearchGarmentQueryEmbedding,
   blip,
 } from "../../lib/image/index";
 import { extractLexicalProductTypeSeeds } from "../../lib/search/productTypeTaxonomy";
@@ -158,6 +158,7 @@ export async function searchProductsByImage(req: Request, res: Response) {
     let embedding: number[];
     let pHash: string | undefined;
     let garmentEmbeddingForSearch: number[] | undefined;
+    let softProductTypeHints: string[] | undefined;
 
     if (file) {
       // Image file uploaded
@@ -184,7 +185,7 @@ export async function searchProductsByImage(req: Request, res: Response) {
 
       const [emb, garmentEmb, pHashResult] = await Promise.all([
         processImageForEmbedding(file.buffer),
-        processImageForGarmentEmbedding(file.buffer).catch(() => [] as number[]),
+        computeImageSearchGarmentQueryEmbedding(file.buffer).catch(() => [] as number[]),
         computePHash(file.buffer),
       ]);
       embedding = emb;
@@ -192,22 +193,14 @@ export async function searchProductsByImage(req: Request, res: Response) {
       garmentEmbeddingForSearch = garmentEmb.length === emb.length ? garmentEmb : undefined;
 
       if (quickHints.length > 0) {
-        const existing: string[] =
-          Array.isArray(filters.colors) && filters.colors.length > 0
-            ? filters.colors.map((c) => String(c).toLowerCase())
-            : filters.color
-              ? [String(filters.color).toLowerCase()]
-              : filters.softColor
-                ? [String(filters.softColor).toLowerCase()]
-                : [];
-        filters.colors = [...new Set([...existing, ...quickHints.map((c) => c.toLowerCase())])];
+        // Query-image color hints are soft signals for reranking, not hard filters.
+        if (!filters.color && !Array.isArray(filters.colors)) {
+          filters.softColor = String(quickHints[0]).toLowerCase();
+        }
       }
 
-      // BLIP caption + taxonomy extraction for productTypes (BM25 soft boost in hybrid search)
       const typeSeeds = extractLexicalProductTypeSeeds(caption);
-      if (typeSeeds.length) {
-        filters.productTypes = typeSeeds;
-      }
+      softProductTypeHints = typeSeeds.length > 0 ? typeSeeds : undefined;
     } else if (req.body.embedding && Array.isArray(req.body.embedding)) {
       // Client-provided vector (expected: same CLIP image space as the index)
       embedding = req.body.embedding;
@@ -229,6 +222,7 @@ export async function searchProductsByImage(req: Request, res: Response) {
       similarityThreshold,
       includeRelated,
       pHash,
+      softProductTypeHints,
     });
 
     const rankingMeta = wantsRankingDebug(req)

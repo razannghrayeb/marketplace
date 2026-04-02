@@ -25,10 +25,24 @@ import { loadEntitiesFromDB } from "./lib/search/semanticSearch";
 
 export async function createServer() {
   if (process.env.NODE_ENV !== "test") {
-    try {
-      await ensureIndex();
-    } catch (err) {
-      console.error("Warning: Could not ensure OpenSearch index:", err);
+    const isCloudRun = Boolean(process.env.K_SERVICE);
+    const ensureIndexOnBoot =
+      process.env.SEARCH_ENSURE_INDEX_ON_BOOT === "1" ||
+      process.env.SEARCH_ENSURE_INDEX_ON_BOOT === "true";
+
+    // Do not block Cloud Run startup on OpenSearch checks/index creation.
+    // Cloud Run only cares that the app binds PORT quickly.
+    if (!isCloudRun || ensureIndexOnBoot) {
+      try {
+        await ensureIndex();
+      } catch (err) {
+        console.error("Warning: Could not ensure OpenSearch index:", err);
+      }
+    } else {
+      // Best-effort in background when running on Cloud Run.
+      ensureIndex().catch((err) =>
+        console.error("Warning: Could not ensure OpenSearch index (background):", err),
+      );
     }
   }
 
@@ -91,7 +105,8 @@ export async function createServer() {
   // =========================================================================
   const clipInitOptional =
     process.env.CLIP_INIT_OPTIONAL === "1" ||
-    process.env.CLIP_INIT_OPTIONAL === "true";
+    process.env.CLIP_INIT_OPTIONAL === "true" ||
+    process.env.K_SERVICE != null; // Cloud Run: never block container startup on model warmup
   try {
     console.log("[server] Initializing CLIP models...");
     await initClip();
@@ -103,8 +118,9 @@ export async function createServer() {
         err,
       );
     } else {
-      console.error("[server] ❌ FATAL: CLIP model initialization failed:", err);
-      process.exit(1);
+      // Keep service bootable even when model artifacts are missing.
+      // Search/image endpoints can still respond with graceful degradation.
+      console.error("[server] ❌ CLIP model initialization failed (continuing):", err);
     }
   }
 

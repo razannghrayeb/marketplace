@@ -21,7 +21,11 @@ import { textSearch as enhancedTextSearch } from "../../routes/search/search.ser
 import { searchByImageWithSimilarity as legacyImageSearch } from "../../routes/products/products.service";
 import { searchProductsFilteredBrowse } from "./filteredBrowseSearch";
 
-import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash } from "../image";
+import {
+  processImageForEmbedding,
+  computeImageSearchGarmentQueryEmbedding,
+  computePHash,
+} from "../image";
 import { tieredColorMatchScore } from "../color/colorCanonical";
 import { getYOLOv8Client } from "../image/yolov8Client";
 import {
@@ -32,6 +36,7 @@ import {
 import {
   expandProductTypesForQuery,
   extractLexicalProductTypeSeeds,
+  filterProductTypeSeedsByMappedCategory,
 } from "./productTypeTaxonomy";
 import { config } from "../../config";
 
@@ -68,18 +73,39 @@ export interface UnifiedImageSearchParams {
    */
   forceHardCategoryFilter?: boolean;
   relaxThresholdWhenEmpty?: boolean;
+  /** Caption/BLIP-derived type tokens — taxonomy soft signal only (see `searchByImageWithSimilarity`). */
+  softProductTypeHints?: string[];
+  /** Structured BLIP signal used for rerank alignment (no hard filter semantics). */
+  blipSignal?: {
+    productType?: string | null;
+    gender?: string;
+    ageGroup?: string;
+    primaryColor?: string | null;
+    secondaryColor?: string | null;
+    style?: string | null;
+    material?: string | null;
+    occasion?: string | null;
+    confidence?: number;
+  };
+  inferredPrimaryColor?: string | null;
+  inferredColorsByItem?: Record<string, string | null>;
 }
 
 function filterByFinalRelevance<T extends { finalRelevance01?: number }>(
   items: T[] | undefined,
   min: number,
+  mode: "lenient" | "strict" = "lenient",
 ): T[] | undefined {
   if (!items) return items;
-  return items.filter((item) => {
+  const filtered = items.filter((item) => {
     const rel = item?.finalRelevance01;
-    // Keep items without calibrated relevance; enforce only when score exists.
+    if (mode === "strict") return typeof rel === "number" && rel >= min;
     return typeof rel !== "number" || rel >= min;
   });
+  if (mode === "strict") {
+    return [...filtered].sort((a, b) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
+  }
+  return filtered;
 }
 
 function expandPredictedTypeHints(seeds: string[]): string[] {
@@ -116,11 +142,11 @@ async function inferPredictedCategoryAislesFromImage(
       const searchCategories = shouldUseAlternatives(categoryMapping)
         ? getSearchCategories(categoryMapping)
         : [categoryMapping.productCategory];
-      const expanded = expandPredictedTypeHints([
-        label,
-        ...searchCategories,
-        ...extractLexicalProductTypeSeeds(label),
-      ]);
+      const lexical = filterProductTypeSeedsByMappedCategory(
+        extractLexicalProductTypeSeeds(label),
+        categoryMapping.productCategory,
+      );
+      const expanded = expandPredictedTypeHints([label, ...searchCategories, ...lexical]);
       return expanded.length > 0 ? expanded : searchCategories;
     };
     return await Promise.race([
@@ -272,6 +298,10 @@ export async function searchImage(
     knnField,
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty,
+    softProductTypeHints,
+    blipSignal,
+    inferredPrimaryColor,
+    inferredColorsByItem,
   } = params;
 
   if ((!imageEmbedding || imageEmbedding.length === 0) && !imageBuffer) {
@@ -280,28 +310,50 @@ export async function searchImage(
 
   const start = Date.now();
 
-  const embedding =
-    imageEmbedding && imageEmbedding.length > 0
-      ? imageEmbedding
-      : await processImageForEmbedding(imageBuffer!);
-
-  const derivedAisleHints =
-    predictedCategoryAisles && predictedCategoryAisles.length > 0
-      ? predictedCategoryAisles
-      : await inferPredictedCategoryAislesFromImage(imageBuffer);
-
   const embeddingDerivedFromBufferOnly =
     Boolean(imageBuffer?.length) &&
     (!imageEmbedding || imageEmbedding.length === 0);
+
+  /** Query pixels aligned to embedded catalog (default: always rembg user photo when sidecar up). */
+  let catalogAlignedBuffer: Buffer | undefined;
+  if (embeddingDerivedFromBufferOnly && imageBuffer?.length) {
+    const { prepareBufferForImageSearchQuery } = await import("../image/embeddingPrep");
+    const prep = await prepareBufferForImageSearchQuery(imageBuffer);
+    catalogAlignedBuffer = prep.buffer;
+    if (String(process.env.SEARCH_IMAGE_PIPELINE_DEBUG ?? "").trim() === "1") {
+      console.log("[searchImage] query image prep", {
+        bgRemoved: prep.bgRemoved,
+        inBytes: imageBuffer.length,
+        outBytes: prep.buffer.length,
+        SEARCH_IMAGE_QUERY_REMBG: process.env.SEARCH_IMAGE_QUERY_REMBG ?? "(default conditional)",
+      });
+    }
+  }
+
+  const embedding =
+    imageEmbedding && imageEmbedding.length > 0
+      ? imageEmbedding
+      : await processImageForEmbedding(catalogAlignedBuffer!);
+
+  const inferAislesEnv = () => {
+    const v = String(process.env.SEARCH_IMAGE_INFER_YOLO_AISLES ?? "1").toLowerCase();
+    return v !== "0" && v !== "false";
+  };
+  const derivedAisleHints =
+    predictedCategoryAisles && predictedCategoryAisles.length > 0
+      ? predictedCategoryAisles
+      : inferAislesEnv() && imageBuffer
+        ? await inferPredictedCategoryAislesFromImage(imageBuffer)
+        : undefined;
 
   let imageEmbeddingGarment: number[] | undefined = garmentFromCaller;
   if (
     (!imageEmbeddingGarment || imageEmbeddingGarment.length === 0) &&
     embeddingDerivedFromBufferOnly &&
-    imageBuffer?.length
+    catalogAlignedBuffer?.length
   ) {
     try {
-      imageEmbeddingGarment = await processImageForGarmentEmbedding(imageBuffer);
+      imageEmbeddingGarment = await computeImageSearchGarmentQueryEmbedding(catalogAlignedBuffer);
     } catch {
       imageEmbeddingGarment = undefined;
     }
@@ -310,10 +362,11 @@ export async function searchImage(
     imageEmbeddingGarment = undefined;
   }
 
-  // Compute pHash only when related-by-pHash is requested and we have raw bytes.
-  // Callers often pass only `imageEmbedding` (e.g. cropped regions); Sharp cannot hash undefined.
+  // When we have raw bytes but no caller-supplied hash, compute pHash once. Used for
+  // related-by-pHash, Postgres identity rescue (same catalog image), and self-search — not only when includeRelated is on.
+  // Callers that pass only `imageEmbedding` (no buffer) cannot be hashed here.
   let effectivePHash = pHash;
-  if (includeRelated && effectivePHash === undefined && imageBuffer && imageBuffer.length > 0) {
+  if (effectivePHash === undefined && imageBuffer && imageBuffer.length > 0) {
     try {
       effectivePHash = await computePHash(imageBuffer);
     } catch (e) {
@@ -324,9 +377,16 @@ export async function searchImage(
   const res = await legacyImageSearch({
     imageEmbedding: embedding,
     imageEmbeddingGarment,
-    /** Pass raw bytes whenever available so color kNN (`embedding_color`) can run; global similarity still uses `imageEmbedding`. */
+    /**
+     * Query-prepared bytes (default always-rembg) for primary + attribute + garment CLIP.
+     * pHash / YOLO aisles still use the original upload above.
+     */
     imageBuffer:
-      imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0 ? imageBuffer : undefined,
+      catalogAlignedBuffer && catalogAlignedBuffer.length > 0
+        ? catalogAlignedBuffer
+        : imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0
+          ? imageBuffer
+          : undefined,
     filters: filters as any,
     limit,
     similarityThreshold,
@@ -335,11 +395,24 @@ export async function searchImage(
     predictedCategoryAisles: derivedAisleHints,
     knnField,
     forceHardCategoryFilter,
-    relaxThresholdWhenEmpty: relaxThresholdWhenEmpty ?? true,
+    relaxThresholdWhenEmpty: relaxThresholdWhenEmpty ?? false,
+    softProductTypeHints,
+    blipSignal,
+    inferredPrimaryColor,
+    inferredColorsByItem,
   } as any);
 
-  const filteredResults = filterByFinalRelevance(res.results, config.search.finalAcceptMinImage) ?? [];
-  const filteredRelated = filterByFinalRelevance(res.related, config.search.finalAcceptMinImage);
+  const metaAny = res.meta as Record<string, unknown> | undefined;
+  const effectiveMin =
+    typeof metaAny?.final_accept_min_effective === "number"
+      ? (metaAny.final_accept_min_effective as number)
+      : config.search.finalAcceptMinImage;
+  // Use "lenient" mode: keep items that have no finalRelevance01 score (rather
+  // than dropping them) and let the upstream kNN + composite ordering dominate.
+  // "strict" was silently discarding all hits whose relevance layer hadn't run
+  // or whose score was depressed by threshold/preprocessing mismatches.
+  const filteredResults = filterByFinalRelevance(res.results, effectiveMin, "lenient") ?? [];
+  const filteredRelated = filterByFinalRelevance(res.related, effectiveMin, "lenient");
   const meta = {
     ...(res.meta ?? {}),
     total_results: filteredResults.length,

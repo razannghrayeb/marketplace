@@ -22,12 +22,14 @@
     "migrate:run": "npx tsx scripts/run-migration.ts",
     "migrate:bootstrap": "npx tsx scripts/bootstrap-db.ts",
     "backfill-r2": "npx tsx scripts/backfill-r2-images.ts",
+    "backfill:blip-catalog": "npx tsx scripts/backfill-blip-catalog-fields.ts",
     "add-image-cdn-col": "npx tsx scripts/add-image-cdn-column.ts",
     "migrate:canonicals": "npx tsx scripts/migrate-canonicals.ts",
     "worker": "npx tsx src/workers/ingest.worker.ts",
     "models:download": "python scripts/download-models.py",
     "models:list": "python scripts/download-models.py --dry-run",
     "search:eval": "npx tsx scripts/search-eval.ts",
+    "search:eval:image": "npx tsx scripts/eval-image-relevance.ts",
     "os:count": "npx tsx scripts/opensearch-count.ts"
   },
   "dependencies": {

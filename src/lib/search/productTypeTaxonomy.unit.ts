@@ -6,6 +6,7 @@ declare const expect: any;
 import {
   extractFashionTypeNounTokens,
   extractLexicalProductTypeSeeds,
+  filterProductTypeSeedsByMappedCategory,
   scoreRerankProductTypeBreakdown,
 } from "./productTypeTaxonomy";
 
@@ -69,6 +70,13 @@ describe("extractLexicalProductTypeSeeds", () => {
     const t = extractLexicalProductTypeSeeds("women tops");
     expect(t.some((x) => x === "tops" || x === "top")).toBe(true);
   });
+
+  test("vest dress: outerwear vest token dropped when aisle is dresses", () => {
+    const seeds = extractLexicalProductTypeSeeds("vest dress");
+    expect(seeds).toContain("vest");
+    expect(seeds).toContain("dress");
+    expect(filterProductTypeSeedsByMappedCategory(seeds, "dresses")).toEqual(["dress"]);
+  });
 });
 
 describe("extractFashionTypeNounTokens", () => {
@@ -79,5 +87,13 @@ describe("extractFashionTypeNounTokens", () => {
   test("stem plural footwear", () => {
     const t = extractFashionTypeNounTokens("black boots");
     expect(t.some((x) => x === "boot" || x === "boots")).toBe(true);
+  });
+});
+
+describe("filterProductTypeSeedsByMappedCategory - accessory isolation", () => {
+  test("head accessory seeds do not drift into bag family", () => {
+    const seeds = ["headband, head covering, hair accessory", "bag", "hat", "accessories"];
+    const filtered = filterProductTypeSeedsByMappedCategory(seeds, "accessories");
+    expect(filtered).not.toContain("bag");
   });
 });

@@ -79,15 +79,23 @@ export {
 } from "./categoryFilter";
 
 export {
+  merchandiseVisualSimilarity01,
+  type MerchandiseVisualSimilarityResult,
+} from "./merchandiseVisualSimilarity";
+
+export {
   expandProductTypesForQuery,
   expandProductTypesForIndexing,
   scoreProductTypeTaxonomyMatch,
   scoreCrossFamilyTypePenalty,
+  inferMacroFamiliesFromListingCategoryFields,
   scoreRerankProductTypeBreakdown,
   scoreHypernymDocMatch,
   crossFamilyTypePenaltyEnabled,
   PRODUCT_TYPE_CLUSTERS,
   extractLexicalProductTypeSeeds,
+  filterProductTypeSeedsByMappedCategory,
+  intentFamiliesForProductCategory,
   extractFashionTypeNounTokens,
   getProductTypePhrasesLongestFirst,
   type RerankTypeBreakdown,

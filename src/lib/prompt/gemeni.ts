@@ -352,6 +352,12 @@ Right: separate rows — e.g. imageIndex 1 with ["color", ...] and imageIndex 0 
 ## USER REQUEST
 "${userPrompt}"
 
+## USER TEXT OVERRIDES IMAGES (NON-NEGOTIABLE)
+Anything the user states in the request above about **category, garment type, colors, materials, patterns, fit, gender, price, brand, or exclusions** is a **hard shopping constraint**, not a soft hint.
+- Fill \`constraints.category\`, \`constraints.gender\`, \`constraints.priceMin\` / \`constraints.priceMax\`, \`constraints.brands\`, \`constraints.mustHave\`, \`constraints.mustNotHave\`, and \`constraints.negativeAttributes\` from the **user's words first**.
+- Use image analyses only where the user explicitly borrows a trait **from a named image** (e.g. "color from the second image") or where the user does **not** contradict the images.
+- If the user says "only", "must", "has to be", "under $X", "women's", "no stripes", etc., encode that strictly in \`mustHave\` / \`mustNotHave\` / \`negativeAttributes\` and constraints — **never ignore it** in favor of visual similarity.
+
 ## IMAGE REFERENCE GUIDE
 ${imageGuide}
 

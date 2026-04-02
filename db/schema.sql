@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS products(
     description TEXT,
     size TEXT,
     color TEXT,
+    gender TEXT,
 
     currency TEXT NOT NULL,
     price_cents BIGINT NOT NULL,

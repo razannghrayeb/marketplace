@@ -157,6 +157,39 @@ const CATEGORY_ALIASES: Record<string, string[]> = {
     "board shorts",
   ],
   underwear: ["underwear", "lingerie", "undergarments", "innerwear", "boxers", "briefs", "bra", "panties", "thong", "undershirt"],
+  /** Skincare / color cosmetics — not apparel; blocks spurious high CLIP scores vs dress/shoe queries */
+  beauty: [
+    "beauty",
+    "makeup",
+    "cosmetics",
+    "cosmetic",
+    "concealer",
+    "concealers",
+    "foundation",
+    "lipstick",
+    "lipsticks",
+    "mascara",
+    "eyeliner",
+    "eyeshadow",
+    "blush",
+    "bronzer",
+    "primer",
+    "highlighter",
+    "skincare",
+    "serum",
+    "moisturizer",
+    "cleanser",
+    "toner",
+    "sunscreen",
+    "perfume",
+    "fragrance",
+    "cologne",
+    "nail polish",
+    "nail care",
+    "nails",
+    "bath & body",
+    "body care",
+  ],
 };
 
 /**
@@ -274,6 +307,27 @@ export function shouldHardFilterAstCategory(
 /**
  * Map vendor listing category + title hints to a canonical aisle label for filtering.
  */
+/**
+ * True when indexed `category` / `category_canonical` indicates beauty (makeup/skincare/fragrance),
+ * so ranking can penalize vs garment/footwear image intent even when `product_types` is empty.
+ */
+export function isBeautyRetailListingFromFields(
+  category: unknown,
+  categoryCanonical: unknown,
+): boolean {
+  const cc = categoryCanonical != null ? String(categoryCanonical).toLowerCase().trim() : "";
+  if (cc === "beauty") return true;
+  const beautyAliases = getCategorySearchTerms("beauty").map((t) => t.toLowerCase());
+  if (cc && beautyAliases.includes(cc)) return true;
+
+  const cat = category != null ? String(category).toLowerCase().trim() : "";
+  if (!cat) return false;
+  if (beautyAliases.includes(cat)) return true;
+  return /\b(concealer|foundation|lipstick|mascara|cosmetic|makeup|skincare|serum|perfume|fragrance|moisturizer|cleanser|bronzer|blush|eyeshadow|primer|highlighter|eyeliner|sunscreen|nail\s*polish)\b/i.test(
+    cat,
+  );
+}
+
 export function inferCategoryCanonical(rawCategory: string | null | undefined, title: string): string | null {
   const cat = rawCategory ? String(rawCategory).toLowerCase().trim() : "";
   for (const [key, aliases] of Object.entries(CATEGORY_ALIASES)) {

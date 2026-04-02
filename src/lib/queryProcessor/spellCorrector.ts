@@ -185,6 +185,10 @@ export function jaroWinkler(a: string, b: string): number {
 export interface SpellCorrection {
   original: string;
   correction: string;
+  /** Exact dictionary string that matched (term or alias). */
+  matched?: string;
+  /** True when the winning match came from an alias, not canonical term. */
+  viaAlias?: boolean;
   distance: number;
   similarity: number;
   confidence: number;
@@ -210,6 +214,8 @@ export function findCorrection(
     return {
       original: word,
       correction: dictionary.get(normalizedWord)!.term,
+      matched: normalizedWord,
+      viaAlias: false,
       distance: 0,
       similarity: 1,
       confidence: 1,
@@ -240,6 +246,8 @@ export function findCorrection(
         bestMatch = {
           original: word,
           correction: entry.term,
+          matched: entry.normalizedTerm,
+          viaAlias: false,
           distance,
           similarity,
           confidence: calculateConfidence(distance, similarity, normalizedWord.length),
@@ -263,6 +271,8 @@ export function findCorrection(
             bestMatch = {
               original: word,
               correction: entry.term,
+              matched: aliasNorm,
+              viaAlias: true,
               distance: aliasDistance,
               similarity: aliasSimilarity,
               confidence: calculateConfidence(aliasDistance, aliasSimilarity, normalizedWord.length),
@@ -323,6 +333,8 @@ const VALID_SEARCH_TERMS = new Set([
   "summer", "winter", "spring", "autumn", "fall",
   "party", "wedding", "office", "beach", "gym", "sport", "sports",
   "everyday", "daily", "weekend",
+  // Common product-type spellings
+  "tshirt", "t-shirt", "tee", "tees", "shirt", "shirts",
   // Sizes (letter codes)
   "xs", "s", "m", "l", "xl", "xxs", "xxl", "xxxl",
   // Size descriptors
@@ -337,6 +349,66 @@ function isSpellConservativeMode(): boolean {
 function isCommerceMode(): boolean {
   const v = String(process.env.SEARCH_COMMERCE_MODE ?? "").toLowerCase();
   return v === "1" || v === "true";
+}
+
+const BROAD_CATEGORY_TERMS = new Set([
+  "tops",
+  "bottoms",
+  "outerwear",
+  "footwear",
+  "accessories",
+  "activewear",
+  "swimwear",
+  "underwear",
+  "modest wear",
+]);
+
+const SPECIFIC_APPAREL_ALIASES = new Set([
+  "tshirt", "t-shirt", "tee", "tees", "shirt", "shirts",
+  "hoodie", "hoodies", "sweater", "sweatshirt",
+  "pants", "trousers", "joggers", "jeans", "shorts",
+  "dress", "dresses", "jacket", "jackets",
+]);
+
+function pickBestAliasCorrection(
+  word: string,
+  entry: DictionaryEntry,
+  maxDistance: number,
+): SpellCorrection | null {
+  if (!entry.aliases?.length) return null;
+  const normalizedWord = word.toLowerCase().trim();
+  let best: SpellCorrection | null = null;
+  let bestScore = 0;
+
+  for (const alias of entry.aliases) {
+    const aliasNorm = alias.toLowerCase().trim();
+    if (!SPECIFIC_APPAREL_ALIASES.has(aliasNorm)) continue;
+
+    const distance = damerauLevenshtein(normalizedWord, aliasNorm, maxDistance);
+    if (distance > maxDistance) continue;
+
+    const similarity = normalizedSimilarity(normalizedWord, aliasNorm);
+    const score = similarity * 0.75 + (1 - distance / maxDistance) * 0.25;
+    if (score > bestScore) {
+      bestScore = score;
+      best = {
+        original: word,
+        correction: aliasNorm,
+        matched: aliasNorm,
+        viaAlias: true,
+        distance,
+        similarity,
+        confidence: calculateConfidence(distance, similarity, normalizedWord.length),
+        source: entry,
+      };
+    }
+  }
+
+  return best;
+}
+
+function normalizeCategorySurface(value: string): string {
+  return String(value || "").toLowerCase().trim();
 }
 
 /** Skip spell-check for tokens that should never be corrected */
@@ -416,7 +488,32 @@ export function correctQuery(
     if (!bestCorrection) {
       const categoryCorrection = findCorrection(word, dictionaries.categories, maxDistance);
       if (categoryCorrection && categoryCorrection.confidence >= categoryAttrMinConf) {
-        bestCorrection = categoryCorrection;
+        // Avoid over-broad rewrites like "tshirrt" -> "tops".
+        // If the category correction is broad, prefer a close specific alias (e.g. tshirt).
+        if (
+          categoryCorrection.source &&
+          BROAD_CATEGORY_TERMS.has(categoryCorrection.correction.toLowerCase())
+        ) {
+          const aliasCorrection = pickBestAliasCorrection(word, categoryCorrection.source, maxDistance);
+          bestCorrection = aliasCorrection ?? categoryCorrection;
+        } else {
+          bestCorrection = categoryCorrection;
+        }
+
+        // General safeguard: never auto-apply broad taxonomy rewrites from typos.
+        // Preserve specific surface forms when available; otherwise downgrade to suggestion-only confidence.
+        if (
+          bestCorrection &&
+          bestCorrection.source?.type === "category" &&
+          BROAD_CATEGORY_TERMS.has(normalizeCategorySurface(bestCorrection.correction))
+        ) {
+          const matched = normalizeCategorySurface(bestCorrection.matched ?? "");
+          if (matched && !BROAD_CATEGORY_TERMS.has(matched)) {
+            bestCorrection.correction = matched;
+          } else {
+            bestCorrection.confidence = Math.min(bestCorrection.confidence, 0.79);
+          }
+        }
       }
     }
 

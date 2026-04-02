@@ -4,9 +4,12 @@
 import { getCategorySearchTerms } from "./categoryFilter";
 import {
   downrankSpuriousProductTypeFromCategory,
+  filterProductTypeSeedsByMappedCategory,
+  hasGarmentLikeFamilyFromProductTypeSeeds,
   scoreCrossFamilyTypePenalty,
   scoreRerankProductTypeBreakdown,
 } from "./productTypeTaxonomy";
+import { isBeautyRetailListingFromFields } from "./categoryFilter";
 import { extractAttributesSync } from "./attributeExtractor";
 import { tieredColorListCompliance } from "../color/colorCanonical";
 import { normalizeColorToken } from "../color/queryColorFilter";
@@ -71,6 +74,7 @@ export function scoreCategoryRelevance01(
  */
 export function computeFinalRelevance01(params: {
   hasTypeIntent: boolean;
+  hasReliableTypeIntent?: boolean;
   typeScore: number;
   catScore: number;
   semScore: number;
@@ -78,8 +82,10 @@ export function computeFinalRelevance01(params: {
   colorScore: number;
   audScore: number;
   styleScore: number;
+  sleeveScore: number;
   hasColorIntent: boolean;
   hasStyleIntent: boolean;
+  hasSleeveIntent: boolean;
   hasAudienceIntent: boolean;
   /** From scoreCrossFamilyTypePenalty; strong garment↔footwear mismatches are typically ≥ 0.8 */
   crossFamilyPenalty: number;
@@ -88,19 +94,33 @@ export function computeFinalRelevance01(params: {
    * Avoids 0.6·sem + 0.4·lex collapsing to sem while still exposing the same number twice in explain.
    */
   applyLexicalToGlobal?: boolean;
+  /** Image similar-search: keep final relevance closer to raw cosine so weak visuals cannot rank as strong matches. */
+  tightSemanticCap?: boolean;
 }): number {
   const crossPen = Math.max(0, params.crossFamilyPenalty);
-  if (params.hasTypeIntent && crossPen >= 0.8) {
+  // Hard block for cross-family mismatch (e.g. footwear query returning dresses).
+  // For image search (tightSemanticCap), type intent comes from YOLO which can be
+  // wrong — don't hard-zero, just heavily penalize so visual similarity can still
+  // rescue genuinely similar products.
+  const gateTypeIntent = params.hasTypeIntent && params.hasReliableTypeIntent !== false;
+  if (gateTypeIntent && crossPen >= 0.8) {
+    if (params.tightSemanticCap) {
+      return Math.max(0, params.semScore * 0.15);
+    }
     return 0;
   }
 
-  const typeGateFactor = !params.hasTypeIntent
+  // For image search (tightSemanticCap), type intent often comes from noisy YOLO
+  // predictions. Use softer gates so a wrong category prediction doesn't nuke all
+  // visually similar results. For text search, keep the strict gates since the user
+  // explicitly typed the product type.
+  const typeGateFactor = !gateTypeIntent
     ? 1
     : params.typeScore >= 0.5
       ? 1
       : params.typeScore >= 0.2
-        ? 0.3
-        : 0.05;
+        ? (params.tightSemanticCap ? 0.75 : 0.3)
+        : (params.tightSemanticCap ? 0.55 : 0.05);
 
   const categoryBoost = 1 + params.catScore * 0.25;
   const applyLex = params.applyLexicalToGlobal !== false;
@@ -111,20 +131,37 @@ export function computeFinalRelevance01(params: {
   const colorPart = params.hasColorIntent ? params.colorScore : 1;
   const audPart = params.hasAudienceIntent ? params.audScore : 1;
   const stylePart = params.hasStyleIntent ? params.styleScore : 1;
+  const sleevePart = params.hasSleeveIntent ? params.sleeveScore : 1;
   // Attribute blend: keep color dominant, but allow style to influence as well.
-  const attrScore = colorPart * 0.5 + stylePart * 0.3 + audPart * 0.2;
+  const attrScore = colorPart * 0.45 + stylePart * 0.2 + sleevePart * 0.2 + audPart * 0.15;
   const attrFactor = 0.5 + attrScore * 0.5;
 
   const crossFamilySoftFactor = Math.max(0, 1 - crossPen * 0.6);
 
   const raw =
     globalScore * typeGateFactor * categoryBoost * attrFactor * crossFamilySoftFactor;
-  return Math.max(0, Math.min(1, raw));
+  const bounded = Math.max(0, Math.min(1, raw));
+  // Prevent final relevance from being unrealistically higher than visual/semantic evidence.
+  // With tightSemanticCap (image search), allow a wider bonus so that products with
+  // strong attribute/type compliance can surface above pure visual similarity.
+  // Previous 0.035/0.07 caps were too restrictive and collapsed all image search
+  // results into a narrow band near raw cosine, making the relevance layer useless.
+  const hasIntent =
+    params.hasTypeIntent || params.hasColorIntent || params.hasStyleIntent || params.hasAudienceIntent;
+  const capBonus = params.tightSemanticCap
+    ? hasIntent
+      ? 0.25
+      : 0.32
+    : hasIntent
+      ? 0.12
+      : 0.2;
+  const softCap = Math.min(1, params.semScore + capBonus);
+  return Math.min(bounded, softCap);
 }
 
 export function normalizeQueryGender(g: string | undefined): string | null {
   if (!g) return null;
-  const x = g.toLowerCase();
+  const x = g.toLowerCase().trim();
   if (x === "men" || x === "women" || x === "unisex") return x;
   return null;
 }
@@ -177,20 +214,30 @@ export function scoreAudienceCompliance(
     } else if (wantAge === "baby" && docAge === "kids") {
       score *= 0.85;
     } else {
-      score *= 0.38;
+      // Hard contradiction: explicit indexed age group disagrees with requested age group.
+      score *= 0;
     }
   }
 
   if (wantG) {
     factors += 1;
     if (!docG) {
-      if (wantG === "men" && /\b(men|mens|male)\b/.test(title)) score *= 0.9;
-      else if (wantG === "women" && /\b(women|womens|female|ladies)\b/.test(title)) score *= 0.9;
-      else score *= 0.78;
+      if (wantG === "men") {
+        if (/\b(men|mens|male)\b/.test(title)) score *= 0.9;
+        else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(title)) score *= 0.28;
+        else score *= 0.78;
+      } else if (wantG === "women") {
+        if (/\b(women|womens|female|ladies|woman)\b/.test(title)) score *= 0.9;
+        else if (/\b(men|mens|male|man|boy|boys)\b/.test(title)) score *= 0.28;
+        else score *= 0.78;
+      } else {
+        score *= 0.85;
+      }
     } else if (docG === "unisex" || docG === wantG) {
       score *= 1;
     } else {
-      score *= 0.35;
+      // Hard contradiction: explicit indexed audience gender disagrees with request.
+      score *= 0;
     }
   }
 
@@ -213,6 +260,8 @@ export interface SearchHitRelevanceIntent {
   desiredColorsTier: string[];
   /** Canonical attr_style token (e.g. "casual", "formal", "smart-casual"). */
   desiredStyle?: string;
+  /** short | long | sleeveless */
+  desiredSleeve?: string;
   rerankColorMode: "any" | "all";
   mergedCategory?: string;
   astCategories: string[];
@@ -229,6 +278,34 @@ export interface SearchHitRelevanceIntent {
   hybridScoreRecall?: HybridScoreRecallStats;
   /** True when AST pipeline fell back to processQueryFast (shallower text understanding). */
   astPipelineDegraded?: boolean;
+  /**
+   * Lowercased substrings; if any appear in title/category/brand, relevance is forced to 0.
+   * Used for mix-and-match: user "no leather", "without stripes", etc.
+   */
+  negationExcludeTerms?: string[];
+  /**
+   * When true, prompt-derived type/color requirements cap relevance for non-compliant hits
+   * (mix-and-match: text instructions must restrict what appears).
+   */
+  enforcePromptConstraints?: boolean;
+  /** Colors in desired* came from the text query (AST), not from image extraction alone. */
+  promptAnchoredColorIntent?: boolean;
+  /** Product types came from prompt/AST/lexical seeds, not only from vision model category fallback. */
+  promptAnchoredTypeIntent?: boolean;
+  /** Image kNN: cap final relevance near cosine similarity (see computeFinalRelevance01). */
+  tightSemanticCap?: boolean;
+  /**
+   * When true, colors in `desiredColors*` come only from soft hints (e.g. auto dominant color on upload).
+   * They still affect `colorCompliance` / rerankScore, but must not set `hasColorIntent` in
+   * `computeFinalRelevance01` — otherwise a wrong auto-color nukes `finalRelevance01` for visually close items.
+   */
+  softColorBiasOnly?: boolean;
+  /**
+   * Whether type intent is reliable enough to act as a hard gate in final relevance.
+   * False for weak inferred hints (e.g. image-only predicted aisle); true for explicit
+   * text/filter/product-type constraints.
+   */
+  reliableTypeIntent?: boolean;
 }
 
 export interface HitCompliance {
@@ -243,15 +320,22 @@ export interface HitCompliance {
   crossFamilyPenalty: number;
   audienceCompliance: number;
   styleCompliance: number;
+  sleeveCompliance: number;
   osSimilarity01: number;
   categoryRelevance01: number;
   semanticScore01: number;
   lexicalScore01: number;
   rerankScore: number;
   finalRelevance01: number;
+  visualComponent?: number;
+  typeComponent?: number;
+  attrComponent?: number;
+  penaltyComponent?: number;
   /** Dev / explain: type gate and intent trace */
   hasTypeIntent?: boolean;
   hasColorIntent?: boolean;
+  hasSleeveIntent?: boolean;
+  hasLengthIntent?: boolean;
   typeGateFactor?: number;
   hardBlocked?: boolean;
   /** False when lexical score is not a separate signal (e.g. image-only kNN): omit from API explain. */
@@ -313,6 +397,44 @@ function mergeColorArrays(...parts: unknown[]): string[] {
   return out;
 }
 
+function normalizeSleeveToken(raw: string | undefined): "short" | "long" | "sleeveless" | null {
+  if (!raw) return null;
+  const s = String(raw).toLowerCase().trim();
+  if (!s) return null;
+  if (s.includes("sleeveless")) return "sleeveless";
+  if (s.includes("short")) return "short";
+  if (s.includes("long")) return "long";
+  return null;
+}
+
+function docSupportsSleeveIntent(src: Record<string, unknown>): boolean {
+  const bag = [
+    src.category,
+    src.category_canonical,
+    src.title,
+    ...(Array.isArray(src.product_types) ? src.product_types : []),
+  ]
+    .map((x) => String(x ?? "").toLowerCase())
+    .join(" ");
+  if (!bag.trim()) return true;
+  // Bottoms have no sleeves — do not score sleeve compliance (avoids misleading 0 on pants).
+  // Use "shorts" not "short" so "short sleeve" / "short dress" on tops & dresses still get sleeve/length logic.
+  if (
+    /\b(pant|pants|trouser|trousers|jean|jeans|shorts|skirt|skirts|legging|leggings|jogger|joggers|chino|chinos|cargo|cargos|bottom|bottoms)\b/.test(
+      bag,
+    )
+  ) {
+    return false;
+  }
+  if (/\b(shoe|shoes|sneaker|sneakers|boot|boots|sandal|sandals|heel|heels|loafer|loafers)\b/.test(bag)) {
+    return false;
+  }
+  if (/\b(bag|bags|wallet|wallets|belt|belts|hat|hats|cap|caps|scarf|scarves|jewelry|jewellery|ring|rings|earring|earrings|necklace|necklaces|bracelet|bracelets)\b/.test(bag)) {
+    return false;
+  }
+  return true;
+}
+
 function rawColorList(...parts: unknown[]): string[] {
   return [
     ...new Set(
@@ -331,11 +453,13 @@ export function computeHitRelevance(
   similarity: number,
   intent: SearchHitRelevanceIntent,
 ): HitCompliance & { primaryColor: string | null } {
+  const src = hit?._source ?? {};
   const {
     desiredProductTypes,
     desiredColors,
     desiredColorsTier,
     desiredStyle,
+    desiredSleeve,
     rerankColorMode,
     mergedCategory,
     astCategories,
@@ -345,14 +469,30 @@ export function computeHitRelevance(
     crossFamilyPenaltyWeight,
     lexicalMatchQuery,
     hybridScoreRecall,
+    negationExcludeTerms,
+    enforcePromptConstraints,
+    promptAnchoredColorIntent,
+    promptAnchoredTypeIntent,
+    tightSemanticCap,
+    softColorBiasOnly,
   } = intent;
 
   const productTypesRaw = hit?._source?.product_types;
-  const productTypes: string[] = Array.isArray(productTypesRaw)
+  let productTypes: string[] = Array.isArray(productTypesRaw)
     ? productTypesRaw.map((x: unknown) => String(x).toLowerCase())
     : productTypesRaw
       ? [String(productTypesRaw).toLowerCase()]
       : [];
+  if (productTypes.length > 0) {
+    const mappedDocCategory =
+      typeof hit?._source?.category_canonical === "string"
+        ? String(hit._source.category_canonical).toLowerCase().trim()
+        : typeof hit?._source?.category === "string"
+          ? String(hit._source.category).toLowerCase().trim()
+          : "";
+    const filtered = filterProductTypeSeedsByMappedCategory(productTypes, mappedDocCategory);
+    if (filtered.length > 0) productTypes = filtered;
+  }
 
   const attrColorsRaw = hit?._source?.attr_colors;
   const attrText = hit?._source?.attr_colors_text;
@@ -462,9 +602,35 @@ export function computeHitRelevance(
     }
   }
 
-  const crossFamilyPenalty =
+  // Guardrail: if catalog color explicitly contradicts desired color, do not allow
+  // image-palette/text color extraction to claim an "exact" match.
+  const catalogColorRaw = typeof hit?._source?.color === "string" ? String(hit._source.color).toLowerCase() : "";
+  const catalogColorNorm = catalogColorRaw ? normalizeColorToken(catalogColorRaw) ?? catalogColorRaw : "";
+  if (desiredColorsTier.length > 0 && catalogColorNorm) {
+    const tCatalog = tieredColorListCompliance(desiredColorsTier, [catalogColorNorm], rerankColorMode);
+    if (tCatalog.compliance <= 0) {
+      // Hard safety: when catalog color contradicts desired color, never allow
+      // inferred palette/text signals to look like a strong color match.
+      colorCompliance = 0;
+      if (colorTier === "exact") colorTier = "none";
+      // Keep `matchedColor` tied to query-vs-hit match evidence only; do not replace it
+      // with catalog color, otherwise explain output can look like query color was rewritten.
+    }
+  }
+
+  const docCategoryForPenalty =
+    typeof hit?._source?.category === "string" ? hit._source.category : undefined;
+  const docCanonicalForPenalty =
+    typeof hit?._source?.category_canonical === "string"
+      ? hit._source.category_canonical
+      : undefined;
+
+  let crossFamilyPenalty =
     desiredProductTypes.length > 0
-      ? scoreCrossFamilyTypePenalty(desiredProductTypes, productTypes)
+      ? scoreCrossFamilyTypePenalty(desiredProductTypes, productTypes, {
+          category: docCategoryForPenalty,
+          categoryCanonical: docCanonicalForPenalty,
+        })
       : 0;
 
   // Style compliance: keyword match on indexed `attr_style`.
@@ -476,10 +642,36 @@ export function computeHitRelevance(
 
   let styleCompliance = 0;
   if (normalizedDesiredStyle) {
-    if (hitStyle === normalizedDesiredStyle) styleCompliance = 1;
-    else if (hitStyle && (hitStyle.includes(normalizedDesiredStyle) || normalizedDesiredStyle.includes(hitStyle))) styleCompliance = 0.7;
-    else if (title.includes(normalizedDesiredStyle)) styleCompliance = 0.6;
-    else styleCompliance = 0;
+    if (hitStyle) {
+      // If explicit indexed style exists, treat mismatch as hard contradiction.
+      if (hitStyle === normalizedDesiredStyle) styleCompliance = 1;
+      else if (hitStyle.includes(normalizedDesiredStyle) || normalizedDesiredStyle.includes(hitStyle)) styleCompliance = 0.7;
+      else styleCompliance = 0;
+    } else if (title.includes(normalizedDesiredStyle)) {
+      styleCompliance = 0.6;
+    } else {
+      styleCompliance = 0;
+    }
+  }
+
+  let sleeveCompliance = 0;
+  const wantedSleeve = normalizeSleeveToken(desiredSleeve);
+  const sleeveIntentApplicable = docSupportsSleeveIntent(src);
+  const hasSleeveIntentForDoc = Boolean(wantedSleeve) && sleeveIntentApplicable;
+  if (hasSleeveIntentForDoc) {
+    const docSleeveRaw = typeof hit?._source?.attr_sleeve === "string" ? hit._source.attr_sleeve : "";
+    const docSleeve = normalizeSleeveToken(docSleeveRaw);
+    const titleSleeve = normalizeSleeveToken(title);
+    const observed = docSleeve ?? titleSleeve;
+    if (!observed) {
+      sleeveCompliance = 0.45;
+    } else if (observed === wantedSleeve) {
+      sleeveCompliance = 1;
+    } else if (docSleeve) {
+      sleeveCompliance = 0;
+    } else {
+      sleeveCompliance = 0.15;
+    }
   }
 
   const audienceCompliance = scoreAudienceCompliance(
@@ -495,12 +687,28 @@ export function computeHitRelevance(
     hit?._source?.category_canonical,
   );
 
-  const src = hit?._source ?? {};
+  /** Garment/footwear image intent vs makeup/skincare listing — CLIP is often high on shared skintone/packaging cues. */
+  const garmentVersusBeautyPenalty = (() => {
+    const raw = Number(process.env.SEARCH_BEAUTY_APPAREL_CROSS_PENALTY ?? "0.92");
+    const p = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0.92;
+    if (p <= 0) return 0;
+    if (!desiredProductTypes.length) return 0;
+    if (!hasGarmentLikeFamilyFromProductTypeSeeds(desiredProductTypes)) return 0;
+    if (!isBeautyRetailListingFromFields(src.category, src.category_canonical)) return 0;
+    return p;
+  })();
+  crossFamilyPenalty = Math.max(crossFamilyPenalty, garmentVersusBeautyPenalty);
 
   // General fallback: if the index misses/undercounts `product_types`, recover
   // type compliance from lexical evidence in title+description.
-  // This prevents `typeGateFactor` from collapsing relevance to ~0.05.
-  if (desiredProductTypes.length > 0 && productTypeCompliance < 0.2) {
+  // Only when there is an actual user/search lexical query: for pure image search
+  // (vision-derived type seeds, no text), title overlap creates false type matches
+  // and floats irrelevant products above true kNN neighbors.
+  if (
+    desiredProductTypes.length > 0 &&
+    productTypeCompliance < 0.2 &&
+    lexicalMatchQuery?.trim()
+  ) {
     const typeTextFallbackWeightRaw = Number(
       process.env.SEARCH_TYPE_TEXT_FALLBACK_WEIGHT ?? "0.25",
     );
@@ -524,33 +732,6 @@ export function computeHitRelevance(
       productTypeCompliance,
       candidateTypeCompliance * typeTextFallbackWeight,
     );
-
-    // #region agent log
-    if (effectiveTypeCompliance > productTypeCompliance) {
-      fetch("http://127.0.0.1:7383/ingest/ccea0d1b-4b26-441e-9797-fbae444c347a", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "00a194" },
-        body: JSON.stringify({
-          sessionId: "00a194",
-          runId: "type-fallback-verify",
-          hypothesisId: "H-type-fallback",
-          location: "searchHitRelevance.ts:productTypeFallback",
-          message: "Recovered type compliance from title+description",
-          data: {
-            productId: src.product_id ?? null,
-            desiredTypesText,
-            typeTextOverlap01,
-            categoryRelevance01,
-            oldProductTypeCompliance: productTypeCompliance,
-            candidateTypeCompliance,
-            typeTextFallbackWeight,
-            effectiveTypeCompliance,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-    }
-    // #endregion
 
     productTypeCompliance = effectiveTypeCompliance;
   }
@@ -602,19 +783,35 @@ export function computeHitRelevance(
 
   const wSim = rerankSimilarityWeight();
   const wAud = rerankAudienceWeight();
-  const rerankScore =
-    productTypeCompliance * 1000 * docTrust +
-    colorCompliance * 100 * docTrust +
-    styleCompliance * 75 * docTrust +
-    audienceCompliance * wAud * docTrust +
-    similarity * wSim -
-    crossFamilyPenalty * crossFamilyPenaltyWeight;
-
+  const typeComponent = productTypeCompliance * 420 * docTrust;
   const hasTypeIntent = desiredProductTypes.length > 0;
+  // Prevent non-type attributes from overpowering clear crop/type intent when type compliance is weak.
+  const attrTypeGate = !hasTypeIntent
+    ? 1
+    : productTypeCompliance >= 0.5
+      ? 1
+      : productTypeCompliance >= 0.2
+        ? 0.35
+        : 0.08;
+  const attrComponentRaw =
+    colorCompliance * 90 * docTrust +
+    styleCompliance * 65 * docTrust +
+    sleeveCompliance * 52 * docTrust +
+    audienceCompliance * wAud * docTrust;
+  const attrComponent = attrComponentRaw * attrTypeGate;
+  // Similarity term strengthened and modulated by type compliance.
+  const visualComponent =
+    similarity * (wSim + 120 * (0.35 + 0.65 * productTypeCompliance));
+  const penaltyComponent = crossFamilyPenalty * crossFamilyPenaltyWeight;
+  const rerankScore = typeComponent + attrComponent + visualComponent - penaltyComponent;
+
+  const hasReliableTypeIntent = hasTypeIntent && intent.reliableTypeIntent !== false;
   const hasColorIntent = desiredColors.length > 0;
+  /** Soft-only auto colors must not gate final acceptance the same as user `filters.color`. */
+  const hasColorIntentForFinalRelevance = hasColorIntent && !softColorBiasOnly;
   const crossPenTrace = Math.max(0, crossFamilyPenalty);
-  const hardBlocked = hasTypeIntent && crossPenTrace >= 0.8;
-  const typeGateFactor = !hasTypeIntent
+  const hardBlocked = hasReliableTypeIntent && crossPenTrace >= 0.8;
+  const typeGateFactor = !hasReliableTypeIntent
     ? 1
     : productTypeCompliance >= 0.5
       ? 1
@@ -622,8 +819,9 @@ export function computeHitRelevance(
         ? 0.3
         : 0.05;
 
-  const finalRelevance01 = computeFinalRelevance01({
+  let finalRelevance01 = computeFinalRelevance01({
     hasTypeIntent,
+    hasReliableTypeIntent,
     typeScore: productTypeCompliance,
     catScore: categoryRelevance01,
     semScore: semScore01,
@@ -631,12 +829,44 @@ export function computeHitRelevance(
     colorScore: colorCompliance,
     audScore: audienceCompliance,
     styleScore: styleCompliance,
-    hasColorIntent,
+    sleeveScore: sleeveCompliance,
+    hasColorIntent: hasColorIntentForFinalRelevance,
     hasStyleIntent: Boolean(normalizedDesiredStyle),
+    hasSleeveIntent: hasSleeveIntentForDoc,
     hasAudienceIntent,
     crossFamilyPenalty,
     applyLexicalToGlobal: lexicalScoreDistinct,
+    tightSemanticCap,
   });
+
+  if (garmentVersusBeautyPenalty >= 0.85) {
+    finalRelevance01 = Math.min(finalRelevance01, semScore01 * 0.22);
+  }
+
+  let negationBlocked = false;
+  if (negationExcludeTerms && negationExcludeTerms.length > 0) {
+    const desc = typeof src.description === "string" ? src.description : "";
+    const blob = [src.title, src.category, src.brand, desc]
+      .filter((x) => x != null && String(x).trim() !== "")
+      .join(" ")
+      .toLowerCase();
+    negationBlocked = negationExcludeTerms.some((term) => {
+      const t = String(term).toLowerCase().trim();
+      return t.length >= 2 && blob.includes(t);
+    });
+    if (negationBlocked) {
+      finalRelevance01 = 0;
+    }
+  }
+
+  if (!negationBlocked && enforcePromptConstraints) {
+    if (promptAnchoredColorIntent && hasColorIntent && colorTier === "none") {
+      finalRelevance01 = Math.min(finalRelevance01, 0.03);
+    }
+    if (promptAnchoredTypeIntent && hasTypeIntent && productTypeCompliance < 0.3) {
+      finalRelevance01 = Math.min(finalRelevance01, 0.04);
+    }
+  }
 
   return {
     productTypeCompliance,
@@ -650,17 +880,23 @@ export function computeHitRelevance(
     crossFamilyPenalty,
     audienceCompliance,
     styleCompliance,
+    sleeveCompliance,
     osSimilarity01: similarity,
     categoryRelevance01,
     semanticScore01: semScore01,
     lexicalScore01: lexScore01,
     rerankScore,
     finalRelevance01,
+    visualComponent,
+    typeComponent,
+    attrComponent,
+    penaltyComponent,
     primaryColor,
     hasTypeIntent,
-    hasColorIntent,
+    hasColorIntent: hasColorIntentForFinalRelevance,
+    hasSleeveIntent: hasSleeveIntentForDoc,
     typeGateFactor,
-    hardBlocked,
+    hardBlocked: hardBlocked || negationBlocked,
     lexicalScoreDistinct,
   };
 }

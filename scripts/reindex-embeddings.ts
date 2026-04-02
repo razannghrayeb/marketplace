@@ -3,6 +3,7 @@ import axios from "axios";
 import { pg, osClient } from "../src/lib/core";
 import { config } from "../src/config";
 import { processImageForEmbedding, processImageForGarmentEmbedding, computePHash } from "../src/lib/image";
+import { prepareBufferForPrimaryCatalogEmbedding } from "../src/lib/image/embeddingPrep";
 import { buildProductSearchDocument } from "../src/lib/search/searchDocument";
 import { extractDominantColorNames } from "../src/lib/color/dominantColor";
 import { loadProductSearchEnrichmentByIds } from "../src/lib/search/loadProductSearchEnrichment";
@@ -92,9 +93,10 @@ async function main() {
       // Validate and generate embedding
       try {
         const enrichRow = enrichMap.get(id);
+        const { buffer: clipBuf } = await prepareBufferForPrimaryCatalogEmbedding(buf);
         const [embedding, embeddingGarment, ph, dominantColors] = await Promise.all([
-          processImageForEmbedding(buf),
-          processImageForGarmentEmbedding(buf).catch(() => [] as number[]),
+          processImageForEmbedding(clipBuf),
+          processImageForGarmentEmbedding(clipBuf).catch(() => [] as number[]),
           computePHash(buf),
           extractDominantColorNames(buf).catch(() => []),
         ]);

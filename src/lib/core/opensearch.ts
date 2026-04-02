@@ -63,7 +63,7 @@ export async function ensureIndex() {
         settings: {
           index: {
             knn: true,
-            "knn.algo_param.ef_search": 384,
+            "knn.algo_param.ef_search": 1024,
           },
           analysis: {
             analyzer: {
@@ -191,11 +191,13 @@ export async function ensureIndex() {
                 space_type: "cosinesimil",
                 engine: "faiss",
                 parameters: {
-                  ef_construction: 128,
-                  m: 16,
+                  ef_construction: 256,
+                  m: 48,
                 },
               },
             },
+            /** Vector score semantics for `embedding`: v1 legacy OpenSearch score path, v2 cosine-normalized path. */
+            embedding_score_version: { type: "keyword" },
             // Garment ROI CLIP vector (see processImageForGarmentEmbedding); use SEARCH_IMAGE_KNN_FIELD=embedding_garment
             embedding_garment: {
               type: "knn_vector",
@@ -210,6 +212,8 @@ export async function ensureIndex() {
                 },
               },
             },
+            /** Vector score semantics for `embedding_garment`: v1 legacy OpenSearch score path, v2 cosine-normalized path. */
+            embedding_garment_score_version: { type: "keyword" },
             // Per-attribute embeddings for multi-vector weighted search
             embedding_color: {
               type: "knn_vector",
