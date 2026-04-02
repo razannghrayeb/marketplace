@@ -45,7 +45,7 @@ import { attributeEmbeddings } from "../src/lib/search/attributeEmbeddings";
 import { buildProductSearchDocument } from "../src/lib/search/searchDocument";
 import { loadProductSearchEnrichmentByIds } from "../src/lib/search/loadProductSearchEnrichment";
 import { extractGarmentFashionColors } from "../src/lib/color/garmentColorPipeline";
-import type { PixelBox } from "../src/lib/image/processor";
+import { scalePixelBoxToImageDims, type PixelBox } from "../src/lib/image/processor";
 import { promises as fs } from "fs";
 import { execSync } from "child_process";
 
@@ -436,20 +436,33 @@ async function generateEmbeddings(
   const processBuf = prep.buffer;
   const bgWasRemoved = prep.bgRemoved;
 
+  /** DB boxes are in raw-image pixels; map to `processBuf` when rembg/resizing changed geometry (matches catalog upload). */
+  let garmentBoxForProcess: PixelBox | null = garmentBox;
+  if (garmentBox) {
+    const [rawMeta, procMeta] = await Promise.all([sharp(rawBuf).metadata(), sharp(processBuf).metadata()]);
+    const rw = rawMeta.width ?? 0;
+    const rh = rawMeta.height ?? 0;
+    const pw = procMeta.width ?? 0;
+    const ph = procMeta.height ?? 0;
+    if (rw > 0 && rh > 0 && pw > 0 && ph > 0 && (rw !== pw || rh !== ph)) {
+      garmentBoxForProcess = scalePixelBoxToImageDims(garmentBox, rw, rh, pw, ph);
+    }
+  }
+
   // ── Garment buffer for garment-specific embedding ─────────────────────────
   // Use YOLO bounding box if available (real segmentation),
   // otherwise fall back to the bg-removed image if available,
   // otherwise fall back to center crop (old behavior).
   let garmentBuf = processBuf;
-  if (garmentBox) {
+  if (garmentBoxForProcess) {
     try {
       // Crop tightly to the detected garment region
       garmentBuf = await sharp(processBuf)
         .extract({
-          left: Math.round(garmentBox.x1),
-          top: Math.round(garmentBox.y1),
-          width: Math.max(1, Math.round(garmentBox.x2 - garmentBox.x1)),
-          height: Math.max(1, Math.round(garmentBox.y2 - garmentBox.y1)),
+          left: Math.round(garmentBoxForProcess.x1),
+          top: Math.round(garmentBoxForProcess.y1),
+          width: Math.max(1, Math.round(garmentBoxForProcess.x2 - garmentBoxForProcess.x1)),
+          height: Math.max(1, Math.round(garmentBoxForProcess.y2 - garmentBoxForProcess.y1)),
         })
         .jpeg({ quality: 90 })
         .toBuffer();
@@ -463,7 +476,7 @@ async function generateEmbeddings(
   let attrEmbFailed = false;
   const [embedding, embeddingGarment, attrEmbs, pHash, garmentColorAnalysis] = await Promise.all([
     processImageForEmbedding(processBuf),
-    processImageForGarmentEmbeddingWithOptionalBox(rawBuf, processBuf, garmentBox).catch(() => null),
+    processImageForGarmentEmbeddingWithOptionalBox(rawBuf, processBuf, garmentBoxForProcess).catch(() => null),
     attributeEmbeddings.generateAllAttributeEmbeddings(processBuf).catch((err: any) => {
       attrEmbFailed = true;
       console.warn(`    ⚠️  Product ${productId}: attribute embeddings failed (${err.message})`);

@@ -6,8 +6,157 @@
 
 import { getImageEmbedding, preprocessImage, isClipAvailable, initClip } from "./clip";
 import { loadImage, normalizeImage, pHash } from "./utils";
+import { prepareBufferForImageSearchQuery } from "./embeddingPrep";
 import sharpLib from "sharp";
 const sharp = typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
+
+export type PixelBox = { x1: number; y1: number; x2: number; y2: number };
+
+/** Padding around YOLO / detector boxes — must match `resume-reindex` + garment CLIP crops. */
+export const GARMENT_DETECTION_PAD_RATIO = 0.1;
+
+export type YoloLikeDetection = {
+  confidence?: number;
+  area_ratio?: number;
+  box?: PixelBox | null;
+};
+
+/**
+ * Choose a primary detection for garment embedding: balances score and size so a huge
+ * low-confidence box does not beat a smaller high-confidence garment (common on busy outfits).
+ */
+export function pickBestYoloDetectionForGarmentEmbedding<T extends YoloLikeDetection>(dets: T[]): T | undefined {
+  if (!Array.isArray(dets) || dets.length === 0) return undefined;
+  return [...dets].sort((a, b) => {
+    const ar = Math.max(0, Number(a.area_ratio ?? 0));
+    const br = Math.max(0, Number(b.area_ratio ?? 0));
+    const ac = Math.max(0, Math.min(1, Number(a.confidence ?? 0)));
+    const bc = Math.max(0, Math.min(1, Number(b.confidence ?? 0)));
+    const scoreA = ac * Math.sqrt(ar + 1e-5);
+    const scoreB = bc * Math.sqrt(br + 1e-5);
+    if (Math.abs(scoreB - scoreA) > 1e-9) return scoreB - scoreA;
+    return br - ar;
+  })[0];
+}
+
+/** Map a box from src image pixel space to dst when rembg/resizing changed dimensions. */
+export function scalePixelBoxToImageDims(
+  box: PixelBox,
+  srcW: number,
+  srcH: number,
+  dstW: number,
+  dstH: number,
+): PixelBox {
+  if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) return box;
+  if (srcW === dstW && srcH === dstH) return box;
+  const sx = dstW / srcW;
+  const sy = dstH / srcH;
+  return {
+    x1: box.x1 * sx,
+    y1: box.y1 * sy,
+    x2: box.x2 * sx,
+    y2: box.y2 * sy,
+  };
+}
+
+/**
+ * Crop garment ROI from an already query/catalog-prepared buffer (same geometry as garment index).
+ * Returns null only when dimensions are unusable.
+ */
+async function resolveGarmentEmbedBufferFromPrepared(
+  processBuf: Buffer,
+  box: PixelBox | null | undefined,
+): Promise<Buffer> {
+  if (
+    box &&
+    Number.isFinite(box.x1) &&
+    Number.isFinite(box.y1) &&
+    Number.isFinite(box.x2) &&
+    Number.isFinite(box.y2)
+  ) {
+    try {
+      const meta = await sharp(processBuf).metadata();
+      const iw = meta.width ?? 0;
+      const ih = meta.height ?? 0;
+
+      if (iw > 32 && ih > 32) {
+        const bx1 = Math.max(0, Math.min(iw, box.x1));
+        const by1 = Math.max(0, Math.min(ih, box.y1));
+        const bx2 = Math.max(bx1 + 4, Math.min(iw, box.x2));
+        const by2 = Math.max(by1 + 4, Math.min(ih, box.y2));
+
+        const bw = bx2 - bx1;
+        const bh = by2 - by1;
+
+        const padX = Math.round(bw * GARMENT_DETECTION_PAD_RATIO);
+        const padY = Math.round(bh * GARMENT_DETECTION_PAD_RATIO);
+
+        const left = Math.max(0, bx1 - padX);
+        const top = Math.max(0, by1 - padY);
+        const right = Math.min(iw, bx2 + padX);
+        const bottom = Math.min(ih, by2 + padY);
+
+        const cropW = Math.max(1, right - left);
+        const cropH = Math.max(1, bottom - top);
+
+        if (cropW >= 10 && cropH >= 10) {
+          return sharp(processBuf)
+            .extract({ left: Math.round(left), top: Math.round(top), width: cropW, height: cropH })
+            .png()
+            .toBuffer();
+        }
+      }
+    } catch {
+      // fall through to full frame
+    }
+  }
+  return processBuf;
+}
+
+/**
+ * Like `resolveGarmentEmbedBufferFromPrepared` but returns null when the padded crop would be
+ * too small (legacy `extractPaddedDetectionCropBuffer` contract).
+ */
+async function tryStrictGarmentRoiFromPrepared(
+  processBuf: Buffer,
+  box: PixelBox,
+): Promise<Buffer | null> {
+  if (
+    !Number.isFinite(box.x1) ||
+    !Number.isFinite(box.y1) ||
+    !Number.isFinite(box.x2) ||
+    !Number.isFinite(box.y2)
+  ) {
+    return null;
+  }
+  try {
+    const meta = await sharp(processBuf).metadata();
+    const iw = meta.width ?? 0;
+    const ih = meta.height ?? 0;
+    if (iw <= 32 || ih <= 32) return null;
+    const bx1 = Math.max(0, Math.min(iw, box.x1));
+    const by1 = Math.max(0, Math.min(ih, box.y1));
+    const bx2 = Math.max(bx1 + 4, Math.min(iw, box.x2));
+    const by2 = Math.max(by1 + 4, Math.min(ih, box.y2));
+    const bw = bx2 - bx1;
+    const bh = by2 - by1;
+    const padX = Math.round(bw * GARMENT_DETECTION_PAD_RATIO);
+    const padY = Math.round(bh * GARMENT_DETECTION_PAD_RATIO);
+    const left = Math.max(0, bx1 - padX);
+    const top = Math.max(0, by1 - padY);
+    const right = Math.min(iw, bx2 + padX);
+    const bottom = Math.min(ih, by2 + padY);
+    const cropW = Math.max(1, right - left);
+    const cropH = Math.max(1, bottom - top);
+    if (cropW < 10 || cropH < 10) return null;
+    return sharp(processBuf)
+      .extract({ left: Math.round(left), top: Math.round(top), width: cropW, height: cropH })
+      .png()
+      .toBuffer();
+  } catch {
+    return null;
+  }
+}
 
 // ── Background removal (rembg sidecar) ─────────────────────────────────────
 
@@ -114,11 +263,9 @@ export async function processImageForGarmentEmbedding(imageBuffer: Buffer): Prom
   return processImageForEmbedding(cropped);
 }
 
-export type PixelBox = { x1: number; y1: number; x2: number; y2: number };
-
 /**
- * Padded pixel crop for a detection box (same geometry as garment indexing / CLIP).
- * Returns null when the box is unusable or the crop would be tiny.
+ * Padded garment ROI on any same-size buffer as the box (legacy helper; prefer
+ * `computeShopTheLookGarmentEmbeddingFromDetection` for search ↔ index alignment).
  */
 export async function extractPaddedDetectionCropBuffer(
   imageBuffer: Buffer,
@@ -137,29 +284,15 @@ export async function extractPaddedDetectionCropBuffer(
   const iw = meta.width ?? 0;
   const ih = meta.height ?? 0;
   if (iw <= 32 || ih <= 32) return null;
-  // Clamp raw box to image bounds before padding (YOLO coords may extend past edges).
-  const bx1 = Math.max(0, Math.min(iw, box.x1));
-  const by1 = Math.max(0, Math.min(ih, box.y1));
-  const bx2 = Math.max(bx1 + 3, Math.min(iw, box.x2));
-  const by2 = Math.max(by1 + 3, Math.min(ih, box.y2));
-  if (bx2 <= bx1 + 2 || by2 <= by1 + 2) {
-    return null;
-  }
-  const bw = bx2 - bx1;
-  const bh = by2 - by1;
-  const padX = bw * 0.08;
-  const padY = bh * 0.08;
-  const x1 = Math.max(0, Math.floor(bx1 - padX));
-  const y1 = Math.max(0, Math.floor(by1 - padY));
-  const x2 = Math.min(iw, Math.ceil(bx2 + padX));
-  const y2 = Math.min(ih, Math.ceil(by2 + padY));
-  const w = Math.max(1, x2 - x1);
-  const h = Math.max(1, y2 - y1);
-  if (w < 10 || h < 10) return null;
-  return sharp(imageBuffer)
-    .extract({ left: x1, top: y1, width: w, height: h })
-    .png()
-    .toBuffer();
+  return tryStrictGarmentRoiFromPrepared(imageBuffer, box);
+}
+
+/** Padded ROI bytes from a prepared (e.g. rembg) frame — same crop as `embedding_garment` indexing. */
+export async function extractGarmentPaddedRoiFromPreparedImage(
+  processBuf: Buffer,
+  box: PixelBox | null | undefined,
+): Promise<Buffer> {
+  return resolveGarmentEmbedBufferFromPrepared(processBuf, box);
 }
 
 /**
@@ -167,78 +300,45 @@ export async function extractPaddedDetectionCropBuffer(
  * Boxes are assumed pixel coordinates in the original image space.
  */
 export async function processImageForGarmentEmbeddingWithOptionalBox(
-  rawBuf: Buffer,
+  _rawBuf: Buffer,
   processBuf: Buffer,
   box: PixelBox | null | undefined,
 ): Promise<number[]> {
-
-  // ── Step 1: determine the best buffer to embed ────────────────────────────
-  let embedBuf: Buffer;
-
-  if (box &&
-    Number.isFinite(box.x1) && Number.isFinite(box.y1) &&
-    Number.isFinite(box.x2) && Number.isFinite(box.y2)
-  ) {
-    // Crop from the rembg-cleaned image using YOLO box + 10% padding
-    try {
-      const meta = await sharp(processBuf).metadata();
-      const iw = meta.width ?? 0;
-      const ih = meta.height ?? 0;
-
-      if (iw > 32 && ih > 32) {
-        // Clamp raw box to image bounds first
-        const bx1 = Math.max(0, Math.min(iw, box.x1));
-        const by1 = Math.max(0, Math.min(ih, box.y1));
-        const bx2 = Math.max(bx1 + 4, Math.min(iw, box.x2));
-        const by2 = Math.max(by1 + 4, Math.min(ih, box.y2));
-
-        const bw = bx2 - bx1;
-        const bh = by2 - by1;
-
-        // 10% padding on each side
-        const padX = Math.round(bw * 0.10);
-        const padY = Math.round(bh * 0.10);
-
-        const left   = Math.max(0, bx1 - padX);
-        const top    = Math.max(0, by1 - padY);
-        const right  = Math.min(iw, bx2 + padX);
-        const bottom = Math.min(ih, by2 + padY);
-
-        const cropW = Math.max(1, right - left);
-        const cropH = Math.max(1, bottom - top);
-
-        if (cropW >= 10 && cropH >= 10) {
-          embedBuf = await sharp(processBuf)
-            .extract({ left: Math.round(left), top: Math.round(top), width: cropW, height: cropH })
-            .png()
-            .toBuffer();
-        } else {
-          // Box too small after clamping — use full clean image
-          embedBuf = processBuf;
-        }
-      } else {
-        embedBuf = processBuf;
-      }
-    } catch {
-      // Crop failed — use full clean image
-      embedBuf = processBuf;
-    }
-  } else {
-    // No box — use full rembg-cleaned image
-    embedBuf = processBuf;
-  }
-
-  // ── Step 2: resize with cover (matching CLIP training) and embed ────────
-  // Must match processImageForEmbedding so query-time and index-time
-  // embeddings live in the same region of CLIP's latent space.
+  const embedBuf = await resolveGarmentEmbedBufferFromPrepared(processBuf, box);
   return processImageForEmbedding(embedBuf);
+}
+
+/**
+ * Shop-the-look / selective search: same garment CLIP path as `resume-reindex` / `embedding_garment`
+ * (full-frame query prep → padded ROI on prepared pixels). `detectionBox` is in original-upload space.
+ */
+export async function computeShopTheLookGarmentEmbeddingFromDetection(
+  rawBuffer: Buffer,
+  detectionBox: PixelBox,
+): Promise<{ embedding: number[]; clipBufferForAttributes: Buffer; processBuf: Buffer }> {
+  const { buffer: processBuf } = await prepareBufferForImageSearchQuery(rawBuffer);
+  const [rawMeta, procMeta] = await Promise.all([
+    sharp(rawBuffer).metadata(),
+    sharp(processBuf).metadata(),
+  ]);
+  const rw = rawMeta.width ?? 0;
+  const rh = rawMeta.height ?? 0;
+  const pw = procMeta.width ?? 0;
+  const ph = procMeta.height ?? 0;
+  let box = detectionBox;
+  if (rw > 0 && rh > 0 && pw > 0 && ph > 0 && (rw !== pw || rh !== ph)) {
+    box = scalePixelBoxToImageDims(detectionBox, rw, rh, pw, ph);
+  }
+  const embedding = await processImageForGarmentEmbeddingWithOptionalBox(rawBuffer, processBuf, box);
+  const clipBufferForAttributes = await extractGarmentPaddedRoiFromPreparedImage(processBuf, box);
+  return { embedding, clipBufferForAttributes, processBuf };
 }
 
 /**
  * Garment query vector for image search, aligned with `scripts/resume-reindex.ts` →
  * `processImageForGarmentEmbeddingWithOptionalBox(raw, processBuf, garmentBox)`:
  * - `processBuf` from `prepareBufferForImageSearchQuery` (same as single-image + shop-the-look query prep)
- * - optional YOLO box on `processBuf` (confidence ≥ 0.45, largest area), same idea as stored `product_image_detections`
+ * - optional YOLO on **original** pixels (same as analyze / stored detections), box scaled onto `processBuf`
  *
  * **Why**: `processImageForGarmentEmbedding` (center crop only) does **not** match bulk-indexed
  * `embedding_garment` when the index used YOLO crops — threshold tuning cannot fix that mismatch.
@@ -253,37 +353,48 @@ export async function computeImageSearchGarmentQueryEmbedding(imageBuffer: Buffe
     return processImageForGarmentEmbedding(imageBuffer);
   }
 
-  const { prepareBufferForImageSearchQuery } = await import("./embeddingPrep");
   const { buffer: processBuf } = await prepareBufferForImageSearchQuery(imageBuffer);
-  const rawBuf = imageBuffer;
+  const [rawMeta, procMeta] = await Promise.all([
+    sharp(imageBuffer).metadata(),
+    sharp(processBuf).metadata(),
+  ]);
+  const rw = rawMeta.width ?? 0;
+  const rh = rawMeta.height ?? 0;
+  const pw = procMeta.width ?? 0;
+  const ph = procMeta.height ?? 0;
 
   const useYolo = String(process.env.SEARCH_IMAGE_QUERY_GARMENT_USE_YOLO ?? "1").toLowerCase() !== "0";
   let box: PixelBox | null = null;
-  if (useYolo) {
+  /** Buffers already smaller than a typical full photo are usually garment ROIs; YOLO on them is noisy and wrong boxes hurt `embedding_garment` kNN. */
+  const maxRawSide = Math.max(rw, rh);
+  const skipYoloOnLikelyCrop = maxRawSide > 0 && maxRawSide <= 640;
+  if (useYolo && !skipYoloOnLikelyCrop) {
     try {
       const { getYOLOv8Client } = await import("./yolov8Client");
       const yolo = getYOLOv8Client();
       if (await yolo.isAvailable()) {
-        const res = await yolo.detectFromBuffer(processBuf, "query.jpg", { confidence: 0.45 });
+        const res = await yolo.detectFromBuffer(imageBuffer, "query.jpg", { confidence: 0.45 });
         const dets = (res.detections ?? []).filter((d) => (d.confidence ?? 0) >= 0.45);
-        if (dets.length > 0) {
-          const best = [...dets].sort((a, b) => (b.area_ratio ?? 0) - (a.area_ratio ?? 0))[0];
-          if (best?.box) {
-            box = {
-              x1: best.box.x1,
-              y1: best.box.y1,
-              x2: best.box.x2,
-              y2: best.box.y2,
-            };
+        const best = pickBestYoloDetectionForGarmentEmbedding(dets);
+        if (best?.box) {
+          let b: PixelBox = {
+            x1: best.box.x1,
+            y1: best.box.y1,
+            x2: best.box.x2,
+            y2: best.box.y2,
+          };
+          if (rw > 0 && rh > 0 && pw > 0 && ph > 0 && (rw !== pw || rh !== ph)) {
+            b = scalePixelBoxToImageDims(b, rw, rh, pw, ph);
           }
+          box = b;
         }
       }
     } catch {
-      // no box — fall through to full-frame garment embed on processBuf
+      // no box — full-frame garment embed on processBuf
     }
   }
 
-  const emb = await processImageForGarmentEmbeddingWithOptionalBox(rawBuf, processBuf, box);
+  const emb = await processImageForGarmentEmbeddingWithOptionalBox(imageBuffer, processBuf, box);
   if (Array.isArray(emb) && emb.length > 0) return emb;
   return processImageForGarmentEmbedding(imageBuffer);
 }

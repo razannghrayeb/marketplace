@@ -308,7 +308,7 @@ export async function searchImage(
         bgRemoved: prep.bgRemoved,
         inBytes: imageBuffer.length,
         outBytes: prep.buffer.length,
-        SEARCH_IMAGE_QUERY_REMBG: process.env.SEARCH_IMAGE_QUERY_REMBG ?? "(default always)",
+        SEARCH_IMAGE_QUERY_REMBG: process.env.SEARCH_IMAGE_QUERY_REMBG ?? "(default conditional)",
       });
     }
   }

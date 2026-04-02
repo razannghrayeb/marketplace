@@ -3,8 +3,8 @@
  *
  * - **Catalog** (`prepareBufferForPrimaryCatalogEmbedding`, reindex/upload/backfill): conditional
  *   rembg on busy backgrounds (matches `resume-reindex` defaults).
- * - **Image search** (`prepareBufferForImageSearchQuery`): default **always** rembg when sidecar is
- *   up, so user photos resemble cutout catalog embeddings.
+ * - **Image search** (`prepareBufferForImageSearchQuery`): default **conditional** rembg (same as
+ *   catalog) so query vs index CLIP inputs stay aligned; set `SEARCH_IMAGE_QUERY_REMBG=always` for aggressive cutouts.
  */
 import sharpLib from "sharp";
 const sharp = typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
@@ -177,15 +177,15 @@ export async function prepareBufferForPrimaryCatalogEmbedding(
 /**
  * Query-time prep for `POST /products/search/image` (and facade image search).
  *
- * - **`always`** (default): if rembg sidecar is healthy, always remove background (then flatten
- *   to white JPEG like indexing). Matches embedded catalog style for user street/room photos.
- * - **`conditional`**: same heuristic as catalog (`SEARCH_IMAGE_BG_REMOVAL` + complexity threshold).
+ * - **`conditional`** (default): same heuristic as catalog (`SEARCH_IMAGE_BG_REMOVAL` + complexity threshold).
+ * - **`always`**: if rembg sidecar is healthy, always remove background — stronger cutouts on busy scenes.
  * - **`off`**: raw bytes.
  */
 export async function prepareBufferForImageSearchQuery(
   rawBuffer: Buffer,
 ): Promise<PrepareBufferResult> {
-  const mode = String(process.env.SEARCH_IMAGE_QUERY_REMBG ?? "always").toLowerCase().trim();
+  /** Default `conditional` matches catalog indexing (`prepareBufferForPrimaryCatalogEmbedding`) so query vs index CLIP space stays aligned. Set `always` for stronger cutouts on busy user photos. */
+  const mode = String(process.env.SEARCH_IMAGE_QUERY_REMBG ?? "conditional").toLowerCase().trim();
 
   if (mode === "off" || mode === "0" || mode === "false") {
     return { buffer: rawBuffer, bgRemoved: false };
@@ -195,7 +195,7 @@ export async function prepareBufferForImageSearchQuery(
     return prepareBufferForPrimaryCatalogEmbedding(rawBuffer);
   }
 
-  // always (default) — try rembg whenever sidecar is up
+  // always — try rembg whenever sidecar is up
   const cleaned = await removeBackgroundCatalogAligned(rawBuffer, rembgIndexTimeoutMs());
   if (cleaned && cleaned.length > 0) {
     return { buffer: cleaned, bgRemoved: true };
