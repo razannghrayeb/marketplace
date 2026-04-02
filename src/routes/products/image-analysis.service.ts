@@ -956,6 +956,13 @@ export interface AnalyzeOptions {
   /** Detection confidence threshold (default: 0.45 — balances recall vs noise) */
   confidence?: number;
 
+  /** Optional image preprocessing passed to YOLO detection. */
+  preprocessing?: {
+    enhanceContrast?: boolean;
+    enhanceSharpness?: boolean;
+    bilateralFilter?: boolean;
+  };
+
   /** Product ID to associate image with */
   productId?: number;
 
@@ -1042,7 +1049,8 @@ export interface AnalyzeAndFindSimilarOptions extends AnalyzeOptions {
   filterByDetectedCategory?: boolean;
 
   /**
-   * When true (default): one similar-product group per YOLO detection instance (same label allowed twice).
+   * When true: one similar-product group per YOLO detection instance (same label allowed twice).
+   * Default is false.
    * When false: merge same-label boxes only when IoU ≥ `YOLO_SHOP_DEDUPE_IOU_THRESHOLD` (default 0.5); spatially separate instances stay separate.
    */
   groupByDetection?: boolean;
@@ -1148,6 +1156,7 @@ export class ImageAnalysisService {
       runDetection = true,
       deferFullImageEmbedding = false,
       confidence = 0.45,
+      preprocessing,
       productId,
       isPrimary = false,
     } = options;
@@ -1190,7 +1199,7 @@ export class ImageAnalysisService {
       // YOLO detection
       runDetection && services.yolo
         ? this.yoloClient
-            .detectFromBuffer(buffer, filename, { confidence })
+            .detectFromBuffer(buffer, filename, { confidence, preprocessing })
             .catch((err) => {
               if (isYoloCircuitOpenError(err)) {
                 console.warn("[YOLOv8] circuit open, detection skipped:", err.message);
@@ -1229,9 +1238,9 @@ export class ImageAnalysisService {
         const retry = await this.yoloClient.detectFromBuffer(buffer, filename, {
           confidence: retryConfidence,
           preprocessing: {
-            enhanceContrast: true,
-            enhanceSharpness: true,
-            bilateralFilter: true,
+            enhanceContrast: preprocessing?.enhanceContrast ?? true,
+            enhanceSharpness: preprocessing?.enhanceSharpness ?? true,
+            bilateralFilter: preprocessing?.bilateralFilter ?? true,
           },
         });
 
@@ -2052,6 +2061,7 @@ export class ImageAnalysisService {
     const fullResult = await this.analyzeImage(buffer, filename, {
       ...baseOptions,
       generateEmbedding: true,
+      preprocessing,
     });
 
     if (!fullResult.detection) {
@@ -2064,7 +2074,7 @@ export class ImageAnalysisService {
 
     // Filter detections based on selection/exclusion
     let itemsToProcess = fullResult.detection.items;
-    const originalIndices: number[] = fullResult.detection.items.map((_, i) => i);
+    let originalIndices: number[] = fullResult.detection.items.map((_, i) => i);
 
     if (selectedItemIndices && selectedItemIndices.length > 0) {
       // Only process selected items
@@ -2072,11 +2082,21 @@ export class ImageAnalysisService {
         (i) => i >= 0 && i < fullResult.detection!.items.length
       );
       itemsToProcess = validIndices.map((i) => fullResult.detection!.items[i]);
+      originalIndices = validIndices;
     }
 
     if (excludedItemIndices.length > 0) {
       const excludeSet = new Set(excludedItemIndices);
-      itemsToProcess = itemsToProcess.filter((_, i) => !excludeSet.has(originalIndices[i]));
+      const kept: typeof itemsToProcess = [];
+      const keptOriginalIndices: number[] = [];
+      for (let i = 0; i < itemsToProcess.length; i++) {
+        const originalIdx = originalIndices[i];
+        if (excludeSet.has(originalIdx)) continue;
+        kept.push(itemsToProcess[i]);
+        keptOriginalIndices.push(originalIdx);
+      }
+      itemsToProcess = kept;
+      originalIndices = keptOriginalIndices;
     }
 
     // Add user-defined boxes as synthetic detections

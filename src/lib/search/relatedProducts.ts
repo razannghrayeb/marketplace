@@ -15,13 +15,20 @@ export interface FindRelatedProductsOptions {
   colorHints?: string[];
 }
 
-export function buildRelatedProductsSearchBody(
+/**
+ * Related products: same category and/or brand as the current result set, excluding main hits.
+ *
+ * Without `relevanceQuery`, ranking is essentially arbitrary (constant scores on keyword `terms`),
+ * so "related" items rarely match what the user actually asked for. Passing the processed query
+ * makes OpenSearch score by title/description alignment like the primary search.
+ */
+export async function findRelatedProducts(
   excludeIds: string[],
   brands: string[],
   categories: string[],
   limit: number,
   options?: FindRelatedProductsOptions,
-): Record<string, unknown> | null {
+): Promise<ProductResult[]> {
   const excludeNumericIds = excludeIds.map((id) => parseInt(id, 10));
 
   const brandShould =
@@ -33,7 +40,7 @@ export function buildRelatedProductsSearchBody(
       ? [{ terms: { category: categories.map((c) => String(c).toLowerCase()) } }]
       : [];
 
-  if (brandShould.length === 0 && categoryShould.length === 0) return null;
+  if (brandShould.length === 0 && categoryShould.length === 0) return [];
 
   const filter: object[] = [
     { term: { is_hidden: false } },
@@ -102,31 +109,13 @@ export function buildRelatedProductsSearchBody(
     queryBool.minimum_should_match = 0;
   }
 
-  return {
+  const searchBody = {
     size: limit,
     query: {
       bool: queryBool,
     },
     sort: [{ _score: "desc" }, { price_usd: "asc" }],
   };
-}
-
-/**
- * Related products: same category and/or brand as the current result set, excluding main hits.
- *
- * Without `relevanceQuery`, ranking is essentially arbitrary (constant scores on keyword `terms`),
- * so "related" items rarely match what the user actually asked for. Passing the processed query
- * makes OpenSearch score by title/description alignment like the primary search.
- */
-export async function findRelatedProducts(
-  excludeIds: string[],
-  brands: string[],
-  categories: string[],
-  limit: number,
-  options?: FindRelatedProductsOptions,
-): Promise<ProductResult[]> {
-  const searchBody = buildRelatedProductsSearchBody(excludeIds, brands, categories, limit, options);
-  if (!searchBody) return [];
 
   const osResponse = await osClient.search({
     index: config.opensearch.index,
