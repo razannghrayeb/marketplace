@@ -53,14 +53,17 @@ export function merchandiseVisualSimilarity01(inp: {
   if (inp.hasProductTypeSeeds) {
     const t = clamp01(inp.productTypeCompliance);
     // Sublinear: mediocre taxonomy agreement cannot read as "very similar" on the API.
-    typeFactor = 0.18 + 0.82 * Math.pow(t, 1.08);
+    // Floor raised from 0.18 → 0.45 so products with missing/incomplete type metadata
+    // are penalized but not suppressed below visual similarity threshold.
+    typeFactor = 0.45 + 0.55 * Math.pow(t, 1.08);
   }
 
   let categoryFactor = 1;
   if (inp.hasStructuredCategoryHints) {
     const c = clamp01(inp.categoryRelevance01);
     const cLift = Math.max(c, 0.05);
-    categoryFactor = 0.22 + 0.78 * Math.pow(cLift, 0.85);
+    // Floor raised from 0.22 → 0.40 so category mismatch doesn't crush similarity.
+    categoryFactor = 0.40 + 0.60 * Math.pow(cLift, 0.85);
   }
 
   const alignmentFactor = typeFactor * categoryFactor;

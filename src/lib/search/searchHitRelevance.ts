@@ -119,8 +119,8 @@ export function computeFinalRelevance01(params: {
     : params.typeScore >= 0.5
       ? 1
       : params.typeScore >= 0.2
-        ? (params.tightSemanticCap ? 0.65 : 0.3)
-        : (params.tightSemanticCap ? 0.4 : 0.05);
+        ? (params.tightSemanticCap ? 0.75 : 0.3)
+        : (params.tightSemanticCap ? 0.55 : 0.05);
 
   const categoryBoost = 1 + params.catScore * 0.25;
   const applyLex = params.applyLexicalToGlobal !== false;
@@ -150,8 +150,8 @@ export function computeFinalRelevance01(params: {
     params.hasTypeIntent || params.hasColorIntent || params.hasStyleIntent || params.hasAudienceIntent;
   const capBonus = params.tightSemanticCap
     ? hasIntent
-      ? 0.18
-      : 0.25
+      ? 0.25
+      : 0.32
     : hasIntent
       ? 0.12
       : 0.2;
