@@ -618,9 +618,19 @@ export function computeHitRelevance(
     }
   }
 
+  const docCategoryForPenalty =
+    typeof hit?._source?.category === "string" ? hit._source.category : undefined;
+  const docCanonicalForPenalty =
+    typeof hit?._source?.category_canonical === "string"
+      ? hit._source.category_canonical
+      : undefined;
+
   let crossFamilyPenalty =
     desiredProductTypes.length > 0
-      ? scoreCrossFamilyTypePenalty(desiredProductTypes, productTypes)
+      ? scoreCrossFamilyTypePenalty(desiredProductTypes, productTypes, {
+          category: docCategoryForPenalty,
+          categoryCanonical: docCanonicalForPenalty,
+        })
       : 0;
 
   // Style compliance: keyword match on indexed `attr_style`.

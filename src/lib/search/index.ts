@@ -88,6 +88,7 @@ export {
   expandProductTypesForIndexing,
   scoreProductTypeTaxonomyMatch,
   scoreCrossFamilyTypePenalty,
+  inferMacroFamiliesFromListingCategoryFields,
   scoreRerankProductTypeBreakdown,
   scoreHypernymDocMatch,
   crossFamilyTypePenaltyEnabled,

@@ -4,6 +4,7 @@ declare const test: any;
 declare const expect: any;
 
 import { computeHitRelevance } from "./searchHitRelevance";
+import { scoreCrossFamilyTypePenalty } from "./productTypeTaxonomy";
 
 describe("computeHitRelevance - sleeve intent", () => {
   test("short-sleeve intent penalizes long-sleeve product", () => {
@@ -65,6 +66,23 @@ describe("computeHitRelevance - sleeve intent", () => {
   });
 });
 
+describe("scoreCrossFamilyTypePenalty - category fallback", () => {
+  test("tops query vs empty product_types + footwear canonical still penalizes", () => {
+    const p = scoreCrossFamilyTypePenalty(["shirt"], [], {
+      categoryCanonical: "footwear",
+      category: "athletic shoes",
+    });
+    expect(p).toBeGreaterThanOrEqual(0.8);
+  });
+
+  test("tops query vs shoes category string with no types still penalizes", () => {
+    const p = scoreCrossFamilyTypePenalty(["tee"], [], {
+      category: "Men's Running Shoes",
+    });
+    expect(p).toBeGreaterThanOrEqual(0.8);
+  });
+});
+
 describe("computeHitRelevance - type intent reliability", () => {
   const footwearHit = {
     _source: {
@@ -102,6 +120,34 @@ describe("computeHitRelevance - type intent reliability", () => {
       rerankColorMode: "any",
       mergedCategory: "dresses",
       astCategories: ["dresses"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.crossFamilyPenalty).toBeGreaterThanOrEqual(0.8);
+    expect(rel.finalRelevance01).toBeLessThan(0.2);
+  });
+
+  test("shirt intent vs footwear listing with missing product_types uses category penalty", () => {
+    const hitNoTypes = {
+      _source: {
+        title: "Running Sneaker",
+        category: "shoes",
+        category_canonical: "footwear",
+        product_types: [],
+        attr_sleeve: null,
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hitNoTypes, 0.92, {
+      desiredProductTypes: ["shirt", "tee"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "tops",
+      astCategories: ["tops"],
       hasAudienceIntent: false,
       crossFamilyPenaltyWeight: 420,
       tightSemanticCap: true,

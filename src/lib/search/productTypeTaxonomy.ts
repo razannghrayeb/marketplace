@@ -1118,10 +1118,78 @@ function intraFamilySubtypePenalty(querySeeds: string[], docTypes: string[]): nu
   return maxPen;
 }
 
+/**
+ * When indexed `product_types` is empty or does not map to taxonomy families, infer
+ * macro families from `category` / `category_canonical` so cross-family penalties
+ * still apply (e.g. tops query vs footwear listing that lacks `product_types`).
+ */
+export function inferMacroFamiliesFromListingCategoryFields(
+  categoryCanonical: unknown,
+  category: unknown,
+): Set<string> {
+  const parts: string[] = [];
+  if (categoryCanonical != null && String(categoryCanonical).trim()) {
+    parts.push(String(categoryCanonical));
+  }
+  if (category != null && String(category).trim()) {
+    parts.push(String(category));
+  }
+  const combined = parts.join(" ").toLowerCase().replace(/[\s_-]+/g, " ").trim();
+  if (!combined) return new Set();
+
+  const direct = intentFamiliesForProductCategory(combined);
+  if (direct && direct.size > 0) return direct;
+
+  for (const seg of combined.split(/\s+/)) {
+    const d = intentFamiliesForProductCategory(seg);
+    if (d && d.size > 0) return d;
+  }
+
+  const out = new Set<string>();
+  if (
+    /\b(footwear|sneaker|sneakers|boot|boots|sandal|sandals|loafer|loafers|heel|heels|slipper|slippers|mule|mules|clog|clogs|trainer|trainers|flipflop|flip-flop|flip flops|crocs?|shoe|shoes)\b/.test(
+      combined,
+    )
+  ) {
+    out.add("footwear");
+  }
+  if (
+    /\b(shirt|shirts|blouse|blouses|tee|tees|t-?shirt|tshirt|polos?|sweater|sweaters|hoodie|hoodies|cardigan|cardigans|tank|tanks|camisole|bodysuit)\b/.test(
+      combined,
+    )
+  ) {
+    out.add("tops");
+  }
+  if (/\b(pants?|jeans?|trousers?|leggings?|joggers?|chinos?|cargos?)\b/.test(combined)) {
+    out.add("bottoms");
+  }
+  if (/\b(shorts?|skirt|skirts)\b/.test(combined)) {
+    out.add("shorts_skirt");
+  }
+  if (/\b(dresses?|gown|gowns)\b/.test(combined)) {
+    out.add("dress");
+  }
+  if (/\b(coat|coats|jacket|jackets|blazer|blazers|parka|parkas|puffer|vests?)\b/.test(combined)) {
+    out.add("outerwear");
+  }
+  if (/\b(bag|bags|handbag|handbags|tote|totes|backpack|backpacks)\b/.test(combined)) {
+    out.add("bags");
+  }
+  return out;
+}
+
+export interface ScoreCrossFamilyTypePenaltyOpts {
+  /** Indexed listing category (human-readable). */
+  category?: string;
+  /** Indexed `category_canonical` aisle key when present. */
+  categoryCanonical?: string;
+  sameClusterWeight?: number;
+}
+
 export function scoreCrossFamilyTypePenalty(
   querySeeds: string[],
   docProductTypes: string[],
-  _opts?: { sameClusterWeight?: number },
+  opts?: ScoreCrossFamilyTypePenaltyOpts,
 ): number {
   if (!crossFamilyTypePenaltyEnabled()) return 0;
   const seeds = querySeeds.map((s) => s.toLowerCase().trim()).filter(Boolean);
@@ -1129,8 +1197,17 @@ export function scoreCrossFamilyTypePenalty(
 
   const expandedQuery = expandProductTypesForQuery(seeds);
   const qFam = familiesForTokens(expandedQuery);
-  const dFam = familiesForTokens(docProductTypes.map((t) => t.toLowerCase().trim()).filter(Boolean));
-  if (qFam.size === 0 || dFam.size === 0) return 0;
+  if (qFam.size === 0) return 0;
+
+  let dFam = familiesForTokens(docProductTypes.map((t) => t.toLowerCase().trim()).filter(Boolean));
+  const dFromCategory = inferMacroFamiliesFromListingCategoryFields(
+    opts?.categoryCanonical,
+    opts?.category,
+  );
+  if (dFromCategory.size > 0) {
+    dFam = new Set([...dFam, ...dFromCategory]);
+  }
+  if (dFam.size === 0) return 0;
 
   let max = 0;
   for (const qf of qFam) {

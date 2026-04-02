@@ -4,35 +4,115 @@ import { getImagesForProducts } from "../../routes/products/images.service";
 import type { ProductResult } from "../../routes/products/types";
 
 /**
- * Related products discovery by category + brand.
+ * Options to rank "related" items by the same signals as main text search, not only aisle/brand.
+ */
+export interface FindRelatedProductsOptions {
+  /** Processed user query — primary lexical relevance for related results. */
+  relevanceQuery?: string;
+  /** Synonym / expansion terms (soft boost). */
+  expandedTerms?: string[];
+  /** Entity colors from the query — extra should-clauses on title/description. */
+  colorHints?: string[];
+}
+
+/**
+ * Related products: same category and/or brand as the current result set, excluding main hits.
  *
- * Used by both enhanced and legacy search flows.
+ * Without `relevanceQuery`, ranking is essentially arbitrary (constant scores on keyword `terms`),
+ * so "related" items rarely match what the user actually asked for. Passing the processed query
+ * makes OpenSearch score by title/description alignment like the primary search.
  */
 export async function findRelatedProducts(
   excludeIds: string[],
   brands: string[],
   categories: string[],
   limit: number,
+  options?: FindRelatedProductsOptions,
 ): Promise<ProductResult[]> {
   const excludeNumericIds = excludeIds.map((id) => parseInt(id, 10));
 
-  // Build OR conditions for brands and categories
-  const should: any[] = [];
-  if (brands.length > 0) should.push({ terms: { brand: brands } });
-  if (categories.length > 0) should.push({ terms: { category: categories } });
+  const brandShould =
+    brands.length > 0
+      ? [{ terms: { brand: brands.map((b) => String(b).toLowerCase()) } }]
+      : [];
+  const categoryShould =
+    categories.length > 0
+      ? [{ terms: { category: categories.map((c) => String(c).toLowerCase()) } }]
+      : [];
 
-  if (should.length === 0) return [];
+  if (brandShould.length === 0 && categoryShould.length === 0) return [];
+
+  const filter: object[] = [
+    { term: { is_hidden: false } },
+    {
+      bool: {
+        should: [...brandShould, ...categoryShould],
+        minimum_should_match: 1,
+      },
+    },
+  ];
+
+  const shouldScore: object[] = [];
+  const q = (options?.relevanceQuery ?? "").trim();
+  if (q.length >= 2) {
+    shouldScore.push({
+      multi_match: {
+        query: q,
+        fields: [
+          "title^3",
+          "description^2",
+          "brand^1.5",
+          "category^1.2",
+          "product_types^1.5",
+          "attr_style",
+          "attr_material",
+        ],
+        type: "best_fields",
+        fuzziness: "AUTO",
+      },
+    });
+  }
+
+  const exp = [...(options?.expandedTerms ?? [])]
+    .map((t) => String(t).trim())
+    .filter((t) => t.length >= 2);
+  const expJoined = [...new Set(exp)].join(" ").trim();
+  if (expJoined.length >= 2 && expJoined.toLowerCase() !== q.toLowerCase()) {
+    shouldScore.push({
+      multi_match: {
+        query: expJoined,
+        fields: ["title^2", "description", "product_types"],
+        type: "best_fields",
+        operator: "or",
+        boost: 0.72,
+      },
+    });
+  }
+
+  for (const col of (options?.colorHints ?? []).slice(0, 4)) {
+    const c = String(col).toLowerCase().trim();
+    if (c.length < 2) continue;
+    shouldScore.push({
+      match: {
+        title: { query: c, boost: 1.1 },
+      },
+    });
+  }
+
+  const queryBool: Record<string, unknown> = {
+    filter,
+    must_not:
+      excludeNumericIds.length > 0 ? { terms: { product_id: excludeIds } } : undefined,
+  };
+  if (shouldScore.length > 0) {
+    queryBool.should = shouldScore;
+    queryBool.minimum_should_match = 0;
+  }
 
   const searchBody = {
     size: limit,
     query: {
-      bool: {
-        must: [{ term: { is_hidden: false } }],
-        should,
-        minimum_should_match: 1,
-        must_not:
-          excludeNumericIds.length > 0 ? { terms: { product_id: excludeIds } } : undefined,
-      },
+      bool: queryBool,
     },
     sort: [{ _score: "desc" }, { price_usd: "asc" }],
   };
@@ -64,4 +144,3 @@ export async function findRelatedProducts(
     };
   }) as ProductResult[];
 }
-

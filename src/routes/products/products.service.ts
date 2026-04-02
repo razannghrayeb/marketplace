@@ -47,6 +47,7 @@ import {
   scoreRerankProductTypeBreakdown,
 } from "../../lib/search/productTypeTaxonomy";
 import type { SearchResultWithRelated } from "./types";
+import { findRelatedProducts } from "../../lib/search/relatedProducts";
 
 // ============================================================================
 // Types
@@ -1644,6 +1645,11 @@ export async function searchByImageWithSimilarity(
   const wColor = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_COLOR_WEIGHT ?? "220") || 220);
   const wStyle = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_STYLE_WEIGHT ?? "60") || 60);
   const wPattern = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_PATTERN_WEIGHT ?? "40") || 40);
+  /** Taxonomy alignment within the same category/aisle (YOLO/BLIP seeds vs indexed product_types). */
+  const wTypeComposite = Math.max(
+    0,
+    Math.min(500, Number(process.env.SEARCH_IMAGE_RERANK_TYPE_WEIGHT ?? "190") || 190),
+  );
 
   const crossFamilyPenaltyWeight = Math.max(
     0,
@@ -1992,9 +1998,16 @@ export async function searchByImageWithSimilarity(
     taxonomyMatchById.set(idStr, categorySoft);
 
     const attrGate = 0.4 + 0.6 * visualSimRaw;
+    const typeComplianceForComposite = comp?.productTypeCompliance ?? 0;
+    const typeSoftForComposite =
+      desiredProductTypes.length > 0 && wTypeComposite > 0 ? typeComplianceForComposite : 0;
     const composite =
       visualSimRaw * 1000 +
-      (categorySoft * aisleSoftWeight + colorSimEff * wColor + styleSimEff * wStyle + patternSim * wPattern) *
+      (categorySoft * aisleSoftWeight +
+        typeSoftForComposite * wTypeComposite +
+        colorSimEff * wColor +
+        styleSimEff * wStyle +
+        patternSim * wPattern) *
         attrGate;
     imageCompositeById.set(idStr, composite);
   }
@@ -2946,7 +2959,12 @@ export async function searchByTextWithRelated(
       productIds,
       extractedBrands,
       extractedCategories,
-      relatedLimit
+      relatedLimit,
+      {
+        relevanceQuery: parsedQuery.semanticQuery?.trim() || effectiveQuery,
+        expandedTerms: parsedQuery.expandedTerms,
+        colorHints: parsedQuery.entities.colors ?? [],
+      },
     );
   }
 
@@ -2964,71 +2982,6 @@ export async function searchByTextWithRelated(
         : undefined,
     },
   };
-}
-
-/**
- * Find related products by category and brand
- */
-async function findRelatedProducts(
-  excludeIds: string[],
-  brands: string[],
-  categories: string[],
-  limit: number
-): Promise<ProductResult[]> {
-  const excludeNumericIds = excludeIds.map(id => parseInt(id, 10));
-  
-  // Build OR conditions for brands and categories
-  const should: any[] = [];
-  if (brands.length > 0) {
-    should.push({ terms: { brand: brands } });
-  }
-  if (categories.length > 0) {
-    should.push({ terms: { category: categories } });
-  }
-
-  if (should.length === 0) return [];
-
-  const searchBody = {
-    size: limit,
-    query: {
-      bool: {
-        must: [{ term: { is_hidden: false } }],
-        should: should,
-        minimum_should_match: 1,
-        must_not: excludeNumericIds.length > 0 
-          ? { terms: { product_id: excludeIds } }
-          : undefined,
-      },
-    },
-    sort: [{ _score: "desc" }, { price_usd: "asc" }],
-  };
-
-  const osResponse = await osClient.search({
-    index: config.opensearch.index,
-    body: searchBody,
-  });
-
-  const hits = osResponse.body.hits.hits;
-  const productIds = hits.map((hit: any) => hit._source.product_id);
-
-  if (productIds.length === 0) return [];
-
-  const products = await getProductsByIdsOrdered(productIds);
-  const numericIds = productIds.map((id: string) => parseInt(id, 10));
-  const imagesByProduct = await getImagesForProducts(numericIds);
-
-  return products.map((p: any) => {
-    const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
-    return {
-      ...p,
-      match_type: "related" as const,
-      images: images.map((img) => ({
-        id: img.id,
-        url: img.cdn_url,
-        is_primary: img.is_primary,
-      })),
-    };
-  }) as ProductResult[];
 }
 
 // ============================================================================
