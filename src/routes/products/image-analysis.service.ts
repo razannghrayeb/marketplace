@@ -332,10 +332,30 @@ function combineConfidenceFromConsistency(base: number, consistency: number): nu
 }
 
 async function captionWithTimeout(buf: Buffer): Promise<string> {
-  return Promise.race([
-    blip.caption(buf),
-    new Promise<string>((resolve) => setTimeout(() => resolve(""), config.search.blipCaptionTimeoutMs)),
-  ]).catch(() => "");
+  const startedAt = Date.now();
+  const timeoutMs = config.search.blipCaptionTimeoutMs;
+  let timedOut = false;
+  const timeoutPromise = new Promise<string>((resolve) =>
+    setTimeout(() => {
+      timedOut = true;
+      resolve("");
+    }, timeoutMs),
+  );
+  try {
+    const out = await Promise.race([blip.caption(buf), timeoutPromise]);
+    const caption = String(out || "").trim();
+    if (!caption && timedOut) {
+      console.warn("[BLIP] caption timeout", { timeoutMs, elapsedMs: Date.now() - startedAt });
+    }
+    return caption;
+  } catch (err) {
+    console.warn("[BLIP] caption failed", {
+      timeoutMs,
+      elapsedMs: Date.now() - startedAt,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return "";
+  }
 }
 
 async function clipCaptionConsistency01(imageEmbedding: number[], caption: string): Promise<number> {
@@ -636,6 +656,100 @@ function summarizeDetectionsByLabel(detections: Detection[]): Record<string, num
     summary[key] = (summary[key] || 0) + 1;
   }
   return summary;
+}
+
+function imagePrimaryDetectionBoost(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_PRIMARY_GROUP_BOOST ?? "1.2");
+  if (!Number.isFinite(raw)) return 1.2;
+  return Math.max(1, Math.min(2, raw));
+}
+
+function imageSecondaryDetectionWeight(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_SECONDARY_GROUP_WEIGHT ?? "0.6");
+  if (!Number.isFinite(raw)) return 0.6;
+  return Math.max(0.2, Math.min(1, raw));
+}
+
+function imageCrossGroupDedupeEnabled(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_CROSS_GROUP_DEDUPE ?? "1").toLowerCase();
+  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
+}
+
+function inferLengthIntentFromCaption(caption: string): "mini" | "midi" | "maxi" | "long" | null {
+  const s = String(caption || "").toLowerCase();
+  if (!s) return null;
+  if (/\bmini\b/.test(s)) return "mini";
+  if (/\bmidi\b/.test(s)) return "midi";
+  if (/\bmaxi\b/.test(s)) return "maxi";
+  if (/\blong\b/.test(s)) return "long";
+  return null;
+}
+
+function inferLengthIntentFromDetection(
+  detection: Detection,
+  imageHeight: number,
+): "mini" | "midi" | "maxi" | "long" | null {
+  const label = String(detection.label || "").toLowerCase();
+  if (!label.includes("dress")) return null;
+  const y1 = detection.box?.y1 ?? 0;
+  const y2 = detection.box?.y2 ?? 0;
+  const h = Math.max(1, imageHeight);
+  const ratio = Math.max(0, Math.min(1, (y2 - y1) / h));
+  if (ratio >= 0.8) return "maxi";
+  if (ratio >= 0.62) return "long";
+  if (ratio >= 0.45) return "midi";
+  return "mini";
+}
+
+function applyGroupedPostRanking(
+  groupedResults: DetectionSimilarProducts[],
+  includeCrossGroupDedupe: boolean,
+): { rows: DetectionSimilarProducts[]; totalProducts: number } {
+  if (groupedResults.length === 0) return { rows: groupedResults, totalProducts: 0 };
+  const weighted = groupedResults.map((row) => {
+    const base = (row.detection.confidence ?? 0) * (Number.isFinite(row.detection.area_ratio) ? row.detection.area_ratio : 0);
+    return { row, base };
+  });
+  const dominantIdx = weighted.reduce((best, cur, idx, arr) => (cur.base > arr[best].base ? idx : best), 0);
+  const primaryBoost = imagePrimaryDetectionBoost();
+  const secondaryWeight = imageSecondaryDetectionWeight();
+  const ranked = weighted
+    .map((x, idx) => ({ ...x, score: x.base * (idx === dominantIdx ? primaryBoost : secondaryWeight) }))
+    .sort((a, b) => b.score - a.score)
+    .map((x) => x.row);
+
+  const rows = includeCrossGroupDedupe
+    ? ranked.map((row, rowIdx) => {
+        const seen = new Set<string>();
+        const deduped = row.products.filter((p) => {
+          const id = String((p as any).id ?? "");
+          if (!id || seen.has(id)) return false;
+          // Keep first seen in ranked group order; dominant group wins ties.
+          seen.add(id);
+          return true;
+        });
+        if (rowIdx === 0) return { ...row, products: deduped, count: deduped.length };
+        return { ...row, products: deduped, count: deduped.length };
+      })
+    : ranked;
+
+  if (includeCrossGroupDedupe) {
+    const globalSeen = new Set<string>();
+    const globalRows = rows.map((row) => {
+      const products = row.products.filter((p) => {
+        const id = String((p as any).id ?? "");
+        if (!id || globalSeen.has(id)) return false;
+        globalSeen.add(id);
+        return true;
+      });
+      return { ...row, products, count: products.length };
+    });
+    const totalProducts = globalRows.reduce((acc, row) => acc + row.count, 0);
+    return { rows: globalRows, totalProducts };
+  }
+
+  const totalProducts = rows.reduce((acc, row) => acc + row.count, 0);
+  return { rows, totalProducts };
 }
 
 /**
@@ -1389,6 +1503,8 @@ export class ImageAnalysisService {
       if (categoryMapping.attributes.sleeveLength) {
         filters.sleeve = categoryMapping.attributes.sleeveLength;
       }
+      const detectionLength = inferLengthIntentFromDetection(detection, imageHeight);
+      if (detectionLength) (filters as any).length = detectionLength;
 
       // Prefer caption color when BLIP named this garment (e.g. "blue velvet top"); crop histograms
       // often misread navy/velvet/shadows as black. Use per-crop dominant only when caption is silent.
@@ -1452,6 +1568,10 @@ export class ImageAnalysisService {
       // Per-detection BLIP captioning + CLIP consistency gate.
       const detCaption = analysisResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
       if (detCaption.trim().length > 0) {
+        const captionLength = inferLengthIntentFromCaption(detCaption);
+        if (captionLength) (filters as any).length = captionLength;
+      }
+      if (detCaption.trim().length > 0) {
         obs.detectionCaptionHits += 1;
         const detStruct = buildStructuredBlipOutput(detCaption);
         const consistency = await clipCaptionConsistency01(finalEmbedding, detCaption);
@@ -1466,7 +1586,10 @@ export class ImageAnalysisService {
           if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
           if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
           const mergedTypes = [...new Set([...(filters.productTypes ?? []), ...detStruct.productTypeHints])];
-          filters.productTypes = mergedTypes.slice(0, 10);
+          filters.productTypes = filterProductTypeSeedsByMappedCategory(
+            mergedTypes,
+            categoryMapping.productCategory,
+          ).slice(0, 10);
         } else {
           obs.detectionCaptionRejected += 1;
         }
@@ -1602,6 +1725,7 @@ export class ImageAnalysisService {
           ageGroup: filters.ageGroup,
           softStyle: filters.softStyle,
           softColor: filters.softColor,
+          length: (filters as any).length,
         },
       } as DetectionSimilarProducts;
     },
@@ -1619,12 +1743,9 @@ export class ImageAnalysisService {
       }
     }
 
-    // Sort by detection "importance" = confidence * visible area ratio (highest first)
-    groupedResults.sort((a, b) => {
-      const wA = (a.detection.confidence ?? 0) * (Number.isFinite(a.detection.area_ratio) ? a.detection.area_ratio : 0);
-      const wB = (b.detection.confidence ?? 0) * (Number.isFinite(b.detection.area_ratio) ? b.detection.area_ratio : 0);
-      return wB - wA;
-    });
+    const postRanked = applyGroupedPostRanking(groupedResults, imageCrossGroupDedupeEnabled());
+    const finalGroupedResults = postRanked.rows;
+    totalProducts = postRanked.totalProducts;
 
     const totalDetectionJobs = detectionJobs.length;
     let coveredDetections = 0;
@@ -1637,7 +1758,7 @@ export class ImageAnalysisService {
     const coverageRatio =
       totalDetectionJobs > 0 ? coveredDetections / totalDetectionJobs : 0;
 
-    const itemsForCoherence = groupedResults
+    const itemsForCoherence = finalGroupedResults
       .filter((r) => r.count > 0 && r.detectionIndex !== undefined)
       .map(
         (r) =>
@@ -1663,7 +1784,7 @@ export class ImageAnalysisService {
       inferredAudience,
       inferredPrimaryColor,
       similarProducts: {
-        byDetection: groupedResults,
+        byDetection: finalGroupedResults,
         totalProducts,
         threshold: similarityThreshold,
         detectedCategories,
@@ -2009,6 +2130,8 @@ export class ImageAnalysisService {
         } else if (inferredStyle.attrStyle) {
           filters.softStyle = inferredStyle.attrStyle;
         }
+        const detectionLength = inferLengthIntentFromDetection(detection, imageHeight);
+        if (detectionLength) (filters as any).length = detectionLength;
 
         let inferredColorForDetection = captionColorForProductCategory(
           categoryMapping.productCategory,
@@ -2054,6 +2177,10 @@ export class ImageAnalysisService {
 
         const detCaption = fullResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
         if (detCaption.trim().length > 0) {
+          const captionLength = inferLengthIntentFromCaption(detCaption);
+          if (captionLength) (filters as any).length = captionLength;
+        }
+        if (detCaption.trim().length > 0) {
           obs.detectionCaptionHits += 1;
           const detStruct = buildStructuredBlipOutput(detCaption);
           const consistency = await clipCaptionConsistency01(finalEmbedding, detCaption);
@@ -2068,7 +2195,10 @@ export class ImageAnalysisService {
             if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
             if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
             const mergedTypes = [...new Set([...(filters.productTypes ?? []), ...detStruct.productTypeHints])];
-            filters.productTypes = mergedTypes.slice(0, 10);
+            filters.productTypes = filterProductTypeSeedsByMappedCategory(
+              mergedTypes,
+              categoryMapping.productCategory,
+            ).slice(0, 10);
           } else {
             obs.detectionCaptionRejected += 1;
           }
@@ -2197,6 +2327,7 @@ export class ImageAnalysisService {
               ageGroup: filters.ageGroup,
               softStyle: filters.softStyle,
               softColor: filters.softColor,
+              length: (filters as any).length,
             },
             source: isUserDefined ? "user_defined" : "yolo",
             originalIndex: isUserDefined ? undefined : originalIndices[i],
@@ -2208,8 +2339,12 @@ export class ImageAnalysisService {
       }
     }
 
+    const postRankedSel = applyGroupedPostRanking(groupedResults, imageCrossGroupDedupeEnabled());
+    const finalGroupedResults = postRankedSel.rows as SelectiveDetectionResult[];
+    totalProducts = postRankedSel.totalProducts;
+
     const itemsForCoherence: DetectionWithColor[] = [];
-    for (const r of groupedResults) {
+    for (const r of finalGroupedResults) {
       if (r.count === 0) continue;
       if (
         r.source === "yolo" &&
@@ -2245,7 +2380,7 @@ export class ImageAnalysisService {
       });
     }
 
-    const coveredSel = groupedResults.filter((r) => r.count > 0).length;
+    const coveredSel = finalGroupedResults.filter((r) => r.count > 0).length;
     const totalSel = allItemsToProcess.length;
 
     return {
@@ -2254,10 +2389,10 @@ export class ImageAnalysisService {
       inferredAudience,
       inferredPrimaryColor,
       similarProducts: {
-        byDetection: groupedResults,
+        byDetection: finalGroupedResults,
         totalProducts,
         threshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
-        detectedCategories: [...new Set(groupedResults.map((r) => r.category))],
+        detectedCategories: [...new Set(finalGroupedResults.map((r) => r.category))],
         shopTheLookStats: {
           totalDetections: totalSel,
           coveredDetections: coveredSel,

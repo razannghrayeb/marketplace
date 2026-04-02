@@ -1,6 +1,6 @@
 # Embeddings & search pipelines
 
-**Last updated:** April 2026  
+**Last updated:** April 2026 (R1 image-ranking hardening)
 
 This document is the **architecture reference** for how **vector embeddings** are produced, stored in **OpenSearch**, and consumed by **text** and **image** search. It complements:
 
@@ -31,6 +31,8 @@ Defined in `src/lib/core/opensearch.ts` (`ensureIndex`). All `knn_vector` fields
 |--------|---------|
 | `embedding` | **Primary image** CLIP vector — main **image search** kNN field and default **text hybrid** visual field. |
 | `embedding_garment` | **Garment-focused** CLIP vector (`processImageForGarmentEmbedding`) — less background; optional kNN via `SEARCH_IMAGE_KNN_FIELD` / dual fusion. |
+| `embedding_score_version` | Score semantics tag for `embedding` (`v1` legacy OpenSearch score path, `v2` cosine-normalized path). |
+| `embedding_garment_score_version` | Score semantics tag for `embedding_garment` (`v1`/`v2`) used by unified normalizer. |
 | `embedding_color` | Attribute-aligned vector (indexing + query-time **image** attribute embedding) for color-aware similarity. |
 | `embedding_style` | Same pattern for **style** aesthetic. |
 | `embedding_pattern` | Same pattern for **pattern / print**. |
@@ -82,8 +84,32 @@ At index time, **attribute vectors** (`embedding_color`, …) are included when 
    **Root mismatch (fixed):** Ignoring `knnField` and always querying `embedding` with a **crop** vector while the index held **full-frame** `embedding` caused weak “similar” hits; garment field + `processImageForGarmentEmbedding` on the crop aligns query/index spaces.
 6. **Query-side attribute embeddings:** from the **same upload buffer**, parallel CLIP attribute encodings (`attributeEmbeddings.generateImageAttributeEmbedding` for color / style / pattern) — used to score hits against stored `embedding_color` / `embedding_style` / `embedding_pattern` on candidates (not necessarily a second full kNN for each).
 7. **Composite score** — blends visual similarity, category soft match, and attribute cosine scores (weights env-tunable, e.g. `SEARCH_IMAGE_RERANK_COLOR_WEIGHT`).
-8. **Relevance layer** — `computeHitRelevance` (`src/lib/search/searchHitRelevance.ts`) applies type/color/audience intent; **final** filter uses `config.search.finalAcceptMinImage`.
+8. **Relevance layer (explicit stage-8 math)** — final relevance is now explicit and auditable (visual + compliance with hard cross-family/type gates), then filtered by `config.search.finalAcceptMinImage`.
 9. **Optional related** — `findSimilarByPHash` when `includeRelated` and pHash present.
+
+### 4.1 April 2026 ranking hardening (what changed)
+
+1. **Unified score normalization**
+   - Candidate visual score now flows through one version-aware normalizer (`v1` legacy / `v2` cosine).
+   - New docs are indexed with `embedding_score_version=v2` and `embedding_garment_score_version=v2`.
+
+2. **Dual-kNN fusion is calibrated blend (not `max`)**
+   - Replaced optimistic `max(sim_global, sim_garment)` with category-weighted interpolation.
+   - Default alpha map: `tops=0.35`, `accessories=0.5`, `default=0.4`.
+   - Keeps a disagreement trace (`|sim_g - sim_r|`) for diagnostics.
+
+3. **BLIP alignment boost is bounded additive**
+   - Replaced multiplicative compounding (`sim_merch * align_blip`) with:
+     - `sim_visual = sim_merch + (1 - sim_merch) * boost01`
+   - `boost01` is capped and confidence-weighted with explicit feature weights
+     (`type > color > style > audience > material > occasion`).
+
+4. **Per-detection BLIP consistency suppression**
+   - Caption consistency now uses piecewise suppression (off/ramp/on) instead of a permanent non-zero floor.
+   - Low-consistency captions can be fully suppressed.
+
+5. **Sparse-result rescue is intent-aware**
+   - Rescue neighbors still prevent empty pages, but now enforce minimum type/color/style compliance when those intents are active.
 
 **Facade export:** `GET /products/search` title search and `POST /products/search/image` both route through `fashionSearchFacade.ts` so the storefront can share one mental model.
 
@@ -127,6 +153,11 @@ At index time, **attribute vectors** (`embedding_color`, …) are included when 
 | `SEARCH_BLIP_CAPTION_TIMEOUT_MS` | Cap BLIP for `/products/search/image` |
 | `SEARCH_IMAGE_YOLO_TIMEOUT_MS` | Cap YOLO aisle inference in facade |
 | `SEARCH_RECALL_WINDOW`, `SEARCH_FINAL_ACCEPT_MIN_TEXT`, `SEARCH_FINAL_ACCEPT_MIN_IMAGE` | Text/image relevance gates |
+| `SEARCH_IMAGE_BLIP_CONS_SUPPRESS_*` | Piecewise suppression for BLIP caption consistency (`OFF`, `ON`, `GAMMA`) |
+| `SEARCH_IMAGE_BLIP_ALIGNMENT_WEIGHT`, `SEARCH_IMAGE_BLIP_ALIGNMENT_MAX_BOOST` | BLIP alignment influence and hard additive cap |
+| `SEARCH_IMAGE_VISUAL_RESCUE_*_MIN_WHEN_INTENT` | Intent-aware rescue minimums for type/color/style |
+| `SEARCH_IMAGE_BLIP_CACHE_TTL_SEC` | BLIP caption cache TTL (Redis + in-memory fallback) |
+| `BLIP_API_URL`, `BLIP_API_TIMEOUT_MS` | Optional external BLIP service (HF sidecar mode) |
 
 ---
 
