@@ -150,47 +150,122 @@ export interface ProductResult {
   finalRelevance01?: number;
   mlRerankScore?: number;
   explain?: {
+    // ── Raw signals ──────────────────────────────────────────
+    /** Raw CLIP cosine similarity [0,1]. */
+    clipCosine?: number;
+    /** CLIP cosine modulated by catalog type/category alignment. */
+    merchandiseSimilarity?: number;
+    /** typeFactor * categoryFactor from merchandise binding. */
+    catalogAlignment?: number;
+    /** Raw cosine of color embedding channel [0,1]. */
+    colorEmbeddingSim?: number;
+    /** Raw cosine of style embedding channel [0,1]. */
+    styleEmbeddingSim?: number;
+    /** Raw cosine of pattern embedding channel [0,1]. */
+    patternEmbeddingSim?: number;
+
+    // ── Blended effective similarities ───────────────────────
+    /** Color embedding blended with keyword compliance (attenuated when intent conflicts). */
+    colorSimEffective?: number;
+    /** Style embedding blended with keyword compliance. */
+    styleSimEffective?: number;
+
+    // ── Type taxonomy ────────────────────────────────────────
     exactTypeScore?: number;
     siblingClusterScore?: number;
     parentHypernymScore?: number;
     intraFamilyPenalty?: number;
     productTypeCompliance?: number;
     categoryScore?: number;
-    /** Omitted when there is no separate lexical signal (e.g. image-only kNN). */
-    lexicalScore?: number;
-    semanticScore?: number;
-    styleSim?: number;
-    colorSim?: number;
-    styleSimRaw?: number;
-    colorSimRaw?: number;
-    styleSimEff?: number;
-    colorSimEff?: number;
-    patternSim?: number;
+
+    // ── Metadata compliance (0-1) ────────────────────────────
+    colorCompliance?: number;
+    matchedColor?: string;
+    colorTier?: "exact" | "family" | "bucket" | "none";
+    styleCompliance?: number;
+    sleeveCompliance?: number;
+    lengthCompliance?: number;
+    audienceCompliance?: number;
+
+    // ── Penalties ────────────────────────────────────────────
+    crossFamilyPenalty?: number;
+    hardBlocked?: boolean;
+
+    // ── Multi-signal reranking ───────────────────────────────
     taxonomyMatch?: number;
     blipAlignment?: number;
     imageCompositeScore?: number;
     imageCompositeScore01?: number;
-    colorCompliance?: number; // 0..1
-    colorScore?: number;
-    globalScore?: number;
-    matchedColor?: string;
-    colorTier?: "exact" | "family" | "bucket" | "none";
-    audienceCompliance?: number;
-    lengthCompliance?: number;
-    crossFamilyPenalty?: number;
+
+    // ── Fused scores (directly used in finalRelevance01) ─────
+    /** Multi-channel visual score (CLIP + color + style + pattern stretched & fused). */
+    fusedVisual?: number;
+    /** Weighted metadata compliance blend used in final formula. */
+    metadataCompliance?: number;
+
+    // ── Intent flags ─────────────────────────────────────────
     hasTypeIntent?: boolean;
     hasColorIntent?: boolean;
+    colorIntentGatesFinalRelevance?: boolean;
+    hasStyleIntent?: boolean;
+    hasSleeveIntent?: boolean;
     hasLengthIntent?: boolean;
-    typeGateFactor?: number;
-    hardBlocked?: boolean;
+
+    // ── Intent context ───────────────────────────────────────
     desiredProductTypes?: string[];
     desiredColors?: string[];
     desiredColorsExplicit?: string[];
     desiredColorsEffective?: string[];
-    colorIntentSource?: "explicit" | "none";
+    colorIntentSource?: "explicit" | "crop" | "none";
+    desiredStyle?: string;
+    desiredSleeve?: string;
     desiredLength?: string;
     colorMode?: "any" | "all";
+    /** Same payload as `meta.relevance_intent` on image search responses. */
+    relevanceIntentDebug?: ImageSearchRelevanceIntentDebug;
+
+    // ── Final score ──────────────────────────────────────────
     finalRelevance01?: number;
+
+    // ── Legacy / text-search fields (omitted in image results) ─
+    /** @deprecated Use clipCosine. Omitted when there is no separate lexical signal. */
+    lexicalScore?: number;
+    /** @deprecated Use clipCosine. */
+    semanticScore?: number;
+    /** @deprecated Use clipCosine. */
+    globalScore?: number;
+    /** @deprecated Use clipCosine. */
+    embedding_cosine_01?: number;
+    /** @deprecated Use merchandiseSimilarity. */
+    merchandise_similarity_01?: number;
+    /** @deprecated Use catalogAlignment. */
+    catalog_similarity_alignment?: number;
+    /** @deprecated Use styleEmbeddingSim. */
+    styleSim?: number;
+    /** @deprecated Use colorEmbeddingSim. */
+    colorSim?: number;
+    /** @deprecated Use styleEmbeddingSim. */
+    styleSimRaw?: number;
+    /** @deprecated Use colorEmbeddingSim. */
+    colorSimRaw?: number;
+    /** @deprecated Use styleSimEffective. */
+    styleSimEff?: number;
+    /** @deprecated Use colorSimEffective. */
+    colorSimEff?: number;
+    /** @deprecated Use patternEmbeddingSim. */
+    patternSim?: number;
+    /** @deprecated Use colorCompliance. */
+    colorScore?: number;
+    /** @deprecated Removed — no longer used in image scoring. */
+    typeGateFactor?: number;
+    /** @deprecated Removed — dead field from text search pipeline. */
+    visual_component?: number;
+    /** @deprecated Removed — dead field from text search pipeline. */
+    type_component?: number;
+    /** @deprecated Removed — dead field from text search pipeline. */
+    attr_component?: number;
+    /** @deprecated Removed — dead field from text search pipeline. */
+    penalty_component?: number;
   };
   // Scores from candidate generator
   clipSim?: number; // 0..1 (cosine or normalized)
@@ -198,6 +273,24 @@ export interface ProductResult {
   openSearchScore?: number; // raw or normalized
   pHashDist?: number;
   candidateScore?: number;
+}
+
+/** Image search: snapshot of how style/color/type intent was built (debugging). */
+export interface ImageSearchRelevanceIntentDebug {
+  style: {
+    gatesFinalRelevance01: boolean;
+    usedInCompositeRerank: boolean;
+    explicitFilter?: string;
+    softHint?: string;
+  };
+  color: {
+    gatesFinalRelevance01: boolean;
+    cropDominantTokens?: string[];
+    softBiasOnly: boolean;
+    explicitFilters: string[];
+    effectiveDesired: string[];
+  };
+  types: { desiredProductTypes: string[] };
 }
 
 export interface SearchResultWithRelated {
@@ -221,6 +314,8 @@ export interface SearchResultWithRelated {
     /** Image kNN: returned best available neighbors after visual/relevance gates would have produced zero results. */
     image_search_pipeline_degraded?: boolean;
     blip_signal_applied?: boolean;
+    /** Image search: how style/color/type intent was built; see `ImageSearchRelevanceIntentDebug`. */
+    relevance_intent?: ImageSearchRelevanceIntentDebug;
     /** OpenSearch kNN field used for retrieval (`embedding` | `embedding_garment`). */
     image_knn_field?: string;
     recall_size?: number;

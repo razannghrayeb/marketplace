@@ -417,6 +417,15 @@ function docSupportsSleeveIntent(src: Record<string, unknown>): boolean {
     .map((x) => String(x ?? "").toLowerCase())
     .join(" ");
   if (!bag.trim()) return true;
+  // Bottoms have no sleeves — do not score sleeve compliance (avoids misleading 0 on pants).
+  // Use "shorts" not "short" so "short sleeve" / "short dress" on tops & dresses still get sleeve/length logic.
+  if (
+    /\b(pant|pants|trouser|trousers|jean|jeans|shorts|skirt|skirts|legging|leggings|jogger|joggers|chino|chinos|cargo|cargos|bottom|bottoms)\b/.test(
+      bag,
+    )
+  ) {
+    return false;
+  }
   if (/\b(shoe|shoes|sneaker|sneakers|boot|boots|sandal|sandals|heel|heels|loafer|loafers)\b/.test(bag)) {
     return false;
   }
