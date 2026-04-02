@@ -56,6 +56,7 @@ export async function searchByImageWithSimilarity(
     knnField,
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty,
+    blipSignal,
   } = params;
 
   // Phase 2 alignment: route through the unified canonical facade.
@@ -72,6 +73,7 @@ export async function searchByImageWithSimilarity(
     knnField,
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty,
+    blipSignal,
   }) as Promise<SearchResultWithRelated>;
 }
 

@@ -201,6 +201,44 @@ function computeTextRecallSize(limit: number, offset: number): number {
   return Math.min(cap, Math.max(w, offset + limit));
 }
 
+type LengthIntent = "mini" | "midi" | "maxi" | "short" | "long";
+
+function extractLengthIntents(rawQuery: string, processedQuery: string): LengthIntent[] {
+  const q = `${rawQuery} ${processedQuery}`.toLowerCase().replace(/[^\w\s-]/g, " ");
+  const words = q.split(/\s+/).filter(Boolean);
+  const out = new Set<LengthIntent>();
+
+  const DRESSLIKE = new Set([
+    "dress", "dresses", "skirt", "skirts", "abaya", "abayas", "kaftan", "kaftans",
+    "gown", "gowns", "jumpsuit", "romper", "tunic",
+  ]);
+  const NON_LENGTH_NEIGHBORS = new Set(["sleeve", "sleeves", "shirt", "shirts", "tee", "tshirt", "t-shirt"]);
+
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    const prev = words[i - 1];
+    const next = words[i + 1];
+
+    if (w === "mini") out.add("mini");
+    if (w === "midi" || w === "mid") out.add("midi");
+    if (w === "maxi") out.add("maxi");
+
+    if (w === "short") {
+      // "short sleeve shirt" is not garment-length intent.
+      if (NON_LENGTH_NEIGHBORS.has(next) || NON_LENGTH_NEIGHBORS.has(prev)) continue;
+      // Prefer length interpretation when attached to dress-like nouns.
+      if (DRESSLIKE.has(next) || DRESSLIKE.has(prev) || !next) out.add("short");
+    }
+
+    if (w === "long") {
+      if (NON_LENGTH_NEIGHBORS.has(next) || NON_LENGTH_NEIGHBORS.has(prev)) continue;
+      if (DRESSLIKE.has(next) || DRESSLIKE.has(prev) || !next) out.add("long");
+    }
+  }
+
+  return [...out];
+}
+
 /** Map parsed negation constraints to index fields (GET /search enhanced path). */
 function appendNegationsToTextSearchBool(
   boolQ: { must_not?: any[] },
@@ -435,6 +473,31 @@ export async function textSearch(
                 boost: 2.0,
               },
             },
+          ],
+          minimum_should_match: 1,
+        },
+      });
+    }
+
+    const lengthIntents = extractLengthIntents(rawQuery, ast.searchQuery || "");
+    if (lengthIntents.length > 0) {
+      // Length words must be present when explicitly requested (e.g. midi dress).
+      // This prevents broad category matches from leaking in.
+      mustClauses.push({
+        bool: {
+          should: [
+            {
+              multi_match: {
+                query: lengthIntents.join(" "),
+                fields: ["title^4", "category.search^2", "description"],
+                type: "best_fields",
+                operator: "or",
+                minimum_should_match: "100%",
+              },
+            },
+            ...lengthIntents.map((t) => ({
+              match_phrase: { title: { query: t, boost: 2.5 } },
+            })),
           ],
           minimum_should_match: 1,
         },
@@ -887,6 +950,7 @@ export async function textSearch(
     console.log('[textSearch] Query:', JSON.stringify({
       raw: rawQuery, processed: ast.searchQuery,
       entities: { category: merged.category, brand: merged.brand, color: merged.color, gender: merged.gender },
+      lengthIntents,
       corrections: ast.corrections.map((c: any) => `${c.original}→${c.corrected}`),
       mustCount: mustClauses.length, shouldCount: searchBody.query.bool.should?.length ?? 0,
       filterCount: filterClauses.length, hasEmbedding: !!embedding,

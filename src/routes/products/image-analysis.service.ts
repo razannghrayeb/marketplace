@@ -304,6 +304,24 @@ function pickConservativeFullImagePrimaryColor(
   return garment ?? top ?? jeans ?? null;
 }
 
+function shouldUseDominantColorFallback(
+  captionColors: ReturnType<typeof inferColorFromCaption>,
+  structured: ReturnType<typeof buildStructuredBlipOutput>,
+): boolean {
+  const top = captionColors.topColor ?? null;
+  const jeans = captionColors.jeansColor ?? null;
+  const garment = captionColors.garmentColor ?? null;
+  const hasAnySlotColor = Boolean(top || jeans || garment);
+  if (!hasAnySlotColor) return true;
+  const mentionsMultipleItems =
+    (Array.isArray(structured.secondaryItems) && structured.secondaryItems.length > 0) ||
+    (top && jeans && top !== jeans);
+  // If caption already has slot-level color cues for a multi-item scene, avoid
+  // replacing them with a single global dominant color.
+  if (mentionsMultipleItems) return false;
+  return false;
+}
+
 function imageBlipConsistencySuppressionEnabled(): boolean {
   const raw = String(process.env.SEARCH_IMAGE_BLIP_CONS_SUPPRESS_ENABLED ?? "1").toLowerCase();
   return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
@@ -504,6 +522,10 @@ function captionColorForProductCategory(
   if (productCategory === "bottoms") return captionColors.jeansColor ?? null;
   if (productCategory === "dresses") return captionColors.garmentColor ?? null;
   return null;
+}
+
+function requiresSlotSpecificColor(productCategory: string): boolean {
+  return productCategory === "tops" || productCategory === "bottoms" || productCategory === "dresses";
 }
 
 function ensureStyleAndMask(detection: Detection, imageWidth: number, imageHeight: number): Detection {
@@ -1432,9 +1454,10 @@ export class ImageAnalysisService {
     };
     // Prefer BLIP caption color when explicit (e.g. "white dress") — full-image dominant can pick up sky/background.
     const captionPrimaryColor = pickConservativeFullImagePrimaryColor(captionColors, blipStructured);
+    const allowDominantFallback = shouldUseDominantColorFallback(captionColors, blipStructured);
     const inferredPrimaryColor =
       captionPrimaryColor ??
-      (imageInferDominantColorEnv() && analysisResult.services?.blip
+      (allowDominantFallback && imageInferDominantColorEnv() && analysisResult.services?.blip
         ? await extractDominantColorNames(buffer, { maxColors: 2, minShare: 0.12 })
             .then((c) => c[0] ?? null)
             .catch(() => null)
@@ -1539,6 +1562,8 @@ export class ImageAnalysisService {
         categoryMapping.productCategory,
         captionColors,
       );
+      let inferredColorSource: "slot" | "dominant" | "blip_global" | "none" =
+        inferredColorForDetection ? "slot" : "none";
       const shouldInferColorForDetection =
         imageInferDominantColorEnv() &&
         (detection.confidence ?? 0) >= imageMinColorConfidenceEnv() &&
@@ -1548,13 +1573,24 @@ export class ImageAnalysisService {
         inferredColorForDetection = await extractDominantColorNames(clipBuffer, { maxColors: 1, minShare: 0.12 }).then(
           (c) => c[0] ?? null,
         );
+        if (inferredColorForDetection) inferredColorSource = "dominant";
       }
 
-      if (!inferredColorForDetection && useBlipSoftHints && blipStructured.colors.length > 0) {
+      if (
+        !inferredColorForDetection &&
+        useBlipSoftHints &&
+        blipStructured.colors.length > 0 &&
+        !requiresSlotSpecificColor(categoryMapping.productCategory)
+      ) {
         inferredColorForDetection = blipStructured.colors[0];
+        if (inferredColorForDetection) inferredColorSource = "blip_global";
       }
       // Keep per-detection intent crop-local: do not fall back to full-frame dominant color.
-      if (inferredColorForDetection) filters.softColor = inferredColorForDetection;
+      if (inferredColorForDetection) {
+        filters.softColor = inferredColorForDetection;
+        filters.softColorStrict =
+          inferredColorSource === "slot" && useStrongBlipSoftHints;
+      }
       let predictedCategoryAisles: string[] | undefined;
       const noisyCat = isNoisyCategoryForAutoHardCategory(categoryMapping, label);
       const baseHardAuto =
@@ -2104,9 +2140,10 @@ export class ImageAnalysisService {
       garmentColor: captionColors.garmentColor ?? null,
     };
     const captionPrimaryColor = pickConservativeFullImagePrimaryColor(captionColors, blipStructured);
+    const allowDominantFallback = shouldUseDominantColorFallback(captionColors, blipStructured);
     const inferredPrimaryColor =
       captionPrimaryColor ??
-      (imageInferDominantColorEnv() && fullResult.services?.blip
+      (allowDominantFallback && imageInferDominantColorEnv() && fullResult.services?.blip
         ? await extractDominantColorNames(buffer, { maxColors: 2, minShare: 0.12 })
             .then((c) => c[0] ?? null)
             .catch(() => null)
@@ -2175,6 +2212,8 @@ export class ImageAnalysisService {
           categoryMapping.productCategory,
           captionColors,
         );
+        let inferredColorSource: "slot" | "dominant" | "blip_global" | "none" =
+          inferredColorForDetection ? "slot" : "none";
         const shouldInferColorForDetection =
           imageInferDominantColorEnv() &&
           (detection.confidence ?? 0) >= imageMinColorConfidenceEnv() &&
@@ -2184,13 +2223,24 @@ export class ImageAnalysisService {
           inferredColorForDetection = await extractDominantColorNames(clipBuffer, { maxColors: 1, minShare: 0.12 }).then(
             (c) => c[0] ?? null,
           );
+          if (inferredColorForDetection) inferredColorSource = "dominant";
         }
 
-        if (!inferredColorForDetection && useBlipSoftHints && blipStructured.colors.length > 0) {
+        if (
+          !inferredColorForDetection &&
+          useBlipSoftHints &&
+          blipStructured.colors.length > 0 &&
+          !requiresSlotSpecificColor(categoryMapping.productCategory)
+        ) {
           inferredColorForDetection = blipStructured.colors[0];
+          if (inferredColorForDetection) inferredColorSource = "blip_global";
         }
         // Keep per-detection intent crop-local: do not fall back to full-frame dominant color.
-        if (inferredColorForDetection) filters.softColor = inferredColorForDetection;
+        if (inferredColorForDetection) {
+          filters.softColor = inferredColorForDetection;
+          filters.softColorStrict =
+            inferredColorSource === "slot" && useStrongBlipSoftHints;
+        }
         let predictedCategoryAisles: string[] | undefined;
         if (options.filterByDetectedCategory !== false) {
           const softCategories = shouldUseAlternatives(categoryMapping)
