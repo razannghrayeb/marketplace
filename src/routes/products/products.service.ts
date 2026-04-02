@@ -437,24 +437,46 @@ function computeExplicitFinalRelevance(params: {
   styleMatch: number;
   lengthMatch: number;
   crossFamily: boolean;
+  crossFamilyPenalty: number;
   isNearDuplicate: boolean;
+  hasTypeIntent: boolean;
 }): number {
-  let simVisual = Math.max(0, Math.min(1, params.simVisual));
-  if (params.crossFamily) return 0;
-  if (!params.typeMatch && simVisual < 0.8) simVisual *= 0.6;
-  const compliance = params.isNearDuplicate
-    ? 1
-    : Math.max(
-        0,
-        Math.min(
-          1,
-          0.42 * params.catSoft +
-            0.26 * params.colorMatch +
-            0.2 * params.styleMatch +
-            0.12 * params.lengthMatch,
-        ),
-      );
-  return Math.max(0, Math.min(1, 0.7 * simVisual + 0.3 * compliance));
+  const simVisual = Math.max(0, Math.min(1, params.simVisual));
+
+  // Cross-family hard block is unconditional — even a near-duplicate visual
+  // match cannot rescue a shoe→dress or dress→cardigan mismatch.
+  if (params.crossFamily) return Math.max(0, simVisual * 0.1);
+
+  // Soft cross-family penalty (0..1) reduces compliance term even when not fully blocked.
+  const crossSoft = Math.max(0, 1 - params.crossFamilyPenalty * 0.7);
+
+  // Type gate: when type intent exists and product type compliance is zero,
+  // cap final relevance — even near-duplicates must obey this when type intent is clear.
+  const typeGate = params.hasTypeIntent
+    ? params.typeMatch
+      ? 1
+      : 0.25
+    : 1;
+
+  // Compliance from structured attributes — never inflate to 1 for near-duplicates.
+  // Near-duplicate bypass only applies when type is also consistent.
+  const complianceFromAttrs = Math.max(
+    0,
+    Math.min(
+      1,
+      0.42 * params.catSoft +
+        0.26 * params.colorMatch +
+        0.2 * params.styleMatch +
+        0.12 * params.lengthMatch,
+    ),
+  );
+  const compliance =
+    params.isNearDuplicate && params.typeMatch
+      ? Math.max(complianceFromAttrs, 0.85)
+      : complianceFromAttrs;
+
+  const raw = (0.7 * simVisual + 0.3 * compliance) * typeGate * crossSoft;
+  return Math.max(0, Math.min(1, raw));
 }
 
 function normalizeLengthToken(raw: unknown): "mini" | "midi" | "maxi" | "long" | null {
@@ -1481,6 +1503,7 @@ export async function searchByImageWithSimilarity(
       docLength.value,
       docLength.explicit,
     );
+    const crossFamilyPenaltyVal = comp.crossFamilyPenalty ?? 0;
     const explicitFinal = computeExplicitFinalRelevance({
       simVisual: rawVisual,
       typeMatch,
@@ -1488,8 +1511,10 @@ export async function searchByImageWithSimilarity(
       colorMatch: comp.colorCompliance ?? 0,
       styleMatch: comp.styleCompliance ?? 0,
       lengthMatch: lengthCompliance,
-      crossFamily: (comp.crossFamilyPenalty ?? 0) >= 0.8,
+      crossFamily: crossFamilyPenaltyVal >= 0.8,
+      crossFamilyPenalty: crossFamilyPenaltyVal,
       isNearDuplicate: rawVisual >= nearIdenticalRawMin,
+      hasTypeIntent: (relevanceIntent.desiredProductTypes?.length ?? 0) > 0,
     });
     (comp as any).lengthCompliance = lengthCompliance;
     comp.finalRelevance01 = explicitFinal;
