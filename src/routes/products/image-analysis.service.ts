@@ -287,6 +287,23 @@ function buildBlipSignal(
   };
 }
 
+function pickConservativeFullImagePrimaryColor(
+  captionColors: ReturnType<typeof inferColorFromCaption>,
+  structured: ReturnType<typeof buildStructuredBlipOutput>,
+): string | null {
+  const top = captionColors.topColor ?? null;
+  const jeans = captionColors.jeansColor ?? null;
+  const garment = captionColors.garmentColor ?? null;
+
+  const mentionsMultipleItems =
+    (Array.isArray(structured.secondaryItems) && structured.secondaryItems.length > 0) ||
+    (top && jeans && top !== jeans);
+
+  // Full-image caption can mix top/bottom/accessories; keep global color only when unambiguous.
+  if (mentionsMultipleItems) return garment;
+  return garment ?? top ?? jeans ?? null;
+}
+
 function imageBlipConsistencySuppressionEnabled(): boolean {
   const raw = String(process.env.SEARCH_IMAGE_BLIP_CONS_SUPPRESS_ENABLED ?? "1").toLowerCase();
   return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
@@ -850,6 +867,12 @@ export interface ImageAnalysisResult {
 
   /** Dominant color inference derived from image (canonical token). */
   inferredPrimaryColor?: string | null;
+  /** Slot-aware colors parsed from BLIP caption to avoid single-color ambiguity on multi-item outfits. */
+  inferredColorsByItem?: {
+    topColor?: string | null;
+    jeansColor?: string | null;
+    garmentColor?: string | null;
+  } | null;
 
   /** Fashion detection results */
   detection: {
@@ -1402,9 +1425,13 @@ export class ImageAnalysisService {
         : ({} as ReturnType<typeof inferAudienceFromCaption>);
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
+    const inferredColorsByItem = {
+      topColor: captionColors.topColor ?? null,
+      jeansColor: captionColors.jeansColor ?? null,
+      garmentColor: captionColors.garmentColor ?? null,
+    };
     // Prefer BLIP caption color when explicit (e.g. "white dress") — full-image dominant can pick up sky/background.
-    const captionPrimaryColor =
-      captionColors.topColor ?? captionColors.jeansColor ?? captionColors.garmentColor ?? null;
+    const captionPrimaryColor = pickConservativeFullImagePrimaryColor(captionColors, blipStructured);
     const inferredPrimaryColor =
       captionPrimaryColor ??
       (imageInferDominantColorEnv() && analysisResult.services?.blip
@@ -1789,6 +1816,7 @@ export class ImageAnalysisService {
       blipCaption,
       inferredAudience,
       inferredPrimaryColor,
+      inferredColorsByItem,
       similarProducts: {
         byDetection: finalGroupedResults,
         totalProducts,
@@ -2070,8 +2098,12 @@ export class ImageAnalysisService {
         : ({} as ReturnType<typeof inferAudienceFromCaption>);
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
-    const captionPrimaryColor =
-      captionColors.topColor ?? captionColors.jeansColor ?? captionColors.garmentColor ?? null;
+    const inferredColorsByItem = {
+      topColor: captionColors.topColor ?? null,
+      jeansColor: captionColors.jeansColor ?? null,
+      garmentColor: captionColors.garmentColor ?? null,
+    };
+    const captionPrimaryColor = pickConservativeFullImagePrimaryColor(captionColors, blipStructured);
     const inferredPrimaryColor =
       captionPrimaryColor ??
       (imageInferDominantColorEnv() && fullResult.services?.blip
@@ -2400,6 +2432,7 @@ export class ImageAnalysisService {
       blipCaption,
       inferredAudience,
       inferredPrimaryColor,
+      inferredColorsByItem,
       similarProducts: {
         byDetection: finalGroupedResults,
         totalProducts,
