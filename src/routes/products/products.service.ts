@@ -488,15 +488,17 @@ function computeExplicitFinalRelevance(params: {
   //   normalised 0.83-0.88 = similar type, different design
   //   normalised 0.88-0.93 = visually similar
   //   normalised 0.93+     = near-identical
-  // Floor at 0.78 so noise maps to 0 and the useful range expands to [0,1].
+  // Floor ~0.70: Fashion-CLIP + merchandise + BLIP effective scores often sit in
+  // 0.72–0.82; 0.78+ made clipStretched=0 for many valid hits, driving finalRelevance
+  // below SEARCH_FINAL_ACCEPT_MIN_IMAGE so the pipeline floored *every* row to the same min.
   const stretchSim = (raw: number, floor: number): number => {
     if (raw <= floor) return 0;
     return Math.min(1, (raw - floor) / (1 - floor));
   };
-  const clipStretched = stretchSim(simVisual, 0.78);
-  const colorStretched = stretchSim(colorSimRaw, 0.62);
-  const styleStretched = stretchSim(styleSimRaw, 0.62);
-  const patternStretched = stretchSim(patternSimRaw, 0.62);
+  const clipStretched = stretchSim(simVisual, 0.70);
+  const colorStretched = stretchSim(colorSimRaw, 0.55);
+  const styleStretched = stretchSim(styleSimRaw, 0.55);
+  const patternStretched = stretchSim(patternSimRaw, 0.55);
 
   // Fused visual score: CLIP is authoritative, sub-channels refine.
   // Sub-channels are gated by clipStretched: when CLIP says "not similar"
@@ -1990,7 +1992,9 @@ export async function searchByImageWithSimilarity(
       const comp = complianceById.get(idStr);
       if (comp) {
         const v = visualSimFromHit(h);
-        comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, Math.max(v, acceptMinImage)));
+        // Keep degraded-path fallback tied to actual visual similarity only.
+        // Do not floor to acceptMinImage; that flattens all products to one score.
+        comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, v));
         comp.osSimilarity01 = Math.max(comp.osSimilarity01 ?? 0, v);
       }
     }
@@ -2007,23 +2011,9 @@ export async function searchByImageWithSimilarity(
   );
 
   if (rankedHits.length === 0 && visualGatedHits.length > 0) {
+    // Strict behavior: if nothing meets final relevance gate, return empty.
+    // Avoid force-keeping weak hits by writing a synthetic floor score.
     imageSearchPipelineDegraded = true;
-    for (const h of visualGatedHits) {
-      const comp = complianceById.get(String(h._source.product_id));
-      if (comp) {
-        comp.finalRelevance01 = Math.max(comp.finalRelevance01 ?? 0, effectiveFinalAcceptMin);
-      }
-    }
-    rankedHits = visualGatedHits.filter(
-      (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= effectiveFinalAcceptMin,
-    );
-    if (rankedHits.length === 0) {
-      rankedHits = visualGatedHits.slice(0, Math.max(limit, 20));
-      for (const h of rankedHits) {
-        const comp = complianceById.get(String(h._source.product_id));
-        if (comp) comp.finalRelevance01 = effectiveFinalAcceptMin;
-      }
-    }
   }
 
   // Keep a small high-visual slice even when metadata-based relevance is noisy.
@@ -2031,7 +2021,7 @@ export async function searchByImageWithSimilarity(
   // dropped solely due to weak/missing type/color fields.
   const rescueMinSim = imageVisualRescueMinSimilarity();
   const rescueMaxCount = imageVisualRescueMaxCount();
-  if (rescueMaxCount > 0) {
+  if (rescueMaxCount > 0 && rankedHits.length > 0) {
     const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
     const rescueAudienceMin = imageVisualRescueAudienceMin();
     const rescueTypeMinIntent = imageVisualRescueTypeMinWhenIntent();
