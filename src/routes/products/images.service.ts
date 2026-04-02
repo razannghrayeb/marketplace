@@ -9,10 +9,13 @@ import {
   productsTableHasGenderColumn,
   toPgVectorParam,
 } from "../../lib/core/index";
-import { uploadImage, generateImageKey } from "../../lib/image/index";
+import { uploadImage, generateImageKey, getYOLOv8Client } from "../../lib/image/index";
 import {
   processImageForEmbedding,
   processImageForGarmentEmbedding,
+  processImageForGarmentEmbeddingWithOptionalBox,
+  pickBestYoloDetectionForGarmentEmbedding,
+  scalePixelBoxToImageDims,
   computePHash,
   validateImage,
   blip,
@@ -42,7 +45,10 @@ async function maybeBlipBackfillMissingCatalogFields(productId: number, buffer: 
 import { buildProductSearchDocument } from "../../lib/search/searchDocument";
 import { loadProductSearchEnrichmentByIds } from "../../lib/search/loadProductSearchEnrichment";
 import { extractGarmentFashionColors } from "../../lib/color/garmentColorPipeline";
-import type { PixelBox } from "../../lib/image/processor";
+import type { PixelBox } from "../../lib/image";
+import sharpLib from "sharp";
+
+const sharp = typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
 
 // ============================================================================
 // Types
@@ -142,12 +148,43 @@ export async function uploadProductImage(
   const { prepareBufferForPrimaryCatalogEmbedding } = await import("../../lib/image/embeddingPrep");
   const { buffer: clipBuf } = await prepareBufferForPrimaryCatalogEmbedding(buffer);
 
-  // Compute both embeddings and pHash in parallel (embedding_garment for kNN on garment ROI)
-  const [embedding, garmentEmbedding, pHash] = await Promise.all([
+  const [embedding, pHash] = await Promise.all([
     processImageForEmbedding(clipBuf),
-    processImageForGarmentEmbedding(clipBuf).catch(() => null),
     computePHash(buffer),
   ]);
+
+  let garmentEmbedding: number[] | null = null;
+  try {
+    const yolo = getYOLOv8Client();
+    if (await yolo.isAvailable()) {
+      const res = await yolo.detectFromBuffer(buffer, "catalog-upload.jpg", { confidence: 0.45 });
+      const dets = (res.detections ?? []).filter((d) => (d.confidence ?? 0) >= 0.45);
+      const best = pickBestYoloDetectionForGarmentEmbedding(dets);
+      if (best?.box) {
+        const [rawMeta, procMeta] = await Promise.all([sharp(buffer).metadata(), sharp(clipBuf).metadata()]);
+        const rw = rawMeta.width ?? 0;
+        const rh = rawMeta.height ?? 0;
+        const pw = procMeta.width ?? 0;
+        const ph = procMeta.height ?? 0;
+        let box: PixelBox = {
+          x1: best.box.x1,
+          y1: best.box.y1,
+          x2: best.box.x2,
+          y2: best.box.y2,
+        };
+        if (rw > 0 && rh > 0 && pw > 0 && ph > 0 && (rw !== pw || rh !== ph)) {
+          box = scalePixelBoxToImageDims(box, rw, rh, pw, ph);
+        }
+        const ge = await processImageForGarmentEmbeddingWithOptionalBox(buffer, clipBuf, box);
+        if (Array.isArray(ge) && ge.length > 0) garmentEmbedding = ge;
+      }
+    }
+  } catch {
+    /* YOLO optional on upload */
+  }
+  if (!garmentEmbedding || garmentEmbedding.length === 0) {
+    garmentEmbedding = await processImageForGarmentEmbedding(clipBuf).catch(() => null);
+  }
 
   // Insert into database
   const result = await pg.query(
