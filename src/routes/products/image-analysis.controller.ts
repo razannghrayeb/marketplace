@@ -201,7 +201,7 @@ router.post(
  *
  * @query
  *   - store: boolean (default: false) - Store image in R2
- *   - threshold: number (default: 0.7) - Similarity threshold 0-1
+ *   - threshold: number (default: 0.63) - Similarity threshold 0-1
  *   - limit_per_item: number (optional) - Max similar products per detection (backend default when omitted)
  *   - filter_category: boolean (default: true) - Filter by detected category
  *   - confidence: number (default: 0.25) - Detection confidence
@@ -270,6 +270,16 @@ router.post(
         filterByDetectedCategory: req.query.filter_category !== "false",
         groupByDetection: req.query.group_by_detection !== "false",
         includeEmptyDetectionGroups: req.query.include_empty_groups === "true",
+        preprocessing:
+          req.query.enhance_contrast === "true" ||
+          req.query.enhance_sharpness === "true" ||
+          req.query.bilateral_filter === "true"
+            ? {
+                enhanceContrast: req.query.enhance_contrast === "true",
+                enhanceSharpness: req.query.enhance_sharpness === "true",
+                bilateralFilter: req.query.bilateral_filter === "true",
+              }
+            : undefined,
       };
 
       const result = await analysisService.analyzeAndFindSimilar(
@@ -307,7 +317,7 @@ router.post(
  *
  * @query
  *   - store: boolean (default: false)
- *   - threshold: number (default: 0.7)
+ *   - threshold: number (default: 0.63)
  *   - limit_per_item: number (optional, backend default when omitted)
  *   - confidence: number (default: 0.25)
  *   - enhance_contrast: boolean (default: false)
@@ -419,7 +429,7 @@ router.post(
  *   - url: string (required) - Image URL
  *
  * @query
- *   - threshold: number (default: 0.7) - Similarity threshold
+ *   - threshold: number (default: 0.63) - Similarity threshold
  *   - limit_per_item: number (optional) - Max products per detection (backend default when omitted)
  *   - category: string (optional) - Filter by category
  */
