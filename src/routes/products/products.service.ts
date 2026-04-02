@@ -389,7 +389,10 @@ function imageDualKnnFusionEnabled(): boolean {
  * HNSW ef_search for image kNN. Improves recall vs default index ef_search for hard self-match queries.
  * Set SEARCH_IMAGE_EF_SEARCH=0 to omit (some managed clusters reject per-query ef_search).
  */
+let imageKnnEfSearchSupported: boolean | null = null;
+
 function imageKnnEfSearch(): number {
+  if (imageKnnEfSearchSupported === false) return 0;
   const rawEnv = process.env.SEARCH_IMAGE_EF_SEARCH;
   if (rawEnv === undefined || String(rawEnv).trim() === "") {
     return 128;
@@ -404,6 +407,20 @@ function knnQueryInner(vector: number[], k: number, ef: number): Record<string, 
   const inner: Record<string, unknown> = { vector, k };
   if (ef > 0) inner.ef_search = ef;
   return inner;
+}
+
+function stripEfSearchFromKnnBody(body: Record<string, unknown>): Record<string, unknown> {
+  const cloned = JSON.parse(JSON.stringify(body)) as Record<string, any>;
+  const knn = cloned?.query?.bool?.must?.knn;
+  if (knn && typeof knn === "object") {
+    for (const fieldName of Object.keys(knn)) {
+      const fieldObj = knn[fieldName];
+      if (fieldObj && typeof fieldObj === "object" && "ef_search" in fieldObj) {
+        delete fieldObj.ef_search;
+      }
+    }
+  }
+  return cloned;
 }
 
 /**
@@ -514,8 +531,11 @@ async function opensearchImageKnnHits(
   timeoutMs: number,
 ): Promise<any[]> {
   const startedAt = Date.now();
+  // This cluster rejects per-query `ef_search`; sanitize every request to keep
+  // the primary pipeline stable and avoid fail-then-retry behavior.
+  const bodyToSend = stripEfSearchFromKnnBody(body);
 
-  const boolQ = (body as any)?.query?.bool;
+  const boolQ = (bodyToSend as any)?.query?.bool;
   const knnObj = boolQ?.must?.knn;
   const knnField = knnObj ? Object.keys(knnObj)[0] : undefined;
   const queryVectorRaw = knnField ? knnObj?.[knnField]?.vector : undefined;
@@ -547,7 +567,7 @@ async function opensearchImageKnnHits(
     const r = await osClient.search(
       {
         index: config.opensearch.index,
-        body: body as any,
+        body: bodyToSend as any,
         timeout: `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`,
       },
       { requestTimeout: timeoutMs },
@@ -568,6 +588,42 @@ async function opensearchImageKnnHits(
 
     return hits;
   } catch (err: any) {
+    const errText = String(err?.message ?? "");
+    const responseReason = String(err?.meta?.body?.error?.reason ?? "");
+    const unknownEfSearch =
+      errText.includes("unknown field [ef_search]") || responseReason.includes("unknown field [ef_search]");
+
+    if (unknownEfSearch) {
+      imageKnnEfSearchSupported = false;
+      process.env.SEARCH_IMAGE_EF_SEARCH = "0";
+      const retryBody = stripEfSearchFromKnnBody(bodyToSend);
+
+      try {
+        const r = await osClient.search(
+          {
+            index: config.opensearch.index,
+            body: retryBody as any,
+            timeout: `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`,
+          },
+          { requestTimeout: timeoutMs },
+        );
+        const hits = (r.body?.hits?.hits ?? []) as any[];
+        if (process.env.NODE_ENV !== "production") {
+          console.warn("[image-knn] retrying without ef_search succeeded", {
+            index: config.opensearch.index,
+            field: knnField ?? null,
+            vectorLength: queryVector?.length ?? null,
+            hits: hits.length,
+            elapsedMs: Date.now() - startedAt,
+            took: r.body?.took ?? null,
+          });
+        }
+        return hits;
+      } catch {
+        // Fall through to the standard error logging below.
+      }
+    }
+
     const timedOut =
       err?.name === "TimeoutError" ||
       err?.message?.includes?.("timeout") ||
