@@ -161,6 +161,7 @@ export interface ProductResult {
     taxonomyMatch?: number;
     blipAlignment?: number;
     imageCompositeScore?: number;
+    imageCompositeScore01?: number;
     colorCompliance?: number; // 0..1
     colorScore?: number;
     globalScore?: number;
