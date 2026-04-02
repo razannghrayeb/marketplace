@@ -222,11 +222,16 @@ export function scoreAudienceCompliance(
   if (wantG) {
     factors += 1;
     if (!docG) {
+      const hasKidsCue = /\b(kids?|child|children|boys?|girls?|toddler|baby|youth)\b/.test(title);
       if (wantG === "men") {
+        if (hasKidsCue) score *= 0.18;
+        else
         if (/\b(men|mens|male)\b/.test(title)) score *= 0.9;
         else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(title)) score *= 0.28;
         else score *= 0.78;
       } else if (wantG === "women") {
+        if (hasKidsCue) score *= 0.18;
+        else
         if (/\b(women|womens|female|ladies|woman)\b/.test(title)) score *= 0.9;
         else if (/\b(men|mens|male|man|boy|boys)\b/.test(title)) score *= 0.28;
         else score *= 0.78;
