@@ -1,0 +1,24 @@
+FROM us-docker.pkg.dev/deeplearning-platform-release/gcr.io/pytorch-gpu.2-2.py310
+
+WORKDIR /app
+
+COPY requirements-blip.txt .
+RUN pip install --no-cache-dir -r requirements-blip.txt
+
+# Build-time model bake from Hugging Face.
+# Pass token at build time only:
+#   docker build --build-arg HF_TOKEN=hf_xxx -f Dockerfile.blip .
+ARG HF_TOKEN=""
+ARG BLIP_HF_REPO="Salesforce/instructblip-flan-t5-xl"
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='${BLIP_HF_REPO}', local_dir='/app/model', token='${HF_TOKEN}' if '${HF_TOKEN}' else None, ignore_patterns=['*.msgpack','*.h5','flax_model*']); print('BLIP model baked in /app/model')"
+
+COPY blip_service.py .
+
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
+ENV MODEL_PATH=/app/model
+ENV PORT=8080
+
+EXPOSE 8080
+
+CMD ["uvicorn", "blip_service:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

@@ -22,10 +22,13 @@ import {
   validateImage,
   isClipAvailable,
 } from "../../lib/image";
+import { getTextEmbedding, cosineSimilarity } from "../../lib/image/clip";
+import { getRedis } from "../../lib/redis";
 import {
   inferAudienceFromCaption,
   inferColorFromCaption,
 } from "../../lib/image/captionAttributeInference";
+import { buildStructuredBlipOutput } from "../../lib/image/blipStructured";
 import { extractDominantColorNames } from "../../lib/color/dominantColor";
 import {
   YOLOv8Client,
@@ -55,6 +58,18 @@ import {
   filterProductTypeSeedsByMappedCategory,
 } from "../../lib/search/productTypeTaxonomy";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
+
+type BlipSignal = {
+  productType?: string | null;
+  gender?: string;
+  ageGroup?: string;
+  primaryColor?: string | null;
+  secondaryColor?: string | null;
+  style?: string | null;
+  material?: string | null;
+  occasion?: string | null;
+  confidence?: number;
+};
 
 /** Default on when unset — soft category + aisle rerank is the normal image path. */
 function imageSoftCategoryEnv(): boolean {
@@ -186,6 +201,113 @@ function imageMinColorAreaRatioEnv(): number {
   const raw = Number(process.env.SEARCH_IMAGE_MIN_COLOR_AREA_RATIO ?? "0.03");
   if (!Number.isFinite(raw)) return 0.03;
   return Math.max(0, raw);
+}
+
+function imageBlipSoftHintConfidenceMin(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_SOFT_HINT_CONF_MIN ?? "0.52");
+  if (!Number.isFinite(raw)) return 0.52;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function imageBlipSoftHintConfidenceStrong(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_SOFT_HINT_CONF_STRONG ?? "0.7");
+  if (!Number.isFinite(raw)) return 0.7;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function imageBlipClipConsistencyMin(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_CLIP_CONSISTENCY_MIN ?? "0.18");
+  if (!Number.isFinite(raw)) return 0.18;
+  return Math.max(-1, Math.min(1, raw));
+}
+
+function imageBlipCacheTtlSec(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_CACHE_TTL_SEC ?? "21600");
+  if (!Number.isFinite(raw)) return 21600;
+  return Math.max(60, Math.min(7 * 24 * 3600, Math.floor(raw)));
+}
+
+function stableBufferHash(buffer: Buffer): string {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+const inMemoryBlipCache = new Map<string, { expiresAt: number; value: string }>();
+
+async function getCachedCaption(buffer: Buffer, scope: "full" | "det"): Promise<string> {
+  const hash = stableBufferHash(buffer);
+  const key = `blip:caption:v2:${scope}:${hash}`;
+  const now = Date.now();
+  const mem = inMemoryBlipCache.get(key);
+  if (mem && mem.expiresAt > now) return mem.value;
+  if (mem && mem.expiresAt <= now) inMemoryBlipCache.delete(key);
+
+  const redis = getRedis();
+  if (redis) {
+    try {
+      const cached = (await redis.get(key)) as string | null;
+      if (cached && String(cached).trim().length > 0) {
+        const ttlMs = imageBlipCacheTtlSec() * 1000;
+        inMemoryBlipCache.set(key, { expiresAt: now + ttlMs, value: String(cached) });
+        return String(cached);
+      }
+    } catch {
+      // Cache is optional; continue to model inference.
+    }
+  }
+
+  const caption = await captionWithTimeout(buffer);
+  if (caption.trim().length > 0) {
+    const ttlSec = imageBlipCacheTtlSec();
+    const ttlMs = ttlSec * 1000;
+    inMemoryBlipCache.set(key, { expiresAt: now + ttlMs, value: caption });
+    if (redis) {
+      try {
+        await redis.setex(key, ttlSec, caption);
+      } catch {
+        // Ignore cache-set failures.
+      }
+    }
+  }
+  return caption;
+}
+
+function buildBlipSignal(
+  structured: ReturnType<typeof buildStructuredBlipOutput>,
+  confidence: number,
+): BlipSignal {
+  return {
+    productType: structured.mainItem ?? undefined,
+    gender: structured.audience.gender,
+    ageGroup: structured.audience.ageGroup,
+    primaryColor: structured.colors[0] ?? undefined,
+    secondaryColor: structured.colors[1] ?? undefined,
+    style: structured.style.attrStyle,
+    occasion: structured.style.occasion,
+    confidence,
+  };
+}
+
+function combineConfidenceFromConsistency(base: number, consistency: number): number {
+  const norm = Math.max(0, Math.min(1, (consistency + 1) / 2));
+  return Math.max(0, Math.min(1, base * (0.55 + 0.45 * norm)));
+}
+
+async function captionWithTimeout(buf: Buffer): Promise<string> {
+  return Promise.race([
+    blip.caption(buf),
+    new Promise<string>((resolve) => setTimeout(() => resolve(""), config.search.blipCaptionTimeoutMs)),
+  ]).catch(() => "");
+}
+
+async function clipCaptionConsistency01(imageEmbedding: number[], caption: string): Promise<number> {
+  const c = String(caption || "").trim();
+  if (!c) return 0;
+  try {
+    const textEmb = await getTextEmbedding(c);
+    return cosineSimilarity(imageEmbedding, textEmb);
+  } catch {
+    return 0;
+  }
 }
 
 /** Formality scores by detection label (1-10 scale). */
@@ -1099,18 +1221,31 @@ export class ImageAnalysisService {
       analysisResult.detection.items.map((item) => item.label)
     )];
 
-    // Infer audience gender (men/women/boys/girls/etc.) and optionally dominant color once per image.
-    // This helps prevent cross-gender recommendations.
+    // Structured BLIP on full image once: schema + normalized taxonomy hints.
+    const obs = {
+      fullCaptionHit: false,
+      detectionCaptionHits: 0,
+      detectionCaptionMisses: 0,
+      detectionCaptionAccepted: 0,
+      detectionCaptionRejected: 0,
+    };
     let blipCaption: string | null = null;
+    let blipStructured = buildStructuredBlipOutput("");
+    let blipStructuredConfidence = 0;
+    let fullBlipSignal: BlipSignal | undefined = undefined;
+    if (analysisResult.services?.blip) {
+      blipCaption = await getCachedCaption(buffer, "full");
+      obs.fullCaptionHit = Boolean(blipCaption && blipCaption.trim().length > 0);
+      blipStructured = buildStructuredBlipOutput(blipCaption);
+      blipStructuredConfidence = blipStructured.confidence;
+      fullBlipSignal = buildBlipSignal(blipStructured, blipStructuredConfidence);
+    }
     const inferredAudience: ReturnType<typeof inferAudienceFromCaption> =
-      analysisResult.services?.blip && imageInferAudienceGenderEnv()
-        ? await blip
-            .caption(buffer)
-            .then((caption) => {
-              blipCaption = caption;
-              return inferAudienceFromCaption(caption);
-            })
-            .catch(() => ({} as ReturnType<typeof inferAudienceFromCaption>))
+      imageInferAudienceGenderEnv() && blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()
+        ? {
+            gender: blipStructured.audience.gender,
+            ageGroup: blipStructured.audience.ageGroup,
+          }
         : ({} as ReturnType<typeof inferAudienceFromCaption>);
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
@@ -1173,7 +1308,7 @@ export class ImageAnalysisService {
       const filters: Partial<import("./types").SearchFilters> = {};
       // Avoid taxonomy pollution for labels like "short sleeve top" where the word "short"
       // may incorrectly map to shorts/shorts_skirt micro-types.
-      const captionWantsJeans = blipCaption ? /\bjeans\b/.test(blipCaption.toLowerCase()) : false;
+      const captionWantsJeans = blipStructured.productTypeHints.includes("jeans");
       const typeSeedSource =
         categoryMapping.productCategory === "bottoms" && captionWantsJeans
           ? "jeans"
@@ -1182,6 +1317,9 @@ export class ImageAnalysisService {
             ? "tshirt tee"
             : label;
       let typeSeeds = extractLexicalProductTypeSeeds(typeSeedSource);
+      if (blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
+        typeSeeds = [...new Set([...typeSeeds, ...blipStructured.productTypeHints])];
+      }
       typeSeeds = filterProductTypeSeedsByMappedCategory(typeSeeds, categoryMapping.productCategory);
       if (typeSeeds.length) {
         filters.productTypes = typeSeeds;
@@ -1192,13 +1330,21 @@ export class ImageAnalysisService {
       }
 
       // "Closet similar" constraints: enforce audience gender + add optional style/color.
-      if (inferredAudience.gender) filters.gender = inferredAudience.gender;
-      if (inferredAudience.ageGroup) filters.ageGroup = inferredAudience.ageGroup;
+      if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
+        filters.gender = inferredAudience.gender;
+      }
+      if (inferredAudience.ageGroup && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
+        filters.ageGroup = inferredAudience.ageGroup;
+      }
 
       const inferredStyle = inferStyleForDetectionLabel(label);
+      const useBlipSoftHints = blipStructuredConfidence >= imageBlipSoftHintConfidenceMin();
+      const useStrongBlipSoftHints = blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
       // Apply style intent whenever we have an inference token; the ranking layer
       // will score it softly (so we avoid going fully empty).
-      if (inferredStyle.attrStyle) {
+      if (useStrongBlipSoftHints && blipStructured.style.attrStyle) {
+        filters.softStyle = blipStructured.style.attrStyle;
+      } else if (inferredStyle.attrStyle) {
         filters.softStyle = inferredStyle.attrStyle;
       }
       if (categoryMapping.attributes.sleeveLength) {
@@ -1222,6 +1368,9 @@ export class ImageAnalysisService {
         );
       }
 
+      if (!inferredColorForDetection && useBlipSoftHints && blipStructured.colors.length > 0) {
+        inferredColorForDetection = blipStructured.colors[0];
+      }
       if (!inferredColorForDetection) inferredColorForDetection = inferredPrimaryColor;
       if (inferredColorForDetection) filters.softColor = inferredColorForDetection;
       let predictedCategoryAisles: string[] | undefined;
@@ -1261,6 +1410,31 @@ export class ImageAnalysisService {
 
       const knnFieldUsed = shopTheLookKnnField();
 
+      // Per-detection BLIP captioning + CLIP consistency gate.
+      const detCaption = analysisResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
+      if (detCaption.trim().length > 0) {
+        obs.detectionCaptionHits += 1;
+        const detStruct = buildStructuredBlipOutput(detCaption);
+        const consistency = await clipCaptionConsistency01(finalEmbedding, detCaption);
+        const detConfidence = combineConfidenceFromConsistency(detStruct.confidence, consistency);
+        if (
+          detConfidence >= imageBlipSoftHintConfidenceMin() &&
+          consistency >= imageBlipClipConsistencyMin()
+        ) {
+          obs.detectionCaptionAccepted += 1;
+          if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
+          if (!filters.softColor && detStruct.colors.length > 0) filters.softColor = detStruct.colors[0];
+          if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
+          if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
+          const mergedTypes = [...new Set([...(filters.productTypes ?? []), ...detStruct.productTypeHints])];
+          filters.productTypes = mergedTypes.slice(0, 10);
+        } else {
+          obs.detectionCaptionRejected += 1;
+        }
+      } else {
+        obs.detectionCaptionMisses += 1;
+      }
+
       let similarResult = await searchByImageWithSimilarity({
         imageEmbedding: finalEmbedding,
         imageEmbeddingGarment:
@@ -1276,6 +1450,7 @@ export class ImageAnalysisService {
         knnField: knnFieldUsed,
         forceHardCategoryFilter: forceHardCategoryFilterUsed,
         relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+        blipSignal: fullBlipSignal,
       });
 
       // If BLIP-derived audience/style/color filters are too strict and remove all hits,
@@ -1313,6 +1488,7 @@ export class ImageAnalysisService {
           knnField: knnFieldUsed,
           forceHardCategoryFilter: forceHardCategoryFilterUsed,
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          blipSignal: fullBlipSignal,
         });
       }
 
@@ -1341,6 +1517,7 @@ export class ImageAnalysisService {
           knnField: shopTheLookKnnField(),
           forceHardCategoryFilter: false,
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          blipSignal: fullBlipSignal,
         });
         if (similarResult.results.length === 0) {
           similarResult = await searchByImageWithSimilarity({
@@ -1357,6 +1534,7 @@ export class ImageAnalysisService {
             knnField: shopTheLookKnnField(),
             forceHardCategoryFilter: false,
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+            blipSignal: fullBlipSignal,
           });
         }
       }
@@ -1431,6 +1609,14 @@ export class ImageAnalysisService {
       itemsForCoherence.length > 0
         ? computeOutfitCoherence(itemsForCoherence)
         : undefined;
+
+    if (process.env.NODE_ENV !== "production" || String(process.env.SEARCH_DEBUG ?? "") === "1") {
+      console.info("[image-search][blip-enrichment]", {
+        stage: "analyzeAndFindSimilar",
+        fullStructuredConfidence: Math.round(blipStructuredConfidence * 1000) / 1000,
+        ...obs,
+      });
+    }
 
     return {
       ...analysisResult,
@@ -1691,16 +1877,30 @@ export class ImageAnalysisService {
     let totalProducts = 0;
 
     // Infer audience & dominant color once for the full image.
+    const obs = {
+      fullCaptionHit: false,
+      detectionCaptionHits: 0,
+      detectionCaptionMisses: 0,
+      detectionCaptionAccepted: 0,
+      detectionCaptionRejected: 0,
+    };
     let blipCaption: string | null = null;
+    let blipStructured = buildStructuredBlipOutput("");
+    let blipStructuredConfidence = 0;
+    let fullBlipSignal: BlipSignal | undefined = undefined;
+    if (fullResult.services?.blip) {
+      blipCaption = await getCachedCaption(buffer, "full");
+      obs.fullCaptionHit = Boolean(blipCaption && blipCaption.trim().length > 0);
+      blipStructured = buildStructuredBlipOutput(blipCaption);
+      blipStructuredConfidence = blipStructured.confidence;
+      fullBlipSignal = buildBlipSignal(blipStructured, blipStructuredConfidence);
+    }
     const inferredAudience: ReturnType<typeof inferAudienceFromCaption> =
-      fullResult.services?.blip && imageInferAudienceGenderEnv()
-        ? await blip
-            .caption(buffer)
-            .then((caption) => {
-              blipCaption = caption;
-              return inferAudienceFromCaption(caption);
-            })
-            .catch(() => ({} as ReturnType<typeof inferAudienceFromCaption>))
+      imageInferAudienceGenderEnv() && blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()
+        ? {
+            gender: blipStructured.audience.gender,
+            ageGroup: blipStructured.audience.ageGroup,
+          }
         : ({} as ReturnType<typeof inferAudienceFromCaption>);
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
@@ -1714,7 +1914,7 @@ export class ImageAnalysisService {
             .catch(() => null)
         : null);
     // Avoid TS "never" narrowing when caption inference is type-proved unreachable.
-    const captionWantsJeans = /\bjeans\b/.test((blipCaption ?? "").toLowerCase());
+    const captionWantsJeans = blipStructured.productTypeHints.includes("jeans");
 
     for (let i = 0; i < allItemsToProcess.length; i++) {
       const detection = allItemsToProcess[i];
@@ -1743,6 +1943,9 @@ export class ImageAnalysisService {
         const typeSeedSourceForSelection =
           categoryMapping.productCategory === "bottoms" && captionWantsJeans ? "jeans" : categorySource;
         let browseTypeSeeds = extractLexicalProductTypeSeeds(typeSeedSourceForSelection);
+        if (blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
+          browseTypeSeeds = [...new Set([...browseTypeSeeds, ...blipStructured.productTypeHints])];
+        }
         browseTypeSeeds = filterProductTypeSeedsByMappedCategory(
           browseTypeSeeds,
           categoryMapping.productCategory,
@@ -1752,11 +1955,19 @@ export class ImageAnalysisService {
         }
 
         // "Closet similar" constraints: enforce audience gender + add optional style/color.
-        if (inferredAudience.gender) filters.gender = inferredAudience.gender;
-        if (inferredAudience.ageGroup) filters.ageGroup = inferredAudience.ageGroup;
+        if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
+          filters.gender = inferredAudience.gender;
+        }
+        if (inferredAudience.ageGroup && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
+          filters.ageGroup = inferredAudience.ageGroup;
+        }
 
         const inferredStyle = inferStyleForDetectionLabel(categorySource);
-        if (inferredStyle.attrStyle) {
+        const useBlipSoftHints = blipStructuredConfidence >= imageBlipSoftHintConfidenceMin();
+        const useStrongBlipSoftHints = blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
+        if (useStrongBlipSoftHints && blipStructured.style.attrStyle) {
+          filters.softStyle = blipStructured.style.attrStyle;
+        } else if (inferredStyle.attrStyle) {
           filters.softStyle = inferredStyle.attrStyle;
         }
 
@@ -1775,6 +1986,9 @@ export class ImageAnalysisService {
           );
         }
 
+        if (!inferredColorForDetection && useBlipSoftHints && blipStructured.colors.length > 0) {
+          inferredColorForDetection = blipStructured.colors[0];
+        }
         if (!inferredColorForDetection) inferredColorForDetection = inferredPrimaryColor;
         if (inferredColorForDetection) filters.softColor = inferredColorForDetection;
         let predictedCategoryAisles: string[] | undefined;
@@ -1799,6 +2013,30 @@ export class ImageAnalysisService {
           }
         }
 
+        const detCaption = fullResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
+        if (detCaption.trim().length > 0) {
+          obs.detectionCaptionHits += 1;
+          const detStruct = buildStructuredBlipOutput(detCaption);
+          const consistency = await clipCaptionConsistency01(finalEmbedding, detCaption);
+          const detConfidence = combineConfidenceFromConsistency(detStruct.confidence, consistency);
+          if (
+            detConfidence >= imageBlipSoftHintConfidenceMin() &&
+            consistency >= imageBlipClipConsistencyMin()
+          ) {
+            obs.detectionCaptionAccepted += 1;
+            if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
+            if (!filters.softColor && detStruct.colors.length > 0) filters.softColor = detStruct.colors[0];
+            if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
+            if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
+            const mergedTypes = [...new Set([...(filters.productTypes ?? []), ...detStruct.productTypeHints])];
+            filters.productTypes = mergedTypes.slice(0, 10);
+          } else {
+            obs.detectionCaptionRejected += 1;
+          }
+        } else {
+          obs.detectionCaptionMisses += 1;
+        }
+
         let similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
           imageEmbeddingGarment:
@@ -1813,6 +2051,7 @@ export class ImageAnalysisService {
           predictedCategoryAisles,
           knnField: shopTheLookKnnField(),
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          blipSignal: fullBlipSignal,
         });
 
         // Retry without inferred attribute filters if they removed all hits.
@@ -1848,6 +2087,7 @@ export class ImageAnalysisService {
             predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+            blipSignal: fullBlipSignal,
           });
         }
 
@@ -1876,6 +2116,7 @@ export class ImageAnalysisService {
             predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+            blipSignal: fullBlipSignal,
           });
           if (similarResult.results.length === 0) {
             similarResult = await searchByImageWithSimilarity({
@@ -1891,6 +2132,7 @@ export class ImageAnalysisService {
               includeRelated: false,
               knnField: shopTheLookKnnField(),
               relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+              blipSignal: fullBlipSignal,
             });
           }
         }
@@ -1955,6 +2197,14 @@ export class ImageAnalysisService {
       itemsForCoherence.length > 0
         ? computeOutfitCoherence(itemsForCoherence)
         : undefined;
+
+    if (process.env.NODE_ENV !== "production" || String(process.env.SEARCH_DEBUG ?? "") === "1") {
+      console.info("[image-search][blip-enrichment]", {
+        stage: "analyzeWithSelection",
+        fullStructuredConfidence: Math.round(blipStructuredConfidence * 1000) / 1000,
+        ...obs,
+      });
+    }
 
     const coveredSel = groupedResults.filter((r) => r.count > 0).length;
     const totalSel = allItemsToProcess.length;

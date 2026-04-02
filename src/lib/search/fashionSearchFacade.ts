@@ -75,6 +75,18 @@ export interface UnifiedImageSearchParams {
   relaxThresholdWhenEmpty?: boolean;
   /** Caption/BLIP-derived type tokens — taxonomy soft signal only (see `searchByImageWithSimilarity`). */
   softProductTypeHints?: string[];
+  /** Structured BLIP signal used for rerank alignment (no hard filter semantics). */
+  blipSignal?: {
+    productType?: string | null;
+    gender?: string;
+    ageGroup?: string;
+    primaryColor?: string | null;
+    secondaryColor?: string | null;
+    style?: string | null;
+    material?: string | null;
+    occasion?: string | null;
+    confidence?: number;
+  };
 }
 
 function filterByFinalRelevance<T extends { finalRelevance01?: number }>(
@@ -285,6 +297,7 @@ export async function searchImage(
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty,
     softProductTypeHints,
+    blipSignal,
   } = params;
 
   if ((!imageEmbedding || imageEmbedding.length === 0) && !imageBuffer) {
@@ -380,6 +393,7 @@ export async function searchImage(
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty: relaxThresholdWhenEmpty ?? false,
     softProductTypeHints,
+    blipSignal,
   } as any);
 
   const metaAny = res.meta as Record<string, unknown> | undefined;

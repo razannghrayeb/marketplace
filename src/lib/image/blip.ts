@@ -26,6 +26,11 @@ const UNK_TOKEN_ID = 100;  // [UNK]
 
 const MODEL_DIR = path.join(process.cwd(), 'models');
 const CACHE_DIR = path.join(MODEL_DIR, '.cache');
+const BLIP_API_URL = String(process.env.BLIP_API_URL || '').trim();
+const BLIP_API_TIMEOUT_MS = Math.max(
+  200,
+  Number(process.env.BLIP_API_TIMEOUT_MS || 8000) || 8000
+);
 
 // BLIP uses standard BERT WordPiece vocab. google-bert/bert-base-uncased is
 // public and doesn't require authentication (unlike the Xenova repo).
@@ -153,8 +158,19 @@ function decodeTokenIds(ids: number[]): string {
 export class BlipService {
   private visionSession:  ort.InferenceSession | null = null;
   private decoderSession: ort.InferenceSession | null = null;
+  private mode: 'onnx-local' | 'remote-api' | 'disabled' = 'disabled';
 
   async init() {
+    if (BLIP_API_URL) {
+      const ok = await this.checkRemoteHealth();
+      if (!ok) {
+        throw new Error(`BLIP_API_URL is set but remote health check failed: ${BLIP_API_URL}`);
+      }
+      this.mode = 'remote-api';
+      console.log(`[BLIP] remote API mode ready: ${BLIP_API_URL}`);
+      return;
+    }
+
     await loadVocab();
 
     [this.visionSession, this.decoderSession] = await Promise.all([
@@ -162,10 +178,15 @@ export class BlipService {
       ort.InferenceSession.create(path.join(MODEL_DIR, 'blip-text-decoder.onnx'), { executionProviders: ['cpu'] }),
     ]);
 
+    this.mode = 'onnx-local';
     console.log('[BLIP] vision + decoder ready');
   }
 
   async caption(imageBuffer: Buffer): Promise<string> {
+    if (this.mode === 'remote-api') {
+      return this.captionViaRemoteApi(imageBuffer);
+    }
+
     if (!this.visionSession || !this.decoderSession) {
       throw new Error('BlipService not initialized — call init() first');
     }
@@ -173,6 +194,80 @@ export class BlipService {
     const imageHiddenStates = await this.encodeImage(imageBuffer);
     const tokenIds = await this.generate(imageHiddenStates);
     return decodeTokenIds(tokenIds).trim();
+  }
+
+  private async checkRemoteHealth(): Promise<boolean> {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), BLIP_API_TIMEOUT_MS);
+      const res = await fetch(`${BLIP_API_URL.replace(/\/$/, '')}/health`, {
+        method: 'GET',
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  private structuredToCaption(input: Record<string, unknown>): string {
+    const productType = String(input.productType ?? '').trim();
+    const primaryColor = String(input.primaryColor ?? '').trim();
+    const secondaryColor = String(input.secondaryColor ?? '').trim();
+    const style = String(input.style ?? '').trim();
+    const material = String(input.material ?? '').trim();
+    const occasion = String(input.occasion ?? '').trim();
+    const gender = String(input.gender ?? '').trim();
+    const ageGroup = String(input.ageGroup ?? '').trim();
+
+    const parts = [
+      primaryColor && primaryColor !== 'null' ? primaryColor : '',
+      secondaryColor && secondaryColor !== 'null' ? secondaryColor : '',
+      style && style !== 'other' ? style : '',
+      material && material !== 'null' ? material : '',
+      productType && productType !== 'other' ? productType : 'fashion item',
+      gender && gender !== 'unisex' ? `for ${gender}` : '',
+      ageGroup ? ageGroup : '',
+      occasion && occasion !== 'null' ? `occasion ${occasion}` : '',
+    ].filter(Boolean);
+
+    return parts.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  private async captionViaRemoteApi(imageBuffer: Buffer): Promise<string> {
+    const payload = {
+      image_b64: imageBuffer.toString('base64'),
+    };
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), BLIP_API_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${BLIP_API_URL.replace(/\/$/, '')}/caption`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`BLIP API HTTP ${res.status}`);
+      const data = (await res.json()) as {
+        caption?: unknown;
+        caption_text?: unknown;
+        error?: string | null;
+      };
+      if (typeof data.caption_text === 'string' && data.caption_text.trim()) {
+        return data.caption_text.trim();
+      }
+      if (typeof data.caption === 'string' && data.caption.trim()) {
+        return data.caption.trim();
+      }
+      if (data.caption && typeof data.caption === 'object') {
+        return this.structuredToCaption(data.caption as Record<string, unknown>);
+      }
+      if (data.error) throw new Error(String(data.error));
+      return '';
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   private async encodeImage(imageBuffer: Buffer): Promise<ort.Tensor> {
