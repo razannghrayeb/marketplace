@@ -83,6 +83,20 @@ export interface ImageSearchParams extends SearchParams {
    * (used for Shop-the-Look where crop↔catalog scores are often below a strict gate).
    */
   relaxThresholdWhenEmpty?: boolean;
+  /**
+   * Structured BLIP signal from query image/crop (used for rerank alignment, not hard filtering).
+   */
+  blipSignal?: {
+    productType?: string | null;
+    gender?: string;
+    ageGroup?: string;
+    primaryColor?: string | null;
+    secondaryColor?: string | null;
+    style?: string | null;
+    material?: string | null;
+    occasion?: string | null;
+    confidence?: number;
+  };
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -145,6 +159,7 @@ export interface ProductResult {
     colorSim?: number;
     patternSim?: number;
     taxonomyMatch?: number;
+    blipAlignment?: number;
     imageCompositeScore?: number;
     colorCompliance?: number; // 0..1
     colorScore?: number;
@@ -190,6 +205,7 @@ export interface SearchResultWithRelated {
     threshold_relaxed?: boolean;
     /** Image kNN: returned best available neighbors after visual/relevance gates would have produced zero results. */
     image_search_pipeline_degraded?: boolean;
+    blip_signal_applied?: boolean;
     /** OpenSearch kNN field used for retrieval (`embedding` | `embedding_garment`). */
     image_knn_field?: string;
     recall_size?: number;

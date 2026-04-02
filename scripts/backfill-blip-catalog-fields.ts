@@ -1,5 +1,6 @@
 /**
- * Batch BLIP backfill: fill empty products.description, color, gender from primary image caption.
+ * Batch BLIP backfill: fill empty products.description, color, gender, style, material, occasion
+ * from primary image caption.
  *
  * Prerequisites: BLIP ONNX models + vocab; migration 013 (gender column) optional.
  *
@@ -46,17 +47,48 @@ async function fetchImageBuffer(url: string, timeoutMs: number): Promise<Buffer 
   }
 }
 
-function missingCatalogFieldsClause(hasGender: boolean): string {
+async function optionalColumns() {
+  const q = await pg.query<{ column_name: string }>(
+    `SELECT column_name
+     FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = 'products'
+       AND column_name = ANY($1::text[])`,
+    [["style", "material", "occasion"]],
+  );
+  const set = new Set((q.rows ?? []).map((r) => r.column_name));
+  return {
+    hasStyle: set.has("style"),
+    hasMaterial: set.has("material"),
+    hasOccasion: set.has("occasion"),
+  };
+}
+
+function missingCatalogFieldsClause(
+  hasGender: boolean,
+  opts: { hasStyle: boolean; hasMaterial: boolean; hasOccasion: boolean },
+): string {
   const needGender = hasGender ? `OR NULLIF(TRIM(COALESCE(p.gender, '')), '') IS NULL` : "";
+  const needStyle = opts.hasStyle ? `OR NULLIF(TRIM(COALESCE(p.style, '')), '') IS NULL` : "";
+  const needMaterial = opts.hasMaterial ? `OR NULLIF(TRIM(COALESCE(p.material, '')), '') IS NULL` : "";
+  const needOccasion = opts.hasOccasion ? `OR NULLIF(TRIM(COALESCE(p.occasion, '')), '') IS NULL` : "";
   return `
         NULLIF(TRIM(COALESCE(p.description, '')), '') IS NULL
         OR NULLIF(TRIM(COALESCE(p.color, '')), '') IS NULL
         ${needGender}
+        ${needStyle}
+        ${needMaterial}
+        ${needOccasion}
   `.trim();
 }
 
-function buildSelectQuery(hasGender: boolean, cursorId: number, batchSize: number): { text: string; values: unknown[] } {
-  const missing = missingCatalogFieldsClause(hasGender);
+function buildSelectQuery(
+  hasGender: boolean,
+  colOpts: { hasStyle: boolean; hasMaterial: boolean; hasOccasion: boolean },
+  cursorId: number,
+  batchSize: number,
+): { text: string; values: unknown[] } {
+  const missing = missingCatalogFieldsClause(hasGender, colOpts);
   // Prefer first non-empty product_images URL (primary first); else products.image_cdn (scraped / legacy feeds).
   const text = `
     SELECT p.id,
@@ -85,8 +117,11 @@ function buildSelectQuery(hasGender: boolean, cursorId: number, batchSize: numbe
 }
 
 /** Helps explain "no more rows" (wrong DB, nothing missing, or no image URLs). */
-async function logBackfillCandidateStats(hasGender: boolean): Promise<void> {
-  const missing = missingCatalogFieldsClause(hasGender);
+async function logBackfillCandidateStats(
+  hasGender: boolean,
+  colOpts: { hasStyle: boolean; hasMaterial: boolean; hasOccasion: boolean },
+): Promise<void> {
+  const missing = missingCatalogFieldsClause(hasGender, colOpts);
   try {
     const [{ n: missingAny }] = (
       await pg.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM products p WHERE (${missing})`)
@@ -132,7 +167,7 @@ async function logBackfillCandidateStats(hasGender: boolean): Promise<void> {
     }
     console.log("[backfill-blip-catalog] DB stats:", {
       totalProducts: Number(totalProducts),
-      productsMissingAnyOfDescColorOrGender: Number(missingAny),
+      productsMissingAnyOfBackfillFields: Number(missingAny),
       missingDescriptionOnlyCount: Number(missDesc),
       missingColorOnlyCount: Number(missColor),
       ...(hasGender ? { missingGenderCount: Number(missGender) } : {}),
@@ -149,8 +184,10 @@ async function main() {
   console.log("[backfill-blip-catalog] starting", opts);
 
   const hasGender = await productsTableHasGenderColumn();
+  const colOpts = await optionalColumns();
   console.log("[backfill-blip-catalog] products.gender column:", hasGender ? "yes" : "no (gender skipped in SQL)");
-  await logBackfillCandidateStats(hasGender);
+  console.log("[backfill-blip-catalog] optional columns:", colOpts);
+  await logBackfillCandidateStats(hasGender, colOpts);
 
   await blip.init();
 
@@ -172,7 +209,7 @@ async function main() {
     const batchSize = opts.limit != null ? Math.min(opts.batch, opts.limit - processed) : opts.batch;
     if (batchSize <= 0) break;
 
-    const { text, values } = buildSelectQuery(hasGender, cursorId, batchSize);
+    const { text, values } = buildSelectQuery(hasGender, colOpts, cursorId, batchSize);
     const { rows } = await pg.query<{ id: number; cdn_url: string }>(text, values);
     if (rows.length === 0) {
       if (cursorId === 0) {

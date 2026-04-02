@@ -22,6 +22,9 @@ services:
       # Bundled YOLO (docker-entrypoint starts uvicorn on 127.0.0.1:8001). Do not point at yolov8 unless you use EMBEDDED_YOLO=0.
       - YOLOV8_SERVICE_URL=http://127.0.0.1:8001
       - ONNX_API_URL=http://onnx-inference:8000
+      # Optional external BLIP service (HF InstructBLIP). Keep empty to use local ONNX BLIP in Node.
+      - BLIP_API_URL=${BLIP_API_URL:-}
+      - BLIP_API_TIMEOUT_MS=${BLIP_API_TIMEOUT_MS:-8000}
     depends_on:
       postgres:
         condition: service_healthy
@@ -158,6 +161,32 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    restart: unless-stopped
+
+  # Optional BLIP sidecar with model baked into the container image at build time.
+  # Start with: docker compose --profile blip-sidecar up -d blip
+  # Then set BLIP_API_URL=http://blip:8080 for the api service.
+  blip:
+    profiles:
+      - blip-sidecar
+    build:
+      context: ./src/lib/model
+      dockerfile: Dockerfile.blip
+      args:
+        HF_TOKEN: ${HF_TOKEN:-}
+        BLIP_HF_REPO: ${BLIP_HF_REPO:-Salesforce/instructblip-flan-t5-xl}
+    ports:
+      - "8003:8080"
+    environment:
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - MODEL_PATH=/app/model
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
 
 volumes:

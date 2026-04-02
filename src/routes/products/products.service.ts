@@ -114,6 +114,18 @@ export interface ImageSearchParams extends SearchParams {
    * Must not be treated as explicit user filters (would enable strict type gates).
    */
   softProductTypeHints?: string[];
+  /** Structured BLIP signal used for rerank alignment (no hard filtering semantics). */
+  blipSignal?: {
+    productType?: string | null;
+    gender?: string;
+    ageGroup?: string;
+    primaryColor?: string | null;
+    secondaryColor?: string | null;
+    style?: string | null;
+    material?: string | null;
+    occasion?: string | null;
+    confidence?: number;
+  };
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -495,6 +507,64 @@ function imageVisualRescueAudienceMin(): number {
   return 0.45;
 }
 
+function imageBlipAlignmentWeight(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_ALIGNMENT_WEIGHT ?? "0.3");
+  if (!Number.isFinite(raw)) return 0.3;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function normalizeSimpleToken(x: unknown): string {
+  return String(x ?? "").toLowerCase().trim();
+}
+
+function computeBlipAlignment(
+  signal: ImageSearchParams["blipSignal"],
+  hit: any,
+): number {
+  if (!signal) return 1;
+  const conf = Math.max(0, Math.min(1, Number(signal.confidence ?? 0)));
+  if (conf <= 0) return 1;
+
+  let bonus = 0;
+  const src = hit?._source ?? {};
+  const productTypes = Array.isArray(src.product_types)
+    ? src.product_types.map((t: unknown) => normalizeSimpleToken(t))
+    : [];
+  const productType = normalizeSimpleToken(signal.productType);
+  const gender = normalizeSimpleToken(signal.gender);
+  const age = normalizeSimpleToken(signal.ageGroup);
+  const style = normalizeSimpleToken(signal.style);
+  const material = normalizeSimpleToken(signal.material);
+  const occasion = normalizeSimpleToken(signal.occasion);
+  const pColor = normalizeSimpleToken(signal.primaryColor);
+  const sColor = normalizeSimpleToken(signal.secondaryColor);
+
+  if (productType && productTypes.includes(productType)) bonus += 0.2;
+  const docGender = normalizeSimpleToken(src.audience_gender || src.attr_gender);
+  if (gender && docGender && (docGender === gender || docGender === "unisex")) bonus += 0.15;
+  if (age && normalizeSimpleToken(src.age_group) === age) bonus += 0.08;
+
+  const docColors = [
+    normalizeSimpleToken(src.attr_color),
+    ...(Array.isArray(src.attr_colors) ? src.attr_colors.map((c: unknown) => normalizeSimpleToken(c)) : []),
+    ...(Array.isArray(src.color_palette_canonical)
+      ? src.color_palette_canonical.map((c: unknown) => normalizeSimpleToken(c))
+      : []),
+  ].filter(Boolean);
+  if (pColor && docColors.includes(pColor)) bonus += 0.12;
+  if (sColor && docColors.includes(sColor)) bonus += 0.05;
+
+  const docStyle = normalizeSimpleToken(src.attr_style);
+  if (style && docStyle && (docStyle === style || docStyle.includes(style) || style.includes(docStyle))) {
+    bonus += 0.18;
+  }
+  if (material && normalizeSimpleToken(src.attr_material) === material) bonus += 0.08;
+  if (occasion && normalizeSimpleToken(src.attr_occasion) === occasion) bonus += 0.1;
+
+  const weightedBonus = bonus * conf * imageBlipAlignmentWeight();
+  return Math.max(0.85, Math.min(1.6, 1 + weightedBonus));
+}
+
 /**
  * Raw CLIP cosine (exact when SEARCH_IMAGE_EXACT_COSINE_RERANK=1) at/above this → treat as a near-duplicate:
  * visual gate + sort + composite use **raw** cosine (not merchandise-bound), and `finalRelevance01` is floored.
@@ -708,6 +778,7 @@ export async function searchByImageWithSimilarity(
     relaxThresholdWhenEmpty = false,
     query: imageSearchTextQuery,
     softProductTypeHints: softProductTypeHintsParam,
+    blipSignal,
   } = params;
 
   if (!imageEmbedding || imageEmbedding.length === 0) {
@@ -1074,6 +1145,7 @@ export async function searchByImageWithSimilarity(
   const colorSimById = new Map<string, number>();
   const patternSimById = new Map<string, number>();
   const taxonomyMatchById = new Map<string, number>();
+  const blipAlignById = new Map<string, number>();
 
   const wColor = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_COLOR_WEIGHT ?? "220") || 220);
   const wStyle = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_STYLE_WEIGHT ?? "60") || 60);
@@ -1293,7 +1365,10 @@ export async function searchByImageWithSimilarity(
   // as the gate and visual-first sort (not raw CLIP alone).
   for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
-    const visualSim = merchandiseSimById.get(idStr) ?? visualSimFromHit(hit);
+    const visualSimRaw = merchandiseSimById.get(idStr) ?? visualSimFromHit(hit);
+    const blipAlign = computeBlipAlignment(blipSignal, hit);
+    blipAlignById.set(idStr, Math.round(blipAlign * 1000) / 1000);
+    const visualSim = Math.max(0, Math.min(1, visualSimRaw * blipAlign));
     const categorySoft =
       useAisleRerank && !forceHardCategoryFilter
         ? categorySoftScoreForHit(hit, desiredCatalogTerms)
@@ -1621,6 +1696,7 @@ export async function searchByImageWithSimilarity(
               colorSim,
               patternSim,
               taxonomyMatch,
+              blipAlignment: blipAlignById.get(idStr) ?? 1,
               imageCompositeScore,
               visual_component: compliance.visualComponent,
               type_component: compliance.typeComponent,
@@ -1815,6 +1891,7 @@ export async function searchByImageWithSimilarity(
       total_results: results.length,
       total_related: related.length,
       image_search_pipeline_degraded: imageSearchPipelineDegraded,
+      blip_signal_applied: Boolean(blipSignal && (blipSignal.confidence ?? 0) > 0),
       below_relevance_threshold: belowRelevanceThreshold,
       threshold_relaxed: thresholdRelaxed,
       final_accept_min: config.search.finalAcceptMinImage,
