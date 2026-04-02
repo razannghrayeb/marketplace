@@ -53,9 +53,9 @@ export function merchandiseVisualSimilarity01(inp: {
   if (inp.hasProductTypeSeeds) {
     const t = clamp01(inp.productTypeCompliance);
     // Sublinear: mediocre taxonomy agreement cannot read as "very similar" on the API.
-    // Floor raised from 0.18 → 0.45 so products with missing/incomplete type metadata
-    // are penalized but not suppressed below visual similarity threshold.
-    typeFactor = 0.45 + 0.55 * Math.pow(t, 1.08);
+    // Slightly steeper curve so same-aisle / same-category CLIP neighbors with wrong
+    // micro-type (e.g. tee vs hoodie) don't keep a high merchandise similarity.
+    typeFactor = 0.32 + 0.68 * Math.pow(t, 1.22);
   }
 
   let categoryFactor = 1;

@@ -1401,6 +1401,12 @@ export async function textSearch(
             brandsForRelated,
             categoriesForRelated,
             relatedLimit,
+            {
+              relevanceQuery:
+                (ast.searchQuery && ast.searchQuery.trim()) || rawQuery.trim(),
+              expandedTerms: lexicalTypeSeeds,
+              colorHints: ast.entities.colors ?? [],
+            },
           ).catch((e) => {
             relatedFetchError = e instanceof Error ? e.message : String(e);
             console.warn("[textSearch] findRelatedProducts failed:", e);
