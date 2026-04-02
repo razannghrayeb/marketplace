@@ -287,9 +287,48 @@ function buildBlipSignal(
   };
 }
 
+function imageBlipConsistencySuppressionEnabled(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_BLIP_CONS_SUPPRESS_ENABLED ?? "1").toLowerCase();
+  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
+}
+
+function imageBlipConsistencySuppressionOff(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_CONS_SUPPRESS_OFF ?? "0.1");
+  if (!Number.isFinite(raw)) return 0.1;
+  return Math.max(-1, Math.min(1, raw));
+}
+
+function imageBlipConsistencySuppressionOn(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_CONS_SUPPRESS_ON ?? "0.28");
+  if (!Number.isFinite(raw)) return 0.28;
+  return Math.max(-1, Math.min(1, raw));
+}
+
+function imageBlipConsistencySuppressionGamma(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_BLIP_CONS_SUPPRESS_GAMMA ?? "1.6");
+  if (!Number.isFinite(raw)) return 1.6;
+  return Math.max(0.5, Math.min(5, raw));
+}
+
+function suppressionMultiplier(consistency: number): number {
+  if (!imageBlipConsistencySuppressionEnabled()) {
+    const norm = Math.max(0, Math.min(1, (consistency + 1) / 2));
+    return Math.max(0, Math.min(1, 0.55 + 0.45 * norm));
+  }
+  const off = imageBlipConsistencySuppressionOff();
+  const on = imageBlipConsistencySuppressionOn();
+  const gamma = imageBlipConsistencySuppressionGamma();
+  if (on <= off) {
+    return consistency >= on ? 1 : 0;
+  }
+  if (consistency < off) return 0;
+  if (consistency >= on) return 1;
+  const t = (consistency - off) / (on - off);
+  return Math.max(0, Math.min(1, Math.pow(t, gamma)));
+}
+
 function combineConfidenceFromConsistency(base: number, consistency: number): number {
-  const norm = Math.max(0, Math.min(1, (consistency + 1) / 2));
-  return Math.max(0, Math.min(1, base * (0.55 + 0.45 * norm)));
+  return Math.max(0, Math.min(1, base * suppressionMultiplier(consistency)));
 }
 
 async function captionWithTimeout(buf: Buffer): Promise<string> {

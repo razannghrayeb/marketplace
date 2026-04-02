@@ -383,9 +383,11 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
 
   if (input.embedding && input.embedding.length > 0) {
     doc.embedding = input.embedding;
+    doc.embedding_score_version = "v2";
   }
   if (input.embeddingGarment && input.embeddingGarment.length > 0) {
     doc.embedding_garment = input.embeddingGarment;
+    doc.embedding_garment_score_version = "v2";
   }
 
   if (input.attributeEmbeddings) {
