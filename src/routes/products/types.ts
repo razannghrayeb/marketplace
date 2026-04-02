@@ -23,6 +23,8 @@ export interface SearchFilters {
   color?: string;
   /** Used to bias ranking without hard filtering (image search "closet similar"). */
   softColor?: string;
+  /** Promote softColor into final relevance gating when inference is strong and slot-specific. */
+  softColorStrict?: boolean;
   /** Multi-color intent (image / enhanced search). */
   colors?: string[];
   colorMode?: "any" | "all";
@@ -184,8 +186,8 @@ export interface ProductResult {
     desiredProductTypes?: string[];
     desiredColors?: string[];
     desiredColorsExplicit?: string[];
-    desiredColorsSoft?: string[];
-    colorIntentSource?: "explicit" | "soft" | "none";
+    desiredColorsEffective?: string[];
+    colorIntentSource?: "explicit" | "none";
     desiredLength?: string;
     colorMode?: "any" | "all";
     finalRelevance01?: number;

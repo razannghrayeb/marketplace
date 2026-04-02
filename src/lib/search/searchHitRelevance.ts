@@ -334,6 +334,8 @@ export interface HitCompliance {
   /** Dev / explain: type gate and intent trace */
   hasTypeIntent?: boolean;
   hasColorIntent?: boolean;
+  hasSleeveIntent?: boolean;
+  hasLengthIntent?: boolean;
   typeGateFactor?: number;
   hardBlocked?: boolean;
   /** False when lexical score is not a separate signal (e.g. image-only kNN): omit from API explain. */
@@ -405,6 +407,25 @@ function normalizeSleeveToken(raw: string | undefined): "short" | "long" | "slee
   return null;
 }
 
+function docSupportsSleeveIntent(src: Record<string, unknown>): boolean {
+  const bag = [
+    src.category,
+    src.category_canonical,
+    src.title,
+    ...(Array.isArray(src.product_types) ? src.product_types : []),
+  ]
+    .map((x) => String(x ?? "").toLowerCase())
+    .join(" ");
+  if (!bag.trim()) return true;
+  if (/\b(shoe|shoes|sneaker|sneakers|boot|boots|sandal|sandals|heel|heels|loafer|loafers)\b/.test(bag)) {
+    return false;
+  }
+  if (/\b(bag|bags|wallet|wallets|belt|belts|hat|hats|cap|caps|scarf|scarves|jewelry|jewellery|ring|rings|earring|earrings|necklace|necklaces|bracelet|bracelets)\b/.test(bag)) {
+    return false;
+  }
+  return true;
+}
+
 function rawColorList(...parts: unknown[]): string[] {
   return [
     ...new Set(
@@ -423,6 +444,7 @@ export function computeHitRelevance(
   similarity: number,
   intent: SearchHitRelevanceIntent,
 ): HitCompliance & { primaryColor: string | null } {
+  const src = hit?._source ?? {};
   const {
     desiredProductTypes,
     desiredColors,
@@ -615,20 +637,21 @@ export function computeHitRelevance(
 
   let sleeveCompliance = 0;
   const wantedSleeve = normalizeSleeveToken(desiredSleeve);
-  if (wantedSleeve) {
+  const sleeveIntentApplicable = docSupportsSleeveIntent(src);
+  const hasSleeveIntentForDoc = Boolean(wantedSleeve) && sleeveIntentApplicable;
+  if (hasSleeveIntentForDoc) {
     const docSleeveRaw = typeof hit?._source?.attr_sleeve === "string" ? hit._source.attr_sleeve : "";
     const docSleeve = normalizeSleeveToken(docSleeveRaw);
     const titleSleeve = normalizeSleeveToken(title);
     const observed = docSleeve ?? titleSleeve;
     if (!observed) {
-      sleeveCompliance = 0.72;
+      sleeveCompliance = 0.45;
     } else if (observed === wantedSleeve) {
       sleeveCompliance = 1;
     } else if (docSleeve) {
-      // Hard contradiction: explicit indexed sleeve disagrees with requested sleeve.
       sleeveCompliance = 0;
     } else {
-      sleeveCompliance = 0.18;
+      sleeveCompliance = 0.15;
     }
   }
 
@@ -644,8 +667,6 @@ export function computeHitRelevance(
     hit?._source?.category,
     hit?._source?.category_canonical,
   );
-
-  const src = hit?._source ?? {};
 
   /** Garment/footwear image intent vs makeup/skincare listing — CLIP is often high on shared skintone/packaging cues. */
   const garmentVersusBeautyPenalty = (() => {
@@ -792,7 +813,7 @@ export function computeHitRelevance(
     sleeveScore: sleeveCompliance,
     hasColorIntent: hasColorIntentForFinalRelevance,
     hasStyleIntent: Boolean(normalizedDesiredStyle),
-    hasSleeveIntent: Boolean(wantedSleeve),
+    hasSleeveIntent: hasSleeveIntentForDoc,
     hasAudienceIntent,
     crossFamilyPenalty,
     applyLexicalToGlobal: lexicalScoreDistinct,
@@ -854,6 +875,7 @@ export function computeHitRelevance(
     primaryColor,
     hasTypeIntent,
     hasColorIntent: hasColorIntentForFinalRelevance,
+    hasSleeveIntent: hasSleeveIntentForDoc,
     typeGateFactor,
     hardBlocked: hardBlocked || negationBlocked,
     lexicalScoreDistinct,

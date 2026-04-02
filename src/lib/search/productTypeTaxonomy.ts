@@ -1231,6 +1231,16 @@ export interface RerankTypeBreakdown {
 
 const DEFAULT_SIBLING_CLUSTER_WEIGHT = 0.64;
 
+function isBroadExactToken(token: string): boolean {
+  const t = String(token || "").toLowerCase().trim();
+  if (!t) return false;
+  // "top/tops/cami" is intentionally a broad catch-all; treat as non-exact for rerank.
+  if (topsMicroGroup(t) === "generic_top") return true;
+  // Hypernym-level labels are too broad for "exact" matching (e.g. shoes/pants/outerwear/bag).
+  const hyperValues = new Set(Object.values(TYPE_TO_HYPERNYM).map((x) => String(x).toLowerCase().trim()));
+  return hyperValues.has(t);
+}
+
 export function scoreRerankProductTypeBreakdown(
   querySeeds: string[],
   docTypes: string[],
@@ -1252,7 +1262,8 @@ export function scoreRerankProductTypeBreakdown(
   const wIntra = opts?.intraPenaltyWeight ?? 0.62;
 
   const exactTax = scoreProductTypeTaxonomyMatch(seeds, docs, { sameClusterWeight: 0 });
-  const exactTypeScore = exactTax.score >= 1 ? 1 : 0;
+  const exactToken = exactTax.bestQueryType ?? exactTax.bestDocType ?? "";
+  const exactTypeScore = exactTax.score >= 1 && !isBroadExactToken(exactToken) ? 1 : 0;
 
   const clusterTax = scoreProductTypeTaxonomyMatch(seeds, docs, { sameClusterWeight: wSib });
   const siblingClusterScore = exactTypeScore >= 1 ? 1 : clusterTax.score;
