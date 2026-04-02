@@ -680,6 +680,26 @@ function normalizeSimpleToken(x: unknown): string {
   return String(x ?? "").toLowerCase().trim();
 }
 
+function blendSoftSimilarityWithCompliance(params: {
+  rawSim: number;
+  compliance: number;
+  hasIntent: boolean;
+  strictIntent: boolean;
+}): number {
+  const raw = Math.max(0, Math.min(1, Number(params.rawSim) || 0));
+  const comp = Math.max(0, Math.min(1, Number(params.compliance) || 0));
+  if (!params.hasIntent) return raw;
+
+  // Balanced policy:
+  // - Keep a small visual floor so retrieval does not collapse on noisy metadata.
+  // - Scale by compliance so explicit contradictions cannot receive full soft-sim credit.
+  // - Apply stricter attenuation for explicit user intent than soft inferred intent.
+  const floor = params.strictIntent ? 0.08 : 0.18;
+  const gain = params.strictIntent ? 0.92 : 0.82;
+  const scale = floor + gain * Math.pow(comp, 0.75);
+  return Math.max(0, Math.min(1, raw * scale));
+}
+
 function computeBlipAlignment(
   signal: ImageSearchParams["blipSignal"],
   hit: any,
@@ -1347,6 +1367,8 @@ export async function searchByImageWithSimilarity(
   const imageCompositeNormById = new Map<string, number>();
   const styleSimById = new Map<string, number>();
   const colorSimById = new Map<string, number>();
+  const styleSimRawById = new Map<string, number>();
+  const colorSimRawById = new Map<string, number>();
   const patternSimById = new Map<string, number>();
   const taxonomyMatchById = new Map<string, number>();
   const blipAlignById = new Map<string, number>();
@@ -1615,16 +1637,36 @@ export async function searchByImageWithSimilarity(
     const patternSim = runPattern
       ? cosineSimilarity01(patternQueryEmbedding ?? undefined, hit._source?.embedding_pattern)
       : 0;
+    const comp = complianceById.get(idStr);
+    const hasStyleIntent = Boolean(desiredStyleForRelevance);
+    const hasColorIntentForComposite = hasExplicitColorIntent || softColorBiasOnly;
+    const colorCompliance = comp?.colorCompliance ?? 0;
+    const styleCompliance = comp?.styleCompliance ?? 0;
+    // Balanced attenuation: reduce soft channels when compliance is weak, but avoid hard zeroing.
+    const colorSimEff = blendSoftSimilarityWithCompliance({
+      rawSim: colorSim,
+      compliance: colorCompliance,
+      hasIntent: hasColorIntentForComposite,
+      strictIntent: hasExplicitColorIntent,
+    });
+    const styleSimEff = blendSoftSimilarityWithCompliance({
+      rawSim: styleSim,
+      compliance: styleCompliance,
+      hasIntent: hasStyleIntent,
+      strictIntent: true,
+    });
 
-    styleSimById.set(idStr, Math.round(styleSim * 1000) / 1000);
-    colorSimById.set(idStr, Math.round(colorSim * 1000) / 1000);
+    styleSimRawById.set(idStr, Math.round(styleSim * 1000) / 1000);
+    colorSimRawById.set(idStr, Math.round(colorSim * 1000) / 1000);
+    styleSimById.set(idStr, Math.round(styleSimEff * 1000) / 1000);
+    colorSimById.set(idStr, Math.round(colorSimEff * 1000) / 1000);
     patternSimById.set(idStr, Math.round(patternSim * 1000) / 1000);
     taxonomyMatchById.set(idStr, categorySoft);
 
     const attrGate = 0.4 + 0.6 * visualSim;
     const composite =
       visualSim * 1000 +
-      (categorySoft * aisleSoftWeight + colorSim * wColor + styleSim * wStyle + patternSim * wPattern) *
+      (categorySoft * aisleSoftWeight + colorSimEff * wColor + styleSimEff * wStyle + patternSim * wPattern) *
         attrGate;
     imageCompositeById.set(idStr, composite);
   }
@@ -1903,6 +1945,8 @@ export async function searchByImageWithSimilarity(
       const compliance = complianceById.get(idStr);
       const styleSim = styleSimById.get(idStr) ?? 0;
       const colorSim = colorSimById.get(idStr) ?? 0;
+      const styleSimRaw = styleSimRawById.get(idStr) ?? styleSim;
+      const colorSimRaw = colorSimRawById.get(idStr) ?? colorSim;
       const patternSim = patternSimById.get(idStr) ?? 0;
       const taxonomyMatch = taxonomyMatchById.get(idStr) ?? 0;
       const imageCompositeScore = imageCompositeById.get(idStr) ?? 0;
@@ -1946,6 +1990,10 @@ export async function searchByImageWithSimilarity(
               catalog_similarity_alignment: merchAlignmentById.get(idStr) ?? 1,
               styleSim,
               colorSim,
+              styleSimRaw,
+              colorSimRaw,
+              styleSimEff: styleSim,
+              colorSimEff: colorSim,
               patternSim,
               taxonomyMatch,
               blipAlignment: blipAlignById.get(idStr) ?? 1,
@@ -1972,7 +2020,15 @@ export async function searchByImageWithSimilarity(
               typeGateFactor: compliance.typeGateFactor,
               hardBlocked: compliance.hardBlocked,
               desiredProductTypes,
-              desiredColors: desiredColorsForRelevance,
+              // Keep explain consistent: this field represents strict (gating) color intent only.
+              desiredColors: hasExplicitColorIntent ? desiredColorsForRelevance : [],
+              desiredColorsExplicit: explicitColorsForRelevance,
+              desiredColorsSoft: softColorsForRelevance,
+              colorIntentSource: hasExplicitColorIntent
+                ? "explicit"
+                : softColorsForRelevance.length > 0
+                  ? "soft"
+                  : "none",
             desiredStyle: desiredStyleForRelevance,
             desiredSleeve: desiredSleeveForRelevance,
               desiredLength: desiredLengthForRelevance ?? undefined,

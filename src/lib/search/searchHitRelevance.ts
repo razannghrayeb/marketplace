@@ -582,9 +582,8 @@ export function computeHitRelevance(
       // inferred palette/text signals to look like a strong color match.
       colorCompliance = 0;
       if (colorTier === "exact") colorTier = "none";
-      if (matchedColor && (normalizeColorToken(matchedColor) ?? matchedColor) !== catalogColorNorm) {
-        matchedColor = catalogColorNorm;
-      }
+      // Keep `matchedColor` tied to query-vs-hit match evidence only; do not replace it
+      // with catalog color, otherwise explain output can look like query color was rewritten.
     }
   }
 

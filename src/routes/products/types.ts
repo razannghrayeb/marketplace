@@ -159,6 +159,10 @@ export interface ProductResult {
     semanticScore?: number;
     styleSim?: number;
     colorSim?: number;
+    styleSimRaw?: number;
+    colorSimRaw?: number;
+    styleSimEff?: number;
+    colorSimEff?: number;
     patternSim?: number;
     taxonomyMatch?: number;
     blipAlignment?: number;
@@ -179,6 +183,9 @@ export interface ProductResult {
     hardBlocked?: boolean;
     desiredProductTypes?: string[];
     desiredColors?: string[];
+    desiredColorsExplicit?: string[];
+    desiredColorsSoft?: string[];
+    colorIntentSource?: "explicit" | "soft" | "none";
     desiredLength?: string;
     colorMode?: "any" | "all";
     finalRelevance01?: number;
