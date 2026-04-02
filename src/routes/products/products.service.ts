@@ -43,6 +43,7 @@ import { merchandiseVisualSimilarity01 } from "../../lib/search/merchandiseVisua
 import {
   extractFashionTypeNounTokens,
   extractLexicalProductTypeSeeds,
+  scoreRerankProductTypeBreakdown,
 } from "../../lib/search/productTypeTaxonomy";
 import type { SearchResultWithRelated } from "./types";
 
@@ -709,20 +710,33 @@ function computeBlipAlignment(
   const W_MATERIAL = 0.06;
   const W_OCCASION = 0.04;
 
-  if (productType && productTypes.includes(productType)) matchScore += W_TYPE;
+  if (productType) {
+    if (productTypes.length > 0) {
+      const t = scoreRerankProductTypeBreakdown([productType], productTypes);
+      matchScore += W_TYPE * Math.max(0, Math.min(1, t.combinedTypeCompliance));
+    } else {
+      const docCategory = normalizeSimpleToken(src.category_canonical || src.category);
+      if (docCategory && (docCategory.includes(productType) || productType.includes(docCategory))) {
+        matchScore += W_TYPE * 0.45;
+      }
+    }
+  }
   const docGender = normalizeSimpleToken(src.audience_gender || src.attr_gender);
   if (gender && docGender && (docGender === gender || docGender === "unisex")) matchScore += W_AUDIENCE * 0.65;
   if (age && normalizeSimpleToken(src.age_group) === age) matchScore += W_AUDIENCE * 0.35;
 
-  const docColors = [
+  const docColorsRaw = [
     normalizeSimpleToken(src.attr_color),
     ...(Array.isArray(src.attr_colors) ? src.attr_colors.map((c: unknown) => normalizeSimpleToken(c)) : []),
     ...(Array.isArray(src.color_palette_canonical)
       ? src.color_palette_canonical.map((c: unknown) => normalizeSimpleToken(c))
       : []),
   ].filter(Boolean);
-  if (pColor && docColors.includes(pColor)) matchScore += W_COLOR * 0.75;
-  if (sColor && docColors.includes(sColor)) matchScore += W_COLOR * 0.25;
+  const docColors = [...new Set(docColorsRaw.map((c) => normalizeColorToken(c) ?? c))];
+  const pColorNorm = normalizeColorToken(pColor) ?? pColor;
+  const sColorNorm = normalizeColorToken(sColor) ?? sColor;
+  if (pColorNorm && docColors.includes(pColorNorm)) matchScore += W_COLOR * 0.75;
+  if (sColorNorm && docColors.includes(sColorNorm)) matchScore += W_COLOR * 0.25;
 
   const docStyle = normalizeSimpleToken(src.attr_style);
   if (style && docStyle && (docStyle === style || docStyle.includes(style) || style.includes(docStyle))) {

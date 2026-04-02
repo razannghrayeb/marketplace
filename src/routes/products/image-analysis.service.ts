@@ -1526,7 +1526,7 @@ export class ImageAnalysisService {
       if (!inferredColorForDetection && useBlipSoftHints && blipStructured.colors.length > 0) {
         inferredColorForDetection = blipStructured.colors[0];
       }
-      if (!inferredColorForDetection) inferredColorForDetection = inferredPrimaryColor;
+      // Keep per-detection intent crop-local: do not fall back to full-frame dominant color.
       if (inferredColorForDetection) filters.softColor = inferredColorForDetection;
       let predictedCategoryAisles: string[] | undefined;
       const noisyCat = isNoisyCategoryForAutoHardCategory(categoryMapping, label);
@@ -1567,6 +1567,7 @@ export class ImageAnalysisService {
 
       // Per-detection BLIP captioning + CLIP consistency gate.
       const detCaption = analysisResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
+      let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
       if (detCaption.trim().length > 0) {
         const captionLength = inferLengthIntentFromCaption(detCaption);
         if (captionLength) (filters as any).length = captionLength;
@@ -1581,6 +1582,7 @@ export class ImageAnalysisService {
           consistency >= imageBlipClipConsistencyMin()
         ) {
           obs.detectionCaptionAccepted += 1;
+          detectionBlipSignal = buildBlipSignal(detStruct, detConfidence);
           if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
           if (!filters.softColor && detStruct.colors.length > 0) filters.softColor = detStruct.colors[0];
           if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
@@ -1612,7 +1614,7 @@ export class ImageAnalysisService {
         knnField: knnFieldUsed,
         forceHardCategoryFilter: forceHardCategoryFilterUsed,
         relaxThresholdWhenEmpty: shopLookRelaxEnv(),
-        blipSignal: fullBlipSignal,
+        blipSignal: detectionBlipSignal,
       });
 
       // If BLIP-derived audience/style/color filters are too strict and remove all hits,
@@ -1650,7 +1652,7 @@ export class ImageAnalysisService {
           knnField: knnFieldUsed,
           forceHardCategoryFilter: forceHardCategoryFilterUsed,
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
-          blipSignal: fullBlipSignal,
+          blipSignal: detectionBlipSignal,
         });
       }
 
@@ -1679,7 +1681,7 @@ export class ImageAnalysisService {
           knnField: shopTheLookKnnField(),
           forceHardCategoryFilter: false,
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
-          blipSignal: fullBlipSignal,
+          blipSignal: detectionBlipSignal,
         });
         if (similarResult.results.length === 0) {
           similarResult = await searchByImageWithSimilarity({
@@ -1689,14 +1691,18 @@ export class ImageAnalysisService {
                 ? finalGarmentEmbedding
                 : undefined,
             imageBuffer: clipBuffer,
-            filters: {},
+              // Keep crop-derived structural intent even in last-resort fallback.
+              filters: {
+                productTypes: filters.productTypes,
+                length: (filters as any).length,
+              } as any,
             limit: similarLimitPerItem,
             similarityThreshold,
             includeRelated: false,
             knnField: shopTheLookKnnField(),
             forceHardCategoryFilter: false,
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
-            blipSignal: fullBlipSignal,
+            blipSignal: detectionBlipSignal,
           });
         }
       }
@@ -2151,7 +2157,7 @@ export class ImageAnalysisService {
         if (!inferredColorForDetection && useBlipSoftHints && blipStructured.colors.length > 0) {
           inferredColorForDetection = blipStructured.colors[0];
         }
-        if (!inferredColorForDetection) inferredColorForDetection = inferredPrimaryColor;
+        // Keep per-detection intent crop-local: do not fall back to full-frame dominant color.
         if (inferredColorForDetection) filters.softColor = inferredColorForDetection;
         let predictedCategoryAisles: string[] | undefined;
         if (options.filterByDetectedCategory !== false) {
@@ -2176,6 +2182,7 @@ export class ImageAnalysisService {
         }
 
         const detCaption = fullResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
+        let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
         if (detCaption.trim().length > 0) {
           const captionLength = inferLengthIntentFromCaption(detCaption);
           if (captionLength) (filters as any).length = captionLength;
@@ -2190,6 +2197,7 @@ export class ImageAnalysisService {
             consistency >= imageBlipClipConsistencyMin()
           ) {
             obs.detectionCaptionAccepted += 1;
+            detectionBlipSignal = buildBlipSignal(detStruct, detConfidence);
             if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
             if (!filters.softColor && detStruct.colors.length > 0) filters.softColor = detStruct.colors[0];
             if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
@@ -2220,7 +2228,7 @@ export class ImageAnalysisService {
           predictedCategoryAisles,
           knnField: shopTheLookKnnField(),
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
-          blipSignal: fullBlipSignal,
+          blipSignal: detectionBlipSignal,
         });
 
         // Retry without inferred attribute filters if they removed all hits.
@@ -2256,7 +2264,7 @@ export class ImageAnalysisService {
             predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
-            blipSignal: fullBlipSignal,
+            blipSignal: detectionBlipSignal,
           });
         }
 
@@ -2285,7 +2293,7 @@ export class ImageAnalysisService {
             predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
-            blipSignal: fullBlipSignal,
+            blipSignal: detectionBlipSignal,
           });
           if (similarResult.results.length === 0) {
             similarResult = await searchByImageWithSimilarity({
@@ -2295,13 +2303,17 @@ export class ImageAnalysisService {
                   ? finalGarmentEmbedding
                   : undefined,
               imageBuffer: clipBuffer,
-              filters: {},
+              // Keep crop-derived structural intent even in last-resort fallback.
+              filters: {
+                productTypes: filters.productTypes,
+                length: (filters as any).length,
+              } as any,
               limit: resolveShopLookLimit(options.similarLimitPerItem),
               similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
               includeRelated: false,
               knnField: shopTheLookKnnField(),
               relaxThresholdWhenEmpty: shopLookRelaxEnv(),
-              blipSignal: fullBlipSignal,
+              blipSignal: detectionBlipSignal,
             });
           }
         }

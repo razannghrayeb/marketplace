@@ -745,18 +745,27 @@ export function computeHitRelevance(
   const wSim = rerankSimilarityWeight();
   const wAud = rerankAudienceWeight();
   const typeComponent = productTypeCompliance * 420 * docTrust;
-  const attrComponent =
+  const hasTypeIntent = desiredProductTypes.length > 0;
+  // Prevent non-type attributes from overpowering clear crop/type intent when type compliance is weak.
+  const attrTypeGate = !hasTypeIntent
+    ? 1
+    : productTypeCompliance >= 0.5
+      ? 1
+      : productTypeCompliance >= 0.2
+        ? 0.35
+        : 0.08;
+  const attrComponentRaw =
     colorCompliance * 90 * docTrust +
     styleCompliance * 65 * docTrust +
     sleeveCompliance * 52 * docTrust +
     audienceCompliance * wAud * docTrust;
+  const attrComponent = attrComponentRaw * attrTypeGate;
   // Similarity term strengthened and modulated by type compliance.
   const visualComponent =
     similarity * (wSim + 120 * (0.35 + 0.65 * productTypeCompliance));
   const penaltyComponent = crossFamilyPenalty * crossFamilyPenaltyWeight;
   const rerankScore = typeComponent + attrComponent + visualComponent - penaltyComponent;
 
-  const hasTypeIntent = desiredProductTypes.length > 0;
   const hasReliableTypeIntent = hasTypeIntent && intent.reliableTypeIntent !== false;
   const hasColorIntent = desiredColors.length > 0;
   /** Soft-only auto colors must not gate final acceptance the same as user `filters.color`. */
