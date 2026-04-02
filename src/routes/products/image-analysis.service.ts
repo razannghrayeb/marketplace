@@ -1652,6 +1652,8 @@ export class ImageAnalysisService {
         forceHardCategoryFilter: forceHardCategoryFilterUsed,
         relaxThresholdWhenEmpty: shopLookRelaxEnv(),
         blipSignal: detectionBlipSignal,
+        inferredPrimaryColor,
+        inferredColorsByItem,
       });
 
       // If BLIP-derived audience/style filters are too strict and remove all hits,
@@ -1686,6 +1688,8 @@ export class ImageAnalysisService {
           forceHardCategoryFilter: forceHardCategoryFilterUsed,
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
           blipSignal: detectionBlipSignal,
+          inferredPrimaryColor,
+          inferredColorsByItem,
         });
       }
 
@@ -1715,6 +1719,8 @@ export class ImageAnalysisService {
           forceHardCategoryFilter: false,
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
           blipSignal: detectionBlipSignal,
+          inferredPrimaryColor,
+          inferredColorsByItem,
         });
         if (similarResult.results.length === 0) {
           similarResult = await searchByImageWithSimilarity({
@@ -1736,6 +1742,8 @@ export class ImageAnalysisService {
             forceHardCategoryFilter: false,
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
+            inferredPrimaryColor,
+            inferredColorsByItem,
           });
         }
       }
@@ -2256,6 +2264,8 @@ export class ImageAnalysisService {
           knnField: shopTheLookKnnField(),
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
           blipSignal: detectionBlipSignal,
+          inferredPrimaryColor,
+          inferredColorsByItem,
         });
 
         // Retry without inferred attribute filters if they removed all hits.
@@ -2288,6 +2298,8 @@ export class ImageAnalysisService {
             knnField: shopTheLookKnnField(),
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
+            inferredPrimaryColor,
+            inferredColorsByItem,
           });
         }
 
@@ -2317,6 +2329,8 @@ export class ImageAnalysisService {
             knnField: shopTheLookKnnField(),
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
+            inferredPrimaryColor,
+            inferredColorsByItem,
           });
           if (similarResult.results.length === 0) {
             similarResult = await searchByImageWithSimilarity({
@@ -2337,6 +2351,8 @@ export class ImageAnalysisService {
               knnField: shopTheLookKnnField(),
               relaxThresholdWhenEmpty: shopLookRelaxEnv(),
               blipSignal: detectionBlipSignal,
+              inferredPrimaryColor,
+              inferredColorsByItem,
             });
           }
         }

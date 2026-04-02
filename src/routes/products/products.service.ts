@@ -33,6 +33,7 @@ import {
   type QueryAST,
 } from "../../lib/queryProcessor";
 import { expandColorTermsForFilter, normalizeColorToken } from "../../lib/color/queryColorFilter";
+import { tieredColorListCompliance } from "../../lib/color/colorCanonical";
 import {
   computeHitRelevance,
   normalizeQueryGender,
@@ -132,6 +133,13 @@ export interface ImageSearchParams extends SearchParams {
     occasion?: string | null;
     confidence?: number;
   };
+  /**
+   * Caption / vision-inferred colors (e.g. from full-image BLIP). Merged into soft color
+   * intent with crop k-means so tier compliance can reflect "blue top" vs catalog white.
+   */
+  inferredPrimaryColor?: string | null;
+  /** Per-slot caption colors (topColor, jeansColor, garmentColor, …). */
+  inferredColorsByItem?: Record<string, string | null>;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -469,6 +477,8 @@ function computeExplicitFinalRelevance(params: {
   imageCompositeScore01?: number;
   /** BLIP alignment matchScore [0,1] — used as soft reranking multiplier. */
   blipMatchScore?: number;
+  /** Weight of batch-normalized composite in the final blend (adaptive per query). */
+  compositeInfluence?: number;
 }): { score: number; fusedVisual: number; metadataCompliance: number } {
   const simVisual = Math.max(0, Math.min(1, params.simVisual));
 
@@ -587,7 +597,10 @@ function computeExplicitFinalRelevance(params: {
 
   // ── Composite contribution ─────────────────────────────────────
   const compositeScore01 = Math.max(0, Math.min(1, params.imageCompositeScore01 ?? 0));
-  const compositeInfluence = 0.12;
+  const compositeInfluence = Math.max(
+    0.02,
+    Math.min(0.25, params.compositeInfluence ?? imageSearchCompositeInfluenceBase()),
+  );
 
   // ── Final blend ──────────────────────────────────────────────────
   const visualWeight = fusedVisual >= 0.30 ? 0.78 : 0.68;
@@ -843,6 +856,104 @@ function blendSoftSimilarityWithCompliance(params: {
   const gain = 1 - floor;
   const scale = floor + gain * Math.pow(comp, 0.5);
   return Math.max(0, Math.min(1, raw * scale));
+}
+
+function imageSearchCompositeInfluenceBase(): number {
+  const n = Number(process.env.SEARCH_IMAGE_COMPOSITE_INFLUENCE_BASE ?? "0.12");
+  return Number.isFinite(n) ? Math.max(0.02, Math.min(0.25, n)) : 0.12;
+}
+
+function blipColorConflictMinConfidence(): number {
+  const n = Number(process.env.SEARCH_IMAGE_BLIP_COLOR_CONFLICT_MIN_CONF ?? "0.35");
+  return Number.isFinite(n) ? Math.max(0.15, Math.min(0.95, n)) : 0.35;
+}
+
+function blipColorConflictMaxPenalty(): number {
+  const n = Number(process.env.SEARCH_IMAGE_BLIP_COLOR_CONFLICT_MAX_PENALTY ?? "0.55");
+  return Number.isFinite(n) ? Math.max(0.02, Math.min(0.95, n)) : 0.55;
+}
+
+function docColorPaletteForHit(hit: { _source?: Record<string, unknown> }): string[] {
+  const src = hit._source ?? {};
+  const raw: string[] = [];
+  const push = (s: string) => {
+    const t = normalizeColorToken(s) ?? s.trim().toLowerCase();
+    if (t && !raw.includes(t)) raw.push(t);
+  };
+  for (const c of Array.isArray(src.attr_colors) ? src.attr_colors : []) {
+    if (c != null) push(String(c));
+  }
+  if (typeof src.attr_color === "string") push(src.attr_color);
+  for (const c of Array.isArray(src.color_palette_canonical) ? src.color_palette_canonical : []) {
+    if (c != null) push(String(c));
+  }
+  if (typeof src.color_primary_canonical === "string") push(src.color_primary_canonical);
+  if (typeof src.color === "string") push(src.color);
+  return raw;
+}
+
+/**
+ * When BLIP primary color is confident and contradicts indexed catalog colors,
+ * dampen the color embedding channel (CLIP can still match lighting/layout).
+ * Returns [0,1] multiplier applied to raw color cosine before fusion.
+ */
+function blipCatalogColorConflictFactor(
+  signal: ImageSearchParams["blipSignal"],
+  hit: { _source?: Record<string, unknown> },
+): number {
+  const primary = signal?.primaryColor?.trim();
+  if (!primary) return 1;
+  const conf = Math.max(0, Math.min(1, Number(signal?.confidence ?? 0)));
+  if (conf < blipColorConflictMinConfidence()) return 1;
+  const desired = normalizeColorToken(primary.toLowerCase()) ?? primary.toLowerCase();
+  const docColors = docColorPaletteForHit(hit);
+  if (docColors.length === 0) return 1;
+  const t = tieredColorListCompliance([desired], docColors, "any");
+  const match = Math.max(0, Math.min(1, t.compliance));
+  const maxPen = blipColorConflictMaxPenalty();
+  const penalty = 1 - match;
+  return Math.max(0.35, 1 - conf * penalty * maxPen);
+}
+
+function collectInferredColorTokens(
+  filtersRecord: Record<string, unknown>,
+  inferredPrimary?: string | null,
+  inferredByItem?: Record<string, string | null>,
+): string[] {
+  const out: string[] = [];
+  const push = (s: string | null | undefined) => {
+    const x = String(s ?? "").toLowerCase().trim();
+    if (!x) return;
+    const norm = normalizeColorToken(x) ?? x;
+    if (norm && !out.includes(norm)) out.push(norm);
+  };
+  push(inferredPrimary ?? undefined);
+  if (inferredByItem && typeof inferredByItem === "object") {
+    for (const v of Object.values(inferredByItem)) push(v);
+  }
+  const fp = (filtersRecord as { inferredPrimaryColor?: unknown }).inferredPrimaryColor;
+  if (fp != null) push(String(fp));
+  const fi = (filtersRecord as { inferredColorsByItem?: Record<string, string | null> }).inferredColorsByItem;
+  if (fi && typeof fi === "object") {
+    for (const v of Object.values(fi)) push(v);
+  }
+  return out;
+}
+
+function computeBatchCompositeInfluence(
+  base: number,
+  candidateCount: number,
+  normalizedNorms: number[],
+): number {
+  const n = normalizedNorms.length;
+  const spread = n > 1 ? Math.max(...normalizedNorms) - Math.min(...normalizedNorms) : 0;
+  let f = 1;
+  if (candidateCount < 8) f *= 0.45;
+  else if (candidateCount < 20) f *= 0.7;
+  if (spread < 0.08) f *= 0.35;
+  else if (spread < 0.15) f *= 0.6;
+  else if (spread < 0.25) f *= 0.85;
+  return Math.max(0.02, Math.min(base, base * f));
 }
 
 function computeBlipAlignment(
@@ -1133,6 +1244,8 @@ export async function searchByImageWithSimilarity(
     query: imageSearchTextQuery,
     softProductTypeHints: softProductTypeHintsParam,
     blipSignal,
+    inferredPrimaryColor: inferredPrimaryFromParams,
+    inferredColorsByItem: inferredByItemFromParams,
   } = params;
 
   if (!imageEmbedding || imageEmbedding.length === 0) {
@@ -1521,6 +1634,10 @@ export async function searchByImageWithSimilarity(
   const patternSimById = new Map<string, number>();
   const taxonomyMatchById = new Map<string, number>();
   const blipAlignById = new Map<string, number>();
+  /** BLIP primary vs catalog palette: multiplier on raw color cosine before fusion. */
+  const blipColorConflictFactorById = new Map<string, number>();
+  /** Color cosine after BLIP-vs-catalog dampening (feeds fusion + blend). */
+  const colorSimFusionRawById = new Map<string, number>();
   /** Effective visual similarity used by final relevance (merchandise + BLIP aligned). */
   const visualSimEffectiveById = new Map<string, number>();
 
@@ -1614,9 +1731,14 @@ export async function searchByImageWithSimilarity(
     : [];
   const hasCropColorSignal = cropDominantColorsRaw.length > 0;
   const hasExplicitColorIntent = explicitColorsForRelevance.length > 0;
+  const inferredColorTokens = collectInferredColorTokens(
+    filtersRecord,
+    inferredPrimaryFromParams ?? (filtersRecord as { inferredPrimaryColor?: string | null }).inferredPrimaryColor,
+    inferredByItemFromParams ?? (filtersRecord as { inferredColorsByItem?: Record<string, string | null> }).inferredColorsByItem,
+  );
   const allColorsForRelevance = hasExplicitColorIntent
     ? [...explicitColorsForRelevance]
-    : [...cropDominantColorsRaw];
+    : [...new Set([...cropDominantColorsRaw, ...inferredColorTokens])];
   const desiredColorsForRelevance = [
     ...new Set(
       allColorsForRelevance.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
@@ -1670,6 +1792,7 @@ export async function searchByImageWithSimilarity(
     color: {
       gatesFinalRelevance01: hasExplicitColorIntent,
       cropDominantTokens: hasCropColorSignal ? [...cropDominantColorsRaw] : undefined,
+      inferredTokens: inferredColorTokens.length > 0 ? [...inferredColorTokens] : undefined,
       softBiasOnly: softColorBiasOnly,
       explicitFilters: [...explicitColorsForRelevance],
       effectiveDesired: [...desiredColorsForRelevance],
@@ -1834,6 +1957,10 @@ export async function searchByImageWithSimilarity(
         : 0;
 
     const colorSim = runColor ? (colorSimRawById.get(idStr) ?? 0) : 0;
+    const blipColorConflict = blipCatalogColorConflictFactor(blipSignal, hit);
+    blipColorConflictFactorById.set(idStr, Math.round(blipColorConflict * 1000) / 1000);
+    const colorFusionRaw = Math.max(0, Math.min(1, colorSim * blipColorConflict));
+    colorSimFusionRawById.set(idStr, Math.round(colorFusionRaw * 1000) / 1000);
     const styleSim = runStyle
       ? cosineSimilarity01(styleQueryEmbedding ?? undefined, hit._source?.embedding_style)
       : 0;
@@ -1846,7 +1973,7 @@ export async function searchByImageWithSimilarity(
     const colorCompliance = comp?.colorCompliance ?? 0;
     const styleCompliance = comp?.styleCompliance ?? 0;
     const colorSimEff = blendSoftSimilarityWithCompliance({
-      rawSim: colorSim,
+      rawSim: colorFusionRaw,
       compliance: colorCompliance,
       hasIntent: hasColorIntentForComposite,
       strictIntent: hasExplicitColorIntent,
@@ -1879,6 +2006,13 @@ export async function searchByImageWithSimilarity(
     const norm = (raw - compositeMin) / compositeRange;
     imageCompositeNormById.set(id, Math.max(0, Math.min(1, norm)));
   }
+
+  const compositeNormValues = Array.from(imageCompositeNormById.values());
+  const batchCompositeInfluence = computeBatchCompositeInfluence(
+    imageSearchCompositeInfluenceBase(),
+    baseCandidates.length,
+    compositeNormValues,
+  );
 
   // Adaptive CLIP floor: derive from batch 10th-percentile so the stretch
   // function adapts to each query's similarity distribution.
@@ -1924,12 +2058,13 @@ export async function searchByImageWithSimilarity(
       hasLengthIntent: hasLengthIntentForHit,
       hasAudienceIntent: hasAudienceIntentForRelevance,
       intraFamilyPenalty: comp.intraFamilyPenalty ?? 0,
-      colorSimRaw: colorSimRawById.get(idStr) ?? 0,
+      colorSimRaw: colorSimFusionRawById.get(idStr) ?? colorSimRawById.get(idStr) ?? 0,
       styleSimRaw: styleSimRawById.get(idStr) ?? 0,
       patternSimRaw: patternSimById.get(idStr) ?? 0,
       adaptiveClipFloor,
       imageCompositeScore01: imageCompositeNormById.get(idStr) ?? 0,
       blipMatchScore: blipAlignById.get(idStr) ?? 0,
+      compositeInfluence: batchCompositeInfluence,
     });
     comp.finalRelevance01 = explicitResult.score;
     fusedVisualById.set(idStr, Math.round(explicitResult.fusedVisual * 1000) / 1000);
@@ -2285,6 +2420,7 @@ export async function searchByImageWithSimilarity(
               // ── Multi-signal reranking ───────────────────────────
               taxonomyMatch,
               blipAlignment: blipAlignById.get(idStr) ?? 0,
+              blipColorConflictFactor: blipColorConflictFactorById.get(idStr) ?? 1,
               imageCompositeScore,
               imageCompositeScore01,
 
@@ -2307,9 +2443,13 @@ export async function searchByImageWithSimilarity(
               desiredColorsEffective: desiredColorsForRelevance,
               colorIntentSource: hasExplicitColorIntent
                 ? "explicit"
-                : hasCropColorSignal
-                  ? "crop"
-                  : "none",
+                : inferredColorTokens.length > 0 && hasCropColorSignal
+                  ? "crop+inferred"
+                  : inferredColorTokens.length > 0
+                    ? "inferred"
+                    : hasCropColorSignal
+                      ? "crop"
+                      : "none",
               desiredStyle: desiredStyleForRelevance,
               desiredSleeve: desiredSleeveForRelevance,
               desiredLength: (compliance as any).hasLengthIntent ? (desiredLengthForRelevance ?? undefined) : undefined,
@@ -2496,6 +2636,7 @@ export async function searchByImageWithSimilarity(
       total_related: related.length,
       image_search_pipeline_degraded: imageSearchPipelineDegraded,
       blip_signal_applied: Boolean(blipSignal && (blipSignal.confidence ?? 0) > 0),
+      batch_composite_influence: batchCompositeInfluence,
       below_relevance_threshold: belowRelevanceThreshold,
       threshold_relaxed: thresholdRelaxed,
       final_accept_min: config.search.finalAcceptMinImage,

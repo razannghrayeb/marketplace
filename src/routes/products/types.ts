@@ -43,6 +43,12 @@ export interface SearchFilters {
   length?: string;
   gender?: string;
   pattern?: string;
+  /** K-means dominant colors on garment crop (image analysis). */
+  cropDominantColors?: string[];
+  /** Caption / vision primary color token merged with crop for soft tier matching. */
+  inferredPrimaryColor?: string | null;
+  /** Per-slot caption colors (e.g. topColor, jeansColor). */
+  inferredColorsByItem?: Record<string, string | null>;
 }
 
 // ============================================================================
@@ -101,6 +107,9 @@ export interface ImageSearchParams extends SearchParams {
     occasion?: string | null;
     confidence?: number;
   };
+  /** Merged with crop k-means into soft color tier intent (Shop-the-Look / caption). */
+  inferredPrimaryColor?: string | null;
+  inferredColorsByItem?: Record<string, string | null>;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -194,6 +203,8 @@ export interface ProductResult {
     // ── Multi-signal reranking ───────────────────────────────
     taxonomyMatch?: number;
     blipAlignment?: number;
+    /** BLIP primary vs catalog palette dampening on color embedding (1 = no dampening). */
+    blipColorConflictFactor?: number;
     imageCompositeScore?: number;
     imageCompositeScore01?: number;
 
@@ -216,7 +227,7 @@ export interface ProductResult {
     desiredColors?: string[];
     desiredColorsExplicit?: string[];
     desiredColorsEffective?: string[];
-    colorIntentSource?: "explicit" | "crop" | "none";
+    colorIntentSource?: "explicit" | "crop" | "inferred" | "crop+inferred" | "none";
     desiredStyle?: string;
     desiredSleeve?: string;
     desiredLength?: string;
@@ -286,6 +297,8 @@ export interface ImageSearchRelevanceIntentDebug {
   color: {
     gatesFinalRelevance01: boolean;
     cropDominantTokens?: string[];
+    /** Caption / vision inferred tokens merged into tier matching with crop. */
+    inferredTokens?: string[];
     softBiasOnly: boolean;
     explicitFilters: string[];
     effectiveDesired: string[];
@@ -314,6 +327,8 @@ export interface SearchResultWithRelated {
     /** Image kNN: returned best available neighbors after visual/relevance gates would have produced zero results. */
     image_search_pipeline_degraded?: boolean;
     blip_signal_applied?: boolean;
+    /** Effective weight of batch-normalized composite in `finalRelevance01` (adaptive by spread & pool size). */
+    batch_composite_influence?: number;
     /** Image search: how style/color/type intent was built; see `ImageSearchRelevanceIntentDebug`. */
     relevance_intent?: ImageSearchRelevanceIntentDebug;
     /** OpenSearch kNN field used for retrieval (`embedding` | `embedding_garment`). */
