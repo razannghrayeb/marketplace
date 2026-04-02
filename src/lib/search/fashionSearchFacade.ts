@@ -87,6 +87,8 @@ export interface UnifiedImageSearchParams {
     occasion?: string | null;
     confidence?: number;
   };
+  inferredPrimaryColor?: string | null;
+  inferredColorsByItem?: Record<string, string | null>;
 }
 
 function filterByFinalRelevance<T extends { finalRelevance01?: number }>(
@@ -298,6 +300,8 @@ export async function searchImage(
     relaxThresholdWhenEmpty,
     softProductTypeHints,
     blipSignal,
+    inferredPrimaryColor,
+    inferredColorsByItem,
   } = params;
 
   if ((!imageEmbedding || imageEmbedding.length === 0) && !imageBuffer) {
@@ -394,6 +398,8 @@ export async function searchImage(
     relaxThresholdWhenEmpty: relaxThresholdWhenEmpty ?? false,
     softProductTypeHints,
     blipSignal,
+    inferredPrimaryColor,
+    inferredColorsByItem,
   } as any);
 
   const metaAny = res.meta as Record<string, unknown> | undefined;

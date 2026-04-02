@@ -57,6 +57,8 @@ export async function searchByImageWithSimilarity(
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty,
     blipSignal,
+    inferredPrimaryColor,
+    inferredColorsByItem,
   } = params;
 
   // Phase 2 alignment: route through the unified canonical facade.
@@ -74,6 +76,8 @@ export async function searchByImageWithSimilarity(
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty,
     blipSignal,
+    inferredPrimaryColor,
+    inferredColorsByItem,
   }) as Promise<SearchResultWithRelated>;
 }
 
