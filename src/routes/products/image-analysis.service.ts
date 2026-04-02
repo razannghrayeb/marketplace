@@ -1556,41 +1556,16 @@ export class ImageAnalysisService {
       const detectionLength = inferLengthIntentFromDetection(detection, imageHeight);
       if (detectionLength) (filters as any).length = detectionLength;
 
-      // Prefer caption color when BLIP named this garment (e.g. "blue velvet top"); crop histograms
-      // often misread navy/velvet/shadows as black. Use per-crop dominant only when caption is silent.
-      let inferredColorForDetection = captionColorForProductCategory(
-        categoryMapping.productCategory,
-        captionColors,
-      );
-      let inferredColorSource: "slot" | "dominant" | "blip_global" | "none" =
-        inferredColorForDetection ? "slot" : "none";
-      const shouldInferColorForDetection =
-        imageInferDominantColorEnv() &&
-        (detection.confidence ?? 0) >= imageMinColorConfidenceEnv() &&
-        (detection.area_ratio ?? 0) >= imageMinColorAreaRatioEnv();
-
-      if (!inferredColorForDetection && shouldInferColorForDetection) {
-        inferredColorForDetection = await extractDominantColorNames(clipBuffer, { maxColors: 1, minShare: 0.12 }).then(
-          (c) => c[0] ?? null,
-        );
-        if (inferredColorForDetection) inferredColorSource = "dominant";
-      }
-
-      if (
-        !inferredColorForDetection &&
-        useBlipSoftHints &&
-        blipStructured.colors.length > 0 &&
-        !requiresSlotSpecificColor(categoryMapping.productCategory)
-      ) {
-        inferredColorForDetection = blipStructured.colors[0];
-        if (inferredColorForDetection) inferredColorSource = "blip_global";
-      }
-      // Keep per-detection intent crop-local: do not fall back to full-frame dominant color.
-      if (inferredColorForDetection) {
-        filters.softColor = inferredColorForDetection;
-        filters.softColorStrict =
-          inferredColorSource === "slot" && useStrongBlipSoftHints;
-      }
+      // Extract dominant colors from the garment crop pixels via k-means + LAB.
+      // clipBuffer is the padded ROI of the detected garment — already isolated
+      // from background/other items. These colors feed into soft color compliance
+      // (rerankScore boost) but do not hard-gate final relevance.
+      try {
+        const cropColors = await extractDominantColorNames(clipBuffer, { maxColors: 2, minShare: 0.15 });
+        if (cropColors.length > 0) {
+          (filters as any).cropDominantColors = cropColors;
+        }
+      } catch { /* non-critical: color embedding channel still works */ }
       let predictedCategoryAisles: string[] | undefined;
       const noisyCat = isNoisyCategoryForAutoHardCategory(categoryMapping, label);
       const baseHardAuto =
@@ -1647,7 +1622,6 @@ export class ImageAnalysisService {
           obs.detectionCaptionAccepted += 1;
           detectionBlipSignal = buildBlipSignal(detStruct, detConfidence);
           if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
-          if (!filters.softColor && detStruct.colors.length > 0) filters.softColor = detStruct.colors[0];
           if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
           if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
           const mergedTypes = [...new Set([...(filters.productTypes ?? []), ...detStruct.productTypeHints])];
@@ -1680,7 +1654,7 @@ export class ImageAnalysisService {
         blipSignal: detectionBlipSignal,
       });
 
-      // If BLIP-derived audience/style/color filters are too strict and remove all hits,
+      // If BLIP-derived audience/style filters are too strict and remove all hits,
       // retry once without those attribute filters (but keep category/productTypes).
       if (
         similarResult.results.length === 0 &&
@@ -1688,18 +1662,14 @@ export class ImageAnalysisService {
           filters.gender ||
           filters.ageGroup ||
           (filters as any).style ||
-          (filters as any).color ||
-          (filters as any).softStyle ||
-          (filters as any).softColor
+          (filters as any).softStyle
         )
       ) {
         const filtersRetry = { ...filters } as typeof filters;
         delete (filtersRetry as any).gender;
         delete (filtersRetry as any).ageGroup;
         delete (filtersRetry as any).style;
-        delete (filtersRetry as any).color;
         delete (filtersRetry as any).softStyle;
-        delete (filtersRetry as any).softColor;
         similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
           imageEmbeddingGarment:
@@ -1793,7 +1763,6 @@ export class ImageAnalysisService {
           gender: filters.gender,
           ageGroup: filters.ageGroup,
           softStyle: filters.softStyle,
-          softColor: filters.softColor,
           length: (filters as any).length,
         },
       } as DetectionSimilarProducts;
@@ -2208,39 +2177,16 @@ export class ImageAnalysisService {
         const detectionLength = inferLengthIntentFromDetection(detection, imageHeight);
         if (detectionLength) (filters as any).length = detectionLength;
 
-        let inferredColorForDetection = captionColorForProductCategory(
-          categoryMapping.productCategory,
-          captionColors,
-        );
-        let inferredColorSource: "slot" | "dominant" | "blip_global" | "none" =
-          inferredColorForDetection ? "slot" : "none";
-        const shouldInferColorForDetection =
-          imageInferDominantColorEnv() &&
-          (detection.confidence ?? 0) >= imageMinColorConfidenceEnv() &&
-          (detection.area_ratio ?? 0) >= imageMinColorAreaRatioEnv();
-
-        if (!inferredColorForDetection && shouldInferColorForDetection) {
-          inferredColorForDetection = await extractDominantColorNames(clipBuffer, { maxColors: 1, minShare: 0.12 }).then(
-            (c) => c[0] ?? null,
-          );
-          if (inferredColorForDetection) inferredColorSource = "dominant";
-        }
-
-        if (
-          !inferredColorForDetection &&
-          useBlipSoftHints &&
-          blipStructured.colors.length > 0 &&
-          !requiresSlotSpecificColor(categoryMapping.productCategory)
-        ) {
-          inferredColorForDetection = blipStructured.colors[0];
-          if (inferredColorForDetection) inferredColorSource = "blip_global";
-        }
-        // Keep per-detection intent crop-local: do not fall back to full-frame dominant color.
-        if (inferredColorForDetection) {
-          filters.softColor = inferredColorForDetection;
-          filters.softColorStrict =
-            inferredColorSource === "slot" && useStrongBlipSoftHints;
-        }
+        // Extract dominant colors from the garment crop pixels via k-means + LAB.
+        // clipBuffer is the padded ROI of the detected garment — already isolated
+        // from background/other items. These colors feed into soft color compliance
+        // (rerankScore boost) but do not hard-gate final relevance.
+        try {
+          const cropColors = await extractDominantColorNames(clipBuffer, { maxColors: 2, minShare: 0.15 });
+          if (cropColors.length > 0) {
+            (filters as any).cropDominantColors = cropColors;
+          }
+        } catch { /* non-critical: color embedding channel still works */ }
         let predictedCategoryAisles: string[] | undefined;
         if (options.filterByDetectedCategory !== false) {
           const softCategories = shouldUseAlternatives(categoryMapping)
@@ -2281,7 +2227,6 @@ export class ImageAnalysisService {
             obs.detectionCaptionAccepted += 1;
             detectionBlipSignal = buildBlipSignal(detStruct, detConfidence);
             if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
-            if (!filters.softColor && detStruct.colors.length > 0) filters.softColor = detStruct.colors[0];
             if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
             if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
             const mergedTypes = [...new Set([...(filters.productTypes ?? []), ...detStruct.productTypeHints])];
@@ -2320,18 +2265,14 @@ export class ImageAnalysisService {
             filters.gender ||
             filters.ageGroup ||
             (filters as any).style ||
-            (filters as any).color ||
-            (filters as any).softStyle ||
-            (filters as any).softColor
+            (filters as any).softStyle
           )
         ) {
           const filtersRetry = { ...filters } as typeof filters;
           delete (filtersRetry as any).gender;
           delete (filtersRetry as any).ageGroup;
           delete (filtersRetry as any).style;
-          delete (filtersRetry as any).color;
           delete (filtersRetry as any).softStyle;
-          delete (filtersRetry as any).softColor;
           similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalEmbedding,
             imageEmbeddingGarment:
@@ -2420,7 +2361,6 @@ export class ImageAnalysisService {
               gender: filters.gender,
               ageGroup: filters.ageGroup,
               softStyle: filters.softStyle,
-              softColor: filters.softColor,
               length: (filters as any).length,
             },
             source: isUserDefined ? "user_defined" : "yolo",

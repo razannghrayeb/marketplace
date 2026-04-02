@@ -79,6 +79,9 @@ export interface SearchFilters {
   length?: string;
   gender?: string;
   pattern?: string;
+  /** Dominant colors extracted from garment crop via k-means pixel analysis.
+   *  Used for soft color compliance ranking — not hard OS filtering. */
+  cropDominantColors?: string[];
 }
 
 export interface SearchParams {
@@ -417,10 +420,18 @@ type ScoreVersion = "v1" | "v2";
 function normalizeTo01ByVersion(rawScore: number, version: ScoreVersion): number {
   if (!Number.isFinite(rawScore)) return 0;
   if (version === "v1") {
+    // Legacy OpenSearch returns `1 + cosθ` in [0,2]; convert to [0,1].
     const s01 = rawScore / 2;
     return Math.max(0, Math.min(1, 2 * s01 - 1));
   }
-  return Math.max(0, Math.min(1, (rawScore + 1) / 2));
+  // v2: raw cosine from cosineSimilarityRaw is already in [-1,1].
+  // For CLIP L2-normalized vectors, values are typically in [0,1].
+  // If the score is > 1 it's a legacy OpenSearch `1+cos` score; convert it.
+  if (rawScore > 1.001) {
+    return Math.max(0, Math.min(1, rawScore / 2));
+  }
+  // Raw cosine already in [0,1] for L2-normalized CLIP vectors.
+  return Math.max(0, Math.min(1, rawScore));
 }
 
 function dualKnnCategoryAlpha(category: string): number {
@@ -455,7 +466,7 @@ function computeExplicitFinalRelevance(params: {
 }): number {
   const simVisual = Math.max(0, Math.min(1, params.simVisual));
 
-  if (params.crossFamily) return Math.max(0, simVisual * 0.08);
+  if (params.crossFamily) return Math.max(0, simVisual * 0.12);
 
   const crossSoft = Math.max(0, 1 - params.crossFamilyPenalty * 0.75);
 
@@ -467,7 +478,7 @@ function computeExplicitFinalRelevance(params: {
         : intra >= 0.25
           ? 0.88
           : 1
-      : 0.18
+      : 0.55
     : 1;
 
   // ── Multi-channel visual similarity ──────────────────────────────
@@ -483,22 +494,21 @@ function computeExplicitFinalRelevance(params: {
   // small CLIP differences produce meaningful relevance gaps.
   //
   // CLIP cosine for fashion products is compressed into a narrow band:
-  //   normalised 0.70-0.78 = random products (noise)
-  //   normalised 0.78-0.83 = same broad category, different item
-  //   normalised 0.83-0.88 = similar type, different design
-  //   normalised 0.88-0.93 = visually similar
-  //   normalised 0.93+     = near-identical
-  // Floor ~0.70: Fashion-CLIP + merchandise + BLIP effective scores often sit in
-  // 0.72–0.82; 0.78+ made clipStretched=0 for many valid hits, driving finalRelevance
-  // below SEARCH_FINAL_ACCEPT_MIN_IMAGE so the pipeline floored *every* row to the same min.
+  //   normalised 0.65-0.72 = random products (noise)
+  //   normalised 0.72-0.78 = same broad category, different item
+  //   normalised 0.78-0.85 = similar type, different design
+  //   normalised 0.85-0.92 = visually similar
+  //   normalised 0.92+     = near-identical
+  // Floor at 0.68 (lowered from 0.78) so genuinely similar products
+  // in the 0.75-0.88 range are not compressed to near-zero.
   const stretchSim = (raw: number, floor: number): number => {
     if (raw <= floor) return 0;
     return Math.min(1, (raw - floor) / (1 - floor));
   };
-  const clipStretched = stretchSim(simVisual, 0.70);
-  const colorStretched = stretchSim(colorSimRaw, 0.55);
-  const styleStretched = stretchSim(styleSimRaw, 0.55);
-  const patternStretched = stretchSim(patternSimRaw, 0.55);
+  const clipStretched = stretchSim(simVisual, 0.68);
+  const colorStretched = stretchSim(colorSimRaw, 0.52);
+  const styleStretched = stretchSim(styleSimRaw, 0.52);
+  const patternStretched = stretchSim(patternSimRaw, 0.52);
 
   // Fused visual score: CLIP is authoritative, sub-channels refine.
   // Sub-channels are gated by clipStretched: when CLIP says "not similar"
@@ -579,9 +589,9 @@ function computeExplicitFinalRelevance(params: {
   // Use fusedVisual (multi-channel) instead of raw CLIP so that
   // products with high global cosine but poor color/style/pattern
   // similarity are differentiated from truly similar matches.
-  // With the raised stretch floors, fusedVisual >= 0.60 means genuinely
+  // With a stretch floor of 0.68, fusedVisual >= 0.40 means genuinely
   // similar products — safe to weight visuals higher.
-  const visualWeight = fusedVisual >= 0.60 ? 0.82 : 0.72;
+  const visualWeight = fusedVisual >= 0.40 ? 0.82 : 0.72;
   const complianceWeight = 1 - visualWeight;
 
   const raw =
@@ -1591,10 +1601,19 @@ export async function searchByImageWithSimilarity(
       : filtersRecord.color
         ? [String(filtersRecord.color).toLowerCase()]
         : [];
-  const softColorsForRelevance: string[] = [];
-  const allColorsForRelevance = [...explicitColorsForRelevance];
+
+  // Crop-dominant colors: extracted from garment pixels via k-means.
+  // These participate in color compliance scoring (rerankScore + colorMatch)
+  // but do NOT hard-gate finalRelevance01 — pixel analysis can misread
+  // shadows/backgrounds, so it's a ranking signal, not an acceptance gate.
+  const cropDominantColorsRaw = Array.isArray(filtersRecord.cropDominantColors)
+    ? filtersRecord.cropDominantColors.map((c: unknown) => String(c).toLowerCase().trim()).filter(Boolean)
+    : [];
+  const hasCropColorSignal = cropDominantColorsRaw.length > 0;
   const hasExplicitColorIntent = explicitColorsForRelevance.length > 0;
-  const hasStrongSoftColorIntent = false;
+  const allColorsForRelevance = hasExplicitColorIntent
+    ? [...explicitColorsForRelevance]
+    : [...cropDominantColorsRaw];
   const desiredColorsForRelevance = [
     ...new Set(
       allColorsForRelevance.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
@@ -1629,7 +1648,9 @@ export async function searchByImageWithSimilarity(
       : null;
 
   const hasColorIntentForFinal = hasExplicitColorIntent;
-  const softColorBiasOnly = false;
+  // Crop-dominant colors affect reranking but must NOT gate final relevance
+  // (pixel k-means can misread shadows/packaging as garment color).
+  const softColorBiasOnly = !hasExplicitColorIntent && hasCropColorSignal;
 
   /**
    * When the user did not narrow the search (category / productTypes / text / explicit color),
@@ -1879,14 +1900,16 @@ export async function searchByImageWithSimilarity(
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
     const idb = String(b._source.product_id);
+    // Primary: finalRelevance01 descending (incorporates visual + metadata signals).
+    const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
+    const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
+    if (Math.abs(fb - fa) > 1e-6) return fb - fa;
+    // Tie-break: for broad searches, use catalog-bound visual; else composite.
     if (imageSearchVisualPrimaryRanking) {
       const va = rankedVisualForSort(a);
       const vb = rankedVisualForSort(b);
       if (Math.abs(vb - va) > 1e-6) return vb - va;
     }
-    const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
-    const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
-    if (Math.abs(fb - fa) > 1e-8) return fb - fa;
     const ia = imageCompositeById.get(ida) ?? 0;
     const ib = imageCompositeById.get(idb) ?? 0;
     if (Math.abs(ib - ia) > 1e-8) return ib - ia;
@@ -1992,9 +2015,9 @@ export async function searchByImageWithSimilarity(
       const comp = complianceById.get(idStr);
       if (comp) {
         const v = visualSimFromHit(h);
-        // Keep degraded-path fallback tied to actual visual similarity only.
-        // Do not floor to acceptMinImage; that flattens all products to one score.
-        comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, v));
+        // Use visual similarity as rescue signal instead of flat acceptMinImage.
+        // This preserves relative ordering among rescued candidates.
+        comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, v * 0.9));
         comp.osSimilarity01 = Math.max(comp.osSimilarity01 ?? 0, v);
       }
     }
@@ -2011,9 +2034,25 @@ export async function searchByImageWithSimilarity(
   );
 
   if (rankedHits.length === 0 && visualGatedHits.length > 0) {
-    // Strict behavior: if nothing meets final relevance gate, return empty.
-    // Avoid force-keeping weak hits by writing a synthetic floor score.
     imageSearchPipelineDegraded = true;
+    // Use visual similarity as the rescue signal instead of a flat minimum.
+    // This preserves relative ordering so that genuinely similar products
+    // rank above dissimilar ones even in the degraded path.
+    for (const h of visualGatedHits) {
+      const comp = complianceById.get(String(h._source.product_id));
+      if (comp) {
+        const v = visualSimFromHit(h);
+        const rescueScore = Math.max(comp.finalRelevance01 ?? 0, v * 0.85);
+        comp.finalRelevance01 = Math.max(rescueScore, effectiveFinalAcceptMin);
+      }
+    }
+    rankedHits = [...visualGatedHits]
+      .sort((a: any, b: any) => {
+        const fa = complianceById.get(String(a._source.product_id))?.finalRelevance01 ?? 0;
+        const fb = complianceById.get(String(b._source.product_id))?.finalRelevance01 ?? 0;
+        return fb - fa;
+      })
+      .slice(0, Math.max(limit, 20));
   }
 
   // Keep a small high-visual slice even when metadata-based relevance is noisy.
@@ -2021,7 +2060,7 @@ export async function searchByImageWithSimilarity(
   // dropped solely due to weak/missing type/color fields.
   const rescueMinSim = imageVisualRescueMinSimilarity();
   const rescueMaxCount = imageVisualRescueMaxCount();
-  if (rescueMaxCount > 0 && rankedHits.length > 0) {
+  if (rescueMaxCount > 0) {
     const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
     const rescueAudienceMin = imageVisualRescueAudienceMin();
     const rescueTypeMinIntent = imageVisualRescueTypeMinWhenIntent();
@@ -2233,24 +2272,30 @@ export async function searchByImageWithSimilarity(
   if (results.length === 0 && resultsBeforeFinalRelevanceFilter.length > 0) {
     imageSearchPipelineDegraded = true;
     results = resultsBeforeFinalRelevanceFilter
-      .map((p: any) => ({
-        ...p,
-        finalRelevance01: Math.max(
-          typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : 0,
-          effectiveFinalAcceptMin,
-        ),
-      }))
+      .map((p: any) => {
+        const currentRel = typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : 0;
+        const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+        return {
+          ...p,
+          finalRelevance01: Math.max(currentRel, sim * 0.85, effectiveFinalAcceptMin),
+        };
+      })
+      .sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0))
       .slice(0, limit) as ProductResult[];
   }
-  if (imageSearchVisualPrimaryRanking) {
-    results.sort((a: any, b: any) => {
+  // Always sort by finalRelevance01 descending as the primary signal.
+  // For visual-primary (broad) searches, use similarity_score as a tie-breaker
+  // only when finalRelevance01 values are very close.
+  results.sort((a: any, b: any) => {
+    const fa = a.finalRelevance01 ?? 0;
+    const fb = b.finalRelevance01 ?? 0;
+    if (Math.abs(fb - fa) > 1e-6) return fb - fa;
+    if (imageSearchVisualPrimaryRanking) {
       const vs = (b.similarity_score ?? 0) - (a.similarity_score ?? 0);
       if (Math.abs(vs) > 1e-6) return vs;
-      return (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0);
-    });
-  } else {
-    results.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
-  }
+    }
+    return 0;
+  });
 
   const dedupedResults = dedupeImageSearchResults(results as any) as ProductResult[];
   const countAfterDedupe = dedupedResults.length;
