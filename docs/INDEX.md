@@ -117,6 +117,13 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 
 ## 🔄 Recent Changes
 
+**April 2026:** Documented image-ranking hardening in **`embeddings-and-search-pipelines.md`**:
+- unified `v1`/`v2` score normalization via vector score-version tags
+- calibrated dual-kNN blend (replacing optimistic `max`)
+- explicit stage-8 relevance behavior + intent-aware rescue
+- BLIP consistency suppression + bounded alignment boost + cache/env tuning
+- optional external BLIP service (`BLIP_API_URL`) deployment notes in `deploy-cloud-run.md`
+
 **March 2026:** Added **`embeddings-and-search-pipelines.md`** — canonical map of OpenSearch vector fields, ingestion vs image/text query pipelines, and env vars.
 
 **Earlier consolidation:** legacy standalone search guides were merged into `SEARCH_API_COMPLETE.md`. **Current docs hub:** `FEATURES.md`, `embeddings-and-search-pipelines.md`, `IMPLEMENTATION_STATUS.md`.
@@ -132,7 +139,7 @@ This file. Master navigation hub for all documentation.
 User- and integrator-oriented map of **Discover, search, complete style, wardrobe, try-on**, etc., with **correct path prefixes** (`/search` vs `/products` vs `/api/...`) and links to deeper docs.
 
 ### IMPLEMENTATION_STATUS.md
-**Latest:** March 2026 (periodic doc sync; verify routes in `src/server.ts`)
+**Latest:** April 2026 (periodic doc sync; verify routes in `src/server.ts`)
 Status of all 14 features, 5 critical bugs, and gaps. Authoritative source for "what's done/missing."
 
 ### architecture.md
@@ -218,5 +225,5 @@ Documentation is considered complete when:
 
 ---
 
-**Last Updated:** March 2026
-**Docs Status:** Search pipeline architecture documented in **`embeddings-and-search-pipelines.md`**
+**Last Updated:** April 2026
+**Docs Status:** Search pipeline architecture + April ranking hardening documented in **`embeddings-and-search-pipelines.md`**

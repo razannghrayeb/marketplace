@@ -37,6 +37,8 @@ export interface SearchFilters {
   softStyle?: string;
   /** Sleeve intent (short | long | sleeveless) used by reranking. */
   sleeve?: string;
+  /** Length intent (mini | midi | maxi | long) used by reranking. */
+  length?: string;
   gender?: string;
   pattern?: string;
 }
@@ -168,13 +170,16 @@ export interface ProductResult {
     matchedColor?: string;
     colorTier?: "exact" | "family" | "bucket" | "none";
     audienceCompliance?: number;
+    lengthCompliance?: number;
     crossFamilyPenalty?: number;
     hasTypeIntent?: boolean;
     hasColorIntent?: boolean;
+    hasLengthIntent?: boolean;
     typeGateFactor?: number;
     hardBlocked?: boolean;
     desiredProductTypes?: string[];
     desiredColors?: string[];
+    desiredLength?: string;
     colorMode?: "any" | "all";
     finalRelevance01?: number;
   };

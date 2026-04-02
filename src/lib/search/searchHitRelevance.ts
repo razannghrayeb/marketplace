@@ -214,7 +214,8 @@ export function scoreAudienceCompliance(
     } else if (wantAge === "baby" && docAge === "kids") {
       score *= 0.85;
     } else {
-      score *= 0.38;
+      // Hard contradiction: explicit indexed age group disagrees with requested age group.
+      score *= 0;
     }
   }
 
@@ -235,7 +236,8 @@ export function scoreAudienceCompliance(
     } else if (docG === "unisex" || docG === wantG) {
       score *= 1;
     } else {
-      score *= 0.35;
+      // Hard contradiction: explicit indexed audience gender disagrees with request.
+      score *= 0;
     }
   }
 
@@ -569,6 +571,23 @@ export function computeHitRelevance(
     }
   }
 
+  // Guardrail: if catalog color explicitly contradicts desired color, do not allow
+  // image-palette/text color extraction to claim an "exact" match.
+  const catalogColorRaw = typeof hit?._source?.color === "string" ? String(hit._source.color).toLowerCase() : "";
+  const catalogColorNorm = catalogColorRaw ? normalizeColorToken(catalogColorRaw) ?? catalogColorRaw : "";
+  if (desiredColorsTier.length > 0 && catalogColorNorm) {
+    const tCatalog = tieredColorListCompliance(desiredColorsTier, [catalogColorNorm], rerankColorMode);
+    if (tCatalog.compliance <= 0) {
+      // Hard safety: when catalog color contradicts desired color, never allow
+      // inferred palette/text signals to look like a strong color match.
+      colorCompliance = 0;
+      if (colorTier === "exact") colorTier = "none";
+      if (matchedColor && (normalizeColorToken(matchedColor) ?? matchedColor) !== catalogColorNorm) {
+        matchedColor = catalogColorNorm;
+      }
+    }
+  }
+
   let crossFamilyPenalty =
     desiredProductTypes.length > 0
       ? scoreCrossFamilyTypePenalty(desiredProductTypes, productTypes)
@@ -583,10 +602,16 @@ export function computeHitRelevance(
 
   let styleCompliance = 0;
   if (normalizedDesiredStyle) {
-    if (hitStyle === normalizedDesiredStyle) styleCompliance = 1;
-    else if (hitStyle && (hitStyle.includes(normalizedDesiredStyle) || normalizedDesiredStyle.includes(hitStyle))) styleCompliance = 0.7;
-    else if (title.includes(normalizedDesiredStyle)) styleCompliance = 0.6;
-    else styleCompliance = 0;
+    if (hitStyle) {
+      // If explicit indexed style exists, treat mismatch as hard contradiction.
+      if (hitStyle === normalizedDesiredStyle) styleCompliance = 1;
+      else if (hitStyle.includes(normalizedDesiredStyle) || normalizedDesiredStyle.includes(hitStyle)) styleCompliance = 0.7;
+      else styleCompliance = 0;
+    } else if (title.includes(normalizedDesiredStyle)) {
+      styleCompliance = 0.6;
+    } else {
+      styleCompliance = 0;
+    }
   }
 
   let sleeveCompliance = 0;
@@ -600,6 +625,9 @@ export function computeHitRelevance(
       sleeveCompliance = 0.72;
     } else if (observed === wantedSleeve) {
       sleeveCompliance = 1;
+    } else if (docSleeve) {
+      // Hard contradiction: explicit indexed sleeve disagrees with requested sleeve.
+      sleeveCompliance = 0;
     } else {
       sleeveCompliance = 0.18;
     }
@@ -817,7 +845,7 @@ export function computeHitRelevance(
     penaltyComponent,
     primaryColor,
     hasTypeIntent,
-    hasColorIntent,
+    hasColorIntent: hasColorIntentForFinalRelevance,
     typeGateFactor,
     hardBlocked: hardBlocked || negationBlocked,
     lexicalScoreDistinct,

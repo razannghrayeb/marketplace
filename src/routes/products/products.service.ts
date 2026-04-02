@@ -74,6 +74,8 @@ export interface SearchFilters {
   softStyle?: string;
   /** Sleeve intent (short | long | sleeveless) for ranking. */
   sleeve?: string;
+  /** Length intent (mini | midi | maxi | long) for ranking. */
+  length?: string;
   gender?: string;
   pattern?: string;
 }
@@ -433,6 +435,7 @@ function computeExplicitFinalRelevance(params: {
   catSoft: number;
   colorMatch: number;
   styleMatch: number;
+  lengthMatch: number;
   crossFamily: boolean;
   isNearDuplicate: boolean;
 }): number {
@@ -443,9 +446,58 @@ function computeExplicitFinalRelevance(params: {
     ? 1
     : Math.max(
         0,
-        Math.min(1, 0.5 * params.catSoft + 0.3 * params.colorMatch + 0.2 * params.styleMatch),
+        Math.min(
+          1,
+          0.42 * params.catSoft +
+            0.26 * params.colorMatch +
+            0.2 * params.styleMatch +
+            0.12 * params.lengthMatch,
+        ),
       );
   return Math.max(0, Math.min(1, 0.7 * simVisual + 0.3 * compliance));
+}
+
+function normalizeLengthToken(raw: unknown): "mini" | "midi" | "maxi" | "long" | null {
+  const s = String(raw ?? "").toLowerCase().trim();
+  if (!s) return null;
+  if (/\bmini\b/.test(s)) return "mini";
+  if (/\bmidi\b/.test(s)) return "midi";
+  if (/\bmaxi\b/.test(s)) return "maxi";
+  if (/\blong\b/.test(s)) return "long";
+  return null;
+}
+
+function inferDocLengthToken(hit: any): {
+  value: "mini" | "midi" | "maxi" | "long" | null;
+  explicit: boolean;
+} {
+  const attr = normalizeLengthToken(hit?._source?.attr_length);
+  if (attr) return { value: attr, explicit: true };
+  const title = String(hit?._source?.title ?? "").toLowerCase();
+  const desc = String(hit?._source?.description ?? "").toLowerCase();
+  const blob = `${title} ${desc}`;
+  if (/\bmini\b/.test(blob)) return { value: "mini", explicit: false };
+  if (/\bmidi\b/.test(blob)) return { value: "midi", explicit: false };
+  if (/\bmaxi\b/.test(blob)) return { value: "maxi", explicit: false };
+  if (/\blong\b/.test(blob)) return { value: "long", explicit: false };
+  return { value: null, explicit: false };
+}
+
+function lengthComplianceScore(
+  desired: "mini" | "midi" | "maxi" | "long" | null,
+  observed: "mini" | "midi" | "maxi" | "long" | null,
+  explicitObserved: boolean,
+): number {
+  if (!desired) return 0;
+  if (!observed) return 0.72;
+  if (desired === observed) return 1;
+  if (explicitObserved) return 0;
+  if ((desired === "long" && (observed === "midi" || observed === "maxi")) || (observed === "long" && (desired === "midi" || desired === "maxi"))) {
+    return 0.86;
+  }
+  if ((desired === "mini" && observed === "midi") || (desired === "midi" && observed === "mini")) return 0.38;
+  if ((desired === "maxi" && observed === "midi") || (desired === "midi" && observed === "maxi")) return 0.52;
+  return 0.18;
 }
 
 /** Parallel kNN on `embedding` + `embedding_garment` (opt-in — requires both fields populated in the index). */
@@ -1371,6 +1423,10 @@ export async function searchByImageWithSimilarity(
         : undefined;
   const desiredSleeveForRelevance =
     typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
+  const desiredLengthForRelevance =
+    typeof filtersRecord.length === "string"
+      ? normalizeLengthToken(String(filtersRecord.length).toLowerCase().trim())
+      : null;
 
   const softColorBiasOnly = !hasExplicitColorIntent && softColorsForRelevance.length > 0;
 
@@ -1419,15 +1475,23 @@ export async function searchByImageWithSimilarity(
     const { primaryColor, ...comp } = rel;
     const typeMatch = (comp.exactTypeScore ?? 0) >= 1 || (comp.productTypeCompliance ?? 0) >= 0.82;
     const rawVisual = Math.max(0, Math.min(1, visualSimFromHit(hit)));
+    const docLength = inferDocLengthToken(hit);
+    const lengthCompliance = lengthComplianceScore(
+      desiredLengthForRelevance,
+      docLength.value,
+      docLength.explicit,
+    );
     const explicitFinal = computeExplicitFinalRelevance({
       simVisual: rawVisual,
       typeMatch,
       catSoft: comp.categoryRelevance01 ?? 0,
       colorMatch: comp.colorCompliance ?? 0,
       styleMatch: comp.styleCompliance ?? 0,
+      lengthMatch: lengthCompliance,
       crossFamily: (comp.crossFamilyPenalty ?? 0) >= 0.8,
       isNearDuplicate: rawVisual >= nearIdenticalRawMin,
     });
+    (comp as any).lengthCompliance = lengthCompliance;
     comp.finalRelevance01 = explicitFinal;
     complianceById.set(idStr, comp);
     colorByHitId.set(idStr, primaryColor);
@@ -1858,8 +1922,10 @@ export async function searchByImageWithSimilarity(
               colorCompliance: compliance.colorCompliance,
             styleCompliance: compliance.styleCompliance,
               sleeveCompliance: compliance.sleeveCompliance,
+              lengthCompliance: (compliance as any).lengthCompliance ?? 0,
             hasStyleIntent: Boolean(desiredStyleForRelevance),
             hasSleeveIntent: Boolean(desiredSleeveForRelevance),
+            hasLengthIntent: Boolean(desiredLengthForRelevance),
               audienceCompliance: compliance.audienceCompliance,
               crossFamilyPenalty: compliance.crossFamilyPenalty,
               hasTypeIntent: compliance.hasTypeIntent,
@@ -1870,6 +1936,7 @@ export async function searchByImageWithSimilarity(
               desiredColors: desiredColorsForRelevance,
             desiredStyle: desiredStyleForRelevance,
             desiredSleeve: desiredSleeveForRelevance,
+              desiredLength: desiredLengthForRelevance ?? undefined,
               colorMode: rerankColorModeForRelevance,
               finalRelevance01: compliance.finalRelevance01,
             }
