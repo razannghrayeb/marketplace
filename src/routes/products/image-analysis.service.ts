@@ -687,6 +687,29 @@ function shouldKeepDetectionForShopTheLook(detection: Detection): boolean {
   return true;
 }
 
+function shouldForceHardCategoryForDetection(
+  detection: Detection,
+  categoryMapping: CategoryMapping,
+): boolean {
+  const confidence = Number.isFinite(detection.confidence) ? detection.confidence : 0;
+  const areaRatio = Number.isFinite(detection.area_ratio) ? detection.area_ratio : 0;
+  const category = String(categoryMapping.productCategory || "").toLowerCase();
+
+  // Exact accessory detections are often small, but when they are high-confidence we must
+  // treat them as hard retrieval constraints or the visual search drifts into unrelated items.
+  if (category === "footwear") {
+    return confidence >= 0.8;
+  }
+  if (category === "bags") {
+    return confidence >= 0.85 && areaRatio >= 0.003;
+  }
+  if (category === "accessories") {
+    return confidence >= 0.88 && areaRatio >= 0.0025;
+  }
+
+  return false;
+}
+
 function summarizeDetectionsByLabel(detections: Detection[]): Record<string, number> {
   const summary: Record<string, number> = {};
   for (const detection of detections) {
@@ -1439,11 +1462,13 @@ export class ImageAnalysisService {
       fullBlipSignal = buildBlipSignal(blipStructured, blipStructuredConfidence);
     }
     const inferredAudience: ReturnType<typeof inferAudienceFromCaption> =
-      imageInferAudienceGenderEnv() && blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()
-        ? {
-            gender: blipStructured.audience.gender,
-            ageGroup: blipStructured.audience.ageGroup,
-          }
+      imageInferAudienceGenderEnv() && blipCaption
+        ? blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()
+          ? {
+              gender: blipStructured.audience.gender,
+              ageGroup: blipStructured.audience.ageGroup,
+            }
+          : inferAudienceFromCaption(blipCaption)
         : ({} as ReturnType<typeof inferAudienceFromCaption>);
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
@@ -1579,7 +1604,7 @@ export class ImageAnalysisService {
         !noisyCat && (baseHardAuto || relaxedGarmentHardAuto);
       const shouldHardCategory =
         filterByDetectedCategory &&
-        (shopLookHardCategoryStrictEnv() || detectionMeetsAutoHardHeuristics);
+        (shopLookHardCategoryStrictEnv() || detectionMeetsAutoHardHeuristics || shouldForceHardCategoryForDetection(detection, categoryMapping));
       const forceHardCategoryFilterUsed = Boolean(shouldHardCategory);
       if (filterByDetectedCategory) {
         const hardLabelForTerms =
