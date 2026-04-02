@@ -1788,8 +1788,13 @@ export async function searchByImageWithSimilarity(
       : "";
   const hasExplicitStyleIntent = explicitStyleForRelevance.length > 0;
   const hasSoftStyleHint = softStyleForRelevance.length > 0;
-  // Only explicit style should gate final relevance; soft style hints stay rerank-only.
-  const desiredStyleForRelevance = hasExplicitStyleIntent ? explicitStyleForRelevance : undefined;
+  // For broad image search, let a soft style hint participate in final relevance so
+  // casual/smart-casual queries can suppress obviously formal products.
+  const desiredStyleForRelevance = hasExplicitStyleIntent
+    ? explicitStyleForRelevance
+    : hasSoftStyleHint && visualPrimaryBroad
+      ? softStyleForRelevance
+      : undefined;
   const desiredSleeveForRelevance =
     typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
   const desiredLengthForRelevance =
@@ -2086,7 +2091,7 @@ export async function searchByImageWithSimilarity(
       isNearDuplicate: rawVisual >= nearIdenticalRawMin,
       hasTypeIntent: (relevanceIntent.desiredProductTypes?.length ?? 0) > 0,
       hasColorIntent: hasColorIntentForFinal,
-      hasStyleIntent: hasExplicitStyleIntent,
+      hasStyleIntent: Boolean(desiredStyleForRelevance),
       hasSleeveIntent: Boolean(comp.hasSleeveIntent),
       hasLengthIntent: hasLengthIntentForHit,
       hasAudienceIntent: hasAudienceIntentForRelevance,
@@ -2129,16 +2134,15 @@ export async function searchByImageWithSimilarity(
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
     const idb = String(b._source.product_id);
+    if (imageSearchVisualPrimaryRanking) {
+      const va = rankedVisualForSort(a);
+      const vb = rankedVisualForSort(b);
+      if (Math.abs(vb - va) > 0.01) return vb - va;
+    }
     // Primary: finalRelevance01 descending (incorporates visual + metadata signals).
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
     const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
     if (Math.abs(fb - fa) > 1e-6) return fb - fa;
-    // Tie-break: for broad searches, use catalog-bound visual; else composite.
-    if (imageSearchVisualPrimaryRanking) {
-      const va = rankedVisualForSort(a);
-      const vb = rankedVisualForSort(b);
-      if (Math.abs(vb - va) > 1e-6) return vb - va;
-    }
     const ia = imageCompositeById.get(ida) ?? 0;
     const ib = imageCompositeById.get(idb) ?? 0;
     if (Math.abs(ib - ia) > 1e-8) return ib - ia;
@@ -2326,7 +2330,7 @@ export async function searchByImageWithSimilarity(
   // by metadata noise, while still respecting audience and type/category safety.
   const mustKeepVisualMin = imageMustKeepVisualMinSimilarity();
   const mustKeepVisualMax = imageMustKeepVisualMaxCount();
-  if (mustKeepVisualMax > 0 && visualGatedHits.length > 0) {
+  if (!imageSearchVisualPrimaryRanking && mustKeepVisualMax > 0 && visualGatedHits.length > 0) {
     const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
     const mustKeepAudienceMin = imageMustKeepVisualAudienceMin();
     const mustKeepTypeMin = hasExplicitTypeFilter || hasExplicitCategoryFilter ? 0.45 : 0.28;
