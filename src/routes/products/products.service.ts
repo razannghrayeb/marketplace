@@ -560,7 +560,8 @@ function computeExplicitFinalRelevance(params: {
   const intentWeights = {
     color: 0.28,
     style: 0.24,
-    sleeve: 0.20,
+    // Sleeve inferred from vision can be noisy; keep it informative but less punitive.
+    sleeve: 0.12,
     length: 0.12,
     audience: 0.16,
   };
@@ -600,11 +601,11 @@ function computeExplicitFinalRelevance(params: {
   const compositeScore01 = Math.max(0, Math.min(1, params.imageCompositeScore01 ?? 0));
   const compositeInfluence = Math.max(
     0.02,
-    Math.min(0.25, params.compositeInfluence ?? imageSearchCompositeInfluenceBase()),
+    Math.min(0.15, params.compositeInfluence ?? imageSearchCompositeInfluenceBase()),
   );
 
   // ── Final blend ──────────────────────────────────────────────────
-  const visualWeight = fusedVisual >= 0.30 ? 0.78 : 0.68;
+  const visualWeight = fusedVisual >= 0.30 ? 0.86 : 0.78;
   const complianceWeight = 1 - visualWeight;
 
   const coreBlend = visualWeight * fusedVisual + complianceWeight * compliance;
@@ -820,6 +821,24 @@ function imageVisualRescueColorMinWhenIntent(): number {
 function imageVisualRescueStyleMinWhenIntent(): number {
   const raw = Number(process.env.SEARCH_IMAGE_VISUAL_RESCUE_STYLE_MIN_WHEN_INTENT ?? "0.22");
   if (!Number.isFinite(raw)) return 0.22;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function imageMustKeepVisualMinSimilarity(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_MUST_KEEP_VISUAL_MIN_SIM ?? "0.72");
+  if (!Number.isFinite(raw)) return 0.72;
+  return Math.max(0.45, Math.min(0.98, raw));
+}
+
+function imageMustKeepVisualMaxCount(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_MUST_KEEP_VISUAL_MAX_COUNT ?? "4");
+  if (!Number.isFinite(raw)) return 4;
+  return Math.max(0, Math.min(12, Math.floor(raw)));
+}
+
+function imageMustKeepVisualAudienceMin(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_MUST_KEEP_VISUAL_AUDIENCE_MIN ?? "0.75");
+  if (!Number.isFinite(raw)) return 0.75;
   return Math.max(0, Math.min(1, raw));
 }
 
@@ -1312,14 +1331,14 @@ export async function searchByImageWithSimilarity(
       g === "women"
         ? ["women", "womens", "female", "ladies", "woman"]
         : g === "men"
-          ? ["men", "mens", "male", "boys", "boy", "man"]
+          ? ["men", "mens", "male", "man"]
           : ["unisex"];
 
     const titleOppShould =
       g === "women"
-        ? ["men", "mens", "male", "boys", "boy", "man"]
+        ? ["men", "mens", "male", "boy", "boys", "man", "kid", "kids", "youth", "toddler", "baby"]
         : g === "men"
-          ? ["women", "womens", "female", "ladies", "woman", "girls", "girl"]
+          ? ["women", "womens", "female", "ladies", "woman", "girls", "girl", "boy", "boys", "kid", "kids", "youth", "toddler", "baby"]
           : [];
 
     const shouldClauses: any[] = [{ term: { attr_gender: g } }];
@@ -1834,9 +1853,10 @@ export async function searchByImageWithSimilarity(
     lexicalMatchQuery: textQueryForRelevance || undefined,
     tightSemanticCap: true,
     softColorBiasOnly,
+    // Detection-derived productTypes are useful hints but can be noisy;
+    // keep strict type gating only for stronger intent anchors.
     reliableTypeIntent:
       forceStrictInferredTypeIntentEnv() ||
-      hasExplicitTypeFilter ||
       hasExplicitCategoryFilter ||
       hasTextTypeIntent,
   };
@@ -2080,6 +2100,18 @@ export async function searchByImageWithSimilarity(
       compositeInfluence: batchCompositeInfluence,
     });
     comp.finalRelevance01 = explicitResult.score;
+
+    const broadImageIntent =
+      !hasExplicitColorIntent &&
+      !hasExplicitStyleIntent &&
+      !hasExplicitCategoryFilter &&
+      !hasTextTypeIntent;
+    if (broadImageIntent) {
+      // Keep image-only ranking aligned with visual similarity when user did not
+      // provide explicit constraints; avoids compressed scores across dissimilar items.
+      comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, effectiveVisual * 0.86));
+    }
+
     fusedVisualById.set(idStr, Math.round(explicitResult.fusedVisual * 1000) / 1000);
     metadataComplianceById.set(idStr, Math.round(explicitResult.metadataCompliance * 1000) / 1000);
     // Near-identical hits can be boosted to raw visual — but only when they are
@@ -2135,14 +2167,14 @@ export async function searchByImageWithSimilarity(
       wantG === "women"
         ? ["women", "womens", "female", "ladies", "woman"]
         : wantG === "men"
-          ? ["men", "mens", "male", "boy", "boys", "man"]
+          ? ["men", "mens", "male", "man"]
           : ["unisex"];
 
     const oppKw =
       wantG === "women"
-        ? ["men", "mens", "male", "boy", "boys", "man"]
+        ? ["men", "mens", "male", "boy", "boys", "man", "kid", "kids", "youth", "toddler", "baby"]
         : wantG === "men"
-          ? ["women", "womens", "female", "ladies", "woman", "girl", "girls"]
+          ? ["women", "womens", "female", "ladies", "woman", "girl", "girls", "boy", "boys", "kid", "kids", "youth", "toddler", "baby"]
           : [];
 
     const matches = (hit: any) => {
@@ -2287,6 +2319,52 @@ export async function searchByImageWithSimilarity(
       .map((x) => x.h);
     if (rescue.length > 0) {
       rankedHits = [...rankedHits, ...rescue];
+    }
+  }
+
+  // Preserve a tiny set of truly high-visual neighbors that may be over-penalized
+  // by metadata noise, while still respecting audience and type/category safety.
+  const mustKeepVisualMin = imageMustKeepVisualMinSimilarity();
+  const mustKeepVisualMax = imageMustKeepVisualMaxCount();
+  if (mustKeepVisualMax > 0 && visualGatedHits.length > 0) {
+    const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
+    const mustKeepAudienceMin = imageMustKeepVisualAudienceMin();
+    const mustKeepTypeMin = hasExplicitTypeFilter || hasExplicitCategoryFilter ? 0.45 : 0.28;
+    const mustKeep: any[] = visualGatedHits
+      .filter((h: any) => !existingIds.has(String(h._source.product_id)))
+      .map((h: any) => {
+        const id = String(h._source.product_id);
+        const visualSim = visualSimFromHit(h);
+        const comp = complianceById.get(id);
+        return {
+          h,
+          id,
+          visualSim,
+          audience: comp?.audienceCompliance ?? 1,
+          typeComp: comp?.productTypeCompliance ?? 0,
+          crossFamily: comp?.crossFamilyPenalty ?? 0,
+        };
+      })
+      .filter(({ visualSim, audience, typeComp, crossFamily }) => {
+        if (visualSim < mustKeepVisualMin) return false;
+        if (hasAudienceIntentForRelevance && audience < mustKeepAudienceMin) return false;
+        if ((hasExplicitTypeFilter || hasExplicitCategoryFilter) && typeComp < mustKeepTypeMin) return false;
+        if (crossFamily >= 0.55) return false;
+        return true;
+      })
+      .sort((a, b) => b.visualSim - a.visualSim)
+      .slice(0, mustKeepVisualMax)
+      .map((x) => x.h);
+
+    if (mustKeep.length > 0) {
+      for (const h of mustKeep) {
+        const id = String(h._source.product_id);
+        const comp = complianceById.get(id);
+        if (!comp) continue;
+        const v = visualSimFromHit(h);
+        comp.finalRelevance01 = Math.max(comp.finalRelevance01 ?? 0, Math.min(1, v * 0.88));
+      }
+      rankedHits = [...rankedHits, ...mustKeep];
     }
   }
 
