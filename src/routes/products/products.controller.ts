@@ -10,8 +10,6 @@ import { searchBrowse, searchImage, searchText } from "../../lib/search/fashionS
 import {
   validateImage,
   computePHash,
-  processImageForEmbedding,
-  computeImageSearchGarmentQueryEmbedding,
   blip,
 } from "../../lib/image/index";
 import { extractLexicalProductTypeSeeds } from "../../lib/search/productTypeTaxonomy";
@@ -155,9 +153,8 @@ export async function searchProductsByImage(req: Request, res: Response) {
     const includeRelated = req.query.includeRelated !== "false";
 
     const file = (req as any).file;
-    let embedding: number[];
+    let embedding: number[] | undefined;
     let pHash: string | undefined;
-    let garmentEmbeddingForSearch: number[] | undefined;
     let softProductTypeHints: string[] | undefined;
 
     if (file) {
@@ -183,14 +180,7 @@ export async function searchProductsByImage(req: Request, res: Response) {
         ),
       ]);
 
-      const [emb, garmentEmb, pHashResult] = await Promise.all([
-        processImageForEmbedding(file.buffer),
-        computeImageSearchGarmentQueryEmbedding(file.buffer).catch(() => [] as number[]),
-        computePHash(file.buffer),
-      ]);
-      embedding = emb;
-      pHash = pHashResult;
-      garmentEmbeddingForSearch = garmentEmb.length === emb.length ? garmentEmb : undefined;
+      pHash = await computePHash(file.buffer);
 
       if (quickHints.length > 0) {
         // Query-image color hints are soft signals for reranking, not hard filters.
@@ -215,8 +205,7 @@ export async function searchProductsByImage(req: Request, res: Response) {
     // Use enhanced search with similarity scoring
       const result = await searchImage({
         imageEmbedding: embedding,
-        imageEmbeddingGarment: garmentEmbeddingForSearch,
-        imageBuffer: file.buffer,
+        imageBuffer: file?.buffer,
       filters,
       limit,
       similarityThreshold,

@@ -14,7 +14,6 @@ export type PixelBox = { x1: number; y1: number; x2: number; y2: number };
 
 /** Padding around YOLO / detector boxes — must match `resume-reindex` + garment CLIP crops. */
 export const GARMENT_DETECTION_PAD_RATIO = 0.1;
-const GARMENT_DETECTION_MIN_PAD_PX = 10;
 
 export type YoloLikeDetection = {
   confidence?: number;
@@ -89,14 +88,8 @@ async function resolveGarmentEmbedBufferFromPrepared(
         const bw = bx2 - bx1;
         const bh = by2 - by1;
 
-        const padX = Math.max(
-          GARMENT_DETECTION_MIN_PAD_PX,
-          Math.round(bw * GARMENT_DETECTION_PAD_RATIO),
-        );
-        const padY = Math.max(
-          GARMENT_DETECTION_MIN_PAD_PX,
-          Math.round(bh * GARMENT_DETECTION_PAD_RATIO),
-        );
+        const padX = Math.round(bw * GARMENT_DETECTION_PAD_RATIO);
+        const padY = Math.round(bh * GARMENT_DETECTION_PAD_RATIO);
 
         const left = Math.max(0, bx1 - padX);
         const top = Math.max(0, by1 - padY);
@@ -147,14 +140,8 @@ async function tryStrictGarmentRoiFromPrepared(
     const by2 = Math.max(by1 + 4, Math.min(ih, box.y2));
     const bw = bx2 - bx1;
     const bh = by2 - by1;
-    const padX = Math.max(
-      GARMENT_DETECTION_MIN_PAD_PX,
-      Math.round(bw * GARMENT_DETECTION_PAD_RATIO),
-    );
-    const padY = Math.max(
-      GARMENT_DETECTION_MIN_PAD_PX,
-      Math.round(bh * GARMENT_DETECTION_PAD_RATIO),
-    );
+    const padX = Math.round(bw * GARMENT_DETECTION_PAD_RATIO);
+    const padY = Math.round(bh * GARMENT_DETECTION_PAD_RATIO);
     const left = Math.max(0, bx1 - padX);
     const top = Math.max(0, by1 - padY);
     const right = Math.min(iw, bx2 + padX);

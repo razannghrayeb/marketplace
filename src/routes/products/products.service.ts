@@ -1327,6 +1327,14 @@ export async function searchByImageWithSimilarity(
   }
   if (filters.brand) filter.push({ term: { brand: String(filters.brand).toLowerCase() } });
   if (filters.vendorId) filter.push({ term: { vendor_id: String(filters.vendorId) } });
+  if (Array.isArray((filters as { productTypes?: string[] }).productTypes)) {
+    const productTypeTerms = ((filters as { productTypes?: string[] }).productTypes ?? [])
+      .map((t) => String(t).toLowerCase().trim())
+      .filter(Boolean);
+    if (productTypeTerms.length > 0) {
+      filter.push({ terms: { product_types: productTypeTerms } });
+    }
+  }
   const filtersAny = filters as { gender?: string; color?: string; softColor?: string; style?: string; softStyle?: string };
   const visualPrimaryBroad = isBroadImageSearchVisualPrimaryRanking(filters, imageSearchTextQuery);
   if (filtersAny.gender) {
@@ -1726,8 +1734,7 @@ export async function searchByImageWithSimilarity(
     Array.isArray(filtersRecord.productTypes) && filtersRecord.productTypes.length > 0;
   const hasExplicitCategoryFilter = filterCategory != null;
   const hasTextTypeIntent = Boolean(textQueryForRelevance);
-  const hasDetectionAnchoredTypeIntent =
-    desiredProductTypes.length > 0 && (Boolean(predictedCategoryAisles?.length) || useAisleRerank);
+  let hasDetectionAnchoredTypeIntent = false;
   const astCategoriesForRelevance = [
     ...new Set(
       [
@@ -1795,6 +1802,8 @@ export async function searchByImageWithSimilarity(
       desiredProductTypes = prunedByLength;
     }
   }
+  hasDetectionAnchoredTypeIntent =
+    desiredProductTypes.length > 0 && (Boolean(predictedCategoryAisles?.length) || useAisleRerank);
 
   const explicitColorsForRelevance =
     Array.isArray(filtersRecord.colors) && filtersRecord.colors.length > 0
@@ -1898,6 +1907,7 @@ export async function searchByImageWithSimilarity(
     reliableTypeIntent:
       forceStrictInferredTypeIntentEnv() ||
       hasExplicitTypeFilter ||
+      hasDetectionAnchoredTypeIntent ||
       hasExplicitCategoryFilter ||
       hasTextTypeIntent,
   };
