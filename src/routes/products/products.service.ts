@@ -2147,7 +2147,8 @@ export async function searchByImageWithSimilarity(
       !hasExplicitColorIntent &&
       !hasExplicitStyleIntent &&
       !hasExplicitCategoryFilter &&
-      !hasTextTypeIntent;
+      !hasTextTypeIntent &&
+      !hasDetectionAnchoredTypeIntent;
     if (broadImageIntent) {
       // Keep image-only ranking aligned with visual similarity when user did not
       // provide explicit constraints; avoids compressed scores across dissimilar items.
