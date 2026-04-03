@@ -193,6 +193,15 @@ export function scoreAudienceCompliance(
   const docAge = docAgeGroup(hit);
   const docG = docAudienceGender(hit);
   const title = typeof hit?._source?.title === "string" ? hit._source.title.toLowerCase() : "";
+  const category = typeof hit?._source?.category === "string" ? hit._source.category.toLowerCase() : "";
+  const canonical =
+    typeof hit?._source?.category_canonical === "string"
+      ? hit._source.category_canonical.toLowerCase()
+      : "";
+  const productTypes = Array.isArray(hit?._source?.product_types)
+    ? hit._source.product_types.map((t) => String(t).toLowerCase()).join(" ")
+    : "";
+  const audienceBlob = `${title} ${category} ${canonical} ${productTypes}`;
 
   let score = 1;
   let factors = 0;
@@ -200,7 +209,7 @@ export function scoreAudienceCompliance(
   if (wantAge) {
     factors += 1;
     if (!docAge) {
-      if (wantAge === "kids" && /\b(kids?|child|children|boys?|girls?|toddler|baby|youth)\b/.test(title)) {
+      if (wantAge === "kids" && /\b(kids?|child|children|boys?|girls?|toddler|baby|youth)\b/.test(audienceBlob)) {
         score *= 0.92;
       } else if (wantAge === "adult" || wantAge === "teen") {
         score *= 0.88;
@@ -222,16 +231,16 @@ export function scoreAudienceCompliance(
   if (wantG) {
     factors += 1;
     if (!docG) {
-      const hasKidsCue = /\b(kids?|child|children|boys?|girls?|toddler|baby|youth)\b/.test(title);
+      const hasKidsCue = /\b(kids?|child|children|boys?|girls?|toddler|baby|youth)\b/.test(audienceBlob);
       if (wantG === "men") {
         if (hasKidsCue) score *= 0;
-        else if (/\b(men|mens|male)\b/.test(title)) score *= 0.9;
-        else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(title)) score *= 0.28;
+        else if (/\b(men|mens|male)\b/.test(audienceBlob)) score *= 0.9;
+        else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(audienceBlob)) score *= 0.28;
         else score *= 0.78;
       } else if (wantG === "women") {
         if (hasKidsCue) score *= 0;
-        else if (/\b(women|womens|female|ladies|woman)\b/.test(title)) score *= 0.9;
-        else if (/\b(men|mens|male|man|boy|boys)\b/.test(title)) score *= 0.28;
+        else if (/\b(women|womens|female|ladies|woman)\b/.test(audienceBlob)) score *= 0.9;
+        else if (/\b(men|mens|male|man|boy|boys)\b/.test(audienceBlob)) score *= 0.28;
         else score *= 0.78;
       } else {
         score *= 0.85;

@@ -1699,6 +1699,8 @@ export async function searchByImageWithSimilarity(
     Array.isArray(filtersRecord.productTypes) && filtersRecord.productTypes.length > 0;
   const hasExplicitCategoryFilter = filterCategory != null;
   const hasTextTypeIntent = Boolean(textQueryForRelevance);
+  const hasDetectionAnchoredTypeIntent =
+    desiredProductTypes.length > 0 && (Boolean(predictedCategoryAisles?.length) || useAisleRerank);
   const astCategoriesForRelevance = [
     ...new Set(
       [
@@ -1848,6 +1850,10 @@ export async function searchByImageWithSimilarity(
       explicitFilter: explicitStyleForRelevance || undefined,
       softHint: softStyleForRelevance || undefined,
     },
+    type: {
+      reliableTypeIntent: hasReliableTypeIntentForRelevance,
+      detectionAnchored: hasDetectionAnchoredTypeIntent,
+    },
     color: {
       gatesFinalRelevance01: hasExplicitColorIntent,
       cropDominantTokens: hasCropColorSignal ? [...cropDominantColorsRaw] : undefined,
@@ -1892,8 +1898,10 @@ export async function searchByImageWithSimilarity(
     reliableTypeIntent:
       forceStrictInferredTypeIntentEnv() ||
       hasExplicitCategoryFilter ||
-      hasTextTypeIntent,
+      hasTextTypeIntent ||
+      hasDetectionAnchoredTypeIntent,
   };
+  const hasReliableTypeIntentForRelevance = Boolean(relevanceIntent.reliableTypeIntent);
 
   const nearIdenticalRawMin = imageSearchNearIdenticalRawCosineMin();
 
@@ -2322,7 +2330,9 @@ export async function searchByImageWithSimilarity(
   if (rescueMaxCount > 0) {
     const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
     const rescueAudienceMin = imageVisualRescueAudienceMin();
-    const rescueTypeMinIntent = imageVisualRescueTypeMinWhenIntent();
+    const rescueTypeMinIntent = hasReliableTypeIntentForRelevance
+      ? 0.45
+      : imageVisualRescueTypeMinWhenIntent();
     const rescueColorMinIntent = imageVisualRescueColorMinWhenIntent();
     const rescueStyleMinIntent = imageVisualRescueStyleMinWhenIntent();
     const rescue: any[] = visualGatedHits
@@ -2335,16 +2345,18 @@ export async function searchByImageWithSimilarity(
         const typeComp = comp?.productTypeCompliance ?? 0;
         const colorComp = comp?.colorCompliance ?? 0;
         const styleComp = comp?.styleCompliance ?? 0;
-        return { h, visualSim, aud, typeComp, colorComp, styleComp };
+        const crossFamily = comp?.crossFamilyPenalty ?? 0;
+        return { h, visualSim, aud, typeComp, colorComp, styleComp, crossFamily };
       })
-      .filter(({ visualSim, aud, typeComp, colorComp, styleComp }) => {
+      .filter(({ visualSim, aud, typeComp, colorComp, styleComp, crossFamily }) => {
         if (visualSim < rescueMinSim) return false;
         if (hasAudienceIntentForRelevance && aud < rescueAudienceMin) return false;
         // Intent-aware rescue: keep sparse-result protection, but do not inject
         // visually similar yet intent-contradicting products.
-        if (hasExplicitTypeFilter && typeComp < rescueTypeMinIntent) return false;
+        if ((hasExplicitTypeFilter || hasReliableTypeIntentForRelevance) && typeComp < rescueTypeMinIntent) return false;
         if (hasColorIntentForFinal && colorComp < rescueColorMinIntent) return false;
         if (hasExplicitStyleIntent && styleComp < rescueStyleMinIntent) return false;
+        if (hasReliableTypeIntentForRelevance && crossFamily >= 0.5) return false;
         return true;
       })
       .sort((a, b) => b.visualSim - a.visualSim)
@@ -2362,7 +2374,11 @@ export async function searchByImageWithSimilarity(
   if (!imageSearchVisualPrimaryRanking && mustKeepVisualMax > 0 && visualGatedHits.length > 0) {
     const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
     const mustKeepAudienceMin = imageMustKeepVisualAudienceMin();
-    const mustKeepTypeMin = hasExplicitTypeFilter || hasExplicitCategoryFilter ? 0.45 : 0.28;
+    const mustKeepTypeMin = hasReliableTypeIntentForRelevance
+      ? 0.45
+      : hasExplicitTypeFilter || hasExplicitCategoryFilter
+        ? 0.45
+        : 0.28;
     const mustKeep: any[] = visualGatedHits
       .filter((h: any) => !existingIds.has(String(h._source.product_id)))
       .map((h: any) => {
@@ -2381,6 +2397,7 @@ export async function searchByImageWithSimilarity(
       .filter(({ visualSim, audience, typeComp, crossFamily }) => {
         if (visualSim < mustKeepVisualMin) return false;
         if (hasAudienceIntentForRelevance && audience < mustKeepAudienceMin) return false;
+        if (hasReliableTypeIntentForRelevance && crossFamily >= 0.5) return false;
         if ((hasExplicitTypeFilter || hasExplicitCategoryFilter) && typeComp < mustKeepTypeMin) return false;
         if (crossFamily >= 0.55) return false;
         return true;
