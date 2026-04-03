@@ -684,7 +684,7 @@ export function computeHitRelevance(
     const titleSleeve = normalizeSleeveToken(title);
     const observed = docSleeve ?? titleSleeve;
     if (!observed) {
-      sleeveCompliance = 0.45;
+      sleeveCompliance = 0.15;
     } else if (observed === wantedSleeve) {
       sleeveCompliance = 1;
     } else if (docSleeve) {

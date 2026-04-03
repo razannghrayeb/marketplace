@@ -804,6 +804,11 @@ function inferLengthIntentFromDetection(
   return "mini";
 }
 
+function isHeadwearLabel(label: string): boolean {
+  const l = String(label || "").toLowerCase();
+  return /\b(hat|hats|cap|caps|beanie|beanies|beret|berets|headwear|head covering)\b/.test(l);
+}
+
 function applyGroupedPostRanking(
   groupedResults: DetectionSimilarProducts[],
   includeCrossGroupDedupe: boolean,
@@ -1582,14 +1587,11 @@ export class ImageAnalysisService {
       const filters: Partial<import("./types").SearchFilters> = {};
       // Avoid taxonomy pollution for labels like "short sleeve top" where the word "short"
       // may incorrectly map to shorts/shorts_skirt micro-types.
-      const captionWantsJeans = blipStructured.productTypeHints.includes("jeans");
       const typeSeedSource =
-        categoryMapping.productCategory === "bottoms" && captionWantsJeans
-          ? "jeans"
-          : categoryMapping.productCategory === "tops" &&
-            categoryMapping.attributes.sleeveLength === "short"
-            ? "tshirt tee"
-            : label;
+        categoryMapping.productCategory === "tops" &&
+        categoryMapping.attributes.sleeveLength === "short"
+          ? "tshirt tee"
+          : label;
       let typeSeeds = extractLexicalProductTypeSeeds(typeSeedSource);
       if (blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
         typeSeeds = [...new Set([...typeSeeds, ...blipStructured.productTypeHints])];
@@ -1654,11 +1656,9 @@ export class ImageAnalysisService {
         (shopLookHardCategoryStrictEnv() || detectionMeetsAutoHardHeuristics || shouldForceHardCategoryForDetection(detection, categoryMapping));
       const forceHardCategoryFilterUsed = Boolean(shouldHardCategory);
       if (filterByDetectedCategory) {
-        const hardLabelForTerms =
-          categoryMapping.productCategory === "bottoms" && captionWantsJeans ? "jeans" : label;
         if (shouldHardCategory) {
           // Apply hard OpenSearch category filtering, even when global soft-category is enabled.
-          const terms = hardCategoryTermsForDetection(hardLabelForTerms, categoryMapping);
+          const terms = hardCategoryTermsForDetection(label, categoryMapping);
           filters.category = terms.length === 1 ? terms[0] : terms;
         } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
           const typeHints = Array.isArray(filters.productTypes) ? filters.productTypes : [];
@@ -1770,6 +1770,7 @@ export class ImageAnalysisService {
         shopLookCategoryFallbackEnv() &&
         similarResult.results.length === 0 &&
         filterByDetectedCategory &&
+        !(categoryMapping.productCategory === "accessories" && isHeadwearLabel(label)) &&
         (filters as { category?: string | string[] }).category
       ) {
         const { category: _omitCategory, ...filtersSansCategory } = filters as {
@@ -2237,7 +2238,10 @@ export class ImageAnalysisService {
 
         const filters: Partial<import("./types").SearchFilters> = {};
         const typeSeedSourceForSelection =
-          categoryMapping.productCategory === "bottoms" && captionWantsJeans ? "jeans" : categorySource;
+          categoryMapping.productCategory === "tops" &&
+          categoryMapping.attributes.sleeveLength === "short"
+            ? "tshirt tee"
+            : categorySource;
         let browseTypeSeeds = extractLexicalProductTypeSeeds(typeSeedSourceForSelection);
         if (blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
           browseTypeSeeds = [...new Set([...browseTypeSeeds, ...blipStructured.productTypeHints])];
@@ -2293,11 +2297,7 @@ export class ImageAnalysisService {
           if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
             predictedCategoryAisles = expandedTypeHints.length ? expandedTypeHints : softCategories;
           } else {
-            const hardLabelForTerms =
-              categoryMapping.productCategory === "bottoms" && captionWantsJeans
-                ? "jeans"
-                : categorySource;
-            const terms = hardCategoryTermsForDetection(hardLabelForTerms, categoryMapping);
+            const terms = hardCategoryTermsForDetection(categorySource, categoryMapping);
             filters.category = terms.length === 1 ? terms[0] : terms;
           }
         }
@@ -2398,6 +2398,7 @@ export class ImageAnalysisService {
           similarResult.results.length === 0 &&
           options.filterByDetectedCategory !== false &&
           !imageSoftCategoryEnv() &&
+          !(categoryMapping.productCategory === "accessories" && isHeadwearLabel(categorySource)) &&
           (filters as { category?: string | string[] }).category
         ) {
           const { category: _omitCategory, ...filtersSansCategory } = filters as {
