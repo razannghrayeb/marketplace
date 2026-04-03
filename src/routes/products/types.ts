@@ -78,6 +78,11 @@ export interface ImageSearchParams extends SearchParams {
    */
   predictedCategoryAisles?: string[];
   /**
+   * Product-type soft hints from detection/BLIP (e.g. ['jeans', 'denim']).
+   * Used for ranking only; do NOT hard-filter candidates (preserves recall).
+   */
+  softProductTypeHints?: string[];
+  /**
    * OpenSearch kNN vector field name (e.g. `embedding` vs `embedding_garment`).
    * Shop-the-Look / detection crops often match `embedding_garment` when the index is built with garment ROI vectors.
    */
