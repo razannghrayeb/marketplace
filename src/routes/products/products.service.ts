@@ -2234,29 +2234,17 @@ export async function searchByImageWithSimilarity(
     return filtered.length > 0 ? filtered : sortedByRelevance;
   })();
 
-  const rankedHitsCandidatesFiltered = rankedHitsCandidates.filter((h: any) => {
-    const comp = complianceById.get(String(h._source.product_id));
-    if (!comp) return false;
-    if (comp.hardBlocked) return false;
-    if (hasReliableTypeIntentForRelevance && (comp.crossFamilyPenalty ?? 0) >= 0.8) return false;
-    return true;
-  });
-
   // Late visual gate (after soft rerank).
-  const thresholdPassedByVisual = rankedHitsCandidatesFiltered.filter((h: any) =>
+  const thresholdPassedByVisual = rankedHitsCandidates.filter((h: any) =>
     passesImageSimilarityThreshold(h, similarityThreshold),
   );
   let thresholdRelaxed = false;
   let relaxFloorUsed: number | null = null;
   let visualGatedHits = thresholdPassedByVisual;
-  if (
-    relaxThresholdWhenEmpty &&
-    thresholdPassedByVisual.length === 0 &&
-    rankedHitsCandidatesFiltered.length > 0
-  ) {
+  if (relaxThresholdWhenEmpty && thresholdPassedByVisual.length === 0 && rankedHitsCandidates.length > 0) {
     const floor = imageRelaxSimilarityFloor();
     relaxFloorUsed = floor;
-    visualGatedHits = rankedHitsCandidatesFiltered.filter((h: any) =>
+    visualGatedHits = rankedHitsCandidates.filter((h: any) =>
       passesImageSimilarityThreshold(h, floor),
     );
     thresholdRelaxed = visualGatedHits.length > 0;
@@ -2264,13 +2252,10 @@ export async function searchByImageWithSimilarity(
 
   if (relaxThresholdWhenEmpty) {
     const minWantCandidates = Math.min(fetchLimit, Math.max(limit, 15));
-    if (
-      visualGatedHits.length < minWantCandidates &&
-      rankedHitsCandidatesFiltered.length > visualGatedHits.length
-    ) {
+    if (visualGatedHits.length < minWantCandidates && rankedHitsCandidates.length > visualGatedHits.length) {
       const floor = imageRelaxSimilarityFloor();
       relaxFloorUsed = floor;
-      const loose = rankedHitsCandidatesFiltered.filter((h: any) =>
+      const loose = rankedHitsCandidates.filter((h: any) =>
         passesImageSimilarityThreshold(h, floor),
       );
       if (loose.length > visualGatedHits.length) {
@@ -2283,9 +2268,9 @@ export async function searchByImageWithSimilarity(
   const acceptMinImage = config.search.finalAcceptMinImage;
   /** When strict CLIP threshold + merchandise binding drop every hit, keep best raw-visual neighbors (always on). */
   let imageSearchPipelineDegraded = false;
-  if (visualGatedHits.length === 0 && rankedHitsCandidatesFiltered.length > 0) {
+  if (visualGatedHits.length === 0 && rankedHitsCandidates.length > 0) {
     const relFloor = imageRelaxSimilarityFloor();
-    const relaxedHits = rankedHitsCandidatesFiltered.filter(
+    const relaxedHits = rankedHitsCandidates.filter(
       (h: any) => visualSimFromHit(h) >= relFloor,
     );
 
@@ -2311,7 +2296,7 @@ export async function searchByImageWithSimilarity(
 
   /** True when reranked candidates exist but visual gate removed all (without relaxation). */
   const belowRelevanceThreshold =
-    rankedHitsCandidatesFiltered.length > 0 && thresholdPassedByVisual.length === 0 && !thresholdRelaxed;
+    rankedHitsCandidates.length > 0 && thresholdPassedByVisual.length === 0 && !thresholdRelaxed;
 
   const finalAcceptMin = acceptMinImage;
   let effectiveFinalAcceptMin = finalAcceptMin;

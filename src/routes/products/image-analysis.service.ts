@@ -1585,12 +1585,15 @@ export class ImageAnalysisService {
       ]);
 
       const filters: Partial<import("./types").SearchFilters> = {};
-      // Avoid taxonomy pollution for labels like "short sleeve top" where the word "short"
-      // may incorrectly map to shorts/shorts_skirt micro-types.
+      // Keep inferred type tokens as soft hints so image search stays recall-first.
+      // Hard product-type filters can suppress visually similar neighbors across categories.
+      const captionWantsJeans = blipStructured.productTypeHints.includes("jeans");
       const typeSeedSource =
-        categoryMapping.productCategory === "tops" &&
-        categoryMapping.attributes.sleeveLength === "short"
-          ? "tshirt tee"
+        categoryMapping.productCategory === "bottoms" && captionWantsJeans
+          ? `${label} jeans`
+          : categoryMapping.productCategory === "tops" &&
+              categoryMapping.attributes.sleeveLength === "short"
+            ? "tshirt tee"
           : label;
       let typeSeeds = extractLexicalProductTypeSeeds(typeSeedSource);
       if (blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
@@ -1598,13 +1601,7 @@ export class ImageAnalysisService {
       }
       typeSeeds = filterProductTypeSeedsByMappedCategory(typeSeeds, categoryMapping.productCategory);
       typeSeeds = tightenTypeSeedsForDetection(label, categoryMapping, typeSeeds);
-      if (typeSeeds.length) {
-        filters.productTypes = typeSeeds;
-      } else if (expandedTypeHints.length > 0 && categoryMapping.productCategory !== "accessories") {
-        // Fallback when lexical extraction misses labels like "hat" or "bag, wallet":
-        // keep type intent so cross-family products (e.g. jeans for hats) are penalized.
-        filters.productTypes = expandedTypeHints.slice(0, 8);
-      }
+      const softProductTypeHints = [...new Set([...typeSeeds, ...expandedTypeHints.slice(0, 8)])];
 
       // "Closet similar" constraints: enforce audience gender + add optional style/color.
       if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
@@ -1717,6 +1714,7 @@ export class ImageAnalysisService {
             : undefined,
         imageBuffer: clipBuffer,
         filters,
+        softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
         limit: similarLimitPerItem,
         similarityThreshold,
         includeRelated: false,
@@ -1753,6 +1751,7 @@ export class ImageAnalysisService {
               : undefined,
           imageBuffer: clipBuffer,
           filters: filtersRetry,
+          softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
           limit: similarLimitPerItem,
           similarityThreshold,
           includeRelated: false,
@@ -1804,11 +1803,11 @@ export class ImageAnalysisService {
                 ? finalGarmentEmbedding
                 : undefined,
             imageBuffer: clipBuffer,
-              // Keep crop-derived structural intent even in last-resort fallback.
-              filters: {
-                productTypes: filters.productTypes,
-                length: (filters as any).length,
-              } as any,
+            // Keep crop-derived structural intent even in last-resort fallback.
+            filters: {
+              length: (filters as any).length,
+            } as any,
+            softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
             limit: similarLimitPerItem,
             similarityThreshold,
             includeRelated: false,
@@ -2237,11 +2236,14 @@ export class ImageAnalysisService {
         const categoryMapping = mapDetectionToCategory(categorySource, detection.confidence);
 
         const filters: Partial<import("./types").SearchFilters> = {};
+        const captionWantsJeans = blipStructured.productTypeHints.includes("jeans");
         const typeSeedSourceForSelection =
-          categoryMapping.productCategory === "tops" &&
-          categoryMapping.attributes.sleeveLength === "short"
-            ? "tshirt tee"
-            : categorySource;
+          categoryMapping.productCategory === "bottoms" && captionWantsJeans
+            ? `${categorySource} jeans`
+            : categoryMapping.productCategory === "tops" &&
+                categoryMapping.attributes.sleeveLength === "short"
+              ? "tshirt tee"
+              : categorySource;
         let browseTypeSeeds = extractLexicalProductTypeSeeds(typeSeedSourceForSelection);
         if (blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
           browseTypeSeeds = [...new Set([...browseTypeSeeds, ...blipStructured.productTypeHints])];
@@ -2251,9 +2253,7 @@ export class ImageAnalysisService {
           categoryMapping.productCategory,
         );
         browseTypeSeeds = tightenTypeSeedsForDetection(categorySource, categoryMapping, browseTypeSeeds);
-        if (browseTypeSeeds.length) {
-          filters.productTypes = browseTypeSeeds;
-        }
+        const softProductTypeHints = browseTypeSeeds.length > 0 ? browseTypeSeeds : undefined;
 
         // "Closet similar" constraints: enforce audience gender + add optional style/color.
         if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
@@ -2347,6 +2347,7 @@ export class ImageAnalysisService {
               : undefined,
           imageBuffer: clipBuffer,
           filters,
+          softProductTypeHints,
           limit: resolveShopLookLimit(options.similarLimitPerItem),
           similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
           includeRelated: false,
@@ -2381,6 +2382,7 @@ export class ImageAnalysisService {
                 : undefined,
             imageBuffer: clipBuffer,
             filters: filtersRetry,
+            softProductTypeHints,
             limit: resolveShopLookLimit(options.similarLimitPerItem),
             similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
             includeRelated: false,
@@ -2413,6 +2415,7 @@ export class ImageAnalysisService {
                 : undefined,
             imageBuffer: clipBuffer,
             filters: filtersSansCategory,
+            softProductTypeHints,
             limit: resolveShopLookLimit(options.similarLimitPerItem),
             similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
             includeRelated: false,
