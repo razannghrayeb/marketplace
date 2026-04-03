@@ -429,15 +429,18 @@ type ScoreVersion = "v1" | "v2";
 function normalizeTo01ByVersion(rawScore: number, version: ScoreVersion): number {
   if (!Number.isFinite(rawScore)) return 0;
   if (version === "v1") {
-    // Legacy OpenSearch returns `1 + cosθ` in [0,2]; convert to [0,1].
-    const s01 = rawScore / 2;
-    return Math.max(0, Math.min(1, 2 * s01 - 1));
+    // Legacy data may be stored as either:
+    // - (1 + cosθ) / 2 in [0,1]
+    // - 1 + cosθ in [0,2]
+    // Convert both to cosine-derived [0,1].
+    const cos = rawScore <= 1.001 ? 2 * rawScore - 1 : rawScore - 1;
+    return Math.max(0, Math.min(1, cos));
   }
   // v2: raw cosine from cosineSimilarityRaw is already in [-1,1].
   // For CLIP L2-normalized vectors, values are typically in [0,1].
-  // If the score is > 1 it's a legacy OpenSearch `1+cos` score; convert it.
+  // If the score is > 1, tolerate legacy `1+cos` responses for mixed indexes.
   if (rawScore > 1.001) {
-    return Math.max(0, Math.min(1, rawScore / 2));
+    return Math.max(0, Math.min(1, rawScore - 1));
   }
   // Raw cosine already in [0,1] for L2-normalized CLIP vectors.
   return Math.max(0, Math.min(1, rawScore));
@@ -1408,14 +1411,38 @@ export async function searchByImageWithSimilarity(
     try {
       const { attributeEmbeddings } = await import("../../lib/search/attributeEmbeddings");
       const [cEmb, sEmb, pEmb] = await Promise.all([
-        attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "color").catch(() => [] as number[]),
-        attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "style").catch(() => [] as number[]),
-        attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "pattern").catch(() => [] as number[]),
+        attributeEmbeddings
+          .generateImageAttributeEmbedding(imageBuffer, "color")
+          .catch((error) => {
+            console.warn("[image-search] color attribute embedding failed", {
+              message: error instanceof Error ? error.message : String(error),
+            });
+            return [] as number[];
+          }),
+        attributeEmbeddings
+          .generateImageAttributeEmbedding(imageBuffer, "style")
+          .catch((error) => {
+            console.warn("[image-search] style attribute embedding failed", {
+              message: error instanceof Error ? error.message : String(error),
+            });
+            return [] as number[];
+          }),
+        attributeEmbeddings
+          .generateImageAttributeEmbedding(imageBuffer, "pattern")
+          .catch((error) => {
+            console.warn("[image-search] pattern attribute embedding failed", {
+              message: error instanceof Error ? error.message : String(error),
+            });
+            return [] as number[];
+          }),
       ]);
       colorQueryEmbedding = cEmb.length > 0 ? cEmb : null;
       styleQueryEmbedding = sEmb.length > 0 ? sEmb : null;
       patternQueryEmbedding = pEmb.length > 0 ? pEmb : null;
-    } catch {
+    } catch (error) {
+      console.warn("[image-search] attribute embedding pipeline failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
       colorQueryEmbedding = null;
       styleQueryEmbedding = null;
       patternQueryEmbedding = null;
