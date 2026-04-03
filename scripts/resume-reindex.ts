@@ -303,6 +303,8 @@ async function getGarmentBox(productId: number, hasDetectionsTable: boolean): Pr
        WHERE pi.product_id = $1
          AND pi.is_primary = true
          AND d.box_x1 IS NOT NULL
+         AND d.box_y1 IS NOT NULL
+         AND d.box_x2 IS NOT NULL
          AND d.box_y2 IS NOT NULL
          AND COALESCE(d.confidence, 0) >= 0.45
        ORDER BY COALESCE(d.area_ratio, 0) DESC NULLS LAST, d.id DESC
@@ -312,12 +314,21 @@ async function getGarmentBox(productId: number, hasDetectionsTable: boolean): Pr
     );
     const r = (res as any).rows[0];
     if (!r) return null;
-    return {
-      x1: Number(r.box_x1),
-      y1: Number(r.box_y1),
-      x2: Number(r.box_x2),
-      y2: Number(r.box_y2),
-    };
+    const x1 = Number(r.box_x1);
+    const y1 = Number(r.box_y1);
+    const x2 = Number(r.box_x2);
+    const y2 = Number(r.box_y2);
+    if (
+      !Number.isFinite(x1) ||
+      !Number.isFinite(y1) ||
+      !Number.isFinite(x2) ||
+      !Number.isFinite(y2) ||
+      x2 <= x1 ||
+      y2 <= y1
+    ) {
+      return null;
+    }
+    return { x1, y1, x2, y2 };
   } catch {
     return null;
   }
@@ -655,7 +666,7 @@ async function saveProgress(progress: Progress, file: string): Promise<void> {
 
 async function waitForDatabase(cfg: ReindexConfig): Promise<void> {
   const maxAttempts = parseInt(process.env.REINDEX_DB_WAIT_ATTEMPTS || "40", 10);
-  const baseDelay = parseInt(process.env.REINDEX_DB_WAIT_MS || "8_000", 10);
+  const baseDelay = parseInt(process.env.REINDEX_DB_WAIT_MS || "8000", 10);
 
   console.log(`🔌 DB pool: max ${REINDEX_PG_MAX} connection(s)`);
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {

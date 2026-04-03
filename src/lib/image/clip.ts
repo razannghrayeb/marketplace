@@ -886,9 +886,7 @@ function simpleTokenizeFallback(_text: string): number[] {
  */
 function normalizeVector(vec: number[]): number[] {
   const norm = Math.sqrt(vec.reduce((sum, v) => sum + v * v, 0));
-  if (!Number.isFinite(norm) || norm < 1e-12) {
-    throw new Error("[CLIP] Invalid embedding norm (zero/NaN/inf)");
-  }
+  if (norm === 0) return vec;
   return vec.map((v) => v / norm);
 }
 
