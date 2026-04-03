@@ -89,6 +89,8 @@ export function computeFinalRelevance01(params: {
   hasAudienceIntent: boolean;
   /** From scoreCrossFamilyTypePenalty; strong garment↔footwear mismatches are typically ≥ 0.8 */
   crossFamilyPenalty: number;
+  /** Intra-family subtype mismatch penalty from product type taxonomy. */
+  intraFamilyPenalty?: number;
   /**
    * When false, the global term is semantic-only (image-only kNN or no lexical query).
    * Avoids 0.6·sem + 0.4·lex collapsing to sem while still exposing the same number twice in explain.
@@ -98,6 +100,7 @@ export function computeFinalRelevance01(params: {
   tightSemanticCap?: boolean;
 }): number {
   const crossPen = Math.max(0, params.crossFamilyPenalty);
+  const intraPen = Math.max(0, params.intraFamilyPenalty ?? 0);
   // Hard block for cross-family mismatch (e.g. footwear query returning dresses).
   // For image search (tightSemanticCap), type intent comes from YOLO which can be
   // wrong — don't hard-zero, just heavily penalize so visual similarity can still
@@ -137,9 +140,14 @@ export function computeFinalRelevance01(params: {
   const attrFactor = 0.5 + attrScore * 0.5;
 
   const crossFamilySoftFactor = Math.max(0, 1 - crossPen * 0.6);
+  const intraFamilySoftFactor = params.hasTypeIntent
+    ? params.tightSemanticCap
+      ? Math.max(0.25, 1 - intraPen * 0.95)
+      : Math.max(0.4, 1 - intraPen * 0.7)
+    : 1;
 
   const raw =
-    globalScore * typeGateFactor * categoryBoost * attrFactor * crossFamilySoftFactor;
+    globalScore * typeGateFactor * categoryBoost * attrFactor * crossFamilySoftFactor * intraFamilySoftFactor;
   const bounded = Math.max(0, Math.min(1, raw));
   // Prevent final relevance from being unrealistically higher than visual/semantic evidence.
   // With tightSemanticCap (image search), allow a wider bonus so that products with
@@ -847,6 +855,7 @@ export function computeHitRelevance(
     hasSleeveIntent: hasSleeveIntentForDoc,
     hasAudienceIntent,
     crossFamilyPenalty,
+    intraFamilyPenalty,
     applyLexicalToGlobal: lexicalScoreDistinct,
     tightSemanticCap,
   });
