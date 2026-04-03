@@ -633,6 +633,47 @@ function expandPredictedTypeHints(seeds: string[]): string[] {
   return expandProductTypesForQuery(normalized);
 }
 
+function tightenTypeSeedsForDetection(
+  detectionLabel: string,
+  categoryMapping: CategoryMapping,
+  seeds: string[],
+): string[] {
+  const label = String(detectionLabel || "").toLowerCase();
+  const category = String(categoryMapping.productCategory || "").toLowerCase();
+  const normalized = [...new Set(seeds.map((s) => String(s).toLowerCase().trim()).filter(Boolean))];
+  if (normalized.length === 0) return normalized;
+
+  if (category === "tops") {
+    if (/\bshort sleeve top\b|\btee\b|\bt-?shirt\b/.test(label)) {
+      const shortTop = normalized.filter((t) =>
+        /\b(tshirt|t-?shirt|tee|tees|top|tops|tank|camisole|cami|polo|polos)\b/.test(t),
+      );
+      return shortTop.length > 0 ? shortTop : normalized;
+    }
+    if (/\blong sleeve top\b|\bshirt\b|\bblouse\b/.test(label)) {
+      const longTop = normalized.filter((t) =>
+        /\b(shirt|shirts|blouse|blouses|top|tops|sweater|hoodie|sweatshirt|pullover|cardigan|knitwear)\b/.test(t),
+      );
+      return longTop.length > 0 ? longTop : normalized;
+    }
+  }
+
+  if (category === "bottoms") {
+    if (/\btrouser|trousers|pant|pants|chino|chinos|slack|slacks|cargo\b/.test(label)) {
+      const trouserLike = normalized.filter((t) =>
+        /\b(trouser|trousers|pant|pants|chino|chinos|slack|slacks|cargo|sweatpants|joggers?)\b/.test(t),
+      );
+      return trouserLike.length > 0 ? trouserLike : normalized;
+    }
+    if (/\bjean|jeans|denim\b/.test(label)) {
+      const jeansLike = normalized.filter((t) => /\b(jean|jeans|denim)\b/.test(t));
+      return jeansLike.length > 0 ? jeansLike : normalized;
+    }
+  }
+
+  return normalized;
+}
+
 /** IoU threshold for merging same-label detections when `groupByDetection` is false (default 0.5). */
 function yoloShopDedupeIouThreshold(): number {
   const raw = Number(process.env.YOLO_SHOP_DEDUPE_IOU_THRESHOLD);
@@ -1558,6 +1599,7 @@ export class ImageAnalysisService {
         typeSeeds = [...new Set([...typeSeeds, ...blipStructured.productTypeHints])];
       }
       typeSeeds = filterProductTypeSeedsByMappedCategory(typeSeeds, categoryMapping.productCategory);
+      typeSeeds = tightenTypeSeedsForDetection(label, categoryMapping, typeSeeds);
       if (typeSeeds.length) {
         filters.productTypes = typeSeeds;
       } else if (expandedTypeHints.length > 0 && categoryMapping.productCategory !== "accessories") {
@@ -1659,10 +1701,11 @@ export class ImageAnalysisService {
           if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
           if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
           const mergedTypes = [...new Set([...(filters.productTypes ?? []), ...detStruct.productTypeHints])];
-          filters.productTypes = filterProductTypeSeedsByMappedCategory(
+          const filteredTypes = filterProductTypeSeedsByMappedCategory(
             mergedTypes,
             categoryMapping.productCategory,
           ).slice(0, 10);
+          filters.productTypes = tightenTypeSeedsForDetection(label, categoryMapping, filteredTypes);
         } else {
           obs.detectionCaptionRejected += 1;
         }
@@ -2207,6 +2250,7 @@ export class ImageAnalysisService {
           browseTypeSeeds,
           categoryMapping.productCategory,
         );
+        browseTypeSeeds = tightenTypeSeedsForDetection(categorySource, categoryMapping, browseTypeSeeds);
         if (browseTypeSeeds.length) {
           filters.productTypes = browseTypeSeeds;
         }
@@ -2283,10 +2327,15 @@ export class ImageAnalysisService {
             if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
             if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
             const mergedTypes = [...new Set([...(filters.productTypes ?? []), ...detStruct.productTypeHints])];
-            filters.productTypes = filterProductTypeSeedsByMappedCategory(
+            const filteredTypes = filterProductTypeSeedsByMappedCategory(
               mergedTypes,
               categoryMapping.productCategory,
             ).slice(0, 10);
+            filters.productTypes = tightenTypeSeedsForDetection(
+              categorySource,
+              categoryMapping,
+              filteredTypes,
+            );
           } else {
             obs.detectionCaptionRejected += 1;
           }
