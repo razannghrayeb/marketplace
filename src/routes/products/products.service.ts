@@ -1840,34 +1840,6 @@ export async function searchByImageWithSimilarity(
   const softColorBiasOnly = !hasExplicitColorIntent && hasCropColorSignal;
 
   /**
-   * Single snapshot for debugging: style can come from explicit filter or soft hint,
-   * and both can now participate in final relevance intent.
-   */
-  const relevanceIntentDebug = {
-    style: {
-      gatesFinalRelevance01: Boolean(desiredStyleForRelevance),
-      usedInCompositeRerank: hasExplicitStyleIntent || hasSoftStyleHint,
-      explicitFilter: explicitStyleForRelevance || undefined,
-      softHint: softStyleForRelevance || undefined,
-    },
-    type: {
-      reliableTypeIntent: hasReliableTypeIntentForRelevance,
-      detectionAnchored: hasDetectionAnchoredTypeIntent,
-    },
-    color: {
-      gatesFinalRelevance01: hasExplicitColorIntent,
-      cropDominantTokens: hasCropColorSignal ? [...cropDominantColorsRaw] : undefined,
-      inferredTokens: inferredColorTokens.length > 0 ? [...inferredColorTokens] : undefined,
-      softBiasOnly: softColorBiasOnly,
-      explicitFilters: [...explicitColorsForRelevance],
-      effectiveDesired: [...desiredColorsForRelevance],
-    },
-    types: {
-      desiredProductTypes: [...desiredProductTypes],
-    },
-  };
-
-  /**
    * When the user did not narrow the search (category / productTypes / text / explicit color),
    * rank by visual similarity first (catalog-bound when SEARCH_IMAGE_MERCHANDISE_SIMILARITY=1),
    * then metadata relevance, then composite tie-break (composite uses the same bound visual).
@@ -1894,14 +1866,43 @@ export async function searchByImageWithSimilarity(
     tightSemanticCap: true,
     softColorBiasOnly,
     // Detection-derived productTypes are useful hints but can be noisy;
-    // keep strict type gating only for stronger intent anchors.
+    // keep strict type gating only for explicit user intent anchors.
+    // YOLO/detection hints remain in scoring but should not hard-gate image retrieval by default.
     reliableTypeIntent:
       forceStrictInferredTypeIntentEnv() ||
+      hasExplicitTypeFilter ||
       hasExplicitCategoryFilter ||
-      hasTextTypeIntent ||
-      hasDetectionAnchoredTypeIntent,
+      hasTextTypeIntent,
   };
   const hasReliableTypeIntentForRelevance = Boolean(relevanceIntent.reliableTypeIntent);
+
+  /**
+   * Single snapshot for debugging: style can come from explicit filter or soft hint,
+   * and both can now participate in final relevance intent.
+   */
+  const relevanceIntentDebug = {
+    style: {
+      gatesFinalRelevance01: Boolean(desiredStyleForRelevance),
+      usedInCompositeRerank: hasExplicitStyleIntent || hasSoftStyleHint,
+      explicitFilter: explicitStyleForRelevance || undefined,
+      softHint: softStyleForRelevance || undefined,
+    },
+    type: {
+      reliableTypeIntent: hasReliableTypeIntentForRelevance,
+      detectionAnchored: hasDetectionAnchoredTypeIntent,
+    },
+    color: {
+      gatesFinalRelevance01: hasExplicitColorIntent,
+      cropDominantTokens: hasCropColorSignal ? [...cropDominantColorsRaw] : undefined,
+      inferredTokens: inferredColorTokens.length > 0 ? [...inferredColorTokens] : undefined,
+      softBiasOnly: softColorBiasOnly,
+      explicitFilters: [...explicitColorsForRelevance],
+      effectiveDesired: [...desiredColorsForRelevance],
+    },
+    types: {
+      desiredProductTypes: [...desiredProductTypes],
+    },
+  };
 
   const nearIdenticalRawMin = imageSearchNearIdenticalRawCosineMin();
 
