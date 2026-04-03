@@ -652,7 +652,12 @@ function lengthComplianceScore(
   explicitObserved: boolean,
 ): number {
   if (!desired) return 0;
-  if (!observed) return 0.72;
+  if (!observed) {
+    // Unknown length should not behave like a strong match when user explicitly asked
+    // for long/maxi silhouettes.
+    if (desired === "long" || desired === "maxi") return 0.32;
+    return 0.45;
+  }
   if (desired === observed) return 1;
   if (explicitObserved) return 0;
   if ((desired === "long" && (observed === "midi" || observed === "maxi")) || (observed === "long" && (desired === "midi" || desired === "maxi"))) {
@@ -1684,6 +1689,10 @@ export async function searchByImageWithSimilarity(
     typeof imageSearchTextQuery === "string" && imageSearchTextQuery.trim()
       ? imageSearchTextQuery.trim()
       : "";
+  const desiredLengthForRelevance =
+    typeof filtersRecord.length === "string"
+      ? normalizeLengthToken(String(filtersRecord.length).toLowerCase().trim())
+      : null;
 
   let desiredProductTypes: string[] = [];
   const hasExplicitTypeFilter =
@@ -1739,6 +1748,24 @@ export async function searchByImageWithSimilarity(
       desiredProductTypes = [...new Set([...desiredProductTypes, ...fromText])];
     }
   }
+  if (desiredLengthForRelevance && desiredProductTypes.length > 0) {
+    const prunedByLength = desiredProductTypes.filter((t) => {
+      const token = String(t).toLowerCase();
+      if (desiredLengthForRelevance === "long" || desiredLengthForRelevance === "maxi") {
+        return !/\bmini\b/.test(token);
+      }
+      if (desiredLengthForRelevance === "mini") {
+        return !/\b(maxi|midi|long)\b/.test(token);
+      }
+      if (desiredLengthForRelevance === "midi") {
+        return !/\b(mini|maxi|long)\b/.test(token);
+      }
+      return true;
+    });
+    if (prunedByLength.length > 0) {
+      desiredProductTypes = prunedByLength;
+    }
+  }
 
   const explicitColorsForRelevance =
     Array.isArray(filtersRecord.colors) && filtersRecord.colors.length > 0
@@ -1761,9 +1788,16 @@ export async function searchByImageWithSimilarity(
     inferredPrimaryFromParams ?? (filtersRecord as { inferredPrimaryColor?: string | null }).inferredPrimaryColor,
     inferredByItemFromParams ?? (filtersRecord as { inferredColorsByItem?: Record<string, string | null> }).inferredColorsByItem,
   );
+  const hasDressLikeTypeIntent = desiredProductTypes.some((t) => /\b(dress|gown|frock)\b/.test(String(t).toLowerCase()));
+  const preferInferredColorsOverCrop =
+    !hasExplicitColorIntent &&
+    hasDressLikeTypeIntent &&
+    inferredColorTokens.length > 0;
   const allColorsForRelevance = hasExplicitColorIntent
     ? [...explicitColorsForRelevance]
-    : [...new Set([...cropDominantColorsRaw, ...inferredColorTokens])];
+    : preferInferredColorsOverCrop
+      ? [...new Set([...inferredColorTokens])]
+      : [...new Set([...cropDominantColorsRaw, ...inferredColorTokens])];
   const desiredColorsForRelevance = [
     ...new Set(
       allColorsForRelevance.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
@@ -1788,19 +1822,15 @@ export async function searchByImageWithSimilarity(
       : "";
   const hasExplicitStyleIntent = explicitStyleForRelevance.length > 0;
   const hasSoftStyleHint = softStyleForRelevance.length > 0;
-  // For broad image search, let a soft style hint participate in final relevance so
-  // casual/smart-casual queries can suppress obviously formal products.
+  // Soft style hints from detection/BLIP should still guide final relevance for
+  // image search when explicit style is absent.
   const desiredStyleForRelevance = hasExplicitStyleIntent
     ? explicitStyleForRelevance
-    : hasSoftStyleHint && visualPrimaryBroad
+    : hasSoftStyleHint
       ? softStyleForRelevance
       : undefined;
   const desiredSleeveForRelevance =
     typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
-  const desiredLengthForRelevance =
-    typeof filtersRecord.length === "string"
-      ? normalizeLengthToken(String(filtersRecord.length).toLowerCase().trim())
-      : null;
 
   const hasColorIntentForFinal = hasExplicitColorIntent;
   // Crop-dominant colors affect reranking but must NOT gate final relevance
@@ -1808,13 +1838,12 @@ export async function searchByImageWithSimilarity(
   const softColorBiasOnly = !hasExplicitColorIntent && hasCropColorSignal;
 
   /**
-   * Single snapshot for debugging: `hasStyleIntent` in explain is ONLY `filters.style`
-   * (gates `computeFinalRelevance01` / style multiplier). Shop-the-look usually sets
-   * `filters.softStyle` only → explain `hasStyleIntent` false while composite rerank still uses style.
+   * Single snapshot for debugging: style can come from explicit filter or soft hint,
+   * and both can now participate in final relevance intent.
    */
   const relevanceIntentDebug = {
     style: {
-      gatesFinalRelevance01: hasExplicitStyleIntent,
+      gatesFinalRelevance01: Boolean(desiredStyleForRelevance),
       usedInCompositeRerank: hasExplicitStyleIntent || hasSoftStyleHint,
       explicitFilter: explicitStyleForRelevance || undefined,
       softHint: softStyleForRelevance || undefined,
