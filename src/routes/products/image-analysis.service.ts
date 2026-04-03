@@ -1448,11 +1448,7 @@ export class ImageAnalysisService {
       const fallbackDetection = syntheticFullImageDetectionBlock(imageWidth, imageHeight);
       const fallbackDetectedCategories = [...new Set(fallbackDetection.items.map((item) => item.label))];
       const { buffer: fullProcessBuf } = await prepareBufferForImageSearchQuery(buffer);
-      const fallbackEmbedding = await processImageForGarmentEmbeddingWithOptionalBox(
-        buffer,
-        fullProcessBuf,
-        null,
-      ).catch(() => null);
+      const fallbackEmbedding = await processImageForEmbedding(fullProcessBuf).catch(() => null);
       if (!fallbackEmbedding || fallbackEmbedding.length === 0) {
         return {
           ...analysisResult,
@@ -1467,7 +1463,7 @@ export class ImageAnalysisService {
         limit: similarLimitPerItem,
         similarityThreshold,
         includeRelated: false,
-        knnField: shopTheLookKnnField(),
+        knnField: "embedding",
         relaxThresholdWhenEmpty: shopLookRelaxEnv(),
       });
       return {

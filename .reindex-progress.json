@@ -1,0 +1,13 @@
+{
+  "lastProcessedId": 0,
+  "totalProcessed": 0,
+  "totalSuccess": 0,
+  "totalFailed": 0,
+  "totalSkipped": 0,
+  "totalBgRemoved": 0,
+  "totalAttrEmbFailures": 0,
+  "failedIds": [],
+  "modelType": "fashion-clip",
+  "startedAt": "2026-04-03T18:36:18.615Z",
+  "lastUpdatedAt": "2026-04-03T18:36:28.586Z"
+}
