@@ -594,30 +594,6 @@ function hardCategoryTermsForDetection(
     String(t).toLowerCase().trim(),
   );
 
-  if (categoryMapping.productCategory === "tops") {
-    const isShortTop = /\bshort sleeve top\b|\btee\b|\bt-?shirt\b|\btshirt\b|\btank\b|\bcamisole\b|\bcrop top\b/.test(
-      l,
-    );
-    if (isShortTop) {
-      const shortTopTerms = baseTerms.filter((t) =>
-        /\b(t-?shirt|tshirt|tee|top|tops|tank|camisole|cami|polo|polos|crop top)\b/.test(t),
-      );
-      return shortTopTerms.length > 0 ? shortTopTerms : baseTerms;
-    }
-
-    const isLongTop = /\blong sleeve top\b|\bshirt\b|\bblouse\b|\bovershirt\b|\bhoodie\b|\bsweatshirt\b|\bsweater\b/.test(
-      l,
-    );
-    if (isLongTop) {
-      const longTopTerms = baseTerms.filter((t) =>
-        /\b(shirt|shirts|blouse|blouses|overshirt|sweater|hoodie|sweatshirt|pullover|cardigan|knitwear|top|tops)\b/.test(
-          t,
-        ),
-      );
-      return longTopTerms.length > 0 ? longTopTerms : baseTerms;
-    }
-  }
-
   // Prefer trousers/pants over jeans when YOLO says "trousers".
   if (categoryMapping.productCategory === "bottoms") {
     const isTrousersLike = /\b(trouser|trousers|pants|pant|chino|chinos|slack|slacks|cargo|cargo pants|sweatpants|sweatpants)\b/.test(
@@ -882,6 +858,11 @@ function shouldUseStrictDetectionCategoryGuard(productCategory: string): boolean
   );
 }
 
+function isAccessoryLikeCategory(productCategory: string): boolean {
+  const c = String(productCategory || "").toLowerCase();
+  return c === "bags" || c === "accessories";
+}
+
 function applyDetectionCategoryGuard(
   products: ProductResult[],
   detectionLabel: string,
@@ -895,10 +876,6 @@ function applyDetectionCategoryGuard(
   const baseAllowed = strictTerms.length > 0 ? strictTerms : fallbackTerms;
   const allowedTerms = [...new Set(baseAllowed.map((t) => normalizeLooseText(t)).filter(Boolean))];
   if (allowedTerms.length === 0) return products;
-  const label = normalizeLooseText(detectionLabel);
-  const isShortSleeveTopDetection =
-    categoryMapping.productCategory === "tops" &&
-    /(short sleeve top|t shirt|tshirt|tee|tank|camisole|crop top)/.test(label);
 
   return products.filter((p) => {
     const categoryText = normalizeLooseText((p as any).category);
@@ -910,40 +887,18 @@ function applyDetectionCategoryGuard(
       : normalizeLooseText(productTypeRaw);
     const haystack = [categoryText, categoryCanonicalText, productTypeText, titleText].filter(Boolean).join(" ");
 
-    // If the catalog row has no usable type/category text, keep the item to avoid
-    // false negatives on sparse vendor feeds.
-    if (!haystack) return true;
+    // For bags/accessories we fail closed when metadata is missing to avoid
+    // leaking generic apparel into strict accessory retrieval flows.
+    if (!haystack) return !isAccessoryLikeCategory(categoryMapping.productCategory);
 
     const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, term));
     if (!allowByTerm) return false;
-
-    if (isShortSleeveTopDetection) {
-      const longOrOuterwearLeak =
-        /\b(overshirt|jacket|coat|blazer|hoodie|sweatshirt|sweater|cardigan|pullover|long sleeve)\b/.test(
-          haystack,
-        );
-      const shortTopSignal = /\b(t shirt|tshirt|tee|tank|camisole|cami|polo|crop top|short sleeve)\b/.test(
-        haystack,
-      );
-      // For short-sleeve detections, reject outer/long-sleeve leakage unless the row
-      // clearly signals short-top semantics.
-      if (longOrOuterwearLeak && !shortTopSignal) return false;
-    }
 
     // Guard against broad lexical collisions (e.g. "denim jacket" inside trouser flow).
     const productCategoryMacro = mapDetectionToCategory(String((p as any).category ?? ""), 1).productCategory;
     if (categoryMapping.productCategory === "bottoms") {
       if (productCategoryMacro === "outerwear" || /\b(jacket|coat|blazer|outerwear)\b/.test(haystack)) {
         return false;
-      }
-    }
-    if (categoryMapping.productCategory === "dresses") {
-      // Reject bottoms/outerwear leakage even if title contains words like "dress".
-      if (productCategoryMacro !== "dresses") {
-        if (productCategoryMacro === "bottoms" || productCategoryMacro === "outerwear") return false;
-        if (/\b(shorts?|skirt|skirts|pants?|trousers?|jeans|jacket|coat|blazer|hoodie|sweatshirt)\b/.test(haystack)) {
-          return false;
-        }
       }
     }
     if (categoryMapping.productCategory === "bags") {
@@ -1859,7 +1814,7 @@ export class ImageAnalysisService {
       let softProductTypeHints = [...new Set([...typeSeeds, ...expandedTypeHints.slice(0, 8)])];
 
       // "Closet similar" constraints: enforce audience gender + add optional style/color.
-      if (inferredAudience.gender && /^(men|women)$/i.test(String(inferredAudience.gender))) {
+      if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
         filters.gender = inferredAudience.gender;
       }
       if (inferredAudience.ageGroup && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
@@ -1903,9 +1858,15 @@ export class ImageAnalysisService {
         (detection.confidence ?? 0) >= 0.75;
       const detectionMeetsAutoHardHeuristics =
         !noisyCat && (baseHardAuto || relaxedGarmentHardAuto);
+      const accessoryLikeCategory = isAccessoryLikeCategory(categoryMapping.productCategory);
       const shouldHardCategory =
         filterByDetectedCategory &&
-        (shopLookHardCategoryStrictEnv() || detectionMeetsAutoHardHeuristics || shouldForceHardCategoryForDetection(detection, categoryMapping));
+        (
+          accessoryLikeCategory ||
+          shopLookHardCategoryStrictEnv() ||
+          detectionMeetsAutoHardHeuristics ||
+          shouldForceHardCategoryForDetection(detection, categoryMapping)
+        );
       const forceHardCategoryFilterUsed = Boolean(shouldHardCategory);
       if (filterByDetectedCategory) {
         if (shouldHardCategory) {
@@ -1932,7 +1893,7 @@ export class ImageAnalysisService {
       // Do not inherit full-image BLIP hints by default for a specific detection.
       // A full-image caption can describe a different region entirely (e.g. top vs trousers)
       // and will poison per-detection retrieval if used as the fallback signal.
-      let detectionBlipSignal: BlipSignal | undefined = undefined;
+      let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
       if (detCaption.trim().length > 0) {
         const captionLength = inferLengthIntentFromCaption(detCaption);
         if (captionLength) (filters as any).length = captionLength;
@@ -1963,6 +1924,10 @@ export class ImageAnalysisService {
       } else {
         obs.detectionCaptionMisses += 1;
       }
+
+      const strictAudienceLock =
+        Boolean(inferredAudience.gender) &&
+        blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
 
       let similarResult = await searchByImageWithSimilarity({
         imageEmbedding: finalEmbedding,
@@ -1998,8 +1963,10 @@ export class ImageAnalysisService {
         )
       ) {
         const filtersRetry = { ...filters } as typeof filters;
-        delete (filtersRetry as any).gender;
-        delete (filtersRetry as any).ageGroup;
+        if (!strictAudienceLock) {
+          delete (filtersRetry as any).gender;
+          delete (filtersRetry as any).ageGroup;
+        }
         delete (filtersRetry as any).style;
         delete (filtersRetry as any).softStyle;
         similarResult = await searchByImageWithSimilarity({
@@ -2029,6 +1996,7 @@ export class ImageAnalysisService {
         shopLookCategoryFallbackEnv() &&
         similarResult.results.length === 0 &&
         filterByDetectedCategory &&
+        !isAccessoryLikeCategory(categoryMapping.productCategory) &&
         !(categoryMapping.productCategory === "accessories" && isHeadwearLabel(label)) &&
         (filters as { category?: string | string[] }).category
       ) {
@@ -2583,7 +2551,7 @@ export class ImageAnalysisService {
         let softProductTypeHints = browseTypeSeeds.length > 0 ? browseTypeSeeds : undefined;
 
         // "Closet similar" constraints: enforce audience gender + add optional style/color.
-        if (inferredAudience.gender && /^(men|women)$/i.test(String(inferredAudience.gender))) {
+        if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
           filters.gender = inferredAudience.gender;
         }
         if (inferredAudience.ageGroup && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
@@ -2612,6 +2580,7 @@ export class ImageAnalysisService {
           }
         } catch { /* non-critical: color embedding channel still works */ }
         let predictedCategoryAisles: string[] | undefined;
+        const accessoryLikeCategory = isAccessoryLikeCategory(categoryMapping.productCategory);
         if (options.filterByDetectedCategory !== false) {
           const softCategories = shouldUseAlternatives(categoryMapping)
             ? getSearchCategories(categoryMapping)
@@ -2621,7 +2590,8 @@ export class ImageAnalysisService {
             ...softCategories,
             ...browseTypeSeeds,
           ]);
-          if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
+          const shouldHardCategory = accessoryLikeCategory || !(imageSoftCategoryEnv() || shopLookSoftCategoryEnv());
+          if (!shouldHardCategory) {
             predictedCategoryAisles = expandedTypeHints.length ? expandedTypeHints : softCategories;
           } else {
             const terms = hardCategoryTermsForDetection(categorySource, categoryMapping);
@@ -2666,6 +2636,10 @@ export class ImageAnalysisService {
           obs.detectionCaptionMisses += 1;
         }
 
+        const strictAudienceLock =
+          Boolean(inferredAudience.gender) &&
+          blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
+
         let similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
           imageEmbeddingGarment:
@@ -2698,8 +2672,10 @@ export class ImageAnalysisService {
           )
         ) {
           const filtersRetry = { ...filters } as typeof filters;
-          delete (filtersRetry as any).gender;
-          delete (filtersRetry as any).ageGroup;
+          if (!strictAudienceLock) {
+            delete (filtersRetry as any).gender;
+            delete (filtersRetry as any).ageGroup;
+          }
           delete (filtersRetry as any).style;
           delete (filtersRetry as any).softStyle;
           similarResult = await searchByImageWithSimilarity({
@@ -2728,6 +2704,7 @@ export class ImageAnalysisService {
           shopLookCategoryFallbackEnv() &&
           similarResult.results.length === 0 &&
           options.filterByDetectedCategory !== false &&
+          !accessoryLikeCategory &&
           !imageSoftCategoryEnv() &&
           !(categoryMapping.productCategory === "accessories" && isHeadwearLabel(categorySource)) &&
           (filters as { category?: string | string[] }).category
