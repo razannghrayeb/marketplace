@@ -2594,11 +2594,31 @@ export async function searchByImageWithSimilarity(
     // Use visual similarity as the rescue signal instead of a flat minimum.
     // This preserves relative ordering so that genuinely similar products
     // rank above dissimilar ones even in the degraded path.
+    const intentAwareRescue =
+      hasReliableTypeIntentForRelevance ||
+      hasDetectionAnchoredTypeIntent ||
+      desiredColorsForRelevance.length > 0 ||
+      Boolean(desiredSleeveForRelevance);
     for (const h of rescuePool) {
       const comp = complianceById.get(String(h._source.product_id));
       if (comp) {
         const v = visualSimFromHit(h);
-        const rescueScore = Math.max(comp.finalRelevance01 ?? 0, v * 0.85);
+        const existing = comp.finalRelevance01 ?? 0;
+        let rescueScore = Math.max(existing, v * 0.85);
+        if (intentAwareRescue) {
+          const typeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
+          const colorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
+          const sleeveComp = Math.max(0, Math.min(1, comp.sleeveCompliance ?? 0));
+          const audienceComp = Math.max(0, Math.min(1, comp.audienceCompliance ?? 1));
+          const complianceBlend =
+            0.4 * typeComp +
+            0.35 * colorComp +
+            0.1 * sleeveComp +
+            0.15 * audienceComp;
+          const intentAwareScore =
+            Math.max(0, Math.min(1, 0.72 * v + 0.28 * complianceBlend)) * 0.85;
+          rescueScore = Math.max(rescueScore, intentAwareScore);
+        }
         comp.finalRelevance01 = Math.max(rescueScore, effectiveFinalAcceptMin);
         finalScoreSourceById.set(String(h._source.product_id), "final_accept_rescue");
       }

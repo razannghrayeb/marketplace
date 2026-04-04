@@ -2135,7 +2135,7 @@ export class ImageAnalysisService {
           const altResult = await searchByImageWithSimilarity({
             imageEmbedding: alt,
             imageEmbeddingGarment: alt,
-            imageBuffer: clipBuffer,
+            imageBuffer: queryProcessBuf,
             filters,
             softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
             limit: similarLimitPerItem,
@@ -2656,6 +2656,9 @@ export class ImageAnalysisService {
             filters.category = terms.length === 1 ? terms[0] : terms;
           }
         }
+        const forceHardCategoryFilterUsed =
+          options.filterByDetectedCategory !== false &&
+          (filters as { category?: string | string[] }).category != null;
 
         const detCaption = fullResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
         let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
@@ -2712,6 +2715,7 @@ export class ImageAnalysisService {
           includeRelated: false,
           predictedCategoryAisles,
           knnField: shopTheLookKnnField(),
+          forceHardCategoryFilter: forceHardCategoryFilterUsed,
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor,
@@ -2750,6 +2754,7 @@ export class ImageAnalysisService {
             includeRelated: false,
             predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
+            forceHardCategoryFilter: forceHardCategoryFilterUsed,
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor,
@@ -2846,7 +2851,7 @@ export class ImageAnalysisService {
             const altResult = await searchByImageWithSimilarity({
               imageEmbedding: alt,
               imageEmbeddingGarment: alt,
-              imageBuffer: clipBuffer,
+              imageBuffer: queryProcessBuf,
               filters,
               softProductTypeHints,
               limit: resolveShopLookLimit(options.similarLimitPerItem),
@@ -2854,6 +2859,7 @@ export class ImageAnalysisService {
               includeRelated: false,
               predictedCategoryAisles,
               knnField: shopTheLookKnnField(),
+              forceHardCategoryFilter: forceHardCategoryFilterUsed,
               relaxThresholdWhenEmpty: shopLookRelaxEnv(),
               blipSignal: detectionBlipSignal,
               inferredPrimaryColor,
