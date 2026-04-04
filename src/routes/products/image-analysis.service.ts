@@ -17,6 +17,7 @@ import {
   processImageForEmbedding,
   processImageForGarmentEmbeddingWithOptionalBox,
   computeShopTheLookGarmentEmbeddingFromDetection,
+  scalePixelBoxToImageDims,
   blip,
   computePHash,
   validateImage,
@@ -784,6 +785,82 @@ function imageCrossGroupDedupeEnabled(): boolean {
   return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
 }
 
+/** Keep per-detection results category-safe even when fallback paths relax OpenSearch filters. */
+function imageDetectionCategoryGuardEnabled(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_DETECTION_CATEGORY_GUARD ?? "1").toLowerCase();
+  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeLooseText(v: unknown): string {
+  return String(v ?? "")
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/[^a-z0-9\s]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function textHasWholePhrase(haystack: string, phrase: string): boolean {
+  if (!haystack || !phrase) return false;
+  const q = normalizeLooseText(phrase);
+  if (!q) return false;
+  const parts = q.split(" ").filter(Boolean).map(escapeRegex);
+  if (parts.length === 0) return false;
+  const pattern = `(?:^|\\s)${parts.join("\\s+")}(?:$|\\s)`;
+  return new RegExp(pattern, "i").test(haystack);
+}
+
+function shouldUseStrictDetectionCategoryGuard(productCategory: string): boolean {
+  const c = String(productCategory || "").toLowerCase();
+  return (
+    c === "tops" ||
+    c === "bottoms" ||
+    c === "dresses" ||
+    c === "outerwear" ||
+    c === "footwear" ||
+    c === "bags" ||
+    c === "accessories"
+  );
+}
+
+function applyDetectionCategoryGuard(
+  products: ProductResult[],
+  detectionLabel: string,
+  categoryMapping: CategoryMapping,
+): ProductResult[] {
+  if (!imageDetectionCategoryGuardEnabled()) return products;
+  if (!shouldUseStrictDetectionCategoryGuard(categoryMapping.productCategory)) return products;
+
+  const strictTerms = hardCategoryTermsForDetection(detectionLabel, categoryMapping);
+  const fallbackTerms = getCategorySearchTerms(categoryMapping.productCategory);
+  const allowedTerms = [...new Set([...strictTerms, ...fallbackTerms].map((t) => normalizeLooseText(t)).filter(Boolean))];
+  if (allowedTerms.length === 0) return products;
+
+  return products.filter((p) => {
+    const productCategoryMacro = mapDetectionToCategory(String((p as any).category ?? ""), 1).productCategory;
+    if (productCategoryMacro === categoryMapping.productCategory) return true;
+
+    const categoryText = normalizeLooseText((p as any).category);
+    const categoryCanonicalText = normalizeLooseText((p as any).category_canonical);
+    const titleText = normalizeLooseText((p as any).title);
+    const productTypeRaw = (p as any).product_types;
+    const productTypeText = Array.isArray(productTypeRaw)
+      ? normalizeLooseText(productTypeRaw.join(" "))
+      : normalizeLooseText(productTypeRaw);
+    const haystack = [categoryText, categoryCanonicalText, productTypeText, titleText].filter(Boolean).join(" ");
+
+    // If the catalog row has no usable type/category text, keep the item to avoid
+    // false negatives on sparse vendor feeds.
+    if (!haystack) return true;
+
+    return allowedTerms.some((term) => textHasWholePhrase(haystack, term));
+  });
+}
+
 function inferLengthIntentFromCaption(caption: string): "mini" | "midi" | "maxi" | "long" | null {
   const s = String(caption || "").toLowerCase();
   if (!s) return null;
@@ -864,6 +941,84 @@ function applyGroupedPostRanking(
 
   const totalProducts = rows.reduce((acc, row) => acc + row.count, 0);
   return { rows, totalProducts };
+}
+
+function lowQualityDetectionFallbackEnabled(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_LOW_QUALITY_MULTICROP ?? "1").toLowerCase();
+  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
+}
+
+function lowQualityDetectionConfidenceThreshold(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_LOW_QUALITY_CONFIDENCE_MAX ?? "0.74");
+  if (!Number.isFinite(raw)) return 0.74;
+  return Math.max(0.2, Math.min(0.95, raw));
+}
+
+function lowQualityDetectionAreaRatioThreshold(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_LOW_QUALITY_AREA_RATIO_MAX ?? "0.035");
+  if (!Number.isFinite(raw)) return 0.035;
+  return Math.max(0.001, Math.min(0.2, raw));
+}
+
+function shouldUseLowQualityMultiCropFallback(detection: Detection): boolean {
+  if (!lowQualityDetectionFallbackEnabled()) return false;
+  const conf = Number.isFinite(detection.confidence) ? Number(detection.confidence) : 0;
+  const area = Number.isFinite(detection.area_ratio) ? Number(detection.area_ratio) : 0;
+  return conf <= lowQualityDetectionConfidenceThreshold() || area <= lowQualityDetectionAreaRatioThreshold();
+}
+
+function expandDetectionBox(
+  box: BoundingBox,
+  imageWidth: number,
+  imageHeight: number,
+  ratio: number,
+): BoundingBox {
+  const iw = Math.max(1, imageWidth);
+  const ih = Math.max(1, imageHeight);
+  const bw = Math.max(1, box.x2 - box.x1);
+  const bh = Math.max(1, box.y2 - box.y1);
+  const padX = bw * ratio;
+  const padY = bh * ratio;
+  return {
+    x1: Math.max(0, box.x1 - padX),
+    y1: Math.max(0, box.y1 - padY),
+    x2: Math.min(iw, box.x2 + padX),
+    y2: Math.min(ih, box.y2 + padY),
+  };
+}
+
+function mergeImageSearchResultsById(
+  primary: ProductResult[],
+  extra: ProductResult[],
+  limit: number,
+): ProductResult[] {
+  const byId = new Map<string, ProductResult>();
+  for (const p of primary) {
+    byId.set(String((p as any).id), p);
+  }
+  for (const p of extra) {
+    const id = String((p as any).id);
+    const cur = byId.get(id);
+    if (!cur) {
+      byId.set(id, p);
+      continue;
+    }
+    const curSim = Number((cur as any).similarity_score ?? 0);
+    const nxtSim = Number((p as any).similarity_score ?? 0);
+    const curRel = Number((cur as any).finalRelevance01 ?? 0);
+    const nxtRel = Number((p as any).finalRelevance01 ?? 0);
+    if (nxtSim > curSim + 1e-6 || (Math.abs(nxtSim - curSim) <= 1e-6 && nxtRel > curRel + 1e-6)) {
+      byId.set(id, p);
+    }
+  }
+  return [...byId.values()]
+    .sort((a: any, b: any) => {
+      const bs = Number(b?.similarity_score ?? 0);
+      const as = Number(a?.similarity_score ?? 0);
+      if (Math.abs(bs - as) > 1e-6) return bs - as;
+      return Number(b?.finalRelevance01 ?? 0) - Number(a?.finalRelevance01 ?? 0);
+    })
+    .slice(0, Math.max(1, limit));
 }
 
 /**
@@ -1567,10 +1722,12 @@ export class ImageAnalysisService {
       const label = detection.label;
       let clipBuffer: Buffer;
       let finalEmbedding: number[];
+      let queryProcessBuf: Buffer;
       try {
         const aligned = await computeShopTheLookGarmentEmbeddingFromDetection(buffer, detection.box);
         finalEmbedding = aligned.embedding;
         clipBuffer = aligned.clipBufferForAttributes;
+        queryProcessBuf = aligned.processBuf;
       } catch {
         return null;
       }
@@ -1829,6 +1986,71 @@ export class ImageAnalysisService {
           });
         }
       }
+
+      const lowQualityFallbackWanted =
+        shouldUseLowQualityMultiCropFallback(detection) &&
+        similarResult.results.length < Math.max(3, Math.floor(similarLimitPerItem * 0.35));
+      if (lowQualityFallbackWanted) {
+        const expandedRaw = expandDetectionBox(detection.box, imageWidth, imageHeight, 0.22);
+        let expandedBox = expandedRaw;
+        try {
+          const procMeta = await sharp(queryProcessBuf).metadata();
+          const pw = procMeta.width ?? 0;
+          const ph = procMeta.height ?? 0;
+          if (pw > 0 && ph > 0 && (pw !== imageWidth || ph !== imageHeight)) {
+            expandedBox = scalePixelBoxToImageDims(expandedRaw, imageWidth, imageHeight, pw, ph);
+          }
+        } catch {
+          // keep raw-space box if process metadata is unavailable
+        }
+
+        const [expandedEmb, centerEmb] = await Promise.all([
+          processImageForGarmentEmbeddingWithOptionalBox(buffer, queryProcessBuf, expandedBox).catch(() => null),
+          processImageForGarmentEmbeddingWithOptionalBox(buffer, queryProcessBuf, null).catch(() => null),
+        ]);
+
+        const altVectors = [expandedEmb, centerEmb].filter(
+          (v): v is number[] => Array.isArray(v) && v.length > 0,
+        );
+        for (const alt of altVectors) {
+          const altResult = await searchByImageWithSimilarity({
+            imageEmbedding: alt,
+            imageEmbeddingGarment: alt,
+            imageBuffer: clipBuffer,
+            filters,
+            softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
+            limit: similarLimitPerItem,
+            similarityThreshold,
+            includeRelated: false,
+            predictedCategoryAisles,
+            knnField: knnFieldUsed,
+            forceHardCategoryFilter: forceHardCategoryFilterUsed,
+            relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+            blipSignal: detectionBlipSignal,
+            inferredPrimaryColor,
+            inferredColorsByItem,
+          });
+          similarResult = {
+            ...similarResult,
+            results: mergeImageSearchResultsById(
+              similarResult.results,
+              altResult.results,
+              similarLimitPerItem,
+            ),
+          };
+          if (similarResult.results.length >= Math.max(4, Math.floor(similarLimitPerItem * 0.5))) break;
+        }
+      }
+
+      const categorySafeResults = applyDetectionCategoryGuard(
+        similarResult.results,
+        detection.label,
+        categoryMapping,
+      );
+      similarResult = {
+        ...similarResult,
+        results: categorySafeResults,
+      };
 
       if (similarResult.results.length === 0 && !includeEmptyDetectionGroups) {
         return null;
@@ -2228,10 +2450,12 @@ export class ImageAnalysisService {
       try {
         let clipBuffer: Buffer;
         let finalEmbedding: number[];
+        let queryProcessBuf: Buffer;
         try {
           const aligned = await computeShopTheLookGarmentEmbeddingFromDetection(buffer, detection.box);
           finalEmbedding = aligned.embedding;
           clipBuffer = aligned.clipBufferForAttributes;
+          queryProcessBuf = aligned.processBuf;
         } catch {
           continue;
         }
@@ -2459,6 +2683,69 @@ export class ImageAnalysisService {
             });
           }
         }
+
+        const lowQualityFallbackWanted =
+          shouldUseLowQualityMultiCropFallback(detection) &&
+          similarResult.results.length < Math.max(3, Math.floor(resolveShopLookLimit(options.similarLimitPerItem) * 0.35));
+        if (lowQualityFallbackWanted) {
+          const expandedRaw = expandDetectionBox(detection.box, imageWidth, imageHeight, 0.22);
+          let expandedBox = expandedRaw;
+          try {
+            const procMeta = await sharp(queryProcessBuf).metadata();
+            const pw = procMeta.width ?? 0;
+            const ph = procMeta.height ?? 0;
+            if (pw > 0 && ph > 0 && (pw !== imageWidth || ph !== imageHeight)) {
+              expandedBox = scalePixelBoxToImageDims(expandedRaw, imageWidth, imageHeight, pw, ph);
+            }
+          } catch {
+            // keep raw-space box if process metadata is unavailable
+          }
+
+          const [expandedEmb, centerEmb] = await Promise.all([
+            processImageForGarmentEmbeddingWithOptionalBox(buffer, queryProcessBuf, expandedBox).catch(() => null),
+            processImageForGarmentEmbeddingWithOptionalBox(buffer, queryProcessBuf, null).catch(() => null),
+          ]);
+
+          const altVectors = [expandedEmb, centerEmb].filter(
+            (v): v is number[] => Array.isArray(v) && v.length > 0,
+          );
+          for (const alt of altVectors) {
+            const altResult = await searchByImageWithSimilarity({
+              imageEmbedding: alt,
+              imageEmbeddingGarment: alt,
+              imageBuffer: clipBuffer,
+              filters,
+              softProductTypeHints,
+              limit: resolveShopLookLimit(options.similarLimitPerItem),
+              similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
+              includeRelated: false,
+              predictedCategoryAisles,
+              knnField: shopTheLookKnnField(),
+              relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+              blipSignal: detectionBlipSignal,
+              inferredPrimaryColor,
+              inferredColorsByItem,
+            });
+            similarResult = {
+              ...similarResult,
+              results: mergeImageSearchResultsById(
+                similarResult.results,
+                altResult.results,
+                resolveShopLookLimit(options.similarLimitPerItem),
+              ),
+            };
+            if (similarResult.results.length >= Math.max(4, Math.floor(resolveShopLookLimit(options.similarLimitPerItem) * 0.5))) break;
+          }
+        }
+
+        similarResult = {
+          ...similarResult,
+          results: applyDetectionCategoryGuard(
+            similarResult.results,
+            categorySource,
+            categoryMapping,
+          ),
+        };
 
         const includeEmpty = options.includeEmptyDetectionGroups === true;
         if (similarResult.results.length > 0 || includeEmpty) {
