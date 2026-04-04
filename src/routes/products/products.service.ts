@@ -886,12 +886,17 @@ function tokenizeLexicalTerms(text: string): string[] {
 
 function computeSubtypeKeywordSignal(params: {
   desiredProductTypes: string[];
+  preferredDesiredProductTypes?: string[];
   hit: any;
   reliableTypeIntent: boolean;
   crossFamilyPenalty: number;
   productTypeCompliance: number;
 }): { boost: number; overlap: number; exactHit: boolean } {
-  const desired = params.desiredProductTypes
+  const preferred = (params.preferredDesiredProductTypes ?? [])
+    .map((t) => String(t).toLowerCase().trim())
+    .filter(Boolean);
+  const desiredRaw = preferred.length > 0 ? preferred : params.desiredProductTypes;
+  const desired = desiredRaw
     .map((t) => String(t).toLowerCase().trim())
     .filter(Boolean);
   if (!params.reliableTypeIntent || desired.length === 0) {
@@ -921,6 +926,36 @@ function computeSubtypeKeywordSignal(params: {
     return new RegExp(`\\b${escaped}\\b`, "i").test(haystack);
   });
 
+  const exactMatchedDesired = desired.filter((d) => {
+    if (!d) return false;
+    if (hitTypes.includes(d)) return true;
+    const escaped = d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${escaped}\\b`, "i").test(haystack);
+  });
+
+  const genericTypeTerms = new Set([
+    "pant",
+    "pants",
+    "trouser",
+    "trousers",
+    "chino",
+    "chinos",
+    "cargo",
+    "jacket",
+    "jackets",
+    "coat",
+    "coats",
+    "outerwear",
+    "shirt",
+    "shirts",
+  ]);
+  const hasSpecificExact = exactMatchedDesired.some((term) => {
+    const toks = tokenizeLexicalTerms(term);
+    if (toks.length === 0) return false;
+    if (toks.length > 1) return true;
+    return !genericTypeTerms.has(toks[0]);
+  });
+
   const desiredTokens = new Set<string>();
   for (const d of desired) {
     for (const tok of tokenizeLexicalTerms(d)) desiredTokens.add(tok);
@@ -940,7 +975,8 @@ function computeSubtypeKeywordSignal(params: {
   const complianceGate = typeComp >= 0.75 ? 1 : typeComp >= 0.6 ? 0.7 : 0;
 
   let baseBoost = 0;
-  if (exactHit) baseBoost = 0.03;
+  if (exactHit && hasSpecificExact) baseBoost = 0.03;
+  else if (exactHit) baseBoost = preferred.length > 0 ? 0.02 : 0.012;
   else if (overlap >= 0.7) baseBoost = 0.022;
   else if (overlap >= 0.5) baseBoost = 0.015;
 
@@ -1917,7 +1953,7 @@ export async function searchByImageWithSimilarity(
             extractLexicalProductTypeSeeds(String(c)),
           )
         : [];
-    const fromPredicted = predictedCategoryAisles?.length
+    const fromPredicted = filterCategory == null && predictedCategoryAisles?.length
       ? predictedCategoryAisles.flatMap((a) => extractLexicalProductTypeSeeds(String(a)))
       : [];
     desiredProductTypes = [
@@ -1931,6 +1967,7 @@ export async function searchByImageWithSimilarity(
   const softHintsMerged = (softProductTypeHintsParam ?? [])
     .map((t) => String(t).toLowerCase().trim())
     .filter(Boolean);
+  const preferredDesiredProductTypes = [...new Set(softHintsMerged)];
   if (softHintsMerged.length > 0) {
     desiredProductTypes = [...new Set([...desiredProductTypes, ...softHintsMerged])];
   }
@@ -1938,6 +1975,10 @@ export async function searchByImageWithSimilarity(
     const fromText = extractFashionTypeNounTokens(textQueryForRelevance).map((t) => t.toLowerCase());
     if (fromText.length > 0) {
       desiredProductTypes = [...new Set([...desiredProductTypes, ...fromText])];
+      for (const t of fromText) {
+        const x = String(t).toLowerCase().trim();
+        if (x && !preferredDesiredProductTypes.includes(x)) preferredDesiredProductTypes.push(x);
+      }
     }
   }
   if (desiredLengthForRelevance && desiredProductTypes.length > 0) {
@@ -2325,8 +2366,10 @@ export async function searchByImageWithSimilarity(
     const effectiveVisual = visualSimEffectiveById.get(idStr) ?? rawVisual;
     const subtypeKeywordSignal = computeSubtypeKeywordSignal({
       desiredProductTypes,
+      preferredDesiredProductTypes,
       hit,
-      reliableTypeIntent: hasReliableTypeIntentForRelevance,
+      reliableTypeIntent:
+        hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent,
       crossFamilyPenalty: comp.crossFamilyPenalty ?? 0,
       productTypeCompliance: comp.productTypeCompliance ?? 0,
     });
@@ -2538,7 +2581,7 @@ export async function searchByImageWithSimilarity(
   if (rankedHits.length === 0 && visualGatedHits.length > 0) {
     imageSearchPipelineDegraded = true;
     let rescuePool = visualGatedHits;
-    if (hasReliableTypeIntentForRelevance) {
+    if (hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) {
       const preferredTypeAligned = visualGatedHits.filter((h: any) => {
         const comp = complianceById.get(String(h._source.product_id));
         if (!comp) return false;

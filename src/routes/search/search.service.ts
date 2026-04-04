@@ -1822,6 +1822,7 @@ export async function multiImageSearch(
 ): Promise<SearchResult> {
   const startTime = Date.now();
   const { images, userPrompt, limit = 50, rerankWeights } = request;
+  const safeLimit = Math.min(Math.max(Math.trunc(Number(limit) || 50), 1), 120);
 
   try {
     let multiImageEffectiveFinalMin = config.search.finalAcceptMinImage;
@@ -1860,16 +1861,21 @@ export async function multiImageSearch(
     const strictRecall =
       multiImageStrictPromptEnabled() &&
       multiImageHasStrictPromptSignals(ast, userPrompt);
+    const strictConstraintMode = strictRecall;
+    const candidateSize = strictConstraintMode
+      ? Math.min(Math.max(safeLimit * 10, 220), 900)
+      : Math.min(Math.max(safeLimit * 6, 140), 520);
     const vectorK = strictRecall
-      ? Math.min(Math.max(limit * 8, 160), 650)
-      : Math.min(Math.max(limit * 5, 100), 400);
+      ? Math.min(Math.max(safeLimit * 12, 220), 900)
+      : Math.min(Math.max(safeLimit * 8, 140), 520);
 
     const queryBundle = queryMapper.mapQuery(compositeQuery, {
-      maxResults: limit,
+      maxResults: candidateSize,
       vectorK,
       vectorWeight: 0.6,
       filterWeight: 0.3,
       priceWeight: 0.1,
+      strictConstraints: strictConstraintMode,
     });
 
     const opensearch = osClient;
@@ -1978,6 +1984,22 @@ export async function multiImageSearch(
       multiImageEffectiveFinalMin = effectiveFinalAcceptMin;
     }
 
+    const hardConstraints = buildMultiImageHardConstraints(
+      ast,
+      parsedIntent,
+      userPrompt,
+      relevanceIntent,
+    );
+    if (hardConstraints.enabled && hits.length > 0) {
+      hits = hits.filter((hit: any) =>
+        multiImageHitPassesHardConstraints(
+          hit,
+          hardConstraints,
+          relevanceById.get(String(hit?._source?.product_id)),
+        ),
+      );
+    }
+
     const productIds = hits.map((hit: any) => hit._source?.product_id);
     const multiImageQueryColorHints = [
       ...new Set(
@@ -2018,7 +2040,15 @@ export async function multiImageSearch(
       })
       .filter((r: any): r is NonNullable<typeof r> => r !== null);
 
-    const mappedForRerank: MultiVectorSearchResult[] = results.map((r: any) => {
+    const constrainedResults =
+      hardConstraints.enabled && results.length > 0
+        ? results.filter((product: any) => {
+            const rel = relevanceById.get(String(product.id));
+            return multiImageProductPassesHardConstraints(product, hardConstraints, rel);
+          })
+        : results;
+
+    const mappedForRerank: MultiVectorSearchResult[] = constrainedResults.map((r: any) => {
       const idStr = String(r.id || r.product_id || r.productId);
       const frozen = rawScoresByProductId.get(idStr);
       return {
@@ -2048,7 +2078,7 @@ export async function multiImageSearch(
 
     let finalResults = reranked
       .map((rer: any) => {
-        const original = results.find((o: any) => (o.id || o.product_id || o.productId) === rer.productId);
+        const original = constrainedResults.find((o: any) => (o.id || o.product_id || o.productId) === rer.productId);
         const rel = relevanceById.get(String(rer.productId));
         return {
           ...original,
@@ -2083,6 +2113,7 @@ export async function multiImageSearch(
         typeof r.finalRelevance01 === "number" && r.finalRelevance01 >= multiImageEffectiveFinalMin,
     );
     finalResults.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
+    finalResults = finalResults.slice(0, safeLimit);
 
     if (finalResults.length > 0) {
       const maxVs = Math.max(
@@ -2105,11 +2136,14 @@ export async function multiImageSearch(
 
     return {
       results: finalResults,
-      total: totalHits,
+      total: finalResults.length,
       tookMs: Date.now() - startTime,
       explanation: explanationParts.join(" "),
       compositeQuery,
       meta: {
+        candidate_hits: totalHits,
+        candidate_used: hits.length,
+        strict_prompt_constraints: hardConstraints.enabled ? true : undefined,
         ...(geminiDegraded ? { gemini_degraded: true } : {}),
         ...(astPipelineDegraded ? { ast_pipeline_degraded: true } : {}),
       },
@@ -2118,6 +2152,254 @@ export async function multiImageSearch(
     console.error('[multiImageSearch] Error:', error);
     return { results: [], total: 0, tookMs: Date.now() - startTime };
   }
+}
+
+interface MultiImageHardConstraints {
+  enabled: boolean;
+  minPrice?: number;
+  maxPrice?: number;
+  categoryTerms: string[];
+  brands: string[];
+  gender?: string;
+  requiredKeywords: string[];
+  forbiddenKeywords: string[];
+  minRequiredKeywordMatches: number;
+  requireColorCompliance: boolean;
+  requireTypeCompliance: boolean;
+  minTypeCompliance: number;
+}
+
+const MULTI_IMAGE_KEYWORD_STOPWORDS = new Set([
+  "the",
+  "a",
+  "an",
+  "and",
+  "or",
+  "for",
+  "with",
+  "from",
+  "of",
+  "to",
+  "in",
+  "on",
+  "at",
+  "like",
+  "want",
+  "need",
+  "look",
+  "image",
+  "first",
+  "second",
+  "third",
+  "fourth",
+  "fifth",
+  "last",
+]);
+
+function normalizeConstraintKeyword(v: unknown): string | null {
+  const s = String(v ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!s || s.length < 3) return null;
+  if (MULTI_IMAGE_KEYWORD_STOPWORDS.has(s)) return null;
+  return s;
+}
+
+function collectConstraintKeywords(values: unknown[]): string[] {
+  const out: string[] = [];
+  for (const raw of values) {
+    if (raw == null) continue;
+    if (Array.isArray(raw)) {
+      for (const x of raw) {
+        const k = normalizeConstraintKeyword(x);
+        if (k && !out.includes(k)) out.push(k);
+      }
+      continue;
+    }
+    const k = normalizeConstraintKeyword(raw);
+    if (k && !out.includes(k)) out.push(k);
+  }
+  return out;
+}
+
+function buildMultiImageHardConstraints(
+  ast: QueryAST,
+  parsedIntent: ParsedIntent,
+  rawPrompt: string,
+  relevanceIntent: SearchHitRelevanceIntent,
+): MultiImageHardConstraints {
+  const prompt = rawPrompt?.trim() ?? "";
+  if (!multiImageStrictPromptEnabled() || prompt.length < 10) {
+    return {
+      enabled: false,
+      categoryTerms: [],
+      brands: [],
+      requiredKeywords: [],
+      forbiddenKeywords: [],
+      minRequiredKeywordMatches: 0,
+      requireColorCompliance: false,
+      requireTypeCompliance: false,
+      minTypeCompliance: 0.45,
+    };
+  }
+
+  const astPrice = ast.filters?.priceRange;
+  const intentPriceMin = parsedIntent.constraints?.priceMin;
+  const intentPriceMax = parsedIntent.constraints?.priceMax;
+  const minPrice =
+    astPrice?.min != null ? Number(astPrice.min) : intentPriceMin != null ? Number(intentPriceMin) : undefined;
+  const maxPrice =
+    astPrice?.max != null ? Number(astPrice.max) : intentPriceMax != null ? Number(intentPriceMax) : undefined;
+
+  const categorySeeds = [
+    parsedIntent.constraints?.category,
+    ...(ast.entities?.categories ?? []),
+  ]
+    .filter((x) => x != null && String(x).trim() !== "")
+    .map((x) => String(x).toLowerCase().trim());
+
+  const categoryTerms = [...new Set(categorySeeds.flatMap((c) => getCategorySearchTerms(c)))];
+
+  const brands = [...new Set(
+    [
+      ...(parsedIntent.constraints?.brands ?? []),
+      ...(ast.entities?.brands ?? []),
+    ]
+      .map((b) => String(b).toLowerCase().trim())
+      .filter(Boolean),
+  )];
+
+  const gender =
+    normalizeQueryGender(parsedIntent.constraints?.gender) ??
+    normalizeQueryGender(ast.entities?.gender) ??
+    undefined;
+
+  const requiredKeywords = collectConstraintKeywords([
+    parsedIntent.constraints?.mustHave ?? [],
+    ast.entities?.productTypes ?? [],
+    ast.entities?.colors ?? [],
+  ]);
+  const minRequiredKeywordMatches =
+    requiredKeywords.length <= 1
+      ? requiredKeywords.length
+      : Math.max(1, Math.ceil(requiredKeywords.length * 0.7));
+
+  const forbiddenKeywords = collectConstraintKeywords([
+    parsedIntent.constraints?.mustNotHave ?? [],
+    collectMultiImageNegationTerms(parsedIntent, rawPrompt),
+  ]);
+
+  const requireColorCompliance = Boolean(relevanceIntent.promptAnchoredColorIntent);
+  const requireTypeCompliance = Boolean(relevanceIntent.promptAnchoredTypeIntent);
+
+  const enabled =
+    requireColorCompliance ||
+    requireTypeCompliance ||
+    forbiddenKeywords.length > 0 ||
+    requiredKeywords.length > 0 ||
+    brands.length > 0 ||
+    categoryTerms.length > 0 ||
+    gender != null ||
+    minPrice != null ||
+    maxPrice != null;
+
+  return {
+    enabled,
+    minPrice,
+    maxPrice,
+    categoryTerms,
+    brands,
+    gender,
+    requiredKeywords,
+    forbiddenKeywords,
+    minRequiredKeywordMatches,
+    requireColorCompliance,
+    requireTypeCompliance,
+    minTypeCompliance: 0.45,
+  };
+}
+
+function countKeywordMatches(blob: string, keywords: string[]): number {
+  let matched = 0;
+  for (const kw of keywords) {
+    if (blob.includes(kw)) matched += 1;
+  }
+  return matched;
+}
+
+function multiImageHitPassesHardConstraints(
+  hit: any,
+  hard: MultiImageHardConstraints,
+  rel?: HitCompliance,
+): boolean {
+  if (!hard.enabled) return true;
+  const src = hit?._source ?? {};
+  const blob = [src.title, src.brand, src.category, src.category_canonical, src.description]
+    .filter((x) => x != null && String(x).trim() !== "")
+    .join(" ")
+    .toLowerCase();
+
+  const price = Number(src.price_usd);
+  if (Number.isFinite(price)) {
+    if (hard.minPrice != null && price < hard.minPrice) return false;
+    if (hard.maxPrice != null && price > hard.maxPrice) return false;
+  }
+
+  if (hard.brands.length > 0) {
+    const brand = String(src.brand ?? "").toLowerCase();
+    if (!brand || !hard.brands.some((b) => brand.includes(b) || b.includes(brand))) return false;
+  }
+
+  if (hard.categoryTerms.length > 0) {
+    const cat = `${String(src.category ?? "")} ${String(src.category_canonical ?? "")}`.toLowerCase();
+    if (!hard.categoryTerms.some((t) => cat.includes(t))) return false;
+  }
+
+  if (hard.gender) {
+    const g = normalizeQueryGender(String(src.audience_gender ?? src.attr_gender ?? "")) ?? undefined;
+    if (g && g !== hard.gender && !(g === "unisex" && (hard.gender === "men" || hard.gender === "women"))) {
+      return false;
+    }
+  }
+
+  if (hard.forbiddenKeywords.length > 0 && hard.forbiddenKeywords.some((t) => blob.includes(t))) {
+    return false;
+  }
+
+  if (hard.requiredKeywords.length > 0) {
+    const matches = countKeywordMatches(blob, hard.requiredKeywords);
+    if (matches < hard.minRequiredKeywordMatches) return false;
+  }
+
+  if (hard.requireColorCompliance && (rel?.colorCompliance ?? 0) <= 0) return false;
+  if (hard.requireTypeCompliance && (rel?.productTypeCompliance ?? 0) < hard.minTypeCompliance) return false;
+  return true;
+}
+
+function multiImageProductPassesHardConstraints(
+  product: any,
+  hard: MultiImageHardConstraints,
+  rel?: HitCompliance,
+): boolean {
+  if (!hard.enabled) return true;
+  const blob = productSearchTextBlob(product);
+  const price = Number(product?.price ?? product?.price_usd);
+  if (Number.isFinite(price)) {
+    if (hard.minPrice != null && price < hard.minPrice) return false;
+    if (hard.maxPrice != null && price > hard.maxPrice) return false;
+  }
+  if (hard.forbiddenKeywords.length > 0 && hard.forbiddenKeywords.some((t) => blob.includes(t))) {
+    return false;
+  }
+  if (hard.requiredKeywords.length > 0) {
+    const matches = countKeywordMatches(blob, hard.requiredKeywords);
+    if (matches < hard.minRequiredKeywordMatches) return false;
+  }
+  if (hard.requireColorCompliance && (rel?.colorCompliance ?? 0) <= 0) return false;
+  if (hard.requireTypeCompliance && (rel?.productTypeCompliance ?? 0) < hard.minTypeCompliance) return false;
+  return true;
 }
 
 /**
