@@ -67,8 +67,8 @@ export function Navbar() {
                 className={clsx(
                   'flex items-center gap-1.5 px-3.5 py-2 rounded-full text-sm font-medium transition-all',
                   pathname.startsWith('/admin')
-                    ? 'bg-neutral-800 text-white'
-                    : 'text-neutral-600 hover:bg-neutral-100'
+                    ? 'bg-violet-600 text-white shadow-sm shadow-violet-500/25'
+                    : 'text-neutral-600 hover:text-violet-700 hover:bg-violet-50/80'
                 )}
               >
                 <Shield className="w-3.5 h-3.5" />
@@ -81,8 +81,8 @@ export function Navbar() {
                 className={clsx(
                   'flex items-center gap-1.5 px-3.5 py-2 rounded-full text-sm font-medium transition-all',
                   pathname.startsWith('/dashboard')
-                    ? 'bg-emerald-600 text-white shadow-sm shadow-emerald-600/20'
-                    : 'text-neutral-600 hover:bg-emerald-50 hover:text-emerald-800'
+                    ? 'bg-violet-100 text-violet-800 shadow-sm'
+                    : 'text-neutral-600 hover:text-violet-700 hover:bg-violet-50/80'
                 )}
               >
                 <Store className="w-3.5 h-3.5" />

@@ -31,6 +31,7 @@ import {
   getRecommendations,
   getOutfitSuggestions,
   completeLookSuggestions,
+  completeLookSuggestionsForCatalogProducts,
   getOnboardingRecommendationsForUser,
   getAdaptedEssentialsForUser,
   getUserPriceTier
@@ -333,14 +334,24 @@ export async function outfitSuggestions(req: Request, res: Response, next: NextF
 export async function completeLook(req: Request, res: Response, next: NextFunction) {
   try {
     const userId = req.user!.id;
-    const itemIds = req.body.item_ids as number[];
+    const itemIds = req.body.item_ids as number[] | undefined;
+    const productIdsRaw = req.body.product_ids as number[] | undefined;
+    const productIds = Array.isArray(productIdsRaw)
+      ? productIdsRaw.map((n) => parseInt(String(n), 10)).filter((n) => Number.isFinite(n) && n >= 1)
+      : [];
     const limit = req.body.limit || 10;
 
-    if (!Array.isArray(itemIds) || itemIds.length === 0) {
-      return res.status(400).json({ success: false, error: "item_ids array required" });
+    const hasItems = Array.isArray(itemIds) && itemIds.length > 0;
+    if (!hasItems && productIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "item_ids or product_ids array required",
+      });
     }
 
-    const result = await completeLookSuggestions(userId, itemIds, limit);
+    const result = hasItems
+      ? await completeLookSuggestions(userId, itemIds!, limit)
+      : await completeLookSuggestionsForCatalogProducts(userId, productIds, limit);
     const suggestions = result.suggestions.map((s) => ({
       ...s,
       id: s.product_id,

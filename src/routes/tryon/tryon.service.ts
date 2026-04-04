@@ -116,8 +116,36 @@ function mimeToExt(mimeType: string): string {
   return map[mimeType] ?? "jpg";
 }
 
-/** Per-user rate limit: max 10 try-on submissions per hour (checked via DB). */
-const TRYON_RATE_LIMIT_PER_HOUR = 10;
+/** Classify try-on error for better messaging */
+function classifyTryOnError(err: any): string {
+  const message = (err?.message || "").toLowerCase();
+  if (message.includes("not found")) return "NOT_FOUND";
+  if (message.includes("timeout")) return "TIMEOUT";
+  if (message.includes("unsupported") || message.includes("garment")) return "UNSUPPORTED_GARMENT";
+  if (message.includes("invalid") || message.includes("image")) return "INVALID_IMAGE";
+  if (message.includes("quota") || message.includes("rate")) return "QUOTA_EXCEEDED";
+  if (message.includes("network") || message.includes("connection")) return "NETWORK_ERROR";
+  if (message.includes("auth")) return "AUTH_ERROR";
+  return "UNKNOWN";
+}
+
+/** Get user-friendly error message for try-on errors */
+function getTryOnErrorMessage(errorType: string, originalMessage: string): string {
+  const messages: Record<string, string> = {
+    "NOT_FOUND": "The requested product or wardrobe item could not be found.",
+    "TIMEOUT": "The try-on process took too long. Please try again.",
+    "UNSUPPORTED_GARMENT": "This garment type is not supported for virtual try-on. Try with a shirt, pants, or dress.",
+    "INVALID_IMAGE": "The image appears to be corrupted or too low quality. Please try with a better quality image.",
+    "QUOTA_EXCEEDED": "Try-on service quota exceeded. Please try again later.",
+    "NETWORK_ERROR": "Network error during processing. The system will retry automatically.",
+    "AUTH_ERROR": "Authentication error. Please check your configuration.",
+    "UNKNOWN": originalMessage || "Try-on processing failed. Please try again."
+  };
+  return messages[errorType] || messages["UNKNOWN"];
+}
+
+/** Per-user rate limit: max 10 try-on submissions per hour (checked via DB). Can be overridden via TRYON_RATE_LIMIT env var. */
+const TRYON_RATE_LIMIT_PER_HOUR = parseInt(process.env.TRYON_RATE_LIMIT || "10", 10);
 
 async function checkRateLimit(userId: number, count = 1): Promise<void> {
   const result = await pg.query<{ count: string }>(
@@ -128,10 +156,12 @@ async function checkRateLimit(userId: number, count = 1): Promise<void> {
   const used = parseInt(result.rows[0].count, 10);
   if (used + count > TRYON_RATE_LIMIT_PER_HOUR) {
     const err = new Error(
-      `Try-on rate limit: max ${TRYON_RATE_LIMIT_PER_HOUR} per hour. ` +
-      `Current usage: ${used}/${TRYON_RATE_LIMIT_PER_HOUR}`
+      `Try-on rate limit exceeded: max ${TRYON_RATE_LIMIT_PER_HOUR} per hour. ` +
+      `Current usage: ${used}/${TRYON_RATE_LIMIT_PER_HOUR}. ` +
+      `Please try again in ${Math.ceil(60 - new Date().getMinutes())} minutes.`
     );
     (err as any).statusCode = 429;
+    (err as any).retryAfter = 3600;
     throw err;
   }
 }
@@ -272,22 +302,27 @@ async function processJobInBackground(opts: JobProcessOpts, attempt: number = 1)
   } catch (err: any) {
     console.error(`[TryOn] Job ${jobId} failed (attempt ${attempt}):`, err.message);
     
+    // Classify error for better messaging
+    const errorType = classifyTryOnError(err);
+    const userMessage = getTryOnErrorMessage(errorType, err.message);
+    
     // Check if error is retryable
     if (isRetryableError(err) && attempt < 3) {
       // Schedule retry with exponential backoff
-      await scheduleRetry(jobId, userId, err.message, attempt);
+      console.log(`[TryOn] Job ${jobId} scheduling retry (attempt ${attempt + 1})`);
+      await scheduleRetry(jobId, userId, userMessage, attempt);
       return;
     }
     
     // Permanent failure
     await pg.query(
       `UPDATE tryon_jobs SET status = 'failed', error_message = $1 WHERE id = $2`,
-      [err.message?.slice(0, 500), jobId]
+      [userMessage.slice(0, 500), jobId]
     );
     
     // Track usage and notify failure
     await trackTryOnUsage(userId, 0, false);
-    await notifyJobFailed(jobId, userId, err.message);
+    await notifyJobFailed(jobId, userId, userMessage);
   }
 }
 

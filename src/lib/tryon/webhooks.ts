@@ -63,6 +63,22 @@ const PUBSUB_CHANNELS = {
 // ============================================================================
 
 /**
+ * Check if tryon_webhooks table exists in database
+ */
+async function checkWebhookTableExists(): Promise<boolean> {
+  try {
+    await pg.query(`SELECT 1 FROM tryon_webhooks LIMIT 1`);
+    return true;
+  } catch (err: any) {
+    if (err.code === "42P01" || err.message?.includes("does not exist")) {
+      console.warn("[Webhook] tryon_webhooks table does not exist. Webhooks disabled.");
+      return false;
+    }
+    throw err;
+  }
+}
+
+/**
  * Register a webhook URL for a user
  */
 export async function registerWebhook(
@@ -70,32 +86,48 @@ export async function registerWebhook(
   url: string,
   secret: string,
   events: WebhookEvent[] = ["job.completed", "job.failed"]
-): Promise<WebhookConfig> {
-  const result = await pg.query<WebhookConfig>(
-    `INSERT INTO tryon_webhooks (user_id, url, secret, events, enabled)
-     VALUES ($1, $2, $3, $4, true)
-     ON CONFLICT (user_id) DO UPDATE SET
-       url = EXCLUDED.url,
-       secret = EXCLUDED.secret,
-       events = EXCLUDED.events,
-       enabled = true
-     RETURNING *`,
-    [userId, url, secret, events]
-  );
-  
-  return result.rows[0];
+): Promise<WebhookConfig | null> {
+  try {
+    const exists = await checkWebhookTableExists();
+    if (!exists) return null;
+
+    const result = await pg.query<WebhookConfig>(
+      `INSERT INTO tryon_webhooks (user_id, url, secret, events, enabled)
+       VALUES ($1, $2, $3, $4, true)
+       ON CONFLICT (user_id) DO UPDATE SET
+         url = EXCLUDED.url,
+         secret = EXCLUDED.secret,
+         events = EXCLUDED.events,
+         enabled = true
+       RETURNING *`,
+      [userId, url, secret, events]
+    );
+    
+    return result.rows[0] || null;
+  } catch (err: any) {
+    console.error("[Webhook] Failed to register webhook:", err.message);
+    return null;
+  }
 }
 
 /**
  * Get webhook config for a user
  */
 export async function getWebhookConfig(userId: number): Promise<WebhookConfig | null> {
-  const result = await pg.query<WebhookConfig>(
-    `SELECT * FROM tryon_webhooks WHERE user_id = $1 AND enabled = true`,
-    [userId]
-  );
-  
-  return result.rows[0] || null;
+  try {
+    const exists = await checkWebhookTableExists();
+    if (!exists) return null;
+
+    const result = await pg.query<WebhookConfig>(
+      `SELECT * FROM tryon_webhooks WHERE user_id = $1 AND enabled = true`,
+      [userId]
+    );
+    
+    return result.rows[0] || null;
+  } catch (err: any) {
+    console.error("[Webhook] Failed to get webhook config:", err.message);
+    return null;
+  }
 }
 
 /**
@@ -239,28 +271,33 @@ export async function notifyJobCompleted(
   userId: number,
   resultUrl: string
 ): Promise<void> {
-  const payload: WebhookPayload = {
-    event: "job.completed",
-    jobId,
-    userId,
-    status: "completed",
-    resultUrl,
-    timestamp: Date.now(),
-  };
-  
-  // Try webhook first
-  const webhookConfig = await getWebhookConfig(userId);
-  if (webhookConfig && webhookConfig.events.includes("job.completed")) {
-    await sendWebhook(webhookConfig, payload);
+  try {
+    const payload: WebhookPayload = {
+      event: "job.completed",
+      jobId,
+      userId,
+      status: "completed",
+      resultUrl,
+      timestamp: Date.now(),
+    };
+    
+    // Try webhook first
+    const webhookConfig = await getWebhookConfig(userId);
+    if (webhookConfig && webhookConfig.events.includes("job.completed")) {
+      await sendWebhook(webhookConfig, payload);
+    }
+    
+    // Always publish to Redis for real-time clients
+    await publishToPubSub(userId, {
+      event: "job.completed",
+      jobId,
+      resultUrl,
+      timestamp: Date.now(),
+    });
+  } catch (err: any) {
+    console.warn(`[Webhook] Failed to notify job completion (${jobId}):`, err.message);
+    // Don't throw - notifications are non-critical
   }
-  
-  // Always publish to Redis for real-time clients
-  await publishToPubSub(userId, {
-    event: "job.completed",
-    jobId,
-    resultUrl,
-    timestamp: Date.now(),
-  });
 }
 
 /**
@@ -271,28 +308,33 @@ export async function notifyJobFailed(
   userId: number,
   error: string
 ): Promise<void> {
-  const payload: WebhookPayload = {
-    event: "job.failed",
-    jobId,
-    userId,
-    status: "failed",
-    error,
-    timestamp: Date.now(),
-  };
-  
-  // Try webhook
-  const webhookConfig = await getWebhookConfig(userId);
-  if (webhookConfig && webhookConfig.events.includes("job.failed")) {
-    await sendWebhook(webhookConfig, payload);
+  try {
+    const payload: WebhookPayload = {
+      event: "job.failed",
+      jobId,
+      userId,
+      status: "failed",
+      error,
+      timestamp: Date.now(),
+    };
+    
+    // Try webhook
+    const webhookConfig = await getWebhookConfig(userId);
+    if (webhookConfig && webhookConfig.events.includes("job.failed")) {
+      await sendWebhook(webhookConfig, payload);
+    }
+    
+    // Publish to Redis
+    await publishToPubSub(userId, {
+      event: "job.failed",
+      jobId,
+      error,
+      timestamp: Date.now(),
+    });
+  } catch (err: any) {
+    console.warn(`[Webhook] Failed to notify job failure (${jobId}):`, err.message);
+    // Don't throw - notifications are non-critical
   }
-  
-  // Publish to Redis
-  await publishToPubSub(userId, {
-    event: "job.failed",
-    jobId,
-    error,
-    timestamp: Date.now(),
-  });
 }
 
 /**
@@ -302,26 +344,31 @@ export async function notifyJobStarted(
   jobId: number,
   userId: number
 ): Promise<void> {
-  const payload: WebhookPayload = {
-    event: "job.started",
-    jobId,
-    userId,
-    status: "processing",
-    timestamp: Date.now(),
-  };
-  
-  // Try webhook
-  const webhookConfig = await getWebhookConfig(userId);
-  if (webhookConfig && webhookConfig.events.includes("job.started")) {
-    await sendWebhook(webhookConfig, payload);
+  try {
+    const payload: WebhookPayload = {
+      event: "job.started",
+      jobId,
+      userId,
+      status: "processing",
+      timestamp: Date.now(),
+    };
+    
+    // Try webhook
+    const webhookConfig = await getWebhookConfig(userId);
+    if (webhookConfig && webhookConfig.events.includes("job.started")) {
+      await sendWebhook(webhookConfig, payload);
+    }
+    
+    // Publish to Redis
+    await publishToPubSub(userId, {
+      event: "job.started",
+      jobId,
+      timestamp: Date.now(),
+    });
+  } catch (err: any) {
+    console.warn(`[Webhook] Failed to notify job started (${jobId}):`, err.message);
+    // Don't throw - notifications are non-critical
   }
-  
-  // Publish to Redis
-  await publishToPubSub(userId, {
-    event: "job.started",
-    jobId,
-    timestamp: Date.now(),
-  });
 }
 
 // ============================================================================

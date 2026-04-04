@@ -104,22 +104,31 @@ function priceCentsFromRecord(raw: Record<string, unknown>): number {
 
 function toProducts(results: unknown[]): Product[] {
   return results
-    .filter((r): r is Record<string, unknown> => Boolean(r && typeof r === 'object' && ('id' in r || 'product_id' in r || 'productId' in r)))
+    .filter((r): r is Record<string, unknown> => {
+      if (!r || typeof r !== 'object') return false
+      const o = r as Record<string, unknown>
+      if ('id' in o || 'product_id' in o || 'productId' in o) return true
+      const src = o._source
+      return Boolean(src && typeof src === 'object' && ('product_id' in src || 'id' in src))
+    })
     .map((r) => {
       const raw = r as Record<string, unknown>
-      const idRaw = raw.id ?? raw.product_id ?? raw.productId ?? 0
-      const id = typeof idRaw === 'number' ? idRaw : Number(idRaw)
-      const saleRaw = raw.sales_price_cents ?? raw.salesPriceCents ?? raw.sale_price
+      const nested =
+        raw._source && typeof raw._source === 'object' ? (raw._source as Record<string, unknown>) : null
+      const src = nested ?? raw
+      const idRaw = src.id ?? src.product_id ?? src.productId ?? raw.id ?? raw.product_id ?? raw.productId ?? 0
+      const id = typeof idRaw === 'number' && Number.isFinite(idRaw) ? idRaw : Number(String(idRaw).replace(/\D/g, '') || 0)
+      const saleRaw = src.sales_price_cents ?? src.salesPriceCents ?? raw.sales_price_cents ?? raw.salesPriceCents ?? raw.sale_price
       const sales_price_cents = parseCentsField(saleRaw)
       return {
-        id: Number.isFinite(id) ? id : 0,
-        title: String(raw.title ?? raw.name ?? ''),
-        price_cents: priceCentsFromRecord(raw),
+        id: Number.isFinite(id) && id >= 1 ? id : 0,
+        title: String(src.title ?? src.name ?? raw.title ?? raw.name ?? ''),
+        price_cents: priceCentsFromRecord(src),
         sales_price_cents: sales_price_cents ?? null,
-        image_url: (raw.image_url ?? raw.imageUrl ?? raw.image_cdn ?? raw.imageCdn ?? null) as string | null,
-        image_cdn: (raw.image_cdn ?? raw.imageCdn ?? null) as string | null,
-        brand: (raw.brand as string) ?? null,
-        category: (raw.category as string) ?? null,
+        image_url: (src.image_url ?? src.imageUrl ?? src.image_cdn ?? src.imageCdn ?? raw.image_url ?? raw.imageUrl ?? null) as string | null,
+        image_cdn: (src.image_cdn ?? src.imageCdn ?? raw.image_cdn ?? null) as string | null,
+        brand: (src.brand ?? raw.brand) as string | null,
+        category: (src.category ?? raw.category) as string | null,
       } as Product
     })
 }
@@ -218,7 +227,7 @@ function ShopTheLookResults({ groups, outfitImageUrl }: { groups: DetectionGroup
 
             return (
               <motion.section
-                key={catKey}
+                key={`${catKey}-${i}-${group.detection?.label ?? ''}-${group.detection?.confidence ?? 0}`}
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.15 + i * 0.1, duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
@@ -388,13 +397,23 @@ function SearchContent() {
         const formData = new FormData()
         formData.append('image', imageFile)
         const res = await api.postForm(endpoints.images.search, formData)
-        const raw = res as { success?: boolean; error?: { message?: string }; similarProducts?: { byDetection?: Array<{ detection?: { label?: string }; products?: unknown[] }> } }
+        const raw = res as Record<string, unknown>
         if (raw?.success === false) {
-          throw new Error(raw?.error?.message ?? 'Shop the look failed')
+          const err = raw.error as { message?: string } | string | undefined
+          const msg = typeof err === 'string' ? err : err?.message
+          throw new Error(msg ?? 'Shop the look failed')
         }
-        const byDetection = raw?.similarProducts?.byDetection ?? []
-        const results = byDetection.flatMap((d) => d.products ?? [])
-        return { results, query: { shopTheLook: true }, byDetection }
+        const sp = (raw.similarProducts ?? raw.data) as { byDetection?: unknown[] } | undefined
+        let byDetection = sp?.byDetection ?? raw.byDetection
+        if (!Array.isArray(byDetection)) byDetection = []
+        const groups = byDetection as Array<{
+          detection?: { label?: string; confidence?: number }
+          category?: string
+          products?: unknown[]
+          count?: number
+        }>
+        const results = groups.flatMap((d) => (Array.isArray(d.products) ? d.products : []))
+        return { results, query: { shopTheLook: true }, byDetection: groups }
       }
       if (mode === 'image' && imageFile) {
         const formData = new FormData()

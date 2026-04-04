@@ -20,10 +20,13 @@ export type SearchFilters = {
     titleQuery?: string;
 };
 
+export type UserType = "customer" | "business";
+
 export interface AuthUser {
   id: number;
   email: string;
   is_admin: boolean;
+  user_type: UserType;
 }
 
 export interface UserRow {
@@ -32,6 +35,7 @@ export interface UserRow {
   password_hash: string;
   is_active: boolean;
   is_admin: boolean;
+  user_type: UserType;
   created_at: Date;
   last_login: Date | null;
 }

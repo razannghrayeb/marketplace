@@ -1,6 +1,11 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { config } from "../config";
+import type { UserType } from "../types";
+
+function userTypeFromPayload(raw: unknown): UserType {
+  return raw === "business" ? "business" : "customer";
+}
 
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
@@ -14,6 +19,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
       sub: number;
       email: string;
       is_admin: boolean;
+      user_type?: unknown;
       type?: string;
     };
 
@@ -21,7 +27,12 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
       return res.status(401).json({ success: false, error: "Access token required" });
     }
 
-    req.user = { id: payload.sub, email: payload.email, is_admin: payload.is_admin };
+    req.user = {
+      id: payload.sub,
+      email: payload.email,
+      is_admin: payload.is_admin,
+      user_type: userTypeFromPayload(payload.user_type),
+    };
     next();
   } catch (err: any) {
     const message = err.name === "TokenExpiredError" ? "Token expired" : "Invalid token";
@@ -41,11 +52,17 @@ export function optionalAuth(req: Request, res: Response, next: NextFunction) {
       sub: number;
       email: string;
       is_admin: boolean;
+      user_type?: unknown;
       type?: string;
     };
 
     if (payload.type !== "refresh") {
-      req.user = { id: payload.sub, email: payload.email, is_admin: payload.is_admin };
+      req.user = {
+        id: payload.sub,
+        email: payload.email,
+        is_admin: payload.is_admin,
+        user_type: userTypeFromPayload(payload.user_type),
+      };
     }
     next();
   } catch {
