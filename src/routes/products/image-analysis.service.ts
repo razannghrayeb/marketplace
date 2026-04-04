@@ -103,6 +103,12 @@ function shopLookCategoryFallbackEnv(): boolean {
   return v === "1" || v === "true";
 }
 
+/** Debug-only isolation path: bypass rerank/final gates and rank by raw exact cosine. */
+function shopLookDebugRawCosineFirstEnv(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_DEBUG_RAW_EXACT_COSINE_FIRST ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
 /**
  * Shop-the-Look: use aisle-level rerank (predictedCategoryAisles) without hard OpenSearch category filter.
  * Default true when unset — pairs with products.service useAisleRerank when aisle hints are sent.
@@ -604,7 +610,19 @@ function hardCategoryTermsForDetection(
     if (isJeansLike) {
       return baseTerms.filter((t) => /\b(jean|jeans|denim|denims)\b/.test(t));
     }
+    const isSkirtLike = /\b(skirt|skirts|mini skirt|midi skirt|maxi skirt)\b/.test(l);
+    if (isSkirtLike) {
+      return baseTerms.filter((t) => /\b(skirt|skirts)\b/.test(t));
+    }
     return baseTerms;
+  }
+
+  if (categoryMapping.productCategory === "bags") {
+    return baseTerms.filter((t) =>
+      /\b(bag|bags|wallet|purse|handbag|handbags|tote|totes|backpack|backpacks|clutch|clutches|crossbody|satchel|satchels)\b/.test(
+        t,
+      ),
+    );
   }
 
   // Prefer hat/cap-family over generic `accessories`.
@@ -670,6 +688,19 @@ function tightenTypeSeedsForDetection(
       const jeansLike = normalized.filter((t) => /\b(jean|jeans|denim)\b/.test(t));
       return jeansLike.length > 0 ? jeansLike : normalized;
     }
+    if (/\bskirt|skirts\b/.test(label)) {
+      const skirtLike = normalized.filter((t) => /\b(skirt|skirts)\b/.test(t));
+      return skirtLike.length > 0 ? skirtLike : normalized;
+    }
+  }
+
+  if (category === "bags") {
+    const bagLike = normalized.filter((t) =>
+      /\b(bag|bags|wallet|purse|handbag|handbags|tote|totes|backpack|backpacks|clutch|clutches|crossbody|satchel|satchels)\b/.test(
+        t,
+      ),
+    );
+    return bagLike.length > 0 ? bagLike : normalized;
   }
 
   return normalized;
@@ -837,13 +868,11 @@ function applyDetectionCategoryGuard(
 
   const strictTerms = hardCategoryTermsForDetection(detectionLabel, categoryMapping);
   const fallbackTerms = getCategorySearchTerms(categoryMapping.productCategory);
-  const allowedTerms = [...new Set([...strictTerms, ...fallbackTerms].map((t) => normalizeLooseText(t)).filter(Boolean))];
+  const baseAllowed = strictTerms.length > 0 ? strictTerms : fallbackTerms;
+  const allowedTerms = [...new Set(baseAllowed.map((t) => normalizeLooseText(t)).filter(Boolean))];
   if (allowedTerms.length === 0) return products;
 
   return products.filter((p) => {
-    const productCategoryMacro = mapDetectionToCategory(String((p as any).category ?? ""), 1).productCategory;
-    if (productCategoryMacro === categoryMapping.productCategory) return true;
-
     const categoryText = normalizeLooseText((p as any).category);
     const categoryCanonicalText = normalizeLooseText((p as any).category_canonical);
     const titleText = normalizeLooseText((p as any).title);
@@ -857,7 +886,23 @@ function applyDetectionCategoryGuard(
     // false negatives on sparse vendor feeds.
     if (!haystack) return true;
 
-    return allowedTerms.some((term) => textHasWholePhrase(haystack, term));
+    const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, term));
+    if (!allowByTerm) return false;
+
+    // Guard against broad lexical collisions (e.g. "denim jacket" inside trouser flow).
+    const productCategoryMacro = mapDetectionToCategory(String((p as any).category ?? ""), 1).productCategory;
+    if (categoryMapping.productCategory === "bottoms") {
+      if (productCategoryMacro === "outerwear" || /\b(jacket|coat|blazer|outerwear)\b/.test(haystack)) {
+        return false;
+      }
+    }
+    if (categoryMapping.productCategory === "bags") {
+      if (/\b(belt|belts|scarf|scarves|hat|hats|cap|caps|jewelry|bracelet|necklace|earrings)\b/.test(haystack)) {
+        return false;
+      }
+    }
+
+    return true;
   });
 }
 
@@ -1750,13 +1795,10 @@ export class ImageAnalysisService {
       const filters: Partial<import("./types").SearchFilters> = {};
       // Keep inferred type tokens as soft hints so image search stays recall-first.
       // Hard product-type filters can suppress visually similar neighbors across categories.
-      const captionWantsJeans = blipStructured.productTypeHints.includes("jeans");
       const typeSeedSource =
-        categoryMapping.productCategory === "bottoms" && captionWantsJeans
-          ? `${label} jeans`
-          : categoryMapping.productCategory === "tops" &&
-              categoryMapping.attributes.sleeveLength === "short"
-            ? "tshirt tee"
+        categoryMapping.productCategory === "tops" &&
+          categoryMapping.attributes.sleeveLength === "short"
+          ? "tshirt tee"
           : label;
       let typeSeeds = extractLexicalProductTypeSeeds(typeSeedSource);
       if (blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
@@ -1764,7 +1806,7 @@ export class ImageAnalysisService {
       }
       typeSeeds = filterProductTypeSeedsByMappedCategory(typeSeeds, categoryMapping.productCategory);
       typeSeeds = tightenTypeSeedsForDetection(label, categoryMapping, typeSeeds);
-      const softProductTypeHints = [...new Set([...typeSeeds, ...expandedTypeHints.slice(0, 8)])];
+      let softProductTypeHints = [...new Set([...typeSeeds, ...expandedTypeHints.slice(0, 8)])];
 
       // "Closet similar" constraints: enforce audience gender + add optional style/color.
       if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
@@ -1859,12 +1901,12 @@ export class ImageAnalysisService {
           if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
           if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
           if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
-          const mergedTypes = [...new Set([...(filters.productTypes ?? []), ...detStruct.productTypeHints])];
+            const mergedTypes = [...new Set([...softProductTypeHints, ...detStruct.productTypeHints])];
           const filteredTypes = filterProductTypeSeedsByMappedCategory(
             mergedTypes,
             categoryMapping.productCategory,
           ).slice(0, 10);
-          filters.productTypes = tightenTypeSeedsForDetection(label, categoryMapping, filteredTypes);
+            softProductTypeHints = tightenTypeSeedsForDetection(label, categoryMapping, filteredTypes);
         } else {
           obs.detectionCaptionRejected += 1;
         }
@@ -1891,6 +1933,7 @@ export class ImageAnalysisService {
         blipSignal: detectionBlipSignal,
         inferredPrimaryColor,
         inferredColorsByItem,
+        debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
       });
 
       // If BLIP-derived audience/style filters are too strict and remove all hits,
@@ -1928,6 +1971,7 @@ export class ImageAnalysisService {
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor,
           inferredColorsByItem,
+          debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
         });
       }
 
@@ -1960,6 +2004,7 @@ export class ImageAnalysisService {
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor,
           inferredColorsByItem,
+          debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
         });
         if (similarResult.results.length === 0) {
           similarResult = await searchByImageWithSimilarity({
@@ -1983,6 +2028,7 @@ export class ImageAnalysisService {
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor,
             inferredColorsByItem,
+            debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
           });
         }
       }
@@ -2029,6 +2075,7 @@ export class ImageAnalysisService {
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor,
             inferredColorsByItem,
+            debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
           });
           similarResult = {
             ...similarResult,
@@ -2469,14 +2516,11 @@ export class ImageAnalysisService {
         const categoryMapping = mapDetectionToCategory(categorySource, detection.confidence);
 
         const filters: Partial<import("./types").SearchFilters> = {};
-        const captionWantsJeans = blipStructured.productTypeHints.includes("jeans");
         const typeSeedSourceForSelection =
-          categoryMapping.productCategory === "bottoms" && captionWantsJeans
-            ? `${categorySource} jeans`
-            : categoryMapping.productCategory === "tops" &&
-                categoryMapping.attributes.sleeveLength === "short"
-              ? "tshirt tee"
-              : categorySource;
+          categoryMapping.productCategory === "tops" &&
+            categoryMapping.attributes.sleeveLength === "short"
+            ? "tshirt tee"
+            : categorySource;
         let browseTypeSeeds = extractLexicalProductTypeSeeds(typeSeedSourceForSelection);
         if (blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
           browseTypeSeeds = [...new Set([...browseTypeSeeds, ...blipStructured.productTypeHints])];
@@ -2486,7 +2530,7 @@ export class ImageAnalysisService {
           categoryMapping.productCategory,
         );
         browseTypeSeeds = tightenTypeSeedsForDetection(categorySource, categoryMapping, browseTypeSeeds);
-        const softProductTypeHints = browseTypeSeeds.length > 0 ? browseTypeSeeds : undefined;
+        let softProductTypeHints = browseTypeSeeds.length > 0 ? browseTypeSeeds : undefined;
 
         // "Closet similar" constraints: enforce audience gender + add optional style/color.
         if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
@@ -2555,12 +2599,12 @@ export class ImageAnalysisService {
             if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
             if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
             if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
-            const mergedTypes = [...new Set([...(filters.productTypes ?? []), ...detStruct.productTypeHints])];
+            const mergedTypes = [...new Set([...(softProductTypeHints ?? []), ...detStruct.productTypeHints])];
             const filteredTypes = filterProductTypeSeedsByMappedCategory(
               mergedTypes,
               categoryMapping.productCategory,
             ).slice(0, 10);
-            filters.productTypes = tightenTypeSeedsForDetection(
+            softProductTypeHints = tightenTypeSeedsForDetection(
               categorySource,
               categoryMapping,
               filteredTypes,
@@ -2590,6 +2634,7 @@ export class ImageAnalysisService {
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor,
           inferredColorsByItem,
+          debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
         });
 
         // Retry without inferred attribute filters if they removed all hits.
@@ -2625,6 +2670,7 @@ export class ImageAnalysisService {
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor,
             inferredColorsByItem,
+            debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
           });
         }
 
@@ -2658,6 +2704,7 @@ export class ImageAnalysisService {
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor,
             inferredColorsByItem,
+            debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
           });
           if (similarResult.results.length === 0) {
             similarResult = await searchByImageWithSimilarity({
@@ -2680,6 +2727,7 @@ export class ImageAnalysisService {
               blipSignal: detectionBlipSignal,
               inferredPrimaryColor,
               inferredColorsByItem,
+              debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
             });
           }
         }
@@ -2725,6 +2773,7 @@ export class ImageAnalysisService {
               blipSignal: detectionBlipSignal,
               inferredPrimaryColor,
               inferredColorsByItem,
+              debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
             });
             similarResult = {
               ...similarResult,
