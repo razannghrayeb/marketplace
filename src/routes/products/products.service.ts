@@ -1926,6 +1926,7 @@ export async function searchByImageWithSimilarity(
       : "";
   const hasExplicitStyleIntent = explicitStyleForRelevance.length > 0;
   const hasSoftStyleHint = softStyleForRelevance.length > 0;
+  const styleIntentGatesFinalRelevance = hasExplicitStyleIntent;
   // Soft style hints from detection/BLIP should still guide final relevance for
   // image search when explicit style is absent.
   const desiredStyleForRelevance = hasExplicitStyleIntent
@@ -1990,7 +1991,7 @@ export async function searchByImageWithSimilarity(
    */
   const relevanceIntentDebug = {
     style: {
-      gatesFinalRelevance01: Boolean(desiredStyleForRelevance),
+      gatesFinalRelevance01: styleIntentGatesFinalRelevance,
       usedInCompositeRerank: hasExplicitStyleIntent || hasSoftStyleHint,
       explicitFilter: explicitStyleForRelevance || undefined,
       softHint: softStyleForRelevance || undefined,
@@ -2219,6 +2220,7 @@ export async function searchByImageWithSimilarity(
   // Track fusedVisual / metadataCompliance per hit for the clean explain output.
   const fusedVisualById = new Map<string, number>();
   const metadataComplianceById = new Map<string, number>();
+  const finalScoreSourceById = new Map<string, string>();
 
   // Final relevance pass: compute the authoritative finalRelevance01 incorporating
   // all visual + metadata signals, adaptive floors, composite, and BLIP reranking.
@@ -2246,7 +2248,7 @@ export async function searchByImageWithSimilarity(
       isNearDuplicate: rawVisual >= nearIdenticalRawMin,
       hasTypeIntent: (relevanceIntent.desiredProductTypes?.length ?? 0) > 0,
       hasColorIntent: hasColorIntentForFinal,
-      hasStyleIntent: Boolean(desiredStyleForRelevance),
+      hasStyleIntent: styleIntentGatesFinalRelevance,
       hasSleeveIntent: Boolean(comp.hasSleeveIntent),
       hasLengthIntent: hasLengthIntentForHit,
       hasAudienceIntent: hasAudienceIntentForRelevance,
@@ -2260,6 +2262,7 @@ export async function searchByImageWithSimilarity(
       compositeInfluence: batchCompositeInfluence,
     });
     comp.finalRelevance01 = explicitResult.score;
+    finalScoreSourceById.set(idStr, "computed");
 
     const broadImageIntent =
       !hasExplicitColorIntent &&
@@ -2283,6 +2286,7 @@ export async function searchByImageWithSimilarity(
       const hasTypeIntentHere = (relevanceIntent.desiredProductTypes?.length ?? 0) > 0;
       if (!crossBlocked && (!hasTypeIntentHere || typeOk)) {
         comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, rawVisual));
+        finalScoreSourceById.set(idStr, "near_identical_floor");
       }
     }
   }
@@ -2406,6 +2410,7 @@ export async function searchByImageWithSimilarity(
           // This preserves relative ordering among rescued candidates.
           comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, v * 0.9));
           comp.osSimilarity01 = Math.max(comp.osSimilarity01 ?? 0, v);
+          finalScoreSourceById.set(idStr, "relaxed_visual_gate_rescue");
         }
       }
     }
@@ -2432,6 +2437,7 @@ export async function searchByImageWithSimilarity(
         const v = visualSimFromHit(h);
         const rescueScore = Math.max(comp.finalRelevance01 ?? 0, v * 0.85);
         comp.finalRelevance01 = Math.max(rescueScore, effectiveFinalAcceptMin);
+        finalScoreSourceById.set(String(h._source.product_id), "final_accept_rescue");
       }
     }
     rankedHits = [...visualGatedHits]
@@ -2534,6 +2540,7 @@ export async function searchByImageWithSimilarity(
         if (!comp) continue;
         const v = visualSimFromHit(h);
         comp.finalRelevance01 = Math.max(comp.finalRelevance01 ?? 0, Math.min(1, v * 0.88));
+        finalScoreSourceById.set(id, "must_keep_visual_rescue");
       }
       rankedHits = [...rankedHits, ...mustKeep];
     }
@@ -2694,7 +2701,7 @@ export async function searchByImageWithSimilarity(
               hasTypeIntent: compliance.hasTypeIntent,
               hasColorIntent: desiredColorsForRelevance.length > 0,
               colorIntentGatesFinalRelevance: compliance.hasColorIntent,
-              hasStyleIntent: Boolean(desiredStyleForRelevance),
+              hasStyleIntent: styleIntentGatesFinalRelevance,
               hasSleeveIntent: Boolean(compliance.hasSleeveIntent),
               hasLengthIntent: Boolean((compliance as any).hasLengthIntent),
 
@@ -2720,6 +2727,7 @@ export async function searchByImageWithSimilarity(
 
               // ── Final score ──────────────────────────────────────
               finalRelevance01: compliance.finalRelevance01,
+              finalRelevanceSource: finalScoreSourceById.get(idStr) ?? "computed",
             }
           : undefined,
         images: imagesOut,
