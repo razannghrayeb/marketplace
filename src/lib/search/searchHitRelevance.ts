@@ -421,6 +421,9 @@ function normalizeSleeveToken(raw: string | undefined): "short" | "long" | "slee
   if (!raw) return null;
   const s = String(raw).toLowerCase().trim();
   if (!s) return null;
+  if (/\b(tank|cami|camisole|sleeveless|strapless|halter|strap top|vest top|spaghetti strap)\b/.test(s)) {
+    return "sleeveless";
+  }
   if (s.includes("sleeveless")) return "sleeveless";
   if (s.includes("short")) return "short";
   if (s.includes("long")) return "long";

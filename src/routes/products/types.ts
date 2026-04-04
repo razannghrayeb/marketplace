@@ -340,6 +340,8 @@ export interface SearchResultWithRelated {
     relevance_intent?: ImageSearchRelevanceIntentDebug;
     /** OpenSearch kNN field used for retrieval (`embedding` | `embedding_garment`). */
     image_knn_field?: string;
+    /** True only when raw-cosine debug bypass branch was explicitly used. */
+    debug_raw_cosine_bypass_used?: boolean;
     recall_size?: number;
     final_accept_min?: number;
     /** Floor used after sparse recall when strict gate yields too few hits (≤ `image_min_results_target`). */
