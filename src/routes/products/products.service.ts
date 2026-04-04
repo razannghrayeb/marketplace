@@ -141,6 +141,8 @@ export interface ImageSearchParams extends SearchParams {
   inferredPrimaryColor?: string | null;
   /** Per-slot caption colors (topColor, jeansColor, garmentColor, …). */
   inferredColorsByItem?: Record<string, string | null>;
+  /** Debug path: bypass rerank/final gates and return top-k raw exact-cosine hits. */
+  debugRawCosineFirst?: boolean;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -1274,6 +1276,7 @@ export async function searchByImageWithSimilarity(
     blipSignal,
     inferredPrimaryColor: inferredPrimaryFromParams,
     inferredColorsByItem: inferredByItemFromParams,
+    debugRawCosineFirst = false,
   } = params;
 
   if (!imageEmbedding || imageEmbedding.length === 0) {
@@ -1664,6 +1667,69 @@ export async function searchByImageWithSimilarity(
   };
 
   const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
+
+  if (debugRawCosineFirst) {
+    const orderedRaw = [...hits]
+      .map((h: any) => ({ hit: h, sim: visualSimFromHit(h) }))
+      .sort((a, b) => b.sim - a.sim);
+
+    const topRaw = orderedRaw.slice(0, Math.max(1, Math.min(limit, orderedRaw.length)));
+    const productIds = topRaw.map((x) => String(x.hit?._source?.product_id ?? "")).filter(Boolean);
+    const scoreMap = new Map<string, number>(
+      topRaw.map((x) => [String(x.hit?._source?.product_id ?? ""), Math.max(0, Math.min(1, x.sim))]),
+    );
+
+    let results: ProductResult[] = [];
+    if (productIds.length > 0) {
+      const products = await getProductsByIdsOrdered(productIds);
+      const numericIds = productIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
+      const imagesByProduct = await getImagesForProducts(numericIds);
+
+      results = products.map((p: any) => {
+        const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
+        const sim = scoreMap.get(String(p.id)) ?? 0;
+        return {
+          ...p,
+          similarity_score: Math.round(sim * 100) / 100,
+          match_type: sim >= config.clip.matchTypeExactMin ? ("exact" as const) : ("similar" as const),
+          rerankScore: undefined,
+          finalRelevance01: sim,
+          explain: {
+            clipCosine: sim,
+            merchandiseSimilarity: sim,
+            catalogAlignment: 1,
+            finalRelevance01: sim,
+          },
+          images: images.map((img) => ({
+            id: img.id,
+            url: img.cdn_url,
+            is_primary: img.is_primary,
+            p_hash: img.p_hash ?? undefined,
+          })),
+        } as ProductResult;
+      });
+    }
+
+    results = (dedupeImageSearchResults(results as any) as ProductResult[]).slice(0, limit);
+
+    let related: ProductResult[] = [];
+    if (includeRelated && pHash) {
+      const excludeIds = results.map((p) => String(p.id));
+      related = await findSimilarByPHash(pHash, excludeIds, limit);
+      related = (filterRelatedAgainstMain(results as any, related as any, { imageSearch: true }) ?? []) as ProductResult[];
+    }
+
+    return {
+      results,
+      ...(related.length > 0 ? { related } : {}),
+      meta: {
+        threshold: similarityThreshold,
+        total_results: results.length,
+        image_knn_field: knnFieldResolved,
+      },
+    };
+  }
+
   const aisleSoftWeightBase = Math.max(
     0,
     Math.min(400, Number(process.env.SEARCH_IMAGE_AISLE_SOFT_WEIGHT ?? "130") || 130),

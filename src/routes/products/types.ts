@@ -115,6 +115,8 @@ export interface ImageSearchParams extends SearchParams {
   /** Merged with crop k-means into soft color tier intent (Shop-the-Look / caption). */
   inferredPrimaryColor?: string | null;
   inferredColorsByItem?: Record<string, string | null>;
+  /** Debug path: bypass rerank/final gates and return top-k by raw exact cosine (with existing category constraints). */
+  debugRawCosineFirst?: boolean;
 }
 
 export interface TextSearchParams extends SearchParams {

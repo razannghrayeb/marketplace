@@ -59,6 +59,7 @@ export async function searchByImageWithSimilarity(
     blipSignal,
     inferredPrimaryColor,
     inferredColorsByItem,
+    debugRawCosineFirst,
   } = params;
 
   // Phase 2 alignment: route through the unified canonical facade.
@@ -79,6 +80,7 @@ export async function searchByImageWithSimilarity(
     blipSignal,
     inferredPrimaryColor,
     inferredColorsByItem,
+    debugRawCosineFirst,
   }) as Promise<SearchResultWithRelated>;
 }
 
