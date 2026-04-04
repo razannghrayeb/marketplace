@@ -594,6 +594,30 @@ function hardCategoryTermsForDetection(
     String(t).toLowerCase().trim(),
   );
 
+  if (categoryMapping.productCategory === "tops") {
+    const isShortTop = /\bshort sleeve top\b|\btee\b|\bt-?shirt\b|\btshirt\b|\btank\b|\bcamisole\b|\bcrop top\b/.test(
+      l,
+    );
+    if (isShortTop) {
+      const shortTopTerms = baseTerms.filter((t) =>
+        /\b(t-?shirt|tshirt|tee|top|tops|tank|camisole|cami|polo|polos|crop top)\b/.test(t),
+      );
+      return shortTopTerms.length > 0 ? shortTopTerms : baseTerms;
+    }
+
+    const isLongTop = /\blong sleeve top\b|\bshirt\b|\bblouse\b|\bovershirt\b|\bhoodie\b|\bsweatshirt\b|\bsweater\b/.test(
+      l,
+    );
+    if (isLongTop) {
+      const longTopTerms = baseTerms.filter((t) =>
+        /\b(shirt|shirts|blouse|blouses|overshirt|sweater|hoodie|sweatshirt|pullover|cardigan|knitwear|top|tops)\b/.test(
+          t,
+        ),
+      );
+      return longTopTerms.length > 0 ? longTopTerms : baseTerms;
+    }
+  }
+
   // Prefer trousers/pants over jeans when YOLO says "trousers".
   if (categoryMapping.productCategory === "bottoms") {
     const isTrousersLike = /\b(trouser|trousers|pants|pant|chino|chinos|slack|slacks|cargo|cargo pants|sweatpants|sweatpants)\b/.test(
@@ -871,6 +895,10 @@ function applyDetectionCategoryGuard(
   const baseAllowed = strictTerms.length > 0 ? strictTerms : fallbackTerms;
   const allowedTerms = [...new Set(baseAllowed.map((t) => normalizeLooseText(t)).filter(Boolean))];
   if (allowedTerms.length === 0) return products;
+  const label = normalizeLooseText(detectionLabel);
+  const isShortSleeveTopDetection =
+    categoryMapping.productCategory === "tops" &&
+    /(short sleeve top|t shirt|tshirt|tee|tank|camisole|crop top)/.test(label);
 
   return products.filter((p) => {
     const categoryText = normalizeLooseText((p as any).category);
@@ -889,11 +917,33 @@ function applyDetectionCategoryGuard(
     const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, term));
     if (!allowByTerm) return false;
 
+    if (isShortSleeveTopDetection) {
+      const longOrOuterwearLeak =
+        /\b(overshirt|jacket|coat|blazer|hoodie|sweatshirt|sweater|cardigan|pullover|long sleeve)\b/.test(
+          haystack,
+        );
+      const shortTopSignal = /\b(t shirt|tshirt|tee|tank|camisole|cami|polo|crop top|short sleeve)\b/.test(
+        haystack,
+      );
+      // For short-sleeve detections, reject outer/long-sleeve leakage unless the row
+      // clearly signals short-top semantics.
+      if (longOrOuterwearLeak && !shortTopSignal) return false;
+    }
+
     // Guard against broad lexical collisions (e.g. "denim jacket" inside trouser flow).
     const productCategoryMacro = mapDetectionToCategory(String((p as any).category ?? ""), 1).productCategory;
     if (categoryMapping.productCategory === "bottoms") {
       if (productCategoryMacro === "outerwear" || /\b(jacket|coat|blazer|outerwear)\b/.test(haystack)) {
         return false;
+      }
+    }
+    if (categoryMapping.productCategory === "dresses") {
+      // Reject bottoms/outerwear leakage even if title contains words like "dress".
+      if (productCategoryMacro !== "dresses") {
+        if (productCategoryMacro === "bottoms" || productCategoryMacro === "outerwear") return false;
+        if (/\b(shorts?|skirt|skirts|pants?|trousers?|jeans|jacket|coat|blazer|hoodie|sweatshirt)\b/.test(haystack)) {
+          return false;
+        }
       }
     }
     if (categoryMapping.productCategory === "bags") {
@@ -1809,7 +1859,7 @@ export class ImageAnalysisService {
       let softProductTypeHints = [...new Set([...typeSeeds, ...expandedTypeHints.slice(0, 8)])];
 
       // "Closet similar" constraints: enforce audience gender + add optional style/color.
-      if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
+      if (inferredAudience.gender && /^(men|women)$/i.test(String(inferredAudience.gender))) {
         filters.gender = inferredAudience.gender;
       }
       if (inferredAudience.ageGroup && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
@@ -2533,7 +2583,7 @@ export class ImageAnalysisService {
         let softProductTypeHints = browseTypeSeeds.length > 0 ? browseTypeSeeds : undefined;
 
         // "Closet similar" constraints: enforce audience gender + add optional style/color.
-        if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
+        if (inferredAudience.gender && /^(men|women)$/i.test(String(inferredAudience.gender))) {
           filters.gender = inferredAudience.gender;
         }
         if (inferredAudience.ageGroup && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
