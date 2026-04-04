@@ -1360,7 +1360,12 @@ export async function searchByImageWithSimilarity(
           ? ["women", "womens", "female", "ladies", "woman", "girls", "girl", "boy", "boys", "kid", "kids", "youth", "toddler", "baby"]
           : [];
 
-    const shouldClauses: any[] = [{ term: { attr_gender: g } }];
+    const shouldClauses: any[] = [
+      { term: { attr_gender: g } },
+      // Keep retrieval recall when catalog metadata is sparse: allow docs with missing attr_gender,
+      // while still excluding opposite-gender title signals below.
+      { bool: { must_not: [{ exists: { field: "attr_gender" } }] } },
+    ];
     if (imageGenderSoftEnv()) {
       // In "soft gender" mode, we also allow a title keyword match.
       for (const kw of titleGenderShould) {
@@ -1523,6 +1528,33 @@ export async function searchByImageWithSimilarity(
   let hits: any[];
   /** Query vector for the active single kNN field (dual fusion uses global + garment separately). */
   let queryVector: number[] = imageEmbedding;
+
+  if (process.env.NODE_ENV !== "production") {
+    const activeFilterKeys = [
+      filters.category ? "category" : null,
+      Array.isArray((filters as any).productTypes) && (filters as any).productTypes.length > 0
+        ? "productTypes"
+        : null,
+      filters.gender ? "gender" : null,
+      (filters as any).ageGroup ? "ageGroup" : null,
+      (filters as any).style ? "style" : null,
+      (filters as any).softStyle ? "softStyle" : null,
+      (filters as any).length ? "length" : null,
+      Array.isArray(predictedCategoryAisles) && predictedCategoryAisles.length > 0
+        ? "predictedCategoryAisles"
+        : null,
+    ].filter(Boolean);
+    console.log("[image-knn] query constraints", {
+      retrievalK,
+      knnFieldParam,
+      useDualKnn,
+      forceHardCategoryFilter,
+      softCategory,
+      desiredCatalogTerms: desiredCatalogTerms ? Array.from(desiredCatalogTerms).slice(0, 12) : [],
+      activeFilterKeys,
+      osFilterClauses: Array.isArray(filter) ? filter.length : 0,
+    });
+  }
 
   if (useDualKnn) {
     knnFieldResolved = "embedding+embedding_garment";

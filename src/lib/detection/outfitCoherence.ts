@@ -122,9 +122,18 @@ const CATEGORY_GROUPS: Record<string, string[]> = {
  * Gets the outfit group (tops, bottoms, etc.) for a detection label
  */
 function getItemGroup(label: string): string {
+  const mapped = mapDetectionToCategory(label).productCategory;
+  if (mapped === "tops") return "tops";
+  if (mapped === "bottoms") return "bottoms";
+  if (mapped === "dresses") return "dresses";
+  if (mapped === "outerwear") return "outerwear";
+  if (mapped === "footwear") return "footwear";
+  if (mapped === "bags") return "bags";
+  if (mapped === "accessories") return "accessories";
+
   const normalized = label.toLowerCase();
   for (const [group, labels] of Object.entries(CATEGORY_GROUPS)) {
-    if (labels.some(l => normalized.includes(l) || l.includes(normalized))) {
+    if (labels.some(l => normalized === l || normalized.includes(l) || l.includes(normalized))) {
       return group;
     }
   }
