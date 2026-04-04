@@ -465,6 +465,18 @@ function rawColorList(...parts: unknown[]): string[] {
   ];
 }
 
+function clamp01(x: number): number {
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(1, x));
+}
+
+function confidenceBlend(score: number, confidence: number, neutralFloor: number): number {
+  const s = clamp01(score);
+  const c = clamp01(confidence);
+  const floor = clamp01(neutralFloor);
+  return s * c + floor * (1 - c);
+}
+
 /**
  * Full text-search-equivalent compliance + rerank + final relevance for one OpenSearch hit.
  */
@@ -801,6 +813,25 @@ export function computeHitRelevance(
     Number.isFinite(typeDoc) && typeDoc >= 0 && typeDoc <= 1 ? 0.45 + 0.55 * typeDoc : 1;
   const docTrust = Math.max(0.25, Math.min(1, docTrustNorm * typeDocTrust));
 
+  const typeMetadataConfidence = clamp01(
+    Number.isFinite(typeDoc) && typeDoc >= 0 && typeDoc <= 1
+      ? typeDoc
+      : Number.isFinite(normDoc) && normDoc >= 0 && normDoc <= 1
+        ? normDoc
+        : 0.72,
+  );
+  const colorMetadataConfidence = clamp01(
+    Math.max(
+      Number.isFinite(wcText) ? wcText : 0,
+      Number.isFinite(wcImg) ? wcImg : 0,
+      Number.isFinite(normDoc) && normDoc >= 0 && normDoc <= 1 ? normDoc * 0.9 : 0,
+      0.58,
+    ),
+  );
+  const styleMetadataConfidence = clamp01(
+    Number.isFinite(normDoc) && normDoc >= 0 && normDoc <= 1 ? normDoc * 0.95 : 0.62,
+  );
+
   const wSim = rerankSimilarityWeight();
   const wAud = rerankAudienceWeight();
   const typeComponent = productTypeCompliance * 420 * docTrust;
@@ -829,7 +860,22 @@ export function computeHitRelevance(
   const hasColorIntent = desiredColors.length > 0;
   /** Soft-only auto colors must not gate final acceptance the same as user `filters.color`. */
   const hasColorIntentForFinalRelevance = hasColorIntent && !softColorBiasOnly;
-  const crossPenTrace = Math.max(0, crossFamilyPenalty);
+  const typeScoreForFinal = hasReliableTypeIntent
+    ? confidenceBlend(productTypeCompliance, typeMetadataConfidence, 0.38)
+    : productTypeCompliance;
+  const colorScoreForFinal = hasColorIntentForFinalRelevance
+    ? confidenceBlend(colorCompliance, colorMetadataConfidence, 0.34)
+    : colorCompliance;
+  const styleScoreForFinal = normalizedDesiredStyle
+    ? confidenceBlend(styleCompliance, styleMetadataConfidence, 0.32)
+    : styleCompliance;
+  const sleeveScoreForFinal = hasSleeveIntentForDoc
+    ? confidenceBlend(sleeveCompliance, styleMetadataConfidence, 0.28)
+    : sleeveCompliance;
+  const crossFamilyPenaltyForFinal = hasReliableTypeIntent
+    ? crossFamilyPenalty * (0.55 + 0.45 * typeMetadataConfidence)
+    : crossFamilyPenalty;
+  const crossPenTrace = Math.max(0, crossFamilyPenaltyForFinal);
   const hardBlocked = hasReliableTypeIntent && crossPenTrace >= 0.8;
   const typeGateFactor = !hasReliableTypeIntent
     ? 1
@@ -842,19 +888,19 @@ export function computeHitRelevance(
   let finalRelevance01 = computeFinalRelevance01({
     hasTypeIntent,
     hasReliableTypeIntent,
-    typeScore: productTypeCompliance,
+    typeScore: typeScoreForFinal,
     catScore: categoryRelevance01,
     semScore: semScore01,
     lexScore: lexScore01,
-    colorScore: colorCompliance,
+    colorScore: colorScoreForFinal,
     audScore: audienceCompliance,
-    styleScore: styleCompliance,
-    sleeveScore: sleeveCompliance,
+    styleScore: styleScoreForFinal,
+    sleeveScore: sleeveScoreForFinal,
     hasColorIntent: hasColorIntentForFinalRelevance,
     hasStyleIntent: Boolean(normalizedDesiredStyle),
     hasSleeveIntent: hasSleeveIntentForDoc,
     hasAudienceIntent,
-    crossFamilyPenalty,
+    crossFamilyPenalty: crossFamilyPenaltyForFinal,
     intraFamilyPenalty,
     applyLexicalToGlobal: lexicalScoreDistinct,
     tightSemanticCap,

@@ -1907,11 +1907,12 @@ export async function searchByImageWithSimilarity(
     reliableTypeIntent:
       forceStrictInferredTypeIntentEnv() ||
       hasExplicitTypeFilter ||
-      hasDetectionAnchoredTypeIntent ||
       hasExplicitCategoryFilter ||
       hasTextTypeIntent,
   };
   const hasReliableTypeIntentForRelevance = Boolean(relevanceIntent.reliableTypeIntent);
+  const hasStrictTypeIntentForMerchandiseGate =
+    forceStrictInferredTypeIntentEnv() || hasExplicitTypeFilter || hasTextTypeIntent;
 
   /**
    * Single snapshot for debugging: style can come from explicit filter or soft hint,
@@ -1992,6 +1993,8 @@ export async function searchByImageWithSimilarity(
   }
 
   const useMerchSim = imageMerchandiseSimilarityBindingEnabled();
+  const useMerchSimForThresholdAndPrimarySort =
+    useMerchSim && hasStrictTypeIntentForMerchandiseGate;
   const merchandiseSimById = new Map<string, number>();
   const merchAlignmentById = new Map<string, number>();
   for (const hit of baseCandidates) {
@@ -2035,14 +2038,18 @@ export async function searchByImageWithSimilarity(
   const passesImageSimilarityThreshold = (hit: any, thresh: number): boolean => {
     const raw = visualSimFromHit(hit);
     const eff =
-      raw >= nearIdenticalRawMin ? raw : (merchandiseSimById.get(String(hit._source.product_id)) ?? raw);
+      raw >= nearIdenticalRawMin
+        ? raw
+        : useMerchSimForThresholdAndPrimarySort
+          ? (merchandiseSimById.get(String(hit._source.product_id)) ?? raw)
+          : raw;
     return eff >= thresh;
   };
 
   const rankedVisualForSort = (hit: any): number => {
     const raw = visualSimFromHit(hit);
     if (raw >= nearIdenticalRawMin) return raw;
-    return useMerchSim
+    return useMerchSimForThresholdAndPrimarySort
       ? (merchandiseSimById.get(String(hit._source.product_id)) ?? raw)
       : raw;
   };
@@ -2051,7 +2058,10 @@ export async function searchByImageWithSimilarity(
   // BLIP alignment (as soft reranking factor), and composite score.
   for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
-    const visualSimRaw = merchandiseSimById.get(idStr) ?? visualSimFromHit(hit);
+    const visualSimRaw =
+      useMerchSimForThresholdAndPrimarySort
+        ? (merchandiseSimById.get(idStr) ?? visualSimFromHit(hit))
+        : visualSimFromHit(hit);
     const blipAlign = computeBlipAlignment(blipSignal, hit);
     blipAlignById.set(idStr, Math.round(blipAlign.matchScore * 1000) / 1000);
     // BLIP is used as a soft reranking multiplier in computeExplicitFinalRelevance,
@@ -2514,7 +2524,10 @@ export async function searchByImageWithSimilarity(
   const scoreMap = new Map<string, number>();
   hitsForHydrate.forEach((hit: any) => {
     const id = String(hit._source.product_id);
-    const sim = merchandiseSimById.get(id) ?? visualSimFromHit(hit);
+    const sim =
+      useMerchSimForThresholdAndPrimarySort
+        ? (merchandiseSimById.get(id) ?? visualSimFromHit(hit))
+        : visualSimFromHit(hit);
     scoreMap.set(id, Math.round(sim * 100) / 100);
   });
 

@@ -30,6 +30,7 @@
     "models:list": "python scripts/download-models.py --dry-run",
     "search:eval": "npx tsx scripts/search-eval.ts",
     "search:eval:image": "npx tsx scripts/eval-image-relevance.ts",
+    "search:tune:image": "npx tsx scripts/tune-image-search-profile.ts",
     "os:count": "npx tsx scripts/opensearch-count.ts"
   },
   "dependencies": {
