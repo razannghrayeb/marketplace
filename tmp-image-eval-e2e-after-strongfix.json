@@ -1,0 +1,960 @@
+{
+  "sampledQueries": 36,
+  "k": 20,
+  "metrics": {
+    "selfRecallAtK": 0.5833333333333334,
+    "selfRecallAt1": 0.5833333333333334,
+    "selfRecallAt5": 0.5833333333333334,
+    "sameCategoryRateAtK": 0.3333333333333333,
+    "typeConsistencyRateAtK": 0.27222222222222225,
+    "unrelatedRateAtK": 0.19861111111111115,
+    "unrelatedRateAt5": 0.15555555555555556
+  },
+  "perQuery": [
+    {
+      "queryId": "8317",
+      "queryTitle": "Basic top",
+      "queryCategory": "tops",
+      "queryTypes": [
+        "top"
+      ],
+      "topIds": [
+        "8317",
+        "22724",
+        "22521",
+        "22385",
+        "22546",
+        "22758",
+        "22429",
+        "22332",
+        "21601",
+        "21766",
+        "22336",
+        "22518",
+        "22646",
+        "21876",
+        "22676",
+        "22367",
+        "21526",
+        "22545",
+        "22487",
+        "22675"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.3,
+      "typeConsistencyRate": 0.05,
+      "unrelatedRate": 0.7
+    },
+    {
+      "queryId": "21523",
+      "queryTitle": "Springfield Men Shirt AMSFW25SLCXRE01",
+      "queryCategory": "tops",
+      "queryTypes": [
+        "shirt"
+      ],
+      "topIds": [
+        "21523",
+        "22443",
+        "22425",
+        "21656",
+        "22472",
+        "22413",
+        "22488",
+        "21655",
+        "22676",
+        "22675",
+        "22677",
+        "22773",
+        "22796",
+        "22502",
+        "22487",
+        "21763",
+        "21660",
+        "22639",
+        "22514",
+        "22690"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.7,
+      "typeConsistencyRate": 0.45,
+      "unrelatedRate": 0.3
+    },
+    {
+      "queryId": "21535",
+      "queryTitle": "Marc O Polo Men Coat AMOPW25COFNW001",
+      "queryCategory": "tops",
+      "queryTypes": [
+        "coat",
+        "outerwear"
+      ],
+      "topIds": [
+        "21535",
+        "22385",
+        "21571",
+        "21812",
+        "22332",
+        "22521",
+        "21767",
+        "21581",
+        "21779",
+        "21526",
+        "22429",
+        "21591",
+        "21678",
+        "22757",
+        "21850",
+        "22545",
+        "21824",
+        "22668",
+        "21587",
+        "21601"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.6,
+      "typeConsistencyRate": 0.15,
+      "unrelatedRate": 0.3
+    },
+    {
+      "queryId": "21540",
+      "queryTitle": "Pepe Jeans Men Shirt Jacket AMPJW25SJFZCO01",
+      "queryCategory": "tops",
+      "queryTypes": [
+        "jeans",
+        "pants",
+        "shirt"
+      ],
+      "topIds": [
+        "21540",
+        "21643",
+        "21779",
+        "21587",
+        "22625",
+        "22390",
+        "22429",
+        "21811",
+        "21581",
+        "22677",
+        "21888",
+        "21594",
+        "22668",
+        "22690",
+        "21593",
+        "22620",
+        "21577",
+        "22663",
+        "21653",
+        "22757"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.5,
+      "typeConsistencyRate": 0.55,
+      "unrelatedRate": 0.25
+    },
+    {
+      "queryId": "21548",
+      "queryTitle": "Boss Men T-Shirt AMBSW25TLCNCO03",
+      "queryCategory": "tops",
+      "queryTypes": [
+        "tshirt",
+        "t-shirt",
+        "shirt"
+      ],
+      "topIds": [
+        "21548",
+        "21568",
+        "21766",
+        "21659",
+        "21574",
+        "21811",
+        "22355",
+        "22429",
+        "22356",
+        "21577",
+        "21582",
+        "22453",
+        "22384",
+        "22518",
+        "21587",
+        "21796",
+        "22329",
+        "22390",
+        "21594",
+        "22521"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.45,
+      "typeConsistencyRate": 0.25,
+      "unrelatedRate": 0.55
+    },
+    {
+      "queryId": "21574",
+      "queryTitle": "Maison Brown Men T-Shirt AMMWW25TLCNCO10",
+      "queryCategory": "tops",
+      "queryTypes": [
+        "tshirt",
+        "t-shirt",
+        "shirt"
+      ],
+      "topIds": [
+        "21574",
+        "21548",
+        "21766",
+        "22518",
+        "22384",
+        "21811",
+        "21659",
+        "21725",
+        "21587",
+        "22329",
+        "22356",
+        "21594",
+        "22355",
+        "22453",
+        "22429",
+        "21876",
+        "22503",
+        "22389",
+        "21582",
+        "22521"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.6,
+      "typeConsistencyRate": 0.35,
+      "unrelatedRate": 0.4
+    },
+    {
+      "queryId": "21580",
+      "queryTitle": "Bossini Men Shirt AMBOW25SLP3RX01",
+      "queryCategory": "tops",
+      "queryTypes": [
+        "shirt"
+      ],
+      "topIds": [
+        "21580",
+        "21527",
+        "21587",
+        "21816",
+        "21779",
+        "21797",
+        "22367",
+        "21581",
+        "22356",
+        "21594",
+        "22355",
+        "22389",
+        "21811",
+        "22332",
+        "21548",
+        "22676",
+        "22546",
+        "21798",
+        "21725",
+        "21643"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.65,
+      "typeConsistencyRate": 0.5,
+      "unrelatedRate": 0.35
+    },
+    {
+      "queryId": "21581",
+      "queryTitle": "Cortefiel Men Overshirt AMCFW25OVFNCO01",
+      "queryCategory": "tops",
+      "queryTypes": [],
+      "topIds": [
+        "21581",
+        "21587",
+        "21779",
+        "21594",
+        "22668",
+        "21811",
+        "21593",
+        "21540",
+        "21643",
+        "22332",
+        "22390",
+        "22690",
+        "21580",
+        "21767",
+        "21660",
+        "21659",
+        "22625",
+        "21571",
+        "22748",
+        "21812"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.65,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0.35
+    },
+    {
+      "queryId": "21526",
+      "queryTitle": "Marc O Polo Men Chino Pants AMOPW25CHP3TA04",
+      "queryCategory": "bottoms",
+      "queryTypes": [
+        "pants",
+        "trousers",
+        "jogger"
+      ],
+      "topIds": [
+        "21526",
+        "21582",
+        "22332",
+        "22521",
+        "22724",
+        "21591",
+        "22429",
+        "22663",
+        "22385",
+        "22546",
+        "22638",
+        "21812",
+        "22729",
+        "22686",
+        "21779",
+        "21571",
+        "22535",
+        "22625",
+        "21601",
+        "21593"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.55,
+      "typeConsistencyRate": 0.55,
+      "unrelatedRate": 0.45
+    },
+    {
+      "queryId": "21527",
+      "queryTitle": "Bossini Men Short Jacket AMBOW259JFZNY01",
+      "queryCategory": "bottoms",
+      "queryTypes": [
+        "short"
+      ],
+      "topIds": [
+        "21527",
+        "22367",
+        "21567",
+        "22329",
+        "21797",
+        "21580",
+        "21816",
+        "21796",
+        "22384",
+        "21653",
+        "21597",
+        "22390",
+        "21823",
+        "21779",
+        "22521",
+        "22518",
+        "22676",
+        "22332",
+        "22453",
+        "22429"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.35,
+      "typeConsistencyRate": 0.15,
+      "unrelatedRate": 0.65
+    },
+    {
+      "queryId": "21549",
+      "queryTitle": "Bugatti Men Chino Pants AMBUW25CHP3M003",
+      "queryCategory": "bottoms",
+      "queryTypes": [
+        "pants",
+        "chino"
+      ],
+      "topIds": [
+        "21549",
+        "21571",
+        "21824",
+        "21850",
+        "21678",
+        "21812",
+        "21535",
+        "21591",
+        "22429",
+        "22336",
+        "21677",
+        "22620",
+        "22748",
+        "21660",
+        "21767",
+        "22385",
+        "22758",
+        "21593",
+        "22332",
+        "22690"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.25,
+      "typeConsistencyRate": 0.15,
+      "unrelatedRate": 0.75
+    },
+    {
+      "queryId": "21567",
+      "queryTitle": "Bossini Men Short Jacket AMBOW259JFZP910",
+      "queryCategory": "bottoms",
+      "queryTypes": [
+        "short"
+      ],
+      "topIds": [
+        "21567",
+        "21527",
+        "22367",
+        "22329",
+        "21797",
+        "21796",
+        "21653",
+        "22390",
+        "22384",
+        "21816",
+        "21823",
+        "21580",
+        "22518",
+        "22453",
+        "21766",
+        "22429",
+        "22521",
+        "21765",
+        "21548",
+        "21687"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.3,
+      "typeConsistencyRate": 0.2,
+      "unrelatedRate": 0.7
+    },
+    {
+      "queryId": "21577",
+      "queryTitle": "Timberland Men Cargo Pants AMTDW25CPFPG401",
+      "queryCategory": "bottoms",
+      "queryTypes": [
+        "pants",
+        "cargo",
+        "pant"
+      ],
+      "topIds": [
+        "21577",
+        "22390",
+        "22453",
+        "22429",
+        "21548",
+        "21811",
+        "22394",
+        "22406",
+        "22329",
+        "22677",
+        "22724",
+        "21582",
+        "22625",
+        "21643",
+        "22646",
+        "21540",
+        "21796",
+        "22638",
+        "22428",
+        "21568"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.5,
+      "typeConsistencyRate": 0.5,
+      "unrelatedRate": 0.45
+    },
+    {
+      "queryId": "21582",
+      "queryTitle": "Marc O Polo Men Chino Pants AMOPW25CHP3TA01",
+      "queryCategory": "bottoms",
+      "queryTypes": [
+        "pants",
+        "chinos"
+      ],
+      "topIds": [
+        "21582",
+        "21526",
+        "22724",
+        "22429",
+        "22332",
+        "22638",
+        "22521",
+        "21601",
+        "21548",
+        "22663",
+        "21811",
+        "21591",
+        "22729",
+        "22385",
+        "21577",
+        "22546",
+        "22686",
+        "22646",
+        "21571",
+        "22384"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.55,
+      "typeConsistencyRate": 0.55,
+      "unrelatedRate": 0.45
+    },
+    {
+      "queryId": "21591",
+      "queryTitle": "Cortefiel Men Dress Pants AMCFW25DRF9CO01",
+      "queryCategory": "bottoms",
+      "queryTypes": [
+        "pants"
+      ],
+      "topIds": [
+        "21591",
+        "22546",
+        "22663",
+        "22724",
+        "22394",
+        "22332",
+        "22686",
+        "22729",
+        "21571",
+        "22690",
+        "21526",
+        "22625",
+        "22638",
+        "22668",
+        "21582",
+        "22521",
+        "22677",
+        "21593",
+        "21601",
+        "22675"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.65,
+      "typeConsistencyRate": 0.7,
+      "unrelatedRate": 0.3
+    },
+    {
+      "queryId": "21597",
+      "queryTitle": "Bossini Men Chino Pants AMBOW25CHP3RE03",
+      "queryCategory": "bottoms",
+      "queryTypes": [
+        "pants",
+        "chino"
+      ],
+      "topIds": [
+        "21597",
+        "21816",
+        "21669",
+        "22546",
+        "22676",
+        "22663",
+        "22729",
+        "21591",
+        "22367",
+        "21527",
+        "22686",
+        "22675",
+        "22514",
+        "22394",
+        "22638",
+        "21580",
+        "22724",
+        "22329",
+        "22625",
+        "21582"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.8,
+      "typeConsistencyRate": 0.75,
+      "unrelatedRate": 0.15
+    },
+    {
+      "queryId": "21530",
+      "queryTitle": "Superga Adult Unisex Sneakers AUSEW25SNLAHL11",
+      "queryCategory": "footwear",
+      "queryTypes": [
+        "sneakers",
+        "shoes",
+        "heel"
+      ],
+      "topIds": [
+        "21530",
+        "22519",
+        "21699",
+        "21773",
+        "22678",
+        "22721",
+        "21702",
+        "21722",
+        "21612",
+        "21592",
+        "21744",
+        "21794",
+        "22395",
+        "22456",
+        "22772",
+        "22781",
+        "22407",
+        "22422",
+        "22366",
+        "22463"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.9,
+      "typeConsistencyRate": 1,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "21592",
+      "queryTitle": "Geox Men Loafers AMGXW25LRM1HL08",
+      "queryCategory": "footwear",
+      "queryTypes": [
+        "loafer",
+        "shoes"
+      ],
+      "topIds": [
+        "21592",
+        "22678",
+        "21530",
+        "22519",
+        "21702",
+        "21744",
+        "21699",
+        "22721",
+        "22366",
+        "21722",
+        "22456",
+        "21773",
+        "22497",
+        "21612",
+        "21709",
+        "22520",
+        "22407",
+        "21816",
+        "22772",
+        "22395"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.85,
+      "typeConsistencyRate": 0.95,
+      "unrelatedRate": 0.05
+    },
+    {
+      "queryId": "21605",
+      "queryTitle": "Superga Adult Unisex Sneakers AUSEW25SNHIHL01",
+      "queryCategory": "footwear",
+      "queryTypes": [
+        "sneakers",
+        "shoes",
+        "sneaker"
+      ],
+      "topIds": [
+        "21605",
+        "21699",
+        "21722",
+        "21702",
+        "21773",
+        "22395",
+        "22520",
+        "21530",
+        "21709",
+        "22749",
+        "21794",
+        "22600",
+        "21849",
+        "21726",
+        "22396",
+        "21612",
+        "22781",
+        "22471",
+        "22456",
+        "21682"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.95,
+      "typeConsistencyRate": 1,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "21612",
+      "queryTitle": "Cole Haan Men Oxford AMCNW25OXWTHL12",
+      "queryCategory": "footwear",
+      "queryTypes": [
+        "oxfords",
+        "shoes",
+        "heel"
+      ],
+      "topIds": [
+        "21612",
+        "21699",
+        "21702",
+        "21530",
+        "21744",
+        "22519",
+        "22772",
+        "22456",
+        "22721",
+        "21773",
+        "22407",
+        "21794",
+        "21592",
+        "22749",
+        "22366",
+        "22781",
+        "22520",
+        "21722",
+        "22678",
+        "22422"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0.9,
+      "typeConsistencyRate": 1,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "21682",
+      "queryTitle": "Geox Men Boots AMGXW25BOABHL06",
+      "queryCategory": "footwear",
+      "queryTypes": [
+        "ankle boot",
+        "boot",
+        "shoes"
+      ],
+      "topIds": [
+        "21682",
+        "22396",
+        "22395",
+        "21709",
+        "22486",
+        "21726",
+        "22473",
+        "22471",
+        "21795",
+        "22491",
+        "22600",
+        "22366",
+        "21849",
+        "21702",
+        "22520",
+        "22678",
+        "22721",
+        "21530",
+        "22519",
+        "21605"
+      ],
+      "selfHit": true,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "21699",
+      "queryTitle": "Marc O Polo Men Sneakers AMOPW25SNLAHL01",
+      "queryCategory": "footwear",
+      "queryTypes": [
+        "trainers",
+        "shoes",
+        "heel",
+        "flat"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "21709",
+      "queryTitle": "Geox Men Boots AMGXW25BOABHL08",
+      "queryCategory": "footwear",
+      "queryTypes": [
+        "ankle boot",
+        "boot",
+        "shoes"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "21722",
+      "queryTitle": "Marc O Polo Men Sneakers AMOPW25SNONHL01",
+      "queryCategory": "footwear",
+      "queryTypes": [
+        "trainers",
+        "shoes",
+        "heel",
+        "flat"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "22721",
+      "queryTitle": "Geox Men Dress Shoes AMGXS26DOP1HL03",
+      "queryCategory": "dresses",
+      "queryTypes": [
+        "shoe",
+        "shoes"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "21568",
+      "queryTitle": "Boss Men Vest AMBSW25VSFZLY02",
+      "queryCategory": "outerwear",
+      "queryTypes": [
+        "vest"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "21571",
+      "queryTitle": "Cortefiel Men Blazer AMCFW25BZ1BP901",
+      "queryCategory": "outerwear",
+      "queryTypes": [
+        "blazer",
+        "outerwear"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "21594",
+      "queryTitle": "Springfield Men Knitwear Cardigan AMSFW25KCFNCO01",
+      "queryCategory": "outerwear",
+      "queryTypes": [
+        "cardigan",
+        "knitwear",
+        "polo"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "21601",
+      "queryTitle": "Maison Brown Men Vest AMMWW25VSFZQN04",
+      "queryCategory": "outerwear",
+      "queryTypes": [
+        "vest"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "21653",
+      "queryTitle": "Bugatti Men Vest AMBUW25VSFZQN03",
+      "queryCategory": "outerwear",
+      "queryTypes": [
+        "vest"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "21823",
+      "queryTitle": "Bossini Men Vest AMBOW25VSFZP903",
+      "queryCategory": "outerwear",
+      "queryTypes": [
+        "vest"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "21850",
+      "queryTitle": "Springfield Men Coat AMSFW25CO1BP901",
+      "queryCategory": "outerwear",
+      "queryTypes": [
+        "coat",
+        "outerwear"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "22336",
+      "queryTitle": "Springfield Men Knitwear Cardigan AMSFW25KCFZCO01",
+      "queryCategory": "outerwear",
+      "queryTypes": [
+        "cardigan",
+        "knitwear"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "8314",
+      "queryTitle": "bag(27232)",
+      "queryCategory": "accessories",
+      "queryTypes": [
+        "bag"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "8315",
+      "queryTitle": "bag(9705)",
+      "queryCategory": "accessories",
+      "queryTypes": [
+        "bag"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    },
+    {
+      "queryId": "8316",
+      "queryTitle": "bag(9705)",
+      "queryCategory": "accessories",
+      "queryTypes": [
+        "bags",
+        "bag"
+      ],
+      "topIds": [],
+      "selfHit": false,
+      "sameCategoryRate": 0,
+      "typeConsistencyRate": 0,
+      "unrelatedRate": 0
+    }
+  ]
+}

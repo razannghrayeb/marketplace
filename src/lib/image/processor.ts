@@ -61,7 +61,8 @@ export function scalePixelBoxToImageDims(
 
 /**
  * Crop garment ROI from an already query/catalog-prepared buffer (same geometry as garment index).
- * Returns null only when dimensions are unusable.
+ * Falls back to a center crop when no reliable box is available so the garment vector stays
+ * garment-focused instead of degrading to the full prepared frame.
  */
 async function resolveGarmentEmbedBufferFromPrepared(
   processBuf: Buffer,
@@ -107,10 +108,10 @@ async function resolveGarmentEmbedBufferFromPrepared(
         }
       }
     } catch {
-      // fall through to full frame
+      // fall through to center crop
     }
   }
-  return processBuf;
+  return extractGarmentCenterCropBuffer(processBuf);
 }
 
 /**

@@ -736,6 +736,12 @@ function shouldForceHardCategoryForDetection(
   const areaRatio = Number.isFinite(detection.area_ratio) ? detection.area_ratio : 0;
   const category = String(categoryMapping.productCategory || "").toLowerCase();
 
+  // Clear garment detections should constrain retrieval hard once the detector is confident enough.
+  // Without this, shop-the-look returns visually plausible but wrong categories for items like trousers.
+  if (category === "tops" || category === "bottoms" || category === "dresses" || category === "outerwear") {
+    return confidence >= 0.9 && areaRatio >= 0.01;
+  }
+
   // Exact accessory detections are often small, but when they are high-confidence we must
   // treat them as hard retrieval constraints or the visual search drifts into unrelated items.
   if (category === "footwear") {
@@ -1674,7 +1680,10 @@ export class ImageAnalysisService {
 
       // Per-detection BLIP captioning + CLIP consistency gate.
       const detCaption = analysisResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
-      let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
+      // Do not inherit full-image BLIP hints by default for a specific detection.
+      // A full-image caption can describe a different region entirely (e.g. top vs trousers)
+      // and will poison per-detection retrieval if used as the fallback signal.
+      let detectionBlipSignal: BlipSignal | undefined = undefined;
       if (detCaption.trim().length > 0) {
         const captionLength = inferLengthIntentFromCaption(detCaption);
         if (captionLength) (filters as any).length = captionLength;
