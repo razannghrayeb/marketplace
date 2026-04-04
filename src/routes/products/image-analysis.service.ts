@@ -520,6 +520,19 @@ function inferStyleForDetectionLabel(label: string): {
   return { formality, attrStyle, style: { occasion, aesthetic, formality } };
 }
 
+function shouldApplyInferredStyleFallback(productCategory: string, detectionLabel: string): boolean {
+  const cat = String(productCategory || "").toLowerCase();
+  const label = String(detectionLabel || "").toLowerCase();
+  if (cat === "bottoms") {
+    // Bottom silhouettes (trousers/pants/jeans) are weak style predictors and
+    // can push retrieval toward formal pants when the crop is actually denim.
+    if (/\b(trouser|trousers|pants|pant|chino|chinos|jean|jeans|denim|slack|slacks|cargo)\b/.test(label)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** BLIP slot color for this catalog category (top vs jeans vs dress), if the caption named one explicitly. */
 function captionColorForProductCategory(
   productCategory: string,
@@ -594,7 +607,32 @@ function hardCategoryTermsForDetection(
     String(t).toLowerCase().trim(),
   );
 
-  // Prefer trousers/pants over jeans when YOLO says "trousers".
+  if (categoryMapping.productCategory === "tops") {
+    const isShortTop = /\bshort sleeve top\b|\btee\b|\bt-?shirt\b|\btshirt\b|\btank\b|\bcamisole\b|\bcrop top\b/.test(
+      l,
+    );
+    if (isShortTop) {
+      const shortTopTerms = baseTerms.filter((t) =>
+        /\b(t-?shirt|tshirt|tee|top|tops|tank|tank top|camisole|cami|polo|polos|crop top)\b/.test(t),
+      );
+      return shortTopTerms.length > 0 ? shortTopTerms : baseTerms;
+    }
+
+    const isLongTop = /\blong sleeve top\b|\bshirt\b|\bblouse\b|\bovershirt\b|\bhoodie\b|\bsweatshirt\b|\bsweater\b/.test(
+      l,
+    );
+    if (isLongTop) {
+      const longTopTerms = baseTerms.filter((t) =>
+        /\b(shirt|shirts|blouse|blouses|overshirt|sweater|hoodie|sweatshirt|pullover|cardigan|knitwear|top|tops)\b/.test(
+          t,
+        ),
+      );
+      return longTopTerms.length > 0 ? longTopTerms : baseTerms;
+    }
+  }
+
+  // Keep trousers/pants as primary, but allow jeans/denim candidates when the
+  // detector says "trousers" so denim bottoms are not over-pruned.
   if (categoryMapping.productCategory === "bottoms") {
     const isTrousersLike = /\b(trouser|trousers|pants|pant|chino|chinos|slack|slacks|cargo|cargo pants|sweatpants|sweatpants)\b/.test(
       l,
@@ -602,10 +640,12 @@ function hardCategoryTermsForDetection(
     const isJeansLike = /\b(jean|jeans|denim|denims)\b/.test(l);
 
     if (isTrousersLike) {
-      // Keep only pants/trousers-side terms; drop shorts/skirt/jeans.
-      return baseTerms.filter((t) =>
+      const trouserLike = baseTerms.filter((t) =>
         /\b(pant|pants|trouser|trousers|chino|chinos|slack|slacks|cargo|sweatpants)\b/.test(t),
       );
+      const jeansLike = baseTerms.filter((t) => /\b(jean|jeans|denim|denims)\b/.test(t));
+      const merged = [...new Set([...trouserLike, ...jeansLike])];
+      return merged.length > 0 ? merged : baseTerms;
     }
     if (isJeansLike) {
       return baseTerms.filter((t) => /\b(jean|jeans|denim|denims)\b/.test(t));
@@ -682,7 +722,9 @@ function tightenTypeSeedsForDetection(
       const trouserLike = normalized.filter((t) =>
         /\b(trouser|trousers|pant|pants|chino|chinos|slack|slacks|cargo|sweatpants|joggers?)\b/.test(t),
       );
-      return trouserLike.length > 0 ? trouserLike : normalized;
+      const jeansLike = normalized.filter((t) => /\b(jean|jeans|denim)\b/.test(t));
+      const merged = [...new Set([...trouserLike, ...jeansLike])];
+      return merged.length > 0 ? merged : normalized;
     }
     if (/\bjean|jeans|denim\b/.test(label)) {
       const jeansLike = normalized.filter((t) => /\b(jean|jeans|denim)\b/.test(t));
@@ -1828,7 +1870,7 @@ export class ImageAnalysisService {
       // will score it softly (so we avoid going fully empty).
       if (useStrongBlipSoftHints && blipStructured.style.attrStyle) {
         filters.softStyle = blipStructured.style.attrStyle;
-      } else if (inferredStyle.attrStyle) {
+      } else if (inferredStyle.attrStyle && shouldApplyInferredStyleFallback(categoryMapping.productCategory, label)) {
         filters.softStyle = inferredStyle.attrStyle;
       }
       if (categoryMapping.attributes.sleeveLength) {
@@ -2563,7 +2605,10 @@ export class ImageAnalysisService {
         const useStrongBlipSoftHints = blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
         if (useStrongBlipSoftHints && blipStructured.style.attrStyle) {
           filters.softStyle = blipStructured.style.attrStyle;
-        } else if (inferredStyle.attrStyle) {
+        } else if (
+          inferredStyle.attrStyle &&
+          shouldApplyInferredStyleFallback(categoryMapping.productCategory, categorySource)
+        ) {
           filters.softStyle = inferredStyle.attrStyle;
         }
         const detectionLength = inferLengthIntentFromDetection(detection, imageHeight);
