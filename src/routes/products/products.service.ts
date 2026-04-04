@@ -868,6 +868,90 @@ function normalizeSimpleToken(x: unknown): string {
   return String(x ?? "").toLowerCase().trim();
 }
 
+function normalizeLexicalToken(x: string): string {
+  const t = x.toLowerCase().trim();
+  if (t.endsWith("ies") && t.length > 4) return `${t.slice(0, -3)}y`;
+  if (t.endsWith("es") && t.length > 4) return t.slice(0, -2);
+  if (t.endsWith("s") && t.length > 3) return t.slice(0, -1);
+  return t;
+}
+
+function tokenizeLexicalTerms(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .map((tok) => normalizeLexicalToken(tok))
+    .filter((tok) => tok.length >= 3);
+}
+
+function computeSubtypeKeywordSignal(params: {
+  desiredProductTypes: string[];
+  hit: any;
+  reliableTypeIntent: boolean;
+  crossFamilyPenalty: number;
+  productTypeCompliance: number;
+}): { boost: number; overlap: number; exactHit: boolean } {
+  const desired = params.desiredProductTypes
+    .map((t) => String(t).toLowerCase().trim())
+    .filter(Boolean);
+  if (!params.reliableTypeIntent || desired.length === 0) {
+    return { boost: 0, overlap: 0, exactHit: false };
+  }
+  if ((params.crossFamilyPenalty ?? 0) >= 0.5) {
+    return { boost: 0, overlap: 0, exactHit: false };
+  }
+
+  const src = params.hit?._source ?? {};
+  const hitTypes = Array.isArray(src.product_types)
+    ? src.product_types.map((t: unknown) => String(t).toLowerCase().trim()).filter(Boolean)
+    : [];
+  const haystack = [
+    ...hitTypes,
+    String(src.category_canonical ?? "").toLowerCase(),
+    String(src.category ?? "").toLowerCase(),
+    String(src.title ?? "").toLowerCase(),
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const exactHit = desired.some((d) => {
+    if (!d) return false;
+    if (hitTypes.includes(d)) return true;
+    const escaped = d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${escaped}\\b`, "i").test(haystack);
+  });
+
+  const desiredTokens = new Set<string>();
+  for (const d of desired) {
+    for (const tok of tokenizeLexicalTerms(d)) desiredTokens.add(tok);
+  }
+  if (desiredTokens.size === 0) {
+    return { boost: 0, overlap: 0, exactHit };
+  }
+
+  const hitTokens = new Set(tokenizeLexicalTerms(haystack));
+  let matched = 0;
+  for (const tok of desiredTokens) {
+    if (hitTokens.has(tok)) matched += 1;
+  }
+  const overlap = Math.max(0, Math.min(1, matched / desiredTokens.size));
+
+  const typeComp = Math.max(0, Math.min(1, params.productTypeCompliance ?? 0));
+  const complianceGate = typeComp >= 0.75 ? 1 : typeComp >= 0.6 ? 0.7 : 0;
+
+  let baseBoost = 0;
+  if (exactHit) baseBoost = 0.03;
+  else if (overlap >= 0.7) baseBoost = 0.022;
+  else if (overlap >= 0.5) baseBoost = 0.015;
+
+  const boost = Math.max(0, Math.min(0.04, baseBoost * complianceGate));
+  return {
+    boost,
+    overlap: Math.round(overlap * 1000) / 1000,
+    exactHit,
+  };
+}
+
 function blendSoftSimilarityWithCompliance(params: {
   rawSim: number;
   compliance: number;
@@ -2226,6 +2310,9 @@ export async function searchByImageWithSimilarity(
   // Track fusedVisual / metadataCompliance per hit for the clean explain output.
   const fusedVisualById = new Map<string, number>();
   const metadataComplianceById = new Map<string, number>();
+  const keywordSubtypeBoostById = new Map<string, number>();
+  const keywordSubtypeOverlapById = new Map<string, number>();
+  const keywordSubtypeExactHitById = new Map<string, boolean>();
   const finalScoreSourceById = new Map<string, string>();
 
   // Final relevance pass: compute the authoritative finalRelevance01 incorporating
@@ -2236,7 +2323,20 @@ export async function searchByImageWithSimilarity(
     if (!comp) continue;
     const rawVisual = Math.max(0, Math.min(1, visualSimFromHit(hit)));
     const effectiveVisual = visualSimEffectiveById.get(idStr) ?? rawVisual;
-    const typeMatch = (comp.exactTypeScore ?? 0) >= 1 || (comp.productTypeCompliance ?? 0) >= 0.82;
+    const subtypeKeywordSignal = computeSubtypeKeywordSignal({
+      desiredProductTypes,
+      hit,
+      reliableTypeIntent: hasReliableTypeIntentForRelevance,
+      crossFamilyPenalty: comp.crossFamilyPenalty ?? 0,
+      productTypeCompliance: comp.productTypeCompliance ?? 0,
+    });
+    const lexicalAssistTypeMatch =
+      (subtypeKeywordSignal.exactHit || subtypeKeywordSignal.overlap >= 0.6) &&
+      (comp.productTypeCompliance ?? 0) >= 0.55;
+    const typeMatch =
+      (comp.exactTypeScore ?? 0) >= 1 ||
+      (comp.productTypeCompliance ?? 0) >= 0.82 ||
+      lexicalAssistTypeMatch;
     const lengthCompliance = lengthComplianceById.get(idStr) ?? 0;
     const hasLengthIntentForHit = hasLengthIntentById.get(idStr) ?? false;
     const crossFamilyPenaltyVal = comp.crossFamilyPenalty ?? 0;
@@ -2267,7 +2367,10 @@ export async function searchByImageWithSimilarity(
       blipMatchScore: blipAlignById.get(idStr) ?? 0,
       compositeInfluence: batchCompositeInfluence,
     });
-    comp.finalRelevance01 = explicitResult.score;
+    comp.finalRelevance01 = Math.min(1, explicitResult.score + subtypeKeywordSignal.boost);
+    keywordSubtypeBoostById.set(idStr, Math.round(subtypeKeywordSignal.boost * 1000) / 1000);
+    keywordSubtypeOverlapById.set(idStr, subtypeKeywordSignal.overlap);
+    keywordSubtypeExactHitById.set(idStr, subtypeKeywordSignal.exactHit);
     finalScoreSourceById.set(idStr, "computed");
 
     const broadImageIntent =
@@ -2434,10 +2537,21 @@ export async function searchByImageWithSimilarity(
 
   if (rankedHits.length === 0 && visualGatedHits.length > 0) {
     imageSearchPipelineDegraded = true;
+    let rescuePool = visualGatedHits;
+    if (hasReliableTypeIntentForRelevance) {
+      const preferredTypeAligned = visualGatedHits.filter((h: any) => {
+        const comp = complianceById.get(String(h._source.product_id));
+        if (!comp) return false;
+        return (comp.exactTypeScore ?? 0) >= 1 || (comp.productTypeCompliance ?? 0) >= 0.38;
+      });
+      if (preferredTypeAligned.length > 0) {
+        rescuePool = preferredTypeAligned;
+      }
+    }
     // Use visual similarity as the rescue signal instead of a flat minimum.
     // This preserves relative ordering so that genuinely similar products
     // rank above dissimilar ones even in the degraded path.
-    for (const h of visualGatedHits) {
+    for (const h of rescuePool) {
       const comp = complianceById.get(String(h._source.product_id));
       if (comp) {
         const v = visualSimFromHit(h);
@@ -2446,7 +2560,7 @@ export async function searchByImageWithSimilarity(
         finalScoreSourceById.set(String(h._source.product_id), "final_accept_rescue");
       }
     }
-    rankedHits = [...visualGatedHits]
+    rankedHits = [...rescuePool]
       .sort((a: any, b: any) => {
         const fa = complianceById.get(String(a._source.product_id))?.finalRelevance01 ?? 0;
         const fb = complianceById.get(String(b._source.product_id))?.finalRelevance01 ?? 0;
@@ -2696,6 +2810,9 @@ export async function searchByImageWithSimilarity(
               taxonomyMatch,
               blipAlignment: blipAlignById.get(idStr) ?? 0,
               blipColorConflictFactor: blipColorConflictFactorById.get(idStr) ?? 1,
+              keywordSubtypeBoost: keywordSubtypeBoostById.get(idStr) ?? 0,
+              keywordSubtypeOverlap: keywordSubtypeOverlapById.get(idStr) ?? 0,
+              keywordSubtypeExactHit: keywordSubtypeExactHitById.get(idStr) ?? false,
               imageCompositeScore,
               imageCompositeScore01,
 
