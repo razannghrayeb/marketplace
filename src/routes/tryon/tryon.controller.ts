@@ -110,7 +110,7 @@ function pickFirstUploadedFile(
 const ALLOWED_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
 /** Image size constraints (in bytes) */
-const MIN_IMAGE_SIZE = 10 * 1024;      // 10 KB
+const MIN_IMAGE_SIZE = 1 * 1024;       // 1 KB (absolute minimum)
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10 MB
 const RECOMMENDED_MAX = 5 * 1024 * 1024; // 5 MB for performance
 
