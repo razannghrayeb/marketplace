@@ -421,34 +421,23 @@ export async function getOutfitSuggestions(
   return outfits.sort((a, b) => b.score - a.score);
 }
 
-/**
- * Get "complete the look" suggestions for a partial outfit
- */
-export async function completeLookSuggestions(
+/** Rows that anchor complete-look (wardrobe items or catalog products). */
+type CompleteLookAnchorRow = {
+  id?: number;
+  product_id?: number | null;
+  embedding?: unknown;
+  dominant_colors?: Array<{ hex?: string }>;
+  name?: string | null;
+  image_url?: string | null;
+  image_cdn?: string | null;
+  category_name?: string | null;
+};
+
+async function runCompleteLookCore(
   userId: number,
-  currentItemIds: number[],
-  limit: number = 10
+  currentItems: CompleteLookAnchorRow[],
+  limit: number
 ): Promise<CompleteLookSuggestionsResult> {
-  const currentItemsResult = await pg.query(
-    `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, wi.name, wi.image_url, wi.image_cdn,
-            c.name as category_name
-     FROM wardrobe_items wi
-     LEFT JOIN categories c ON wi.category_id = c.id
-     WHERE wi.id = ANY($1) AND wi.user_id = $2`,
-    [currentItemIds, userId]
-  );
-
-  const currentItems = currentItemsResult.rows as Array<{
-    id: number;
-    product_id?: number | null;
-    embedding?: unknown;
-    dominant_colors?: Array<{ hex?: string }>;
-    name?: string | null;
-    image_url?: string | null;
-    image_cdn?: string | null;
-    category_name?: string | null;
-  }>;
-
   const currentCategories = new Set<string>();
   const currentCategoryList: string[] = [];
   const pushCategory = (normalized: string | null) => {
@@ -653,6 +642,63 @@ export async function completeLookSuggestions(
     outfitSets,
     missingCategories,
   };
+}
+
+/**
+ * Get "complete the look" suggestions for wardrobe item IDs (same as before).
+ */
+export async function completeLookSuggestions(
+  userId: number,
+  currentItemIds: number[],
+  limit: number = 10
+): Promise<CompleteLookSuggestionsResult> {
+  const currentItemsResult = await pg.query(
+    `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, wi.name, wi.image_url, wi.image_cdn,
+            c.name as category_name
+     FROM wardrobe_items wi
+     LEFT JOIN categories c ON wi.category_id = c.id
+     WHERE wi.id = ANY($1) AND wi.user_id = $2`,
+    [currentItemIds, userId]
+  );
+
+  const currentItems = currentItemsResult.rows as CompleteLookAnchorRow[];
+  return runCompleteLookCore(userId, currentItems, limit);
+}
+
+/**
+ * Same complete-look pipeline anchored on catalog product IDs (for PDP "complete this look").
+ */
+export async function completeLookSuggestionsForCatalogProducts(
+  userId: number,
+  productIds: number[],
+  limit: number = 10
+): Promise<CompleteLookSuggestionsResult> {
+  if (!productIds.length) {
+    return { suggestions: [], outfitSets: [], missingCategories: [] };
+  }
+  const currentItemsResult = await pg.query(
+    `SELECT p.id AS id,
+            p.id AS product_id,
+            pi.embedding,
+            NULL::jsonb AS dominant_colors,
+            p.title AS name,
+            p.image_url AS image_url,
+            p.image_cdn AS image_cdn,
+            p.category AS category_name
+     FROM products p
+     LEFT JOIN LATERAL (
+       SELECT embedding
+       FROM product_images
+       WHERE product_id = p.id AND embedding IS NOT NULL
+       ORDER BY is_primary DESC NULLS LAST, id ASC
+       LIMIT 1
+     ) pi ON TRUE
+     WHERE p.id = ANY($1::bigint[])`,
+    [productIds]
+  );
+
+  const currentItems = currentItemsResult.rows as CompleteLookAnchorRow[];
+  return runCompleteLookCore(userId, currentItems, limit);
 }
 
 const COLOR_FAMILIES_BY_NAME: Record<string, string> = {

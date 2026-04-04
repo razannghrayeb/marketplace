@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuthStore } from '@/store/auth'
 import { AdminSidebar } from '@/components/admin/AdminSidebar'
+import { AdminBasePathProvider } from '@/components/admin/AdminBasePathContext'
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter()
@@ -44,9 +45,11 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   }
 
   return (
-    <div className="flex max-w-[1600px] mx-auto px-2 sm:px-4">
-      <AdminSidebar />
-      <div className="flex-1 min-w-0 py-8 px-4">{children}</div>
-    </div>
+    <AdminBasePathProvider value="/admin">
+      <div className="flex max-w-[1600px] mx-auto px-2 sm:px-4 mesh-bg min-h-[calc(100vh-4rem)]">
+        <AdminSidebar brandLabel="Admin" />
+        <div className="flex-1 min-w-0 py-8 px-4">{children}</div>
+      </div>
+    </AdminBasePathProvider>
   )
 }

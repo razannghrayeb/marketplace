@@ -3,8 +3,8 @@ import { signup, login, refreshTokens, logout, getMe, updateProfile } from "./au
 
 export async function signupHandler(req: Request, res: Response, next: NextFunction) {
   try {
-    const { email, password } = req.body;
-    const result = await signup(email, password);
+    const { email, password, user_type } = req.body;
+    const result = await signup(email, password, user_type ?? "customer");
     res.status(201).json({
       success: true,
       user: result.user,

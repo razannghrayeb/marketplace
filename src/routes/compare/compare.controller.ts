@@ -21,6 +21,16 @@ import {
   getProductReviewAnalysis,
   compareReviews,
 } from "./compare.service";
+import {
+  getEnhancedComparison,
+  getProductInventory,
+  getPriceTrend,
+  getProductMerchantReputation,
+  getShippingInfo,
+  findBestValue,
+  findMostReliable,
+  findBestShipping,
+} from "./compare-enhanced.service";
 import { InsufficientProductsForCompareError } from "../../lib/compare/compareEngine";
 
 const router = Router();
@@ -36,7 +46,8 @@ const compareBodyMultipart = multer().none();
  * Compare 2-5 products and get verdict
  * 
  * Body: application/json { product_ids: number[] } or multipart/form-data (same field; string JSON array or comma-separated).
- * Returns: FullVerdictResponse
+ * Query: ?enhanced=true (optional, adds inventory, shipping, reputation data)
+ * Returns: FullVerdictResponse + optional enhanced data
  */
 router.post("/", compareBodyMultipart, async (req: Request, res: Response) => {
   try {
@@ -48,6 +59,28 @@ router.post("/", compareBodyMultipart, async (req: Request, res: Response) => {
     }
 
     const result = await compareProductsWithVerdict(parsed.productIds);
+    
+    // Optionally add enhanced data (inventory, shipping, reputation, pricing)
+    if (req.query.enhanced === "true" || req.body.enhanced === true) {
+      try {
+        const enhanced = await getEnhancedComparison(parsed.productIds);
+        return res.json({
+          ...result,
+          enhanced_data: {
+            comparisons: enhanced,
+            recommendations: {
+              best_value: findBestValue(enhanced),
+              most_reliable: findMostReliable(enhanced),
+              best_shipping: findBestShipping(enhanced),
+            },
+          },
+        });
+      } catch (enhanceErr) {
+        console.warn("Could not get enhanced data:", enhanceErr);
+        // Fall through to return basic verdict anyway
+      }
+    }
+    
     res.json(result);
   } catch (error) {
     console.error("Compare error:", error);
@@ -258,6 +291,128 @@ router.post("/reviews", async (req: Request, res: Response) => {
   } catch (error) {
     console.error("Review comparison error:", error);
     res.status(500).json({ error: "Failed to compare reviews" });
+  }
+});
+
+// ============================================================================
+// Enhanced Comparison (NEW)
+// ============================================================================
+
+/**
+ * POST /api/compare/enhanced
+ * 
+ * Get comprehensive comparison with inventory, pricing, shipping, and reputation
+ * 
+ * Body: { product_ids: number[] }
+ */
+router.post("/enhanced", compareBodyMultipart, async (req: Request, res: Response) => {
+  try {
+    const product_ids = coerceCompareProductIdsInput(req.body);
+    const parsed = validateCompareInput(product_ids);
+    
+    if (!parsed.ok) {
+      return res.status(400).json({ success: false, error: parsed.error });
+    }
+
+    const comparisons = await getEnhancedComparison(parsed.productIds);
+    const bestValue = findBestValue(comparisons);
+    const mostReliable = findMostReliable(comparisons);
+    const bestShipping = findBestShipping(comparisons);
+
+    res.json({
+      success: true,
+      data: {
+        comparisons,
+        recommendations: {
+          best_value: bestValue,
+          most_reliable: mostReliable,
+          best_shipping: bestShipping,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Enhanced compare error:", error);
+    res.status(500).json({ success: false, error: "Failed to get enhanced comparison" });
+  }
+});
+
+/**
+ * GET /api/compare/inventory/:productId
+ * 
+ * Get current inventory status for a product
+ */
+router.get("/inventory/:productId", async (req: Request, res: Response) => {
+  try {
+    const productId = validateProductId(req.params.productId);
+    if (!productId) {
+      return res.status(400).json({ error: "Invalid product ID" });
+    }
+
+    const inventory = await getProductInventory(productId);
+    res.json({ success: true, data: inventory });
+  } catch (error) {
+    console.error("Inventory error:", error);
+    res.status(500).json({ success: false, error: "Failed to get inventory" });
+  }
+});
+
+/**
+ * GET /api/compare/price-trend/:productId
+ * 
+ * Get price trend and volatility analysis
+ */
+router.get("/price-trend/:productId", async (req: Request, res: Response) => {
+  try {
+    const productId = validateProductId(req.params.productId);
+    if (!productId) {
+      return res.status(400).json({ error: "Invalid product ID" });
+    }
+
+    const trend = await getPriceTrend(productId);
+    res.json({ success: true, data: trend });
+  } catch (error) {
+    console.error("Price trend error:", error);
+    res.status(500).json({ success: false, error: "Failed to get price trend" });
+  }
+});
+
+/**
+ * GET /api/compare/merchant/:productId
+ * 
+ * Get vendor/merchant reputation information
+ */
+router.get("/merchant/:productId", async (req: Request, res: Response) => {
+  try {
+    const productId = validateProductId(req.params.productId);
+    if (!productId) {
+      return res.status(400).json({ error: "Invalid product ID" });
+    }
+
+    const merchant = await getProductMerchantReputation(productId);
+    res.json({ success: true, data: merchant });
+  } catch (error) {
+    console.error("Merchant info error:", error);
+    res.status(500).json({ success: false, error: "Failed to get merchant information" });
+  }
+});
+
+/**
+ * GET /api/compare/shipping/:productId
+ * 
+ * Get shipping and return policy information
+ */
+router.get("/shipping/:productId", async (req: Request, res: Response) => {
+  try {
+    const productId = validateProductId(req.params.productId);
+    if (!productId) {
+      return res.status(400).json({ error: "Invalid product ID" });
+    }
+
+    const shipping = await getShippingInfo(productId);
+    res.json({ success: true, data: shipping });
+  } catch (error) {
+    console.error("Shipping info error:", error);
+    res.status(500).json({ success: false, error: "Failed to get shipping information" });
   }
 });
 

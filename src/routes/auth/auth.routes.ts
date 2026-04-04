@@ -16,6 +16,7 @@ const router = Router();
 const signupSchema = z.object({
   email: z.string().email("Invalid email format"),
   password: z.string().min(8, "Password must be at least 8 characters"),
+  user_type: z.enum(["customer", "business"]).optional().default("customer"),
 });
 
 const loginSchema = z.object({

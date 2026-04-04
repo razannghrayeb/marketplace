@@ -12,9 +12,13 @@
 import { Router } from "express";
 import multer from "multer";
 import { rateLimit } from "../../middleware/index";
+import { optionalAuth } from "../../middleware/auth";
 import * as controller from "./tryon.controller";
 
 const router = Router();
+
+/** Populate req.user from JWT so try-on works when x-user-id is omitted but Bearer token is valid */
+router.use(optionalAuth);
 
 const upload = multer({
   storage: multer.memoryStorage(),
