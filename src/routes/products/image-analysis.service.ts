@@ -105,6 +105,9 @@ function shopLookCategoryFallbackEnv(): boolean {
 
 /** Debug-only isolation path: bypass rerank/final gates and rank by raw exact cosine. */
 function shopLookDebugRawCosineFirstEnv(): boolean {
+  // Never allow raw-cosine bypass outside local/dev debugging.
+  const nodeEnv = String(process.env.NODE_ENV ?? "").toLowerCase();
+  if (nodeEnv === "production") return false;
   const v = String(process.env.SEARCH_IMAGE_DEBUG_RAW_EXACT_COSINE_FIRST ?? "").toLowerCase();
   return v === "1" || v === "true";
 }
@@ -613,7 +616,7 @@ function hardCategoryTermsForDetection(
     );
     if (isShortTop) {
       const shortTopTerms = baseTerms.filter((t) =>
-        /\b(t-?shirt|tshirt|tee|top|tops|tank|tank top|camisole|cami|polo|polos|crop top)\b/.test(t),
+        /\b(t-?shirt|tshirt|tee|top|tops|blouse|blouses|shirt|shirts|polo|polos)\b/.test(t),
       );
       return shortTopTerms.length > 0 ? shortTopTerms : baseTerms;
     }
@@ -641,7 +644,7 @@ function hardCategoryTermsForDetection(
 
     if (isTrousersLike) {
       const trouserLike = baseTerms.filter((t) =>
-        /\b(pant|pants|trouser|trousers|chino|chinos|slack|slacks|cargo|sweatpants)\b/.test(t),
+        /\b(pant|pants|trouser|trousers|chino|chinos|slack|slacks|cargo)\b/.test(t),
       );
       const jeansLike = baseTerms.filter((t) => /\b(jean|jeans|denim|denims)\b/.test(t));
       const merged = [...new Set([...trouserLike, ...jeansLike])];
@@ -705,7 +708,7 @@ function tightenTypeSeedsForDetection(
   if (category === "tops") {
     if (/\bshort sleeve top\b|\btee\b|\bt-?shirt\b/.test(label)) {
       const shortTop = normalized.filter((t) =>
-        /\b(tshirt|t-?shirt|tee|tees|top|tops|tank|camisole|cami|polo|polos)\b/.test(t),
+        /\b(tshirt|t-?shirt|tee|tees|top|tops|shirt|shirts|blouse|blouses|polo|polos)\b/.test(t),
       );
       return shortTop.length > 0 ? shortTop : normalized;
     }
@@ -720,7 +723,7 @@ function tightenTypeSeedsForDetection(
   if (category === "bottoms") {
     if (/\btrouser|trousers|pant|pants|chino|chinos|slack|slacks|cargo\b/.test(label)) {
       const trouserLike = normalized.filter((t) =>
-        /\b(trouser|trousers|pant|pants|chino|chinos|slack|slacks|cargo|sweatpants|joggers?)\b/.test(t),
+        /\b(trouser|trousers|pant|pants|chino|chinos|slack|slacks|cargo)\b/.test(t),
       );
       const jeansLike = normalized.filter((t) => /\b(jean|jeans|denim)\b/.test(t));
       const merged = [...new Set([...trouserLike, ...jeansLike])];
@@ -1854,6 +1857,16 @@ export class ImageAnalysisService {
       typeSeeds = filterProductTypeSeedsByMappedCategory(typeSeeds, categoryMapping.productCategory);
       typeSeeds = tightenTypeSeedsForDetection(label, categoryMapping, typeSeeds);
       let softProductTypeHints = [...new Set([...typeSeeds, ...expandedTypeHints.slice(0, 8)])];
+
+      // If the full-image caption explicitly mentions jeans, bias bottoms retrieval
+      // toward jeans/denim so non-denim sporty pants do not outrank true jeans.
+      if (
+        categoryMapping.productCategory === "bottoms" &&
+        Boolean(inferredColorsByItem.jeansColor || /\bjeans?\b|\bdenim\b/.test(String(blipCaption ?? "").toLowerCase()))
+      ) {
+        const jeansPriority = ["jeans", "jean", "denim", "straight jeans", "wide leg jeans"];
+        softProductTypeHints = [...new Set([...jeansPriority, ...softProductTypeHints])];
+      }
 
       // "Closet similar" constraints: enforce audience gender + add optional style/color.
       if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {

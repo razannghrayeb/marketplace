@@ -1668,7 +1668,11 @@ export async function searchByImageWithSimilarity(
 
   const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
 
-  if (debugRawCosineFirst) {
+  const rawCosineDebugAllowed =
+    debugRawCosineFirst &&
+    String(process.env.NODE_ENV ?? "").toLowerCase() !== "production" &&
+    String(process.env.SEARCH_ENABLE_DEBUG_RAW_BRANCH ?? "").toLowerCase() === "1";
+  if (rawCosineDebugAllowed) {
     const orderedRaw = [...hits]
       .map((h: any) => ({ hit: h, sim: visualSimFromHit(h) }))
       .sort((a, b) => b.sim - a.sim);
@@ -1699,6 +1703,7 @@ export async function searchByImageWithSimilarity(
             merchandiseSimilarity: sim,
             catalogAlignment: 1,
             finalRelevance01: sim,
+            finalRelevanceSource: "raw_debug_bypass",
           },
           images: images.map((img) => ({
             id: img.id,
@@ -1726,6 +1731,7 @@ export async function searchByImageWithSimilarity(
         threshold: similarityThreshold,
         total_results: results.length,
         image_knn_field: knnFieldResolved,
+        debug_raw_cosine_bypass_used: true,
       },
     };
   }
@@ -2916,6 +2922,7 @@ export async function searchByImageWithSimilarity(
       below_final_relevance_gate: belowFinalRelevanceGate,
       relevance_gate_soft: false,
       image_knn_field: knnFieldResolved,
+      debug_raw_cosine_bypass_used: false,
       pipeline_counts: {
         exact_cosine_rerank: exactCosineRerank,
         dual_knn_fusion: useDualKnn,
