@@ -958,6 +958,8 @@ async function fetchCategoryTopUpSuggestions(params: {
 
   return dedupeCompleteLookSuggestions(out.sort((a, b) => b.score - a.score)).slice(0, params.needed);
 }
+
+const COLOR_FAMILIES_BY_NAME: Record<string, string> = {
   black: "neutral",
   white: "neutral",
   gray: "neutral",
