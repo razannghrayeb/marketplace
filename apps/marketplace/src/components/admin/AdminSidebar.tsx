@@ -13,6 +13,10 @@ import {
   Brain,
   Activity,
   ChevronRight,
+  Store,
+  Package,
+  TrendingUp,
+  Clock,
 } from 'lucide-react'
 import { useAdminBasePath } from '@/components/admin/AdminBasePathContext'
 
@@ -22,6 +26,24 @@ type NavItem = {
   icon: LucideIcon
   color: string
   exact?: boolean
+}
+
+type CatalogLinkItem = {
+  href: string
+  label: string
+  icon: LucideIcon
+  color: string
+}
+
+const CATALOG_LINKS: { section: string; items: CatalogLinkItem[] } = {
+  section: 'Catalog database',
+  items: [
+    { href: '/admin/catalog', label: 'Scraper overview', icon: LayoutDashboard, color: 'bg-teal-600' },
+    { href: '/admin/catalog/vendors', label: 'Vendors', icon: Store, color: 'bg-blue-500' },
+    { href: '/admin/catalog/products', label: 'Products', icon: Package, color: 'bg-purple-500' },
+    { href: '/admin/catalog/prices', label: 'Prices', icon: TrendingUp, color: 'bg-green-500' },
+    { href: '/admin/catalog/freshness', label: 'Freshness', icon: Clock, color: 'bg-slate-500' },
+  ],
 }
 
 const SECTIONS: { section: string; items: NavItem[] }[] = [
@@ -101,6 +123,40 @@ export function AdminSidebar({ brandLabel = 'Admin' }: { brandLabel?: string }) 
             })}
           </div>
         ))}
+        <div className="mb-4">
+          <p className="px-4 py-1 text-[10px] font-semibold text-neutral-400 uppercase tracking-widest">
+            {CATALOG_LINKS.section}
+          </p>
+          {CATALOG_LINKS.items.map(({ href, label, icon: Icon, color }) => {
+            const active =
+              href === '/admin/catalog'
+                ? pathname === href || pathname === `${href}/`
+                : pathname === href || pathname.startsWith(`${href}/`)
+            return (
+              <Link
+                key={href}
+                href={href}
+                className={clsx(
+                  'flex items-center gap-2.5 px-4 py-2 mx-2 rounded-lg text-sm transition-colors',
+                  active
+                    ? 'bg-teal-100 text-teal-950 font-medium shadow-sm'
+                    : 'text-neutral-600 hover:bg-teal-50/80 hover:text-teal-950'
+                )}
+              >
+                <span
+                  className={clsx(
+                    'w-5 h-5 rounded-md flex items-center justify-center shrink-0 shadow-sm',
+                    color
+                  )}
+                >
+                  <Icon className="w-3 h-3 text-white" />
+                </span>
+                <span className="flex-1">{label}</span>
+                {active && <ChevronRight className="w-3 h-3 text-teal-600 shrink-0" />}
+              </Link>
+            )
+          })}
+        </div>
       </nav>
 
       <div className="px-4 py-3 border-t border-neutral-100 mt-auto">

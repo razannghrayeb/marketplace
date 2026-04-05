@@ -179,6 +179,19 @@ function databaseConnectionHints(err: unknown): string[] {
     return hints;
   }
 
+  if (
+    code === "ECONNREFUSED" ||
+    msg.includes("econnrefused") ||
+    msg.includes("connect econnrefused")
+  ) {
+    hints.push(
+      "Nothing accepted the connection at the host:port in DATABASE_URL — Postgres not running locally, wrong port, or firewall/VPN.",
+    );
+    hints.push(
+      "If the host is 127.0.0.1:5432, start local Postgres or switch DATABASE_URL to your Supabase pooler URI.",
+    );
+  }
+
   if (code === "08006" || msg.includes("authentication") || msg.includes("password")) {
     hints.push(
       "Check password: copy the database password from Supabase (not the anon/service API keys).",

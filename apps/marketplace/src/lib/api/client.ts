@@ -14,6 +14,20 @@ function joinApiUrl(path: string): string {
   return `${API_BASE}${p}`
 }
 
+const REACHABILITY_HINT =
+  'Start the API from the repo root (pnpm dev), or point NEXT_PUBLIC_API_URL in apps/marketplace/.env.local at a running backend.'
+
+async function apiFetch(input: string | URL, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init)
+  } catch (e) {
+    if (e instanceof TypeError) {
+      throw new Error(`Cannot reach API at ${API_BASE}. ${REACHABILITY_HINT}`)
+    }
+    throw e
+  }
+}
+
 export type ApiResponse<T> = {
   success: boolean
   data?: T
@@ -61,7 +75,7 @@ async function handleResponse<T>(res: Response): Promise<ApiResponse<T>> {
       if (refreshToken) {
         const refreshed = await refreshTokens(refreshToken)
         if (refreshed) {
-          return fetch(res.url, { ...res, headers: await getAuthHeaders() }).then((r) => handleResponse<T>(r))
+          return apiFetch(res.url, { headers: await getAuthHeaders() }).then((r) => handleResponse<T>(r))
         }
       }
       localStorage.removeItem('accessToken')
@@ -75,7 +89,7 @@ async function handleResponse<T>(res: Response): Promise<ApiResponse<T>> {
 }
 
 export async function refreshTokens(refreshToken: string): Promise<boolean> {
-  const res = await fetch(joinApiUrl('/api/auth/refresh'), {
+  const res = await apiFetch(joinApiUrl('/api/auth/refresh'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ refresh_token: refreshToken }),
@@ -97,12 +111,12 @@ export const api = {
     if (params) {
       Object.entries(params).forEach(([k, v]) => v != null && url.searchParams.set(k, String(v)))
     }
-    const res = await fetch(url.toString(), { headers: await getAuthHeaders() })
+    const res = await apiFetch(url.toString(), { headers: await getAuthHeaders() })
     return handleResponse<T>(res)
   },
 
   async post<T>(path: string, body?: unknown): Promise<ApiResponse<T>> {
-    const res = await fetch(joinApiUrl(path), {
+    const res = await apiFetch(joinApiUrl(path), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders()) },
       body: body ? JSON.stringify(body) : undefined,
@@ -112,7 +126,7 @@ export const api = {
 
   async postForm<T>(path: string, formData: FormData): Promise<ApiResponse<T>> {
     const headers = await getAuthHeaders()
-    const res = await fetch(joinApiUrl(path), {
+    const res = await apiFetch(joinApiUrl(path), {
       method: 'POST',
       headers: { ...headers },
       body: formData,
@@ -121,7 +135,7 @@ export const api = {
   },
 
   async patch<T>(path: string, body?: unknown): Promise<ApiResponse<T>> {
-    const res = await fetch(joinApiUrl(path), {
+    const res = await apiFetch(joinApiUrl(path), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders()) },
       body: body ? JSON.stringify(body) : undefined,
@@ -130,7 +144,7 @@ export const api = {
   },
 
   async put<T>(path: string, body?: unknown): Promise<ApiResponse<T>> {
-    const res = await fetch(joinApiUrl(path), {
+    const res = await apiFetch(joinApiUrl(path), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders()) },
       body: body ? JSON.stringify(body) : undefined,
@@ -149,7 +163,7 @@ export const api = {
     if (params) {
       Object.entries(params).forEach(([k, v]) => v != null && url.searchParams.set(k, String(v)))
     }
-    const res = await fetch(url.toString(), { headers: await getAuthHeaders() })
+    const res = await apiFetch(url.toString(), { headers: await getAuthHeaders() })
     const contentType = res.headers.get('content-type') || ''
     if (contentType.includes('application/json')) {
       const body = (await res.json().catch(() => ({}))) as Record<string, unknown>
@@ -160,7 +174,7 @@ export const api = {
   },
 
   async delete<T>(path: string): Promise<ApiResponse<T>> {
-    const res = await fetch(joinApiUrl(path), {
+    const res = await apiFetch(joinApiUrl(path), {
       method: 'DELETE',
       headers: await getAuthHeaders(),
     })
