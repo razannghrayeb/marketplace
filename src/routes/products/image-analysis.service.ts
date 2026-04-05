@@ -644,7 +644,7 @@ function hardCategoryTermsForDetection(
     );
     if (isShortTop) {
       const shortTopTerms = baseTerms.filter((t) =>
-        /\b(t-?shirt|tshirt|tee|top|tops|blouse|blouses|shirt|shirts|polo|polos)\b/.test(t),
+        /\b(t-?shirt|tshirt|tee|top|tops|tank|camisole|cami|crop top|polo|polos)\b/.test(t),
       );
       return shortTopTerms.length > 0 ? shortTopTerms : baseTerms;
     }
@@ -736,7 +736,7 @@ function tightenTypeSeedsForDetection(
   if (category === "tops") {
     if (/\bshort sleeve top\b|\btee\b|\bt-?shirt\b/.test(label)) {
       const shortTop = normalized.filter((t) =>
-        /\b(tshirt|t-?shirt|tee|tees|top|tops|shirt|shirts|blouse|blouses|polo|polos)\b/.test(t),
+        /\b(tshirt|t-?shirt|tee|tees|top|tops|tank|camisole|cami|crop top|polo|polos)\b/.test(t),
       );
       return shortTop.length > 0 ? shortTop : normalized;
     }
@@ -918,6 +918,43 @@ function textHasWholePhrase(haystack: string, phrase: string): boolean {
   return new RegExp(pattern, "i").test(haystack);
 }
 
+function inferSleeveIntentFromDetectionLabel(
+  detectionLabel: string,
+): "short" | "long" | "sleeveless" | null {
+  const label = normalizeLooseText(detectionLabel);
+  if (!label) return null;
+  if (/\b(sleeveless|tank|camisole|cami|vest top|strapless|halter)\b/.test(label)) {
+    return "sleeveless";
+  }
+  if (/\bshort sleeve\b/.test(label)) return "short";
+  if (/\blong sleeve\b/.test(label)) return "long";
+  return null;
+}
+
+function inferSleeveFromProductText(
+  haystack: string,
+): "short" | "long" | "sleeveless" | null {
+  const txt = normalizeLooseText(haystack);
+  if (!txt) return null;
+
+  const hasSleeveless = /\b(sleeveless|tank|camisole|cami|strapless|halter)\b/.test(txt);
+  const hasShort = /\b(short sleeve|short sleeved|ss)\b/.test(txt);
+  const hasLong = /\b(long sleeve|long sleeved|ls)\b/.test(txt);
+
+  if (hasSleeveless && !hasShort && !hasLong) return "sleeveless";
+  if (hasShort && !hasLong) return "short";
+  if (hasLong && !hasShort) return "long";
+  return null;
+}
+
+function isSleeveContradiction(
+  desired: "short" | "long" | "sleeveless" | null,
+  observed: "short" | "long" | "sleeveless" | null,
+): boolean {
+  if (!desired || !observed) return false;
+  return desired !== observed;
+}
+
 function shouldUseStrictDetectionCategoryGuard(productCategory: string): boolean {
   const c = String(productCategory || "").toLowerCase();
   return (
@@ -948,17 +985,29 @@ function applyDetectionCategoryGuard(
   const fallbackTerms = getCategorySearchTerms(categoryMapping.productCategory);
   const baseAllowed = strictTerms.length > 0 ? strictTerms : fallbackTerms;
   const allowedTerms = [...new Set(baseAllowed.map((t) => normalizeLooseText(t)).filter(Boolean))];
+  const desiredSleeveIntent = inferSleeveIntentFromDetectionLabel(detectionLabel);
   if (allowedTerms.length === 0) return products;
 
   return products.filter((p) => {
     const categoryText = normalizeLooseText((p as any).category);
     const categoryCanonicalText = normalizeLooseText((p as any).category_canonical);
     const titleText = normalizeLooseText((p as any).title);
+    const descriptionText = normalizeLooseText((p as any).description);
+    const attrSleeveText = normalizeLooseText((p as any).attr_sleeve);
     const productTypeRaw = (p as any).product_types;
     const productTypeText = Array.isArray(productTypeRaw)
       ? normalizeLooseText(productTypeRaw.join(" "))
       : normalizeLooseText(productTypeRaw);
-    const haystack = [categoryText, categoryCanonicalText, productTypeText, titleText].filter(Boolean).join(" ");
+    const haystack = [
+      categoryText,
+      categoryCanonicalText,
+      productTypeText,
+      titleText,
+      descriptionText,
+      attrSleeveText,
+    ]
+      .filter(Boolean)
+      .join(" ");
 
     // For bags/accessories we fail closed when metadata is missing to avoid
     // leaking generic apparel into strict accessory retrieval flows.
@@ -966,6 +1015,15 @@ function applyDetectionCategoryGuard(
 
     const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, term));
     if (!allowByTerm) return false;
+
+    // Sleeve contradiction guard: when detection is explicitly sleeve-typed,
+    // reject products that explicitly indicate a conflicting sleeve type.
+    if (categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses") {
+      const observedSleeve = inferSleeveFromProductText(haystack);
+      if (isSleeveContradiction(desiredSleeveIntent, observedSleeve)) {
+        return false;
+      }
+    }
 
     // Guard against broad lexical collisions (e.g. "denim jacket" inside trouser flow).
     const productCategoryMacro = mapDetectionToCategory(String((p as any).category ?? ""), 1).productCategory;
