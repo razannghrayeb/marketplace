@@ -2585,33 +2585,26 @@ export async function searchByImageWithSimilarity(
     if (hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) {
       const desiredSleeveNorm = String(desiredSleeveForRelevance ?? "").toLowerCase();
       const enforceSleeveGate = desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless";
-      const enforceLengthGate = hasDetectionAnchoredTypeIntent && Boolean(desiredLengthForRelevance);
       const minTypeCompliance = hasDetectionAnchoredTypeIntent ? 0.5 : 0.38;
-      const minLengthCompliance = hasDetectionAnchoredTypeIntent ? 0.42 : 0.3;
       const preferredTypeAligned = visualGatedHits.filter((h: any) => {
         const comp = complianceById.get(String(h._source.product_id));
         if (!comp) return false;
-
-        // Must pass type intent.
+        
+        // Must pass type intent
         if (!((comp.exactTypeScore ?? 0) >= 1 || (comp.productTypeCompliance ?? 0) >= minTypeCompliance)) {
           return false;
         }
-
+        
         // Apply sleeve gating only for restrictive sleeve intents where mismatches are high-impact.
         if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < 0.25) {
           return false;
         }
-
-        // Detection-anchored long/mini mismatches should not pass rescue.
-        if (enforceLengthGate && ((comp as any).lengthCompliance ?? 0) < minLengthCompliance) {
-          return false;
-        }
-
-        // Must pass color intent if set (avoid color mismatches in rescue).
+        
+        // Must pass color intent if set (avoid color mismatches in rescue)
         if (desiredColorsForRelevance.length > 0 && (comp.colorCompliance ?? 0) < 0.4) {
           return false;
         }
-
+        
         return true;
       });
       if (preferredTypeAligned.length > 0 || hasDetectionAnchoredTypeIntent) {
@@ -2625,8 +2618,7 @@ export async function searchByImageWithSimilarity(
       hasReliableTypeIntentForRelevance ||
       hasDetectionAnchoredTypeIntent ||
       desiredColorsForRelevance.length > 0 ||
-      Boolean(desiredSleeveForRelevance) ||
-      Boolean(desiredLengthForRelevance);
+      Boolean(desiredSleeveForRelevance);
     for (const h of rescuePool) {
       const comp = complianceById.get(String(h._source.product_id));
       if (comp) {
@@ -2637,28 +2629,21 @@ export async function searchByImageWithSimilarity(
           const typeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
           const colorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
           const sleeveComp = Math.max(0, Math.min(1, comp.sleeveCompliance ?? 0));
-          const lengthComp = Math.max(0, Math.min(1, (comp as any).lengthCompliance ?? 0));
           const audienceComp = Math.max(0, Math.min(1, comp.audienceCompliance ?? 1));
           const complianceBlend =
             0.4 * typeComp +
-            0.2 * colorComp +
-            0.15 * sleeveComp +
-            0.2 * lengthComp +
-            0.05 * audienceComp;
+            0.35 * colorComp +
+            0.1 * sleeveComp +
+            0.15 * audienceComp;
           const intentAwareScore =
             Math.max(0, Math.min(1, 0.72 * v + 0.28 * complianceBlend)) * 0.85;
           rescueScore = Math.max(rescueScore, intentAwareScore);
         }
-        comp.finalRelevance01 = rescueScore;
+        comp.finalRelevance01 = Math.max(rescueScore, effectiveFinalAcceptMin);
         finalScoreSourceById.set(String(h._source.product_id), "final_accept_rescue");
       }
     }
-    rankedHits = rescuePool
-      .filter(
-        (h: any) =>
-          (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >=
-          effectiveFinalAcceptMin,
-      )
+    rankedHits = [...rescuePool]
       .sort((a: any, b: any) => {
         const fa = complianceById.get(String(a._source.product_id))?.finalRelevance01 ?? 0;
         const fb = complianceById.get(String(b._source.product_id))?.finalRelevance01 ?? 0;
@@ -2768,7 +2753,6 @@ export async function searchByImageWithSimilarity(
   const imageMinResultsTarget = config.search.imageSearchMinResults;
   const relevanceRelaxDelta = config.search.imageSearchRelevanceRelaxDelta;
   if (
-    !hasDetectionAnchoredTypeIntent &&
     imageMinResultsTarget > 0 &&
     rankedHits.length < imageMinResultsTarget &&
     visualGatedHits.length > rankedHits.length
@@ -2963,11 +2947,7 @@ export async function searchByImageWithSimilarity(
     (p: any) =>
       typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalAcceptMin,
   ) as ProductResult[];
-  if (
-    !hasDetectionAnchoredTypeIntent &&
-    results.length === 0 &&
-    resultsBeforeFinalRelevanceFilter.length > 0
-  ) {
+  if (results.length === 0 && resultsBeforeFinalRelevanceFilter.length > 0) {
     imageSearchPipelineDegraded = true;
     results = resultsBeforeFinalRelevanceFilter
       .map((p: any) => {
