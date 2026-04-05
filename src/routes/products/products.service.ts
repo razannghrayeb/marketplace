@@ -2072,9 +2072,10 @@ export async function searchByImageWithSimilarity(
     typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
 
   const hasColorIntentForFinal = hasExplicitColorIntent;
-  // Crop-dominant colors affect reranking but must NOT gate final relevance
-  // (pixel k-means can misread shadows/packaging as garment color).
-  const softColorBiasOnly = !hasExplicitColorIntent && hasCropColorSignal;
+  // Crop-dominant colors affect reranking but should not gate final relevance
+  // unless we also have inferred semantic color evidence (e.g., BLIP "blue jeans").
+  const softColorBiasOnly =
+    !hasExplicitColorIntent && hasCropColorSignal && !hasInferredColorSignal;
 
   /**
    * When the user did not narrow the search (category / productTypes / text / explicit color),
@@ -2290,7 +2291,8 @@ export async function searchByImageWithSimilarity(
       : 0;
     const comp = complianceById.get(idStr);
     const hasStyleIntentForComposite = hasExplicitStyleIntent || hasSoftStyleHint;
-    const hasColorIntentForComposite = hasExplicitColorIntent || hasCropColorSignal;
+    const hasColorIntentForComposite =
+      hasExplicitColorIntent || hasCropColorSignal || hasInferredColorSignal;
     const colorCompliance = comp?.colorCompliance ?? 0;
     const styleCompliance = comp?.styleCompliance ?? 0;
     const colorSimEff = blendSoftSimilarityWithCompliance({
@@ -2625,7 +2627,10 @@ export async function searchByImageWithSimilarity(
         const fallbackTypeAligned = visualGatedHits.filter((h: any) => {
           const comp = complianceById.get(String(h._source.product_id));
           if (!comp) return false;
-          if ((comp.audienceCompliance ?? 1) < 0.55) return false;
+          // Stronger gender gate: when gender is explicitly filtered, reject hard mismatches (audienceCompliance === 0)
+          // and also reject low compliance (< 0.75) to prevent women's shoes from appearing in men's searches
+          const minAudienceCompliance = filtersAny.gender ? 0.75 : 0.55;
+          if ((comp.audienceCompliance ?? 1) < minAudienceCompliance) return false;
           if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
           if ((comp.exactTypeScore ?? 0) < 1 && (comp.productTypeCompliance ?? 0) < 0.22) return false;
           if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < 0.1) return false;
@@ -2820,6 +2825,31 @@ export async function searchByImageWithSimilarity(
     }
   }
   const countAfterColorPostfilter = rankedHits.length;
+
+  // Hard gate for explicit gender intent: filter out products with hard gender mismatches.
+  // When user specifies men/women, reject products where audience compliance is 0 or null gender
+  // with conflicting title keywords.
+  if (filtersAny.gender) {
+    const queryGenderNorm = normalizeQueryGender(filtersAny.gender);
+    if (queryGenderNorm) {
+      const strictGenderGate = String(process.env.SEARCH_GENDER_HARD_GATE ?? "1").toLowerCase() !== "0";
+      const genderCompliantHits = rankedHits.filter((h: any) => {
+        const comp = complianceById.get(String(h._source.product_id));
+        if (!comp) return true; // Keep if no compliance data
+        const audienceCompliance = comp.audienceCompliance ?? 0;
+        // Hard reject: when audience compliance is 0, it means hard gender contradiction
+        if (audienceCompliance === 0) return false;
+        // Stricter gate: reject low compliance (< 0.5) when there's explicit gender intent
+        if (strictGenderGate && audienceCompliance < 0.5) return false;
+        return true;
+      });
+      if (genderCompliantHits.length > 0) {
+        rankedHits = genderCompliantHits;
+      }
+      // If all results were filtered out, keep original ranked list to avoid empty results
+    }
+  }
+  const countAfterGenderPostfilter = rankedHits.length;
 
   const maxHydrate = Math.min(
     rankedHits.length,

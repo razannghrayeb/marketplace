@@ -289,6 +289,139 @@ async function enrichClipOnlyIntentFromImages(
   }
 }
 
+type PromptAnchorKind = "color" | "style" | "texture" | "pattern" | "silhouette";
+
+function promptAnchorKindRegex(kind: PromptAnchorKind): RegExp {
+  switch (kind) {
+    case "color":
+      return /(?:color|colour|tone|shade)/i;
+    case "style":
+      return /(?:style|vibe|aesthetic|look)/i;
+    case "texture":
+      return /(?:texture|material|fabric)/i;
+    case "pattern":
+      return /(?:pattern|print|striped?|plaid|floral|paisley|polka)/i;
+    case "silhouette":
+      return /(?:silhouette|fit|shape|cut)/i;
+  }
+}
+
+function findPromptAnchoredImageIndex(
+  prompt: string,
+  kind: PromptAnchorKind,
+  imageCount: number,
+): number | null {
+  if (!prompt || imageCount <= 0) return null;
+  const kindRe = promptAnchorKindRegex(kind);
+  if (!kindRe.test(prompt)) return null;
+
+  const aliases: string[][] = [
+    ["first", "1st", "image 1", "pic 1", "picture 1", "photo 1"],
+    ["second", "2nd", "image 2", "pic 2", "picture 2", "photo 2"],
+    ["third", "3rd", "image 3", "pic 3", "picture 3", "photo 3"],
+    ["fourth", "4th", "image 4", "pic 4", "picture 4", "photo 4"],
+    ["fifth", "5th", "image 5", "pic 5", "picture 5", "photo 5"],
+  ];
+
+  const normalized = prompt.toLowerCase().replace(/\s+/g, " ");
+  const linked: number[] = [];
+  const maxIdx = Math.min(imageCount, aliases.length);
+
+  for (let idx = 0; idx < maxIdx; idx++) {
+    const aliasGroup = aliases[idx];
+    const aliasPattern = aliasGroup
+      .map((a) => a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"))
+      .join("|");
+    const bridge = "(?:(?!\\s+and\\s+)[^.!?\\n]){0,90}";
+    const kindSrc = `(?:${kindRe.source})${bridge}(?:from|of|in|like)?\\s*(?:the\\s+)?(?:${aliasPattern})`;
+    const srcKind = `(?:from|of|in|like)?\\s*(?:the\\s+)?(?:${aliasPattern})${bridge}(?:${kindRe.source})`;
+    if (new RegExp(kindSrc, "i").test(normalized) || new RegExp(srcKind, "i").test(normalized)) {
+      linked.push(idx);
+    }
+  }
+
+  if (imageCount >= 2) {
+    const lastIdx = imageCount - 1;
+    const lastAlias = "(?:last|final)(?:\\s+(?:image|one|pic|picture|photo))?";
+    const bridge = "(?:(?!\\s+and\\s+)[^.!?\\n]){0,90}";
+    const kindLast = `(?:${kindRe.source})${bridge}(?:from|of|in|like)?\\s*(?:the\\s+)?${lastAlias}`;
+    const lastKind = `(?:from|of|in|like)?\\s*(?:the\\s+)?${lastAlias}${bridge}(?:${kindRe.source})`;
+    if (new RegExp(kindLast, "i").test(normalized) || new RegExp(lastKind, "i").test(normalized)) {
+      if (!linked.includes(lastIdx)) linked.push(lastIdx);
+    }
+  }
+
+  return linked.length === 1 ? linked[0] : null;
+}
+
+function ensureImageIntentRow(parsedIntent: ParsedIntent, imageIndex: number): NonNullable<ParsedIntent["imageIntents"]>[number] {
+  if (!parsedIntent.imageIntents) parsedIntent.imageIntents = [];
+  let row = parsedIntent.imageIntents.find((x) => x.imageIndex === imageIndex);
+  if (!row) {
+    row = {
+      imageIndex,
+      primaryAttributes: [],
+      extractedValues: {},
+      weight: 0.5,
+      reasoning: `Prompt-anchor fallback for image ${imageIndex}`,
+    };
+    parsedIntent.imageIntents.push(row);
+  }
+  row.primaryAttributes = row.primaryAttributes || [];
+  row.extractedValues = row.extractedValues || {};
+  return row;
+}
+
+async function enrichPromptAnchoredIntentFromImages(
+  parsedIntent: ParsedIntent,
+  preparedImages: Buffer[],
+  userPrompt: string,
+): Promise<void> {
+  if (!preparedImages.length || !userPrompt?.trim()) return;
+  const imageCount = preparedImages.length;
+  const colorIdx = findPromptAnchoredImageIndex(userPrompt, "color", imageCount);
+  const styleIdx = findPromptAnchoredImageIndex(userPrompt, "style", imageCount);
+
+  if (colorIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, colorIdx);
+    if (!row.primaryAttributes.includes("color")) row.primaryAttributes.push("color");
+    if (row.extractedValues && !row.extractedValues.color) {
+      const hints = await extractQuickFashionColorHints(preparedImages[colorIdx], { maxHints: 3 });
+      const canonical = hints
+        .map((c) => normalizeColorToken(c) ?? c.toLowerCase())
+        .filter(Boolean);
+      if (canonical.length > 0) {
+        row.extractedValues.color = canonical;
+        parsedIntent.constraints = parsedIntent.constraints || { mustHave: [], mustNotHave: [] };
+        parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
+        appendUnique(parsedIntent.constraints.mustHave, canonical);
+      }
+    }
+  }
+
+  if (styleIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, styleIdx);
+    if (!row.primaryAttributes.includes("style")) row.primaryAttributes.push("style");
+    const ev = row.extractedValues as Record<string, unknown>;
+    if (!ev.style || String(ev.style).trim() === "") {
+      try {
+        await blip.init();
+        const caption = await blip.caption(preparedImages[styleIdx]);
+        const structured = buildStructuredBlipOutput(caption || "");
+        const styleHint = structured.style?.attrStyle;
+        if (styleHint) {
+          ev.style = styleHint;
+          parsedIntent.constraints = parsedIntent.constraints || { mustHave: [], mustNotHave: [] };
+          parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
+          appendUnique(parsedIntent.constraints.mustHave, [styleHint]);
+        }
+      } catch {
+        // best-effort fallback only
+      }
+    }
+  }
+}
+
 function strictProductTypeFilterEnv(): boolean {
   const v = String(process.env.SEARCH_STRICT_PRODUCT_TYPE ?? '').toLowerCase();
   return v === '1' || v === 'true';
@@ -1953,6 +2086,7 @@ export async function multiImageSearch(
     if (geminiDegraded) {
       await enrichClipOnlyIntentFromImages(parsedIntent, prepared, userPrompt);
     }
+    await enrichPromptAnchoredIntentFromImages(parsedIntent, prepared, userPrompt);
     reconcileIntentNegativeCollisions(parsedIntent);
 
     const imageEmbeddings = await Promise.all(
@@ -2491,6 +2625,7 @@ function buildMultiImageHardConstraints(
 
   const promptTypeTerms = extractPromptTypeTerms(rawPrompt);
   const promptColorTerms = extractPromptColorTerms(rawPrompt);
+  const promptStyleTerms = extractPromptStyleTerms(rawPrompt);
 
   const astPrice = ast.filters?.priceRange;
   const intentPriceMin = parsedIntent.constraints?.priceMin;
@@ -2531,12 +2666,16 @@ function buildMultiImageHardConstraints(
     [promptTypeTerms, ast.entities?.productTypes ?? []],
     { maxKeywords: 4 },
   );
+  const promptStyleKeywords = compactConstraintKeywords(
+    [promptStyleTerms],
+    { maxKeywords: 3 },
+  );
   const promptColorKeywords = compactConstraintKeywords(
     [promptColorTerms, ast.entities?.colors ?? []],
     { maxKeywords: 3 },
   );
   const requiredKeywords = compactConstraintKeywords(
-    [explicitMustHave, promptTypedKeywords, promptColorKeywords],
+    [explicitMustHave, promptTypedKeywords, promptStyleKeywords, promptColorKeywords],
     { maxKeywords: 6 },
   );
   const minRequiredKeywordMatches =
@@ -2762,6 +2901,7 @@ export async function multiVectorWeightedSearch(
       prepared,
       userPrompt,
     );
+    await enrichPromptAnchoredIntentFromImages(parsedIntent, prepared, userPrompt);
     reconcileIntentNegativeCollisions(parsedIntent);
 
     const attributeEmbedList: AttributeEmbedding[] = [];
@@ -3047,9 +3187,11 @@ function multiImageHasStrictPromptSignals(ast: QueryAST, rawPrompt: string): boo
   if (t.length < 10) return false;
   const lexicalColorSignals = extractPromptColorTerms(t);
   const lexicalTypeSignals = extractPromptTypeTerms(t);
+  const lexicalStyleSignals = extractPromptStyleTerms(t);
   if (parseNegations(t).negations.length > 0) return true;
   if (lexicalColorSignals.length > 0) return true;
   if (lexicalTypeSignals.length > 0) return true;
+  if (lexicalStyleSignals.length > 0) return true;
   if ((ast.entities?.colors ?? []).length > 0) return true;
   if ((ast.entities?.productTypes ?? []).length > 0) return true;
   if ((ast.entities?.categories ?? []).length > 0) return true;
@@ -3085,6 +3227,45 @@ function extractPromptTypeTerms(rawPrompt: string): string[] {
     .map((s) => String(s).toLowerCase().trim())
     .filter(Boolean);
   return [...new Set(seeds)];
+}
+
+function extractPromptStyleTerms(rawPrompt: string): string[] {
+  const q = String(rawPrompt ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!q) return [];
+
+  const styleLexicon = [
+    "casual",
+    "formal",
+    "minimal",
+    "minimalist",
+    "elegant",
+    "edgy",
+    "streetwear",
+    "boho",
+    "bohemian",
+    "vintage",
+    "sporty",
+    "romantic",
+    "classic",
+    "chic",
+    "modern",
+    "oversized",
+    "fitted",
+    "flowy",
+    "structured",
+    "relaxed",
+  ];
+
+  const out = new Set<string>();
+  for (const s of styleLexicon) {
+    const re = new RegExp(`(^|\\s)${s.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}(\\s|$)`, "i");
+    if (re.test(q)) out.add(s);
+  }
+  return [...out];
 }
 
 function collectMultiImageNegationTerms(parsedIntent: ParsedIntent, rawPrompt: string): string[] {
