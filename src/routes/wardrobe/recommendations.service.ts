@@ -718,6 +718,57 @@ async function runCompleteLookCore(
   };
 }
 
+/**
+ * Complete look from existing wardrobe item IDs.
+ */
+export async function completeLookSuggestions(
+  userId: number,
+  currentItemIds: number[],
+  limit: number = 10
+): Promise<CompleteLookSuggestionsResult> {
+  const currentItemsResult = await pg.query(
+    `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, wi.name, wi.image_url, wi.image_cdn,
+            c.name as category_name
+     FROM wardrobe_items wi
+     LEFT JOIN categories c ON wi.category_id = c.id
+     WHERE wi.id = ANY($1) AND wi.user_id = $2`,
+    [currentItemIds, userId]
+  );
+
+  return runCompleteLookCore(userId, currentItemsResult.rows as CompleteLookAnchorRow[], limit);
+}
+
+/**
+ * Complete look from catalog product IDs (used when user has no wardrobe item IDs yet).
+ */
+export async function completeLookSuggestionsForCatalogProducts(
+  userId: number,
+  productIds: number[],
+  limit: number = 10
+): Promise<CompleteLookSuggestionsResult> {
+  if (!Array.isArray(productIds) || productIds.length === 0) {
+    return {
+      suggestions: [],
+      outfitSets: [],
+      missingCategories: ["tops", "bottoms", "shoes"],
+    };
+  }
+
+  const productResult = await pg.query(
+    `SELECT p.id as product_id,
+            p.embedding,
+            p.title as name,
+            p.image as image_url,
+            p.image_cdn,
+            p.category as category_name
+     FROM products p
+     WHERE p.id = ANY($1)`,
+    [productIds]
+  );
+
+  return runCompleteLookCore(userId, productResult.rows as CompleteLookAnchorRow[], limit);
+}
+
 function topHistogramKeys(histogram?: Record<string, number> | null, limit: number = 3): string[] {
   if (!histogram) return [];
   return Object.entries(histogram)
@@ -958,6 +1009,8 @@ async function fetchCategoryTopUpSuggestions(params: {
 
   return dedupeCompleteLookSuggestions(out.sort((a, b) => b.score - a.score)).slice(0, params.needed);
 }
+
+const COLOR_FAMILIES_BY_NAME: Record<string, string> = {
   black: "neutral",
   white: "neutral",
   gray: "neutral",
