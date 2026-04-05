@@ -39,6 +39,20 @@ interface CompareResult {
     is_tie: boolean
     score_difference: number
   }
+  comparison_context?: {
+    mode: 'direct_head_to_head' | 'cross_category_guidance'
+    comparable: boolean
+    reason: string
+    category_groups: Record<number, string>
+  }
+  shopping_insights?: {
+    best_quality_product_id: number | null
+    best_value_product_id: number | null
+    best_budget_product_id: number | null
+    weakest_link_product_id: number | null
+    notes: string[]
+    suggested_next_action: string
+  }
   product_map?: Record<number, string>
 }
 
@@ -112,6 +126,11 @@ export default function ComparePage() {
 
   const compareResult = compareMutation.data
   const canCompare = productIds.length >= 2 && productIds.length <= 5
+
+  const getProductLetter = (productId: number | null | undefined) => {
+    if (!productId) return null
+    return compareResult?.product_map?.[productId] ?? String(productId)
+  }
 
   const runCompare = () => {
     if (canCompare) compareMutation.mutate()
@@ -303,12 +322,62 @@ export default function ComparePage() {
                         <p className="text-sm text-neutral-500 italic mb-4">{compareResult.verdict.tradeoff}</p>
                       )}
 
+                      {compareResult.comparison_context && !compareResult.comparison_context.comparable && (
+                        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                          <p className="text-sm font-medium text-amber-800">Smart compare mode active</p>
+                          <p className="text-xs text-amber-700 mt-1">{compareResult.comparison_context.reason}</p>
+                        </div>
+                      )}
+
                       <div className="flex items-center gap-2 px-4 py-3 rounded-xl bg-gradient-to-r from-violet-50 to-fuchsia-50 border border-violet-100">
                         <Sparkles className="w-4 h-4 text-violet-600 flex-shrink-0" />
                         <p className="text-sm font-medium text-violet-800">{compareResult.verdict.recommendation}</p>
                       </div>
                     </div>
                   </div>
+
+                  {/* Shopping insights */}
+                  {compareResult.shopping_insights && (
+                    <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm">
+                      <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Shopping insights</h3>
+                      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                        <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2.5">
+                          <p className="text-[11px] uppercase tracking-wider text-neutral-500">Best quality</p>
+                          <p className="text-sm font-semibold text-neutral-900 mt-0.5">
+                            {getProductLetter(compareResult.shopping_insights.best_quality_product_id) ? `Product ${getProductLetter(compareResult.shopping_insights.best_quality_product_id)}` : 'N/A'}
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2.5">
+                          <p className="text-[11px] uppercase tracking-wider text-neutral-500">Best value</p>
+                          <p className="text-sm font-semibold text-neutral-900 mt-0.5">
+                            {getProductLetter(compareResult.shopping_insights.best_value_product_id) ? `Product ${getProductLetter(compareResult.shopping_insights.best_value_product_id)}` : 'N/A'}
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2.5">
+                          <p className="text-[11px] uppercase tracking-wider text-neutral-500">Best budget</p>
+                          <p className="text-sm font-semibold text-neutral-900 mt-0.5">
+                            {getProductLetter(compareResult.shopping_insights.best_budget_product_id) ? `Product ${getProductLetter(compareResult.shopping_insights.best_budget_product_id)}` : 'N/A'}
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2.5">
+                          <p className="text-[11px] uppercase tracking-wider text-neutral-500">Needs review</p>
+                          <p className="text-sm font-semibold text-neutral-900 mt-0.5">
+                            {getProductLetter(compareResult.shopping_insights.weakest_link_product_id) ? `Product ${getProductLetter(compareResult.shopping_insights.weakest_link_product_id)}` : 'N/A'}
+                          </p>
+                        </div>
+                      </div>
+
+                      {compareResult.shopping_insights.notes?.length > 0 && (
+                        <div className="space-y-2 mb-3">
+                          {compareResult.shopping_insights.notes.map((note, i) => (
+                            <p key={i} className="text-sm text-neutral-600">• {note}</p>
+                          ))}
+                        </div>
+                      )}
+
+                      <p className="text-sm font-medium text-violet-700">{compareResult.shopping_insights.suggested_next_action}</p>
+                    </div>
+                  )}
 
                   {/* Product score cards */}
                   <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">

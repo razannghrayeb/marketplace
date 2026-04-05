@@ -50,7 +50,7 @@ export class QueryMapper {
       category: 'category',
       brand: 'brand',
       price: 'price_cents',
-      gender: 'color',
+      gender: 'gender',
     };
 
     this.fuzzyThreshold = 0.7; // Similarity threshold for fuzzy matching

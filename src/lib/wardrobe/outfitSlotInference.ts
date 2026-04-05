@@ -7,6 +7,7 @@ import { extractOutfitComposition, getYOLOv8Client } from "../image/yolov8Client
 import { mapDetectionToCategory } from "../detection/categoryMapper";
 
 const DEFAULT_MIN_CONFIDENCE = 0.32;
+const RETRY_MIN_CONFIDENCE = 0.24;
 
 /** Map YOLO / product taxonomy → slots used by wardrobe complete-look. */
 export function productCategoryToWardrobeSlot(productCategory: string): string | null {
@@ -28,13 +29,22 @@ export async function inferWardrobeSlotsFromImageBuffer(
   const slots = new Set<string>();
   try {
     const client = getYOLOv8Client();
-    const response = await client.detectFromBuffer(imageBuffer, "wardrobe-complete-look.jpg", {
+    const primary = await client.detectFromBuffer(imageBuffer, "wardrobe-complete-look.jpg", {
       confidence: minConfidence,
     });
-    const detections = response?.detections;
-    if (!response?.success || !Array.isArray(detections) || detections.length === 0) {
-      return slots;
+    let detections = primary?.detections;
+    if (!primary?.success || !Array.isArray(detections) || detections.length === 0) {
+      const retry = await client.detectFromBuffer(imageBuffer, "wardrobe-complete-look.jpg", {
+        confidence: Math.min(minConfidence, RETRY_MIN_CONFIDENCE),
+        preprocessing: {
+          enhanceContrast: true,
+          enhanceSharpness: true,
+          bilateralFilter: true,
+        },
+      });
+      detections = retry?.detections;
     }
+    if (!Array.isArray(detections) || detections.length === 0) return slots;
 
     const composition = extractOutfitComposition(detections);
     if (composition.tops.length) slots.add("tops");
@@ -47,7 +57,7 @@ export async function inferWardrobeSlotsFromImageBuffer(
 
     // Also map any detection that extractOutfitComposition skipped (unknown labels)
     for (const d of detections) {
-      if (d.confidence < minConfidence) continue;
+      if (d.confidence < Math.min(minConfidence, RETRY_MIN_CONFIDENCE)) continue;
       const mapped = mapDetectionToCategory(d.label, d.confidence).productCategory;
       const slot = productCategoryToWardrobeSlot(mapped);
       if (slot) slots.add(slot);

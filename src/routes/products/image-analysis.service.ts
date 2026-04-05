@@ -1868,8 +1868,9 @@ export class ImageAnalysisService {
         softProductTypeHints = [...new Set([...jeansPriority, ...softProductTypeHints])];
       }
 
-      // "Closet similar" constraints: enforce audience gender + add optional style/color.
-      if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
+      // "Closet similar" constraints: always enforce inferred audience gender when available.
+      // Confidence gating here causes frequent cross-gender leakage (e.g. men query returning women items).
+      if (inferredAudience.gender) {
         filters.gender = inferredAudience.gender;
       }
       if (inferredAudience.ageGroup && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
@@ -1980,9 +1981,7 @@ export class ImageAnalysisService {
         obs.detectionCaptionMisses += 1;
       }
 
-      const strictAudienceLock =
-        Boolean(inferredAudience.gender) &&
-        blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
+      const strictAudienceLock = Boolean(inferredAudience.gender);
 
       let similarResult = await searchByImageWithSimilarity({
         imageEmbedding: finalEmbedding,
@@ -2606,7 +2605,7 @@ export class ImageAnalysisService {
         let softProductTypeHints = browseTypeSeeds.length > 0 ? browseTypeSeeds : undefined;
 
         // "Closet similar" constraints: enforce audience gender + add optional style/color.
-        if (inferredAudience.gender && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
+        if (inferredAudience.gender) {
           filters.gender = inferredAudience.gender;
         }
         if (inferredAudience.ageGroup && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
@@ -2697,9 +2696,7 @@ export class ImageAnalysisService {
           obs.detectionCaptionMisses += 1;
         }
 
-        const strictAudienceLock =
-          Boolean(inferredAudience.gender) &&
-          blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
+        const strictAudienceLock = Boolean(inferredAudience.gender);
 
         let similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,

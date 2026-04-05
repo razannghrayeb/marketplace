@@ -57,6 +57,13 @@ export interface FullVerdictResponse {
     is_tie: boolean;
     score_difference: number;
   };
+  comparison_context: {
+    mode: CompareVerdict["comparison_mode"];
+    comparable: boolean;
+    reason: string;
+    category_groups: Record<number, string>;
+  };
+  shopping_insights: CompareVerdict["shopping_insights"];
 }
 
 // ============================================================================
@@ -366,16 +373,16 @@ export function generateVerdict(
   const confidenceInfo = CONFIDENCE_LABELS[verdict.confidence];
   
   // Generate title with winner letter
-  const title = winnerLetter
+  const defaultTitle = winnerLetter
     ? template.title.replace("{winner_letter}", winnerLetter)
     : template.title;
-  
-  const recommendation = winnerLetter
+
+  const defaultRecommendation = winnerLetter
     ? template.recommendation.replace("{winner_letter}", winnerLetter)
     : template.recommendation;
-  
+
   // Generate bullet points from reasons
-  const bulletPoints = verdict.top_reasons.map(reason => {
+  const defaultBulletPoints = verdict.top_reasons.map(reason => {
     return REASON_TEMPLATES[reason]?.text || reason;
   }).slice(0, 3);
   
@@ -387,16 +394,28 @@ export function generateVerdict(
     tradeoff = tradeoff.replace(/the other option/gi, `Product ${loserLetter}`);
   }
   
-  // Build verdict output
-  const verdictOutput: VerdictOutput = {
-    title,
-    subtitle: template.subtitle,
-    bullet_points: bulletPoints,
-    tradeoff,
-    confidence_label: confidenceInfo.label,
-    confidence_description: confidenceInfo.description,
-    recommendation,
-  };
+  let verdictOutput: VerdictOutput;
+  if (verdict.comparison_mode === "cross_category_guidance") {
+    verdictOutput = {
+      title: "These products serve different fashion roles",
+      subtitle: "No direct winner selected because this is a cross-category selection",
+      bullet_points: verdict.shopping_insights.notes.slice(0, 3),
+      tradeoff,
+      confidence_label: "Smart Guidance",
+      confidence_description: "Use picks below for quality, value, and budget",
+      recommendation: verdict.shopping_insights.suggested_next_action,
+    };
+  } else {
+    verdictOutput = {
+      title: defaultTitle,
+      subtitle: template.subtitle,
+      bullet_points: defaultBulletPoints,
+      tradeoff,
+      confidence_label: confidenceInfo.label,
+      confidence_description: confidenceInfo.description,
+      recommendation: defaultRecommendation,
+    };
+  }
   
   // Generate product summaries
   const productSummaries = verdict.products.map(generateProductSummary);
@@ -409,6 +428,13 @@ export function generateVerdict(
       is_tie: verdict.confidence === "tie",
       score_difference: verdict.score_difference,
     },
+    comparison_context: {
+      mode: verdict.comparison_mode,
+      comparable: verdict.compatibility.is_comparable,
+      reason: verdict.compatibility.reason,
+      category_groups: verdict.compatibility.category_groups,
+    },
+    shopping_insights: verdict.shopping_insights,
   };
 }
 
