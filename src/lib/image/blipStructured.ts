@@ -69,6 +69,33 @@ function normalizeColorToken(token: string): string {
   return COLOR_SYNONYMS[x] ?? x;
 }
 
+function isFootwearHint(token: string): boolean {
+  return /\b(sneaker|sneakers|trainer|trainers|shoe|shoes|boot|boots|sandal|sandals|heel|heels|pump|pumps|flat|flats|loafer|loafers|mule|mules|slipper|slippers|oxford|oxfords|brogue|brogues|slide|slides|clog|clogs|espadrille|espadrilles)\b/.test(
+    token,
+  );
+}
+
+function isApparelHint(token: string): boolean {
+  return /\b(dress|dresses|gown|gowns|frock|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|blazer|blazers|jacket|jackets|coat|coats|parka|parkas|trench|windbreaker|windbreakers|vest|vests|hoodie|hoodies|sweatshirt|sweatshirts|pullover|pullovers|sweater|sweaters|cardigan|cardigans|jumper|jumpers|shirt|shirts|blouse|blouses|button down|button-down|tshirt|tee|tees|t-shirt|tank|camisole|camis|top|tops|cami|polo|polos|pant|pants|trouser|trousers|chino|chinos|cargo|cargos|legging|leggings|tights|shorts|short|bermuda|board shorts|skirt|skirts|swimsuit|swimwear|bikini|bikinis|underwear)\b/.test(
+    token,
+  );
+}
+
+function rankProductTypeHint(token: string): number {
+  const t = normalizeTypeToken(token);
+  if (!t) return 999;
+  if (/\b(dress|dresses|gown|gowns|frock|midi dress|maxi dress|mini dress)\b/.test(t)) return 0;
+  if (/\b(jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits)\b/.test(t)) return 1;
+  if (/\b(blazer|blazers|sport coat|sportcoat|suit jacket|jacket|jackets|coat|coats|parka|parkas|trench|windbreaker|windbreakers|vest|vests|gilet|poncho|anorak|bomber|bomber jacket)\b/.test(t)) return 2;
+  if (/\b(hoodie|hoodies|sweatshirt|sweatshirts|pullover|pullovers|sweater|sweaters|cardigan|cardigans|jumper|jumpers|knitwear|shirt|shirts|blouse|blouses|button down|button-down|tshirt|tee|tees|t-shirt|tank|camisole|camis|top|tops|cami|polo|polos|polo shirt)\b/.test(t)) return 3;
+  if (/\b(pant|pants|trouser|trousers|chino|chinos|cargo pants|cargo|slacks|jean|jeans|denim|denims|legging|leggings|tights)\b/.test(t)) return 4;
+  if (/\b(shorts|short|bermuda|board shorts|skirt|skirts|mini skirt|midi skirt)\b/.test(t)) return 5;
+  if (/\b(swimsuit|swimwear|bikini|bikinis|underwear)\b/.test(t)) return 6;
+  if (isFootwearHint(t)) return 7;
+  if (/\b(bag|bags|handbag|handbags|tote|totes|clutch|clutches|purse|purses|backpack|backpacks|crossbody|satchel|satchels|wallet|wallets)\b/.test(t)) return 8;
+  return 20;
+}
+
 function inferStyleFromCaption(caption: string): StructuredBlipStyle {
   const s = caption.toLowerCase();
   if (/\b(formal|elegant|gown|tailored|blazer)\b/.test(s)) {
@@ -92,7 +119,11 @@ export function buildStructuredBlipOutput(rawCaption: string): StructuredBlipOut
   const slotColors = inferColorFromCaption(normalizedCaption);
   const lexicalTypes = extractLexicalProductTypeSeeds(normalizedCaption).map(normalizeTypeToken);
   const expanded = expandProductTypesForQuery(lexicalTypes).map(normalizeTypeToken);
-  const productTypeHints = [...new Set([...lexicalTypes, ...expanded])].filter(Boolean).slice(0, 12);
+  const mergedHints = [...new Set([...lexicalTypes, ...expanded])].filter(Boolean);
+  const hasApparel = mergedHints.some((t) => isApparelHint(t));
+  const productTypeHints = (hasApparel ? mergedHints.filter((t) => !isFootwearHint(t)) : mergedHints)
+    .sort((a, b) => rankProductTypeHint(a) - rankProductTypeHint(b) || a.localeCompare(b))
+    .slice(0, 12);
 
   const colorCandidates = [
     slotColors.topColor,

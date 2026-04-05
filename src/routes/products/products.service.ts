@@ -566,7 +566,8 @@ function computeExplicitFinalRelevance(params: {
     color: 0.28,
     style: 0.24,
     // Sleeve inferred from vision can be noisy; keep it informative but less punitive.
-    sleeve: 0.12,
+    // When visual similarity is very high (>0.65), reduce sleeve weight since it's often a detection artifact.
+    sleeve: params.simVisual >= 0.65 ? 0.06 : 0.12,
     length: 0.12,
     audience: 0.16,
   };
@@ -2585,7 +2586,23 @@ export async function searchByImageWithSimilarity(
       const preferredTypeAligned = visualGatedHits.filter((h: any) => {
         const comp = complianceById.get(String(h._source.product_id));
         if (!comp) return false;
-        return (comp.exactTypeScore ?? 0) >= 1 || (comp.productTypeCompliance ?? 0) >= 0.38;
+        
+        // Must pass type intent
+        if (!((comp.exactTypeScore ?? 0) >= 1 || (comp.productTypeCompliance ?? 0) >= 0.38)) {
+          return false;
+        }
+        
+        // Must pass sleeve intent if set (avoid long sleeves when short is desired)
+        if (desiredSleeveForRelevance && (comp.sleeveCompliance ?? 0) < 0.25) {
+          return false;
+        }
+        
+        // Must pass color intent if set (avoid color mismatches in rescue)
+        if (desiredColorsForRelevance.length > 0 && (comp.colorCompliance ?? 0) < 0.4) {
+          return false;
+        }
+        
+        return true;
       });
       if (preferredTypeAligned.length > 0) {
         rescuePool = preferredTypeAligned;

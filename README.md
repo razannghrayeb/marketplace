@@ -223,8 +223,8 @@ pnpm install
 # 2. Start infrastructure
 docker-compose up -d
 
-# 3. Run database migrations
-npx tsx scripts/run-migration.ts
+# 3. Run database bootstrap (schema + all migrations)
+pnpm migrate:bootstrap
 
 # 4. Download ML models
 pnpm models:download
@@ -397,6 +397,18 @@ Migrations live in `db/migrations/`. Run them in order:
 006c_feature6_wardrobe_enhancements_no_vector.sql — wardrobe fallback without pgvector
 007_virtual_tryon.sql               — tryon_jobs, tryon_saved_results
 008_refresh_token_blacklist.sql     — refresh token revoke/denylist
+009_user_type.sql                   — users.user_type role column
+010_fashion_search_taxonomy.sql     — search taxonomy tables
+011_expand_fashion_taxonomy.sql     — taxonomy expansion
+012_drop_product_variants.sql       — remove deprecated variants table
+013_products_gender.sql             — products.gender + indexes
+014_ensure_users_user_type.sql      — safety migration for users.user_type
+```
+
+To run a specific migration file directly:
+
+```bash
+pnpm migrate:run 014_ensure_users_user_type.sql
 ```
 
 For first-time production setup, use one command:
