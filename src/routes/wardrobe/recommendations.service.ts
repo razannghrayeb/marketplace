@@ -640,7 +640,8 @@ async function runCompleteLookCore(
       allowWardrobeHistory: audienceOptions.allowUserAudienceFallback !== false,
       allowUserProfile: audienceOptions.allowUserAudienceFallback !== false,
     }));
-  const enforceNeutralAudienceWhenUnknown = Boolean(audienceOptions.enforceNeutralAudienceWhenUnknown);
+  const enforceNeutralAudienceWhenUnknown =
+    Boolean(audienceOptions.enforceNeutralAudienceWhenUnknown) || !inferredAudienceGender;
   const missingCategories = inferMissingCategoriesForOutfit({
     currentCategories,
     warmWeatherLikely,

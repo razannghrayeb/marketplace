@@ -2,94 +2,27 @@
 
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { GitCompare, X, CheckCircle, AlertTriangle, Trophy, ArrowRight, Sparkles, BarChart3 } from 'lucide-react'
+import { GitCompare, X, CheckCircle, Trophy, Sparkles, BarChart3 } from 'lucide-react'
 import Link from 'next/link'
 import Image from 'next/image'
 import { api } from '@/lib/api/client'
 import { endpoints } from '@/lib/api/endpoints'
 import { useCompareStore } from '@/store/compare'
-import { ProductCard } from '@/components/product/ProductCard'
 import type { Product } from '@/types/product'
 import { useState } from 'react'
-
-interface ProductSummary {
-  product_id: number
-  level_label: string
-  level_color: 'green' | 'yellow' | 'red'
-  score: number
-  highlights: string[]
-  concerns: string[]
-  tooltips: Record<string, string>
-}
-
-interface VerdictOutput {
-  title: string
-  subtitle: string
-  bullet_points: string[]
-  tradeoff: string | null
-  confidence_label: string
-  confidence_description: string
-  recommendation: string
-}
-
-interface CompareResult {
-  verdict: VerdictOutput
-  product_summaries: ProductSummary[]
-  comparison_details: {
-    winner_id: number | null
-    is_tie: boolean
-    score_difference: number
-  }
-  comparison_context?: {
-    mode: 'direct_head_to_head' | 'scenario_compare' | 'outfit_compare'
-    comparable: boolean
-    reason: string
-    category_groups: Record<number, string>
-    requested_goal: 'best_value' | 'premium_quality' | 'style_match' | 'low_risk_return' | 'occasion_fit'
-    requested_occasion: 'casual' | 'work' | 'formal' | 'party' | 'travel' | null
-  }
-  shopping_insights?: {
-    best_quality_product_id: number | null
-    best_value_product_id: number | null
-    best_budget_product_id: number | null
-    weakest_link_product_id: number | null
-    notes: string[]
-    suggested_next_action: string
-  }
-  winners_by_goal?: {
-    overall: number | null
-    value: number | null
-    quality: number | null
-    style: number | null
-    risk: number | null
-    occasion: number | null
-  }
-  evidence?: string[]
-  alternatives?: {
-    better_cheaper_product_id: number | null
-    better_quality_product_id: number | null
-    similar_style_safer_product_id: number | null
-  }
-  risk_summary?: {
-    overall_risk_level: 'low' | 'medium' | 'high'
-    product_risks: Record<number, {
-      risk_score: number
-      risk_level: 'low' | 'medium' | 'high'
-      reasons: string[]
-    }>
-  }
-  timing_insight?: {
-    recommendation: 'buy_now' | 'wait' | 'monitor'
-    reason: string
-  }
-  outfit_impact?: {
-    mode: 'outfit_compare'
-    outfit_winner_product_id: number | null
-    versatility_scores: Record<number, number>
-    gap_fill_scores: Record<number, number>
-  }
-  product_map?: Record<number, string>
-}
+import {
+  buildCompareDecisionRequest,
+  getAttractionState,
+  getConsequenceByProductId,
+  getIdentityAlignmentByProductId,
+  getModeLabel,
+  getProductInsightById,
+  getRegretByProductId,
+  type CompareDecisionResponse,
+  type CompareGoal,
+  type CompareOccasion,
+  type CompareBusinessMode,
+} from '@/features/compare'
 
 function ScoreRing({ score, color, size = 72 }: { score: number; color: string; size?: number }) {
   const radius = (size - 8) / 2
@@ -136,8 +69,15 @@ function ScoreRing({ score, color, size = 72 }: { score: number; color: string; 
 
 export default function ComparePage() {
   const { productIds, remove, clear } = useCompareStore()
-  const [compareGoal, setCompareGoal] = useState<'best_value' | 'premium_quality' | 'style_match' | 'low_risk_return' | 'occasion_fit'>('best_value')
-  const [occasion, setOccasion] = useState<'casual' | 'work' | 'formal' | 'party' | 'travel' | ''>('')
+  const [compareGoal, setCompareGoal] = useState<CompareGoal>('best_value')
+  const [occasion, setOccasion] = useState<CompareOccasion | ''>('')
+  const [mode, setMode] = useState<CompareBusinessMode>('standard')
+  const [currentSelf, setCurrentSelf] = useState('')
+  const [aspirationalSelf, setAspirationalSelf] = useState('')
+  const [firstAttractionProductId, setFirstAttractionProductId] = useState<number | undefined>(undefined)
+  const [safeBoldPreference, setSafeBoldPreference] = useState(0.5)
+  const [practicalExpressivePreference, setPracticalExpressivePreference] = useState(0.5)
+  const [polishedEffortlessPreference, setPolishedEffortlessPreference] = useState(0.5)
 
   const { data: products, isLoading: loadingProducts } = useQuery({
     queryKey: ['compare-products', productIds],
@@ -155,23 +95,35 @@ export default function ComparePage() {
 
   const compareMutation = useMutation({
     mutationFn: async () => {
-      const body: Record<string, unknown> = {
-        product_ids: productIds,
-        compare_goal: compareGoal,
-      }
-      if (occasion) body.occasion = occasion
-      const res = await api.post<CompareResult>(endpoints.compare.root, body) as Record<string, unknown>
+      const payload = buildCompareDecisionRequest({
+        productIds,
+        compareGoal,
+        occasion,
+        mode,
+        currentSelf,
+        aspirationalSelf,
+        firstAttractionProductId,
+        safeBoldPreference,
+        practicalExpressivePreference,
+        polishedEffortlessPreference,
+      })
+      const res = await api.post<CompareDecisionResponse>(endpoints.compare.root, payload) as Record<string, unknown>
       if (res?.success === false) throw new Error((res?.error as { message?: string })?.message)
-      return (res?.data ?? res) as CompareResult
+      return (res?.data ?? res) as CompareDecisionResponse
     },
   })
 
   const compareResult = compareMutation.data
   const canCompare = productIds.length >= 2 && productIds.length <= 5
+  const productLetterMap = new Map<number, string>()
+  productIds.forEach((id, idx) => productLetterMap.set(id, String.fromCharCode(65 + idx)))
+
+  const attractionState = getAttractionState(compareResult)
+  const modeLabel = getModeLabel(compareResult?.comparisonMode)
 
   const getProductLetter = (productId: number | null | undefined) => {
     if (!productId) return null
-    return compareResult?.product_map?.[productId] ?? String(productId)
+    return productLetterMap.get(productId) ?? String(productId)
   }
 
   const runCompare = () => {
@@ -260,6 +212,16 @@ export default function ComparePage() {
                   <option value="party">Party</option>
                   <option value="travel">Travel</option>
                 </select>
+                <button
+                  onClick={() => setMode((prev) => (prev === 'standard' ? 'alter_ego' : 'standard'))}
+                  className={`rounded-full border px-3 py-2 text-xs font-medium transition-colors ${
+                    mode === 'alter_ego'
+                      ? 'border-fuchsia-300 bg-fuchsia-50 text-fuchsia-700'
+                      : 'border-neutral-200 bg-white text-neutral-700'
+                  }`}
+                >
+                  {mode === 'alter_ego' ? 'Alter ego on' : 'Alter ego off'}
+                </button>
                 <button onClick={clear} className="text-sm text-neutral-400 hover:text-rose-500 transition-colors">
                   Clear all
                 </button>
@@ -323,10 +285,51 @@ export default function ComparePage() {
                           <p className="text-xs font-semibold text-violet-600 uppercase tracking-wider">{p.brand || p.category || ''}</p>
                           <p className="text-sm font-medium text-neutral-800 line-clamp-1 mt-0.5">{p.title}</p>
                           <p className="text-sm font-bold text-neutral-900 mt-0.5">{formatPrice(p.price_cents)}</p>
+                          <button
+                            onClick={(e) => {
+                              e.preventDefault()
+                              setFirstAttractionProductId(p.id)
+                            }}
+                            className={`mt-1 text-[11px] font-medium ${firstAttractionProductId === p.id ? 'text-fuchsia-600' : 'text-neutral-400 hover:text-neutral-600'}`}
+                          >
+                            {firstAttractionProductId === p.id ? 'First attraction' : 'Set first attraction'}
+                          </button>
                         </div>
                       </Link>
                     </motion.div>
                   ))}
+            </div>
+
+            <div className="mb-8 rounded-2xl border border-neutral-200/70 bg-white p-4 sm:p-5">
+              <p className="text-sm font-semibold text-neutral-900 mb-3">Identity and preference signals</p>
+              <div className="grid lg:grid-cols-2 gap-4 mb-4">
+                <textarea
+                  value={currentSelf}
+                  onChange={(e) => setCurrentSelf(e.target.value)}
+                  placeholder="Current self tags (comma separated): minimalist, practical, office"
+                  className="w-full min-h-[88px] rounded-xl border border-neutral-200 px-3 py-2 text-sm text-neutral-700"
+                />
+                <textarea
+                  value={aspirationalSelf}
+                  onChange={(e) => setAspirationalSelf(e.target.value)}
+                  placeholder="Aspirational self tags (comma separated): bold, creative, statement"
+                  className="w-full min-h-[88px] rounded-xl border border-neutral-200 px-3 py-2 text-sm text-neutral-700"
+                />
+              </div>
+              <div className="grid md:grid-cols-3 gap-4">
+                <label className="text-xs text-neutral-500">
+                  Safe ↔ Bold ({safeBoldPreference.toFixed(2)})
+                  <input type="range" min={0} max={1} step={0.01} value={safeBoldPreference} onChange={(e) => setSafeBoldPreference(Number(e.target.value))} className="w-full mt-1" />
+                </label>
+                <label className="text-xs text-neutral-500">
+                  Practical ↔ Expressive ({practicalExpressivePreference.toFixed(2)})
+                  <input type="range" min={0} max={1} step={0.01} value={practicalExpressivePreference} onChange={(e) => setPracticalExpressivePreference(Number(e.target.value))} className="w-full mt-1" />
+                </label>
+                <label className="text-xs text-neutral-500">
+                  Polished ↔ Effortless ({polishedEffortlessPreference.toFixed(2)})
+                  <input type="range" min={0} max={1} step={0.01} value={polishedEffortlessPreference} onChange={(e) => setPolishedEffortlessPreference(Number(e.target.value))} className="w-full mt-1" />
+                </label>
+              </div>
             </div>
 
             {/* Error */}
@@ -350,7 +353,7 @@ export default function ComparePage() {
                   transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
                   className="space-y-8"
                 >
-                  {/* Verdict card */}
+                  {/* Decision summary */}
                   <div className="relative overflow-hidden rounded-3xl border border-neutral-200/60 bg-white shadow-lg">
                     <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-violet-500 via-fuchsia-500 to-rose-400" />
                     <div className="p-6 sm:p-8">
@@ -360,15 +363,15 @@ export default function ComparePage() {
                         </div>
                         <div className="flex-1 min-w-0">
                           <h2 className="font-display text-xl sm:text-2xl font-bold text-neutral-900">
-                            {compareResult.verdict.title}
+                            {modeLabel}
                           </h2>
-                          <p className="text-neutral-500 mt-1">{compareResult.verdict.subtitle}</p>
+                          <p className="text-neutral-500 mt-1">{compareResult.comparisonContext.modeReason}</p>
                         </div>
                       </div>
 
-                      {compareResult.verdict.bullet_points?.length > 0 && (
+                      {compareResult.stepInsights.visualDifferences?.length > 0 && (
                         <div className="flex flex-wrap gap-2.5 mb-5">
-                          {compareResult.verdict.bullet_points.map((b, i) => (
+                          {compareResult.stepInsights.visualDifferences.slice(0, 4).map((b, i) => (
                             <motion.span
                               key={i}
                               initial={{ opacity: 0, x: -10 }}
@@ -383,118 +386,117 @@ export default function ComparePage() {
                         </div>
                       )}
 
-                      {compareResult.verdict.tradeoff && (
-                        <p className="text-sm text-neutral-500 italic mb-4">{compareResult.verdict.tradeoff}</p>
-                      )}
-
-                      {compareResult.comparison_context && !compareResult.comparison_context.comparable && (
+                      {compareResult.comparisonMode === 'outfit_compare' && (
                         <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
                           <p className="text-sm font-medium text-amber-800">Smart compare mode active</p>
-                          <p className="text-xs text-amber-700 mt-1">{compareResult.comparison_context.reason}</p>
+                          <p className="text-xs text-amber-700 mt-1">{compareResult.comparisonContext.modeReason}</p>
                         </div>
                       )}
 
                       <div className="flex items-center gap-2 px-4 py-3 rounded-xl bg-gradient-to-r from-violet-50 to-fuchsia-50 border border-violet-100">
                         <Sparkles className="w-4 h-4 text-violet-600 flex-shrink-0" />
-                        <p className="text-sm font-medium text-violet-800">{compareResult.verdict.recommendation}</p>
+                        <p className="text-sm font-medium text-violet-800">Data quality score: {compareResult.comparisonContext.dataQuality.overallScore}</p>
                       </div>
                     </div>
                   </div>
 
-                  {/* Shopping insights */}
-                  {compareResult.shopping_insights && (
+                  {attractionState.enabled && (
                     <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm">
-                      <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Shopping insights</h3>
-                      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-                        <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2.5">
-                          <p className="text-[11px] uppercase tracking-wider text-neutral-500">Best quality</p>
-                          <p className="text-sm font-semibold text-neutral-900 mt-0.5">
-                            {getProductLetter(compareResult.shopping_insights.best_quality_product_id) ? `Product ${getProductLetter(compareResult.shopping_insights.best_quality_product_id)}` : 'N/A'}
+                      <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Attraction snapshot</h3>
+                      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
+                        {attractionState.attractionScores.map((row) => (
+                          <p key={row.productId} className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2.5 text-sm text-neutral-700">
+                            Product {getProductLetter(row.productId)} attraction score: <span className="font-semibold">{row.score}</span>
                           </p>
-                        </div>
-                        <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2.5">
-                          <p className="text-[11px] uppercase tracking-wider text-neutral-500">Best value</p>
-                          <p className="text-sm font-semibold text-neutral-900 mt-0.5">
-                            {getProductLetter(compareResult.shopping_insights.best_value_product_id) ? `Product ${getProductLetter(compareResult.shopping_insights.best_value_product_id)}` : 'N/A'}
-                          </p>
-                        </div>
-                        <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2.5">
-                          <p className="text-[11px] uppercase tracking-wider text-neutral-500">Best budget</p>
-                          <p className="text-sm font-semibold text-neutral-900 mt-0.5">
-                            {getProductLetter(compareResult.shopping_insights.best_budget_product_id) ? `Product ${getProductLetter(compareResult.shopping_insights.best_budget_product_id)}` : 'N/A'}
-                          </p>
-                        </div>
-                        <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2.5">
-                          <p className="text-[11px] uppercase tracking-wider text-neutral-500">Needs review</p>
-                          <p className="text-sm font-semibold text-neutral-900 mt-0.5">
-                            {getProductLetter(compareResult.shopping_insights.weakest_link_product_id) ? `Product ${getProductLetter(compareResult.shopping_insights.weakest_link_product_id)}` : 'N/A'}
-                          </p>
-                        </div>
+                        ))}
                       </div>
-
-                      {compareResult.shopping_insights.notes?.length > 0 && (
-                        <div className="space-y-2 mb-3">
-                          {compareResult.shopping_insights.notes.map((note, i) => (
-                            <p key={i} className="text-sm text-neutral-600">• {note}</p>
-                          ))}
-                        </div>
-                      )}
-
-                      <p className="text-sm font-medium text-violet-700">{compareResult.shopping_insights.suggested_next_action}</p>
+                      {attractionState.explanation.map((line, idx) => (
+                        <p key={idx} className="text-sm text-neutral-600 mb-1">• {line}</p>
+                      ))}
                     </div>
                   )}
 
-                  {compareResult.winners_by_goal && (
+                  <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm">
+                    <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Decision confidence</h3>
+                    <p className="text-sm text-neutral-700 mb-2">
+                      Level: <span className="font-semibold uppercase">{compareResult.decisionConfidence.level.replace('_', ' ')}</span>
+                    </p>
+                    <p className="text-sm text-neutral-700 mb-3">Score: {compareResult.decisionConfidence.score}</p>
+                    {compareResult.decisionConfidence.explanation.map((line, idx) => (
+                      <p key={idx} className="text-sm text-neutral-600">• {line}</p>
+                    ))}
+                  </div>
+
+                  <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm">
+                    <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Winners by context</h3>
+                    <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-sm">
+                      {Object.entries(compareResult.winnersByContext).map(([key, value]) => (
+                        <p key={key} className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">
+                          {key}: {value ? `Product ${getProductLetter(value)}` : 'N/A'}
+                        </p>
+                      ))}
+                    </div>
+                  </div>
+
+                  {compareResult.whyNotBoth?.enabled && (
                     <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm">
-                      <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Winners by customer goal</h3>
-                      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-sm">
-                        <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Overall: {getProductLetter(compareResult.winners_by_goal.overall) ? `Product ${getProductLetter(compareResult.winners_by_goal.overall)}` : 'N/A'}</p>
-                        <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Value: {getProductLetter(compareResult.winners_by_goal.value) ? `Product ${getProductLetter(compareResult.winners_by_goal.value)}` : 'N/A'}</p>
-                        <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Quality: {getProductLetter(compareResult.winners_by_goal.quality) ? `Product ${getProductLetter(compareResult.winners_by_goal.quality)}` : 'N/A'}</p>
-                        <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Style: {getProductLetter(compareResult.winners_by_goal.style) ? `Product ${getProductLetter(compareResult.winners_by_goal.style)}` : 'N/A'}</p>
-                        <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Risk: {getProductLetter(compareResult.winners_by_goal.risk) ? `Product ${getProductLetter(compareResult.winners_by_goal.risk)}` : 'N/A'}</p>
-                        <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Occasion: {getProductLetter(compareResult.winners_by_goal.occasion) ? `Product ${getProductLetter(compareResult.winners_by_goal.occasion)}` : 'N/A'}</p>
-                      </div>
-                    </div>
-                  )}
-
-                  {(compareResult.risk_summary || compareResult.timing_insight || compareResult.alternatives) && (
-                    <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm space-y-4">
-                      <h3 className="font-display text-lg font-bold text-neutral-900">Purchase risk and timing</h3>
-                      {compareResult.risk_summary && (
-                        <p className="text-sm text-neutral-700">Overall risk level: <span className="font-semibold uppercase">{compareResult.risk_summary.overall_risk_level}</span></p>
-                      )}
-                      {compareResult.timing_insight && (
-                        <p className="text-sm text-neutral-700">Timing: <span className="font-semibold">{compareResult.timing_insight.recommendation.replace('_', ' ')}</span> — {compareResult.timing_insight.reason}</p>
-                      )}
-                      {compareResult.alternatives && (
-                        <div className="grid sm:grid-cols-3 gap-3 text-sm">
-                          <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Better cheaper: {getProductLetter(compareResult.alternatives.better_cheaper_product_id) ? `Product ${getProductLetter(compareResult.alternatives.better_cheaper_product_id)}` : 'N/A'}</p>
-                          <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Better quality: {getProductLetter(compareResult.alternatives.better_quality_product_id) ? `Product ${getProductLetter(compareResult.alternatives.better_quality_product_id)}` : 'N/A'}</p>
-                          <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Style safer: {getProductLetter(compareResult.alternatives.similar_style_safer_product_id) ? `Product ${getProductLetter(compareResult.alternatives.similar_style_safer_product_id)}` : 'N/A'}</p>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {compareResult.outfit_impact && (
-                    <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm">
-                      <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Outfit impact (cross-category)</h3>
-                      <p className="text-sm text-neutral-700 mb-3">Outfit winner: {getProductLetter(compareResult.outfit_impact.outfit_winner_product_id) ? `Product ${getProductLetter(compareResult.outfit_impact.outfit_winner_product_id)}` : 'N/A'}</p>
-                      <div className="space-y-2">
-                        {Object.entries(compareResult.outfit_impact.versatility_scores).map(([id, score]) => (
-                          <p key={id} className="text-sm text-neutral-600">Product {getProductLetter(Number(id)) ?? id}: versatility {score}, gap-fill {compareResult.outfit_impact?.gap_fill_scores?.[Number(id)] ?? 0}</p>
+                      <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Why not both?</h3>
+                      {compareResult.whyNotBoth.explanation.map((line, idx) => (
+                        <p key={idx} className="text-sm text-neutral-600">• {line}</p>
+                      ))}
+                      <div className="grid md:grid-cols-2 gap-3 mt-3 text-sm">
+                        {compareResult.whyNotBoth.productRoles.map((r) => (
+                          <p key={r.productId} className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Product {getProductLetter(r.productId)} role: {r.role}</p>
                         ))}
                       </div>
                     </div>
                   )}
 
-                  {compareResult.evidence && compareResult.evidence.length > 0 && (
+                  {compareResult.outfitImpact?.enabled && (
                     <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm">
-                      <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Why this recommendation</h3>
-                      <div className="space-y-2">
-                        {compareResult.evidence.map((e, i) => (
-                          <p key={i} className="text-sm text-neutral-600">• {e}</p>
+                      <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Outfit impact</h3>
+                      {compareResult.outfitImpact.explanation.map((line, idx) => (
+                        <p key={idx} className="text-sm text-neutral-600">• {line}</p>
+                      ))}
+                    </div>
+                  )}
+
+                  {compareResult.socialMirror?.enabled && (
+                    <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm">
+                      <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Social mirror</h3>
+                      <div className="space-y-2 text-sm text-neutral-600">
+                        {compareResult.socialMirror.explanation.map((item) => (
+                          <p key={item.productId}>Product {getProductLetter(item.productId)}: {item.message}</p>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {compareResult.peopleLikeYou?.enabled && (
+                    <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm space-y-4">
+                      <h3 className="font-display text-lg font-bold text-neutral-900">People like you</h3>
+                      {compareResult.peopleLikeYou.explanation.map((line, idx) => (
+                        <p key={idx} className="text-sm text-neutral-600">• {line}</p>
+                      ))}
+                      {compareResult.peopleLikeYou.notes?.map((line, idx) => (
+                        <p key={`n-${idx}`} className="text-sm text-neutral-500">{line}</p>
+                      ))}
+                    </div>
+                  )}
+
+                  {compareResult.tensionAxes.length > 0 && (
+                    <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm">
+                      <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Tension axes</h3>
+                      <div className="space-y-4">
+                        {compareResult.tensionAxes.map((axis) => (
+                          <div key={axis.axis} className="rounded-xl border border-neutral-200 bg-neutral-50 p-3">
+                            <p className="text-xs uppercase tracking-wider text-neutral-500 mb-2">{axis.axis.replace('_', ' ')}</p>
+                            <div className="grid sm:grid-cols-2 gap-2 text-sm">
+                              {axis.positions.map((p) => (
+                                <p key={p.productId}>Product {getProductLetter(p.productId)}: {p.value}</p>
+                              ))}
+                            </div>
+                          </div>
                         ))}
                       </div>
                     </div>
@@ -502,14 +504,25 @@ export default function ComparePage() {
 
                   {/* Product score cards */}
                   <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
-                    {compareResult.product_summaries.map((summary, idx) => {
-                      const product = products?.find((p) => p.id === summary.product_id)
-                      const letter = compareResult.product_map?.[summary.product_id] ?? '?'
-                      const isWinner = compareResult.comparison_details.winner_id === summary.product_id
+                    {productIds.map((productId, idx) => {
+                      const product = products?.find((p) => p.id === productId)
+                      const letter = getProductLetter(productId) ?? '?'
+                      const insight = getProductInsightById(compareResult, productId)
+                      const consequence = getConsequenceByProductId(compareResult, productId)
+                      const regret = getRegretByProductId(compareResult, productId)
+                      const identity = getIdentityAlignmentByProductId(compareResult, productId)
+                      const overallWinnerId = compareResult.winnersByContext.overall
+                      const isWinner = overallWinnerId === productId
+                      const scoreColor: 'green' | 'yellow' | 'red' =
+                        (insight?.scores.overall ?? 0) >= 70
+                          ? 'green'
+                          : (insight?.scores.overall ?? 0) >= 45
+                            ? 'yellow'
+                            : 'red'
 
                       return (
                         <motion.div
-                          key={summary.product_id}
+                          key={productId}
                           initial={{ opacity: 0, y: 20 }}
                           animate={{ opacity: 1, y: 0 }}
                           transition={{ delay: 0.2 + idx * 0.12, duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
@@ -550,32 +563,41 @@ export default function ComparePage() {
                                 <p className="font-semibold text-neutral-900 text-sm line-clamp-1">{product?.title}</p>
                                 <p className="text-xs text-neutral-500 mt-0.5">{product?.brand ?? ''}</p>
                               </div>
-                              <ScoreRing score={summary.score} color={summary.level_color} />
+                              <ScoreRing score={Math.round(insight?.scores.overall ?? 0)} color={scoreColor} />
                             </div>
 
-                            {/* Highlights */}
-                            {summary.highlights?.length > 0 && (
+                            {consequence?.ifYouChooseThis?.length ? (
                               <div className="mt-4 space-y-1.5">
-                                {summary.highlights.map((h, i) => (
+                                {consequence.ifYouChooseThis.slice(0, 2).map((h, i) => (
                                   <div key={i} className="flex items-start gap-2 text-sm">
                                     <CheckCircle className="w-4 h-4 text-emerald-500 flex-shrink-0 mt-0.5" />
                                     <span className="text-neutral-700">{h}</span>
                                   </div>
                                 ))}
                               </div>
-                            )}
+                            ) : null}
 
-                            {/* Concerns */}
-                            {summary.concerns?.length > 0 && (
+                            {regret ? (
                               <div className="mt-3 space-y-1.5">
-                                {summary.concerns.map((c, i) => (
-                                  <div key={i} className="flex items-start gap-2 text-sm">
-                                    <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
-                                    <span className="text-neutral-600">{c}</span>
-                                  </div>
-                                ))}
+                                <p className="text-sm text-neutral-600"><span className="font-medium">Regret flash:</span> {regret.shortTermFeeling} {'->'} {regret.longTermReality}</p>
                               </div>
-                            )}
+                            ) : null}
+
+                            {identity ? (
+                              <div className="mt-3 rounded-xl bg-neutral-50 border border-neutral-200 px-3 py-2 text-xs text-neutral-600">
+                                Current self: {identity.currentSelfScore} | Aspirational self: {identity.aspirationalSelfScore}
+                              </div>
+                            ) : null}
+
+                            {insight ? (
+                              <div className="mt-3 space-y-1 text-xs text-neutral-500">
+                                <p>Friction: {insight.frictionIndex}</p>
+                                <p>Wear est: {insight.wearFrequency.estimatedMonthlyWear}/month</p>
+                                <p>Photo reality: {insight.photoRealityGap.label}</p>
+                                <p>{insight.hiddenFlaw}</p>
+                                <p className="text-neutral-700">{insight.microStory}</p>
+                              </div>
+                            ) : null}
                           </div>
                         </motion.div>
                       )
@@ -583,7 +605,7 @@ export default function ComparePage() {
                   </div>
 
                   {/* Confidence footer */}
-                  {compareResult.verdict.confidence_label && (
+                  {compareResult.decisionConfidence && (
                     <motion.div
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
@@ -591,10 +613,8 @@ export default function ComparePage() {
                       className="flex items-center justify-center gap-2 text-sm text-neutral-400"
                     >
                       <BarChart3 className="w-4 h-4" />
-                      <span>Confidence: {compareResult.verdict.confidence_label}</span>
-                      {compareResult.verdict.confidence_description && (
-                        <span className="text-neutral-300"> — {compareResult.verdict.confidence_description}</span>
-                      )}
+                      <span>Confidence: {compareResult.decisionConfidence.level.replace('_', ' ')}</span>
+                      <span className="text-neutral-300"> — {compareResult.decisionConfidence.score}</span>
                     </motion.div>
                   )}
                 </motion.div>

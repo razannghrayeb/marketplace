@@ -2181,7 +2181,8 @@ export class ImageAnalysisService {
         )
       ) {
         const filtersRetry = { ...filters } as typeof filters;
-        if (!strictAudienceLock) {
+        const preserveInferredAudience = Boolean(inferredAudience.gender || inferredAudience.ageGroup);
+        if (!strictAudienceLock && !preserveInferredAudience) {
           delete (filtersRetry as any).gender;
           delete (filtersRetry as any).ageGroup;
         }
@@ -2922,7 +2923,8 @@ export class ImageAnalysisService {
           )
         ) {
           const filtersRetry = { ...filters } as typeof filters;
-          if (!strictAudienceLock) {
+          const preserveInferredAudience = Boolean(inferredAudience.gender || inferredAudience.ageGroup);
+          if (!strictAudienceLock && !preserveInferredAudience) {
             delete (filtersRetry as any).gender;
             delete (filtersRetry as any).ageGroup;
           }
