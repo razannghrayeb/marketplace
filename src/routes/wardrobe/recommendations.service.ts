@@ -15,6 +15,7 @@ import {
 import { getAdaptedEssentials, inferPriceTier } from "../../lib/wardrobe/lifestyleAdapter";
 import { inferWardrobeSlotsFromWardrobeRows } from "../../lib/wardrobe/outfitSlotInference";
 import { normalizeQueryGender } from "../../lib/search/searchHitRelevance";
+import { attrGenderFilterClause } from "../products/opensearchFilters";
 
 // ============================================================================
 // Types
@@ -70,7 +71,7 @@ export interface CompleteLookSuggestionsResult {
 }
 
 /** Slots used for gap detection (DB name, vision, and OpenSearch slot labels). */
-const TRACKED_OUTFIT_SLOTS = new Set([
+export const TRACKED_OUTFIT_SLOTS = new Set([
   "tops",
   "bottoms",
   "shoes",
@@ -117,6 +118,153 @@ function normalizeWardrobeCategory(value?: string | null): string | null {
   if (raw.includes("accessor") || raw.includes("watch") || raw.includes("scarf") || raw.includes("hat") || raw.includes("sunglass") || raw.includes("jewelry"))
     return "accessories";
   return raw;
+}
+
+function inferSlotsFromFreeText(value?: string | null): Set<string> {
+  const out = new Set<string>();
+  const raw = String(value || "").toLowerCase().trim();
+  if (!raw) return out;
+
+  if (/\b(dress|dresses|gown|frock|maxi|midi|mini|sundress|jumpsuit|romper|abaya|kaftan)\b/.test(raw)) out.add("dresses");
+  if (/\b(top|tops|shirt|shirts|blouse|blouses|t-?shirt|tee|polo|hoodie|sweater|sweatshirt|cardigan|tank|crop top|camisole)\b/.test(raw)) out.add("tops");
+  if (/\b(bottom|bottoms|pant|pants|trouser|trousers|jeans|joggers|leggings|skirt|skirts|shorts?)\b/.test(raw)) out.add("bottoms");
+  if (/\b(shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|loafer|loafers|sandal|sandals|flats?|pumps?|mules?|trainers?)\b/.test(raw)) out.add("shoes");
+  if (/\b(outerwear|jacket|jackets|coat|coats|blazer|blazers|parka|windbreaker|trench|bomber)\b/.test(raw)) out.add("outerwear");
+  if (/\b(bag|bags|handbag|handbags|tote|totes|clutch|clutches|purse|wallet|backpack|crossbody|satchel|messenger)\b/.test(raw)) out.add("bags");
+  if (/\b(accessor|watch|scarf|hat|sunglass|jewel|necklace|earring|bracelet|ring|belt)\b/.test(raw)) out.add("accessories");
+
+  return out;
+}
+
+function shouldSuggestOuterwear(
+  warmWeatherLikely: boolean,
+  currentItems: CompleteLookAnchorRow[],
+  seasonCoverage: string[]
+): boolean {
+  if (warmWeatherLikely) return false;
+  const seasons = new Set((seasonCoverage || []).map((s) => String(s || "").toLowerCase().trim()));
+  if (seasons.has("winter") || seasons.has("fall")) return true;
+
+  const blob = currentItems
+    .map((i) => `${String(i.name || "")} ${String(i.title || "")} ${String(i.category_name || "")}`)
+    .join(" ")
+    .toLowerCase();
+  const coldHits = (blob.match(/\bjacket\b|\bcoat\b|\bhoodie\b|\bsweater\b|\bcardigan\b|\bblazer\b|\bwinter\b|\bcold\b/g) || []).length;
+  return coldHits > 0;
+}
+
+export function inferMissingCategoriesForOutfit(params: {
+  currentCategories: Set<string>;
+  warmWeatherLikely: boolean;
+  shouldOfferOuterwear: boolean;
+}): string[] {
+  const { currentCategories, warmWeatherLikely, shouldOfferOuterwear } = params;
+  const hasDress = currentCategories.has("dresses");
+  const missing: string[] = [];
+
+  if (hasDress) {
+    if (!currentCategories.has("shoes")) missing.push("shoes");
+  } else {
+    if (!currentCategories.has("tops")) missing.push("tops");
+    if (!currentCategories.has("bottoms")) missing.push("bottoms");
+    if (!currentCategories.has("shoes")) missing.push("shoes");
+  }
+
+  const complements: string[] = ["accessories", "bags"];
+  if (shouldOfferOuterwear && !warmWeatherLikely) complements.push("outerwear");
+  for (const extra of complements) {
+    if (missing.length >= 2) break;
+    if (!currentCategories.has(extra) && !missing.includes(extra)) missing.push(extra);
+  }
+
+  if (missing.length === 0) {
+    if (!currentCategories.has("accessories")) missing.push("accessories");
+    else if (!currentCategories.has("bags")) missing.push("bags");
+    else if (shouldOfferOuterwear && !warmWeatherLikely && !currentCategories.has("outerwear")) missing.push("outerwear");
+    else missing.push("accessories");
+  }
+
+  return missing.slice(0, 3);
+}
+
+function slotKeywordRegex(slot: string): RegExp | null {
+  const map: Record<string, RegExp> = {
+    tops: /\b(top|tops|shirt|shirts|blouse|blouses|t-?shirt|tee|hoodie|sweater|sweatshirt|cardigan|tank|camisole|polo)\b/,
+    bottoms: /\b(bottom|bottoms|pants?|trousers?|jeans?|joggers?|leggings?|skirts?|shorts?)\b/,
+    dresses: /\b(dress|dresses|gown|frock|sundress|maxi|midi|mini|jumpsuit|romper|abaya|kaftan)\b/,
+    outerwear: /\b(outerwear|jacket|jackets|coat|coats|blazer|blazers|parka|windbreaker|trench|bomber|anorak)\b/,
+    shoes: /\b(shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|loafer|loafers|sandal|sandals|flat|flats|pump|pumps|mule|mules|trainer|trainers|footwear)\b/,
+    bags: /\b(bag|bags|handbag|handbags|tote|totes|clutch|clutches|purse|purses|wallet|wallets|backpack|backpacks|crossbody|satchel|messenger)\b/,
+    accessories: /\b(accessor|watch|watches|scarf|scarves|hat|hats|cap|caps|sunglass|sunglasses|jewel|jewelry|jewellery|necklace|earring|bracelet|ring|belt)\b/,
+  };
+  return map[slot] || null;
+}
+
+function slotMismatchRegex(slot: string): RegExp | null {
+  if (slot === "bags") return /\b(headband|hair accessory|hairband|headwear|hat|cap|beanie)\b/;
+  if (slot === "accessories") {
+    return /\b(handbag|bag|tote|clutch|wallet|crossbody|backpack|satchel|messenger)\b/;
+  }
+  return null;
+}
+
+function sourceMatchesSlot(slot: string, source: any): boolean {
+  const canonical = normalizeWardrobeCategory(source?.category_canonical || source?.category);
+  if (canonical === slot) return true;
+
+  const blob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.category_canonical || "")}`.toLowerCase();
+  const allow = slotKeywordRegex(slot);
+  const reject = slotMismatchRegex(slot);
+  if (reject && reject.test(blob)) return false;
+  if (!allow) return canonical === slot;
+  return allow.test(blob);
+}
+
+function buildSlotIntentFilter(slot: string): any | null {
+  const bagTerms = ["bag", "handbag", "tote", "clutch", "purse", "wallet", "crossbody", "backpack", "satchel", "messenger"];
+  const accessoryTerms = ["accessories", "jewelry", "watch", "scarf", "belt", "sunglasses", "hat", "earrings", "necklace", "bracelet", "ring"];
+  const outerwearTerms = ["outerwear", "jacket", "coat", "blazer", "cardigan", "parka", "trench", "bomber"];
+
+  if (slot === "bags") {
+    return {
+      bool: {
+        should: bagTerms.map((kw) => ({ match_phrase: { title: kw } })),
+        minimum_should_match: 1,
+        must_not: [
+          {
+            bool: {
+              should: [
+                { match_phrase: { title: "hair accessory" } },
+                { match_phrase: { title: "headwear" } },
+                { match_phrase: { title: "headband" } },
+              ],
+              minimum_should_match: 1,
+            },
+          },
+        ],
+      },
+    };
+  }
+
+  if (slot === "accessories") {
+    return {
+      bool: {
+        should: accessoryTerms.map((kw) => ({ match_phrase: { title: kw } })),
+        minimum_should_match: 1,
+      },
+    };
+  }
+
+  if (slot === "outerwear") {
+    return {
+      bool: {
+        should: outerwearTerms.map((kw) => ({ match_phrase: { title: kw } })),
+        minimum_should_match: 1,
+      },
+    };
+  }
+
+  return null;
 }
 
 function dedupeCompleteLookSuggestions(items: CompleteLookSuggestion[]): CompleteLookSuggestion[] {
@@ -460,36 +608,35 @@ async function runCompleteLookCore(
   for (const row of currentItems) {
     pushCategory(normalizeWardrobeCategory(row.category_name));
     pushCategory(normalizeWardrobeCategory(row.name));
+    pushCategory(normalizeWardrobeCategory(row.title));
+
+    const freeTextSignals = inferSlotsFromFreeText(
+      `${String(row.name || "")} ${String(row.title || "")} ${String(row.category_name || "")}`
+    );
+    for (const signal of freeTextSignals) pushCategory(signal);
   }
 
+  const styleProfile = await getStyleProfile(userId).catch(() => null);
   const visionSlots = await inferWardrobeSlotsFromWardrobeRows(currentItems);
   for (const slot of visionSlots) pushCategory(slot);
 
-  const hasDress = currentCategoryList.some((c) => c === "dresses");
   const warmWeatherLikely = inferWarmWeatherLook(currentItems);
+  const shouldOfferOuterwear = shouldSuggestOuterwear(
+    warmWeatherLikely,
+    currentItems,
+    styleProfile?.season_coverage || []
+  );
   const inferredAudienceGender = await inferPreferredAudienceGender(userId, currentItems);
-  const essentialForOutfit = hasDress ? ["shoes", "outerwear"] : ["tops", "bottoms", "shoes"];
-  const missingCategories = essentialForOutfit.filter((c) => !currentCategories.has(c));
-  const optionalComplements = hasDress
-    ? (["bags", "accessories", "outerwear"] as const)
-    : (warmWeatherLikely
-        ? (["accessories", "bags", "outerwear"] as const)
-        : (["bags", "accessories", "outerwear"] as const));
-  for (const extra of optionalComplements) {
-    if (missingCategories.length >= 2) break;
-    if (!currentCategories.has(extra) && !missingCategories.includes(extra)) {
-      missingCategories.push(extra);
-    }
-  }
-  if (missingCategories.length === 0) {
-    missingCategories.push("accessories", "bags");
-  }
+  const missingCategories = inferMissingCategoriesForOutfit({
+    currentCategories,
+    warmWeatherLikely,
+    shouldOfferOuterwear,
+  });
 
   const currentEmbeddings = currentItems
     .map((row) => parseVector(row.embedding))
     .filter((vec): vec is number[] => Array.isArray(vec) && vec.length > 0);
 
-  const styleProfile = await getStyleProfile(userId).catch(() => null);
   let centroid = meanEmbedding(currentEmbeddings);
   if (!centroid && styleProfile?.style_centroid && styleProfile.style_centroid.length > 0) {
     centroid = styleProfile.style_centroid;
@@ -525,6 +672,7 @@ async function runCompleteLookCore(
     "attr_gender",
     "audience_gender",
     "age_group",
+    "product_types",
   ];
 
   for (const category of missingCategories) {
@@ -540,6 +688,10 @@ async function runCompleteLookCore(
         ];
         if (inferredAudienceGender && inferredAudienceGender !== "unisex") {
           f.push(buildAudienceGenderFilter(inferredAudienceGender));
+        }
+        const slotIntentFilter = buildSlotIntentFilter(category);
+        if (slotIntentFilter) {
+          f.push(slotIntentFilter);
         }
         if (applyPriceTier && userPriceTier) {
           f.push({
@@ -563,6 +715,7 @@ async function runCompleteLookCore(
 
         for (const hit of hits) {
           const source = hit._source || {};
+          if (!sourceMatchesSlot(category, source)) continue;
           if (!audienceGenderMatches(inferredAudienceGender, source)) continue;
           const productId = parseInt(source.product_id, 10);
           if (!productId || ownedProductIds.has(String(productId))) continue;
@@ -839,6 +992,27 @@ async function inferPreferredAudienceGender(
   }
 
   if (counts.men === 0 && counts.women === 0) {
+    const wardrobeGenderRows = await pg
+      .query(
+        `SELECT p.gender, COUNT(*)::int AS cnt
+         FROM wardrobe_items wi
+         JOIN products p ON p.id = wi.product_id
+         WHERE wi.user_id = $1 AND p.gender IS NOT NULL
+         GROUP BY p.gender`,
+        [userId]
+      )
+      .then((r) => r.rows)
+      .catch(() => [] as Array<{ gender: unknown; cnt: number }>);
+
+    for (const row of wardrobeGenderRows) {
+      const normalized = normalizeAudienceGenderValue(row.gender);
+      if (!normalized) continue;
+      const weight = Math.max(1, Number(row.cnt) || 1);
+      counts[normalized] += normalized === "unisex" ? weight * 0.25 : weight;
+    }
+  }
+
+  if (counts.men === 0 && counts.women === 0) {
     const userGender = await pg
       .query(`SELECT gender FROM users WHERE id = $1`, [userId])
       .then((r) => normalizeAudienceGenderValue(r.rows?.[0]?.gender))
@@ -854,6 +1028,12 @@ async function inferPreferredAudienceGender(
 
 function buildAudienceGenderFilter(gender: "men" | "women"): any {
   const allowTerms = [gender, "unisex"];
+  const attrGenderTerms = [
+    ...new Set([
+      ...(attrGenderFilterClause(gender).terms.attr_gender || []),
+      ...(attrGenderFilterClause("unisex").terms.attr_gender || []),
+    ]),
+  ];
   const oppositeTitleTerms =
     gender === "men"
       ? ["women", "womens", "female", "ladies", "woman", "girls", "girl"]
@@ -862,7 +1042,7 @@ function buildAudienceGenderFilter(gender: "men" | "women"): any {
   return {
     bool: {
       should: [
-        { terms: { attr_gender: allowTerms } },
+        { terms: { attr_gender: attrGenderTerms } },
         { terms: { audience_gender: allowTerms } },
         ...allowTerms.map((kw) => ({ match: { title: kw } })),
       ],
@@ -1019,6 +1199,12 @@ async function fetchCategoryTopUpSuggestions(params: {
     { term: { availability: "in_stock" } },
     { terms: { category_canonical: canonicalCategories } },
   ];
+  const slotIntentFilters = params.missingCategories
+    .map((slot) => buildSlotIntentFilter(slot))
+    .filter((f): f is Record<string, any> => Boolean(f));
+  if (slotIntentFilters.length > 0) {
+    filter.push({ bool: { should: slotIntentFilters, minimum_should_match: 1 } });
+  }
   if (params.inferredAudienceGender && params.inferredAudienceGender !== "unisex") {
     filter.push(buildAudienceGenderFilter(params.inferredAudienceGender));
   }
@@ -1069,6 +1255,7 @@ async function fetchCategoryTopUpSuggestions(params: {
         "attr_material",
         "attr_gender",
         "audience_gender",
+        "product_types",
       ],
       sort: [{ _score: { order: "desc" } }, { last_seen_at: { order: "desc", missing: "_last" } }],
     },
@@ -1080,6 +1267,7 @@ async function fetchCategoryTopUpSuggestions(params: {
 
   for (const hit of hits) {
     const source = hit?._source || {};
+    if (!params.missingCategories.some((slot) => sourceMatchesSlot(slot, source))) continue;
     if (!audienceGenderMatches(params.inferredAudienceGender, source)) continue;
     const productId = parseInt(source.product_id, 10);
     if (!productId) continue;

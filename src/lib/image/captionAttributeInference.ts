@@ -120,13 +120,7 @@ export function productDescriptionFromCaption(caption: string): string | null {
 
 const GENDER_ENUM = new Set(["men", "women", "unisex", "boys", "girls"]);
 
-/**
- * Value for `products.gender` only. Uses caption + optional product title (titles often
- * carry "Men's / Women's / Kids'" signals when the image caption does not).
- * Still requires apparel/product context so random scene captions do not set gender alone.
- */
-export function catalogGenderFromCaption(caption: string, productTitle?: string | null): string | null {
-  const combined = [String(productTitle || "").trim(), String(caption || "").trim()].filter(Boolean).join(" ");
+function inferCatalogGenderFromCombinedText(combined: string): string | null {
   if (!combined) return null;
 
   const { gender } = inferAudienceFromCaption(combined);
@@ -137,11 +131,32 @@ export function catalogGenderFromCaption(caption: string, productTitle?: string 
     CATALOG_PRODUCT_CONTEXT_RE.test(combined) ||
     primaryColorHintFromCaption(combined) != null ||
     /\b(wearing|dressed|outfit|fashion|style|clothes|clothing|apparel|garment)\b/.test(s);
-  /** Titles like "Men's Cologne" / "Women's Watch" — gender signal without garment vocabulary. */
+  /** Titles like "Men's Cologne" / "Women's Watch" provide explicit retail audience context. */
   const explicitRetailGender =
     /\b(men's|mens\b|women's|womens\b|ladies'|boys'|girls'|boy's|girl's|unisex|for men\b|for women\b|for boys\b|for girls\b)\b/i.test(
       combined,
     );
   if (!apparelContext && !explicitRetailGender) return null;
   return gender;
+}
+
+/**
+ * Detect catalog gender from product text fields (title/description/details).
+ * Returns normalized values: men | women | unisex | boys | girls.
+ */
+export function catalogGenderFromProductText(...texts: Array<string | null | undefined>): string | null {
+  const combined = texts
+    .map((t) => String(t || "").trim())
+    .filter(Boolean)
+    .join(" ");
+  return inferCatalogGenderFromCombinedText(combined);
+}
+
+/**
+ * Value for `products.gender` only. Uses caption + optional product title (titles often
+ * carry "Men's / Women's / Kids'" signals when the image caption does not).
+ * Still requires apparel/product context so random scene captions do not set gender alone.
+ */
+export function catalogGenderFromCaption(caption: string, productTitle?: string | null): string | null {
+  return catalogGenderFromProductText(productTitle, caption);
 }
