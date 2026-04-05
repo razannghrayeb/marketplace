@@ -10,6 +10,8 @@ import { getRedis, isRedisAvailable } from "../redis";
 import { getTryOnClient } from "../image/tryonClient";
 import { uploadImage } from "../image/r2";
 
+type PgLikeError = { code?: string; message?: string };
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -439,9 +441,49 @@ export async function trackTryOnUsage(
 ): Promise<void> {
   const period = new Date().toISOString().slice(0, 7); // YYYY-MM
   const estimatedCost = 0.004; // ~$0.004 per try-on
-  
+
+  const params = [
+    userId,
+    period,
+    success ? 1 : 0,
+    success ? 0 : 1,
+    processingTimeMs,
+    estimatedCost,
+  ];
+
+  try {
+    await upsertTryOnUsage(params);
+  } catch (err: any) {
+    const pgErr = err as PgLikeError;
+    const missingUsageTable =
+      pgErr.code === "42P01" && (pgErr.message || "").includes("tryon_usage");
+
+    if (missingUsageTable) {
+      // Best effort: auto-create usage table on first write after deploy.
+      try {
+        await ensureUsageTable();
+        await upsertTryOnUsage(params);
+        return;
+      } catch (createErr: any) {
+        console.warn(
+          `[TryOn] Usage tracking disabled (could not create tryon_usage table): ${createErr?.message || createErr}`
+        );
+        return;
+      }
+    }
+
+    // Usage tracking is non-critical and should never fail try-on requests.
+    console.warn(
+      `[TryOn] Usage tracking failed for user ${userId}: ${err?.message || err}`
+    );
+  }
+}
+
+async function upsertTryOnUsage(
+  params: [number, string, number, number, number, number]
+): Promise<void> {
   await pg.query(
-    `INSERT INTO tryon_usage (user_id, period, total_jobs, successful_jobs, failed_jobs, 
+    `INSERT INTO tryon_usage (user_id, period, total_jobs, successful_jobs, failed_jobs,
                               total_processing_ms, estimated_cost_usd)
      VALUES ($1, $2, 1, $3, $4, $5, $6)
      ON CONFLICT (user_id, period) DO UPDATE SET
@@ -450,14 +492,7 @@ export async function trackTryOnUsage(
        failed_jobs = tryon_usage.failed_jobs + $4,
        total_processing_ms = tryon_usage.total_processing_ms + $5,
        estimated_cost_usd = tryon_usage.estimated_cost_usd + $6`,
-    [
-      userId,
-      period,
-      success ? 1 : 0,
-      success ? 0 : 1,
-      processingTimeMs,
-      estimatedCost,
-    ]
+    params
   );
 }
 

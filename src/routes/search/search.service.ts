@@ -2112,14 +2112,46 @@ export async function multiImageSearch(
       userPrompt,
       relevanceIntent,
     );
+    let hardConstraintRelaxationLevel: 0 | 1 | 2 = 0;
     if (hardConstraints.enabled && hits.length > 0) {
-      hits = hits.filter((hit: any) =>
+      const strictHits = hits.filter((hit: any) =>
         multiImageHitPassesHardConstraints(
           hit,
           hardConstraints,
           relevanceById.get(String(hit?._source?.product_id)),
         ),
       );
+      if (strictHits.length > 0) {
+        hits = strictHits;
+      } else {
+        const relaxedLv1 = relaxMultiImageHardConstraints(hardConstraints, 1);
+        const lv1Hits = hits.filter((hit: any) =>
+          multiImageHitPassesHardConstraints(
+            hit,
+            relaxedLv1,
+            relevanceById.get(String(hit?._source?.product_id)),
+          ),
+        );
+        if (lv1Hits.length > 0) {
+          hits = lv1Hits;
+          hardConstraintRelaxationLevel = 1;
+        } else {
+          const relaxedLv2 = relaxMultiImageHardConstraints(hardConstraints, 2);
+          const lv2Hits = hits.filter((hit: any) =>
+            multiImageHitPassesHardConstraints(
+              hit,
+              relaxedLv2,
+              relevanceById.get(String(hit?._source?.product_id)),
+            ),
+          );
+          if (lv2Hits.length > 0) {
+            hits = lv2Hits;
+            hardConstraintRelaxationLevel = 2;
+          } else {
+            hits = strictHits;
+          }
+        }
+      }
     }
 
     const productIds = hits.map((hit: any) => hit._source?.product_id);
@@ -2162,11 +2194,18 @@ export async function multiImageSearch(
       })
       .filter((r: any): r is NonNullable<typeof r> => r !== null);
 
+    const activeHardConstraints =
+      hardConstraintRelaxationLevel === 1
+        ? relaxMultiImageHardConstraints(hardConstraints, 1)
+        : hardConstraintRelaxationLevel === 2
+          ? relaxMultiImageHardConstraints(hardConstraints, 2)
+          : hardConstraints;
+
     const constrainedResults =
-      hardConstraints.enabled && results.length > 0
+      activeHardConstraints.enabled && results.length > 0
         ? results.filter((product: any) => {
             const rel = relevanceById.get(String(product.id));
-            return multiImageProductPassesHardConstraints(product, hardConstraints, rel);
+            return multiImageProductPassesHardConstraints(product, activeHardConstraints, rel);
           })
         : results;
 
@@ -2267,6 +2306,9 @@ export async function multiImageSearch(
         candidate_hits: totalHits,
         candidate_used: hits.length,
         strict_prompt_constraints: hardConstraints.enabled ? true : undefined,
+        ...(hardConstraintRelaxationLevel > 0
+          ? { hard_constraint_relaxation_level: hardConstraintRelaxationLevel }
+          : {}),
         ...(geminiDegraded ? { gemini_degraded: true } : {}),
         ...(astPipelineDegraded ? { ast_pipeline_degraded: true } : {}),
       },
@@ -2542,6 +2584,31 @@ function multiImageProductPassesHardConstraints(
   if (hard.requireColorCompliance && (rel?.colorCompliance ?? 0) <= 0) return false;
   if (hard.requireTypeCompliance && (rel?.productTypeCompliance ?? 0) < hard.minTypeCompliance) return false;
   return true;
+}
+
+function relaxMultiImageHardConstraints(
+  hard: MultiImageHardConstraints,
+  level: 1 | 2,
+): MultiImageHardConstraints {
+  if (!hard.enabled) return hard;
+  if (level === 1) {
+    return {
+      ...hard,
+      minRequiredKeywordMatches:
+        hard.requiredKeywords.length <= 1
+          ? hard.minRequiredKeywordMatches
+          : Math.max(1, Math.floor(hard.minRequiredKeywordMatches * 0.5)),
+      minTypeCompliance: Math.max(0.3, hard.minTypeCompliance - 0.15),
+    };
+  }
+
+  return {
+    ...hard,
+    requiredKeywords: [],
+    minRequiredKeywordMatches: 0,
+    requireTypeCompliance: false,
+    minTypeCompliance: 0,
+  };
 }
 
 function dedupeMultiImageResults(results: any[]): any[] {

@@ -18,11 +18,14 @@ export function errorHandler(
   let code: string | undefined;
 
   const pgCode = (err as NodeJS.ErrnoException & { code?: string }).code;
-  if (pgCode === "42P01" && /tryon_jobs|tryon_saved/i.test(message)) {
+  if (
+    pgCode === "42P01" &&
+    /tryon_jobs|tryon_saved|tryon_usage|tryon_webhooks|tryon_webhook_failures/i.test(message)
+  ) {
     status = 503;
     code = "TRYON_DB_NOT_MIGRATED";
     message =
-      "Try-on database is not initialized. Apply migration db/migrations/007_virtual_tryon.sql on your Postgres database.";
+      "Try-on database is not fully initialized. Apply migrations db/migrations/007_virtual_tryon.sql and db/migrations/015_tryon_usage_and_webhooks.sql on your Postgres database.";
   } else if (
     /Virtual try-on is not configured/i.test(message) &&
     /GCLOUD_PROJECT|GOOGLE_CLOUD_PROJECT/i.test(message)

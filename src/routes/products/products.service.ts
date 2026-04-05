@@ -2583,17 +2583,20 @@ export async function searchByImageWithSimilarity(
     imageSearchPipelineDegraded = true;
     let rescuePool = visualGatedHits;
     if (hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) {
+      const desiredSleeveNorm = String(desiredSleeveForRelevance ?? "").toLowerCase();
+      const enforceSleeveGate = desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless";
+      const minTypeCompliance = hasDetectionAnchoredTypeIntent ? 0.5 : 0.38;
       const preferredTypeAligned = visualGatedHits.filter((h: any) => {
         const comp = complianceById.get(String(h._source.product_id));
         if (!comp) return false;
         
         // Must pass type intent
-        if (!((comp.exactTypeScore ?? 0) >= 1 || (comp.productTypeCompliance ?? 0) >= 0.38)) {
+        if (!((comp.exactTypeScore ?? 0) >= 1 || (comp.productTypeCompliance ?? 0) >= minTypeCompliance)) {
           return false;
         }
         
-        // Must pass sleeve intent if set (avoid long sleeves when short is desired)
-        if (desiredSleeveForRelevance && (comp.sleeveCompliance ?? 0) < 0.25) {
+        // Apply sleeve gating only for restrictive sleeve intents where mismatches are high-impact.
+        if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < 0.25) {
           return false;
         }
         
@@ -2604,7 +2607,7 @@ export async function searchByImageWithSimilarity(
         
         return true;
       });
-      if (preferredTypeAligned.length > 0) {
+      if (preferredTypeAligned.length > 0 || hasDetectionAnchoredTypeIntent) {
         rescuePool = preferredTypeAligned;
       }
     }
