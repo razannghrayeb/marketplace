@@ -4,9 +4,15 @@
  */
 import { pg, productsTableHasGenderColumn } from "../core/db";
 import {
+  catalogMaterialFromProductText,
+  catalogOccasionFromProductText,
+  catalogStyleFromProductText,
   catalogGenderFromCaption,
   catalogGenderFromProductText,
+  inferCatalogFieldsFromProductText,
   primaryColorHintFromCaption,
+  primaryColorHintFromProductText,
+  productDescriptionFromProductText,
   productDescriptionFromCaption,
 } from "./captionAttributeInference";
 import { buildStructuredBlipOutput } from "./blipStructured";
@@ -73,10 +79,62 @@ export async function applyBlipCaptionToMissingProductFields(
   const vals: unknown[] = [];
   const fields: string[] = [];
   let pi = 1;
+  const title = (cur as { title?: unknown }).title as string | null | undefined;
+  const description = (cur as { description?: unknown }).description as string | null | undefined;
+  const details = (cur as { details?: unknown }).details as string | null | undefined;
+  const textHints = inferCatalogFieldsFromProductText(title, description, details);
+
+  if (isCatalogFieldBlank(cur.description) && textHints.description) {
+    updates.push(`description = $${pi++}`);
+    vals.push(textHints.description);
+    fields.push("description");
+  }
+  if (isCatalogFieldBlank(cur.color) && textHints.color) {
+    updates.push(`color = $${pi++}`);
+    vals.push(textHints.color);
+    fields.push("color");
+  }
+  if (hasGender && isCatalogFieldBlank((cur as { gender?: unknown }).gender) && textHints.gender) {
+    updates.push(`gender = $${pi++}`);
+    vals.push(textHints.gender);
+    fields.push("gender");
+  }
+  if (hasStyle && isCatalogFieldBlank((cur as { style?: unknown }).style) && textHints.style) {
+    updates.push(`style = $${pi++}`);
+    vals.push(textHints.style);
+    fields.push("style");
+  }
+  if (hasOccasion && isCatalogFieldBlank((cur as { occasion?: unknown }).occasion) && textHints.occasion) {
+    updates.push(`occasion = $${pi++}`);
+    vals.push(textHints.occasion);
+    fields.push("occasion");
+  }
+  if (hasMaterial && isCatalogFieldBlank((cur as { material?: unknown }).material) && textHints.material) {
+    updates.push(`material = $${pi++}`);
+    vals.push(textHints.material);
+    fields.push("material");
+  }
+
+  const needsBlipFallback =
+    isCatalogFieldBlank(cur.description) ||
+    isCatalogFieldBlank(cur.color) ||
+    (hasGender && isCatalogFieldBlank((cur as { gender?: unknown }).gender)) ||
+    (hasStyle && isCatalogFieldBlank((cur as { style?: unknown }).style)) ||
+    (hasOccasion && isCatalogFieldBlank((cur as { occasion?: unknown }).occasion)) ||
+    (hasMaterial && isCatalogFieldBlank((cur as { material?: unknown }).material));
+
+  if (!needsBlipFallback) {
+    if (updates.length === 0) return { updated: false, fields: [] };
+    if (options?.dryRun) return { updated: true, fields };
+    vals.push(productId);
+    await pg.query(`UPDATE products SET ${updates.join(", ")} WHERE id = $${pi}`, vals);
+    return { updated: true, fields };
+  }
+
   const structured = buildStructuredBlipOutput(c);
   const hasCaptionSignals = c.length >= 8;
 
-  if (hasCaptionSignals && isCatalogFieldBlank(cur.description)) {
+  if (hasCaptionSignals && isCatalogFieldBlank(cur.description) && !textHints.description) {
     const desc = productDescriptionFromCaption(c);
     if (desc) {
       updates.push(`description = $${pi++}`);
@@ -84,7 +142,7 @@ export async function applyBlipCaptionToMissingProductFields(
       fields.push("description");
     }
   }
-  if (hasCaptionSignals && isCatalogFieldBlank(cur.color)) {
+  if (hasCaptionSignals && isCatalogFieldBlank(cur.color) && !textHints.color) {
     const pc = primaryColorHintFromCaption(c);
     if (pc) {
       updates.push(`color = $${pi++}`);
@@ -92,19 +150,9 @@ export async function applyBlipCaptionToMissingProductFields(
       fields.push("color");
     }
   }
-  if (hasGender && isCatalogFieldBlank((cur as { gender?: unknown }).gender)) {
-    const title = (cur as { title?: unknown }).title as string | null | undefined;
-    const description = (cur as { description?: unknown }).description as string | null | undefined;
-    const details = (cur as { details?: unknown }).details as string | null | undefined;
-
-    // Prefer explicit product metadata first; use BLIP only as fallback.
-    const genderFromText = catalogGenderFromProductText(title, description, details);
-    const genderFromBlip = genderFromText
-      ? null
-      : hasCaptionSignals
-        ? catalogGenderFromCaption(c, title)
-        : null;
-    const gender = genderFromText ?? genderFromBlip;
+  if (hasGender && isCatalogFieldBlank((cur as { gender?: unknown }).gender) && !textHints.gender) {
+    const genderFromBlip = hasCaptionSignals ? catalogGenderFromCaption(c, title) : null;
+    const gender = genderFromBlip;
 
     if (gender) {
       updates.push(`gender = $${pi++}`);
@@ -112,17 +160,17 @@ export async function applyBlipCaptionToMissingProductFields(
       fields.push("gender");
     }
   }
-  if (hasCaptionSignals && hasStyle && isCatalogFieldBlank((cur as { style?: unknown }).style) && structured.style.attrStyle) {
+  if (hasCaptionSignals && hasStyle && isCatalogFieldBlank((cur as { style?: unknown }).style) && !textHints.style && structured.style.attrStyle) {
     updates.push(`style = $${pi++}`);
     vals.push(structured.style.attrStyle);
     fields.push("style");
   }
-  if (hasCaptionSignals && hasOccasion && isCatalogFieldBlank((cur as { occasion?: unknown }).occasion) && structured.style.occasion) {
+  if (hasCaptionSignals && hasOccasion && isCatalogFieldBlank((cur as { occasion?: unknown }).occasion) && !textHints.occasion && structured.style.occasion) {
     updates.push(`occasion = $${pi++}`);
     vals.push(structured.style.occasion);
     fields.push("occasion");
   }
-  if (hasCaptionSignals && hasMaterial && isCatalogFieldBlank((cur as { material?: unknown }).material)) {
+  if (hasCaptionSignals && hasMaterial && isCatalogFieldBlank((cur as { material?: unknown }).material) && !textHints.material) {
     const normalizedCaption = structured.normalizedCaption;
     let material: string | null = null;
     if (/\b(denim|jean)\b/.test(normalizedCaption)) material = "denim";

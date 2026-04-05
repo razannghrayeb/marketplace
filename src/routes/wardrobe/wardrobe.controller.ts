@@ -340,6 +340,11 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
       ? productIdsRaw.map((n) => parseInt(String(n), 10)).filter((n) => Number.isFinite(n) && n >= 1)
       : [];
     const limit = req.body.limit || 10;
+    const audienceGenderHintRaw = req.body.audience_gender ?? req.body.gender;
+    const audienceGenderHint =
+      typeof audienceGenderHintRaw === "string" && audienceGenderHintRaw.trim().length > 0
+        ? audienceGenderHintRaw.trim()
+        : undefined;
 
     const hasItems = Array.isArray(itemIds) && itemIds.length > 0;
     if (!hasItems && productIds.length === 0) {
@@ -350,8 +355,8 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
     }
 
     const result = hasItems
-      ? await completeLookSuggestions(userId, itemIds!, limit)
-      : await completeLookSuggestionsForCatalogProducts(userId, productIds, limit);
+      ? await completeLookSuggestions(userId, itemIds!, limit, { audienceGenderHint })
+      : await completeLookSuggestionsForCatalogProducts(userId, productIds, limit, { audienceGenderHint });
     const suggestions = result.suggestions.map((s) => ({
       ...s,
       id: s.product_id,

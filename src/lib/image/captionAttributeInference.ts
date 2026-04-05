@@ -92,6 +92,67 @@ export function primaryColorHintFromCaption(caption: string): string | null {
   return garmentColor ?? topColor ?? jeansColor ?? null;
 }
 
+function normalizeProductText(...texts: Array<string | null | undefined>): string {
+  return texts.map((t) => String(t || "").trim()).filter(Boolean).join(" ");
+}
+
+function inferCatalogStyleAndOccasionFromText(text: string): { attrStyle?: string; occasion?: string } {
+  const s = String(text || "").toLowerCase();
+  if (!s) return {};
+
+  if (/\b(formal|elegant|evening|black tie|gown|tailored|ceremony)\b/.test(s)) {
+    return { attrStyle: "formal", occasion: "formal" };
+  }
+  if (/\b(smart casual|smart-casual|office|workwear|business|blazer|tailored|semi formal|semi-formal)\b/.test(s)) {
+    return { attrStyle: "smart-casual", occasion: "work" };
+  }
+  if (/\b(active|athletic|gym|running|training|sport|sports|workout|yoga)\b/.test(s)) {
+    return { attrStyle: "casual", occasion: "active" };
+  }
+  if (/\b(party|night out|cocktail|occasion|event|evening wear|statement)\b/.test(s)) {
+    return { attrStyle: "formal", occasion: "party" };
+  }
+  if (/\b(travel|airport|vacation|weekend|everyday|casual|streetwear|denim|relaxed|lounge)\b/.test(s)) {
+    return { attrStyle: "casual", occasion: "casual" };
+  }
+
+  return {};
+}
+
+/** Text-first product description extraction for DB fields such as title/description/details. */
+export function productDescriptionFromProductText(...texts: Array<string | null | undefined>): string | null {
+  return productDescriptionFromCaption(normalizeProductText(...texts));
+}
+
+/** Text-first primary color extraction for DB fields such as title/description/details. */
+export function primaryColorHintFromProductText(...texts: Array<string | null | undefined>): string | null {
+  return primaryColorHintFromCaption(normalizeProductText(...texts));
+}
+
+/** Text-first style extraction for DB fields such as title/description/details. */
+export function catalogStyleFromProductText(...texts: Array<string | null | undefined>): string | null {
+  const { attrStyle } = inferCatalogStyleAndOccasionFromText(normalizeProductText(...texts));
+  return attrStyle ?? null;
+}
+
+/** Text-first occasion extraction for DB fields such as title/description/details. */
+export function catalogOccasionFromProductText(...texts: Array<string | null | undefined>): string | null {
+  const { occasion } = inferCatalogStyleAndOccasionFromText(normalizeProductText(...texts));
+  return occasion ?? null;
+}
+
+/** Text-first material extraction for DB fields such as title/description/details. */
+export function catalogMaterialFromProductText(...texts: Array<string | null | undefined>): string | null {
+  const normalizedCaption = normalizeProductText(...texts).toLowerCase();
+  if (/\b(denim|jean)\b/.test(normalizedCaption)) return "denim";
+  if (/\b(cotton)\b/.test(normalizedCaption)) return "cotton";
+  if (/\b(linen)\b/.test(normalizedCaption)) return "linen";
+  if (/\b(leather|suede)\b/.test(normalizedCaption)) return "leather";
+  if (/\b(wool|knit|knitted|cashmere)\b/.test(normalizedCaption)) return "wool";
+  if (/\b(silk|satin)\b/.test(normalizedCaption)) return "silk";
+  return null;
+}
+
 /**
  * Text for `products.description` only: normalized sentence, never raw attribute dumps.
  * Returns null when the caption is too short or looks like color/audience only (those belong in other columns).
@@ -145,11 +206,30 @@ function inferCatalogGenderFromCombinedText(combined: string): string | null {
  * Returns normalized values: men | women | unisex | boys | girls.
  */
 export function catalogGenderFromProductText(...texts: Array<string | null | undefined>): string | null {
-  const combined = texts
-    .map((t) => String(t || "").trim())
-    .filter(Boolean)
-    .join(" ");
+  const combined = normalizeProductText(...texts);
   return inferCatalogGenderFromCombinedText(combined);
+}
+
+export function inferCatalogFieldsFromProductText(
+  title?: string | null,
+  description?: string | null,
+  details?: string | null,
+): {
+  description?: string | null;
+  color?: string | null;
+  gender?: string | null;
+  style?: string | null;
+  occasion?: string | null;
+  material?: string | null;
+} {
+  return {
+    description: productDescriptionFromProductText(title, description, details),
+    color: primaryColorHintFromProductText(title, description, details),
+    gender: catalogGenderFromProductText(title, description, details),
+    style: catalogStyleFromProductText(title, description, details),
+    occasion: catalogOccasionFromProductText(title, description, details),
+    material: catalogMaterialFromProductText(title, description, details),
+  };
 }
 
 /**

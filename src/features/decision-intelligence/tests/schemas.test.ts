@@ -14,6 +14,14 @@ test("schema accepts snake_case and camelCase fields", () => {
   assert.equal(parsed.occasion, "work");
 });
 
+test("schema accepts numeric string product IDs and normalizes to numbers", () => {
+  const parsed = CompareDecisionRequestSchema.parse({
+    product_ids: ["135598", "136405"],
+  });
+
+  assert.deepEqual(parsed.productIds, [135598, 136405]);
+});
+
 test("schema rejects duplicate IDs", () => {
   const result = CompareDecisionRequestSchema.safeParse({ productIds: [5, 5] });
   assert.equal(result.success, false);

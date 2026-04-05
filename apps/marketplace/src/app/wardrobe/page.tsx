@@ -38,8 +38,11 @@ export default function WardrobePage() {
   const queryClient = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
+  const COMPLETE_STYLE_LIMIT_STEP = 8
+  const COMPLETE_STYLE_LIMIT_MAX = 48
   const [selectedItem, setSelectedItem] = useState<WardrobeItem | null>(null)
   const [showCompleteStyle, setShowCompleteStyle] = useState(false)
+  const [completeStyleLimit, setCompleteStyleLimit] = useState(COMPLETE_STYLE_LIMIT_STEP)
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['wardrobe'],
@@ -81,12 +84,12 @@ export default function WardrobePage() {
   })
 
   const completeStyleQuery = useQuery({
-    queryKey: ['complete-style', selectedItem?.id],
+    queryKey: ['complete-style', selectedItem?.id, completeStyleLimit],
     queryFn: async () => {
       if (!selectedItem) return null
       const res = await api.post<{ suggestions?: CompleteLookSuggestion[] }>(endpoints.wardrobe.completeLook, {
         item_ids: [selectedItem.id],
-        limit: 8,
+        limit: completeStyleLimit,
       })
       const r = res as { success?: boolean; suggestions?: CompleteLookSuggestion[]; data?: CompleteLookSuggestion[]; error?: { message?: string } }
       if (r?.success === false) throw new Error(r?.error?.message ?? 'Failed to get suggestions')
@@ -150,6 +153,7 @@ export default function WardrobePage() {
 
   const openCompleteStyle = (item: WardrobeItem) => {
     setSelectedItem(item)
+    setCompleteStyleLimit(COMPLETE_STYLE_LIMIT_STEP)
     setShowCompleteStyle(true)
   }
 
@@ -402,15 +406,16 @@ export default function WardrobePage() {
                     <p className="text-sm text-neutral-500">{(completeStyleQuery.error as Error)?.message}</p>
                   </div>
                 ) : completeStyleQuery.data && completeStyleQuery.data.length > 0 ? (
-                  <motion.div
-                    initial="hidden"
-                    animate="visible"
-                    variants={{ visible: { transition: { staggerChildren: 0.06 } }, hidden: {} }}
-                    className="grid grid-cols-2 gap-4"
-                  >
-                    {(completeStyleQuery.data as CompleteLookSuggestion[])
-                      .filter((s) => suggestionProductId(s) != null)
-                      .map((s) => {
+                  <>
+                    <motion.div
+                      initial="hidden"
+                      animate="visible"
+                      variants={{ visible: { transition: { staggerChildren: 0.06 } }, hidden: {} }}
+                      className="grid grid-cols-2 gap-4"
+                    >
+                      {(completeStyleQuery.data as CompleteLookSuggestion[])
+                        .filter((s) => suggestionProductId(s) != null)
+                        .map((s) => {
                         const pid = suggestionProductId(s)!
                         const cents = s.price_cents
                         const priceLabel =
@@ -457,7 +462,31 @@ export default function WardrobePage() {
                       </motion.div>
                         )
                       })}
-                  </motion.div>
+                    </motion.div>
+
+                    {(() => {
+                      const dataLen = Array.isArray(completeStyleQuery.data) ? completeStyleQuery.data.length : 0
+                      const canLoadMore =
+                        dataLen >= completeStyleLimit && completeStyleLimit < COMPLETE_STYLE_LIMIT_MAX
+                      if (!canLoadMore) return null
+                      return (
+                        <div className="mt-5 flex justify-center">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCompleteStyleLimit((prev) =>
+                                Math.min(COMPLETE_STYLE_LIMIT_MAX, prev + COMPLETE_STYLE_LIMIT_STEP)
+                              )
+                            }
+                            disabled={completeStyleQuery.isFetching}
+                            className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-violet-200 bg-violet-50 text-violet-700 font-semibold text-sm hover:bg-violet-100 transition-colors disabled:opacity-60"
+                          >
+                            {completeStyleQuery.isFetching ? 'Loading…' : 'Load more'}
+                          </button>
+                        </div>
+                      )
+                    })()}
+                  </>
                 ) : (
                   <div className="text-center py-12">
                     <div className="w-14 h-14 rounded-2xl bg-neutral-100 flex items-center justify-center mx-auto mb-4">
