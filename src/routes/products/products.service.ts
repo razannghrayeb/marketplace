@@ -853,6 +853,12 @@ function imageMustKeepVisualAudienceMin(): number {
   return Math.max(0, Math.min(1, raw));
 }
 
+function imageGenderUnknownVisualMinSimilarity(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_GENDER_UNKNOWN_MIN_SIM ?? "0.82");
+  if (!Number.isFinite(raw)) return 0.82;
+  return Math.max(0.5, Math.min(0.99, raw));
+}
+
 function imageBlipAlignmentWeight(): number {
   const raw = Number(process.env.SEARCH_IMAGE_BLIP_ALIGNMENT_WEIGHT ?? "0.3");
   if (!Number.isFinite(raw)) return 0.3;
@@ -2493,15 +2499,19 @@ export async function searchByImageWithSimilarity(
         : wantG === "men"
           ? ["women", "womens", "female", "ladies", "woman", "girl", "girls", "boy", "boys", "kid", "kids", "youth", "toddler", "baby"]
           : [];
+    const unknownGenderMinSim = imageGenderUnknownVisualMinSimilarity();
 
     const matches = (hit: any) => {
       const dg = docGender(hit);
       const t = title(hit?._source?.title);
       if (dg === wantG) return true;
+      if (dg === "unisex") return true;
+      if (dg) return false;
       const hasWant = wantKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(t));
-      if (!hasWant) return false;
       if (oppKw.length > 0 && oppKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(t))) return false;
-      return true;
+      if (hasWant) return true;
+      if (!dg && visualSimFromHit(hit) >= unknownGenderMinSim) return true;
+      return false;
     };
 
     const filtered = sortedByRelevance.filter((h: any) => matches(h));
@@ -2585,7 +2595,13 @@ export async function searchByImageWithSimilarity(
     if (hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) {
       const desiredSleeveNorm = String(desiredSleeveForRelevance ?? "").toLowerCase();
       const enforceSleeveGate = desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless";
-      const minTypeCompliance = hasDetectionAnchoredTypeIntent ? 0.5 : 0.38;
+      const minTypeCompliance = hasDetectionAnchoredTypeIntent
+        ? visualGatedHits.length >= 30
+          ? 0.5
+          : visualGatedHits.length >= 12
+            ? 0.4
+            : 0.3
+        : 0.38;
       const preferredTypeAligned = visualGatedHits.filter((h: any) => {
         const comp = complianceById.get(String(h._source.product_id));
         if (!comp) return false;
@@ -2607,8 +2623,22 @@ export async function searchByImageWithSimilarity(
         
         return true;
       });
-      if (preferredTypeAligned.length > 0 || hasDetectionAnchoredTypeIntent) {
+      if (preferredTypeAligned.length > 0) {
         rescuePool = preferredTypeAligned;
+      } else if (hasDetectionAnchoredTypeIntent) {
+        const fallbackTypeAligned = visualGatedHits.filter((h: any) => {
+          const comp = complianceById.get(String(h._source.product_id));
+          if (!comp) return false;
+          if ((comp.audienceCompliance ?? 1) < 0.55) return false;
+          if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
+          if ((comp.exactTypeScore ?? 0) < 1 && (comp.productTypeCompliance ?? 0) < 0.22) return false;
+          if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < 0.1) return false;
+          if (desiredColorsForRelevance.length > 0 && (comp.colorCompliance ?? 0) < 0.18) return false;
+          return true;
+        });
+        if (fallbackTypeAligned.length > 0) {
+          rescuePool = fallbackTypeAligned;
+        }
       }
     }
     // Use visual similarity as the rescue signal instead of a flat minimum.

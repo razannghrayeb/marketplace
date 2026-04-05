@@ -1000,51 +1000,98 @@ POST /api/compare
 ```json
 {
   "product_ids": [12345, 12346, 12347],
-  "analysis_type": "full"
+  "compare_goal": "best_value",
+  "occasion": "work"
 }
 ```
+
+#### Request Fields
+| Field | Type | Required | Description |
+|------|------|----------|-------------|
+| product_ids | number[] | Yes | 2 to 5 product IDs |
+| compare_goal | string | No | best_value, premium_quality, style_match, low_risk_return, occasion_fit |
+| occasion | string | No | casual, work, formal, party, travel |
 
 #### Example Response
 ```json
 {
-  "success": true,
-  "data": {
-    "winner": {
-      "product_id": 12345,
-      "title": "Nike Air Max 90",
-      "overall_score": 89,
-      "verdict": "recommended"
+  "verdict": {
+    "title": "Product A is the safer choice",
+    "subtitle": "Based on description quality, pricing stability, and seller information",
+    "bullet_points": ["Stable and consistent pricing", "Clear return/exchange policy"],
+    "tradeoff": "Product B is 12% cheaper but has limited details.",
+    "confidence_label": "High Confidence",
+    "confidence_description": "Clear differences in quality signals",
+    "recommendation": "We recommend Product A based on overall quality signals."
+  },
+  "comparison_details": {
+    "winner_id": 12345,
+    "is_tie": false,
+    "score_difference": 14
+  },
+  "comparison_context": {
+    "mode": "scenario_compare",
+    "comparable": true,
+    "reason": "All selected products are in the same comparison group (footwear).",
+    "category_groups": {
+      "12345": "footwear",
+      "12346": "footwear"
     },
-    "comparison": {
+    "requested_goal": "best_value",
+    "requested_occasion": "work"
+  },
+  "winners_by_goal": {
+    "overall": 12345,
+    "value": 12345,
+    "quality": 12346,
+    "style": 12346,
+    "risk": 12345,
+    "occasion": 12345
+  },
+  "risk_summary": {
+    "overall_risk_level": "medium",
+    "product_risks": {
       "12345": {
-        "overall_score": 89,
-        "quality_level": "green",
-        "scores": {
-          "text_quality": 92,
-          "price_analysis": 85,
-          "image_quality": 90,
-          "policy_score": 88
-        },
-        "strengths": ["detailed_description", "competitive_pricing", "good_return_policy"],
-        "weaknesses": ["limited_size_info"]
-      },
-      "12346": {
-        "overall_score": 75,
-        "quality_level": "yellow",
-        "scores": {...},
-        "strengths": [...],
-        "weaknesses": [...]
+        "risk_score": 24,
+        "risk_level": "low",
+        "reasons": ["Return policy present"]
       }
-    },
-    "recommendations": [
-      {
-        "type": "price_alert",
-        "message": "Product 12345 is priced 15% below market average"
-      }
-    ]
+    }
+  },
+  "timing_insight": {
+    "recommendation": "monitor",
+    "reason": "Some risk signals exist. Monitor price and listing updates before checkout."
+  },
+  "alternatives": {
+    "better_cheaper_product_id": 12347,
+    "better_quality_product_id": 12346,
+    "similar_style_safer_product_id": 12345
+  },
+  "evidence": [
+    "Selected winner has 11 points price safety advantage.",
+    "Style winner differs from requested goal winner, indicating a tradeoff."
+  ],
+  "shopping_insights": {
+    "best_quality_product_id": 12346,
+    "best_value_product_id": 12345,
+    "best_budget_product_id": 12347,
+    "weakest_link_product_id": 12348,
+    "notes": ["Best value-for-money balance: Product 12345."],
+    "suggested_next_action": "Use the quality and value picks to make your final decision."
+  },
+  "product_map": {
+    "12345": "A",
+    "12346": "B"
   }
 }
 ```
+
+#### Mode Behavior
+- direct_head_to_head: Same type, direct winner decision.
+- scenario_compare: Same major category but different subtype scenarios.
+- outfit_compare: Cross-category selection, outfit impact guidance (no fake direct winner).
+
+For full design and engineering details, see docs/compare-intelligent-shopping.md.
 
 ### Get Product Quality Analysis
 Get detailed quality analysis for a single product.

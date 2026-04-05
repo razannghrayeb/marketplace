@@ -2305,10 +2305,16 @@ export async function multiImageSearch(
         return (b.rerankScore ?? 0) - (a.rerankScore ?? 0);
       });
 
+    const preThresholdFinalResults = [...finalResults];
     finalResults = finalResults.filter(
       (r: any) =>
         typeof r.finalRelevance01 === "number" && r.finalRelevance01 >= multiImageEffectiveFinalMin,
     );
+    let finalFloorFallbackUsed = false;
+    if (finalResults.length === 0 && preThresholdFinalResults.length > 0) {
+      finalResults = preThresholdFinalResults.slice(0, Math.min(safeLimit, 5));
+      finalFloorFallbackUsed = true;
+    }
     finalResults.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
     finalResults = dedupeMultiImageResults(finalResults);
     finalResults = finalResults.slice(0, safeLimit);
@@ -2354,6 +2360,7 @@ export async function multiImageSearch(
         ...(hardConstraintRelaxationLevel > 0
           ? { hard_constraint_relaxation_level: hardConstraintRelaxationLevel }
           : {}),
+        ...(finalFloorFallbackUsed ? { final_floor_fallback_used: true } : {}),
         ...(geminiDegraded ? { gemini_degraded: true } : {}),
         ...(astPipelineDegraded ? { ast_pipeline_degraded: true } : {}),
       },

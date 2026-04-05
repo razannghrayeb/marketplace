@@ -10,6 +10,7 @@ import { endpoints } from '@/lib/api/endpoints'
 import { useCompareStore } from '@/store/compare'
 import { ProductCard } from '@/components/product/ProductCard'
 import type { Product } from '@/types/product'
+import { useState } from 'react'
 
 interface ProductSummary {
   product_id: number
@@ -40,10 +41,12 @@ interface CompareResult {
     score_difference: number
   }
   comparison_context?: {
-    mode: 'direct_head_to_head' | 'cross_category_guidance'
+    mode: 'direct_head_to_head' | 'scenario_compare' | 'outfit_compare'
     comparable: boolean
     reason: string
     category_groups: Record<number, string>
+    requested_goal: 'best_value' | 'premium_quality' | 'style_match' | 'low_risk_return' | 'occasion_fit'
+    requested_occasion: 'casual' | 'work' | 'formal' | 'party' | 'travel' | null
   }
   shopping_insights?: {
     best_quality_product_id: number | null
@@ -52,6 +55,38 @@ interface CompareResult {
     weakest_link_product_id: number | null
     notes: string[]
     suggested_next_action: string
+  }
+  winners_by_goal?: {
+    overall: number | null
+    value: number | null
+    quality: number | null
+    style: number | null
+    risk: number | null
+    occasion: number | null
+  }
+  evidence?: string[]
+  alternatives?: {
+    better_cheaper_product_id: number | null
+    better_quality_product_id: number | null
+    similar_style_safer_product_id: number | null
+  }
+  risk_summary?: {
+    overall_risk_level: 'low' | 'medium' | 'high'
+    product_risks: Record<number, {
+      risk_score: number
+      risk_level: 'low' | 'medium' | 'high'
+      reasons: string[]
+    }>
+  }
+  timing_insight?: {
+    recommendation: 'buy_now' | 'wait' | 'monitor'
+    reason: string
+  }
+  outfit_impact?: {
+    mode: 'outfit_compare'
+    outfit_winner_product_id: number | null
+    versatility_scores: Record<number, number>
+    gap_fill_scores: Record<number, number>
   }
   product_map?: Record<number, string>
 }
@@ -101,6 +136,8 @@ function ScoreRing({ score, color, size = 72 }: { score: number; color: string; 
 
 export default function ComparePage() {
   const { productIds, remove, clear } = useCompareStore()
+  const [compareGoal, setCompareGoal] = useState<'best_value' | 'premium_quality' | 'style_match' | 'low_risk_return' | 'occasion_fit'>('best_value')
+  const [occasion, setOccasion] = useState<'casual' | 'work' | 'formal' | 'party' | 'travel' | ''>('')
 
   const { data: products, isLoading: loadingProducts } = useQuery({
     queryKey: ['compare-products', productIds],
@@ -118,7 +155,12 @@ export default function ComparePage() {
 
   const compareMutation = useMutation({
     mutationFn: async () => {
-      const res = await api.post<CompareResult>(endpoints.compare.root, { product_ids: productIds }) as Record<string, unknown>
+      const body: Record<string, unknown> = {
+        product_ids: productIds,
+        compare_goal: compareGoal,
+      }
+      if (occasion) body.occasion = occasion
+      const res = await api.post<CompareResult>(endpoints.compare.root, body) as Record<string, unknown>
       if (res?.success === false) throw new Error((res?.error as { message?: string })?.message)
       return (res?.data ?? res) as CompareResult
     },
@@ -195,6 +237,29 @@ export default function ComparePage() {
                 {!canCompare && <span className="ml-1.5 text-amber-600">(need at least 2)</span>}
               </p>
               <div className="flex items-center gap-2.5">
+                <select
+                  value={compareGoal}
+                  onChange={(e) => setCompareGoal(e.target.value as typeof compareGoal)}
+                  className="rounded-full border border-neutral-200 bg-white px-3 py-2 text-xs font-medium text-neutral-700"
+                >
+                  <option value="best_value">Best value</option>
+                  <option value="premium_quality">Premium quality</option>
+                  <option value="style_match">Style match</option>
+                  <option value="low_risk_return">Low risk return</option>
+                  <option value="occasion_fit">Occasion fit</option>
+                </select>
+                <select
+                  value={occasion}
+                  onChange={(e) => setOccasion(e.target.value as typeof occasion)}
+                  className="rounded-full border border-neutral-200 bg-white px-3 py-2 text-xs font-medium text-neutral-700"
+                >
+                  <option value="">Any occasion</option>
+                  <option value="casual">Casual</option>
+                  <option value="work">Work</option>
+                  <option value="formal">Formal</option>
+                  <option value="party">Party</option>
+                  <option value="travel">Travel</option>
+                </select>
                 <button onClick={clear} className="text-sm text-neutral-400 hover:text-rose-500 transition-colors">
                   Clear all
                 </button>
@@ -376,6 +441,62 @@ export default function ComparePage() {
                       )}
 
                       <p className="text-sm font-medium text-violet-700">{compareResult.shopping_insights.suggested_next_action}</p>
+                    </div>
+                  )}
+
+                  {compareResult.winners_by_goal && (
+                    <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm">
+                      <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Winners by customer goal</h3>
+                      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-sm">
+                        <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Overall: {getProductLetter(compareResult.winners_by_goal.overall) ? `Product ${getProductLetter(compareResult.winners_by_goal.overall)}` : 'N/A'}</p>
+                        <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Value: {getProductLetter(compareResult.winners_by_goal.value) ? `Product ${getProductLetter(compareResult.winners_by_goal.value)}` : 'N/A'}</p>
+                        <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Quality: {getProductLetter(compareResult.winners_by_goal.quality) ? `Product ${getProductLetter(compareResult.winners_by_goal.quality)}` : 'N/A'}</p>
+                        <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Style: {getProductLetter(compareResult.winners_by_goal.style) ? `Product ${getProductLetter(compareResult.winners_by_goal.style)}` : 'N/A'}</p>
+                        <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Risk: {getProductLetter(compareResult.winners_by_goal.risk) ? `Product ${getProductLetter(compareResult.winners_by_goal.risk)}` : 'N/A'}</p>
+                        <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Occasion: {getProductLetter(compareResult.winners_by_goal.occasion) ? `Product ${getProductLetter(compareResult.winners_by_goal.occasion)}` : 'N/A'}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {(compareResult.risk_summary || compareResult.timing_insight || compareResult.alternatives) && (
+                    <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm space-y-4">
+                      <h3 className="font-display text-lg font-bold text-neutral-900">Purchase risk and timing</h3>
+                      {compareResult.risk_summary && (
+                        <p className="text-sm text-neutral-700">Overall risk level: <span className="font-semibold uppercase">{compareResult.risk_summary.overall_risk_level}</span></p>
+                      )}
+                      {compareResult.timing_insight && (
+                        <p className="text-sm text-neutral-700">Timing: <span className="font-semibold">{compareResult.timing_insight.recommendation.replace('_', ' ')}</span> — {compareResult.timing_insight.reason}</p>
+                      )}
+                      {compareResult.alternatives && (
+                        <div className="grid sm:grid-cols-3 gap-3 text-sm">
+                          <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Better cheaper: {getProductLetter(compareResult.alternatives.better_cheaper_product_id) ? `Product ${getProductLetter(compareResult.alternatives.better_cheaper_product_id)}` : 'N/A'}</p>
+                          <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Better quality: {getProductLetter(compareResult.alternatives.better_quality_product_id) ? `Product ${getProductLetter(compareResult.alternatives.better_quality_product_id)}` : 'N/A'}</p>
+                          <p className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">Style safer: {getProductLetter(compareResult.alternatives.similar_style_safer_product_id) ? `Product ${getProductLetter(compareResult.alternatives.similar_style_safer_product_id)}` : 'N/A'}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {compareResult.outfit_impact && (
+                    <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm">
+                      <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Outfit impact (cross-category)</h3>
+                      <p className="text-sm text-neutral-700 mb-3">Outfit winner: {getProductLetter(compareResult.outfit_impact.outfit_winner_product_id) ? `Product ${getProductLetter(compareResult.outfit_impact.outfit_winner_product_id)}` : 'N/A'}</p>
+                      <div className="space-y-2">
+                        {Object.entries(compareResult.outfit_impact.versatility_scores).map(([id, score]) => (
+                          <p key={id} className="text-sm text-neutral-600">Product {getProductLetter(Number(id)) ?? id}: versatility {score}, gap-fill {compareResult.outfit_impact?.gap_fill_scores?.[Number(id)] ?? 0}</p>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {compareResult.evidence && compareResult.evidence.length > 0 && (
+                    <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-sm">
+                      <h3 className="font-display text-lg font-bold text-neutral-900 mb-4">Why this recommendation</h3>
+                      <div className="space-y-2">
+                        {compareResult.evidence.map((e, i) => (
+                          <p key={i} className="text-sm text-neutral-600">• {e}</p>
+                        ))}
+                      </div>
                     </div>
                   )}
 

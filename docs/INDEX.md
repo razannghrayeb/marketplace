@@ -29,6 +29,7 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 | **IMPLEMENTATION_STATUS.md** | What's implemented, bugs, gaps | Tech leads |
 | **architecture.md** | Module structure & patterns | Backend engineers |
 | **api-reference.md** | Complete API specification | API consumers |
+| **compare-intelligent-shopping.md** | Intelligent compare goals, modes, and response contract | Product, backend, frontend |
 
 ---
 
@@ -70,6 +71,7 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 |----------|------|
 | ...the whole system | `../README.md` → **`FEATURES.md`** → `SEARCH_API_COMPLETE.md` |
 | ...all API endpoints | `api-reference.md` (full spec) or `SEARCH_API_COMPLETE.md` |
+| ...intelligent fashion compare | `compare-intelligent-shopping.md` |
 | ...search capabilities | `SEARCH_API_COMPLETE.md` (user guide + technical) |
 | ...embeddings & how search uses vectors | **`embeddings-and-search-pipelines.md`** |
 | ...recommendations | `ml-models.md` → section on XGBoost Ranker |
@@ -90,6 +92,7 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 |------|------|
 | Implement a new search feature | **`embeddings-and-search-pipelines.md`** + `SEARCH_API_COMPLETE.md` + `api-reference.md` |
 | Add a new API endpoint | `architecture.md` (patterns) + `api-reference.md` (reference) |
+| Implement/adjust compare behavior | `compare-intelligent-shopping.md` + `api-reference.md` |
 | Fix a bug | `../IMPLEMENTATION_STATUS.md` (known bugs) |
 | Deploy to production | `deployment.md` + `database.md` |
 | Monitor models | `ranker-runbook.md` + `ml-models.md` |
