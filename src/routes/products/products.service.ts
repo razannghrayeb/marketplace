@@ -2030,16 +2030,12 @@ export async function searchByImageWithSimilarity(
     inferredPrimaryFromParams ?? (filtersRecord as { inferredPrimaryColor?: string | null }).inferredPrimaryColor,
     inferredByItemFromParams ?? (filtersRecord as { inferredColorsByItem?: Record<string, string | null> }).inferredColorsByItem,
   );
-  const hasDressLikeTypeIntent = desiredProductTypes.some((t) => /\b(dress|gown|frock)\b/.test(String(t).toLowerCase()));
-  const preferInferredColorsOverCrop =
-    !hasExplicitColorIntent &&
-    hasDressLikeTypeIntent &&
-    inferredColorTokens.length > 0;
+  const hasInferredColorSignal = inferredColorTokens.length > 0;
   const allColorsForRelevance = hasExplicitColorIntent
     ? [...explicitColorsForRelevance]
-    : preferInferredColorsOverCrop
+    : hasInferredColorSignal
       ? [...new Set([...inferredColorTokens])]
-      : [...new Set([...cropDominantColorsRaw, ...inferredColorTokens])];
+      : [...new Set([...cropDominantColorsRaw])];
   const desiredColorsForRelevance = [
     ...new Set(
       allColorsForRelevance.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),

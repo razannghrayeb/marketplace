@@ -590,10 +590,17 @@ type CompleteLookAnchorRow = {
 
 type AudienceGender = "men" | "women" | "unisex";
 
+type CompleteLookAudienceOptions = {
+  audienceGenderHint?: string | null;
+  allowUserAudienceFallback?: boolean;
+  enforceNeutralAudienceWhenUnknown?: boolean;
+};
+
 async function runCompleteLookCore(
   userId: number,
   currentItems: CompleteLookAnchorRow[],
-  limit: number
+  limit: number,
+  audienceOptions: CompleteLookAudienceOptions = {}
 ): Promise<CompleteLookSuggestionsResult> {
   const currentCategories = new Set<string>();
   const currentCategoryList: string[] = [];
@@ -626,7 +633,14 @@ async function runCompleteLookCore(
     currentItems,
     styleProfile?.season_coverage || []
   );
-  const inferredAudienceGender = await inferPreferredAudienceGender(userId, currentItems);
+  const hintedAudienceGender = normalizeAudienceGenderValue(audienceOptions.audienceGenderHint);
+  const inferredAudienceGender =
+    hintedAudienceGender ||
+    (await inferPreferredAudienceGender(userId, currentItems, {
+      allowWardrobeHistory: audienceOptions.allowUserAudienceFallback !== false,
+      allowUserProfile: audienceOptions.allowUserAudienceFallback !== false,
+    }));
+  const enforceNeutralAudienceWhenUnknown = Boolean(audienceOptions.enforceNeutralAudienceWhenUnknown);
   const missingCategories = inferMissingCategoriesForOutfit({
     currentCategories,
     warmWeatherLikely,
@@ -716,7 +730,7 @@ async function runCompleteLookCore(
         for (const hit of hits) {
           const source = hit._source || {};
           if (!sourceMatchesSlot(category, source)) continue;
-          if (!audienceGenderMatches(inferredAudienceGender, source)) continue;
+          if (!audienceGenderMatches(inferredAudienceGender, source, enforceNeutralAudienceWhenUnknown)) continue;
           const productId = parseInt(source.product_id, 10);
           if (!productId || ownedProductIds.has(String(productId))) continue;
 
@@ -864,6 +878,7 @@ async function runCompleteLookCore(
       preferredMaterials,
       preferredFormality,
       inferredAudienceGender,
+      enforceNeutralAudienceWhenUnknown,
       wardrobeColorFamilies,
       currentCategoryList,
       needed: limit - mergedSuggestions.length,
@@ -892,7 +907,8 @@ async function runCompleteLookCore(
 export async function completeLookSuggestions(
   userId: number,
   currentItemIds: number[],
-  limit: number = 10
+  limit: number = 10,
+  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint"> = {}
 ): Promise<CompleteLookSuggestionsResult> {
   const currentItemsResult = await pg.query(
     `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, wi.name, wi.image_url, wi.image_cdn,
@@ -906,7 +922,9 @@ export async function completeLookSuggestions(
     [currentItemIds, userId]
   );
 
-  return runCompleteLookCore(userId, currentItemsResult.rows as CompleteLookAnchorRow[], limit);
+  return runCompleteLookCore(userId, currentItemsResult.rows as CompleteLookAnchorRow[], limit, {
+    audienceGenderHint: options.audienceGenderHint,
+  });
 }
 
 /**
@@ -915,7 +933,8 @@ export async function completeLookSuggestions(
 export async function completeLookSuggestionsForCatalogProducts(
   userId: number,
   productIds: number[],
-  limit: number = 10
+  limit: number = 10,
+  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint"> = {}
 ): Promise<CompleteLookSuggestionsResult> {
   if (!Array.isArray(productIds) || productIds.length === 0) {
     return {
@@ -939,7 +958,11 @@ export async function completeLookSuggestionsForCatalogProducts(
     [productIds]
   );
 
-  return runCompleteLookCore(userId, productResult.rows as CompleteLookAnchorRow[], limit);
+  return runCompleteLookCore(userId, productResult.rows as CompleteLookAnchorRow[], limit, {
+    audienceGenderHint: options.audienceGenderHint,
+    allowUserAudienceFallback: false,
+    enforceNeutralAudienceWhenUnknown: true,
+  });
 }
 
 function topHistogramKeys(histogram?: Record<string, number> | null, limit: number = 3): string[] {
@@ -975,7 +998,8 @@ function inferGenderFromText(text: string): AudienceGender | null {
 
 async function inferPreferredAudienceGender(
   userId: number,
-  currentItems: CompleteLookAnchorRow[]
+  currentItems: CompleteLookAnchorRow[],
+  options: { allowWardrobeHistory?: boolean; allowUserProfile?: boolean } = {}
 ): Promise<AudienceGender | null> {
   const counts: Record<AudienceGender, number> = { men: 0, women: 0, unisex: 0 };
 
@@ -991,7 +1015,7 @@ async function inferPreferredAudienceGender(
     if (textSignal) counts[textSignal] += 1;
   }
 
-  if (counts.men === 0 && counts.women === 0) {
+  if (counts.men === 0 && counts.women === 0 && options.allowWardrobeHistory !== false) {
     const wardrobeGenderRows = await pg
       .query(
         `SELECT p.gender, COUNT(*)::int AS cnt
@@ -1012,18 +1036,21 @@ async function inferPreferredAudienceGender(
     }
   }
 
-  if (counts.men === 0 && counts.women === 0) {
+  if (counts.men === 0 && counts.women === 0 && options.allowUserProfile !== false) {
     const userGender = await pg
       .query(`SELECT gender FROM users WHERE id = $1`, [userId])
       .then((r) => normalizeAudienceGenderValue(r.rows?.[0]?.gender))
       .catch(() => null);
-    if (userGender && userGender !== "unisex") counts[userGender] += 1;
+    if (userGender && userGender !== "unisex") {
+      counts[userGender] += 5; // Strong weight: user profile takes precedence over weak item signals
+    }
   }
 
   if (counts.men === 0 && counts.women === 0 && counts.unisex === 0) return null;
   if (counts.men >= counts.women && counts.men > 0) return "men";
-  if (counts.women > counts.men && counts.women > 0) return "women";
-  return counts.unisex > 0 ? "unisex" : null;
+  if (counts.women > counts.men) return "women";
+  // Only return unisex if truly no gender signal from user, wardrobe, or profile
+  return null;
 }
 
 function buildAudienceGenderFilter(gender: "men" | "women"): any {
@@ -1059,13 +1086,27 @@ function buildAudienceGenderFilter(gender: "men" | "women"): any {
   };
 }
 
-function audienceGenderMatches(inferred: AudienceGender | null, source: any): boolean {
-  if (!inferred || inferred === "unisex") return true;
+function audienceGenderMatches(
+  inferred: AudienceGender | null,
+  source: any,
+  enforceNeutralWhenUnknown: boolean = false
+): boolean {
+  const textBlob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(
+    source?.category_canonical || ""
+  )}`;
   const doc = normalizeAudienceGenderValue(source?.audience_gender ?? source?.attr_gender);
+
+  if (!inferred || inferred === "unisex") {
+    if (!enforceNeutralWhenUnknown) return true;
+    if (doc && doc !== "unisex") return false;
+    const fromTextUnknown = inferGenderFromText(textBlob);
+    return !fromTextUnknown;
+  }
+
   if (doc) {
     return doc === inferred || doc === "unisex";
   }
-  const fromText = inferGenderFromText(String(source?.title || ""));
+  const fromText = inferGenderFromText(textBlob);
   return !fromText || fromText === inferred;
 }
 
@@ -1186,6 +1227,7 @@ async function fetchCategoryTopUpSuggestions(params: {
   preferredMaterials: string[];
   preferredFormality: "casual" | "business" | "formal" | "mixed";
   inferredAudienceGender: AudienceGender | null;
+  enforceNeutralAudienceWhenUnknown?: boolean;
   wardrobeColorFamilies: Set<string>;
   currentCategoryList: string[];
   needed: number;
@@ -1268,7 +1310,14 @@ async function fetchCategoryTopUpSuggestions(params: {
   for (const hit of hits) {
     const source = hit?._source || {};
     if (!params.missingCategories.some((slot) => sourceMatchesSlot(slot, source))) continue;
-    if (!audienceGenderMatches(params.inferredAudienceGender, source)) continue;
+    if (
+      !audienceGenderMatches(
+        params.inferredAudienceGender,
+        source,
+        Boolean(params.enforceNeutralAudienceWhenUnknown)
+      )
+    )
+      continue;
     const productId = parseInt(source.product_id, 10);
     if (!productId) continue;
     const productKey = String(productId);

@@ -2146,7 +2146,9 @@ export async function multiImageSearch(
       relevanceIntent,
     );
     let hardConstraintRelaxationLevel: 0 | 1 | 2 = 0;
+    let hardConstraintFallbackUsed = false;
     if (hardConstraints.enabled && hits.length > 0) {
+      const preHardConstraintHits = hits;
       const strictHits = hits.filter((hit: any) =>
         multiImageHitPassesHardConstraints(
           hit,
@@ -2181,7 +2183,10 @@ export async function multiImageSearch(
             hits = lv2Hits;
             hardConstraintRelaxationLevel = 2;
           } else {
-            hits = strictHits;
+            // Preserve recall when strict and relaxed hard gates all empty out.
+            hits = preHardConstraintHits;
+            hardConstraintRelaxationLevel = 2;
+            hardConstraintFallbackUsed = true;
           }
         }
       }
@@ -2360,6 +2365,7 @@ export async function multiImageSearch(
         ...(hardConstraintRelaxationLevel > 0
           ? { hard_constraint_relaxation_level: hardConstraintRelaxationLevel }
           : {}),
+        ...(hardConstraintFallbackUsed ? { hard_constraint_fallback_used: true } : {}),
         ...(finalFloorFallbackUsed ? { final_floor_fallback_used: true } : {}),
         ...(geminiDegraded ? { gemini_degraded: true } : {}),
         ...(astPipelineDegraded ? { ast_pipeline_degraded: true } : {}),
@@ -2441,6 +2447,27 @@ function collectConstraintKeywords(values: unknown[]): string[] {
   return out;
 }
 
+function compactConstraintKeywords(
+  values: unknown[],
+  options?: { maxKeywords?: number },
+): string[] {
+  const maxKeywords = Math.max(1, options?.maxKeywords ?? 6);
+  const raw = collectConstraintKeywords(values);
+  if (raw.length <= maxKeywords) return raw;
+
+  const prioritized = raw
+    .slice()
+    .sort((a, b) => {
+      // Keep specific multi-token phrases before generic single words.
+      const aWords = a.split(" ").length;
+      const bWords = b.split(" ").length;
+      if (aWords !== bWords) return bWords - aWords;
+      return b.length - a.length;
+    });
+
+  return prioritized.slice(0, maxKeywords);
+}
+
 function buildMultiImageHardConstraints(
   ast: QueryAST,
   parsedIntent: ParsedIntent,
@@ -2497,17 +2524,29 @@ function buildMultiImageHardConstraints(
     normalizeQueryGender(ast.entities?.gender) ??
     undefined;
 
-  const requiredKeywords = collectConstraintKeywords([
+  const explicitMustHave = collectConstraintKeywords([
     parsedIntent.constraints?.mustHave ?? [],
-    ast.entities?.productTypes ?? [],
-    ast.entities?.colors ?? [],
-    promptTypeTerms,
-    promptColorTerms,
   ]);
+  const promptTypedKeywords = compactConstraintKeywords(
+    [promptTypeTerms, ast.entities?.productTypes ?? []],
+    { maxKeywords: 4 },
+  );
+  const promptColorKeywords = compactConstraintKeywords(
+    [promptColorTerms, ast.entities?.colors ?? []],
+    { maxKeywords: 3 },
+  );
+  const requiredKeywords = compactConstraintKeywords(
+    [explicitMustHave, promptTypedKeywords, promptColorKeywords],
+    { maxKeywords: 6 },
+  );
   const minRequiredKeywordMatches =
     requiredKeywords.length <= 1
       ? requiredKeywords.length
-      : Math.max(1, Math.ceil(requiredKeywords.length * 0.7));
+      : requiredKeywords.length <= 3
+        ? 1
+        : requiredKeywords.length <= 5
+          ? 2
+          : 3;
 
   const forbiddenKeywords = collectConstraintKeywords([
     parsedIntent.constraints?.mustNotHave ?? [],
@@ -2626,6 +2665,26 @@ function multiImageProductPassesHardConstraints(
     if (hard.minPrice != null && price < hard.minPrice) return false;
     if (hard.maxPrice != null && price > hard.maxPrice) return false;
   }
+
+  if (hard.brands.length > 0) {
+    const brand = String(product?.brand ?? "").toLowerCase();
+    if (!brand || !hard.brands.some((b) => brand.includes(b) || b.includes(brand))) return false;
+  }
+
+  if (hard.categoryTerms.length > 0) {
+    const cat = String(product?.category ?? "").toLowerCase();
+    if (!hard.categoryTerms.some((t) => cat.includes(t) || blob.includes(t))) return false;
+  }
+
+  if (hard.gender) {
+    const g = normalizeQueryGender(
+      String(product?.audience_gender ?? product?.attr_gender ?? product?.gender ?? ""),
+    ) ?? undefined;
+    if (g && g !== hard.gender && !(g === "unisex" && (hard.gender === "men" || hard.gender === "women"))) {
+      return false;
+    }
+  }
+
   if (hard.forbiddenKeywords.length > 0 && hard.forbiddenKeywords.some((t) => blob.includes(t))) {
     return false;
   }

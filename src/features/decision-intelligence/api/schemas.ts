@@ -14,11 +14,15 @@ const occasionSchema = z.enum(["casual", "work", "formal", "party", "travel"]);
 const modeSchema = z.enum(["standard", "alter_ego"]);
 
 const preferenceSchema = z.number().min(0).max(1);
+const positiveIntFromNumberOrStringSchema = z
+  .union([z.number(), z.string().regex(/^\d+$/)])
+  .transform((v) => Number(v))
+  .pipe(z.number().int().positive());
 
 export const CompareDecisionRequestSchema = z
   .object({
-    productIds: z.array(z.number().int().positive()).min(2).max(5).optional(),
-    product_ids: z.array(z.number().int().positive()).min(2).max(5).optional(),
+    productIds: z.array(positiveIntFromNumberOrStringSchema).min(2).max(5).optional(),
+    product_ids: z.array(positiveIntFromNumberOrStringSchema).min(2).max(5).optional(),
     compareGoal: compareGoalSchema.optional(),
     compare_goal: compareGoalSchema.optional(),
     occasion: occasionSchema.optional(),
