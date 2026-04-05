@@ -117,15 +117,9 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 
 ## 🔄 Recent Changes
 
-**April 2026:** Documented image-ranking hardening in **`embeddings-and-search-pipelines.md`**:
-- unified `v1`/`v2` score normalization via vector score-version tags
-- calibrated dual-kNN blend (replacing optimistic `max`)
-- explicit stage-8 relevance behavior + intent-aware rescue
-- BLIP consistency suppression + bounded alignment boost + cache/env tuning
-- optional external BLIP service (`BLIP_API_URL`) deployment notes in `deploy-cloud-run.md`
+**April 2026:** Image-ranking hardening in **`embeddings-and-search-pipelines.md`**: unified `v1`/`v2` score normalization, calibrated dual-kNN blend, stage-8 relevance, BLIP consistency/alignment tuning, intent-aware rescue; optional **`BLIP_API_URL`** in **`deploy-cloud-run.md`**.
 
-**March 2026:** Added **`embeddings-and-search-pipelines.md`** — canonical map of OpenSearch vector fields, ingestion vs image/text query pipelines, and env vars.
-
+**March 2026:** Added **`embeddings-and-search-pipelines.md`** and **`FEATURES.md`** — vector field map, ingest/query pipelines, feature ↔ endpoint map.
 **Earlier consolidation:** legacy standalone search guides were merged into `SEARCH_API_COMPLETE.md`. **Current docs hub:** `FEATURES.md`, `embeddings-and-search-pipelines.md`, `IMPLEMENTATION_STATUS.md`.
 
 ---
@@ -226,4 +220,4 @@ Documentation is considered complete when:
 ---
 
 **Last Updated:** April 2026
-**Docs Status:** Search pipeline architecture + April ranking hardening documented in **`embeddings-and-search-pipelines.md`**
+**Docs Status:** Search pipeline architecture + ranking hardening documented in **`embeddings-and-search-pipelines.md`**; **`FEATURES.md`** for endpoints.

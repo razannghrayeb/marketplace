@@ -425,34 +425,23 @@ export async function getOutfitSuggestions(
   return outfits.sort((a, b) => b.score - a.score);
 }
 
-/**
- * Get "complete the look" suggestions for a partial outfit
- */
-export async function completeLookSuggestions(
+/** Rows that anchor complete-look (wardrobe items or catalog products). */
+type CompleteLookAnchorRow = {
+  id?: number;
+  product_id?: number | null;
+  embedding?: unknown;
+  dominant_colors?: Array<{ hex?: string }>;
+  name?: string | null;
+  image_url?: string | null;
+  image_cdn?: string | null;
+  category_name?: string | null;
+};
+
+async function runCompleteLookCore(
   userId: number,
-  currentItemIds: number[],
-  limit: number = 10
+  currentItems: CompleteLookAnchorRow[],
+  limit: number
 ): Promise<CompleteLookSuggestionsResult> {
-  const currentItemsResult = await pg.query(
-    `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, wi.name, wi.image_url, wi.image_cdn,
-            c.name as category_name
-     FROM wardrobe_items wi
-     LEFT JOIN categories c ON wi.category_id = c.id
-     WHERE wi.id = ANY($1) AND wi.user_id = $2`,
-    [currentItemIds, userId]
-  );
-
-  const currentItems = currentItemsResult.rows as Array<{
-    id: number;
-    product_id?: number | null;
-    embedding?: unknown;
-    dominant_colors?: Array<{ hex?: string }>;
-    name?: string | null;
-    image_url?: string | null;
-    image_cdn?: string | null;
-    category_name?: string | null;
-  }>;
-
   const currentCategories = new Set<string>();
   const currentCategoryList: string[] = [];
   const pushCategory = (normalized: string | null) => {

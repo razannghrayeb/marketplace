@@ -84,32 +84,16 @@ At index time, **attribute vectors** (`embedding_color`, …) are included when 
    **Root mismatch (fixed):** Ignoring `knnField` and always querying `embedding` with a **crop** vector while the index held **full-frame** `embedding` caused weak “similar” hits; garment field + `processImageForGarmentEmbedding` on the crop aligns query/index spaces.
 6. **Query-side attribute embeddings:** from the **same upload buffer**, parallel CLIP attribute encodings (`attributeEmbeddings.generateImageAttributeEmbedding` for color / style / pattern) — used to score hits against stored `embedding_color` / `embedding_style` / `embedding_pattern` on candidates (not necessarily a second full kNN for each).
 7. **Composite score** — blends visual similarity, category soft match, and attribute cosine scores (weights env-tunable, e.g. `SEARCH_IMAGE_RERANK_COLOR_WEIGHT`).
-8. **Relevance layer (explicit stage-8 math)** — final relevance is now explicit and auditable (visual + compliance with hard cross-family/type gates), then filtered by `config.search.finalAcceptMinImage`.
+8. **Relevance layer (explicit stage-8 math)** — final relevance is explicit and auditable (visual + compliance with hard cross-family/type gates), then filtered by `config.search.finalAcceptMinImage`.
 9. **Optional related** — `findSimilarByPHash` when `includeRelated` and pHash present.
 
 ### 4.1 April 2026 ranking hardening (what changed)
 
-1. **Unified score normalization**
-   - Candidate visual score now flows through one version-aware normalizer (`v1` legacy / `v2` cosine).
-   - New docs are indexed with `embedding_score_version=v2` and `embedding_garment_score_version=v2`.
-
-2. **Dual-kNN fusion is calibrated blend (not `max`)**
-   - Replaced optimistic `max(sim_global, sim_garment)` with category-weighted interpolation.
-   - Default alpha map: `tops=0.35`, `accessories=0.5`, `default=0.4`.
-   - Keeps a disagreement trace (`|sim_g - sim_r|`) for diagnostics.
-
-3. **BLIP alignment boost is bounded additive**
-   - Replaced multiplicative compounding (`sim_merch * align_blip`) with:
-     - `sim_visual = sim_merch + (1 - sim_merch) * boost01`
-   - `boost01` is capped and confidence-weighted with explicit feature weights
-     (`type > color > style > audience > material > occasion`).
-
-4. **Per-detection BLIP consistency suppression**
-   - Caption consistency now uses piecewise suppression (off/ramp/on) instead of a permanent non-zero floor.
-   - Low-consistency captions can be fully suppressed.
-
-5. **Sparse-result rescue is intent-aware**
-   - Rescue neighbors still prevent empty pages, but now enforce minimum type/color/style compliance when those intents are active.
+1. **Unified score normalization** — version-aware normalizer (`v1` legacy / `v2` cosine); new docs indexed with `embedding_score_version=v2` and `embedding_garment_score_version=v2`.
+2. **Dual-kNN fusion** — calibrated category-weighted blend (not `max(sim_global, sim_garment)`); default alpha map `tops=0.35`, `accessories=0.5`, `default=0.4`.
+3. **BLIP alignment boost** — bounded additive form `sim_visual = sim_merch + (1 - sim_merch) * boost01` with capped, confidence-weighted features.
+4. **BLIP consistency suppression** — piecewise (off/ramp/on); low-consistency captions can be fully suppressed.
+5. **Sparse-result rescue** — intent-aware minimums for type/color/style when those intents are active.
 
 **Facade export:** `GET /products/search` title search and `POST /products/search/image` both route through `fashionSearchFacade.ts` so the storefront can share one mental model.
 
@@ -166,7 +150,7 @@ At index time, **attribute vectors** (`embedding_color`, …) are included when 
 1. After changing **CLIP model** or **dimension**: recreate or migrate index (`recreateIndex` / migrations), set `EXPECTED_EMBEDDING_DIM`, **reindex** all products.
 2. If **image search** is slow: check BLIP cap, YOLO timeout, attribute embedding cache (`src/lib/cache/embeddingCache.ts`), and OpenSearch latency.
 3. If **results ignore color**: ensure **query** passes color intent or quick hints run; confirm index has `attr_colors` / `color_*` and rerank weights; verify `embedding_color` backfill for older docs.
-4. **After April 2026 preprocessing fix**: run a **full reindex** (`npx tsx scripts/resume-reindex.ts`) to regenerate all embeddings with the corrected `fit: "cover"` + raw-image pipeline. Without reindexing, stored vectors use the old `fit: "contain"` (letterbox) + rembg preprocessing and will have poor cosine similarity against new query-time vectors.
+4. **After April 2026 preprocessing fix**: run a **full reindex** (`npx tsx scripts/resume-reindex.ts`) to regenerate embeddings with the corrected `fit: "cover"` + raw-image pipeline. Without reindexing, older stored vectors may misalign with new query-time vectors.
 
 ---
 

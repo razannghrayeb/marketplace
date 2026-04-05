@@ -1,18 +1,13 @@
 /node_modules
+/models
 /.venv
-.env
-.env.*
-!.env.example
-node_modules/
-.next/
-dist/
-build/
 /src/lib/model/__pycache__
 /src/lib/model/.venv
 /src/lib/model/.venv311
 /data
 /dist
 /src/lib/model/data
+<<<<<<< HEAD
 /dist/
 # ML models are stored on HuggingFace: razangh/fashion-models
 # Run `pnpm models:download` (or `python scripts/download-models.py`) to restore them locally.
@@ -21,3 +16,6 @@ build/
 
 
 
+=======
+/dist/
+>>>>>>> 42892add (added new website that i created and modified it with the dashboard)

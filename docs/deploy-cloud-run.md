@@ -204,11 +204,8 @@ If YOLO is unreachable, routes **fall back** to whole-image embedding search.
 
 The API supports two BLIP modes:
 
-1. **Local ONNX BLIP in Node** (default)  
-   `BLIP_API_URL` unset.
-2. **External BLIP service** (recommended for large HF instruct BLIP models)  
-   Set `BLIP_API_URL` and run the dedicated service built from
-   `src/lib/model/Dockerfile.blip`.
+1. **Local ONNX BLIP in Node** (default) — `BLIP_API_URL` unset.
+2. **External BLIP service** (recommended for large HF instruct BLIP models) — set `BLIP_API_URL` and run the dedicated service built from `src/lib/model/Dockerfile.blip`.
 
 ### Build and deploy BLIP service (Cloud Run GPU)
 

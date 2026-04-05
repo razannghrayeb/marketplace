@@ -17,12 +17,47 @@ interface Props {
   onClose: () => void
 }
 
-type Tab = 'details' | 'images' | 'history'
+type Tab = 'details' | 'images' | 'history' | 'style'
+
+interface StyleRecommendation {
+  category: string
+  reason: string
+  priority: number
+  priorityLabel: string
+  products: Array<{
+    id: number
+    title: string
+    brand?: string
+    price: number
+    currency: string
+    image?: string
+    matchScore: number
+    matchReasons: string[]
+  }>
+}
+
+interface StyleData {
+  sourceProduct: { id: number; title: string; brand?: string }
+  detectedCategory: string
+  style: {
+    occasion: string
+    aesthetic: string
+    season: string
+    formality: number
+    colorProfile: { primary: string; type: string }
+  }
+  outfitSuggestion: string
+  recommendations: StyleRecommendation[]
+  totalRecommendations: number
+}
 
 export function ProductDrawer({ product: p, onClose }: Props) {
   const [tab, setTab]           = useState<Tab>('details')
   const [history, setHistory]   = useState<PriceHistory[]>([])
   const [loadingH, setLoadingH] = useState(false)
+  const [styleData, setStyleData] = useState<StyleData | null>(null)
+  const [styleError, setStyleError] = useState<string | null>(null)
+  const [loadingS, setLoadingS] = useState(false)
 
   const flags = getProductFlags(p)
   const active = getActiveFlags(flags)
@@ -37,6 +72,27 @@ export function ProductDrawer({ product: p, onClose }: Props) {
         .finally(() => setLoadingH(false))
     }
   }, [tab, p.id, history.length])
+
+  useEffect(() => {
+    if (tab === 'style' && !styleData && !styleError) {
+      setLoadingS(true)
+      const base = process.env.NEXT_PUBLIC_MARKETPLACE_API_URL || 'http://localhost:4000'
+      fetch(`${base}/products/${p.id}/complete-style?maxPerCategory=5&maxTotal=12`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.success && d.data) {
+            setStyleData(d.data)
+          } else {
+            setStyleError(d.error?.message || 'Failed to load style recommendations')
+          }
+        })
+        .catch((err) => {
+          console.error('Style error:', err)
+          setStyleError(err.message || 'Failed to load style recommendations')
+        })
+        .finally(() => setLoadingS(false))
+    }
+  }, [tab, p.id, styleData, styleError])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
@@ -59,6 +115,7 @@ export function ProductDrawer({ product: p, onClose }: Props) {
     { id: 'details', label: 'Details' },
     { id: 'images', label: `Images${images.length ? ` (${images.length})` : ''}` },
     { id: 'history', label: 'Price history' },
+    { id: 'style', label: 'Complete style' },
   ]
 
   return (
@@ -254,6 +311,79 @@ export function ProductDrawer({ product: p, onClose }: Props) {
                   </div>
                 </>
               )}
+            </div>
+          )}
+
+          {tab === 'style' && (
+            <div className="space-y-4">
+              {loadingS ? (
+                <div className="text-xs text-gray-400 py-8 text-center">Loading style recommendations...</div>
+              ) : styleError ? (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                  <p className="text-xs text-red-700">{styleError}</p>
+                </div>
+              ) : styleData ? (
+                <>
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                    <p className="text-xs text-gray-600 mb-2">
+                      <span className="font-semibold">{styleData.detectedCategory || 'Unknown'}</span>
+                      {' - '}
+                      {styleData.outfitSuggestion}
+                    </p>
+                    <div className="grid grid-cols-2 gap-2 text-[10px]">
+                      <div className="text-gray-600">
+                        <span className="font-semibold">Occasion:</span> {styleData.style.occasion}
+                      </div>
+                      <div className="text-gray-600">
+                        <span className="font-semibold">Aesthetic:</span> {styleData.style.aesthetic}
+                      </div>
+                      <div className="text-gray-600">
+                        <span className="font-semibold">Season:</span> {styleData.style.season}
+                      </div>
+                      <div className="text-gray-600">
+                        <span className="font-semibold">Formality:</span> {styleData.style.formality}/10
+                      </div>
+                    </div>
+                  </div>
+
+                  {styleData.recommendations.map((rec) => (
+                    <div key={rec.category} className="bg-gray-50 rounded-lg p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="text-xs font-semibold text-gray-900 capitalize">{rec.category}</h4>
+                        <Badge color={rec.priority === 1 ? 'red' : rec.priority === 2 ? 'yellow' : 'gray'}>
+                          {rec.priorityLabel}
+                        </Badge>
+                      </div>
+                      <p className="text-[10px] text-gray-600 mb-2">{rec.reason}</p>
+                      <div className="space-y-1.5">
+                        {rec.products.slice(0, 3).map((prod) => (
+                          <div key={prod.id} className="flex items-start gap-2 bg-white rounded p-1.5">
+                            {prod.image && (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={prod.image}
+                                alt={prod.title}
+                                className="w-8 h-8 rounded object-cover shrink-0"
+                              />
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-medium text-gray-800 line-clamp-1">{prod.title}</p>
+                              <div className="flex items-center justify-between mt-0.5">
+                                <p className="text-[10px] text-gray-500">
+                                  {prod.currency} {(prod.price / 100).toFixed(2)}
+                                </p>
+                                <span className="text-[10px] bg-green-100 text-green-700 px-1 rounded">
+                                  {(prod.matchScore * 100).toFixed(0)}%
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </>
+              ) : null}
             </div>
           )}
         </div>

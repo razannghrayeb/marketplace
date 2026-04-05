@@ -385,12 +385,12 @@ function calculateOverallScore(
   imageScore: number,
   policyScore: number
 ): number {
-  // Weights (should sum to 1)
+  // Weights (sum to 1) — balanced for shopping decisions: value + trust, not only copy length
   const weights = {
-    text: 0.35,    // Description quality most important
-    price: 0.30,   // Price stability/risk
-    image: 0.20,   // Image originality
-    policy: 0.15,  // Return policy
+    text: 0.28,
+    price: 0.32,
+    image: 0.22,
+    policy: 0.18,
   };
   
   const weighted = 

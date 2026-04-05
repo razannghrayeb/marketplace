@@ -48,6 +48,9 @@ function httpError(statusCode: number, message: string): Error {
  * on the server when the app has no auth yet.
  */
 function getUserId(req: Request): number {
+  if (req.user?.id != null && Number.isFinite(req.user.id) && req.user.id >= 1) {
+    return req.user.id;
+  }
   const rawHeader =
     req.headers["x-user-id"] ?? req.query.user_id ?? req.body?.user_id;
   const trimmed =
@@ -106,6 +109,11 @@ function pickFirstUploadedFile(
 
 const ALLOWED_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
+/** Image size constraints (in bytes) */
+const MIN_IMAGE_SIZE = 1 * 1024;       // 1 KB (absolute minimum)
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10 MB
+const RECOMMENDED_MAX = 5 * 1024 * 1024; // 5 MB for performance
+
 function validateImageFile(
   file: Express.Multer.File | undefined,
   fieldName: string
@@ -115,6 +123,24 @@ function validateImageFile(
     const err = new Error(`${fieldName} must be a JPEG, PNG, or WebP image`);
     (err as any).statusCode = 400;
     throw err;
+  }
+  if (file.size < MIN_IMAGE_SIZE) {
+    const err = new Error(`${fieldName} is too small (${file.size} bytes, minimum ${MIN_IMAGE_SIZE} bytes)`);
+    (err as any).statusCode = 400;
+    throw err;
+  }
+  if (file.size > MAX_IMAGE_SIZE) {
+    const err = new Error(
+      `${fieldName} is too large (${(file.size / 1024 / 1024).toFixed(2)} MB, maximum 10 MB)`
+    );
+    (err as any).statusCode = 413;
+    throw err;
+  }
+  if (file.size > RECOMMENDED_MAX) {
+    console.warn(
+      `[TryOn] ${fieldName} is larger than recommended (${(file.size / 1024 / 1024).toFixed(2)} MB > 5 MB). ` +
+      `Processing may be slower.`
+    );
   }
 }
 
@@ -141,24 +167,52 @@ export async function createTryOn(
     if (!personFile) {
       return res.status(400).json({
         success: false,
-        error:
-          "Person image required (multipart field: person_image, person, model, or model_image)",
+        error: {
+          message: "Person image is required",
+          code: "MISSING_PERSON_IMAGE",
+          details: {
+            allowedFields: ["person_image", "person", "model", "model_image"],
+            example: "Use form field 'person_image' with your image file"
+          }
+        }
       });
     }
-    validateImageFile(personFile, "person_image");
-    validateImageFile(garmentFile, "garment_image");
+
+    try {
+      validateImageFile(personFile, "Person image");
+      if (garmentFile) validateImageFile(garmentFile, "Garment image");
+    } catch (validationErr: any) {
+      return res.status(validationErr.statusCode || 400).json({
+        success: false,
+        error: {
+          message: validationErr.message,
+          code: "INVALID_IMAGE",
+          details: { maxSize: `${RECOMMENDED_MAX / 1024 / 1024}MB recommended` }
+        }
+      });
+    }
 
     const garmentId = req.body.garment_id
       ? parseInt(req.body.garment_id, 10)
       : undefined;
     const garmentSource = req.body.garment_source || "upload";
+    const category = req.body.category || "upper_body";
 
     if (!garmentFile && !garmentId) {
       return res.status(400).json({
         success: false,
-        error: "Either garment_image file or garment_id is required",
+        error: {
+          message: "Either garment image or garment ID is required",
+          code: "MISSING_GARMENT",
+          details: {
+            options: ["Upload garment_image file", "Provide garment_id from product/wardrobe"]
+          }
+        }
       });
     }
+
+    // Log try-on attempt
+    console.log(`[TryOn] Starting try-on for user ${userId}, category: ${category}, source: ${garmentSource}`);
 
     const job = await performTryOn({
       userId,
@@ -166,12 +220,19 @@ export async function createTryOn(
       personMimeType:    personFile.mimetype,
       garmentImageBuffer: garmentFile?.buffer,
       garmentId,
-      garmentSource,
-      category: req.body.category || "upper_body",
+      garmentSource: garmentSource as "upload" | "product" | "wardrobe",
+      category: category as "upper_body" | "lower_body" | "dresses",
       garmentDescription: req.body.garment_description,
     });
 
-    res.status(202).json({ success: true, job, jobId: job.id });
+    res.status(202).json({
+      success: true,
+      data: { job, jobId: job.id },
+      meta: {
+        statusUrl: `/api/tryon/${job.id}`,
+        estimatedWaitTime: "30-120 seconds"
+      }
+    });
   } catch (err) {
     next(err);
   }

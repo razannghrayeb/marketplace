@@ -7,13 +7,19 @@ import {
 } from "../../lib/auth/refreshTokenBlacklist";
 import { pg } from "../../lib/core/db";
 import { config } from "../../config";
-import { AuthUser, UserRow } from "../../types";
+import { AuthUser, UserRow, UserType } from "../../types";
 
 const SALT_ROUNDS = 12;
 
 function signAccessToken(user: AuthUser): string {
   return jwt.sign(
-    { sub: user.id, email: user.email, is_admin: user.is_admin, type: "access" },
+    {
+      sub: user.id,
+      email: user.email,
+      is_admin: user.is_admin,
+      user_type: user.user_type,
+      type: "access",
+    },
     config.jwt.secret,
     { expiresIn: config.jwt.accessExpiresIn } as SignOptions
   );
@@ -48,9 +54,11 @@ function verifyRefreshToken(refreshToken: string): JwtPayload & { sub: number; t
 
 export async function signup(
   email: string,
-  password: string
+  password: string,
+  userType: UserType = "customer"
 ): Promise<{ user: AuthUser; accessToken: string; refreshToken: string }> {
   const normalEmail = email.toLowerCase().trim();
+  const ut: UserType = userType === "business" ? "business" : "customer";
 
   const existing = await pg.query("SELECT id FROM users WHERE email = $1", [normalEmail]);
   if (existing.rows.length > 0) {
@@ -60,15 +68,20 @@ export async function signup(
   }
 
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-  const result = await pg.query<UserRow>(
-    `INSERT INTO users (email, password_hash)
-     VALUES ($1, $2)
-     RETURNING id, email, is_admin`,
-    [normalEmail, passwordHash]
+  const result = await pg.query<{ id: number; email: string; is_admin: boolean; user_type: UserType }>(
+    `INSERT INTO users (email, password_hash, user_type)
+     VALUES ($1, $2, $3)
+     RETURNING id, email, is_admin, user_type`,
+    [normalEmail, passwordHash, ut]
   );
 
   const row = result.rows[0];
-  const user: AuthUser = { id: row.id, email: row.email, is_admin: row.is_admin };
+  const user: AuthUser = {
+    id: row.id,
+    email: row.email,
+    is_admin: row.is_admin,
+    user_type: row.user_type ?? "customer",
+  };
   return {
     user,
     accessToken: signAccessToken(user),
@@ -83,7 +96,7 @@ export async function login(
   const normalEmail = email.toLowerCase().trim();
 
   const result = await pg.query<UserRow>(
-    "SELECT id, email, password_hash, is_active, is_admin FROM users WHERE email = $1",
+    "SELECT id, email, password_hash, is_active, is_admin, user_type FROM users WHERE email = $1",
     [normalEmail]
   );
   const row = result.rows[0];
@@ -109,7 +122,12 @@ export async function login(
 
   await pg.query("UPDATE users SET last_login = NOW() WHERE id = $1", [row.id]);
 
-  const user: AuthUser = { id: row.id, email: row.email, is_admin: row.is_admin };
+  const user: AuthUser = {
+    id: row.id,
+    email: row.email,
+    is_admin: row.is_admin,
+    user_type: row.user_type ?? "customer",
+  };
   return {
     user,
     accessToken: signAccessToken(user),
@@ -130,7 +148,7 @@ export async function refreshTokens(
   }
 
   const result = await pg.query<UserRow>(
-    "SELECT id, email, is_admin, is_active FROM users WHERE id = $1",
+    "SELECT id, email, is_admin, is_active, user_type FROM users WHERE id = $1",
     [payload.sub]
   );
   const row = result.rows[0];
@@ -140,7 +158,12 @@ export async function refreshTokens(
     throw err;
   }
 
-  const user: AuthUser = { id: row.id, email: row.email, is_admin: row.is_admin };
+  const user: AuthUser = {
+    id: row.id,
+    email: row.email,
+    is_admin: row.is_admin,
+    user_type: row.user_type ?? "customer",
+  };
   return {
     accessToken: signAccessToken(user),
     refreshToken: signRefreshToken(user.id),
@@ -161,7 +184,7 @@ export async function logout(refreshToken: string): Promise<void> {
 
 export async function getMe(userId: number) {
   const result = await pg.query(
-    "SELECT id, email, is_active, is_admin, created_at, last_login FROM users WHERE id = $1",
+    "SELECT id, email, is_active, is_admin, user_type, created_at, last_login FROM users WHERE id = $1",
     [userId]
   );
   return result.rows[0] ?? null;
@@ -205,7 +228,7 @@ export async function updateProfile(
   values.push(userId);
   const result = await pg.query(
     `UPDATE users SET ${sets.join(", ")} WHERE id = $${i}
-     RETURNING id, email, is_active, is_admin, created_at, last_login`,
+     RETURNING id, email, is_active, is_admin, user_type, created_at, last_login`,
     values
   );
   return result.rows[0];
