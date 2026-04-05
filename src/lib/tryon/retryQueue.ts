@@ -442,7 +442,7 @@ export async function trackTryOnUsage(
   const period = new Date().toISOString().slice(0, 7); // YYYY-MM
   const estimatedCost = 0.004; // ~$0.004 per try-on
 
-  const params = [
+  const params: [number, string, number, number, number, number] = [
     userId,
     period,
     success ? 1 : 0,
