@@ -14,6 +14,7 @@ import {
 } from "../../lib/recommendations/coldStart";
 import { getAdaptedEssentials, inferPriceTier } from "../../lib/wardrobe/lifestyleAdapter";
 import { inferWardrobeSlotsFromWardrobeRows } from "../../lib/wardrobe/outfitSlotInference";
+import { normalizeQueryGender } from "../../lib/search/searchHitRelevance";
 
 // ============================================================================
 // Types
@@ -435,7 +436,11 @@ type CompleteLookAnchorRow = {
   image_url?: string | null;
   image_cdn?: string | null;
   category_name?: string | null;
+  title?: string | null;
+  gender?: string | null;
 };
+
+type AudienceGender = "men" | "women" | "unisex";
 
 async function runCompleteLookCore(
   userId: number,
@@ -461,11 +466,15 @@ async function runCompleteLookCore(
   for (const slot of visionSlots) pushCategory(slot);
 
   const hasDress = currentCategoryList.some((c) => c === "dresses");
+  const warmWeatherLikely = inferWarmWeatherLook(currentItems);
+  const inferredAudienceGender = await inferPreferredAudienceGender(userId, currentItems);
   const essentialForOutfit = hasDress ? ["shoes", "outerwear"] : ["tops", "bottoms", "shoes"];
   const missingCategories = essentialForOutfit.filter((c) => !currentCategories.has(c));
   const optionalComplements = hasDress
     ? (["bags", "accessories", "outerwear"] as const)
-    : (["outerwear", "bags", "accessories"] as const);
+    : (warmWeatherLikely
+        ? (["accessories", "bags", "outerwear"] as const)
+        : (["bags", "accessories", "outerwear"] as const));
   for (const extra of optionalComplements) {
     if (missingCategories.length >= 2) break;
     if (!currentCategories.has(extra) && !missingCategories.includes(extra)) {
@@ -513,6 +522,7 @@ async function runCompleteLookCore(
     "attr_style",
     "attr_pattern",
     "attr_material",
+    "attr_gender",
     "audience_gender",
     "age_group",
   ];
@@ -528,6 +538,9 @@ async function runCompleteLookCore(
           { term: { availability: "in_stock" } },
           { term: { category_canonical: canonical } },
         ];
+        if (inferredAudienceGender && inferredAudienceGender !== "unisex") {
+          f.push(buildAudienceGenderFilter(inferredAudienceGender));
+        }
         if (applyPriceTier && userPriceTier) {
           f.push({
             range: {
@@ -550,6 +563,7 @@ async function runCompleteLookCore(
 
         for (const hit of hits) {
           const source = hit._source || {};
+          if (!audienceGenderMatches(inferredAudienceGender, source)) continue;
           const productId = parseInt(source.product_id, 10);
           if (!productId || ownedProductIds.has(String(productId))) continue;
 
@@ -696,6 +710,7 @@ async function runCompleteLookCore(
       preferredPatterns,
       preferredMaterials,
       preferredFormality,
+      inferredAudienceGender,
       wardrobeColorFamilies,
       currentCategoryList,
       needed: limit - mergedSuggestions.length,
@@ -728,8 +743,11 @@ export async function completeLookSuggestions(
 ): Promise<CompleteLookSuggestionsResult> {
   const currentItemsResult = await pg.query(
     `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, wi.name, wi.image_url, wi.image_cdn,
+            p.title,
+            p.gender,
             c.name as category_name
      FROM wardrobe_items wi
+     LEFT JOIN products p ON p.id = wi.product_id
      LEFT JOIN categories c ON wi.category_id = c.id
      WHERE wi.id = ANY($1) AND wi.user_id = $2`,
     [currentItemIds, userId]
@@ -758,6 +776,8 @@ export async function completeLookSuggestionsForCatalogProducts(
     `SELECT p.id as product_id,
             p.embedding,
             p.title as name,
+            p.title,
+            p.gender,
             p.image as image_url,
             p.image_cdn,
             p.category as category_name
@@ -776,6 +796,108 @@ function topHistogramKeys(histogram?: Record<string, number> | null, limit: numb
     .sort((a, b) => Number(b[1]) - Number(a[1]))
     .slice(0, Math.max(1, limit))
     .map(([key]) => key.toLowerCase().trim());
+}
+
+function normalizeAudienceGenderValue(raw: unknown): AudienceGender | null {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).toLowerCase().trim();
+  if (!s) return null;
+  const normalized = normalizeQueryGender(s);
+  if (normalized === "men" || normalized === "women" || normalized === "unisex") return normalized;
+  if (["male", "man", "mens", "men's", "gents", "gentlemen"].includes(s)) return "men";
+  if (["female", "woman", "womens", "women's", "ladies", "lady"].includes(s)) return "women";
+  return null;
+}
+
+function inferGenderFromText(text: string): AudienceGender | null {
+  const s = text.toLowerCase();
+  const menHits =
+    (s.match(/\bmen\b|\bmens\b|\bmen's\b|\bmale\b|\bman\b|\bgents?\b/g) || []).length;
+  const womenHits =
+    (s.match(/\bwomen\b|\bwomens\b|\bwomen's\b|\bfemale\b|\bwoman\b|\bladies\b|\blady\b/g) || []).length;
+  if (menHits > womenHits) return "men";
+  if (womenHits > menHits) return "women";
+  return null;
+}
+
+async function inferPreferredAudienceGender(
+  userId: number,
+  currentItems: CompleteLookAnchorRow[]
+): Promise<AudienceGender | null> {
+  const counts: Record<AudienceGender, number> = { men: 0, women: 0, unisex: 0 };
+
+  for (const item of currentItems) {
+    const explicit = normalizeAudienceGenderValue(item.gender);
+    if (explicit) {
+      counts[explicit] += explicit === "unisex" ? 0.5 : 2;
+    }
+
+    const textSignal = inferGenderFromText(
+      `${String(item.name || "")} ${String(item.title || "")} ${String(item.category_name || "")}`
+    );
+    if (textSignal) counts[textSignal] += 1;
+  }
+
+  if (counts.men === 0 && counts.women === 0) {
+    const userGender = await pg
+      .query(`SELECT gender FROM users WHERE id = $1`, [userId])
+      .then((r) => normalizeAudienceGenderValue(r.rows?.[0]?.gender))
+      .catch(() => null);
+    if (userGender && userGender !== "unisex") counts[userGender] += 1;
+  }
+
+  if (counts.men === 0 && counts.women === 0 && counts.unisex === 0) return null;
+  if (counts.men >= counts.women && counts.men > 0) return "men";
+  if (counts.women > counts.men && counts.women > 0) return "women";
+  return counts.unisex > 0 ? "unisex" : null;
+}
+
+function buildAudienceGenderFilter(gender: "men" | "women"): any {
+  const allowTerms = [gender, "unisex"];
+  const oppositeTitleTerms =
+    gender === "men"
+      ? ["women", "womens", "female", "ladies", "woman", "girls", "girl"]
+      : ["men", "mens", "male", "man", "gents", "boys", "boy"];
+
+  return {
+    bool: {
+      should: [
+        { terms: { attr_gender: allowTerms } },
+        { terms: { audience_gender: allowTerms } },
+        ...allowTerms.map((kw) => ({ match: { title: kw } })),
+      ],
+      minimum_should_match: 1,
+      must_not: [
+        {
+          bool: {
+            should: oppositeTitleTerms.map((kw) => ({ match: { title: kw } })),
+            minimum_should_match: 1,
+          },
+        },
+      ],
+    },
+  };
+}
+
+function audienceGenderMatches(inferred: AudienceGender | null, source: any): boolean {
+  if (!inferred || inferred === "unisex") return true;
+  const doc = normalizeAudienceGenderValue(source?.audience_gender ?? source?.attr_gender);
+  if (doc) {
+    return doc === inferred || doc === "unisex";
+  }
+  const fromText = inferGenderFromText(String(source?.title || ""));
+  return !fromText || fromText === inferred;
+}
+
+function inferWarmWeatherLook(items: CompleteLookAnchorRow[]): boolean {
+  const blob = items
+    .map((i) => `${String(i.name || "")} ${String(i.title || "")} ${String(i.category_name || "")}`)
+    .join(" ")
+    .toLowerCase();
+
+  const warmHits = (blob.match(/\bt-?shirt\b|\btee\b|\bshorts?\b|\bsandal\b|\bslipper\b/g) || []).length;
+  const coldHits = (blob.match(/\bjacket\b|\bcoat\b|\bhoodie\b|\bsweater\b|\bcardigan\b|\bblazer\b/g) || []).length;
+  return warmHits > 0 && coldHits === 0;
 }
 
 function inferStyleTermsFromCurrentItems(
@@ -883,6 +1005,7 @@ async function fetchCategoryTopUpSuggestions(params: {
   preferredPatterns: string[];
   preferredMaterials: string[];
   preferredFormality: "casual" | "business" | "formal" | "mixed";
+  inferredAudienceGender: AudienceGender | null;
   wardrobeColorFamilies: Set<string>;
   currentCategoryList: string[];
   needed: number;
@@ -896,6 +1019,9 @@ async function fetchCategoryTopUpSuggestions(params: {
     { term: { availability: "in_stock" } },
     { terms: { category_canonical: canonicalCategories } },
   ];
+  if (params.inferredAudienceGender && params.inferredAudienceGender !== "unisex") {
+    filter.push(buildAudienceGenderFilter(params.inferredAudienceGender));
+  }
 
   const blockedProductIds = Array.from(new Set([...params.ownedProductIds, ...params.existingProductIds]));
   if (blockedProductIds.length > 0) {
@@ -941,6 +1067,8 @@ async function fetchCategoryTopUpSuggestions(params: {
         "attr_style",
         "attr_pattern",
         "attr_material",
+        "attr_gender",
+        "audience_gender",
       ],
       sort: [{ _score: { order: "desc" } }, { last_seen_at: { order: "desc", missing: "_last" } }],
     },
@@ -952,6 +1080,7 @@ async function fetchCategoryTopUpSuggestions(params: {
 
   for (const hit of hits) {
     const source = hit?._source || {};
+    if (!audienceGenderMatches(params.inferredAudienceGender, source)) continue;
     const productId = parseInt(source.product_id, 10);
     if (!productId) continue;
     const productKey = String(productId);

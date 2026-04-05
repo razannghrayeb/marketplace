@@ -62,8 +62,16 @@ export interface FullVerdictResponse {
     comparable: boolean;
     reason: string;
     category_groups: Record<number, string>;
+    requested_goal: CompareVerdict["requested_goal"];
+    requested_occasion: CompareVerdict["requested_occasion"];
   };
   shopping_insights: CompareVerdict["shopping_insights"];
+  winners_by_goal: CompareVerdict["winners_by_goal"];
+  evidence: CompareVerdict["evidence"];
+  alternatives: CompareVerdict["alternatives"];
+  risk_summary: CompareVerdict["risk_summary"];
+  timing_insight: CompareVerdict["timing_insight"];
+  outfit_impact?: CompareVerdict["outfit_impact"];
 }
 
 // ============================================================================
@@ -395,7 +403,7 @@ export function generateVerdict(
   }
   
   let verdictOutput: VerdictOutput;
-  if (verdict.comparison_mode === "cross_category_guidance") {
+  if (verdict.comparison_mode === "outfit_compare") {
     verdictOutput = {
       title: "These products serve different fashion roles",
       subtitle: "No direct winner selected because this is a cross-category selection",
@@ -404,6 +412,16 @@ export function generateVerdict(
       confidence_label: "Smart Guidance",
       confidence_description: "Use picks below for quality, value, and budget",
       recommendation: verdict.shopping_insights.suggested_next_action,
+    };
+  } else if (verdict.comparison_mode === "scenario_compare") {
+    verdictOutput = {
+      title: defaultTitle,
+      subtitle: "Products are in the same category but optimized for different scenarios",
+      bullet_points: defaultBulletPoints.length > 0 ? defaultBulletPoints : verdict.shopping_insights.notes.slice(0, 3),
+      tradeoff,
+      confidence_label: confidenceInfo.label,
+      confidence_description: "Scenario-aware ranking applied",
+      recommendation: defaultRecommendation,
     };
   } else {
     verdictOutput = {
@@ -433,8 +451,16 @@ export function generateVerdict(
       comparable: verdict.compatibility.is_comparable,
       reason: verdict.compatibility.reason,
       category_groups: verdict.compatibility.category_groups,
+      requested_goal: verdict.requested_goal,
+      requested_occasion: verdict.requested_occasion,
     },
     shopping_insights: verdict.shopping_insights,
+    winners_by_goal: verdict.winners_by_goal,
+    evidence: verdict.evidence,
+    alternatives: verdict.alternatives,
+    risk_summary: verdict.risk_summary,
+    timing_insight: verdict.timing_insight,
+    outfit_impact: verdict.outfit_impact,
   };
 }
 

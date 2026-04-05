@@ -16,6 +16,7 @@ import {
   computeBaselines,
   getAllTooltips,
   validateCompareInput,
+  validateCompareOptions,
   validateProductId,
   validateTextInput,
   getProductReviewAnalysis,
@@ -58,7 +59,12 @@ router.post("/", compareBodyMultipart, async (req: Request, res: Response) => {
       return res.status(400).json({ error: parsed.error, example: parsed.example });
     }
 
-    const result = await compareProductsWithVerdict(parsed.productIds);
+    const parsedOptions = validateCompareOptions(req.body);
+    if (!parsedOptions.ok) {
+      return res.status(400).json({ error: parsedOptions.error, example: parsedOptions.example });
+    }
+
+    const result = await compareProductsWithVerdict(parsed.productIds, parsedOptions.options);
     
     // Optionally add enhanced data (inventory, shipping, reputation, pricing)
     if (req.query.enhanced === "true" || req.body.enhanced === true) {

@@ -1981,7 +1981,9 @@ export class ImageAnalysisService {
         obs.detectionCaptionMisses += 1;
       }
 
-      const strictAudienceLock = Boolean(inferredAudience.gender);
+      const strictAudienceLock =
+        Boolean(inferredAudience.gender) &&
+        blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
 
       let similarResult = await searchByImageWithSimilarity({
         imageEmbedding: finalEmbedding,
@@ -2696,7 +2698,9 @@ export class ImageAnalysisService {
           obs.detectionCaptionMisses += 1;
         }
 
-        const strictAudienceLock = Boolean(inferredAudience.gender);
+        const strictAudienceLock =
+          Boolean(inferredAudience.gender) &&
+          blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
 
         let similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
