@@ -210,20 +210,43 @@ function slotMismatchRegex(slot: string): RegExp | null {
 
 function sourceMatchesSlot(slot: string, source: any): boolean {
   const canonical = normalizeWardrobeCategory(source?.category_canonical || source?.category);
-  if (canonical === slot) return true;
-
   const blob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.category_canonical || "")}`.toLowerCase();
   const allow = slotKeywordRegex(slot);
   const reject = slotMismatchRegex(slot);
   if (reject && reject.test(blob)) return false;
   if (!allow) return canonical === slot;
-  return allow.test(blob);
+
+  const textMatches = allow.test(blob);
+  if (!textMatches) return false;
+
+  // Require the text intent to agree with the canonical slot when the index is noisy.
+  // This prevents mislabeled items (e.g. shirts indexed as shoes) from leaking through.
+  if (canonical && canonical !== slot) {
+    const canonicalRegex = slotKeywordRegex(canonical);
+    if (canonicalRegex && canonicalRegex.test(blob)) return false;
+  }
+
+  return true;
 }
 
 function buildSlotIntentFilter(slot: string): any | null {
   const bagTerms = ["bag", "handbag", "tote", "clutch", "purse", "wallet", "crossbody", "backpack", "satchel", "messenger"];
   const accessoryTerms = ["accessories", "jewelry", "watch", "scarf", "belt", "sunglasses", "hat", "earrings", "necklace", "bracelet", "ring"];
   const outerwearTerms = ["outerwear", "jacket", "coat", "blazer", "cardigan", "parka", "trench", "bomber"];
+  const topTerms = ["top", "tops", "shirt", "shirts", "blouse", "blouses", "t-shirt", "tee", "hoodie", "sweater", "sweatshirt", "cardigan", "tank", "camisole", "polo"];
+  const bottomTerms = ["bottom", "bottoms", "pant", "pants", "trouser", "trousers", "jeans", "joggers", "leggings", "skirt", "skirts", "shorts"];
+  const shoeTerms = ["shoe", "shoes", "sneaker", "sneakers", "boot", "boots", "heel", "heels", "loafer", "loafers", "sandal", "sandals", "flat", "flats", "pump", "pumps", "mule", "mules", "trainer", "trainers", "footwear"];
+
+  const rejectTerms =
+    slot === "shoes"
+      ? topTerms.concat(bottomTerms).concat(["bag", "handbag", "backpack", "wallet"])
+      : slot === "tops"
+        ? bottomTerms.concat(shoeTerms).concat(["bag", "handbag", "backpack", "wallet"])
+        : slot === "bottoms"
+          ? topTerms.concat(shoeTerms).concat(["bag", "handbag", "backpack", "wallet"])
+          : slot === "bags"
+            ? ["shirt", "top", "pant", "shoe", "sneaker", "jacket"]
+            : [];
 
   if (slot === "bags") {
     return {
@@ -260,6 +283,32 @@ function buildSlotIntentFilter(slot: string): any | null {
       bool: {
         should: outerwearTerms.map((kw) => ({ match_phrase: { title: kw } })),
         minimum_should_match: 1,
+      },
+    };
+  }
+
+  if (slot === "tops" || slot === "bottoms" || slot === "shoes" || slot === "dresses") {
+    return {
+      bool: {
+        should:
+          slot === "tops"
+            ? topTerms.map((kw) => ({ match_phrase: { title: kw } }))
+            : slot === "bottoms"
+              ? bottomTerms.map((kw) => ({ match_phrase: { title: kw } }))
+              : slot === "shoes"
+                ? shoeTerms.map((kw) => ({ match_phrase: { title: kw } }))
+                : [{ match_phrase: { title: "dress" } }, { match_phrase: { title: "gown" } }],
+        minimum_should_match: 1,
+        must_not: rejectTerms.length
+          ? [
+              {
+                bool: {
+                  should: rejectTerms.map((kw) => ({ match_phrase: { title: kw } })),
+                  minimum_should_match: 1,
+                },
+              },
+            ]
+          : undefined,
       },
     };
   }
@@ -719,7 +768,10 @@ async function runCompleteLookCore(
           });
         }
         if (ownedProductIds.size > 0) {
-          f.push({ bool: { must_not: [{ terms: { product_id: Array.from(ownedProductIds) } }] } });
+      const enforceNeutralAudienceWhenUnknown =
+        audienceOptions.enforceNeutralAudienceWhenUnknown !== undefined
+          ? Boolean(audienceOptions.enforceNeutralAudienceWhenUnknown)
+          : !inferredAudienceGender;
         }
         return f;
       };

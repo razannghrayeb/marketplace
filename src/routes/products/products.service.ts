@@ -2593,6 +2593,8 @@ export async function searchByImageWithSimilarity(
     if (hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) {
       const desiredSleeveNorm = String(desiredSleeveForRelevance ?? "").toLowerCase();
       const enforceSleeveGate = desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless";
+      const preferredSleeveMin = enforceSleeveGate ? 0.55 : 0.25;
+      const fallbackSleeveMin = enforceSleeveGate ? 0.4 : 0.1;
       const minTypeCompliance = hasDetectionAnchoredTypeIntent
         ? visualGatedHits.length >= 30
           ? 0.5
@@ -2610,7 +2612,7 @@ export async function searchByImageWithSimilarity(
         }
         
         // Apply sleeve gating only for restrictive sleeve intents where mismatches are high-impact.
-        if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < 0.25) {
+        if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < preferredSleeveMin) {
           return false;
         }
         
@@ -2633,7 +2635,7 @@ export async function searchByImageWithSimilarity(
           if ((comp.audienceCompliance ?? 1) < minAudienceCompliance) return false;
           if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
           if ((comp.exactTypeScore ?? 0) < 1 && (comp.productTypeCompliance ?? 0) < 0.22) return false;
-          if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < 0.1) return false;
+          if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < fallbackSleeveMin) return false;
           if (desiredColorsForRelevance.length > 0 && (comp.colorCompliance ?? 0) < 0.18) return false;
           return true;
         });
@@ -2663,14 +2665,19 @@ export async function searchByImageWithSimilarity(
           const audienceComp = Math.max(0, Math.min(1, comp.audienceCompliance ?? 1));
           const complianceBlend =
             0.4 * typeComp +
-            0.35 * colorComp +
-            0.1 * sleeveComp +
+            0.15 * colorComp +
+            0.3 * sleeveComp +
             0.15 * audienceComp;
           const intentAwareScore =
             Math.max(0, Math.min(1, 0.72 * v + 0.28 * complianceBlend)) * 0.85;
           rescueScore = Math.max(rescueScore, intentAwareScore);
         }
-        comp.finalRelevance01 = Math.max(rescueScore, effectiveFinalAcceptMin);
+        // In rescue mode, keep intent-constrained scoring expressive instead of lifting all
+        // candidates to the same global floor (which can hide sleeve/type mismatches).
+        const rescueFloor = intentAwareRescue
+          ? Math.min(effectiveFinalAcceptMin, 0.56)
+          : effectiveFinalAcceptMin;
+        comp.finalRelevance01 = Math.max(rescueScore, rescueFloor);
         finalScoreSourceById.set(String(h._source.product_id), "final_accept_rescue");
       }
     }

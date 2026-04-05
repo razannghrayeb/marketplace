@@ -43,6 +43,7 @@ export default function WardrobePage() {
   const [selectedItem, setSelectedItem] = useState<WardrobeItem | null>(null)
   const [showCompleteStyle, setShowCompleteStyle] = useState(false)
   const [completeStyleLimit, setCompleteStyleLimit] = useState(COMPLETE_STYLE_LIMIT_STEP)
+  const [completeStyleAudienceGender, setCompleteStyleAudienceGender] = useState<'men' | 'women' | 'unisex' | undefined>(undefined)
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['wardrobe'],
@@ -84,13 +85,15 @@ export default function WardrobePage() {
   })
 
   const completeStyleQuery = useQuery({
-    queryKey: ['complete-style', selectedItem?.id, completeStyleLimit],
+    queryKey: ['complete-style', selectedItem?.id, completeStyleLimit, completeStyleAudienceGender ?? 'auto'],
     queryFn: async () => {
       if (!selectedItem) return null
-      const res = await api.post<{ suggestions?: CompleteLookSuggestion[] }>(endpoints.wardrobe.completeLook, {
+      const requestBody: { item_ids: number[]; limit: number; audience_gender?: 'men' | 'women' | 'unisex' } = {
         item_ids: [selectedItem.id],
         limit: completeStyleLimit,
-      })
+      }
+      if (completeStyleAudienceGender) requestBody.audience_gender = completeStyleAudienceGender
+      const res = await api.post<{ suggestions?: CompleteLookSuggestion[] }>(endpoints.wardrobe.completeLook, requestBody)
       const r = res as { success?: boolean; suggestions?: CompleteLookSuggestion[]; data?: CompleteLookSuggestion[]; error?: { message?: string } }
       if (r?.success === false) throw new Error(r?.error?.message ?? 'Failed to get suggestions')
       return (r?.suggestions ?? r?.data ?? []) as CompleteLookSuggestion[]
@@ -154,6 +157,7 @@ export default function WardrobePage() {
   const openCompleteStyle = (item: WardrobeItem) => {
     setSelectedItem(item)
     setCompleteStyleLimit(COMPLETE_STYLE_LIMIT_STEP)
+    setCompleteStyleAudienceGender(undefined)
     setShowCompleteStyle(true)
   }
 
@@ -388,6 +392,37 @@ export default function WardrobePage() {
                     {selectedItem.category && <p className="text-xs text-violet-600 mt-0.5">{selectedItem.category}</p>}
                   </div>
                   <span className="text-xs font-medium text-neutral-400 uppercase tracking-wider">Styling for</span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 mb-6">
+                  {(['men', 'women', 'unisex'] as const).map((gender) => {
+                    const active = completeStyleAudienceGender === gender
+                    return (
+                      <button
+                        key={gender}
+                        type="button"
+                        onClick={() => setCompleteStyleAudienceGender(gender)}
+                        className={`px-3 py-1.5 rounded-full text-sm font-semibold border transition-colors ${
+                          active
+                            ? 'bg-violet-600 text-white border-violet-600'
+                            : 'bg-white text-neutral-600 border-neutral-200 hover:border-violet-200 hover:text-violet-700'
+                        }`}
+                      >
+                        {gender === 'men' ? 'Men' : gender === 'women' ? 'Women' : 'Unisex'}
+                      </button>
+                    )
+                  })}
+                  <button
+                    type="button"
+                    onClick={() => setCompleteStyleAudienceGender(undefined)}
+                    className={`px-3 py-1.5 rounded-full text-sm font-semibold border transition-colors ${
+                      completeStyleAudienceGender === undefined
+                        ? 'bg-violet-600 text-white border-violet-600'
+                        : 'bg-white text-neutral-600 border-neutral-200 hover:border-violet-200 hover:text-violet-700'
+                    }`}
+                  >
+                    Auto
+                  </button>
                 </div>
 
                 {/* Suggestions */}
