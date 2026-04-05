@@ -24,6 +24,8 @@ export interface ProductForComparison {
   title: string;
   brand?: string | null;
   category?: string | null;
+  color?: string | null;
+  gender?: string | null;
   description?: string | null;
   price_cents: number;
   currency: string;
@@ -95,7 +97,7 @@ export class InsufficientProductsForCompareError extends Error {
   constructor(requestedIds: number[], foundIds: number[]) {
     const foundSet = new Set(foundIds);
     const missing = requestedIds.filter((id) => !foundSet.has(id));
-    const uniqueMissing = [...new Set(missing)];
+    const uniqueMissing = Array.from(new Set(missing));
     super(
       `Not all products found for comparison. Missing product id(s): ${uniqueMissing.join(", ")}.`
     );
@@ -107,6 +109,20 @@ export class InsufficientProductsForCompareError extends Error {
 export interface CompareVerdict {
   winner_product_id: number | null;  // null = tie
   confidence: "high" | "medium" | "low" | "tie";
+  comparison_mode: "direct_head_to_head" | "cross_category_guidance";
+  compatibility: {
+    is_comparable: boolean;
+    reason: string;
+    category_groups: Record<number, string>;
+  };
+  shopping_insights: {
+    best_quality_product_id: number | null;
+    best_value_product_id: number | null;
+    best_budget_product_id: number | null;
+    weakest_link_product_id: number | null;
+    notes: string[];
+    suggested_next_action: string;
+  };
   
   // Top reasons the winner was chosen
   top_reasons: CompareReason[];
@@ -119,6 +135,139 @@ export interface CompareVerdict {
   
   // Individual product comparisons
   products: ProductComparison[];
+}
+
+function normalizeToken(v: string | null | undefined): string {
+  return (v || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function inferCategoryGroup(product: ProductForComparison): string {
+  const raw = `${normalizeToken(product.category)} ${normalizeToken(product.title)}`;
+  const hasAny = (keywords: string[]): boolean => keywords.some((k) => raw.includes(k));
+
+  if (hasAny(["t shirt", "tee", "shirt", "blouse", "top", "hoodie", "sweater", "cardigan", "tank", "camisole"])) return "tops";
+  if (hasAny(["jean", "pants", "trouser", "short", "skirt", "legging", "jogger", "bottom"])) return "bottoms";
+  if (hasAny(["dress", "abaya", "jumpsuit", "romper", "gown", "kaftan"])) return "one_piece";
+  if (hasAny(["jacket", "coat", "blazer", "outerwear", "parka", "trench"])) return "outerwear";
+  if (hasAny(["shoe", "sneaker", "heel", "boot", "loafer", "sandal", "slipper", "footwear"])) return "footwear";
+  if (hasAny(["bag", "tote", "backpack", "clutch", "wallet", "purse"])) return "bags";
+  if (hasAny(["ring", "necklace", "bracelet", "earring", "scarf", "belt", "hat", "cap", "accessory", "watch", "sunglass"])) return "accessories";
+  if (hasAny(["perfume", "fragrance", "makeup", "lipstick", "mascara", "serum", "skincare", "beauty"])) return "beauty";
+
+  return "other";
+}
+
+function resolveComparability(products: ProductForComparison[]): {
+  isComparable: boolean;
+  reason: string;
+  categoryGroups: Record<number, string>;
+} {
+  const categoryGroups: Record<number, string> = {};
+  for (const p of products) {
+    categoryGroups[p.id] = inferCategoryGroup(p);
+  }
+
+  const uniqueGroups = new Set(Object.values(categoryGroups));
+  if (uniqueGroups.size === 1) {
+    const only = Array.from(uniqueGroups)[0] || "category";
+    return {
+      isComparable: true,
+      reason: `All selected products are in the same comparison group (${only}).`,
+      categoryGroups,
+    };
+  }
+
+  return {
+    isComparable: false,
+    reason: "Selected products are from different item types, so a head-to-head winner is not meaningful.",
+    categoryGroups,
+  };
+}
+
+function computeShoppingInsights(
+  comparisons: ProductComparison[],
+  productsMap: Map<number, ProductForComparison>,
+  directComparable: boolean
+): CompareVerdict["shopping_insights"] {
+  if (comparisons.length === 0) {
+    return {
+      best_quality_product_id: null,
+      best_value_product_id: null,
+      best_budget_product_id: null,
+      weakest_link_product_id: null,
+      notes: ["No products available for insight generation."],
+      suggested_next_action: "Try again with at least 2 valid products.",
+    };
+  }
+
+  const byScoreDesc = [...comparisons].sort((a, b) => b.overall_score - a.overall_score);
+  const bestQuality = byScoreDesc[0] || null;
+  const weakest = byScoreDesc[byScoreDesc.length - 1] || null;
+
+  let bestBudget: ProductComparison | null = null;
+  for (const c of comparisons) {
+    if (!bestBudget) {
+      bestBudget = c;
+      continue;
+    }
+    const cPrice = productsMap.get(c.product_id)?.price_cents ?? Number.MAX_SAFE_INTEGER;
+    const bPrice = productsMap.get(bestBudget.product_id)?.price_cents ?? Number.MAX_SAFE_INTEGER;
+    if (cPrice < bPrice) bestBudget = c;
+  }
+
+  let bestValue: ProductComparison | null = null;
+  let bestValueRatio = -1;
+  for (const c of comparisons) {
+    const p = productsMap.get(c.product_id);
+    const price = p?.price_cents ?? 0;
+    if (price <= 0) continue;
+    const ratio = c.overall_score / (price / 100);
+    if (ratio > bestValueRatio) {
+      bestValueRatio = ratio;
+      bestValue = c;
+    }
+  }
+
+  const prices = comparisons
+    .map((c) => productsMap.get(c.product_id)?.price_cents ?? 0)
+    .filter((v) => v > 0)
+    .sort((a, b) => a - b);
+
+  const notes: string[] = [];
+  if (directComparable) {
+    if (bestQuality) notes.push(`Top quality signal: Product ${bestQuality.product_id}.`);
+    if (bestValue) notes.push(`Best value-for-money balance: Product ${bestValue.product_id}.`);
+  } else {
+    notes.push("These products are different wardrobe roles; compare similar item types for a winner.");
+    if (bestQuality) notes.push(`Highest confidence listing quality: Product ${bestQuality.product_id}.`);
+  }
+
+  if (bestBudget) notes.push(`Most budget-friendly pick: Product ${bestBudget.product_id}.`);
+  if (weakest && weakest.overall_score < 45) {
+    notes.push(`Weakest listing quality signal: Product ${weakest.product_id} (review details before buying).`);
+  }
+
+  if (prices.length >= 2) {
+    const min = prices[0];
+    const max = prices[prices.length - 1];
+    if (min > 0) {
+      const spreadPct = Math.round(((max - min) / min) * 100);
+      if (spreadPct >= 35) {
+        notes.push(`Price spread is wide (${spreadPct}%), so verify material and return policy before choosing.`);
+      }
+    }
+  }
+
+  return {
+    best_quality_product_id: bestQuality?.product_id ?? null,
+    best_value_product_id: bestValue?.product_id ?? null,
+    best_budget_product_id: bestBudget?.product_id ?? null,
+    weakest_link_product_id: weakest?.product_id ?? null,
+    notes: notes.slice(0, 5),
+    suggested_next_action: directComparable
+      ? "Use the quality and value picks to make your final decision."
+      : "To get a direct winner, compare products within the same item type (for example shirt vs shirt).",
+  };
 }
 
 // ============================================================================
@@ -373,6 +522,7 @@ export async function compareProducts(productIds: number[]): Promise<CompareVerd
   // Fetch product data
   const result = await pg.query(
     `SELECT p.id, p.title, p.brand, p.category, p.description, 
+            p.color, p.gender,
             p.price_cents, p.currency, p.sales_price_cents,
             p.image_cdn, pi.p_hash
      FROM products p
@@ -444,6 +594,30 @@ export async function compareProducts(productIds: number[]): Promise<CompareVerd
   if (comparisons.length < 2) {
     throw new InsufficientProductsForCompareError(productIds, foundIds);
   }
+
+  const foundProducts = productIds
+    .map((id) => productsMap.get(id))
+    .filter((p): p is ProductForComparison => Boolean(p));
+  const comparability = resolveComparability(foundProducts);
+  const shoppingInsights = computeShoppingInsights(comparisons, productsMap, comparability.isComparable);
+
+  if (!comparability.isComparable) {
+    return {
+      winner_product_id: null,
+      confidence: "tie",
+      comparison_mode: "cross_category_guidance",
+      compatibility: {
+        is_comparable: false,
+        reason: comparability.reason,
+        category_groups: comparability.categoryGroups,
+      },
+      shopping_insights: shoppingInsights,
+      top_reasons: [],
+      tradeoff_reason: "Head-to-head comparison skipped because products are from different categories.",
+      score_difference: 0,
+      products: comparisons,
+    };
+  }
   
   // Sort by overall score (highest first)
   comparisons.sort((a, b) => b.overall_score - a.overall_score);
@@ -484,6 +658,13 @@ export async function compareProducts(productIds: number[]): Promise<CompareVerd
   return {
     winner_product_id: winnerId,
     confidence,
+    comparison_mode: "direct_head_to_head",
+    compatibility: {
+      is_comparable: true,
+      reason: comparability.reason,
+      category_groups: comparability.categoryGroups,
+    },
+    shopping_insights: shoppingInsights,
     top_reasons: topReasons,
     tradeoff_reason: tradeoff,
     score_difference: scoreDiff,

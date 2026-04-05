@@ -47,6 +47,10 @@ export interface CompleteLookSuggestion extends ProductRecommendation {
     embeddingNorm: number;
     categoryCompat: number;
     colorHarmony: number;
+    styleAlignment?: number;
+    patternAlignment?: number;
+    materialAlignment?: number;
+    formalityAlignment?: number;
   };
 }
 
@@ -464,29 +468,33 @@ export async function completeLookSuggestions(
     pushCategory(normalizeWardrobeCategory(row.name));
   }
 
-  // Photo often contains several garments while DB category_id is unset — use YOLO multi-detection
   const visionSlots = await inferWardrobeSlotsFromWardrobeRows(currentItems);
   for (const slot of visionSlots) pushCategory(slot);
 
   const hasDress = currentCategoryList.some((c) => c === "dresses");
   const essentialForOutfit = hasDress ? ["shoes", "outerwear"] : ["tops", "bottoms", "shoes"];
   const missingCategories = essentialForOutfit.filter((c) => !currentCategories.has(c));
-  if (missingCategories.length === 0) {
-    for (const extra of ["accessories", "bags"] as const) {
-      if (!currentCategories.has(extra)) missingCategories.push(extra);
+  const optionalComplements = hasDress
+    ? (["bags", "accessories", "outerwear"] as const)
+    : (["outerwear", "bags", "accessories"] as const);
+  for (const extra of optionalComplements) {
+    if (missingCategories.length >= 2) break;
+    if (!currentCategories.has(extra) && !missingCategories.includes(extra)) {
+      missingCategories.push(extra);
     }
+  }
+  if (missingCategories.length === 0) {
+    missingCategories.push("accessories", "bags");
   }
 
   const currentEmbeddings = currentItems
     .map((row) => parseVector(row.embedding))
     .filter((vec): vec is number[] => Array.isArray(vec) && vec.length > 0);
 
+  const styleProfile = await getStyleProfile(userId).catch(() => null);
   let centroid = meanEmbedding(currentEmbeddings);
-  if (!centroid) {
-    const styleProfile = await getStyleProfile(userId);
-    if (styleProfile?.style_centroid && styleProfile.style_centroid.length > 0) {
-      centroid = styleProfile.style_centroid;
-    }
+  if (!centroid && styleProfile?.style_centroid && styleProfile.style_centroid.length > 0) {
+    centroid = styleProfile.style_centroid;
   }
 
   const userPriceTier = await inferPriceTier(userId).catch(() => null);
@@ -497,6 +505,10 @@ export async function completeLookSuggestions(
   );
 
   const wardrobeColorFamilies = extractWardrobeColorFamilies(currentItems);
+  const preferredPatterns = topHistogramKeys(styleProfile?.pattern_histogram, 3);
+  const preferredMaterials = topHistogramKeys(styleProfile?.material_histogram, 3);
+  const preferredStyleTerms = inferStyleTermsFromCurrentItems(currentItems, styleProfile?.occasion_coverage || []);
+  const preferredFormality = inferPreferredFormality(styleProfile?.occasion_coverage || []);
   const suggestionsByCategory = new Map<string, CompleteLookSuggestion[]>();
 
   const sourceFields = [
@@ -504,15 +516,22 @@ export async function completeLookSuggestions(
     "title",
     "brand",
     "category",
+    "category_canonical",
     "price_usd",
     "image_cdn",
     "color_primary_canonical",
     "attr_color",
+    "attr_style",
+    "attr_pattern",
+    "attr_material",
+    "audience_gender",
+    "age_group",
   ];
 
   for (const category of missingCategories) {
     try {
-      const perCategoryPool = Math.max(12, Math.ceil(limit / Math.max(missingCategories.length, 1)) * 4);
+      const perCategoryPool = Math.max(20, Math.ceil(limit / Math.max(missingCategories.length, 1)) * 8);
+      const minPerCategory = Math.max(4, Math.ceil(limit / Math.max(1, missingCategories.length)));
       const canonical = wardrobeSlotToCategoryCanonical(category);
 
       const buildFilters = (applyPriceTier: boolean): any[] => {
@@ -537,11 +556,9 @@ export async function completeLookSuggestions(
       };
 
       const scoreHits = (hits: any[]): CompleteLookSuggestion[] => {
-        const maxRawScore = Math.max(
-          1,
-          ...hits.map((h: any) => (Number.isFinite(h._score) ? h._score : 0))
-        );
+        const maxRawScore = Math.max(1, ...hits.map((h: any) => (Number.isFinite(h._score) ? h._score : 0)));
         const scored: CompleteLookSuggestion[] = [];
+
         for (const hit of hits) {
           const source = hit._source || {};
           const productId = parseInt(source.product_id, 10);
@@ -554,12 +571,25 @@ export async function completeLookSuggestions(
           );
           const candidateColor = normalizeColorName(source.color_primary_canonical || source.attr_color);
           const colorHarmony = computeColorHarmonyWithWardrobe(wardrobeColorFamilies, candidateColor);
-          const finalScore = embeddingNorm * 0.55 + categoryCompat * 0.25 + colorHarmony * 0.2;
+          const styleAlignment = computeStyleAlignment(source, preferredStyleTerms);
+          const patternAlignment = computeTokenAffinity(source.attr_pattern, preferredPatterns);
+          const materialAlignment = computeTokenAffinity(source.attr_material, preferredMaterials);
+          const formalityAlignment = computeFormalityAlignment(source, preferredFormality);
+          const finalScore =
+            embeddingNorm * 0.38 +
+            categoryCompat * 0.19 +
+            colorHarmony * 0.13 +
+            styleAlignment * 0.11 +
+            patternAlignment * 0.06 +
+            materialAlignment * 0.05 +
+            formalityAlignment * 0.08;
 
           const reasons: string[] = [];
           if (embeddingNorm >= 0.75) reasons.push("strong style similarity");
           if (categoryCompat >= 0.8) reasons.push("high category compatibility");
           if (colorHarmony >= 0.75) reasons.push("good color harmony");
+          if (styleAlignment >= 0.75) reasons.push("style-aware match");
+          if (formalityAlignment >= 0.8) reasons.push("occasion/formality aligned");
           if (reasons.length === 0) reasons.push("balances the current outfit");
 
           scored.push({
@@ -580,14 +610,21 @@ export async function completeLookSuggestions(
               embeddingNorm: Math.round(embeddingNorm * 1000) / 1000,
               categoryCompat: Math.round(categoryCompat * 1000) / 1000,
               colorHarmony: Math.round(colorHarmony * 1000) / 1000,
+              styleAlignment: Math.round(styleAlignment * 1000) / 1000,
+              patternAlignment: Math.round(patternAlignment * 1000) / 1000,
+              materialAlignment: Math.round(materialAlignment * 1000) / 1000,
+              formalityAlignment: Math.round(formalityAlignment * 1000) / 1000,
             },
           });
         }
+
         return scored;
       };
 
-      const runSearch = async (filters: any[]) => {
-        const queryBody: any = centroid
+      const runSearch = async (filters: any[], useVector: boolean) => {
+        const styleHint = preferredStyleTerms.slice(0, 4).join(" ").trim();
+        const lexicalHint = `${canonical} ${styleHint}`.trim();
+        const queryBody: any = centroid && useVector
           ? {
               size: perCategoryPool,
               query: {
@@ -610,11 +647,21 @@ export async function completeLookSuggestions(
               query: {
                 bool: {
                   filter: filters,
+                  should: [
+                    {
+                      multi_match: {
+                        query: lexicalHint,
+                        fields: ["title^3", "category^2", "brand", "attr_style", "attr_pattern", "attr_material"],
+                      },
+                    },
+                  ],
+                  minimum_should_match: 0,
                 },
               },
-              sort: [{ last_seen_at: { order: "desc", missing: "_last" } }],
+              sort: [{ _score: { order: "desc" } }, { last_seen_at: { order: "desc", missing: "_last" } }],
               _source: sourceFields,
             };
+
         const response = await osClient.search({
           index: config.opensearch.index,
           body: queryBody,
@@ -622,29 +669,56 @@ export async function completeLookSuggestions(
         return response.body.hits.hits || [];
       };
 
-      let hits = await runSearch(buildFilters(true));
+      let hits = await runSearch(buildFilters(true), true);
       let scored = scoreHits(hits);
+      if (scored.length < minPerCategory) {
+        const lexicalHits = await runSearch(buildFilters(true), false);
+        scored = dedupeCompleteLookSuggestions(scored.concat(scoreHits(lexicalHits)).sort((a, b) => b.score - a.score));
+      }
       if (scored.length === 0 && userPriceTier) {
-        hits = await runSearch(buildFilters(false));
+        hits = await runSearch(buildFilters(false), true);
         scored = scoreHits(hits);
+        if (scored.length < minPerCategory) {
+          const relaxedLexicalHits = await runSearch(buildFilters(false), false);
+          scored = dedupeCompleteLookSuggestions(scored.concat(scoreHits(relaxedLexicalHits)).sort((a, b) => b.score - a.score));
+        }
       }
 
       scored.sort((a, b) => b.score - a.score);
-      suggestionsByCategory.set(
-        category,
-        scored.slice(0, Math.max(3, Math.ceil(limit / Math.max(1, missingCategories.length))))
-      );
+      suggestionsByCategory.set(category, scored.slice(0, Math.max(minPerCategory, 6)));
     } catch (err) {
       console.error(`Error fetching ${category} suggestions:`, err);
       suggestionsByCategory.set(category, []);
     }
   }
 
-  const mergedSuggestions = dedupeCompleteLookSuggestions(
+  let mergedSuggestions = dedupeCompleteLookSuggestions(
     Array.from(suggestionsByCategory.values())
       .flat()
       .sort((a, b) => b.score - a.score)
-  ).slice(0, limit);
+  );
+
+  if (mergedSuggestions.length < limit) {
+    const topUp = await fetchCategoryTopUpSuggestions({
+      missingCategories,
+      ownedProductIds,
+      existingProductIds: new Set(mergedSuggestions.map((s) => String(s.product_id))),
+      preferredStyleTerms,
+      preferredPatterns,
+      preferredMaterials,
+      preferredFormality,
+      wardrobeColorFamilies,
+      currentCategoryList,
+      needed: limit - mergedSuggestions.length,
+    }).catch(() => []);
+    if (topUp.length > 0) {
+      mergedSuggestions = dedupeCompleteLookSuggestions(
+        mergedSuggestions.concat(topUp).sort((a, b) => b.score - a.score)
+      );
+    }
+  }
+
+  mergedSuggestions = mergedSuggestions.slice(0, limit);
 
   const outfitSets = buildOutfitSets(suggestionsByCategory, missingCategories);
 
@@ -655,7 +729,246 @@ export async function completeLookSuggestions(
   };
 }
 
-const COLOR_FAMILIES_BY_NAME: Record<string, string> = {
+function topHistogramKeys(histogram?: Record<string, number> | null, limit: number = 3): string[] {
+  if (!histogram) return [];
+  return Object.entries(histogram)
+    .filter(([key, value]) => typeof key === "string" && key.trim().length > 0 && Number.isFinite(Number(value)) && Number(value) > 0)
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .slice(0, Math.max(1, limit))
+    .map(([key]) => key.toLowerCase().trim());
+}
+
+function inferStyleTermsFromCurrentItems(
+  items: Array<{ name?: string | null; category_name?: string | null }>,
+  occasionCoverage: string[]
+): string[] {
+  const terms = new Set<string>();
+  const styleLexicon = [
+    "casual",
+    "formal",
+    "minimalist",
+    "streetwear",
+    "classic",
+    "vintage",
+    "sporty",
+    "athleisure",
+    "boho",
+    "elegant",
+    "chic",
+    "edgy",
+    "business",
+    "romantic",
+  ];
+
+  for (const item of items) {
+    const blob = `${String(item.name || "")} ${String(item.category_name || "")}`.toLowerCase();
+    for (const token of styleLexicon) {
+      if (blob.includes(token)) terms.add(token);
+    }
+  }
+
+  for (const occ of occasionCoverage) {
+    const normalized = String(occ || "").toLowerCase().trim();
+    if (!normalized) continue;
+    if (normalized.includes("work")) terms.add("business");
+    else terms.add(normalized);
+  }
+
+  return Array.from(terms);
+}
+
+function computeStyleAlignment(source: any, preferredStyleTerms: string[]): number {
+  if (preferredStyleTerms.length === 0) return 0.62;
+  const blob = `${String(source?.attr_style || "")} ${String(source?.title || "")}`.toLowerCase();
+  if (!blob.trim()) return 0.58;
+
+  let best = 0.45;
+  for (const token of preferredStyleTerms) {
+    if (!token) continue;
+    if (blob === token) best = Math.max(best, 0.92);
+    else if (blob.includes(token)) best = Math.max(best, 0.82);
+  }
+  return best;
+}
+
+function computeTokenAffinity(candidateRaw: unknown, preferredTokens: string[]): number {
+  if (preferredTokens.length === 0) return 0.62;
+  const candidate = String(candidateRaw || "").toLowerCase().trim();
+  if (!candidate) return 0.55;
+  for (const token of preferredTokens) {
+    if (candidate === token) return 0.9;
+    if (candidate.includes(token) || token.includes(candidate)) return 0.78;
+  }
+  return 0.42;
+}
+
+function inferPreferredFormality(occasionCoverage: string[]): "casual" | "business" | "formal" | "mixed" {
+  const set = new Set(occasionCoverage.map((o) => String(o || "").toLowerCase().trim()).filter(Boolean));
+  if (set.size === 0) return "mixed";
+  if (set.has("formal") && !set.has("casual") && !set.has("work")) return "formal";
+  if (set.has("work") && !set.has("casual") && !set.has("formal")) return "business";
+  if (set.has("casual") && !set.has("formal") && !set.has("work")) return "casual";
+  return "mixed";
+}
+
+function inferCandidateFormality(source: any): "casual" | "business" | "formal" | "mixed" {
+  const blob = `${String(source?.attr_style || "")} ${String(source?.title || "")}`.toLowerCase();
+  if (/formal|evening|cocktail|gown|wedding|tux|tailored/.test(blob)) return "formal";
+  if (/business|office|blazer|suit|work/.test(blob)) return "business";
+  if (/casual|street|sport|athleisure|denim|daily/.test(blob)) return "casual";
+  return "mixed";
+}
+
+function computeFormalityAlignment(
+  source: any,
+  preferred: "casual" | "business" | "formal" | "mixed"
+): number {
+  const candidate = inferCandidateFormality(source);
+  if (preferred === "mixed" || candidate === "mixed") return 0.68;
+  if (preferred === candidate) return 0.9;
+  const adjacent =
+    (preferred === "business" && candidate === "formal") ||
+    (preferred === "formal" && candidate === "business") ||
+    (preferred === "business" && candidate === "casual") ||
+    (preferred === "casual" && candidate === "business");
+  if (adjacent) return 0.72;
+  return 0.42;
+}
+
+async function fetchCategoryTopUpSuggestions(params: {
+  missingCategories: string[];
+  ownedProductIds: Set<string>;
+  existingProductIds: Set<string>;
+  preferredStyleTerms: string[];
+  preferredPatterns: string[];
+  preferredMaterials: string[];
+  preferredFormality: "casual" | "business" | "formal" | "mixed";
+  wardrobeColorFamilies: Set<string>;
+  currentCategoryList: string[];
+  needed: number;
+}): Promise<CompleteLookSuggestion[]> {
+  if (params.needed <= 0 || params.missingCategories.length === 0) return [];
+  const canonicalCategories = Array.from(
+    new Set(params.missingCategories.map((c) => wardrobeSlotToCategoryCanonical(c)))
+  );
+
+  const filter: any[] = [
+    { term: { availability: "in_stock" } },
+    { terms: { category_canonical: canonicalCategories } },
+  ];
+
+  const blockedProductIds = Array.from(new Set([...params.ownedProductIds, ...params.existingProductIds]));
+  if (blockedProductIds.length > 0) {
+    filter.push({ bool: { must_not: [{ terms: { product_id: blockedProductIds } }] } });
+  }
+
+  const hint = [
+    ...params.preferredStyleTerms.slice(0, 3),
+    ...params.preferredPatterns.slice(0, 2),
+    ...params.preferredMaterials.slice(0, 2),
+  ]
+    .join(" ")
+    .trim();
+
+  const response = await osClient.search({
+    index: config.opensearch.index,
+    body: {
+      size: Math.max(12, params.needed * 6),
+      query: {
+        bool: {
+          filter,
+          should: [
+            {
+              multi_match: {
+                query: hint || canonicalCategories.join(" "),
+                fields: ["title^3", "category^2", "brand", "attr_style", "attr_pattern", "attr_material"],
+              },
+            },
+          ],
+          minimum_should_match: 0,
+        },
+      },
+      _source: [
+        "product_id",
+        "title",
+        "brand",
+        "category",
+        "category_canonical",
+        "price_usd",
+        "image_cdn",
+        "color_primary_canonical",
+        "attr_color",
+        "attr_style",
+        "attr_pattern",
+        "attr_material",
+      ],
+      sort: [{ _score: { order: "desc" } }, { last_seen_at: { order: "desc", missing: "_last" } }],
+    },
+  });
+
+  const hits = response.body?.hits?.hits || [];
+  const maxRawScore = Math.max(1, ...hits.map((h: any) => (Number.isFinite(h?._score) ? h._score : 0)));
+  const out: CompleteLookSuggestion[] = [];
+
+  for (const hit of hits) {
+    const source = hit?._source || {};
+    const productId = parseInt(source.product_id, 10);
+    if (!productId) continue;
+    const productKey = String(productId);
+    if (params.ownedProductIds.has(productKey) || params.existingProductIds.has(productKey)) continue;
+
+    const guessedSlot = normalizeWardrobeCategory(source.category_canonical || source.category) || "accessories";
+    const embeddingNorm = Number.isFinite(hit._score) ? Math.min(1, hit._score / maxRawScore) : 0.52;
+    const categoryCompat = computeCategoryCompatibility(
+      guessedSlot,
+      params.currentCategoryList.length > 0 ? params.currentCategoryList : ["other"]
+    );
+    const colorHarmony = computeColorHarmonyWithWardrobe(
+      params.wardrobeColorFamilies,
+      normalizeColorName(source.color_primary_canonical || source.attr_color)
+    );
+    const styleAlignment = computeStyleAlignment(source, params.preferredStyleTerms);
+    const patternAlignment = computeTokenAffinity(source.attr_pattern, params.preferredPatterns);
+    const materialAlignment = computeTokenAffinity(source.attr_material, params.preferredMaterials);
+    const formalityAlignment = computeFormalityAlignment(source, params.preferredFormality);
+
+    const score =
+      embeddingNorm * 0.36 +
+      categoryCompat * 0.2 +
+      colorHarmony * 0.14 +
+      styleAlignment * 0.12 +
+      patternAlignment * 0.07 +
+      materialAlignment * 0.05 +
+      formalityAlignment * 0.06;
+
+    out.push({
+      product_id: productId,
+      title: source.title,
+      brand: source.brand,
+      category: source.category,
+      price_cents:
+        source.price_usd != null && Number.isFinite(Number(source.price_usd))
+          ? Math.round(Number(source.price_usd) * 100)
+          : undefined,
+      image_url: source.image_cdn,
+      image_cdn: source.image_cdn,
+      score: Math.round(score * 1000) / 1000,
+      reason: `Add ${guessedSlot} to complete the look (fashion-aware top-up match)`,
+      reason_type: "compatible",
+      fitBreakdown: {
+        embeddingNorm: Math.round(embeddingNorm * 1000) / 1000,
+        categoryCompat: Math.round(categoryCompat * 1000) / 1000,
+        colorHarmony: Math.round(colorHarmony * 1000) / 1000,
+        styleAlignment: Math.round(styleAlignment * 1000) / 1000,
+        patternAlignment: Math.round(patternAlignment * 1000) / 1000,
+        materialAlignment: Math.round(materialAlignment * 1000) / 1000,
+        formalityAlignment: Math.round(formalityAlignment * 1000) / 1000,
+      },
+    });
+  }
+
+  return dedupeCompleteLookSuggestions(out.sort((a, b) => b.score - a.score)).slice(0, params.needed);
+}
   black: "neutral",
   white: "neutral",
   gray: "neutral",
@@ -923,3 +1236,9 @@ export async function getAdaptedEssentialsForUser(userId: number) {
 export async function getUserPriceTier(userId: number) {
   return inferPriceTier(userId);
 }
+
+
+
+
+
+
