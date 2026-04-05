@@ -84,6 +84,21 @@ Response additions:
 - timing_insight
 - outfit_impact (when mode=outfit_compare)
 
+Optional pagination (list-style compare endpoints):
+- `GET /api/compare/tooltips?paginate=true&page=1&limit=20`
+- `POST /api/compare/reviews?paginate=true&page=1&limit=20`
+
+Pagination response shape when enabled:
+- `pagination.page`
+- `pagination.limit`
+- `pagination.total`
+- `pagination.total_pages`
+- `pagination.has_next`
+- `pagination.has_prev`
+
+Note:
+- `POST /api/compare` itself does not need pagination because input is capped to 2-5 products and output is intentionally bounded.
+
 ## Engineering Notes
 
 Scoring strategy is deterministic and derived from existing compare signals.

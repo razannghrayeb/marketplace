@@ -5,6 +5,7 @@
 import { pg, productsTableHasGenderColumn } from "../core/db";
 import {
   catalogGenderFromCaption,
+  catalogGenderFromProductText,
   primaryColorHintFromCaption,
   productDescriptionFromCaption,
 } from "./captionAttributeInference";
@@ -47,20 +48,20 @@ export async function applyBlipCaptionToMissingProductFields(
   options?: { dryRun?: boolean },
 ): Promise<ApplyBlipCaptionResult> {
   const c = String(caption || "").trim();
-  if (c.length < 8) return { updated: false, fields: [] };
 
   const hasGender = await productsTableHasGenderColumn();
-  const [hasStyle, hasMaterial, hasOccasion] = await Promise.all([
+  const [hasStyle, hasMaterial, hasOccasion, hasDetails] = await Promise.all([
     productsTableHasColumn("style"),
     productsTableHasColumn("material"),
     productsTableHasColumn("occasion"),
+    productsTableHasColumn("details"),
   ]);
   const selectSql = hasGender
-    ? `SELECT description, color, gender, title, ${hasStyle ? "style" : "NULL::text AS style"},
+    ? `SELECT description, color, gender, title, ${hasDetails ? "details" : "NULL::text AS details"}, ${hasStyle ? "style" : "NULL::text AS style"},
               ${hasMaterial ? "material" : "NULL::text AS material"},
               ${hasOccasion ? "occasion" : "NULL::text AS occasion"}
        FROM products WHERE id = $1`
-    : `SELECT description, color, title, ${hasStyle ? "style" : "NULL::text AS style"},
+    : `SELECT description, color, title, ${hasDetails ? "details" : "NULL::text AS details"}, ${hasStyle ? "style" : "NULL::text AS style"},
               ${hasMaterial ? "material" : "NULL::text AS material"},
               ${hasOccasion ? "occasion" : "NULL::text AS occasion"}
        FROM products WHERE id = $1`;
@@ -73,8 +74,9 @@ export async function applyBlipCaptionToMissingProductFields(
   const fields: string[] = [];
   let pi = 1;
   const structured = buildStructuredBlipOutput(c);
+  const hasCaptionSignals = c.length >= 8;
 
-  if (isCatalogFieldBlank(cur.description)) {
+  if (hasCaptionSignals && isCatalogFieldBlank(cur.description)) {
     const desc = productDescriptionFromCaption(c);
     if (desc) {
       updates.push(`description = $${pi++}`);
@@ -82,7 +84,7 @@ export async function applyBlipCaptionToMissingProductFields(
       fields.push("description");
     }
   }
-  if (isCatalogFieldBlank(cur.color)) {
+  if (hasCaptionSignals && isCatalogFieldBlank(cur.color)) {
     const pc = primaryColorHintFromCaption(c);
     if (pc) {
       updates.push(`color = $${pi++}`);
@@ -91,24 +93,36 @@ export async function applyBlipCaptionToMissingProductFields(
     }
   }
   if (hasGender && isCatalogFieldBlank((cur as { gender?: unknown }).gender)) {
-    const gender = catalogGenderFromCaption(c, (cur as { title?: unknown }).title as string | null | undefined);
+    const title = (cur as { title?: unknown }).title as string | null | undefined;
+    const description = (cur as { description?: unknown }).description as string | null | undefined;
+    const details = (cur as { details?: unknown }).details as string | null | undefined;
+
+    // Prefer explicit product metadata first; use BLIP only as fallback.
+    const genderFromText = catalogGenderFromProductText(title, description, details);
+    const genderFromBlip = genderFromText
+      ? null
+      : hasCaptionSignals
+        ? catalogGenderFromCaption(c, title)
+        : null;
+    const gender = genderFromText ?? genderFromBlip;
+
     if (gender) {
       updates.push(`gender = $${pi++}`);
       vals.push(gender);
       fields.push("gender");
     }
   }
-  if (hasStyle && isCatalogFieldBlank((cur as { style?: unknown }).style) && structured.style.attrStyle) {
+  if (hasCaptionSignals && hasStyle && isCatalogFieldBlank((cur as { style?: unknown }).style) && structured.style.attrStyle) {
     updates.push(`style = $${pi++}`);
     vals.push(structured.style.attrStyle);
     fields.push("style");
   }
-  if (hasOccasion && isCatalogFieldBlank((cur as { occasion?: unknown }).occasion) && structured.style.occasion) {
+  if (hasCaptionSignals && hasOccasion && isCatalogFieldBlank((cur as { occasion?: unknown }).occasion) && structured.style.occasion) {
     updates.push(`occasion = $${pi++}`);
     vals.push(structured.style.occasion);
     fields.push("occasion");
   }
-  if (hasMaterial && isCatalogFieldBlank((cur as { material?: unknown }).material)) {
+  if (hasCaptionSignals && hasMaterial && isCatalogFieldBlank((cur as { material?: unknown }).material)) {
     const normalizedCaption = structured.normalizedCaption;
     let material: string | null = null;
     if (/\b(denim|jean)\b/.test(normalizedCaption)) material = "denim";

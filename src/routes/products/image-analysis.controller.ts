@@ -68,6 +68,23 @@ function pickImageFile(req: Request): Express.Multer.File | undefined {
   return f?.buffer?.length ? f : undefined;
 }
 
+function parsePositiveInt(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isInteger(value) && value > 0 ? value : null;
+  }
+  if (typeof value === "string") {
+    const v = value.trim();
+    if (!/^\d+$/.test(v)) return null;
+    const n = parseInt(v, 10);
+    return n > 0 ? n : null;
+  }
+  return null;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
 // ============================================================================
 // Routes
 // ============================================================================
@@ -203,6 +220,10 @@ router.post(
  *   - store: boolean (default: false) - Store image in R2
  *   - threshold: number (default: 0.63) - Similarity threshold 0-1
  *   - limit_per_item: number (optional) - Max similar products per detection (backend default when omitted)
+ *   - products_page: number (optional, default: 1) - Page for per-detection products
+ *   - products_limit: number (optional) - Page size for per-detection products
+ *   - detections_page: number (optional, default: 1) - Page for detection groups
+ *   - detections_limit: number (optional) - Page size for detection groups
  *   - filter_category: boolean (default: true) - Filter by detected category
  *   - confidence: number (default: 0.25) - Detection confidence
  *   - enhance_contrast: boolean (default: false) - Preprocess: enhance contrast
@@ -253,6 +274,22 @@ router.post(
         });
       }
 
+      const baseLimitPerItem = parsePositiveInt(req.query.limit_per_item);
+      const productsPage = parsePositiveInt(req.query.products_page) ?? 1;
+      const productsLimitRaw = parsePositiveInt(req.query.products_limit);
+      const productsPaginationEnabled =
+        req.query.products_page !== undefined || req.query.products_limit !== undefined;
+      const productsLimit = clamp(productsLimitRaw ?? baseLimitPerItem ?? 22, 1, 80);
+      const productsOffset = (productsPage - 1) * productsLimit;
+      const fetchLimitPerItem = productsPaginationEnabled
+        ? clamp(productsLimit * productsPage, 1, 80)
+        : baseLimitPerItem ?? undefined;
+
+      const detectionsPage = parsePositiveInt(req.query.detections_page) ?? 1;
+      const detectionsLimitRaw = parsePositiveInt(req.query.detections_limit);
+      const detectionsPaginationEnabled =
+        req.query.detections_page !== undefined || req.query.detections_limit !== undefined;
+
       const options = {
         store: req.query.store === "true",
         generateEmbedding: true,
@@ -264,8 +301,12 @@ router.post(
         similarityThreshold: req.query.threshold
           ? parseFloat(req.query.threshold as string)
           : 0.63,
-        similarLimitPerItem: req.query.limit_per_item
-          ? parseInt(req.query.limit_per_item as string, 10)
+        similarLimitPerItem: fetchLimitPerItem,
+        resultsPage: req.query.products_page
+          ? parseInt(req.query.products_page as string, 10)
+          : undefined,
+        resultsPageSize: req.query.products_limit
+          ? parseInt(req.query.products_limit as string, 10)
           : undefined,
         filterByDetectedCategory: req.query.filter_category !== "false",
         groupByDetection: req.query.group_by_detection !== "false",
@@ -291,9 +332,69 @@ router.post(
       // Don't expose raw embedding to clients
       const { embedding, ...safeResult } = result;
 
+      const payload = safeResult as any;
+      if (payload.similarProducts && Array.isArray(payload.similarProducts.byDetection)) {
+        const originalByDetection = payload.similarProducts.byDetection as Array<any>;
+
+        const byDetectionAfterProductPaging = productsPaginationEnabled
+          ? originalByDetection.map((row) => ({
+              ...row,
+              products: Array.isArray(row.products)
+                ? row.products.slice(productsOffset, productsOffset + productsLimit)
+                : [],
+            }))
+          : originalByDetection;
+
+        const detectionsLimitBase =
+          detectionsLimitRaw ??
+          (byDetectionAfterProductPaging.length > 0
+            ? byDetectionAfterProductPaging.length
+            : 1);
+        const detectionsLimit = clamp(detectionsLimitBase, 1, 200);
+        const detectionsOffset = (detectionsPage - 1) * detectionsLimit;
+        const finalByDetection = detectionsPaginationEnabled
+          ? byDetectionAfterProductPaging.slice(
+              detectionsOffset,
+              detectionsOffset + detectionsLimit,
+            )
+          : byDetectionAfterProductPaging;
+
+        payload.similarProducts.byDetection = finalByDetection;
+        payload.similarProducts.totalProductsPage = finalByDetection.reduce(
+          (sum: number, row: any) => sum + (Array.isArray(row.products) ? row.products.length : 0),
+          0,
+        );
+        payload.similarProducts.pagination = {
+          products: {
+            enabled: productsPaginationEnabled,
+            page: productsPage,
+            limit: productsLimit,
+            has_next: productsPaginationEnabled
+              ? originalByDetection.some(
+                  (row) => Array.isArray(row.products) && row.products.length > productsOffset + productsLimit,
+                )
+              : false,
+          },
+          detections: {
+            enabled: detectionsPaginationEnabled,
+            page: detectionsPage,
+            limit: detectionsLimit,
+            total: byDetectionAfterProductPaging.length,
+            total_pages: Math.max(
+              1,
+              Math.ceil(byDetectionAfterProductPaging.length / detectionsLimit),
+            ),
+            has_next: detectionsPaginationEnabled
+              ? detectionsOffset + finalByDetection.length < byDetectionAfterProductPaging.length
+              : false,
+            has_prev: detectionsPaginationEnabled ? detectionsPage > 1 : false,
+          },
+        };
+      }
+
       return res.json({
         success: true,
-        ...safeResult,
+        ...payload,
       });
     } catch (error) {
       next(error);

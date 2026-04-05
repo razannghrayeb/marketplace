@@ -160,6 +160,34 @@ function resolveShopLookLimit(explicit?: number): number {
   return defaultShopLookResultBudget();
 }
 
+function resolveShopLookPage(explicit?: number): number {
+  if (typeof explicit === "number" && Number.isFinite(explicit) && explicit >= 1) {
+    return Math.floor(explicit);
+  }
+  return 1;
+}
+
+function resolveShopLookPageSize(explicit: number | undefined, fallback: number): number {
+  if (typeof explicit === "number" && Number.isFinite(explicit) && explicit >= 1) {
+    return Math.min(80, Math.floor(explicit));
+  }
+  return resolveShopLookLimit(fallback);
+}
+
+/** Extra visual floor above threshold to keep Shop-the-Look results precision-first. */
+function shopLookPostVisualMinDelta(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_POST_VISUAL_MIN_DELTA ?? "0.03");
+  if (!Number.isFinite(raw)) return 0.03;
+  return Math.max(0, Math.min(0.2, raw));
+}
+
+/** Minimum high-precision hits to keep before backing off to the base threshold. */
+function shopLookPostVisualMinKeep(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_POST_VISUAL_MIN_KEEP ?? "8");
+  if (!Number.isFinite(raw)) return 8;
+  return Math.max(1, Math.min(40, Math.floor(raw)));
+}
+
 /**
  * Skip auto hard-category for accessory/bag noise and ambiguous top silhouettes.
  * `SEARCH_IMAGE_SHOP_HARD_CATEGORY_STRICT` still forces hard filtering when needed.
@@ -956,6 +984,71 @@ function applyDetectionCategoryGuard(
   });
 }
 
+function applyShopLookVisualPrecisionGuard(
+  products: ProductResult[],
+  similarityThreshold: number,
+): ProductResult[] {
+  if (!Array.isArray(products) || products.length === 0) return [];
+
+  const baseMin = Math.max(0, Math.min(1, similarityThreshold));
+  const strictMin = Math.max(baseMin, Math.min(1, baseMin + shopLookPostVisualMinDelta()));
+  const scoreOf = (p: ProductResult): number => {
+    const raw = Number((p as any).similarity_score);
+    return Number.isFinite(raw) ? raw : 0;
+  };
+
+  const strict = products.filter((p) => scoreOf(p) >= strictMin);
+  if (strict.length >= shopLookPostVisualMinKeep()) return strict;
+
+  // Never return below the endpoint threshold, even if lower-fidelity fallback paths ran.
+  return products.filter((p) => scoreOf(p) >= baseMin);
+}
+
+function paginateDetectionGroups(
+  rows: DetectionSimilarProducts[],
+  page: number,
+  pageSize: number,
+): {
+  rows: DetectionSimilarProducts[];
+  totalProducts: number;
+  totalAvailableProducts: number;
+} {
+  const safePage = Math.max(1, Math.floor(page));
+  const safePageSize = Math.max(1, Math.floor(pageSize));
+  const offset = (safePage - 1) * safePageSize;
+
+  let totalProducts = 0;
+  let totalAvailableProducts = 0;
+  const paginated = rows.map((row) => {
+    const allProducts = Array.isArray(row.products) ? row.products : [];
+    const totalItems = allProducts.length;
+    const totalPages = totalItems > 0 ? Math.ceil(totalItems / safePageSize) : 0;
+    const products = allProducts.slice(offset, offset + safePageSize);
+    totalProducts += products.length;
+    totalAvailableProducts += totalItems;
+    return {
+      ...row,
+      products,
+      count: products.length,
+      totalAvailable: totalItems,
+      pagination: {
+        page: safePage,
+        pageSize: safePageSize,
+        totalItems,
+        totalPages,
+        hasNextPage: totalPages > 0 && safePage < totalPages,
+        hasPrevPage: safePage > 1 && totalPages > 0,
+      },
+    };
+  });
+
+  return {
+    rows: paginated,
+    totalProducts,
+    totalAvailableProducts,
+  };
+}
+
 function inferLengthIntentFromCaption(caption: string): "mini" | "midi" | "maxi" | "long" | null {
   const s = String(caption || "").toLowerCase();
   if (!s) return null;
@@ -1305,6 +1398,17 @@ export interface DetectionSimilarProducts {
   products: ProductResult[];
   /** Number of similar products found */
   count: number;
+  /** Number of similar products before pagination is applied. */
+  totalAvailable?: number;
+  /** Per-detection pagination metadata. */
+  pagination?: {
+    page: number;
+    pageSize: number;
+    totalItems: number;
+    totalPages: number;
+    hasNextPage: boolean;
+    hasPrevPage: boolean;
+  };
   /** Index into `detection.items` for this row (when multiple instances share a label). */
   detectionIndex?: number;
 
@@ -1321,6 +1425,8 @@ export interface GroupedSimilarProducts {
   byDetection: DetectionSimilarProducts[];
   /** Total products across all detections */
   totalProducts: number;
+  /** Total products across all detections before pagination is applied. */
+  totalAvailableProducts?: number;
   /** Similarity threshold used */
   threshold: number;
   /** All detected categories */
@@ -1335,6 +1441,12 @@ export interface GroupedSimilarProducts {
     emptyDetections: number;
     coverageRatio: number;
   };
+  /** Pagination settings applied to each detection group. */
+  pagination?: {
+    mode: "per_detection";
+    page: number;
+    pageSize: number;
+  };
 }
 
 export interface AnalyzeAndFindSimilarOptions extends AnalyzeOptions {
@@ -1346,6 +1458,12 @@ export interface AnalyzeAndFindSimilarOptions extends AnalyzeOptions {
 
   /** Max similar products per detection (default from SEARCH_IMAGE_SHOP_LIMIT_PER_DETECTION or 22) */
   similarLimitPerItem?: number;
+
+  /** Per-detection result page number (1-based, default: 1). */
+  resultsPage?: number;
+
+  /** Per-detection page size (default: similarLimitPerItem). */
+  resultsPageSize?: number;
 
   /** Filter similar products by detected category */
   filterByDetectedCategory?: boolean;
@@ -1678,11 +1796,19 @@ export class ImageAnalysisService {
       findSimilar = true,
       similarityThreshold = config.clip.imageSimilarityThreshold,
       similarLimitPerItem = defaultShopLookResultBudget(),
+      resultsPage,
+      resultsPageSize,
       filterByDetectedCategory = true,
       groupByDetection = false,
       includeEmptyDetectionGroups = false,
       ...analyzeOptions
     } = options;
+    const resolvedLimitPerItem = resolveShopLookLimit(similarLimitPerItem);
+    const resolvedResultsPage = resolveShopLookPage(resultsPage);
+    const resolvedResultsPageSize = resolveShopLookPageSize(resultsPageSize, resolvedLimitPerItem);
+    const retrievalLimit = resolveShopLookLimit(
+      Math.max(resolvedLimitPerItem, resolvedResultsPage * resolvedResultsPageSize),
+    );
 
     // Get image dimensions first
     const metadata = await sharp(buffer).metadata();
@@ -1695,12 +1821,24 @@ export class ImageAnalysisService {
       generateEmbedding: true, // Force embedding for similarity search
       deferFullImageEmbedding: findSimilar,
     });
+    const sourceImagePHash = await computePHash(buffer).catch(() => undefined);
 
     // Similarity search disabled — return early
     if (!findSimilar) {
       return {
         ...analysisResult,
-        similarProducts: { byDetection: [], totalProducts: 0, threshold: similarityThreshold, detectedCategories: [] },
+        similarProducts: {
+          byDetection: [],
+          totalProducts: 0,
+          totalAvailableProducts: 0,
+          threshold: similarityThreshold,
+          detectedCategories: [],
+          pagination: {
+            mode: "per_detection",
+            page: resolvedResultsPage,
+            pageSize: resolvedResultsPageSize,
+          },
+        },
       };
     }
 
@@ -1714,32 +1852,55 @@ export class ImageAnalysisService {
         return {
           ...analysisResult,
           detection: fallbackDetection,
-          similarProducts: { byDetection: [], totalProducts: 0, threshold: similarityThreshold, detectedCategories: fallbackDetectedCategories },
+          similarProducts: {
+            byDetection: [],
+            totalProducts: 0,
+            totalAvailableProducts: 0,
+            threshold: similarityThreshold,
+            detectedCategories: fallbackDetectedCategories,
+            pagination: {
+              mode: "per_detection",
+              page: resolvedResultsPage,
+              pageSize: resolvedResultsPageSize,
+            },
+          },
         };
       }
       const fallback = await searchByImageWithSimilarity({
         imageEmbedding: fallbackEmbedding,
         imageBuffer: fullProcessBuf,
         filters: {},
-        limit: similarLimitPerItem,
+        limit: retrievalLimit,
         similarityThreshold,
         includeRelated: false,
         knnField: "embedding",
         relaxThresholdWhenEmpty: shopLookRelaxEnv(),
       });
+      const fallbackRows: DetectionSimilarProducts[] = fallback.results.length > 0 ? [{
+        detection: { label: "full_image", confidence: 1.0, box: { x1: 0, y1: 0, x2: imageWidth, y2: imageHeight }, area_ratio: 1.0 },
+        category: "all",
+        products: fallback.results,
+        count: fallback.results.length,
+      }] : [];
+      const pagedFallback = paginateDetectionGroups(
+        fallbackRows,
+        resolvedResultsPage,
+        resolvedResultsPageSize,
+      );
       return {
         ...analysisResult,
         detection: fallbackDetection,
         similarProducts: {
-          byDetection: fallback.results.length > 0 ? [{
-            detection: { label: "full_image", confidence: 1.0, box: { x1: 0, y1: 0, x2: imageWidth, y2: imageHeight }, area_ratio: 1.0 },
-            category: "all",
-            products: fallback.results,
-            count: fallback.results.length,
-          }] : [],
-          totalProducts: fallback.results.length,
+          byDetection: pagedFallback.rows,
+          totalProducts: pagedFallback.totalProducts,
+          totalAvailableProducts: pagedFallback.totalAvailableProducts,
           threshold: similarityThreshold,
           detectedCategories: fallbackDetectedCategories,
+          pagination: {
+            mode: "per_detection",
+            page: resolvedResultsPage,
+            pageSize: resolvedResultsPageSize,
+          },
         },
       };
     }
@@ -1992,9 +2153,10 @@ export class ImageAnalysisService {
             ? finalGarmentEmbedding
             : undefined,
         imageBuffer: clipBuffer,
+        pHash: sourceImagePHash,
         filters,
         softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
-        limit: similarLimitPerItem,
+        limit: retrievalLimit,
         similarityThreshold,
         includeRelated: false,
         predictedCategoryAisles,
@@ -2032,9 +2194,10 @@ export class ImageAnalysisService {
               ? finalGarmentEmbedding
               : undefined,
           imageBuffer: clipBuffer,
+          pHash: sourceImagePHash,
           filters: filtersRetry,
           softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
-          limit: similarLimitPerItem,
+          limit: retrievalLimit,
           similarityThreshold,
           includeRelated: false,
           predictedCategoryAisles,
@@ -2067,8 +2230,9 @@ export class ImageAnalysisService {
               ? finalGarmentEmbedding
               : undefined,
           imageBuffer: clipBuffer,
+          pHash: sourceImagePHash,
           filters: filtersSansCategory,
-          limit: similarLimitPerItem,
+          limit: retrievalLimit,
           similarityThreshold,
           includeRelated: false,
           predictedCategoryAisles,
@@ -2088,12 +2252,13 @@ export class ImageAnalysisService {
                 ? finalGarmentEmbedding
                 : undefined,
             imageBuffer: clipBuffer,
+            pHash: sourceImagePHash,
             // Keep crop-derived structural intent even in last-resort fallback.
             filters: {
               length: (filters as any).length,
             } as any,
             softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
-            limit: similarLimitPerItem,
+            limit: retrievalLimit,
             similarityThreshold,
             includeRelated: false,
             knnField: shopTheLookKnnField(),
@@ -2109,7 +2274,7 @@ export class ImageAnalysisService {
 
       const lowQualityFallbackWanted =
         shouldUseLowQualityMultiCropFallback(detection) &&
-        similarResult.results.length < Math.max(3, Math.floor(similarLimitPerItem * 0.35));
+        similarResult.results.length < Math.max(3, Math.floor(retrievalLimit * 0.35));
       if (lowQualityFallbackWanted) {
         const expandedRaw = expandDetectionBox(detection.box, imageWidth, imageHeight, 0.22);
         let expandedBox = expandedRaw;
@@ -2137,9 +2302,10 @@ export class ImageAnalysisService {
             imageEmbedding: alt,
             imageEmbeddingGarment: alt,
             imageBuffer: queryProcessBuf,
+              pHash: sourceImagePHash,
             filters,
             softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
-            limit: similarLimitPerItem,
+              limit: retrievalLimit,
             similarityThreshold,
             includeRelated: false,
             predictedCategoryAisles,
@@ -2156,15 +2322,20 @@ export class ImageAnalysisService {
             results: mergeImageSearchResultsById(
               similarResult.results,
               altResult.results,
-              similarLimitPerItem,
+                retrievalLimit,
             ),
           };
-          if (similarResult.results.length >= Math.max(4, Math.floor(similarLimitPerItem * 0.5))) break;
+          if (similarResult.results.length >= Math.max(4, Math.floor(retrievalLimit * 0.5))) break;
         }
       }
 
-      const categorySafeResults = applyDetectionCategoryGuard(
+      const precisionSafeResults = applyShopLookVisualPrecisionGuard(
         similarResult.results,
+        similarityThreshold,
+      );
+
+      const categorySafeResults = applyDetectionCategoryGuard(
+        precisionSafeResults,
         detection.label,
         categoryMapping,
       );
@@ -2280,12 +2451,16 @@ export class ImageAnalysisService {
       similarityThreshold?: number;
       limitPerItem?: number;
       filterByCategory?: string;
+      resultsPage?: number;
+      resultsPageSize?: number;
     } = {}
   ): Promise<GroupedSimilarProducts> {
     const {
       similarityThreshold = config.clip.imageSimilarityThreshold,
       limitPerItem = defaultShopLookResultBudget(),
       filterByCategory,
+      resultsPage,
+      resultsPageSize,
     } = options;
 
     // Download image
@@ -2305,6 +2480,8 @@ export class ImageAnalysisService {
       store: false,
       similarityThreshold,
       similarLimitPerItem: limitPerItem,
+      resultsPage,
+      resultsPageSize,
       filterByDetectedCategory: !filterByCategory, // Use custom filter if provided
     });
 
@@ -2440,8 +2617,16 @@ export class ImageAnalysisService {
       excludedItemIndices = [],
       userDefinedBoxes = [],
       preprocessing,
+      resultsPage,
+      resultsPageSize,
       ...baseOptions
     } = options;
+    const resolvedLimitPerItem = resolveShopLookLimit(options.similarLimitPerItem);
+    const resolvedResultsPage = resolveShopLookPage(resultsPage);
+    const resolvedResultsPageSize = resolveShopLookPageSize(resultsPageSize, resolvedLimitPerItem);
+    const retrievalLimit = resolveShopLookLimit(
+      Math.max(resolvedLimitPerItem, resolvedResultsPage * resolvedResultsPageSize),
+    );
 
     // Get image dimensions
     const metadata = await sharp(buffer).metadata();
@@ -2454,6 +2639,7 @@ export class ImageAnalysisService {
       generateEmbedding: true,
       preprocessing,
     });
+    const sourceImagePHash = await computePHash(buffer).catch(() => undefined);
 
     if (!fullResult.detection) {
       return {
@@ -2709,9 +2895,10 @@ export class ImageAnalysisService {
               ? finalGarmentEmbedding
               : undefined,
           imageBuffer: clipBuffer,
+          pHash: sourceImagePHash,
           filters,
           softProductTypeHints,
-          limit: resolveShopLookLimit(options.similarLimitPerItem),
+          limit: retrievalLimit,
           similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
           includeRelated: false,
           predictedCategoryAisles,
@@ -2748,9 +2935,10 @@ export class ImageAnalysisService {
                 ? finalGarmentEmbedding
                 : undefined,
             imageBuffer: clipBuffer,
+            pHash: sourceImagePHash,
             filters: filtersRetry,
             softProductTypeHints,
-            limit: resolveShopLookLimit(options.similarLimitPerItem),
+            limit: retrievalLimit,
             similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
             includeRelated: false,
             predictedCategoryAisles,
@@ -2784,9 +2972,10 @@ export class ImageAnalysisService {
                 ? finalGarmentEmbedding
                 : undefined,
             imageBuffer: clipBuffer,
+            pHash: sourceImagePHash,
             filters: filtersSansCategory,
             softProductTypeHints,
-            limit: resolveShopLookLimit(options.similarLimitPerItem),
+            limit: retrievalLimit,
             similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
             includeRelated: false,
             predictedCategoryAisles,
@@ -2805,12 +2994,13 @@ export class ImageAnalysisService {
                   ? finalGarmentEmbedding
                   : undefined,
               imageBuffer: clipBuffer,
+              pHash: sourceImagePHash,
               // Keep crop-derived structural intent even in last-resort fallback.
               filters: {
                 productTypes: filters.productTypes,
                 length: (filters as any).length,
               } as any,
-              limit: resolveShopLookLimit(options.similarLimitPerItem),
+              limit: retrievalLimit,
               similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
               includeRelated: false,
               knnField: shopTheLookKnnField(),
@@ -2825,7 +3015,7 @@ export class ImageAnalysisService {
 
         const lowQualityFallbackWanted =
           shouldUseLowQualityMultiCropFallback(detection) &&
-          similarResult.results.length < Math.max(3, Math.floor(resolveShopLookLimit(options.similarLimitPerItem) * 0.35));
+          similarResult.results.length < Math.max(3, Math.floor(retrievalLimit * 0.35));
         if (lowQualityFallbackWanted) {
           const expandedRaw = expandDetectionBox(detection.box, imageWidth, imageHeight, 0.22);
           let expandedBox = expandedRaw;
@@ -2853,9 +3043,10 @@ export class ImageAnalysisService {
               imageEmbedding: alt,
               imageEmbeddingGarment: alt,
               imageBuffer: queryProcessBuf,
+              pHash: sourceImagePHash,
               filters,
               softProductTypeHints,
-              limit: resolveShopLookLimit(options.similarLimitPerItem),
+              limit: retrievalLimit,
               similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
               includeRelated: false,
               predictedCategoryAisles,
@@ -2872,17 +3063,23 @@ export class ImageAnalysisService {
               results: mergeImageSearchResultsById(
                 similarResult.results,
                 altResult.results,
-                resolveShopLookLimit(options.similarLimitPerItem),
+                retrievalLimit,
               ),
             };
-            if (similarResult.results.length >= Math.max(4, Math.floor(resolveShopLookLimit(options.similarLimitPerItem) * 0.5))) break;
+            if (similarResult.results.length >= Math.max(4, Math.floor(retrievalLimit * 0.5))) break;
           }
         }
 
+        const effectiveSimilarityThreshold =
+          options.similarityThreshold ?? config.clip.imageSimilarityThreshold;
+        const precisionSafeResults = applyShopLookVisualPrecisionGuard(
+          similarResult.results,
+          effectiveSimilarityThreshold,
+        );
         similarResult = {
           ...similarResult,
           results: applyDetectionCategoryGuard(
-            similarResult.results,
+            precisionSafeResults,
             categorySource,
             categoryMapping,
           ),
@@ -2921,8 +3118,13 @@ export class ImageAnalysisService {
     }
 
     const postRankedSel = applyGroupedPostRanking(groupedResults, imageCrossGroupDedupeEnabled());
-    const finalGroupedResults = postRankedSel.rows as SelectiveDetectionResult[];
-    totalProducts = postRankedSel.totalProducts;
+    const pagedSel = paginateDetectionGroups(
+      postRankedSel.rows,
+      resolvedResultsPage,
+      resolvedResultsPageSize,
+    );
+    const finalGroupedResults = pagedSel.rows as SelectiveDetectionResult[];
+    totalProducts = pagedSel.totalProducts;
 
     const itemsForCoherence: DetectionWithColor[] = [];
     for (const r of finalGroupedResults) {
@@ -2973,8 +3175,14 @@ export class ImageAnalysisService {
       similarProducts: {
         byDetection: finalGroupedResults,
         totalProducts,
+        totalAvailableProducts: pagedSel.totalAvailableProducts,
         threshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
         detectedCategories: [...new Set(finalGroupedResults.map((r) => r.category))],
+        pagination: {
+          mode: "per_detection",
+          page: resolvedResultsPage,
+          pageSize: resolvedResultsPageSize,
+        },
         shopTheLookStats: {
           totalDetections: totalSel,
           coveredDetections: coveredSel,
