@@ -661,15 +661,22 @@ async function runCompleteLookCore(
     }
   };
 
+  // Pass 1: trust structured category signal first.
   for (const row of currentItems) {
     pushCategory(normalizeWardrobeCategory(row.category_name));
-    pushCategory(normalizeWardrobeCategory(row.name));
-    pushCategory(normalizeWardrobeCategory(row.title));
+  }
 
-    const freeTextSignals = inferSlotsFromFreeText(
-      `${String(row.name || "")} ${String(row.title || "")} ${String(row.category_name || "")}`
-    );
-    for (const signal of freeTextSignals) pushCategory(signal);
+  // Pass 2: only use weak text hints when structured categories are sparse.
+  if (currentCategories.size < 2) {
+    for (const row of currentItems) {
+      pushCategory(normalizeWardrobeCategory(row.name));
+      pushCategory(normalizeWardrobeCategory(row.title));
+
+      const freeTextSignals = inferSlotsFromFreeText(
+        `${String(row.name || "")} ${String(row.title || "")} ${String(row.category_name || "")}`
+      );
+      for (const signal of freeTextSignals) pushCategory(signal);
+    }
   }
 
   const styleProfile = await getStyleProfile(userId).catch(() => null);
@@ -785,7 +792,7 @@ async function runCompleteLookCore(
         for (const hit of hits) {
           const source = hit._source || {};
           if (!sourceMatchesSlot(category, source)) continue;
-          if (!audienceGenderMatches(inferredAudienceGender, source, enforceNeutralAudienceWhenUnknown)) continue;
+          if (!audienceGenderMatchesForSlot(inferredAudienceGender, source, category, enforceNeutralAudienceWhenUnknown)) continue;
           const productId = parseInt(source.product_id, 10);
           if (!productId || ownedProductIds.has(String(productId))) continue;
 
@@ -999,12 +1006,15 @@ export async function completeLookSuggestionsForCatalogProducts(
     };
   }
 
+  // Embeddings are now stored in product_images table, not on products.
+  // This query fetches catalog products without embedding (embeddings will be
+  // loaded from product_images if needed for vector operations).
   const productResult = await pg.query(
     `SELECT p.id as product_id,
-            p.embedding,
+            NULL::text as embedding,
             p.title as name,
             p.title,
-            p.image as image_url,
+            p.image_url as image_url,
             p.image_cdn,
             p.category as category_name
      FROM products p
@@ -1169,6 +1179,29 @@ function audienceGenderMatches(
   }
   const fromText = inferGenderFromText(textBlob);
   return !fromText || fromText === inferred;
+}
+
+function audienceGenderMatchesForSlot(
+  inferred: AudienceGender | null,
+  source: any,
+  slot: string,
+  enforceNeutralWhenUnknown: boolean = false
+): boolean {
+  const base = audienceGenderMatches(inferred, source, enforceNeutralWhenUnknown);
+  if (!base) return false;
+
+  // Bags/accessories often miss structured gender tags; in gendered looks,
+  // avoid accepting unknown-gender docs for these slots.
+  if (inferred && inferred !== "unisex" && (slot === "bags" || slot === "accessories")) {
+    const doc = normalizeAudienceGenderValue(source?.audience_gender ?? source?.attr_gender);
+    if (doc) return doc === inferred || doc === "unisex";
+    const fromText = inferGenderFromText(
+      `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.category_canonical || "")}`
+    );
+    return fromText === inferred;
+  }
+
+  return true;
 }
 
 function inferWarmWeatherLook(items: CompleteLookAnchorRow[]): boolean {
@@ -1370,15 +1403,15 @@ async function fetchCategoryTopUpSuggestions(params: {
 
   for (const hit of hits) {
     const source = hit?._source || {};
+    const matchedSlot =
+      params.missingCategories.find((slot) => sourceMatchesSlot(slot, source)) || "accessories";
     if (!params.missingCategories.some((slot) => sourceMatchesSlot(slot, source))) continue;
-    if (
-      !audienceGenderMatches(
-        params.inferredAudienceGender,
-        source,
-        Boolean(params.enforceNeutralAudienceWhenUnknown)
-      )
-    )
-      continue;
+    if (!audienceGenderMatchesForSlot(
+      params.inferredAudienceGender,
+      source,
+      matchedSlot,
+      Boolean(params.enforceNeutralAudienceWhenUnknown)
+    )) continue;
     const productId = parseInt(source.product_id, 10);
     if (!productId) continue;
     const productKey = String(productId);

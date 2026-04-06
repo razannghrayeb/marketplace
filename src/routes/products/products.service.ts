@@ -2664,13 +2664,8 @@ export async function searchByImageWithSimilarity(
         if (hasColorIntentForFinal && (comp.colorCompliance ?? 0) < 0.4) {
           return false;
         }
-        if (
-          hasSoftColorIntentForRescue &&
-          (comp.colorCompliance ?? 0) < 0.22 &&
-          (comp.colorTier ?? "none") === "none"
-        ) {
-          return false;
-        }
+        // Soft color intent should NOT gate rescue admission — only explicit color gates.
+        // This prevents crop-dominant colors from pulling wrong categories (e.g., blue into white-dress search).
         
         return true;
       });
@@ -2688,11 +2683,8 @@ export async function searchByImageWithSimilarity(
           if ((comp.exactTypeScore ?? 0) < 1 && (comp.productTypeCompliance ?? 0) < 0.22) return false;
           if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < fallbackSleeveMin) return false;
           if (hasColorIntentForFinal && (comp.colorCompliance ?? 0) < 0.18) return false;
-          if (
-            hasSoftColorIntentForRescue &&
-            (comp.colorCompliance ?? 0) < 0.14 &&
-            (comp.colorTier ?? "none") === "none"
-          ) return false;
+          // Soft color intent does not gate fallback — only explicit color does.
+          // This prevents crop-derived colors from blocking valid type matches.
           return true;
         });
         if (fallbackTypeAligned.length > 0) {
@@ -2703,10 +2695,12 @@ export async function searchByImageWithSimilarity(
     // Use visual similarity as the rescue signal instead of a flat minimum.
     // This preserves relative ordering so that genuinely similar products
     // rank above dissimilar ones even in the degraded path.
+    // Note: intentAwareRescue now excludes softColorBiasOnly to avoid lifting weak candidates
+    // when only crop-dominant color exists with no explicit type intent.
     const intentAwareRescue =
       hasReliableTypeIntentForRelevance ||
       hasDetectionAnchoredTypeIntent ||
-      desiredColorsForRelevance.length > 0 ||
+      (desiredColorsForRelevance.length > 0 && (hasExplicitColorIntent || (hasInferredColorSignal && !softColorBiasOnly))) ||
       Boolean(desiredSleeveForRelevance);
     for (const h of rescuePool) {
       const comp = complianceById.get(String(h._source.product_id));
@@ -2730,8 +2724,12 @@ export async function searchByImageWithSimilarity(
         }
         // In rescue mode, keep intent-constrained scoring expressive instead of lifting all
         // candidates to the same global floor (which can hide sleeve/type mismatches).
+        // When only soft color hint exists (crop-dominant), use much lower floor to filter out weak matches.
+        const hasOnlySoftColorHint = softColorBiasOnly && !hasReliableTypeIntentForRelevance && !hasDetectionAnchoredTypeIntent;
         const rescueFloor = intentAwareRescue
-          ? Math.min(effectiveFinalAcceptMin, 0.56)
+          ? hasOnlySoftColorHint
+            ? Math.min(effectiveFinalAcceptMin, 0.35)  // Very conservative for crop-color-only cases
+            : Math.min(effectiveFinalAcceptMin, 0.56)
           : effectiveFinalAcceptMin;
         comp.finalRelevance01 = Math.max(rescueScore, rescueFloor);
         finalScoreSourceById.set(String(h._source.product_id), "final_accept_rescue");
@@ -2781,6 +2779,9 @@ export async function searchByImageWithSimilarity(
         if (hasColorIntentForFinal && colorComp < rescueColorMinIntent) return false;
         if (hasExplicitStyleIntent && styleComp < rescueStyleMinIntent) return false;
         if (hasReliableTypeIntentForRelevance && crossFamily >= 0.5) return false;
+        // When only soft color hint exists, require stricter type alignment to prevent crop-color bleed.
+        // This prevents pants/jackets from leaking into dress/shoe searches via weak soft color signals.
+        if (softColorBiasOnly && typeComp < 0.3) return false;
         return true;
       })
       .sort((a, b) => b.visualSim - a.visualSim)
