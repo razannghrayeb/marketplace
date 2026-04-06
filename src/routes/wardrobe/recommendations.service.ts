@@ -1006,23 +1006,15 @@ export async function completeLookSuggestionsForCatalogProducts(
     };
   }
 
-  const hasProductsEmbedding = await pg
-    .query(
-      `SELECT 1
-       FROM information_schema.columns
-       WHERE table_name = 'products' AND column_name = 'embedding'`
-    )
-    .then((r) => Number(r.rowCount || 0) > 0)
-    .catch(() => false);
-
-  const embeddingExpr = hasProductsEmbedding ? "p.embedding" : "NULL::text as embedding";
-
+  // Embeddings are now stored in product_images table, not on products.
+  // This query fetches catalog products without embedding (embeddings will be
+  // loaded from product_images if needed for vector operations).
   const productResult = await pg.query(
     `SELECT p.id as product_id,
-            ${embeddingExpr},
+            NULL::text as embedding,
             p.title as name,
             p.title,
-            p.image as image_url,
+            p.image_url as image_url,
             p.image_cdn,
             p.category as category_name
      FROM products p
