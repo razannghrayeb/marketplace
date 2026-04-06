@@ -174,6 +174,16 @@ function resolveShopLookPageSize(explicit: number | undefined, fallback: number)
   return resolveShopLookLimit(fallback);
 }
 
+/**
+ * Fetch a wider candidate pool than the final UI limit, then rely on rerank/gates.
+ * This improves recall for hard detections (e.g. pink long dresses) without changing output size.
+ */
+function shopLookRecallMultiplier(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_RECALL_MULTIPLIER ?? "3");
+  if (!Number.isFinite(raw)) return 3;
+  return Math.max(1, Math.min(5, Math.floor(raw)));
+}
+
 /** Extra visual floor above threshold to keep Shop-the-Look results precision-first. */
 function shopLookPostVisualMinDelta(): number {
   const raw = Number(process.env.SEARCH_IMAGE_SHOP_POST_VISUAL_MIN_DELTA ?? "0.03");
@@ -1880,7 +1890,8 @@ export class ImageAnalysisService {
     const resolvedResultsPage = resolveShopLookPage(resultsPage);
     const resolvedResultsPageSize = resolveShopLookPageSize(resultsPageSize, resolvedLimitPerItem);
     const retrievalLimit = resolveShopLookLimit(
-      Math.max(resolvedLimitPerItem, resolvedResultsPage * resolvedResultsPageSize),
+      Math.max(resolvedLimitPerItem, resolvedResultsPage * resolvedResultsPageSize) *
+        shopLookRecallMultiplier(),
     );
 
     // Get image dimensions first
@@ -2418,6 +2429,65 @@ export class ImageAnalysisService {
         results: categorySafeResults,
       };
 
+      // Tiny footwear boxes often produce weak crop embeddings. If footwear search is empty,
+      // retry once with a broader query embedding while keeping strict footwear category terms.
+      if (
+        similarResult.results.length === 0 &&
+        categoryMapping.productCategory === "footwear" &&
+        (detection.area_ratio ?? 0) <= 0.02
+      ) {
+        const footwearTerms = hardCategoryTermsForDetection(label, categoryMapping);
+        const footwearFilters: Partial<import("./types").SearchFilters> = {};
+        if (footwearTerms.length > 0) {
+          footwearFilters.category = footwearTerms.length === 1 ? footwearTerms[0] : footwearTerms;
+        }
+        if (filters.gender) footwearFilters.gender = filters.gender;
+        if (filters.ageGroup) footwearFilters.ageGroup = filters.ageGroup;
+
+        const recoveryEmbedding = await processImageForEmbedding(queryProcessBuf).catch(() => null);
+        const recoveryVectors: number[][] = [];
+        if (Array.isArray(recoveryEmbedding) && recoveryEmbedding.length > 0) {
+          recoveryVectors.push(recoveryEmbedding);
+        }
+        if (Array.isArray(finalEmbedding) && finalEmbedding.length > 0) {
+          recoveryVectors.push(finalEmbedding);
+        }
+
+        for (const recoveryVector of recoveryVectors) {
+          const footwearRecovery = await searchByImageWithSimilarity({
+            imageEmbedding: recoveryVector,
+            imageBuffer: queryProcessBuf,
+            pHash: sourceImagePHash,
+            filters: footwearFilters,
+            limit: retrievalLimit,
+            similarityThreshold,
+            includeRelated: false,
+            knnField: "embedding",
+            forceHardCategoryFilter: true,
+            relaxThresholdWhenEmpty: true,
+            blipSignal: detectionBlipSignal,
+            inferredPrimaryColor,
+            inferredColorsByItem,
+            debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+          });
+
+          if (footwearRecovery.results.length > 0) {
+            similarResult = {
+              ...similarResult,
+              results: mergeImageSearchResultsById(
+                similarResult.results,
+                footwearRecovery.results,
+                retrievalLimit,
+              ),
+            };
+          }
+
+          if (similarResult.results.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) {
+            break;
+          }
+        }
+      }
+
       if (similarResult.results.length === 0 && !includeEmptyDetectionGroups) {
         return null;
       }
@@ -2699,7 +2769,8 @@ export class ImageAnalysisService {
     const resolvedResultsPage = resolveShopLookPage(resultsPage);
     const resolvedResultsPageSize = resolveShopLookPageSize(resultsPageSize, resolvedLimitPerItem);
     const retrievalLimit = resolveShopLookLimit(
-      Math.max(resolvedLimitPerItem, resolvedResultsPage * resolvedResultsPageSize),
+      Math.max(resolvedLimitPerItem, resolvedResultsPage * resolvedResultsPageSize) *
+        shopLookRecallMultiplier(),
     );
 
     // Get image dimensions

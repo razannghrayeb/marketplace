@@ -2031,11 +2031,39 @@ export async function searchByImageWithSimilarity(
     inferredByItemFromParams ?? (filtersRecord as { inferredColorsByItem?: Record<string, string | null> }).inferredColorsByItem,
   );
   const hasInferredColorSignal = inferredColorTokens.length > 0;
-  const allColorsForRelevance = hasExplicitColorIntent
-    ? [...explicitColorsForRelevance]
-    : hasInferredColorSignal
-      ? [...new Set([...inferredColorTokens])]
-      : [...new Set([...cropDominantColorsRaw])];
+  const normalizedCropColors = [
+    ...new Set(
+      cropDominantColorsRaw.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
+    ),
+  ];
+  const normalizedInferredColors = [
+    ...new Set(
+      inferredColorTokens.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
+    ),
+  ];
+
+  let allColorsForRelevance: string[];
+  if (hasExplicitColorIntent) {
+    allColorsForRelevance = [...explicitColorsForRelevance];
+  } else if (normalizedInferredColors.length > 0 && normalizedCropColors.length > 0) {
+    const inferredVsCrop = tieredColorListCompliance(
+      normalizedInferredColors,
+      normalizedCropColors,
+      "any",
+    );
+    if (inferredVsCrop.compliance > 0) {
+      allColorsForRelevance = [...new Set([...normalizedInferredColors, ...normalizedCropColors])];
+    } else {
+      // Conflict between full-image inference and crop-local evidence: trust crop colors
+      // to avoid leaking shirt/jacket color into trousers/shoes retrieval.
+      allColorsForRelevance = [...normalizedCropColors];
+    }
+  } else if (normalizedInferredColors.length > 0) {
+    allColorsForRelevance = [...normalizedInferredColors];
+  } else {
+    allColorsForRelevance = [...normalizedCropColors];
+  }
+
   const desiredColorsForRelevance = [
     ...new Set(
       allColorsForRelevance.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
@@ -2072,6 +2100,7 @@ export async function searchByImageWithSimilarity(
     typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
 
   const hasColorIntentForFinal = hasExplicitColorIntent;
+  const hasSoftColorIntentForRescue = !hasExplicitColorIntent && desiredColorsForRelevance.length > 0;
   // Crop-dominant colors affect reranking but should not gate final relevance
   // unless we also have inferred semantic color evidence (e.g., BLIP "blue jeans").
   const softColorBiasOnly =
@@ -2632,7 +2661,14 @@ export async function searchByImageWithSimilarity(
         }
         
         // Must pass color intent if set (avoid color mismatches in rescue)
-        if (desiredColorsForRelevance.length > 0 && (comp.colorCompliance ?? 0) < 0.4) {
+        if (hasColorIntentForFinal && (comp.colorCompliance ?? 0) < 0.4) {
+          return false;
+        }
+        if (
+          hasSoftColorIntentForRescue &&
+          (comp.colorCompliance ?? 0) < 0.22 &&
+          (comp.colorTier ?? "none") === "none"
+        ) {
           return false;
         }
         
@@ -2651,7 +2687,12 @@ export async function searchByImageWithSimilarity(
           if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
           if ((comp.exactTypeScore ?? 0) < 1 && (comp.productTypeCompliance ?? 0) < 0.22) return false;
           if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < fallbackSleeveMin) return false;
-          if (desiredColorsForRelevance.length > 0 && (comp.colorCompliance ?? 0) < 0.18) return false;
+          if (hasColorIntentForFinal && (comp.colorCompliance ?? 0) < 0.18) return false;
+          if (
+            hasSoftColorIntentForRescue &&
+            (comp.colorCompliance ?? 0) < 0.14 &&
+            (comp.colorTier ?? "none") === "none"
+          ) return false;
           return true;
         });
         if (fallbackTypeAligned.length > 0) {
