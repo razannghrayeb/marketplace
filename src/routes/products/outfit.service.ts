@@ -15,6 +15,7 @@ import {
 } from "../../lib/outfit/index";
 import { type ExtractedAttributes } from "../../lib/search/attributeExtractor";
 import { pg } from "../../lib/core";
+import { completeLookSuggestionsForCatalogProducts } from "../wardrobe/recommendations.service";
 import {
   logImpressionBatch,
   type RecommendationImpression,
@@ -105,6 +106,47 @@ export async function getOutfitRecommendations(
   options: CompleteStyleOptions = {},
   userId?: number
 ): Promise<StyleRecommendationResponse | null> {
+  const sourceProduct = await getCatalogProductById(productId);
+  if (!sourceProduct) {
+    return null;
+  }
+
+  // Use the wardrobe complete-look engine for product pages so both catalog product
+  // and user wardrobe context influence the recommendations.
+  const maxTotal = Math.max(1, Math.min(options.maxTotal ?? 20, 50));
+  const maxPerCategory = Math.max(1, Math.min(options.maxPerCategory ?? 5, 20));
+  const anchorProductIds = await buildCompleteStyleAnchorProductIds(productId, userId);
+  const audienceGenderHint = normalizeAudienceHint(sourceProduct.gender);
+  const detected = await detectCategory(sourceProduct.title, sourceProduct.description);
+  const sourceStyle = await buildStyleProfile(sourceProduct);
+
+  const completeLookResult = await completeLookSuggestionsForCatalogProducts(
+    userId ?? 0,
+    anchorProductIds,
+    maxTotal,
+    { audienceGenderHint }
+  );
+
+  const filteredSuggestions = applyCompleteStyleOptionFilters(
+    completeLookResult.suggestions,
+    options,
+    sourceProduct
+  ).slice(0, maxTotal);
+
+  if (filteredSuggestions.length > 0) {
+    return mapCompleteLookToStyleResponse({
+      sourceProduct,
+      completeLookResult: {
+        ...completeLookResult,
+        suggestions: filteredSuggestions,
+      },
+      maxPerCategory,
+      detectedCategory: detected.category,
+      sourceStyle,
+    });
+  }
+
+  // Fallback keeps legacy behavior if complete-look cannot produce candidates.
   const result = await completeOutfitFromProductId(productId, {
     maxPerCategory: options.maxPerCategory,
     maxTotal: options.maxTotal,
@@ -113,14 +155,9 @@ export async function getOutfitRecommendations(
     preferSameBrand: options.preferSameBrand,
     disablePriceFilter: options.disablePriceFilter,
   });
+  if (!result) return null;
 
-  if (!result) {
-    return null;
-  }
-
-  const response = formatOutfitCompletion(
-    userId ? await mergeWardrobeOwnedIntoCompletion(result, userId, options) : result
-  );
+  const response = formatOutfitCompletion(userId ? await mergeWardrobeOwnedIntoCompletion(result, userId, options) : result);
 
   // Log impressions for training data (async, non-blocking)
   logOutfitImpressions(productId, result).catch((err) =>
@@ -268,6 +305,198 @@ function formatOutfitCompletion(result: OutfitCompletion): StyleRecommendationRe
     })),
     totalRecommendations: result.recommendations.reduce((sum, r) => sum + r.products.length, 0),
   };
+}
+
+type CompleteLookMappedSourceProduct = Product & { gender?: string | null };
+
+type CompleteLookMappedSuggestion = {
+  product_id: number;
+  title: string;
+  brand?: string;
+  category?: string;
+  price_cents?: number;
+  image_url?: string;
+  image_cdn?: string;
+  score: number;
+  reason: string;
+};
+
+async function getCatalogProductById(productId: number): Promise<CompleteLookMappedSourceProduct | null> {
+  const result = await pg.query(
+    `SELECT id, title, brand, category, color, price_cents, currency,
+            image_url, image_cdn, description, gender
+     FROM products
+     WHERE id = $1`,
+    [productId]
+  );
+  return (result.rows[0] as CompleteLookMappedSourceProduct | undefined) ?? null;
+}
+
+async function buildCompleteStyleAnchorProductIds(productId: number, userId?: number): Promise<number[]> {
+  const base = [productId];
+  if (!userId) return base;
+
+  // Wardrobe items may not have rich free-text metadata, so we only use rows linked to
+  // catalog products (stable attributes + embeddings) as extra anchors.
+  const wardrobeLinked = await pg
+    .query<{ product_id: number }>(
+      `SELECT wi.product_id
+       FROM wardrobe_items wi
+       WHERE wi.user_id = $1
+         AND wi.product_id IS NOT NULL
+       GROUP BY wi.product_id
+       ORDER BY MAX(wi.created_at) DESC
+       LIMIT 18`,
+      [userId]
+    )
+    .then((r) => r.rows)
+    .catch(() => [] as Array<{ product_id: number }>);
+
+  const extra = wardrobeLinked
+    .map((r) => Number(r.product_id))
+    .filter((n) => Number.isFinite(n) && n >= 1 && n !== productId);
+
+  return Array.from(new Set(base.concat(extra)));
+}
+
+function normalizeAudienceHint(raw: unknown): string | undefined {
+  if (raw == null) return undefined;
+  const s = String(raw).toLowerCase().trim();
+  if (!s) return undefined;
+  if (["men", "man", "male", "mens", "men's", "gents"].includes(s)) return "men";
+  if (["women", "woman", "female", "womens", "women's", "ladies"].includes(s)) return "women";
+  if (["unisex", "neutral"].includes(s)) return "unisex";
+  return undefined;
+}
+
+function completeStyleCategoryLabel(raw?: string): string {
+  const c = String(raw || "").toLowerCase().trim();
+  if (!c) return "Recommended";
+  if (c.includes("footwear") || c.includes("shoe")) return "Shoes";
+  if (c.includes("dress")) return "Dresses";
+  if (c.includes("outerwear") || c.includes("jacket") || c.includes("coat") || c.includes("blazer")) return "Outerwear";
+  if (c.includes("top") || c.includes("shirt") || c.includes("blouse") || c.includes("hoodie") || c.includes("sweater")) return "Tops";
+  if (c.includes("bottom") || c.includes("pants") || c.includes("trouser") || c.includes("jeans") || c.includes("skirt") || c.includes("short")) return "Bottoms";
+  if (c.includes("bag") || c.includes("accessor")) return "Accessories";
+  return c.charAt(0).toUpperCase() + c.slice(1);
+}
+
+function completeStylePriorityFromCategory(categoryLabel: string, missingCategories: string[]): number {
+  const key = categoryLabel.toLowerCase();
+  const idx = missingCategories.findIndex((m) => key.includes(String(m).toLowerCase()));
+  if (idx === 0) return 1;
+  if (idx >= 1) return 2;
+  return 3;
+}
+
+function mapCompleteLookToStyleResponse(params: {
+  sourceProduct: CompleteLookMappedSourceProduct;
+  completeLookResult: {
+    suggestions: CompleteLookMappedSuggestion[];
+    missingCategories: string[];
+  };
+  maxPerCategory: number;
+  detectedCategory: ProductCategory;
+  sourceStyle: StyleProfile;
+}): StyleRecommendationResponse {
+  const { sourceProduct, completeLookResult, maxPerCategory, detectedCategory, sourceStyle } = params;
+  const groups = new Map<string, Array<{
+    id: number;
+    title: string;
+    brand?: string;
+    price: number;
+    currency: string;
+    image?: string;
+    matchScore: number;
+    matchReasons: string[];
+  }>>();
+  const reasons = new Map<string, string>();
+
+  for (const s of completeLookResult.suggestions) {
+    const categoryLabel = completeStyleCategoryLabel(s.category);
+    if (!groups.has(categoryLabel)) groups.set(categoryLabel, []);
+    const bucket = groups.get(categoryLabel)!;
+    if (bucket.length >= maxPerCategory) continue;
+
+    bucket.push({
+      id: s.product_id,
+      title: s.title,
+      brand: s.brand,
+      price: typeof s.price_cents === "number" && Number.isFinite(s.price_cents) ? Math.round(s.price_cents) : 0,
+      currency: sourceProduct.currency || "USD",
+      image: s.image_cdn || s.image_url,
+      matchScore: Math.round(Math.max(0, Math.min(1, s.score || 0)) * 100),
+      matchReasons: [s.reason || "Complements your selected item"],
+    });
+
+    if (!reasons.has(categoryLabel)) {
+      reasons.set(categoryLabel, s.reason || `Recommended ${categoryLabel.toLowerCase()} for this look`);
+    }
+  }
+
+  const recommendations = Array.from(groups.entries()).map(([category, products]) => {
+    const priority = completeStylePriorityFromCategory(category, completeLookResult.missingCategories || []);
+    return {
+      category,
+      reason: reasons.get(category) || `Recommended ${category.toLowerCase()} for this look`,
+      priority,
+      priorityLabel: getPriorityLabel(priority),
+      products,
+    };
+  }).sort((a, b) => a.priority - b.priority);
+
+  return {
+    sourceProduct,
+    detectedCategory,
+    style: {
+      occasion: sourceStyle.occasion,
+      aesthetic: sourceStyle.aesthetic,
+      season: sourceStyle.season,
+      formality: sourceStyle.formality,
+      colorProfile: {
+        primary: sourceStyle.colorProfile.primary,
+        type: sourceStyle.colorProfile.type,
+      },
+    },
+    outfitSuggestion:
+      completeLookResult.missingCategories && completeLookResult.missingCategories.length > 0
+        ? `Try adding ${completeLookResult.missingCategories.join(", ")} to complete this outfit.`
+        : "Recommended pieces to complete your style.",
+    recommendations,
+    totalRecommendations: recommendations.reduce((sum, r) => sum + r.products.length, 0),
+  };
+}
+
+function applyCompleteStyleOptionFilters(
+  suggestions: CompleteLookMappedSuggestion[],
+  options: CompleteStyleOptions,
+  sourceProduct: { brand?: string | null }
+) {
+  const excludedBrands = new Set((options.excludeBrands || []).map((b) => String(b).toLowerCase().trim()).filter(Boolean));
+  const minPrice = options.priceRange?.min;
+  const maxPrice = options.priceRange?.max;
+  const preferSameBrand = Boolean(options.preferSameBrand && sourceProduct.brand);
+  const sourceBrand = String(sourceProduct.brand || "").toLowerCase().trim();
+
+  let out = suggestions.filter((s) => {
+    const brand = String(s.brand || "").toLowerCase().trim();
+    if (excludedBrands.size > 0 && brand && excludedBrands.has(brand)) return false;
+    const price = typeof s.price_cents === "number" && Number.isFinite(s.price_cents) ? Math.round(s.price_cents) : null;
+    if (minPrice != null && price != null && price < minPrice) return false;
+    if (maxPrice != null && price != null && price > maxPrice) return false;
+    return true;
+  });
+
+  if (preferSameBrand && sourceBrand) {
+    out = out.slice().sort((a, b) => {
+      const aSame = String(a.brand || "").toLowerCase().trim() === sourceBrand ? 1 : 0;
+      const bSame = String(b.brand || "").toLowerCase().trim() === sourceBrand ? 1 : 0;
+      if (aSame !== bSame) return bSame - aSame;
+      return (b.score || 0) - (a.score || 0);
+    });
+  }
+
+  return out;
 }
 
 async function mergeWardrobeOwnedIntoCompletion(

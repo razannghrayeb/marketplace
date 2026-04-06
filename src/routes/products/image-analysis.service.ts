@@ -978,7 +978,12 @@ function applyDetectionCategoryGuard(
   detectionLabel: string,
   categoryMapping: CategoryMapping,
 ): ProductResult[] {
-  if (!imageDetectionCategoryGuardEnabled()) return products;
+  const guardEnabled = imageDetectionCategoryGuardEnabled();
+  const strictAlwaysOn =
+    categoryMapping.productCategory === "footwear" ||
+    categoryMapping.productCategory === "bags" ||
+    categoryMapping.productCategory === "accessories";
+  if (!guardEnabled && !strictAlwaysOn) return products;
   if (!shouldUseStrictDetectionCategoryGuard(categoryMapping.productCategory)) return products;
 
   const strictTerms = hardCategoryTermsForDetection(detectionLabel, categoryMapping);
@@ -1011,7 +1016,11 @@ function applyDetectionCategoryGuard(
 
     // For bags/accessories we fail closed when metadata is missing to avoid
     // leaking generic apparel into strict accessory retrieval flows.
-    if (!haystack) return !isAccessoryLikeCategory(categoryMapping.productCategory);
+    if (!haystack) {
+      // Fail closed for strict small-item categories where weak metadata causes frequent drift.
+      if (categoryMapping.productCategory === "footwear") return false;
+      return !isAccessoryLikeCategory(categoryMapping.productCategory);
+    }
 
     const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, term));
     if (!allowByTerm) return false;
@@ -1027,6 +1036,12 @@ function applyDetectionCategoryGuard(
 
     // Guard against broad lexical collisions (e.g. "denim jacket" inside trouser flow).
     const productCategoryMacro = mapDetectionToCategory(String((p as any).category ?? ""), 1).productCategory;
+    if (categoryMapping.productCategory === "footwear") {
+      // Hard safety: footwear detections should not return outerwear/tops/bottoms even on lexical overlap.
+      if (productCategoryMacro && productCategoryMacro !== "footwear") {
+        return false;
+      }
+    }
     if (categoryMapping.productCategory === "bottoms") {
       if (productCategoryMacro === "outerwear" || /\b(jacket|coat|blazer|outerwear)\b/.test(haystack)) {
         return false;

@@ -768,10 +768,7 @@ async function runCompleteLookCore(
           });
         }
         if (ownedProductIds.size > 0) {
-      const enforceNeutralAudienceWhenUnknown =
-        audienceOptions.enforceNeutralAudienceWhenUnknown !== undefined
-          ? Boolean(audienceOptions.enforceNeutralAudienceWhenUnknown)
-          : !inferredAudienceGender;
+          f.push({ bool: { must_not: [{ terms: { product_id: Array.from(ownedProductIds) } }] } });
         }
         return f;
       };
@@ -1100,8 +1097,9 @@ async function inferPreferredAudienceGender(
   }
 
   if (counts.men === 0 && counts.women === 0 && counts.unisex === 0) return null;
-  if (counts.men >= counts.women && counts.men > 0) return "men";
+  if (counts.men > counts.women) return "men";
   if (counts.women > counts.men) return "women";
+  // Ambiguous tie between men/women signals: keep neutral instead of defaulting to men.
   // Only return unisex if truly no gender signal from user, wardrobe, or profile
   return null;
 }
@@ -1118,6 +1116,10 @@ function buildAudienceGenderFilter(gender: "men" | "women"): any {
     gender === "men"
       ? ["women", "womens", "female", "ladies", "woman", "girls", "girl"]
       : ["men", "mens", "male", "man", "gents", "boys", "boy"];
+  const oppositeGender = gender === "men" ? "women" : "men";
+  const oppositeAttrTerms = [
+    ...new Set(attrGenderFilterClause(oppositeGender).terms.attr_gender || []),
+  ];
 
   return {
     bool: {
@@ -1128,6 +1130,8 @@ function buildAudienceGenderFilter(gender: "men" | "women"): any {
       ],
       minimum_should_match: 1,
       must_not: [
+        ...(oppositeAttrTerms.length > 0 ? [{ terms: { attr_gender: oppositeAttrTerms } }] : []),
+        { terms: { audience_gender: [oppositeGender] } },
         {
           bool: {
             should: oppositeTitleTerms.map((kw) => ({ match: { title: kw } })),
