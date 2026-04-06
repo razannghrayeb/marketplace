@@ -37,6 +37,15 @@ import {
   getUserPriceTier
 } from "./recommendations.service";
 
+function refreshStyleProfileInBackground(userId: number): void {
+  void computeStyleProfile(userId).catch((err) => {
+    console.warn("Wardrobe: failed to refresh style profile after mutation", {
+      userId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+}
+
 // ============================================================================
 // Wardrobe Items CRUD
 // ============================================================================
@@ -96,6 +105,8 @@ export async function createItem(req: Request, res: Response, next: NextFunction
       material_id: req.body.material_id ? parseInt(req.body.material_id, 10) : undefined
     });
 
+    refreshStyleProfileInBackground(userId);
+
     res.status(201).json({ success: true, item });
   } catch (err) {
     next(err);
@@ -142,6 +153,8 @@ export async function updateItem(req: Request, res: Response, next: NextFunction
       return res.status(404).json({ success: false, error: "Item not found" });
     }
 
+    refreshStyleProfileInBackground(userId);
+
     res.json({ success: true, item });
   } catch (err) {
     next(err);
@@ -160,6 +173,8 @@ export async function deleteItem(req: Request, res: Response, next: NextFunction
     if (!deleted) {
       return res.status(404).json({ success: false, error: "Item not found" });
     }
+
+    refreshStyleProfileInBackground(userId);
 
     res.json({ success: true, deleted: true });
   } catch (err) {

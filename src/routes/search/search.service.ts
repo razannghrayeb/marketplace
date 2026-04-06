@@ -2089,16 +2089,8 @@ export async function multiImageSearch(
     await enrichPromptAnchoredIntentFromImages(parsedIntent, prepared, userPrompt);
     reconcileIntentNegativeCollisions(parsedIntent);
 
-    const imageEmbeddings = await Promise.all(
-      prepared.map((img) => processImageForEmbedding(img)),
-    );
-
-    const compositeQuery = await queryBuilder.buildQuery(parsedIntent, imageEmbeddings);
-
-    // Same CLIP text embedding path as text search: bridges language in the prompt to image-indexed vectors.
-    await blendPromptClipIntoCompositeGlobal(compositeQuery, userPrompt, parsedIntent);
-
-    // Parse the text prompt before kNN so constraints can widen recall and strict gating can use the same AST.
+    // Parse the text prompt before composing query vectors so prompt constraints can
+    // shape retrieval and strict gating from the beginning.
     let astPipelineDegraded = false;
     let ast: QueryAST;
     try {
@@ -2113,6 +2105,19 @@ export async function multiImageSearch(
         ast = await processQueryFast('fashion');
       }
     }
+
+    applyPromptAstOverridesToParsedIntent(parsedIntent, ast, userPrompt, {
+      geminiDegraded,
+    });
+
+    const imageEmbeddings = await Promise.all(
+      prepared.map((img) => processImageForEmbedding(img)),
+    );
+
+    const compositeQuery = await queryBuilder.buildQuery(parsedIntent, imageEmbeddings);
+
+    // Same CLIP text embedding path as text search: bridges language in the prompt to image-indexed vectors.
+    await blendPromptClipIntoCompositeGlobal(compositeQuery, userPrompt, parsedIntent);
 
     const strictRecall =
       multiImageStrictPromptEnabled() &&
@@ -2375,13 +2380,16 @@ export async function multiImageSearch(
           ? relaxMultiImageHardConstraints(hardConstraints, 2)
           : hardConstraints;
 
-    const constrainedResults =
+    let constrainedResults =
       activeHardConstraints.enabled && results.length > 0
         ? results.filter((product: any) => {
             const rel = relevanceById.get(String(product.id));
             return multiImageProductPassesHardConstraints(product, activeHardConstraints, rel);
           })
         : results;
+    if (constrainedResults.length === 0 && results.length > 0 && hardConstraintFallbackUsed) {
+      constrainedResults = results;
+    }
     constrainedCount = constrainedResults.length;
 
     const mappedForRerank: MultiVectorSearchResult[] = constrainedResults.map((r: any) => {
@@ -2659,9 +2667,6 @@ function buildMultiImageHardConstraints(
     normalizeQueryGender(ast.entities?.gender) ??
     undefined;
 
-  const explicitMustHave = collectConstraintKeywords([
-    parsedIntent.constraints?.mustHave ?? [],
-  ]);
   const promptTypedKeywords = compactConstraintKeywords(
     [promptTypeTerms, ast.entities?.productTypes ?? []],
     { maxKeywords: 4 },
@@ -2675,7 +2680,7 @@ function buildMultiImageHardConstraints(
     { maxKeywords: 3 },
   );
   const requiredKeywords = compactConstraintKeywords(
-    [explicitMustHave, promptTypedKeywords, promptStyleKeywords, promptColorKeywords],
+    [promptTypedKeywords, promptStyleKeywords, promptColorKeywords],
     { maxKeywords: 6 },
   );
   const minRequiredKeywordMatches =
@@ -3199,6 +3204,110 @@ function multiImageHasStrictPromptSignals(ast: QueryAST, rawPrompt: string): boo
   return Boolean(pr && (pr.min != null || pr.max != null));
 }
 
+function normalizePromptKeywordTerm(raw: unknown): string {
+  return String(raw ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function promptTermLooksLikeColor(raw: unknown): boolean {
+  const term = normalizePromptKeywordTerm(raw);
+  if (!term) return false;
+  if (normalizeColorToken(term)) return true;
+  const tokens = term.split(" ").filter(Boolean);
+  for (let i = 0; i < tokens.length; i++) {
+    if (normalizeColorToken(tokens[i])) return true;
+    if (i < tokens.length - 1 && normalizeColorToken(`${tokens[i]} ${tokens[i + 1]}`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function appendUniqueTerms(target: string[], values: unknown[]): void {
+  for (const raw of values) {
+    const term = normalizePromptKeywordTerm(raw);
+    if (!term) continue;
+    if (!target.includes(term)) target.push(term);
+  }
+}
+
+function applyPromptAstOverridesToParsedIntent(
+  parsedIntent: ParsedIntent,
+  ast: QueryAST,
+  rawPrompt: string,
+  options?: { geminiDegraded?: boolean },
+): void {
+  parsedIntent.constraints = parsedIntent.constraints || { mustHave: [], mustNotHave: [] };
+  parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
+  parsedIntent.constraints.mustNotHave = parsedIntent.constraints.mustNotHave || [];
+
+  const promptColors = [
+    ...new Set(
+      [...extractPromptColorTerms(rawPrompt), ...(ast.entities?.colors ?? [])]
+        .map((c) => normalizeColorToken(String(c)) ?? String(c).toLowerCase().trim())
+        .filter(Boolean),
+    ),
+  ];
+  const promptTypes = [
+    ...new Set([
+      ...extractPromptTypeTerms(rawPrompt),
+      ...((ast.entities?.productTypes ?? []).map((t) => String(t).toLowerCase().trim())),
+    ].filter(Boolean)),
+  ];
+  const promptStyles = extractPromptStyleTerms(rawPrompt);
+
+  if (promptColors.length > 0) {
+    parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave
+      .map((x) => normalizePromptKeywordTerm(x))
+      .filter((x) => x.length > 0)
+      .filter((x) => !promptTermLooksLikeColor(x));
+    appendUniqueTerms(parsedIntent.constraints.mustHave, promptColors);
+  }
+
+  if (promptTypes.length > 0) {
+    appendUniqueTerms(parsedIntent.constraints.mustHave, promptTypes.slice(0, 3));
+    parsedIntent.constraints.category = promptTypes[0];
+  } else if (!parsedIntent.constraints.category && (ast.entities?.categories?.length ?? 0) > 0) {
+    parsedIntent.constraints.category = String(ast.entities.categories[0]).toLowerCase().trim();
+  }
+
+  if (promptStyles.length > 0) {
+    appendUniqueTerms(parsedIntent.constraints.mustHave, promptStyles.slice(0, 3));
+  }
+
+  if ((ast.entities?.brands?.length ?? 0) > 0) {
+    const existing = parsedIntent.constraints.brands || [];
+    const merged = [
+      ...new Set(
+        [...existing, ...(ast.entities?.brands ?? [])]
+          .map((b) => String(b).toLowerCase().trim())
+          .filter(Boolean),
+      ),
+    ];
+    parsedIntent.constraints.brands = merged;
+  }
+
+  const g = normalizeQueryGender(ast.entities?.gender);
+  if (g) {
+    parsedIntent.constraints.gender = g;
+  }
+
+  const pr = ast.filters?.priceRange;
+  if (pr?.min != null && Number.isFinite(Number(pr.min))) {
+    parsedIntent.constraints.priceMin = Number(pr.min);
+  }
+  if (pr?.max != null && Number.isFinite(Number(pr.max))) {
+    parsedIntent.constraints.priceMax = Number(pr.max);
+  }
+
+  if (options?.geminiDegraded && parsedIntent.confidence < 0.55) {
+    parsedIntent.confidence = 0.55;
+  }
+}
+
 function extractPromptColorTerms(rawPrompt: string): string[] {
   const q = String(rawPrompt ?? "")
     .toLowerCase()
@@ -3390,6 +3499,9 @@ function buildMultiImageSearchHitRelevanceIntent(
       negationExcludeTerms.length > 0 ||
       hasPriceIntent);
 
+  const softColorBiasOnly = !promptAnchoredColorIntent && rerankDesiredColors.length > 0;
+  const reliableTypeIntent = promptAnchoredTypeIntent;
+
   return {
     desiredProductTypes,
     desiredColors: rerankDesiredColors,
@@ -3407,6 +3519,8 @@ function buildMultiImageSearchHitRelevanceIntent(
     enforcePromptConstraints: enforcePromptConstraints ? true : undefined,
     promptAnchoredColorIntent: promptAnchoredColorIntent ? true : undefined,
     promptAnchoredTypeIntent: promptAnchoredTypeIntent ? true : undefined,
+    softColorBiasOnly: softColorBiasOnly ? true : undefined,
+    reliableTypeIntent,
   };
 }
 

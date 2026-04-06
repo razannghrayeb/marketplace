@@ -2187,9 +2187,24 @@ export async function searchByImageWithSimilarity(
       if (!comp) continue;
       const cs = cosineSimilarity01(colorQueryEmbedding ?? undefined, hit._source?.embedding_color);
       colorSimRawById.set(idStr, Math.round(cs * 1000) / 1000);
+
+      // Guard against re-inflating color compliance when catalog color explicitly
+      // contradicts desired/inferred color tokens (e.g. query white, doc color blue).
+      const catalogColorRaw = typeof hit._source?.color === "string" ? String(hit._source.color).toLowerCase().trim() : "";
+      const catalogColorNorm = catalogColorRaw ? normalizeColorToken(catalogColorRaw) ?? catalogColorRaw : "";
+      const hasHardCatalogColorConflict =
+        hasAnyColorTokenIntent &&
+        Boolean(catalogColorNorm) &&
+        tieredColorListCompliance(desiredColorsTierForRelevance, [catalogColorNorm], rerankColorModeForRelevance)
+          .compliance <= 0;
+
+      if (hasHardCatalogColorConflict) {
+        comp.colorCompliance = 0;
+      }
+
       if (!hasAnyColorTokenIntent) {
         comp.colorCompliance = Math.max(0, Math.min(1, cs));
-      } else if ((comp.colorCompliance ?? 0) < 0.12 && cs >= 0.42) {
+      } else if (!hasHardCatalogColorConflict && (comp.colorCompliance ?? 0) < 0.12 && cs >= 0.42) {
         comp.colorCompliance = Math.max(
           comp.colorCompliance ?? 0,
           Math.min(1, cs * 0.82),

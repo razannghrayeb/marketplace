@@ -99,7 +99,7 @@ Implemented in `src/routes/favorites/`. All routes require `requireAuth`.
 | POST | `/products/recommendations/batch` | Batch recommendations |
 | GET | `/products/:id/complete-style` | Outfit completion suggestions |
 | GET | `/products/:id/style-profile` | Style profile for product |
-| POST | `/products/complete-style` | Outfit completion from body |
+| POST | `/products/complete-style` | Outfit completion from body (preferred: `product_id`; fallback: `product`) |
 | GET | `/products/:id/images` | List product images |
 | POST | `/products/:id/images` | Upload product image |
 | PUT | `/products/:id/images/:imageId/primary` | Set primary image |

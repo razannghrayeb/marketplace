@@ -365,7 +365,7 @@ GET  /api/images/status       - Service health
 
 **Endpoints / Locations**
 - `GET /products/:id/complete-style` - Complete a product page with curated suggestions
-- `POST /products/complete-style` - Submit outfit images / product ids for completion
+- `POST /products/complete-style` - Preferred payload: `product_id` (or `product.id`) to use DB-backed complete-look; fallback `product` object for non-DB items
 - Core logic: [src/lib/outfit/completestyle.ts](../src/lib/outfit/completestyle.ts#L1)
 - Controller: [src/routes/products/outfit.controller.ts](../src/routes/products/outfit.controller.ts#L1)
 - Service: [src/routes/products/outfit.service.ts](../src/routes/products/outfit.service.ts#L1)

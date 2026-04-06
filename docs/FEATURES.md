@@ -83,7 +83,7 @@ In `src/server.ts`, search lives under **`/search`** (not `/api/search`). Catalo
 | Endpoint | Method | Notes |
 |----------|--------|--------|
 | `/products/:id/complete-style` | GET | Query params: `maxPerCategory`, `maxTotal`, price, brands |
-| `/products/complete-style` | POST | Body with `product` + optional `options` |
+| `/products/complete-style` | POST | Preferred body: `product_id` + optional `options`; fallback `product` object |
 | `/products/:id/style-profile` | GET | Debug / UI profile |
 
 **Implementation:** `outfit.controller.ts`, `outfit.service.ts`, `lib/outfit/completestyle.ts`. Optional `x-user-id` / JWT merges wardrobe-owned items when present.

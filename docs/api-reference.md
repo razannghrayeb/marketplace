@@ -940,6 +940,11 @@ If you are authenticated, the completions are wardrobe-aware and may include use
 - `preferSameBrand` (`"true"` / `"false"`, default `"false"`)
 - `excludeBrands` (comma-separated string, optional)
 
+#### Body (POST)
+- Preferred: `{ "product_id": 12345, "options": { ... } }`
+- Also supported: `{ "product": { ... }, "options": { ... } }` for products not in DB.
+- If both are provided, `product_id` / `product.id` path is used.
+
 #### Example Response
 ```json
 {
