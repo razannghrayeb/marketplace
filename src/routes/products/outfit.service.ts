@@ -115,7 +115,7 @@ export async function getOutfitRecommendations(
   // and user wardrobe context influence the recommendations.
   const maxTotal = Math.max(1, Math.min(options.maxTotal ?? 20, 50));
   const maxPerCategory = Math.max(1, Math.min(options.maxPerCategory ?? 5, 20));
-  const anchorProductIds = await buildCompleteStyleAnchorProductIds(productId, userId);
+  const anchorProductIds = [productId];
   const audienceGenderHint = normalizeAudienceHint(sourceProduct.gender);
   const detected = await detectCategory(sourceProduct.title, sourceProduct.description);
   const sourceStyle = await buildStyleProfile(sourceProduct);
@@ -324,39 +324,12 @@ type CompleteLookMappedSuggestion = {
 async function getCatalogProductById(productId: number): Promise<CompleteLookMappedSourceProduct | null> {
   const result = await pg.query(
     `SELECT id, title, brand, category, color, price_cents, currency,
-            image_url, image_cdn, description, gender
+            image_url, image_cdn, description
      FROM products
      WHERE id = $1`,
     [productId]
   );
   return (result.rows[0] as CompleteLookMappedSourceProduct | undefined) ?? null;
-}
-
-async function buildCompleteStyleAnchorProductIds(productId: number, userId?: number): Promise<number[]> {
-  const base = [productId];
-  if (!userId) return base;
-
-  // Wardrobe items may not have rich free-text metadata, so we only use rows linked to
-  // catalog products (stable attributes + embeddings) as extra anchors.
-  const wardrobeLinked = await pg
-    .query<{ product_id: number }>(
-      `SELECT wi.product_id
-       FROM wardrobe_items wi
-       WHERE wi.user_id = $1
-         AND wi.product_id IS NOT NULL
-       GROUP BY wi.product_id
-       ORDER BY MAX(wi.created_at) DESC
-       LIMIT 18`,
-      [userId]
-    )
-    .then((r) => r.rows)
-    .catch(() => [] as Array<{ product_id: number }>);
-
-  const extra = wardrobeLinked
-    .map((r) => Number(r.product_id))
-    .filter((n) => Number.isFinite(n) && n >= 1 && n !== productId);
-
-  return Array.from(new Set(base.concat(extra)));
 }
 
 function normalizeAudienceHint(raw: unknown): string | undefined {

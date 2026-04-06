@@ -468,6 +468,47 @@ function rawColorList(...parts: unknown[]): string[] {
   ];
 }
 
+function extractColorHintsFromProductUrl(productUrl: unknown): string[] {
+  const raw = String(productUrl ?? "").trim();
+  if (!raw) return [];
+
+  const hints = new Set<string>();
+  const push = (v: string | null | undefined) => {
+    const s = String(v ?? "")
+      .toLowerCase()
+      .replace(/[+_]/g, " ")
+      .replace(/%20/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!s) return;
+    hints.add(s);
+    const norm = normalizeColorToken(s);
+    if (norm) hints.add(norm);
+  };
+
+  // Handle both query params and fragment params, e.g. ?color=white or #color=off%20white.
+  const candidate = raw.replace(/^#/, "");
+  const qIdx = candidate.indexOf("?");
+  const hIdx = candidate.indexOf("#");
+  const queryPart = qIdx >= 0 ? candidate.slice(qIdx + 1, hIdx >= 0 && hIdx > qIdx ? hIdx : undefined) : "";
+  const hashPart = hIdx >= 0 ? candidate.slice(hIdx + 1) : (qIdx < 0 ? candidate : "");
+
+  const parsePart = (part: string) => {
+    if (!part) return;
+    for (const segment of part.split("&")) {
+      const [kRaw, vRaw] = segment.split("=");
+      const k = decodeURIComponent(String(kRaw ?? "")).toLowerCase().trim();
+      const v = decodeURIComponent(String(vRaw ?? "")).trim();
+      if (!k || !v) continue;
+      if (k === "color" || k === "colour" || k === "variant" || k === "shade") push(v);
+    }
+  };
+
+  parsePart(queryPart);
+  parsePart(hashPart);
+  return [...hints];
+}
+
 function clamp01(x: number): number {
   if (!Number.isFinite(x)) return 0;
   return Math.max(0, Math.min(1, x));
@@ -547,6 +588,16 @@ export function computeHitRelevance(
 
   if (unionTierRaw.length === 0 && hit?._source?.attr_color) {
     unionTierRaw = rawColorList(hit._source.attr_color);
+  }
+
+  if (unionTierRaw.length === 0) {
+    const urlColorHints = extractColorHintsFromProductUrl(hit?._source?.product_url);
+    if (urlColorHints.length > 0) {
+      unionTierRaw = rawColorList(urlColorHints);
+      if (textTierRaw.length === 0) {
+        textTierRaw = rawColorList(urlColorHints);
+      }
+    }
   }
 
   if (unionTierRaw.length === 0 && typeof hit?._source?.title === "string") {

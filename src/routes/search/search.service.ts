@@ -192,6 +192,7 @@ async function enrichClipOnlyIntentFromImages(
   const canonicalColorHints = colorHints
     .map((c) => normalizeColorToken(c) ?? c.toLowerCase())
     .filter(Boolean);
+  const promptColorHints = extractPromptColorTerms(userPrompt);
 
   let secondaryTypeHints: string[] = [];
   let secondaryStyleHint: string | undefined;
@@ -219,7 +220,9 @@ async function enrichClipOnlyIntentFromImages(
   parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
   parsedIntent.constraints.mustNotHave = parsedIntent.constraints.mustNotHave || [];
 
-  appendUnique(parsedIntent.constraints.mustHave, canonicalColorHints);
+  if (promptColorHints.length > 0) {
+    appendUnique(parsedIntent.constraints.mustHave, promptColorHints);
+  }
   appendUnique(parsedIntent.constraints.mustHave, secondaryTypeHints);
 
   if (!parsedIntent.constraints.category && secondaryTypeHints.length > 0) {
@@ -381,6 +384,8 @@ async function enrichPromptAnchoredIntentFromImages(
   const imageCount = preparedImages.length;
   const colorIdx = findPromptAnchoredImageIndex(userPrompt, "color", imageCount);
   const styleIdx = findPromptAnchoredImageIndex(userPrompt, "style", imageCount);
+  const patternIdx = findPromptAnchoredImageIndex(userPrompt, "pattern", imageCount);
+  const silhouetteIdx = findPromptAnchoredImageIndex(userPrompt, "silhouette", imageCount);
 
   if (colorIdx != null) {
     const row = ensureImageIntentRow(parsedIntent, colorIdx);
@@ -418,6 +423,41 @@ async function enrichPromptAnchoredIntentFromImages(
       } catch {
         // best-effort fallback only
       }
+    }
+  }
+
+  if (patternIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, patternIdx);
+    if (!row.primaryAttributes.includes("pattern")) row.primaryAttributes.push("pattern");
+    const ev = row.extractedValues as Record<string, unknown>;
+    if (!ev.pattern || String(ev.pattern).trim() === "") {
+      try {
+        await blip.init();
+        const caption = await blip.caption(preparedImages[patternIdx]);
+        const hint = extractPatternHintFromCaption(caption || "");
+        if (hint) {
+          ev.pattern = hint;
+          parsedIntent.constraints = parsedIntent.constraints || { mustHave: [], mustNotHave: [] };
+          parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
+          appendUnique(parsedIntent.constraints.mustHave, [hint]);
+        }
+      } catch {
+        // best-effort fallback only
+      }
+    }
+  }
+
+  if (silhouetteIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, silhouetteIdx);
+    if (!row.primaryAttributes.includes("silhouette")) row.primaryAttributes.push("silhouette");
+    if (!row.primaryAttributes.includes("fit")) row.primaryAttributes.push("fit");
+    const ev = row.extractedValues as Record<string, unknown>;
+    const promptLengths = extractPromptLengthTerms(userPrompt);
+    if (promptLengths.length > 0) {
+      ev.fit = promptLengths[0];
+      parsedIntent.constraints = parsedIntent.constraints || { mustHave: [], mustNotHave: [] };
+      parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
+      appendUnique(parsedIntent.constraints.mustHave, promptLengths);
     }
   }
 }
@@ -2288,6 +2328,11 @@ export async function multiImageSearch(
     let hardConstraintFallbackUsed = false;
     if (hardConstraints.enabled && hits.length > 0) {
       const preHardConstraintHits = hits;
+      const allowHardConstraintBypass =
+        hardConstraints.requiredLengthTerms.length === 0 &&
+        hardConstraints.requiredPatternTerms.length === 0 &&
+        !hardConstraints.requireTypeCompliance &&
+        !hardConstraints.requireColorCompliance;
       const strictHits = hits.filter((hit: any) =>
         multiImageHitPassesHardConstraints(
           hit,
@@ -2322,10 +2367,16 @@ export async function multiImageSearch(
             hits = lv2Hits;
             hardConstraintRelaxationLevel = 2;
           } else {
-            // Preserve recall when strict and relaxed hard gates all empty out.
-            hits = preHardConstraintHits;
-            hardConstraintRelaxationLevel = 2;
-            hardConstraintFallbackUsed = true;
+            if (allowHardConstraintBypass) {
+              // Preserve recall when strict and relaxed hard gates all empty out.
+              hits = preHardConstraintHits;
+              hardConstraintRelaxationLevel = 2;
+              hardConstraintFallbackUsed = true;
+            } else {
+              hits = [];
+              hardConstraintRelaxationLevel = 2;
+              hardConstraintFallbackUsed = false;
+            }
           }
         }
       }
@@ -2527,6 +2578,8 @@ interface MultiImageHardConstraints {
   brands: string[];
   gender?: string;
   requiredKeywords: string[];
+  requiredLengthTerms: string[];
+  requiredPatternTerms: string[];
   forbiddenKeywords: string[];
   minRequiredKeywordMatches: number;
   requireColorCompliance: boolean;
@@ -2623,6 +2676,8 @@ function buildMultiImageHardConstraints(
       categoryTerms: [],
       brands: [],
       requiredKeywords: [],
+      requiredLengthTerms: [],
+      requiredPatternTerms: [],
       forbiddenKeywords: [],
       minRequiredKeywordMatches: 0,
       requireColorCompliance: false,
@@ -2634,6 +2689,8 @@ function buildMultiImageHardConstraints(
   const promptTypeTerms = extractPromptTypeTerms(rawPrompt);
   const promptColorTerms = extractPromptColorTerms(rawPrompt);
   const promptStyleTerms = extractPromptStyleTerms(rawPrompt);
+  const promptLengthTerms = extractPromptLengthTerms(rawPrompt);
+  const promptPatternTerms = extractPromptPatternTerms(rawPrompt);
 
   const astPrice = ast.filters?.priceRange;
   const intentPriceMin = parsedIntent.constraints?.priceMin;
@@ -2707,6 +2764,8 @@ function buildMultiImageHardConstraints(
     requireTypeCompliance ||
     forbiddenKeywords.length > 0 ||
     requiredKeywords.length > 0 ||
+    promptLengthTerms.length > 0 ||
+    promptPatternTerms.length > 0 ||
     brands.length > 0 ||
     categoryTerms.length > 0 ||
     gender != null ||
@@ -2723,6 +2782,8 @@ function buildMultiImageHardConstraints(
     brands,
     gender,
     requiredKeywords,
+    requiredLengthTerms: promptLengthTerms,
+    requiredPatternTerms: promptPatternTerms,
     forbiddenKeywords,
     minRequiredKeywordMatches,
     requireColorCompliance,
@@ -2792,6 +2853,14 @@ function multiImageHitPassesHardConstraints(
     if (matches < hard.minRequiredKeywordMatches) return false;
   }
 
+  if (hard.requiredLengthTerms.length > 0) {
+    if (!hard.requiredLengthTerms.some((t) => blob.includes(t))) return false;
+  }
+
+  if (hard.requiredPatternTerms.length > 0) {
+    if (!hard.requiredPatternTerms.some((t) => blob.includes(t))) return false;
+  }
+
   if (hard.requireColorCompliance && (rel?.colorCompliance ?? 0) <= 0) return false;
   if (hard.requireTypeCompliance && (rel?.productTypeCompliance ?? 0) < hard.minTypeCompliance) return false;
   return true;
@@ -2835,6 +2904,12 @@ function multiImageProductPassesHardConstraints(
   if (hard.requiredKeywords.length > 0) {
     const matches = countKeywordMatches(blob, hard.requiredKeywords);
     if (matches < hard.minRequiredKeywordMatches) return false;
+  }
+  if (hard.requiredLengthTerms.length > 0) {
+    if (!hard.requiredLengthTerms.some((t) => blob.includes(t))) return false;
+  }
+  if (hard.requiredPatternTerms.length > 0) {
+    if (!hard.requiredPatternTerms.some((t) => blob.includes(t))) return false;
   }
   if (hard.requireColorCompliance && (rel?.colorCompliance ?? 0) <= 0) return false;
   if (hard.requireTypeCompliance && (rel?.productTypeCompliance ?? 0) < hard.minTypeCompliance) return false;
@@ -3265,6 +3340,11 @@ function applyPromptAstOverridesToParsedIntent(
       .filter((x) => x.length > 0)
       .filter((x) => !promptTermLooksLikeColor(x));
     appendUniqueTerms(parsedIntent.constraints.mustHave, promptColors);
+  } else if (options?.geminiDegraded) {
+    parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave
+      .map((x) => normalizePromptKeywordTerm(x))
+      .filter((x) => x.length > 0)
+      .filter((x) => !promptTermLooksLikeColor(x));
   }
 
   if (promptTypes.length > 0) {
@@ -3375,6 +3455,79 @@ function extractPromptStyleTerms(rawPrompt: string): string[] {
     if (re.test(q)) out.add(s);
   }
   return [...out];
+}
+
+function extractPromptLengthTerms(rawPrompt: string): string[] {
+  const q = String(rawPrompt ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!q) return [];
+
+  const out = new Set<string>();
+  if (/\b(maxi|long)\b/.test(q)) out.add("long");
+  if (/\b(mini|short)\b/.test(q)) out.add("short");
+  if (/\bmidi\b/.test(q)) out.add("midi");
+  return [...out];
+}
+
+function extractPromptPatternTerms(rawPrompt: string): string[] {
+  const q = String(rawPrompt ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!q) return [];
+
+  const lexicon = [
+    "pattern",
+    "print",
+    "floral",
+    "striped",
+    "stripe",
+    "plaid",
+    "checkered",
+    "checked",
+    "polka",
+    "leopard",
+    "animal",
+    "paisley",
+    "geometric",
+    "abstract",
+  ];
+  const out = new Set<string>();
+  for (const t of lexicon) {
+    const re = new RegExp(`(^|\\s)${t.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}(\\s|$)`, "i");
+    if (re.test(q)) out.add(t);
+  }
+  return [...out];
+}
+
+function extractPatternHintFromCaption(rawCaption: string): string | undefined {
+  const c = String(rawCaption ?? "").toLowerCase();
+  if (!c.trim()) return undefined;
+
+  const orderedHints = [
+    "leopard",
+    "floral",
+    "striped",
+    "plaid",
+    "checkered",
+    "polka",
+    "paisley",
+    "geometric",
+    "abstract",
+    "animal",
+    "pattern",
+    "print",
+  ];
+
+  for (const h of orderedHints) {
+    const re = new RegExp(`(^|\\s)${h.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}(\\s|$)`, "i");
+    if (re.test(c)) return h;
+  }
+  return undefined;
 }
 
 function collectMultiImageNegationTerms(parsedIntent: ParsedIntent, rawPrompt: string): string[] {

@@ -673,8 +673,13 @@ async function runCompleteLookCore(
   }
 
   const styleProfile = await getStyleProfile(userId).catch(() => null);
-  const visionSlots = await inferWardrobeSlotsFromWardrobeRows(currentItems);
-  for (const slot of visionSlots) pushCategory(slot);
+  // Vision is useful when wardrobe metadata is sparse, but it can overfire on
+  // already-labeled outfits (e.g. shirt + pants turning into false shoes/bags).
+  // Only use it as a supplement when the structured signals are weak.
+  if (currentCategories.size < 2) {
+    const visionSlots = await inferWardrobeSlotsFromWardrobeRows(currentItems);
+    for (const slot of visionSlots) pushCategory(slot);
+  }
 
   const warmWeatherLikely = inferWarmWeatherLook(currentItems);
   const shouldOfferOuterwear = shouldSuggestOuterwear(
@@ -999,7 +1004,6 @@ export async function completeLookSuggestionsForCatalogProducts(
             p.embedding,
             p.title as name,
             p.title,
-            p.gender,
             p.image as image_url,
             p.image_cdn,
             p.category as category_name
