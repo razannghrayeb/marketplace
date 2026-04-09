@@ -2693,6 +2693,9 @@ export async function searchByImageWithSimilarity(
   const rankedHitsForGates = rankedHitsCategorySafe.length > 0
     ? rankedHitsCategorySafe
     : rankedHitsCandidates;
+  const droppedByCategorySafety = strictCategorySafetyActive
+    ? Math.max(0, rankedHitsCandidates.length - rankedHitsCategorySafe.length)
+    : 0;
 
   // Late visual gate (after soft rerank).
   const thresholdPassedByVisual = rankedHitsForGates.filter((h: any) =>
@@ -2758,6 +2761,7 @@ export async function searchByImageWithSimilarity(
   /** True when reranked candidates exist but visual gate removed all (without relaxation). */
   const belowRelevanceThreshold =
     rankedHitsForGates.length > 0 && thresholdPassedByVisual.length === 0 && !thresholdRelaxed;
+  const droppedByVisualThreshold = Math.max(0, rankedHitsForGates.length - visualGatedHits.length);
 
   const finalAcceptMin = acceptMinImage;
   let effectiveFinalAcceptMin = finalAcceptMin;
@@ -3235,6 +3239,8 @@ export async function searchByImageWithSimilarity(
   ) as ProductResult[];
 
   const strongVisualOverrideMax = imageStrongVisualOverrideMaxCount();
+  const droppedByFinalRelevanceBeforeOverride = Math.max(0, resultsBeforeFinalRelevanceFilter.length - results.length);
+  let rescuedByStrongVisualOverride = 0;
   if (strongVisualOverrideMax > 0 && resultsBeforeFinalRelevanceFilter.length > results.length) {
     const existingIds = new Set(results.map((p) => String((p as any).id)));
     const strongMisses = resultsBeforeFinalRelevanceFilter
@@ -3266,6 +3272,7 @@ export async function searchByImageWithSimilarity(
         };
       });
     if (strongMisses.length > 0) {
+      rescuedByStrongVisualOverride = strongMisses.length;
       results = [...results, ...strongMisses] as ProductResult[];
     }
   }
@@ -3300,8 +3307,10 @@ export async function searchByImageWithSimilarity(
 
   const dedupedResults = dedupeImageSearchResults(results as any) as ProductResult[];
   const countAfterDedupe = dedupedResults.length;
+  const droppedByDedupe = Math.max(0, results.length - countAfterDedupe);
   results = dedupedResults.slice(0, limit) as ProductResult[];
   const finalReturnedCount = results.length;
+  const droppedByLimit = Math.max(0, countAfterDedupe - finalReturnedCount);
 
   let related: ProductResult[] = [];
   if (includeRelated && pHash) {
@@ -3422,6 +3431,14 @@ export async function searchByImageWithSimilarity(
       relax_floor_used: relaxFloorUsed,
       image_search_pipeline_degraded: imageSearchPipelineDegraded,
       relevance_intent: relevanceIntentDebug,
+      drops_debug: {
+        dropped_by_category_safety: droppedByCategorySafety,
+        dropped_by_visual_threshold: droppedByVisualThreshold,
+        dropped_by_final_relevance_before_override: droppedByFinalRelevanceBeforeOverride,
+        rescued_by_strong_visual_override: rescuedByStrongVisualOverride,
+        dropped_by_dedupe: droppedByDedupe,
+        dropped_by_limit: droppedByLimit,
+      },
     });
   }
 
@@ -3453,12 +3470,18 @@ export async function searchByImageWithSimilarity(
         raw_open_search_hits: rawOpenSearchHitCount,
         base_candidates: baseCandidates.length,
         ranked_candidates: rankedHitsCandidates.length,
+        dropped_by_category_safety: droppedByCategorySafety,
         threshold_passed_visual: thresholdPassedByVisual.length,
         visual_gated_hits: visualGatedHits.length,
+        dropped_by_visual_threshold: droppedByVisualThreshold,
         hits_after_final_accept_min: countAfterFinalAcceptMin,
+        dropped_by_final_relevance_before_override: droppedByFinalRelevanceBeforeOverride,
+        rescued_by_strong_visual_override: rescuedByStrongVisualOverride,
         hits_after_color_postfilter: countAfterColorPostfilter,
         hits_after_hydration: countAfterHydration,
+        dropped_by_dedupe: droppedByDedupe,
         hits_after_dedupe: countAfterDedupe,
+        dropped_by_limit: droppedByLimit,
         final_returned_count: finalReturnedCount,
       },
     },
