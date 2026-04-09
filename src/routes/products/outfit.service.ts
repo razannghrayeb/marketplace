@@ -418,7 +418,7 @@ function categoryFamily(label?: string | null): string {
   const text = normalizeStyleToken(label);
   if (!text) return "unknown";
   if (text.includes("dress") || text.includes("gown")) return "dress";
-  if (text.includes("top") || text.includes("shirt") || text.includes("blouse") || text.includes("hoodie") || text.includes("sweater") || text.includes("tshirt") || text.includes("tee")) return "tops";
+  if (text.includes("top") || text.includes("shirt") || text.includes("blouse") || text.includes("hoodie") || text.includes("sweater") || text.includes("sweatshirt") || text.includes("tshirt") || text.includes("tee")) return "tops";
   if (text.includes("bottom") || text.includes("pant") || text.includes("trouser") || text.includes("jean") || text.includes("skirt") || text.includes("short")) return "bottoms";
   if (text.includes("outer") || text.includes("jacket") || text.includes("coat") || text.includes("blazer") || text.includes("cardigan") || text.includes("bomber")) return "outerwear";
   if (text.includes("shoe") || text.includes("sneaker") || text.includes("heel") || text.includes("boot") || text.includes("sandal") || text.includes("loafer") || text.includes("flat")) return "shoes";
@@ -499,6 +499,35 @@ function scoreCategoryCompatibility(sourceFamily: string, candidateFamily: strin
   };
   if (pairingMap[sourceFamily]?.includes(candidateFamily)) return 0.93;
   if (pairingMap[candidateFamily]?.includes(sourceFamily)) return 0.87;
+
+function scoreFootwearOccasionCompatibility(
+  sourceOccasion: StyleProfile["occasion"],
+  candidateTitle: string,
+  candidateCategory?: string | null
+): number {
+  const text = `${String(candidateTitle || "")} ${String(candidateCategory || "")}`.toLowerCase();
+  const isSneakerLike = /\b(sneaker|sneakers|trainer|trainers|running shoe|canvas shoe|basketball shoe)\b/.test(text);
+  const isDressyFootwear = /\b(heel|heels|pump|pumps|stiletto|stilettos|sandal|sandals|mule|mules|loafer|loafers|boot|boots|flat|flats|oxford|oxfords)\b/.test(text);
+
+  if (sourceOccasion === "party") {
+    if (isSneakerLike) return 0.22;
+    if (isDressyFootwear) return 0.98;
+    return 0.72;
+  }
+
+  if (sourceOccasion === "formal" || sourceOccasion === "semi-formal") {
+    if (isSneakerLike) return 0.3;
+    if (isDressyFootwear) return 0.95;
+    return 0.68;
+  }
+
+  if (sourceOccasion === "casual") {
+    if (isSneakerLike) return 0.95;
+    if (isDressyFootwear) return 0.72;
+  }
+
+  return 0.74;
+}
   return 0.44;
 }
 
@@ -579,6 +608,10 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     const formalityScore = scoreFormalityCompatibility(params.sourceStyle.formality, candidateStyle.formality);
     const seasonScore = scoreSeasonCompatibility(params.sourceStyle.season, candidateStyle.season);
     const priceScore = scoreRangeMatch(params.sourceProduct.price_cents, candidateProduct.price_cents);
+    const footwearOccasionScore =
+      candidateFamily === "shoes"
+        ? scoreFootwearOccasionCompatibility(params.sourceStyle.occasion, candidateProduct.title, candidateProduct.category)
+        : 1;
 
     const sourcePattern = splitStyleTokens(`${params.sourceProduct.category || ""} ${params.sourceProduct.title || ""}`);
     const candidatePattern = splitStyleTokens(`${candidateProduct.category || ""} ${candidateProduct.title || ""}`);
@@ -594,6 +627,7 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       colorScore * 0.18 +
       formalityScore * 0.16 +
       seasonScore * 0.08 +
+      footwearOccasionScore * 0.14 +
       patternOverlap * 0.06 +
       materialOverlap * 0.04 +
       priceScore * 0.02;
@@ -615,6 +649,13 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
         patternScore: patternOverlap,
         materialScore: materialOverlap,
       }),
+      ...(candidateFamily === "shoes"
+        ? [
+            sourceStyle.occasion === "party" && /\b(sneaker|sneakers|trainer|trainers)\b/i.test(`${candidateProduct.title} ${candidateProduct.category || ""}`)
+              ? "too casual for a party look"
+              : "footwear matches the occasion",
+          ]
+        : []),
       reason: s.reason || "fashion-aware match",
     };
   }));
@@ -674,7 +715,7 @@ function inferSourceCategoryFallback(sourceProduct: {
   const text = `${String(sourceProduct.category || "")} ${String(sourceProduct.title || "")} ${String(sourceProduct.description || "")}`.toLowerCase();
   if (/\b(jacket|coat|blazer|outerwear|bomber|parka|windbreaker)\b/.test(text)) return "outerwear" as ProductCategory;
   if (/\b(trouser|trousers|pants|jeans|skirt|shorts?|leggings|bottoms?)\b/.test(text)) return "bottoms" as ProductCategory;
-  if (/\b(top|tops|shirt|blouse|tee|t-?shirt|hoodie|sweater|knit)\b/.test(text)) return "tops" as ProductCategory;
+  if (/\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|hoodie|hoodies|sweater|sweaters|sweatshirt|sweatshirts|knit)\b/.test(text)) return "tops" as ProductCategory;
   if (/\b(dress|gown|romper|jumpsuit|playsuit)\b/.test(text)) return "dress" as ProductCategory;
   if (/\b(shoe|sneaker|boot|heel|sandal|loafer|flats?)\b/.test(text)) return "shoes" as ProductCategory;
   if (/\b(bag|wallet|backpack|accessor|crossbody|clutch|tote)\b/.test(text)) return "accessories" as ProductCategory;
