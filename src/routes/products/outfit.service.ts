@@ -116,9 +116,14 @@ export async function getOutfitRecommendations(
   const maxTotal = Math.max(1, Math.min(options.maxTotal ?? 20, 50));
   const maxPerCategory = Math.max(1, Math.min(options.maxPerCategory ?? 5, 20));
   const anchorProductIds = [productId];
-  const audienceGenderHint = normalizeAudienceHint(sourceProduct.gender);
+  const audienceGenderHint =
+    normalizeAudienceHint(sourceProduct.gender) || inferAudienceGenderHintFromProduct(sourceProduct);
   const ageGroupHint = inferAgeGroupHintFromProduct(sourceProduct);
   const detected = await detectCategory(sourceProduct.title, sourceProduct.description);
+  const resolvedSourceCategory =
+    detected.category === "unknown"
+      ? inferSourceCategoryFallback(sourceProduct)
+      : detected.category;
   const sourceStyle = await buildStyleProfile(sourceProduct);
 
   const completeLookResult = await completeLookSuggestionsForCatalogProducts(
@@ -131,7 +136,7 @@ export async function getOutfitRecommendations(
   const rerankedSuggestions = await rerankCompleteStyleSuggestions({
     sourceProduct,
     sourceStyle,
-    sourceCategory: detected.category,
+    sourceCategory: resolvedSourceCategory,
     suggestions: completeLookResult.suggestions,
     userId,
     maxSuggestions: maxTotal * 2,
@@ -151,7 +156,7 @@ export async function getOutfitRecommendations(
         suggestions: filteredSuggestions,
       },
       maxPerCategory,
-      detectedCategory: detected.category,
+      detectedCategory: resolvedSourceCategory,
       sourceStyle,
     });
   }
@@ -336,7 +341,7 @@ type CompleteLookMappedSuggestion = {
 async function getCatalogProductById(productId: number): Promise<CompleteLookMappedSourceProduct | null> {
   const result = await pg.query(
     `SELECT id, title, brand, category, color, price_cents, currency,
-            image_url, image_cdn, description, gender
+            image_url, image_cdn, description, gender, product_url, parent_product_url
      FROM products
      WHERE id = $1`,
     [productId]
@@ -344,12 +349,33 @@ async function getCatalogProductById(productId: number): Promise<CompleteLookMap
   return (result.rows[0] as CompleteLookMappedSourceProduct | undefined) ?? null;
 }
 
-function inferAgeGroupHintFromProduct(product: { title?: string | null; category?: string | null; description?: string | null }): string | undefined {
-  const text = `${String(product.title || "")} ${String(product.category || "")} ${String(product.description || "")}`.toLowerCase();
+function inferAgeGroupHintFromProduct(product: {
+  title?: string | null;
+  category?: string | null;
+  description?: string | null;
+  product_url?: string | null;
+  parent_product_url?: string | null;
+}): string | undefined {
+  const text = `${String(product.title || "")} ${String(product.category || "")} ${String(product.description || "")} ${String(product.product_url || "")} ${String(product.parent_product_url || "")}`.toLowerCase();
   const kidsHits = (text.match(/\bkids?\b|\bchildren\b|\bchild\b|\bbaby\b|\btoddler\b|\byouth\b|\bjunior\b|\bboys?\b|\bgirls?\b/g) || []).length;
   const adultHits = (text.match(/\bmen\b|\bwomen\b|\badult\b|\bladies\b|\bgents\b|\bmale\b|\bfemale\b/g) || []).length;
   if (kidsHits > adultHits && kidsHits > 0) return "kids";
   if (adultHits > kidsHits && adultHits > 0) return "adult";
+  return undefined;
+}
+
+function inferAudienceGenderHintFromProduct(product: {
+  title?: string | null;
+  category?: string | null;
+  description?: string | null;
+  product_url?: string | null;
+  parent_product_url?: string | null;
+}): string | undefined {
+  const text = `${String(product.title || "")} ${String(product.category || "")} ${String(product.description || "")} ${String(product.product_url || "")} ${String(product.parent_product_url || "")}`.toLowerCase();
+  const menHits = (text.match(/\bmen\b|\bmens\b|\bmen's\b|\bboy\b|\bboys\b|\bgents\b|\bmale\b/g) || []).length;
+  const womenHits = (text.match(/\bwomen\b|\bwomens\b|\bwomen's\b|\bgirl\b|\bgirls\b|\bladies\b|\bfemale\b/g) || []).length;
+  if (menHits > womenHits && menHits > 0) return "men";
+  if (womenHits > menHits && womenHits > 0) return "women";
   return undefined;
 }
 
@@ -612,16 +638,44 @@ function completeStyleCategoryLabel(raw?: string): string {
   if (c.includes("outerwear") || c.includes("jacket") || c.includes("coat") || c.includes("blazer")) return "Outerwear";
   if (c.includes("top") || c.includes("shirt") || c.includes("blouse") || c.includes("hoodie") || c.includes("sweater")) return "Tops";
   if (c.includes("bottom") || c.includes("pants") || c.includes("trouser") || c.includes("jeans") || c.includes("skirt") || c.includes("short")) return "Bottoms";
-  if (c.includes("bag") || c.includes("accessor")) return "Accessories";
+  if (
+    c.includes("bag") ||
+    c.includes("accessor") ||
+    c.includes("wallet") ||
+    c.includes("backpack") ||
+    c.includes("crossbody") ||
+    c.includes("clutch") ||
+    c.includes("tote") ||
+    c.includes("waist")
+  ) return "Accessories";
+  if (c === "recommended") return "Accessories";
   return c.charAt(0).toUpperCase() + c.slice(1);
 }
 
 function completeStylePriorityFromCategory(categoryLabel: string, missingCategories: string[]): number {
   const key = categoryLabel.toLowerCase();
+  const expandedKey = key === "accessories" ? "accessories bags" : key;
   const idx = missingCategories.findIndex((m) => key.includes(String(m).toLowerCase()));
-  if (idx === 0) return 1;
-  if (idx >= 1) return 2;
+  const idxExpanded = missingCategories.findIndex((m) => expandedKey.includes(String(m).toLowerCase()));
+  const resolvedIdx = idx >= 0 ? idx : idxExpanded;
+  if (resolvedIdx === 0) return 1;
+  if (resolvedIdx >= 1) return 2;
   return 3;
+}
+
+function inferSourceCategoryFallback(sourceProduct: {
+  category?: string | null;
+  title?: string | null;
+  description?: string | null;
+}): ProductCategory {
+  const text = `${String(sourceProduct.category || "")} ${String(sourceProduct.title || "")} ${String(sourceProduct.description || "")}`.toLowerCase();
+  if (/\b(jacket|coat|blazer|outerwear|bomber|parka|windbreaker)\b/.test(text)) return "outerwear" as ProductCategory;
+  if (/\b(trouser|trousers|pants|jeans|skirt|shorts?|leggings|bottoms?)\b/.test(text)) return "bottoms" as ProductCategory;
+  if (/\b(top|tops|shirt|blouse|tee|t-?shirt|hoodie|sweater|knit)\b/.test(text)) return "tops" as ProductCategory;
+  if (/\b(dress|gown|romper|jumpsuit|playsuit)\b/.test(text)) return "dress" as ProductCategory;
+  if (/\b(shoe|sneaker|boot|heel|sandal|loafer|flats?)\b/.test(text)) return "shoes" as ProductCategory;
+  if (/\b(bag|wallet|backpack|accessor|crossbody|clutch|tote)\b/.test(text)) return "accessories" as ProductCategory;
+  return "unknown" as ProductCategory;
 }
 
 function mapCompleteLookToStyleResponse(params: {
