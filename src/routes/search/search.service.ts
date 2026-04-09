@@ -2492,6 +2492,7 @@ export async function multiImageSearch(
     );
     let hardConstraintRelaxationLevel: 0 | 1 | 2 = 0;
     let hardConstraintFallbackUsed = false;
+    let hardConstraintZeroGuardUsed = false;
     if (hardConstraints.enabled && hits.length > 0) {
       const preHardConstraintHits = hits;
       const allowHardConstraintBypass =
@@ -2533,11 +2534,16 @@ export async function multiImageSearch(
             hits = lv2Hits;
             hardConstraintRelaxationLevel = 2;
           } else {
-            if (allowHardConstraintBypass) {
+            const shouldGuardAgainstEmpty =
+              allowHardConstraintBypass ||
+              multiImageStrictPromptEnabled() ||
+              preHardConstraintHits.length > 0;
+            if (shouldGuardAgainstEmpty) {
               // Preserve recall when strict and relaxed hard gates all empty out.
               hits = preHardConstraintHits;
               hardConstraintRelaxationLevel = 2;
               hardConstraintFallbackUsed = true;
+              hardConstraintZeroGuardUsed = true;
             } else {
               hits = [];
               hardConstraintRelaxationLevel = 2;
@@ -2604,8 +2610,9 @@ export async function multiImageSearch(
             return multiImageProductPassesHardConstraints(product, activeHardConstraints, rel);
           })
         : results;
-    if (constrainedResults.length === 0 && results.length > 0 && hardConstraintFallbackUsed) {
+    if (constrainedResults.length === 0 && results.length > 0 && (hardConstraintFallbackUsed || hardConstraintZeroGuardUsed)) {
       constrainedResults = results;
+      hardConstraintZeroGuardUsed = true;
     }
     constrainedCount = constrainedResults.length;
 
@@ -2726,6 +2733,7 @@ export async function multiImageSearch(
           ? { hard_constraint_relaxation_level: hardConstraintRelaxationLevel }
           : {}),
         ...(hardConstraintFallbackUsed ? { hard_constraint_fallback_used: true } : {}),
+        ...(hardConstraintZeroGuardUsed ? { hard_constraint_zero_guard_used: true } : {}),
         ...(finalFloorFallbackUsed ? { final_floor_fallback_used: true } : {}),
         ...(geminiDegraded ? { gemini_degraded: true } : {}),
         intent_provider: intentProvider,
