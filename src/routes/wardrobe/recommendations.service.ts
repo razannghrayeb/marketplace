@@ -653,12 +653,18 @@ type CompleteLookAnchorRow = {
   category_name?: string | null;
   title?: string | null;
   gender?: string | null;
+  age_group?: string | null;
+  style_tags?: string[] | null;
+  occasion_tags?: string[] | null;
+  season_tags?: string[] | null;
 };
 
 type AudienceGender = "men" | "women" | "unisex";
+type AudienceAgeGroup = "kids" | "adult";
 
 type CompleteLookAudienceOptions = {
   audienceGenderHint?: string | null;
+  ageGroupHint?: string | null;
   allowUserAudienceFallback?: boolean;
   enforceNeutralAudienceWhenUnknown?: boolean;
 };
@@ -724,15 +730,18 @@ async function runCompleteLookCore(
   const visualContext = centroid
     ? await inferVisualContextFromCentroid(centroid, currentCategoryList).catch(() => ({
         inferredAudienceGender: null as AudienceGender | null,
+        inferredAgeGroup: null as AudienceAgeGroup | null,
         styleTerms: [] as string[],
       }))
-    : { inferredAudienceGender: null as AudienceGender | null, styleTerms: [] as string[] };
+    : { inferredAudienceGender: null as AudienceGender | null, inferredAgeGroup: null as AudienceAgeGroup | null, styleTerms: [] as string[] };
 
   const hintedAudienceGender = normalizeAudienceGenderValue(audienceOptions.audienceGenderHint);
+  const hintedAgeGroup = normalizeAudienceAgeGroupValue(audienceOptions.ageGroupHint);
   const inferredFromAnchors = await inferPreferredAudienceGender(userId, currentItems, {
     allowWardrobeHistory: false,
     allowUserProfile: false,
   });
+  const inferredAgeFromAnchors = inferPreferredAgeGroup(currentItems);
   const inferredAudienceGender =
     hintedAudienceGender ||
     inferredFromAnchors ||
@@ -741,6 +750,7 @@ async function runCompleteLookCore(
       allowWardrobeHistory: audienceOptions.allowUserAudienceFallback !== false,
       allowUserProfile: audienceOptions.allowUserAudienceFallback !== false,
     }));
+  const inferredAgeGroup = hintedAgeGroup || inferredAgeFromAnchors || visualContext.inferredAgeGroup;
   const enforceNeutralAudienceWhenUnknown =
     Boolean(audienceOptions.enforceNeutralAudienceWhenUnknown) || !inferredAudienceGender;
   const missingCategories = inferMissingCategoriesForOutfit({
@@ -802,6 +812,9 @@ async function runCompleteLookCore(
         if (inferredAudienceGender && inferredAudienceGender !== "unisex") {
           f.push(buildAudienceGenderFilter(inferredAudienceGender));
         }
+        if (inferredAgeGroup) {
+          f.push(buildAgeGroupFilter(inferredAgeGroup));
+        }
         const slotIntentFilter = buildSlotIntentFilter(category);
         if (slotIntentFilter) {
           f.push(slotIntentFilter);
@@ -830,6 +843,7 @@ async function runCompleteLookCore(
           const source = hit._source || {};
           if (!sourceMatchesSlot(category, source)) continue;
           if (!audienceGenderMatchesForSlot(inferredAudienceGender, source, category, enforceNeutralAudienceWhenUnknown)) continue;
+          if (!audienceAgeGroupMatches(inferredAgeGroup, source)) continue;
           const productId = parseInt(source.product_id, 10);
           if (!productId || ownedProductIds.has(String(productId))) continue;
 
@@ -983,6 +997,7 @@ async function runCompleteLookCore(
       preferredMaterials,
       preferredFormality,
       inferredAudienceGender,
+      inferredAgeGroup,
       enforceNeutralAudienceWhenUnknown,
       wardrobeColorFamilies,
       currentCategoryList,
@@ -1002,6 +1017,7 @@ async function runCompleteLookCore(
     wardrobeColorFamilies,
     currentCategoryList,
     inferredAudienceGender,
+    inferredAgeGroup,
     limit,
   }).catch(() => mergedSuggestions);
 
@@ -1081,6 +1097,7 @@ async function rerankCompleteLookFashionAware(params: {
   wardrobeColorFamilies: Set<string>;
   currentCategoryList: string[];
   inferredAudienceGender: AudienceGender | null;
+  inferredAgeGroup: AudienceAgeGroup | null;
   limit: number;
 }): Promise<CompleteLookSuggestion[]> {
   if (!Array.isArray(params.suggestions) || params.suggestions.length <= 1) {
@@ -1119,6 +1136,24 @@ async function rerankCompleteLookFashionAware(params: {
         ...s,
         score: Math.max(0, (s.score || 0) * 0.35),
         reason: `Add ${String(s.category || "item")} to complete the look (gender mismatch penalty applied)`,
+      };
+    }
+
+    const docAge = normalizeAudienceAgeGroupValue(row.age_group);
+    const textAge = inferAgeGroupFromText(`${String(row.title || "")} ${String(row.category || "")}`);
+    const effectiveDocAge = docAge || textAge;
+    if (params.inferredAgeGroup === "kids" && effectiveDocAge === "adult") {
+      return {
+        ...s,
+        score: Math.max(0, (s.score || 0) * 0.25),
+        reason: `Add ${String(s.category || "item")} to complete the look (age mismatch penalty applied)`,
+      };
+    }
+    if (params.inferredAgeGroup === "adult" && effectiveDocAge === "kids") {
+      return {
+        ...s,
+        score: Math.max(0, (s.score || 0) * 0.22),
+        reason: `Add ${String(s.category || "item")} to complete the look (age mismatch penalty applied)`,
       };
     }
 
@@ -1194,22 +1229,28 @@ export async function completeLookSuggestions(
   userId: number,
   currentItemIds: number[],
   limit: number = 10,
-  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint"> = {}
+  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint"> = {}
 ): Promise<CompleteLookSuggestionsResult> {
   const currentItemsResult = await pg.query(
     `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, wi.name, wi.image_url, wi.image_cdn,
             p.title,
-            p.gender,
+            COALESCE(wam.audience_gender, p.gender) as gender,
+            wam.age_group,
+            wam.style_tags,
+            wam.occasion_tags,
+            wam.season_tags,
             c.name as category_name
      FROM wardrobe_items wi
      LEFT JOIN products p ON p.id = wi.product_id
      LEFT JOIN categories c ON wi.category_id = c.id
+     LEFT JOIN wardrobe_item_audience_metadata wam ON wam.wardrobe_item_id = wi.id
      WHERE wi.id = ANY($1) AND wi.user_id = $2`,
     [currentItemIds, userId]
   );
 
   return runCompleteLookCore(userId, currentItemsResult.rows as CompleteLookAnchorRow[], limit, {
     audienceGenderHint: options.audienceGenderHint,
+    ageGroupHint: options.ageGroupHint,
   });
 }
 
@@ -1220,7 +1261,7 @@ export async function completeLookSuggestionsForCatalogProducts(
   userId: number,
   productIds: number[],
   limit: number = 10,
-  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint"> = {}
+  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint"> = {}
 ): Promise<CompleteLookSuggestionsResult> {
   if (!Array.isArray(productIds) || productIds.length === 0) {
     return {
@@ -1240,6 +1281,11 @@ export async function completeLookSuggestionsForCatalogProducts(
             p.title,
             p.image_url as image_url,
             p.image_cdn,
+            p.gender,
+            NULL::text as age_group,
+            NULL::text[] as style_tags,
+            NULL::text[] as occasion_tags,
+            NULL::text[] as season_tags,
             p.category as category_name
      FROM products p
      WHERE p.id = ANY($1)`,
@@ -1248,6 +1294,7 @@ export async function completeLookSuggestionsForCatalogProducts(
 
   return runCompleteLookCore(userId, productResult.rows as CompleteLookAnchorRow[], limit, {
     audienceGenderHint: options.audienceGenderHint,
+    ageGroupHint: options.ageGroupHint,
     allowUserAudienceFallback: false,
     enforceNeutralAudienceWhenUnknown: true,
   });
@@ -1274,7 +1321,7 @@ function extractStyleTokensFromText(text: string): string[] {
 async function inferVisualContextFromCentroid(
   centroid: number[],
   currentCategoryList: string[]
-): Promise<{ inferredAudienceGender: AudienceGender | null; styleTerms: string[] }> {
+): Promise<{ inferredAudienceGender: AudienceGender | null; inferredAgeGroup: AudienceAgeGroup | null; styleTerms: string[] }> {
   const filter: any[] = [{ term: { availability: "in_stock" } }];
   const canonicalCandidates = Array.from(
     new Set(currentCategoryList.map((slot) => wardrobeSlotToCategoryCanonical(slot)))
@@ -1300,13 +1347,14 @@ async function inferVisualContextFromCentroid(
           filter,
         },
       },
-      _source: ["title", "attr_style", "audience_gender", "attr_gender"],
+      _source: ["title", "attr_style", "audience_gender", "attr_gender", "age_group"],
     },
   });
 
   const hits = response.body?.hits?.hits || [];
   const styleCounts = new Map<string, number>();
   const genderCounts: Record<AudienceGender, number> = { men: 0, women: 0, unisex: 0 };
+  const ageCounts: Record<AudienceAgeGroup, number> = { kids: 0, adult: 0 };
 
   for (const hit of hits) {
     const source = hit?._source || {};
@@ -1319,6 +1367,9 @@ async function inferVisualContextFromCentroid(
     if (audience) {
       genderCounts[audience] += audience === "unisex" ? weight * 0.4 : weight;
     }
+
+    const ageGroup = normalizeAudienceAgeGroupValue(source?.age_group) || inferAgeGroupFromText(String(source?.title || ""));
+    if (ageGroup) ageCounts[ageGroup] += weight;
 
     const styleBlob = `${String(source?.attr_style || "")} ${String(source?.title || "")}`;
     for (const token of extractStyleTokensFromText(styleBlob)) {
@@ -1336,7 +1387,86 @@ async function inferVisualContextFromCentroid(
   else if (genderCounts.women > genderCounts.men && genderCounts.women >= 1.1) inferredAudienceGender = "women";
   else if (genderCounts.unisex >= 1.4) inferredAudienceGender = "unisex";
 
-  return { inferredAudienceGender, styleTerms };
+  let inferredAgeGroup: AudienceAgeGroup | null = null;
+  if (ageCounts.kids >= 1.1 && ageCounts.kids > ageCounts.adult) inferredAgeGroup = "kids";
+  else if (ageCounts.adult >= 1.1 && ageCounts.adult > ageCounts.kids) inferredAgeGroup = "adult";
+
+  return { inferredAudienceGender, inferredAgeGroup, styleTerms };
+}
+
+function normalizeAudienceAgeGroupValue(raw: unknown): AudienceAgeGroup | null {
+  if (raw == null) return null;
+  const s = String(raw).toLowerCase().trim();
+  if (!s) return null;
+  if (["kids", "kid", "children", "child", "baby", "toddler", "youth", "junior", "boys", "girls"].includes(s)) return "kids";
+  if (["adult", "adults", "men", "women", "unisex"].includes(s)) return "adult";
+  return null;
+}
+
+function inferAgeGroupFromText(text: string): AudienceAgeGroup | null {
+  const s = String(text || "").toLowerCase();
+  const kidsHits = (s.match(/\bkids?\b|\bchildren\b|\bchild\b|\bbaby\b|\btoddler\b|\byouth\b|\bjunior\b|\bboys?\b|\bgirls?\b/g) || []).length;
+  const adultHits = (s.match(/\bmen\b|\bwomen\b|\badult\b|\bladies\b|\bgents\b|\bmale\b|\bfemale\b/g) || []).length;
+  if (kidsHits > adultHits && kidsHits > 0) return "kids";
+  if (adultHits > kidsHits && adultHits > 0) return "adult";
+  return null;
+}
+
+function inferPreferredAgeGroup(currentItems: CompleteLookAnchorRow[]): AudienceAgeGroup | null {
+  let kids = 0;
+  let adult = 0;
+  for (const item of currentItems) {
+    const explicit = normalizeAudienceAgeGroupValue(item.age_group);
+    if (explicit === "kids") kids += 2;
+    if (explicit === "adult") adult += 2;
+    const inferred = inferAgeGroupFromText(`${String(item.name || "")} ${String(item.title || "")} ${String(item.category_name || "")}`);
+    if (inferred === "kids") kids += 1;
+    if (inferred === "adult") adult += 1;
+  }
+  if (kids > adult && kids > 0) return "kids";
+  if (adult > kids && adult > 0) return "adult";
+  return null;
+}
+
+function buildAgeGroupFilter(ageGroup: AudienceAgeGroup): any {
+  if (ageGroup === "kids") {
+    return {
+      bool: {
+        should: [
+          { terms: { age_group: ["kids", "kid", "children", "child", "youth", "junior"] } },
+          { match: { title: "kids" } },
+          { match: { title: "children" } },
+          { match: { title: "junior" } },
+        ],
+        minimum_should_match: 1,
+        must_not: [
+          {
+            bool: {
+              should: [{ match: { title: "men" } }, { match: { title: "women" } }, { match: { title: "adult" } }],
+              minimum_should_match: 1,
+            },
+          },
+        ],
+      },
+    };
+  }
+  return {
+    bool: {
+      must_not: [
+        {
+          bool: {
+            should: [
+              { terms: { age_group: ["kids", "kid", "children", "child", "youth", "junior"] } },
+              { match: { title: "kids" } },
+              { match: { title: "children" } },
+              { match: { title: "junior" } },
+            ],
+            minimum_should_match: 1,
+          },
+        },
+      ],
+    },
+  };
 }
 
 function normalizeAudienceGenderValue(raw: unknown): AudienceGender | null {
@@ -1507,7 +1637,17 @@ function audienceGenderMatches(
     return doc === inferred || doc === "unisex";
   }
   const fromText = inferGenderFromText(textBlob);
-  return !fromText || fromText === inferred;
+  if (!fromText) return false;
+  return fromText === inferred;
+}
+
+function audienceAgeGroupMatches(inferredAgeGroup: AudienceAgeGroup | null, source: any): boolean {
+  if (!inferredAgeGroup) return true;
+  const docAge = normalizeAudienceAgeGroupValue(source?.age_group);
+  const textAge = inferAgeGroupFromText(`${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.category_canonical || "")}`);
+  const effective = docAge || textAge;
+  if (!effective) return inferredAgeGroup !== "kids";
+  return effective === inferredAgeGroup;
 }
 
 function audienceGenderMatchesForSlot(
@@ -1547,7 +1687,13 @@ function inferWarmWeatherLook(items: CompleteLookAnchorRow[]): boolean {
 }
 
 function inferStyleTermsFromCurrentItems(
-  items: Array<{ name?: string | null; title?: string | null; category_name?: string | null }>,
+  items: Array<{
+    name?: string | null;
+    title?: string | null;
+    category_name?: string | null;
+    style_tags?: string[] | null;
+    occasion_tags?: string[] | null;
+  }>,
   occasionCoverage: string[]
 ): string[] {
   const terms = new Set<string>();
@@ -1556,6 +1702,17 @@ function inferStyleTermsFromCurrentItems(
     const blob = `${String(item.name || "")} ${String(item.title || "")} ${String(item.category_name || "")}`.toLowerCase();
     for (const token of STYLE_TERMS_LEXICON) {
       if (blob.includes(token)) terms.add(token);
+    }
+    for (const tag of item.style_tags || []) {
+      const normalized = String(tag || "").toLowerCase().trim();
+      if (!normalized) continue;
+      if (STYLE_TERMS_LEXICON.includes(normalized as any)) terms.add(normalized);
+    }
+    for (const occ of item.occasion_tags || []) {
+      const normalized = String(occ || "").toLowerCase().trim();
+      if (!normalized) continue;
+      if (normalized.includes("work")) terms.add("business");
+      else if (STYLE_TERMS_LEXICON.includes(normalized as any)) terms.add(normalized);
     }
   }
 
@@ -1636,6 +1793,7 @@ async function fetchCategoryTopUpSuggestions(params: {
   preferredMaterials: string[];
   preferredFormality: "casual" | "business" | "formal" | "mixed";
   inferredAudienceGender: AudienceGender | null;
+  inferredAgeGroup: AudienceAgeGroup | null;
   enforceNeutralAudienceWhenUnknown?: boolean;
   wardrobeColorFamilies: Set<string>;
   currentCategoryList: string[];
@@ -1658,6 +1816,9 @@ async function fetchCategoryTopUpSuggestions(params: {
   }
   if (params.inferredAudienceGender && params.inferredAudienceGender !== "unisex") {
     filter.push(buildAudienceGenderFilter(params.inferredAudienceGender));
+  }
+  if (params.inferredAgeGroup) {
+    filter.push(buildAgeGroupFilter(params.inferredAgeGroup));
   }
 
   const blockedProductIds = Array.from(new Set([...params.ownedProductIds, ...params.existingProductIds]));
@@ -1727,6 +1888,7 @@ async function fetchCategoryTopUpSuggestions(params: {
       matchedSlot,
       Boolean(params.enforceNeutralAudienceWhenUnknown)
     )) continue;
+    if (!audienceAgeGroupMatches(params.inferredAgeGroup, source)) continue;
     const productId = parseInt(source.product_id, 10);
     if (!productId) continue;
     const productKey = String(productId);

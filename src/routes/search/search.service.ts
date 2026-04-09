@@ -140,6 +140,8 @@ export type UnifiedSearchResult = SearchResultWithRelated & {
   total: number;
   tookMs: number;
   query?: QueryASTSummary;
+  /** True when retrieval required any fallback/relax retry path. */
+  did_relax?: boolean;
 };
 
 /** Lightweight subset of QueryAST shipped back with every text-search response */
@@ -179,6 +181,17 @@ function appendUnique(target: string[], values: string[]) {
     if (!x) continue;
     if (!target.includes(x)) target.push(x);
   }
+}
+
+let blipInitPromise: Promise<void> | null = null;
+async function ensureBlipInitialized(): Promise<void> {
+  if (!blipInitPromise) {
+    blipInitPromise = blip.init().catch((err) => {
+      blipInitPromise = null;
+      throw err;
+    });
+  }
+  await blipInitPromise;
 }
 
 const NEUTRAL_COLOR_TOKENS = new Set([
@@ -238,7 +251,7 @@ async function enrichClipOnlyIntentFromImages(
   let imageTypeHints: string[] = [];
   let styleAnchoredTypeHints: string[] = [];
   try {
-    await blip.init();
+    await ensureBlipInitialized();
     const typeCounts = new Map<string, number>();
     for (let i = 0; i < preparedImages.length; i++) {
       const img = preparedImages[i];
@@ -319,7 +332,7 @@ async function enrichClipOnlyIntentFromImages(
     if (!ev.color) {
       let captionColors: string[] = [];
       try {
-        await blip.init();
+        await ensureBlipInitialized();
         const caption = await blip.caption(preparedImages[colorIdx]);
         const structured = buildStructuredBlipOutput(caption || "");
         captionColors = (structured.colors || []).map((c) => String(c));
@@ -396,15 +409,15 @@ type PromptAnchorKind = "color" | "style" | "texture" | "pattern" | "silhouette"
 function promptAnchorKindRegex(kind: PromptAnchorKind): RegExp {
   switch (kind) {
     case "color":
-      return /(?:color|colour|tone|shade)/i;
+      return /(?:color|colour|tone|shade|palette|hue|colourway|colore|couleur|tono)/i;
     case "style":
-      return /(?:style|vibe|aesthetic|look)/i;
+      return /(?:style|vibe|aesthetic|look|design|theme|mood|cut)/i;
     case "texture":
-      return /(?:texture|material|fabric)/i;
+      return /(?:texture|material|fabric|finish)/i;
     case "pattern":
-      return /(?:pattern|print|striped?|plaid|floral|paisley|polka)/i;
+      return /(?:pattern|print|striped?|plaid|floral|paisley|polka|motif)/i;
     case "silhouette":
-      return /(?:silhouette|fit|shape|cut)/i;
+      return /(?:silhouette|fit|shape|cut|outline|tailoring)/i;
   }
 }
 
@@ -418,25 +431,54 @@ function findPromptAnchoredImageIndex(
   if (!kindRe.test(prompt)) return null;
 
   const aliases: string[][] = [
-    ["first", "1st", "image 1", "pic 1", "picture 1", "photo 1"],
-    ["second", "2nd", "image 2", "pic 2", "picture 2", "photo 2"],
-    ["third", "3rd", "image 3", "pic 3", "picture 3", "photo 3"],
-    ["fourth", "4th", "image 4", "pic 4", "picture 4", "photo 4"],
-    ["fifth", "5th", "image 5", "pic 5", "picture 5", "photo 5"],
+    ["first", "1st", "one", "image 1", "img 1", "pic 1", "picture 1", "photo 1"],
+    ["second", "2nd", "two", "image 2", "img 2", "pic 2", "picture 2", "photo 2"],
+    ["third", "3rd", "three", "image 3", "img 3", "pic 3", "picture 3", "photo 3"],
+    ["fourth", "4th", "four", "image 4", "img 4", "pic 4", "picture 4", "photo 4"],
+    ["fifth", "5th", "five", "image 5", "img 5", "pic 5", "picture 5", "photo 5"],
   ];
 
   const normalized = prompt.toLowerCase().replace(/\s+/g, " ");
-  const linked: number[] = [];
+
+  // First pass: clause-local matching (handles "and" typos like "ans" and avoids cross-clause bleed).
+  const clauseParts = normalized
+    .split(/\b(?:and|ans)\b|[,&+]/i)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const clauseLinked: number[] = [];
   const maxIdx = Math.min(imageCount, aliases.length);
+  for (const part of clauseParts) {
+    if (!kindRe.test(part)) continue;
+    const localHits: number[] = [];
+    for (let idx = 0; idx < maxIdx; idx++) {
+      const aliasGroup = aliases[idx];
+      const aliasPattern = aliasGroup
+        .map((a) => a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"))
+        .join("|");
+      if (new RegExp(`(?:^|\\s)(?:${aliasPattern})(?:'s)?(?:\\s|$)`, "i").test(part)) {
+        localHits.push(idx);
+      }
+    }
+    if (imageCount >= 2 && /(?:^|\s)(?:last|final)(?:\s+(?:image|one|pic|picture|photo))?(?:\s|$)/i.test(part)) {
+      localHits.push(imageCount - 1);
+    }
+    const uniqLocal = [...new Set(localHits)];
+    if (uniqLocal.length === 1 && !clauseLinked.includes(uniqLocal[0])) {
+      clauseLinked.push(uniqLocal[0]);
+    }
+  }
+  if (clauseLinked.length === 1) return clauseLinked[0];
+
+  const linked: number[] = [];
 
   for (let idx = 0; idx < maxIdx; idx++) {
     const aliasGroup = aliases[idx];
     const aliasPattern = aliasGroup
       .map((a) => a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"))
       .join("|");
-    const bridge = "(?:(?!\\s+and\\s+)[^.!?\\n]){0,90}";
-    const kindSrc = `(?:${kindRe.source})${bridge}(?:from|of|in|like)?\\s*(?:the\\s+)?(?:${aliasPattern})`;
-    const srcKind = `(?:from|of|in|like)?\\s*(?:the\\s+)?(?:${aliasPattern})${bridge}(?:${kindRe.source})`;
+    const bridge = "(?:(?!\\s+(?:and|ans|then)\\s+|[,&+])[^.!?\\n]){0,120}";
+    const kindSrc = `(?:${kindRe.source})${bridge}(?:from|of|in|like|using|use)?\\s*(?:the\\s+)?(?:${aliasPattern})(?:'s)?`;
+    const srcKind = `(?:from|of|in|like|using|use)?\\s*(?:the\\s+)?(?:${aliasPattern})(?:'s)?${bridge}(?:${kindRe.source})`;
     if (new RegExp(kindSrc, "i").test(normalized) || new RegExp(srcKind, "i").test(normalized)) {
       linked.push(idx);
     }
@@ -445,7 +487,7 @@ function findPromptAnchoredImageIndex(
   if (imageCount >= 2) {
     const lastIdx = imageCount - 1;
     const lastAlias = "(?:last|final)(?:\\s+(?:image|one|pic|picture|photo))?";
-    const bridge = "(?:(?!\\s+and\\s+)[^.!?\\n]){0,90}";
+    const bridge = "(?:(?!\\s+(?:and|ans|then)\\s+|[,&+])[^.!?\\n]){0,90}";
     const kindLast = `(?:${kindRe.source})${bridge}(?:from|of|in|like)?\\s*(?:the\\s+)?${lastAlias}`;
     const lastKind = `(?:from|of|in|like)?\\s*(?:the\\s+)?${lastAlias}${bridge}(?:${kindRe.source})`;
     if (new RegExp(kindLast, "i").test(normalized) || new RegExp(lastKind, "i").test(normalized)) {
@@ -492,7 +534,7 @@ async function enrichPromptAnchoredIntentFromImages(
     if (row.extractedValues && !row.extractedValues.color) {
       let captionColors: string[] = [];
       try {
-        await blip.init();
+        await ensureBlipInitialized();
         const caption = await blip.caption(preparedImages[colorIdx]);
         const structured = buildStructuredBlipOutput(caption || "");
         captionColors = (structured.colors || [])
@@ -519,7 +561,7 @@ async function enrichPromptAnchoredIntentFromImages(
     const ev = row.extractedValues as Record<string, unknown>;
     if (!ev.style || String(ev.style).trim() === "") {
       try {
-        await blip.init();
+        await ensureBlipInitialized();
         const caption = await blip.caption(preparedImages[styleIdx]);
         const structured = buildStructuredBlipOutput(caption || "");
         const styleHint = structured.style?.attrStyle;
@@ -551,7 +593,7 @@ async function enrichPromptAnchoredIntentFromImages(
     const ev = row.extractedValues as Record<string, unknown>;
     if (!ev.pattern || String(ev.pattern).trim() === "") {
       try {
-        await blip.init();
+        await ensureBlipInitialized();
         const caption = await blip.caption(preparedImages[patternIdx]);
         const hint = extractPatternHintFromCaption(caption || "");
         if (hint) {
@@ -772,6 +814,7 @@ export async function textSearch(
         related: undefined,
         total: 0,
         tookMs: Date.now() - startTime,
+        did_relax: false,
         query: summarizeAST(ast),
         meta: {
           query: rawQuery,
@@ -2018,6 +2061,7 @@ export async function textSearch(
     }
 
     const includeDebug = debug || results.length === 0;
+    const didRelax = searchRetryTrace.length > 0;
     const includeRetrievalMeta =
       includeDebug || belowRelevanceThreshold || results.length === 0;
     markStage("before_response");
@@ -2116,6 +2160,7 @@ export async function textSearch(
       related: related.length > 0 ? related : undefined,
       total,
       tookMs: Date.now() - startTime,
+      did_relax: didRelax,
       query: summarizeAST(ast),
       meta: {
         query: rawQuery,
@@ -2132,6 +2177,7 @@ export async function textSearch(
         ...(includeRetrievalMeta
           ? {
               retrieval: {
+                did_relax: didRelax,
                 search_retry_trace: searchRetryTrace,
                 open_search_hits_count: hits.length,
                 open_search_total_raw:
@@ -2170,6 +2216,7 @@ export async function textSearch(
       related: undefined,
       total: 0,
       tookMs: Date.now() - startTime,
+      did_relax: false,
       meta: { total_results: 0 },
     };
   }
@@ -2700,13 +2747,111 @@ interface MultiImageHardConstraints {
   brands: string[];
   gender?: string;
   requiredKeywords: string[];
+  requiredColorTerms: string[];
   requiredLengthTerms: string[];
   requiredPatternTerms: string[];
   forbiddenKeywords: string[];
   minRequiredKeywordMatches: number;
   requireColorCompliance: boolean;
+  minColorCompliance: number;
   requireTypeCompliance: boolean;
   minTypeCompliance: number;
+  signalFloorConstraint: "none" | "color" | "type";
+}
+
+function countIntentRowsWithSignal(
+  parsedIntent: ParsedIntent,
+  predicate: (ev: Record<string, unknown>) => boolean,
+): number {
+  let n = 0;
+  for (const ii of parsedIntent.imageIntents || []) {
+    const ev = (ii.extractedValues as Record<string, unknown> | undefined) || {};
+    if (predicate(ev)) n += 1;
+  }
+  return n;
+}
+
+function buildMultiImageIntentSignalQuality(
+  parsedIntent: ParsedIntent,
+  rawPrompt: string,
+): {
+  colorReliability01: number;
+  typeReliability01: number;
+  signalFloorConstraint: "none" | "color" | "type";
+} {
+  const promptColors = extractPromptColorTerms(rawPrompt);
+  const promptTypes = extractPromptTypeTerms(rawPrompt);
+  const inferredImageCount = Math.max(
+    0,
+    ...((parsedIntent.imageIntents || []).map((ii) => Number(ii.imageIndex) || 0)),
+  ) + (parsedIntent.imageIntents?.length ? 1 : 0);
+
+  const anchoredColorIdx =
+    inferredImageCount > 0
+      ? findPromptAnchoredImageIndex(rawPrompt, "color", inferredImageCount)
+      : null;
+  const anchoredStyleIdx =
+    inferredImageCount > 0
+      ? findPromptAnchoredImageIndex(rawPrompt, "style", inferredImageCount)
+      : null;
+
+  const colorRows = countIntentRowsWithSignal(parsedIntent, (ev) => {
+    const col = ev.color ?? ev.colour ?? ev.colors;
+    const arr = Array.isArray(col) ? col : col != null ? [col] : [];
+    return arr.some((x) => String(x).trim().length > 0);
+  });
+  const typeRows = countIntentRowsWithSignal(parsedIntent, (ev) => {
+    const t = ev.productType;
+    const arr = Array.isArray(t) ? t : t != null ? [t] : [];
+    return arr.some((x) => String(x).trim().length > 0);
+  });
+
+  const anchoredColorHasSignal =
+    anchoredColorIdx != null &&
+    (parsedIntent.imageIntents || []).some((ii) => {
+      if (ii.imageIndex !== anchoredColorIdx) return false;
+      const ev = (ii.extractedValues as Record<string, unknown> | undefined) || {};
+      const col = ev.color ?? ev.colour ?? ev.colors;
+      const arr = Array.isArray(col) ? col : col != null ? [col] : [];
+      return arr.some((x) => String(x).trim().length > 0);
+    });
+
+  const anchoredStyleHasTypeSignal =
+    anchoredStyleIdx != null &&
+    (parsedIntent.imageIntents || []).some((ii) => {
+      if (ii.imageIndex !== anchoredStyleIdx) return false;
+      const ev = (ii.extractedValues as Record<string, unknown> | undefined) || {};
+      const t = ev.productType;
+      const arr = Array.isArray(t) ? t : t != null ? [t] : [];
+      return arr.some((x) => String(x).trim().length > 0);
+    });
+
+  const colorTransferRequested = promptAnchorKindRegex("color").test(rawPrompt || "");
+  const typeTransferRequested =
+    promptAnchorKindRegex("style").test(rawPrompt || "") ||
+    promptAnchorKindRegex("silhouette").test(rawPrompt || "");
+
+  let colorReliability01 = 0.2;
+  if (promptColors.length > 0) colorReliability01 = 1;
+  else if (colorTransferRequested && anchoredColorHasSignal) colorReliability01 = 0.82;
+  else if (colorRows >= 2) colorReliability01 = 0.6;
+  else if (colorRows >= 1) colorReliability01 = 0.45;
+
+  let typeReliability01 = 0.2;
+  if (promptTypes.length > 0) typeReliability01 = 1;
+  else if (typeTransferRequested && anchoredStyleHasTypeSignal) typeReliability01 = 0.8;
+  else if (parsedIntent.constraints?.category) typeReliability01 = 0.65;
+  else if (typeRows >= 2) typeReliability01 = 0.6;
+  else if (typeRows >= 1) typeReliability01 = 0.45;
+
+  const signalFloorConstraint: "none" | "color" | "type" =
+    colorReliability01 >= 0.58
+      ? "color"
+      : typeReliability01 >= 0.58
+        ? "type"
+        : "none";
+
+  return { colorReliability01, typeReliability01, signalFloorConstraint };
 }
 
 const MULTI_IMAGE_KEYWORD_STOPWORDS = new Set([
@@ -2798,15 +2943,20 @@ function buildMultiImageHardConstraints(
       categoryTerms: [],
       brands: [],
       requiredKeywords: [],
+      requiredColorTerms: [],
       requiredLengthTerms: [],
       requiredPatternTerms: [],
       forbiddenKeywords: [],
       minRequiredKeywordMatches: 0,
       requireColorCompliance: false,
+      minColorCompliance: 0,
       requireTypeCompliance: false,
       minTypeCompliance: 0.45,
+      signalFloorConstraint: "none",
     };
   }
+
+  const signalQuality = buildMultiImageIntentSignalQuality(parsedIntent, rawPrompt);
 
   const promptTypeTerms = extractPromptTypeTerms(rawPrompt);
   const promptColorTerms = extractPromptColorTerms(rawPrompt);
@@ -2877,9 +3027,34 @@ function buildMultiImageHardConstraints(
   ]);
 
   const requireColorCompliance =
-    Boolean(relevanceIntent.promptAnchoredColorIntent) || promptColorTerms.length > 0;
+    (Boolean(relevanceIntent.promptAnchoredColorIntent) || promptColorTerms.length > 0) &&
+    signalQuality.colorReliability01 >= 0.4;
   const requireTypeCompliance =
-    Boolean(relevanceIntent.promptAnchoredTypeIntent) || promptTypeTerms.length > 0;
+    (Boolean(relevanceIntent.promptAnchoredTypeIntent) || promptTypeTerms.length > 0) &&
+    signalQuality.typeReliability01 >= 0.4;
+
+  const strictColorSeeds =
+    signalQuality.colorReliability01 >= 0.45
+      ? (promptColorTerms.length > 0
+          ? promptColorTerms
+          : (relevanceIntent.promptAnchoredColorIntent
+              ? (relevanceIntent.desiredColors ?? [])
+              : []))
+      : [];
+  const requiredColorTerms = compactConstraintKeywords(
+    [strictColorSeeds, strictColorSeeds.flatMap((c) => expandColorTermsForFilter(c))],
+    { maxKeywords: 6 },
+  );
+  const minColorCompliance =
+    requireColorCompliance
+      ? (promptColorTerms.length > 0
+          ? Math.max(0.18, Math.min(0.45, 0.25 + 0.2 * signalQuality.colorReliability01))
+          : Math.max(0.1, Math.min(0.32, 0.08 + 0.24 * signalQuality.colorReliability01)))
+      : 0;
+  const minTypeCompliance =
+    requireTypeCompliance
+      ? Math.max(0.28, Math.min(0.62, 0.2 + 0.42 * signalQuality.typeReliability01))
+      : 0.28;
 
   const enabled =
     requireColorCompliance ||
@@ -2904,13 +3079,16 @@ function buildMultiImageHardConstraints(
     brands,
     gender,
     requiredKeywords,
+    requiredColorTerms,
     requiredLengthTerms: promptLengthTerms,
     requiredPatternTerms: promptPatternTerms,
     forbiddenKeywords,
     minRequiredKeywordMatches,
     requireColorCompliance,
+    minColorCompliance,
     requireTypeCompliance,
-    minTypeCompliance: 0.45,
+    minTypeCompliance,
+    signalFloorConstraint: signalQuality.signalFloorConstraint,
   };
 }
 
@@ -2983,7 +3161,13 @@ function multiImageHitPassesHardConstraints(
     if (!hard.requiredPatternTerms.some((t) => blob.includes(t))) return false;
   }
 
-  if (hard.requireColorCompliance && (rel?.colorCompliance ?? 0) <= 0) return false;
+  if (hard.requiredColorTerms.length > 0) {
+    const colorTermHit = hard.requiredColorTerms.some((t) => blob.includes(t));
+    const colorScore = rel?.colorCompliance ?? 0;
+    if (!colorTermHit && colorScore < hard.minColorCompliance) return false;
+  }
+
+  if (hard.requireColorCompliance && (rel?.colorCompliance ?? 0) < hard.minColorCompliance) return false;
   if (hard.requireTypeCompliance && (rel?.productTypeCompliance ?? 0) < hard.minTypeCompliance) return false;
   return true;
 }
@@ -3033,7 +3217,13 @@ function multiImageProductPassesHardConstraints(
   if (hard.requiredPatternTerms.length > 0) {
     if (!hard.requiredPatternTerms.some((t) => blob.includes(t))) return false;
   }
-  if (hard.requireColorCompliance && (rel?.colorCompliance ?? 0) <= 0) return false;
+
+  if (hard.requiredColorTerms.length > 0) {
+    const colorTermHit = hard.requiredColorTerms.some((t) => blob.includes(t));
+    const colorScore = rel?.colorCompliance ?? 0;
+    if (!colorTermHit && colorScore < hard.minColorCompliance) return false;
+  }
+  if (hard.requireColorCompliance && (rel?.colorCompliance ?? 0) < hard.minColorCompliance) return false;
   if (hard.requireTypeCompliance && (rel?.productTypeCompliance ?? 0) < hard.minTypeCompliance) return false;
   return true;
 }
@@ -3050,6 +3240,7 @@ function relaxMultiImageHardConstraints(
         hard.requiredKeywords.length <= 1
           ? hard.minRequiredKeywordMatches
           : Math.max(1, Math.floor(hard.minRequiredKeywordMatches * 0.5)),
+      minColorCompliance: Math.max(0, hard.minColorCompliance - 0.15),
       minTypeCompliance: Math.max(0.3, hard.minTypeCompliance - 0.15),
     };
   }
@@ -3057,9 +3248,18 @@ function relaxMultiImageHardConstraints(
   return {
     ...hard,
     requiredKeywords: [],
+    requiredColorTerms: [],
     minRequiredKeywordMatches: 0,
-    requireTypeCompliance: false,
-    minTypeCompliance: 0,
+    requireTypeCompliance: hard.signalFloorConstraint === "type" ? true : false,
+    requireColorCompliance: hard.signalFloorConstraint === "color" ? true : false,
+    minColorCompliance:
+      hard.signalFloorConstraint === "color"
+        ? Math.max(0.08, hard.minColorCompliance * 0.5)
+        : 0,
+    minTypeCompliance:
+      hard.signalFloorConstraint === "type"
+        ? Math.max(0.22, hard.minTypeCompliance * 0.55)
+        : 0,
   };
 }
 
@@ -3337,6 +3537,9 @@ async function parseMultiImageIntentWithGuards(
       ),
     ]);
     const parserSignaledDegrade = Boolean(parsedIntent.meta?.degraded);
+    if (parserSignaledDegrade && parsedIntent.meta?.reason) {
+      console.warn("[multiImageIntent] Gemini degraded:", parsedIntent.meta.reason);
+    }
     return {
       parsedIntent,
       geminiDegraded: parserSignaledDegrade,
@@ -3391,7 +3594,7 @@ async function blendPromptClipIntoCompositeGlobal(
   userPrompt: string,
   intent: ParsedIntent,
 ): Promise<void> {
-  const w = clampEnv01(process.env.MULTI_IMAGE_PROMPT_EMBED_WEIGHT, 0.45, 0.65);
+  const w = clampEnv01(process.env.MULTI_IMAGE_PROMPT_EMBED_WEIGHT, 0.22, 0.5);
   if (w <= 0) return;
   const text = buildMultiImageTextForEmbedding(userPrompt, intent);
   if (!text) return;
@@ -3404,16 +3607,18 @@ async function blendPromptClipIntoCompositeGlobal(
   const g = compositeQuery.embeddings.global;
   if (!promptEmb?.length || promptEmb.length !== g.length) return;
   const nImg = intent.imageIntents?.length ?? 0;
-  const intentTrust = Math.min(
+  const degradedIntent = Boolean(intent.meta?.degraded);
+  const intentTrustRaw = Math.min(
     1,
     (intent.confidence ?? 0.5) + 0.12 * Math.min(5, nImg),
   );
+  const intentTrust = degradedIntent ? Math.min(0.2, intentTrustRaw) : intentTrustRaw;
   // User instructions must move the kNN query: do not let high Gemini confidence erase the prompt vector.
   const promptChars = Math.min(500, userPrompt.trim().length);
   const substance01 = Math.min(1, promptChars / 72);
   const effectiveW = Math.min(
-    0.56,
-    w * (0.48 + 0.52 * substance01) * (1 - 0.12 * intentTrust),
+    degradedIntent ? 0.16 : 0.46,
+    w * (0.48 + 0.52 * substance01) * (1 - 0.42 * intentTrust),
   );
   console.info(
     `[multiImage] CLIP prompt blend: effective=${effectiveW.toFixed(3)} base=${w.toFixed(3)} intentTrust=${intentTrust.toFixed(3)} substance01=${substance01.toFixed(3)}`,

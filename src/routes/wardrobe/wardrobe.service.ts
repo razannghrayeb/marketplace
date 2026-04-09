@@ -28,8 +28,21 @@ export interface WardrobeItem {
   attributes_extracted: boolean;
   extraction_version?: string;
   extraction_confidence?: number;
+  audience_gender?: "men" | "women" | "unisex" | null;
+  age_group?: "kids" | "adult" | null;
+  style_tags?: string[];
+  occasion_tags?: string[];
+  season_tags?: string[];
   created_at: Date;
   updated_at: Date;
+}
+
+export interface WardrobeItemAudienceInput {
+  audience_gender?: "men" | "women" | "unisex" | null;
+  age_group?: "kids" | "adult" | null;
+  style_tags?: string[];
+  occasion_tags?: string[];
+  season_tags?: string[];
 }
 
 export interface CreateWardrobeItemInput {
@@ -52,6 +65,17 @@ export interface UpdateWardrobeItemInput {
   pattern_id?: number;
   material_id?: number;
   dominant_colors?: Array<{ color_id: number; hex: string; percent: number }>;
+}
+
+function sanitizeTextArray(values?: string[] | null): string[] {
+  if (!Array.isArray(values)) return [];
+  return Array.from(
+    new Set(
+      values
+        .map((v) => String(v || "").toLowerCase().trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 20);
 }
 
 // ============================================================================
@@ -114,7 +138,10 @@ export async function createWardrobeItem(input: CreateWardrobeItemInput): Promis
  */
 export async function getWardrobeItem(itemId: number, userId: number): Promise<WardrobeItem | null> {
   const result = await pg.query<WardrobeItem>(
-    `SELECT * FROM wardrobe_items WHERE id = $1 AND user_id = $2`,
+    `SELECT wi.*, wam.audience_gender, wam.age_group, wam.style_tags, wam.occasion_tags, wam.season_tags
+     FROM wardrobe_items wi
+     LEFT JOIN wardrobe_item_audience_metadata wam ON wam.wardrobe_item_id = wi.id
+     WHERE wi.id = $1 AND wi.user_id = $2`,
     [itemId, userId]
   );
   return result.rows[0] || null;
@@ -129,21 +156,28 @@ export async function getUserWardrobeItems(
 ): Promise<{ items: WardrobeItem[]; total: number }> {
   const { categoryId, limit = 50, offset = 0 } = options;
 
-  let whereClause = "WHERE user_id = $1";
+  let whereClause = "WHERE wi.user_id = $1";
+  let whereClauseCount = "WHERE user_id = $1";
   const params: any[] = [userId];
 
   if (categoryId) {
-    whereClause += ` AND category_id = $${params.length + 1}`;
+    whereClause += ` AND wi.category_id = $${params.length + 1}`;
+    whereClauseCount += ` AND category_id = $${params.length + 1}`;
     params.push(categoryId);
   }
 
   const countResult = await pg.query(
-    `SELECT COUNT(*) as count FROM wardrobe_items ${whereClause}`,
+    `SELECT COUNT(*) as count FROM wardrobe_items ${whereClauseCount}`,
     params
   );
 
   const result = await pg.query<WardrobeItem>(
-    `SELECT * FROM wardrobe_items ${whereClause} ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    `SELECT wi.*, wam.audience_gender, wam.age_group, wam.style_tags, wam.occasion_tags, wam.season_tags
+     FROM wardrobe_items wi
+     LEFT JOIN wardrobe_item_audience_metadata wam ON wam.wardrobe_item_id = wi.id
+     ${whereClause}
+     ORDER BY wi.created_at DESC
+     LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
     [...params, limit, offset]
   );
 
@@ -228,6 +262,36 @@ export async function deleteWardrobeItem(itemId: number, userId: number): Promis
   }
 
   return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Upsert user-provided audience/style metadata for an item.
+ */
+export async function upsertWardrobeItemAudienceMetadata(
+  itemId: number,
+  userId: number,
+  input: WardrobeItemAudienceInput
+): Promise<void> {
+  const audienceGender = input.audience_gender ?? null;
+  const ageGroup = input.age_group ?? null;
+  const styleTags = sanitizeTextArray(input.style_tags);
+  const occasionTags = sanitizeTextArray(input.occasion_tags);
+  const seasonTags = sanitizeTextArray(input.season_tags);
+
+  await pg.query(
+    `INSERT INTO wardrobe_item_audience_metadata
+      (wardrobe_item_id, user_id, audience_gender, age_group, style_tags, occasion_tags, season_tags)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (wardrobe_item_id) DO UPDATE SET
+      user_id = EXCLUDED.user_id,
+      audience_gender = EXCLUDED.audience_gender,
+      age_group = EXCLUDED.age_group,
+      style_tags = EXCLUDED.style_tags,
+      occasion_tags = EXCLUDED.occasion_tags,
+      season_tags = EXCLUDED.season_tags,
+      updated_at = NOW()`,
+    [itemId, userId, audienceGender, ageGroup, styleTags, occasionTags, seasonTags]
+  );
 }
 
 // ============================================================================

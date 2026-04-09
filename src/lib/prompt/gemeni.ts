@@ -216,6 +216,12 @@ export class IntentParserService {
 
     } catch (error) {
       console.error('[IntentParserService] Error parsing intent:', error);
+      const errorText = String((error as any)?.message ?? error ?? "").toLowerCase();
+      const isInvalidApiKey =
+        errorText.includes("api_key_invalid") ||
+        errorText.includes("invalid api key") ||
+        errorText.includes("invalid key") ||
+        errorText.includes("permission denied");
       const fallback = this.createFallbackIntent(
         this.ensureAnalysesForFallback(analyses, images.length),
         userPrompt,
@@ -223,7 +229,7 @@ export class IntentParserService {
       fallback.meta = {
         provider: "local",
         degraded: true,
-        reason: "gemini_parse_failed",
+        reason: isInvalidApiKey ? "invalid_gemini_api_key" : "gemini_parse_failed",
       };
       return fallback;
     }

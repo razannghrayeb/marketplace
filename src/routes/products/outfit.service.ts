@@ -117,6 +117,7 @@ export async function getOutfitRecommendations(
   const maxPerCategory = Math.max(1, Math.min(options.maxPerCategory ?? 5, 20));
   const anchorProductIds = [productId];
   const audienceGenderHint = normalizeAudienceHint(sourceProduct.gender);
+  const ageGroupHint = inferAgeGroupHintFromProduct(sourceProduct);
   const detected = await detectCategory(sourceProduct.title, sourceProduct.description);
   const sourceStyle = await buildStyleProfile(sourceProduct);
 
@@ -124,7 +125,7 @@ export async function getOutfitRecommendations(
     userId ?? 0,
     anchorProductIds,
     maxTotal,
-    { audienceGenderHint }
+    { audienceGenderHint, ageGroupHint }
   );
 
   const rerankedSuggestions = await rerankCompleteStyleSuggestions({
@@ -335,12 +336,21 @@ type CompleteLookMappedSuggestion = {
 async function getCatalogProductById(productId: number): Promise<CompleteLookMappedSourceProduct | null> {
   const result = await pg.query(
     `SELECT id, title, brand, category, color, price_cents, currency,
-            image_url, image_cdn, description
+            image_url, image_cdn, description, gender
      FROM products
      WHERE id = $1`,
     [productId]
   );
   return (result.rows[0] as CompleteLookMappedSourceProduct | undefined) ?? null;
+}
+
+function inferAgeGroupHintFromProduct(product: { title?: string | null; category?: string | null; description?: string | null }): string | undefined {
+  const text = `${String(product.title || "")} ${String(product.category || "")} ${String(product.description || "")}`.toLowerCase();
+  const kidsHits = (text.match(/\bkids?\b|\bchildren\b|\bchild\b|\bbaby\b|\btoddler\b|\byouth\b|\bjunior\b|\bboys?\b|\bgirls?\b/g) || []).length;
+  const adultHits = (text.match(/\bmen\b|\bwomen\b|\badult\b|\bladies\b|\bgents\b|\bmale\b|\bfemale\b/g) || []).length;
+  if (kidsHits > adultHits && kidsHits > 0) return "kids";
+  if (adultHits > kidsHits && adultHits > 0) return "adult";
+  return undefined;
 }
 
 type FashionRerankContext = {

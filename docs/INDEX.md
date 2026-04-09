@@ -33,12 +33,13 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 
 ---
 
-### Search & Discovery (4 files)
+### Search & Discovery (5 files)
 
 | File | Purpose | Audience |
 |------|---------|----------|
 | **embeddings-and-search-pipelines.md** | **Embeddings, OpenSearch fields, ingest vs query paths (text + image)** | Backend, ML, search engineers |
 | **SEARCH_API_COMPLETE.md** | All search features (user guide + technical) | Everyone |
+| **multi-image-attribute-transfer.md** | Multi-image attribute transfer feature architecture and build details | Backend, search engineers, integrators |
 | **multi-vector-search.md** | Multi-vector kNN deep-dive | ML engineers |
 | **composite-query-system.md** | Advanced composite query details | Architecture |
 
@@ -99,6 +100,7 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 | Train/retrain ML models | `ml-models.md` → Intent Classification Evaluation section |
 | Understand wardrobe features | `../FEATURE_ANALYSIS.md` → Feature #6 |
 | Use multi-image search API | `SEARCH_API_COMPLETE.md` (Part 1: User Guide) |
+| Understand how multi-image transfer is built | `multi-image-attribute-transfer.md` |
 | Integrate with database | `database.md` → Schema section |
 | Test search quality | `SEARCH_API_COMPLETE.md` (testing section) |
 | Setup CI/CD | `../ACTION_PLAN_30_DAYS.md` → Week 4 |
