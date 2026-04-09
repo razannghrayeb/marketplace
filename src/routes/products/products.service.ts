@@ -3184,6 +3184,42 @@ export async function searchByImageWithSimilarity(
         is_primary: img.is_primary,
         p_hash: img.p_hash ?? undefined,
       }));
+      const authoritativeColorRaw = typeof p.color === "string" ? p.color : "";
+      const authoritativeColorNorm = authoritativeColorRaw
+        ? normalizeColorToken(authoritativeColorRaw) ?? authoritativeColorRaw.toLowerCase().trim()
+        : "";
+      let finalRelevance01 = compliance?.finalRelevance01;
+      let finalRelevanceSource = finalScoreSourceById.get(idStr) ?? "computed";
+      let explainColorCompliance = compliance?.colorCompliance;
+      let explainMatchedColor = compliance?.matchedColor;
+      let explainColorTier = compliance?.colorTier;
+
+      if (hasColorIntentForFinal && authoritativeColorNorm && compliance) {
+        const authoritativeColor = tieredColorListCompliance(
+          desiredColorsTierForRelevance,
+          [authoritativeColorNorm],
+          rerankColorModeForRelevance,
+        );
+        if (authoritativeColor.compliance <= 0) {
+          const colorPenalty = hasExplicitColorIntent
+            ? 0.72
+            : hasInferredColorSignal
+              ? 0.82
+              : 0.9;
+          finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore * colorPenalty);
+          finalRelevanceSource = "catalog_color_correction";
+          explainColorCompliance = 0;
+          explainMatchedColor = authoritativeColorNorm;
+          explainColorTier = "none";
+        } else if ((compliance.colorCompliance ?? 0) + 0.05 < authoritativeColor.compliance) {
+          const colorLift = 0.88 + 0.12 * authoritativeColor.compliance;
+          finalRelevance01 = Math.max(finalRelevance01 ?? 0, Math.min(1, similarityScore * colorLift));
+          finalRelevanceSource = "catalog_color_correction";
+          explainColorCompliance = authoritativeColor.compliance;
+          explainMatchedColor = authoritativeColor.bestMatch ?? authoritativeColorNorm;
+          explainColorTier = authoritativeColor.tier;
+        }
+      }
       return {
         ...p,
         // Never overwrite canonical catalog color with query-time matched color.
@@ -3200,7 +3236,7 @@ export async function searchByImageWithSimilarity(
           return typeAligned ? ("exact" as const) : ("similar" as const);
         })(),
         rerankScore: compliance?.rerankScore,
-        finalRelevance01: compliance?.finalRelevance01,
+        finalRelevance01,
         explain: compliance
           ? {
               // ── Raw signals ──────────────────────────────────────
@@ -3224,9 +3260,9 @@ export async function searchByImageWithSimilarity(
               categoryScore: compliance.categoryRelevance01,
 
               // ── Metadata compliance (0-1) ────────────────────────
-              colorCompliance: compliance.colorCompliance,
-              matchedColor: compliance.matchedColor ?? undefined,
-              colorTier: compliance.colorTier,
+              colorCompliance: explainColorCompliance,
+              matchedColor: explainMatchedColor ?? undefined,
+              colorTier: explainColorTier,
               styleCompliance: compliance.styleCompliance,
               sleeveCompliance: compliance.sleeveCompliance,
               lengthCompliance: (compliance as any).lengthCompliance ?? 0,
@@ -3280,8 +3316,8 @@ export async function searchByImageWithSimilarity(
               relevanceIntentDebug,
 
               // ── Final score ──────────────────────────────────────
-              finalRelevance01: compliance.finalRelevance01,
-              finalRelevanceSource: finalScoreSourceById.get(idStr) ?? "computed",
+              finalRelevance01,
+              finalRelevanceSource,
             }
           : undefined,
         images: imagesOut,

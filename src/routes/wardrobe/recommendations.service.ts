@@ -189,7 +189,7 @@ export function inferMissingCategoriesForOutfit(params: {
     if (!currentCategories.has("shoes")) missing.push("shoes");
   }
 
-  const complements: string[] = ["accessories", "bags"];
+  const complements: string[] = ["bags", "accessories"];
   if (shouldOfferOuterwear && !warmWeatherLikely) complements.push("outerwear");
   for (const extra of complements) {
     if (missing.length >= 2) break;
@@ -197,8 +197,8 @@ export function inferMissingCategoriesForOutfit(params: {
   }
 
   if (missing.length === 0) {
-    if (!currentCategories.has("accessories")) missing.push("accessories");
-    else if (!currentCategories.has("bags")) missing.push("bags");
+    if (!currentCategories.has("bags")) missing.push("bags");
+    else if (!currentCategories.has("accessories")) missing.push("accessories");
     else if (shouldOfferOuterwear && !warmWeatherLikely && !currentCategories.has("outerwear")) missing.push("outerwear");
     else missing.push("accessories");
   }
