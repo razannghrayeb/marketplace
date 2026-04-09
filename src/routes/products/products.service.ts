@@ -491,8 +491,11 @@ function computeExplicitFinalRelevance(params: {
    * - lower for inferred/crop-only signals to reduce noisy color over-weighting
    */
   colorWeightScale?: number;
+  /** Strength of color intent for the final multiplicative gate [0,1]. */
+  colorIntentStrength?: number;
 }): { score: number; fusedVisual: number; metadataCompliance: number } {
     const colorWeightScale = Math.max(0.2, Math.min(1, params.colorWeightScale ?? 1));
+  const colorIntentStrength = Math.max(0, Math.min(1, params.colorIntentStrength ?? 0));
 
   const simVisual = Math.max(0, Math.min(1, params.simVisual));
 
@@ -569,6 +572,11 @@ function computeExplicitFinalRelevance(params: {
       ? Math.max(complianceFromAttrs, 0.85)
       : complianceFromAttrs;
 
+  const colorGate =
+    colorIntentStrength > 0
+      ? Math.max(0.55, 1 - 0.45 * colorIntentStrength * (1 - params.colorMatch))
+      : 1;
+
   // ── Intent coverage gate ─────────────────────────────────────────
   const intentWeights = {
     color: 0.28,
@@ -626,7 +634,7 @@ function computeExplicitFinalRelevance(params: {
   const withComposite =
     (1 - compositeInfluence) * coreBlend + compositeInfluence * compositeScore01;
 
-  const raw = withComposite * typeGate * crossSoft * intentGate * blipFactor;
+  const raw = withComposite * typeGate * crossSoft * intentGate * colorGate * blipFactor;
   return {
     score: Math.max(0, Math.min(1, raw)),
     fusedVisual,
@@ -2181,7 +2189,7 @@ export async function searchByImageWithSimilarity(
   const desiredSleeveForRelevance =
     typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
 
-  const hasColorIntentForFinal = hasExplicitColorIntent;
+  const hasColorIntentForFinal = hasExplicitColorIntent || (hasInferredColorSignal && preferInferredColorWhenConflict);
   const hasInferredColorIntentForRescue = !hasExplicitColorIntent && hasInferredColorSignal;
   const hasSoftColorIntentForRescue = !hasExplicitColorIntent && desiredColorsForRelevance.length > 0;
   // Crop-dominant colors affect reranking but should not gate final relevance
@@ -2259,6 +2267,14 @@ export async function searchByImageWithSimilarity(
       desiredProductTypes: [...desiredProductTypes],
     },
   };
+
+  const colorIntentStrengthForFinal = hasExplicitColorIntent
+    ? 1
+    : hasInferredColorSignal
+      ? (preferInferredColorWhenConflict ? 0.82 : 0.68)
+      : hasCropColorSignal
+        ? 0.42
+        : 0;
 
   const nearIdenticalRawMin = imageSearchNearIdenticalRawCosineMin();
 
@@ -2559,6 +2575,7 @@ export async function searchByImageWithSimilarity(
           : hasCropColorSignal
             ? 0.55
             : 0.35,
+      colorIntentStrength: colorIntentStrengthForFinal,
     });
     comp.finalRelevance01 = Math.min(1, explicitResult.score + subtypeKeywordSignal.boost);
     (comp as any).colorContradictionPenalty = Math.round(colorContradictionPenalty * 1000) / 1000;
@@ -2606,6 +2623,11 @@ export async function searchByImageWithSimilarity(
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
     const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
     if (Math.abs(fb - fa) > 1e-6) return fb - fa;
+    if (hasExplicitColorIntent || hasInferredColorSignal) {
+      const ca = complianceById.get(ida)?.colorCompliance ?? 0;
+      const cb = complianceById.get(idb)?.colorCompliance ?? 0;
+      if (Math.abs(cb - ca) > 1e-6) return cb - ca;
+    }
     const va = visualSimEffectiveById.get(ida) ?? rankedVisualForSort(a);
     const vb = visualSimEffectiveById.get(idb) ?? rankedVisualForSort(b);
     if (Math.abs(vb - va) > 0.002) return vb - va;
@@ -3243,6 +3265,7 @@ export async function searchByImageWithSimilarity(
   let rescuedByStrongVisualOverride = 0;
   if (strongVisualOverrideMax > 0 && resultsBeforeFinalRelevanceFilter.length > results.length) {
     const existingIds = new Set(results.map((p) => String((p as any).id)));
+    const strongColorIntent = hasExplicitColorIntent || hasInferredColorSignal;
     const strongMisses = resultsBeforeFinalRelevanceFilter
       .filter((p: any) => !existingIds.has(String(p.id)))
       .filter((p: any) => {
@@ -3252,6 +3275,13 @@ export async function searchByImageWithSimilarity(
         if ((explainAny?.hardBlocked ?? false) === true) return false;
         const crossFamily = Number(explainAny?.crossFamilyPenalty ?? 0);
         if (crossFamily >= 0.55) return false;
+        if (strongColorIntent) {
+          const colorCompliance = Number(explainAny?.colorCompliance ?? 0);
+          const colorTier = String(explainAny?.colorTier ?? "none").toLowerCase();
+          const minColorCompliance = hasExplicitColorIntent ? 0.22 : 0.12;
+          if (colorTier === "none" && colorCompliance <= 0) return false;
+          if (colorCompliance < minColorCompliance) return false;
+        }
         return true;
       })
       .slice(0, strongVisualOverrideMax)
