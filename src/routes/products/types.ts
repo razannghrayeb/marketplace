@@ -361,12 +361,18 @@ export interface SearchResultWithRelated {
       raw_open_search_hits: number;
       base_candidates: number;
       ranked_candidates: number;
+      dropped_by_category_safety: number;
       threshold_passed_visual: number;
       visual_gated_hits: number;
+      dropped_by_visual_threshold: number;
       hits_after_final_accept_min: number;
+      dropped_by_final_relevance_before_override: number;
+      rescued_by_strong_visual_override: number;
       hits_after_color_postfilter: number;
       hits_after_hydration: number;
+      dropped_by_dedupe: number;
       hits_after_dedupe: number;
+      dropped_by_limit: number;
       final_returned_count: number;
     };
   };

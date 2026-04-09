@@ -861,6 +861,18 @@ function imageMustKeepVisualAudienceMin(): number {
   return Math.max(0, Math.min(1, raw));
 }
 
+function imageStrongVisualOverrideMinSimilarity(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_STRONG_VISUAL_OVERRIDE_MIN_SIM ?? "0.86");
+  if (!Number.isFinite(raw)) return 0.86;
+  return Math.max(0.65, Math.min(0.99, raw));
+}
+
+function imageStrongVisualOverrideMaxCount(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_STRONG_VISUAL_OVERRIDE_MAX_COUNT ?? "6");
+  if (!Number.isFinite(raw)) return 6;
+  return Math.max(0, Math.min(20, Math.floor(raw)));
+}
+
 function imageGenderUnknownVisualMinSimilarity(): number {
   const raw = Number(process.env.SEARCH_IMAGE_GENDER_UNKNOWN_MIN_SIM ?? "0.82");
   if (!Number.isFinite(raw)) return 0.82;
@@ -1103,6 +1115,29 @@ function collectInferredColorTokens(
     for (const v of Object.values(fi)) push(v);
   }
   return out;
+}
+
+function shouldPreferInferredColorWhenConflict(params: {
+  mergedCategoryForRelevance?: string;
+  desiredProductTypes: string[];
+  inferredPrimary?: string | null;
+  inferredColorTokens: string[];
+}): boolean {
+  const merged = String(params.mergedCategoryForRelevance ?? "").toLowerCase().trim();
+  const typeText = params.desiredProductTypes.join(" ").toLowerCase();
+  const inferredPrimary = String(params.inferredPrimary ?? "").toLowerCase().trim();
+  const hasGarmentInferredColor =
+    inferredPrimary.length > 0 || Array.isArray(params.inferredColorTokens) && params.inferredColorTokens.length > 0;
+  if (!hasGarmentInferredColor) return false;
+
+  // For one-piece / upper-body garments, full-image semantic color (BLIP + inferred)
+  // is usually more trustworthy than tiny/noisy crop dominant tokens.
+  if (/dress|gown|romper|playsuit|jumpsuit/.test(merged)) return true;
+  if (/dress|gown|romper|playsuit|jumpsuit/.test(typeText)) return true;
+  if (/top|shirt|tee|t-?shirt|blouse|sweater|hoodie|jacket|coat|skirt|pants|trouser|jean/.test(merged)) return true;
+  if (/top|shirt|tee|t-?shirt|blouse|sweater|hoodie|jacket|coat|skirt|pants|trouser|jean/.test(typeText)) return true;
+
+  return false;
 }
 
 function computeColorContradictionPenalty(params: {
@@ -2078,6 +2113,12 @@ export async function searchByImageWithSimilarity(
       inferredColorTokens.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
     ),
   ];
+  const preferInferredColorWhenConflict = shouldPreferInferredColorWhenConflict({
+    mergedCategoryForRelevance: typeof mergedCategoryForRelevance === "string" ? mergedCategoryForRelevance : undefined,
+    desiredProductTypes,
+    inferredPrimary: inferredPrimaryFromParams ?? (filtersRecord as { inferredPrimaryColor?: string | null }).inferredPrimaryColor,
+    inferredColorTokens,
+  });
 
   let allColorsForRelevance: string[];
   if (hasExplicitColorIntent) {
@@ -2090,6 +2131,10 @@ export async function searchByImageWithSimilarity(
     );
     if (inferredVsCrop.compliance > 0) {
       allColorsForRelevance = [...new Set([...normalizedInferredColors, ...normalizedCropColors])];
+    } else if (preferInferredColorWhenConflict) {
+      // Dress-like queries frequently include background/footwear colors in crops.
+      // Use inferred garment color to avoid ranking wrong-color variants above true matches.
+      allColorsForRelevance = [...normalizedInferredColors];
     } else {
       // Conflict between full-image inference and crop-local evidence: trust crop colors
       // to avoid leaking shirt/jacket color into trousers/shoes retrieval.
@@ -2625,6 +2670,7 @@ export async function searchByImageWithSimilarity(
     hasDetectionAnchoredTypeIntent ||
     hasExplicitTypeFilter ||
     hasExplicitCategoryFilter;
+  const strongVisualOverrideMinSim = imageStrongVisualOverrideMinSimilarity();
   const rankedHitsCategorySafe = strictCategorySafetyActive
     ? rankedHitsCandidates.filter((h: any) => {
         const comp = complianceById.get(String(h._source.product_id));
@@ -2634,10 +2680,11 @@ export async function searchByImageWithSimilarity(
         if (crossFamily >= 0.55) return false;
         const typeComp = comp.productTypeCompliance ?? 0;
         const exactType = comp.exactTypeScore ?? 0;
+        const visualStrong = visualSimFromHit(h) >= strongVisualOverrideMinSim;
         if ((hasExplicitTypeFilter || hasExplicitCategoryFilter) && exactType < 1 && typeComp < 0.28) {
           return false;
         }
-        if (hasDetectionAnchoredTypeIntent && exactType < 1 && typeComp < 0.22) {
+        if (hasDetectionAnchoredTypeIntent && exactType < 1 && typeComp < 0.22 && !visualStrong) {
           return false;
         }
         return true;
@@ -2646,6 +2693,9 @@ export async function searchByImageWithSimilarity(
   const rankedHitsForGates = rankedHitsCategorySafe.length > 0
     ? rankedHitsCategorySafe
     : rankedHitsCandidates;
+  const droppedByCategorySafety = strictCategorySafetyActive
+    ? Math.max(0, rankedHitsCandidates.length - rankedHitsCategorySafe.length)
+    : 0;
 
   // Late visual gate (after soft rerank).
   const thresholdPassedByVisual = rankedHitsForGates.filter((h: any) =>
@@ -2711,6 +2761,7 @@ export async function searchByImageWithSimilarity(
   /** True when reranked candidates exist but visual gate removed all (without relaxation). */
   const belowRelevanceThreshold =
     rankedHitsForGates.length > 0 && thresholdPassedByVisual.length === 0 && !thresholdRelaxed;
+  const droppedByVisualThreshold = Math.max(0, rankedHitsForGates.length - visualGatedHits.length);
 
   const finalAcceptMin = acceptMinImage;
   let effectiveFinalAcceptMin = finalAcceptMin;
@@ -2722,6 +2773,9 @@ export async function searchByImageWithSimilarity(
     imageSearchPipelineDegraded = true;
     let rescuePool = visualGatedHits;
     if (hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) {
+      // In intent-constrained searches, never fall back to the full visual pool.
+      // Start empty and admit only type-safe candidates.
+      rescuePool = [];
       const desiredSleeveNorm = String(desiredSleeveForRelevance ?? "").toLowerCase();
       const enforceSleeveGate = desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless";
       const preferredSleeveMin = enforceSleeveGate ? 0.55 : 0.25;
@@ -2783,6 +2837,21 @@ export async function searchByImageWithSimilarity(
           rescuePool = fallbackTypeAligned;
         }
       }
+
+      // Last safe fallback for sparse catalogs: keep only minimally type-aligned items.
+      if (rescuePool.length === 0) {
+        const minTypeFloor = hasDetectionAnchoredTypeIntent ? 0.16 : 0.22;
+        rescuePool = visualGatedHits.filter((h: any) => {
+          const comp = complianceById.get(String(h._source.product_id));
+          if (!comp) return false;
+          if ((comp.hardBlocked ?? false) === true) return false;
+          if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
+          const typeComp = comp.productTypeCompliance ?? 0;
+          const exactType = comp.exactTypeScore ?? 0;
+          if (exactType >= 1) return true;
+          return typeComp >= minTypeFloor;
+        });
+      }
     }
     // Use visual similarity as the rescue signal instead of a flat minimum.
     // This preserves relative ordering so that genuinely similar products
@@ -2797,6 +2866,12 @@ export async function searchByImageWithSimilarity(
     for (const h of rescuePool) {
       const comp = complianceById.get(String(h._source.product_id));
       if (comp) {
+        if (hasDetectionAnchoredTypeIntent) {
+          const typeComp = comp.productTypeCompliance ?? 0;
+          const exactType = comp.exactTypeScore ?? 0;
+          if (exactType < 1 && typeComp < 0.16) continue;
+          if ((comp.crossFamilyPenalty ?? 0) >= 0.62) continue;
+        }
         const v = visualSimFromHit(h);
         const existing = comp.finalRelevance01 ?? 0;
         let rescueScore = Math.max(existing, v * 0.85);
@@ -3162,6 +3237,46 @@ export async function searchByImageWithSimilarity(
     (p: any) =>
       typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalAcceptMin,
   ) as ProductResult[];
+
+  const strongVisualOverrideMax = imageStrongVisualOverrideMaxCount();
+  const droppedByFinalRelevanceBeforeOverride = Math.max(0, resultsBeforeFinalRelevanceFilter.length - results.length);
+  let rescuedByStrongVisualOverride = 0;
+  if (strongVisualOverrideMax > 0 && resultsBeforeFinalRelevanceFilter.length > results.length) {
+    const existingIds = new Set(results.map((p) => String((p as any).id)));
+    const strongMisses = resultsBeforeFinalRelevanceFilter
+      .filter((p: any) => !existingIds.has(String(p.id)))
+      .filter((p: any) => {
+        const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+        if (sim < strongVisualOverrideMinSim) return false;
+        const explainAny = p.explain as any;
+        if ((explainAny?.hardBlocked ?? false) === true) return false;
+        const crossFamily = Number(explainAny?.crossFamilyPenalty ?? 0);
+        if (crossFamily >= 0.55) return false;
+        return true;
+      })
+      .slice(0, strongVisualOverrideMax)
+      .map((p: any) => {
+        const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+        const currentRel = typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : 0;
+        const lifted = Math.max(currentRel, Math.min(1, sim * 0.86));
+        return {
+          ...p,
+          finalRelevance01: lifted,
+          explain: p.explain
+            ? {
+                ...(p.explain as any),
+                finalRelevance01: lifted,
+                finalRelevanceSource: "strong_visual_override",
+              }
+            : p.explain,
+        };
+      });
+    if (strongMisses.length > 0) {
+      rescuedByStrongVisualOverride = strongMisses.length;
+      results = [...results, ...strongMisses] as ProductResult[];
+    }
+  }
+
   if (results.length === 0 && resultsBeforeFinalRelevanceFilter.length > 0) {
     imageSearchPipelineDegraded = true;
     results = resultsBeforeFinalRelevanceFilter
@@ -3192,8 +3307,10 @@ export async function searchByImageWithSimilarity(
 
   const dedupedResults = dedupeImageSearchResults(results as any) as ProductResult[];
   const countAfterDedupe = dedupedResults.length;
+  const droppedByDedupe = Math.max(0, results.length - countAfterDedupe);
   results = dedupedResults.slice(0, limit) as ProductResult[];
   const finalReturnedCount = results.length;
+  const droppedByLimit = Math.max(0, countAfterDedupe - finalReturnedCount);
 
   let related: ProductResult[] = [];
   if (includeRelated && pHash) {
@@ -3314,6 +3431,14 @@ export async function searchByImageWithSimilarity(
       relax_floor_used: relaxFloorUsed,
       image_search_pipeline_degraded: imageSearchPipelineDegraded,
       relevance_intent: relevanceIntentDebug,
+      drops_debug: {
+        dropped_by_category_safety: droppedByCategorySafety,
+        dropped_by_visual_threshold: droppedByVisualThreshold,
+        dropped_by_final_relevance_before_override: droppedByFinalRelevanceBeforeOverride,
+        rescued_by_strong_visual_override: rescuedByStrongVisualOverride,
+        dropped_by_dedupe: droppedByDedupe,
+        dropped_by_limit: droppedByLimit,
+      },
     });
   }
 
@@ -3345,12 +3470,18 @@ export async function searchByImageWithSimilarity(
         raw_open_search_hits: rawOpenSearchHitCount,
         base_candidates: baseCandidates.length,
         ranked_candidates: rankedHitsCandidates.length,
+        dropped_by_category_safety: droppedByCategorySafety,
         threshold_passed_visual: thresholdPassedByVisual.length,
         visual_gated_hits: visualGatedHits.length,
+        dropped_by_visual_threshold: droppedByVisualThreshold,
         hits_after_final_accept_min: countAfterFinalAcceptMin,
+        dropped_by_final_relevance_before_override: droppedByFinalRelevanceBeforeOverride,
+        rescued_by_strong_visual_override: rescuedByStrongVisualOverride,
         hits_after_color_postfilter: countAfterColorPostfilter,
         hits_after_hydration: countAfterHydration,
+        dropped_by_dedupe: droppedByDedupe,
         hits_after_dedupe: countAfterDedupe,
+        dropped_by_limit: droppedByLimit,
         final_returned_count: finalReturnedCount,
       },
     },

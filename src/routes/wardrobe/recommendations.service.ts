@@ -212,14 +212,14 @@ function slotKeywordRegex(slot: string): RegExp | null {
     dresses: /\b(dress|dresses|gown|frock|sundress|maxi|midi|mini|jumpsuit|romper|abaya|kaftan)\b/,
     outerwear: /\b(outerwear|jacket|jackets|coat|coats|blazer|blazers|parka|windbreaker|trench|bomber|anorak)\b/,
     shoes: /\b(shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|loafer|loafers|sandal|sandals|flat|flats|pump|pumps|mule|mules|trainer|trainers|footwear)\b/,
-    bags: /\b(bag|bags|handbag|handbags|tote|totes|clutch|clutches|purse|purses|wallet|wallets|backpack|backpacks|crossbody|satchel|messenger)\b/,
+    bags: /\b(bag|bags|handbag|handbags|tote|totes|clutch|clutches|purse|purses|crossbody|satchel|messenger|shoulder bag|bucket bag|hobo bag)\b/,
     accessories: /\b(accessor|watch|watches|scarf|scarves|hat|hats|cap|caps|sunglass|sunglasses|jewel|jewelry|jewellery|necklace|earring|bracelet|ring|belt)\b/,
   };
   return map[slot] || null;
 }
 
 function slotMismatchRegex(slot: string): RegExp | null {
-  if (slot === "bags") return /\b(headband|hair accessory|hairband|headwear|hat|cap|beanie)\b/;
+  if (slot === "bags") return /\b(headband|hair accessory|hairband|headwear|hat|cap|beanie|wallet|backpack|duffle|luggage|suitcase|travel accessory|key ring|keychain)\b/;
   if (slot === "accessories") {
     return /\b(handbag|bag|tote|clutch|wallet|crossbody|backpack|satchel|messenger)\b/;
   }
@@ -248,7 +248,7 @@ function sourceMatchesSlot(slot: string, source: any): boolean {
 }
 
 function buildSlotIntentFilter(slot: string): any | null {
-  const bagTerms = ["bag", "handbag", "tote", "clutch", "purse", "wallet", "crossbody", "backpack", "satchel", "messenger"];
+  const bagTerms = ["bag", "handbag", "tote", "clutch", "purse", "crossbody", "satchel", "messenger", "shoulder bag", "bucket bag", "hobo bag"];
   const accessoryTerms = ["accessories", "jewelry", "watch", "scarf", "belt", "sunglasses", "hat", "earrings", "necklace", "bracelet", "ring"];
   const outerwearTerms = ["outerwear", "jacket", "coat", "blazer", "cardigan", "parka", "trench", "bomber"];
   const topTerms = ["top", "tops", "shirt", "shirts", "blouse", "blouses", "t-shirt", "tee", "hoodie", "sweater", "sweatshirt", "cardigan", "tank", "camisole", "polo"];
@@ -263,7 +263,7 @@ function buildSlotIntentFilter(slot: string): any | null {
         : slot === "bottoms"
           ? topTerms.concat(shoeTerms).concat(["bag", "handbag", "backpack", "wallet"])
           : slot === "bags"
-            ? ["shirt", "top", "pant", "shoe", "sneaker", "jacket"]
+            ? ["shirt", "top", "pant", "shoe", "sneaker", "jacket", "wallet", "backpack", "duffle", "luggage", "suitcase", "travel accessory", "key ring", "keychain"]
             : [];
 
   if (slot === "bags") {
@@ -278,6 +278,14 @@ function buildSlotIntentFilter(slot: string): any | null {
                 { match_phrase: { title: "hair accessory" } },
                 { match_phrase: { title: "headwear" } },
                 { match_phrase: { title: "headband" } },
+                { match_phrase: { title: "wallet" } },
+                { match_phrase: { title: "backpack" } },
+                { match_phrase: { title: "duffle" } },
+                { match_phrase: { title: "luggage" } },
+                { match_phrase: { title: "suitcase" } },
+                { match_phrase: { title: "travel accessory" } },
+                { match_phrase: { title: "key ring" } },
+                { match_phrase: { title: "keychain" } },
               ],
               minimum_should_match: 1,
             },
@@ -355,6 +363,14 @@ function dedupeCompleteLookSuggestions(items: CompleteLookSuggestion[]): Complet
     out.push(s);
   }
   return out;
+}
+
+function minimumSlotScore(slot: string): number {
+  const normalized = normalizeWardrobeCategory(slot) || String(slot || "").toLowerCase().trim();
+  if (normalized === "bags" || normalized === "accessories") return 0.62;
+  if (normalized === "shoes") return 0.58;
+  if (normalized === "tops" || normalized === "bottoms" || normalized === "outerwear" || normalized === "dresses") return 0.57;
+  return 0.56;
 }
 
 // ============================================================================
@@ -872,6 +888,10 @@ async function runCompleteLookCore(
             patternAlignment * 0.08 +
             materialAlignment * 0.05 +
             formalityAlignment * 0.07;
+
+          if (finalScore < minimumSlotScore(category)) {
+            continue;
+          }
 
           const reasons: string[] = [];
           if (embeddingNorm >= 0.75) reasons.push("strong style similarity");
@@ -1403,6 +1423,11 @@ function normalizeAudienceAgeGroupValue(raw: unknown): AudienceAgeGroup | null {
   return null;
 }
 
+function strictAudienceMatchEnabled(): boolean {
+  const raw = String(process.env.SEARCH_STRICT_AUDIENCE_MATCH ?? "1").toLowerCase().trim();
+  return !(raw === "0" || raw === "false" || raw === "no");
+}
+
 function inferAgeGroupFromText(text: string): AudienceAgeGroup | null {
   const s = String(text || "").toLowerCase();
   const kidsHits = (s.match(/\bkids?\b|\bchildren\b|\bchild\b|\bbaby\b|\btoddler\b|\byouth\b|\bjunior\b|\bboys?\b|\bgirls?\b/g) || []).length;
@@ -1429,6 +1454,7 @@ function inferPreferredAgeGroup(currentItems: CompleteLookAnchorRow[]): Audience
 }
 
 function buildAgeGroupFilter(ageGroup: AudienceAgeGroup): any {
+  const strictAudience = strictAudienceMatchEnabled();
   if (ageGroup === "kids") {
     return {
       bool: {
@@ -1443,6 +1469,34 @@ function buildAgeGroupFilter(ageGroup: AudienceAgeGroup): any {
           {
             bool: {
               should: [{ match: { title: "men" } }, { match: { title: "women" } }, { match: { title: "adult" } }],
+              minimum_should_match: 1,
+            },
+          },
+        ],
+      },
+    };
+  }
+  if (strictAudience) {
+    return {
+      bool: {
+        should: [
+          { terms: { age_group: ["adult", "adults"] } },
+          { match: { title: "men" } },
+          { match: { title: "women" } },
+          { match: { title: "adult" } },
+        ],
+        minimum_should_match: 1,
+        must_not: [
+          {
+            bool: {
+              should: [
+                { terms: { age_group: ["kids", "kid", "children", "child", "youth", "junior"] } },
+                { match: { title: "kids" } },
+                { match: { title: "children" } },
+                { match: { title: "junior" } },
+                { match: { title: "boys" } },
+                { match: { title: "girls" } },
+              ],
               minimum_should_match: 1,
             },
           },
@@ -1496,8 +1550,8 @@ function normalizeAudienceGenderValue(raw: unknown): AudienceGender | null {
       hasWomen = true;
       continue;
     }
-    if (["male", "man", "mens", "men's", "gents", "gentlemen"].includes(s)) hasMen = true;
-    if (["female", "woman", "womens", "women's", "ladies", "lady"].includes(s)) hasWomen = true;
+    if (["male", "man", "mens", "men's", "gents", "gentlemen", "boy", "boys", "boys-kids", "boys_kids"].includes(s)) hasMen = true;
+    if (["female", "woman", "womens", "women's", "ladies", "lady", "girl", "girls", "girls-kids", "girls_kids"].includes(s)) hasWomen = true;
   }
 
   if (hasUnisex || (hasMen && hasWomen)) return "unisex";
@@ -1509,9 +1563,9 @@ function normalizeAudienceGenderValue(raw: unknown): AudienceGender | null {
 function inferGenderFromText(text: string): AudienceGender | null {
   const s = text.toLowerCase();
   const menHits =
-    (s.match(/\bmen\b|\bmens\b|\bmen's\b|\bmale\b|\bman\b|\bgents?\b/g) || []).length;
+    (s.match(/\bmen\b|\bmens\b|\bmen's\b|\bmale\b|\bman\b|\bgents?\b|\bboys?\b/g) || []).length;
   const womenHits =
-    (s.match(/\bwomen\b|\bwomens\b|\bwomen's\b|\bfemale\b|\bwoman\b|\bladies\b|\blady\b/g) || []).length;
+    (s.match(/\bwomen\b|\bwomens\b|\bwomen's\b|\bfemale\b|\bwoman\b|\bladies\b|\blady\b|\bgirls?\b/g) || []).length;
   if (menHits > womenHits) return "men";
   if (womenHits > menHits) return "women";
   return null;
@@ -1576,7 +1630,8 @@ async function inferPreferredAudienceGender(
 }
 
 function buildAudienceGenderFilter(gender: "men" | "women"): any {
-  const allowTerms = [gender, "unisex"];
+  const strictAudience = strictAudienceMatchEnabled();
+  const allowTerms = strictAudience ? [gender] : [gender, "unisex"];
   const attrGenderTerms = [
     ...new Set([
       ...(attrGenderFilterClause(gender).terms.attr_gender || []),
@@ -1619,6 +1674,7 @@ function audienceGenderMatches(
   source: any,
   enforceNeutralWhenUnknown: boolean = false
 ): boolean {
+  const strictAudience = strictAudienceMatchEnabled();
   const textBlob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(
     source?.category_canonical || ""
   )}`;
@@ -1634,6 +1690,7 @@ function audienceGenderMatches(
   }
 
   if (doc) {
+    if (strictAudience) return doc === inferred;
     return doc === inferred || doc === "unisex";
   }
   const fromText = inferGenderFromText(textBlob);
@@ -1642,11 +1699,12 @@ function audienceGenderMatches(
 }
 
 function audienceAgeGroupMatches(inferredAgeGroup: AudienceAgeGroup | null, source: any): boolean {
+  const strictAudience = strictAudienceMatchEnabled();
   if (!inferredAgeGroup) return true;
   const docAge = normalizeAudienceAgeGroupValue(source?.age_group);
   const textAge = inferAgeGroupFromText(`${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.category_canonical || "")}`);
   const effective = docAge || textAge;
-  if (!effective) return inferredAgeGroup !== "kids";
+  if (!effective) return strictAudience ? false : inferredAgeGroup !== "kids";
   return effective === inferredAgeGroup;
 }
 
@@ -1670,6 +1728,13 @@ function audienceGenderMatchesForSlot(
       `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.category_canonical || "")}`
     );
     return fromText === inferred;
+  }
+
+  if (slot === "bags") {
+    const bagBlob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.category_canonical || "")}`.toLowerCase();
+    if (/\b(wallet|backpack|duffle|luggage|suitcase|travel accessory|key ring|keychain)\b/.test(bagBlob)) {
+      return false;
+    }
   }
 
   return true;
@@ -1917,6 +1982,8 @@ async function fetchCategoryTopUpSuggestions(params: {
       patternAlignment * 0.08 +
       materialAlignment * 0.05 +
       formalityAlignment * 0.07;
+
+    if (score < minimumSlotScore(matchedSlot)) continue;
 
     out.push({
       product_id: productId,
