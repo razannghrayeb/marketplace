@@ -3810,8 +3810,33 @@ function buildMultiImageSearchHitRelevanceIntent(
     }
   }
 
+  const inferredImageCount = Math.max(
+    0,
+    ...((parsedIntent.imageIntents || []).map((ii) => Number(ii.imageIndex) || 0)),
+  ) + (parsedIntent.imageIntents?.length ? 1 : 0);
+  const anchoredColorImageIdx =
+    inferredImageCount > 0
+      ? findPromptAnchoredImageIndex(rawPrompt, "color", inferredImageCount)
+      : null;
+  const colorTransferRequested = promptAnchorKindRegex("color").test(String(rawPrompt || ""));
+  const anchoredImageHasExtractedColor =
+    anchoredColorImageIdx != null &&
+    (parsedIntent.imageIntents || []).some((ii) => {
+      if (ii.imageIndex !== anchoredColorImageIdx) return false;
+      const ev = ii.extractedValues as Record<string, unknown> | undefined;
+      if (!ev) return false;
+      const col = ev.color ?? ev.colour ?? ev.colors;
+      const arr = Array.isArray(col) ? col : col != null ? [col] : [];
+      return arr.some((x) => String(x).trim().length > 0);
+    });
+  const explicitColorTransferIntent =
+    colorTransferRequested &&
+    ((anchoredColorImageIdx != null && anchoredImageHasExtractedColor) ||
+      (anchoredColorImageIdx == null && fromImageColors.length > 0));
+
   // When the user names colors in the prompt, those are restrictions — do not dilute with hues from uploads.
-  const promptAnchoredColorIntent = fromAstColors.length > 0 || fromPromptColors.length > 0;
+  const promptAnchoredColorIntent =
+    fromAstColors.length > 0 || fromPromptColors.length > 0 || explicitColorTransferIntent;
   const rerankDesiredColorsRaw = promptAnchoredColorIntent
     ? [...new Set([...fromAstColors, ...fromPromptColors].filter(Boolean))]
     : [...new Set([...fromAstColors, ...fromImageColors].filter(Boolean))];

@@ -991,6 +991,12 @@ function inferMacroCategoryFromProductText(
   const txt = normalizeLooseText(`${categoryCanonicalText} ${categoryText} ${haystack}`);
   if (!txt) return null;
 
+  // Prefer indexed category fields first when they map cleanly.
+  const mappedCanonical = mapDetectionToCategory(categoryCanonicalText, 1);
+  if (mappedCanonical.confidence >= 0.55) return mappedCanonical.productCategory;
+  const mappedCategory = mapDetectionToCategory(categoryText, 1);
+  if (mappedCategory.confidence >= 0.55) return mappedCategory.productCategory;
+
   if (/\b(shoe|shoes|sneaker|sneakers|boot|boots|sandal|sandals|heel|heels|loafer|loafers|flat|flats|mule|mules|slipper|slippers|pump|pumps|oxford|oxfords|trainer|trainers)\b/.test(txt)) {
     return "footwear";
   }
@@ -1013,11 +1019,6 @@ function inferMacroCategoryFromProductText(
   if (/\b(top|tops|shirt|shirts|t shirt|tshirt|tee|tees|blouse|blouses|tank|camisole|cami|sweater|sweatshirt|pullover|tunic|polo|henley|crop top)\b/.test(txt)) {
     return "tops";
   }
-
-  const mappedCanonical = mapDetectionToCategory(categoryCanonicalText, 1);
-  if (mappedCanonical.confidence >= 0.75) return mappedCanonical.productCategory;
-  const mappedCategory = mapDetectionToCategory(categoryText, 1);
-  if (mappedCategory.confidence >= 0.75) return mappedCategory.productCategory;
   return null;
 }
 
@@ -1079,8 +1080,15 @@ function applyDetectionCategoryGuard(
       categoryText,
       categoryCanonicalText,
     );
-    if (!observedMacroCategory || observedMacroCategory !== categoryMapping.productCategory) {
+    if (observedMacroCategory && observedMacroCategory !== categoryMapping.productCategory) {
       return false;
+    }
+    if (!observedMacroCategory) {
+      // Fail closed on tiny-item families where lexical noise is common; keep apparel
+      // families tolerant to unknown macro classification to avoid empty dress groups.
+      if (categoryMapping.productCategory === "footwear" || isAccessoryLikeCategory(categoryMapping.productCategory)) {
+        return false;
+      }
     }
 
     // Sleeve contradiction guard: when detection is explicitly sleeve-typed,
@@ -2530,13 +2538,23 @@ export class ImageAnalysisService {
           });
 
           if (footwearRecovery.results.length > 0) {
+            const merged = mergeImageSearchResultsById(
+              similarResult.results,
+              footwearRecovery.results,
+              retrievalLimit,
+            );
+            const mergedPrecisionSafe = applyShopLookVisualPrecisionGuard(
+              merged,
+              similarityThreshold,
+            );
+            const mergedCategorySafe = applyDetectionCategoryGuard(
+              mergedPrecisionSafe,
+              detection.label,
+              categoryMapping,
+            );
             similarResult = {
               ...similarResult,
-              results: mergeImageSearchResultsById(
-                similarResult.results,
-                footwearRecovery.results,
-                retrievalLimit,
-              ),
+              results: mergedCategorySafe,
             };
           }
 
