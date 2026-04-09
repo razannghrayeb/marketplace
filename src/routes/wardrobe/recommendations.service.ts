@@ -66,6 +66,7 @@ export interface OutfitSetSuggestion {
 }
 
 export interface CompleteLookSuggestionsResult {
+  completionMode: "wardrobe" | "catalog-product";
   suggestions: CompleteLookSuggestion[];
   outfitSets: OutfitSetSuggestion[];
   missingCategories: string[];
@@ -219,16 +220,21 @@ function slotKeywordRegex(slot: string): RegExp | null {
 }
 
 function slotMismatchRegex(slot: string): RegExp | null {
+  const sleepwear = /\b(pyjama|pyjamas|pajama|pajamas|sleepwear|nightwear|loungewear|lingerie)\b/;
+  if (slot !== "dresses" && slot !== "outerwear") {
+    if (sleepwear.test(slot)) return sleepwear;
+  }
   if (slot === "bags") return /\b(headband|hair accessory|hairband|headwear|hat|cap|beanie|wallet|backpack|duffle|luggage|suitcase|travel accessory|key ring|keychain)\b/;
   if (slot === "accessories") {
     return /\b(handbag|bag|tote|clutch|wallet|crossbody|backpack|satchel|messenger)\b/;
   }
-  return null;
+  return sleepwear;
 }
 
 function sourceMatchesSlot(slot: string, source: any): boolean {
   const canonical = normalizeWardrobeCategory(source?.category_canonical || source?.category);
   const blob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.category_canonical || "")}`.toLowerCase();
+  if (/\b(pyjama|pyjamas|pajama|pajamas|sleepwear|nightwear|loungewear|lingerie)\b/.test(blob)) return false;
   const allow = slotKeywordRegex(slot);
   const reject = slotMismatchRegex(slot);
   if (reject && reject.test(blob)) return false;
@@ -689,6 +695,7 @@ async function runCompleteLookCore(
   userId: number,
   currentItems: CompleteLookAnchorRow[],
   limit: number,
+  completionMode: CompleteLookSuggestionsResult["completionMode"],
   audienceOptions: CompleteLookAudienceOptions = {}
 ): Promise<CompleteLookSuggestionsResult> {
   const currentCategories = new Set<string>();
@@ -774,6 +781,8 @@ async function runCompleteLookCore(
     warmWeatherLikely,
     shouldOfferOuterwear,
   });
+  const relaxedBagAudienceMode =
+    missingCategories.length === 1 && normalizeWardrobeCategory(missingCategories[0]) === "bags";
 
   const userPriceTier = await inferPriceTier(userId).catch(() => null);
   const ownedProductIds = new Set<string>(
@@ -825,10 +834,10 @@ async function runCompleteLookCore(
           { term: { availability: "in_stock" } },
           { term: { category_canonical: canonical } },
         ];
-        if (inferredAudienceGender && inferredAudienceGender !== "unisex") {
+        if (inferredAudienceGender && inferredAudienceGender !== "unisex" && !(relaxedBagAudienceMode && category === "bags")) {
           f.push(buildAudienceGenderFilter(inferredAudienceGender));
         }
-        if (inferredAgeGroup) {
+        if (inferredAgeGroup && !(relaxedBagAudienceMode && category === "bags")) {
           f.push(buildAgeGroupFilter(inferredAgeGroup));
         }
         const slotIntentFilter = buildSlotIntentFilter(category);
@@ -858,8 +867,12 @@ async function runCompleteLookCore(
         for (const hit of hits) {
           const source = hit._source || {};
           if (!sourceMatchesSlot(category, source)) continue;
-          if (!audienceGenderMatchesForSlot(inferredAudienceGender, source, category, enforceNeutralAudienceWhenUnknown)) continue;
-          if (!audienceAgeGroupMatches(inferredAgeGroup, source)) continue;
+          if (!audienceGenderMatchesForSlot(inferredAudienceGender, source, category, enforceNeutralAudienceWhenUnknown, {
+            allowUnknownForBags: relaxedBagAudienceMode && category === "bags",
+          })) continue;
+          if (!audienceAgeGroupMatchesWithOptions(inferredAgeGroup, source, {
+            allowUnknown: relaxedBagAudienceMode && category === "bags",
+          })) continue;
           const productId = parseInt(source.product_id, 10);
           if (!productId || ownedProductIds.has(String(productId))) continue;
 
@@ -1019,6 +1032,7 @@ async function runCompleteLookCore(
       inferredAudienceGender,
       inferredAgeGroup,
       enforceNeutralAudienceWhenUnknown,
+      relaxedBagAudienceMode,
       wardrobeColorFamilies,
       currentCategoryList,
       needed: limit - mergedSuggestions.length,
@@ -1046,6 +1060,7 @@ async function runCompleteLookCore(
   const outfitSets = buildOutfitSets(suggestionsByCategory, missingCategories);
 
   return {
+    completionMode,
     suggestions: mergedSuggestions,
     outfitSets,
     missingCategories,
@@ -1268,7 +1283,7 @@ export async function completeLookSuggestions(
     [currentItemIds, userId]
   );
 
-  return runCompleteLookCore(userId, currentItemsResult.rows as CompleteLookAnchorRow[], limit, {
+  return await runCompleteLookCore(userId, currentItemsResult.rows as CompleteLookAnchorRow[], limit, "wardrobe", {
     audienceGenderHint: options.audienceGenderHint,
     ageGroupHint: options.ageGroupHint,
   });
@@ -1285,6 +1300,7 @@ export async function completeLookSuggestionsForCatalogProducts(
 ): Promise<CompleteLookSuggestionsResult> {
   if (!Array.isArray(productIds) || productIds.length === 0) {
     return {
+      completionMode: "catalog-product",
       suggestions: [],
       outfitSets: [],
       missingCategories: ["tops", "bottoms", "shoes"],
@@ -1312,7 +1328,7 @@ export async function completeLookSuggestionsForCatalogProducts(
     [productIds]
   );
 
-  return runCompleteLookCore(userId, productResult.rows as CompleteLookAnchorRow[], limit, {
+  return await runCompleteLookCore(userId, productResult.rows as CompleteLookAnchorRow[], limit, "catalog-product", {
     audienceGenderHint: options.audienceGenderHint,
     ageGroupHint: options.ageGroupHint,
     allowUserAudienceFallback: false,
@@ -1699,12 +1715,21 @@ function audienceGenderMatches(
 }
 
 function audienceAgeGroupMatches(inferredAgeGroup: AudienceAgeGroup | null, source: any): boolean {
+  return audienceAgeGroupMatchesWithOptions(inferredAgeGroup, source, {});
+}
+
+function audienceAgeGroupMatchesWithOptions(
+  inferredAgeGroup: AudienceAgeGroup | null,
+  source: any,
+  options: { allowUnknown?: boolean } = {}
+): boolean {
+  const allowUnknown = Boolean(options.allowUnknown);
   const strictAudience = strictAudienceMatchEnabled();
   if (!inferredAgeGroup) return true;
   const docAge = normalizeAudienceAgeGroupValue(source?.age_group);
   const textAge = inferAgeGroupFromText(`${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.category_canonical || "")}`);
   const effective = docAge || textAge;
-  if (!effective) return strictAudience ? false : inferredAgeGroup !== "kids";
+  if (!effective) return allowUnknown ? true : strictAudience ? false : inferredAgeGroup !== "kids";
   return effective === inferredAgeGroup;
 }
 
@@ -1712,8 +1737,10 @@ function audienceGenderMatchesForSlot(
   inferred: AudienceGender | null,
   source: any,
   slot: string,
-  enforceNeutralWhenUnknown: boolean = false
+  enforceNeutralWhenUnknown: boolean = false,
+  options: { allowUnknownForBags?: boolean } = {}
 ): boolean {
+  const allowUnknownForBags = Boolean(options.allowUnknownForBags);
   const base = audienceGenderMatches(inferred, source, enforceNeutralWhenUnknown);
   if (!base) return false;
 
@@ -1727,6 +1754,7 @@ function audienceGenderMatchesForSlot(
     const fromText = inferGenderFromText(
       `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.category_canonical || "")}`
     );
+    if (!fromText && slot === "bags" && allowUnknownForBags) return true;
     return fromText === inferred;
   }
 
@@ -1860,6 +1888,7 @@ async function fetchCategoryTopUpSuggestions(params: {
   inferredAudienceGender: AudienceGender | null;
   inferredAgeGroup: AudienceAgeGroup | null;
   enforceNeutralAudienceWhenUnknown?: boolean;
+  relaxedBagAudienceMode?: boolean;
   wardrobeColorFamilies: Set<string>;
   currentCategoryList: string[];
   needed: number;
@@ -1879,10 +1908,11 @@ async function fetchCategoryTopUpSuggestions(params: {
   if (slotIntentFilters.length > 0) {
     filter.push({ bool: { should: slotIntentFilters, minimum_should_match: 1 } });
   }
-  if (params.inferredAudienceGender && params.inferredAudienceGender !== "unisex") {
+  const topUpBagOnlyRelaxed = Boolean(params.relaxedBagAudienceMode) && params.missingCategories.length === 1;
+  if (params.inferredAudienceGender && params.inferredAudienceGender !== "unisex" && !topUpBagOnlyRelaxed) {
     filter.push(buildAudienceGenderFilter(params.inferredAudienceGender));
   }
-  if (params.inferredAgeGroup) {
+  if (params.inferredAgeGroup && !topUpBagOnlyRelaxed) {
     filter.push(buildAgeGroupFilter(params.inferredAgeGroup));
   }
 
@@ -1951,9 +1981,12 @@ async function fetchCategoryTopUpSuggestions(params: {
       params.inferredAudienceGender,
       source,
       matchedSlot,
-      Boolean(params.enforceNeutralAudienceWhenUnknown)
+      Boolean(params.enforceNeutralAudienceWhenUnknown),
+      { allowUnknownForBags: topUpBagOnlyRelaxed && matchedSlot === "bags" }
     )) continue;
-    if (!audienceAgeGroupMatches(params.inferredAgeGroup, source)) continue;
+    if (!audienceAgeGroupMatchesWithOptions(params.inferredAgeGroup, source, {
+      allowUnknown: topUpBagOnlyRelaxed && matchedSlot === "bags",
+    })) continue;
     const productId = parseInt(source.product_id, 10);
     if (!productId) continue;
     const productKey = String(productId);

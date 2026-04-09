@@ -574,6 +574,7 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
     }));
     res.json({
       success: true,
+      completionMode: result.completionMode,
       suggestions,
       outfitSets: result.outfitSets,
       missingCategories: result.missingCategories,
