@@ -2217,14 +2217,13 @@ export async function searchByImageWithSimilarity(
       const cs = cosineSimilarity01(colorQueryEmbedding ?? undefined, hit._source?.embedding_color);
       colorSimRawById.set(idStr, Math.round(cs * 1000) / 1000);
 
-      // Guard against re-inflating color compliance when catalog color explicitly
-      // contradicts desired/inferred color tokens (e.g. query white, doc color blue).
-      const catalogColorRaw = typeof hit._source?.color === "string" ? String(hit._source.color).toLowerCase().trim() : "";
-      const catalogColorNorm = catalogColorRaw ? normalizeColorToken(catalogColorRaw) ?? catalogColorRaw : "";
+      // Guard against re-inflating color compliance when indexed catalog colors
+      // contradict desired/inferred tokens (e.g. query white, doc palette blue).
+      const docCatalogColors = docColorPaletteForHit(hit);
       const hasHardCatalogColorConflict =
         hasAnyColorTokenIntent &&
-        Boolean(catalogColorNorm) &&
-        tieredColorListCompliance(desiredColorsTierForRelevance, [catalogColorNorm], rerankColorModeForRelevance)
+        docCatalogColors.length > 0 &&
+        tieredColorListCompliance(desiredColorsTierForRelevance, docCatalogColors, rerankColorModeForRelevance)
           .compliance <= 0;
 
       if (hasHardCatalogColorConflict) {

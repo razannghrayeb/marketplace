@@ -1027,9 +1027,9 @@ function applyDetectionCategoryGuard(
     // For bags/accessories we fail closed when metadata is missing to avoid
     // leaking generic apparel into strict accessory retrieval flows.
     if (!haystack) {
-      // Fail closed for strict small-item categories where weak metadata causes frequent drift.
-      if (categoryMapping.productCategory === "footwear") return false;
-      return !isAccessoryLikeCategory(categoryMapping.productCategory);
+      // In strict per-detection mode, missing taxonomy/title metadata is unsafe.
+      // Fail closed to avoid cross-category leakage (e.g., pants in dress detections).
+      return false;
     }
 
     const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, term));
@@ -2194,7 +2194,7 @@ export class ImageAnalysisService {
       // Do not inherit full-image BLIP hints by default for a specific detection.
       // A full-image caption can describe a different region entirely (e.g. top vs trousers)
       // and will poison per-detection retrieval if used as the fallback signal.
-      let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
+      let detectionBlipSignal: BlipSignal | undefined = undefined;
       if (detCaption.trim().length > 0) {
         const captionLength = inferLengthIntentFromCaption(detCaption);
         if (captionLength) (filters as any).length = captionLength;
@@ -2993,7 +2993,7 @@ export class ImageAnalysisService {
           (filters as { category?: string | string[] }).category != null;
 
         const detCaption = fullResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
-        let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
+        let detectionBlipSignal: BlipSignal | undefined = undefined;
         if (detCaption.trim().length > 0) {
           const captionLength = inferLengthIntentFromCaption(detCaption);
           if (captionLength) (filters as any).length = captionLength;

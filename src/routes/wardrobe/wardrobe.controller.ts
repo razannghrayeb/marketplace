@@ -46,6 +46,73 @@ function refreshStyleProfileInBackground(userId: number): void {
   });
 }
 
+function parseOptionalInt(raw: unknown): number | undefined {
+  if (raw === null || raw === undefined || raw === "") return undefined;
+  const n = parseInt(String(raw), 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function normalizeAnalysisCategory(raw: unknown): string | null {
+  const s = String(raw || "").toLowerCase().trim();
+  if (!s) return null;
+  if (s.includes("dress") || s.includes("gown") || s.includes("jumpsuit") || s.includes("romper")) return "dresses";
+  if (s.includes("outer") || s.includes("jacket") || s.includes("coat") || s.includes("blazer") || s.includes("cardigan")) return "outerwear";
+  if (s.includes("shoe") || s.includes("sneaker") || s.includes("heel") || s.includes("boot") || s.includes("sandal") || s.includes("loafer") || s.includes("footwear")) return "shoes";
+  if (s.includes("bag") || s.includes("tote") || s.includes("clutch") || s.includes("wallet") || s.includes("backpack") || s.includes("purse")) return "bags";
+  if (s.includes("accessor") || s.includes("jewel") || s.includes("watch") || s.includes("belt") || s.includes("scarf") || s.includes("hat") || s.includes("sunglass")) return "accessories";
+  if (s.includes("pant") || s.includes("trouser") || s.includes("jean") || s.includes("skirt") || s.includes("short") || s.includes("legging") || s.includes("bottom")) return "bottoms";
+  if (s.includes("top") || s.includes("shirt") || s.includes("blouse") || s.includes("hoodie") || s.includes("sweater") || s.includes("tee") || s.includes("tank")) return "tops";
+  return null;
+}
+
+async function lookupCategoryIdFromAnalysis(categoryRaw: unknown, subcategoryRaw: unknown): Promise<number | undefined> {
+  const normalized = normalizeAnalysisCategory(categoryRaw) || normalizeAnalysisCategory(subcategoryRaw);
+  if (!normalized) return undefined;
+  const result = await pg.query<{ id: number }>(
+    `SELECT id FROM categories WHERE lower(name) = $1 ORDER BY id ASC LIMIT 1`,
+    [normalized]
+  );
+  return result.rows[0]?.id;
+}
+
+async function lookupPatternId(patternRaw: unknown): Promise<number | undefined> {
+  const normalized = String(patternRaw || "").toLowerCase().trim();
+  if (!normalized) return undefined;
+  const alias: Record<string, string> = {
+    striped: "stripes",
+    stripe: "stripes",
+    plaid: "plaid",
+    polka: "polka-dots",
+    "polka dots": "polka-dots",
+    geometric: "geometric",
+    floral: "floral",
+    solid: "solid",
+    camo: "camo",
+  };
+  const key = alias[normalized] || normalized;
+  const result = await pg.query<{ id: number }>(
+    `SELECT id FROM patterns WHERE lower(name) = $1 ORDER BY id ASC LIMIT 1`,
+    [key]
+  );
+  return result.rows[0]?.id;
+}
+
+async function lookupMaterialId(materialRaw: unknown): Promise<number | undefined> {
+  const normalized = String(materialRaw || "").toLowerCase().trim();
+  if (!normalized) return undefined;
+  const alias: Record<string, string> = {
+    "faux leather": "leather",
+    "soft knit": "jersey",
+    knit: "jersey",
+  };
+  const key = alias[normalized] || normalized;
+  const result = await pg.query<{ id: number }>(
+    `SELECT id FROM materials WHERE lower(name) = $1 ORDER BY id ASC LIMIT 1`,
+    [key]
+  );
+  return result.rows[0]?.id;
+}
+
 // ============================================================================
 // Wardrobe Items CRUD
 // ============================================================================
@@ -92,18 +159,72 @@ export async function createItem(req: Request, res: Response, next: NextFunction
   try {
     const userId = req.user!.id;
 
+    const providedCategoryId = parseOptionalInt(req.body.category_id);
+    const providedPatternId = parseOptionalInt(req.body.pattern_id);
+    const providedMaterialId = parseOptionalInt(req.body.material_id);
+
+    let derivedCategoryId = providedCategoryId;
+    let derivedPatternId = providedPatternId;
+    let derivedMaterialId = providedMaterialId;
+    let derivedName = typeof req.body.name === "string" && req.body.name.trim().length > 0 ? req.body.name.trim() : undefined;
+    let derivedDominantColors: Array<{ color_id: number; hex: string; percent: number }> | undefined;
+
+    // Auto-enrich uploaded images so complete-look has reliable category/style anchors.
+    if (req.file?.buffer && (!derivedCategoryId || !derivedPatternId || !derivedMaterialId || !derivedName)) {
+      try {
+        const { analyzeWardrobePhoto } = await import("../../lib/wardrobe/imageRecognition");
+        const analysis = await analyzeWardrobePhoto(req.file.buffer, {
+          useGemini: true,
+          extractEmbedding: false,
+          minConfidence: 0.5,
+        });
+
+        if (!derivedCategoryId) {
+          derivedCategoryId = await lookupCategoryIdFromAnalysis(analysis.category, analysis.subcategory);
+        }
+        if (!derivedPatternId) {
+          derivedPatternId = await lookupPatternId(analysis.pattern);
+        }
+        if (!derivedMaterialId) {
+          derivedMaterialId = await lookupMaterialId(analysis.material);
+        }
+        if (!derivedName && analysis.suggestedName) {
+          derivedName = analysis.suggestedName;
+        }
+
+        if (Array.isArray(analysis.colors?.dominantHex) && analysis.colors.dominantHex.length > 0) {
+          const palette = analysis.colors.dominantHex.slice(0, 3).filter((hex) => typeof hex === "string" && /^#[0-9a-f]{6}$/i.test(hex));
+          if (palette.length > 0) {
+            const pct = Math.round((100 / palette.length) * 1000) / 1000;
+            derivedDominantColors = palette.map((hex) => ({ color_id: 0, hex, percent: pct }));
+          }
+        }
+      } catch (analysisErr) {
+        console.warn("Wardrobe: create item auto-analysis failed, continuing with provided metadata", {
+          userId,
+          error: analysisErr instanceof Error ? analysisErr.message : String(analysisErr),
+        });
+      }
+    }
+
     const item = await createWardrobeItem({
       user_id: userId,
       source: req.body.source || "manual",
-      product_id: req.body.product_id ? parseInt(req.body.product_id, 10) : undefined,
+      product_id: parseOptionalInt(req.body.product_id),
       image_buffer: req.file?.buffer,
       image_url: req.body.image_url,
-      name: req.body.name,
-      category_id: req.body.category_id ? parseInt(req.body.category_id, 10) : undefined,
+      name: derivedName,
+      category_id: derivedCategoryId,
       brand: req.body.brand,
-      pattern_id: req.body.pattern_id ? parseInt(req.body.pattern_id, 10) : undefined,
-      material_id: req.body.material_id ? parseInt(req.body.material_id, 10) : undefined
+      pattern_id: derivedPatternId,
+      material_id: derivedMaterialId
     });
+
+    if (derivedDominantColors && derivedDominantColors.length > 0) {
+      await updateWardrobeItem(item.id, userId, {
+        dominant_colors: derivedDominantColors,
+      });
+    }
 
     refreshStyleProfileInBackground(userId);
 
