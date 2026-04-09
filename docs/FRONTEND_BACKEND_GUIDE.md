@@ -104,9 +104,9 @@ Mounted at **`/search`** (root, not under `/api`).
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/wardrobe/items` | List wardrobe items |
-| POST | `/api/wardrobe/items` | Add item (multipart: image, name, category_id, etc.) |
+| POST | `/api/wardrobe/items` | Add item (multipart: image, name, category_id, audience_gender, age_group, style_tags, occasion_tags, season_tags) |
 | GET | `/api/wardrobe/items/:id` | Get item |
-| PATCH | `/api/wardrobe/items/:id` | Update item |
+| PATCH | `/api/wardrobe/items/:id` | Update item (supports same audience/style fields) |
 | DELETE | `/api/wardrobe/items/:id` | Delete item |
 | GET | `/api/wardrobe/profile` | Style profile |
 | GET | `/api/wardrobe/gaps` | Missing essentials |

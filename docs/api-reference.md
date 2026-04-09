@@ -1266,10 +1266,23 @@ curl -X POST "http://0.0.0.0:3000/api/wardrobe/items" \
   -F "brand=Zara" \
   -F "source=manual" \
   -F "category_id=12" \
+  -F "audience_gender=women" \
+  -F "age_group=adult" \
+  -F "style_tags=[\"classic\",\"minimalist\"]" \
+  -F "occasion_tags=[\"work\",\"smart-casual\"]" \
+  -F "season_tags=[\"spring\",\"fall\"]" \
   -F "pattern_id=1" \
   -F "material_id=3" \
   -F "image=@shirt.jpg"
 ```
+
+Optional user-provided audience/style fields for `POST /api/wardrobe/items` and `PATCH /api/wardrobe/items/{id}`:
+
+- `audience_gender`: `men` | `women` | `unisex`
+- `age_group`: `kids` | `adult`
+- `style_tags`: string array (JSON array string in multipart, or array in JSON)
+- `occasion_tags`: string array
+- `season_tags`: string array
 
 Example response:
 

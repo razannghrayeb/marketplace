@@ -983,45 +983,6 @@ function isAccessoryLikeCategory(productCategory: string): boolean {
   return c === "bags" || c === "accessories";
 }
 
-function inferMacroCategoryFromProductText(
-  haystack: string,
-  categoryText: string,
-  categoryCanonicalText: string,
-): string | null {
-  const txt = normalizeLooseText(`${categoryCanonicalText} ${categoryText} ${haystack}`);
-  if (!txt) return null;
-
-  // Prefer indexed category fields first when they map cleanly.
-  const mappedCanonical = mapDetectionToCategory(categoryCanonicalText, 1);
-  if (mappedCanonical.confidence >= 0.55) return mappedCanonical.productCategory;
-  const mappedCategory = mapDetectionToCategory(categoryText, 1);
-  if (mappedCategory.confidence >= 0.55) return mappedCategory.productCategory;
-
-  if (/\b(shoe|shoes|sneaker|sneakers|boot|boots|sandal|sandals|heel|heels|loafer|loafers|flat|flats|mule|mules|slipper|slippers|pump|pumps|oxford|oxfords|trainer|trainers)\b/.test(txt)) {
-    return "footwear";
-  }
-  if (/\b(bag|bags|wallet|wallets|purse|purses|handbag|handbags|tote|totes|backpack|backpacks|clutch|clutches|crossbody|satchel|satchels)\b/.test(txt)) {
-    return "bags";
-  }
-  if (/\b(accessory|accessories|hat|hats|cap|caps|scarf|scarves|belt|belts|jewelry|jewellery|bracelet|bracelets|necklace|necklaces|earring|earrings|watch|watches)\b/.test(txt)) {
-    return "accessories";
-  }
-  if (/\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|parka|windbreaker|trench|bomber|gilet)\b/.test(txt)) {
-    return "outerwear";
-  }
-  // Keep bottoms before dresses so "dress pants" stays bottoms.
-  if (/\b(pant|pants|trouser|trousers|jean|jeans|short|shorts|skirt|skirts|legging|leggings|jogger|joggers|chino|chinos|culotte|culottes|cargo|bottom|bottoms)\b/.test(txt)) {
-    return "bottoms";
-  }
-  if (/\b(dress|dresses|gown|gowns|frock|frocks|maxi dress|midi dress|mini dress|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits)\b/.test(txt)) {
-    return "dresses";
-  }
-  if (/\b(top|tops|shirt|shirts|t shirt|tshirt|tee|tees|blouse|blouses|tank|camisole|cami|sweater|sweatshirt|pullover|tunic|polo|henley|crop top)\b/.test(txt)) {
-    return "tops";
-  }
-  return null;
-}
-
 function applyDetectionCategoryGuard(
   products: ProductResult[],
   detectionLabel: string,
@@ -1066,30 +1027,13 @@ function applyDetectionCategoryGuard(
     // For bags/accessories we fail closed when metadata is missing to avoid
     // leaking generic apparel into strict accessory retrieval flows.
     if (!haystack) {
-      // In strict per-detection mode, missing taxonomy/title metadata is unsafe.
-      // Fail closed to avoid cross-category leakage (e.g., pants in dress detections).
-      return false;
+      // Fail closed for strict small-item categories where weak metadata causes frequent drift.
+      if (categoryMapping.productCategory === "footwear") return false;
+      return !isAccessoryLikeCategory(categoryMapping.productCategory);
     }
 
     const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, term));
     if (!allowByTerm) return false;
-
-    // Strict for all detection types: product macro-category must match the detected macro-category.
-    const observedMacroCategory = inferMacroCategoryFromProductText(
-      haystack,
-      categoryText,
-      categoryCanonicalText,
-    );
-    if (observedMacroCategory && observedMacroCategory !== categoryMapping.productCategory) {
-      return false;
-    }
-    if (!observedMacroCategory) {
-      // Fail closed on tiny-item families where lexical noise is common; keep apparel
-      // families tolerant to unknown macro classification to avoid empty dress groups.
-      if (categoryMapping.productCategory === "footwear" || isAccessoryLikeCategory(categoryMapping.productCategory)) {
-        return false;
-      }
-    }
 
     // Sleeve contradiction guard: when detection is explicitly sleeve-typed,
     // reject products that explicitly indicate a conflicting sleeve type.
@@ -1101,7 +1045,7 @@ function applyDetectionCategoryGuard(
     }
 
     // Guard against broad lexical collisions (e.g. "denim jacket" inside trouser flow).
-    const productCategoryMacro = observedMacroCategory;
+    const productCategoryMacro = mapDetectionToCategory(String((p as any).category ?? ""), 1).productCategory;
     if (categoryMapping.productCategory === "footwear") {
       // Hard safety: footwear detections should not return outerwear/tops/bottoms even on lexical overlap.
       if (productCategoryMacro && productCategoryMacro !== "footwear") {
@@ -1110,16 +1054,6 @@ function applyDetectionCategoryGuard(
     }
     if (categoryMapping.productCategory === "bottoms") {
       if (productCategoryMacro === "outerwear" || /\b(jacket|coat|blazer|outerwear)\b/.test(haystack)) {
-        return false;
-      }
-    }
-    if (categoryMapping.productCategory === "dresses") {
-      // Prevent lexical collisions like "dress pants" / "dress shorts" from leaking
-      // into actual dress detections.
-      if (productCategoryMacro && productCategoryMacro !== "dresses") {
-        return false;
-      }
-      if (/\b(dress\s+pant|dress\s+pants|dress\s+short|dress\s+shorts|trouser|trousers|pant|pants|shorts?)\b/.test(haystack)) {
         return false;
       }
     }
@@ -2260,7 +2194,7 @@ export class ImageAnalysisService {
       // Do not inherit full-image BLIP hints by default for a specific detection.
       // A full-image caption can describe a different region entirely (e.g. top vs trousers)
       // and will poison per-detection retrieval if used as the fallback signal.
-      let detectionBlipSignal: BlipSignal | undefined = undefined;
+      let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
       if (detCaption.trim().length > 0) {
         const captionLength = inferLengthIntentFromCaption(detCaption);
         if (captionLength) (filters as any).length = captionLength;
@@ -2538,23 +2472,13 @@ export class ImageAnalysisService {
           });
 
           if (footwearRecovery.results.length > 0) {
-            const merged = mergeImageSearchResultsById(
-              similarResult.results,
-              footwearRecovery.results,
-              retrievalLimit,
-            );
-            const mergedPrecisionSafe = applyShopLookVisualPrecisionGuard(
-              merged,
-              similarityThreshold,
-            );
-            const mergedCategorySafe = applyDetectionCategoryGuard(
-              mergedPrecisionSafe,
-              detection.label,
-              categoryMapping,
-            );
             similarResult = {
               ...similarResult,
-              results: mergedCategorySafe,
+              results: mergeImageSearchResultsById(
+                similarResult.results,
+                footwearRecovery.results,
+                retrievalLimit,
+              ),
             };
           }
 
@@ -3069,7 +2993,7 @@ export class ImageAnalysisService {
           (filters as { category?: string | string[] }).category != null;
 
         const detCaption = fullResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
-        let detectionBlipSignal: BlipSignal | undefined = undefined;
+        let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
         if (detCaption.trim().length > 0) {
           const captionLength = inferLengthIntentFromCaption(detCaption);
           if (captionLength) (filters as any).length = captionLength;
