@@ -117,12 +117,29 @@ export async function completeStyleFromBody(req: Request, res: Response) {
       return res.status(400).json({ success: false, error: { message: "Product with title is required" } });
     }
 
+    const queryOptions = parseCompleteStyleOptions(req.query);
+    const bodyMaxPer = Number(bodyOptions?.maxPerCategory);
+    const bodyMaxTotal = Number(bodyOptions?.maxTotal);
+    const hasBodyMaxPer = Number.isFinite(bodyMaxPer) && bodyMaxPer >= 1;
+    const hasBodyMaxTotal = Number.isFinite(bodyMaxTotal) && bodyMaxTotal >= 1;
+
     const options: CompleteStyleOptions = {
-      maxPerCategory: Math.min(bodyOptions?.maxPerCategory || 5, 20),
-      maxTotal: Math.min(bodyOptions?.maxTotal || 20, 50),
-      preferSameBrand: bodyOptions?.preferSameBrand || false,
-      priceRange: bodyOptions?.priceRange,
-      excludeBrands: bodyOptions?.excludeBrands,
+      ...queryOptions,
+      maxPerCategory: hasBodyMaxPer ? Math.min(Math.floor(bodyMaxPer), 20) : queryOptions.maxPerCategory,
+      maxTotal: hasBodyMaxTotal ? Math.min(Math.floor(bodyMaxTotal), 50) : queryOptions.maxTotal,
+      preferSameBrand:
+        typeof bodyOptions?.preferSameBrand === "boolean"
+          ? bodyOptions.preferSameBrand
+          : queryOptions.preferSameBrand,
+      disablePriceFilter:
+        typeof bodyOptions?.disablePriceFilter === "boolean"
+          ? bodyOptions.disablePriceFilter
+          : queryOptions.disablePriceFilter,
+      priceRange: bodyOptions?.priceRange || queryOptions.priceRange,
+      excludeBrands:
+        Array.isArray(bodyOptions?.excludeBrands) && bodyOptions.excludeBrands.length > 0
+          ? bodyOptions.excludeBrands
+          : queryOptions.excludeBrands,
     };
 
     const userId = getOptionalUserId(req);
