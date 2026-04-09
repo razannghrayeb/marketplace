@@ -499,6 +499,8 @@ function scoreCategoryCompatibility(sourceFamily: string, candidateFamily: strin
   };
   if (pairingMap[sourceFamily]?.includes(candidateFamily)) return 0.93;
   if (pairingMap[candidateFamily]?.includes(sourceFamily)) return 0.87;
+  return 0.44;
+}
 
 function scoreFootwearOccasionCompatibility(
   sourceOccasion: StyleProfile["occasion"],
@@ -527,8 +529,6 @@ function scoreFootwearOccasionCompatibility(
   }
 
   return 0.74;
-}
-  return 0.44;
 }
 
 function buildFashionReasons(params: {
@@ -651,7 +651,7 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       }),
       ...(candidateFamily === "shoes"
         ? [
-            sourceStyle.occasion === "party" && /\b(sneaker|sneakers|trainer|trainers)\b/i.test(`${candidateProduct.title} ${candidateProduct.category || ""}`)
+            params.sourceStyle.occasion === "party" && /\b(sneaker|sneakers|trainer|trainers)\b/i.test(`${candidateProduct.title} ${candidateProduct.category || ""}`)
               ? "too casual for a party look"
               : "footwear matches the occasion",
           ]
