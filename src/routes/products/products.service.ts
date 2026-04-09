@@ -460,6 +460,7 @@ function computeExplicitFinalRelevance(params: {
   typeMatch: boolean;
   catSoft: number;
   colorMatch: number;
+  colorTier?: "exact" | "family" | "bucket" | "none";
   styleMatch: number;
   sleeveMatch: number;
   lengthMatch: number;
@@ -496,6 +497,7 @@ function computeExplicitFinalRelevance(params: {
 }): { score: number; fusedVisual: number; metadataCompliance: number } {
     const colorWeightScale = Math.max(0.2, Math.min(1, params.colorWeightScale ?? 1));
   const colorIntentStrength = Math.max(0, Math.min(1, params.colorIntentStrength ?? 0));
+  const colorTier = String(params.colorTier ?? "none").toLowerCase();
 
   const simVisual = Math.max(0, Math.min(1, params.simVisual));
 
@@ -576,6 +578,16 @@ function computeExplicitFinalRelevance(params: {
     colorIntentStrength > 0
       ? Math.max(0.55, 1 - 0.45 * colorIntentStrength * (1 - params.colorMatch))
       : 1;
+  const colorTierFactor =
+    colorIntentStrength > 0
+      ? colorTier === "exact"
+        ? 1.1 + 0.05 * colorIntentStrength
+        : colorTier === "family"
+          ? 1.04 + 0.03 * colorIntentStrength
+          : colorTier === "bucket"
+            ? 0.93 - 0.03 * colorIntentStrength
+            : 0.83 - 0.08 * colorIntentStrength
+      : 1;
 
   // ── Intent coverage gate ─────────────────────────────────────────
   const intentWeights = {
@@ -634,7 +646,7 @@ function computeExplicitFinalRelevance(params: {
   const withComposite =
     (1 - compositeInfluence) * coreBlend + compositeInfluence * compositeScore01;
 
-  const raw = withComposite * typeGate * crossSoft * intentGate * colorGate * blipFactor;
+  const raw = withComposite * typeGate * crossSoft * intentGate * colorGate * colorTierFactor * blipFactor;
   return {
     score: Math.max(0, Math.min(1, raw)),
     fusedVisual,
@@ -1158,7 +1170,6 @@ function computeColorContradictionPenalty(params: {
   nearIdenticalRawMin: number;
   hit: { _source?: Record<string, unknown> };
 }): number {
-  if (params.rawVisual >= params.nearIdenticalRawMin) return 1;
   if (!Array.isArray(params.desiredColorsTier) || params.desiredColorsTier.length === 0) return 1;
 
   const docColors = docColorPaletteForHit(params.hit);
@@ -1170,6 +1181,13 @@ function computeColorContradictionPenalty(params: {
     params.rerankColorMode,
   );
   if ((tier?.compliance ?? 0) > 0) return 1;
+
+  if (params.rawVisual >= params.nearIdenticalRawMin) {
+    if (params.hasExplicitColorIntent) return 0.74;
+    if (params.hasInferredColorSignal) return 0.84;
+    if (params.hasCropColorSignal) return 0.92;
+    return 1;
+  }
 
   if (params.hasExplicitColorIntent) return 0.72;
   if (params.hasInferredColorSignal) return 0.82;
@@ -2547,6 +2565,7 @@ export async function searchByImageWithSimilarity(
       typeMatch,
       catSoft: comp.categoryRelevance01 ?? 0,
       colorMatch: comp.colorCompliance ?? 0,
+      colorTier: comp.colorTier,
       styleMatch: comp.styleCompliance ?? 0,
       sleeveMatch: comp.sleeveCompliance ?? 0,
       lengthMatch: lengthCompliance,
@@ -2897,10 +2916,19 @@ export async function searchByImageWithSimilarity(
         const v = visualSimFromHit(h);
         const existing = comp.finalRelevance01 ?? 0;
         const colorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
+        const colorTier = String(comp.colorTier ?? "none").toLowerCase();
+        const colorTierFactor =
+          colorTier === "exact"
+            ? 1.12
+            : colorTier === "family"
+              ? 1.05
+              : colorTier === "bucket"
+                ? 0.94
+                : 0.8;
         const colorLift = hasColorIntentForFinal
-          ? 0.58 + 0.42 * colorComp
+          ? (0.58 + 0.42 * colorComp) * colorTierFactor
           : hasInferredColorIntentForRescue
-            ? 0.7 + 0.3 * colorComp
+            ? (0.7 + 0.3 * colorComp) * colorTierFactor
             : 1;
         let rescueScore = Math.max(existing, v * 0.85 * colorLift);
         if (intentAwareRescue) {
@@ -2914,7 +2942,7 @@ export async function searchByImageWithSimilarity(
             0.15 * audienceComp;
           const intentAwareScore =
             Math.max(0, Math.min(1, 0.68 * v + 0.32 * complianceBlend)) *
-            (hasColorIntentForFinal ? 0.92 + 0.08 * colorComp : 0.85);
+            (hasColorIntentForFinal ? (0.92 + 0.08 * colorComp) * colorTierFactor : 0.85);
           rescueScore = Math.max(rescueScore, intentAwareScore);
         }
         // In rescue mode, keep intent-constrained scoring expressive instead of lifting all
@@ -3287,7 +3315,10 @@ export async function searchByImageWithSimilarity(
           const colorCompliance = Number(explainAny?.colorCompliance ?? 0);
           const colorTier = String(explainAny?.colorTier ?? "none").toLowerCase();
           const minColorCompliance = hasExplicitColorIntent ? 0.42 : 0.28;
-          if (colorTier === "none" && colorCompliance < 0.22) return false;
+          if (colorTier === "exact" && colorCompliance < 0.24) return false;
+          if (colorTier === "family" && colorCompliance < 0.46) return false;
+          if (colorTier === "bucket" && colorCompliance < 0.58) return false;
+          if (colorTier === "none" && colorCompliance < 0.34) return false;
           if (colorCompliance < minColorCompliance) return false;
         }
         return true;
