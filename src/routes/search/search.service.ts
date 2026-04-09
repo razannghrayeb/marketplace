@@ -181,6 +181,48 @@ function appendUnique(target: string[], values: string[]) {
   }
 }
 
+const NEUTRAL_COLOR_TOKENS = new Set([
+  "white",
+  "off-white",
+  "cream",
+  "beige",
+  "ivory",
+  "gray",
+  "grey",
+  "charcoal",
+  "black",
+  "taupe",
+  "nude",
+]);
+
+function normalizeTypeHintTerms(raw: string): string[] {
+  const base = String(raw || "").toLowerCase().trim();
+  if (!base) return [];
+  const expanded = [
+    ...extractLexicalProductTypeSeeds(base),
+    ...extractFashionTypeNounTokens(base),
+  ]
+    .map((s) => String(s).toLowerCase().trim())
+    .filter(Boolean);
+  return [...new Set([base, ...expanded])];
+}
+
+function normalizeAndPrioritizeColorHints(colors: string[], maxHints = 3): string[] {
+  const canonical = [...new Set(
+    colors
+      .map((c) => normalizeColorToken(String(c)) ?? String(c).toLowerCase().trim())
+      .filter(Boolean),
+  )];
+  if (canonical.length <= 1) return canonical.slice(0, maxHints);
+
+  const vivid = canonical.filter((c) => !NEUTRAL_COLOR_TOKENS.has(c));
+  if (vivid.length > 0) {
+    const neutral = canonical.filter((c) => NEUTRAL_COLOR_TOKENS.has(c));
+    return [...vivid, ...neutral].slice(0, maxHints);
+  }
+  return canonical.slice(0, maxHints);
+}
+
 async function enrichClipOnlyIntentFromImages(
   parsedIntent: ParsedIntent,
   preparedImages: Buffer[],
@@ -191,6 +233,49 @@ async function enrichClipOnlyIntentFromImages(
   const promptColorHints = extractPromptColorTerms(userPrompt);
   const promptTypeHints = extractPromptTypeTerms(userPrompt).slice(0, 3);
   const promptStyleHints = extractPromptStyleTerms(userPrompt).slice(0, 3);
+  const styleIdx = findPromptAnchoredImageIndex(userPrompt, "style", preparedImages.length);
+
+  let imageTypeHints: string[] = [];
+  let styleAnchoredTypeHints: string[] = [];
+  try {
+    await blip.init();
+    const typeCounts = new Map<string, number>();
+    for (let i = 0; i < preparedImages.length; i++) {
+      const img = preparedImages[i];
+      const caption = await blip.caption(img);
+      const structured = buildStructuredBlipOutput(caption || "");
+      const uniq = [
+        ...new Set(
+          (structured.productTypeHints || [])
+            .map((t) => String(t).toLowerCase().trim())
+            .filter(Boolean),
+        ),
+      ];
+      const expanded = [...new Set(uniq.flatMap((t) => normalizeTypeHintTerms(t)).filter(Boolean))];
+      const terms = expanded.length > 0 ? expanded : uniq;
+      if (styleIdx != null && i === styleIdx && terms.length > 0) {
+        styleAnchoredTypeHints = [...terms.slice(0, 3)];
+      }
+      for (const t of terms.slice(0, 6)) {
+        typeCounts.set(t, (typeCounts.get(t) || 0) + 1);
+      }
+    }
+    const minConsensus = Math.max(1, Math.ceil(preparedImages.length / 2));
+    const rankedTypeHints = [...typeCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([t]) => t);
+    imageTypeHints = [...typeCounts.entries()]
+      .filter(([, count]) => count >= minConsensus)
+      .sort((a, b) => b[1] - a[1])
+      .map(([t]) => t)
+      .slice(0, 3);
+    if (imageTypeHints.length === 0) {
+      imageTypeHints = rankedTypeHints.slice(0, 3);
+    }
+  } catch {
+    imageTypeHints = [];
+    styleAnchoredTypeHints = [];
+  }
 
   parsedIntent.constraints = parsedIntent.constraints || {
     mustHave: [],
@@ -200,11 +285,22 @@ async function enrichClipOnlyIntentFromImages(
   parsedIntent.constraints.mustNotHave = parsedIntent.constraints.mustNotHave || [];
 
   if (promptColorHints.length > 0) appendUnique(parsedIntent.constraints.mustHave, promptColorHints);
-  if (promptTypeHints.length > 0) appendUnique(parsedIntent.constraints.mustHave, promptTypeHints);
+  const preferredTypeHints =
+    promptTypeHints.length > 0
+      ? promptTypeHints
+      : styleAnchoredTypeHints.length > 0
+        ? styleAnchoredTypeHints
+        : imageTypeHints;
+
+  if (preferredTypeHints.length > 0) appendUnique(parsedIntent.constraints.mustHave, preferredTypeHints);
   if (promptStyleHints.length > 0) appendUnique(parsedIntent.constraints.mustHave, promptStyleHints);
 
   if (!parsedIntent.constraints.category && promptTypeHints.length > 0) {
     parsedIntent.constraints.category = promptTypeHints[0];
+  } else if (!parsedIntent.constraints.category && styleAnchoredTypeHints.length > 0) {
+    parsedIntent.constraints.category = styleAnchoredTypeHints[0];
+  } else if (!parsedIntent.constraints.category && imageTypeHints.length > 0) {
+    parsedIntent.constraints.category = imageTypeHints[0];
   }
 
   if (!parsedIntent.imageIntents || parsedIntent.imageIntents.length === 0) {
@@ -212,7 +308,6 @@ async function enrichClipOnlyIntentFromImages(
   }
 
   const colorIdx = findPromptAnchoredImageIndex(userPrompt, "color", preparedImages.length);
-  const styleIdx = findPromptAnchoredImageIndex(userPrompt, "style", preparedImages.length);
   const textureIdx = findPromptAnchoredImageIndex(userPrompt, "texture", preparedImages.length);
   const patternIdx = findPromptAnchoredImageIndex(userPrompt, "pattern", preparedImages.length);
   const silhouetteIdx = findPromptAnchoredImageIndex(userPrompt, "silhouette", preparedImages.length);
@@ -222,10 +317,17 @@ async function enrichClipOnlyIntentFromImages(
     if (!row.primaryAttributes.includes("color")) row.primaryAttributes.push("color");
     const ev = row.extractedValues as Record<string, unknown>;
     if (!ev.color) {
+      let captionColors: string[] = [];
+      try {
+        await blip.init();
+        const caption = await blip.caption(preparedImages[colorIdx]);
+        const structured = buildStructuredBlipOutput(caption || "");
+        captionColors = (structured.colors || []).map((c) => String(c));
+      } catch {
+        captionColors = [];
+      }
       const hints = await extractQuickFashionColorHints(preparedImages[colorIdx], { maxHints: 3 });
-      const canonical = hints
-        .map((c) => normalizeColorToken(c) ?? c.toLowerCase())
-        .filter(Boolean);
+      const canonical = normalizeAndPrioritizeColorHints([...captionColors, ...hints], 3);
       if (canonical.length > 0) ev.color = canonical;
     }
   }
@@ -233,6 +335,16 @@ async function enrichClipOnlyIntentFromImages(
   if (styleIdx != null) {
     const row = ensureImageIntentRow(parsedIntent, styleIdx);
     if (!row.primaryAttributes.includes("style")) row.primaryAttributes.push("style");
+    const ev = row.extractedValues as Record<string, unknown>;
+    if (!ev.productType) {
+      const styleTypeHints =
+        preferredTypeHints.length > 0
+          ? preferredTypeHints
+          : styleAnchoredTypeHints.length > 0
+            ? styleAnchoredTypeHints
+            : imageTypeHints;
+      if (styleTypeHints.length > 0) ev.productType = styleTypeHints.slice(0, 2);
+    }
   }
 
   if (textureIdx != null) {
@@ -271,6 +383,7 @@ async function enrichClipOnlyIntentFromImages(
   const signals: string[] = [];
   if (promptColorHints.length > 0) signals.push(`prompt color=${promptColorHints.join('/')}`);
   if (promptTypeHints.length > 0) signals.push(`prompt type=${promptTypeHints.join('/')}`);
+  if (promptTypeHints.length === 0 && preferredTypeHints.length > 0) signals.push(`image type=${preferredTypeHints.join('/')}`);
   if (promptStyleHints.length > 0) signals.push(`prompt style=${promptStyleHints.join('/')}`);
   if (signals.length > 0) {
     parsedIntent.searchStrategy = `Local prompt-anchored fallback: ${signals.join(' | ')}`;
@@ -377,10 +490,20 @@ async function enrichPromptAnchoredIntentFromImages(
     const row = ensureImageIntentRow(parsedIntent, colorIdx);
     if (!row.primaryAttributes.includes("color")) row.primaryAttributes.push("color");
     if (row.extractedValues && !row.extractedValues.color) {
+      let captionColors: string[] = [];
+      try {
+        await blip.init();
+        const caption = await blip.caption(preparedImages[colorIdx]);
+        const structured = buildStructuredBlipOutput(caption || "");
+        captionColors = (structured.colors || [])
+          .map((c) => normalizeColorToken(String(c)) ?? String(c).toLowerCase())
+          .filter(Boolean);
+      } catch {
+        captionColors = [];
+      }
+
       const hints = await extractQuickFashionColorHints(preparedImages[colorIdx], { maxHints: 3 });
-      const canonical = hints
-        .map((c) => normalizeColorToken(c) ?? c.toLowerCase())
-        .filter(Boolean);
+      const canonical = normalizeAndPrioritizeColorHints([...captionColors, ...hints], 3);
       if (canonical.length > 0) {
         row.extractedValues.color = canonical;
         parsedIntent.constraints = parsedIntent.constraints || { mustHave: [], mustNotHave: [] };
@@ -405,6 +528,16 @@ async function enrichPromptAnchoredIntentFromImages(
           parsedIntent.constraints = parsedIntent.constraints || { mustHave: [], mustNotHave: [] };
           parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
           appendUnique(parsedIntent.constraints.mustHave, [styleHint]);
+        }
+        const styleTypeHints = [...new Set((structured.productTypeHints || []).flatMap((t) => normalizeTypeHintTerms(String(t))).filter(Boolean))].slice(0, 3);
+        if (styleTypeHints.length > 0) {
+          ev.productType = styleTypeHints;
+          parsedIntent.constraints = parsedIntent.constraints || { mustHave: [], mustNotHave: [] };
+          parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
+          appendUnique(parsedIntent.constraints.mustHave, styleTypeHints);
+          if (!parsedIntent.constraints.category) {
+            parsedIntent.constraints.category = styleTypeHints[0];
+          }
         }
       } catch {
         // best-effort fallback only
@@ -3611,10 +3744,44 @@ function buildMultiImageSearchHitRelevanceIntent(
     ),
   ];
   const astProductTypes = (ast.entities.productTypes || []).map((t) => t.toLowerCase());
-  let desiredProductTypes = [...new Set([...astProductTypes, ...lexicalTypeSeeds])];
+  const imageDerivedTypeTerms = [
+    ...new Set(
+      (parsedIntent.imageIntents || [])
+        .flatMap((ii) => {
+          const ev = ii.extractedValues as Record<string, unknown> | undefined;
+          const t = ev?.productType;
+          const arr = Array.isArray(t) ? t : t != null ? [t] : [];
+          return arr.flatMap((x) => normalizeTypeHintTerms(String(x)));
+        })
+        .map((t) => t.toLowerCase().trim())
+        .filter(Boolean),
+    ),
+  ];
+  const constraintDerivedTypeTerms = [
+    ...new Set(
+      [
+        parsedIntent.constraints?.category,
+        ...(parsedIntent.constraints?.mustHave ?? []),
+      ]
+        .flatMap((x) => normalizeTypeHintTerms(String(x ?? "")))
+        .map((t) => t.toLowerCase().trim())
+        .filter(Boolean),
+    ),
+  ];
+  let desiredProductTypes = [
+    ...new Set([
+      ...astProductTypes,
+      ...lexicalTypeSeeds,
+      ...imageDerivedTypeTerms,
+      ...constraintDerivedTypeTerms,
+    ]),
+  ];
 
   const promptAnchoredTypeIntent =
-    astProductTypes.length > 0 || lexicalTypeSeeds.length > 0;
+    astProductTypes.length > 0 ||
+    lexicalTypeSeeds.length > 0 ||
+    imageDerivedTypeTerms.length > 0 ||
+    constraintDerivedTypeTerms.length > 0;
 
   const modelCategory = parsedIntent.constraints?.category?.toLowerCase()?.trim();
   if (desiredProductTypes.length === 0 && modelCategory) {
@@ -3688,7 +3855,7 @@ function buildMultiImageSearchHitRelevanceIntent(
       hasPriceIntent);
 
   const softColorBiasOnly = !promptAnchoredColorIntent && rerankDesiredColors.length > 0;
-  const reliableTypeIntent = promptAnchoredTypeIntent;
+  const reliableTypeIntent = promptAnchoredTypeIntent && desiredProductTypes.length > 0;
 
   return {
     desiredProductTypes,

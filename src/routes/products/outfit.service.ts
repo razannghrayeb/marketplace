@@ -127,8 +127,17 @@ export async function getOutfitRecommendations(
     { audienceGenderHint }
   );
 
+  const rerankedSuggestions = await rerankCompleteStyleSuggestions({
+    sourceProduct,
+    sourceStyle,
+    sourceCategory: detected.category,
+    suggestions: completeLookResult.suggestions,
+    userId,
+    maxSuggestions: maxTotal * 2,
+  });
+
   const filteredSuggestions = applyCompleteStyleOptionFilters(
-    completeLookResult.suggestions,
+    rerankedSuggestions,
     options,
     sourceProduct
   ).slice(0, maxTotal);
@@ -319,6 +328,8 @@ type CompleteLookMappedSuggestion = {
   image_cdn?: string;
   score: number;
   reason: string;
+  matchReasons?: string[];
+  fashionScore?: number;
 };
 
 async function getCatalogProductById(productId: number): Promise<CompleteLookMappedSourceProduct | null> {
@@ -330,6 +341,247 @@ async function getCatalogProductById(productId: number): Promise<CompleteLookMap
     [productId]
   );
   return (result.rows[0] as CompleteLookMappedSourceProduct | undefined) ?? null;
+}
+
+type FashionRerankContext = {
+  sourceProduct: CompleteLookMappedSourceProduct;
+  sourceStyle: StyleProfile;
+  sourceCategory: ProductCategory;
+  suggestions: CompleteLookMappedSuggestion[];
+  userId?: number;
+  maxSuggestions: number;
+};
+
+type CandidateStyleRow = {
+  id: number;
+  title: string;
+  brand?: string | null;
+  category?: string | null;
+  color?: string | null;
+  price_cents?: number | null;
+  currency?: string | null;
+  image_url?: string | null;
+  image_cdn?: string | null;
+  description?: string | null;
+};
+
+function normalizeStyleToken(value: unknown): string {
+  return String(value || "").toLowerCase().trim();
+}
+
+function splitStyleTokens(value: string): string[] {
+  return value
+    .split(/[^a-z0-9]+/g)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function categoryFamily(label?: string | null): string {
+  const text = normalizeStyleToken(label);
+  if (!text) return "unknown";
+  if (text.includes("dress") || text.includes("gown")) return "dress";
+  if (text.includes("top") || text.includes("shirt") || text.includes("blouse") || text.includes("hoodie") || text.includes("sweater") || text.includes("tshirt") || text.includes("tee")) return "tops";
+  if (text.includes("bottom") || text.includes("pant") || text.includes("trouser") || text.includes("jean") || text.includes("skirt") || text.includes("short")) return "bottoms";
+  if (text.includes("outer") || text.includes("jacket") || text.includes("coat") || text.includes("blazer") || text.includes("cardigan") || text.includes("bomber")) return "outerwear";
+  if (text.includes("shoe") || text.includes("sneaker") || text.includes("heel") || text.includes("boot") || text.includes("sandal") || text.includes("loafer") || text.includes("flat")) return "shoes";
+  if (text.includes("bag") || text.includes("clutch") || text.includes("tote") || text.includes("backpack") || text.includes("crossbody")) return "bags";
+  if (text.includes("accessor") || text.includes("watch") || text.includes("scarf") || text.includes("hat") || text.includes("sunglass") || text.includes("jewel") || text.includes("belt")) return "accessories";
+  return text;
+}
+
+function scoreRangeMatch(source: number, candidate: number): number {
+  if (!Number.isFinite(source) || source <= 0 || !Number.isFinite(candidate) || candidate <= 0) return 0.55;
+  const ratio = candidate / source;
+  if (ratio >= 0.8 && ratio <= 1.35) return 1;
+  if (ratio >= 0.65 && ratio <= 1.7) return 0.82;
+  if (ratio >= 0.5 && ratio <= 2.2) return 0.65;
+  return 0.35;
+}
+
+function scoreAestheticCompatibility(source: StyleProfile["aesthetic"], candidate: StyleProfile["aesthetic"]): number {
+  if (source === candidate) return 1;
+  const compat: Record<StyleProfile["aesthetic"], StyleProfile["aesthetic"][]> = {
+    classic: ["minimalist", "modern", "romantic"],
+    modern: ["minimalist", "classic", "streetwear"],
+    bohemian: ["romantic", "classic", "modern"],
+    minimalist: ["modern", "classic", "streetwear"],
+    streetwear: ["sporty", "modern", "edgy"],
+    romantic: ["classic", "bohemian", "minimalist"],
+    edgy: ["streetwear", "modern", "sporty"],
+    sporty: ["streetwear", "modern", "minimalist"],
+  };
+  return compat[source]?.includes(candidate) ? 0.86 : 0.45;
+}
+
+function scoreSeasonCompatibility(source: StyleProfile["season"], candidate: StyleProfile["season"]): number {
+  if (source === candidate) return 1;
+  if (source === "all-season" || candidate === "all-season") return 0.82;
+  const pairs: Record<StyleProfile["season"], StyleProfile["season"][]> = {
+    spring: ["summer", "all-season"],
+    summer: ["spring", "all-season"],
+    fall: ["winter", "all-season"],
+    winter: ["fall", "all-season"],
+    "all-season": ["spring", "summer", "fall", "winter", "all-season"],
+  };
+  return pairs[source]?.includes(candidate) ? 0.74 : 0.42;
+}
+
+function scoreFormalityCompatibility(source: number, candidate: number): number {
+  const diff = Math.abs(source - candidate);
+  if (diff <= 1.2) return 1;
+  if (diff <= 2.5) return 0.86;
+  if (diff <= 4) return 0.62;
+  return 0.34;
+}
+
+function scoreColorHarmony(sourceStyle: StyleProfile, candidateColor: string | undefined): number {
+  const color = normalizeStyleToken(candidateColor);
+  if (!color) return 0.58;
+  const primary = normalizeStyleToken(sourceStyle.colorProfile.primary);
+  if (!primary || primary === "neutral") return 0.92;
+  if (primary === color) return 0.88;
+  const harmonyHit = sourceStyle.colorProfile.harmonies.some((h) => h.colors.map(normalizeStyleToken).includes(color));
+  if (harmonyHit) return 0.84;
+  const neutralColors = ["black", "white", "gray", "grey", "beige", "cream", "navy", "tan", "camel", "brown"];
+  if (neutralColors.includes(color)) return 0.78;
+  return 0.46;
+}
+
+function scoreCategoryCompatibility(sourceFamily: string, candidateFamily: string): number {
+  if (!sourceFamily || !candidateFamily) return 0.5;
+  if (sourceFamily === candidateFamily) return sourceFamily === "accessories" ? 0.74 : 0.38;
+  const pairingMap: Record<string, string[]> = {
+    dress: ["shoes", "bags", "outerwear", "accessories"],
+    tops: ["bottoms", "outerwear", "shoes", "accessories"],
+    bottoms: ["tops", "outerwear", "shoes", "accessories"],
+    outerwear: ["tops", "bottoms", "shoes", "accessories", "dress"],
+    shoes: ["tops", "bottoms", "dress", "outerwear", "bags", "accessories"],
+    bags: ["dress", "tops", "bottoms", "outerwear", "shoes", "accessories"],
+    accessories: ["dress", "tops", "bottoms", "outerwear", "shoes", "bags"],
+  };
+  if (pairingMap[sourceFamily]?.includes(candidateFamily)) return 0.93;
+  if (pairingMap[candidateFamily]?.includes(sourceFamily)) return 0.87;
+  return 0.44;
+}
+
+function buildFashionReasons(params: {
+  categoryScore: number;
+  colorScore: number;
+  aestheticScore: number;
+  formalityScore: number;
+  seasonScore: number;
+  priceScore: number;
+  patternScore: number;
+  materialScore: number;
+}): string[] {
+  const reasons: string[] = [];
+  if (params.categoryScore >= 0.9) reasons.push("strong outfit compatibility");
+  if (params.aestheticScore >= 0.85) reasons.push("same style family");
+  if (params.colorScore >= 0.84) reasons.push("harmonious color palette");
+  if (params.formalityScore >= 0.86) reasons.push("matching formality");
+  if (params.seasonScore >= 0.82) reasons.push("season-aligned");
+  if (params.patternScore >= 0.8) reasons.push("pattern balance");
+  if (params.materialScore >= 0.8) reasons.push("material-compatible");
+  if (params.priceScore >= 0.82) reasons.push("price-tier aligned");
+  if (reasons.length === 0) reasons.push("fashion-balanced match");
+  return reasons.slice(0, 4);
+}
+
+async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Promise<CompleteLookMappedSuggestion[]> {
+  if (!params.suggestions.length) return [];
+
+  const topSuggestions = [...params.suggestions]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.max(params.maxSuggestions, 20));
+
+  const candidateIds = Array.from(new Set(topSuggestions.map((s) => s.product_id))).slice(0, 80);
+  const candidateRows = await pg.query<CandidateStyleRow>(
+    `SELECT id, title, brand, category, color, price_cents, currency, image_url, image_cdn, description
+     FROM products
+     WHERE id = ANY($1)`,
+    [candidateIds]
+  );
+
+  const rowById = new Map<number, CandidateStyleRow>();
+  for (const row of candidateRows.rows) {
+    rowById.set(row.id, row);
+  }
+
+  const enriched = await Promise.all(topSuggestions.map(async (s) => {
+    const row = rowById.get(s.product_id);
+    if (!row) {
+      return {
+        ...s,
+        matchReasons: [s.reason || "fashion-compatible"],
+        fashionScore: Math.max(0, Math.min(1, s.score || 0)),
+      };
+    }
+
+    const candidateProduct: Product = {
+      id: row.id,
+      title: row.title,
+      brand: row.brand ?? undefined,
+      category: row.category ?? undefined,
+      color: row.color ?? undefined,
+      price_cents: Math.max(0, Math.round(Number(row.price_cents || 0))),
+      currency: row.currency || "USD",
+      image_url: row.image_url ?? undefined,
+      image_cdn: row.image_cdn ?? undefined,
+      description: row.description ?? undefined,
+    };
+
+    const candidateCategory = await detectCategory(candidateProduct.title, candidateProduct.description);
+    const candidateStyle = await buildStyleProfile(candidateProduct);
+
+    const sourceFamily = categoryFamily(params.sourceCategory);
+    const candidateFamily = categoryFamily(candidateCategory.category);
+    const categoryScore = scoreCategoryCompatibility(sourceFamily, candidateFamily);
+    const colorScore = scoreColorHarmony(params.sourceStyle, candidateStyle.colorProfile.primary);
+    const aestheticScore = scoreAestheticCompatibility(params.sourceStyle.aesthetic, candidateStyle.aesthetic);
+    const formalityScore = scoreFormalityCompatibility(params.sourceStyle.formality, candidateStyle.formality);
+    const seasonScore = scoreSeasonCompatibility(params.sourceStyle.season, candidateStyle.season);
+    const priceScore = scoreRangeMatch(params.sourceProduct.price_cents, candidateProduct.price_cents);
+
+    const sourcePattern = splitStyleTokens(`${params.sourceProduct.category || ""} ${params.sourceProduct.title || ""}`);
+    const candidatePattern = splitStyleTokens(`${candidateProduct.category || ""} ${candidateProduct.title || ""}`);
+    const patternOverlap = candidatePattern.some((token) => sourcePattern.includes(token)) ? 0.9 : 0.62;
+
+    const sourceMaterial = normalizeStyleToken(params.sourceProduct.description);
+    const candidateMaterial = normalizeStyleToken(candidateProduct.description);
+    const materialOverlap = sourceMaterial && candidateMaterial && sourceMaterial === candidateMaterial ? 0.88 : 0.65;
+
+    const fashionScore =
+      categoryScore * 0.24 +
+      aestheticScore * 0.22 +
+      colorScore * 0.18 +
+      formalityScore * 0.16 +
+      seasonScore * 0.08 +
+      patternOverlap * 0.06 +
+      materialOverlap * 0.04 +
+      priceScore * 0.02;
+
+    const retrievalScore = Math.max(0, Math.min(1, s.score || 0));
+    const finalScore = Math.round((fashionScore * 0.7 + retrievalScore * 0.3) * 1000) / 1000;
+
+    return {
+      ...s,
+      score: finalScore,
+      fashionScore: Math.round(fashionScore * 1000) / 1000,
+      matchReasons: buildFashionReasons({
+        categoryScore,
+        colorScore,
+        aestheticScore,
+        formalityScore,
+        seasonScore,
+        priceScore,
+        patternScore: patternOverlap,
+        materialScore: materialOverlap,
+      }),
+      reason: s.reason || "fashion-aware match",
+    };
+  }));
+
+  return enriched.sort((a, b) => b.score - a.score);
 }
 
 function normalizeAudienceHint(raw: unknown): string | undefined {
@@ -399,7 +651,7 @@ function mapCompleteLookToStyleResponse(params: {
       currency: sourceProduct.currency || "USD",
       image: s.image_cdn || s.image_url,
       matchScore: Math.round(Math.max(0, Math.min(1, s.score || 0)) * 100),
-      matchReasons: [s.reason || "Complements your selected item"],
+      matchReasons: s.matchReasons?.length ? s.matchReasons : [s.reason || "Complements your selected item"],
     });
 
     if (!reasons.has(categoryLabel)) {
@@ -469,7 +721,7 @@ function applyCompleteStyleOptionFilters(
     });
   }
 
-  return out;
+  return out.slice().sort((a, b) => (b.score || 0) - (a.score || 0));
 }
 
 async function mergeWardrobeOwnedIntoCompletion(
