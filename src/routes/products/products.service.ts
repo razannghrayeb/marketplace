@@ -2896,10 +2896,15 @@ export async function searchByImageWithSimilarity(
         }
         const v = visualSimFromHit(h);
         const existing = comp.finalRelevance01 ?? 0;
-        let rescueScore = Math.max(existing, v * 0.85);
+        const colorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
+        const colorLift = hasColorIntentForFinal
+          ? 0.58 + 0.42 * colorComp
+          : hasInferredColorIntentForRescue
+            ? 0.7 + 0.3 * colorComp
+            : 1;
+        let rescueScore = Math.max(existing, v * 0.85 * colorLift);
         if (intentAwareRescue) {
           const typeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
-          const colorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
           const sleeveComp = Math.max(0, Math.min(1, comp.sleeveCompliance ?? 0));
           const audienceComp = Math.max(0, Math.min(1, comp.audienceCompliance ?? 1));
           const complianceBlend =
@@ -2908,7 +2913,8 @@ export async function searchByImageWithSimilarity(
             0.3 * sleeveComp +
             0.15 * audienceComp;
           const intentAwareScore =
-            Math.max(0, Math.min(1, 0.72 * v + 0.28 * complianceBlend)) * 0.85;
+            Math.max(0, Math.min(1, 0.68 * v + 0.32 * complianceBlend)) *
+            (hasColorIntentForFinal ? 0.92 + 0.08 * colorComp : 0.85);
           rescueScore = Math.max(rescueScore, intentAwareScore);
         }
         // In rescue mode, keep intent-constrained scoring expressive instead of lifting all
@@ -2918,7 +2924,9 @@ export async function searchByImageWithSimilarity(
         const rescueFloor = intentAwareRescue
           ? hasOnlySoftColorHint
             ? Math.min(effectiveFinalAcceptMin, 0.35)  // Very conservative for crop-color-only cases
-            : Math.min(effectiveFinalAcceptMin, 0.56)
+            : hasColorIntentForFinal
+              ? Math.min(effectiveFinalAcceptMin, hasExplicitColorIntent ? 0.48 : 0.44)
+              : Math.min(effectiveFinalAcceptMin, 0.56)
           : effectiveFinalAcceptMin;
         comp.finalRelevance01 = Math.max(rescueScore, rescueFloor);
         finalScoreSourceById.set(String(h._source.product_id), "final_accept_rescue");
@@ -3278,8 +3286,8 @@ export async function searchByImageWithSimilarity(
         if (strongColorIntent) {
           const colorCompliance = Number(explainAny?.colorCompliance ?? 0);
           const colorTier = String(explainAny?.colorTier ?? "none").toLowerCase();
-          const minColorCompliance = hasExplicitColorIntent ? 0.22 : 0.12;
-          if (colorTier === "none" && colorCompliance <= 0) return false;
+          const minColorCompliance = hasExplicitColorIntent ? 0.42 : 0.28;
+          if (colorTier === "none" && colorCompliance < 0.22) return false;
           if (colorCompliance < minColorCompliance) return false;
         }
         return true;
