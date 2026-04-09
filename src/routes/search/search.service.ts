@@ -188,30 +188,9 @@ async function enrichClipOnlyIntentFromImages(
 ): Promise<void> {
   if (!preparedImages.length) return;
 
-  const colorHints = await extractQuickFashionColorHints(preparedImages[0], { maxHints: 2 });
-  const canonicalColorHints = colorHints
-    .map((c) => normalizeColorToken(c) ?? c.toLowerCase())
-    .filter(Boolean);
   const promptColorHints = extractPromptColorTerms(userPrompt);
-
-  let secondaryTypeHints: string[] = [];
-  let secondaryStyleHint: string | undefined;
-  const secondaryImage = preparedImages[1] ?? preparedImages[0];
-  try {
-    await blip.init();
-    const caption = await blip.caption(secondaryImage);
-    if (caption?.trim()) {
-      const structured = buildStructuredBlipOutput(caption);
-      secondaryTypeHints = (structured.productTypeHints || [])
-        .map((t) => String(t).toLowerCase().trim())
-        .filter(Boolean)
-        .slice(0, 3);
-      secondaryStyleHint = structured.style?.attrStyle || undefined;
-    }
-  } catch {
-    secondaryTypeHints = [];
-    secondaryStyleHint = undefined;
-  }
+  const promptTypeHints = extractPromptTypeTerms(userPrompt).slice(0, 3);
+  const promptStyleHints = extractPromptStyleTerms(userPrompt).slice(0, 3);
 
   parsedIntent.constraints = parsedIntent.constraints || {
     mustHave: [],
@@ -220,50 +199,57 @@ async function enrichClipOnlyIntentFromImages(
   parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
   parsedIntent.constraints.mustNotHave = parsedIntent.constraints.mustNotHave || [];
 
-  if (promptColorHints.length > 0) {
-    appendUnique(parsedIntent.constraints.mustHave, promptColorHints);
-  }
-  appendUnique(parsedIntent.constraints.mustHave, secondaryTypeHints);
+  if (promptColorHints.length > 0) appendUnique(parsedIntent.constraints.mustHave, promptColorHints);
+  if (promptTypeHints.length > 0) appendUnique(parsedIntent.constraints.mustHave, promptTypeHints);
+  if (promptStyleHints.length > 0) appendUnique(parsedIntent.constraints.mustHave, promptStyleHints);
 
-  if (!parsedIntent.constraints.category && secondaryTypeHints.length > 0) {
-    parsedIntent.constraints.category = secondaryTypeHints[0];
+  if (!parsedIntent.constraints.category && promptTypeHints.length > 0) {
+    parsedIntent.constraints.category = promptTypeHints[0];
   }
 
   if (!parsedIntent.imageIntents || parsedIntent.imageIntents.length === 0) {
     parsedIntent.imageIntents = [];
   }
 
-  const firstIntent = parsedIntent.imageIntents.find((x) => x.imageIndex === 0) || {
-    imageIndex: 0,
-    primaryAttributes: [],
-    weight: preparedImages.length > 1 ? 0.5 : 1,
-    extractedValues: {},
-    reasoning: 'Fallback from image-derived signals',
-  };
-  if (!parsedIntent.imageIntents.includes(firstIntent)) parsedIntent.imageIntents.push(firstIntent);
-  firstIntent.primaryAttributes = [...new Set([...(firstIntent.primaryAttributes || []), 'color'])];
-  firstIntent.extractedValues = firstIntent.extractedValues || {};
-  if (canonicalColorHints.length > 0) {
-    firstIntent.extractedValues.color = canonicalColorHints;
+  const colorIdx = findPromptAnchoredImageIndex(userPrompt, "color", preparedImages.length);
+  const styleIdx = findPromptAnchoredImageIndex(userPrompt, "style", preparedImages.length);
+  const textureIdx = findPromptAnchoredImageIndex(userPrompt, "texture", preparedImages.length);
+  const patternIdx = findPromptAnchoredImageIndex(userPrompt, "pattern", preparedImages.length);
+  const silhouetteIdx = findPromptAnchoredImageIndex(userPrompt, "silhouette", preparedImages.length);
+
+  if (colorIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, colorIdx);
+    if (!row.primaryAttributes.includes("color")) row.primaryAttributes.push("color");
+    const ev = row.extractedValues as Record<string, unknown>;
+    if (!ev.color) {
+      const hints = await extractQuickFashionColorHints(preparedImages[colorIdx], { maxHints: 3 });
+      const canonical = hints
+        .map((c) => normalizeColorToken(c) ?? c.toLowerCase())
+        .filter(Boolean);
+      if (canonical.length > 0) ev.color = canonical;
+    }
   }
 
-  if (preparedImages.length > 1) {
-    const secondIntent = parsedIntent.imageIntents.find((x) => x.imageIndex === 1) || {
-      imageIndex: 1,
-      primaryAttributes: [],
-      weight: 0.5,
-      extractedValues: {},
-      reasoning: 'Fallback from image-derived signals',
-    };
-    if (!parsedIntent.imageIntents.includes(secondIntent)) parsedIntent.imageIntents.push(secondIntent);
-    secondIntent.primaryAttributes = [...new Set([
-      ...(secondIntent.primaryAttributes || []),
-      'style',
-      'silhouette',
-    ])];
-    secondIntent.extractedValues = secondIntent.extractedValues || {};
-    if (secondaryStyleHint) secondIntent.extractedValues.style = secondaryStyleHint;
-    if (secondaryTypeHints.length > 0) secondIntent.extractedValues.category = secondaryTypeHints[0];
+  if (styleIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, styleIdx);
+    if (!row.primaryAttributes.includes("style")) row.primaryAttributes.push("style");
+  }
+
+  if (textureIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, textureIdx);
+    if (!row.primaryAttributes.includes("texture")) row.primaryAttributes.push("texture");
+    if (!row.primaryAttributes.includes("material")) row.primaryAttributes.push("material");
+  }
+
+  if (patternIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, patternIdx);
+    if (!row.primaryAttributes.includes("pattern")) row.primaryAttributes.push("pattern");
+  }
+
+  if (silhouetteIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, silhouetteIdx);
+    if (!row.primaryAttributes.includes("silhouette")) row.primaryAttributes.push("silhouette");
+    if (!row.primaryAttributes.includes("fit")) row.primaryAttributes.push("fit");
   }
 
   const n = Math.max(1, parsedIntent.imageIntents.length);
@@ -283,11 +269,11 @@ async function enrichClipOnlyIntentFromImages(
   }
 
   const signals: string[] = [];
-  if (canonicalColorHints.length > 0) signals.push(`img1 color=${canonicalColorHints.join('/')}`);
-  if (secondaryTypeHints.length > 0) signals.push(`img2 type=${secondaryTypeHints.join('/')}`);
-  if (secondaryStyleHint) signals.push(`img2 style=${secondaryStyleHint}`);
+  if (promptColorHints.length > 0) signals.push(`prompt color=${promptColorHints.join('/')}`);
+  if (promptTypeHints.length > 0) signals.push(`prompt type=${promptTypeHints.join('/')}`);
+  if (promptStyleHints.length > 0) signals.push(`prompt style=${promptStyleHints.join('/')}`);
   if (signals.length > 0) {
-    parsedIntent.searchStrategy = `Degraded image-derived constraints: ${signals.join(' | ')}`;
+    parsedIntent.searchStrategy = `Local prompt-anchored fallback: ${signals.join(' | ')}`;
     parsedIntent.confidence = Math.max(parsedIntent.confidence || 0, 0.38);
   }
 }
@@ -2119,11 +2105,11 @@ export async function multiImageSearch(
   try {
     let multiImageEffectiveFinalMin = config.search.finalAcceptMinImage;
     const prepared = await preprocessMultiImageBuffers(images);
-    const { parsedIntent, geminiDegraded } = await parseMultiImageIntentWithGuards(
+    const { parsedIntent, geminiDegraded, intentProvider, intentDegradedReason } = await parseMultiImageIntentWithGuards(
       prepared,
       userPrompt,
     );
-    if (geminiDegraded) {
+    if (geminiDegraded || intentProvider === "local") {
       await enrichClipOnlyIntentFromImages(parsedIntent, prepared, userPrompt);
     }
     await enrichPromptAnchoredIntentFromImages(parsedIntent, prepared, userPrompt);
@@ -2534,6 +2520,7 @@ export async function multiImageSearch(
 
     const explanationParts = [compositeQuery.explanation].filter(Boolean) as string[];
     if (geminiDegraded) explanationParts.push("[intent: gemini_degraded]");
+    if (intentProvider === "local") explanationParts.push("[intent_provider: local]");
     if (astPipelineDegraded) explanationParts.push("[relevance: ast_fast_path]");
 
     return {
@@ -2561,6 +2548,8 @@ export async function multiImageSearch(
         ...(hardConstraintFallbackUsed ? { hard_constraint_fallback_used: true } : {}),
         ...(finalFloorFallbackUsed ? { final_floor_fallback_used: true } : {}),
         ...(geminiDegraded ? { gemini_degraded: true } : {}),
+        intent_provider: intentProvider,
+        ...(intentDegradedReason ? { intent_degraded_reason: intentDegradedReason } : {}),
         ...(astPipelineDegraded ? { ast_pipeline_degraded: true } : {}),
       },
     };
@@ -2970,17 +2959,24 @@ export async function multiVectorWeightedSearch(
   results: MultiVectorSearchResult[];
   total: number;
   tookMs: number;
-  meta?: { gemini_degraded?: boolean };
+  meta?: {
+    gemini_degraded?: boolean;
+    intent_provider?: "local" | "gemini";
+    intent_degraded_reason?: string;
+  };
 }> {
   const startTime = Date.now();
   const { images, userPrompt, limit = 50, attributeWeights, explainScores = false } = request;
 
   try {
     const prepared = await preprocessMultiImageBuffers(images);
-    const { parsedIntent, geminiDegraded } = await parseMultiImageIntentWithGuards(
+    const { parsedIntent, geminiDegraded, intentProvider, intentDegradedReason } = await parseMultiImageIntentWithGuards(
       prepared,
       userPrompt,
     );
+    if (geminiDegraded || intentProvider === "local") {
+      await enrichClipOnlyIntentFromImages(parsedIntent, prepared, userPrompt);
+    }
     await enrichPromptAnchoredIntentFromImages(parsedIntent, prepared, userPrompt);
     reconcileIntentNegativeCollisions(parsedIntent);
 
@@ -3041,7 +3037,11 @@ export async function multiVectorWeightedSearch(
       results: reranked,
       total: reranked.length,
       tookMs: Date.now() - startTime,
-      meta: geminiDegraded ? { gemini_degraded: true } : undefined,
+      meta: {
+        ...(geminiDegraded ? { gemini_degraded: true } : {}),
+        intent_provider: intentProvider,
+        ...(intentDegradedReason ? { intent_degraded_reason: intentDegradedReason } : {}),
+      },
     };
   } catch (error) {
     console.error('[multiVectorWeightedSearch] Error:', error);
@@ -3138,13 +3138,38 @@ function clampEnv01(raw: string | undefined, fallback: number, max: number): num
 
 const MULTI_IMAGE_GEMINI_BUDGET_EXCEEDED = "MULTI_IMAGE_GEMINI_BUDGET";
 
+type MultiImageIntentProvider = "local" | "gemini";
+
+function resolveMultiImageIntentProvider(): MultiImageIntentProvider {
+  const raw = String(process.env.MULTI_IMAGE_INTENT_PROVIDER ?? "local").toLowerCase().trim();
+  if (raw === "gemini") return "gemini";
+  return "local";
+}
+
 /**
- * Bounded Gemini intent parse: missing key / outer budget → CLIP-only ParsedIntent (retrieval still runs).
+ * Bounded intent parse with pluggable provider.
+ * Default provider is local (no Gemini/OpenAI required). Gemini is optional via env.
  */
 async function parseMultiImageIntentWithGuards(
   prepared: Buffer[],
   userPrompt: string,
-): Promise<{ parsedIntent: ParsedIntent; geminiDegraded: boolean }> {
+): Promise<{
+  parsedIntent: ParsedIntent;
+  geminiDegraded: boolean;
+  intentProvider: MultiImageIntentProvider;
+  intentDegradedReason?: string;
+}> {
+  const intentProvider = resolveMultiImageIntentProvider();
+  if (intentProvider === "local") {
+    const parsedIntent = createClipOnlyParsedIntent(prepared.length, userPrompt);
+    return {
+      parsedIntent,
+      geminiDegraded: false,
+      intentProvider,
+      intentDegradedReason: "local_provider",
+    };
+  }
+
   const geminiBudgetMs = Math.max(
     1500,
     Number(process.env.MULTI_IMAGE_GEMINI_BUDGET_MS ?? 3000) || 3000,
@@ -3162,6 +3187,8 @@ async function parseMultiImageIntentWithGuards(
     return {
       parsedIntent: createClipOnlyParsedIntent(prepared.length, userPrompt),
       geminiDegraded: true,
+      intentProvider,
+      intentDegradedReason: "missing_gemini_api_key",
     };
   }
   const intentParser = new IntentParserService({
@@ -3176,13 +3203,21 @@ async function parseMultiImageIntentWithGuards(
         setTimeout(() => rej(new Error(MULTI_IMAGE_GEMINI_BUDGET_EXCEEDED)), geminiBudgetMs),
       ),
     ]);
-    return { parsedIntent, geminiDegraded: false };
+    const parserSignaledDegrade = Boolean(parsedIntent.meta?.degraded);
+    return {
+      parsedIntent,
+      geminiDegraded: parserSignaledDegrade,
+      intentProvider,
+      intentDegradedReason: parsedIntent.meta?.reason,
+    };
   } catch (e: any) {
     if (e?.message === MULTI_IMAGE_GEMINI_BUDGET_EXCEEDED) {
       console.warn("[multiImageIntent] Gemini budget exceeded, using CLIP-only intent");
       return {
         parsedIntent: createClipOnlyParsedIntent(prepared.length, userPrompt),
         geminiDegraded: true,
+        intentProvider,
+        intentDegradedReason: "gemini_budget_exceeded",
       };
     }
     throw e;

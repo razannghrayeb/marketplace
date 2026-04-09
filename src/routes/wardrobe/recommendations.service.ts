@@ -81,6 +81,23 @@ export const TRACKED_OUTFIT_SLOTS = new Set([
   "accessories",
 ]);
 
+const STYLE_TERMS_LEXICON = [
+  "casual",
+  "formal",
+  "minimalist",
+  "streetwear",
+  "classic",
+  "vintage",
+  "sporty",
+  "athleisure",
+  "boho",
+  "elegant",
+  "chic",
+  "edgy",
+  "business",
+  "romantic",
+] as const;
+
 function isTrackedOutfitSlot(value: string): boolean {
   return TRACKED_OUTFIT_SLOTS.has(value);
 }
@@ -694,9 +711,31 @@ async function runCompleteLookCore(
     currentItems,
     styleProfile?.season_coverage || []
   );
+  const currentEmbeddings = currentItems
+    .map((row) => parseVector(row.embedding))
+    .filter((vec): vec is number[] => Array.isArray(vec) && vec.length > 0);
+
+  let centroid = meanEmbedding(currentEmbeddings);
+  if (!centroid && styleProfile?.style_centroid && styleProfile.style_centroid.length > 0) {
+    centroid = styleProfile.style_centroid;
+  }
+
+  const visualContext = centroid
+    ? await inferVisualContextFromCentroid(centroid, currentCategoryList).catch(() => ({
+        inferredAudienceGender: null as AudienceGender | null,
+        styleTerms: [] as string[],
+      }))
+    : { inferredAudienceGender: null as AudienceGender | null, styleTerms: [] as string[] };
+
   const hintedAudienceGender = normalizeAudienceGenderValue(audienceOptions.audienceGenderHint);
+  const inferredFromAnchors = await inferPreferredAudienceGender(userId, currentItems, {
+    allowWardrobeHistory: false,
+    allowUserProfile: false,
+  });
   const inferredAudienceGender =
     hintedAudienceGender ||
+    inferredFromAnchors ||
+    visualContext.inferredAudienceGender ||
     (await inferPreferredAudienceGender(userId, currentItems, {
       allowWardrobeHistory: audienceOptions.allowUserAudienceFallback !== false,
       allowUserProfile: audienceOptions.allowUserAudienceFallback !== false,
@@ -709,15 +748,6 @@ async function runCompleteLookCore(
     shouldOfferOuterwear,
   });
 
-  const currentEmbeddings = currentItems
-    .map((row) => parseVector(row.embedding))
-    .filter((vec): vec is number[] => Array.isArray(vec) && vec.length > 0);
-
-  let centroid = meanEmbedding(currentEmbeddings);
-  if (!centroid && styleProfile?.style_centroid && styleProfile.style_centroid.length > 0) {
-    centroid = styleProfile.style_centroid;
-  }
-
   const userPriceTier = await inferPriceTier(userId).catch(() => null);
   const ownedProductIds = new Set<string>(
     currentItems
@@ -728,7 +758,13 @@ async function runCompleteLookCore(
   const wardrobeColorFamilies = extractWardrobeColorFamilies(currentItems);
   const preferredPatterns = topHistogramKeys(styleProfile?.pattern_histogram, 3);
   const preferredMaterials = topHistogramKeys(styleProfile?.material_histogram, 3);
-  const preferredStyleTerms = inferStyleTermsFromCurrentItems(currentItems, styleProfile?.occasion_coverage || []);
+  const preferredStyleTerms = Array.from(
+    new Set(
+      inferStyleTermsFromCurrentItems(currentItems, styleProfile?.occasion_coverage || []).concat(
+        visualContext.styleTerms
+      )
+    )
+  ).slice(0, 8);
   const preferredFormality = inferPreferredFormality(styleProfile?.occasion_coverage || []);
   const suggestionsByCategory = new Map<string, CompleteLookSuggestion[]>();
 
@@ -807,14 +843,20 @@ async function runCompleteLookCore(
           const patternAlignment = computeTokenAffinity(source.attr_pattern, preferredPatterns);
           const materialAlignment = computeTokenAffinity(source.attr_material, preferredMaterials);
           const formalityAlignment = computeFormalityAlignment(source, preferredFormality);
+
+          // Enforce style/occasion compatibility when we have a reliable style intent.
+          if (preferredStyleTerms.length > 0 && styleAlignment < 0.52 && formalityAlignment < 0.5) {
+            continue;
+          }
+
           const finalScore =
-            embeddingNorm * 0.38 +
-            categoryCompat * 0.19 +
-            colorHarmony * 0.13 +
-            styleAlignment * 0.11 +
-            patternAlignment * 0.06 +
+            embeddingNorm * 0.32 +
+            categoryCompat * 0.18 +
+            colorHarmony * 0.12 +
+            styleAlignment * 0.18 +
+            patternAlignment * 0.08 +
             materialAlignment * 0.05 +
-            formalityAlignment * 0.08;
+            formalityAlignment * 0.07;
 
           const reasons: string[] = [];
           if (embeddingNorm >= 0.75) reasons.push("strong style similarity");
@@ -1038,14 +1080,117 @@ function topHistogramKeys(histogram?: Record<string, number> | null, limit: numb
     .map(([key]) => key.toLowerCase().trim());
 }
 
+function extractStyleTokensFromText(text: string): string[] {
+  const s = text.toLowerCase();
+  const out = new Set<string>();
+  for (const token of STYLE_TERMS_LEXICON) {
+    if (new RegExp(`\\b${token}\\b`).test(s)) out.add(token);
+  }
+  return Array.from(out);
+}
+
+async function inferVisualContextFromCentroid(
+  centroid: number[],
+  currentCategoryList: string[]
+): Promise<{ inferredAudienceGender: AudienceGender | null; styleTerms: string[] }> {
+  const filter: any[] = [{ term: { availability: "in_stock" } }];
+  const canonicalCandidates = Array.from(
+    new Set(currentCategoryList.map((slot) => wardrobeSlotToCategoryCanonical(slot)))
+  ).filter(Boolean);
+  if (canonicalCandidates.length > 0) {
+    filter.push({ terms: { category_canonical: canonicalCandidates } });
+  }
+
+  const response = await osClient.search({
+    index: config.opensearch.index,
+    body: {
+      size: 30,
+      query: {
+        bool: {
+          must: {
+            knn: {
+              embedding: {
+                vector: centroid,
+                k: 80,
+              },
+            },
+          },
+          filter,
+        },
+      },
+      _source: ["title", "attr_style", "audience_gender", "attr_gender"],
+    },
+  });
+
+  const hits = response.body?.hits?.hits || [];
+  const styleCounts = new Map<string, number>();
+  const genderCounts: Record<AudienceGender, number> = { men: 0, women: 0, unisex: 0 };
+
+  for (const hit of hits) {
+    const source = hit?._source || {};
+    const rawScore = Number(hit?._score);
+    const weight = Number.isFinite(rawScore) ? Math.max(0.15, Math.min(1.5, rawScore / 6)) : 0.35;
+
+    const audience =
+      normalizeAudienceGenderValue(source?.audience_gender) ||
+      normalizeAudienceGenderValue(source?.attr_gender);
+    if (audience) {
+      genderCounts[audience] += audience === "unisex" ? weight * 0.4 : weight;
+    }
+
+    const styleBlob = `${String(source?.attr_style || "")} ${String(source?.title || "")}`;
+    for (const token of extractStyleTokensFromText(styleBlob)) {
+      styleCounts.set(token, (styleCounts.get(token) || 0) + weight);
+    }
+  }
+
+  const styleTerms = Array.from(styleCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([k]) => k);
+
+  let inferredAudienceGender: AudienceGender | null = null;
+  if (genderCounts.men > genderCounts.women && genderCounts.men >= 1.1) inferredAudienceGender = "men";
+  else if (genderCounts.women > genderCounts.men && genderCounts.women >= 1.1) inferredAudienceGender = "women";
+  else if (genderCounts.unisex >= 1.4) inferredAudienceGender = "unisex";
+
+  return { inferredAudienceGender, styleTerms };
+}
+
 function normalizeAudienceGenderValue(raw: unknown): AudienceGender | null {
   if (raw === null || raw === undefined) return null;
-  const s = String(raw).toLowerCase().trim();
-  if (!s) return null;
-  const normalized = normalizeQueryGender(s);
-  if (normalized === "men" || normalized === "women" || normalized === "unisex") return normalized;
-  if (["male", "man", "mens", "men's", "gents", "gentlemen"].includes(s)) return "men";
-  if (["female", "woman", "womens", "women's", "ladies", "lady"].includes(s)) return "women";
+
+  const values = Array.isArray(raw)
+    ? raw.flatMap((v) => String(v).split(/[|,;/]+/g))
+    : String(raw).split(/[|,;/]+/g);
+
+  let hasMen = false;
+  let hasWomen = false;
+  let hasUnisex = false;
+
+  for (const part of values) {
+    const s = String(part).toLowerCase().trim();
+    if (!s) continue;
+    const normalized = normalizeQueryGender(s);
+    if (normalized === "unisex") {
+      hasUnisex = true;
+      continue;
+    }
+    if (normalized === "men") {
+      hasMen = true;
+      continue;
+    }
+    if (normalized === "women") {
+      hasWomen = true;
+      continue;
+    }
+    if (["male", "man", "mens", "men's", "gents", "gentlemen"].includes(s)) hasMen = true;
+    if (["female", "woman", "womens", "women's", "ladies", "lady"].includes(s)) hasWomen = true;
+  }
+
+  if (hasUnisex || (hasMen && hasWomen)) return "unisex";
+  if (hasMen) return "men";
+  if (hasWomen) return "women";
   return null;
 }
 
@@ -1106,7 +1251,7 @@ async function inferPreferredAudienceGender(
       .then((r) => normalizeAudienceGenderValue(r.rows?.[0]?.gender))
       .catch(() => null);
     if (userGender && userGender !== "unisex") {
-      counts[userGender] += 5; // Strong weight: user profile takes precedence over weak item signals
+      counts[userGender] += 2;
     }
   }
 
@@ -1165,7 +1310,9 @@ function audienceGenderMatches(
   const textBlob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(
     source?.category_canonical || ""
   )}`;
-  const doc = normalizeAudienceGenderValue(source?.audience_gender ?? source?.attr_gender);
+  const doc =
+    normalizeAudienceGenderValue(source?.audience_gender) ||
+    normalizeAudienceGenderValue(source?.attr_gender);
 
   if (!inferred || inferred === "unisex") {
     if (!enforceNeutralWhenUnknown) return true;
@@ -1193,7 +1340,9 @@ function audienceGenderMatchesForSlot(
   // Bags/accessories often miss structured gender tags; in gendered looks,
   // avoid accepting unknown-gender docs for these slots.
   if (inferred && inferred !== "unisex" && (slot === "bags" || slot === "accessories")) {
-    const doc = normalizeAudienceGenderValue(source?.audience_gender ?? source?.attr_gender);
+    const doc =
+      normalizeAudienceGenderValue(source?.audience_gender) ||
+      normalizeAudienceGenderValue(source?.attr_gender);
     if (doc) return doc === inferred || doc === "unisex";
     const fromText = inferGenderFromText(
       `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.category_canonical || "")}`
@@ -1216,30 +1365,14 @@ function inferWarmWeatherLook(items: CompleteLookAnchorRow[]): boolean {
 }
 
 function inferStyleTermsFromCurrentItems(
-  items: Array<{ name?: string | null; category_name?: string | null }>,
+  items: Array<{ name?: string | null; title?: string | null; category_name?: string | null }>,
   occasionCoverage: string[]
 ): string[] {
   const terms = new Set<string>();
-  const styleLexicon = [
-    "casual",
-    "formal",
-    "minimalist",
-    "streetwear",
-    "classic",
-    "vintage",
-    "sporty",
-    "athleisure",
-    "boho",
-    "elegant",
-    "chic",
-    "edgy",
-    "business",
-    "romantic",
-  ];
 
   for (const item of items) {
-    const blob = `${String(item.name || "")} ${String(item.category_name || "")}`.toLowerCase();
-    for (const token of styleLexicon) {
+    const blob = `${String(item.name || "")} ${String(item.title || "")} ${String(item.category_name || "")}`.toLowerCase();
+    for (const token of STYLE_TERMS_LEXICON) {
       if (blob.includes(token)) terms.add(token);
     }
   }
@@ -1433,13 +1566,13 @@ async function fetchCategoryTopUpSuggestions(params: {
     const formalityAlignment = computeFormalityAlignment(source, params.preferredFormality);
 
     const score =
-      embeddingNorm * 0.36 +
-      categoryCompat * 0.2 +
-      colorHarmony * 0.14 +
-      styleAlignment * 0.12 +
-      patternAlignment * 0.07 +
+      embeddingNorm * 0.31 +
+      categoryCompat * 0.18 +
+      colorHarmony * 0.12 +
+      styleAlignment * 0.19 +
+      patternAlignment * 0.08 +
       materialAlignment * 0.05 +
-      formalityAlignment * 0.06;
+      formalityAlignment * 0.07;
 
     out.push({
       product_id: productId,
