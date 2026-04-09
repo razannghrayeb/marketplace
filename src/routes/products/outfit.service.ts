@@ -35,6 +35,7 @@ export interface CompleteStyleOptions {
 }
 
 export interface StyleRecommendationResponse {
+  completionMode: "product";
   sourceProduct: Product;
   detectedCategory: ProductCategory;
   style: {
@@ -280,6 +281,7 @@ export async function analyzeProductStyle(product: Product): Promise<{
  */
 function formatOutfitCompletion(result: OutfitCompletion): StyleRecommendationResponse {
   return {
+    completionMode: "product",
     sourceProduct: result.sourceProduct,
     detectedCategory: result.detectedCategory,
     style: {
@@ -633,7 +635,8 @@ function normalizeAudienceHint(raw: unknown): string | undefined {
 function completeStyleCategoryLabel(raw?: string): string {
   const c = String(raw || "").toLowerCase().trim();
   if (!c) return "Recommended";
-  if (c.includes("footwear") || c.includes("shoe")) return "Shoes";
+  if (c.includes("pyjama") || c.includes("pajama") || c.includes("sleepwear") || c.includes("nightwear") || c.includes("loungewear")) return "";
+  if (c.includes("footwear") || c.includes("shoe") || c.includes("sneaker") || c.includes("boot") || c.includes("sandal") || c.includes("loafer") || c.includes("heel") || c.includes("flat") || c.includes("mule") || c.includes("trainer")) return "Shoes";
   if (c.includes("dress")) return "Dresses";
   if (c.includes("outerwear") || c.includes("jacket") || c.includes("coat") || c.includes("blazer")) return "Outerwear";
   if (c.includes("top") || c.includes("shirt") || c.includes("blouse") || c.includes("hoodie") || c.includes("sweater")) return "Tops";
@@ -703,6 +706,7 @@ function mapCompleteLookToStyleResponse(params: {
 
   for (const s of completeLookResult.suggestions) {
     const categoryLabel = completeStyleCategoryLabel(s.category);
+    if (!categoryLabel) continue;
     if (!groups.has(categoryLabel)) groups.set(categoryLabel, []);
     const bucket = groups.get(categoryLabel)!;
     if (bucket.length >= maxPerCategory) continue;
@@ -735,6 +739,7 @@ function mapCompleteLookToStyleResponse(params: {
   }).sort((a, b) => a.priority - b.priority);
 
   return {
+    completionMode: "product",
     sourceProduct,
     detectedCategory,
     style: {
