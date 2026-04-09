@@ -983,6 +983,44 @@ function isAccessoryLikeCategory(productCategory: string): boolean {
   return c === "bags" || c === "accessories";
 }
 
+function inferMacroCategoryFromProductText(
+  haystack: string,
+  categoryText: string,
+  categoryCanonicalText: string,
+): string | null {
+  const txt = normalizeLooseText(`${categoryCanonicalText} ${categoryText} ${haystack}`);
+  if (!txt) return null;
+
+  if (/\b(shoe|shoes|sneaker|sneakers|boot|boots|sandal|sandals|heel|heels|loafer|loafers|flat|flats|mule|mules|slipper|slippers|pump|pumps|oxford|oxfords|trainer|trainers)\b/.test(txt)) {
+    return "footwear";
+  }
+  if (/\b(bag|bags|wallet|wallets|purse|purses|handbag|handbags|tote|totes|backpack|backpacks|clutch|clutches|crossbody|satchel|satchels)\b/.test(txt)) {
+    return "bags";
+  }
+  if (/\b(accessory|accessories|hat|hats|cap|caps|scarf|scarves|belt|belts|jewelry|jewellery|bracelet|bracelets|necklace|necklaces|earring|earrings|watch|watches)\b/.test(txt)) {
+    return "accessories";
+  }
+  if (/\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|parka|windbreaker|trench|bomber|gilet)\b/.test(txt)) {
+    return "outerwear";
+  }
+  // Keep bottoms before dresses so "dress pants" stays bottoms.
+  if (/\b(pant|pants|trouser|trousers|jean|jeans|short|shorts|skirt|skirts|legging|leggings|jogger|joggers|chino|chinos|culotte|culottes|cargo|bottom|bottoms)\b/.test(txt)) {
+    return "bottoms";
+  }
+  if (/\b(dress|dresses|gown|gowns|frock|frocks|maxi dress|midi dress|mini dress|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits)\b/.test(txt)) {
+    return "dresses";
+  }
+  if (/\b(top|tops|shirt|shirts|t shirt|tshirt|tee|tees|blouse|blouses|tank|camisole|cami|sweater|sweatshirt|pullover|tunic|polo|henley|crop top)\b/.test(txt)) {
+    return "tops";
+  }
+
+  const mappedCanonical = mapDetectionToCategory(categoryCanonicalText, 1);
+  if (mappedCanonical.confidence >= 0.75) return mappedCanonical.productCategory;
+  const mappedCategory = mapDetectionToCategory(categoryText, 1);
+  if (mappedCategory.confidence >= 0.75) return mappedCategory.productCategory;
+  return null;
+}
+
 function applyDetectionCategoryGuard(
   products: ProductResult[],
   detectionLabel: string,
@@ -1035,6 +1073,16 @@ function applyDetectionCategoryGuard(
     const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, term));
     if (!allowByTerm) return false;
 
+    // Strict for all detection types: product macro-category must match the detected macro-category.
+    const observedMacroCategory = inferMacroCategoryFromProductText(
+      haystack,
+      categoryText,
+      categoryCanonicalText,
+    );
+    if (!observedMacroCategory || observedMacroCategory !== categoryMapping.productCategory) {
+      return false;
+    }
+
     // Sleeve contradiction guard: when detection is explicitly sleeve-typed,
     // reject products that explicitly indicate a conflicting sleeve type.
     if (categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses") {
@@ -1045,7 +1093,7 @@ function applyDetectionCategoryGuard(
     }
 
     // Guard against broad lexical collisions (e.g. "denim jacket" inside trouser flow).
-    const productCategoryMacro = mapDetectionToCategory(String((p as any).category ?? ""), 1).productCategory;
+    const productCategoryMacro = observedMacroCategory;
     if (categoryMapping.productCategory === "footwear") {
       // Hard safety: footwear detections should not return outerwear/tops/bottoms even on lexical overlap.
       if (productCategoryMacro && productCategoryMacro !== "footwear") {
@@ -1054,6 +1102,16 @@ function applyDetectionCategoryGuard(
     }
     if (categoryMapping.productCategory === "bottoms") {
       if (productCategoryMacro === "outerwear" || /\b(jacket|coat|blazer|outerwear)\b/.test(haystack)) {
+        return false;
+      }
+    }
+    if (categoryMapping.productCategory === "dresses") {
+      // Prevent lexical collisions like "dress pants" / "dress shorts" from leaking
+      // into actual dress detections.
+      if (productCategoryMacro && productCategoryMacro !== "dresses") {
+        return false;
+      }
+      if (/\b(dress\s+pant|dress\s+pants|dress\s+short|dress\s+shorts|trouser|trousers|pant|pants|shorts?)\b/.test(haystack)) {
         return false;
       }
     }

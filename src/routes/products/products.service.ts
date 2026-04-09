@@ -2054,9 +2054,12 @@ export async function searchByImageWithSimilarity(
     if (inferredVsCrop.compliance > 0) {
       allColorsForRelevance = [...new Set([...normalizedInferredColors, ...normalizedCropColors])];
     } else {
-      // Conflict between full-image inference and crop-local evidence: trust crop colors
-      // to avoid leaking shirt/jacket color into trousers/shoes retrieval.
-      allColorsForRelevance = [...normalizedCropColors];
+      // If a detection-anchored garment intent exists, prefer inferred semantic color
+      // (e.g. caption says "white dress") over noisy crop pixels that can pick up
+      // background/shadows. For broad/noisy intents we keep crop-local preference.
+      allColorsForRelevance = hasDetectionAnchoredTypeIntent
+        ? [...normalizedInferredColors]
+        : [...normalizedCropColors];
     }
   } else if (normalizedInferredColors.length > 0) {
     allColorsForRelevance = [...normalizedInferredColors];
@@ -2634,6 +2637,7 @@ export async function searchByImageWithSimilarity(
     imageSearchPipelineDegraded = true;
     let rescuePool = visualGatedHits;
     if (hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) {
+      rescuePool = [];
       const desiredSleeveNorm = String(desiredSleeveForRelevance ?? "").toLowerCase();
       const enforceSleeveGate = desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless";
       const preferredSleeveMin = enforceSleeveGate ? 0.55 : 0.25;
@@ -2648,6 +2652,7 @@ export async function searchByImageWithSimilarity(
       const preferredTypeAligned = visualGatedHits.filter((h: any) => {
         const comp = complianceById.get(String(h._source.product_id));
         if (!comp) return false;
+        if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
         
         // Must pass type intent
         if (!((comp.exactTypeScore ?? 0) >= 1 || (comp.productTypeCompliance ?? 0) >= minTypeCompliance)) {
@@ -2689,6 +2694,8 @@ export async function searchByImageWithSimilarity(
         if (fallbackTypeAligned.length > 0) {
           rescuePool = fallbackTypeAligned;
         }
+      } else {
+        rescuePool = visualGatedHits;
       }
     }
     // Use visual similarity as the rescue signal instead of a flat minimum.
@@ -2704,6 +2711,10 @@ export async function searchByImageWithSimilarity(
     for (const h of rescuePool) {
       const comp = complianceById.get(String(h._source.product_id));
       if (comp) {
+        if (hasDetectionAnchoredTypeIntent) {
+          if ((comp.crossFamilyPenalty ?? 0) >= 0.62) continue;
+          if ((comp.exactTypeScore ?? 0) < 1 && (comp.productTypeCompliance ?? 0) < 0.22) continue;
+        }
         const v = visualSimFromHit(h);
         const existing = comp.finalRelevance01 ?? 0;
         let rescueScore = Math.max(existing, v * 0.85);
@@ -2774,10 +2785,10 @@ export async function searchByImageWithSimilarity(
         if (hasAudienceIntentForRelevance && aud < rescueAudienceMin) return false;
         // Intent-aware rescue: keep sparse-result protection, but do not inject
         // visually similar yet intent-contradicting products.
-        if ((hasExplicitTypeFilter || hasReliableTypeIntentForRelevance) && typeComp < rescueTypeMinIntent) return false;
+        if ((hasExplicitTypeFilter || hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) && typeComp < rescueTypeMinIntent) return false;
         if (hasColorIntentForFinal && colorComp < rescueColorMinIntent) return false;
         if (hasExplicitStyleIntent && styleComp < rescueStyleMinIntent) return false;
-        if (hasReliableTypeIntentForRelevance && crossFamily >= 0.5) return false;
+        if ((hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) && crossFamily >= 0.5) return false;
         // When only soft color hint exists, require stricter type alignment to prevent crop-color bleed.
         // This prevents pants/jackets from leaking into dress/shoe searches via weak soft color signals.
         if (softColorBiasOnly && typeComp < 0.3) return false;
