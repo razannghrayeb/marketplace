@@ -47,8 +47,10 @@ export interface SearchFilters {
   cropDominantColors?: string[];
   /** Caption / vision primary color token merged with crop for soft tier matching. */
   inferredPrimaryColor?: string | null;
-  /** Per-slot caption colors (e.g. topColor, jeansColor). */
+  /** Per-detection item colors keyed by detection label/index. */
   inferredColorsByItem?: Record<string, string | null>;
+  /** Confidence for each inferred item color (same keys as inferredColorsByItem). */
+  inferredColorsByItemConfidence?: Record<string, number>;
 }
 
 // ============================================================================
@@ -115,6 +117,7 @@ export interface ImageSearchParams extends SearchParams {
   /** Merged with crop k-means into soft color tier intent (Shop-the-Look / caption). */
   inferredPrimaryColor?: string | null;
   inferredColorsByItem?: Record<string, string | null>;
+  inferredColorsByItemConfidence?: Record<string, number>;
   /** Debug path: bypass rerank/final gates and return top-k by raw exact cosine (with existing category constraints). */
   debugRawCosineFirst?: boolean;
 }

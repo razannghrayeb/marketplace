@@ -59,6 +59,7 @@ export async function searchByImageWithSimilarity(
     blipSignal,
     inferredPrimaryColor,
     inferredColorsByItem,
+    inferredColorsByItemConfidence,
     debugRawCosineFirst,
   } = params;
 
@@ -80,6 +81,7 @@ export async function searchByImageWithSimilarity(
     blipSignal,
     inferredPrimaryColor,
     inferredColorsByItem,
+    inferredColorsByItemConfidence,
     debugRawCosineFirst,
   }) as Promise<SearchResultWithRelated>;
 }
