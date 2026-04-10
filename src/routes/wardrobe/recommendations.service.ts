@@ -192,7 +192,7 @@ export function inferMissingCategoriesForOutfit(params: {
   const complements: string[] = ["bags", "accessories"];
   if (shouldOfferOuterwear && !warmWeatherLikely) complements.push("outerwear");
   for (const extra of complements) {
-    if (missing.length >= 2) break;
+    if (missing.length >= 3) break;
     if (!currentCategories.has(extra) && !missing.includes(extra)) missing.push(extra);
   }
 
@@ -811,11 +811,18 @@ async function runCompleteLookCore(
   const preferredMaterials = topHistogramKeys(styleProfile?.material_histogram, 3);
   const preferredStyleTerms = Array.from(
     new Set(
-      inferStyleTermsFromCurrentItems(currentItems, styleProfile?.occasion_coverage || []).concat(
-        visualContext.styleTerms
-      )
+      inferStyleTermsFromCurrentItems(currentItems, styleProfile?.occasion_coverage || [])
+        .concat(visualContext.styleTerms)
+        .concat(
+          // Extract additional style terms from titles and categories for better keyword coverage
+          currentItems
+            .map(item => extractStyleTokensFromText(
+              `${String(item.name || "")} ${String(item.title || "")} ${String(item.category_name || "")}`
+            ))
+            .flat()
+        )
     )
-  ).slice(0, 8);
+  ).slice(0, 12);
   const preferredFormality = inferPreferredFormality(styleProfile?.occasion_coverage || []);
   const suggestionsByCategory = new Map<string, CompleteLookSuggestion[]>();
 
@@ -840,8 +847,8 @@ async function runCompleteLookCore(
 
   for (const category of missingCategories) {
     try {
-      const perCategoryPool = Math.max(20, Math.ceil(limit / Math.max(missingCategories.length, 1)) * 8);
-      const minPerCategory = Math.max(4, Math.ceil(limit / Math.max(1, missingCategories.length)));
+      const perCategoryPool = Math.max(40, Math.ceil(limit / Math.max(missingCategories.length, 1)) * 10);
+      const minPerCategory = Math.max(6, Math.ceil(limit / Math.max(1, missingCategories.length)));
       const canonical = wardrobeSlotToCategoryCanonical(category);
 
       const buildFilters = (applyPriceTier: boolean): any[] => {
@@ -883,10 +890,10 @@ async function runCompleteLookCore(
           const source = hit._source || {};
           if (!sourceMatchesSlot(category, source)) continue;
           if (!audienceGenderMatchesForSlot(inferredAudienceGender, source, category, enforceNeutralAudienceWhenUnknown, {
-            allowUnknownForBags: relaxedBagAudienceMode && category === "bags",
+            allowUnknownForBags: category === "bags",
           })) continue;
           if (!audienceAgeGroupMatchesWithOptions(inferredAgeGroup, source, {
-            allowUnknown: relaxedBagAudienceMode && category === "bags",
+            allowUnknown: category === "bags",
           })) continue;
           const productId = parseInt(source.product_id, 10);
           if (!productId || ownedProductIds.has(String(productId))) continue;
@@ -909,13 +916,13 @@ async function runCompleteLookCore(
           }
 
           const finalScore =
-            embeddingNorm * 0.32 +
-            categoryCompat * 0.18 +
-            colorHarmony * 0.12 +
-            styleAlignment * 0.18 +
+            embeddingNorm * 0.28 +
+            categoryCompat * 0.22 +
+            colorHarmony * 0.16 +
+            styleAlignment * 0.16 +
             patternAlignment * 0.08 +
             materialAlignment * 0.05 +
-            formalityAlignment * 0.07;
+            formalityAlignment * 0.05;
 
           if (finalScore < minimumSlotScore(category)) {
             continue;
@@ -933,7 +940,7 @@ async function runCompleteLookCore(
             product_id: productId,
             title: source.title,
             brand: source.brand,
-            category: source.category,
+            category,
             price_cents:
               source.price_usd != null && Number.isFinite(Number(source.price_usd))
                 ? Math.round(Number(source.price_usd) * 100)
@@ -1022,7 +1029,7 @@ async function runCompleteLookCore(
       }
 
       scored.sort((a, b) => b.score - a.score);
-      suggestionsByCategory.set(category, scored.slice(0, Math.max(minPerCategory, 6)));
+      suggestionsByCategory.set(category, scored.slice(0, Math.max(minPerCategory * 2, 12)));
     } catch (err) {
       console.error(`Error fetching ${category} suggestions:`, err);
       suggestionsByCategory.set(category, []);
@@ -1723,10 +1730,13 @@ function audienceGenderMatches(
     normalizeAudienceGenderValue(source?.audience_gender) ||
     normalizeAudienceGenderValue(source?.attr_gender);
 
-  // When inferred gender is null/unknown, accept items of any gender.
-  // Unknown-gender products (e.g., unbranded sweatshirts) should pair with items from all genders.
+  // When inferred gender is null/unknown, avoid leaking explicitly gendered docs
+  // when neutral enforcement is requested; otherwise allow broad matching.
   if (!inferred) {
-    return true;
+    if (!enforceNeutralWhenUnknown) return true;
+    if (doc && doc !== "unisex") return false;
+    const fromTextUnknown = inferGenderFromText(textBlob);
+    return !fromTextUnknown;
   }
 
   if (inferred === "unisex") {
@@ -2013,10 +2023,10 @@ async function fetchCategoryTopUpSuggestions(params: {
       source,
       matchedSlot,
       Boolean(params.enforceNeutralAudienceWhenUnknown),
-      { allowUnknownForBags: topUpBagOnlyRelaxed && matchedSlot === "bags" }
+      { allowUnknownForBags: matchedSlot === "bags" }
     )) continue;
     if (!audienceAgeGroupMatchesWithOptions(params.inferredAgeGroup, source, {
-      allowUnknown: topUpBagOnlyRelaxed && matchedSlot === "bags",
+      allowUnknown: matchedSlot === "bags",
     })) continue;
     const productId = parseInt(source.product_id, 10);
     if (!productId) continue;
@@ -2039,13 +2049,13 @@ async function fetchCategoryTopUpSuggestions(params: {
     const formalityAlignment = computeFormalityAlignment(source, params.preferredFormality);
 
     const score =
-      embeddingNorm * 0.31 +
-      categoryCompat * 0.18 +
-      colorHarmony * 0.12 +
-      styleAlignment * 0.19 +
+      embeddingNorm * 0.28 +
+      categoryCompat * 0.22 +
+      colorHarmony * 0.16 +
+      styleAlignment * 0.16 +
       patternAlignment * 0.08 +
       materialAlignment * 0.05 +
-      formalityAlignment * 0.07;
+      formalityAlignment * 0.05;
 
     if (score < minimumSlotScore(matchedSlot)) continue;
 
@@ -2053,7 +2063,7 @@ async function fetchCategoryTopUpSuggestions(params: {
       product_id: productId,
       title: source.title,
       brand: source.brand,
-      category: source.category,
+      category: matchedSlot,
       price_cents:
         source.price_usd != null && Number.isFinite(Number(source.price_usd))
           ? Math.round(Number(source.price_usd) * 100)
@@ -2061,7 +2071,7 @@ async function fetchCategoryTopUpSuggestions(params: {
       image_url: source.image_cdn,
       image_cdn: source.image_cdn,
       score: Math.round(score * 1000) / 1000,
-      reason: `Add ${guessedSlot} to complete the look (fashion-aware top-up match)`,
+      reason: `Add ${matchedSlot} to complete the look (fashion-aware top-up match)`,
       reason_type: "compatible",
       fitBreakdown: {
         embeddingNorm: Math.round(embeddingNorm * 1000) / 1000,
@@ -2214,7 +2224,7 @@ function computeCategoryCompatibility(targetCategory: string, currentCategories:
   for (const raw of currentCategories) {
     const current = normalizeWardrobeCategory(raw) || raw;
     if (target === current) {
-      best = Math.max(best, target === "accessories" ? 0.75 : 0.3);
+      best = Math.max(best, target === "accessories" ? 0.75 : 0.9);
       continue;
     }
     const pairs = GOOD_PAIRINGS[current] || [];

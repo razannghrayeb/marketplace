@@ -1128,6 +1128,7 @@ function collectConfidentColorTokenMap(params: {
   filtersRecord: Record<string, unknown>;
 }): Map<string, number> {
   const scores = new Map<string, number>();
+  const defaultItemColorConfidence = 0.62;
   const add = (value: string | null | undefined, confidence: number) => {
     const x = String(value ?? "").toLowerCase().trim();
     if (!x) return;
@@ -1142,7 +1143,8 @@ function collectConfidentColorTokenMap(params: {
   const itemColors = params.inferredByItem ?? {};
   const itemConfs = params.inferredByItemConfidence ?? {};
   for (const [key, value] of Object.entries(itemColors)) {
-    const conf = Number(itemConfs[key] ?? 0);
+    const rawConf = Number(itemConfs[key]);
+    const conf = Number.isFinite(rawConf) ? rawConf : defaultItemColorConfidence;
     if (conf >= colorConfidenceThreshold()) {
       add(value, conf);
     }
@@ -1155,7 +1157,8 @@ function collectConfidentColorTokenMap(params: {
   const fci = (params.filtersRecord as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence;
   if (fi && typeof fi === "object") {
     for (const [key, value] of Object.entries(fi)) {
-      const conf = Number(fci?.[key] ?? 0);
+      const rawConf = Number(fci?.[key]);
+      const conf = Number.isFinite(rawConf) ? rawConf : defaultItemColorConfidence;
       if (conf >= colorConfidenceThreshold()) {
         add(value, conf);
       }
@@ -1193,6 +1196,11 @@ function shouldPreferInferredColorWhenConflict(params: {
   const hasGarmentInferredColor =
     inferredPrimary.length > 0 || (Array.isArray(params.inferredColorTokens) && params.inferredColorTokens.length > 0);
   if (!hasGarmentInferredColor) return false;
+
+  // One-piece garments (especially dresses) are highly sensitive to lower-crop bleed
+  // from shoes/background. Prefer semantic inferred color when conflict appears.
+  if (/\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(merged)) return true;
+  if (/\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(typeText)) return true;
 
   // Prefer inferred color only for upper-body / outerwear intents.
   // Full-image inference is less reliable for full-body garments such as dresses,
@@ -2188,59 +2196,16 @@ export async function searchByImageWithSimilarity(
       inferredColorTokens.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
     ),
   ];
-  const inferredBlueFamilyIntent = normalizedInferredColors.some((c) =>
-    ["blue", "navy", "light-blue"].includes(String(c).toLowerCase()),
-  );
-  const cropHasBlueFamily = normalizedCropColors.some((c) =>
-    ["blue", "navy", "light-blue"].includes(String(c).toLowerCase()),
-  );
-  // Crop k-means frequently includes shadow black for denim; when inferred color
-  // already points to blue-family and crop agrees, drop neutral dark tokens so
-  // black products do not get promoted above blue jeans.
   const normalizedCropColorsForMerge =
-    !hasExplicitColorIntent && inferredBlueFamilyIntent && cropHasBlueFamily
-      ? normalizedCropColors.filter((c) => !["black", "gray", "charcoal"].includes(String(c).toLowerCase()))
-      : normalizedCropColors;
-  const preferInferredColorWhenConflict = shouldPreferInferredColorWhenConflict({
-    mergedCategoryForRelevance: typeof mergedCategoryForRelevance === "string" ? mergedCategoryForRelevance : undefined,
-    desiredProductTypes,
-    inferredPrimary: inferredPrimaryFromParams ?? (filtersRecord as { inferredPrimaryColor?: string | null }).inferredPrimaryColor,
-    inferredColorTokens,
-  });
+    normalizedCropColors.filter((c) => !["black", "gray", "charcoal"].includes(String(c).toLowerCase()));
 
   let allColorsForRelevance: string[];
   if (hasExplicitColorIntent) {
     allColorsForRelevance = [...explicitColorsForRelevance];
-  } else if (normalizedInferredColors.length > 0 && normalizedCropColors.length > 0) {
-    const inferredVsCrop = tieredColorListCompliance(
-      normalizedInferredColors,
-      normalizedCropColorsForMerge,
-      "any",
-    );
-    const cropHasExtraTokens = normalizedCropColorsForMerge.some(
-      (c) => !normalizedInferredColors.includes(c),
-    );
-    if (inferredVsCrop.compliance > 0 && !preferInferredColorWhenConflict) {
-      allColorsForRelevance = [...new Set([...normalizedInferredColors, ...normalizedCropColorsForMerge])];
-    } else if (inferredVsCrop.compliance > 0 && preferInferredColorWhenConflict && cropHasExtraTokens) {
-      // Inferred garment color is strong and crop color list includes extra
-      // likely background/shadow tokens. Keep the inferred token only.
-      allColorsForRelevance = [...normalizedInferredColors];
-    } else if (inferredVsCrop.compliance > 0) {
-      allColorsForRelevance = [...new Set([...normalizedInferredColors, ...normalizedCropColorsForMerge])];
-    } else if (preferInferredColorWhenConflict) {
-      // Dress-like queries frequently include background/footwear colors in crops.
-      // Use inferred garment color to avoid ranking wrong-color variants above true matches.
-      allColorsForRelevance = [...normalizedInferredColors];
-    } else {
-      // Conflict between full-image inference and crop-local evidence: trust crop colors
-      // to avoid leaking shirt/jacket color into trousers/shoes retrieval.
-      allColorsForRelevance = [...normalizedCropColorsForMerge];
-    }
   } else if (normalizedInferredColors.length > 0) {
     allColorsForRelevance = [...normalizedInferredColors];
   } else {
-    allColorsForRelevance = [...normalizedCropColors];
+    allColorsForRelevance = [...normalizedCropColorsForMerge];
   }
 
   const desiredColorsForRelevance = [
@@ -2360,7 +2325,7 @@ export async function searchByImageWithSimilarity(
   const colorIntentStrengthForFinal = hasExplicitColorIntent
     ? 1
     : hasInferredColorSignal
-      ? (preferInferredColorWhenConflict ? 0.82 : 0.68)
+      ? 0.82
       : hasCropColorSignal
         ? 0.42
         : 0;
@@ -2712,6 +2677,11 @@ export async function searchByImageWithSimilarity(
     // Primary: finalRelevance01 descending (incorporates visual + metadata signals).
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
     const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
+    if (hasColorIntentForFinal && Math.abs(fb - fa) <= 0.04) {
+      const ca = complianceById.get(ida)?.colorCompliance ?? 0;
+      const cb = complianceById.get(idb)?.colorCompliance ?? 0;
+      if (Math.abs(cb - ca) >= 0.03) return cb - ca;
+    }
     if (Math.abs(fb - fa) > 1e-6) return fb - fa;
     if (hasExplicitColorIntent || hasInferredColorSignal) {
       const ca = complianceById.get(ida)?.colorCompliance ?? 0;
@@ -3373,13 +3343,11 @@ export async function searchByImageWithSimilarity(
               desiredColorsEffective: desiredColorsForRelevance,
               colorIntentSource: hasExplicitColorIntent
                 ? "explicit"
-                : inferredColorTokens.length > 0 && hasCropColorSignal
-                  ? "crop+inferred"
-                  : inferredColorTokens.length > 0
-                    ? "inferred"
-                    : hasCropColorSignal
-                      ? "crop"
-                      : "none",
+                : inferredColorTokens.length > 0
+                  ? "inferred"
+                  : hasCropColorSignal
+                    ? "crop"
+                    : "none",
               desiredStyle: desiredStyleForRelevance,
               desiredSleeve: desiredSleeveForRelevance,
               desiredLength: (compliance as any).hasLengthIntent ? (desiredLengthForRelevance ?? undefined) : undefined,
