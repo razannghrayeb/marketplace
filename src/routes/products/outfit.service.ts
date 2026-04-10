@@ -20,6 +20,7 @@ import {
   logImpressionBatch,
   type RecommendationImpression,
 } from "../../lib/recommendations";
+import { catalogGenderFromCaption } from "../../lib/image/captionAttributeInference";
 
 // ============================================================================
 // Types
@@ -133,10 +134,11 @@ export async function getOutfitRecommendations(
   let audienceGenderHint =
     normalizeAudienceHint(sourceProduct.gender) || inferAudienceGenderHintFromProduct(sourceProduct);
   
-  // If gender is unknown and we have an image, use BLIP to detect gender from image content
+  // If gender is unknown and we have an image, use BLIP to detect gender from image content.
+  // We only trust BLIP when caption parsing yields a concrete retail gender signal.
   if (!audienceGenderHint && sourceProduct.image_url) {
     try {
-      audienceGenderHint = await inferGenderFromImageUrl(sourceProduct.image_url);
+      audienceGenderHint = await inferGenderFromImageUrl(sourceProduct.image_url, sourceProduct.title);
     } catch (err) {
       // Silently fail - fall back to text-based inference
       console.debug("[OutfitService] BLIP gender detection failed, using text hints");
@@ -356,7 +358,7 @@ function isClothingItem(product: { category?: string | null; title?: string | nu
  * Infer audience gender from image URL using BLIP vision model
  * Returns "men" | "women" | undefined based on high-confidence visual cues
  */
-async function inferGenderFromImageUrl(imageUrl: string): Promise<string | undefined> {
+async function inferGenderFromImageUrl(imageUrl: string, productTitle?: string | null): Promise<string | undefined> {
   try {
     // Fetch image buffer from URL with explicit abort timeout
     const controller = new AbortController();
@@ -375,11 +377,11 @@ async function inferGenderFromImageUrl(imageUrl: string): Promise<string | undef
     if (!caption || typeof caption !== "string") return undefined;
 
     // Extract gender from caption using same logic as image analysis service
-    const { inferAudienceFromCaption } = await import("../../lib/image/captionAttributeInference");
-    const audience = inferAudienceFromCaption(caption);
-    
-    // Only return high-confidence gender signals (explicitly mentioned in caption)
-    return audience?.gender;
+    const parsed = catalogGenderFromCaption(caption, productTitle);
+    if (parsed === "men" || parsed === "women" || parsed === "unisex") {
+      return parsed;
+    }
+    return undefined;
   } catch (err) {
     // Silently fail - BLIP may not be available or image may be unreachable
     return undefined;

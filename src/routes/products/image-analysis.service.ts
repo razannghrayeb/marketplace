@@ -585,6 +585,45 @@ function captionColorForProductCategory(
   return null;
 }
 
+function isOnePieceColorSensitiveCategory(productCategory: string, detectionLabel: string): boolean {
+  const cat = String(productCategory || "").toLowerCase();
+  const label = String(detectionLabel || "").toLowerCase();
+  if (cat === "dresses") return true;
+  return /\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(label);
+}
+
+async function extractDetectionCropColorsForRanking(params: {
+  clipBuffer: Buffer;
+  productCategory: string;
+  detectionLabel: string;
+}): Promise<string[]> {
+  const onePiece = isOnePieceColorSensitiveCategory(params.productCategory, params.detectionLabel);
+  let colorBuffer = params.clipBuffer;
+
+  if (onePiece) {
+    try {
+      const meta = await sharp(params.clipBuffer).metadata();
+      const w = meta.width ?? 0;
+      const h = meta.height ?? 0;
+      if (w >= 24 && h >= 48) {
+        // Exclude lower hem/footwear overlap where detector boxes touch shoes.
+        const topH = Math.max(24, Math.floor(h * 0.72));
+        colorBuffer = await sharp(params.clipBuffer)
+          .extract({ left: 0, top: 0, width: w, height: topH })
+          .png()
+          .toBuffer();
+      }
+    } catch {
+      // Fall back to the original clip buffer.
+    }
+  }
+
+  return extractDominantColorNames(colorBuffer, {
+    maxColors: 2,
+    minShare: onePiece ? 0.18 : 0.15,
+  });
+}
+
 function requiresSlotSpecificColor(productCategory: string): boolean {
   return productCategory === "tops" || productCategory === "bottoms" || productCategory === "dresses";
 }
@@ -1432,17 +1471,22 @@ function estimateCropColorConfidence(detection: Detection): number {
 function setDetectionColorIfHigherConfidence(
   colorByItem: Record<string, string | null>,
   confByItem: Record<string, number>,
+  sourceByItem: Record<string, number>,
   key: string,
   color: string | null | undefined,
   confidence: number,
+  sourcePriority: number,
 ): void {
   const c = String(color ?? "").toLowerCase().trim();
   if (!c) return;
   const nextConf = clamp01(confidence);
   const prevConf = clamp01(Number(confByItem[key] ?? 0));
-  if (!(key in colorByItem) || nextConf >= prevConf) {
+  const nextPriority = Math.max(0, Math.floor(sourcePriority));
+  const prevPriority = Math.max(0, Math.floor(Number(sourceByItem[key] ?? 0)));
+  if (!(key in colorByItem) || nextPriority > prevPriority || (nextPriority === prevPriority && nextConf >= prevConf)) {
     colorByItem[key] = c;
     confByItem[key] = nextConf;
+    sourceByItem[key] = nextPriority;
   }
 }
 
@@ -2057,6 +2101,7 @@ export class ImageAnalysisService {
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
     const inferredColorsByItem: Record<string, string | null> = {};
     const inferredColorsByItemConfidence: Record<string, number> = {};
+    const inferredColorsByItemSource: Record<string, number> = {};
     // Prefer BLIP caption color when explicit (e.g. "white dress") — full-image dominant can pick up sky/background.
     const captionPrimaryColor = pickConservativeFullImagePrimaryColor(captionColors, blipStructured);
     const allowDominantFallback = shouldUseDominantColorFallback(captionColors, blipStructured);
@@ -2144,6 +2189,7 @@ export class ImageAnalysisService {
       const itemColorKey = detectionColorKey(label, detectionIndex);
       if (!(itemColorKey in inferredColorsByItem)) inferredColorsByItem[itemColorKey] = null;
       if (!(itemColorKey in inferredColorsByItemConfidence)) inferredColorsByItemConfidence[itemColorKey] = 0;
+      if (!(itemColorKey in inferredColorsByItemSource)) inferredColorsByItemSource[itemColorKey] = 0;
 
       // "Closet similar" constraints: always enforce inferred audience gender when available.
       // Confidence gating here causes frequent cross-gender leakage (e.g. men query returning women items).
@@ -2175,15 +2221,21 @@ export class ImageAnalysisService {
       // from background/other items. These colors feed into soft color compliance
       // (rerankScore boost) but do not hard-gate final relevance.
       try {
-        const cropColors = await extractDominantColorNames(clipBuffer, { maxColors: 2, minShare: 0.15 });
+        const cropColors = await extractDetectionCropColorsForRanking({
+          clipBuffer,
+          productCategory: categoryMapping.productCategory,
+          detectionLabel: label,
+        });
         if (cropColors.length > 0) {
           (filters as any).cropDominantColors = cropColors;
           setDetectionColorIfHigherConfidence(
             inferredColorsByItem,
             inferredColorsByItemConfidence,
+            inferredColorsByItemSource,
             itemColorKey,
             cropColors[0],
             estimateCropColorConfidence(detection),
+            1,
           );
         }
       } catch { /* non-critical: color embedding channel still works */ }
@@ -2254,9 +2306,11 @@ export class ImageAnalysisService {
         setDetectionColorIfHigherConfidence(
           inferredColorsByItem,
           inferredColorsByItemConfidence,
+          inferredColorsByItemSource,
           itemColorKey,
           detCaptionColor,
           detConfidence,
+          2,
         );
         if (
           detConfidence >= imageBlipSoftHintConfidenceMin() &&
@@ -2938,6 +2992,7 @@ export class ImageAnalysisService {
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
     const inferredColorsByItem: Record<string, string | null> = {};
     const inferredColorsByItemConfidence: Record<string, number> = {};
+    const inferredColorsByItemSource: Record<string, number> = {};
     const captionPrimaryColor = pickConservativeFullImagePrimaryColor(captionColors, blipStructured);
     const allowDominantFallback = shouldUseDominantColorFallback(captionColors, blipStructured);
     const inferredPrimaryColor =
@@ -2977,6 +3032,7 @@ export class ImageAnalysisService {
         const itemColorKey = detectionColorKey(categorySource, i);
         if (!(itemColorKey in inferredColorsByItem)) inferredColorsByItem[itemColorKey] = null;
         if (!(itemColorKey in inferredColorsByItemConfidence)) inferredColorsByItemConfidence[itemColorKey] = 0;
+        if (!(itemColorKey in inferredColorsByItemSource)) inferredColorsByItemSource[itemColorKey] = 0;
 
         const filters: Partial<import("./types").SearchFilters> = {};
         const typeSeedSourceForSelection =
@@ -3022,15 +3078,21 @@ export class ImageAnalysisService {
         // from background/other items. These colors feed into soft color compliance
         // (rerankScore boost) but do not hard-gate final relevance.
         try {
-          const cropColors = await extractDominantColorNames(clipBuffer, { maxColors: 2, minShare: 0.15 });
+          const cropColors = await extractDetectionCropColorsForRanking({
+            clipBuffer,
+            productCategory: categoryMapping.productCategory,
+            detectionLabel: categorySource,
+          });
           if (cropColors.length > 0) {
             (filters as any).cropDominantColors = cropColors;
             setDetectionColorIfHigherConfidence(
               inferredColorsByItem,
               inferredColorsByItemConfidence,
+              inferredColorsByItemSource,
               itemColorKey,
               cropColors[0],
               estimateCropColorConfidence(detection),
+              1,
             );
           }
         } catch { /* non-critical: color embedding channel still works */ }
@@ -3079,9 +3141,11 @@ export class ImageAnalysisService {
           setDetectionColorIfHigherConfidence(
             inferredColorsByItem,
             inferredColorsByItemConfidence,
+            inferredColorsByItemSource,
             itemColorKey,
             detCaptionColor,
             detConfidence,
+            2,
           );
           if (
             detConfidence >= imageBlipSoftHintConfidenceMin() &&
