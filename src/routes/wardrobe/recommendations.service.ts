@@ -52,8 +52,9 @@ export interface CompleteLookSuggestion extends ProductRecommendation {
     colorHarmony: number;
     styleAlignment?: number;
     patternAlignment?: number;
-    materialAlignment?: number;
     formalityAlignment?: number;
+    materialAlignment?: number;
+
   };
 }
 
@@ -204,6 +205,19 @@ export function inferMissingCategoriesForOutfit(params: {
   }
 
   return missing.slice(0, 3);
+}
+
+function categoryLabelToSlot(label?: string | null): string {
+  const text = String(label || "").toLowerCase().trim();
+  if (!text) return "accessories";
+  if (text.includes("bag") || text.includes("backpack") || text.includes("crossbody") || text.includes("clutch") || text.includes("tote") || text.includes("wallet")) return "bags";
+  if (text.includes("accessor") || text.includes("watch") || text.includes("scarf") || text.includes("hat") || text.includes("belt") || text.includes("jewel") || text.includes("sunglass")) return "accessories";
+  if (text.includes("shoe") || text.includes("sneaker") || text.includes("boot") || text.includes("heel") || text.includes("sandal") || text.includes("loafer") || text.includes("flat") || text.includes("mule") || text.includes("trainer")) return "shoes";
+  if (text.includes("dress")) return "dresses";
+  if (text.includes("outer") || text.includes("jacket") || text.includes("coat") || text.includes("blazer")) return "outerwear";
+  if (text.includes("top") || text.includes("shirt") || text.includes("hoodie") || text.includes("sweater") || text.includes("blouse")) return "tops";
+  if (text.includes("bottom") || text.includes("pant") || text.includes("trouser") || text.includes("jean") || text.includes("skirt") || text.includes("short")) return "bottoms";
+  return "accessories";
 }
 
 function slotKeywordRegex(slot: string): RegExp | null {
@@ -890,10 +904,10 @@ async function runCompleteLookCore(
           const source = hit._source || {};
           if (!sourceMatchesSlot(category, source)) continue;
           if (!audienceGenderMatchesForSlot(inferredAudienceGender, source, category, enforceNeutralAudienceWhenUnknown, {
-            allowUnknownForBags: category === "bags",
+            allowUnknownForBags: categoryLabelToSlot(source.category_canonical || source.category) === "bags",
           })) continue;
           if (!audienceAgeGroupMatchesWithOptions(inferredAgeGroup, source, {
-            allowUnknown: category === "bags",
+            allowUnknown: categoryLabelToSlot(source.category_canonical || source.category) === "bags",
           })) continue;
           const productId = parseInt(source.product_id, 10);
           if (!productId || ownedProductIds.has(String(productId))) continue;
@@ -2023,17 +2037,17 @@ async function fetchCategoryTopUpSuggestions(params: {
       source,
       matchedSlot,
       Boolean(params.enforceNeutralAudienceWhenUnknown),
-      { allowUnknownForBags: matchedSlot === "bags" }
+      { allowUnknownForBags: categoryLabelToSlot(source.category_canonical || source.category) === "bags" }
     )) continue;
     if (!audienceAgeGroupMatchesWithOptions(params.inferredAgeGroup, source, {
-      allowUnknown: matchedSlot === "bags",
+      allowUnknown: categoryLabelToSlot(source.category_canonical || source.category) === "bags",
     })) continue;
     const productId = parseInt(source.product_id, 10);
     if (!productId) continue;
     const productKey = String(productId);
     if (params.ownedProductIds.has(productKey) || params.existingProductIds.has(productKey)) continue;
 
-    const guessedSlot = normalizeWardrobeCategory(source.category_canonical || source.category) || "accessories";
+    const guessedSlot = categoryLabelToSlot(source.category_canonical || source.category);
     const embeddingNorm = Number.isFinite(hit._score) ? Math.min(1, hit._score / maxRawScore) : 0.52;
     const categoryCompat = computeCategoryCompatibility(
       guessedSlot,

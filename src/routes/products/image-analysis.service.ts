@@ -28,6 +28,7 @@ import { getRedis } from "../../lib/redis";
 import {
   inferAudienceFromCaption,
   inferColorFromCaption,
+  primaryColorHintFromCaption,
 } from "../../lib/image/captionAttributeInference";
 import { buildStructuredBlipOutput } from "../../lib/image/blipStructured";
 import { extractDominantColorNames } from "../../lib/color/dominantColor";
@@ -368,6 +369,16 @@ function shouldUseDominantColorFallback(
   // replacing them with a single global dominant color.
   if (mentionsMultipleItems) return false;
   return false;
+}
+
+function resolveCaptionPrimaryColor(
+  caption: string,
+  captionColors: ReturnType<typeof inferColorFromCaption>,
+  structured: ReturnType<typeof buildStructuredBlipOutput>,
+): string | null {
+  const captionTextPrimary = primaryColorHintFromCaption(caption);
+  const structuredPrimary = pickConservativeFullImagePrimaryColor(captionColors, structured);
+  return structuredPrimary ?? captionTextPrimary ?? null;
 }
 
 function imageBlipConsistencySuppressionEnabled(): boolean {
@@ -2103,7 +2114,7 @@ export class ImageAnalysisService {
     const inferredColorsByItemConfidence: Record<string, number> = {};
     const inferredColorsByItemSource: Record<string, number> = {};
     // Prefer BLIP caption color when explicit (e.g. "white dress") — full-image dominant can pick up sky/background.
-    const captionPrimaryColor = pickConservativeFullImagePrimaryColor(captionColors, blipStructured);
+    const captionPrimaryColor = resolveCaptionPrimaryColor(blipCaption ?? "", captionColors, blipStructured);
     const allowDominantFallback = shouldUseDominantColorFallback(captionColors, blipStructured);
     const inferredPrimaryColor =
       captionPrimaryColor ??
@@ -2993,7 +3004,7 @@ export class ImageAnalysisService {
     const inferredColorsByItem: Record<string, string | null> = {};
     const inferredColorsByItemConfidence: Record<string, number> = {};
     const inferredColorsByItemSource: Record<string, number> = {};
-    const captionPrimaryColor = pickConservativeFullImagePrimaryColor(captionColors, blipStructured);
+    const captionPrimaryColor = resolveCaptionPrimaryColor(blipCaption ?? "", captionColors, blipStructured);
     const allowDominantFallback = shouldUseDominantColorFallback(captionColors, blipStructured);
     const inferredPrimaryColor =
       captionPrimaryColor ??
