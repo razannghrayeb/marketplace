@@ -22,8 +22,8 @@ export function CatalogPriceCharts({ volume }: Props) {
           <AreaChart data={data} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
             <defs>
               <linearGradient id="catalogPriceGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#10b981" stopOpacity={0.15} />
-                <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                <stop offset="5%" stopColor="#7c3aed" stopOpacity={0.15} />
+                <stop offset="95%" stopColor="#c026d3" stopOpacity={0} />
               </linearGradient>
             </defs>
             <XAxis dataKey="date" tick={{ fontSize: 10 }} tickLine={false} interval="preserveStartEnd" />
@@ -32,7 +32,7 @@ export function CatalogPriceCharts({ volume }: Props) {
               contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #e5e7eb' }}
               formatter={(v: number) => [v.toLocaleString(), 'Actual changes']}
             />
-            <Area type="monotone" dataKey="count" stroke="#10b981" strokeWidth={1.5} fill="url(#catalogPriceGrad)" />
+            <Area type="monotone" dataKey="count" stroke="#7c3aed" strokeWidth={1.5} fill="url(#catalogPriceGrad)" />
           </AreaChart>
         </ResponsiveContainer>
       )}

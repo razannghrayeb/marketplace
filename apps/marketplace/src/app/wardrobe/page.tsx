@@ -3,22 +3,21 @@
 import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Shirt, Plus, X, Upload, Camera, Sparkles, Eye, Trash2, ChevronRight, Wand2, ShoppingBag } from 'lucide-react'
+import { Shirt, Plus, X, Upload, Camera, Sparkles, Trash2, ChevronRight, Wand2, ShoppingBag, Pencil, ChevronDown } from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
 import { api } from '@/lib/api/client'
 import { endpoints } from '@/lib/api/endpoints'
 import { useAuthStore } from '@/store/auth'
-import type { Product } from '@/types/product'
+import type { WardrobeItemDto, WardrobeItemMetaForm } from '@/types/wardrobeItem'
+import {
+  appendWardrobeItemMultipartFields,
+  emptyWardrobeMetaForm,
+  patchBodyFromMetaForm,
+  wardrobeMetaFormFromItem,
+} from '@/types/wardrobeItem'
 
-interface WardrobeItem {
-  id: number
-  name?: string
-  category?: string
-  color?: string
-  image_url?: string
-  image_cdn?: string
-}
+type WardrobeItem = WardrobeItemDto
 
 interface CompleteLookSuggestion {
   id?: number
@@ -40,6 +39,14 @@ export default function WardrobePage() {
   const cameraInputRef = useRef<HTMLInputElement>(null)
   const [selectedItem, setSelectedItem] = useState<WardrobeItem | null>(null)
   const [showCompleteStyle, setShowCompleteStyle] = useState(false)
+  const [showUploadModal, setShowUploadModal] = useState(false)
+  const [pendingUploadFile, setPendingUploadFile] = useState<File | null>(null)
+  const [uploadMeta, setUploadMeta] = useState<WardrobeItemMetaForm>(() => emptyWardrobeMetaForm())
+  const [editingItem, setEditingItem] = useState<WardrobeItem | null>(null)
+  const [editMeta, setEditMeta] = useState<WardrobeItemMetaForm>(() => emptyWardrobeMetaForm())
+  const [completeAudience, setCompleteAudience] = useState<WardrobeItemMetaForm['audience_gender']>('')
+  const [completeAge, setCompleteAge] = useState<WardrobeItemMetaForm['age_group']>('')
+  const [completeLookLimit, setCompleteLookLimit] = useState(8)
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['wardrobe'],
@@ -53,17 +60,37 @@ export default function WardrobePage() {
   })
 
   const addMutation = useMutation({
-    mutationFn: async (file: File) => {
+    mutationFn: async ({ file, meta }: { file: File; meta: WardrobeItemMetaForm }) => {
       const formData = new FormData()
       formData.append('image', file)
       formData.append('source', 'uploaded')
+      appendWardrobeItemMultipartFields(formData, meta)
       const res = await api.postForm(endpoints.wardrobe.items, formData)
       if ((res as { success?: boolean }).success === false) {
         throw new Error((res as { error?: { message?: string } }).error?.message ?? 'Upload failed')
       }
       return res
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['wardrobe'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['wardrobe'] })
+      setShowUploadModal(false)
+      setPendingUploadFile(null)
+      setUploadMeta(emptyWardrobeMetaForm())
+    },
+  })
+
+  const editMutation = useMutation({
+    mutationFn: async ({ id, meta }: { id: number; meta: WardrobeItemMetaForm }) => {
+      const res = await api.patch(endpoints.wardrobe.item(id), patchBodyFromMetaForm(meta))
+      if ((res as { success?: boolean }).success === false) {
+        throw new Error((res as { error?: { message?: string } }).error?.message ?? 'Update failed')
+      }
+      return res
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['wardrobe'] })
+      setEditingItem(null)
+    },
   })
 
   const deleteMutation = useMutation({
@@ -81,13 +108,16 @@ export default function WardrobePage() {
   })
 
   const completeStyleQuery = useQuery({
-    queryKey: ['complete-style', selectedItem?.id],
+    queryKey: ['complete-style', selectedItem?.id, completeAudience, completeAge, completeLookLimit],
     queryFn: async () => {
       if (!selectedItem) return null
-      const res = await api.post<{ suggestions?: CompleteLookSuggestion[] }>(endpoints.wardrobe.completeLook, {
+      const body: Record<string, unknown> = {
         item_ids: [selectedItem.id],
-        limit: 8,
-      })
+        limit: completeLookLimit,
+      }
+      if (completeAudience) body.audience_gender = completeAudience
+      if (completeAge) body.age_group = completeAge
+      const res = await api.post<{ suggestions?: CompleteLookSuggestion[] }>(endpoints.wardrobe.completeLook, body)
       const r = res as { success?: boolean; suggestions?: CompleteLookSuggestion[]; data?: CompleteLookSuggestion[]; error?: { message?: string } }
       if (r?.success === false) throw new Error(r?.error?.message ?? 'Failed to get suggestions')
       return (r?.suggestions ?? r?.data ?? []) as CompleteLookSuggestion[]
@@ -95,11 +125,92 @@ export default function WardrobePage() {
     enabled: showCompleteStyle && !!selectedItem,
   })
 
+  const openUploadModal = (file: File) => {
+    setPendingUploadFile(file)
+    setUploadMeta(emptyWardrobeMetaForm())
+    setShowUploadModal(true)
+  }
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file) addMutation.mutate(file)
+    if (file) openUploadModal(file)
     e.target.value = ''
   }
+
+  const openEditModal = (item: WardrobeItem) => {
+    setEditingItem(item)
+    setEditMeta(wardrobeMetaFormFromItem(item))
+  }
+
+  const metaFields = (
+    meta: WardrobeItemMetaForm,
+    setMeta: (m: WardrobeItemMetaForm | ((prev: WardrobeItemMetaForm) => WardrobeItemMetaForm)) => void
+  ) => (
+    <div className="space-y-3 text-left">
+      <div className="grid sm:grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs font-semibold text-neutral-500 uppercase mb-1">Audience</label>
+          <select
+            className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900"
+            value={meta.audience_gender}
+            onChange={(e) =>
+              setMeta((m) => ({ ...m, audience_gender: e.target.value as WardrobeItemMetaForm['audience_gender'] }))
+            }
+          >
+            <option value="">Not specified</option>
+            <option value="men">Men</option>
+            <option value="women">Women</option>
+            <option value="unisex">Unisex</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs font-semibold text-neutral-500 uppercase mb-1">Age group</label>
+          <select
+            className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900"
+            value={meta.age_group}
+            onChange={(e) => setMeta((m) => ({ ...m, age_group: e.target.value as WardrobeItemMetaForm['age_group'] }))}
+          >
+            <option value="">Not specified</option>
+            <option value="adult">Adult</option>
+            <option value="kids">Kids</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label className="block text-xs font-semibold text-neutral-500 uppercase mb-1">Style tags (comma-separated)</label>
+        <input
+          type="text"
+          className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm"
+          placeholder='e.g. classic, minimalist'
+          value={meta.style_tags_csv}
+          onChange={(e) => setMeta((m) => ({ ...m, style_tags_csv: e.target.value }))}
+        />
+      </div>
+      <div>
+        <label className="block text-xs font-semibold text-neutral-500 uppercase mb-1">Occasion tags</label>
+        <input
+          type="text"
+          className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm"
+          placeholder="e.g. work, smart-casual"
+          value={meta.occasion_tags_csv}
+          onChange={(e) => setMeta((m) => ({ ...m, occasion_tags_csv: e.target.value }))}
+        />
+      </div>
+      <div>
+        <label className="block text-xs font-semibold text-neutral-500 uppercase mb-1">Season tags</label>
+        <input
+          type="text"
+          className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm"
+          placeholder="e.g. spring, fall"
+          value={meta.season_tags_csv}
+          onChange={(e) => setMeta((m) => ({ ...m, season_tags_csv: e.target.value }))}
+        />
+      </div>
+      <p className="text-[11px] text-neutral-400">
+        For uploads, tag lists are sent as JSON strings in multipart form data. All fields optional.
+      </p>
+    </div>
+  )
 
   const formatPrice = (cents: number, currency = 'USD') =>
     new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 0 }).format(cents / 100)
@@ -150,6 +261,9 @@ export default function WardrobePage() {
 
   const openCompleteStyle = (item: WardrobeItem) => {
     setSelectedItem(item)
+    setCompleteAudience((item.audience_gender as WardrobeItemMetaForm['audience_gender']) || '')
+    setCompleteAge((item.age_group as WardrobeItemMetaForm['age_group']) || '')
+    setCompleteLookLimit(8)
     setShowCompleteStyle(true)
   }
 
@@ -294,15 +408,25 @@ export default function WardrobePage() {
 
                   {/* Hover overlay actions */}
                   <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-                  <div className="absolute bottom-0 inset-x-0 p-3 flex items-center gap-2 translate-y-full group-hover:translate-y-0 transition-transform duration-300 ease-out">
+                  <div className="absolute bottom-0 inset-x-0 p-2 flex flex-wrap items-center gap-1.5 translate-y-full group-hover:translate-y-0 transition-transform duration-300 ease-out">
                     <button
+                      type="button"
                       onClick={() => openCompleteStyle(item)}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-white/90 backdrop-blur-sm text-violet-700 text-xs font-semibold hover:bg-white transition-colors"
+                      className="flex-1 min-w-[6rem] flex items-center justify-center gap-1 px-2 py-2 rounded-xl bg-white/90 backdrop-blur-sm text-violet-700 text-[11px] font-semibold hover:bg-white transition-colors"
                     >
-                      <Wand2 className="w-3.5 h-3.5" />
-                      Complete style
+                      <Wand2 className="w-3.5 h-3.5 shrink-0" />
+                      Style
                     </button>
                     <button
+                      type="button"
+                      onClick={() => openEditModal(item)}
+                      className="p-2 rounded-xl bg-white/90 backdrop-blur-sm text-neutral-500 hover:text-violet-600 hover:bg-white transition-colors"
+                      title="Edit details"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => deleteMutation.mutate(item.id)}
                       className="p-2 rounded-xl bg-white/90 backdrop-blur-sm text-neutral-500 hover:text-rose-500 hover:bg-white transition-colors"
                       title="Remove item"
@@ -314,14 +438,27 @@ export default function WardrobePage() {
 
                 <div className="p-3">
                   <p className="font-semibold text-neutral-800 text-sm truncate">{item.name || 'Unnamed item'}</p>
-                  <div className="flex items-center gap-2 mt-1">
+                  <div className="flex items-center gap-2 mt-1 flex-wrap">
                     {item.category && (
                       <span className="text-xs font-medium text-violet-600 bg-violet-50 px-2 py-0.5 rounded-full">{item.category}</span>
                     )}
                     {item.color && (
                       <span className="text-xs text-neutral-500">{item.color}</span>
                     )}
+                    {item.audience_gender && (
+                      <span className="text-[10px] font-medium text-neutral-600 bg-neutral-100 px-1.5 py-0.5 rounded">
+                        {item.audience_gender}
+                      </span>
+                    )}
+                    {item.age_group && (
+                      <span className="text-[10px] font-medium text-neutral-600 bg-neutral-100 px-1.5 py-0.5 rounded">{item.age_group}</span>
+                    )}
                   </div>
+                  {(item.style_tags?.length || item.occasion_tags?.length) ? (
+                    <p className="text-[10px] text-neutral-400 mt-1 line-clamp-2">
+                      {[...(item.style_tags ?? []), ...(item.occasion_tags ?? [])].slice(0, 6).join(' · ')}
+                    </p>
+                  ) : null}
                 </div>
               </motion.div>
             ))}
@@ -365,7 +502,43 @@ export default function WardrobePage() {
                 </button>
               </div>
 
-              <div className="p-6">
+                <div className="p-6">
+                <div className="grid sm:grid-cols-2 gap-3 mb-5">
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-500 uppercase mb-1">Catalog filter · audience</label>
+                    <select
+                      className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm"
+                      value={completeAudience}
+                      onChange={(e) => {
+                        setCompleteAudience(e.target.value as WardrobeItemMetaForm['audience_gender'])
+                        setCompleteLookLimit(8)
+                      }}
+                    >
+                      <option value="">From item / any</option>
+                      <option value="men">Men (strict)</option>
+                      <option value="women">Women (strict)</option>
+                      <option value="unisex">Unisex (strict)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-500 uppercase mb-1">Catalog filter · age</label>
+                    <select
+                      className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm"
+                      value={completeAge}
+                      onChange={(e) => {
+                        setCompleteAge(e.target.value as WardrobeItemMetaForm['age_group'])
+                        setCompleteLookLimit(8)
+                      }}
+                    >
+                      <option value="">From item / any</option>
+                      <option value="adult">Adult (strict)</option>
+                      <option value="kids">Kids (strict)</option>
+                    </select>
+                  </div>
+                </div>
+                <p className="text-[11px] text-neutral-400 mb-5">
+                  Optional: set strict audience/age to bias catalog results. Leave as “From item” to use metadata saved on this piece (or no filter).
+                </p>
                 {/* Selected item */}
                 <div className="flex items-center gap-4 p-3 rounded-2xl bg-neutral-50 border border-neutral-200/60 mb-6">
                   <div className="w-16 h-16 rounded-xl overflow-hidden bg-neutral-100 flex-shrink-0 ring-1 ring-neutral-200/60">
@@ -402,6 +575,7 @@ export default function WardrobePage() {
                     <p className="text-sm text-neutral-500">{(completeStyleQuery.error as Error)?.message}</p>
                   </div>
                 ) : completeStyleQuery.data && completeStyleQuery.data.length > 0 ? (
+                  <>
                   <motion.div
                     initial="hidden"
                     animate="visible"
@@ -458,6 +632,22 @@ export default function WardrobePage() {
                         )
                       })}
                   </motion.div>
+                  {(completeStyleQuery.data as CompleteLookSuggestion[]).filter((s) => suggestionProductId(s) != null)
+                    .length >= completeLookLimit &&
+                    completeLookLimit < 48 && (
+                      <div className="flex justify-center mt-6">
+                        <button
+                          type="button"
+                          onClick={() => setCompleteLookLimit((n) => Math.min(n + 8, 48))}
+                          disabled={completeStyleQuery.isFetching}
+                          className="inline-flex items-center gap-2 px-6 py-2.5 rounded-full border border-violet-200 bg-white text-sm font-semibold text-violet-700 hover:bg-violet-50 disabled:opacity-60"
+                        >
+                          <ChevronDown className="w-4 h-4" />
+                          {completeStyleQuery.isFetching ? 'Loading…' : 'Show more'}
+                        </button>
+                      </div>
+                    )}
+                  </>
                 ) : (
                   <div className="text-center py-12">
                     <div className="w-14 h-14 rounded-2xl bg-neutral-100 flex items-center justify-center mx-auto mb-4">
@@ -467,6 +657,133 @@ export default function WardrobePage() {
                     <p className="text-sm text-neutral-500">Add more items to your wardrobe for style matches.</p>
                   </div>
                 )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Upload metadata + confirm */}
+      <AnimatePresence>
+        {showUploadModal && pendingUploadFile && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setShowUploadModal(false)
+                setPendingUploadFile(null)
+              }
+            }}
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 24, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 24, scale: 0.98 }}
+              transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+              className="w-full max-w-md bg-white rounded-3xl shadow-2xl p-6 max-h-[90vh] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-3 mb-4">
+                <div>
+                  <h3 className="font-display font-bold text-neutral-900">Add wardrobe item</h3>
+                  <p className="text-xs text-neutral-500 mt-1 break-all">{pendingUploadFile.name}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowUploadModal(false)
+                    setPendingUploadFile(null)
+                  }}
+                  className="p-2 rounded-xl hover:bg-neutral-100 text-neutral-400"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              {metaFields(uploadMeta, setUploadMeta)}
+              {addMutation.isError && (
+                <p className="mt-3 text-sm text-rose-600">{(addMutation.error as Error)?.message ?? 'Upload failed'}</p>
+              )}
+              <div className="flex gap-2 mt-5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowUploadModal(false)
+                    setPendingUploadFile(null)
+                  }}
+                  className="flex-1 py-2.5 rounded-xl border border-neutral-200 text-sm font-semibold text-neutral-700 hover:bg-neutral-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={addMutation.isPending}
+                  onClick={() => addMutation.mutate({ file: pendingUploadFile, meta: uploadMeta })}
+                  className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-500 text-white text-sm font-semibold disabled:opacity-60"
+                >
+                  {addMutation.isPending ? 'Uploading…' : 'Upload'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Edit item metadata */}
+      <AnimatePresence>
+        {editingItem && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setEditingItem(null)
+            }}
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 24, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 24, scale: 0.98 }}
+              transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+              className="w-full max-w-md bg-white rounded-3xl shadow-2xl p-6 max-h-[90vh] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-3 mb-4">
+                <div>
+                  <h3 className="font-display font-bold text-neutral-900">Edit item details</h3>
+                  <p className="text-xs text-neutral-500 mt-1 truncate">{editingItem.name || `Item #${editingItem.id}`}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingItem(null)}
+                  className="p-2 rounded-xl hover:bg-neutral-100 text-neutral-400"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              {metaFields(editMeta, setEditMeta)}
+              {editMutation.isError && (
+                <p className="mt-3 text-sm text-rose-600">{(editMutation.error as Error)?.message ?? 'Update failed'}</p>
+              )}
+              <div className="flex gap-2 mt-5">
+                <button
+                  type="button"
+                  onClick={() => setEditingItem(null)}
+                  className="flex-1 py-2.5 rounded-xl border border-neutral-200 text-sm font-semibold text-neutral-700 hover:bg-neutral-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={editMutation.isPending}
+                  onClick={() => editMutation.mutate({ id: editingItem.id, meta: editMeta })}
+                  className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-500 text-white text-sm font-semibold disabled:opacity-60"
+                >
+                  {editMutation.isPending ? 'Saving…' : 'Save'}
+                </button>
               </div>
             </motion.div>
           </motion.div>

@@ -2,11 +2,11 @@
 
 import { useSearchParams } from 'next/navigation'
 import { Suspense, useState, useCallback, useEffect } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useInfiniteQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import Link from 'next/link'
 import NextImage from 'next/image'
-import { Search, Image, Sparkles, Layers, Camera, Upload, TrendingUp, ArrowRight, Shirt, Palette, Zap, Eye } from 'lucide-react'
+import { Search, Image, Sparkles, Layers, Camera, Upload, TrendingUp, ArrowRight, Shirt, Palette, Zap, Eye, ChevronDown } from 'lucide-react'
 import { api } from '@/lib/api/client'
 import { endpoints } from '@/lib/api/endpoints'
 import { ProductCard } from '@/components/product/ProductCard'
@@ -102,6 +102,39 @@ function priceCentsFromRecord(raw: Record<string, unknown>): number {
   return 0
 }
 
+const TEXT_SEARCH_PAGE_SIZE = 24
+
+/** Normalize GET /search and GET /products/search responses for paginated text search */
+function extractTextSearchPage(res: unknown): { results: unknown[]; total: number } {
+  const r = res as {
+    success?: boolean
+    error?: { message?: string }
+    results?: unknown[]
+    data?: unknown[] | { results?: unknown[] }
+    total?: number
+    meta?: { open_search_total_estimate?: number; total_results?: number; total_above_threshold?: number }
+  }
+  if (r?.success === false) {
+    throw new Error(r?.error?.message ?? 'Search failed')
+  }
+  let results: unknown[] = []
+  if (Array.isArray(r.results)) results = r.results
+  else if (r.data && Array.isArray(r.data)) results = r.data
+  else if (r.data && typeof r.data === 'object' && Array.isArray((r.data as { results?: unknown[] }).results)) {
+    results = (r.data as { results: unknown[] }).results
+  }
+  let total = typeof r.total === 'number' && Number.isFinite(r.total) ? r.total : 0
+  if (!total && r.meta && typeof r.meta === 'object') {
+    const est = r.meta.open_search_total_estimate
+    const tr = r.meta.total_results
+    const ta = r.meta.total_above_threshold
+    if (typeof est === 'number' && est > 0) total = est
+    else if (typeof tr === 'number' && tr > 0) total = tr
+    else if (typeof ta === 'number' && ta > 0) total = ta
+  }
+  return { results, total }
+}
+
 function toProducts(results: unknown[]): Product[] {
   return results
     .filter((r): r is Record<string, unknown> => {
@@ -176,7 +209,11 @@ function dedupeGroups(groups: DetectionGroup[]): DetectionGroup[] {
   return Array.from(merged.values())
 }
 
+const SHOP_THE_LOOK_INITIAL = 6
+const SHOP_THE_LOOK_STEP = 6
+
 function ShopTheLookResults({ groups, outfitImageUrl }: { groups: DetectionGroup[]; outfitImageUrl: string }) {
+  const [visibleByKey, setVisibleByKey] = useState<Record<string, number>>({})
   const deduped = dedupeGroups(groups.filter((g) => g.products && g.products.length > 0))
   if (deduped.length === 0) return null
 
@@ -225,6 +262,11 @@ function ShopTheLookResults({ groups, outfitImageUrl }: { groups: DetectionGroup
             const unique = parsed.filter((p) => { if (seen.has(p.id)) return false; seen.add(p.id); return true })
             if (unique.length === 0) return null
 
+            const sectionKey = `${catKey}-${i}-${group.detection?.label ?? ''}`
+            const visibleCap = visibleByKey[sectionKey] ?? SHOP_THE_LOOK_INITIAL
+            const visibleProducts = unique.slice(0, visibleCap)
+            const hasMoreInSection = unique.length > visibleProducts.length
+
             return (
               <motion.section
                 key={`${catKey}-${i}-${group.detection?.label ?? ''}-${group.detection?.confidence ?? 0}`}
@@ -240,14 +282,17 @@ function ShopTheLookResults({ groups, outfitImageUrl }: { groups: DetectionGroup
                     </div>
                     <div>
                       <h3 className="text-base font-bold text-neutral-900">{formatted}</h3>
-                      <p className="text-[11px] text-neutral-400">{unique.length} similar product{unique.length !== 1 ? 's' : ''} found</p>
+                      <p className="text-[11px] text-neutral-400">
+                        {unique.length} similar product{unique.length !== 1 ? 's' : ''} found
+                        {visibleProducts.length < unique.length ? ` · showing ${visibleProducts.length}` : ''}
+                      </p>
                     </div>
                   </div>
                 </div>
 
                 {/* Product cards grid */}
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                  {unique.map((product, j) => {
+                  {visibleProducts.map((product, j) => {
                     const imgUrl = product.image_cdn || product.image_url || ''
                     const cents = typeof product.price_cents === 'string' ? parseInt(product.price_cents, 10) : product.price_cents
                     const price = cents > 0
@@ -283,6 +328,24 @@ function ShopTheLookResults({ groups, outfitImageUrl }: { groups: DetectionGroup
                     )
                   })}
                 </div>
+
+                {hasMoreInSection && (
+                  <div className="mt-4 flex justify-center">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setVisibleByKey((prev) => ({
+                          ...prev,
+                          [sectionKey]: (prev[sectionKey] ?? SHOP_THE_LOOK_INITIAL) + SHOP_THE_LOOK_STEP,
+                        }))
+                      }
+                      className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full border border-violet-200 bg-white text-sm font-semibold text-violet-700 hover:bg-violet-50 transition-colors"
+                    >
+                      <ChevronDown className="w-4 h-4" />
+                      Show more
+                    </button>
+                  </div>
+                )}
 
                 {/* Divider between sections */}
                 {i < deduped.length - 1 && (
@@ -363,6 +426,37 @@ function SearchContent() {
         ? !!imageFile && searchTrigger > 0
         : !!q.trim()
 
+  const textSearchActive = mode === 'text' && !!q.trim()
+
+  const textSearchInfinite = useInfiniteQuery({
+    queryKey: ['search', 'text', 'paged', q.trim(), TEXT_SEARCH_PAGE_SIZE],
+    initialPageParam: 1,
+    queryFn: async ({ pageParam }) => {
+      let res = await api.get<unknown>(endpoints.search.text, {
+        q: q.trim(),
+        limit: TEXT_SEARCH_PAGE_SIZE,
+        page: pageParam,
+      })
+      if ((res as { success?: boolean }).success === false) {
+        res = await api.get<unknown>(endpoints.products.search, {
+          q: q.trim(),
+          limit: TEXT_SEARCH_PAGE_SIZE,
+          page: pageParam,
+        })
+      }
+      const { results, total } = extractTextSearchPage(res)
+      return { results, page: pageParam, total }
+    },
+    getNextPageParam: (lastPage, allPages) => {
+      if (lastPage.results.length < TEXT_SEARCH_PAGE_SIZE) return undefined
+      const loaded = allPages.reduce((acc, p) => acc + p.results.length, 0)
+      const reportedTotal = allPages[0]?.total ?? 0
+      if (reportedTotal > 0 && loaded >= reportedTotal) return undefined
+      return lastPage.page + 1
+    },
+    enabled: textSearchActive,
+  })
+
   const { data, isLoading, isFetching, isError, error } = useQuery({
     queryKey: [...queryKey],
     queryFn: async () => {
@@ -432,9 +526,9 @@ function SearchContent() {
         return { results: Array.isArray(results) ? results : [], query: { original: 'Image search' } }
       }
       if (q.trim()) {
-        let res = await api.get(endpoints.search.text, { q: q.trim(), limit: 24, page: 1 })
+        let res = await api.get(endpoints.search.text, { q: q.trim(), limit: TEXT_SEARCH_PAGE_SIZE, page: 1 })
         if (res.success === false) {
-          res = await api.get(endpoints.products.search, { q: q.trim(), limit: 24, page: 1 })
+          res = await api.get(endpoints.products.search, { q: q.trim(), limit: TEXT_SEARCH_PAGE_SIZE, page: 1 })
         }
         const resData = res as { success?: boolean; error?: { message?: string }; data?: { results?: Product[] }; results?: Product[] }
         if (resData?.success === false) {
@@ -445,14 +539,21 @@ function SearchContent() {
       }
       return { results: [], query: null }
     },
-    enabled: searchEnabled,
+    enabled: searchEnabled && !textSearchActive,
   })
 
   const rawResults = data && (data as { results?: unknown[] }).results
-  const products = toProducts(Array.isArray(rawResults) ? rawResults : [])
+  const products = textSearchActive
+    ? toProducts(textSearchInfinite.data?.pages.flatMap((p) => p.results) ?? [])
+    : toProducts(Array.isArray(rawResults) ? rawResults : [])
   const shopDetections: DetectionGroup[] = (data as { byDetection?: DetectionGroup[] })?.byDetection ?? []
 
-  const isLoadingState = isLoading || isFetching
+  const isLoadingState =
+    textSearchActive
+      ? textSearchInfinite.isLoading || textSearchInfinite.isFetching
+      : isLoading || isFetching
+  const searchFailed = textSearchActive ? textSearchInfinite.isError : isError
+  const searchError = textSearchActive ? textSearchInfinite.error : error
 
   const modeTabs = [
     { key: 'text', label: 'Text', Icon: Search, href: '/search', desc: 'Describe what you want' },
@@ -753,15 +854,33 @@ function SearchContent() {
           ) : products.length > 0 ? (
             <>
               <div className="flex items-center justify-between mb-6">
-                <p className="text-sm font-medium text-neutral-500">{products.length} result{products.length !== 1 ? 's' : ''} found</p>
+                <p className="text-sm font-medium text-neutral-500">
+                  {products.length} result{products.length !== 1 ? 's' : ''} shown
+                  {textSearchActive && (textSearchInfinite.data?.pages[0]?.total ?? 0) > 0
+                    ? ` · ${textSearchInfinite.data!.pages[0].total.toLocaleString()} total matches`
+                    : null}
+                </p>
               </div>
               <SearchProductGrid
                 products={products}
                 addToCompare={addToCompare}
                 inCompare={inCompare}
               />
+              {textSearchActive && textSearchInfinite.hasNextPage ? (
+                <div className="flex flex-col items-center gap-2 mt-10">
+                  <button
+                    type="button"
+                    onClick={() => textSearchInfinite.fetchNextPage()}
+                    disabled={textSearchInfinite.isFetchingNextPage}
+                    className="inline-flex items-center gap-2 px-8 py-3 rounded-full border-2 border-violet-200 bg-white text-sm font-semibold text-violet-700 hover:bg-violet-50 disabled:opacity-60 transition-colors"
+                  >
+                    <ChevronDown className="w-4 h-4" />
+                    {textSearchInfinite.isFetchingNextPage ? 'Loading…' : 'Load more results'}
+                  </button>
+                </div>
+              ) : null}
             </>
-          ) : isError ? (
+          ) : searchFailed ? (
             <motion.div
               initial={{ opacity: 0, scale: 0.97 }}
               animate={{ opacity: 1, scale: 1 }}
@@ -771,7 +890,9 @@ function SearchContent() {
                 <Search className="w-8 h-8" />
               </div>
               <p className="font-bold text-neutral-900 text-lg mb-2">Connection issue</p>
-              <p className="text-sm text-neutral-600 mb-4">{(error as Error)?.message ?? 'The backend is down or not responding.'}</p>
+              <p className="text-sm text-neutral-600 mb-4">
+                {(searchError as Error)?.message ?? 'The backend is down or not responding.'}
+              </p>
               <p className="text-xs text-neutral-400">Check that the API is running and configured correctly.</p>
             </motion.div>
           ) : (

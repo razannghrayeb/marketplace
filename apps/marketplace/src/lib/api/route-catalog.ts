@@ -133,6 +133,15 @@ export const routeCatalog: CatalogRoute[] = [
     defaultBody: '{\n  "product_ids": [1, 2, 3]\n}',
   },
   {
+    id: 'compare-decision',
+    group: 'Compare',
+    label: 'Compare decision journey (POST)',
+    method: 'POST',
+    path: '/api/compare',
+    defaultBody:
+      '{\n  "productIds": [1, 2],\n  "compareGoal": "best_value",\n  "mode": "standard"\n}',
+  },
+  {
     id: 'compare-quality',
     group: 'Compare',
     label: 'Quality score',
