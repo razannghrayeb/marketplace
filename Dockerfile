@@ -19,12 +19,12 @@ ENV HF_HOME=/root/.cache/huggingface
 ENV HF_HUB_DOWNLOAD_TIMEOUT=240
 ENV HF_HUB_ETAG_TIMEOUT=60
 RUN pip install --no-cache-dir huggingface_hub hf_transfer
-ENV HF_HUB_ENABLE_HF_TRANSFER=1
+ENV HF_HUB_ENABLE_HF_TRANSFER=0
 RUN set -eux; \
-    attempts=5; \
+    attempts=8; \
     for attempt in $(seq 1 ${attempts}); do \
       echo "Downloading models (attempt ${attempt}/${attempts})"; \
-      python -c "from huggingface_hub import snapshot_download; import os; token = os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, resume_download=True, max_workers=4, ignore_patterns=['*.gitattributes', '.gitattributes', 'README.md']); print('Models downloaded successfully to /models')" && break; \
+      python -c "from huggingface_hub import snapshot_download; import os; token = os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, resume_download=True, max_workers=1, allow_patterns=['*.onnx', '*.onnx.data', '*.json', '*.pkl', '*.txt'], ignore_patterns=['*.gitattributes', '.gitattributes', 'README.md']); print('Models downloaded successfully to /models')" && break; \
       if [ "${attempt}" -eq "${attempts}" ]; then \
         echo "Model download failed after ${attempts} attempts"; \
         exit 1; \
