@@ -56,7 +56,7 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
   "long sleeve outwear": {
     productCategory: "outerwear",
     confidence: 0.9,
-    alternativeCategories: ["jackets", "coats"],
+    alternativeCategories: ["jackets", "coats", "suits", "blazers", "dress jackets"],
     attributes: { sleeveLength: "long" },
   },
   "short sleeve outwear": {
