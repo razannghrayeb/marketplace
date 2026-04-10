@@ -246,6 +246,9 @@ function sourceMatchesSlot(slot: string, source: any): boolean {
   // Require the text intent to agree with the canonical slot when the index is noisy.
   // This prevents mislabeled items (e.g. shirts indexed as shoes) from leaking through.
   if (canonical && canonical !== slot) {
+    // Special case: hooded/hoodie items can be used as tops even if categorizied as outerwear
+    if (slot === "tops" && /\b(hoodie|hooded)\b/.test(blob)) return true;
+    
     const canonicalRegex = slotKeywordRegex(canonical);
     if (canonicalRegex && canonicalRegex.test(blob)) return false;
   }
@@ -689,6 +692,7 @@ type CompleteLookAudienceOptions = {
   ageGroupHint?: string | null;
   allowUserAudienceFallback?: boolean;
   enforceNeutralAudienceWhenUnknown?: boolean;
+  useDetectedCategoryForCurrentItems?: boolean;
 };
 
 async function runCompleteLookCore(
@@ -708,9 +712,20 @@ async function runCompleteLookCore(
     }
   };
 
-  // Pass 1: trust structured category signal first.
-  for (const row of currentItems) {
-    pushCategory(normalizeWardrobeCategory(row.category_name));
+  // Pass 0: use detected category if provided (e.g., image-detected "hoodie" for a jacket)
+  if (audienceOptions.useDetectedCategoryForCurrentItems) {
+    for (const row of currentItems as Array<any>) {
+      if (row.detected_category) {
+        pushCategory(normalizeWardrobeCategory(row.detected_category));
+      }
+    }
+  }
+
+  // Pass 1: trust structured category signal first (unless detected category was used).
+  if (!audienceOptions.useDetectedCategoryForCurrentItems) {
+    for (const row of currentItems) {
+      pushCategory(normalizeWardrobeCategory(row.category_name));
+    }
   }
 
   // Pass 2: only use weak text hints when structured categories are sparse.
@@ -1296,7 +1311,7 @@ export async function completeLookSuggestionsForCatalogProducts(
   userId: number,
   productIds: number[],
   limit: number = 10,
-  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint"> = {}
+  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint"> & { detectedCategories?: Map<number, string> } = {}
 ): Promise<CompleteLookSuggestionsResult> {
   if (!Array.isArray(productIds) || productIds.length === 0) {
     return {
@@ -1328,11 +1343,21 @@ export async function completeLookSuggestionsForCatalogProducts(
     [productIds]
   );
 
-  return await runCompleteLookCore(userId, productResult.rows as CompleteLookAnchorRow[], limit, "catalog-product", {
+  // Attach detected categories to rows if provided
+  const rows = productResult.rows as Array<CompleteLookAnchorRow & { detected_category?: string }>;
+  if (options.detectedCategories) {
+    for (const row of rows) {
+      const detected = options.detectedCategories.get(Number(row.product_id));
+      if (detected) row.detected_category = detected;
+    }
+  }
+
+  return await runCompleteLookCore(userId, rows, limit, "catalog-product", {
     audienceGenderHint: options.audienceGenderHint,
     ageGroupHint: options.ageGroupHint,
     allowUserAudienceFallback: false,
     enforceNeutralAudienceWhenUnknown: true,
+    useDetectedCategoryForCurrentItems: true,
   });
 }
 
@@ -1698,7 +1723,13 @@ function audienceGenderMatches(
     normalizeAudienceGenderValue(source?.audience_gender) ||
     normalizeAudienceGenderValue(source?.attr_gender);
 
-  if (!inferred || inferred === "unisex") {
+  // When inferred gender is null/unknown, accept items of any gender.
+  // Unknown-gender products (e.g., unbranded sweatshirts) should pair with items from all genders.
+  if (!inferred) {
+    return true;
+  }
+
+  if (inferred === "unisex") {
     if (!enforceNeutralWhenUnknown) return true;
     if (doc && doc !== "unisex") return false;
     const fromTextUnknown = inferGenderFromText(textBlob);

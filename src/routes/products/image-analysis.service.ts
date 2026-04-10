@@ -2321,9 +2321,10 @@ export class ImageAnalysisService {
         )
       ) {
         const filtersRetry = { ...filters } as typeof filters;
+        // Keep explicit audience gender across retries to prevent cross-gender leakage.
+        // Only relax age group when strict lock is not active.
         const preserveInferredAudience = strictAudienceLock;
         if (!preserveInferredAudience) {
-          delete (filtersRetry as any).gender;
           delete (filtersRetry as any).ageGroup;
         }
         delete (filtersRetry as any).style;
@@ -3148,9 +3149,10 @@ export class ImageAnalysisService {
           )
         ) {
           const filtersRetry = { ...filters } as typeof filters;
+          // Keep explicit audience gender across retries to prevent cross-gender leakage.
+          // Only relax age group when strict lock is not active.
           const preserveInferredAudience = strictAudienceLock;
           if (!preserveInferredAudience) {
-            delete (filtersRetry as any).gender;
             delete (filtersRetry as any).ageGroup;
           }
           delete (filtersRetry as any).style;

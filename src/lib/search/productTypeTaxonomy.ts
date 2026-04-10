@@ -32,8 +32,8 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   ["tshirt", "tee", "tees", "t-shirt", "tank", "camisole", "camis"],
   ["top", "tops", "cami"],
   ["polo", "polos", "polo shirt"],
-  // Outerwear (2)
-  ["blazer", "blazers", "sport coat", "sportcoat", "suit jacket"],
+  // Outerwear (3)
+  ["blazer", "blazers", "suit", "suits", "sport coat", "sportcoat", "suit jacket", "dress jacket"],
   [
     "jacket",
     "jackets",
@@ -218,6 +218,8 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
 
   blazer: "outerwear",
   blazers: "outerwear",
+  suit: "outerwear",
+  suits: "outerwear",
   jacket: "outerwear",
   jackets: "outerwear",
   coat: "outerwear",

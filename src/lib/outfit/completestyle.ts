@@ -860,6 +860,25 @@ function detectCategoryFallback(text: string): { category: ProductCategory; conf
     }
   }
   
+  // Direct "shoes" keyword match → prioritize footwear
+  if (/\b(shoes?|footwear)\b/.test(lowerText)) {
+    const footwearCategories = ['loafers', 'flats', 'boots', 'heels', 'sandals', 'sneakers'];
+    for (const cat of footwearCategories) {
+      if (categoryScores[cat as ProductCategory] > 0) {
+        // High confidence if "shoes" is mentioned + any footwear match found
+        return {
+          category: cat as ProductCategory,
+          confidence: 0.85,
+        };
+      }
+    }
+    // If "shoes" is mentioned but no specific type found, return unknown with shoes note
+    return {
+      category: 'unknown',
+      confidence: 0.5,
+    };
+  }
+  
   // Find highest scoring category
   let bestCategory: ProductCategory = "unknown";
   let bestScore = 0;

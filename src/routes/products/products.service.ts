@@ -46,6 +46,7 @@ import {
   extractLexicalProductTypeSeeds,
   scoreRerankProductTypeBreakdown,
 } from "../../lib/search/productTypeTaxonomy";
+import { attrGenderFilterClause } from "./opensearchFilters";
 import type { SearchResultWithRelated } from "./types";
 import { findRelatedProducts } from "../../lib/search/relatedProducts";
 
@@ -1190,15 +1191,14 @@ function shouldPreferInferredColorWhenConflict(params: {
   const typeText = params.desiredProductTypes.join(" ").toLowerCase();
   const inferredPrimary = String(params.inferredPrimary ?? "").toLowerCase().trim();
   const hasGarmentInferredColor =
-    inferredPrimary.length > 0 || Array.isArray(params.inferredColorTokens) && params.inferredColorTokens.length > 0;
+    inferredPrimary.length > 0 || (Array.isArray(params.inferredColorTokens) && params.inferredColorTokens.length > 0);
   if (!hasGarmentInferredColor) return false;
 
-  // For one-piece / upper-body garments, full-image semantic color (BLIP + inferred)
-  // is usually more trustworthy than tiny/noisy crop dominant tokens.
-  if (/dress|gown|romper|playsuit|jumpsuit/.test(merged)) return true;
-  if (/dress|gown|romper|playsuit|jumpsuit/.test(typeText)) return true;
-  if (/top|shirt|tee|t-?shirt|blouse|sweater|hoodie|jacket|coat|skirt|pants|trouser|jean/.test(merged)) return true;
-  if (/top|shirt|tee|t-?shirt|blouse|sweater|hoodie|jacket|coat|skirt|pants|trouser|jean/.test(typeText)) return true;
+  // Prefer inferred color only for upper-body / outerwear intents.
+  // Full-image inference is less reliable for full-body garments such as dresses,
+  // skirts, pants, and jumpsuits where crop-based color extraction is usually better.
+  if (/(top|shirt|tee|t-?shirt|blouse|sweater|hoodie|jacket|coat|blazer|outerwear)/.test(merged)) return true;
+  if (/(top|shirt|tee|t-?shirt|blouse|sweater|hoodie|jacket|coat|blazer|outerwear)/.test(typeText)) return true;
 
   return false;
 }
@@ -1628,7 +1628,11 @@ export async function searchByImageWithSimilarity(
           ? ["women", "womens", "female", "ladies", "woman", "girls", "girl", "boy", "boys", "kid", "kids", "youth", "toddler", "baby"]
           : [];
 
-    const shouldClauses: any[] = [{ term: { attr_gender: g } }];
+    const genderVariants = attrGenderFilterClause(g).terms.attr_gender;
+    const shouldClauses: any[] = [
+      { terms: { attr_gender: genderVariants } },
+      { terms: { audience_gender: genderVariants } },
+    ];
     if (imageGenderSoftEnv()) {
       // In "soft gender" mode, we also allow a title keyword match.
       for (const kw of titleGenderShould) {
@@ -2213,7 +2217,16 @@ export async function searchByImageWithSimilarity(
       normalizedCropColorsForMerge,
       "any",
     );
-    if (inferredVsCrop.compliance > 0) {
+    const cropHasExtraTokens = normalizedCropColorsForMerge.some(
+      (c) => !normalizedInferredColors.includes(c),
+    );
+    if (inferredVsCrop.compliance > 0 && !preferInferredColorWhenConflict) {
+      allColorsForRelevance = [...new Set([...normalizedInferredColors, ...normalizedCropColorsForMerge])];
+    } else if (inferredVsCrop.compliance > 0 && preferInferredColorWhenConflict && cropHasExtraTokens) {
+      // Inferred garment color is strong and crop color list includes extra
+      // likely background/shadow tokens. Keep the inferred token only.
+      allColorsForRelevance = [...normalizedInferredColors];
+    } else if (inferredVsCrop.compliance > 0) {
       allColorsForRelevance = [...new Set([...normalizedInferredColors, ...normalizedCropColorsForMerge])];
     } else if (preferInferredColorWhenConflict) {
       // Dress-like queries frequently include background/footwear colors in crops.
@@ -2265,7 +2278,7 @@ export async function searchByImageWithSimilarity(
   const desiredSleeveForRelevance =
     typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
 
-  const hasColorIntentForFinal = hasExplicitColorIntent || (hasInferredColorSignal && preferInferredColorWhenConflict);
+  const hasColorIntentForFinal = hasExplicitColorIntent || hasInferredColorSignal;
   const hasInferredColorIntentForRescue = !hasExplicitColorIntent && hasInferredColorSignal;
   const hasSoftColorIntentForRescue = !hasExplicitColorIntent && desiredColorsForRelevance.length > 0;
   // Crop-dominant colors affect reranking but should not gate final relevance

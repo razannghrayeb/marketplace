@@ -112,26 +112,55 @@ export async function getOutfitRecommendations(
     return null;
   }
 
+  // Skip outfit recommendations for non-clothing items (makeup, skincare, jewelry, accessories, etc.)
+  if (!isClothingItem(sourceProduct)) {
+    return null;
+  }
+
   // Use the wardrobe complete-look engine for product pages so both catalog product
   // and user wardrobe context influence the recommendations.
   const maxTotal = Math.max(1, Math.min(options.maxTotal ?? 20, 50));
   const maxPerCategory = Math.max(1, Math.min(options.maxPerCategory ?? 5, 20));
   const anchorProductIds = [productId];
-  const audienceGenderHint =
-    normalizeAudienceHint(sourceProduct.gender) || inferAudienceGenderHintFromProduct(sourceProduct);
-  const ageGroupHint = inferAgeGroupHintFromProduct(sourceProduct);
+  
   const detected = await detectCategory(sourceProduct.title, sourceProduct.description);
   const resolvedSourceCategory =
     detected.category === "unknown"
       ? inferSourceCategoryFallback(sourceProduct)
       : detected.category;
+  
+  // Infer audience gender from product metadata first, then BLIP if unknown
+  let audienceGenderHint =
+    normalizeAudienceHint(sourceProduct.gender) || inferAudienceGenderHintFromProduct(sourceProduct);
+  
+  // If gender is unknown and we have an image, use BLIP to detect gender from image content
+  if (!audienceGenderHint && sourceProduct.image_url) {
+    try {
+      audienceGenderHint = await inferGenderFromImageUrl(sourceProduct.image_url);
+    } catch (err) {
+      // Silently fail - fall back to text-based inference
+      console.debug("[OutfitService] BLIP gender detection failed, using text hints");
+    }
+  }
+  
+  const ageGroupHint = inferAgeGroupHintFromProduct(sourceProduct);
   const sourceStyle = await buildStyleProfile(sourceProduct);
+
+  // Pass detected category to wardrobe engine for accurate gap detection
+  const detectedCategoryMap = new Map<number, string>();
+  if (resolvedSourceCategory !== "unknown") {
+    detectedCategoryMap.set(productId, resolvedSourceCategory);
+  }
 
   const completeLookResult = await completeLookSuggestionsForCatalogProducts(
     userId ?? 0,
     anchorProductIds,
     maxTotal,
-    { audienceGenderHint, ageGroupHint }
+    { 
+      audienceGenderHint, 
+      ageGroupHint,
+      detectedCategories: detectedCategoryMap,
+    }
   );
 
   const rerankedSuggestions = await rerankCompleteStyleSuggestions({
@@ -272,13 +301,88 @@ export async function analyzeProductStyle(product: Product): Promise<{
   };
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
+/**
+ * Check if product is a clothing/apparel item (vs makeup, skincare, jewelry, etc.)
+ * Returns false for non-apparel items to skip outfit recommendations
+ */
+function isClothingItem(product: { category?: string | null; title?: string | null; description?: string | null }): boolean {
+  const text = `${String(product.category || "")} ${String(product.title || "")} ${String(product.description || "")}`.toLowerCase();
+  
+  // Non-apparel keywords that should be excluded
+  const nonApparel = [
+    "makeup", "cosmetics", "skincare", "beauty", "serum", "lotion", "cream", "moisturizer",
+    "lipstick", "mascara", "eyeshadow", "foundation", "concealer", "blush", "bronzer",
+    "nail polish", "nail care", "shampoo", "conditioner", "hair care", "hair product",
+    "perfume", "fragrance", "cologne", "deodorant", "antiperspirant",
+    "face wash", "cleanser", "toner", "essence", "mask", "exfoliator",
+    "sunscreen", "spf", "sunblock", "retinol", "niacinamide", "hyaluronic",
+    "jewelry box", "watch case", "jewelry cleaner", "jewelry box",
+    "phone case", "phone cover", "screen protector",
+    "home decor", "pillow", "bedding", "blanket", "throw"
+  ];
+  
+  // Apparel keywords that should be included
+  const apparel = [
+    "fashion", "clothes", "clothing", "apparel", "garment",
+    "dress", "shirt", "pants", "jeans", "shorts", "skirt", "tops", "tops",
+    "jacket", "coat", "blazer", "sweater", "hoodie", "cardigan", "sweatshirt",
+    "shoe", "shoes", "sneaker", "boot", "heel", "sandal", "loafer", "flat",
+    "bag", "backpack", "tote", "clutch", "wallet",
+    "scarf", "belt", "hat", "glove", "sock", "stocking",
+    "swimsuit", "swimwear", "bikini", "bathing",
+    "athletic", "activewear", "sportswear", "workout", "gym wear"
+  ];
+  
+  // Check for non-apparel exclusions first
+  for (const keyword of nonApparel) {
+    if (text.includes(keyword)) {
+      return false;
+    }
+  }
+  
+  // Check for apparel inclusions
+  for (const keyword of apparel) {
+    if (text.includes(keyword)) {
+      return true;
+    }
+  }
+  
+  // Default: if category exists and isn't explicitly non-apparel, allow it
+  // This handles generic cases and edge cases
+  return Boolean(product.category);
+}
 
 /**
- * Format OutfitCompletion to API response format
+ * Infer audience gender from image URL using BLIP vision model
+ * Returns "men" | "women" | undefined based on high-confidence visual cues
  */
+async function inferGenderFromImageUrl(imageUrl: string): Promise<string | undefined> {
+  try {
+    // Fetch image buffer from URL
+    const response = await fetch(imageUrl, { timeout: 10000 });
+    if (!response.ok) return undefined;
+    
+    const buffer = await response.buffer();
+    if (!buffer || buffer.length === 0) return undefined;
+
+    // Use BLIP to generate caption describing the image
+    const { blip } = await import("../../lib/image");
+    const caption = await blip(buffer).catch(() => null);
+    if (!caption || typeof caption !== "string") return undefined;
+
+    // Extract gender from caption using same logic as image analysis service
+    const { inferAudienceFromCaption } = await import("../../lib/image/captionAttributeInference");
+    const audience = inferAudienceFromCaption(caption);
+    
+    // Only return high-confidence gender signals (explicitly mentioned in caption)
+    return audience?.gender;
+  } catch (err) {
+    // Silently fail - BLIP may not be available or image may be unreachable
+    return undefined;
+  }
+}
+
+// ============================================================================
 function formatOutfitCompletion(result: OutfitCompletion): StyleRecommendationResponse {
   return {
     completionMode: "product",
@@ -713,11 +817,20 @@ function inferSourceCategoryFallback(sourceProduct: {
   description?: string | null;
 }): ProductCategory {
   const text = `${String(sourceProduct.category || "")} ${String(sourceProduct.title || "")} ${String(sourceProduct.description || "")}`.toLowerCase();
-  if (/\b(jacket|coat|blazer|outerwear|bomber|parka|windbreaker)\b/.test(text)) return "outerwear" as ProductCategory;
-  if (/\b(trouser|trousers|pants|jeans|skirt|shorts?|leggings|bottoms?)\b/.test(text)) return "bottoms" as ProductCategory;
-  if (/\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|hoodie|hoodies|sweater|sweaters|sweatshirt|sweatshirts|knit)\b/.test(text)) return "tops" as ProductCategory;
+  if (/\b(jacket|coat|blazer|outerwear|bomber|parka|windbreaker)\b/.test(text)) return "jacket" as ProductCategory;
+  if (/\b(trouser|trousers|pants|jeans|skirt|shorts?|leggings|bottoms?)\b/.test(text)) return "pants" as ProductCategory;
+  if (/\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|hoodie|hoodies|sweater|sweaters|sweatshirt|sweatshirts|knit)\b/.test(text)) return "top" as ProductCategory;
   if (/\b(dress|gown|romper|jumpsuit|playsuit)\b/.test(text)) return "dress" as ProductCategory;
-  if (/\b(shoe|sneaker|boot|heel|sandal|loafer|flats?)\b/.test(text)) return "shoes" as ProductCategory;
+  
+  // For shoes, detect specific type or default to loafers
+  if (/\b(shoe|shoes|sneaker|sneakers|trainer|trainers|running shoe|athletic|canvas)\b/.test(text)) return "sneakers" as ProductCategory;
+  if (/\b(heel|heels|pump|pumps|stiletto|stilettos)\b/.test(text)) return "heels" as ProductCategory;
+  if (/\b(boot|boots|ankle boot|knee boot|combat)\b/.test(text)) return "boots" as ProductCategory;
+  if (/\b(sandal|sandals|flip flop|slide|slide sandal)\b/.test(text)) return "sandals" as ProductCategory;
+  if (/\b(loafer|loafers|moccasin|moccasins|slip-?on|penny)\b/.test(text)) return "loafers" as ProductCategory;
+  if (/\b(flat|flats|ballet flat|ballerina|flat shoe)\b/.test(text)) return "flats" as ProductCategory;
+  if (/\b(shoe|footwear|shoes?)\b/.test(text)) return "loafers" as ProductCategory; // Default to loafers for generic shoes
+  
   if (/\b(bag|wallet|backpack|accessor|crossbody|clutch|tote)\b/.test(text)) return "accessories" as ProductCategory;
   return "unknown" as ProductCategory;
 }
@@ -957,6 +1070,10 @@ async function mergeWardrobeOwnedIntoCompletion(
   return completion;
 }
 
+/**
+ * Infer audience gender from image URL using BLIP vision model
+ * Returns "men" | "women" | undefined based on high-confidence visual cues
+ */
 /**
  * Get human-readable formality label
  */
