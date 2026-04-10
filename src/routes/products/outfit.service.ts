@@ -358,16 +358,20 @@ function isClothingItem(product: { category?: string | null; title?: string | nu
  */
 async function inferGenderFromImageUrl(imageUrl: string): Promise<string | undefined> {
   try {
-    // Fetch image buffer from URL
-    const response = await fetch(imageUrl, { timeout: 10000 });
+    // Fetch image buffer from URL with explicit abort timeout
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const response = await fetch(imageUrl, { signal: controller.signal });
+    clearTimeout(timeout);
     if (!response.ok) return undefined;
-    
-    const buffer = await response.buffer();
+
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
     if (!buffer || buffer.length === 0) return undefined;
 
     // Use BLIP to generate caption describing the image
     const { blip } = await import("../../lib/image");
-    const caption = await blip(buffer).catch(() => null);
+    const caption = await blip.caption(buffer).catch(() => null);
     if (!caption || typeof caption !== "string") return undefined;
 
     // Extract gender from caption using same logic as image analysis service
