@@ -16,8 +16,44 @@ FROM python:3.11-slim AS model-downloader
 ARG HF_TOKEN=""
 ENV HF_TOKEN=${HF_TOKEN}
 ENV HF_HOME=/root/.cache/huggingface
-RUN pip install --no-cache-dir huggingface_hub
-RUN python -c "from huggingface_hub import snapshot_download; import os; token = os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, ignore_patterns=['*.gitattributes', '.gitattributes', 'README.md']); print('Models downloaded successfully to /models')"
+ENV HF_HUB_DOWNLOAD_TIMEOUT=240
+ENV HF_HUB_ETAG_TIMEOUT=60
+RUN pip install --no-cache-dir huggingface_hub hf_transfer
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+RUN python - <<'PY'
+import os
+import time
+from huggingface_hub import snapshot_download
+
+token = os.environ.get("HF_TOKEN") or None
+repo_id = "razangh/fashion-models"
+last_err = None
+
+for attempt in range(1, 6):
+  try:
+    snapshot_download(
+      repo_id=repo_id,
+      repo_type="model",
+      local_dir="/models",
+      token=token,
+      resume_download=True,
+      max_workers=4,
+      ignore_patterns=["*.gitattributes", ".gitattributes", "README.md"],
+    )
+    print("Models downloaded successfully to /models")
+    break
+  except Exception as exc:
+    last_err = exc
+    if attempt == 5:
+      raise
+    wait_seconds = min(60, 2 ** attempt)
+    print(f"Attempt {attempt}/5 failed: {exc}")
+    print(f"Retrying in {wait_seconds}s...")
+    time.sleep(wait_seconds)
+
+if last_err is not None:
+  print("Recovered after transient download error.")
+PY
 
 # Pre-download tokenizer vocab files via huggingface_hub (already installed,
 # handles auth + redirects). CLIP BPE: openai/clip-vit-base-patch32 (public).
