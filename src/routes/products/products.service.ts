@@ -141,6 +141,8 @@ export interface ImageSearchParams extends SearchParams {
   inferredPrimaryColor?: string | null;
   /** Per-slot caption colors (topColor, jeansColor, garmentColor, …). */
   inferredColorsByItem?: Record<string, string | null>;
+  /** Confidence for each inferred item color (same keys as inferredColorsByItem). */
+  inferredColorsByItemConfidence?: Record<string, number>;
   /** Debug path: bypass rerank/final gates and return top-k raw exact-cosine hits. */
   debugRawCosineFirst?: boolean;
 }
@@ -1112,29 +1114,70 @@ function blipCatalogColorConflictFactor(
   return Math.max(0.35, 1 - conf * penalty * maxPen);
 }
 
+function colorConfidenceThreshold(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_ITEM_COLOR_CONF_MIN ?? "0.45");
+  if (!Number.isFinite(raw)) return 0.45;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function collectConfidentColorTokenMap(params: {
+  inferredPrimary?: string | null;
+  inferredByItem?: Record<string, string | null>;
+  inferredByItemConfidence?: Record<string, number>;
+  filtersRecord: Record<string, unknown>;
+}): Map<string, number> {
+  const scores = new Map<string, number>();
+  const add = (value: string | null | undefined, confidence: number) => {
+    const x = String(value ?? "").toLowerCase().trim();
+    if (!x) return;
+    const norm = normalizeColorToken(x) ?? x;
+    if (!norm) return;
+    const next = Math.max(0, Math.min(1, confidence));
+    scores.set(norm, Math.max(scores.get(norm) ?? 0, next));
+  };
+
+  add(params.inferredPrimary, 0.5);
+
+  const itemColors = params.inferredByItem ?? {};
+  const itemConfs = params.inferredByItemConfidence ?? {};
+  for (const [key, value] of Object.entries(itemColors)) {
+    const conf = Number(itemConfs[key] ?? 0);
+    if (conf >= colorConfidenceThreshold()) {
+      add(value, conf);
+    }
+  }
+
+  const fp = (params.filtersRecord as { inferredPrimaryColor?: unknown }).inferredPrimaryColor;
+  if (fp != null) add(String(fp), 0.45);
+
+  const fi = (params.filtersRecord as { inferredColorsByItem?: Record<string, string | null> }).inferredColorsByItem;
+  const fci = (params.filtersRecord as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence;
+  if (fi && typeof fi === "object") {
+    for (const [key, value] of Object.entries(fi)) {
+      const conf = Number(fci?.[key] ?? 0);
+      if (conf >= colorConfidenceThreshold()) {
+        add(value, conf);
+      }
+    }
+  }
+
+  return scores;
+}
+
 function collectInferredColorTokens(
   filtersRecord: Record<string, unknown>,
   inferredPrimary?: string | null,
   inferredByItem?: Record<string, string | null>,
+  inferredByItemConfidence?: Record<string, number>,
 ): string[] {
-  const out: string[] = [];
-  const push = (s: string | null | undefined) => {
-    const x = String(s ?? "").toLowerCase().trim();
-    if (!x) return;
-    const norm = normalizeColorToken(x) ?? x;
-    if (norm && !out.includes(norm)) out.push(norm);
-  };
-  push(inferredPrimary ?? undefined);
-  if (inferredByItem && typeof inferredByItem === "object") {
-    for (const v of Object.values(inferredByItem)) push(v);
-  }
-  const fp = (filtersRecord as { inferredPrimaryColor?: unknown }).inferredPrimaryColor;
-  if (fp != null) push(String(fp));
-  const fi = (filtersRecord as { inferredColorsByItem?: Record<string, string | null> }).inferredColorsByItem;
-  if (fi && typeof fi === "object") {
-    for (const v of Object.values(fi)) push(v);
-  }
-  return out;
+  const scored = collectConfidentColorTokenMap({
+    inferredPrimary,
+    inferredByItem,
+    inferredByItemConfidence,
+    filtersRecord,
+  });
+  const top = [...scored.entries()].sort((a, b) => b[1] - a[1])[0];
+  return top ? [top[0]] : [];
 }
 
 function shouldPreferInferredColorWhenConflict(params: {
@@ -2127,6 +2170,8 @@ export async function searchByImageWithSimilarity(
     filtersRecord,
     inferredPrimaryFromParams ?? (filtersRecord as { inferredPrimaryColor?: string | null }).inferredPrimaryColor,
     inferredByItemFromParams ?? (filtersRecord as { inferredColorsByItem?: Record<string, string | null> }).inferredColorsByItem,
+    (params as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence ??
+      (filtersRecord as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence,
   );
   const hasInferredColorSignal = inferredColorTokens.length > 0;
   const normalizedCropColors = [
@@ -2139,6 +2184,19 @@ export async function searchByImageWithSimilarity(
       inferredColorTokens.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
     ),
   ];
+  const inferredBlueFamilyIntent = normalizedInferredColors.some((c) =>
+    ["blue", "navy", "light-blue"].includes(String(c).toLowerCase()),
+  );
+  const cropHasBlueFamily = normalizedCropColors.some((c) =>
+    ["blue", "navy", "light-blue"].includes(String(c).toLowerCase()),
+  );
+  // Crop k-means frequently includes shadow black for denim; when inferred color
+  // already points to blue-family and crop agrees, drop neutral dark tokens so
+  // black products do not get promoted above blue jeans.
+  const normalizedCropColorsForMerge =
+    !hasExplicitColorIntent && inferredBlueFamilyIntent && cropHasBlueFamily
+      ? normalizedCropColors.filter((c) => !["black", "gray", "charcoal"].includes(String(c).toLowerCase()))
+      : normalizedCropColors;
   const preferInferredColorWhenConflict = shouldPreferInferredColorWhenConflict({
     mergedCategoryForRelevance: typeof mergedCategoryForRelevance === "string" ? mergedCategoryForRelevance : undefined,
     desiredProductTypes,
@@ -2152,11 +2210,11 @@ export async function searchByImageWithSimilarity(
   } else if (normalizedInferredColors.length > 0 && normalizedCropColors.length > 0) {
     const inferredVsCrop = tieredColorListCompliance(
       normalizedInferredColors,
-      normalizedCropColors,
+      normalizedCropColorsForMerge,
       "any",
     );
     if (inferredVsCrop.compliance > 0) {
-      allColorsForRelevance = [...new Set([...normalizedInferredColors, ...normalizedCropColors])];
+      allColorsForRelevance = [...new Set([...normalizedInferredColors, ...normalizedCropColorsForMerge])];
     } else if (preferInferredColorWhenConflict) {
       // Dress-like queries frequently include background/footwear colors in crops.
       // Use inferred garment color to avoid ranking wrong-color variants above true matches.
@@ -2164,7 +2222,7 @@ export async function searchByImageWithSimilarity(
     } else {
       // Conflict between full-image inference and crop-local evidence: trust crop colors
       // to avoid leaking shirt/jacket color into trousers/shoes retrieval.
-      allColorsForRelevance = [...normalizedCropColors];
+      allColorsForRelevance = [...normalizedCropColorsForMerge];
     }
   } else if (normalizedInferredColors.length > 0) {
     allColorsForRelevance = [...normalizedInferredColors];

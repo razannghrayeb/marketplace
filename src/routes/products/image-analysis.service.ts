@@ -1390,12 +1390,10 @@ export interface ImageAnalysisResult {
 
   /** Dominant color inference derived from image (canonical token). */
   inferredPrimaryColor?: string | null;
-  /** Slot-aware colors parsed from BLIP caption to avoid single-color ambiguity on multi-item outfits. */
-  inferredColorsByItem?: {
-    topColor?: string | null;
-    jeansColor?: string | null;
-    garmentColor?: string | null;
-  } | null;
+  /** Detection-driven item colors keyed by YOLO label/index (e.g. "short_sleeve_dress_0"). */
+  inferredColorsByItem?: Record<string, string | null> | null;
+  /** Confidence of chosen per-item color after BLIP vs crop fusion (0..1). */
+  inferredColorsByItemConfidence?: Record<string, number> | null;
 
   /** Fashion detection results */
   detection: {
@@ -1413,6 +1411,39 @@ export interface ImageAnalysisResult {
     /** Set when `yolo` is false — why detection is off and how to fix it locally */
     yoloHint?: string;
   };
+}
+
+function detectionColorKey(label: string, index?: number): string {
+  const base = String(label || "item")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "item";
+  return Number.isFinite(index as number) ? `${base}_${index}` : base;
+}
+
+function estimateCropColorConfidence(detection: Detection): number {
+  const detConf = clamp01(Number(detection.confidence ?? 0));
+  const area = Math.max(0, Number(detection.area_ratio ?? 0));
+  const areaSignal = clamp01(Math.min(1, area / 0.2));
+  // Crop color is strong when detection is confident and reasonably sized.
+  return clamp01(0.35 + 0.45 * detConf + 0.2 * areaSignal);
+}
+
+function setDetectionColorIfHigherConfidence(
+  colorByItem: Record<string, string | null>,
+  confByItem: Record<string, number>,
+  key: string,
+  color: string | null | undefined,
+  confidence: number,
+): void {
+  const c = String(color ?? "").toLowerCase().trim();
+  if (!c) return;
+  const nextConf = clamp01(confidence);
+  const prevConf = clamp01(Number(confByItem[key] ?? 0));
+  if (!(key in colorByItem) || nextConf >= prevConf) {
+    colorByItem[key] = c;
+    confByItem[key] = nextConf;
+  }
 }
 
 export interface AnalyzeOptions {
@@ -2024,11 +2055,8 @@ export class ImageAnalysisService {
         : ({} as ReturnType<typeof inferAudienceFromCaption>);
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
-    const inferredColorsByItem = {
-      topColor: captionColors.topColor ?? null,
-      jeansColor: captionColors.jeansColor ?? null,
-      garmentColor: captionColors.garmentColor ?? null,
-    };
+    const inferredColorsByItem: Record<string, string | null> = {};
+    const inferredColorsByItemConfidence: Record<string, number> = {};
     // Prefer BLIP caption color when explicit (e.g. "white dress") — full-image dominant can pick up sky/background.
     const captionPrimaryColor = pickConservativeFullImagePrimaryColor(captionColors, blipStructured);
     const allowDominantFallback = shouldUseDominantColorFallback(captionColors, blipStructured);
@@ -2107,11 +2135,15 @@ export class ImageAnalysisService {
       // toward jeans/denim so non-denim sporty pants do not outrank true jeans.
       if (
         categoryMapping.productCategory === "bottoms" &&
-        Boolean(inferredColorsByItem.jeansColor || /\bjeans?\b|\bdenim\b/.test(String(blipCaption ?? "").toLowerCase()))
+        /\bjeans?\b|\bdenim\b/.test(String(blipCaption ?? "").toLowerCase())
       ) {
         const jeansPriority = ["jeans", "jean", "denim", "straight jeans", "wide leg jeans"];
         softProductTypeHints = [...new Set([...jeansPriority, ...softProductTypeHints])];
       }
+
+      const itemColorKey = detectionColorKey(label, detectionIndex);
+      if (!(itemColorKey in inferredColorsByItem)) inferredColorsByItem[itemColorKey] = null;
+      if (!(itemColorKey in inferredColorsByItemConfidence)) inferredColorsByItemConfidence[itemColorKey] = 0;
 
       // "Closet similar" constraints: always enforce inferred audience gender when available.
       // Confidence gating here causes frequent cross-gender leakage (e.g. men query returning women items).
@@ -2146,6 +2178,13 @@ export class ImageAnalysisService {
         const cropColors = await extractDominantColorNames(clipBuffer, { maxColors: 2, minShare: 0.15 });
         if (cropColors.length > 0) {
           (filters as any).cropDominantColors = cropColors;
+          setDetectionColorIfHigherConfidence(
+            inferredColorsByItem,
+            inferredColorsByItemConfidence,
+            itemColorKey,
+            cropColors[0],
+            estimateCropColorConfidence(detection),
+          );
         }
       } catch { /* non-critical: color embedding channel still works */ }
       let predictedCategoryAisles: string[] | undefined;
@@ -2195,20 +2234,36 @@ export class ImageAnalysisService {
       // A full-image caption can describe a different region entirely (e.g. top vs trousers)
       // and will poison per-detection retrieval if used as the fallback signal.
       let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
+      let detectionCaptionAcceptedForLock = false;
       if (detCaption.trim().length > 0) {
         const captionLength = inferLengthIntentFromCaption(detCaption);
         if (captionLength) (filters as any).length = captionLength;
       }
       if (detCaption.trim().length > 0) {
         obs.detectionCaptionHits += 1;
+        const detCaptionColors = inferColorFromCaption(detCaption);
+        const detCaptionColor =
+          captionColorForProductCategory(categoryMapping.productCategory, detCaptionColors) ??
+          detCaptionColors.garmentColor ??
+          detCaptionColors.topColor ??
+          detCaptionColors.jeansColor ??
+          null;
         const detStruct = buildStructuredBlipOutput(detCaption);
         const consistency = await clipCaptionConsistency01(finalEmbedding, detCaption);
         const detConfidence = combineConfidenceFromConsistency(detStruct.confidence, consistency);
+        setDetectionColorIfHigherConfidence(
+          inferredColorsByItem,
+          inferredColorsByItemConfidence,
+          itemColorKey,
+          detCaptionColor,
+          detConfidence,
+        );
         if (
           detConfidence >= imageBlipSoftHintConfidenceMin() &&
           consistency >= imageBlipClipConsistencyMin()
         ) {
           obs.detectionCaptionAccepted += 1;
+          detectionCaptionAcceptedForLock = true;
           detectionBlipSignal = buildBlipSignal(detStruct, detConfidence);
           if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
           if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
@@ -2228,7 +2283,8 @@ export class ImageAnalysisService {
 
       const strictAudienceLock =
         Boolean(inferredAudience.gender) &&
-        blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
+        blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong() &&
+        detectionCaptionAcceptedForLock;
 
       let similarResult = await searchByImageWithSimilarity({
         imageEmbedding: finalEmbedding,
@@ -2265,8 +2321,8 @@ export class ImageAnalysisService {
         )
       ) {
         const filtersRetry = { ...filters } as typeof filters;
-        const preserveInferredAudience = Boolean(inferredAudience.gender || inferredAudience.ageGroup);
-        if (!strictAudienceLock && !preserveInferredAudience) {
+        const preserveInferredAudience = strictAudienceLock;
+        if (!preserveInferredAudience) {
           delete (filtersRetry as any).gender;
           delete (filtersRetry as any).ageGroup;
         }
@@ -2570,6 +2626,7 @@ export class ImageAnalysisService {
       inferredAudience,
       inferredPrimaryColor,
       inferredColorsByItem,
+      inferredColorsByItemConfidence,
       similarProducts: {
         byDetection: finalGroupedResults,
         totalProducts,
@@ -2878,11 +2935,8 @@ export class ImageAnalysisService {
         : ({} as ReturnType<typeof inferAudienceFromCaption>);
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
-    const inferredColorsByItem = {
-      topColor: captionColors.topColor ?? null,
-      jeansColor: captionColors.jeansColor ?? null,
-      garmentColor: captionColors.garmentColor ?? null,
-    };
+    const inferredColorsByItem: Record<string, string | null> = {};
+    const inferredColorsByItemConfidence: Record<string, number> = {};
     const captionPrimaryColor = pickConservativeFullImagePrimaryColor(captionColors, blipStructured);
     const allowDominantFallback = shouldUseDominantColorFallback(captionColors, blipStructured);
     const inferredPrimaryColor =
@@ -2919,6 +2973,9 @@ export class ImageAnalysisService {
             ? userDefinedBoxes[i - itemsToProcess.length].categoryHint!
             : detection.label;
         const categoryMapping = mapDetectionToCategory(categorySource, detection.confidence);
+        const itemColorKey = detectionColorKey(categorySource, i);
+        if (!(itemColorKey in inferredColorsByItem)) inferredColorsByItem[itemColorKey] = null;
+        if (!(itemColorKey in inferredColorsByItemConfidence)) inferredColorsByItemConfidence[itemColorKey] = 0;
 
         const filters: Partial<import("./types").SearchFilters> = {};
         const typeSeedSourceForSelection =
@@ -2967,6 +3024,13 @@ export class ImageAnalysisService {
           const cropColors = await extractDominantColorNames(clipBuffer, { maxColors: 2, minShare: 0.15 });
           if (cropColors.length > 0) {
             (filters as any).cropDominantColors = cropColors;
+            setDetectionColorIfHigherConfidence(
+              inferredColorsByItem,
+              inferredColorsByItemConfidence,
+              itemColorKey,
+              cropColors[0],
+              estimateCropColorConfidence(detection),
+            );
           }
         } catch { /* non-critical: color embedding channel still works */ }
         let predictedCategoryAisles: string[] | undefined;
@@ -2994,20 +3058,36 @@ export class ImageAnalysisService {
 
         const detCaption = fullResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
         let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
+        let detectionCaptionAcceptedForLock = false;
         if (detCaption.trim().length > 0) {
           const captionLength = inferLengthIntentFromCaption(detCaption);
           if (captionLength) (filters as any).length = captionLength;
         }
         if (detCaption.trim().length > 0) {
           obs.detectionCaptionHits += 1;
+          const detCaptionColors = inferColorFromCaption(detCaption);
+          const detCaptionColor =
+            captionColorForProductCategory(categoryMapping.productCategory, detCaptionColors) ??
+            detCaptionColors.garmentColor ??
+            detCaptionColors.topColor ??
+            detCaptionColors.jeansColor ??
+            null;
           const detStruct = buildStructuredBlipOutput(detCaption);
           const consistency = await clipCaptionConsistency01(finalEmbedding, detCaption);
           const detConfidence = combineConfidenceFromConsistency(detStruct.confidence, consistency);
+          setDetectionColorIfHigherConfidence(
+            inferredColorsByItem,
+            inferredColorsByItemConfidence,
+            itemColorKey,
+            detCaptionColor,
+            detConfidence,
+          );
           if (
             detConfidence >= imageBlipSoftHintConfidenceMin() &&
             consistency >= imageBlipClipConsistencyMin()
           ) {
             obs.detectionCaptionAccepted += 1;
+            detectionCaptionAcceptedForLock = true;
             detectionBlipSignal = buildBlipSignal(detStruct, detConfidence);
             if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
             if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
@@ -3031,7 +3111,8 @@ export class ImageAnalysisService {
 
         const strictAudienceLock =
           Boolean(inferredAudience.gender) &&
-          blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
+          blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong() &&
+          detectionCaptionAcceptedForLock;
 
         let similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
@@ -3067,8 +3148,8 @@ export class ImageAnalysisService {
           )
         ) {
           const filtersRetry = { ...filters } as typeof filters;
-          const preserveInferredAudience = Boolean(inferredAudience.gender || inferredAudience.ageGroup);
-          if (!strictAudienceLock && !preserveInferredAudience) {
+          const preserveInferredAudience = strictAudienceLock;
+          if (!preserveInferredAudience) {
             delete (filtersRetry as any).gender;
             delete (filtersRetry as any).ageGroup;
           }
@@ -3318,6 +3399,7 @@ export class ImageAnalysisService {
       inferredAudience,
       inferredPrimaryColor,
       inferredColorsByItem,
+      inferredColorsByItemConfidence,
       similarProducts: {
         byDetection: finalGroupedResults,
         totalProducts,

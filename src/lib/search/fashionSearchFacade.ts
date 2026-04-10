@@ -89,6 +89,7 @@ export interface UnifiedImageSearchParams {
   };
   inferredPrimaryColor?: string | null;
   inferredColorsByItem?: Record<string, string | null>;
+  inferredColorsByItemConfidence?: Record<string, number>;
   /** Debug path: bypass rerank/final gates in products.service and return top-k raw exact-cosine hits. */
   debugRawCosineFirst?: boolean;
 }
@@ -304,6 +305,7 @@ export async function searchImage(
     blipSignal,
     inferredPrimaryColor,
     inferredColorsByItem,
+    inferredColorsByItemConfidence,
     debugRawCosineFirst,
   } = params;
 
@@ -403,6 +405,7 @@ export async function searchImage(
     blipSignal,
     inferredPrimaryColor,
     inferredColorsByItem,
+    inferredColorsByItemConfidence,
     debugRawCosineFirst,
   } as any);
 
