@@ -1173,7 +1173,17 @@ function collectInferredColorTokens(
   inferredPrimary?: string | null,
   inferredByItem?: Record<string, string | null>,
   inferredByItemConfidence?: Record<string, number>,
+  mergedCategoryForRelevance?: string,
+  desiredProductTypes?: string[],
 ): string[] {
+  const merged = String(mergedCategoryForRelevance ?? "").toLowerCase().trim();
+  const typeText = (desiredProductTypes ?? []).join(" ").toLowerCase();
+  const onePiece = /\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(merged) || /\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(typeText);
+  const normalizedPrimary = normalizeColorToken(String(inferredPrimary ?? "").toLowerCase().trim()) ?? String(inferredPrimary ?? "").toLowerCase().trim();
+  if (onePiece && normalizedPrimary) {
+    return [normalizedPrimary];
+  }
+
   const scored = collectConfidentColorTokenMap({
     inferredPrimary,
     inferredByItem,
@@ -2184,6 +2194,8 @@ export async function searchByImageWithSimilarity(
     inferredByItemFromParams ?? (filtersRecord as { inferredColorsByItem?: Record<string, string | null> }).inferredColorsByItem,
     (params as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence ??
       (filtersRecord as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence,
+    typeof mergedCategoryForRelevance === "string" ? mergedCategoryForRelevance : undefined,
+    desiredProductTypes,
   );
   const hasInferredColorSignal = inferredColorTokens.length > 0;
   const normalizedCropColors = [

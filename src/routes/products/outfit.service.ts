@@ -597,7 +597,7 @@ function scoreColorHarmony(sourceStyle: StyleProfile, candidateColor: string | u
 
 function scoreCategoryCompatibility(sourceFamily: string, candidateFamily: string): number {
   if (!sourceFamily || !candidateFamily) return 0.5;
-  if (sourceFamily === candidateFamily) return sourceFamily === "accessories" ? 0.74 : 0.38;
+  if (sourceFamily === candidateFamily) return sourceFamily === "accessories" ? 0.82 : 0.92;
   const pairingMap: Record<string, string[]> = {
     dress: ["shoes", "bags", "outerwear", "accessories"],
     tops: ["bottoms", "outerwear", "shoes", "accessories"],
@@ -792,16 +792,8 @@ function completeStyleCategoryLabel(raw?: string): string {
   if (c.includes("outerwear") || c.includes("jacket") || c.includes("coat") || c.includes("blazer")) return "Outerwear";
   if (c.includes("top") || c.includes("shirt") || c.includes("blouse") || c.includes("hoodie") || c.includes("sweater")) return "Tops";
   if (c.includes("bottom") || c.includes("pants") || c.includes("trouser") || c.includes("jeans") || c.includes("skirt") || c.includes("short")) return "Bottoms";
-  if (
-    c.includes("bag") ||
-    c.includes("accessor") ||
-    c.includes("wallet") ||
-    c.includes("backpack") ||
-    c.includes("crossbody") ||
-    c.includes("clutch") ||
-    c.includes("tote") ||
-    c.includes("waist")
-  ) return "Accessories";
+  if (c.includes("bag") || c.includes("wallet") || c.includes("backpack") || c.includes("crossbody") || c.includes("clutch") || c.includes("tote") || c.includes("waist")) return "Bags";
+  if (c.includes("accessor") || c.includes("watch") || c.includes("scarf") || c.includes("hat") || c.includes("belt") || c.includes("jewel") || c.includes("jewelry") || c.includes("sunglass")) return "Accessories";
   if (c === "recommended") return "Accessories";
   return c.charAt(0).toUpperCase() + c.slice(1);
 }
