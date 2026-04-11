@@ -1108,13 +1108,34 @@ export async function textSearch(
         }
       } else if (hardAstCategory && categoryVocab) {
         const resolved = resolveCategoryTermsForOpensearch(mergedCategory, categoryVocab);
+        const normalizedQuery = String(rawQuery || "").toLowerCase();
+        const bagIntent =
+          mergedCategory.toLowerCase() === "accessories" &&
+          /\b(bag|bags|handbag|handbags|purse|purses|wallet|wallets|tote|totes|backpack|backpacks|clutch|clutches|crossbody|satchel|satchels)\b/.test(
+            normalizedQuery,
+          );
         if (resolved.length > 0) {
+          const bagShouldClauses = bagIntent
+            ? [
+                { wildcard: { category: { value: "*bag*" } } },
+                { wildcard: { category: { value: "*handbag*" } } },
+                { wildcard: { category: { value: "*purse*" } } },
+                { wildcard: { category: { value: "*wallet*" } } },
+                { wildcard: { category: { value: "*tote*" } } },
+                { wildcard: { category: { value: "*backpack*" } } },
+                { wildcard: { category: { value: "*clutch*" } } },
+                { wildcard: { category: { value: "*crossbody*" } } },
+                { wildcard: { category: { value: "*satchel*" } } },
+                { wildcard: { title: { value: "*bag*" } } },
+              ]
+            : [];
           filterClauses.push({
             bool: {
               _name: "hard_ast_category_filter",
               should: [
                 { terms: { category: resolved } },
                 { terms: { category_canonical: resolved } },
+                ...bagShouldClauses,
               ],
               minimum_should_match: 1,
             },

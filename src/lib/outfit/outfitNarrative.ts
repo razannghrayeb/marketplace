@@ -35,10 +35,13 @@ function buildTemplateNarrative(
   category: ProductCategory,
   style: StyleProfile,
   recommendations: StyleRecommendation[],
+  userGender?: string | null,
+  userAgeGroup?: string | null,
 ): OutfitNarrative {
   const categoryName = category.replace(/_/g, " ");
   const color = style.colorProfile.primary;
-  let narrative = `For your ${color !== "neutral" ? color + " " : ""}${categoryName}`;
+  const genderPrefix = userGender && userGender !== "unisex" ? userGender + "'s " : "";
+  let narrative = `For your ${genderPrefix}${color !== "neutral" ? color + " " : ""}${categoryName}`;
   narrative += ` (${style.occasion}, ${style.aesthetic}).`;
   const essentials = recommendations.filter((r) => r.priority === 1);
   if (essentials.length > 0) {
@@ -142,12 +145,16 @@ export async function generateOutfitNarrativeV2(params: {
   style: StyleProfile;
   recommendations: StyleRecommendation[];
   ownedSummaries?: string[];
+  userGender?: string | null;
+  userAgeGroup?: string | null;
 }): Promise<OutfitNarrative> {
   const fallback = buildTemplateNarrative(
     params.seedProduct,
     params.detectedCategory,
     params.style,
     params.recommendations,
+    params.userGender,
+    params.userAgeGroup,
   );
 
   try {
@@ -210,6 +217,8 @@ export async function generateOutfitNarrativeWithCache(params: {
   style: StyleProfile;
   recommendations: StyleRecommendation[];
   ownedSummaries?: string[];
+  userGender?: string | null;
+  userAgeGroup?: string | null;
 }): Promise<OutfitNarrative> {
   const pid = params.seedProduct.id;
   const h = hashStyleProfile(params.style);
