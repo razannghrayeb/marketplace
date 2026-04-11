@@ -37,6 +37,8 @@ import {
   getAdaptedEssentialsForUser,
   getUserPriceTier
 } from "./recommendations.service";
+import { recordOutfitFeedback, type OutfitFeedbackEvent } from "../../lib/outfit/outfitFeedback";
+import { outfitFeedbackActionsTotal } from "../../lib/metrics";
 
 function refreshStyleProfileInBackground(userId: number): void {
   void computeStyleProfile(userId).catch((err) => {
@@ -87,6 +89,18 @@ function parseAgeGroup(raw: unknown): "kids" | "adult" | undefined {
   const s = String(raw).toLowerCase().trim();
   if (["kids", "kid", "children", "child", "junior", "youth", "toddler", "baby"].includes(s)) return "kids";
   if (["adult", "adults", "men", "women", "unisex"].includes(s)) return "adult";
+  return undefined;
+}
+
+function parseOccasionHint(raw: unknown): "formal" | "semi-formal" | "casual" | "active" | "party" | "beach" | undefined {
+  if (raw == null) return undefined;
+  const s = String(raw).toLowerCase().trim();
+  if (s === "formal") return "formal";
+  if (["semi-formal", "semiformal", "business"].includes(s)) return "semi-formal";
+  if (s === "casual") return "casual";
+  if (["active", "sport"].includes(s)) return "active";
+  if (["party", "date"].includes(s)) return "party";
+  if (["beach", "resort"].includes(s)) return "beach";
   return undefined;
 }
 
@@ -556,6 +570,7 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
       typeof ageGroupHintRaw === "string" && ageGroupHintRaw.trim().length > 0
         ? ageGroupHintRaw.trim()
         : undefined;
+    const occasionHint = parseOccasionHint(req.body.occasion ?? req.body.occasion_hint);
 
     const hasItems = Array.isArray(itemIds) && itemIds.length > 0;
     if (!hasItems && productIds.length === 0) {
@@ -566,8 +581,8 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
     }
 
     const result = hasItems
-      ? await completeLookSuggestions(userId, itemIds!, limit, { audienceGenderHint, ageGroupHint })
-      : await completeLookSuggestionsForCatalogProducts(userId, productIds, limit, { audienceGenderHint, ageGroupHint });
+      ? await completeLookSuggestions(userId, itemIds!, limit, { audienceGenderHint, ageGroupHint, occasionHint })
+      : await completeLookSuggestionsForCatalogProducts(userId, productIds, limit, { audienceGenderHint, ageGroupHint, occasionHint });
     const suggestions = result.suggestions.map((s) => ({
       ...s,
       id: s.product_id,
@@ -578,7 +593,62 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
       suggestions,
       outfitSets: result.outfitSets,
       missingCategories: result.missingCategories,
+      outfitNarrative: result.outfitNarrative,
+      inferredOccasion: result.inferredOccasion,
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/wardrobe/outfit-feedback - persist outfit interaction feedback
+ */
+export async function outfitFeedback(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = req.user!.id;
+    const sessionId = String(req.body.sessionId || "").trim();
+    const seedProductId = parseInt(String(req.body.seedProductId), 10);
+    const eventsRaw = Array.isArray(req.body.events) ? req.body.events : [];
+
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: "sessionId is required" });
+    }
+    if (!Number.isFinite(seedProductId) || seedProductId < 1) {
+      return res.status(400).json({ success: false, error: "seedProductId is required" });
+    }
+
+    const allowedActions = new Set(["click", "add_to_cart", "purchase", "dismiss", "hover"]);
+    const events: OutfitFeedbackEvent[] = eventsRaw
+      .map((e: any) => ({
+        productId: parseInt(String(e?.productId), 10),
+        bucketCategory: String(e?.bucketCategory || "").trim() || "unknown",
+        action: String(e?.action || "").trim(),
+        rankPosition: parseInt(String(e?.rankPosition ?? 0), 10),
+        matchScore: Number(e?.matchScore ?? 0),
+      }))
+      .filter((e: any) => Number.isFinite(e.productId) && e.productId >= 1)
+      .filter((e: any) => allowedActions.has(e.action))
+      .map((e: any) => ({
+        productId: e.productId,
+        bucketCategory: e.bucketCategory,
+        action: e.action,
+        rankPosition: Number.isFinite(e.rankPosition) ? e.rankPosition : 0,
+        matchScore: Number.isFinite(e.matchScore) ? e.matchScore : 0,
+      }));
+
+    const saved = await recordOutfitFeedback({
+      sessionId,
+      userId,
+      seedProductId,
+      events,
+    });
+
+    for (const e of events) {
+      outfitFeedbackActionsTotal.inc({ action: e.action });
+    }
+
+    res.status(201).json({ success: true, inserted: saved.inserted });
   } catch (err) {
     next(err);
   }

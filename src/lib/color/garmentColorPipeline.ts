@@ -90,6 +90,15 @@ function labDist(a: [number, number, number], b: [number, number, number]): numb
 
 function mapRgbToCanonical(r: number, g: number, b: number): string {
   const lab = rgbToLab(r, g, b);
+  const chroma = Math.sqrt(lab[1] * lab[1] + lab[2] * lab[2]);
+  const blueLead = b - Math.max(r, g);
+
+  // Dark denim / navy fabrics can be low-light and get pulled to black by LAB distance.
+  // Keep them in the blue family when channel evidence is clearly blue-leaning.
+  if (lab[0] < 42 && blueLead >= 8 && chroma >= 10) {
+    return lab[0] < 30 ? "navy" : "blue";
+  }
+
   let bestName = "gray";
   let bestD = Infinity;
   for (const [name, rgb] of Object.entries(CANONICAL_REF_RGB)) {
@@ -100,8 +109,8 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
       bestName = name;
     }
   }
-  // Very dark → black
-  if (lab[0] < 18 && bestD > 18) return "black";
+  // Very dark neutral values map to black.
+  if (lab[0] < 18 && chroma < 8 && bestD > 18) return "black";
   // Very light near-neutral → white/off-white/cream
   if (lab[0] > 88 && Math.abs(lab[1]) < 10 && Math.abs(lab[2]) < 10) {
     if (lab[2] > 6) return "cream";

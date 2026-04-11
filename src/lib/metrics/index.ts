@@ -68,6 +68,62 @@ export const recommendationsGenerated = new Counter({
 });
 
 // ============================================================================
+// Outfit Stylist Metrics
+// ============================================================================
+
+export const outfitSuggestionsTotal = new Counter({
+  name: "outfit_suggestions_total",
+  help: "Count of complete-look requests",
+  labelNames: ["mode"],
+  registers: [metricsRegistry],
+});
+
+export const outfitSuggestionsReturned = new Histogram({
+  name: "outfit_suggestions_returned_count",
+  help: "Number of suggestions returned per complete-look request",
+  labelNames: ["mode"],
+  buckets: [0, 1, 2, 3, 4, 6, 8, 10, 15, 20],
+  registers: [metricsRegistry],
+});
+
+export const outfitSlotRejectionRate = new Histogram({
+  name: "outfit_slot_rejection_rate",
+  help: "Per-slot fraction rejected by contamination guard",
+  labelNames: ["slot"],
+  buckets: [0, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 1],
+  registers: [metricsRegistry],
+});
+
+export const outfitEmbeddingCoverage = new Gauge({
+  name: "outfit_embedding_coverage",
+  help: "Fraction of current anchors with embeddings available",
+  labelNames: ["mode"],
+  registers: [metricsRegistry],
+});
+
+export const outfitNarrativeLatencyMs = new Histogram({
+  name: "outfit_narrative_latency_ms",
+  help: "Gemini/LLM narrative generation latency in milliseconds",
+  labelNames: ["generated_by"],
+  buckets: [50, 100, 200, 350, 500, 800, 1200, 2000, 4000, 8000],
+  registers: [metricsRegistry],
+});
+
+export const outfitSetCoherence = new Histogram({
+  name: "outfit_set_coherence",
+  help: "Coherence score distribution for returned outfit sets",
+  buckets: [0, 0.2, 0.35, 0.5, 0.65, 0.75, 0.85, 1],
+  registers: [metricsRegistry],
+});
+
+export const outfitFeedbackActionsTotal = new Counter({
+  name: "outfit_feedback_actions_total",
+  help: "Feedback actions recorded for outfit suggestions",
+  labelNames: ["action"],
+  registers: [metricsRegistry],
+});
+
+// ============================================================================
 // Ingestion Metrics
 // ============================================================================
 

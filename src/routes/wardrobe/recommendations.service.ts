@@ -17,6 +17,21 @@ import { inferWardrobeSlotsFromWardrobeRows } from "../../lib/wardrobe/outfitSlo
 import { normalizeQueryGender } from "../../lib/search/searchHitRelevance";
 import { attrGenderFilterClause } from "../products/opensearchFilters";
 import { buildStyleProfile, type Product as OutfitProduct } from "../../lib/outfit/index";
+import {
+  outfitEmbeddingCoverage,
+  outfitNarrativeLatencyMs,
+  outfitSetCoherence,
+  outfitSlotRejectionRate,
+  outfitSuggestionsReturned,
+  outfitSuggestionsTotal,
+} from "../../lib/metrics";
+import { inferOccasion, type InferredOccasion } from "../../lib/outfit/occasionInference";
+import {
+  applyNarrativeToProducts,
+  generateOutfitNarrativeWithCache,
+  type OutfitNarrative,
+} from "../../lib/outfit/outfitNarrative";
+import type { ProductCategory, StyleProfile, StyleRecommendation } from "../../lib/outfit/completestyle";
 
 // ============================================================================
 // Types
@@ -63,6 +78,7 @@ export interface CompleteLookSuggestion extends ProductRecommendation {
     aesthetic?: string;
     styleTokens?: string[];
   };
+  attributionTags?: string[];
 }
 
 export interface OutfitSetSuggestion {
@@ -78,6 +94,8 @@ export interface CompleteLookSuggestionsResult {
   suggestions: CompleteLookSuggestion[];
   outfitSets: OutfitSetSuggestion[];
   missingCategories: string[];
+  outfitNarrative?: OutfitNarrative;
+  inferredOccasion?: InferredOccasion;
 }
 
 /** Slots used for gap detection (DB name, vision, and OpenSearch slot labels). */
@@ -738,10 +756,42 @@ type AudienceAgeGroup = "kids" | "adult";
 type CompleteLookAudienceOptions = {
   audienceGenderHint?: string | null;
   ageGroupHint?: string | null;
+  occasionHint?: string | null;
   allowUserAudienceFallback?: boolean;
   enforceNeutralAudienceWhenUnknown?: boolean;
   useDetectedCategoryForCurrentItems?: boolean;
 };
+
+function normalizeOccasionHint(value?: string | null): InferredOccasion | null {
+  const v = String(value || "").toLowerCase().trim();
+  if (v === "formal") return "formal";
+  if (v === "semi-formal" || v === "semiformal" || v === "business") return "semi-formal";
+  if (v === "casual") return "casual";
+  if (v === "active" || v === "sport") return "active";
+  if (v === "party" || v === "date") return "party";
+  if (v === "beach" || v === "resort") return "beach";
+  return null;
+}
+
+function occasionToFormality(occasion: InferredOccasion): "casual" | "business" | "formal" | "mixed" {
+  if (occasion === "formal") return "formal";
+  if (occasion === "semi-formal") return "business";
+  if (occasion === "party") return "business";
+  return "casual";
+}
+
+function buildAttributionTags(
+  fitBreakdown?: CompleteLookSuggestion["fitBreakdown"],
+): string[] {
+  if (!fitBreakdown) return ["general_complement"];
+  const tags: string[] = [];
+  if ((fitBreakdown.colorHarmony ?? 0) > 0.75) tags.push("color_match");
+  if ((fitBreakdown.styleAlignment ?? 0) > 0.75) tags.push("style_match");
+  if ((fitBreakdown.formalityAlignment ?? 0) > 0.75) tags.push("formality_match");
+  if ((fitBreakdown.categoryCompat ?? 0) > 0.75) tags.push("category_complement");
+  if ((fitBreakdown.embeddingNorm ?? 0) > 0.75) tags.push("visual_similarity");
+  return tags.length > 0 ? tags : ["general_complement"];
+}
 
 async function runCompleteLookCore(
   userId: number,
@@ -813,6 +863,10 @@ async function runCompleteLookCore(
     centroid = styleProfile.style_centroid;
   }
 
+  outfitSuggestionsTotal.inc({ mode: completionMode });
+  const embeddingCoverage = currentItems.length > 0 ? currentEmbeddings.length / currentItems.length : 0;
+  outfitEmbeddingCoverage.set({ mode: completionMode }, Math.max(0, Math.min(1, embeddingCoverage)));
+
   const visualContext = centroid
     ? await inferVisualContextFromCentroid(centroid, currentCategoryList).catch(() => ({
         inferredAudienceGender: null as AudienceGender | null,
@@ -823,6 +877,7 @@ async function runCompleteLookCore(
 
   const hintedAudienceGender = normalizeAudienceGenderValue(audienceOptions.audienceGenderHint);
   const hintedAgeGroup = normalizeAudienceAgeGroupValue(audienceOptions.ageGroupHint);
+  const hintedOccasion = normalizeOccasionHint(audienceOptions.occasionHint);
   const inferredFromAnchors = await inferPreferredAudienceGender(userId, currentItems, {
     allowWardrobeHistory: false,
     allowUserProfile: false,
@@ -837,6 +892,21 @@ async function runCompleteLookCore(
       allowUserProfile: audienceOptions.allowUserAudienceFallback !== false,
     }));
   const inferredAgeGroup = hintedAgeGroup || inferredAgeFromAnchors || visualContext.inferredAgeGroup;
+
+  let inferredOccasion: InferredOccasion = hintedOccasion || "casual";
+  if (!hintedOccasion) {
+    const occasionInference = await inferOccasion(
+      currentItems.map((row) => ({
+        title: String(row.title || row.name || ""),
+        category: String(row.category_name || ""),
+        color: undefined,
+        styleTokens: extractStyleTokensFromText(
+          `${String(row.title || "")} ${String(row.name || "")} ${String(row.category_name || "")}`,
+        ),
+      })),
+    );
+    inferredOccasion = occasionInference.occasion;
+  }
   const enforceNeutralAudienceWhenUnknown =
     Boolean(audienceOptions.enforceNeutralAudienceWhenUnknown) || !inferredAudienceGender;
   const missingCategories = inferMissingCategoriesForOutfit({
@@ -869,7 +939,10 @@ async function runCompleteLookCore(
         )
     )
   ).slice(0, 12);
-  const preferredFormality = inferPreferredFormality(styleProfile?.occasion_coverage || []);
+  const preferredFormality =
+    hintedOccasion || !styleProfile?.occasion_coverage?.length
+      ? occasionToFormality(inferredOccasion)
+      : inferPreferredFormality(styleProfile?.occasion_coverage || []);
   const suggestionsByCategory = new Map<string, CompleteLookSuggestion[]>();
 
   const sourceFields = [
@@ -929,6 +1002,9 @@ async function runCompleteLookCore(
         return f;
       };
 
+      let slotCandidatesEvaluated = 0;
+      let slotCandidatesRejected = 0;
+
       const scoreHits = (hits: any[], options: { relaxedFloor?: boolean } = {}): CompleteLookSuggestion[] => {
         const relaxedFloor = Boolean(options.relaxedFloor);
         const maxRawScore = Math.max(1, ...hits.map((h: any) => (Number.isFinite(h._score) ? h._score : 0)));
@@ -936,7 +1012,11 @@ async function runCompleteLookCore(
 
         for (const hit of hits) {
           const source = hit._source || {};
-          if (!sourceMatchesSlot(category, source)) continue;
+          slotCandidatesEvaluated += 1;
+          if (!sourceMatchesSlot(category, source)) {
+            slotCandidatesRejected += 1;
+            continue;
+          }
           const strongTitleSlot = inferStrongTitleSlot(source);
           if (strongTitleSlot && strongTitleSlot !== category) continue;
           if (!audienceGenderMatchesForSlot(inferredAudienceGender, source, category, enforceNeutralAudienceWhenUnknown, {
@@ -992,6 +1072,16 @@ async function runCompleteLookCore(
           if (formalityAlignment >= 0.8) reasons.push("occasion/formality aligned");
           if (reasons.length === 0) reasons.push("balances the current outfit");
 
+          const fitBreakdown = {
+            embeddingNorm: Math.round(embeddingNorm * 1000) / 1000,
+            categoryCompat: Math.round(categoryCompat * 1000) / 1000,
+            colorHarmony: Math.round(colorHarmony * 1000) / 1000,
+            styleAlignment: Math.round(styleAlignment * 1000) / 1000,
+            patternAlignment: Math.round(patternAlignment * 1000) / 1000,
+            materialAlignment: Math.round(materialAlignment * 1000) / 1000,
+            formalityAlignment: Math.round(formalityAlignment * 1000) / 1000,
+          };
+
           scored.push({
             product_id: productId,
             title: source.title,
@@ -1006,15 +1096,7 @@ async function runCompleteLookCore(
             score: Math.round(finalScore * 1000) / 1000,
             reason: `Add ${category} to complete the look (${reasons.join(", ")})`,
             reason_type: "compatible",
-            fitBreakdown: {
-              embeddingNorm: Math.round(embeddingNorm * 1000) / 1000,
-              categoryCompat: Math.round(categoryCompat * 1000) / 1000,
-              colorHarmony: Math.round(colorHarmony * 1000) / 1000,
-              styleAlignment: Math.round(styleAlignment * 1000) / 1000,
-              patternAlignment: Math.round(patternAlignment * 1000) / 1000,
-              materialAlignment: Math.round(materialAlignment * 1000) / 1000,
-              formalityAlignment: Math.round(formalityAlignment * 1000) / 1000,
-            },
+            fitBreakdown,
             stylistSignals: {
               slot: displayCategory,
               color: candidateColor,
@@ -1023,6 +1105,7 @@ async function runCompleteLookCore(
                 `${String(source.title || "")} ${String(source.category || "")} ${String(source.attr_style || "")}`
               ),
             },
+            attributionTags: buildAttributionTags(fitBreakdown),
           });
         }
 
@@ -1104,6 +1187,19 @@ async function runCompleteLookCore(
         );
       }
 
+      if (slotCandidatesEvaluated > 0) {
+        const rejectionRate = slotCandidatesRejected / slotCandidatesEvaluated;
+        outfitSlotRejectionRate.observe({ slot: category }, rejectionRate);
+        if (slotCandidatesRejected > 0) {
+          console.info("[complete-look][slot-guard]", {
+            slot: category,
+            evaluated: slotCandidatesEvaluated,
+            rejected: slotCandidatesRejected,
+            rejectionRate: Math.round(rejectionRate * 1000) / 1000,
+          });
+        }
+      }
+
       scored.sort((a, b) => b.score - a.score);
       suggestionsByCategory.set(category, scored.slice(0, Math.max(minPerCategory * 2, 12)));
     } catch (err) {
@@ -1155,12 +1251,106 @@ async function runCompleteLookCore(
   mergedSuggestions = mergedSuggestions.slice(0, limit);
 
   const outfitSets = buildOutfitSets(suggestionsByCategory, missingCategories);
+  for (const set of outfitSets) {
+    outfitSetCoherence.observe(set.coherenceScore);
+  }
+
+  outfitSuggestionsReturned.observe({ mode: completionMode }, mergedSuggestions.length);
+
+  const groupedForNarrative = new Map<string, CompleteLookSuggestion[]>();
+  for (const s of mergedSuggestions) {
+    const key = normalizeWardrobeCategory(s.stylistSignals?.slot || s.category) || "accessories";
+    const arr = groupedForNarrative.get(key) || [];
+    arr.push(s);
+    groupedForNarrative.set(key, arr);
+  }
+
+  const styleRecommendations: StyleRecommendation[] = Array.from(groupedForNarrative.entries()).map(
+    ([slot, items]) => ({
+      category: slot,
+      priority: missingCategories.indexOf(slot) + 1 > 0 ? Math.min(3, missingCategories.indexOf(slot) + 1) : 2,
+      reason: `Recommended ${slot} based on color/style/formality compatibility`,
+      products: items.slice(0, 4).map((item) => ({
+        id: item.product_id,
+        title: item.title,
+        brand: item.brand,
+        category: item.category,
+        color: item.stylistSignals?.color || undefined,
+        price_cents: item.price_cents || 0,
+        currency: "USD",
+        image_url: item.image_url,
+        image_cdn: item.image_cdn,
+        matchScore: Math.round((item.score || 0) * 100),
+        confidence: item.score || 0,
+        matchReasons: [item.reason],
+        explainability: {
+          visualSimilarity: item.fitBreakdown?.embeddingNorm ?? 0,
+          attributeMatch: item.fitBreakdown?.categoryCompat ?? 0,
+          colorHarmony: item.fitBreakdown?.colorHarmony ?? 0,
+          styleCompatibility: item.fitBreakdown?.styleAlignment ?? 0,
+          occasionAlignment: item.fitBreakdown?.formalityAlignment ?? 0,
+        },
+      })),
+    }),
+  );
+
+  const seedAnchor = currentItems[0];
+  const seedProduct = {
+    id: Number(seedAnchor?.product_id || seedAnchor?.id || 0),
+    title: String(seedAnchor?.title || seedAnchor?.name || "Current item"),
+    category: String(seedAnchor?.category_name || "unknown"),
+    color: undefined,
+    price_cents: 0,
+    currency: "USD",
+    image_url: String(seedAnchor?.image_url || "") || undefined,
+    image_cdn: String(seedAnchor?.image_cdn || "") || undefined,
+  };
+
+  const styleForNarrative: StyleProfile = {
+    occasion: inferredOccasion === "semi-formal" ? "semi-formal" : inferredOccasion,
+    aesthetic: "modern",
+    season: "all-season",
+    colorProfile: {
+      primary: "neutral",
+      type: "neutral",
+      harmonies: [{ type: "neutral", colors: ["neutral"] }],
+    },
+    formality: preferredFormalityToScore(preferredFormality),
+  };
+
+  const narrativeStart = Date.now();
+  const outfitNarrative = await generateOutfitNarrativeWithCache({
+    seedProduct,
+    detectedCategory: "unknown" as ProductCategory,
+    style: styleForNarrative,
+    recommendations: styleRecommendations,
+  });
+  outfitNarrativeLatencyMs.observe(
+    { generated_by: outfitNarrative.generatedBy },
+    Date.now() - narrativeStart,
+  );
+  applyNarrativeToProducts(styleRecommendations, outfitNarrative);
+
+  const reasonById = new Map<number, string>();
+  for (const rec of styleRecommendations) {
+    for (const p of rec.products) {
+      if (Array.isArray(p.matchReasons) && p.matchReasons.length > 0) {
+        reasonById.set(p.id, p.matchReasons[0]);
+      }
+    }
+  }
+  mergedSuggestions = mergedSuggestions.map((s) => ({
+    ...s,
+    reason: reasonById.get(s.product_id) || s.reason,
+  }));
 
   return {
     completionMode,
     suggestions: mergedSuggestions,
     outfitSets,
     missingCategories,
+    outfitNarrative,
+    inferredOccasion,
   };
 }
 
@@ -1370,7 +1560,7 @@ export async function completeLookSuggestions(
   userId: number,
   currentItemIds: number[],
   limit: number = 10,
-  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint"> = {}
+  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint"> = {}
 ): Promise<CompleteLookSuggestionsResult> {
   const currentItemsResult = await pg.query(
     `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, wi.name, wi.image_url, wi.image_cdn,
@@ -1392,6 +1582,7 @@ export async function completeLookSuggestions(
   return await runCompleteLookCore(userId, currentItemsResult.rows as CompleteLookAnchorRow[], limit, "wardrobe", {
     audienceGenderHint: options.audienceGenderHint,
     ageGroupHint: options.ageGroupHint,
+    occasionHint: options.occasionHint,
   });
 }
 
@@ -1402,7 +1593,7 @@ export async function completeLookSuggestionsForCatalogProducts(
   userId: number,
   productIds: number[],
   limit: number = 10,
-  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint"> & { detectedCategories?: Map<number, string> } = {}
+  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint"> & { detectedCategories?: Map<number, string> } = {}
 ): Promise<CompleteLookSuggestionsResult> {
   if (!Array.isArray(productIds) || productIds.length === 0) {
     return {
@@ -1446,6 +1637,7 @@ export async function completeLookSuggestionsForCatalogProducts(
   return await runCompleteLookCore(userId, rows, limit, "catalog-product", {
     audienceGenderHint: options.audienceGenderHint,
     ageGroupHint: options.ageGroupHint,
+    occasionHint: options.occasionHint,
     allowUserAudienceFallback: false,
     enforceNeutralAudienceWhenUnknown: true,
     useDetectedCategoryForCurrentItems: true,
@@ -2388,7 +2580,31 @@ function buildOutfitSets(
   };
 
   walk(0);
-  return results.sort((a, b) => b.totalScore - a.totalScore).slice(0, 5);
+  const ranked = results.sort((a, b) => b.totalScore - a.totalScore);
+  const selected: OutfitSetSuggestion[] = [];
+  const maxSets = 5;
+  const maxJaccard = 0.4;
+
+  for (const candidate of ranked) {
+    const c = new Set(candidate.productIds.map((id) => String(id)));
+    const tooSimilar = selected.some((picked) => {
+      const p = new Set(picked.productIds.map((id) => String(id)));
+      let overlap = 0;
+      for (const id of c) {
+        if (p.has(id)) overlap += 1;
+      }
+      const union = c.size + p.size - overlap;
+      const jaccard = union > 0 ? overlap / union : 1;
+      return jaccard >= maxJaccard;
+    });
+
+    if (!tooSimilar) {
+      selected.push(candidate);
+      if (selected.length >= maxSets) break;
+    }
+  }
+
+  return selected;
 }
 
 function scoreColorPair(colorA: string | null | undefined, colorB: string | null | undefined): number {
