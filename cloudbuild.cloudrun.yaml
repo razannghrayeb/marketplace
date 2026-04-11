@@ -32,14 +32,14 @@ steps:
         if [ -n "${HF_TOKEN:-}" ]; then
           HF_TOKEN_VALUE="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}"
         fi
-        if [ -z "$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}" ]; then
+        if [ -z "${HF_TOKEN:-}" ]; then
           echo "ERROR: HF_TOKEN is required at build time for model download."
           echo "Set Secret Manager secret 'hf-token' and grant Cloud Build access, or pass _HF_TOKEN substitution."
           exit 1
         fi
 
         docker build \
-          --build-arg HF_TOKEN="${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}" \
+          --build-arg HF_TOKEN="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" \
           --build-arg EMBEDDED_YOLO=${_EMBEDDED_YOLO} \
           --build-arg BUILDKIT_INLINE_CACHE=1 \
           --cache-from "${CACHE_IMAGE}" \
