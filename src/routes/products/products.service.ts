@@ -1215,8 +1215,8 @@ function shouldPreferInferredColorWhenConflict(params: {
   // Prefer inferred color only for upper-body / outerwear intents.
   // Full-image inference is less reliable for full-body garments such as dresses,
   // skirts, pants, and jumpsuits where crop-based color extraction is usually better.
-  if (/(top|shirt|tee|t-?shirt|blouse|sweater|hoodie|jacket|coat|blazer|outerwear)/.test(merged)) return true;
-  if (/(top|shirt|tee|t-?shirt|blouse|sweater|hoodie|jacket|coat|blazer|outerwear)/.test(typeText)) return true;
+  if (/\b(top|shirt|tee|t-?shirt|blouse|sweater|hoodie|jacket|coat|blazer|outerwear)\b/.test(merged)) return true;
+  if (/\b(top|shirt|tee|t-?shirt|blouse|sweater|hoodie|jacket|coat|blazer|outerwear)\b/.test(typeText)) return true;
 
   return false;
 }
@@ -2325,7 +2325,7 @@ export async function searchByImageWithSimilarity(
       detectionAnchored: hasDetectionAnchoredTypeIntent,
     },
     color: {
-      gatesFinalRelevance01: hasExplicitColorIntent,
+      gatesFinalRelevance01: hasColorIntentForFinal,
       cropDominantTokens: hasCropColorSignal ? [...cropDominantColorsRaw] : undefined,
       inferredTokens: inferredColorTokens.length > 0 ? [...inferredColorTokens] : undefined,
       softBiasOnly: softColorBiasOnly,
