@@ -47,6 +47,8 @@ const path = require('path')
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Allow a second dev server (e.g. port 3010) without clobbering `.next` — avoids webpack "reading 'call'" / chunk 404s.
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   images: {
     remotePatterns: [
       { protocol: 'https', hostname: '**', pathname: '/**' },

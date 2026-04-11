@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3001",
-    "dev:3010": "next dev -p 3010",
+    "dev:3010": "cross-env NEXT_DIST_DIR=.next-3010 next dev -p 3010",
     "build": "next build",
     "start": "next start -p 3001",
     "lint": "next lint",
@@ -30,6 +30,7 @@
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
+    "cross-env": "^7.0.3",
     "autoprefixer": "^10.4.19",
     "eslint": "^8",
     "eslint-config-next": "14.2.5",

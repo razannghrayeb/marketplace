@@ -5,6 +5,7 @@
 !.env.example
 node_modules/
 .next/
+.next-3010/
 dist/
 build/
 /src/lib/model/__pycache__
