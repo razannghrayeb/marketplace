@@ -30,16 +30,16 @@ steps:
         CACHE_IMAGE="${IMAGE_BASE}:latest"
         HF_TOKEN_VALUE="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"
         if [ -n "${HF_TOKEN:-}" ]; then
-          HF_TOKEN_VALUE="${HF_TOKEN}"
+          HF_TOKEN_VALUE="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}"
         fi
-        if [ -z "${HF_TOKEN_VALUE}" ]; then
+        if [ -z "$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}" ]; then
           echo "ERROR: HF_TOKEN is required at build time for model download."
           echo "Set Secret Manager secret 'hf-token' and grant Cloud Build access, or pass _HF_TOKEN substitution."
           exit 1
         fi
 
         docker build \
-          --build-arg HF_TOKEN="${HF_TOKEN_VALUE}" \
+          --build-arg HF_TOKEN="${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}" \
           --build-arg EMBEDDED_YOLO=${_EMBEDDED_YOLO} \
           --build-arg BUILDKIT_INLINE_CACHE=1 \
           --cache-from "${CACHE_IMAGE}" \
@@ -113,7 +113,7 @@ substitutions:
   _IMAGE_NAME: marketplace
   _SERVICE: marketplace
 
-  _HF_TOKEN: ""
+  _HF_TOKEN: "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"
   # 1 = monolith with in-container YOLO (slower/larger build). 0 = API-only; set YOLO_API_URL to a separate service.
   _EMBEDDED_YOLO: "1"
 
