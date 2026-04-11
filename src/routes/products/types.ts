@@ -47,8 +47,10 @@ export interface SearchFilters {
   cropDominantColors?: string[];
   /** Caption / vision primary color token merged with crop for soft tier matching. */
   inferredPrimaryColor?: string | null;
-  /** Per-slot caption colors (e.g. topColor, jeansColor). */
+  /** Per-detection item colors keyed by detection label/index. */
   inferredColorsByItem?: Record<string, string | null>;
+  /** Confidence for each inferred item color (same keys as inferredColorsByItem). */
+  inferredColorsByItemConfidence?: Record<string, number>;
 }
 
 // ============================================================================
@@ -77,6 +79,11 @@ export interface ImageSearchParams extends SearchParams {
    * `SEARCH_IMAGE_SOFT_CATEGORY=1` — avoids hard OpenSearch category filters.
    */
   predictedCategoryAisles?: string[];
+  /**
+   * Product-type soft hints from detection/BLIP (e.g. ['jeans', 'denim']).
+   * Used for ranking only; do NOT hard-filter candidates (preserves recall).
+   */
+  softProductTypeHints?: string[];
   /**
    * OpenSearch kNN vector field name (e.g. `embedding` vs `embedding_garment`).
    * Shop-the-Look / detection crops often match `embedding_garment` when the index is built with garment ROI vectors.
@@ -110,6 +117,9 @@ export interface ImageSearchParams extends SearchParams {
   /** Merged with crop k-means into soft color tier intent (Shop-the-Look / caption). */
   inferredPrimaryColor?: string | null;
   inferredColorsByItem?: Record<string, string | null>;
+  inferredColorsByItemConfidence?: Record<string, number>;
+  /** Debug path: bypass rerank/final gates and return top-k by raw exact cosine (with existing category constraints). */
+  debugRawCosineFirst?: boolean;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -333,6 +343,8 @@ export interface SearchResultWithRelated {
     relevance_intent?: ImageSearchRelevanceIntentDebug;
     /** OpenSearch kNN field used for retrieval (`embedding` | `embedding_garment`). */
     image_knn_field?: string;
+    /** True only when raw-cosine debug bypass branch was explicitly used. */
+    debug_raw_cosine_bypass_used?: boolean;
     recall_size?: number;
     final_accept_min?: number;
     /** Floor used after sparse recall when strict gate yields too few hits (≤ `image_min_results_target`). */
@@ -352,12 +364,18 @@ export interface SearchResultWithRelated {
       raw_open_search_hits: number;
       base_candidates: number;
       ranked_candidates: number;
+      dropped_by_category_safety: number;
       threshold_passed_visual: number;
       visual_gated_hits: number;
+      dropped_by_visual_threshold: number;
       hits_after_final_accept_min: number;
+      dropped_by_final_relevance_before_override: number;
+      rescued_by_strong_visual_override: number;
       hits_after_color_postfilter: number;
       hits_after_hydration: number;
+      dropped_by_dedupe: number;
       hits_after_dedupe: number;
+      dropped_by_limit: number;
       final_returned_count: number;
     };
   };

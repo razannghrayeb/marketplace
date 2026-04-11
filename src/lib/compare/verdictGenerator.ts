@@ -57,6 +57,21 @@ export interface FullVerdictResponse {
     is_tie: boolean;
     score_difference: number;
   };
+  comparison_context: {
+    mode: CompareVerdict["comparison_mode"];
+    comparable: boolean;
+    reason: string;
+    category_groups: Record<number, string>;
+    requested_goal: CompareVerdict["requested_goal"];
+    requested_occasion: CompareVerdict["requested_occasion"];
+  };
+  shopping_insights: CompareVerdict["shopping_insights"];
+  winners_by_goal: CompareVerdict["winners_by_goal"];
+  evidence: CompareVerdict["evidence"];
+  alternatives: CompareVerdict["alternatives"];
+  risk_summary: CompareVerdict["risk_summary"];
+  timing_insight: CompareVerdict["timing_insight"];
+  outfit_impact?: CompareVerdict["outfit_impact"];
 }
 
 // ============================================================================
@@ -366,16 +381,16 @@ export function generateVerdict(
   const confidenceInfo = CONFIDENCE_LABELS[verdict.confidence];
   
   // Generate title with winner letter
-  const title = winnerLetter
+  const defaultTitle = winnerLetter
     ? template.title.replace("{winner_letter}", winnerLetter)
     : template.title;
-  
-  const recommendation = winnerLetter
+
+  const defaultRecommendation = winnerLetter
     ? template.recommendation.replace("{winner_letter}", winnerLetter)
     : template.recommendation;
-  
+
   // Generate bullet points from reasons
-  const bulletPoints = verdict.top_reasons.map(reason => {
+  const defaultBulletPoints = verdict.top_reasons.map(reason => {
     return REASON_TEMPLATES[reason]?.text || reason;
   }).slice(0, 3);
   
@@ -387,16 +402,38 @@ export function generateVerdict(
     tradeoff = tradeoff.replace(/the other option/gi, `Product ${loserLetter}`);
   }
   
-  // Build verdict output
-  const verdictOutput: VerdictOutput = {
-    title,
-    subtitle: template.subtitle,
-    bullet_points: bulletPoints,
-    tradeoff,
-    confidence_label: confidenceInfo.label,
-    confidence_description: confidenceInfo.description,
-    recommendation,
-  };
+  let verdictOutput: VerdictOutput;
+  if (verdict.comparison_mode === "outfit_compare") {
+    verdictOutput = {
+      title: "These products serve different fashion roles",
+      subtitle: "No direct winner selected because this is a cross-category selection",
+      bullet_points: verdict.shopping_insights.notes.slice(0, 3),
+      tradeoff,
+      confidence_label: "Smart Guidance",
+      confidence_description: "Use picks below for quality, value, and budget",
+      recommendation: verdict.shopping_insights.suggested_next_action,
+    };
+  } else if (verdict.comparison_mode === "scenario_compare") {
+    verdictOutput = {
+      title: defaultTitle,
+      subtitle: "Products are in the same category but optimized for different scenarios",
+      bullet_points: defaultBulletPoints.length > 0 ? defaultBulletPoints : verdict.shopping_insights.notes.slice(0, 3),
+      tradeoff,
+      confidence_label: confidenceInfo.label,
+      confidence_description: "Scenario-aware ranking applied",
+      recommendation: defaultRecommendation,
+    };
+  } else {
+    verdictOutput = {
+      title: defaultTitle,
+      subtitle: template.subtitle,
+      bullet_points: defaultBulletPoints,
+      tradeoff,
+      confidence_label: confidenceInfo.label,
+      confidence_description: confidenceInfo.description,
+      recommendation: defaultRecommendation,
+    };
+  }
   
   // Generate product summaries
   const productSummaries = verdict.products.map(generateProductSummary);
@@ -409,6 +446,21 @@ export function generateVerdict(
       is_tie: verdict.confidence === "tie",
       score_difference: verdict.score_difference,
     },
+    comparison_context: {
+      mode: verdict.comparison_mode,
+      comparable: verdict.compatibility.is_comparable,
+      reason: verdict.compatibility.reason,
+      category_groups: verdict.compatibility.category_groups,
+      requested_goal: verdict.requested_goal,
+      requested_occasion: verdict.requested_occasion,
+    },
+    shopping_insights: verdict.shopping_insights,
+    winners_by_goal: verdict.winners_by_goal,
+    evidence: verdict.evidence,
+    alternatives: verdict.alternatives,
+    risk_summary: verdict.risk_summary,
+    timing_insight: verdict.timing_insight,
+    outfit_impact: verdict.outfit_impact,
   };
 }
 

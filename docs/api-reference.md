@@ -3,6 +3,7 @@
 This document provides detailed information about all API endpoints available in the Fashion Aggregator API.
 
 ## Base URL
+
 ```
 Local Node (pnpm dev): http://0.0.0.0:4000
 Docker Compose API:    http://0.0.0.0:3000
@@ -19,6 +20,7 @@ The codebase follows a modular route structure. Each API module lives under `src
 Keeping services alongside routes makes modules self-contained. See `docs/architecture.md` for developer guidance and examples.
 
 ## Authentication
+
 Authentication is currently disabled for all routes in this repository snapshot (including `/admin/*`).
 
 If you deploy behind an auth gateway or add middleware, document that in your environment-specific runbook.
@@ -27,21 +29,22 @@ If you deploy behind an auth gateway or add middleware, document that in your en
 
 The server mounts modules with these prefixes:
 
-| Module | Prefix |
-|--------|--------|
-| Health | `/health` |
-| Search | `/search` |
-| Products | `/products` |
-| Admin | `/admin` |
-| Compare | `/api/compare` |
-| Image Analysis | `/api/images` |
-| Ingest Queue | `/api/ingest` |
-| Wardrobe | `/api/wardrobe` |
-| Labeling | `/api/labeling` |
+| Module         | Prefix          |
+| -------------- | --------------- |
+| Health         | `/health`       |
+| Search         | `/search`       |
+| Products       | `/products`     |
+| Admin          | `/admin`        |
+| Compare        | `/api/compare`  |
+| Image Analysis | `/api/images`   |
+| Ingest Queue   | `/api/ingest`   |
+| Wardrobe       | `/api/wardrobe` |
+| Labeling       | `/api/labeling` |
 
 See also: `docs/ENDPOINT_MATRIX.md` (auto-generated endpoint inventory).
 
 ## Response Format
+
 All API responses follow a consistent JSON format:
 
 ```json
@@ -57,6 +60,7 @@ All API responses follow a consistent JSON format:
 ```
 
 Error responses:
+
 ```json
 {
   "success": false,
@@ -73,42 +77,49 @@ Error responses:
 The Fashion Aggregator API provides a comprehensive suite of features for fashion e-commerce, powered by machine learning and computer vision. Here's what you can build with this platform:
 
 ### 🖼️ **Visual Fashion Intelligence**
+
 - **Image Upload & Processing**: Upload fashion images for automatic attribute extraction
 - **Fashion Attribute Detection**: AI-powered recognition of categories, colors, patterns, and materials
 - **Visual Similarity Search**: Find similar fashion items using CLIP embeddings
 - **Smart Categorization**: Automatic classification of fashion items into 100+ categories
 
 ### 🔍 **Advanced Search & Discovery**
+
 - **Semantic Text Search**: Search using natural language ("red summer dress", "casual sneakers")
 - **Visual Search**: Upload an image to find similar products
 - **Hybrid Search**: Combine text and visual queries for precise results
 - **Personalized Recommendations**: ML-powered outfit suggestions and product recommendations
 
 ### 👔 **Wardrobe Management**
+
 - **Personal Wardrobe**: Upload and organize your fashion collection
 - **Style Analysis**: Get insights about your fashion preferences
 - **Outfit Suggestions**: AI-generated outfit combinations from your wardrobe
 - **Gap Detection**: Identify missing wardrobe essentials
 
 ### 🎯 **Active Learning System**
+
 - **Human-in-the-Loop**: AI flags uncertain predictions for human review
 - **Labeling Interface**: Web UI for efficient manual categorization
 - **Continuous Improvement**: Models learn from human corrections
 - **Quality Assurance**: Maintain high accuracy through active learning
 
 ### 📊 **Analytics & Insights**
+
 - **Fashion Trends**: Analyze popular categories, colors, and patterns
 - **Price Intelligence**: Track price changes and find deals
 - **Market Analysis**: Understand fashion market dynamics
 - **Personalization Metrics**: Measure recommendation effectiveness
 
 ### 🔧 **Developer Features**
+
 - **RESTful API**: Clean, consistent API design
 - **Real-time Processing**: Asynchronous image processing with job tracking
 - **Scalable Architecture**: Built for high-volume fashion marketplaces
 - **Extensible ML Pipeline**: Easy to add new models and features
 
 ### 🏗️ **Technical Architecture**
+
 - **ONNX Models**: Fast inference with FashionCLIP for embeddings
 - **OpenSearch**: High-performance vector similarity search
 - **PostgreSQL**: Robust data storage with advanced queries
@@ -120,18 +131,21 @@ The Fashion Aggregator API provides a comprehensive suite of features for fashio
 ### 🤖 **Machine Learning Pipeline**
 
 #### FashionCLIP Integration
+
 - **Dual Encoder Architecture**: Separate text and image encoders sharing 512-dim embedding space
 - **CLIP Tokenizer**: HuggingFace transformers for proper text tokenization (77-token max length)
 - **Image Preprocessing**: Center crop, resize to 224×224, ImageNet normalization
 - **Cosine Similarity**: Measures semantic alignment between text and images
 
 #### Attribute Extraction Models
+
 - **Multi-Head Classification**: Separate heads for category, pattern, material, color prediction
 - **ONNX Runtime**: Optimized inference with CPU threading and graph optimization
 - **Confidence Thresholding**: Active learning triggers below 70% confidence scores
 - **Batch Processing**: Efficient GPU/CPU utilization for multiple images
 
 #### Ranking & Recommendations
+
 - **XGBoost Classifier**: Trained on user interaction data for personalization
 - **Feature Engineering**: Price ratios, category compatibility, visual similarity scores
 - **A/B Testing Framework**: Compare ranking algorithms and measure engagement
@@ -140,18 +154,21 @@ The Fashion Aggregator API provides a comprehensive suite of features for fashio
 ### 🔍 **Search & Retrieval Systems**
 
 #### OpenSearch Integration
+
 - **Vector Fields**: 512-dimensional float arrays for CLIP embeddings
 - **Hybrid Scoring**: Combines BM25 text search with cosine similarity
 - **Index Optimization**: Custom analyzers for fashion-specific terminology
 - **Real-time Updates**: Streaming ingestion for new products and price changes
 
 #### Semantic Search Processing
+
 - **Query Expansion**: Synonym expansion ("sneakers" → "athletic shoes", "runners")
 - **Entity Recognition**: Extract brands, categories, colors, sizes from natural language
 - **Intent Classification**: Distinguish product search from style advice queries
 - **Query Rewriting**: LLM-powered query enhancement for better results
 
 #### Visual Search Pipeline
+
 - **Perceptual Hashing**: dHash/pHash for duplicate detection and fast similarity
 - **CLIP Embeddings**: Semantic visual understanding beyond pixel matching
 - **Multi-Modal Retrieval**: Combine visual and textual features for hybrid search
@@ -160,12 +177,14 @@ The Fashion Aggregator API provides a comprehensive suite of features for fashio
 ### 📊 **Data Processing & Analytics**
 
 #### Price Intelligence
+
 - **Time Series Analysis**: Track price volatility and trends over time
 - **Anomaly Detection**: Statistical methods to identify unusual price movements
 - **Market Positioning**: Compare prices against category averages and competitors
 - **Discount Detection**: Automated identification of sales and promotions
 
 #### Quality Analysis
+
 - **NLP Text Analysis**: Sentiment analysis, readability scores, information completeness
 - **Image Quality Metrics**: Resolution, composition, uniqueness scoring
 - **Policy Analysis**: Automated parsing of return policies and shipping terms
@@ -174,18 +193,21 @@ The Fashion Aggregator API provides a comprehensive suite of features for fashio
 ### ⚡ **Performance & Scalability**
 
 #### Asynchronous Processing
+
 - **Redis Queue**: Bull.js for job queuing with retry logic and dead letter queues
 - **Worker Pools**: Configurable concurrency for CPU-intensive ML tasks
 - **Progress Tracking**: Real-time job status updates for long-running operations
 - **Error Handling**: Circuit breakers and exponential backoff for external services
 
 #### Caching Strategy
+
 - **Multi-Level Caching**: Redis for hot data, application-level for computed results
 - **Cache Invalidation**: Event-driven cache clearing on data updates
 - **Cache Warming**: Pre-populate frequently accessed data on startup
 - **TTL Management**: Intelligent cache expiration based on data volatility
 
 #### Database Optimization
+
 - **Connection Pooling**: PgBouncer for efficient PostgreSQL connection management
 - **Query Optimization**: Strategic indexing on search-heavy columns
 - **Partitioning**: Time-based partitioning for large tables (price_history, search_logs)
@@ -194,18 +216,21 @@ The Fashion Aggregator API provides a comprehensive suite of features for fashio
 ### 🔒 **Security & Reliability**
 
 #### Input Validation
+
 - **File Upload Security**: Type validation, size limits, malware scanning
 - **Rate Limiting**: Token bucket algorithm with Redis backing
 - **SQL Injection Prevention**: Parameterized queries with type checking
 - **XSS Protection**: Input sanitization and output encoding
 
 #### Monitoring & Observability
+
 - **Structured Logging**: JSON logs with correlation IDs for request tracing
 - **Metrics Collection**: Prometheus metrics for latency, error rates, throughput
 - **Health Checks**: Comprehensive endpoint monitoring for all services
 - **Alerting**: Automated alerts for service degradation and anomalies
 
 #### Data Integrity
+
 - **Transactional Operations**: ACID compliance for multi-table updates
 - **Referential Integrity**: Foreign key constraints and cascade operations
 - **Backup Strategy**: Automated daily backups with point-in-time recovery
@@ -214,12 +239,14 @@ The Fashion Aggregator API provides a comprehensive suite of features for fashio
 ### 🚀 **Deployment & DevOps**
 
 #### Container Orchestration
+
 - **Docker Images**: Multi-stage builds for optimized production images
 - **Kubernetes Manifests**: Declarative deployment with rolling updates
 - **Service Mesh**: Istio for traffic management and observability
 - **Config Management**: Environment-based configuration with validation
 
 #### CI/CD Pipeline
+
 - **Automated Testing**: Unit, integration, and E2E test suites
 - **Code Quality**: ESLint, Prettier, and TypeScript strict mode
 - **Security Scanning**: Dependency vulnerability checks and SAST
@@ -230,6 +257,7 @@ The Fashion Aggregator API provides a comprehensive suite of features for fashio
 ## Products API
 
 ### List Products
+
 Retrieve a paginated list of products with optional filtering.
 
 ```http
@@ -237,25 +265,28 @@ GET /products
 ```
 
 #### Query Parameters
-| Parameter | Type | Description | Default |
-|-----------|------|-------------|---------|
-| `page` | integer | Page number (1-based) | 1 |
-| `limit` | integer | Items per page (max 100) | 20 |
-| `category` | string | Filter by category | - |
-| `brand` | string | Filter by brand | - |
-| `vendor_ids` | string | Comma-separated vendor IDs | - |
-| `min_price` | number | Minimum price in cents | - |
-| `max_price` | number | Maximum price in cents | - |
-| `availability` | boolean | Filter by availability | - |
-| `sort` | string | Sort field (`price`, `title`, `last_seen`) | `last_seen` |
-| `order` | string | Sort order (`asc`, `desc`) | `desc` |
+
+| Parameter      | Type    | Description                                | Default     |
+| -------------- | ------- | ------------------------------------------ | ----------- |
+| `page`         | integer | Page number (1-based)                      | 1           |
+| `limit`        | integer | Items per page (max 100)                   | 20          |
+| `category`     | string  | Filter by category                         | -           |
+| `brand`        | string  | Filter by brand                            | -           |
+| `vendor_ids`   | string  | Comma-separated vendor IDs                 | -           |
+| `min_price`    | number  | Minimum price in cents                     | -           |
+| `max_price`    | number  | Maximum price in cents                     | -           |
+| `availability` | boolean | Filter by availability                     | -           |
+| `sort`         | string  | Sort field (`price`, `title`, `last_seen`) | `last_seen` |
+| `order`        | string  | Sort order (`asc`, `desc`)                 | `desc`      |
 
 #### Example Request
+
 ```http
 GET /products?category=shoes&brand=nike&min_price=5000&max_price=20000&page=1&limit=10
 ```
 
 #### Example Response
+
 ```json
 {
   "success": true,
@@ -290,6 +321,7 @@ GET /products?category=shoes&brand=nike&min_price=5000&max_price=20000&page=1&li
 ```
 
 ### Get product by ID
+
 Returns one product (Postgres + images). Used by the storefront product detail page.
 
 ```http
@@ -297,6 +329,7 @@ GET /products/{id}
 ```
 
 #### Example Response
+
 ```json
 {
   "success": true,
@@ -315,6 +348,7 @@ GET /products/{id}
 **Note:** On `SERVICE_ROLE=api` hosts, this route is mounted locally (same as `SERVICE_ROLE=all` / `ml`). The storefront should call `{API_BASE}/products/{id}` — same base URL as `GET /products`.
 
 ### Get Product Facets
+
 Retrieve available filter options for products.
 
 ```http
@@ -322,6 +356,7 @@ GET /products/facets
 ```
 
 #### Example Response
+
 ```json
 {
   "success": true,
@@ -350,6 +385,7 @@ GET /products/facets
 ```
 
 ### Get Product Price History
+
 Retrieve historical pricing data for a specific product.
 
 ```http
@@ -357,22 +393,26 @@ GET /products/{id}/price-history
 ```
 
 #### Path Parameters
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | integer | Product ID |
+
+| Parameter | Type    | Description |
+| --------- | ------- | ----------- |
+| `id`      | integer | Product ID  |
 
 #### Query Parameters
-| Parameter | Type | Description | Default |
-|-----------|------|-------------|---------|
-| `days` | integer | Number of days to retrieve | 30 |
-| `interval` | string | Data interval (`daily`, `weekly`) | `daily` |
+
+| Parameter  | Type    | Description                       | Default |
+| ---------- | ------- | --------------------------------- | ------- |
+| `days`     | integer | Number of days to retrieve        | 30      |
+| `interval` | string  | Data interval (`daily`, `weekly`) | `daily` |
 
 #### Example Request
+
 ```http
 GET /products/12345/price-history?days=90&interval=daily
 ```
 
 #### Example Response
+
 ```json
 {
   "success": true,
@@ -403,6 +443,7 @@ GET /products/12345/price-history?days=90&interval=daily
 ```
 
 ### Get Price Drops
+
 Retrieve recent significant price drop events.
 
 ```http
@@ -410,14 +451,16 @@ GET /products/price-drops
 ```
 
 #### Query Parameters
-| Parameter | Type | Description | Default |
-|-----------|------|-------------|---------|
-| `days` | integer | Number of days to look back | 7 |
-| `min_drop_percent` | number | Minimum drop percentage | 15 |
-| `category` | string | Filter by category | - |
-| `limit` | integer | Maximum results | 50 |
+
+| Parameter          | Type    | Description                 | Default |
+| ------------------ | ------- | --------------------------- | ------- |
+| `days`             | integer | Number of days to look back | 7       |
+| `min_drop_percent` | number  | Minimum drop percentage     | 15      |
+| `category`         | string  | Filter by category          | -       |
+| `limit`            | integer | Maximum results             | 50      |
 
 #### Example Response
+
 ```json
 {
   "success": true,
@@ -442,6 +485,7 @@ GET /products/price-drops
 ## Search API
 
 ### Text Search
+
 Perform intelligent text-based product search with semantic understanding.
 
 ```http
@@ -449,23 +493,26 @@ GET /search
 ```
 
 #### Query Parameters
-| Parameter | Type | Description | Default |
-|-----------|------|-------------|---------|
-| `q` | string | Search query (required) | - |
-| `page` | integer | Page number | 1 |
-| `limit` | integer | Results per page | 20 |
-| `category` | string | Filter by category | - |
-| `brand` | string | Filter by brand | - |
-| `min_price` | number | Minimum price filter | - |
-| `max_price` | number | Maximum price filter | - |
-| `use_semantic` | boolean | Enable semantic search | true |
+
+| Parameter      | Type    | Description             | Default |
+| -------------- | ------- | ----------------------- | ------- |
+| `q`            | string  | Search query (required) | -       |
+| `page`         | integer | Page number             | 1       |
+| `limit`        | integer | Results per page        | 20      |
+| `category`     | string  | Filter by category      | -       |
+| `brand`        | string  | Filter by brand         | -       |
+| `min_price`    | number  | Minimum price filter    | -       |
+| `max_price`    | number  | Maximum price filter    | -       |
+| `use_semantic` | boolean | Enable semantic search  | true    |
 
 #### Example Request
+
 ```http
 GET /search?q=red running shoes nike&limit=10&use_semantic=true
 ```
 
 #### Example Response
+
 ```json
 {
   "success": true,
@@ -480,7 +527,14 @@ GET /search?q=red running shoes nike&limit=10&use_semantic=true
         "attributes": ["running"]
       },
       "intent": "product_search",
-      "expanded_terms": ["red", "crimson", "scarlet", "running", "athletic", "jogging"]
+      "expanded_terms": [
+        "red",
+        "crimson",
+        "scarlet",
+        "running",
+        "athletic",
+        "jogging"
+      ]
     },
     "results": [
       {
@@ -518,19 +572,20 @@ For YOLO-based product detection ("shop the look"), see [Image Analysis API](#im
 
 ### Quick Comparison
 
-| Feature | Endpoint | Input | Best For |
-|---------|----------|-------|----------|
-| **Text Search** | `GET /search` | Query + filters | Keyword search, filtering |
-| **Image Search** | `POST /search/image` | 1 image | "Find similar to this" |
-| **Multi-Image** | `POST /search/multi-image` | 1-5 images + prompt | "Color from first, style from second" |
-| **YOLO Detection** | `POST /api/images/search` | 1 image | "Shop this outfit" |
-| **Discover (storefront)** | `POST /products/search/image` | 1 image | Same CLIP pipeline as `/search/image` |
+| Feature                   | Endpoint                      | Input               | Best For                              |
+| ------------------------- | ----------------------------- | ------------------- | ------------------------------------- |
+| **Text Search**           | `GET /search`                 | Query + filters     | Keyword search, filtering             |
+| **Image Search**          | `POST /search/image`          | 1 image             | "Find similar to this"                |
+| **Multi-Image**           | `POST /search/multi-image`    | 1-5 images + prompt | "Color from first, style from second" |
+| **YOLO Detection**        | `POST /api/images/search`     | 1 image             | "Shop this outfit"                    |
+| **Discover (storefront)** | `POST /products/search/image` | 1 image             | Same CLIP pipeline as `/search/image` |
 
 📚 **See [SEARCH_API_COMPLETE.md](./SEARCH_API_COMPLETE.md) and [FEATURES.md](./FEATURES.md) for guides and examples.**
 
 ---
 
 ### Text Search
+
 Search products using keywords and filters.
 
 ```http
@@ -538,20 +593,22 @@ GET /search
 ```
 
 #### Query Parameters
-| Parameter | Type | Description | Default |
-|-----------|------|-------------|---------|
-| `q` | string | Search query | - |
-| `brand` | string | Filter by brand | - |
-| `category` | string | Filter by category | - |
-| `minPrice` | number | Minimum price | - |
-| `maxPrice` | number | Maximum price | - |
-| `color` | string | Filter by color | - |
-| `size` | string | Filter by size | - |
-| `vendor_id` | number | Filter by vendor | - |
-| `limit` | integer | Max results | 20 |
-| `offset` | integer | Pagination offset | 0 |
+
+| Parameter   | Type    | Description        | Default |
+| ----------- | ------- | ------------------ | ------- |
+| `q`         | string  | Search query       | -       |
+| `brand`     | string  | Filter by brand    | -       |
+| `category`  | string  | Filter by category | -       |
+| `minPrice`  | number  | Minimum price      | -       |
+| `maxPrice`  | number  | Maximum price      | -       |
+| `color`     | string  | Filter by color    | -       |
+| `size`      | string  | Filter by size     | -       |
+| `vendor_id` | number  | Filter by vendor   | -       |
+| `limit`     | integer | Max results        | 20      |
+| `offset`    | integer | Pagination offset  | 0       |
 
 #### Example Request
+
 ```bash
 curl "http://0.0.0.0:4000/search?q=red+dress&brand=Nike&maxPrice=15000&limit=10"
 ```
@@ -559,6 +616,7 @@ curl "http://0.0.0.0:4000/search?q=red+dress&brand=Nike&maxPrice=15000&limit=10"
 ---
 
 ### Single Image Search
+
 Find visually similar products using image uploads.
 
 ```http
@@ -566,15 +624,18 @@ POST /search/image
 ```
 
 #### Request
+
 - **Content-Type**: `multipart/form-data`
 - **Body**: Form data with `image` file field
 
 #### Query Parameters
-| Parameter | Type | Description | Default |
-|-----------|------|-------------|---------|
-| `limit` | integer | Maximum results | 50 |
+
+| Parameter | Type    | Description     | Default |
+| --------- | ------- | --------------- | ------- |
+| `limit`   | integer | Maximum results | 50      |
 
 #### Example Request
+
 ```bash
 curl -X POST http://0.0.0.0:4000/search/image \
   -F "image=@dress.jpg" \
@@ -582,6 +643,7 @@ curl -X POST http://0.0.0.0:4000/search/image \
 ```
 
 #### Example Response
+
 ```json
 {
   "results": [
@@ -603,6 +665,7 @@ curl -X POST http://0.0.0.0:4000/search/image \
 ---
 
 ### Multi-Image Composite Search (NEW)
+
 Mix attributes from multiple images using natural language prompts.
 
 ```http
@@ -612,8 +675,9 @@ POST /search/multi-image
 This is the **unique feature** that enables cross-image attribute mixing with AI-powered intent parsing.
 
 #### Request
+
 - **Content-Type**: `multipart/form-data`
-- **Body**: 
+- **Body**:
   - `images`: 1-5 image files (order matters!)
   - `prompt`: Natural language description
   - `limit`: Max results (optional)
@@ -622,6 +686,7 @@ This is the **unique feature** that enables cross-image attribute mixing with AI
 #### Example Requests
 
 **Basic Cross-Image Attributes:**
+
 ```bash
 curl -X POST http://0.0.0.0:4000/search/multi-image \
   -F "images=@red_dress.jpg" \
@@ -631,6 +696,7 @@ curl -X POST http://0.0.0.0:4000/search/multi-image \
 ```
 
 **With Custom Ranking Weights:**
+
 ```bash
 curl -X POST http://0.0.0.0:4000/search/multi-image \
   -F "images=@vintage_coat.jpg" \
@@ -640,16 +706,18 @@ curl -X POST http://0.0.0.0:4000/search/multi-image \
 ```
 
 #### Rerank Weights
+
 ```json
 {
-  "vectorWeight": 0.6,      // Vector similarity (default: 0.6)
-  "attributeWeight": 0.3,   // Attribute matches (default: 0.3)
-  "priceWeight": 0.1,       // Price relevance (default: 0.1)
-  "recencyWeight": 0.0      // Recency (default: 0.0)
+  "vectorWeight": 0.6, // Vector similarity (default: 0.6)
+  "attributeWeight": 0.3, // Attribute matches (default: 0.3)
+  "priceWeight": 0.1, // Price relevance (default: 0.1)
+  "recencyWeight": 0.0 // Recency (default: 0.0)
 }
 ```
 
 #### Example Response
+
 ```json
 {
   "results": [
@@ -676,6 +744,7 @@ curl -X POST http://0.0.0.0:4000/search/multi-image \
 ```
 
 #### How It Works (5-Phase Pipeline)
+
 1. **Intent Understanding** - Gemini AI parses natural language + images
 2. **DNA Extraction** - Extract per-attribute embeddings (color, texture, style, etc.)
 3. **Composite Query** - Build weighted query from intent
@@ -685,6 +754,7 @@ curl -X POST http://0.0.0.0:4000/search/multi-image \
 ---
 
 ### Advanced Multi-Vector Search
+
 For power users who want explicit control over attribute weights.
 
 ```http
@@ -692,6 +762,7 @@ POST /search/multi-vector
 ```
 
 #### Request Body
+
 - `images`: 1-5 image files
 - `prompt`: Text description
 - `attributeWeights`: JSON with explicit weights per attribute
@@ -699,6 +770,7 @@ POST /search/multi-vector
 - `limit`: Max results (optional)
 
 #### Example Request
+
 ```bash
 curl -X POST http://0.0.0.0:4000/search/multi-vector \
   -F "images=@dress1.jpg" \
@@ -709,6 +781,7 @@ curl -X POST http://0.0.0.0:4000/search/multi-vector \
 ```
 
 #### Example Response
+
 ```json
 {
   "results": [
@@ -722,7 +795,7 @@ curl -X POST http://0.0.0.0:4000/search/multi-vector \
         "color": 0.91,
         "texture": 0.87,
         "material": 0.89,
-        "style": 0.90,
+        "style": 0.9,
         "pattern": 0.78
       },
       "price": 299.99
@@ -740,6 +813,7 @@ curl -X POST http://0.0.0.0:4000/search/multi-vector \
 For YOLO-based product detection and "shop the look" functionality.
 
 ### Visual Product Search (Shop the Look)
+
 Upload an image to detect fashion items and find similar products for each.
 
 ```http
@@ -747,19 +821,22 @@ POST /images/search
 ```
 
 #### Request
+
 - **Content-Type**: `multipart/form-data`
 - **Body**: Form data with `image` file field
 
 #### Query Parameters
-| Parameter | Type | Description | Default |
-|-----------|------|-------------|---------|
-| `confidence` | number | Detection confidence (0-1) | 0.25 |
-| `threshold` | number | Similarity threshold (0-1) | 0.7 |
-| `limit_per_item` | number | Max products per detected item | 10 |
-| `filter_category` | boolean | Filter by detected category | true |
-| `store` | boolean | Store image in R2 | false |
+
+| Parameter         | Type    | Description                    | Default |
+| ----------------- | ------- | ------------------------------ | ------- |
+| `confidence`      | number  | Detection confidence (0-1)     | 0.25    |
+| `threshold`       | number  | Similarity threshold (0-1)     | 0.7     |
+| `limit_per_item`  | number  | Max products per detected item | 10      |
+| `filter_category` | boolean | Filter by detected category    | true    |
+| `store`           | boolean | Store image in R2              | false   |
 
 #### Example Request
+
 ```bash
 curl -X POST http://0.0.0.0:3000/api/images/search \
   -F "image=@outfit.jpg" \
@@ -768,6 +845,7 @@ curl -X POST http://0.0.0.0:3000/api/images/search \
 ```
 
 #### Example Response
+
 ```json
 {
   "success": true,
@@ -810,6 +888,7 @@ curl -X POST http://0.0.0.0:3000/api/images/search \
 ```
 
 ---
+
         "similarity_score": 0.92,
         "clip_similarity": 0.89,
         "visual_features": ["similar_color", "similar_shape", "similar_texture"],
@@ -817,13 +896,15 @@ curl -X POST http://0.0.0.0:3000/api/images/search \
         "price_cents": 12000
       }
     ]
-  },
-  "meta": {
-    "total_matches": 15,
-    "processing_time_ms": 450
-  }
+
+},
+"meta": {
+"total_matches": 15,
+"processing_time_ms": 450
 }
-```
+}
+
+````
 
 ---
 
@@ -834,21 +915,24 @@ Get ML-powered recommendations for similar products.
 
 ```http
 GET /products/{id}/recommendations
-```
+````
 
 #### Path Parameters
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | integer | Product ID |
+
+| Parameter | Type    | Description |
+| --------- | ------- | ----------- |
+| `id`      | integer | Product ID  |
 
 #### Query Parameters
-| Parameter | Type | Description | Default |
-|-----------|------|-------------|---------|
-| `limit` | integer | Maximum recommendations | 10 |
-| `use_ml_ranking` | boolean | Use ML model for ranking | true |
-| `min_score` | number | Minimum recommendation score | 0.5 |
+
+| Parameter        | Type    | Description                  | Default |
+| ---------------- | ------- | ---------------------------- | ------- |
+| `limit`          | integer | Maximum recommendations      | 10      |
+| `use_ml_ranking` | boolean | Use ML model for ranking     | true    |
+| `min_score`      | number  | Minimum recommendation score | 0.5     |
 
 #### Example Response
+
 ```json
 {
   "success": true,
@@ -885,6 +969,7 @@ GET /products/{id}/recommendations
 ```
 
 ### Batch Recommendations
+
 Get recommendations for multiple products at once.
 
 ```http
@@ -892,6 +977,7 @@ POST /products/recommendations/batch
 ```
 
 #### Request Body
+
 ```json
 {
   "product_ids": [12345, 12346, 12347],
@@ -901,6 +987,7 @@ POST /products/recommendations/batch
 ```
 
 #### Example Response
+
 ```json
 {
   "success": true,
@@ -922,6 +1009,7 @@ POST /products/recommendations/batch
 ## Style Completion API
 
 ### Complete Style/Outfit
+
 Get complementary items to complete an outfit or style.
 
 ```http
@@ -934,13 +1022,21 @@ Authentication: `Authorization: Bearer <jwt>` is optional.
 If you are authenticated, the completions are wardrobe-aware and may include user-owned products. Those products will be marked with `owned: true`.
 
 #### Query Parameters (GET)
+
 - `maxPerCategory` (default `5`)
 - `maxTotal` (default `20`)
 - `minPrice` / `maxPrice` (in cents, optional)
 - `preferSameBrand` (`"true"` / `"false"`, default `"false"`)
 - `excludeBrands` (comma-separated string, optional)
 
+#### Body (POST)
+
+- Preferred: `{ "product_id": 12345, "options": { ... } }`
+- Also supported: `{ "product": { ... }, "options": { ... } }` for products not in DB.
+- If both are provided, `product_id` / `product.id` path is used.
+
 #### Example Response
+
 ```json
 {
   "success": true,
@@ -990,6 +1086,7 @@ If you are authenticated, the completions are wardrobe-aware and may include use
 ## Product Comparison API
 
 ### Compare Products
+
 Perform detailed quality and feature comparison between products.
 
 ```http
@@ -997,56 +1094,111 @@ POST /api/compare
 ```
 
 #### Request Body
+
 ```json
 {
   "product_ids": [12345, 12346, 12347],
-  "analysis_type": "full"
+  "compare_goal": "best_value",
+  "occasion": "work"
 }
 ```
 
+#### Request Fields
+
+| Field        | Type     | Required | Description                                                             |
+| ------------ | -------- | -------- | ----------------------------------------------------------------------- |
+| product_ids  | number[] | Yes      | 2 to 5 product IDs                                                      |
+| compare_goal | string   | No       | best_value, premium_quality, style_match, low_risk_return, occasion_fit |
+| occasion     | string   | No       | casual, work, formal, party, travel                                     |
+
 #### Example Response
+
 ```json
 {
-  "success": true,
-  "data": {
-    "winner": {
-      "product_id": 12345,
-      "title": "Nike Air Max 90",
-      "overall_score": 89,
-      "verdict": "recommended"
+  "verdict": {
+    "title": "Product A is the safer choice",
+    "subtitle": "Based on description quality, pricing stability, and seller information",
+    "bullet_points": [
+      "Stable and consistent pricing",
+      "Clear return/exchange policy"
+    ],
+    "tradeoff": "Product B is 12% cheaper but has limited details.",
+    "confidence_label": "High Confidence",
+    "confidence_description": "Clear differences in quality signals",
+    "recommendation": "We recommend Product A based on overall quality signals."
+  },
+  "comparison_details": {
+    "winner_id": 12345,
+    "is_tie": false,
+    "score_difference": 14
+  },
+  "comparison_context": {
+    "mode": "scenario_compare",
+    "comparable": true,
+    "reason": "All selected products are in the same comparison group (footwear).",
+    "category_groups": {
+      "12345": "footwear",
+      "12346": "footwear"
     },
-    "comparison": {
+    "requested_goal": "best_value",
+    "requested_occasion": "work"
+  },
+  "winners_by_goal": {
+    "overall": 12345,
+    "value": 12345,
+    "quality": 12346,
+    "style": 12346,
+    "risk": 12345,
+    "occasion": 12345
+  },
+  "risk_summary": {
+    "overall_risk_level": "medium",
+    "product_risks": {
       "12345": {
-        "overall_score": 89,
-        "quality_level": "green",
-        "scores": {
-          "text_quality": 92,
-          "price_analysis": 85,
-          "image_quality": 90,
-          "policy_score": 88
-        },
-        "strengths": ["detailed_description", "competitive_pricing", "good_return_policy"],
-        "weaknesses": ["limited_size_info"]
-      },
-      "12346": {
-        "overall_score": 75,
-        "quality_level": "yellow",
-        "scores": {...},
-        "strengths": [...],
-        "weaknesses": [...]
+        "risk_score": 24,
+        "risk_level": "low",
+        "reasons": ["Return policy present"]
       }
-    },
-    "recommendations": [
-      {
-        "type": "price_alert",
-        "message": "Product 12345 is priced 15% below market average"
-      }
-    ]
+    }
+  },
+  "timing_insight": {
+    "recommendation": "monitor",
+    "reason": "Some risk signals exist. Monitor price and listing updates before checkout."
+  },
+  "alternatives": {
+    "better_cheaper_product_id": 12347,
+    "better_quality_product_id": 12346,
+    "similar_style_safer_product_id": 12345
+  },
+  "evidence": [
+    "Selected winner has 11 points price safety advantage.",
+    "Style winner differs from requested goal winner, indicating a tradeoff."
+  ],
+  "shopping_insights": {
+    "best_quality_product_id": 12346,
+    "best_value_product_id": 12345,
+    "best_budget_product_id": 12347,
+    "weakest_link_product_id": 12348,
+    "notes": ["Best value-for-money balance: Product 12345."],
+    "suggested_next_action": "Use the quality and value picks to make your final decision."
+  },
+  "product_map": {
+    "12345": "A",
+    "12346": "B"
   }
 }
 ```
 
+#### Mode Behavior
+
+- direct_head_to_head: Same type, direct winner decision.
+- scenario_compare: Same major category but different subtype scenarios.
+- outfit_compare: Cross-category selection, outfit impact guidance (no fake direct winner).
+
+For full design and engineering details, see docs/compare-intelligent-shopping.md.
+
 ### Get Product Quality Analysis
+
 Get detailed quality analysis for a single product.
 
 ```http
@@ -1054,6 +1206,7 @@ GET /api/compare/quality/{id}
 ```
 
 #### Example Response
+
 ```json
 {
   "success": true,
@@ -1094,6 +1247,7 @@ GET /api/compare/quality/{id}
 ## Image Management API
 
 ### List Product Images
+
 Get all images associated with a product.
 
 ```http
@@ -1101,6 +1255,7 @@ GET /products/{id}/images
 ```
 
 #### Example Response
+
 ```json
 {
   "success": true,
@@ -1119,6 +1274,7 @@ GET /products/{id}/images
 ```
 
 ### Upload Product Image
+
 Upload a new image for a product.
 
 ```http
@@ -1126,10 +1282,12 @@ POST /products/{id}/images
 ```
 
 #### Request
+
 - **Content-Type**: `multipart/form-data`
 - **Body**: Form data with `image` file field
 
 #### Example Response
+
 ```json
 {
   "success": true,
@@ -1144,6 +1302,7 @@ POST /products/{id}/images
 ```
 
 ### Set Primary Image
+
 Set an image as the primary image for a product.
 
 ```http
@@ -1151,6 +1310,7 @@ PUT /products/{id}/images/{imageId}/primary
 ```
 
 ### Remove Image
+
 Delete an image from a product.
 
 ```http
@@ -1214,10 +1374,23 @@ curl -X POST "http://0.0.0.0:3000/api/wardrobe/items" \
   -F "brand=Zara" \
   -F "source=manual" \
   -F "category_id=12" \
+  -F "audience_gender=women" \
+  -F "age_group=adult" \
+  -F "style_tags=[\"classic\",\"minimalist\"]" \
+  -F "occasion_tags=[\"work\",\"smart-casual\"]" \
+  -F "season_tags=[\"spring\",\"fall\"]" \
   -F "pattern_id=1" \
   -F "material_id=3" \
   -F "image=@shirt.jpg"
 ```
+
+Optional user-provided audience/style fields for `POST /api/wardrobe/items` and `PATCH /api/wardrobe/items/{id}`:
+
+- `audience_gender`: `men` | `women` | `unisex`
+- `age_group`: `kids` | `adult`
+- `style_tags`: string array (JSON array string in multipart, or array in JSON)
+- `occasion_tags`: string array
+- `season_tags`: string array
 
 Example response:
 
@@ -1274,45 +1447,75 @@ Example request:
 ```json
 {
   "item_ids": [901, 910],
+  "audience_gender": "women",
+  "age_group": "adult",
   "limit": 10
 }
 ```
+
+Notes:
+
+- Send either `item_ids` (wardrobe item IDs) or `product_ids` (catalog product IDs).
+- `audience_gender` and `age_group` are optional hints that tighten filtering when known.
+- Outfit set generation now applies pairwise stylist-coherence filtering and excludes weak sets.
 
 Example response:
 
 ```json
 {
   "success": true,
+  "completionMode": "wardrobe",
   "suggestions": [
     {
       "product_id": 7788,
       "title": "Chelsea Boots",
       "brand": "BootCo",
-      "category": "footwear",
+      "category": "shoes",
       "price_cents": 12900,
       "image_url": "https://.../image.webp",
       "score": 0.86,
-      "reason": "Completes your current outfit",
-      "reason_type": "gap",
+      "reason": "Add shoes to complete the look (style-aligned, formality-consistent, harmonious palette)",
+      "reason_type": "compatible",
       "fitBreakdown": {
         "embeddingNorm": 0.62,
         "categoryCompat": 0.74,
-        "colorHarmony": 0.81
+        "colorHarmony": 0.81,
+        "styleAlignment": 0.8,
+        "patternAlignment": 0.62,
+        "materialAlignment": 0.58,
+        "formalityAlignment": 0.84
+      },
+      "stylistSignals": {
+        "slot": "shoes",
+        "color": "black",
+        "formalityScore": 6.2,
+        "aesthetic": "classic",
+        "styleTokens": ["classic", "business", "minimalist"]
       }
     }
   ],
   "outfitSets": [
     {
       "productIds": [10001, 10022, 7788],
-      "categories": ["tops", "bottoms", "footwear"],
+      "categories": ["tops", "bottoms", "shoes"],
       "coherenceScore": 0.83,
-      "totalScore": 0.79,
-      "reasons": ["Matches wardrobe color family", "Good category compatibility"]
+      "totalScore": 0.83,
+      "reasons": [
+        "balanced across tops, bottoms, shoes",
+        "ranked by pairwise stylist compatibility",
+        "pairwise coherence is strong"
+      ]
     }
   ],
-  "missingCategories": ["footwear", "bags"]
+  "missingCategories": ["shoes", "bags"]
 }
 ```
+
+Scoring behavior summary:
+
+- Candidate ranking blends retrieval score with fashion signals (category compatibility, color harmony, style token alignment, pattern/material affinity, formality alignment).
+- `outfitSets` are scored with pairwise item compatibility (category, color pair, formality consistency, style-token overlap).
+- Sets below the minimum coherence threshold are filtered out.
 
 ---
 
@@ -1455,16 +1658,16 @@ Legacy examples like `/admin/opensearch` and `/admin/ranker` are removed from th
 
 ## Error Codes
 
-| Code | Description |
-|------|-------------|
-| `PRODUCT_NOT_FOUND` | Product with specified ID does not exist |
-| `INVALID_IMAGE_FORMAT` | Uploaded image format not supported |
-| `SEARCH_QUERY_EMPTY` | Search query parameter is required |
-| `COMPARISON_LIMIT_EXCEEDED` | Too many products for comparison (max 10) |
-| `ML_SERVICE_UNAVAILABLE` | Machine learning service is temporarily unavailable |
-| `RATE_LIMIT_EXCEEDED` | API rate limit exceeded |
-| `VALIDATION_ERROR` | Request validation failed |
-| `INTERNAL_SERVER_ERROR` | Unexpected server error |
+| Code                        | Description                                         |
+| --------------------------- | --------------------------------------------------- |
+| `PRODUCT_NOT_FOUND`         | Product with specified ID does not exist            |
+| `INVALID_IMAGE_FORMAT`      | Uploaded image format not supported                 |
+| `SEARCH_QUERY_EMPTY`        | Search query parameter is required                  |
+| `COMPARISON_LIMIT_EXCEEDED` | Too many products for comparison (max 10)           |
+| `ML_SERVICE_UNAVAILABLE`    | Machine learning service is temporarily unavailable |
+| `RATE_LIMIT_EXCEEDED`       | API rate limit exceeded                             |
+| `VALIDATION_ERROR`          | Request validation failed                           |
+| `INTERNAL_SERVER_ERROR`     | Unexpected server error                             |
 
 ## Rate Limits
 
@@ -1474,6 +1677,7 @@ Legacy examples like `/admin/opensearch` and `/admin/ranker` are removed from th
 - **ML predictions**: 40 requests per minute per IP
 
 Rate limit headers are included in responses:
+
 ```
 X-RateLimit-Limit: 100
 X-RateLimit-Remaining: 95
@@ -1483,23 +1687,26 @@ X-RateLimit-Reset: 1642341600
 ## SDKs and Libraries
 
 ### JavaScript/Node.js
+
 ```bash
 npm install @fashion-aggregator/api-client
 ```
 
 ### Python
+
 ```bash
 pip install fashion-aggregator-client
 ```
 
 ### Example Usage
-```javascript
-import { FashionApi } from '@fashion-aggregator/api-client';
 
-const api = new FashionApi('http://0.0.0.0:4000');
+```javascript
+import { FashionApi } from "@fashion-aggregator/api-client";
+
+const api = new FashionApi("http://0.0.0.0:4000");
 
 // Search for products
-const results = await api.search.text({ q: 'red sneakers', limit: 10 });
+const results = await api.search.text({ q: "red sneakers", limit: 10 });
 
 // Get recommendations
 const recommendations = await api.products.getRecommendations(12345);
@@ -1507,4 +1714,3 @@ const recommendations = await api.products.getRecommendations(12345);
 // Upload image for search
 const imageResults = await api.search.image({ image: fileBuffer });
 ```
-

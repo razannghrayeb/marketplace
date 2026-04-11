@@ -860,6 +860,25 @@ function detectCategoryFallback(text: string): { category: ProductCategory; conf
     }
   }
   
+  // Direct "shoes" keyword match → prioritize footwear
+  if (/\b(shoes?|footwear)\b/.test(lowerText)) {
+    const footwearCategories = ['loafers', 'flats', 'boots', 'heels', 'sandals', 'sneakers'];
+    for (const cat of footwearCategories) {
+      if (categoryScores[cat as ProductCategory] > 0) {
+        // High confidence if "shoes" is mentioned + any footwear match found
+        return {
+          category: cat as ProductCategory,
+          confidence: 0.85,
+        };
+      }
+    }
+    // If "shoes" is mentioned but no specific type found, return unknown with shoes note
+    return {
+      category: 'unknown',
+      confidence: 0.5,
+    };
+  }
+  
   // Find highest scoring category
   let bestCategory: ProductCategory = "unknown";
   let bestScore = 0;
@@ -1185,8 +1204,8 @@ async function findProductsForCategory(
         })),
         minimum_should_match: 1,
         filter: [
-          // Index uses string enum (see searchDocument.ts); boolean true matches nothing.
-          { term: { availability: "in_stock" } },
+          // Allow BOTH in_stock and out_of_stock products for outfit recommendations
+          { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } },
         ]
       }
     };
@@ -1229,6 +1248,15 @@ async function findProductsForCategory(
         });
       }
     }
+    
+    // Allow both in_stock and out_of_stock products for recommendations
+    query.bool.filter = query.bool.filter || [];
+    query.bool.filter.push({
+      bool: {
+        should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }],
+        minimum_should_match: 1,
+      },
+    });
     
     // Execute search
     const response = await osClient.search({

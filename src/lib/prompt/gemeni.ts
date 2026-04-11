@@ -79,6 +79,11 @@ export interface ParsedIntent {
   searchStrategy: string;
   confidence: number;
   rawQuery?: string;
+  meta?: {
+    provider?: "gemini" | "local";
+    degraded?: boolean;
+    reason?: string;
+  };
 }
 
 export interface IntentParserConfig {
@@ -113,7 +118,7 @@ export function createClipOnlyParsedIntent(imageCount: number, userPrompt: strin
   return {
     imageIntents: Array.from({ length: n }, (_, i) => ({
       imageIndex: i,
-      primaryAttributes: ["color", "style", "silhouette", "texture", "material", "pattern"],
+      primaryAttributes: [],
       extractedValues: {},
       weight: w,
       reasoning: "CLIP-only fallback (Gemini unavailable, timed out, or skipped)",
@@ -125,6 +130,11 @@ export function createClipOnlyParsedIntent(imageCount: number, userPrompt: strin
     searchStrategy: "Visual similarity from uploaded images only",
     confidence: 0.15,
     rawQuery: userPrompt,
+    meta: {
+      provider: "local",
+      degraded: true,
+      reason: "clip_only_fallback",
+    },
   };
 }
 
@@ -188,6 +198,10 @@ export class IntentParserService {
       // Step 4: Parse and validate the response
       const parsedIntent = this.parseIntentResponse(response, analyses.length);
       parsedIntent.rawQuery = userPrompt;
+      parsedIntent.meta = {
+        provider: "gemini",
+        degraded: false,
+      };
 
       // Step 5: Merge pre-parsed constraints into the result
       this.mergePreParsedConstraints(
@@ -202,10 +216,22 @@ export class IntentParserService {
 
     } catch (error) {
       console.error('[IntentParserService] Error parsing intent:', error);
-      return this.createFallbackIntent(
+      const errorText = String((error as any)?.message ?? error ?? "").toLowerCase();
+      const isInvalidApiKey =
+        errorText.includes("api_key_invalid") ||
+        errorText.includes("invalid api key") ||
+        errorText.includes("invalid key") ||
+        errorText.includes("permission denied");
+      const fallback = this.createFallbackIntent(
         this.ensureAnalysesForFallback(analyses, images.length),
         userPrompt,
       );
+      fallback.meta = {
+        provider: "local",
+        degraded: true,
+        reason: isInvalidApiKey ? "invalid_gemini_api_key" : "gemini_parse_failed",
+      };
+      return fallback;
     }
   }
 

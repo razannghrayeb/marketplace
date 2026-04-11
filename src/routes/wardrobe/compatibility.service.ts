@@ -175,8 +175,12 @@ export async function computeItemCompatibility(
       (sum: number, v: number, i: number) => sum + v * (itemB.embedding[i] || 0),
       0
     );
-    // For fashion, moderate similarity is good (too similar = boring)
-    styleMatch = 0.3 + 0.7 * Math.abs(dot - 0.5) * 2;
+    // For fashion pairing, reward moderate-to-high visual similarity while penalizing extremes.
+    const cosine = Math.max(-1, Math.min(1, dot));
+    const similarity01 = (cosine + 1) / 2;
+    const sweetSpot = 0.62;
+    const distance = Math.abs(similarity01 - sweetSpot);
+    styleMatch = Math.max(0.35, 1 - distance / sweetSpot);
   }
 
   // Combine factors

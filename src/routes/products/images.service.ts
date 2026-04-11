@@ -336,6 +336,42 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
   const images = imagesResult.rows;
   let primaryImage = images.find((img: any) => img.is_primary) || images[0];
 
+  let garmentBox: PixelBox | null = null;
+  try {
+    if (primaryImage?.id) {
+      const det = await pg.query(
+        `SELECT box_x1, box_y1, box_x2, box_y2, confidence, area_ratio
+         FROM product_image_detections
+         WHERE product_image_id = $1
+           AND box_x1 IS NOT NULL AND box_y1 IS NOT NULL
+           AND box_x2 IS NOT NULL AND box_y2 IS NOT NULL
+           AND COALESCE(confidence, 0) >= 0.22
+         ORDER BY COALESCE(area_ratio, 0) DESC NULLS LAST, id DESC
+         LIMIT 1`,
+        [primaryImage.id],
+      );
+      const r = det.rows[0];
+      if (r) {
+        const x1 = Number(r.box_x1);
+        const y1 = Number(r.box_y1);
+        const x2 = Number(r.box_x2);
+        const y2 = Number(r.box_y2);
+        if (
+          Number.isFinite(x1) &&
+          Number.isFinite(y1) &&
+          Number.isFinite(x2) &&
+          Number.isFinite(y2) &&
+          x2 > x1 &&
+          y2 > y1
+        ) {
+          garmentBox = { x1, y1, x2, y2 };
+        }
+      }
+    }
+  } catch {
+    garmentBox = null;
+  }
+
   let garmentColorAnalysis: Awaited<ReturnType<typeof extractGarmentFashionColors>> | null = null;
   if (sourceBuffer && sourceBuffer.length > 0) {
     garmentColorAnalysis = await extractGarmentFashionColors(sourceBuffer).catch(() => null);
@@ -418,7 +454,8 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
             `SELECT box_x1, box_y1, box_x2, box_y2, confidence, area_ratio
              FROM product_image_detections
              WHERE product_image_id = $1
-               AND box_x1 IS NOT NULL AND box_y2 IS NOT NULL
+               AND box_x1 IS NOT NULL AND box_y1 IS NOT NULL
+               AND box_x2 IS NOT NULL AND box_y2 IS NOT NULL
                AND COALESCE(confidence, 0) >= 0.22
              ORDER BY COALESCE(area_ratio, 0) DESC NULLS LAST, id DESC
              LIMIT 1`,
@@ -426,7 +463,20 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
           );
           const r = det.rows[0];
           if (r) {
-            box = { x1: Number(r.box_x1), y1: Number(r.box_y1), x2: Number(r.box_x2), y2: Number(r.box_y2) };
+            const x1 = Number(r.box_x1);
+            const y1 = Number(r.box_y1);
+            const x2 = Number(r.box_x2);
+            const y2 = Number(r.box_y2);
+            if (
+              Number.isFinite(x1) &&
+              Number.isFinite(y1) &&
+              Number.isFinite(x2) &&
+              Number.isFinite(y2) &&
+              x2 > x1 &&
+              y2 > y1
+            ) {
+              box = { x1, y1, x2, y2 };
+            }
           }
         } catch {
           box = null;
@@ -453,8 +503,11 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
     }
   }
 
-  if (!doc.embedding && primaryImage) {
-    // Attempt to backfill missing embedding by computing it now
+  const needsEmbeddingBackfill = !doc.embedding && primaryImage;
+  const needsGarmentBackfill = !doc.embedding_garment && primaryImage;
+
+  if (needsEmbeddingBackfill || needsGarmentBackfill) {
+    // Attempt to backfill missing vectors by computing them now.
     try {
       // Prefer fetching from public CDN URL; fallback to R2 if needed
       let buffer: Buffer | null = null;
@@ -490,44 +543,34 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
           "../../lib/image/processor"
         );
 
-        let garmentBox: { x1: number; y1: number; x2: number; y2: number } | null = null;
-        try {
-          const det = await pg.query(
-            `SELECT box_x1, box_y1, box_x2, box_y2, confidence, area_ratio
-             FROM product_image_detections
-             WHERE product_image_id = $1
-               AND box_x1 IS NOT NULL AND box_y2 IS NOT NULL
-               AND COALESCE(confidence, 0) >= 0.22
-             ORDER BY COALESCE(area_ratio, 0) DESC NULLS LAST, id DESC
-             LIMIT 1`,
-            [primaryImage.id],
-          );
-          const r = det.rows[0];
-          if (r) {
-            garmentBox = {
-              x1: Number(r.box_x1),
-              y1: Number(r.box_y1),
-              x2: Number(r.box_x2),
-              y2: Number(r.box_y2),
-            };
-          }
-        } catch {
-          garmentBox = null;
-        }
-
-        // Garment colors from original pixels; CLIP from catalog-aligned buffer (matches search + reindex)
+        // Garment colors from original pixels; CLIP from catalog-aligned buffer (matches search + reindex).
         const [embedding, embeddingGarment, garmentAnalysis] = await Promise.all([
-          processImageForEmbedding(clipBuf),
-          processImageForGarmentEmbedding(clipBuf).catch(() => null as unknown as number[]),
-          extractGarmentFashionColors(buffer, { box: garmentBox }).catch(() => null),
+          needsEmbeddingBackfill ? processImageForEmbedding(clipBuf) : Promise.resolve(null as unknown as number[]),
+          needsGarmentBackfill
+            ? (async () => {
+                if (garmentBox) {
+                  try {
+                    return await processImageForGarmentEmbeddingWithOptionalBox(buffer, clipBuf, garmentBox);
+                  } catch {
+                    // Fall through to center-crop fallback below.
+                  }
+                }
+                return processImageForGarmentEmbedding(clipBuf).catch(() => null as unknown as number[]);
+              })()
+            : Promise.resolve(null as unknown as number[]),
+          (needsEmbeddingBackfill || needsGarmentBackfill)
+            ? extractGarmentFashionColors(buffer, { box: garmentBox }).catch(() => null)
+            : Promise.resolve(null),
         ]);
-        // Update DB for this image row and include in document
-        await pg.query(
-          `UPDATE product_images SET embedding = $1::vector WHERE id = $2`,
-          [toPgVectorParam(embedding), primaryImage.id]
-        );
-        doc.embedding = embedding;
-        if (Array.isArray(embeddingGarment) && embeddingGarment.length > 0) {
+        // Update DB for this image row and include in document.
+        if (needsEmbeddingBackfill && Array.isArray(embedding) && embedding.length > 0) {
+          await pg.query(
+            `UPDATE product_images SET embedding = $1::vector WHERE id = $2`,
+            [toPgVectorParam(embedding), primaryImage.id]
+          );
+          doc.embedding = embedding;
+        }
+        if (needsGarmentBackfill && Array.isArray(embeddingGarment) && embeddingGarment.length > 0) {
           doc.embedding_garment = embeddingGarment;
         }
         if ((!doc.attr_colors || doc.attr_colors.length === 0) && garmentAnalysis && garmentAnalysis.paletteCanonical.length > 0) {

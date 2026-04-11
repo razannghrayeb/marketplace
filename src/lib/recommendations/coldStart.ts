@@ -272,7 +272,8 @@ async function getStyleBasedOnboarding(
             },
           },
           filter: [
-            { term: { availability: "in_stock" } },
+            // Allow BOTH in_stock and out_of_stock products
+            { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } },
           ],
         },
       },
@@ -300,7 +301,8 @@ async function getTrendingForDemographic(
   limit: number
 ): Promise<OnboardingRecommendation[]> {
   const filters: any[] = [
-    { term: { availability: "in_stock" } },
+    // Allow BOTH in_stock and out_of_stock products
+    { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } },
     { range: { popularity_score: { gte: 0.5 } } },
   ];
   
@@ -399,7 +401,8 @@ async function getEssentialCategoryItems(
           bool: {
             must: { match: { category: essential.category } },
             filter: [
-              { term: { availability: "in_stock" } },
+              // Allow BOTH in_stock and out_of_stock products
+              { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } },
               { range: { popularity_score: { gte: 0.3 } } },
             ],
           },

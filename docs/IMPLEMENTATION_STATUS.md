@@ -99,7 +99,7 @@ Implemented in `src/routes/favorites/`. All routes require `requireAuth`.
 | POST | `/products/recommendations/batch` | Batch recommendations |
 | GET | `/products/:id/complete-style` | Outfit completion suggestions |
 | GET | `/products/:id/style-profile` | Style profile for product |
-| POST | `/products/complete-style` | Outfit completion from body |
+| POST | `/products/complete-style` | Outfit completion from body (preferred: `product_id`; fallback: `product`) |
 | GET | `/products/:id/images` | List product images |
 | POST | `/products/:id/images` | Upload product image |
 | PUT | `/products/:id/images/:imageId/primary` | Set primary image |
@@ -177,6 +177,12 @@ All routes require `requireAuth`. Mounted at `/api/wardrobe`.
 - GET `/api/wardrobe/compatibility/:category/learned`
 - GET `/api/wardrobe/compatibility/graph`
 - POST `/api/wardrobe/compatibility/learn`
+
+### April 2026 quality hardening (complete-look)
+- Pairwise stylist-coherence scoring added for complete-look outfit sets.
+- Low-coherence outfit combinations are filtered before returning `outfitSets`.
+- Compatibility style-similarity heuristic adjusted to a stylist sweet spot (moderate-to-high similarity).
+- Validation run: `pnpm -s tsc -p . --noEmit` and `pnpm test:complete-look-matrix --timeout=60000`.
 
 ---
 

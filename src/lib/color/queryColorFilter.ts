@@ -29,7 +29,29 @@ const COLOR_ALIAS_TO_CANONICAL = (() => {
 export function normalizeColorToken(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const key = raw.toLowerCase().replace(/[_-]/g, " ").replace(/\s+/g, " ").trim();
-  return COLOR_ALIAS_TO_CANONICAL.get(key) ?? null;
+  const direct = COLOR_ALIAS_TO_CANONICAL.get(key);
+  if (direct) return direct;
+
+  // Phrase fallback for compound merchant values like "mid wash denim".
+  // Prefer explicit color words first, then infer denim family as blue.
+  const hasWord = (w: string) => new RegExp(`\\b${w}\\b`).test(key);
+
+  if (key.includes("denim")) {
+    if (hasWord("black")) return "black";
+    if (hasWord("white") || key.includes("off white") || key.includes("off-white")) return "white";
+    if (hasWord("gray") || hasWord("grey") || hasWord("charcoal")) return "gray";
+    return "blue";
+  }
+
+  // Generic fallback: if a known alias appears as a whole word/phrase inside
+  // the value, resolve to that canonical color.
+  for (const [alias, canonical] of COLOR_ALIAS_TO_CANONICAL.entries()) {
+    if (new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\b`).test(key)) {
+      return canonical;
+    }
+  }
+
+  return null;
 }
 
 export function expandColorTermsForFilter(color: string): string[] {

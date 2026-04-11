@@ -83,7 +83,7 @@ In `src/server.ts`, search lives under **`/search`** (not `/api/search`). Catalo
 | Endpoint | Method | Notes |
 |----------|--------|--------|
 | `/products/:id/complete-style` | GET | Query params: `maxPerCategory`, `maxTotal`, price, brands |
-| `/products/complete-style` | POST | Body with `product` + optional `options` |
+| `/products/complete-style` | POST | Preferred body: `product_id` + optional `options`; fallback `product` object |
 | `/products/:id/style-profile` | GET | Debug / UI profile |
 
 **Implementation:** `outfit.controller.ts`, `outfit.service.ts`, `lib/outfit/completestyle.ts`. Optional `x-user-id` / JWT merges wardrobe-owned items when present.
@@ -122,6 +122,8 @@ In `src/server.ts`, search lives under **`/search`** (not `/api/search`). Catalo
 **Auth:** JWT + routes under `/api/wardrobe` require auth (see `wardrobe.routes.ts`).
 
 Highlights: CRUD items, profile, gaps, recommendations, `complete-look`, `outfit-suggestions`, `analyze-photo`, compatibility and layering endpoints (see `IMPLEMENTATION_STATUS.md` § Wardrobe).
+
+Technical build details for complete-look stylist pipeline: `outfit-stylist-pipeline.md`.
 
 ---
 

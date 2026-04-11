@@ -340,9 +340,30 @@ export function inferCategoryCanonical(rawCategory: string | null | undefined, t
     .replace(/\s+/g, " ")
     .trim();
   if (norm) {
+    // Resolve high-signal garment classes first to avoid ambiguous alias collisions
+    // like "short jacket" being mapped to bottoms due the token "short".
+    if (/\b(jacket|jackets|coat|coats|blazer|blazers|cardigan|cardigans|parka|windbreaker|vest|gilet|trench|overshirt)\b/.test(norm)) {
+      return "outerwear";
+    }
+    if (/\b(dress|dresses|gown|frock|maxi dress|mini dress|midi dress|sundress|jumpsuit|romper|abaya|kaftan|jalabiya|thobe)\b/.test(norm)) {
+      return "dresses";
+    }
+    if (/\b(shoes?|sneakers?|boots?|sandals?|heels?|loafers?|flats?|mules?|slides?|slippers?|pumps?|oxfords?|trainers?)\b/.test(norm)) {
+      return "footwear";
+    }
+    if (/\b(shorts|bermuda|bermudas|cargo shorts|denim shorts|jeans|trousers|pants|chinos|leggings|skirt|skirts|culottes|sweatpants)\b/.test(norm)) {
+      return "bottoms";
+    }
+    if (/\b(top|tops|shirt|shirts|blouse|blouses|tshirt|t-shirt|tee|tank top|polo|henley|tunic|crop top|camisole|sweater|pullover|hoodie|sweatshirt)\b/.test(norm)) {
+      return "tops";
+    }
+
+    const tokens = new Set(norm.split(/\s+/));
     for (const [key, aliases] of Object.entries(CATEGORY_ALIASES)) {
       for (const a of aliases) {
-        if (a.length > 2 && norm.split(/\s+/).includes(a)) return key;
+        // Ambiguous single token; do not classify bottoms by "short" alone.
+        if (a === "short") continue;
+        if (a.length > 2 && tokens.has(a)) return key;
         if (a.length > 3 && norm.includes(a)) return key;
       }
     }

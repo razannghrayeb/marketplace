@@ -16,7 +16,11 @@ import axios from "axios";
 import { Pool } from "pg";
 import { osClient } from "../src/lib/core/opensearch";
 import { config } from "../src/config";
-import { processImageForGarmentEmbedding } from "../src/lib/image";
+import {
+  processImageForGarmentEmbedding,
+  processImageForGarmentEmbeddingWithOptionalBox,
+} from "../src/lib/image";
+import { prepareBufferForPrimaryCatalogEmbedding } from "../src/lib/image/embeddingPrep";
 import { promises as fs } from "fs";
 
 const reindexPg = new Pool({
@@ -115,9 +119,24 @@ Options:
     const params = lastProcessedId > 0 ? [batchSize, lastProcessedId] : [batchSize];
 
     const { rows } = await reindexPg.query(
-      `SELECT p.id, COALESCE(p.image_cdn, pi.cdn_url, p.image_url) AS image_url
+      `SELECT p.id,
+              COALESCE(p.image_cdn, pi.cdn_url, p.image_url) AS image_url,
+              d.box_x1,
+              d.box_y1,
+              d.box_x2,
+              d.box_y2
        FROM products p
        LEFT JOIN product_images pi ON pi.product_id = p.id AND pi.is_primary = true
+       LEFT JOIN LATERAL (
+         SELECT box_x1, box_y1, box_x2, box_y2
+         FROM product_image_detections
+         WHERE product_image_id = pi.id
+            AND box_x1 IS NOT NULL AND box_y1 IS NOT NULL
+            AND box_x2 IS NOT NULL AND box_y2 IS NOT NULL
+           AND COALESCE(confidence, 0) >= 0.22
+         ORDER BY COALESCE(area_ratio, 0) DESC NULLS LAST, id DESC
+         LIMIT 1
+       ) d ON true
        WHERE COALESCE(p.image_cdn, pi.cdn_url, p.image_url) IS NOT NULL
          AND COALESCE(TRIM(COALESCE(p.image_cdn, pi.cdn_url, p.image_url)), '') != ''
          ${offsetClause}
@@ -150,9 +169,23 @@ Options:
         continue;
       }
 
+      let box: { x1: number; y1: number; x2: number; y2: number } | null = null;
+      if (row.box_x1 != null && row.box_y1 != null && row.box_x2 != null && row.box_y2 != null) {
+        box = {
+          x1: Number(row.box_x1),
+          y1: Number(row.box_y1),
+          x2: Number(row.box_x2),
+          y2: Number(row.box_y2),
+        };
+      }
+
+      const { buffer: clipBuf } = await prepareBufferForPrimaryCatalogEmbedding(buf);
+
       let garmentEmbedding: number[];
       try {
-        garmentEmbedding = await processImageForGarmentEmbedding(buf);
+        garmentEmbedding = box
+          ? await processImageForGarmentEmbeddingWithOptionalBox(buf, clipBuf, box)
+          : await processImageForGarmentEmbedding(clipBuf);
       } catch (err: any) {
         console.warn(`  ⚠️  Product ${productId}: garment embedding failed - ${err.message}`);
         batchFailed++;

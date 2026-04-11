@@ -66,6 +66,7 @@ import {
   searchEvalVariant,
 } from '../../lib/search/evalHooks';
 import { expandColorTermsForFilter, normalizeColorToken } from '../../lib/color/queryColorFilter';
+import { extractQuickFashionColorHints } from '../../lib/color/quickImageColor';
 import {
   computeHitRelevance,
   normalizeQueryGender,
@@ -77,6 +78,8 @@ import {
   parseNegations,
   type NegationConstraint,
 } from '../../lib/queryProcessor/negationHandler';
+import { blip } from '../../lib/image';
+import { buildStructuredBlipOutput } from '../../lib/image/blipStructured';
 
 function buildHybridScoreRecallStats(hits: any[]): HybridScoreRecallStats | undefined {
   if (!hits?.length) return undefined;
@@ -139,6 +142,8 @@ export type UnifiedSearchResult = SearchResultWithRelated & {
   total: number;
   tookMs: number;
   query?: QueryASTSummary;
+  /** True when retrieval required any fallback/relax retry path. */
+  did_relax?: boolean;
 };
 
 /** Lightweight subset of QueryAST shipped back with every text-search response */
@@ -170,6 +175,454 @@ export interface MultiImageSearchRequest {
   userPrompt: string;
   limit?: number;
   rerankWeights?: RerankOptions | any;
+}
+
+function appendUnique(target: string[], values: string[]) {
+  for (const v of values) {
+    const x = String(v || '').toLowerCase().trim();
+    if (!x) continue;
+    if (!target.includes(x)) target.push(x);
+  }
+}
+
+let blipInitPromise: Promise<void> | null = null;
+async function ensureBlipInitialized(): Promise<void> {
+  if (!blipInitPromise) {
+    blipInitPromise = blip.init().catch((err) => {
+      blipInitPromise = null;
+      throw err;
+    });
+  }
+  await blipInitPromise;
+}
+
+const NEUTRAL_COLOR_TOKENS = new Set([
+  "white",
+  "off-white",
+  "cream",
+  "beige",
+  "ivory",
+  "gray",
+  "grey",
+  "charcoal",
+  "black",
+  "taupe",
+  "nude",
+]);
+
+function normalizeTypeHintTerms(raw: string): string[] {
+  const base = String(raw || "").toLowerCase().trim();
+  if (!base) return [];
+  const expanded = [
+    ...extractLexicalProductTypeSeeds(base),
+    ...extractFashionTypeNounTokens(base),
+  ]
+    .map((s) => String(s).toLowerCase().trim())
+    .filter(Boolean);
+  return [...new Set([base, ...expanded])];
+}
+
+function normalizeAndPrioritizeColorHints(colors: string[], maxHints = 3): string[] {
+  const canonical = [...new Set(
+    colors
+      .map((c) => normalizeColorToken(String(c)) ?? String(c).toLowerCase().trim())
+      .filter(Boolean),
+  )];
+  if (canonical.length <= 1) return canonical.slice(0, maxHints);
+
+  const vivid = canonical.filter((c) => !NEUTRAL_COLOR_TOKENS.has(c));
+  if (vivid.length > 0) {
+    const neutral = canonical.filter((c) => NEUTRAL_COLOR_TOKENS.has(c));
+    return [...vivid, ...neutral].slice(0, maxHints);
+  }
+  return canonical.slice(0, maxHints);
+}
+
+async function enrichClipOnlyIntentFromImages(
+  parsedIntent: ParsedIntent,
+  preparedImages: Buffer[],
+  userPrompt: string,
+): Promise<void> {
+  if (!preparedImages.length) return;
+
+  const promptColorHints = extractPromptColorTerms(userPrompt);
+  const promptTypeHints = extractPromptTypeTerms(userPrompt).slice(0, 3);
+  const promptStyleHints = extractPromptStyleTerms(userPrompt).slice(0, 3);
+  const styleIdx = findPromptAnchoredImageIndex(userPrompt, "style", preparedImages.length);
+
+  let imageTypeHints: string[] = [];
+  let styleAnchoredTypeHints: string[] = [];
+  try {
+    await ensureBlipInitialized();
+    const typeCounts = new Map<string, number>();
+    for (let i = 0; i < preparedImages.length; i++) {
+      const img = preparedImages[i];
+      const caption = await blip.caption(img);
+      const structured = buildStructuredBlipOutput(caption || "");
+      const uniq = [
+        ...new Set(
+          (structured.productTypeHints || [])
+            .map((t) => String(t).toLowerCase().trim())
+            .filter(Boolean),
+        ),
+      ];
+      const expanded = [...new Set(uniq.flatMap((t) => normalizeTypeHintTerms(t)).filter(Boolean))];
+      const terms = expanded.length > 0 ? expanded : uniq;
+      if (styleIdx != null && i === styleIdx && terms.length > 0) {
+        styleAnchoredTypeHints = [...terms.slice(0, 3)];
+      }
+      for (const t of terms.slice(0, 6)) {
+        typeCounts.set(t, (typeCounts.get(t) || 0) + 1);
+      }
+    }
+    const minConsensus = Math.max(1, Math.ceil(preparedImages.length / 2));
+    const rankedTypeHints = [...typeCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([t]) => t);
+    imageTypeHints = [...typeCounts.entries()]
+      .filter(([, count]) => count >= minConsensus)
+      .sort((a, b) => b[1] - a[1])
+      .map(([t]) => t)
+      .slice(0, 3);
+    if (imageTypeHints.length === 0) {
+      imageTypeHints = rankedTypeHints.slice(0, 3);
+    }
+  } catch {
+    imageTypeHints = [];
+    styleAnchoredTypeHints = [];
+  }
+
+  parsedIntent.constraints = parsedIntent.constraints || {
+    mustHave: [],
+    mustNotHave: [],
+  };
+  parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
+  parsedIntent.constraints.mustNotHave = parsedIntent.constraints.mustNotHave || [];
+
+  if (promptColorHints.length > 0) appendUnique(parsedIntent.constraints.mustHave, promptColorHints);
+  const preferredTypeHints =
+    promptTypeHints.length > 0
+      ? promptTypeHints
+      : styleAnchoredTypeHints.length > 0
+        ? styleAnchoredTypeHints
+        : imageTypeHints;
+
+  if (preferredTypeHints.length > 0) appendUnique(parsedIntent.constraints.mustHave, preferredTypeHints);
+  if (promptStyleHints.length > 0) appendUnique(parsedIntent.constraints.mustHave, promptStyleHints);
+
+  if (!parsedIntent.constraints.category && promptTypeHints.length > 0) {
+    parsedIntent.constraints.category = promptTypeHints[0];
+  } else if (!parsedIntent.constraints.category && styleAnchoredTypeHints.length > 0) {
+    parsedIntent.constraints.category = styleAnchoredTypeHints[0];
+  } else if (!parsedIntent.constraints.category && imageTypeHints.length > 0) {
+    parsedIntent.constraints.category = imageTypeHints[0];
+  }
+
+  if (!parsedIntent.imageIntents || parsedIntent.imageIntents.length === 0) {
+    parsedIntent.imageIntents = [];
+  }
+
+  const colorIdx = findPromptAnchoredImageIndex(userPrompt, "color", preparedImages.length);
+  const textureIdx = findPromptAnchoredImageIndex(userPrompt, "texture", preparedImages.length);
+  const patternIdx = findPromptAnchoredImageIndex(userPrompt, "pattern", preparedImages.length);
+  const silhouetteIdx = findPromptAnchoredImageIndex(userPrompt, "silhouette", preparedImages.length);
+
+  if (colorIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, colorIdx);
+    if (!row.primaryAttributes.includes("color")) row.primaryAttributes.push("color");
+    const ev = row.extractedValues as Record<string, unknown>;
+    if (!ev.color) {
+      let captionColors: string[] = [];
+      try {
+        await ensureBlipInitialized();
+        const caption = await blip.caption(preparedImages[colorIdx]);
+        const structured = buildStructuredBlipOutput(caption || "");
+        captionColors = (structured.colors || []).map((c) => String(c));
+      } catch {
+        captionColors = [];
+      }
+      const hints = await extractQuickFashionColorHints(preparedImages[colorIdx], { maxHints: 3 });
+      const canonical = normalizeAndPrioritizeColorHints([...captionColors, ...hints], 3);
+      if (canonical.length > 0) ev.color = canonical;
+    }
+  }
+
+  if (styleIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, styleIdx);
+    if (!row.primaryAttributes.includes("style")) row.primaryAttributes.push("style");
+    const ev = row.extractedValues as Record<string, unknown>;
+    if (!ev.productType) {
+      const styleTypeHints =
+        preferredTypeHints.length > 0
+          ? preferredTypeHints
+          : styleAnchoredTypeHints.length > 0
+            ? styleAnchoredTypeHints
+            : imageTypeHints;
+      if (styleTypeHints.length > 0) ev.productType = styleTypeHints.slice(0, 2);
+    }
+  }
+
+  if (textureIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, textureIdx);
+    if (!row.primaryAttributes.includes("texture")) row.primaryAttributes.push("texture");
+    if (!row.primaryAttributes.includes("material")) row.primaryAttributes.push("material");
+  }
+
+  if (patternIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, patternIdx);
+    if (!row.primaryAttributes.includes("pattern")) row.primaryAttributes.push("pattern");
+  }
+
+  if (silhouetteIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, silhouetteIdx);
+    if (!row.primaryAttributes.includes("silhouette")) row.primaryAttributes.push("silhouette");
+    if (!row.primaryAttributes.includes("fit")) row.primaryAttributes.push("fit");
+  }
+
+  const n = Math.max(1, parsedIntent.imageIntents.length);
+  const equalW = 1 / n;
+  parsedIntent.imageIntents = parsedIntent.imageIntents
+    .sort((a, b) => a.imageIndex - b.imageIndex)
+    .map((x) => ({
+      ...x,
+      weight: Number.isFinite(Number(x.weight)) && Number(x.weight) > 0 ? Number(x.weight) : equalW,
+    }));
+
+  const totalW = parsedIntent.imageIntents.reduce((s, x) => s + (x.weight || 0), 0);
+  if (totalW > 0) {
+    parsedIntent.imageIntents.forEach((x) => {
+      x.weight = (x.weight || 0) / totalW;
+    });
+  }
+
+  const signals: string[] = [];
+  if (promptColorHints.length > 0) signals.push(`prompt color=${promptColorHints.join('/')}`);
+  if (promptTypeHints.length > 0) signals.push(`prompt type=${promptTypeHints.join('/')}`);
+  if (promptTypeHints.length === 0 && preferredTypeHints.length > 0) signals.push(`image type=${preferredTypeHints.join('/')}`);
+  if (promptStyleHints.length > 0) signals.push(`prompt style=${promptStyleHints.join('/')}`);
+  if (signals.length > 0) {
+    parsedIntent.searchStrategy = `Local prompt-anchored fallback: ${signals.join(' | ')}`;
+    parsedIntent.confidence = Math.max(parsedIntent.confidence || 0, 0.38);
+  }
+}
+
+type PromptAnchorKind = "color" | "style" | "texture" | "pattern" | "silhouette";
+
+function promptAnchorKindRegex(kind: PromptAnchorKind): RegExp {
+  switch (kind) {
+    case "color":
+      return /(?:color|colour|tone|shade|palette|hue|colourway|colore|couleur|tono)/i;
+    case "style":
+      return /(?:style|vibe|aesthetic|look|design|theme|mood|cut)/i;
+    case "texture":
+      return /(?:texture|material|fabric|finish)/i;
+    case "pattern":
+      return /(?:pattern|print|striped?|plaid|floral|paisley|polka|motif)/i;
+    case "silhouette":
+      return /(?:silhouette|fit|shape|cut|outline|tailoring)/i;
+  }
+}
+
+function findPromptAnchoredImageIndex(
+  prompt: string,
+  kind: PromptAnchorKind,
+  imageCount: number,
+): number | null {
+  if (!prompt || imageCount <= 0) return null;
+  const kindRe = promptAnchorKindRegex(kind);
+  if (!kindRe.test(prompt)) return null;
+
+  const aliases: string[][] = [
+    ["first", "1st", "one", "image 1", "img 1", "pic 1", "picture 1", "photo 1"],
+    ["second", "2nd", "two", "image 2", "img 2", "pic 2", "picture 2", "photo 2"],
+    ["third", "3rd", "three", "image 3", "img 3", "pic 3", "picture 3", "photo 3"],
+    ["fourth", "4th", "four", "image 4", "img 4", "pic 4", "picture 4", "photo 4"],
+    ["fifth", "5th", "five", "image 5", "img 5", "pic 5", "picture 5", "photo 5"],
+  ];
+
+  const normalized = prompt.toLowerCase().replace(/\s+/g, " ");
+
+  // First pass: clause-local matching (handles "and" typos like "ans" and avoids cross-clause bleed).
+  const clauseParts = normalized
+    .split(/\b(?:and|ans)\b|[,&+]/i)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const clauseLinked: number[] = [];
+  const maxIdx = Math.min(imageCount, aliases.length);
+  for (const part of clauseParts) {
+    if (!kindRe.test(part)) continue;
+    const localHits: number[] = [];
+    for (let idx = 0; idx < maxIdx; idx++) {
+      const aliasGroup = aliases[idx];
+      const aliasPattern = aliasGroup
+        .map((a) => a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"))
+        .join("|");
+      if (new RegExp(`(?:^|\\s)(?:${aliasPattern})(?:'s)?(?:\\s|$)`, "i").test(part)) {
+        localHits.push(idx);
+      }
+    }
+    if (imageCount >= 2 && /(?:^|\s)(?:last|final)(?:\s+(?:image|one|pic|picture|photo))?(?:\s|$)/i.test(part)) {
+      localHits.push(imageCount - 1);
+    }
+    const uniqLocal = [...new Set(localHits)];
+    if (uniqLocal.length === 1 && !clauseLinked.includes(uniqLocal[0])) {
+      clauseLinked.push(uniqLocal[0]);
+    }
+  }
+  if (clauseLinked.length === 1) return clauseLinked[0];
+
+  const linked: number[] = [];
+
+  for (let idx = 0; idx < maxIdx; idx++) {
+    const aliasGroup = aliases[idx];
+    const aliasPattern = aliasGroup
+      .map((a) => a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"))
+      .join("|");
+    const bridge = "(?:(?!\\s+(?:and|ans|then)\\s+|[,&+])[^.!?\\n]){0,120}";
+    const kindSrc = `(?:${kindRe.source})${bridge}(?:from|of|in|like|using|use)?\\s*(?:the\\s+)?(?:${aliasPattern})(?:'s)?`;
+    const srcKind = `(?:from|of|in|like|using|use)?\\s*(?:the\\s+)?(?:${aliasPattern})(?:'s)?${bridge}(?:${kindRe.source})`;
+    if (new RegExp(kindSrc, "i").test(normalized) || new RegExp(srcKind, "i").test(normalized)) {
+      linked.push(idx);
+    }
+  }
+
+  if (imageCount >= 2) {
+    const lastIdx = imageCount - 1;
+    const lastAlias = "(?:last|final)(?:\\s+(?:image|one|pic|picture|photo))?";
+    const bridge = "(?:(?!\\s+(?:and|ans|then)\\s+|[,&+])[^.!?\\n]){0,90}";
+    const kindLast = `(?:${kindRe.source})${bridge}(?:from|of|in|like)?\\s*(?:the\\s+)?${lastAlias}`;
+    const lastKind = `(?:from|of|in|like)?\\s*(?:the\\s+)?${lastAlias}${bridge}(?:${kindRe.source})`;
+    if (new RegExp(kindLast, "i").test(normalized) || new RegExp(lastKind, "i").test(normalized)) {
+      if (!linked.includes(lastIdx)) linked.push(lastIdx);
+    }
+  }
+
+  return linked.length === 1 ? linked[0] : null;
+}
+
+function ensureImageIntentRow(parsedIntent: ParsedIntent, imageIndex: number): NonNullable<ParsedIntent["imageIntents"]>[number] {
+  if (!parsedIntent.imageIntents) parsedIntent.imageIntents = [];
+  let row = parsedIntent.imageIntents.find((x) => x.imageIndex === imageIndex);
+  if (!row) {
+    row = {
+      imageIndex,
+      primaryAttributes: [],
+      extractedValues: {},
+      weight: 0.5,
+      reasoning: `Prompt-anchor fallback for image ${imageIndex}`,
+    };
+    parsedIntent.imageIntents.push(row);
+  }
+  row.primaryAttributes = row.primaryAttributes || [];
+  row.extractedValues = row.extractedValues || {};
+  return row;
+}
+
+async function enrichPromptAnchoredIntentFromImages(
+  parsedIntent: ParsedIntent,
+  preparedImages: Buffer[],
+  userPrompt: string,
+): Promise<void> {
+  if (!preparedImages.length || !userPrompt?.trim()) return;
+  const imageCount = preparedImages.length;
+  const colorIdx = findPromptAnchoredImageIndex(userPrompt, "color", imageCount);
+  const styleIdx = findPromptAnchoredImageIndex(userPrompt, "style", imageCount);
+  const patternIdx = findPromptAnchoredImageIndex(userPrompt, "pattern", imageCount);
+  const silhouetteIdx = findPromptAnchoredImageIndex(userPrompt, "silhouette", imageCount);
+
+  if (colorIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, colorIdx);
+    if (!row.primaryAttributes.includes("color")) row.primaryAttributes.push("color");
+    if (row.extractedValues && !row.extractedValues.color) {
+      let captionColors: string[] = [];
+      try {
+        await ensureBlipInitialized();
+        const caption = await blip.caption(preparedImages[colorIdx]);
+        const structured = buildStructuredBlipOutput(caption || "");
+        captionColors = (structured.colors || [])
+          .map((c) => normalizeColorToken(String(c)) ?? String(c).toLowerCase())
+          .filter(Boolean);
+      } catch {
+        captionColors = [];
+      }
+
+      const hints = await extractQuickFashionColorHints(preparedImages[colorIdx], { maxHints: 3 });
+      const canonical = normalizeAndPrioritizeColorHints([...captionColors, ...hints], 3);
+      if (canonical.length > 0) {
+        row.extractedValues.color = canonical;
+        parsedIntent.constraints = parsedIntent.constraints || { mustHave: [], mustNotHave: [] };
+        parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
+        appendUnique(parsedIntent.constraints.mustHave, canonical);
+      }
+    }
+  }
+
+  if (styleIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, styleIdx);
+    if (!row.primaryAttributes.includes("style")) row.primaryAttributes.push("style");
+    const ev = row.extractedValues as Record<string, unknown>;
+    if (!ev.style || String(ev.style).trim() === "") {
+      try {
+        await ensureBlipInitialized();
+        const caption = await blip.caption(preparedImages[styleIdx]);
+        const structured = buildStructuredBlipOutput(caption || "");
+        const styleHint = structured.style?.attrStyle;
+        if (styleHint) {
+          ev.style = styleHint;
+          parsedIntent.constraints = parsedIntent.constraints || { mustHave: [], mustNotHave: [] };
+          parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
+          appendUnique(parsedIntent.constraints.mustHave, [styleHint]);
+        }
+        const styleTypeHints = [...new Set((structured.productTypeHints || []).flatMap((t) => normalizeTypeHintTerms(String(t))).filter(Boolean))].slice(0, 3);
+        if (styleTypeHints.length > 0) {
+          ev.productType = styleTypeHints;
+          parsedIntent.constraints = parsedIntent.constraints || { mustHave: [], mustNotHave: [] };
+          parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
+          appendUnique(parsedIntent.constraints.mustHave, styleTypeHints);
+          if (!parsedIntent.constraints.category) {
+            parsedIntent.constraints.category = styleTypeHints[0];
+          }
+        }
+      } catch {
+        // best-effort fallback only
+      }
+    }
+  }
+
+  if (patternIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, patternIdx);
+    if (!row.primaryAttributes.includes("pattern")) row.primaryAttributes.push("pattern");
+    const ev = row.extractedValues as Record<string, unknown>;
+    if (!ev.pattern || String(ev.pattern).trim() === "") {
+      try {
+        await ensureBlipInitialized();
+        const caption = await blip.caption(preparedImages[patternIdx]);
+        const hint = extractPatternHintFromCaption(caption || "");
+        if (hint) {
+          ev.pattern = hint;
+          parsedIntent.constraints = parsedIntent.constraints || { mustHave: [], mustNotHave: [] };
+          parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
+          appendUnique(parsedIntent.constraints.mustHave, [hint]);
+        }
+      } catch {
+        // best-effort fallback only
+      }
+    }
+  }
+
+  if (silhouetteIdx != null) {
+    const row = ensureImageIntentRow(parsedIntent, silhouetteIdx);
+    if (!row.primaryAttributes.includes("silhouette")) row.primaryAttributes.push("silhouette");
+    if (!row.primaryAttributes.includes("fit")) row.primaryAttributes.push("fit");
+    const ev = row.extractedValues as Record<string, unknown>;
+    const promptLengths = extractPromptLengthTerms(userPrompt);
+    if (promptLengths.length > 0) {
+      ev.fit = promptLengths[0];
+      parsedIntent.constraints = parsedIntent.constraints || { mustHave: [], mustNotHave: [] };
+      parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
+      appendUnique(parsedIntent.constraints.mustHave, promptLengths);
+    }
+  }
 }
 
 function strictProductTypeFilterEnv(): boolean {
@@ -363,6 +816,7 @@ export async function textSearch(
         related: undefined,
         total: 0,
         tookMs: Date.now() - startTime,
+        did_relax: false,
         query: summarizeAST(ast),
         meta: {
           query: rawQuery,
@@ -656,13 +1110,34 @@ export async function textSearch(
         }
       } else if (hardAstCategory && categoryVocab) {
         const resolved = resolveCategoryTermsForOpensearch(mergedCategory, categoryVocab);
+        const normalizedQuery = String(rawQuery || "").toLowerCase();
+        const bagIntent =
+          mergedCategory.toLowerCase() === "accessories" &&
+          /\b(bag|bags|handbag|handbags|purse|purses|wallet|wallets|tote|totes|backpack|backpacks|clutch|clutches|crossbody|satchel|satchels)\b/.test(
+            normalizedQuery,
+          );
         if (resolved.length > 0) {
+          const bagShouldClauses = bagIntent
+            ? [
+                { wildcard: { category: { value: "*bag*" } } },
+                { wildcard: { category: { value: "*handbag*" } } },
+                { wildcard: { category: { value: "*purse*" } } },
+                { wildcard: { category: { value: "*wallet*" } } },
+                { wildcard: { category: { value: "*tote*" } } },
+                { wildcard: { category: { value: "*backpack*" } } },
+                { wildcard: { category: { value: "*clutch*" } } },
+                { wildcard: { category: { value: "*crossbody*" } } },
+                { wildcard: { category: { value: "*satchel*" } } },
+                { wildcard: { title: { value: "*bag*" } } },
+              ]
+            : [];
           filterClauses.push({
             bool: {
               _name: "hard_ast_category_filter",
               should: [
                 { terms: { category: resolved } },
                 { terms: { category_canonical: resolved } },
+                ...bagShouldClauses,
               ],
               minimum_should_match: 1,
             },
@@ -1609,6 +2084,7 @@ export async function textSearch(
     }
 
     const includeDebug = debug || results.length === 0;
+    const didRelax = searchRetryTrace.length > 0;
     const includeRetrievalMeta =
       includeDebug || belowRelevanceThreshold || results.length === 0;
     markStage("before_response");
@@ -1707,6 +2183,7 @@ export async function textSearch(
       related: related.length > 0 ? related : undefined,
       total,
       tookMs: Date.now() - startTime,
+      did_relax: didRelax,
       query: summarizeAST(ast),
       meta: {
         query: rawQuery,
@@ -1723,6 +2200,7 @@ export async function textSearch(
         ...(includeRetrievalMeta
           ? {
               retrieval: {
+                did_relax: didRelax,
                 search_retry_trace: searchRetryTrace,
                 open_search_hits_count: hits.length,
                 open_search_total_raw:
@@ -1761,6 +2239,7 @@ export async function textSearch(
       related: undefined,
       total: 0,
       tookMs: Date.now() - startTime,
+      did_relax: false,
       meta: { total_results: 0 },
     };
   }
@@ -1824,6 +2303,7 @@ export async function multiImageSearch(
 ): Promise<SearchResult> {
   const startTime = Date.now();
   const { images, userPrompt, limit = 50, rerankWeights } = request;
+  const safeLimit = Math.min(Math.max(Math.trunc(Number(limit) || 50), 1), 120);
 
   try {
     let multiImageEffectiveFinalMin = config.search.finalAcceptMinImage;
@@ -1831,6 +2311,14 @@ export async function multiImageSearch(
     const intentParse = await parseMultiImageIntentWithGuards(prepared, userPrompt);
     const geminiDegraded = intentParse.geminiDegraded;
     let parsedIntent = intentParse.parsedIntent;
+    const { parsedIntent, geminiDegraded, intentProvider, intentDegradedReason } = await parseMultiImageIntentWithGuards(
+      prepared,
+      userPrompt,
+    );
+    if (geminiDegraded || intentProvider === "local") {
+      await enrichClipOnlyIntentFromImages(parsedIntent, prepared, userPrompt);
+    }
+    await enrichPromptAnchoredIntentFromImages(parsedIntent, prepared, userPrompt);
     reconcileIntentNegativeCollisions(parsedIntent);
     parsedIntent = applyOrdinalMixMatchToIntent(parsedIntent, prepared.length, userPrompt);
 
@@ -1849,6 +2337,8 @@ export async function multiImageSearch(
     await blendPromptClipIntoCompositeGlobal(compositeQuery, userPrompt, parsedIntent);
 
     // Parse the text prompt before kNN so constraints can widen recall and strict gating can use the same AST.
+    // Parse the text prompt before composing query vectors so prompt constraints can
+    // shape retrieval and strict gating from the beginning.
     let astPipelineDegraded = false;
     let ast: QueryAST;
     try {
@@ -1864,32 +2354,82 @@ export async function multiImageSearch(
       }
     }
 
+    applyPromptAstOverridesToParsedIntent(parsedIntent, ast, userPrompt, {
+      geminiDegraded,
+    });
+
+    const imageEmbeddings = await Promise.all(
+      prepared.map((img) => processImageForEmbedding(img)),
+    );
+
+    const compositeQuery = await queryBuilder.buildQuery(parsedIntent, imageEmbeddings);
+
+    // Same CLIP text embedding path as text search: bridges language in the prompt to image-indexed vectors.
+    await blendPromptClipIntoCompositeGlobal(compositeQuery, userPrompt, parsedIntent);
+
     const strictRecall =
       multiImageStrictPromptEnabled() &&
       multiImageHasStrictPromptSignals(ast, userPrompt);
+    const strictConstraintMode = strictRecall;
+    const candidateSize = strictConstraintMode
+      ? Math.min(Math.max(safeLimit * 10, 220), 900)
+      : Math.min(Math.max(safeLimit * 6, 140), 520);
     const vectorK = strictRecall
-      ? Math.min(Math.max(limit * 8, 160), 650)
-      : Math.min(Math.max(limit * 5, 100), 400);
+      ? Math.min(Math.max(safeLimit * 12, 220), 900)
+      : Math.min(Math.max(safeLimit * 8, 140), 520);
 
-    const queryBundle = queryMapper.mapQuery(compositeQuery, {
-      maxResults: limit,
+    let queryBundle = queryMapper.mapQuery(compositeQuery, {
+      maxResults: candidateSize,
       vectorK,
       vectorWeight: 0.6,
       filterWeight: 0.3,
       priceWeight: 0.1,
+      strictConstraints: strictConstraintMode,
     });
 
     const opensearch = osClient;
-    const response = await opensearch.search({
+    let response = await opensearch.search({
       index: config.opensearch.index,
       body: queryBundle.opensearch,
     });
 
     let hits = response.body.hits.hits as any[];
-    const totalHits =
+    let totalHits =
       typeof response.body.hits.total === "object" && response.body.hits.total != null
         ? (response.body.hits.total as { value?: number }).value ?? 0
         : Number(response.body.hits.total) || 0;
+
+    let retrievalFallbackUsed = false;
+    let retrievalHitsInitial = hits.length;
+    let retrievalHitsAfterQuery = hits.length;
+    let hitsAfterRelevanceGate = hits.length;
+    let hitsAfterHardGate = hits.length;
+    let hydratedCount = 0;
+    let constrainedCount = 0;
+    if (strictConstraintMode && totalHits === 0) {
+      const relaxedMaxResults = Math.min(Math.max(candidateSize, safeLimit * 8), 1000);
+      const relaxedVectorK = Math.min(Math.max(vectorK, safeLimit * 10), 1000);
+      queryBundle = queryMapper.mapQuery(compositeQuery, {
+        maxResults: relaxedMaxResults,
+        vectorK: relaxedVectorK,
+        vectorWeight: 0.6,
+        filterWeight: 0.3,
+        priceWeight: 0.1,
+        strictConstraints: false,
+      });
+      response = await opensearch.search({
+        index: config.opensearch.index,
+        body: queryBundle.opensearch,
+      });
+      hits = response.body.hits.hits as any[];
+      totalHits =
+        typeof response.body.hits.total === "object" && response.body.hits.total != null
+          ? (response.body.hits.total as { value?: number }).value ?? 0
+          : Number(response.body.hits.total) || 0;
+      retrievalFallbackUsed = true;
+      retrievalHitsAfterQuery = hits.length;
+    }
+    retrievalHitsAfterQuery = hits.length;
 
     let relevanceIntent = buildMultiImageSearchHitRelevanceIntent(
       ast,
@@ -1982,7 +2522,79 @@ export async function multiImageSearch(
         }
       }
       hits = relFiltered;
+      hitsAfterRelevanceGate = hits.length;
       multiImageEffectiveFinalMin = effectiveFinalAcceptMin;
+    }
+
+    const hardConstraints = buildMultiImageHardConstraints(
+      ast,
+      parsedIntent,
+      userPrompt,
+      relevanceIntent,
+    );
+    let hardConstraintRelaxationLevel: 0 | 1 | 2 = 0;
+    let hardConstraintFallbackUsed = false;
+    let hardConstraintZeroGuardUsed = false;
+    if (hardConstraints.enabled && hits.length > 0) {
+      const preHardConstraintHits = hits;
+      const allowHardConstraintBypass =
+        hardConstraints.requiredLengthTerms.length === 0 &&
+        hardConstraints.requiredPatternTerms.length === 0 &&
+        !hardConstraints.requireTypeCompliance &&
+        !hardConstraints.requireColorCompliance;
+      const strictHits = hits.filter((hit: any) =>
+        multiImageHitPassesHardConstraints(
+          hit,
+          hardConstraints,
+          relevanceById.get(String(hit?._source?.product_id)),
+        ),
+      );
+      if (strictHits.length > 0) {
+        hits = strictHits;
+      } else {
+        const relaxedLv1 = relaxMultiImageHardConstraints(hardConstraints, 1);
+        const lv1Hits = hits.filter((hit: any) =>
+          multiImageHitPassesHardConstraints(
+            hit,
+            relaxedLv1,
+            relevanceById.get(String(hit?._source?.product_id)),
+          ),
+        );
+        if (lv1Hits.length > 0) {
+          hits = lv1Hits;
+          hardConstraintRelaxationLevel = 1;
+        } else {
+          const relaxedLv2 = relaxMultiImageHardConstraints(hardConstraints, 2);
+          const lv2Hits = hits.filter((hit: any) =>
+            multiImageHitPassesHardConstraints(
+              hit,
+              relaxedLv2,
+              relevanceById.get(String(hit?._source?.product_id)),
+            ),
+          );
+          if (lv2Hits.length > 0) {
+            hits = lv2Hits;
+            hardConstraintRelaxationLevel = 2;
+          } else {
+            const shouldGuardAgainstEmpty =
+              allowHardConstraintBypass ||
+              multiImageStrictPromptEnabled() ||
+              preHardConstraintHits.length > 0;
+            if (shouldGuardAgainstEmpty) {
+              // Preserve recall when strict and relaxed hard gates all empty out.
+              hits = preHardConstraintHits;
+              hardConstraintRelaxationLevel = 2;
+              hardConstraintFallbackUsed = true;
+              hardConstraintZeroGuardUsed = true;
+            } else {
+              hits = [];
+              hardConstraintRelaxationLevel = 2;
+              hardConstraintFallbackUsed = false;
+            }
+          }
+        }
+      }
+      hitsAfterHardGate = hits.length;
     }
 
     const productIds = hits.map((hit: any) => hit._source?.product_id);
@@ -1998,6 +2610,7 @@ export async function multiImageSearch(
       queryColorHints: multiImageQueryColorHints,
       textQuery: userPrompt?.trim() || null,
     });
+    hydratedCount = hydratedResults.length;
 
     const rawScoresByProductId = new Map<
       string,
@@ -2027,7 +2640,27 @@ export async function multiImageSearch(
       })
       .filter((r: any): r is NonNullable<typeof r> => r !== null);
 
-    const mappedForRerank: MultiVectorSearchResult[] = results.map((r: any) => {
+    const activeHardConstraints =
+      hardConstraintRelaxationLevel === 1
+        ? relaxMultiImageHardConstraints(hardConstraints, 1)
+        : hardConstraintRelaxationLevel === 2
+          ? relaxMultiImageHardConstraints(hardConstraints, 2)
+          : hardConstraints;
+
+    let constrainedResults =
+      activeHardConstraints.enabled && results.length > 0
+        ? results.filter((product: any) => {
+            const rel = relevanceById.get(String(product.id));
+            return multiImageProductPassesHardConstraints(product, activeHardConstraints, rel);
+          })
+        : results;
+    if (constrainedResults.length === 0 && results.length > 0 && (hardConstraintFallbackUsed || hardConstraintZeroGuardUsed)) {
+      constrainedResults = results;
+      hardConstraintZeroGuardUsed = true;
+    }
+    constrainedCount = constrainedResults.length;
+
+    const mappedForRerank: MultiVectorSearchResult[] = constrainedResults.map((r: any) => {
       const idStr = String(r.id || r.product_id || r.productId);
       const frozen = rawScoresByProductId.get(idStr);
       return {
@@ -2057,7 +2690,7 @@ export async function multiImageSearch(
 
     let finalResults = reranked
       .map((rer: any) => {
-        const original = results.find((o: any) => (o.id || o.product_id || o.productId) === rer.productId);
+        const original = constrainedResults.find((o: any) => (o.id || o.product_id || o.productId) === rer.productId);
         const rel = relevanceById.get(String(rer.productId));
         return {
           ...original,
@@ -2089,6 +2722,7 @@ export async function multiImageSearch(
         return (b.rerankScore ?? 0) - (a.rerankScore ?? 0);
       });
 
+    const preThresholdFinalResults = [...finalResults];
     finalResults = finalResults.filter(
       (r: any) =>
         typeof r.finalRelevance01 === "number" && r.finalRelevance01 >= multiImageEffectiveFinalMin,
@@ -2098,6 +2732,14 @@ export async function multiImageSearch(
       const cb = colorCompositeFilterBoost(b, compositeColorFiltersForRank);
       return (b.finalRelevance01 ?? 0) + cb - ((a.finalRelevance01 ?? 0) + ca);
     });
+    let finalFloorFallbackUsed = false;
+    if (finalResults.length === 0 && preThresholdFinalResults.length > 0) {
+      finalResults = preThresholdFinalResults.slice(0, Math.min(safeLimit, 5));
+      finalFloorFallbackUsed = true;
+    }
+    finalResults.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
+    finalResults = dedupeMultiImageResults(finalResults);
+    finalResults = finalResults.slice(0, safeLimit);
 
     if (finalResults.length > 0) {
       const maxVs = Math.max(
@@ -2116,16 +2758,37 @@ export async function multiImageSearch(
 
     const explanationParts = [compositeQuery.explanation].filter(Boolean) as string[];
     if (geminiDegraded) explanationParts.push("[intent: gemini_degraded]");
+    if (intentProvider === "local") explanationParts.push("[intent_provider: local]");
     if (astPipelineDegraded) explanationParts.push("[relevance: ast_fast_path]");
 
     return {
       results: finalResults,
-      total: totalHits,
+      total: finalResults.length,
       tookMs: Date.now() - startTime,
       explanation: explanationParts.join(" "),
       compositeQuery,
       meta: {
+        candidate_hits: totalHits,
+        candidate_used: hits.length,
+        pipeline_counts: {
+          retrieval_hits_initial: retrievalHitsInitial,
+          retrieval_hits_after_query: retrievalHitsAfterQuery,
+          retrieval_hits_after_relevance: hitsAfterRelevanceGate,
+          retrieval_hits_after_hard_gate: hitsAfterHardGate,
+          hydrated_products: hydratedCount,
+          constrained_products: constrainedCount,
+        },
+        strict_prompt_constraints: hardConstraints.enabled ? true : undefined,
+        ...(retrievalFallbackUsed ? { retrieval_fallback_relaxed_query: true } : {}),
+        ...(hardConstraintRelaxationLevel > 0
+          ? { hard_constraint_relaxation_level: hardConstraintRelaxationLevel }
+          : {}),
+        ...(hardConstraintFallbackUsed ? { hard_constraint_fallback_used: true } : {}),
+        ...(hardConstraintZeroGuardUsed ? { hard_constraint_zero_guard_used: true } : {}),
+        ...(finalFloorFallbackUsed ? { final_floor_fallback_used: true } : {}),
         ...(geminiDegraded ? { gemini_degraded: true } : {}),
+        intent_provider: intentProvider,
+        ...(intentDegradedReason ? { intent_degraded_reason: intentDegradedReason } : {}),
         ...(astPipelineDegraded ? { ast_pipeline_degraded: true } : {}),
       },
     };
@@ -2133,6 +2796,546 @@ export async function multiImageSearch(
     console.error('[multiImageSearch] Error:', error);
     return { results: [], total: 0, tookMs: Date.now() - startTime };
   }
+}
+
+interface MultiImageHardConstraints {
+  enabled: boolean;
+  minPrice?: number;
+  maxPrice?: number;
+  categoryTerms: string[];
+  brands: string[];
+  gender?: string;
+  requiredKeywords: string[];
+  requiredColorTerms: string[];
+  requiredLengthTerms: string[];
+  requiredPatternTerms: string[];
+  forbiddenKeywords: string[];
+  minRequiredKeywordMatches: number;
+  requireColorCompliance: boolean;
+  minColorCompliance: number;
+  requireTypeCompliance: boolean;
+  minTypeCompliance: number;
+  signalFloorConstraint: "none" | "color" | "type";
+}
+
+function countIntentRowsWithSignal(
+  parsedIntent: ParsedIntent,
+  predicate: (ev: Record<string, unknown>) => boolean,
+): number {
+  let n = 0;
+  for (const ii of parsedIntent.imageIntents || []) {
+    const ev = (ii.extractedValues as Record<string, unknown> | undefined) || {};
+    if (predicate(ev)) n += 1;
+  }
+  return n;
+}
+
+function buildMultiImageIntentSignalQuality(
+  parsedIntent: ParsedIntent,
+  rawPrompt: string,
+): {
+  colorReliability01: number;
+  typeReliability01: number;
+  signalFloorConstraint: "none" | "color" | "type";
+} {
+  const promptColors = extractPromptColorTerms(rawPrompt);
+  const promptTypes = extractPromptTypeTerms(rawPrompt);
+  const inferredImageCount = Math.max(
+    0,
+    ...((parsedIntent.imageIntents || []).map((ii) => Number(ii.imageIndex) || 0)),
+  ) + (parsedIntent.imageIntents?.length ? 1 : 0);
+
+  const anchoredColorIdx =
+    inferredImageCount > 0
+      ? findPromptAnchoredImageIndex(rawPrompt, "color", inferredImageCount)
+      : null;
+  const anchoredStyleIdx =
+    inferredImageCount > 0
+      ? findPromptAnchoredImageIndex(rawPrompt, "style", inferredImageCount)
+      : null;
+
+  const colorRows = countIntentRowsWithSignal(parsedIntent, (ev) => {
+    const col = ev.color ?? ev.colour ?? ev.colors;
+    const arr = Array.isArray(col) ? col : col != null ? [col] : [];
+    return arr.some((x) => String(x).trim().length > 0);
+  });
+  const typeRows = countIntentRowsWithSignal(parsedIntent, (ev) => {
+    const t = ev.productType;
+    const arr = Array.isArray(t) ? t : t != null ? [t] : [];
+    return arr.some((x) => String(x).trim().length > 0);
+  });
+
+  const anchoredColorHasSignal =
+    anchoredColorIdx != null &&
+    (parsedIntent.imageIntents || []).some((ii) => {
+      if (ii.imageIndex !== anchoredColorIdx) return false;
+      const ev = (ii.extractedValues as Record<string, unknown> | undefined) || {};
+      const col = ev.color ?? ev.colour ?? ev.colors;
+      const arr = Array.isArray(col) ? col : col != null ? [col] : [];
+      return arr.some((x) => String(x).trim().length > 0);
+    });
+
+  const anchoredStyleHasTypeSignal =
+    anchoredStyleIdx != null &&
+    (parsedIntent.imageIntents || []).some((ii) => {
+      if (ii.imageIndex !== anchoredStyleIdx) return false;
+      const ev = (ii.extractedValues as Record<string, unknown> | undefined) || {};
+      const t = ev.productType;
+      const arr = Array.isArray(t) ? t : t != null ? [t] : [];
+      return arr.some((x) => String(x).trim().length > 0);
+    });
+
+  const colorTransferRequested = promptAnchorKindRegex("color").test(rawPrompt || "");
+  const typeTransferRequested =
+    promptAnchorKindRegex("style").test(rawPrompt || "") ||
+    promptAnchorKindRegex("silhouette").test(rawPrompt || "");
+
+  let colorReliability01 = 0.2;
+  if (promptColors.length > 0) colorReliability01 = 1;
+  else if (colorTransferRequested && anchoredColorHasSignal) colorReliability01 = 0.82;
+  else if (colorRows >= 2) colorReliability01 = 0.6;
+  else if (colorRows >= 1) colorReliability01 = 0.45;
+
+  let typeReliability01 = 0.2;
+  if (promptTypes.length > 0) typeReliability01 = 1;
+  else if (typeTransferRequested && anchoredStyleHasTypeSignal) typeReliability01 = 0.8;
+  else if (parsedIntent.constraints?.category) typeReliability01 = 0.65;
+  else if (typeRows >= 2) typeReliability01 = 0.6;
+  else if (typeRows >= 1) typeReliability01 = 0.45;
+
+  const signalFloorConstraint: "none" | "color" | "type" =
+    colorReliability01 >= 0.58
+      ? "color"
+      : typeReliability01 >= 0.58
+        ? "type"
+        : "none";
+
+  return { colorReliability01, typeReliability01, signalFloorConstraint };
+}
+
+const MULTI_IMAGE_KEYWORD_STOPWORDS = new Set([
+  "the",
+  "a",
+  "an",
+  "and",
+  "or",
+  "for",
+  "with",
+  "from",
+  "of",
+  "to",
+  "in",
+  "on",
+  "at",
+  "like",
+  "want",
+  "need",
+  "look",
+  "image",
+  "first",
+  "second",
+  "third",
+  "fourth",
+  "fifth",
+  "last",
+]);
+
+function normalizeConstraintKeyword(v: unknown): string | null {
+  const s = String(v ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!s || s.length < 3) return null;
+  if (MULTI_IMAGE_KEYWORD_STOPWORDS.has(s)) return null;
+  return s;
+}
+
+function collectConstraintKeywords(values: unknown[]): string[] {
+  const out: string[] = [];
+  for (const raw of values) {
+    if (raw == null) continue;
+    if (Array.isArray(raw)) {
+      for (const x of raw) {
+        const k = normalizeConstraintKeyword(x);
+        if (k && !out.includes(k)) out.push(k);
+      }
+      continue;
+    }
+    const k = normalizeConstraintKeyword(raw);
+    if (k && !out.includes(k)) out.push(k);
+  }
+  return out;
+}
+
+function compactConstraintKeywords(
+  values: unknown[],
+  options?: { maxKeywords?: number },
+): string[] {
+  const maxKeywords = Math.max(1, options?.maxKeywords ?? 6);
+  const raw = collectConstraintKeywords(values);
+  if (raw.length <= maxKeywords) return raw;
+
+  const prioritized = raw
+    .slice()
+    .sort((a, b) => {
+      // Keep specific multi-token phrases before generic single words.
+      const aWords = a.split(" ").length;
+      const bWords = b.split(" ").length;
+      if (aWords !== bWords) return bWords - aWords;
+      return b.length - a.length;
+    });
+
+  return prioritized.slice(0, maxKeywords);
+}
+
+function buildMultiImageHardConstraints(
+  ast: QueryAST,
+  parsedIntent: ParsedIntent,
+  rawPrompt: string,
+  relevanceIntent: SearchHitRelevanceIntent,
+): MultiImageHardConstraints {
+  const prompt = rawPrompt?.trim() ?? "";
+  if (!multiImageStrictPromptEnabled() || prompt.length < 10) {
+    return {
+      enabled: false,
+      categoryTerms: [],
+      brands: [],
+      requiredKeywords: [],
+      requiredColorTerms: [],
+      requiredLengthTerms: [],
+      requiredPatternTerms: [],
+      forbiddenKeywords: [],
+      minRequiredKeywordMatches: 0,
+      requireColorCompliance: false,
+      minColorCompliance: 0,
+      requireTypeCompliance: false,
+      minTypeCompliance: 0.45,
+      signalFloorConstraint: "none",
+    };
+  }
+
+  const signalQuality = buildMultiImageIntentSignalQuality(parsedIntent, rawPrompt);
+
+  const promptTypeTerms = extractPromptTypeTerms(rawPrompt);
+  const promptColorTerms = extractPromptColorTerms(rawPrompt);
+  const promptStyleTerms = extractPromptStyleTerms(rawPrompt);
+  const promptLengthTerms = extractPromptLengthTerms(rawPrompt);
+  const promptPatternTerms = extractPromptPatternTerms(rawPrompt);
+
+  const astPrice = ast.filters?.priceRange;
+  const intentPriceMin = parsedIntent.constraints?.priceMin;
+  const intentPriceMax = parsedIntent.constraints?.priceMax;
+  const minPrice =
+    astPrice?.min != null ? Number(astPrice.min) : intentPriceMin != null ? Number(intentPriceMin) : undefined;
+  const maxPrice =
+    astPrice?.max != null ? Number(astPrice.max) : intentPriceMax != null ? Number(intentPriceMax) : undefined;
+
+  const categorySeeds = [
+    parsedIntent.constraints?.category,
+    ...(ast.entities?.categories ?? []),
+    ...promptTypeTerms,
+  ]
+    .filter((x) => x != null && String(x).trim() !== "")
+    .map((x) => String(x).toLowerCase().trim());
+
+  const categoryTerms = [...new Set(categorySeeds.flatMap((c) => getCategorySearchTerms(c)))];
+
+  const brands = [...new Set(
+    [
+      ...(parsedIntent.constraints?.brands ?? []),
+      ...(ast.entities?.brands ?? []),
+    ]
+      .map((b) => String(b).toLowerCase().trim())
+      .filter(Boolean),
+  )];
+
+  const gender =
+    normalizeQueryGender(parsedIntent.constraints?.gender) ??
+    normalizeQueryGender(ast.entities?.gender) ??
+    undefined;
+
+  const promptTypedKeywords = compactConstraintKeywords(
+    [promptTypeTerms, ast.entities?.productTypes ?? []],
+    { maxKeywords: 4 },
+  );
+  const promptStyleKeywords = compactConstraintKeywords(
+    [promptStyleTerms],
+    { maxKeywords: 3 },
+  );
+  const promptColorKeywords = compactConstraintKeywords(
+    [promptColorTerms, ast.entities?.colors ?? []],
+    { maxKeywords: 3 },
+  );
+  const requiredKeywords = compactConstraintKeywords(
+    [promptTypedKeywords, promptStyleKeywords, promptColorKeywords],
+    { maxKeywords: 6 },
+  );
+  const minRequiredKeywordMatches =
+    requiredKeywords.length <= 1
+      ? requiredKeywords.length
+      : requiredKeywords.length <= 3
+        ? 1
+        : requiredKeywords.length <= 5
+          ? 2
+          : 3;
+
+  const forbiddenKeywords = collectConstraintKeywords([
+    parsedIntent.constraints?.mustNotHave ?? [],
+    collectMultiImageNegationTerms(parsedIntent, rawPrompt),
+  ]);
+
+  const requireColorCompliance =
+    (Boolean(relevanceIntent.promptAnchoredColorIntent) || promptColorTerms.length > 0) &&
+    signalQuality.colorReliability01 >= 0.4;
+  const requireTypeCompliance =
+    (Boolean(relevanceIntent.promptAnchoredTypeIntent) || promptTypeTerms.length > 0) &&
+    signalQuality.typeReliability01 >= 0.4;
+
+  const strictColorSeeds =
+    signalQuality.colorReliability01 >= 0.45
+      ? (promptColorTerms.length > 0
+          ? promptColorTerms
+          : (relevanceIntent.promptAnchoredColorIntent
+              ? (relevanceIntent.desiredColors ?? [])
+              : []))
+      : [];
+  const requiredColorTerms = compactConstraintKeywords(
+    [strictColorSeeds, strictColorSeeds.flatMap((c) => expandColorTermsForFilter(c))],
+    { maxKeywords: 6 },
+  );
+  const minColorCompliance =
+    requireColorCompliance
+      ? (promptColorTerms.length > 0
+          ? Math.max(0.18, Math.min(0.45, 0.25 + 0.2 * signalQuality.colorReliability01))
+          : Math.max(0.1, Math.min(0.32, 0.08 + 0.24 * signalQuality.colorReliability01)))
+      : 0;
+  const minTypeCompliance =
+    requireTypeCompliance
+      ? Math.max(0.28, Math.min(0.62, 0.2 + 0.42 * signalQuality.typeReliability01))
+      : 0.28;
+
+  const enabled =
+    requireColorCompliance ||
+    requireTypeCompliance ||
+    forbiddenKeywords.length > 0 ||
+    requiredKeywords.length > 0 ||
+    promptLengthTerms.length > 0 ||
+    promptPatternTerms.length > 0 ||
+    brands.length > 0 ||
+    categoryTerms.length > 0 ||
+    gender != null ||
+    minPrice != null ||
+    maxPrice != null ||
+    promptTypeTerms.length > 0 ||
+    promptColorTerms.length > 0;
+
+  return {
+    enabled,
+    minPrice,
+    maxPrice,
+    categoryTerms,
+    brands,
+    gender,
+    requiredKeywords,
+    requiredColorTerms,
+    requiredLengthTerms: promptLengthTerms,
+    requiredPatternTerms: promptPatternTerms,
+    forbiddenKeywords,
+    minRequiredKeywordMatches,
+    requireColorCompliance,
+    minColorCompliance,
+    requireTypeCompliance,
+    minTypeCompliance,
+    signalFloorConstraint: signalQuality.signalFloorConstraint,
+  };
+}
+
+function countKeywordMatches(blob: string, keywords: string[]): number {
+  let matched = 0;
+  for (const kw of keywords) {
+    if (blob.includes(kw)) matched += 1;
+  }
+  return matched;
+}
+
+function multiImageHitPassesHardConstraints(
+  hit: any,
+  hard: MultiImageHardConstraints,
+  rel?: HitCompliance,
+): boolean {
+  if (!hard.enabled) return true;
+  const src = hit?._source ?? {};
+  const blob = [
+    src.title,
+    src.brand,
+    src.category,
+    src.category_canonical,
+    src.description,
+    src.color,
+    src.attr_color,
+    ...(Array.isArray(src.attr_colors) ? src.attr_colors : []),
+  ]
+    .filter((x) => x != null && String(x).trim() !== "")
+    .join(" ")
+    .toLowerCase();
+
+  const price = Number(src.price_usd);
+  if (Number.isFinite(price)) {
+    if (hard.minPrice != null && price < hard.minPrice) return false;
+    if (hard.maxPrice != null && price > hard.maxPrice) return false;
+  }
+
+  if (hard.brands.length > 0) {
+    const brand = String(src.brand ?? "").toLowerCase();
+    if (!brand || !hard.brands.some((b) => brand.includes(b) || b.includes(brand))) return false;
+  }
+
+  if (hard.categoryTerms.length > 0) {
+    const cat = `${String(src.category ?? "")} ${String(src.category_canonical ?? "")}`.toLowerCase();
+    if (!hard.categoryTerms.some((t) => cat.includes(t))) return false;
+  }
+
+  if (hard.gender) {
+    const g = normalizeQueryGender(String(src.audience_gender ?? src.attr_gender ?? "")) ?? undefined;
+    if (g && g !== hard.gender && !(g === "unisex" && (hard.gender === "men" || hard.gender === "women"))) {
+      return false;
+    }
+  }
+
+  if (hard.forbiddenKeywords.length > 0 && hard.forbiddenKeywords.some((t) => blob.includes(t))) {
+    return false;
+  }
+
+  if (hard.requiredKeywords.length > 0) {
+    const matches = countKeywordMatches(blob, hard.requiredKeywords);
+    if (matches < hard.minRequiredKeywordMatches) return false;
+  }
+
+  if (hard.requiredLengthTerms.length > 0) {
+    if (!hard.requiredLengthTerms.some((t) => blob.includes(t))) return false;
+  }
+
+  if (hard.requiredPatternTerms.length > 0) {
+    if (!hard.requiredPatternTerms.some((t) => blob.includes(t))) return false;
+  }
+
+  if (hard.requiredColorTerms.length > 0) {
+    const colorTermHit = hard.requiredColorTerms.some((t) => blob.includes(t));
+    const colorScore = rel?.colorCompliance ?? 0;
+    if (!colorTermHit && colorScore < hard.minColorCompliance) return false;
+  }
+
+  if (hard.requireColorCompliance && (rel?.colorCompliance ?? 0) < hard.minColorCompliance) return false;
+  if (hard.requireTypeCompliance && (rel?.productTypeCompliance ?? 0) < hard.minTypeCompliance) return false;
+  return true;
+}
+
+function multiImageProductPassesHardConstraints(
+  product: any,
+  hard: MultiImageHardConstraints,
+  rel?: HitCompliance,
+): boolean {
+  if (!hard.enabled) return true;
+  const blob = productSearchTextBlob(product);
+  const price = Number(product?.price ?? product?.price_usd);
+  if (Number.isFinite(price)) {
+    if (hard.minPrice != null && price < hard.minPrice) return false;
+    if (hard.maxPrice != null && price > hard.maxPrice) return false;
+  }
+
+  if (hard.brands.length > 0) {
+    const brand = String(product?.brand ?? "").toLowerCase();
+    if (!brand || !hard.brands.some((b) => brand.includes(b) || b.includes(brand))) return false;
+  }
+
+  if (hard.categoryTerms.length > 0) {
+    const cat = String(product?.category ?? "").toLowerCase();
+    if (!hard.categoryTerms.some((t) => cat.includes(t) || blob.includes(t))) return false;
+  }
+
+  if (hard.gender) {
+    const g = normalizeQueryGender(
+      String(product?.audience_gender ?? product?.attr_gender ?? product?.gender ?? ""),
+    ) ?? undefined;
+    if (g && g !== hard.gender && !(g === "unisex" && (hard.gender === "men" || hard.gender === "women"))) {
+      return false;
+    }
+  }
+
+  if (hard.forbiddenKeywords.length > 0 && hard.forbiddenKeywords.some((t) => blob.includes(t))) {
+    return false;
+  }
+  if (hard.requiredKeywords.length > 0) {
+    const matches = countKeywordMatches(blob, hard.requiredKeywords);
+    if (matches < hard.minRequiredKeywordMatches) return false;
+  }
+  if (hard.requiredLengthTerms.length > 0) {
+    if (!hard.requiredLengthTerms.some((t) => blob.includes(t))) return false;
+  }
+  if (hard.requiredPatternTerms.length > 0) {
+    if (!hard.requiredPatternTerms.some((t) => blob.includes(t))) return false;
+  }
+
+  if (hard.requiredColorTerms.length > 0) {
+    const colorTermHit = hard.requiredColorTerms.some((t) => blob.includes(t));
+    const colorScore = rel?.colorCompliance ?? 0;
+    if (!colorTermHit && colorScore < hard.minColorCompliance) return false;
+  }
+  if (hard.requireColorCompliance && (rel?.colorCompliance ?? 0) < hard.minColorCompliance) return false;
+  if (hard.requireTypeCompliance && (rel?.productTypeCompliance ?? 0) < hard.minTypeCompliance) return false;
+  return true;
+}
+
+function relaxMultiImageHardConstraints(
+  hard: MultiImageHardConstraints,
+  level: 1 | 2,
+): MultiImageHardConstraints {
+  if (!hard.enabled) return hard;
+  if (level === 1) {
+    return {
+      ...hard,
+      minRequiredKeywordMatches:
+        hard.requiredKeywords.length <= 1
+          ? hard.minRequiredKeywordMatches
+          : Math.max(1, Math.floor(hard.minRequiredKeywordMatches * 0.5)),
+      minColorCompliance: Math.max(0, hard.minColorCompliance - 0.15),
+      minTypeCompliance: Math.max(0.3, hard.minTypeCompliance - 0.15),
+    };
+  }
+
+  return {
+    ...hard,
+    requiredKeywords: [],
+    requiredColorTerms: [],
+    minRequiredKeywordMatches: 0,
+    requireTypeCompliance: hard.signalFloorConstraint === "type" ? true : false,
+    requireColorCompliance: hard.signalFloorConstraint === "color" ? true : false,
+    minColorCompliance:
+      hard.signalFloorConstraint === "color"
+        ? Math.max(0.08, hard.minColorCompliance * 0.5)
+        : 0,
+    minTypeCompliance:
+      hard.signalFloorConstraint === "type"
+        ? Math.max(0.22, hard.minTypeCompliance * 0.55)
+        : 0,
+  };
+}
+
+function dedupeMultiImageResults(results: any[]): any[] {
+  const seen = new Set<string>();
+  const out: any[] = [];
+  for (const r of results) {
+    const key = [
+      String(r?.vendor_id ?? ""),
+      String(r?.name ?? "").toLowerCase().trim(),
+      String(r?.image_url ?? "").toLowerCase().trim(),
+    ].join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  return out;
 }
 
 /**
@@ -2148,7 +3351,11 @@ export async function multiVectorWeightedSearch(
   results: MultiVectorSearchResult[];
   total: number;
   tookMs: number;
-  meta?: { gemini_degraded?: boolean };
+  meta?: {
+    gemini_degraded?: boolean;
+    intent_provider?: "local" | "gemini";
+    intent_degraded_reason?: string;
+  };
 }> {
   const startTime = Date.now();
   const { images, userPrompt, limit = 50, attributeWeights, explainScores = false } = request;
@@ -2158,6 +3365,14 @@ export async function multiVectorWeightedSearch(
     const mvIntentParse = await parseMultiImageIntentWithGuards(prepared, userPrompt);
     const geminiDegraded = mvIntentParse.geminiDegraded;
     let parsedIntent = mvIntentParse.parsedIntent;
+    const { parsedIntent, geminiDegraded, intentProvider, intentDegradedReason } = await parseMultiImageIntentWithGuards(
+      prepared,
+      userPrompt,
+    );
+    if (geminiDegraded || intentProvider === "local") {
+      await enrichClipOnlyIntentFromImages(parsedIntent, prepared, userPrompt);
+    }
+    await enrichPromptAnchoredIntentFromImages(parsedIntent, prepared, userPrompt);
     reconcileIntentNegativeCollisions(parsedIntent);
     parsedIntent = applyOrdinalMixMatchToIntent(parsedIntent, prepared.length, userPrompt);
 
@@ -2218,7 +3433,11 @@ export async function multiVectorWeightedSearch(
       results: reranked,
       total: reranked.length,
       tookMs: Date.now() - startTime,
-      meta: geminiDegraded ? { gemini_degraded: true } : undefined,
+      meta: {
+        ...(geminiDegraded ? { gemini_degraded: true } : {}),
+        intent_provider: intentProvider,
+        ...(intentDegradedReason ? { intent_degraded_reason: intentDegradedReason } : {}),
+      },
     };
   } catch (error) {
     console.error('[multiVectorWeightedSearch] Error:', error);
@@ -2315,6 +3534,14 @@ function clampEnv01(raw: string | undefined, fallback: number, max: number): num
 
 const MULTI_IMAGE_GEMINI_BUDGET_EXCEEDED = "MULTI_IMAGE_GEMINI_BUDGET";
 
+type MultiImageIntentProvider = "local" | "gemini";
+
+function resolveMultiImageIntentProvider(): MultiImageIntentProvider {
+  const raw = String(process.env.MULTI_IMAGE_INTENT_PROVIDER ?? "local").toLowerCase().trim();
+  if (raw === "gemini") return "gemini";
+  return "local";
+}
+
 /**
  * Detect ordinal references like "color from the first", "style from the second" (0-based indices).
  * Drives embedding merge when Gemini is missing or ignores upload order.
@@ -2405,11 +3632,29 @@ function applyOrdinalMixMatchToIntent(
 
 /**
  * Bounded Gemini intent parse: missing key / outer budget → CLIP-only ParsedIntent (retrieval still runs).
+ * Bounded intent parse with pluggable provider.
+ * Default provider is local (no Gemini/OpenAI required). Gemini is optional via env.
  */
 async function parseMultiImageIntentWithGuards(
   prepared: Buffer[],
   userPrompt: string,
-): Promise<{ parsedIntent: ParsedIntent; geminiDegraded: boolean }> {
+): Promise<{
+  parsedIntent: ParsedIntent;
+  geminiDegraded: boolean;
+  intentProvider: MultiImageIntentProvider;
+  intentDegradedReason?: string;
+}> {
+  const intentProvider = resolveMultiImageIntentProvider();
+  if (intentProvider === "local") {
+    const parsedIntent = createClipOnlyParsedIntent(prepared.length, userPrompt);
+    return {
+      parsedIntent,
+      geminiDegraded: false,
+      intentProvider,
+      intentDegradedReason: "local_provider",
+    };
+  }
+
   const geminiBudgetMs = Math.max(
     1500,
     Number(process.env.MULTI_IMAGE_GEMINI_BUDGET_MS ?? 3000) || 3000,
@@ -2427,6 +3672,8 @@ async function parseMultiImageIntentWithGuards(
     return {
       parsedIntent: createClipOnlyParsedIntent(prepared.length, userPrompt),
       geminiDegraded: true,
+      intentProvider,
+      intentDegradedReason: "missing_gemini_api_key",
     };
   }
   const intentParser = new IntentParserService({
@@ -2441,13 +3688,24 @@ async function parseMultiImageIntentWithGuards(
         setTimeout(() => rej(new Error(MULTI_IMAGE_GEMINI_BUDGET_EXCEEDED)), geminiBudgetMs),
       ),
     ]);
-    return { parsedIntent, geminiDegraded: false };
+    const parserSignaledDegrade = Boolean(parsedIntent.meta?.degraded);
+    if (parserSignaledDegrade && parsedIntent.meta?.reason) {
+      console.warn("[multiImageIntent] Gemini degraded:", parsedIntent.meta.reason);
+    }
+    return {
+      parsedIntent,
+      geminiDegraded: parserSignaledDegrade,
+      intentProvider,
+      intentDegradedReason: parsedIntent.meta?.reason,
+    };
   } catch (e: any) {
     if (e?.message === MULTI_IMAGE_GEMINI_BUDGET_EXCEEDED) {
       console.warn("[multiImageIntent] Gemini budget exceeded, using CLIP-only intent");
       return {
         parsedIntent: createClipOnlyParsedIntent(prepared.length, userPrompt),
         geminiDegraded: true,
+        intentProvider,
+        intentDegradedReason: "gemini_budget_exceeded",
       };
     }
     throw e;
@@ -2488,7 +3746,7 @@ async function blendPromptClipIntoCompositeGlobal(
   userPrompt: string,
   intent: ParsedIntent,
 ): Promise<void> {
-  const w = clampEnv01(process.env.MULTI_IMAGE_PROMPT_EMBED_WEIGHT, 0.45, 0.65);
+  const w = clampEnv01(process.env.MULTI_IMAGE_PROMPT_EMBED_WEIGHT, 0.22, 0.5);
   if (w <= 0) return;
   const text = buildMultiImageTextForEmbedding(userPrompt, intent);
   if (!text) return;
@@ -2501,16 +3759,18 @@ async function blendPromptClipIntoCompositeGlobal(
   const g = compositeQuery.embeddings.global;
   if (!promptEmb?.length || promptEmb.length !== g.length) return;
   const nImg = intent.imageIntents?.length ?? 0;
-  const intentTrust = Math.min(
+  const degradedIntent = Boolean(intent.meta?.degraded);
+  const intentTrustRaw = Math.min(
     1,
     (intent.confidence ?? 0.5) + 0.12 * Math.min(5, nImg),
   );
+  const intentTrust = degradedIntent ? Math.min(0.2, intentTrustRaw) : intentTrustRaw;
   // User instructions must move the kNN query: do not let high Gemini confidence erase the prompt vector.
   const promptChars = Math.min(500, userPrompt.trim().length);
   const substance01 = Math.min(1, promptChars / 72);
   const effectiveW = Math.min(
-    0.56,
-    w * (0.48 + 0.52 * substance01) * (1 - 0.12 * intentTrust),
+    degradedIntent ? 0.16 : 0.46,
+    w * (0.48 + 0.52 * substance01) * (1 - 0.42 * intentTrust),
   );
   console.info(
     `[multiImage] CLIP prompt blend: effective=${effectiveW.toFixed(3)} base=${w.toFixed(3)} intentTrust=${intentTrust.toFixed(3)} substance01=${substance01.toFixed(3)}`,
@@ -2545,13 +3805,271 @@ function multiImageUsesImageAnchoredColorPhrasing(raw: string): boolean {
 function multiImageHasStrictPromptSignals(ast: QueryAST, rawPrompt: string): boolean {
   const t = rawPrompt?.trim() ?? "";
   if (t.length < 10) return false;
+  const lexicalColorSignals = extractPromptColorTerms(t);
+  const lexicalTypeSignals = extractPromptTypeTerms(t);
+  const lexicalStyleSignals = extractPromptStyleTerms(t);
   if (parseNegations(t).negations.length > 0) return true;
   if (!multiImageUsesImageAnchoredColorPhrasing(t) && (ast.entities?.colors ?? []).length > 0)
     return true;
+  if (lexicalColorSignals.length > 0) return true;
+  if (lexicalTypeSignals.length > 0) return true;
+  if (lexicalStyleSignals.length > 0) return true;
+  if ((ast.entities?.colors ?? []).length > 0) return true;
   if ((ast.entities?.productTypes ?? []).length > 0) return true;
   if ((ast.entities?.categories ?? []).length > 0) return true;
   const pr = ast.filters?.priceRange;
   return Boolean(pr && (pr.min != null || pr.max != null));
+}
+
+function normalizePromptKeywordTerm(raw: unknown): string {
+  return String(raw ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function promptTermLooksLikeColor(raw: unknown): boolean {
+  const term = normalizePromptKeywordTerm(raw);
+  if (!term) return false;
+  if (normalizeColorToken(term)) return true;
+  const tokens = term.split(" ").filter(Boolean);
+  for (let i = 0; i < tokens.length; i++) {
+    if (normalizeColorToken(tokens[i])) return true;
+    if (i < tokens.length - 1 && normalizeColorToken(`${tokens[i]} ${tokens[i + 1]}`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function appendUniqueTerms(target: string[], values: unknown[]): void {
+  for (const raw of values) {
+    const term = normalizePromptKeywordTerm(raw);
+    if (!term) continue;
+    if (!target.includes(term)) target.push(term);
+  }
+}
+
+function applyPromptAstOverridesToParsedIntent(
+  parsedIntent: ParsedIntent,
+  ast: QueryAST,
+  rawPrompt: string,
+  options?: { geminiDegraded?: boolean },
+): void {
+  parsedIntent.constraints = parsedIntent.constraints || { mustHave: [], mustNotHave: [] };
+  parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave || [];
+  parsedIntent.constraints.mustNotHave = parsedIntent.constraints.mustNotHave || [];
+
+  const promptColors = [
+    ...new Set(
+      [...extractPromptColorTerms(rawPrompt), ...(ast.entities?.colors ?? [])]
+        .map((c) => normalizeColorToken(String(c)) ?? String(c).toLowerCase().trim())
+        .filter(Boolean),
+    ),
+  ];
+  const promptTypes = [
+    ...new Set([
+      ...extractPromptTypeTerms(rawPrompt),
+      ...((ast.entities?.productTypes ?? []).map((t) => String(t).toLowerCase().trim())),
+    ].filter(Boolean)),
+  ];
+  const promptStyles = extractPromptStyleTerms(rawPrompt);
+
+  if (promptColors.length > 0) {
+    parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave
+      .map((x) => normalizePromptKeywordTerm(x))
+      .filter((x) => x.length > 0)
+      .filter((x) => !promptTermLooksLikeColor(x));
+    appendUniqueTerms(parsedIntent.constraints.mustHave, promptColors);
+  } else if (options?.geminiDegraded) {
+    parsedIntent.constraints.mustHave = parsedIntent.constraints.mustHave
+      .map((x) => normalizePromptKeywordTerm(x))
+      .filter((x) => x.length > 0)
+      .filter((x) => !promptTermLooksLikeColor(x));
+  }
+
+  if (promptTypes.length > 0) {
+    appendUniqueTerms(parsedIntent.constraints.mustHave, promptTypes.slice(0, 3));
+    parsedIntent.constraints.category = promptTypes[0];
+  } else if (!parsedIntent.constraints.category && (ast.entities?.categories?.length ?? 0) > 0) {
+    parsedIntent.constraints.category = String(ast.entities.categories[0]).toLowerCase().trim();
+  }
+
+  if (promptStyles.length > 0) {
+    appendUniqueTerms(parsedIntent.constraints.mustHave, promptStyles.slice(0, 3));
+  }
+
+  if ((ast.entities?.brands?.length ?? 0) > 0) {
+    const existing = parsedIntent.constraints.brands || [];
+    const merged = [
+      ...new Set(
+        [...existing, ...(ast.entities?.brands ?? [])]
+          .map((b) => String(b).toLowerCase().trim())
+          .filter(Boolean),
+      ),
+    ];
+    parsedIntent.constraints.brands = merged;
+  }
+
+  const g = normalizeQueryGender(ast.entities?.gender);
+  if (g) {
+    parsedIntent.constraints.gender = g;
+  }
+
+  const pr = ast.filters?.priceRange;
+  if (pr?.min != null && Number.isFinite(Number(pr.min))) {
+    parsedIntent.constraints.priceMin = Number(pr.min);
+  }
+  if (pr?.max != null && Number.isFinite(Number(pr.max))) {
+    parsedIntent.constraints.priceMax = Number(pr.max);
+  }
+
+  if (options?.geminiDegraded && parsedIntent.confidence < 0.55) {
+    parsedIntent.confidence = 0.55;
+  }
+}
+
+function extractPromptColorTerms(rawPrompt: string): string[] {
+  const q = String(rawPrompt ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!q) return [];
+  const parts = q.split(" ").filter(Boolean);
+  const out = new Set<string>();
+  for (let i = 0; i < parts.length; i++) {
+    const one = normalizeColorToken(parts[i]);
+    if (one) out.add(one);
+    if (i < parts.length - 1) {
+      const two = normalizeColorToken(`${parts[i]} ${parts[i + 1]}`);
+      if (two) out.add(two);
+    }
+  }
+  return [...out];
+}
+
+function extractPromptTypeTerms(rawPrompt: string): string[] {
+  const seeds = [
+    ...extractLexicalProductTypeSeeds(rawPrompt),
+    ...extractFashionTypeNounTokens(rawPrompt),
+  ]
+    .map((s) => String(s).toLowerCase().trim())
+    .filter(Boolean);
+  return [...new Set(seeds)];
+}
+
+function extractPromptStyleTerms(rawPrompt: string): string[] {
+  const q = String(rawPrompt ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!q) return [];
+
+  const styleLexicon = [
+    "casual",
+    "formal",
+    "minimal",
+    "minimalist",
+    "elegant",
+    "edgy",
+    "streetwear",
+    "boho",
+    "bohemian",
+    "vintage",
+    "sporty",
+    "romantic",
+    "classic",
+    "chic",
+    "modern",
+    "oversized",
+    "fitted",
+    "flowy",
+    "structured",
+    "relaxed",
+  ];
+
+  const out = new Set<string>();
+  for (const s of styleLexicon) {
+    const re = new RegExp(`(^|\\s)${s.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}(\\s|$)`, "i");
+    if (re.test(q)) out.add(s);
+  }
+  return [...out];
+}
+
+function extractPromptLengthTerms(rawPrompt: string): string[] {
+  const q = String(rawPrompt ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!q) return [];
+
+  const out = new Set<string>();
+  if (/\b(maxi|long)\b/.test(q)) out.add("long");
+  if (/\b(mini|short)\b/.test(q)) out.add("short");
+  if (/\bmidi\b/.test(q)) out.add("midi");
+  return [...out];
+}
+
+function extractPromptPatternTerms(rawPrompt: string): string[] {
+  const q = String(rawPrompt ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!q) return [];
+
+  const lexicon = [
+    "pattern",
+    "print",
+    "floral",
+    "striped",
+    "stripe",
+    "plaid",
+    "checkered",
+    "checked",
+    "polka",
+    "leopard",
+    "animal",
+    "paisley",
+    "geometric",
+    "abstract",
+  ];
+  const out = new Set<string>();
+  for (const t of lexicon) {
+    const re = new RegExp(`(^|\\s)${t.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}(\\s|$)`, "i");
+    if (re.test(q)) out.add(t);
+  }
+  return [...out];
+}
+
+function extractPatternHintFromCaption(rawCaption: string): string | undefined {
+  const c = String(rawCaption ?? "").toLowerCase();
+  if (!c.trim()) return undefined;
+
+  const orderedHints = [
+    "leopard",
+    "floral",
+    "striped",
+    "plaid",
+    "checkered",
+    "polka",
+    "paisley",
+    "geometric",
+    "abstract",
+    "animal",
+    "pattern",
+    "print",
+  ];
+
+  for (const h of orderedHints) {
+    const re = new RegExp(`(^|\\s)${h.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}(\\s|$)`, "i");
+    if (re.test(c)) return h;
+  }
+  return undefined;
 }
 
 function collectMultiImageNegationTerms(parsedIntent: ParsedIntent, rawPrompt: string): string[] {
@@ -2600,10 +4118,44 @@ function buildMultiImageSearchHitRelevanceIntent(
     ),
   ];
   const astProductTypes = (ast.entities.productTypes || []).map((t) => t.toLowerCase());
-  let desiredProductTypes = [...new Set([...astProductTypes, ...lexicalTypeSeeds])];
+  const imageDerivedTypeTerms = [
+    ...new Set(
+      (parsedIntent.imageIntents || [])
+        .flatMap((ii) => {
+          const ev = ii.extractedValues as Record<string, unknown> | undefined;
+          const t = ev?.productType;
+          const arr = Array.isArray(t) ? t : t != null ? [t] : [];
+          return arr.flatMap((x) => normalizeTypeHintTerms(String(x)));
+        })
+        .map((t) => t.toLowerCase().trim())
+        .filter(Boolean),
+    ),
+  ];
+  const constraintDerivedTypeTerms = [
+    ...new Set(
+      [
+        parsedIntent.constraints?.category,
+        ...(parsedIntent.constraints?.mustHave ?? []),
+      ]
+        .flatMap((x) => normalizeTypeHintTerms(String(x ?? "")))
+        .map((t) => t.toLowerCase().trim())
+        .filter(Boolean),
+    ),
+  ];
+  let desiredProductTypes = [
+    ...new Set([
+      ...astProductTypes,
+      ...lexicalTypeSeeds,
+      ...imageDerivedTypeTerms,
+      ...constraintDerivedTypeTerms,
+    ]),
+  ];
 
   const promptAnchoredTypeIntent =
-    astProductTypes.length > 0 || lexicalTypeSeeds.length > 0;
+    astProductTypes.length > 0 ||
+    lexicalTypeSeeds.length > 0 ||
+    imageDerivedTypeTerms.length > 0 ||
+    constraintDerivedTypeTerms.length > 0;
 
   const modelCategory = parsedIntent.constraints?.category?.toLowerCase()?.trim();
   if (desiredProductTypes.length === 0 && modelCategory) {
@@ -2622,6 +4174,8 @@ function buildMultiImageSearchHitRelevanceIntent(
   const fromAstColors = imageAnchoredColorPhrase
     ? []
     : (ast.entities.colors ?? []).map((c) => String(c).toLowerCase());
+  const fromAstColors = (ast.entities.colors ?? []).map((c) => String(c).toLowerCase());
+  const fromPromptColors = extractPromptColorTerms(rawPrompt);
   const fromImageColors: string[] = [];
   for (const ii of parsedIntent.imageIntents || []) {
     const ev = ii.extractedValues as Record<string, unknown> | undefined;
@@ -2634,6 +4188,30 @@ function buildMultiImageSearchHitRelevanceIntent(
     }
   }
 
+  const inferredImageCount = Math.max(
+    0,
+    ...((parsedIntent.imageIntents || []).map((ii) => Number(ii.imageIndex) || 0)),
+  ) + (parsedIntent.imageIntents?.length ? 1 : 0);
+  const anchoredColorImageIdx =
+    inferredImageCount > 0
+      ? findPromptAnchoredImageIndex(rawPrompt, "color", inferredImageCount)
+      : null;
+  const colorTransferRequested = promptAnchorKindRegex("color").test(String(rawPrompt || ""));
+  const anchoredImageHasExtractedColor =
+    anchoredColorImageIdx != null &&
+    (parsedIntent.imageIntents || []).some((ii) => {
+      if (ii.imageIndex !== anchoredColorImageIdx) return false;
+      const ev = ii.extractedValues as Record<string, unknown> | undefined;
+      if (!ev) return false;
+      const col = ev.color ?? ev.colour ?? ev.colors;
+      const arr = Array.isArray(col) ? col : col != null ? [col] : [];
+      return arr.some((x) => String(x).trim().length > 0);
+    });
+  const explicitColorTransferIntent =
+    colorTransferRequested &&
+    ((anchoredColorImageIdx != null && anchoredImageHasExtractedColor) ||
+      (anchoredColorImageIdx == null && fromImageColors.length > 0));
+
   // When the user names colors in the prompt, those are restrictions — do not dilute with hues from uploads.
   // When they say "color from image N", literal AST colors are unreliable — use embeddings, not bogus tokens.
   const promptAnchoredColorIntent = !imageAnchoredColorPhrase && fromAstColors.length > 0;
@@ -2642,6 +4220,11 @@ function buildMultiImageSearchHitRelevanceIntent(
     : promptAnchoredColorIntent
       ? [...new Set(fromAstColors.filter(Boolean))]
       : [...new Set([...fromAstColors, ...fromImageColors].filter(Boolean))];
+  const promptAnchoredColorIntent =
+    fromAstColors.length > 0 || fromPromptColors.length > 0 || explicitColorTransferIntent;
+  const rerankDesiredColorsRaw = promptAnchoredColorIntent
+    ? [...new Set([...fromAstColors, ...fromPromptColors].filter(Boolean))]
+    : [...new Set([...fromAstColors, ...fromImageColors].filter(Boolean))];
 
   const rerankDesiredColors = [
     ...new Set(
@@ -2681,6 +4264,9 @@ function buildMultiImageSearchHitRelevanceIntent(
       negationExcludeTerms.length > 0 ||
       hasPriceIntent);
 
+  const softColorBiasOnly = !promptAnchoredColorIntent && rerankDesiredColors.length > 0;
+  const reliableTypeIntent = promptAnchoredTypeIntent && desiredProductTypes.length > 0;
+
   return {
     desiredProductTypes,
     desiredColors: rerankDesiredColors,
@@ -2698,6 +4284,8 @@ function buildMultiImageSearchHitRelevanceIntent(
     enforcePromptConstraints: enforcePromptConstraints ? true : undefined,
     promptAnchoredColorIntent: promptAnchoredColorIntent ? true : undefined,
     promptAnchoredTypeIntent: promptAnchoredTypeIntent ? true : undefined,
+    softColorBiasOnly: softColorBiasOnly ? true : undefined,
+    reliableTypeIntent,
   };
 }
 

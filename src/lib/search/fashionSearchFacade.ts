@@ -89,6 +89,9 @@ export interface UnifiedImageSearchParams {
   };
   inferredPrimaryColor?: string | null;
   inferredColorsByItem?: Record<string, string | null>;
+  inferredColorsByItemConfidence?: Record<string, number>;
+  /** Debug path: bypass rerank/final gates in products.service and return top-k raw exact-cosine hits. */
+  debugRawCosineFirst?: boolean;
 }
 
 function filterByFinalRelevance<T extends { finalRelevance01?: number }>(
@@ -302,6 +305,8 @@ export async function searchImage(
     blipSignal,
     inferredPrimaryColor,
     inferredColorsByItem,
+    inferredColorsByItemConfidence,
+    debugRawCosineFirst,
   } = params;
 
   if ((!imageEmbedding || imageEmbedding.length === 0) && !imageBuffer) {
@@ -400,6 +405,8 @@ export async function searchImage(
     blipSignal,
     inferredPrimaryColor,
     inferredColorsByItem,
+    inferredColorsByItemConfidence,
+    debugRawCosineFirst,
   } as any);
 
   const metaAny = res.meta as Record<string, unknown> | undefined;

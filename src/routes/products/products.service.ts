@@ -46,6 +46,7 @@ import {
   extractLexicalProductTypeSeeds,
   scoreRerankProductTypeBreakdown,
 } from "../../lib/search/productTypeTaxonomy";
+import { attrGenderFilterClause } from "./opensearchFilters";
 import type { SearchResultWithRelated } from "./types";
 import { findRelatedProducts } from "../../lib/search/relatedProducts";
 
@@ -103,6 +104,10 @@ export interface ImageSearchParams extends SearchParams {
    * `knnField` / `SEARCH_IMAGE_KNN_FIELD` is `embedding_garment` (shop-the-look detection crops vs catalog).
    */
   imageEmbeddingGarment?: number[];
+  /** YOLO detection confidence for this item (0-1); used to relax type floor for high-confidence bottoms. */
+  detectionYoloConfidence?: number;
+  /** Product category from detection (e.g. 'tops', 'bottoms'); enables category-specific type flooring. */
+  detectionProductCategory?: string;
   /** Raw bytes when embedding is computed by the callee (unified image search path). */
   imageBuffer?: Buffer;
   /** Soft rerank hints when SEARCH_IMAGE_SOFT_CATEGORY=1 */
@@ -141,6 +146,10 @@ export interface ImageSearchParams extends SearchParams {
   inferredPrimaryColor?: string | null;
   /** Per-slot caption colors (topColor, jeansColor, garmentColor, …). */
   inferredColorsByItem?: Record<string, string | null>;
+  /** Confidence for each inferred item color (same keys as inferredColorsByItem). */
+  inferredColorsByItemConfidence?: Record<string, number>;
+  /** Debug path: bypass rerank/final gates and return top-k raw exact-cosine hits. */
+  debugRawCosineFirst?: boolean;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -429,15 +438,18 @@ type ScoreVersion = "v1" | "v2";
 function normalizeTo01ByVersion(rawScore: number, version: ScoreVersion): number {
   if (!Number.isFinite(rawScore)) return 0;
   if (version === "v1") {
-    // Legacy OpenSearch returns `1 + cosθ` in [0,2]; convert to [0,1].
-    const s01 = rawScore / 2;
-    return Math.max(0, Math.min(1, 2 * s01 - 1));
+    // Legacy data may be stored as either:
+    // - (1 + cosθ) / 2 in [0,1]
+    // - 1 + cosθ in [0,2]
+    // Convert both to cosine-derived [0,1].
+    const cos = rawScore <= 1.001 ? 2 * rawScore - 1 : rawScore - 1;
+    return Math.max(0, Math.min(1, cos));
   }
   // v2: raw cosine from cosineSimilarityRaw is already in [-1,1].
   // For CLIP L2-normalized vectors, values are typically in [0,1].
-  // If the score is > 1 it's a legacy OpenSearch `1+cos` score; convert it.
+  // If the score is > 1, tolerate legacy `1+cos` responses for mixed indexes.
   if (rawScore > 1.001) {
-    return Math.max(0, Math.min(1, rawScore / 2));
+    return Math.max(0, Math.min(1, rawScore - 1));
   }
   // Raw cosine already in [0,1] for L2-normalized CLIP vectors.
   return Math.max(0, Math.min(1, rawScore));
@@ -455,6 +467,7 @@ function computeExplicitFinalRelevance(params: {
   typeMatch: boolean;
   catSoft: number;
   colorMatch: number;
+  colorTier?: "exact" | "family" | "bucket" | "none";
   styleMatch: number;
   sleeveMatch: number;
   lengthMatch: number;
@@ -480,7 +493,19 @@ function computeExplicitFinalRelevance(params: {
   blipMatchScore?: number;
   /** Weight of batch-normalized composite in the final blend (adaptive per query). */
   compositeInfluence?: number;
+  /**
+   * Relative trust in color metadata channel [0,1].
+   * - 1.0 for explicit user color intent
+   * - lower for inferred/crop-only signals to reduce noisy color over-weighting
+   */
+  colorWeightScale?: number;
+  /** Strength of color intent for the final multiplicative gate [0,1]. */
+  colorIntentStrength?: number;
 }): { score: number; fusedVisual: number; metadataCompliance: number } {
+    const colorWeightScale = Math.max(0.2, Math.min(1, params.colorWeightScale ?? 1));
+  const colorIntentStrength = Math.max(0, Math.min(1, params.colorIntentStrength ?? 0));
+  const colorTier = String(params.colorTier ?? "none").toLowerCase();
+
   const simVisual = Math.max(0, Math.min(1, params.simVisual));
 
   if (params.crossFamily) {
@@ -521,6 +546,15 @@ function computeExplicitFinalRelevance(params: {
   const styleStretched = stretchSim(styleSimRaw, subFloor);
   const patternStretched = stretchSim(patternSimRaw, subFloor);
 
+  // Intent-aware channel coherence: avoid rewarding high embedding similarity
+  // when the corresponding metadata compliance clearly disagrees.
+  const colorChannelCoherence = params.hasColorIntent
+    ? 0.2 + 0.8 * Math.max(0, Math.min(1, params.colorMatch))
+    : 1;
+  const styleChannelCoherence = params.hasStyleIntent
+    ? 0.25 + 0.75 * Math.max(0, Math.min(1, params.styleMatch))
+    : 1;
+
   // Sub-channels are independently gated with a soft floor so that
   // moderate CLIP similarity does not zero out strong color/style/pattern signals.
   const subChannelGate = Math.min(1, 0.3 + clipStretched * 1.4);
@@ -529,8 +563,8 @@ function computeExplicitFinalRelevance(params: {
     Math.min(
       1,
       0.52 * clipStretched +
-        0.19 * colorStretched * subChannelGate +
-        0.16 * styleStretched * subChannelGate +
+        0.19 * colorStretched * subChannelGate * colorChannelCoherence +
+        0.16 * styleStretched * subChannelGate * styleChannelCoherence +
         0.13 * patternStretched * subChannelGate,
     ),
   );
@@ -542,7 +576,7 @@ function computeExplicitFinalRelevance(params: {
     Math.min(
       1,
       0.12 * params.catSoft +
-        0.32 * params.colorMatch +
+        0.32 * params.colorMatch * colorWeightScale +
         0.22 * params.styleMatch +
         0.14 * params.sleeveMatch +
         0.08 * params.lengthMatch +
@@ -556,11 +590,28 @@ function computeExplicitFinalRelevance(params: {
       ? Math.max(complianceFromAttrs, 0.85)
       : complianceFromAttrs;
 
+  const colorGate =
+    colorIntentStrength > 0
+      ? Math.max(0.55, 1 - 0.45 * colorIntentStrength * (1 - params.colorMatch))
+      : 1;
+  const colorTierFactor =
+    colorIntentStrength > 0
+      ? colorTier === "exact"
+        ? 1.1 + 0.05 * colorIntentStrength
+        : colorTier === "family"
+          ? 1.04 + 0.03 * colorIntentStrength
+          : colorTier === "bucket"
+            ? 0.93 - 0.03 * colorIntentStrength
+            : 0.83 - 0.08 * colorIntentStrength
+      : 1;
+
   // ── Intent coverage gate ─────────────────────────────────────────
   const intentWeights = {
     color: 0.28,
-    style: 0.24,
-    sleeve: 0.20,
+    style: 0.18,
+    // Sleeve inferred from vision can be noisy; keep it informative but less punitive.
+    // When visual similarity is very high (>0.65), reduce sleeve weight since it's often a detection artifact.
+    sleeve: params.simVisual >= 0.65 ? 0.04 : 0.08,
     length: 0.12,
     audience: 0.16,
   };
@@ -572,11 +623,19 @@ function computeExplicitFinalRelevance(params: {
   }
   if (params.hasStyleIntent) {
     activeIntentWeight += intentWeights.style;
-    coveredIntentWeight += intentWeights.style * Math.max(0, Math.min(1, params.styleMatch));
+    const styleCoverage = Math.max(
+      Math.max(0, Math.min(1, params.styleMatch)),
+      Math.min(0.22, clipStretched * 0.28),
+    );
+    coveredIntentWeight += intentWeights.style * styleCoverage;
   }
   if (params.hasSleeveIntent) {
     activeIntentWeight += intentWeights.sleeve;
-    coveredIntentWeight += intentWeights.sleeve * Math.max(0, Math.min(1, params.sleeveMatch));
+    const sleeveCoverage = Math.max(
+      Math.max(0, Math.min(1, params.sleeveMatch)),
+      Math.min(0.18, clipStretched * 0.22),
+    );
+    coveredIntentWeight += intentWeights.sleeve * sleeveCoverage;
   }
   if (params.hasLengthIntent) {
     activeIntentWeight += intentWeights.length;
@@ -600,18 +659,18 @@ function computeExplicitFinalRelevance(params: {
   const compositeScore01 = Math.max(0, Math.min(1, params.imageCompositeScore01 ?? 0));
   const compositeInfluence = Math.max(
     0.02,
-    Math.min(0.25, params.compositeInfluence ?? imageSearchCompositeInfluenceBase()),
+    Math.min(0.15, params.compositeInfluence ?? imageSearchCompositeInfluenceBase()),
   );
 
   // ── Final blend ──────────────────────────────────────────────────
-  const visualWeight = fusedVisual >= 0.30 ? 0.78 : 0.68;
+  const visualWeight = fusedVisual >= 0.30 ? 0.86 : 0.78;
   const complianceWeight = 1 - visualWeight;
 
   const coreBlend = visualWeight * fusedVisual + complianceWeight * compliance;
   const withComposite =
     (1 - compositeInfluence) * coreBlend + compositeInfluence * compositeScore01;
 
-  const raw = withComposite * typeGate * crossSoft * intentGate * blipFactor;
+  const raw = withComposite * typeGate * crossSoft * intentGate * colorGate * colorTierFactor * blipFactor;
   return {
     score: Math.max(0, Math.min(1, raw)),
     fusedVisual,
@@ -651,7 +710,12 @@ function lengthComplianceScore(
   explicitObserved: boolean,
 ): number {
   if (!desired) return 0;
-  if (!observed) return 0.72;
+  if (!observed) {
+    // Unknown length should not behave like a strong match when user explicitly asked
+    // for long/maxi silhouettes.
+    if (desired === "long" || desired === "maxi") return 0.32;
+    return 0.45;
+  }
   if (desired === observed) return 1;
   if (explicitObserved) return 0;
   if ((desired === "long" && (observed === "midi" || observed === "maxi")) || (observed === "long" && (desired === "midi" || desired === "maxi"))) {
@@ -823,6 +887,42 @@ function imageVisualRescueStyleMinWhenIntent(): number {
   return Math.max(0, Math.min(1, raw));
 }
 
+function imageMustKeepVisualMinSimilarity(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_MUST_KEEP_VISUAL_MIN_SIM ?? "0.72");
+  if (!Number.isFinite(raw)) return 0.72;
+  return Math.max(0.45, Math.min(0.98, raw));
+}
+
+function imageMustKeepVisualMaxCount(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_MUST_KEEP_VISUAL_MAX_COUNT ?? "4");
+  if (!Number.isFinite(raw)) return 4;
+  return Math.max(0, Math.min(12, Math.floor(raw)));
+}
+
+function imageMustKeepVisualAudienceMin(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_MUST_KEEP_VISUAL_AUDIENCE_MIN ?? "0.75");
+  if (!Number.isFinite(raw)) return 0.75;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function imageStrongVisualOverrideMinSimilarity(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_STRONG_VISUAL_OVERRIDE_MIN_SIM ?? "0.86");
+  if (!Number.isFinite(raw)) return 0.86;
+  return Math.max(0.65, Math.min(0.99, raw));
+}
+
+function imageStrongVisualOverrideMaxCount(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_STRONG_VISUAL_OVERRIDE_MAX_COUNT ?? "6");
+  if (!Number.isFinite(raw)) return 6;
+  return Math.max(0, Math.min(20, Math.floor(raw)));
+}
+
+function imageGenderUnknownVisualMinSimilarity(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_GENDER_UNKNOWN_MIN_SIM ?? "0.82");
+  if (!Number.isFinite(raw)) return 0.82;
+  return Math.max(0.5, Math.min(0.99, raw));
+}
+
 function imageBlipAlignmentWeight(): number {
   const raw = Number(process.env.SEARCH_IMAGE_BLIP_ALIGNMENT_WEIGHT ?? "0.3");
   if (!Number.isFinite(raw)) return 0.3;
@@ -837,6 +937,126 @@ function imageBlipAlignmentMaxBoost(): number {
 
 function normalizeSimpleToken(x: unknown): string {
   return String(x ?? "").toLowerCase().trim();
+}
+
+function normalizeLexicalToken(x: string): string {
+  const t = x.toLowerCase().trim();
+  if (t.endsWith("ies") && t.length > 4) return `${t.slice(0, -3)}y`;
+  if (t.endsWith("es") && t.length > 4) return t.slice(0, -2);
+  if (t.endsWith("s") && t.length > 3) return t.slice(0, -1);
+  return t;
+}
+
+function tokenizeLexicalTerms(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .map((tok) => normalizeLexicalToken(tok))
+    .filter((tok) => tok.length >= 3);
+}
+
+function computeSubtypeKeywordSignal(params: {
+  desiredProductTypes: string[];
+  preferredDesiredProductTypes?: string[];
+  hit: any;
+  reliableTypeIntent: boolean;
+  crossFamilyPenalty: number;
+  productTypeCompliance: number;
+}): { boost: number; overlap: number; exactHit: boolean } {
+  const preferred = (params.preferredDesiredProductTypes ?? [])
+    .map((t) => String(t).toLowerCase().trim())
+    .filter(Boolean);
+  const desiredRaw = preferred.length > 0 ? preferred : params.desiredProductTypes;
+  const desired = desiredRaw
+    .map((t) => String(t).toLowerCase().trim())
+    .filter(Boolean);
+  if (!params.reliableTypeIntent || desired.length === 0) {
+    return { boost: 0, overlap: 0, exactHit: false };
+  }
+  if ((params.crossFamilyPenalty ?? 0) >= 0.5) {
+    return { boost: 0, overlap: 0, exactHit: false };
+  }
+
+  const src = params.hit?._source ?? {};
+  const hitTypes = Array.isArray(src.product_types)
+    ? src.product_types.map((t: unknown) => String(t).toLowerCase().trim()).filter(Boolean)
+    : [];
+  const haystack = [
+    ...hitTypes,
+    String(src.category_canonical ?? "").toLowerCase(),
+    String(src.category ?? "").toLowerCase(),
+    String(src.title ?? "").toLowerCase(),
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const exactHit = desired.some((d) => {
+    if (!d) return false;
+    if (hitTypes.includes(d)) return true;
+    const escaped = d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${escaped}\\b`, "i").test(haystack);
+  });
+
+  const exactMatchedDesired = desired.filter((d) => {
+    if (!d) return false;
+    if (hitTypes.includes(d)) return true;
+    const escaped = d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${escaped}\\b`, "i").test(haystack);
+  });
+
+  const genericTypeTerms = new Set([
+    "pant",
+    "pants",
+    "trouser",
+    "trousers",
+    "chino",
+    "chinos",
+    "cargo",
+    "jacket",
+    "jackets",
+    "coat",
+    "coats",
+    "outerwear",
+    "shirt",
+    "shirts",
+  ]);
+  const hasSpecificExact = exactMatchedDesired.some((term) => {
+    const toks = tokenizeLexicalTerms(term);
+    if (toks.length === 0) return false;
+    if (toks.length > 1) return true;
+    return !genericTypeTerms.has(toks[0]);
+  });
+
+  const desiredTokens = new Set<string>();
+  for (const d of desired) {
+    for (const tok of tokenizeLexicalTerms(d)) desiredTokens.add(tok);
+  }
+  if (desiredTokens.size === 0) {
+    return { boost: 0, overlap: 0, exactHit };
+  }
+
+  const hitTokens = new Set(tokenizeLexicalTerms(haystack));
+  let matched = 0;
+  for (const tok of desiredTokens) {
+    if (hitTokens.has(tok)) matched += 1;
+  }
+  const overlap = Math.max(0, Math.min(1, matched / desiredTokens.size));
+
+  const typeComp = Math.max(0, Math.min(1, params.productTypeCompliance ?? 0));
+  const complianceGate = typeComp >= 0.75 ? 1 : typeComp >= 0.6 ? 0.7 : 0;
+
+  let baseBoost = 0;
+  if (exactHit && hasSpecificExact) baseBoost = 0.03;
+  else if (exactHit) baseBoost = preferred.length > 0 ? 0.02 : 0.012;
+  else if (overlap >= 0.7) baseBoost = 0.022;
+  else if (overlap >= 0.5) baseBoost = 0.015;
+
+  const boost = Math.max(0, Math.min(0.04, baseBoost * complianceGate));
+  return {
+    boost,
+    overlap: Math.round(overlap * 1000) / 1000,
+    exactHit,
+  };
 }
 
 function blendSoftSimilarityWithCompliance(params: {
@@ -916,29 +1136,166 @@ function blipCatalogColorConflictFactor(
   return Math.max(0.35, 1 - conf * penalty * maxPen);
 }
 
+function colorConfidenceThreshold(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_ITEM_COLOR_CONF_MIN ?? "0.45");
+  if (!Number.isFinite(raw)) return 0.45;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function collectConfidentColorTokenMap(params: {
+  inferredPrimary?: string | null;
+  inferredByItem?: Record<string, string | null>;
+  inferredByItemConfidence?: Record<string, number>;
+  filtersRecord: Record<string, unknown>;
+}): Map<string, number> {
+  const scores = new Map<string, number>();
+  const defaultItemColorConfidence = 0.62;
+  const add = (value: string | null | undefined, confidence: number) => {
+    const x = String(value ?? "").toLowerCase().trim();
+    if (!x) return;
+    const norm = normalizeColorToken(x) ?? x;
+    if (!norm) return;
+    const next = Math.max(0, Math.min(1, confidence));
+    scores.set(norm, Math.max(scores.get(norm) ?? 0, next));
+  };
+
+  const itemColors = params.inferredByItem ?? {};
+  const itemConfs = params.inferredByItemConfidence ?? {};
+
+  const accessoryKeyRe = /(shoe|sandal|sneaker|heel|boot|bag|wallet|hat|cap|belt|watch|ring|earring|necklace|bracelet|jewel|scarf)/i;
+  const apparelKeyRe = /(trouser|pant|jean|skirt|dress|gown|top|shirt|blouse|sleeve|outwear|outerwear|jacket|coat|hoodie|sweater|cardigan|short|legging|romper|jumpsuit)/i;
+
+  const hasConfidentApparelColor = Object.entries(itemColors).some(([key, value]) => {
+    const rawConf = Number(itemConfs[key]);
+    const conf = Number.isFinite(rawConf) ? rawConf : defaultItemColorConfidence;
+    const norm = normalizeColorToken(String(value ?? "").toLowerCase().trim()) ?? String(value ?? "").toLowerCase().trim();
+    return Boolean(norm) && conf >= colorConfidenceThreshold() && apparelKeyRe.test(key);
+  });
+
+  // Full-image dominant color is noisy in multi-item scenes; trust it mainly when
+  // confident item-level colors are unavailable.
+  if (!hasConfidentApparelColor) {
+    add(params.inferredPrimary, 0.58);
+  }
+
+  for (const [key, value] of Object.entries(itemColors)) {
+    const rawConf = Number(itemConfs[key]);
+    let conf = Number.isFinite(rawConf) ? rawConf : defaultItemColorConfidence;
+    if (hasConfidentApparelColor && accessoryKeyRe.test(key) && !apparelKeyRe.test(key)) {
+      conf *= 0.72;
+    }
+    if (conf >= colorConfidenceThreshold()) {
+      add(value, conf);
+    }
+  }
+
+  const fp = (params.filtersRecord as { inferredPrimaryColor?: unknown }).inferredPrimaryColor;
+  if (fp != null) add(String(fp), 0.45);
+
+  const fi = (params.filtersRecord as { inferredColorsByItem?: Record<string, string | null> }).inferredColorsByItem;
+  const fci = (params.filtersRecord as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence;
+  if (fi && typeof fi === "object") {
+    for (const [key, value] of Object.entries(fi)) {
+      const rawConf = Number(fci?.[key]);
+      let conf = Number.isFinite(rawConf) ? rawConf : defaultItemColorConfidence;
+      if (hasConfidentApparelColor && accessoryKeyRe.test(key) && !apparelKeyRe.test(key)) {
+        conf *= 0.72;
+      }
+      if (conf >= colorConfidenceThreshold()) {
+        add(value, conf);
+      }
+    }
+  }
+
+  return scores;
+}
+
 function collectInferredColorTokens(
   filtersRecord: Record<string, unknown>,
   inferredPrimary?: string | null,
   inferredByItem?: Record<string, string | null>,
+  inferredByItemConfidence?: Record<string, number>,
+  mergedCategoryForRelevance?: string,
+  desiredProductTypes?: string[],
 ): string[] {
-  const out: string[] = [];
-  const push = (s: string | null | undefined) => {
-    const x = String(s ?? "").toLowerCase().trim();
-    if (!x) return;
-    const norm = normalizeColorToken(x) ?? x;
-    if (norm && !out.includes(norm)) out.push(norm);
-  };
-  push(inferredPrimary ?? undefined);
-  if (inferredByItem && typeof inferredByItem === "object") {
-    for (const v of Object.values(inferredByItem)) push(v);
+  const merged = String(mergedCategoryForRelevance ?? "").toLowerCase().trim();
+  const typeText = (desiredProductTypes ?? []).join(" ").toLowerCase();
+  const onePiece = /\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(merged) || /\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(typeText);
+  const normalizedPrimary = normalizeColorToken(String(inferredPrimary ?? "").toLowerCase().trim()) ?? String(inferredPrimary ?? "").toLowerCase().trim();
+  if (onePiece && normalizedPrimary) {
+    return [normalizedPrimary];
   }
-  const fp = (filtersRecord as { inferredPrimaryColor?: unknown }).inferredPrimaryColor;
-  if (fp != null) push(String(fp));
-  const fi = (filtersRecord as { inferredColorsByItem?: Record<string, string | null> }).inferredColorsByItem;
-  if (fi && typeof fi === "object") {
-    for (const v of Object.values(fi)) push(v);
+
+  const scored = collectConfidentColorTokenMap({
+    inferredPrimary,
+    inferredByItem,
+    inferredByItemConfidence,
+    filtersRecord,
+  });
+  const top = [...scored.entries()].sort((a, b) => b[1] - a[1])[0];
+  return top ? [top[0]] : [];
+}
+
+function shouldPreferInferredColorWhenConflict(params: {
+  mergedCategoryForRelevance?: string;
+  desiredProductTypes: string[];
+  inferredPrimary?: string | null;
+  inferredColorTokens: string[];
+}): boolean {
+  const merged = String(params.mergedCategoryForRelevance ?? "").toLowerCase().trim();
+  const typeText = params.desiredProductTypes.join(" ").toLowerCase();
+  const inferredPrimary = String(params.inferredPrimary ?? "").toLowerCase().trim();
+  const hasGarmentInferredColor =
+    inferredPrimary.length > 0 || (Array.isArray(params.inferredColorTokens) && params.inferredColorTokens.length > 0);
+  if (!hasGarmentInferredColor) return false;
+
+  // One-piece garments (especially dresses) are highly sensitive to lower-crop bleed
+  // from shoes/background. Prefer semantic inferred color when conflict appears.
+  if (/\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(merged)) return true;
+  if (/\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(typeText)) return true;
+
+  // Prefer inferred color only for upper-body / outerwear intents.
+  // Full-image inference is less reliable for full-body garments such as dresses,
+  // skirts, pants, and jumpsuits where crop-based color extraction is usually better.
+  if (/\b(top|shirt|tee|t-?shirt|blouse|sweater|hoodie|jacket|coat|blazer|outerwear)\b/.test(merged)) return true;
+  if (/\b(top|shirt|tee|t-?shirt|blouse|sweater|hoodie|jacket|coat|blazer|outerwear)\b/.test(typeText)) return true;
+
+  return false;
+}
+
+function computeColorContradictionPenalty(params: {
+  desiredColorsTier: string[];
+  rerankColorMode: "any" | "all";
+  hasExplicitColorIntent: boolean;
+  hasInferredColorSignal: boolean;
+  hasCropColorSignal: boolean;
+  rawVisual: number;
+  nearIdenticalRawMin: number;
+  hit: { _source?: Record<string, unknown> };
+}): number {
+  if (!Array.isArray(params.desiredColorsTier) || params.desiredColorsTier.length === 0) return 1;
+
+  const docColors = docColorPaletteForHit(params.hit);
+  if (docColors.length === 0) return 1;
+
+  const tier = tieredColorListCompliance(
+    params.desiredColorsTier,
+    docColors,
+    params.rerankColorMode,
+  );
+  if ((tier?.compliance ?? 0) > 0) return 1;
+
+  if (params.rawVisual >= params.nearIdenticalRawMin) {
+    if (params.hasExplicitColorIntent) return 0.74;
+    if (params.hasInferredColorSignal) return 0.84;
+    if (params.hasCropColorSignal) return 0.92;
+    return 1;
   }
-  return out;
+
+  if (params.hasExplicitColorIntent) return 0.72;
+  if (params.hasInferredColorSignal) return 0.82;
+  if (params.hasCropColorSignal) return 0.9;
+  return 1;
 }
 
 function computeBatchCompositeInfluence(
@@ -1247,6 +1604,7 @@ export async function searchByImageWithSimilarity(
     blipSignal,
     inferredPrimaryColor: inferredPrimaryFromParams,
     inferredColorsByItem: inferredByItemFromParams,
+    debugRawCosineFirst = false,
   } = params;
 
   if (!imageEmbedding || imageEmbedding.length === 0) {
@@ -1300,6 +1658,14 @@ export async function searchByImageWithSimilarity(
   }
   if (filters.brand) filter.push({ term: { brand: String(filters.brand).toLowerCase() } });
   if (filters.vendorId) filter.push({ term: { vendor_id: String(filters.vendorId) } });
+  if (Array.isArray((filters as { productTypes?: string[] }).productTypes)) {
+    const productTypeTerms = ((filters as { productTypes?: string[] }).productTypes ?? [])
+      .map((t) => String(t).toLowerCase().trim())
+      .filter(Boolean);
+    if (productTypeTerms.length > 0) {
+      filter.push({ terms: { product_types: productTypeTerms } });
+    }
+  }
   const filtersAny = filters as { gender?: string; color?: string; softColor?: string; style?: string; softStyle?: string };
   const visualPrimaryBroad = isBroadImageSearchVisualPrimaryRanking(filters, imageSearchTextQuery);
   if (filtersAny.gender) {
@@ -1312,17 +1678,26 @@ export async function searchByImageWithSimilarity(
       g === "women"
         ? ["women", "womens", "female", "ladies", "woman"]
         : g === "men"
-          ? ["men", "mens", "male", "boys", "boy", "man"]
+          ? ["men", "mens", "male", "man"]
           : ["unisex"];
 
     const titleOppShould =
       g === "women"
-        ? ["men", "mens", "male", "boys", "boy", "man"]
+        ? ["men", "mens", "male", "boy", "boys", "man", "kid", "kids", "youth", "toddler", "baby"]
         : g === "men"
-          ? ["women", "womens", "female", "ladies", "woman", "girls", "girl"]
+          ? ["women", "womens", "female", "ladies", "woman", "girls", "girl", "boy", "boys", "kid", "kids", "youth", "toddler", "baby"]
           : [];
 
-    const shouldClauses: any[] = [{ term: { attr_gender: g } }];
+    const genderVariants = attrGenderFilterClause(g).terms.attr_gender;
+    const shouldClauses: any[] = [
+      { terms: { attr_gender: genderVariants } },
+      { terms: { audience_gender: genderVariants } },
+      {
+        bool: {
+          must_not: [{ exists: { field: "attr_gender" } }, { exists: { field: "audience_gender" } }],
+        },
+      },
+    ];
     if (imageGenderSoftEnv()) {
       // In "soft gender" mode, we also allow a title keyword match.
       for (const kw of titleGenderShould) {
@@ -1384,14 +1759,38 @@ export async function searchByImageWithSimilarity(
     try {
       const { attributeEmbeddings } = await import("../../lib/search/attributeEmbeddings");
       const [cEmb, sEmb, pEmb] = await Promise.all([
-        attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "color").catch(() => [] as number[]),
-        attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "style").catch(() => [] as number[]),
-        attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, "pattern").catch(() => [] as number[]),
+        attributeEmbeddings
+          .generateImageAttributeEmbedding(imageBuffer, "color")
+          .catch((error) => {
+            console.warn("[image-search] color attribute embedding failed", {
+              message: error instanceof Error ? error.message : String(error),
+            });
+            return [] as number[];
+          }),
+        attributeEmbeddings
+          .generateImageAttributeEmbedding(imageBuffer, "style")
+          .catch((error) => {
+            console.warn("[image-search] style attribute embedding failed", {
+              message: error instanceof Error ? error.message : String(error),
+            });
+            return [] as number[];
+          }),
+        attributeEmbeddings
+          .generateImageAttributeEmbedding(imageBuffer, "pattern")
+          .catch((error) => {
+            console.warn("[image-search] pattern attribute embedding failed", {
+              message: error instanceof Error ? error.message : String(error),
+            });
+            return [] as number[];
+          }),
       ]);
       colorQueryEmbedding = cEmb.length > 0 ? cEmb : null;
       styleQueryEmbedding = sEmb.length > 0 ? sEmb : null;
       patternQueryEmbedding = pEmb.length > 0 ? pEmb : null;
-    } catch {
+    } catch (error) {
+      console.warn("[image-search] attribute embedding pipeline failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
       colorQueryEmbedding = null;
       styleQueryEmbedding = null;
       patternQueryEmbedding = null;
@@ -1605,6 +2004,75 @@ export async function searchByImageWithSimilarity(
   };
 
   const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
+
+  const rawCosineDebugAllowed =
+    debugRawCosineFirst &&
+    String(process.env.NODE_ENV ?? "").toLowerCase() !== "production" &&
+    String(process.env.SEARCH_ENABLE_DEBUG_RAW_BRANCH ?? "").toLowerCase() === "1";
+  if (rawCosineDebugAllowed) {
+    const orderedRaw = [...hits]
+      .map((h: any) => ({ hit: h, sim: visualSimFromHit(h) }))
+      .sort((a, b) => b.sim - a.sim);
+
+    const topRaw = orderedRaw.slice(0, Math.max(1, Math.min(limit, orderedRaw.length)));
+    const productIds = topRaw.map((x) => String(x.hit?._source?.product_id ?? "")).filter(Boolean);
+    const scoreMap = new Map<string, number>(
+      topRaw.map((x) => [String(x.hit?._source?.product_id ?? ""), Math.max(0, Math.min(1, x.sim))]),
+    );
+
+    let results: ProductResult[] = [];
+    if (productIds.length > 0) {
+      const products = await getProductsByIdsOrdered(productIds);
+      const numericIds = productIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
+      const imagesByProduct = await getImagesForProducts(numericIds);
+
+      results = products.map((p: any) => {
+        const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
+        const sim = scoreMap.get(String(p.id)) ?? 0;
+        return {
+          ...p,
+          similarity_score: Math.round(sim * 100) / 100,
+          match_type: sim >= config.clip.matchTypeExactMin ? ("exact" as const) : ("similar" as const),
+          rerankScore: undefined,
+          finalRelevance01: sim,
+          explain: {
+            clipCosine: sim,
+            merchandiseSimilarity: sim,
+            catalogAlignment: 1,
+            finalRelevance01: sim,
+            finalRelevanceSource: "raw_debug_bypass",
+          },
+          images: images.map((img) => ({
+            id: img.id,
+            url: img.cdn_url,
+            is_primary: img.is_primary,
+            p_hash: img.p_hash ?? undefined,
+          })),
+        } as ProductResult;
+      });
+    }
+
+    results = (dedupeImageSearchResults(results as any) as ProductResult[]).slice(0, limit);
+
+    let related: ProductResult[] = [];
+    if (includeRelated && pHash) {
+      const excludeIds = results.map((p) => String(p.id));
+      related = await findSimilarByPHash(pHash, excludeIds, limit);
+      related = (filterRelatedAgainstMain(results as any, related as any, { imageSearch: true }) ?? []) as ProductResult[];
+    }
+
+    return {
+      results,
+      ...(related.length > 0 ? { related } : {}),
+      meta: {
+        threshold: similarityThreshold,
+        total_results: results.length,
+        image_knn_field: knnFieldResolved,
+        debug_raw_cosine_bypass_used: true,
+      },
+    };
+  }
+
   const aisleSoftWeightBase = Math.max(
     0,
     Math.min(400, Number(process.env.SEARCH_IMAGE_AISLE_SOFT_WEIGHT ?? "130") || 130),
@@ -1665,12 +2133,17 @@ export async function searchByImageWithSimilarity(
     typeof imageSearchTextQuery === "string" && imageSearchTextQuery.trim()
       ? imageSearchTextQuery.trim()
       : "";
+  const desiredLengthForRelevance =
+    typeof filtersRecord.length === "string"
+      ? normalizeLengthToken(String(filtersRecord.length).toLowerCase().trim())
+      : null;
 
   let desiredProductTypes: string[] = [];
   const hasExplicitTypeFilter =
     Array.isArray(filtersRecord.productTypes) && filtersRecord.productTypes.length > 0;
   const hasExplicitCategoryFilter = filterCategory != null;
   const hasTextTypeIntent = Boolean(textQueryForRelevance);
+  let hasDetectionAnchoredTypeIntent = false;
   const astCategoriesForRelevance = [
     ...new Set(
       [
@@ -1697,7 +2170,7 @@ export async function searchByImageWithSimilarity(
             extractLexicalProductTypeSeeds(String(c)),
           )
         : [];
-    const fromPredicted = predictedCategoryAisles?.length
+    const fromPredicted = filterCategory == null && predictedCategoryAisles?.length
       ? predictedCategoryAisles.flatMap((a) => extractLexicalProductTypeSeeds(String(a)))
       : [];
     desiredProductTypes = [
@@ -1711,6 +2184,7 @@ export async function searchByImageWithSimilarity(
   const softHintsMerged = (softProductTypeHintsParam ?? [])
     .map((t) => String(t).toLowerCase().trim())
     .filter(Boolean);
+  const preferredDesiredProductTypes = [...new Set(softHintsMerged)];
   if (softHintsMerged.length > 0) {
     desiredProductTypes = [...new Set([...desiredProductTypes, ...softHintsMerged])];
   }
@@ -1718,8 +2192,32 @@ export async function searchByImageWithSimilarity(
     const fromText = extractFashionTypeNounTokens(textQueryForRelevance).map((t) => t.toLowerCase());
     if (fromText.length > 0) {
       desiredProductTypes = [...new Set([...desiredProductTypes, ...fromText])];
+      for (const t of fromText) {
+        const x = String(t).toLowerCase().trim();
+        if (x && !preferredDesiredProductTypes.includes(x)) preferredDesiredProductTypes.push(x);
+      }
     }
   }
+  if (desiredLengthForRelevance && desiredProductTypes.length > 0) {
+    const prunedByLength = desiredProductTypes.filter((t) => {
+      const token = String(t).toLowerCase();
+      if (desiredLengthForRelevance === "long" || desiredLengthForRelevance === "maxi") {
+        return !/\bmini\b/.test(token);
+      }
+      if (desiredLengthForRelevance === "mini") {
+        return !/\b(maxi|midi|long)\b/.test(token);
+      }
+      if (desiredLengthForRelevance === "midi") {
+        return !/\b(mini|maxi|long)\b/.test(token);
+      }
+      return true;
+    });
+    if (prunedByLength.length > 0) {
+      desiredProductTypes = prunedByLength;
+    }
+  }
+  hasDetectionAnchoredTypeIntent =
+    desiredProductTypes.length > 0 && (Boolean(predictedCategoryAisles?.length) || useAisleRerank);
 
   const explicitColorsForRelevance =
     Array.isArray(filtersRecord.colors) && filtersRecord.colors.length > 0
@@ -1741,10 +2239,34 @@ export async function searchByImageWithSimilarity(
     filtersRecord,
     inferredPrimaryFromParams ?? (filtersRecord as { inferredPrimaryColor?: string | null }).inferredPrimaryColor,
     inferredByItemFromParams ?? (filtersRecord as { inferredColorsByItem?: Record<string, string | null> }).inferredColorsByItem,
+    (params as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence ??
+      (filtersRecord as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence,
+    typeof mergedCategoryForRelevance === "string" ? mergedCategoryForRelevance : undefined,
+    desiredProductTypes,
   );
-  const allColorsForRelevance = hasExplicitColorIntent
-    ? [...explicitColorsForRelevance]
-    : [...new Set([...cropDominantColorsRaw, ...inferredColorTokens])];
+  const hasInferredColorSignal = inferredColorTokens.length > 0;
+  const normalizedCropColors = [
+    ...new Set(
+      cropDominantColorsRaw.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
+    ),
+  ];
+  const normalizedInferredColors = [
+    ...new Set(
+      inferredColorTokens.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
+    ),
+  ];
+  const normalizedCropColorsForMerge =
+    normalizedCropColors.filter((c) => !["black", "gray", "charcoal"].includes(String(c).toLowerCase()));
+
+  let allColorsForRelevance: string[];
+  if (hasExplicitColorIntent) {
+    allColorsForRelevance = [...explicitColorsForRelevance];
+  } else if (normalizedInferredColors.length > 0) {
+    allColorsForRelevance = [...normalizedInferredColors];
+  } else {
+    allColorsForRelevance = [...normalizedCropColorsForMerge];
+  }
+
   const desiredColorsForRelevance = [
     ...new Set(
       allColorsForRelevance.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
@@ -1769,44 +2291,27 @@ export async function searchByImageWithSimilarity(
       : "";
   const hasExplicitStyleIntent = explicitStyleForRelevance.length > 0;
   const hasSoftStyleHint = softStyleForRelevance.length > 0;
-  // Only explicit style should gate final relevance; soft style hints stay rerank-only.
-  const desiredStyleForRelevance = hasExplicitStyleIntent ? explicitStyleForRelevance : undefined;
+  const softStyleGateEnabled = String(process.env.SEARCH_IMAGE_SOFT_STYLE_GATE ?? "1").toLowerCase() !== "0";
+  const styleIntentGatesFinalRelevance =
+    hasExplicitStyleIntent ||
+    (softStyleGateEnabled && hasSoftStyleHint && hasDetectionAnchoredTypeIntent);
+  // Soft style hints from detection/BLIP should still guide final relevance for
+  // image search when explicit style is absent.
+  const desiredStyleForRelevance = hasExplicitStyleIntent
+    ? explicitStyleForRelevance
+    : hasSoftStyleHint
+      ? softStyleForRelevance
+      : undefined;
   const desiredSleeveForRelevance =
     typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
-  const desiredLengthForRelevance =
-    typeof filtersRecord.length === "string"
-      ? normalizeLengthToken(String(filtersRecord.length).toLowerCase().trim())
-      : null;
 
-  const hasColorIntentForFinal = hasExplicitColorIntent;
-  // Crop-dominant colors affect reranking but must NOT gate final relevance
-  // (pixel k-means can misread shadows/packaging as garment color).
-  const softColorBiasOnly = !hasExplicitColorIntent && hasCropColorSignal;
-
-  /**
-   * Single snapshot for debugging: `hasStyleIntent` in explain is ONLY `filters.style`
-   * (gates `computeFinalRelevance01` / style multiplier). Shop-the-look usually sets
-   * `filters.softStyle` only → explain `hasStyleIntent` false while composite rerank still uses style.
-   */
-  const relevanceIntentDebug = {
-    style: {
-      gatesFinalRelevance01: hasExplicitStyleIntent,
-      usedInCompositeRerank: hasExplicitStyleIntent || hasSoftStyleHint,
-      explicitFilter: explicitStyleForRelevance || undefined,
-      softHint: softStyleForRelevance || undefined,
-    },
-    color: {
-      gatesFinalRelevance01: hasExplicitColorIntent,
-      cropDominantTokens: hasCropColorSignal ? [...cropDominantColorsRaw] : undefined,
-      inferredTokens: inferredColorTokens.length > 0 ? [...inferredColorTokens] : undefined,
-      softBiasOnly: softColorBiasOnly,
-      explicitFilters: [...explicitColorsForRelevance],
-      effectiveDesired: [...desiredColorsForRelevance],
-    },
-    types: {
-      desiredProductTypes: [...desiredProductTypes],
-    },
-  };
+  const hasColorIntentForFinal = hasExplicitColorIntent || hasInferredColorSignal;
+  const hasInferredColorIntentForRescue = !hasExplicitColorIntent && hasInferredColorSignal;
+  const hasSoftColorIntentForRescue = !hasExplicitColorIntent && desiredColorsForRelevance.length > 0;
+  // Crop-dominant colors affect reranking but should not gate final relevance
+  // unless we also have inferred semantic color evidence (e.g., BLIP "blue jeans").
+  const softColorBiasOnly =
+    !hasExplicitColorIntent && hasCropColorSignal && !hasInferredColorSignal;
 
   /**
    * When the user did not narrow the search (category / productTypes / text / explicit color),
@@ -1834,12 +2339,58 @@ export async function searchByImageWithSimilarity(
     lexicalMatchQuery: textQueryForRelevance || undefined,
     tightSemanticCap: true,
     softColorBiasOnly,
+    // Detection-derived productTypes are useful hints but can be noisy;
+    // keep strict type gating only for explicit user intent anchors.
+    // YOLO/detection hints remain in scoring but should not hard-gate image retrieval by default.
     reliableTypeIntent:
       forceStrictInferredTypeIntentEnv() ||
       hasExplicitTypeFilter ||
       hasExplicitCategoryFilter ||
       hasTextTypeIntent,
   };
+  const hasReliableTypeIntentForRelevance = Boolean(relevanceIntent.reliableTypeIntent);
+  const shouldUseVisualPrimarySort =
+    imageSearchVisualPrimaryRanking &&
+    !hasReliableTypeIntentForRelevance &&
+    !hasDetectionAnchoredTypeIntent;
+  const hasStrictTypeIntentForMerchandiseGate =
+    forceStrictInferredTypeIntentEnv() || hasExplicitTypeFilter || hasTextTypeIntent;
+
+  /**
+   * Single snapshot for debugging: style can come from explicit filter or soft hint,
+   * and both can now participate in final relevance intent.
+   */
+  const relevanceIntentDebug = {
+    style: {
+      gatesFinalRelevance01: styleIntentGatesFinalRelevance,
+      usedInCompositeRerank: hasExplicitStyleIntent || hasSoftStyleHint,
+      explicitFilter: explicitStyleForRelevance || undefined,
+      softHint: softStyleForRelevance || undefined,
+    },
+    type: {
+      reliableTypeIntent: hasReliableTypeIntentForRelevance,
+      detectionAnchored: hasDetectionAnchoredTypeIntent,
+    },
+    color: {
+      gatesFinalRelevance01: hasColorIntentForFinal,
+      cropDominantTokens: hasCropColorSignal ? [...cropDominantColorsRaw] : undefined,
+      inferredTokens: inferredColorTokens.length > 0 ? [...inferredColorTokens] : undefined,
+      softBiasOnly: softColorBiasOnly,
+      explicitFilters: [...explicitColorsForRelevance],
+      effectiveDesired: [...desiredColorsForRelevance],
+    },
+    types: {
+      desiredProductTypes: [...desiredProductTypes],
+    },
+  };
+
+  const colorIntentStrengthForFinal = hasExplicitColorIntent
+    ? 1
+    : hasInferredColorSignal
+      ? 0.82
+      : hasCropColorSignal
+        ? 0.42
+        : 0;
 
   const nearIdenticalRawMin = imageSearchNearIdenticalRawCosineMin();
 
@@ -1880,9 +2431,24 @@ export async function searchByImageWithSimilarity(
       if (!comp) continue;
       const cs = cosineSimilarity01(colorQueryEmbedding ?? undefined, hit._source?.embedding_color);
       colorSimRawById.set(idStr, Math.round(cs * 1000) / 1000);
+
+      // Guard against re-inflating color compliance when catalog color explicitly
+      // contradicts desired/inferred color tokens (e.g. query white, doc color blue).
+      const catalogColorRaw = typeof hit._source?.color === "string" ? String(hit._source.color).toLowerCase().trim() : "";
+      const catalogColorNorm = catalogColorRaw ? normalizeColorToken(catalogColorRaw) ?? catalogColorRaw : "";
+      const hasHardCatalogColorConflict =
+        hasAnyColorTokenIntent &&
+        Boolean(catalogColorNorm) &&
+        tieredColorListCompliance(desiredColorsTierForRelevance, [catalogColorNorm], rerankColorModeForRelevance)
+          .compliance <= 0;
+
+      if (hasHardCatalogColorConflict) {
+        comp.colorCompliance = 0;
+      }
+
       if (!hasAnyColorTokenIntent) {
         comp.colorCompliance = Math.max(0, Math.min(1, cs));
-      } else if ((comp.colorCompliance ?? 0) < 0.12 && cs >= 0.42) {
+      } else if (!hasHardCatalogColorConflict && (comp.colorCompliance ?? 0) < 0.12 && cs >= 0.42) {
         comp.colorCompliance = Math.max(
           comp.colorCompliance ?? 0,
           Math.min(1, cs * 0.82),
@@ -1892,6 +2458,8 @@ export async function searchByImageWithSimilarity(
   }
 
   const useMerchSim = imageMerchandiseSimilarityBindingEnabled();
+  const useMerchSimForThresholdAndPrimarySort =
+    useMerchSim && hasStrictTypeIntentForMerchandiseGate;
   const merchandiseSimById = new Map<string, number>();
   const merchAlignmentById = new Map<string, number>();
   for (const hit of baseCandidates) {
@@ -1935,14 +2503,18 @@ export async function searchByImageWithSimilarity(
   const passesImageSimilarityThreshold = (hit: any, thresh: number): boolean => {
     const raw = visualSimFromHit(hit);
     const eff =
-      raw >= nearIdenticalRawMin ? raw : (merchandiseSimById.get(String(hit._source.product_id)) ?? raw);
+      raw >= nearIdenticalRawMin
+        ? raw
+        : useMerchSimForThresholdAndPrimarySort
+          ? (merchandiseSimById.get(String(hit._source.product_id)) ?? raw)
+          : raw;
     return eff >= thresh;
   };
 
   const rankedVisualForSort = (hit: any): number => {
     const raw = visualSimFromHit(hit);
     if (raw >= nearIdenticalRawMin) return raw;
-    return useMerchSim
+    return useMerchSimForThresholdAndPrimarySort
       ? (merchandiseSimById.get(String(hit._source.product_id)) ?? raw)
       : raw;
   };
@@ -1951,7 +2523,10 @@ export async function searchByImageWithSimilarity(
   // BLIP alignment (as soft reranking factor), and composite score.
   for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
-    const visualSimRaw = merchandiseSimById.get(idStr) ?? visualSimFromHit(hit);
+    const visualSimRaw =
+      useMerchSimForThresholdAndPrimarySort
+        ? (merchandiseSimById.get(idStr) ?? visualSimFromHit(hit))
+        : visualSimFromHit(hit);
     const blipAlign = computeBlipAlignment(blipSignal, hit);
     blipAlignById.set(idStr, Math.round(blipAlign.matchScore * 1000) / 1000);
     // BLIP is used as a soft reranking multiplier in computeExplicitFinalRelevance,
@@ -1975,7 +2550,8 @@ export async function searchByImageWithSimilarity(
       : 0;
     const comp = complianceById.get(idStr);
     const hasStyleIntentForComposite = hasExplicitStyleIntent || hasSoftStyleHint;
-    const hasColorIntentForComposite = hasExplicitColorIntent || hasCropColorSignal;
+    const hasColorIntentForComposite =
+      hasExplicitColorIntent || hasCropColorSignal || hasInferredColorSignal;
     const colorCompliance = comp?.colorCompliance ?? 0;
     const styleCompliance = comp?.styleCompliance ?? 0;
     const colorSimEff = blendSoftSimilarityWithCompliance({
@@ -2039,6 +2615,10 @@ export async function searchByImageWithSimilarity(
   // Track fusedVisual / metadataCompliance per hit for the clean explain output.
   const fusedVisualById = new Map<string, number>();
   const metadataComplianceById = new Map<string, number>();
+  const keywordSubtypeBoostById = new Map<string, number>();
+  const keywordSubtypeOverlapById = new Map<string, number>();
+  const keywordSubtypeExactHitById = new Map<string, boolean>();
+  const finalScoreSourceById = new Map<string, string>();
 
   // Final relevance pass: compute the authoritative finalRelevance01 incorporating
   // all visual + metadata signals, adaptive floors, composite, and BLIP reranking.
@@ -2048,15 +2628,42 @@ export async function searchByImageWithSimilarity(
     if (!comp) continue;
     const rawVisual = Math.max(0, Math.min(1, visualSimFromHit(hit)));
     const effectiveVisual = visualSimEffectiveById.get(idStr) ?? rawVisual;
-    const typeMatch = (comp.exactTypeScore ?? 0) >= 1 || (comp.productTypeCompliance ?? 0) >= 0.82;
+    const colorContradictionPenalty = computeColorContradictionPenalty({
+      desiredColorsTier: desiredColorsTierForRelevance,
+      rerankColorMode: rerankColorModeForRelevance,
+      hasExplicitColorIntent,
+      hasInferredColorSignal,
+      hasCropColorSignal,
+      rawVisual,
+      nearIdenticalRawMin,
+      hit,
+    });
+    const effectiveVisualForScoring = Math.max(0, Math.min(1, effectiveVisual * colorContradictionPenalty));
+    const subtypeKeywordSignal = computeSubtypeKeywordSignal({
+      desiredProductTypes,
+      preferredDesiredProductTypes,
+      hit,
+      reliableTypeIntent:
+        hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent,
+      crossFamilyPenalty: comp.crossFamilyPenalty ?? 0,
+      productTypeCompliance: comp.productTypeCompliance ?? 0,
+    });
+    const lexicalAssistTypeMatch =
+      (subtypeKeywordSignal.exactHit || subtypeKeywordSignal.overlap >= 0.6) &&
+      (comp.productTypeCompliance ?? 0) >= 0.55;
+    const typeMatch =
+      (comp.exactTypeScore ?? 0) >= 1 ||
+      (comp.productTypeCompliance ?? 0) >= 0.82 ||
+      lexicalAssistTypeMatch;
     const lengthCompliance = lengthComplianceById.get(idStr) ?? 0;
     const hasLengthIntentForHit = hasLengthIntentById.get(idStr) ?? false;
     const crossFamilyPenaltyVal = comp.crossFamilyPenalty ?? 0;
     const explicitResult = computeExplicitFinalRelevance({
-      simVisual: effectiveVisual,
+      simVisual: effectiveVisualForScoring,
       typeMatch,
       catSoft: comp.categoryRelevance01 ?? 0,
       colorMatch: comp.colorCompliance ?? 0,
+      colorTier: comp.colorTier,
       styleMatch: comp.styleCompliance ?? 0,
       sleeveMatch: comp.sleeveCompliance ?? 0,
       lengthMatch: lengthCompliance,
@@ -2066,7 +2673,7 @@ export async function searchByImageWithSimilarity(
       isNearDuplicate: rawVisual >= nearIdenticalRawMin,
       hasTypeIntent: (relevanceIntent.desiredProductTypes?.length ?? 0) > 0,
       hasColorIntent: hasColorIntentForFinal,
-      hasStyleIntent: hasExplicitStyleIntent,
+      hasStyleIntent: styleIntentGatesFinalRelevance,
       hasSleeveIntent: Boolean(comp.hasSleeveIntent),
       hasLengthIntent: hasLengthIntentForHit,
       hasAudienceIntent: hasAudienceIntentForRelevance,
@@ -2078,8 +2685,34 @@ export async function searchByImageWithSimilarity(
       imageCompositeScore01: imageCompositeNormById.get(idStr) ?? 0,
       blipMatchScore: blipAlignById.get(idStr) ?? 0,
       compositeInfluence: batchCompositeInfluence,
+      colorWeightScale: hasExplicitColorIntent
+        ? 1
+        : hasInferredColorSignal
+          ? 0.85
+          : hasCropColorSignal
+            ? 0.55
+            : 0.35,
+      colorIntentStrength: colorIntentStrengthForFinal,
     });
-    comp.finalRelevance01 = explicitResult.score;
+    comp.finalRelevance01 = Math.min(1, explicitResult.score + subtypeKeywordSignal.boost);
+    (comp as any).colorContradictionPenalty = Math.round(colorContradictionPenalty * 1000) / 1000;
+    keywordSubtypeBoostById.set(idStr, Math.round(subtypeKeywordSignal.boost * 1000) / 1000);
+    keywordSubtypeOverlapById.set(idStr, subtypeKeywordSignal.overlap);
+    keywordSubtypeExactHitById.set(idStr, subtypeKeywordSignal.exactHit);
+    finalScoreSourceById.set(idStr, "computed");
+
+    const broadImageIntent =
+      !hasExplicitColorIntent &&
+      !hasExplicitStyleIntent &&
+      !hasExplicitCategoryFilter &&
+      !hasTextTypeIntent &&
+      !hasDetectionAnchoredTypeIntent;
+    if (broadImageIntent) {
+      // Keep image-only ranking aligned with visual similarity when user did not
+      // provide explicit constraints; avoids compressed scores across dissimilar items.
+      comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, effectiveVisual * 0.86));
+    }
+
     fusedVisualById.set(idStr, Math.round(explicitResult.fusedVisual * 1000) / 1000);
     metadataComplianceById.set(idStr, Math.round(explicitResult.metadataCompliance * 1000) / 1000);
     // Near-identical hits can be boosted to raw visual — but only when they are
@@ -2090,6 +2723,7 @@ export async function searchByImageWithSimilarity(
       const hasTypeIntentHere = (relevanceIntent.desiredProductTypes?.length ?? 0) > 0;
       if (!crossBlocked && (!hasTypeIntentHere || typeOk)) {
         comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, rawVisual));
+        finalScoreSourceById.set(idStr, "near_identical_floor");
       }
     }
   }
@@ -2097,16 +2731,28 @@ export async function searchByImageWithSimilarity(
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
     const idb = String(b._source.product_id);
+    if (shouldUseVisualPrimarySort) {
+      const va = rankedVisualForSort(a);
+      const vb = rankedVisualForSort(b);
+      if (Math.abs(vb - va) > 0.01) return vb - va;
+    }
     // Primary: finalRelevance01 descending (incorporates visual + metadata signals).
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
     const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
-    if (Math.abs(fb - fa) > 1e-6) return fb - fa;
-    // Tie-break: for broad searches, use catalog-bound visual; else composite.
-    if (imageSearchVisualPrimaryRanking) {
-      const va = rankedVisualForSort(a);
-      const vb = rankedVisualForSort(b);
-      if (Math.abs(vb - va) > 1e-6) return vb - va;
+    if (hasColorIntentForFinal && Math.abs(fb - fa) <= 0.04) {
+      const ca = complianceById.get(ida)?.colorCompliance ?? 0;
+      const cb = complianceById.get(idb)?.colorCompliance ?? 0;
+      if (Math.abs(cb - ca) >= 0.03) return cb - ca;
     }
+    if (Math.abs(fb - fa) > 1e-6) return fb - fa;
+    if (hasExplicitColorIntent || hasInferredColorSignal) {
+      const ca = complianceById.get(ida)?.colorCompliance ?? 0;
+      const cb = complianceById.get(idb)?.colorCompliance ?? 0;
+      if (Math.abs(cb - ca) > 1e-6) return cb - ca;
+    }
+    const va = visualSimEffectiveById.get(ida) ?? rankedVisualForSort(a);
+    const vb = visualSimEffectiveById.get(idb) ?? rankedVisualForSort(b);
+    if (Math.abs(vb - va) > 0.002) return vb - va;
     const ia = imageCompositeById.get(ida) ?? 0;
     const ib = imageCompositeById.get(idb) ?? 0;
     if (Math.abs(ib - ia) > 1e-8) return ib - ia;
@@ -2135,41 +2781,90 @@ export async function searchByImageWithSimilarity(
       wantG === "women"
         ? ["women", "womens", "female", "ladies", "woman"]
         : wantG === "men"
-          ? ["men", "mens", "male", "boy", "boys", "man"]
+          ? ["men", "mens", "male", "man"]
           : ["unisex"];
 
     const oppKw =
       wantG === "women"
-        ? ["men", "mens", "male", "boy", "boys", "man"]
+        ? ["men", "mens", "male", "boy", "boys", "man", "kid", "kids", "youth", "toddler", "baby"]
         : wantG === "men"
-          ? ["women", "womens", "female", "ladies", "woman", "girl", "girls"]
+          ? ["women", "womens", "female", "ladies", "woman", "girl", "girls", "boy", "boys", "kid", "kids", "youth", "toddler", "baby"]
           : [];
+    const unknownGenderMinSim = imageGenderUnknownVisualMinSimilarity();
 
     const matches = (hit: any) => {
       const dg = docGender(hit);
       const t = title(hit?._source?.title);
       if (dg === wantG) return true;
+      if (dg === "unisex") return true;
+      if (dg) return false;
       const hasWant = wantKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(t));
-      if (!hasWant) return false;
       if (oppKw.length > 0 && oppKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(t))) return false;
-      return true;
+      if (hasWant) return true;
+      if (!dg && visualSimFromHit(hit) >= unknownGenderMinSim) return true;
+      return false;
     };
 
     const filtered = sortedByRelevance.filter((h: any) => matches(h));
     return filtered.length > 0 ? filtered : sortedByRelevance;
   })();
 
+  const strictCategorySafetyActive =
+    hasReliableTypeIntentForRelevance ||
+    hasDetectionAnchoredTypeIntent ||
+    hasExplicitTypeFilter ||
+    hasExplicitCategoryFilter;
+  const strongVisualOverrideMinSim = imageStrongVisualOverrideMinSimilarity();
+  const rankedHitsCategorySafe = strictCategorySafetyActive
+    ? rankedHitsCandidates.filter((h: any) => {
+        const comp = complianceById.get(String(h._source.product_id));
+        if (!comp) return false;
+        if (comp.hardBlocked) return false;
+        const crossFamily = comp.crossFamilyPenalty ?? 0;
+        if (crossFamily >= 0.55) return false;
+        const typeComp = comp.productTypeCompliance ?? 0;
+        const exactType = comp.exactTypeScore ?? 0;
+        const visualStrong = visualSimFromHit(h) >= strongVisualOverrideMinSim;
+        if ((hasExplicitTypeFilter || hasExplicitCategoryFilter) && exactType < 1 && typeComp < 0.28) {
+          return false;
+        }
+        // Category-specific type floor: relax for bottoms with high YOLO confidence to handle jeans/denims
+        // with low productTypeCompliance to 'trousers' detection label (0.928 confidence).
+        let detAnchoredTypeFloor = hasColorIntentForFinal ? 0.3 : 0.26;
+        if (hasDetectionAnchoredTypeIntent && params.detectionProductCategory === 'bottoms') {
+          const yoloConfidence = params.detectionYoloConfidence ?? 0;
+          if (yoloConfidence >= 0.9) {
+            // High-confidence bottoms detection: allow lower type compliance (jeans as denims/pants)
+            detAnchoredTypeFloor = 0.15;
+          } else if (yoloConfidence >= 0.8) {
+            // Medium-high confidence: moderate relaxation
+            detAnchoredTypeFloor = 0.19;
+          }
+        }
+        if (hasDetectionAnchoredTypeIntent && exactType < 1 && typeComp < detAnchoredTypeFloor && !visualStrong) {
+          return false;
+        }
+        return true;
+      })
+    : rankedHitsCandidates;
+  const rankedHitsForGates = rankedHitsCategorySafe.length > 0
+    ? rankedHitsCategorySafe
+    : rankedHitsCandidates;
+  const droppedByCategorySafety = strictCategorySafetyActive
+    ? Math.max(0, rankedHitsCandidates.length - rankedHitsCategorySafe.length)
+    : 0;
+
   // Late visual gate (after soft rerank).
-  const thresholdPassedByVisual = rankedHitsCandidates.filter((h: any) =>
+  const thresholdPassedByVisual = rankedHitsForGates.filter((h: any) =>
     passesImageSimilarityThreshold(h, similarityThreshold),
   );
   let thresholdRelaxed = false;
   let relaxFloorUsed: number | null = null;
   let visualGatedHits = thresholdPassedByVisual;
-  if (relaxThresholdWhenEmpty && thresholdPassedByVisual.length === 0 && rankedHitsCandidates.length > 0) {
+  if (relaxThresholdWhenEmpty && thresholdPassedByVisual.length === 0 && rankedHitsForGates.length > 0) {
     const floor = imageRelaxSimilarityFloor();
     relaxFloorUsed = floor;
-    visualGatedHits = rankedHitsCandidates.filter((h: any) =>
+    visualGatedHits = rankedHitsForGates.filter((h: any) =>
       passesImageSimilarityThreshold(h, floor),
     );
     thresholdRelaxed = visualGatedHits.length > 0;
@@ -2177,10 +2872,10 @@ export async function searchByImageWithSimilarity(
 
   if (relaxThresholdWhenEmpty) {
     const minWantCandidates = Math.min(fetchLimit, Math.max(limit, 15));
-    if (visualGatedHits.length < minWantCandidates && rankedHitsCandidates.length > visualGatedHits.length) {
+    if (visualGatedHits.length < minWantCandidates && rankedHitsForGates.length > visualGatedHits.length) {
       const floor = imageRelaxSimilarityFloor();
       relaxFloorUsed = floor;
-      const loose = rankedHitsCandidates.filter((h: any) =>
+      const loose = rankedHitsForGates.filter((h: any) =>
         passesImageSimilarityThreshold(h, floor),
       );
       if (loose.length > visualGatedHits.length) {
@@ -2193,9 +2888,11 @@ export async function searchByImageWithSimilarity(
   const acceptMinImage = config.search.finalAcceptMinImage;
   /** When strict CLIP threshold + merchandise binding drop every hit, keep best raw-visual neighbors (always on). */
   let imageSearchPipelineDegraded = false;
-  if (visualGatedHits.length === 0 && rankedHitsCandidates.length > 0) {
+  if (visualGatedHits.length === 0 && rankedHitsForGates.length > 0) {
     const relFloor = imageRelaxSimilarityFloor();
-    const relaxedHits = rankedHitsCandidates.filter((h: any) => visualSimFromHit(h) >= relFloor);
+    const relaxedHits = rankedHitsForGates.filter(
+      (h: any) => visualSimFromHit(h) >= relFloor,
+    );
 
     // Only relax when the caller explicitly opts in. Returning distant neighbors by default
     // makes image search look broken because it surfaces products that are visually unrelated.
@@ -2212,6 +2909,7 @@ export async function searchByImageWithSimilarity(
           // This preserves relative ordering among rescued candidates.
           comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, v * 0.9));
           comp.osSimilarity01 = Math.max(comp.osSimilarity01 ?? 0, v);
+          finalScoreSourceById.set(idStr, "relaxed_visual_gate_rescue");
         }
       }
     }
@@ -2219,7 +2917,8 @@ export async function searchByImageWithSimilarity(
 
   /** True when reranked candidates exist but visual gate removed all (without relaxation). */
   const belowRelevanceThreshold =
-    rankedHitsCandidates.length > 0 && thresholdPassedByVisual.length === 0 && !thresholdRelaxed;
+    rankedHitsForGates.length > 0 && thresholdPassedByVisual.length === 0 && !thresholdRelaxed;
+  const droppedByVisualThreshold = Math.max(0, rankedHitsForGates.length - visualGatedHits.length);
 
   const finalAcceptMin = acceptMinImage;
   let effectiveFinalAcceptMin = finalAcceptMin;
@@ -2229,18 +2928,155 @@ export async function searchByImageWithSimilarity(
 
   if (rankedHits.length === 0 && visualGatedHits.length > 0) {
     imageSearchPipelineDegraded = true;
+    let rescuePool = visualGatedHits;
+    if (hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) {
+      // In intent-constrained searches, never fall back to the full visual pool.
+      // Start empty and admit only type-safe candidates.
+      rescuePool = [];
+      const desiredSleeveNorm = String(desiredSleeveForRelevance ?? "").toLowerCase();
+      const enforceSleeveGate = desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless";
+      const preferredSleeveMin = enforceSleeveGate ? 0.55 : 0.25;
+      const fallbackSleeveMin = enforceSleeveGate ? 0.4 : 0.1;
+      const minTypeCompliance = hasDetectionAnchoredTypeIntent
+        ? visualGatedHits.length >= 30
+          ? 0.5
+          : visualGatedHits.length >= 12
+            ? 0.4
+            : 0.3
+        : 0.38;
+      const preferredTypeAligned = visualGatedHits.filter((h: any) => {
+        const comp = complianceById.get(String(h._source.product_id));
+        if (!comp) return false;
+        if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
+        
+        // Must pass type intent
+        if (!((comp.exactTypeScore ?? 0) >= 1 || (comp.productTypeCompliance ?? 0) >= minTypeCompliance)) {
+          return false;
+        }
+        
+        // Apply sleeve gating only for restrictive sleeve intents where mismatches are high-impact.
+        if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < preferredSleeveMin) {
+          return false;
+        }
+        
+        // Must pass color intent if set (avoid color mismatches in rescue)
+        if (hasColorIntentForFinal && (comp.colorCompliance ?? 0) < 0.4) {
+          return false;
+        }
+        if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < 0.18) {
+          return false;
+        }
+        // Soft color intent should NOT gate rescue admission — only explicit color gates.
+        // This prevents crop-dominant colors from pulling wrong categories (e.g., blue into white-dress search).
+        
+        return true;
+      });
+      if (preferredTypeAligned.length > 0) {
+        rescuePool = preferredTypeAligned;
+      } else if (hasDetectionAnchoredTypeIntent) {
+        const fallbackTypeAligned = visualGatedHits.filter((h: any) => {
+          const comp = complianceById.get(String(h._source.product_id));
+          if (!comp) return false;
+          // Stronger gender gate: when gender is explicitly filtered, reject hard mismatches (audienceCompliance === 0)
+          // and also reject low compliance (< 0.75) to prevent women's shoes from appearing in men's searches
+          const minAudienceCompliance = filtersAny.gender ? 0.75 : 0.55;
+          if ((comp.audienceCompliance ?? 1) < minAudienceCompliance) return false;
+          if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
+          if ((comp.exactTypeScore ?? 0) < 1 && (comp.productTypeCompliance ?? 0) < 0.22) return false;
+          if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < fallbackSleeveMin) return false;
+          if (hasColorIntentForFinal && (comp.colorCompliance ?? 0) < 0.18) return false;
+          if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < 0.08) return false;
+          // Soft color intent does not gate fallback — only explicit color does.
+          // This prevents crop-derived colors from blocking valid type matches.
+          return true;
+        });
+        if (fallbackTypeAligned.length > 0) {
+          rescuePool = fallbackTypeAligned;
+        }
+      }
+
+      // Last safe fallback for sparse catalogs: keep only minimally type-aligned items.
+      if (rescuePool.length === 0) {
+        const minTypeFloor = hasDetectionAnchoredTypeIntent ? 0.16 : 0.22;
+        rescuePool = visualGatedHits.filter((h: any) => {
+          const comp = complianceById.get(String(h._source.product_id));
+          if (!comp) return false;
+          if ((comp.hardBlocked ?? false) === true) return false;
+          if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
+          const typeComp = comp.productTypeCompliance ?? 0;
+          const exactType = comp.exactTypeScore ?? 0;
+          if (exactType >= 1) return true;
+          return typeComp >= minTypeFloor;
+        });
+      }
+    }
     // Use visual similarity as the rescue signal instead of a flat minimum.
     // This preserves relative ordering so that genuinely similar products
     // rank above dissimilar ones even in the degraded path.
-    for (const h of visualGatedHits) {
+    // Note: intentAwareRescue now excludes softColorBiasOnly to avoid lifting weak candidates
+    // when only crop-dominant color exists with no explicit type intent.
+    const intentAwareRescue =
+      hasReliableTypeIntentForRelevance ||
+      hasDetectionAnchoredTypeIntent ||
+      (desiredColorsForRelevance.length > 0 && (hasExplicitColorIntent || (hasInferredColorSignal && !softColorBiasOnly))) ||
+      Boolean(desiredSleeveForRelevance);
+    for (const h of rescuePool) {
       const comp = complianceById.get(String(h._source.product_id));
       if (comp) {
+        if (hasDetectionAnchoredTypeIntent) {
+          const typeComp = comp.productTypeCompliance ?? 0;
+          const exactType = comp.exactTypeScore ?? 0;
+          if (exactType < 1 && typeComp < 0.16) continue;
+          if ((comp.crossFamilyPenalty ?? 0) >= 0.62) continue;
+        }
         const v = visualSimFromHit(h);
-        const rescueScore = Math.max(comp.finalRelevance01 ?? 0, v * 0.85);
-        comp.finalRelevance01 = Math.max(rescueScore, effectiveFinalAcceptMin);
+        const existing = comp.finalRelevance01 ?? 0;
+        const colorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
+        const colorTier = String(comp.colorTier ?? "none").toLowerCase();
+        const colorTierFactor =
+          colorTier === "exact"
+            ? 1.12
+            : colorTier === "family"
+              ? 1.05
+              : colorTier === "bucket"
+                ? 0.94
+                : 0.8;
+        const colorLift = hasColorIntentForFinal
+          ? (0.58 + 0.42 * colorComp) * colorTierFactor
+          : hasInferredColorIntentForRescue
+            ? (0.7 + 0.3 * colorComp) * colorTierFactor
+            : 1;
+        let rescueScore = Math.max(existing, v * 0.85 * colorLift);
+        if (intentAwareRescue) {
+          const typeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
+          const sleeveComp = Math.max(0, Math.min(1, comp.sleeveCompliance ?? 0));
+          const audienceComp = Math.max(0, Math.min(1, comp.audienceCompliance ?? 1));
+          const complianceBlend =
+            0.4 * typeComp +
+            0.15 * colorComp +
+            0.3 * sleeveComp +
+            0.15 * audienceComp;
+          const intentAwareScore =
+            Math.max(0, Math.min(1, 0.68 * v + 0.32 * complianceBlend)) *
+            (hasColorIntentForFinal ? (0.92 + 0.08 * colorComp) * colorTierFactor : 0.85);
+          rescueScore = Math.max(rescueScore, intentAwareScore);
+        }
+        // In rescue mode, keep intent-constrained scoring expressive instead of lifting all
+        // candidates to the same global floor (which can hide sleeve/type mismatches).
+        // When only soft color hint exists (crop-dominant), use much lower floor to filter out weak matches.
+        const hasOnlySoftColorHint = softColorBiasOnly && !hasReliableTypeIntentForRelevance && !hasDetectionAnchoredTypeIntent;
+        const rescueFloor = intentAwareRescue
+          ? hasOnlySoftColorHint
+            ? Math.min(effectiveFinalAcceptMin, 0.35)  // Very conservative for crop-color-only cases
+            : hasColorIntentForFinal
+              ? Math.min(effectiveFinalAcceptMin, hasExplicitColorIntent ? 0.48 : 0.44)
+              : Math.min(effectiveFinalAcceptMin, 0.56)
+          : effectiveFinalAcceptMin;
+        comp.finalRelevance01 = Math.max(rescueScore, rescueFloor);
+        finalScoreSourceById.set(String(h._source.product_id), "final_accept_rescue");
       }
     }
-    rankedHits = [...visualGatedHits]
+    rankedHits = [...rescuePool]
       .sort((a: any, b: any) => {
         const fa = complianceById.get(String(a._source.product_id))?.finalRelevance01 ?? 0;
         const fb = complianceById.get(String(b._source.product_id))?.finalRelevance01 ?? 0;
@@ -2257,7 +3093,9 @@ export async function searchByImageWithSimilarity(
   if (rescueMaxCount > 0) {
     const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
     const rescueAudienceMin = imageVisualRescueAudienceMin();
-    const rescueTypeMinIntent = imageVisualRescueTypeMinWhenIntent();
+    const rescueTypeMinIntent = hasReliableTypeIntentForRelevance
+      ? 0.45
+      : imageVisualRescueTypeMinWhenIntent();
     const rescueColorMinIntent = imageVisualRescueColorMinWhenIntent();
     const rescueStyleMinIntent = imageVisualRescueStyleMinWhenIntent();
     const rescue: any[] = visualGatedHits
@@ -2270,16 +3108,23 @@ export async function searchByImageWithSimilarity(
         const typeComp = comp?.productTypeCompliance ?? 0;
         const colorComp = comp?.colorCompliance ?? 0;
         const styleComp = comp?.styleCompliance ?? 0;
-        return { h, visualSim, aud, typeComp, colorComp, styleComp };
+        const crossFamily = comp?.crossFamilyPenalty ?? 0;
+        return { h, visualSim, aud, typeComp, colorComp, styleComp, crossFamily };
       })
-      .filter(({ visualSim, aud, typeComp, colorComp, styleComp }) => {
+      .filter(({ visualSim, aud, typeComp, colorComp, styleComp, crossFamily }) => {
         if (visualSim < rescueMinSim) return false;
         if (hasAudienceIntentForRelevance && aud < rescueAudienceMin) return false;
         // Intent-aware rescue: keep sparse-result protection, but do not inject
         // visually similar yet intent-contradicting products.
-        if (hasExplicitTypeFilter && typeComp < rescueTypeMinIntent) return false;
+        if ((hasExplicitTypeFilter || hasReliableTypeIntentForRelevance) && typeComp < rescueTypeMinIntent) return false;
+        if (hasDetectionAnchoredTypeIntent && typeComp < 0.3) return false;
         if (hasColorIntentForFinal && colorComp < rescueColorMinIntent) return false;
+        if (hasInferredColorIntentForRescue && colorComp < 0.16) return false;
         if (hasExplicitStyleIntent && styleComp < rescueStyleMinIntent) return false;
+        if ((hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) && crossFamily >= 0.5) return false;
+        // When only soft color hint exists, require stricter type alignment to prevent crop-color bleed.
+        // This prevents pants/jackets from leaking into dress/shoe searches via weak soft color signals.
+        if (softColorBiasOnly && typeComp < 0.3) return false;
         return true;
       })
       .sort((a, b) => b.visualSim - a.visualSim)
@@ -2287,6 +3132,58 @@ export async function searchByImageWithSimilarity(
       .map((x) => x.h);
     if (rescue.length > 0) {
       rankedHits = [...rankedHits, ...rescue];
+    }
+  }
+
+  // Preserve a tiny set of truly high-visual neighbors that may be over-penalized
+  // by metadata noise, while still respecting audience and type/category safety.
+  const mustKeepVisualMin = imageMustKeepVisualMinSimilarity();
+  const mustKeepVisualMax = imageMustKeepVisualMaxCount();
+  if (!imageSearchVisualPrimaryRanking && mustKeepVisualMax > 0 && visualGatedHits.length > 0) {
+    const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
+    const mustKeepAudienceMin = imageMustKeepVisualAudienceMin();
+    const mustKeepTypeMin = hasReliableTypeIntentForRelevance
+      ? 0.45
+      : hasExplicitTypeFilter || hasExplicitCategoryFilter || hasDetectionAnchoredTypeIntent
+        ? 0.45
+        : 0.28;
+    const mustKeep: any[] = visualGatedHits
+      .filter((h: any) => !existingIds.has(String(h._source.product_id)))
+      .map((h: any) => {
+        const id = String(h._source.product_id);
+        const visualSim = visualSimFromHit(h);
+        const comp = complianceById.get(id);
+        return {
+          h,
+          id,
+          visualSim,
+          audience: comp?.audienceCompliance ?? 1,
+          typeComp: comp?.productTypeCompliance ?? 0,
+          crossFamily: comp?.crossFamilyPenalty ?? 0,
+        };
+      })
+      .filter(({ visualSim, audience, typeComp, crossFamily }) => {
+        if (visualSim < mustKeepVisualMin) return false;
+        if (hasAudienceIntentForRelevance && audience < mustKeepAudienceMin) return false;
+        if ((hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) && crossFamily >= 0.5) return false;
+        if ((hasExplicitTypeFilter || hasExplicitCategoryFilter || hasDetectionAnchoredTypeIntent) && typeComp < mustKeepTypeMin) return false;
+        if (crossFamily >= 0.55) return false;
+        return true;
+      })
+      .sort((a, b) => b.visualSim - a.visualSim)
+      .slice(0, mustKeepVisualMax)
+      .map((x) => x.h);
+
+    if (mustKeep.length > 0) {
+      for (const h of mustKeep) {
+        const id = String(h._source.product_id);
+        const comp = complianceById.get(id);
+        if (!comp) continue;
+        const v = visualSimFromHit(h);
+        comp.finalRelevance01 = Math.max(comp.finalRelevance01 ?? 0, Math.min(1, v * 0.88));
+        finalScoreSourceById.set(id, "must_keep_visual_rescue");
+      }
+      rankedHits = [...rankedHits, ...mustKeep];
     }
   }
 
@@ -2336,6 +3233,31 @@ export async function searchByImageWithSimilarity(
   }
   const countAfterColorPostfilter = rankedHits.length;
 
+  // Hard gate for explicit gender intent: filter out products with hard gender mismatches.
+  // When user specifies men/women, reject products where audience compliance is 0 or null gender
+  // with conflicting title keywords.
+  if (filtersAny.gender) {
+    const queryGenderNorm = normalizeQueryGender(filtersAny.gender);
+    if (queryGenderNorm) {
+      const strictGenderGate = String(process.env.SEARCH_GENDER_HARD_GATE ?? "1").toLowerCase() !== "0";
+      const genderCompliantHits = rankedHits.filter((h: any) => {
+        const comp = complianceById.get(String(h._source.product_id));
+        if (!comp) return true; // Keep if no compliance data
+        const audienceCompliance = comp.audienceCompliance ?? 0;
+        // Hard reject: when audience compliance is 0, it means hard gender contradiction
+        if (audienceCompliance === 0) return false;
+        // Stricter gate: reject low compliance (< 0.5) when there's explicit gender intent
+        if (strictGenderGate && audienceCompliance < 0.5) return false;
+        return true;
+      });
+      if (genderCompliantHits.length > 0) {
+        rankedHits = genderCompliantHits;
+      }
+      // If all results were filtered out, keep original ranked list to avoid empty results
+    }
+  }
+  const countAfterGenderPostfilter = rankedHits.length;
+
   const maxHydrate = Math.min(
     rankedHits.length,
     Math.max(limit * 10, 150),
@@ -2345,7 +3267,10 @@ export async function searchByImageWithSimilarity(
   const scoreMap = new Map<string, number>();
   hitsForHydrate.forEach((hit: any) => {
     const id = String(hit._source.product_id);
-    const sim = merchandiseSimById.get(id) ?? visualSimFromHit(hit);
+    const sim =
+      useMerchSimForThresholdAndPrimarySort
+        ? (merchandiseSimById.get(id) ?? visualSimFromHit(hit))
+        : visualSimFromHit(hit);
     scoreMap.set(id, Math.round(sim * 100) / 100);
   });
 
@@ -2375,6 +3300,82 @@ export async function searchByImageWithSimilarity(
         is_primary: img.is_primary,
         p_hash: img.p_hash ?? undefined,
       }));
+      const authoritativeColorRaw = typeof p.color === "string" ? p.color : "";
+      const authoritativeColorNorm = authoritativeColorRaw
+        ? normalizeColorToken(authoritativeColorRaw) ?? authoritativeColorRaw.toLowerCase().trim()
+        : "";
+      let finalRelevance01 = compliance?.finalRelevance01;
+      let finalRelevanceSource = finalScoreSourceById.get(idStr) ?? "computed";
+      let explainColorCompliance = compliance?.colorCompliance;
+      let explainMatchedColor = compliance?.matchedColor;
+      let explainColorTier = compliance?.colorTier;
+
+      // Hard gate: reject sport/athletic brand products when fashion (non-sport) intent is detected.
+      // Sport brands (Adidas, Nike, Puma, etc.) are only relevant for explicit sportswear searches.
+      const isSportBrand = /adidas|nike|puma|reebok|asics|under armour|newbalance|new balance|lululemon|columbia|the north face|patagonia|asics|vibram|mizuno/i.test(
+        String(p.brand ?? ""),
+      );
+      const isSportKeyword = /sport|athletic|training|workout|gym|fitness|crossfit|yoga|jogger|track|runner|climber|climax|dri-fit|dryfit/i.test(
+        String(p.title ?? "") + " " + String(p.description ?? ""),
+      );
+      const isSportContext = isSportBrand && isSportKeyword;
+      const isExplicitSportIntent =
+        hasExplicitStyleIntent &&
+        /sport|athletic|training|casual|active|workout/i.test(desiredStyleForRelevance ?? "");
+      if (
+        hasDetectionAnchoredTypeIntent &&
+        isSportContext &&
+        !isExplicitSportIntent &&
+        (compliance?.colorCompliance ?? 0) <= 0
+      ) {
+        // Sport product with color contradiction in non-sport context: hard reject to top-20
+        finalRelevance01 = 0;
+        finalRelevanceSource = "sport_keyword_hard_gate";
+      } else if (hasColorIntentForFinal && authoritativeColorNorm && compliance) {
+        const authoritativeColor = tieredColorListCompliance(
+          desiredColorsTierForRelevance,
+          [authoritativeColorNorm],
+          rerankColorModeForRelevance,
+        );
+        if (authoritativeColor.compliance <= 0) {
+          const blipColorConflict = blipColorConflictFactorById.get(idStr) ?? 1;
+          const conflictStrength = Math.max(0, Math.min(1, 1 - blipColorConflict));
+          const baseConflictCap = hasExplicitColorIntent
+            ? similarityScore * 0.36
+            : hasInferredColorSignal
+              ? similarityScore * 0.48
+              : similarityScore * 0.62;
+          const conflictAdjustedCap = baseConflictCap * (1 - 0.35 * conflictStrength);
+          const maxConflictCap = hasExplicitColorIntent
+            ? 0.2
+            : hasInferredColorSignal
+              ? 0.28
+              : 0.36;
+          const nearDuplicateRelax = similarityScore >= nearIdenticalRawMin ? 0.06 : 0;
+          // Keep contradictory colors visible for sparse catalogs, but never with inflated relevance.
+          const conservativeCap = Math.min(
+            maxConflictCap + nearDuplicateRelax,
+            Math.max(0.05, conflictAdjustedCap),
+          );
+          finalRelevance01 = Math.min(finalRelevance01 ?? 0, conservativeCap);
+          finalRelevanceSource = "catalog_color_correction";
+          explainColorCompliance = 0;
+          explainMatchedColor = authoritativeColorNorm;
+          explainColorTier = "none";
+        } else if ((compliance.colorCompliance ?? 0) + 0.05 < authoritativeColor.compliance) {
+          const canApplyColorLift =
+            hasExplicitColorIntent ||
+            authoritativeColor.tier === "exact";
+          if (canApplyColorLift) {
+            const colorLift = 0.88 + 0.12 * authoritativeColor.compliance;
+            finalRelevance01 = Math.max(finalRelevance01 ?? 0, Math.min(1, similarityScore * colorLift));
+            finalRelevanceSource = "catalog_color_correction";
+          }
+          explainColorCompliance = authoritativeColor.compliance;
+          explainMatchedColor = authoritativeColor.bestMatch ?? authoritativeColorNorm;
+          explainColorTier = authoritativeColor.tier;
+        }
+      }
       return {
         ...p,
         // Never overwrite canonical catalog color with query-time matched color.
@@ -2391,7 +3392,7 @@ export async function searchByImageWithSimilarity(
           return typeAligned ? ("exact" as const) : ("similar" as const);
         })(),
         rerankScore: compliance?.rerankScore,
-        finalRelevance01: compliance?.finalRelevance01,
+        finalRelevance01,
         explain: compliance
           ? {
               // ── Raw signals ──────────────────────────────────────
@@ -2415,9 +3416,9 @@ export async function searchByImageWithSimilarity(
               categoryScore: compliance.categoryRelevance01,
 
               // ── Metadata compliance (0-1) ────────────────────────
-              colorCompliance: compliance.colorCompliance,
-              matchedColor: compliance.matchedColor ?? undefined,
-              colorTier: compliance.colorTier,
+              colorCompliance: explainColorCompliance,
+              matchedColor: explainMatchedColor ?? undefined,
+              colorTier: explainColorTier,
               styleCompliance: compliance.styleCompliance,
               sleeveCompliance: compliance.sleeveCompliance,
               lengthCompliance: (compliance as any).lengthCompliance ?? 0,
@@ -2431,6 +3432,10 @@ export async function searchByImageWithSimilarity(
               taxonomyMatch,
               blipAlignment: blipAlignById.get(idStr) ?? 0,
               blipColorConflictFactor: blipColorConflictFactorById.get(idStr) ?? 1,
+              colorContradictionPenalty: (compliance as any).colorContradictionPenalty ?? 1,
+              keywordSubtypeBoost: keywordSubtypeBoostById.get(idStr) ?? 0,
+              keywordSubtypeOverlap: keywordSubtypeOverlapById.get(idStr) ?? 0,
+              keywordSubtypeExactHit: keywordSubtypeExactHitById.get(idStr) ?? false,
               imageCompositeScore,
               imageCompositeScore01,
 
@@ -2442,7 +3447,7 @@ export async function searchByImageWithSimilarity(
               hasTypeIntent: compliance.hasTypeIntent,
               hasColorIntent: desiredColorsForRelevance.length > 0,
               colorIntentGatesFinalRelevance: compliance.hasColorIntent,
-              hasStyleIntent: Boolean(desiredStyleForRelevance),
+              hasStyleIntent: styleIntentGatesFinalRelevance,
               hasSleeveIntent: Boolean(compliance.hasSleeveIntent),
               hasLengthIntent: Boolean((compliance as any).hasLengthIntent),
 
@@ -2453,13 +3458,11 @@ export async function searchByImageWithSimilarity(
               desiredColorsEffective: desiredColorsForRelevance,
               colorIntentSource: hasExplicitColorIntent
                 ? "explicit"
-                : inferredColorTokens.length > 0 && hasCropColorSignal
-                  ? "crop+inferred"
-                  : inferredColorTokens.length > 0
-                    ? "inferred"
-                    : hasCropColorSignal
-                      ? "crop"
-                      : "none",
+                : inferredColorTokens.length > 0
+                  ? "inferred"
+                  : hasCropColorSignal
+                    ? "crop"
+                    : "none",
               desiredStyle: desiredStyleForRelevance,
               desiredSleeve: desiredSleeveForRelevance,
               desiredLength: (compliance as any).hasLengthIntent ? (desiredLengthForRelevance ?? undefined) : undefined,
@@ -2467,7 +3470,8 @@ export async function searchByImageWithSimilarity(
               relevanceIntentDebug,
 
               // ── Final score ──────────────────────────────────────
-              finalRelevance01: compliance.finalRelevance01,
+              finalRelevance01,
+              finalRelevanceSource,
             }
           : undefined,
         images: imagesOut,
@@ -2481,6 +3485,57 @@ export async function searchByImageWithSimilarity(
     (p: any) =>
       typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalAcceptMin,
   ) as ProductResult[];
+
+  const strongVisualOverrideMax = imageStrongVisualOverrideMaxCount();
+  const droppedByFinalRelevanceBeforeOverride = Math.max(0, resultsBeforeFinalRelevanceFilter.length - results.length);
+  let rescuedByStrongVisualOverride = 0;
+  if (strongVisualOverrideMax > 0 && resultsBeforeFinalRelevanceFilter.length > results.length) {
+    const existingIds = new Set(results.map((p) => String((p as any).id)));
+    const strongColorIntent = hasExplicitColorIntent || hasInferredColorSignal;
+    const strongMisses = resultsBeforeFinalRelevanceFilter
+      .filter((p: any) => !existingIds.has(String(p.id)))
+      .filter((p: any) => {
+        const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+        if (sim < strongVisualOverrideMinSim) return false;
+        const explainAny = p.explain as any;
+        if ((explainAny?.hardBlocked ?? false) === true) return false;
+        const crossFamily = Number(explainAny?.crossFamilyPenalty ?? 0);
+        if (crossFamily >= 0.55) return false;
+        if (strongColorIntent) {
+          const colorCompliance = Number(explainAny?.colorCompliance ?? 0);
+          const colorTier = String(explainAny?.colorTier ?? "none").toLowerCase();
+          const minColorCompliance = hasExplicitColorIntent ? 0.42 : 0.28;
+          if (colorTier === "exact" && colorCompliance < 0.24) return false;
+          if (colorTier === "family" && colorCompliance < 0.46) return false;
+          if (colorTier === "bucket" && colorCompliance < 0.58) return false;
+          if (colorTier === "none" && colorCompliance < 0.34) return false;
+          if (colorCompliance < minColorCompliance) return false;
+        }
+        return true;
+      })
+      .slice(0, strongVisualOverrideMax)
+      .map((p: any) => {
+        const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+        const currentRel = typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : 0;
+        const lifted = Math.max(currentRel, Math.min(1, sim * 0.86));
+        return {
+          ...p,
+          finalRelevance01: lifted,
+          explain: p.explain
+            ? {
+                ...(p.explain as any),
+                finalRelevance01: lifted,
+                finalRelevanceSource: "strong_visual_override",
+              }
+            : p.explain,
+        };
+      });
+    if (strongMisses.length > 0) {
+      rescuedByStrongVisualOverride = strongMisses.length;
+      results = [...results, ...strongMisses] as ProductResult[];
+    }
+  }
+
   if (results.length === 0 && resultsBeforeFinalRelevanceFilter.length > 0) {
     imageSearchPipelineDegraded = true;
     results = resultsBeforeFinalRelevanceFilter
@@ -2494,6 +3549,22 @@ export async function searchByImageWithSimilarity(
       })
       .sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0))
       .slice(0, limit) as ProductResult[];
+  }
+
+  if (hasDetectionAnchoredTypeIntent) {
+    const filtered = results.filter((p: any) => {
+      const ex = (p.explain ?? {}) as any;
+      const typeComp = Number(ex.productTypeCompliance ?? 0);
+      const exactType = Number(ex.exactTypeScore ?? 0);
+      const crossFamily = Number(ex.crossFamilyPenalty ?? 0);
+      const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+      if (crossFamily >= 0.5) return false;
+      if (exactType >= 1 || typeComp >= 0.3) return true;
+      return sim >= 0.96 && crossFamily < 0.35;
+    });
+    if (filtered.length > 0) {
+      results = filtered as ProductResult[];
+    }
   }
   // Always sort by finalRelevance01 descending as the primary signal.
   // For visual-primary (broad) searches, use similarity_score as a tie-breaker
@@ -2511,8 +3582,10 @@ export async function searchByImageWithSimilarity(
 
   const dedupedResults = dedupeImageSearchResults(results as any) as ProductResult[];
   const countAfterDedupe = dedupedResults.length;
+  const droppedByDedupe = Math.max(0, results.length - countAfterDedupe);
   results = dedupedResults.slice(0, limit) as ProductResult[];
   const finalReturnedCount = results.length;
+  const droppedByLimit = Math.max(0, countAfterDedupe - finalReturnedCount);
 
   let related: ProductResult[] = [];
   if (includeRelated && pHash) {
@@ -2633,6 +3706,14 @@ export async function searchByImageWithSimilarity(
       relax_floor_used: relaxFloorUsed,
       image_search_pipeline_degraded: imageSearchPipelineDegraded,
       relevance_intent: relevanceIntentDebug,
+      drops_debug: {
+        dropped_by_category_safety: droppedByCategorySafety,
+        dropped_by_visual_threshold: droppedByVisualThreshold,
+        dropped_by_final_relevance_before_override: droppedByFinalRelevanceBeforeOverride,
+        rescued_by_strong_visual_override: rescuedByStrongVisualOverride,
+        dropped_by_dedupe: droppedByDedupe,
+        dropped_by_limit: droppedByLimit,
+      },
     });
   }
 
@@ -2656,6 +3737,7 @@ export async function searchByImageWithSimilarity(
       below_final_relevance_gate: belowFinalRelevanceGate,
       relevance_gate_soft: false,
       image_knn_field: knnFieldResolved,
+      debug_raw_cosine_bypass_used: false,
       pipeline_counts: {
         exact_cosine_rerank: exactCosineRerank,
         dual_knn_fusion: useDualKnn,
@@ -2663,12 +3745,18 @@ export async function searchByImageWithSimilarity(
         raw_open_search_hits: rawOpenSearchHitCount,
         base_candidates: baseCandidates.length,
         ranked_candidates: rankedHitsCandidates.length,
+        dropped_by_category_safety: droppedByCategorySafety,
         threshold_passed_visual: thresholdPassedByVisual.length,
         visual_gated_hits: visualGatedHits.length,
+        dropped_by_visual_threshold: droppedByVisualThreshold,
         hits_after_final_accept_min: countAfterFinalAcceptMin,
+        dropped_by_final_relevance_before_override: droppedByFinalRelevanceBeforeOverride,
+        rescued_by_strong_visual_override: rescuedByStrongVisualOverride,
         hits_after_color_postfilter: countAfterColorPostfilter,
         hits_after_hydration: countAfterHydration,
+        dropped_by_dedupe: droppedByDedupe,
         hits_after_dedupe: countAfterDedupe,
+        dropped_by_limit: droppedByLimit,
         final_returned_count: finalReturnedCount,
       },
     },

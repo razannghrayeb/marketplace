@@ -54,6 +54,7 @@ router.post("/compatibility/precompute", controller.precomputeCompatibility);
 // ============================================================================
 router.post("/outfit-suggestions", controller.outfitSuggestions);
 router.post("/complete-look", controller.completeLook);
+router.post("/outfit-feedback", controller.outfitFeedback);
 
 // ============================================================================
 // Utility

@@ -89,6 +89,8 @@ export function computeFinalRelevance01(params: {
   hasAudienceIntent: boolean;
   /** From scoreCrossFamilyTypePenalty; strong garment↔footwear mismatches are typically ≥ 0.8 */
   crossFamilyPenalty: number;
+  /** Intra-family subtype mismatch penalty from product type taxonomy. */
+  intraFamilyPenalty?: number;
   /**
    * When false, the global term is semantic-only (image-only kNN or no lexical query).
    * Avoids 0.6·sem + 0.4·lex collapsing to sem while still exposing the same number twice in explain.
@@ -98,6 +100,7 @@ export function computeFinalRelevance01(params: {
   tightSemanticCap?: boolean;
 }): number {
   const crossPen = Math.max(0, params.crossFamilyPenalty);
+  const intraPen = Math.max(0, params.intraFamilyPenalty ?? 0);
   // Hard block for cross-family mismatch (e.g. footwear query returning dresses).
   // For image search (tightSemanticCap), type intent comes from YOLO which can be
   // wrong — don't hard-zero, just heavily penalize so visual similarity can still
@@ -137,9 +140,14 @@ export function computeFinalRelevance01(params: {
   const attrFactor = 0.5 + attrScore * 0.5;
 
   const crossFamilySoftFactor = Math.max(0, 1 - crossPen * 0.6);
+  const intraFamilySoftFactor = params.hasTypeIntent
+    ? params.tightSemanticCap
+      ? Math.max(0.25, 1 - intraPen * 0.95)
+      : Math.max(0.4, 1 - intraPen * 0.7)
+    : 1;
 
   const raw =
-    globalScore * typeGateFactor * categoryBoost * attrFactor * crossFamilySoftFactor;
+    globalScore * typeGateFactor * categoryBoost * attrFactor * crossFamilySoftFactor * intraFamilySoftFactor;
   const bounded = Math.max(0, Math.min(1, raw));
   // Prevent final relevance from being unrealistically higher than visual/semantic evidence.
   // With tightSemanticCap (image search), allow a wider bonus so that products with
@@ -193,6 +201,15 @@ export function scoreAudienceCompliance(
   const docAge = docAgeGroup(hit);
   const docG = docAudienceGender(hit);
   const title = typeof hit?._source?.title === "string" ? hit._source.title.toLowerCase() : "";
+  const category = typeof hit?._source?.category === "string" ? hit._source.category.toLowerCase() : "";
+  const canonical =
+    typeof hit?._source?.category_canonical === "string"
+      ? hit._source.category_canonical.toLowerCase()
+      : "";
+  const productTypes = Array.isArray(hit?._source?.product_types)
+    ? hit._source.product_types.map((t) => String(t).toLowerCase()).join(" ")
+    : "";
+  const audienceBlob = `${title} ${category} ${canonical} ${productTypes}`;
 
   let score = 1;
   let factors = 0;
@@ -200,7 +217,7 @@ export function scoreAudienceCompliance(
   if (wantAge) {
     factors += 1;
     if (!docAge) {
-      if (wantAge === "kids" && /\b(kids?|child|children|boys?|girls?|toddler|baby|youth)\b/.test(title)) {
+      if (wantAge === "kids" && /\b(kids?|child|children|boys?|girls?|toddler|baby|youth)\b/.test(audienceBlob)) {
         score *= 0.92;
       } else if (wantAge === "adult" || wantAge === "teen") {
         score *= 0.88;
@@ -222,13 +239,16 @@ export function scoreAudienceCompliance(
   if (wantG) {
     factors += 1;
     if (!docG) {
+      const hasKidsCue = /\b(kids?|child|children|boys?|girls?|toddler|baby|youth)\b/.test(audienceBlob);
       if (wantG === "men") {
-        if (/\b(men|mens|male)\b/.test(title)) score *= 0.9;
-        else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(title)) score *= 0.28;
+        if (hasKidsCue) score *= 0;
+        else if (/\b(men|mens|male)\b/.test(audienceBlob)) score *= 0.9;
+        else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(audienceBlob)) score *= 0.28;
         else score *= 0.78;
       } else if (wantG === "women") {
-        if (/\b(women|womens|female|ladies|woman)\b/.test(title)) score *= 0.9;
-        else if (/\b(men|mens|male|man|boy|boys)\b/.test(title)) score *= 0.28;
+        if (hasKidsCue) score *= 0;
+        else if (/\b(women|womens|female|ladies|woman)\b/.test(audienceBlob)) score *= 0.9;
+        else if (/\b(men|mens|male|man|boy|boys)\b/.test(audienceBlob)) score *= 0.28;
         else score *= 0.78;
       } else {
         score *= 0.85;
@@ -401,6 +421,9 @@ function normalizeSleeveToken(raw: string | undefined): "short" | "long" | "slee
   if (!raw) return null;
   const s = String(raw).toLowerCase().trim();
   if (!s) return null;
+  if (/\b(tank|cami|camisole|sleeveless|strapless|halter|strap top|vest top|spaghetti strap)\b/.test(s)) {
+    return "sleeveless";
+  }
   if (s.includes("sleeveless")) return "sleeveless";
   if (s.includes("short")) return "short";
   if (s.includes("long")) return "long";
@@ -443,6 +466,59 @@ function rawColorList(...parts: unknown[]): string[] {
         .filter(Boolean),
     ),
   ];
+}
+
+function extractColorHintsFromProductUrl(productUrl: unknown): string[] {
+  const raw = String(productUrl ?? "").trim();
+  if (!raw) return [];
+
+  const hints = new Set<string>();
+  const push = (v: string | null | undefined) => {
+    const s = String(v ?? "")
+      .toLowerCase()
+      .replace(/[+_]/g, " ")
+      .replace(/%20/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!s) return;
+    hints.add(s);
+    const norm = normalizeColorToken(s);
+    if (norm) hints.add(norm);
+  };
+
+  // Handle both query params and fragment params, e.g. ?color=white or #color=off%20white.
+  const candidate = raw.replace(/^#/, "");
+  const qIdx = candidate.indexOf("?");
+  const hIdx = candidate.indexOf("#");
+  const queryPart = qIdx >= 0 ? candidate.slice(qIdx + 1, hIdx >= 0 && hIdx > qIdx ? hIdx : undefined) : "";
+  const hashPart = hIdx >= 0 ? candidate.slice(hIdx + 1) : (qIdx < 0 ? candidate : "");
+
+  const parsePart = (part: string) => {
+    if (!part) return;
+    for (const segment of part.split("&")) {
+      const [kRaw, vRaw] = segment.split("=");
+      const k = decodeURIComponent(String(kRaw ?? "")).toLowerCase().trim();
+      const v = decodeURIComponent(String(vRaw ?? "")).trim();
+      if (!k || !v) continue;
+      if (k === "color" || k === "colour" || k === "variant" || k === "shade") push(v);
+    }
+  };
+
+  parsePart(queryPart);
+  parsePart(hashPart);
+  return [...hints];
+}
+
+function clamp01(x: number): number {
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(1, x));
+}
+
+function confidenceBlend(score: number, confidence: number, neutralFloor: number): number {
+  const s = clamp01(score);
+  const c = clamp01(confidence);
+  const floor = clamp01(neutralFloor);
+  return s * c + floor * (1 - c);
 }
 
 /**
@@ -512,6 +588,16 @@ export function computeHitRelevance(
 
   if (unionTierRaw.length === 0 && hit?._source?.attr_color) {
     unionTierRaw = rawColorList(hit._source.attr_color);
+  }
+
+  if (unionTierRaw.length === 0) {
+    const urlColorHints = extractColorHintsFromProductUrl(hit?._source?.product_url);
+    if (urlColorHints.length > 0) {
+      unionTierRaw = rawColorList(urlColorHints);
+      if (textTierRaw.length === 0) {
+        textTierRaw = rawColorList(urlColorHints);
+      }
+    }
   }
 
   if (unionTierRaw.length === 0 && typeof hit?._source?.title === "string") {
@@ -664,7 +750,7 @@ export function computeHitRelevance(
     const titleSleeve = normalizeSleeveToken(title);
     const observed = docSleeve ?? titleSleeve;
     if (!observed) {
-      sleeveCompliance = 0.45;
+      sleeveCompliance = 0.15;
     } else if (observed === wantedSleeve) {
       sleeveCompliance = 1;
     } else if (docSleeve) {
@@ -781,6 +867,25 @@ export function computeHitRelevance(
     Number.isFinite(typeDoc) && typeDoc >= 0 && typeDoc <= 1 ? 0.45 + 0.55 * typeDoc : 1;
   const docTrust = Math.max(0.25, Math.min(1, docTrustNorm * typeDocTrust));
 
+  const typeMetadataConfidence = clamp01(
+    Number.isFinite(typeDoc) && typeDoc >= 0 && typeDoc <= 1
+      ? typeDoc
+      : Number.isFinite(normDoc) && normDoc >= 0 && normDoc <= 1
+        ? normDoc
+        : 0.72,
+  );
+  const colorMetadataConfidence = clamp01(
+    Math.max(
+      Number.isFinite(wcText) ? wcText : 0,
+      Number.isFinite(wcImg) ? wcImg : 0,
+      Number.isFinite(normDoc) && normDoc >= 0 && normDoc <= 1 ? normDoc * 0.9 : 0,
+      0.58,
+    ),
+  );
+  const styleMetadataConfidence = clamp01(
+    Number.isFinite(normDoc) && normDoc >= 0 && normDoc <= 1 ? normDoc * 0.95 : 0.62,
+  );
+
   const wSim = rerankSimilarityWeight();
   const wAud = rerankAudienceWeight();
   const typeComponent = productTypeCompliance * 420 * docTrust;
@@ -809,7 +914,22 @@ export function computeHitRelevance(
   const hasColorIntent = desiredColors.length > 0;
   /** Soft-only auto colors must not gate final acceptance the same as user `filters.color`. */
   const hasColorIntentForFinalRelevance = hasColorIntent && !softColorBiasOnly;
-  const crossPenTrace = Math.max(0, crossFamilyPenalty);
+  const typeScoreForFinal = hasReliableTypeIntent
+    ? confidenceBlend(productTypeCompliance, typeMetadataConfidence, 0.38)
+    : productTypeCompliance;
+  const colorScoreForFinal = hasColorIntentForFinalRelevance
+    ? confidenceBlend(colorCompliance, colorMetadataConfidence, 0.34)
+    : colorCompliance;
+  const styleScoreForFinal = normalizedDesiredStyle
+    ? confidenceBlend(styleCompliance, styleMetadataConfidence, 0.32)
+    : styleCompliance;
+  const sleeveScoreForFinal = hasSleeveIntentForDoc
+    ? confidenceBlend(sleeveCompliance, styleMetadataConfidence, 0.28)
+    : sleeveCompliance;
+  const crossFamilyPenaltyForFinal = hasReliableTypeIntent
+    ? crossFamilyPenalty * (0.55 + 0.45 * typeMetadataConfidence)
+    : crossFamilyPenalty;
+  const crossPenTrace = Math.max(0, crossFamilyPenaltyForFinal);
   const hardBlocked = hasReliableTypeIntent && crossPenTrace >= 0.8;
   const typeGateFactor = !hasReliableTypeIntent
     ? 1
@@ -822,19 +942,20 @@ export function computeHitRelevance(
   let finalRelevance01 = computeFinalRelevance01({
     hasTypeIntent,
     hasReliableTypeIntent,
-    typeScore: productTypeCompliance,
+    typeScore: typeScoreForFinal,
     catScore: categoryRelevance01,
     semScore: semScore01,
     lexScore: lexScore01,
-    colorScore: colorCompliance,
+    colorScore: colorScoreForFinal,
     audScore: audienceCompliance,
-    styleScore: styleCompliance,
-    sleeveScore: sleeveCompliance,
+    styleScore: styleScoreForFinal,
+    sleeveScore: sleeveScoreForFinal,
     hasColorIntent: hasColorIntentForFinalRelevance,
     hasStyleIntent: Boolean(normalizedDesiredStyle),
     hasSleeveIntent: hasSleeveIntentForDoc,
     hasAudienceIntent,
-    crossFamilyPenalty,
+    crossFamilyPenalty: crossFamilyPenaltyForFinal,
+    intraFamilyPenalty,
     applyLexicalToGlobal: lexicalScoreDistinct,
     tightSemanticCap,
   });

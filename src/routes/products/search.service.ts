@@ -52,12 +52,15 @@ export async function searchByImageWithSimilarity(
     includeRelated = false,
     pHash,
     predictedCategoryAisles,
+    softProductTypeHints,
     knnField,
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty,
     blipSignal,
     inferredPrimaryColor,
     inferredColorsByItem,
+    inferredColorsByItemConfidence,
+    debugRawCosineFirst,
   } = params;
 
   // Phase 2 alignment: route through the unified canonical facade.
@@ -71,12 +74,15 @@ export async function searchByImageWithSimilarity(
     includeRelated,
     pHash,
     predictedCategoryAisles,
+    softProductTypeHints,
     knnField,
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty,
     blipSignal,
     inferredPrimaryColor,
     inferredColorsByItem,
+    inferredColorsByItemConfidence,
+    debugRawCosineFirst,
   }) as Promise<SearchResultWithRelated>;
 }
 

@@ -16,6 +16,7 @@ import "dotenv/config";
 import { pg } from "../src/lib/core/db";
 import { productsTableHasGenderColumn } from "../src/lib/core/db";
 import { blip, validateImage } from "../src/lib/image";
+import { catalogGenderFromProductText } from "../src/lib/image/captionAttributeInference";
 import { applyBlipCaptionToMissingProductFields } from "../src/lib/image/blipCatalogBackfill";
 import { updateProductIndex } from "../src/routes/products/images.service";
 
@@ -61,6 +62,7 @@ async function optionalColumns() {
     hasStyle: set.has("style"),
     hasMaterial: set.has("material"),
     hasOccasion: set.has("occasion"),
+    hasDetails: set.has("details"),
   };
 }
 
@@ -84,7 +86,7 @@ function missingCatalogFieldsClause(
 
 function buildSelectQuery(
   hasGender: boolean,
-  colOpts: { hasStyle: boolean; hasMaterial: boolean; hasOccasion: boolean },
+  colOpts: { hasStyle: boolean; hasMaterial: boolean; hasOccasion: boolean; hasDetails: boolean },
   cursorId: number,
   batchSize: number,
 ): { text: string; values: unknown[] } {
@@ -92,6 +94,14 @@ function buildSelectQuery(
   // Prefer first non-empty product_images URL (primary first); else products.image_cdn (scraped / legacy feeds).
   const text = `
     SELECT p.id,
+      p.title,
+      p.description,
+      p.color,
+      ${hasGender ? "p.gender," : "NULL::text AS gender,"}
+      ${colOpts.hasDetails ? "p.details," : "NULL::text AS details,"}
+      ${colOpts.hasStyle ? "p.style," : "NULL::text AS style,"}
+      ${colOpts.hasMaterial ? "p.material," : "NULL::text AS material,"}
+      ${colOpts.hasOccasion ? "p.occasion," : "NULL::text AS occasion,"}
       COALESCE(
         pi.cdn_url,
         NULLIF(TRIM(COALESCE(p.image_cdn, '')), '')
@@ -203,6 +213,28 @@ async function main() {
   const blipMs = opts.captionTimeoutMs;
   console.log("[backfill-blip-catalog] caption timeout ms:", blipMs);
 
+  const nonCaptionFieldMissing = (row: {
+    description?: unknown;
+    color?: unknown;
+    style?: unknown;
+    material?: unknown;
+    occasion?: unknown;
+  }): boolean => {
+    return (
+      String(row.description ?? "").trim().length === 0 ||
+      String(row.color ?? "").trim().length === 0 ||
+      (colOpts.hasStyle && String(row.style ?? "").trim().length === 0) ||
+      (colOpts.hasMaterial && String(row.material ?? "").trim().length === 0) ||
+      (colOpts.hasOccasion && String(row.occasion ?? "").trim().length === 0)
+    );
+  };
+
+  const updateGenderFromText = async (id: number, gender: string): Promise<boolean> => {
+    if (!hasGender) return false;
+    const result = await pg.query(`UPDATE products SET gender = $1 WHERE id = $2 AND NULLIF(TRIM(COALESCE(gender, '')), '') IS NULL`, [gender, id]);
+    return (result.rowCount ?? 0) > 0;
+  };
+
   while (true) {
     if (opts.limit != null && processed >= opts.limit) break;
 
@@ -228,6 +260,28 @@ async function main() {
         chunk.map(async (row) => {
           const id = row.id;
           try {
+            const textGender = hasGender
+              ? catalogGenderFromProductText(
+                  row.title as string | null | undefined,
+                  row.description as string | null | undefined,
+                  row.details as string | null | undefined,
+                )
+              : null;
+
+            if (textGender && String(row.gender ?? "").trim().length === 0) {
+              const genderUpdated = await updateGenderFromText(id, textGender);
+              if (genderUpdated) updated++;
+            }
+
+            const needsCaption = nonCaptionFieldMissing(row);
+            if (!needsCaption) {
+              if (textGender) {
+                return;
+              }
+              skipped++;
+              return;
+            }
+
             const buf = await fetchImageBuffer(row.cdn_url, opts.fetchTimeoutMs);
             if (!buf || buf.length < 2048) {
               if (!buf) skipFetchFail++;

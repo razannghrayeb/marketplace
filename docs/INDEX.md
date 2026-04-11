@@ -29,15 +29,17 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 | **IMPLEMENTATION_STATUS.md** | What's implemented, bugs, gaps | Tech leads |
 | **architecture.md** | Module structure & patterns | Backend engineers |
 | **api-reference.md** | Complete API specification | API consumers |
+| **compare-intelligent-shopping.md** | Intelligent compare goals, modes, and response contract | Product, backend, frontend |
 
 ---
 
-### Search & Discovery (4 files)
+### Search & Discovery (5 files)
 
 | File | Purpose | Audience |
 |------|---------|----------|
 | **embeddings-and-search-pipelines.md** | **Embeddings, OpenSearch fields, ingest vs query paths (text + image)** | Backend, ML, search engineers |
 | **SEARCH_API_COMPLETE.md** | All search features (user guide + technical) | Everyone |
+| **multi-image-attribute-transfer.md** | Multi-image attribute transfer feature architecture and build details | Backend, search engineers, integrators |
 | **multi-vector-search.md** | Multi-vector kNN deep-dive | ML engineers |
 | **composite-query-system.md** | Advanced composite query details | Architecture |
 
@@ -70,11 +72,13 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 |----------|------|
 | ...the whole system | `../README.md` → **`FEATURES.md`** → `SEARCH_API_COMPLETE.md` |
 | ...all API endpoints | `api-reference.md` (full spec) or `SEARCH_API_COMPLETE.md` |
+| ...intelligent fashion compare | `compare-intelligent-shopping.md` |
 | ...search capabilities | `SEARCH_API_COMPLETE.md` (user guide + technical) |
 | ...embeddings & how search uses vectors | **`embeddings-and-search-pipelines.md`** |
 | ...recommendations | `ml-models.md` → section on XGBoost Ranker |
 | ...virtual try-on | `../EXECUTIVE_SUMMARY.md` → Feature #7 section |
 | ...wardrobe | `../FEATURE_ANALYSIS.md` → Feature #6 section |
+| ...how complete-look stylist is built | `outfit-stylist-pipeline.md` |
 | ...code architecture | `architecture.md` |
 | ...database | `database.md` |
 | ...ML models | `ml-models.md` |
@@ -90,12 +94,15 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 |------|------|
 | Implement a new search feature | **`embeddings-and-search-pipelines.md`** + `SEARCH_API_COMPLETE.md` + `api-reference.md` |
 | Add a new API endpoint | `architecture.md` (patterns) + `api-reference.md` (reference) |
+| Implement/adjust compare behavior | `compare-intelligent-shopping.md` + `api-reference.md` |
 | Fix a bug | `../IMPLEMENTATION_STATUS.md` (known bugs) |
 | Deploy to production | `deployment.md` + `database.md` |
 | Monitor models | `ranker-runbook.md` + `ml-models.md` |
 | Train/retrain ML models | `ml-models.md` → Intent Classification Evaluation section |
 | Understand wardrobe features | `../FEATURE_ANALYSIS.md` → Feature #6 |
+| Understand complete-look stylist internals | `outfit-stylist-pipeline.md` |
 | Use multi-image search API | `SEARCH_API_COMPLETE.md` (Part 1: User Guide) |
+| Understand how multi-image transfer is built | `multi-image-attribute-transfer.md` |
 | Integrate with database | `database.md` → Schema section |
 | Test search quality | `SEARCH_API_COMPLETE.md` (testing section) |
 | Setup CI/CD | `../ACTION_PLAN_30_DAYS.md` → Week 4 |
@@ -156,6 +163,9 @@ Technical documentation on composite query system, attribute extraction, reranki
 
 ### embeddings-and-search-pipelines.md
 How **CLIP (and related) embeddings** land in **OpenSearch**, and how **image** vs **text** search **pipelines** call kNN, BM25, reranking, and supporting services.
+
+### outfit-stylist-pipeline.md
+Technical deep-dive of wardrobe complete-look stylist pipeline: slot inference, retrieval filters, scoring weights, reranking, pairwise set coherence, and validation steps.
 
 ### ml-models.md
 Overview of all ML models: CLIP, YOLOv8, XGBoost, Gemini, Vertex AI.

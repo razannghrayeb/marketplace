@@ -30,7 +30,9 @@
     "models:list": "python scripts/download-models.py --dry-run",
     "search:eval": "npx tsx scripts/search-eval.ts",
     "search:eval:image": "npx tsx scripts/eval-image-relevance.ts",
-    "os:count": "npx tsx scripts/opensearch-count.ts"
+    "search:tune:image": "npx tsx scripts/tune-image-search-profile.ts",
+    "os:count": "npx tsx scripts/opensearch-count.ts",
+    "test:complete-look-matrix": "npx tsx scripts/validate-complete-look-matrix.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.962.0",
