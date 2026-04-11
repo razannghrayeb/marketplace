@@ -89,6 +89,10 @@ export interface ImageSearchParams extends SearchParams {
    * Shop-the-Look / detection crops often match `embedding_garment` when the index is built with garment ROI vectors.
    */
   knnField?: string;
+  /** YOLO confidence for detection-driven searches; used by category-specific ranking relaxations. */
+  detectionYoloConfidence?: number;
+  /** Detection-mapped product category (e.g. tops, bottoms); enables category-aware ranking rules. */
+  detectionProductCategory?: string;
   /**
    * Forces image search into "hard category" mode for this call.
    * When enabled, the OpenSearch `filters.category` terms are applied even if
