@@ -334,6 +334,56 @@ async function getGarmentBox(productId: number, hasDetectionsTable: boolean): Pr
   }
 }
 
+/**
+ * Get both garment box AND YOLO label for part extraction.
+ * Used in Phase 1 part-level embeddings.
+ */
+async function getGarmentBoxWithLabel(
+  productId: number,
+  hasDetectionsTable: boolean
+): Promise<{ box: PixelBox; label: string } | null> {
+  if (!hasDetectionsTable) return null;
+  try {
+    const res = await queryWithRetry(
+      `SELECT d.box_x1, d.box_y1, d.box_x2, d.box_y2, d.label
+       FROM product_image_detections d
+       INNER JOIN product_images pi ON pi.id = d.product_image_id
+       WHERE pi.product_id = $1
+         AND pi.is_primary = true
+         AND d.box_x1 IS NOT NULL
+         AND d.box_y1 IS NOT NULL
+         AND d.box_x2 IS NOT NULL
+         AND d.box_y2 IS NOT NULL
+         AND COALESCE(d.confidence, 0) >= 0.45
+       ORDER BY COALESCE(d.area_ratio, 0) DESC NULLS LAST, d.id DESC
+       LIMIT 1`,
+      [productId],
+      "garmentBoxWithLabel"
+    );
+    const r = (res as any).rows[0];
+    if (!r) return null;
+    const x1 = Number(r.box_x1);
+    const y1 = Number(r.box_y1);
+    const x2 = Number(r.box_x2);
+    const y2 = Number(r.box_y2);
+    const label = String(r.label ?? "").toLowerCase().trim();
+    if (
+      !Number.isFinite(x1) ||
+      !Number.isFinite(y1) ||
+      !Number.isFinite(x2) ||
+      !Number.isFinite(y2) ||
+      x2 <= x1 ||
+      y2 <= y1 ||
+      !label
+    ) {
+      return null;
+    }
+    return { box: { x1, y1, x2, y2 }, label };
+  } catch {
+    return null;
+  }
+}
+
 // ============================================================================
 // Image fetching
 // ============================================================================
@@ -426,16 +476,19 @@ interface EmbeddingResult {
   embedding: number[];
   embeddingGarment: number[] | null;
   attrEmbeddings: Awaited<ReturnType<typeof attributeEmbeddings.generateAllAttributeEmbeddings>> | null;
+  partEmbeddings: Record<string, number[] | null> | null;
   pHash: string;
   garmentColorAnalysis: any;
   bgWasRemoved: boolean;
   attrEmbFailed: boolean;
+  partEmbFailed: boolean;
 }
 
 async function generateEmbeddings(
   rawBuf: Buffer,
   productId: number,
   garmentBox: PixelBox | null,
+  yoloLabel: string | null,
   cfg: ReindexConfig,
   sidecarAvailable: boolean
 ): Promise<EmbeddingResult> {
@@ -485,6 +538,7 @@ async function generateEmbeddings(
 
   // ── Parallel embedding generation ─────────────────────────────────────────
   let attrEmbFailed = false;
+  let partEmbFailed = false;
   const [embedding, embeddingGarment, attrEmbs, pHash, garmentColorAnalysis] = await Promise.all([
     processImageForEmbedding(processBuf),
     processImageForGarmentEmbeddingWithOptionalBox(rawBuf, processBuf, garmentBoxForProcess).catch(() => null),
@@ -497,16 +551,38 @@ async function generateEmbeddings(
     extractGarmentFashionColors(garmentBuf, { box: null }).catch(() => null),
   ]);
 
+  // ── Part-level embeddings (Phase 1) ───────────────────────────────────────
+  // Generate embeddings for canonical parts (sleeves, necklines, heels, etc.)
+  // Only if we have a garment ROI and YOLO label
+  let partEmbs: Record<string, number[] | null> | null = null;
+  if (garmentBuf && Buffer.isBuffer(garmentBuf) && garmentBuf.length > 0 && yoloLabel) {
+    try {
+      const { computeAllPartEmbeddingsFromDetection } = await import("../src/lib/image/processor");
+      partEmbs = await computeAllPartEmbeddingsFromDetection(garmentBuf, yoloLabel).catch(
+        (err: any) => {
+          partEmbFailed = true;
+          console.warn(`    ⚠️  Product ${productId}: part embeddings failed (${err.message})`);
+          return null;
+        }
+      );
+    } catch (err: any) {
+      partEmbFailed = true;
+      console.warn(`    ⚠️  Product ${productId}: part embedding import failed (${err.message})`);
+    }
+  }
+
   return {
     embedding,
     embeddingGarment: Array.isArray(embeddingGarment) && embeddingGarment.length > 0
       ? embeddingGarment
       : null,
     attrEmbeddings: attrEmbs,
+    partEmbeddings: partEmbs,
     pHash,
     garmentColorAnalysis,
     bgWasRemoved,
     attrEmbFailed,
+    partEmbFailed,
   };
 }
 
@@ -550,8 +626,10 @@ async function processProduct(
       return { success: true, bgRemoved: false, attrEmbFailed: false };
     }
 
-    const garmentBox = await getGarmentBox(id, hasDetectionsTable);
-    const emb = await generateEmbeddings(rawBuf, id, garmentBox, cfg, sidecarAvailable);
+    const garmentBoxWithLabel = await getGarmentBoxWithLabel(id, hasDetectionsTable);
+    const garmentBox = garmentBoxWithLabel?.box ?? null;
+    const yoloLabel = garmentBoxWithLabel?.label ?? null;
+    const emb = await generateEmbeddings(rawBuf, id, garmentBox, yoloLabel, cfg, sidecarAvailable);
 
     const enrichRow = enrichMap.get(id);
 
@@ -593,12 +671,22 @@ async function processProduct(
       body.embedding_pattern  = emb.attrEmbeddings.pattern;
     }
 
+    // Attach per-part embeddings when available (Phase 1)
+    if (emb.partEmbeddings && typeof emb.partEmbeddings === 'object') {
+      for (const [partType, partEmb] of Object.entries(emb.partEmbeddings)) {
+        if (Array.isArray(partEmb) && partEmb.length > 0) {
+          body[`embedding_part_${partType}`] = partEmb;
+        }
+      }
+    }
+
     // Record whether bg removal was applied (useful for analytics / audit)
     
 
     const icon = emb.bgWasRemoved ? "🧹" : "✅";
     const attrIcon = emb.attrEmbFailed ? " [attr❌]" : "";
-    console.log(`  ${icon} [${id}]${attrIcon} ${title.substring(0, 55)}`);
+    const partIcon = emb.partEmbFailed ? " [part❌]" : "";
+    console.log(`  ${icon} [${id}]${attrIcon}${partIcon} ${title.substring(0, 55)}`);
 
     return {
       success: true,

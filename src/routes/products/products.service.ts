@@ -1797,6 +1797,30 @@ export async function searchByImageWithSimilarity(
     }
   }
 
+  // ────────────────────────────────────────────────────────────────────────────
+  // PART-LEVEL EMBEDDINGS (Phase 1)
+  // ────────────────────────────────────────────────────────────────────────────
+  // Generate embeddings for canonical parts (sleeves, necklines, heels, bag handles, etc.)
+  let partQueryEmbeddings: Record<string, number[] | null> = {};
+  if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
+    try {
+      const { computeAndGenerateQueryPartEmbeddings } = await import("../../lib/image/processor");
+      partQueryEmbeddings = await computeAndGenerateQueryPartEmbeddings(imageBuffer).catch(
+        (error) => {
+          console.warn("[image-search] part embeddings generation failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return {};
+        }
+      );
+    } catch (error) {
+      console.warn("[image-search] part embedding import failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      partQueryEmbeddings = {};
+    }
+  }
+
   const runColor = Boolean(colorQueryEmbedding && colorQueryEmbedding.length > 0);
   const runStyle = Boolean(styleQueryEmbedding && styleQueryEmbedding.length > 0);
   const runPattern = Boolean(patternQueryEmbedding && patternQueryEmbedding.length > 0);
@@ -1988,6 +2012,59 @@ export async function searchByImageWithSimilarity(
   }
 
   const exactCosineRerank = imageExactCosineRerankEnabled();
+  
+  // ────────────────────────────────────────────────────────────────────────────
+  // PART SIMILARITY COMPUTATION (Phase 1)
+  // ────────────────────────────────────────────────────────────────────────────
+  // For each retrieved hit, compute similarities against query part embeddings
+  const partSimByDocId = new Map<string, Record<string, number>>();
+  const hasQueryPartEmbeddings = Object.keys(partQueryEmbeddings).some(
+    (key) => partQueryEmbeddings[key] && Array.isArray(partQueryEmbeddings[key]) && partQueryEmbeddings[key]!.length > 0
+  );
+
+  if (hasQueryPartEmbeddings && Array.isArray(hits) && hits.length > 0) {
+    try {
+      const { cosineSimilarityRaw } = await import("../../lib/image/clip");
+      
+      for (const hit of hits) {
+        const partSims: Record<string, number> = {};
+        const productId = String(hit?._source?.product_id ?? "");
+        
+        if (!productId) continue;
+
+        // For each part type with a query embedding
+        for (const [partType, queryPartVec] of Object.entries(partQueryEmbeddings)) {
+          if (!queryPartVec || !Array.isArray(queryPartVec) || queryPartVec.length === 0) {
+            partSims[partType] = 0;
+            continue;
+          }
+
+          // Try to get the corresponding document part vector
+          const docPartField = `embedding_part_${partType}`;
+          const docPartVec = asFloatVector(hit?._source?.[docPartField], queryPartVec.length);
+
+          if (docPartVec) {
+            // Compute cosine similarity between query and document part vectors
+            try {
+              const rawSim = cosineSimilarityRaw(queryPartVec, docPartVec);
+              partSims[partType] = normalizeTo01ByVersion(rawSim, "v2");
+            } catch {
+              partSims[partType] = 0;
+            }
+          } else {
+            partSims[partType] = 0;
+          }
+        }
+
+        partSimByDocId.set(productId, partSims);
+      }
+    } catch (err) {
+      console.warn("[image-search] part similarity computation failed", {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   const visualSimFromHit = (hit: any): number => {
     if (typeof hit?._exactCosineRaw === "number") {
       return normalizeTo01ByVersion(Number(hit._exactCosineRaw), "v2");
