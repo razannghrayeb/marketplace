@@ -17,6 +17,8 @@ export interface RawProduct {
   brand: string;
   category: string;
   subcategory?: string;
+  gender?: string;
+  ageGroup?: string;
   price: number;
   salePrice?: number;
   colors?: string[];

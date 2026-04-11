@@ -639,24 +639,69 @@ function isOnePieceColorSensitiveCategory(productCategory: string, detectionLabe
   return /\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(label);
 }
 
+function isBottomColorSensitiveCategory(productCategory: string, detectionLabel: string): boolean {
+  const cat = String(productCategory || "").toLowerCase();
+  const label = String(detectionLabel || "").toLowerCase();
+  if (cat === "bottoms") return true;
+  return /\b(trouser|trousers|pant|pants|jean|jeans|denim|legging|leggings|short|shorts|skirt|skirts)\b/.test(label);
+}
+
+function isTopLikeColorSensitiveCategory(productCategory: string, detectionLabel: string): boolean {
+  const cat = String(productCategory || "").toLowerCase();
+  const label = String(detectionLabel || "").toLowerCase();
+  if (cat === "tops" || cat === "outerwear") return true;
+  return /\b(top|shirt|tee|t-?shirt|blouse|sweater|hoodie|jacket|coat|blazer|outerwear|cardigan)\b/.test(label);
+}
+
 async function extractDetectionCropColorsForRanking(params: {
   clipBuffer: Buffer;
   productCategory: string;
   detectionLabel: string;
 }): Promise<string[]> {
   const onePiece = isOnePieceColorSensitiveCategory(params.productCategory, params.detectionLabel);
+  const bottoms = isBottomColorSensitiveCategory(params.productCategory, params.detectionLabel);
+  const topLike = isTopLikeColorSensitiveCategory(params.productCategory, params.detectionLabel);
   let colorBuffer = params.clipBuffer;
 
-  if (onePiece) {
+  if (onePiece || bottoms || topLike) {
     try {
       const meta = await sharp(params.clipBuffer).metadata();
       const w = meta.width ?? 0;
       const h = meta.height ?? 0;
       if (w >= 24 && h >= 48) {
-        // Exclude lower hem/footwear overlap where detector boxes touch shoes.
-        const topH = Math.max(24, Math.floor(h * 0.72));
+        let left = 0;
+        let top = 0;
+        let width = w;
+        let height = h;
+
+        if (onePiece) {
+          // Exclude lower hem/footwear overlap where detector boxes touch shoes.
+          height = Math.max(24, Math.floor(h * 0.72));
+        } else if (bottoms) {
+          // Bottom boxes often include torso at the top and shoes at the bottom.
+          // Keep a centered vertical band and trim side edges to reduce bleed.
+          left = Math.floor(w * 0.1);
+          width = Math.max(18, Math.floor(w * 0.8));
+          top = Math.floor(h * 0.16);
+          const bottom = Math.floor(h * 0.82);
+          height = Math.max(24, bottom - top);
+        } else if (topLike) {
+          // Top/outerwear boxes can include pants near the lower edge.
+          // Sample upper-mid torso where garment color is usually most stable.
+          left = Math.floor(w * 0.08);
+          width = Math.max(18, Math.floor(w * 0.84));
+          top = Math.floor(h * 0.1);
+          const bottom = Math.floor(h * 0.74);
+          height = Math.max(24, bottom - top);
+        }
+
+        left = Math.max(0, Math.min(left, Math.max(0, w - 1)));
+        top = Math.max(0, Math.min(top, Math.max(0, h - 1)));
+        width = Math.max(1, Math.min(width, w - left));
+        height = Math.max(1, Math.min(height, h - top));
+
         colorBuffer = await sharp(params.clipBuffer)
-          .extract({ left: 0, top: 0, width: w, height: topH })
+          .extract({ left, top, width, height })
           .png()
           .toBuffer();
       }
@@ -667,7 +712,7 @@ async function extractDetectionCropColorsForRanking(params: {
 
   return extractDominantColorNames(colorBuffer, {
     maxColors: 2,
-    minShare: onePiece ? 0.18 : 0.15,
+    minShare: onePiece ? 0.18 : bottoms ? 0.17 : 0.15,
   });
 }
 
@@ -1267,11 +1312,24 @@ function applyFormalityFilter(products: ProductResult[], minFormality: number | 
     return products;
   }
 
-  // Filter products by checking their formality score in the structure.
-  // Product detection style contains formality (1-10 scale).
+  // Only enforce a hard numeric gate when the product actually carries structured
+  // formality metadata. Missing metadata should not zero out otherwise valid matches.
+  const hasStructuredFormality = products.some((p) => {
+    const v = Number((p as any)?.style?.formality);
+    return Number.isFinite(v);
+  });
+
+  if (!hasStructuredFormality) {
+    console.log(
+      `[formality-filter] skipped hard filter (no structured formality metadata, minFormality=${minFormality})`,
+    );
+    return products;
+  }
+
   const filtered = products.filter((p) => {
-    const productFormality = Number((p as any)?.style?.formality ?? 0);
-    return productFormality >= minFormality;
+    const formalityRaw = Number((p as any)?.style?.formality);
+    if (!Number.isFinite(formalityRaw)) return true;
+    return formalityRaw >= minFormality;
   });
 
   if (filtered.length !== products.length) {
@@ -1285,6 +1343,11 @@ function applyFormalityFilter(products: ProductResult[], minFormality: number | 
 function applyRelevanceThresholdFilter(
   products: ProductResult[],
   minRelevance: number | undefined,
+  options?: {
+    preserveAtLeastOne?: boolean;
+    detectionLabel?: string;
+    category?: string;
+  },
 ): ProductResult[] {
   if (!minRelevance || minRelevance <= 0 || !Array.isArray(products) || products.length === 0) {
     return products;
@@ -1301,7 +1364,32 @@ function applyRelevanceThresholdFilter(
     );
   }
 
+  if (filtered.length === 0 && options?.preserveAtLeastOne) {
+    const sorted = [...products].sort((a, b) => {
+      const ar = Number((a as any)?.finalRelevance01 ?? Number.NEGATIVE_INFINITY);
+      const br = Number((b as any)?.finalRelevance01 ?? Number.NEGATIVE_INFINITY);
+      return br - ar;
+    });
+    const best = sorted[0];
+    const bestRelevance = Number((best as any)?.finalRelevance01 ?? 0);
+    console.log(
+      `[relevance-threshold-fallback] preserved 1 product for detection="${options.detectionLabel ?? "unknown"}" category="${options.category ?? "unknown"}" bestFinalRelevance01=${bestRelevance.toFixed(3)} threshold=${minRelevance}`,
+    );
+    return best ? [best] : [];
+  }
+
   return filtered;
+}
+
+function isCoreOutfitCategory(category: string | undefined): boolean {
+  const normalized = String(category ?? "").trim().toLowerCase();
+  return (
+    normalized === "tops" ||
+    normalized === "bottoms" ||
+    normalized === "dresses" ||
+    normalized === "footwear" ||
+    normalized === "outerwear"
+  );
 }
 
 function paginateDetectionGroups(
@@ -2990,7 +3078,11 @@ export class ImageAnalysisService {
     
     const relevanceFilteredResults = finalGroupedResults.map((detection) => ({
       ...detection,
-      products: applyRelevanceThresholdFilter(detection.products, minRelevanceThreshold),
+      products: applyRelevanceThresholdFilter(detection.products, minRelevanceThreshold, {
+        preserveAtLeastOne: isCoreOutfitCategory(detection.category),
+        detectionLabel: detection.detection?.label,
+        category: detection.category,
+      }),
       count: 0, // Will be recalculated below
     }));
     
@@ -3886,7 +3978,11 @@ export class ImageAnalysisService {
     
     const relevanceFilteredResultsSel = finalGroupedResults.map((detection) => ({
       ...detection,
-      products: applyRelevanceThresholdFilter(detection.products, minRelevanceThresholdSel),
+      products: applyRelevanceThresholdFilter(detection.products, minRelevanceThresholdSel, {
+        preserveAtLeastOne: isCoreOutfitCategory(detection.category),
+        detectionLabel: detection.detection?.label,
+        category: detection.category,
+      }),
       count: 0, // Will be recalculated below
     }));
     

@@ -1,6 +1,52 @@
 import type { ProductDecisionProfile } from "../types";
 import { clamp01 } from "./scoreUtils";
 
+function topKey<T extends Record<string, number>>(obj: T): keyof T {
+  return Object.entries(obj).sort((a, b) => b[1] - a[1])[0][0] as keyof T;
+}
+
+function styleLabel(key: keyof ProductDecisionProfile["styleSignals"]): string {
+  switch (key) {
+    case "classic":
+      return "classic";
+    case "trendy":
+      return "trend-forward";
+    case "polished":
+      return "polished";
+    case "relaxed":
+      return "relaxed";
+    case "edgy":
+      return "edgy";
+    case "feminine":
+      return "feminine";
+    case "minimal":
+      return "minimal";
+    case "expressive":
+      return "expressive";
+    default:
+      return "balanced";
+  }
+}
+
+function usageLabel(key: keyof ProductDecisionProfile["usageSignals"]): string {
+  switch (key) {
+    case "versatility":
+      return "versatility";
+    case "stylingEase":
+      return "styling ease";
+    case "occasionRange":
+      return "occasion range";
+    case "maintenanceEase":
+      return "maintenance ease";
+    case "seasonality":
+      return "seasonality";
+    case "repeatWearPotential":
+      return "repeat-wear potential";
+    default:
+      return "everyday utility";
+  }
+}
+
 const identitySignalMap: Record<string, Array<{ signal: keyof ProductDecisionProfile["styleSignals"] | "visualBoldness" | "practicalStrength"; weight: number }>> = {
   confident: [
     { signal: "polished", weight: 0.35 },
@@ -77,7 +123,11 @@ export function scoreIdentityAlignment(
     );
   }
   if (explanation.length === 0) {
-    explanation.push("No identity terms provided, so alignment is scored from neutral baseline.");
+    const dominantStyle = topKey(profile.styleSignals);
+    const dominantUsage = topKey(profile.usageSignals);
+    explanation.push(
+      `No identity terms provided, so baseline uses this item's ${styleLabel(dominantStyle)} signature and ${usageLabel(dominantUsage)} profile.`
+    );
   }
 
   return { currentSelfScore, aspirationalSelfScore, explanation };

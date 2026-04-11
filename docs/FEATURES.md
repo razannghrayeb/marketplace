@@ -123,6 +123,8 @@ In `src/server.ts`, search lives under **`/search`** (not `/api/search`). Catalo
 
 Highlights: CRUD items, profile, gaps, recommendations, `complete-look`, `outfit-suggestions`, `analyze-photo`, compatibility and layering endpoints (see `IMPLEMENTATION_STATUS.md` § Wardrobe).
 
+Technical build details for complete-look stylist pipeline: `outfit-stylist-pipeline.md`.
+
 ---
 
 ## 9. Virtual try-on (signed-in)

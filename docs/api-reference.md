@@ -1447,48 +1447,75 @@ Example request:
 ```json
 {
   "item_ids": [901, 910],
+  "audience_gender": "women",
+  "age_group": "adult",
   "limit": 10
 }
 ```
+
+Notes:
+
+- Send either `item_ids` (wardrobe item IDs) or `product_ids` (catalog product IDs).
+- `audience_gender` and `age_group` are optional hints that tighten filtering when known.
+- Outfit set generation now applies pairwise stylist-coherence filtering and excludes weak sets.
 
 Example response:
 
 ```json
 {
   "success": true,
+  "completionMode": "wardrobe",
   "suggestions": [
     {
       "product_id": 7788,
       "title": "Chelsea Boots",
       "brand": "BootCo",
-      "category": "footwear",
+      "category": "shoes",
       "price_cents": 12900,
       "image_url": "https://.../image.webp",
       "score": 0.86,
-      "reason": "Completes your current outfit",
-      "reason_type": "gap",
+      "reason": "Add shoes to complete the look (style-aligned, formality-consistent, harmonious palette)",
+      "reason_type": "compatible",
       "fitBreakdown": {
         "embeddingNorm": 0.62,
         "categoryCompat": 0.74,
-        "colorHarmony": 0.81
+        "colorHarmony": 0.81,
+        "styleAlignment": 0.8,
+        "patternAlignment": 0.62,
+        "materialAlignment": 0.58,
+        "formalityAlignment": 0.84
+      },
+      "stylistSignals": {
+        "slot": "shoes",
+        "color": "black",
+        "formalityScore": 6.2,
+        "aesthetic": "classic",
+        "styleTokens": ["classic", "business", "minimalist"]
       }
     }
   ],
   "outfitSets": [
     {
       "productIds": [10001, 10022, 7788],
-      "categories": ["tops", "bottoms", "footwear"],
+      "categories": ["tops", "bottoms", "shoes"],
       "coherenceScore": 0.83,
-      "totalScore": 0.79,
+      "totalScore": 0.83,
       "reasons": [
-        "Matches wardrobe color family",
-        "Good category compatibility"
+        "balanced across tops, bottoms, shoes",
+        "ranked by pairwise stylist compatibility",
+        "pairwise coherence is strong"
       ]
     }
   ],
-  "missingCategories": ["footwear", "bags"]
+  "missingCategories": ["shoes", "bags"]
 }
 ```
+
+Scoring behavior summary:
+
+- Candidate ranking blends retrieval score with fashion signals (category compatibility, color harmony, style token alignment, pattern/material affinity, formality alignment).
+- `outfitSets` are scored with pairwise item compatibility (category, color pair, formality consistency, style-token overlap).
+- Sets below the minimum coherence threshold are filtered out.
 
 ---
 
