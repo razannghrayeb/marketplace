@@ -4,7 +4,7 @@
  * API endpoints for product comparison feature.
  */
 
-import { Router, Request, Response } from "express";
+import express, { Router, Request, Response } from "express";
 import multer from "multer";
 import {
   compareProductsWithVerdict,
@@ -32,9 +32,46 @@ import {
   findBestShipping,
 } from "./compare-enhanced.service";
 import { InsufficientProductsForCompareError } from "../../lib/compare/compareEngine";
+import { compareDecisionRequestSchema } from "./compare-decision.schema";
+import { runCompareDecision } from "./compare-decision.service";
 
 const router = Router();
 const compareBodyMultipart = multer().none();
+
+// ============================================================================
+// Compare decision (new contract — camelCase JSON)
+// ============================================================================
+
+/**
+ * POST /api/compare/decision
+ *
+ * Body: CompareDecisionRequest. Returns CompareDecisionResponse.
+ * Until the dedicated decision microservice is wired, the handler bridges legacy compare output
+ * (see `compare-decision.adapter.ts`).
+ */
+router.post("/decision", express.json({ limit: "512kb" }), async (req: Request, res: Response) => {
+  const parsed = compareDecisionRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "Invalid compare decision request",
+      details: parsed.error.flatten(),
+    });
+  }
+
+  try {
+    const result = await runCompareDecision(parsed.data);
+    return res.json(result);
+  } catch (error) {
+    console.error("Compare decision error:", error);
+    if (error instanceof InsufficientProductsForCompareError) {
+      return res.status(404).json({
+        error: error.message,
+        missing_product_ids: error.missingProductIds,
+      });
+    }
+    return res.status(500).json({ error: "Failed to run compare decision" });
+  }
+});
 
 // ============================================================================
 // Compare Products

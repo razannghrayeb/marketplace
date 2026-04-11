@@ -37,6 +37,49 @@ import {
   getUserPriceTier
 } from "./recommendations.service";
 
+const ALLOWED_AUDIENCE_GENDER = new Set(["men", "women", "unisex"]);
+const ALLOWED_AGE_GROUP = new Set(["kids", "adult"]);
+
+/** Multipart: tag arrays sent as JSON strings, e.g. ["classic","minimalist"] */
+function parseTagArrayField(value: unknown): string[] | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (Array.isArray(value)) {
+    return value.map((x) => String(x).trim()).filter(Boolean);
+  }
+  const raw = String(value).trim();
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.map((x) => String(x).trim()).filter(Boolean);
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function parseAudienceGenderBody(value: unknown): string | undefined {
+  if (value == null || value === "") return undefined;
+  const s = String(value).trim();
+  return ALLOWED_AUDIENCE_GENDER.has(s) ? s : undefined;
+}
+
+function parseAgeGroupBody(value: unknown): string | undefined {
+  if (value == null || value === "") return undefined;
+  const s = String(value).trim();
+  return ALLOWED_AGE_GROUP.has(s) ? s : undefined;
+}
+
+function normalizeTagArrayPatch(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return [];
+  if (Array.isArray(value)) {
+    return value.map((x) => String(x).trim()).filter(Boolean);
+  }
+  return parseTagArrayField(value);
+}
+
 // ============================================================================
 // Wardrobe Items CRUD
 // ============================================================================
@@ -93,7 +136,12 @@ export async function createItem(req: Request, res: Response, next: NextFunction
       category_id: req.body.category_id ? parseInt(req.body.category_id, 10) : undefined,
       brand: req.body.brand,
       pattern_id: req.body.pattern_id ? parseInt(req.body.pattern_id, 10) : undefined,
-      material_id: req.body.material_id ? parseInt(req.body.material_id, 10) : undefined
+      material_id: req.body.material_id ? parseInt(req.body.material_id, 10) : undefined,
+      audience_gender: parseAudienceGenderBody(req.body.audience_gender) ?? null,
+      age_group: parseAgeGroupBody(req.body.age_group) ?? null,
+      style_tags: parseTagArrayField(req.body.style_tags) ?? null,
+      occasion_tags: parseTagArrayField(req.body.occasion_tags) ?? null,
+      season_tags: parseTagArrayField(req.body.season_tags) ?? null
     });
 
     res.status(201).json({ success: true, item });
@@ -135,7 +183,19 @@ export async function updateItem(req: Request, res: Response, next: NextFunction
       brand: req.body.brand,
       pattern_id: req.body.pattern_id,
       material_id: req.body.material_id,
-      dominant_colors: req.body.dominant_colors
+      dominant_colors: req.body.dominant_colors,
+      audience_gender:
+        req.body.audience_gender === null
+          ? null
+          : parseAudienceGenderBody(req.body.audience_gender) ??
+            (req.body.audience_gender === "" ? null : undefined),
+      age_group:
+        req.body.age_group === null
+          ? null
+          : parseAgeGroupBody(req.body.age_group) ?? (req.body.age_group === "" ? null : undefined),
+      style_tags: normalizeTagArrayPatch(req.body.style_tags),
+      occasion_tags: normalizeTagArrayPatch(req.body.occasion_tags),
+      season_tags: normalizeTagArrayPatch(req.body.season_tags)
     });
 
     if (!item) {
@@ -349,9 +409,16 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
       });
     }
 
+    const catalogAudience = parseAudienceGenderBody(req.body.audience_gender);
+    const catalogAge = parseAgeGroupBody(req.body.age_group);
+    const catalogFilter: { audience_gender?: string; age_group?: string } = {};
+    if (catalogAudience) catalogFilter.audience_gender = catalogAudience;
+    if (catalogAge) catalogFilter.age_group = catalogAge;
+    const audienceOpts = Object.keys(catalogFilter).length > 0 ? catalogFilter : undefined;
+
     const result = hasItems
-      ? await completeLookSuggestions(userId, itemIds!, limit)
-      : await completeLookSuggestionsForCatalogProducts(userId, productIds, limit);
+      ? await completeLookSuggestions(userId, itemIds!, limit, audienceOpts)
+      : await completeLookSuggestionsForCatalogProducts(userId, productIds, limit, audienceOpts);
     const suggestions = result.suggestions.map((s) => ({
       ...s,
       id: s.product_id,

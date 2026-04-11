@@ -431,12 +431,20 @@ type CompleteLookAnchorRow = {
   image_url?: string | null;
   image_cdn?: string | null;
   category_name?: string | null;
+  audience_gender?: string | null;
+  age_group?: string | null;
+};
+
+export type CompleteLookCatalogFilters = {
+  audience_gender?: string;
+  age_group?: string;
 };
 
 async function runCompleteLookCore(
   userId: number,
   currentItems: CompleteLookAnchorRow[],
-  limit: number
+  limit: number,
+  catalogFilters?: CompleteLookCatalogFilters
 ): Promise<CompleteLookSuggestionsResult> {
   const currentCategories = new Set<string>();
   const currentCategoryList: string[] = [];
@@ -509,6 +517,12 @@ async function runCompleteLookCore(
           { term: { availability: "in_stock" } },
           { term: { category_canonical: canonical } },
         ];
+        if (catalogFilters?.audience_gender) {
+          f.push({ term: { audience_gender: catalogFilters.audience_gender } });
+        }
+        if (catalogFilters?.age_group) {
+          f.push({ term: { age_group: catalogFilters.age_group } });
+        }
         if (applyPriceTier && userPriceTier) {
           f.push({
             range: {
@@ -650,10 +664,12 @@ async function runCompleteLookCore(
 export async function completeLookSuggestions(
   userId: number,
   currentItemIds: number[],
-  limit: number = 10
+  limit: number = 10,
+  requestCatalogFilters?: CompleteLookCatalogFilters
 ): Promise<CompleteLookSuggestionsResult> {
   const currentItemsResult = await pg.query(
     `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, wi.name, wi.image_url, wi.image_cdn,
+            wi.audience_gender, wi.age_group,
             c.name as category_name
      FROM wardrobe_items wi
      LEFT JOIN categories c ON wi.category_id = c.id
@@ -662,7 +678,18 @@ export async function completeLookSuggestions(
   );
 
   const currentItems = currentItemsResult.rows as CompleteLookAnchorRow[];
-  return runCompleteLookCore(userId, currentItems, limit);
+  const row = currentItems[0];
+  const ag = requestCatalogFilters?.audience_gender ?? row?.audience_gender ?? undefined;
+  const age = requestCatalogFilters?.age_group ?? row?.age_group ?? undefined;
+  const effectiveFilters: CompleteLookCatalogFilters | undefined =
+    ag || age
+      ? {
+          ...(ag ? { audience_gender: ag } : {}),
+          ...(age ? { age_group: age } : {}),
+        }
+      : undefined;
+
+  return runCompleteLookCore(userId, currentItems, limit, effectiveFilters);
 }
 
 /**
@@ -671,7 +698,8 @@ export async function completeLookSuggestions(
 export async function completeLookSuggestionsForCatalogProducts(
   userId: number,
   productIds: number[],
-  limit: number = 10
+  limit: number = 10,
+  requestCatalogFilters?: CompleteLookCatalogFilters
 ): Promise<CompleteLookSuggestionsResult> {
   if (!productIds.length) {
     return { suggestions: [], outfitSets: [], missingCategories: [] };
@@ -698,7 +726,16 @@ export async function completeLookSuggestionsForCatalogProducts(
   );
 
   const currentItems = currentItemsResult.rows as CompleteLookAnchorRow[];
-  return runCompleteLookCore(userId, currentItems, limit);
+  const ag = requestCatalogFilters?.audience_gender;
+  const age = requestCatalogFilters?.age_group;
+  const effectiveFilters: CompleteLookCatalogFilters | undefined =
+    ag || age
+      ? {
+          ...(ag ? { audience_gender: ag } : {}),
+          ...(age ? { age_group: age } : {}),
+        }
+      : undefined;
+  return runCompleteLookCore(userId, currentItems, limit, effectiveFilters);
 }
 
 const COLOR_FAMILIES_BY_NAME: Record<string, string> = {

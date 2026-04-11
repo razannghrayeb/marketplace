@@ -24,6 +24,11 @@ export interface WardrobeItem {
   dominant_colors?: Array<{ color_id: number; hex: string; percent: number }>;
   pattern_id?: number;
   material_id?: number;
+  audience_gender?: string | null;
+  age_group?: string | null;
+  style_tags?: string[] | null;
+  occasion_tags?: string[] | null;
+  season_tags?: string[] | null;
   embedding?: number[];
   attributes_extracted: boolean;
   extraction_version?: string;
@@ -43,6 +48,11 @@ export interface CreateWardrobeItemInput {
   brand?: string;
   pattern_id?: number;
   material_id?: number;
+  audience_gender?: string | null;
+  age_group?: string | null;
+  style_tags?: string[] | null;
+  occasion_tags?: string[] | null;
+  season_tags?: string[] | null;
 }
 
 export interface UpdateWardrobeItemInput {
@@ -52,6 +62,11 @@ export interface UpdateWardrobeItemInput {
   pattern_id?: number;
   material_id?: number;
   dominant_colors?: Array<{ color_id: number; hex: string; percent: number }>;
+  audience_gender?: string | null;
+  age_group?: string | null;
+  style_tags?: string[] | null;
+  occasion_tags?: string[] | null;
+  season_tags?: string[] | null;
 }
 
 // ============================================================================
@@ -78,8 +93,9 @@ export async function createWardrobeItem(input: CreateWardrobeItemInput): Promis
 
   const result = await pg.query<WardrobeItem>(
     `INSERT INTO wardrobe_items 
-     (user_id, source, product_id, image_url, image_cdn, r2_key, p_hash, name, category_id, brand, pattern_id, material_id, embedding, attributes_extracted)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::vector, $14)
+     (user_id, source, product_id, image_url, image_cdn, r2_key, p_hash, name, category_id, brand, pattern_id, material_id,
+      audience_gender, age_group, style_tags, occasion_tags, season_tags, embedding, attributes_extracted)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::vector, $19)
      RETURNING *`,
     [
       input.user_id,
@@ -94,6 +110,11 @@ export async function createWardrobeItem(input: CreateWardrobeItemInput): Promis
       input.brand || null,
       input.pattern_id || null,
       input.material_id || null,
+      input.audience_gender ?? null,
+      input.age_group ?? null,
+      input.style_tags ?? [],
+      input.occasion_tags ?? [],
+      input.season_tags ?? [],
       toPgVectorParam(embedding),
       embedding !== null
     ]
@@ -191,6 +212,26 @@ export async function updateWardrobeItem(
   if (input.dominant_colors !== undefined) {
     sets.push(`dominant_colors = $${paramIndex++}`);
     params.push(JSON.stringify(input.dominant_colors));
+  }
+  if (input.audience_gender !== undefined) {
+    sets.push(`audience_gender = $${paramIndex++}`);
+    params.push(input.audience_gender);
+  }
+  if (input.age_group !== undefined) {
+    sets.push(`age_group = $${paramIndex++}`);
+    params.push(input.age_group);
+  }
+  if (input.style_tags !== undefined) {
+    sets.push(`style_tags = $${paramIndex++}`);
+    params.push(input.style_tags);
+  }
+  if (input.occasion_tags !== undefined) {
+    sets.push(`occasion_tags = $${paramIndex++}`);
+    params.push(input.occasion_tags);
+  }
+  if (input.season_tags !== undefined) {
+    sets.push(`season_tags = $${paramIndex++}`);
+    params.push(input.season_tags);
   }
 
   if (sets.length === 0) return getWardrobeItem(itemId, userId);
