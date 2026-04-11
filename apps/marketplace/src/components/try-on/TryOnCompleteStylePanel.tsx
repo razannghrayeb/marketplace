@@ -45,10 +45,10 @@ export function TryOnCompleteStylePanel({ garmentFile, jobId, enabled }: Props) 
           Outfit ideas use your garment photo. Start a new try-on to unlock suggestions here.
         </p>
         <Link
-          href="/search?mode=image"
+          href="/search"
           className="mt-4 inline-flex text-sm font-semibold text-violet-600 hover:text-violet-700"
         >
-          Search by image instead →
+          Search the catalog →
         </Link>
       </div>
     )
