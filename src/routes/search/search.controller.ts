@@ -240,6 +240,10 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
       return res.status(400).json({ error: "Image file is required" });
     }
 
+    const sessionId = (req.query.session_id as string) || (req.headers["x-session-id"] as string | undefined);
+    const userIdRaw = (req.query.user_id as string) || (req as any).userId;
+    const userId = userIdRaw !== undefined ? Number(userIdRaw) : undefined;
+
     const validation = await validateImage(req.file.buffer);
     if (!validation.valid) {
       return res.status(400).json({ error: validation.error || "Invalid image" });
@@ -249,6 +253,8 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
       imageBuffer: req.file.buffer,
       limit: req.body.limit ? Number(req.body.limit) : 50,
       includeRelated: false,
+      sessionId,
+      userId: Number.isFinite(userId as number) ? (userId as number) : undefined,
     });
     
     res.json(result);

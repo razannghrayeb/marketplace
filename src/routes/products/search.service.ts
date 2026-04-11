@@ -63,6 +63,10 @@ export async function searchByImageWithSimilarity(
     inferredColorsByItem,
     inferredColorsByItemConfidence,
     debugRawCosineFirst,
+    sessionId,
+    userId,
+    sessionFilters,
+    collapseVariantGroups,
   } = params;
 
   // Phase 2 alignment: route through the unified canonical facade.
@@ -87,6 +91,10 @@ export async function searchByImageWithSimilarity(
     inferredColorsByItem,
     inferredColorsByItemConfidence,
     debugRawCosineFirst,
+    sessionId,
+    userId,
+    sessionFilters,
+    collapseVariantGroups,
   }) as Promise<SearchResultWithRelated>;
 }
 

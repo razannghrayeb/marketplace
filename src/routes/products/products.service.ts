@@ -7,6 +7,8 @@ import {
 import { config } from "../../config";
 import { getImagesForProducts, ProductImage } from "./images.service";
 import { hammingDistance } from "../../lib/products";
+import { learnUserLifestyle } from "../../lib/wardrobe/lifestyleAdapter";
+import { getSession } from "../../lib/queryProcessor/conversationalContext";
 import {
   dedupeImageSearchResults,
   filterRelatedAgainstMain,
@@ -150,6 +152,14 @@ export interface ImageSearchParams extends SearchParams {
   inferredColorsByItemConfidence?: Record<string, number>;
   /** Debug path: bypass rerank/final gates and return top-k raw exact-cosine hits. */
   debugRawCosineFirst?: boolean;
+  /** Optional session context used to inherit conversational filters. */
+  sessionId?: string;
+  /** Optional authenticated user used for wardrobe-driven personalization. */
+  userId?: number;
+  /** Optional precomputed session filters to merge into image search. */
+  sessionFilters?: Record<string, unknown> | null;
+  /** When true, merge same variant family into one representative result. */
+  collapseVariantGroups?: boolean;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -175,6 +185,11 @@ export interface ProductResult {
   image_url?: string;
   image_cdn?: string;
   images?: Array<{ id: number; url: string; is_primary: boolean }>;
+  parent_product_url?: string | null;
+  variant_group_key?: string | null;
+  variant_group_size?: number;
+  variant_group_ids?: string[];
+  interaction_count?: number;
   similarity_score?: number;     // For image search results
   match_type?: "exact" | "similar" | "related";  // How the product matched
   rerankScore?: number;
@@ -294,6 +309,396 @@ function forceStrictInferredTypeIntentEnv(): boolean {
 function imageMerchandiseSimilarityBindingEnabled(): boolean {
   const v = String(process.env.SEARCH_IMAGE_MERCHANDISE_SIMILARITY ?? "1").toLowerCase();
   return v !== "0" && v !== "false";
+}
+
+/** Phase 8: deep visual+text fusion in final image ranking. Default ON. */
+function imageDeepFusionEnabled(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_DEEP_FUSION ?? "1").toLowerCase();
+  return v !== "0" && v !== "false";
+}
+
+/** Phase 8: blend weight for deep fusion score (0..0.4). */
+function imageDeepFusionWeight(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_DEEP_FUSION_WEIGHT ?? "0.16");
+  if (!Number.isFinite(raw)) return 0.16;
+  return Math.max(0, Math.min(0.4, raw));
+}
+
+/** Phase 9: apply MMR-style diversity reranking after relevance sort + dedupe. Default ON. */
+function imageDiversityRerankEnabled(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_DIVERSITY_RERANK ?? "1").toLowerCase();
+  return v !== "0" && v !== "false";
+}
+
+/** Phase 9: lambda in MMR (higher = more relevance, lower = more diversity). */
+function imageDiversityLambda(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_DIVERSITY_LAMBDA ?? "0.82");
+  if (!Number.isFinite(raw)) return 0.82;
+  return Math.max(0.5, Math.min(0.98, raw));
+}
+
+/** Phase 9: cap candidate pool used for diversity reranking (latency guard). */
+function imageDiversityPoolCap(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_DIVERSITY_POOL_CAP ?? "120");
+  if (!Number.isFinite(raw)) return 120;
+  return Math.max(20, Math.min(300, Math.floor(raw)));
+}
+
+type ImageSearchContext = {
+  userId?: number;
+  sessionId?: string;
+  sessionFilters?: Record<string, unknown> | null;
+  collapseVariantGroups?: boolean;
+};
+
+type UserLifestyleSnapshot = Awaited<ReturnType<typeof learnUserLifestyle>>;
+
+const userLifestyleCache = new Map<number, Promise<UserLifestyleSnapshot | null>>();
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
+}
+
+function normalizeStringValue(value: unknown): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => normalizeStringValue(item)).filter(Boolean);
+}
+
+function mergeSessionFilters(
+  base: SearchFilters,
+  sessionFilters?: Record<string, unknown> | null,
+): SearchFilters {
+  if (!sessionFilters) return { ...base };
+  const merged: SearchFilters = { ...base };
+  const assignIfMissing = <K extends keyof SearchFilters>(key: K, value: SearchFilters[K]) => {
+    if (merged[key] === undefined || merged[key] === null || merged[key] === "") {
+      merged[key] = value;
+    }
+  };
+
+  const category = sessionFilters.category;
+  if (category !== undefined) {
+    assignIfMissing(
+      "category",
+      Array.isArray(category) ? (category as string[]).map((c) => String(c)) : String(category),
+    );
+  }
+
+  const brand = sessionFilters.brand;
+  if (brand !== undefined) assignIfMissing("brand", String(brand));
+
+  const color = sessionFilters.color;
+  if (color !== undefined) assignIfMissing("color", normalizeStringValue(color));
+
+  const material = sessionFilters.material;
+  if (material !== undefined) assignIfMissing("material", normalizeStringValue(material));
+
+  const fit = sessionFilters.fit;
+  if (fit !== undefined) assignIfMissing("fit", normalizeStringValue(fit));
+
+  const style = sessionFilters.style;
+  if (style !== undefined) assignIfMissing("style", normalizeStringValue(style));
+
+  const gender = sessionFilters.gender;
+  if (gender !== undefined) assignIfMissing("gender", normalizeStringValue(gender));
+
+  const pattern = sessionFilters.pattern;
+  if (pattern !== undefined) assignIfMissing("pattern", normalizeStringValue(pattern));
+
+  const ageGroup = sessionFilters.ageGroup;
+  if (ageGroup !== undefined) assignIfMissing("ageGroup", normalizeStringValue(ageGroup));
+
+  const priceRange = sessionFilters.priceRange as { min?: number; max?: number } | undefined;
+  if (priceRange) {
+    if (merged.minPriceCents === undefined && Number.isFinite(Number(priceRange.min))) {
+      merged.minPriceCents = Math.max(0, Math.floor(Number(priceRange.min)));
+    }
+    if (merged.maxPriceCents === undefined && Number.isFinite(Number(priceRange.max))) {
+      merged.maxPriceCents = Math.max(0, Math.floor(Number(priceRange.max)));
+    }
+  }
+
+  return merged;
+}
+
+async function loadUserLifestyleSnapshot(userId?: number): Promise<UserLifestyleSnapshot | null> {
+  if (!userId || !Number.isFinite(userId) || userId < 1) return null;
+  const existing = userLifestyleCache.get(userId);
+  if (existing) return existing;
+  const pending = learnUserLifestyle(userId).catch((error) => {
+    console.warn("[image-search] failed to load user lifestyle:", error);
+    return null;
+  });
+  userLifestyleCache.set(userId, pending);
+  return pending;
+}
+
+function stringMatchesAny(haystack: string, needles: string[]): boolean {
+  if (!haystack || needles.length === 0) return false;
+  return needles.some((needle) => needle && haystack.includes(needle));
+}
+
+function priceSimilarity01(priceCents: number, min?: number, max?: number): number {
+  if (!Number.isFinite(priceCents) || priceCents <= 0) return 0;
+  const lo = Number.isFinite(Number(min)) ? Number(min) : undefined;
+  const hi = Number.isFinite(Number(max)) ? Number(max) : undefined;
+  if (lo !== undefined && hi !== undefined && lo <= hi) {
+    if (priceCents >= lo && priceCents <= hi) return 1;
+    const anchor = priceCents < lo ? lo : hi;
+    return clamp01(1 - Math.abs(priceCents - anchor) / Math.max(anchor, priceCents, 1));
+  }
+  if (lo !== undefined) {
+    return clamp01(1 - Math.abs(priceCents - lo) / Math.max(lo, priceCents, 1));
+  }
+  if (hi !== undefined) {
+    return clamp01(1 - Math.abs(priceCents - hi) / Math.max(hi, priceCents, 1));
+  }
+  return 0;
+}
+
+function scoreImageSearchContext01(params: {
+  product: ProductResult;
+  sessionFilters?: SearchFilters;
+  lifestyle?: UserLifestyleSnapshot | null;
+}): number {
+  const { product, sessionFilters, lifestyle } = params;
+  const title = normalizeStringValue(product.title);
+  const brand = normalizeStringValue(product.brand);
+  const category = normalizeStringValue(product.category);
+  const color = normalizeStringValue(product.color);
+  const description = normalizeStringValue(product.description);
+
+  let score = 0.35;
+
+  if (product.availability) score += 0.08;
+  if (typeof product.interaction_count === "number" && product.interaction_count > 0) {
+    score += Math.min(0.08, Math.log1p(product.interaction_count) / 50);
+  }
+  if (
+    typeof product.sales_price_cents === "number" &&
+    product.sales_price_cents > 0 &&
+    product.sales_price_cents < product.price_cents
+  ) {
+    score += 0.04;
+  }
+
+  if (sessionFilters) {
+    if (sessionFilters.brand && brand && normalizeStringValue(sessionFilters.brand) === brand) score += 0.16;
+    if (sessionFilters.category) {
+      const categories = Array.isArray(sessionFilters.category)
+        ? normalizeStringArray(sessionFilters.category)
+        : [normalizeStringValue(sessionFilters.category)];
+      if (categories.some((cat) => cat && category.includes(cat))) score += 0.14;
+    }
+    if (sessionFilters.color && color && normalizeStringValue(sessionFilters.color) === color) score += 0.08;
+    if (sessionFilters.material && description && normalizeStringValue(sessionFilters.material) && description.includes(normalizeStringValue(sessionFilters.material))) score += 0.05;
+    if (sessionFilters.gender && description && normalizeStringValue(sessionFilters.gender) && description.includes(normalizeStringValue(sessionFilters.gender))) score += 0.03;
+    if (sessionFilters.style && description && normalizeStringValue(sessionFilters.style) && description.includes(normalizeStringValue(sessionFilters.style))) score += 0.05;
+    if (sessionFilters.minPriceCents !== undefined || sessionFilters.maxPriceCents !== undefined) {
+      score += 0.08 * priceSimilarity01(product.price_cents, sessionFilters.minPriceCents, sessionFilters.maxPriceCents);
+    }
+  }
+
+  if (lifestyle) {
+    if (lifestyle.preferredBrands.some((preferred) => preferred && normalizeStringValue(preferred) === brand)) {
+      score += 0.16;
+    }
+    if (lifestyle.preferredCategories.some((preferred) => preferred && category.includes(normalizeStringValue(preferred)))) {
+      score += 0.12;
+    }
+    if (lifestyle.styleProfile?.colorPreferences?.some((preferred) => preferred && normalizeStringValue(preferred) === color)) {
+      score += 0.08;
+    }
+    if (lifestyle.styleProfile?.dominantStyle) {
+      const dominantStyle = normalizeStringValue(lifestyle.styleProfile.dominantStyle);
+      if (dominantStyle && (title.includes(dominantStyle) || description.includes(dominantStyle))) score += 0.04;
+    }
+    if (lifestyle.styleProfile?.aestheticTags?.length) {
+      const matchedTag = lifestyle.styleProfile.aestheticTags.some((tag) => {
+        const norm = normalizeStringValue(tag);
+        return norm && (title.includes(norm) || description.includes(norm));
+      });
+      if (matchedTag) score += 0.03;
+    }
+    if (lifestyle.priceRange) {
+      score += 0.08 * priceSimilarity01(product.price_cents, lifestyle.priceRange.p25, lifestyle.priceRange.p75);
+    }
+  }
+
+  return clamp01(score);
+}
+
+function getVariantGroupKey(product: ProductResult): string | null {
+  const parent = normalizeStringValue((product as any).parent_product_url);
+  const vendor = normalizeStringValue(product.vendor_id);
+  if (!parent && !vendor) return null;
+  const parentKey = parent || `__single_${product.id}`;
+  const vendorKey = vendor || "__vendor";
+  return `${parentKey}|${vendorKey}`;
+}
+
+function collapseVariantGroups(results: ProductResult[]): {
+  results: ProductResult[];
+  groupCount: number;
+  representativeCount: number;
+} {
+  if (results.length <= 1) {
+    return { results, groupCount: 0, representativeCount: results.length };
+  }
+
+  const groups = new Map<string, ProductResult[]>();
+  const passthrough: ProductResult[] = [];
+
+  for (const product of results) {
+    const key = getVariantGroupKey(product);
+    if (!key || key.startsWith("__single_")) {
+      passthrough.push(product);
+      continue;
+    }
+    const list = groups.get(key);
+    if (list) list.push(product);
+    else groups.set(key, [product]);
+  }
+
+  const representatives: ProductResult[] = [];
+  let groupCount = 0;
+  for (const [key, group] of groups.entries()) {
+    if (group.length === 0) continue;
+    groupCount += 1;
+    const sortedGroup = [...group].sort((a, b) => {
+      const fa = Number(a.finalRelevance01 ?? 0);
+      const fb = Number(b.finalRelevance01 ?? 0);
+      if (Math.abs(fb - fa) > 1e-6) return fb - fa;
+      const sa = Number(a.similarity_score ?? 0);
+      const sb = Number(b.similarity_score ?? 0);
+      if (Math.abs(sb - sa) > 1e-6) return sb - sa;
+      return Number(b.rerankScore ?? 0) - Number(a.rerankScore ?? 0);
+    });
+    const representative = { ...sortedGroup[0] } as ProductResult;
+    representative.variant_group_key = key;
+    representative.variant_group_size = group.length;
+    representative.variant_group_ids = group.map((item) => String(item.id));
+    representatives.push(representative);
+  }
+
+  return {
+    results: [...passthrough, ...representatives],
+    groupCount,
+    representativeCount: passthrough.length + representatives.length,
+  };
+}
+
+function textTokenSet(raw: string | null | undefined): Set<string> {
+  const out = new Set<string>();
+  const s = String(raw ?? "").toLowerCase();
+  for (const t of s.split(/[^a-z0-9]+/g)) {
+    if (t.length >= 3) out.add(t);
+  }
+  return out;
+}
+
+function tokenOverlap01(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  for (const t of a) if (b.has(t)) inter += 1;
+  return inter / Math.max(1, Math.min(a.size, b.size));
+}
+
+function deepFusionTextAlignment01(params: {
+  hit: any;
+  queryText: string;
+  desiredProductTypes: string[];
+  desiredStyles: string[];
+  desiredColors: string[];
+  blipSignal?: {
+    productType?: string | null;
+    style?: string | null;
+    material?: string | null;
+    confidence?: number;
+  };
+}): number {
+  const { hit, queryText, desiredProductTypes, desiredStyles, desiredColors, blipSignal } = params;
+  const src = hit?._source ?? {};
+  const docBlob = [
+    src.title,
+    src.category,
+    src.category_canonical,
+    ...(Array.isArray(src.product_types) ? src.product_types : []),
+    src.attr_style,
+    src.attr_material,
+    src.attr_color,
+    ...(Array.isArray(src.attr_colors) ? src.attr_colors : []),
+  ]
+    .map((x: unknown) => String(x ?? ""))
+    .join(" ");
+
+  const docTokens = textTokenSet(docBlob);
+  const queryTokens = textTokenSet(queryText);
+  const queryOverlap = tokenOverlap01(queryTokens, docTokens);
+
+  const intentTokens = textTokenSet(
+    [
+      ...desiredProductTypes,
+      ...desiredStyles,
+      ...desiredColors,
+      blipSignal?.productType ?? "",
+      blipSignal?.style ?? "",
+      blipSignal?.material ?? "",
+    ].join(" "),
+  );
+  const intentOverlap = tokenOverlap01(intentTokens, docTokens);
+
+  const blipConf = Number(blipSignal?.confidence ?? 0);
+  const blipWeight = Math.max(0, Math.min(1, blipConf));
+
+  return Math.max(0, Math.min(1, queryOverlap * 0.55 + intentOverlap * (0.35 + 0.1 * blipWeight)));
+}
+
+function itemDiversitySimilarity01(a: ProductResult, b: ProductResult): number {
+  const aa = a as any;
+  const bb = b as any;
+  const sameCategory = String(aa.category ?? "").toLowerCase() === String(bb.category ?? "").toLowerCase() ? 0.34 : 0;
+  const sameBrand = String(aa.brand ?? "").toLowerCase() !== "" && String(aa.brand ?? "").toLowerCase() === String(bb.brand ?? "").toLowerCase() ? 0.22 : 0;
+  const sameColor = String(aa.color ?? "").toLowerCase() !== "" && String(aa.color ?? "").toLowerCase() === String(bb.color ?? "").toLowerCase() ? 0.2 : 0;
+  const sameStyle = String(aa.attr_style ?? aa.style ?? "").toLowerCase() !== "" && String(aa.attr_style ?? aa.style ?? "").toLowerCase() === String(bb.attr_style ?? bb.style ?? "").toLowerCase() ? 0.14 : 0;
+  const pa = Number(aa.price_cents ?? 0);
+  const pb = Number(bb.price_cents ?? 0);
+  const priceSim = pa > 0 && pb > 0
+    ? Math.max(0, 1 - Math.abs(pa - pb) / Math.max(pa, pb)) * 0.1
+    : 0;
+  return Math.max(0, Math.min(1, sameCategory + sameBrand + sameColor + sameStyle + priceSim));
+}
+
+function applyImageDiversityRerank(results: ProductResult[], lambda: number): ProductResult[] {
+  if (results.length <= 2) return results;
+  const selected: ProductResult[] = [];
+  const remaining = [...results];
+  selected.push(remaining.shift() as ProductResult);
+
+  while (remaining.length > 0) {
+    let bestIdx = 0;
+    let bestMmr = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < remaining.length; i++) {
+      const cand = remaining[i];
+      const rel = Number((cand as any).finalRelevance01 ?? cand.similarity_score ?? 0);
+      let maxSim = 0;
+      for (const s of selected) {
+        maxSim = Math.max(maxSim, itemDiversitySimilarity01(cand, s));
+      }
+      const mmr = lambda * rel - (1 - lambda) * maxSim;
+      if (mmr > bestMmr) {
+        bestMmr = mmr;
+        bestIdx = i;
+      }
+    }
+    selected.push(remaining.splice(bestIdx, 1)[0]);
+  }
+  return selected;
 }
 
 /**
@@ -1595,7 +2000,7 @@ export async function searchByImageWithSimilarity(
     imageEmbedding,
     imageEmbeddingGarment,
     imageBuffer,
-    filters = {},
+    filters: baseFilters = {},
     page = 1,
     limit = 500,
     similarityThreshold = config.clip.imageSimilarityThreshold,
@@ -1612,6 +2017,10 @@ export async function searchByImageWithSimilarity(
     inferredPrimaryColor: inferredPrimaryFromParams,
     inferredColorsByItem: inferredByItemFromParams,
     debugRawCosineFirst = false,
+    sessionId,
+    userId,
+    sessionFilters: sessionFiltersFromParams,
+    collapseVariantGroups: collapseVariantGroupsRequested = true,
   } = params;
 
   if (!imageEmbedding || imageEmbedding.length === 0) {
@@ -1622,6 +2031,17 @@ export async function searchByImageWithSimilarity(
   const breakdownDebug =
     String(process.env.SEARCH_DEBUG ?? "").toLowerCase() === "1" ||
     String(process.env.SEARCH_TRACE_BREAKDOWN ?? "").toLowerCase() === "1";
+
+  const filters = mergeSessionFilters(
+    baseFilters,
+    sessionFiltersFromParams ?? (sessionId ? (getSession(sessionId).accumulatedFilters as Record<string, unknown>) : null),
+  );
+  const personalizationPromise = loadUserLifestyleSnapshot(userId);
+  const personalizationApplied = Boolean(
+    sessionId ||
+      userId ||
+      (sessionFiltersFromParams && Object.keys(sessionFiltersFromParams).length > 0),
+  );
 
   const softCategory = forceHardCategoryFilter ? false : imageSoftCategoryEnv();
   const aisleHints = predictedCategoryAisles?.length
@@ -1760,16 +2180,34 @@ export async function searchByImageWithSimilarity(
   const retrievalK = imageSearchKnnPoolLimit();
 
   let colorQueryEmbedding: number[] | null = null;
+  let textureQueryEmbedding: number[] | null = null;
+  let materialQueryEmbedding: number[] | null = null;
   let styleQueryEmbedding: number[] | null = null;
   let patternQueryEmbedding: number[] | null = null;
   if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
     try {
       const { attributeEmbeddings } = await import("../../lib/search/attributeEmbeddings");
-      const [cEmb, sEmb, pEmb] = await Promise.all([
+      const [cEmb, tEmb, mEmb, sEmb, pEmb] = await Promise.all([
         attributeEmbeddings
           .generateImageAttributeEmbedding(imageBuffer, "color")
           .catch((error) => {
             console.warn("[image-search] color attribute embedding failed", {
+              message: error instanceof Error ? error.message : String(error),
+            });
+            return [] as number[];
+          }),
+        attributeEmbeddings
+          .generateImageAttributeEmbedding(imageBuffer, "texture")
+          .catch((error) => {
+            console.warn("[image-search] texture attribute embedding failed", {
+              message: error instanceof Error ? error.message : String(error),
+            });
+            return [] as number[];
+          }),
+        attributeEmbeddings
+          .generateImageAttributeEmbedding(imageBuffer, "material")
+          .catch((error) => {
+            console.warn("[image-search] material attribute embedding failed", {
               message: error instanceof Error ? error.message : String(error),
             });
             return [] as number[];
@@ -1792,6 +2230,8 @@ export async function searchByImageWithSimilarity(
           }),
       ]);
       colorQueryEmbedding = cEmb.length > 0 ? cEmb : null;
+      textureQueryEmbedding = tEmb.length > 0 ? tEmb : null;
+      materialQueryEmbedding = mEmb.length > 0 ? mEmb : null;
       styleQueryEmbedding = sEmb.length > 0 ? sEmb : null;
       patternQueryEmbedding = pEmb.length > 0 ? pEmb : null;
     } catch (error) {
@@ -1799,6 +2239,8 @@ export async function searchByImageWithSimilarity(
         message: error instanceof Error ? error.message : String(error),
       });
       colorQueryEmbedding = null;
+      textureQueryEmbedding = null;
+      materialQueryEmbedding = null;
       styleQueryEmbedding = null;
       patternQueryEmbedding = null;
     }
@@ -1829,6 +2271,8 @@ export async function searchByImageWithSimilarity(
   }
 
   const runColor = Boolean(colorQueryEmbedding && colorQueryEmbedding.length > 0);
+  const runTexture = Boolean(textureQueryEmbedding && textureQueryEmbedding.length > 0);
+  const runMaterial = Boolean(materialQueryEmbedding && materialQueryEmbedding.length > 0);
   const runStyle = Boolean(styleQueryEmbedding && styleQueryEmbedding.length > 0);
   const runPattern = Boolean(patternQueryEmbedding && patternQueryEmbedding.length > 0);
 
@@ -1862,6 +2306,8 @@ export async function searchByImageWithSimilarity(
     "embedding_score_version",
     "embedding_garment_score_version",
     "embedding_color",
+    "embedding_texture",
+    "embedding_material",
     "embedding_style",
     "embedding_pattern",
   ];
@@ -2184,7 +2630,11 @@ export async function searchByImageWithSimilarity(
   const colorSimById = new Map<string, number>();
   const styleSimRawById = new Map<string, number>();
   const colorSimRawById = new Map<string, number>();
+  const textureSimById = new Map<string, number>();
+  const materialSimById = new Map<string, number>();
   const patternSimById = new Map<string, number>();
+  const deepFusionTextById = new Map<string, number>();
+  const deepFusionScoreById = new Map<string, number>();
   const taxonomyMatchById = new Map<string, number>();
   const blipAlignById = new Map<string, number>();
   /** BLIP primary vs catalog palette: multiplier on raw color cosine before fusion. */
@@ -2196,6 +2646,8 @@ export async function searchByImageWithSimilarity(
 
   const wColor = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_COLOR_WEIGHT ?? "220") || 220);
   const wStyle = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_STYLE_WEIGHT ?? "60") || 60);
+  const wTexture = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_TEXTURE_WEIGHT ?? "30") || 30);
+  const wMaterial = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_MATERIAL_WEIGHT ?? "30") || 30);
   const wPattern = Math.max(0, Number(process.env.SEARCH_IMAGE_RERANK_PATTERN_WEIGHT ?? "40") || 40);
   /** Taxonomy alignment within the same category/aisle (YOLO/BLIP seeds vs indexed product_types). */
   const wTypeComposite = Math.max(
@@ -2632,6 +3084,12 @@ export async function searchByImageWithSimilarity(
     const patternSim = runPattern
       ? cosineSimilarity01(patternQueryEmbedding ?? undefined, hit._source?.embedding_pattern)
       : 0;
+    const textureSim = runTexture
+      ? cosineSimilarity01(textureQueryEmbedding ?? undefined, hit._source?.embedding_texture)
+      : 0;
+    const materialSim = runMaterial
+      ? cosineSimilarity01(materialQueryEmbedding ?? undefined, hit._source?.embedding_material)
+      : 0;
     const comp = complianceById.get(idStr);
     const hasStyleIntentForComposite = hasExplicitStyleIntent || hasSoftStyleHint;
     const hasColorIntentForComposite =
@@ -2654,6 +3112,8 @@ export async function searchByImageWithSimilarity(
     styleSimRawById.set(idStr, Math.round(styleSim * 1000) / 1000);
     styleSimById.set(idStr, Math.round(styleSimEff * 1000) / 1000);
     colorSimById.set(idStr, Math.round(colorSimEff * 1000) / 1000);
+    textureSimById.set(idStr, Math.round(textureSim * 1000) / 1000);
+    materialSimById.set(idStr, Math.round(materialSim * 1000) / 1000);
     patternSimById.set(idStr, Math.round(patternSim * 1000) / 1000);
     taxonomyMatchById.set(idStr, categorySoft);
 
@@ -2667,9 +3127,33 @@ export async function searchByImageWithSimilarity(
         typeSoftForComposite * wTypeComposite +
         colorSimEff * wColor +
         styleSimEff * wStyle +
+        textureSim * wTexture +
+        materialSim * wMaterial +
         patternSim * wPattern) *
         attrGate;
     imageCompositeById.set(idStr, composite);
+
+    const deepText = deepFusionTextAlignment01({
+      hit,
+      queryText: textQueryForRelevance,
+      desiredProductTypes,
+      desiredStyles: desiredStyleForRelevance ? [desiredStyleForRelevance] : [],
+      desiredColors: desiredColorsForRelevance,
+      blipSignal,
+    });
+    deepFusionTextById.set(idStr, Math.round(deepText * 1000) / 1000);
+
+    const attrBlend =
+      0.32 * colorSimEff +
+      0.22 * styleSimEff +
+      0.16 * patternSim +
+      0.15 * textureSim +
+      0.15 * materialSim;
+    const deepFusionScore = Math.max(
+      0,
+      Math.min(1, 0.55 * deepText + 0.45 * attrBlend),
+    );
+    deepFusionScoreById.set(idStr, Math.round(deepFusionScore * 1000) / 1000);
   }
   const compositeValues = Array.from(imageCompositeById.values());
   const compositeMin = compositeValues.length > 0 ? Math.min(...compositeValues) : 0;
@@ -2798,7 +3282,17 @@ export async function searchByImageWithSimilarity(
       colorIntentStrength: colorIntentStrengthForFinal,
       partMatchingFactor,
     });
-    comp.finalRelevance01 = Math.min(1, explicitResult.score + subtypeKeywordSignal.boost);
+    const baseFinal = Math.min(1, explicitResult.score + subtypeKeywordSignal.boost);
+    if (imageDeepFusionEnabled()) {
+      const wDeep = imageDeepFusionWeight();
+      const deepFusion = deepFusionScoreById.get(idStr) ?? 0;
+      comp.finalRelevance01 = Math.max(
+        0,
+        Math.min(1, (1 - wDeep) * baseFinal + wDeep * deepFusion),
+      );
+    } else {
+      comp.finalRelevance01 = baseFinal;
+    }
     (comp as any).colorContradictionPenalty = Math.round(colorContradictionPenalty * 1000) / 1000;
     keywordSubtypeBoostById.set(idStr, Math.round(subtypeKeywordSignal.boost * 1000) / 1000);
     keywordSubtypeOverlapById.set(idStr, subtypeKeywordSignal.overlap);
@@ -3384,6 +3878,7 @@ export async function searchByImageWithSimilarity(
     const products = await getProductsByIdsOrdered(productIds);
     const numericIds = productIds.map((id: string) => parseInt(id, 10));
     const imagesByProduct = await getImagesForProducts(numericIds);
+    const userLifestyle = await personalizationPromise;
 
     results = products.map((p: any) => {
       const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
@@ -3395,6 +3890,10 @@ export async function searchByImageWithSimilarity(
       const styleSimRaw = styleSimRawById.get(idStr) ?? styleSim;
       const colorSimRaw = colorSimRawById.get(idStr) ?? colorSim;
       const patternSim = patternSimById.get(idStr) ?? 0;
+      const textureSim = textureSimById.get(idStr) ?? 0;
+      const materialSim = materialSimById.get(idStr) ?? 0;
+      const deepFusionText = deepFusionTextById.get(idStr) ?? 0;
+      const deepFusionScore = deepFusionScoreById.get(idStr) ?? 0;
       const taxonomyMatch = taxonomyMatchById.get(idStr) ?? 0;
       const imageCompositeScore = imageCompositeById.get(idStr) ?? 0;
       const imageCompositeScore01 = imageCompositeNormById.get(idStr) ?? 0;
@@ -3480,6 +3979,27 @@ export async function searchByImageWithSimilarity(
           explainColorTier = authoritativeColor.tier;
         }
       }
+
+      const canApplyPersonalization =
+        finalRelevanceSource === "computed" || finalRelevanceSource === "catalog_color_correction";
+      if (canApplyPersonalization) {
+        const contextBoost01 = scoreImageSearchContext01({
+          product: p,
+          sessionFilters: filters,
+          lifestyle: userLifestyle,
+        });
+        if (contextBoost01 > 0) {
+          const baseRelevance = Math.max(0, finalRelevance01 ?? 0);
+          const personalized = clamp01(Math.max(baseRelevance, baseRelevance * 0.88 + contextBoost01 * 0.12));
+          if (personalized > baseRelevance + 1e-6) {
+            finalRelevance01 = personalized;
+            if (finalRelevanceSource === "computed") {
+              finalRelevanceSource = "context_personalization";
+            }
+          }
+        }
+      }
+
       return {
         ...p,
         // Never overwrite canonical catalog color with query-time matched color.
@@ -3506,6 +4026,10 @@ export async function searchByImageWithSimilarity(
               colorEmbeddingSim: colorSimRaw,
               styleEmbeddingSim: styleSimRaw,
               patternEmbeddingSim: patternSim,
+              textureEmbeddingSim: textureSim,
+              materialEmbeddingSim: materialSim,
+              deepFusionTextAlignment: deepFusionText,
+              deepFusionScore,
 
               // ── Blended effective similarities ───────────────────
               colorSimEffective: colorSim,
@@ -3687,7 +4211,23 @@ export async function searchByImageWithSimilarity(
   const dedupedResults = dedupeImageSearchResults(results as any) as ProductResult[];
   const countAfterDedupe = dedupedResults.length;
   const droppedByDedupe = Math.max(0, results.length - countAfterDedupe);
-  results = dedupedResults.slice(0, limit) as ProductResult[];
+  const variantCollapsingApplied = collapseVariantGroupsRequested !== false;
+  const variantCollapsed = variantCollapsingApplied
+    ? collapseVariantGroups(dedupedResults)
+    : { results: dedupedResults, groupCount: 0, representativeCount: dedupedResults.length };
+  const variantGroupCount = variantCollapsed.groupCount;
+  const variantRepresentativeCount = variantCollapsed.representativeCount;
+  const diversityRerankApplied = imageDiversityRerankEnabled() && variantCollapsed.results.length > 2;
+  const diversityLambda = imageDiversityLambda();
+  const diversityPoolCap = imageDiversityPoolCap();
+  if (diversityRerankApplied) {
+    const head = variantCollapsed.results.slice(0, Math.max(limit, diversityPoolCap));
+    const tail = variantCollapsed.results.slice(Math.max(limit, diversityPoolCap));
+    const rerankedHead = applyImageDiversityRerank(head as ProductResult[], diversityLambda);
+    results = [...rerankedHead, ...tail].slice(0, limit) as ProductResult[];
+  } else {
+    results = variantCollapsed.results.slice(0, limit) as ProductResult[];
+  }
   const finalReturnedCount = results.length;
   const droppedByLimit = Math.max(0, countAfterDedupe - finalReturnedCount);
 
@@ -3809,6 +4349,17 @@ export async function searchByImageWithSimilarity(
       threshold_relaxed: thresholdRelaxed,
       relax_floor_used: relaxFloorUsed,
       image_search_pipeline_degraded: imageSearchPipelineDegraded,
+      deep_fusion_enabled: imageDeepFusionEnabled(),
+      deep_fusion_weight: imageDeepFusionWeight(),
+      diversity_rerank_applied: diversityRerankApplied,
+      diversity_lambda: diversityLambda,
+      diversity_pool_cap: diversityPoolCap,
+      session_id: sessionId,
+      user_id: userId,
+      personalization_applied: personalizationApplied,
+      variant_group_collapsing_applied: variantCollapsingApplied,
+      variant_group_count: variantGroupCount,
+      variant_group_representatives: variantRepresentativeCount,
       relevance_intent: relevanceIntentDebug,
       drops_debug: {
         dropped_by_category_safety: droppedByCategorySafety,
@@ -3842,6 +4393,17 @@ export async function searchByImageWithSimilarity(
       relevance_gate_soft: false,
       image_knn_field: knnFieldResolved,
       debug_raw_cosine_bypass_used: false,
+      deep_fusion_enabled: imageDeepFusionEnabled(),
+      deep_fusion_weight: imageDeepFusionWeight(),
+      diversity_rerank_applied: diversityRerankApplied,
+      diversity_lambda: diversityLambda,
+      diversity_pool_cap: diversityPoolCap,
+      session_id: sessionId,
+      user_id: userId,
+      personalization_applied: personalizationApplied,
+      variant_group_collapsing_applied: variantCollapsingApplied,
+      variant_group_count: variantGroupCount,
+      variant_group_representatives: variantRepresentativeCount,
       pipeline_counts: {
         exact_cosine_rerank: exactCosineRerank,
         dual_knn_fusion: useDualKnn,

@@ -70,6 +70,16 @@ export {
   partEmbeddingsToOsFields,
 } from "./partExtraction";
 
+// Phase 2: Enhanced attribute extraction
+export {
+  extractQueryAttributeEmbeddings,
+  generateFallbackGlobalEmbedding,
+  getAvailableAttributes,
+  getExtractionHealthSummary,
+  type QueryAttributeEmbeddings,
+  type QueryAttributeExtractionResult,
+} from "./queryAttributeExtraction";
+
 // Part cropping (Phase 1)
 export {
   extractPartCropBuffer,

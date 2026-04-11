@@ -8,6 +8,7 @@
 
 import type { ParsedIntent } from "../prompt/gemeni";
 import type { MultiVectorSearchResult } from "../search/multiVectorSearch";
+import type { SemanticAttribute } from "../search/multiVectorSearch";
 
 export interface RerankOptions {
   vectorWeight?: number; // importance of existing vector score
@@ -24,6 +25,22 @@ export interface RerankedResult extends MultiVectorSearchResult {
     price: number;
     recency: number;
   };
+}
+
+export interface IntentRerankDiagnostics {
+  weights: Required<RerankOptions>;
+  intentAttributeWeights: Partial<Record<SemanticAttribute, number>>;
+  scoreStats: {
+    count: number;
+    min: number;
+    max: number;
+    mean: number;
+  };
+}
+
+export interface IntentRerankResponse {
+  results: RerankedResult[];
+  diagnostics: IntentRerankDiagnostics;
 }
 
 /** Match OpenSearch / hybrid raw scores to [0,1] for rerank (same as composite multi-image path). */
@@ -115,13 +132,15 @@ export function intentAwareRerank(
   intent: ParsedIntent,
   options?: RerankOptions
 ): RerankedResult[] {
-  const opts = {
-    vectorWeight: 0.6,
-    attributeWeight: 0.25,
-    priceWeight: 0.1,
-    recencyWeight: 0.05,
-    ...(options || {}),
-  };
+  return intentAwareRerankWithDiagnostics(results, intent, options).results;
+}
+
+export function intentAwareRerankWithDiagnostics(
+  results: MultiVectorSearchResult[],
+  intent: ParsedIntent,
+  options?: RerankOptions
+): IntentRerankResponse {
+  const opts = normalizeRerankOptions(options);
 
   // Determine intent attribute priorities (from parsed intent.imageIntents and constraints)
   const intentAttrWeights = extractIntentAttributeWeights(intent);
@@ -131,7 +150,7 @@ export function intentAwareRerank(
     ? { min: intent.constraints?.priceMin ?? 0, max: intent.constraints?.priceMax ?? Infinity }
     : null;
 
-  return results.map(res => {
+  const reranked = results.map((res) => {
     // Prefer frozen OS/fusion scores when provided (pre-hydration / pre-norm snapshot).
     const vectorComp = clamp01(vectorInputForRerank(res));
 
@@ -163,11 +182,16 @@ export function intentAwareRerank(
     // Recency / availability: boost if in stock
     const recencyComp = (res.product && res.product.availability === 'in_stock') ? 1 : 0;
 
-    const rerankScore =
+    let rerankScore =
       opts.vectorWeight * vectorComp +
       opts.attributeWeight * attributeComp +
       opts.priceWeight * priceComp +
       opts.recencyWeight * recencyComp;
+
+    // Guardrail: keep strong vector matches from being over-penalized by sparse metadata.
+    if (vectorComp >= 0.8 && attributeComp < 0.2) {
+      rerankScore = Math.max(rerankScore, opts.vectorWeight * vectorComp + 0.08);
+    }
 
     const reranked: RerankedResult = {
       ...res,
@@ -181,15 +205,35 @@ export function intentAwareRerank(
     };
 
     return reranked;
-  }).sort((a,b) => b.rerankScore - a.rerankScore);
+  }).sort((a,b) => {
+    if (Math.abs(b.rerankScore - a.rerankScore) > 1e-9) return b.rerankScore - a.rerankScore;
+    const av = Number((a as any)._rawScores?.vectorScore ?? a.score ?? 0);
+    const bv = Number((b as any)._rawScores?.vectorScore ?? b.score ?? 0);
+    if (Math.abs(bv - av) > 1e-9) return bv - av;
+    return String(a.productId).localeCompare(String(b.productId));
+  });
+
+  const scores = reranked.map((r) => r.rerankScore);
+  const diagnostics: IntentRerankDiagnostics = {
+    weights: opts,
+    intentAttributeWeights: intentAttrWeights,
+    scoreStats: {
+      count: scores.length,
+      min: scores.length ? Math.min(...scores) : 0,
+      max: scores.length ? Math.max(...scores) : 0,
+      mean: scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0,
+    },
+  };
+
+  return { results: reranked, diagnostics };
 }
 
 /**
  * Extract attribute weights from parsed intent.
  * - Looks at imageIntents primaryAttributes and any explicit extractedValues
  */
-function extractIntentAttributeWeights(intent: ParsedIntent): Record<string, number> {
-  const weights: Record<string, number> = {};
+function extractIntentAttributeWeights(intent: ParsedIntent): Partial<Record<SemanticAttribute, number>> {
+  const weights: Partial<Record<SemanticAttribute, number>> = {};
 
   if (!intent) return weights;
 
@@ -199,31 +243,27 @@ function extractIntentAttributeWeights(intent: ParsedIntent): Record<string, num
       const w = imgIntent.weight ?? 1;
       if (imgIntent.primaryAttributes && imgIntent.primaryAttributes.length > 0) {
         for (const a of imgIntent.primaryAttributes) {
-          const key = a as string;
-          weights[key] = (weights[key] || 0) + w;
+          const mapped = mapIntentAttributeToSemantic(a);
+          if (!mapped) continue;
+          weights[mapped] = (weights[mapped] || 0) + w;
         }
       }
       // extractedValues may also carry attribute-specific hints
       if ((imgIntent as any).extractedValues) {
         for (const k of Object.keys((imgIntent as any).extractedValues as Record<string, any>)) {
-          weights[k] = (weights[k] || 0) + 1;
+          const mapped = mapIntentAttributeToSemantic(k);
+          if (!mapped) continue;
+          weights[mapped] = (weights[mapped] || 0) + 1;
         }
       }
     }
   }
 
-  // From constraints (e.g., explicit category/brand) - treat as high-level intents
-  if ((intent as any).constraints) {
-    const c: any = (intent as any).constraints;
-    if (c.category) weights['category'] = (weights['category'] || 0) + 2;
-    if (c.brands && c.brands.length > 0) weights['brand'] = (weights['brand'] || 0) + 1;
-  }
-
   // Normalize to sum to 1
-  const total = Object.values(weights).reduce((a,b) => a+b, 0);
+  const total = Object.values(weights).reduce((a,b) => a + (b || 0), 0);
   if (total > 0) {
-    for (const k of Object.keys(weights)) {
-      weights[k] = weights[k] / total;
+    for (const k of Object.keys(weights) as SemanticAttribute[]) {
+      weights[k] = (weights[k] || 0) / total;
     }
   }
 
@@ -231,6 +271,51 @@ function extractIntentAttributeWeights(intent: ParsedIntent): Record<string, num
 }
 
 function clamp01(v: number) { return Math.max(0, Math.min(1, v)); }
+
+function normalizeRerankOptions(options?: RerankOptions): Required<RerankOptions> {
+  const defaults: Required<RerankOptions> = {
+    vectorWeight: 0.6,
+    attributeWeight: 0.25,
+    priceWeight: 0.1,
+    recencyWeight: 0.05,
+  };
+  const raw: Required<RerankOptions> = {
+    vectorWeight: Number(options?.vectorWeight ?? defaults.vectorWeight),
+    attributeWeight: Number(options?.attributeWeight ?? defaults.attributeWeight),
+    priceWeight: Number(options?.priceWeight ?? defaults.priceWeight),
+    recencyWeight: Number(options?.recencyWeight ?? defaults.recencyWeight),
+  };
+  const clamped: Required<RerankOptions> = {
+    vectorWeight: Math.max(0, raw.vectorWeight),
+    attributeWeight: Math.max(0, raw.attributeWeight),
+    priceWeight: Math.max(0, raw.priceWeight),
+    recencyWeight: Math.max(0, raw.recencyWeight),
+  };
+  const sum =
+    clamped.vectorWeight +
+    clamped.attributeWeight +
+    clamped.priceWeight +
+    clamped.recencyWeight;
+  if (!Number.isFinite(sum) || sum <= 0) return defaults;
+  return {
+    vectorWeight: clamped.vectorWeight / sum,
+    attributeWeight: clamped.attributeWeight / sum,
+    priceWeight: clamped.priceWeight / sum,
+    recencyWeight: clamped.recencyWeight / sum,
+  };
+}
+
+function mapIntentAttributeToSemantic(raw: string | undefined): SemanticAttribute | null {
+  const k = String(raw || "").toLowerCase().trim();
+  if (!k) return null;
+  if (k === "overall" || k === "global") return "global";
+  if (k === "color" || k === "colour") return "color";
+  if (k === "texture") return "texture";
+  if (k === "material" || k === "fabric") return "material";
+  if (k === "style" || k === "aesthetic" || k === "vibe") return "style";
+  if (k === "pattern" || k === "print") return "pattern";
+  return null;
+}
 
 /**
  * Convert raw similarity (expected cosine in [-1,1]) to [0,1]

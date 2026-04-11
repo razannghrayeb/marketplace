@@ -124,6 +124,14 @@ export interface ImageSearchParams extends SearchParams {
   inferredColorsByItemConfidence?: Record<string, number>;
   /** Debug path: bypass rerank/final gates and return top-k by raw exact cosine (with existing category constraints). */
   debugRawCosineFirst?: boolean;
+  /** Optional session context used to inherit conversational filters. */
+  sessionId?: string;
+  /** Optional authenticated user used for wardrobe-driven personalization. */
+  userId?: number;
+  /** Optional precomputed session filters to merge into image search. */
+  sessionFilters?: Partial<SearchFilters>;
+  /** When true, merge same variant family into one representative result. */
+  collapseVariantGroups?: boolean;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -161,6 +169,10 @@ export interface ProductResult {
   image_url?: string;
   image_cdn?: string;
   images?: ProductImage[];
+  parent_product_url?: string | null;
+  variant_group_key?: string | null;
+  variant_group_size?: number;
+  variant_group_ids?: string[];
   embedding?: number[]; // Optional vector payload when returned from vector search
   created_at?: string | Date; // Optional for exploration/cold-start logic
   interaction_count?: number; // Optional interaction signal for ranking/boosting
@@ -186,6 +198,14 @@ export interface ProductResult {
     styleEmbeddingSim?: number;
     /** Raw cosine of pattern embedding channel [0,1]. */
     patternEmbeddingSim?: number;
+    /** Raw cosine of texture embedding channel [0,1]. */
+    textureEmbeddingSim?: number;
+    /** Raw cosine of material embedding channel [0,1]. */
+    materialEmbeddingSim?: number;
+    /** Query/doc lexical-intent overlap used in deep fusion [0,1]. */
+    deepFusionTextAlignment?: number;
+    /** Phase 8 deep visual+text fusion score [0,1]. */
+    deepFusionScore?: number;
 
     // ── Blended effective similarities ───────────────────────
     /** Color embedding blended with keyword compliance (attenuated when intent conflicts). */
@@ -349,6 +369,20 @@ export interface SearchResultWithRelated {
     image_knn_field?: string;
     /** True only when raw-cosine debug bypass branch was explicitly used. */
     debug_raw_cosine_bypass_used?: boolean;
+    /** Phase 8 deep fusion toggle + effective blend weight. */
+    deep_fusion_enabled?: boolean;
+    deep_fusion_weight?: number;
+    /** Phase 9 diversity rerank diagnostics. */
+    diversity_rerank_applied?: boolean;
+    diversity_lambda?: number;
+    diversity_pool_cap?: number;
+    /** Session/user personalization and variant handling diagnostics. */
+    session_id?: string;
+    user_id?: number;
+    personalization_applied?: boolean;
+    variant_group_collapsing_applied?: boolean;
+    variant_group_count?: number;
+    variant_group_representatives?: number;
     recall_size?: number;
     final_accept_min?: number;
     /** Floor used after sparse recall when strict gate yields too few hits (≤ `image_min_results_target`). */

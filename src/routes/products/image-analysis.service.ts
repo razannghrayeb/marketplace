@@ -25,6 +25,7 @@ import {
 } from "../../lib/image";
 import { getTextEmbedding, cosineSimilarity } from "../../lib/image/clip";
 import { getRedis } from "../../lib/redis";
+import { getSession } from "../../lib/queryProcessor/conversationalContext";
 import {
   inferAudienceFromCaption,
   inferColorFromCaption,
@@ -216,6 +217,49 @@ function shopLookMinFinalRelevanceThreshold(): number {
   const raw = Number(process.env.SEARCH_IMAGE_SHOP_MIN_FINAL_RELEVANCE ?? "0.4");
   if (!Number.isFinite(raw)) return 0.4;
   return Math.max(0, Math.min(1, raw));
+}
+
+function mergeImageSearchSessionFilters(
+  base: Partial<import("./types").SearchFilters>,
+  sessionFilters?: Record<string, unknown> | null,
+): Partial<import("./types").SearchFilters> {
+  if (!sessionFilters) return base;
+  const merged = { ...base } as Partial<import("./types").SearchFilters>;
+  const lower = (value: unknown): string => String(value ?? "").trim().toLowerCase();
+  const assignIfMissing = <K extends keyof import("./types").SearchFilters>(key: K, value: import("./types").SearchFilters[K]) => {
+    if (merged[key] === undefined || merged[key] === null || merged[key] === "") {
+      merged[key] = value;
+    }
+  };
+
+  if (sessionFilters.brand !== undefined) assignIfMissing("brand", String(sessionFilters.brand));
+  if (sessionFilters.category !== undefined) {
+    assignIfMissing(
+      "category",
+      Array.isArray(sessionFilters.category)
+        ? (sessionFilters.category as string[]).map((item) => String(item))
+        : String(sessionFilters.category),
+    );
+  }
+  if (sessionFilters.color !== undefined) assignIfMissing("color", lower(sessionFilters.color));
+  if (sessionFilters.material !== undefined) assignIfMissing("material", lower(sessionFilters.material));
+  if (sessionFilters.fit !== undefined) assignIfMissing("fit", lower(sessionFilters.fit));
+  if (sessionFilters.style !== undefined) assignIfMissing("style", lower(sessionFilters.style));
+  if (sessionFilters.gender !== undefined) assignIfMissing("gender", lower(sessionFilters.gender));
+  if (sessionFilters.pattern !== undefined) assignIfMissing("pattern", lower(sessionFilters.pattern));
+  if (sessionFilters.ageGroup !== undefined) assignIfMissing("ageGroup", lower(sessionFilters.ageGroup));
+
+  const priceRange = sessionFilters.priceRange as { min?: number; max?: number } | undefined;
+  if (priceRange) {
+    if (merged.minPriceCents === undefined && Number.isFinite(Number(priceRange.min))) {
+      merged.minPriceCents = Math.max(0, Math.floor(Number(priceRange.min)));
+    }
+    if (merged.maxPriceCents === undefined && Number.isFinite(Number(priceRange.max))) {
+      merged.maxPriceCents = Math.max(0, Math.floor(Number(priceRange.max)));
+    }
+  }
+
+  return merged;
 }
 
 /**
@@ -1786,6 +1830,13 @@ export interface AnalyzeOptions {
 
   /** Mark as primary image for product */
   isPrimary?: boolean;
+
+  /** Optional session context for inherited conversational filters. */
+  sessionId?: string;
+  /** Optional authenticated user for personalization boosts. */
+  userId?: number;
+  /** Optional precomputed session filters to merge into image search. */
+  sessionFilters?: Record<string, unknown> | null;
 }
 
 export interface QuickDetectResult {
@@ -1900,6 +1951,9 @@ export interface AnalyzeAndFindSimilarOptions extends AnalyzeOptions {
 
   /** When true, include each detection in `byDetection` even if similarity search returns no products (products may be []). */
   includeEmptyDetectionGroups?: boolean;
+
+  /** Merge same variant family into one representative result per detection. */
+  collapseVariantGroups?: boolean;
 }
 
 export interface FullAnalysisResult extends ImageAnalysisResult {
@@ -2431,6 +2485,13 @@ export class ImageAnalysisService {
       ]);
 
       const filters: Partial<import("./types").SearchFilters> = {};
+      Object.assign(
+        filters,
+        mergeImageSearchSessionFilters(
+          filters,
+          options.sessionFilters ?? (options.sessionId ? (getSession(options.sessionId).accumulatedFilters as Record<string, unknown>) : null),
+        ),
+      );
       // Apply global inferred gender from full-image BLIP as baseline for all detections.
       // Per-detection BLIP can override only if detected with strong confidence.
       if (inferredAudience.gender) {
@@ -2951,6 +3012,13 @@ export class ImageAnalysisService {
         console.log(`[recovery-attempt] detection="${label}" type=footwear_tiny reason="empty + tiny area"`);
         const footwearTerms = hardCategoryTermsForDetection(label, categoryMapping);
         const footwearFilters: Partial<import("./types").SearchFilters> = {};
+        Object.assign(
+          footwearFilters,
+          mergeImageSearchSessionFilters(
+            footwearFilters,
+            options.sessionFilters ?? (options.sessionId ? (getSession(options.sessionId).accumulatedFilters as Record<string, unknown>) : null),
+          ),
+        );
         if (footwearTerms.length > 0) {
           footwearFilters.category = footwearTerms.length === 1 ? footwearTerms[0] : footwearTerms;
         }
@@ -3012,6 +3080,13 @@ export class ImageAnalysisService {
         console.log(`[recovery-attempt] detection="${label}" type=tops_recovery reason="empty + high conf + sufficient area"`);
         const topTerms = hardCategoryTermsForDetection(label, categoryMapping);
         const topFilters: Partial<import("./types").SearchFilters> = {};
+        Object.assign(
+          topFilters,
+          mergeImageSearchSessionFilters(
+            topFilters,
+            options.sessionFilters ?? (options.sessionId ? (getSession(options.sessionId).accumulatedFilters as Record<string, unknown>) : null),
+          ),
+        );
         if (topTerms.length > 0) {
           topFilters.category = topTerms.length === 1 ? topTerms[0] : topTerms;
         }
@@ -3546,6 +3621,13 @@ export class ImageAnalysisService {
         }
 
         const filters: Partial<import("./types").SearchFilters> = {};
+        Object.assign(
+          filters,
+          mergeImageSearchSessionFilters(
+            filters,
+            options.sessionFilters ?? (options.sessionId ? (getSession(options.sessionId).accumulatedFilters as Record<string, unknown>) : null),
+          ),
+        );
         const typeSeedSourceForSelection =
           categoryMapping.productCategory === "tops" &&
             categoryMapping.attributes.sleeveLength === "short"
