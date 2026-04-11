@@ -20,6 +20,7 @@ import { textSearch as enhancedTextSearch } from "../../routes/search/search.ser
 
 import { searchByImageWithSimilarity as legacyImageSearch } from "../../routes/products/products.service";
 import { searchProductsFilteredBrowse } from "./filteredBrowseSearch";
+import { getSession } from "../queryProcessor/conversationalContext";
 
 import {
   processImageForEmbedding,
@@ -94,6 +95,10 @@ export interface UnifiedImageSearchParams {
   inferredColorsByItemConfidence?: Record<string, number>;
   /** Debug path: bypass rerank/final gates in products.service and return top-k raw exact-cosine hits. */
   debugRawCosineFirst?: boolean;
+  sessionId?: string;
+  userId?: number;
+  sessionFilters?: Partial<LegacySearchFilters>;
+  collapseVariantGroups?: boolean;
 }
 
 function filterByFinalRelevance<T extends { finalRelevance01?: number }>(
@@ -311,6 +316,10 @@ export async function searchImage(
     inferredColorsByItem,
     inferredColorsByItemConfidence,
     debugRawCosineFirst,
+    sessionId,
+    userId,
+    sessionFilters,
+    collapseVariantGroups,
   } = params;
 
   if ((!imageEmbedding || imageEmbedding.length === 0) && !imageBuffer) {
@@ -343,6 +352,12 @@ export async function searchImage(
     imageEmbedding && imageEmbedding.length > 0
       ? imageEmbedding
       : await processImageForEmbedding(catalogAlignedBuffer!);
+
+  const inheritedSessionFilters =
+    sessionFilters ?? (sessionId ? (getSession(sessionId).accumulatedFilters as Partial<LegacySearchFilters>) : undefined);
+  const mergedFilters = inheritedSessionFilters
+    ? { ...inheritedSessionFilters, ...filters }
+    : filters;
 
   const inferAislesEnv = () => {
     const v = String(process.env.SEARCH_IMAGE_INFER_YOLO_AISLES ?? "1").toLowerCase();
@@ -396,7 +411,7 @@ export async function searchImage(
         : imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0
           ? imageBuffer
           : undefined,
-    filters: filters as any,
+    filters: mergedFilters as any,
     limit,
     similarityThreshold,
     includeRelated,
@@ -413,6 +428,10 @@ export async function searchImage(
     inferredColorsByItem,
     inferredColorsByItemConfidence,
     debugRawCosineFirst,
+    sessionId,
+    userId,
+    sessionFilters: inheritedSessionFilters as any,
+    collapseVariantGroups,
   } as any);
 
   const metaAny = res.meta as Record<string, unknown> | undefined;

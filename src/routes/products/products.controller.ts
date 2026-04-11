@@ -172,6 +172,8 @@ export async function searchProductsByImage(req: Request, res: Response) {
     const similarityThreshold =
       parseFloat(req.query.threshold as string) || config.clip.imageSimilarityThreshold;
     const includeRelated = req.query.includeRelated !== "false";
+    const sessionId = (req.query.session_id as string) || (req.headers["x-session-id"] as string | undefined);
+    const userId = (req as any).user?.id ?? (req as any).userId;
 
     const file = (req as any).file;
     let embedding: number[] | undefined;
@@ -233,6 +235,8 @@ export async function searchProductsByImage(req: Request, res: Response) {
       includeRelated,
       pHash,
       softProductTypeHints,
+        sessionId,
+        userId,
     });
 
     const rankingMeta = wantsRankingDebug(req)

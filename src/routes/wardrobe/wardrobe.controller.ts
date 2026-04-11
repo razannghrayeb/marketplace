@@ -311,15 +311,13 @@ export async function createItem(req: Request, res: Response, next: NextFunction
       name: derivedName,
       category_id: derivedCategoryId,
       brand: req.body.brand,
-      pattern_id: req.body.pattern_id ? parseInt(req.body.pattern_id, 10) : undefined,
-      material_id: req.body.material_id ? parseInt(req.body.material_id, 10) : undefined,
+      pattern_id: derivedPatternId,
+      material_id: derivedMaterialId,
       audience_gender: parseAudienceGenderBody(req.body.audience_gender) ?? null,
       age_group: parseAgeGroupBody(req.body.age_group) ?? null,
       style_tags: parseTagArrayField(req.body.style_tags) ?? null,
       occasion_tags: parseTagArrayField(req.body.occasion_tags) ?? null,
-      season_tags: parseTagArrayField(req.body.season_tags) ?? null
-      pattern_id: derivedPatternId,
-      material_id: derivedMaterialId
+      season_tags: parseTagArrayField(req.body.season_tags) ?? null,
     });
 
     const audienceGender = parseAudienceGender(req.body.audience_gender ?? req.body.gender);
@@ -647,13 +645,26 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
     const catalogFilter: { audience_gender?: string; age_group?: string } = {};
     if (catalogAudience) catalogFilter.audience_gender = catalogAudience;
     if (catalogAge) catalogFilter.age_group = catalogAge;
-    const audienceOpts = Object.keys(catalogFilter).length > 0 ? catalogFilter : undefined;
+    const requestCatalogFilters =
+      Object.keys(catalogFilter).length > 0 ? catalogFilter : undefined;
 
     const result = hasItems
-      ? await completeLookSuggestions(userId, itemIds!, limit, audienceOpts)
-      : await completeLookSuggestionsForCatalogProducts(userId, productIds, limit, audienceOpts);
-      ? await completeLookSuggestions(userId, itemIds!, limit, { audienceGenderHint, ageGroupHint, occasionHint })
-      : await completeLookSuggestionsForCatalogProducts(userId, productIds, limit, { audienceGenderHint, ageGroupHint, occasionHint });
+      ? await completeLookSuggestions(userId, itemIds!, limit, requestCatalogFilters, {
+          audienceGenderHint,
+          ageGroupHint,
+          occasionHint,
+        })
+      : await completeLookSuggestionsForCatalogProducts(
+          userId,
+          productIds,
+          limit,
+          requestCatalogFilters,
+          {
+            audienceGenderHint,
+            ageGroupHint,
+            occasionHint,
+          },
+        );
     const suggestions = result.suggestions.map((s) => ({
       ...s,
       id: s.product_id,

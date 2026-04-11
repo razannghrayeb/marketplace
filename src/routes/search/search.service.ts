@@ -29,7 +29,11 @@ import {
   MultiVectorSearchConfig
 } from '../../lib/search/multiVectorSearch';
 import { attributeEmbeddings } from '../../lib/search/attributeEmbeddings';
-import { intentAwareRerank, type RerankOptions } from '../../lib/ranker/intentReranker';
+import {
+  intentAwareRerank,
+  intentAwareRerankWithDiagnostics,
+  type RerankOptions,
+} from '../../lib/ranker/intentReranker';
 import { buildFeatureRows, predictWithFallback, isRankerAvailable } from '../../lib/ranker';
 import {
   processQuery as processQueryAST,
@@ -2309,33 +2313,22 @@ export async function multiImageSearch(
   try {
     let multiImageEffectiveFinalMin = config.search.finalAcceptMinImage;
     const prepared = await preprocessMultiImageBuffers(images);
-    const intentParse = await parseMultiImageIntentWithGuards(prepared, userPrompt);
-    const geminiDegraded = intentParse.geminiDegraded;
-    let parsedIntent = intentParse.parsedIntent;
-    const { parsedIntent, geminiDegraded, intentProvider, intentDegradedReason } = await parseMultiImageIntentWithGuards(
+    const {
+      parsedIntent: parsedIntentFromProvider,
+      geminiDegraded,
+      intentProvider,
+      intentDegradedReason,
+    } = await parseMultiImageIntentWithGuards(
       prepared,
       userPrompt,
     );
+    let parsedIntent = parsedIntentFromProvider;
     if (geminiDegraded || intentProvider === "local") {
       await enrichClipOnlyIntentFromImages(parsedIntent, prepared, userPrompt);
     }
     await enrichPromptAnchoredIntentFromImages(parsedIntent, prepared, userPrompt);
     reconcileIntentNegativeCollisions(parsedIntent);
     parsedIntent = applyOrdinalMixMatchToIntent(parsedIntent, prepared.length, userPrompt);
-
-    const imageEmbeddings = await Promise.all(
-      prepared.map((img) => processImageForEmbedding(img)),
-    );
-
-    const compositeQuery = await queryBuilder.buildQuery(parsedIntent, imageEmbeddings);
-    const compositeColorFiltersForRank = compositeQuery.filters.filter((f) => f.attribute === "color");
-
-    if (multiImageUsesImageAnchoredColorPhrasing(userPrompt)) {
-      compositeQuery.filters = compositeQuery.filters.filter((f) => f.attribute !== "color");
-    }
-
-    // Same CLIP text embedding path as text search: bridges language in the prompt to image-indexed vectors.
-    await blendPromptClipIntoCompositeGlobal(compositeQuery, userPrompt, parsedIntent);
 
     // Parse the text prompt before kNN so constraints can widen recall and strict gating can use the same AST.
     // Parse the text prompt before composing query vectors so prompt constraints can
@@ -2364,6 +2357,11 @@ export async function multiImageSearch(
     );
 
     const compositeQuery = await queryBuilder.buildQuery(parsedIntent, imageEmbeddings);
+    const compositeColorFiltersForRank = compositeQuery.filters.filter((f) => f.attribute === "color");
+
+    if (multiImageUsesImageAnchoredColorPhrasing(userPrompt)) {
+      compositeQuery.filters = compositeQuery.filters.filter((f) => f.attribute !== "color");
+    }
 
     // Same CLIP text embedding path as text search: bridges language in the prompt to image-indexed vectors.
     await blendPromptClipIntoCompositeGlobal(compositeQuery, userPrompt, parsedIntent);
@@ -3356,6 +3354,18 @@ export async function multiVectorWeightedSearch(
     gemini_degraded?: boolean;
     intent_provider?: "local" | "gemini";
     intent_degraded_reason?: string;
+    rerank_diagnostics?: {
+      count: number;
+      min: number;
+      max: number;
+      mean: number;
+      weights: {
+        vectorWeight: number;
+        attributeWeight: number;
+        priceWeight: number;
+        recencyWeight: number;
+      };
+    };
   };
 }> {
   const startTime = Date.now();
@@ -3363,13 +3373,16 @@ export async function multiVectorWeightedSearch(
 
   try {
     const prepared = await preprocessMultiImageBuffers(images);
-    const mvIntentParse = await parseMultiImageIntentWithGuards(prepared, userPrompt);
-    const geminiDegraded = mvIntentParse.geminiDegraded;
-    let parsedIntent = mvIntentParse.parsedIntent;
-    const { parsedIntent, geminiDegraded, intentProvider, intentDegradedReason } = await parseMultiImageIntentWithGuards(
+    const {
+      parsedIntent: parsedIntentFromProvider,
+      geminiDegraded,
+      intentProvider,
+      intentDegradedReason,
+    } = await parseMultiImageIntentWithGuards(
       prepared,
       userPrompt,
     );
+    let parsedIntent = parsedIntentFromProvider;
     if (geminiDegraded || intentProvider === "local") {
       await enrichClipOnlyIntentFromImages(parsedIntent, prepared, userPrompt);
     }
@@ -3377,58 +3390,32 @@ export async function multiVectorWeightedSearch(
     reconcileIntentNegativeCollisions(parsedIntent);
     parsedIntent = applyOrdinalMixMatchToIntent(parsedIntent, prepared.length, userPrompt);
 
-    const attributeEmbedList: AttributeEmbedding[] = [];
-
-    if (parsedIntent.imageIntents && parsedIntent.imageIntents.length > 0) {
-      for (const imageIntent of parsedIntent.imageIntents) {
-        const imageBuffer = prepared[imageIntent.imageIndex];
-        if (imageBuffer && imageIntent.primaryAttributes) {
-          for (const attr of imageIntent.primaryAttributes) {
-            const semanticAttr = attr.toLowerCase() as SemanticAttribute;
-            const attrMapping: Record<string, SemanticAttribute> = {
-              color: 'color', texture: 'texture', material: 'material',
-              style: 'style', pattern: 'pattern', overall: 'global', global: 'global',
-            };
-            const mappedAttr = attrMapping[semanticAttr] || 'global';
-            const embedding = await attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, mappedAttr);
-            attributeEmbedList.push({
-              attribute: mappedAttr,
-              vector: embedding,
-              weight: attributeWeights?.[mappedAttr] || imageIntent.weight || (1.0 / parsedIntent.imageIntents.length),
-            });
-          }
-        }
-      }
-    } else {
-      for (let i = 0; i < prepared.length; i++) {
-        const embedding = await processImageForEmbedding(prepared[i]);
-        attributeEmbedList.push({
-          attribute: "global",
-          vector: embedding,
-          weight: attributeWeights?.global || 1.0 / prepared.length,
-        });
-      }
-    }
-
-    const filters = buildFiltersFromIntent(parsedIntent);
+    // Phase 3: Composite query builder (embeddings + filters + search tuning)
+    const phase3Plan = await buildPhase3CompositeSearchPlan({
+      prepared,
+      parsedIntent,
+      limit,
+      attributeWeights,
+    });
 
     const searchEngine = new MultiVectorSearchEngine();
     const searchConfig: MultiVectorSearchConfig = {
-      embeddings: attributeEmbedList,
-      filters,
+      embeddings: phase3Plan.embeddings,
+      filters: phase3Plan.filters,
       size: limit,
       explainScores,
-      baseK: 100,
-      candidateMultiplier: 2.0,
-      minCandidatesPerAttribute: 20,
-      maxTotalCandidates: 1000,
+      baseK: phase3Plan.tuning.baseK,
+      candidateMultiplier: phase3Plan.tuning.candidateMultiplier,
+      minCandidatesPerAttribute: phase3Plan.tuning.minCandidatesPerAttribute,
+      maxTotalCandidates: phase3Plan.tuning.maxTotalCandidates,
     };
 
     const results = await searchEngine.search(searchConfig);
 
     const defaultRerank: RerankOptions = { vectorWeight: 0.6, attributeWeight: 0.3, priceWeight: 0.1, recencyWeight: 0.0 };
     const rerankOpts = Object.assign({}, defaultRerank, request.rerankWeights || {});
-    const reranked = intentAwareRerank(results, parsedIntent, rerankOpts);
+    const rerankResponse = intentAwareRerankWithDiagnostics(results, parsedIntent, rerankOpts);
+    const reranked = rerankResponse.results;
 
     return {
       results: reranked,
@@ -3438,6 +3425,10 @@ export async function multiVectorWeightedSearch(
         ...(geminiDegraded ? { gemini_degraded: true } : {}),
         intent_provider: intentProvider,
         ...(intentDegradedReason ? { intent_degraded_reason: intentDegradedReason } : {}),
+        rerank_diagnostics: {
+          ...rerankResponse.diagnostics.scoreStats,
+          weights: rerankResponse.diagnostics.weights,
+        },
       },
     };
   } catch (error) {
@@ -3524,6 +3515,134 @@ function buildFiltersFromIntent(intent: ParsedIntent): any {
   }
   filters.excludeHidden = true;
   return filters;
+}
+
+type Phase3CompositePlan = {
+  embeddings: AttributeEmbedding[];
+  filters: any;
+  tuning: {
+    baseK: number;
+    candidateMultiplier: number;
+    minCandidatesPerAttribute: number;
+    maxTotalCandidates: number;
+  };
+};
+
+function toSemanticAttribute(rawAttr: string | undefined): SemanticAttribute {
+  const attr = String(rawAttr ?? "").toLowerCase().trim();
+  const map: Record<string, SemanticAttribute> = {
+    global: "global",
+    overall: "global",
+    color: "color",
+    colour: "color",
+    texture: "texture",
+    material: "material",
+    style: "style",
+    pattern: "pattern",
+    print: "pattern",
+  };
+  return map[attr] ?? "global";
+}
+
+function normalizeAttributeEmbeddingWeights(
+  embeddings: AttributeEmbedding[],
+): AttributeEmbedding[] {
+  if (!embeddings.length) return embeddings;
+  const sanitized = embeddings.map((e) => ({
+    ...e,
+    weight: Number.isFinite(e.weight) && e.weight > 0 ? e.weight : 0.01,
+  }));
+  const total = sanitized.reduce((s, e) => s + e.weight, 0);
+  if (!Number.isFinite(total) || total <= 0) {
+    const uniform = 1 / sanitized.length;
+    return sanitized.map((e) => ({ ...e, weight: uniform }));
+  }
+  return sanitized.map((e) => ({ ...e, weight: e.weight / total }));
+}
+
+function buildPhase3SearchTuning(
+  attributeCount: number,
+  imageCount: number,
+  limit: number,
+): Phase3CompositePlan["tuning"] {
+  const safeAttrCount = Math.max(1, attributeCount);
+  const safeImageCount = Math.max(1, imageCount);
+  const safeLimit = Math.min(Math.max(Math.trunc(Number(limit) || 50), 1), 200);
+  const baseK = Math.min(180, Math.max(80, 80 + safeAttrCount * 10 + safeImageCount * 8));
+  const candidateMultiplier = Math.min(3.0, Math.max(1.8, 1.8 + safeAttrCount * 0.12));
+  const minCandidatesPerAttribute = 20;
+  const maxTotalCandidates = Math.min(2000, Math.max(600, safeLimit * 20));
+  return {
+    baseK,
+    candidateMultiplier,
+    minCandidatesPerAttribute,
+    maxTotalCandidates,
+  };
+}
+
+/**
+ * Phase 3 composite query builder for multi-vector search.
+ * Produces weighted attribute embeddings, intent filters, and search tuning knobs.
+ */
+async function buildPhase3CompositeSearchPlan(params: {
+  prepared: Buffer[];
+  parsedIntent: ParsedIntent;
+  limit: number;
+  attributeWeights?: Partial<Record<SemanticAttribute, number>>;
+}): Promise<Phase3CompositePlan> {
+  const { prepared, parsedIntent, limit, attributeWeights } = params;
+  const embeddings: AttributeEmbedding[] = [];
+  const imageIntents = Array.isArray(parsedIntent.imageIntents) ? parsedIntent.imageIntents : [];
+
+  if (imageIntents.length > 0) {
+    for (const imageIntent of imageIntents) {
+      const imageBuffer = prepared[imageIntent.imageIndex];
+      if (!imageBuffer) continue;
+      const attrs: SemanticAttribute[] = (imageIntent.primaryAttributes ?? []).map((a) =>
+        toSemanticAttribute(a),
+      );
+      const dedupedAttrs: SemanticAttribute[] = [
+        ...new Set<SemanticAttribute>(attrs.length ? attrs : ["global"]),
+      ];
+      for (const mappedAttr of dedupedAttrs) {
+        const embedding = await attributeEmbeddings.generateImageAttributeEmbedding(imageBuffer, mappedAttr);
+        embeddings.push({
+          attribute: mappedAttr,
+          vector: embedding,
+          weight:
+            attributeWeights?.[mappedAttr] ??
+            imageIntent.weight ??
+            (1.0 / Math.max(1, imageIntents.length)),
+        });
+      }
+    }
+  }
+
+  // Fail-open fallback: if no attribute plan could be built, use global embeddings per image.
+  if (embeddings.length === 0) {
+    for (let i = 0; i < prepared.length; i++) {
+      const embedding = await processImageForEmbedding(prepared[i]);
+      embeddings.push({
+        attribute: "global",
+        vector: embedding,
+        weight: attributeWeights?.global ?? 1.0 / Math.max(1, prepared.length),
+      });
+    }
+  }
+
+  const normalizedEmbeddings = normalizeAttributeEmbeddingWeights(embeddings);
+  const filters = buildFiltersFromIntent(parsedIntent);
+  const tuning = buildPhase3SearchTuning(
+    normalizedEmbeddings.length,
+    prepared.length,
+    limit,
+  );
+
+  return {
+    embeddings: normalizedEmbeddings,
+    filters,
+    tuning,
+  };
 }
 
 function clampEnv01(raw: string | undefined, fallback: number, max: number): number {
@@ -4175,7 +4294,6 @@ function buildMultiImageSearchHitRelevanceIntent(
   const fromAstColors = imageAnchoredColorPhrase
     ? []
     : (ast.entities.colors ?? []).map((c) => String(c).toLowerCase());
-  const fromAstColors = (ast.entities.colors ?? []).map((c) => String(c).toLowerCase());
   const fromPromptColors = extractPromptColorTerms(rawPrompt);
   const fromImageColors: string[] = [];
   for (const ii of parsedIntent.imageIntents || []) {
@@ -4215,17 +4333,13 @@ function buildMultiImageSearchHitRelevanceIntent(
 
   // When the user names colors in the prompt, those are restrictions — do not dilute with hues from uploads.
   // When they say "color from image N", literal AST colors are unreliable — use embeddings, not bogus tokens.
-  const promptAnchoredColorIntent = !imageAnchoredColorPhrase && fromAstColors.length > 0;
+  const promptAnchoredColorIntent =
+    fromAstColors.length > 0 || fromPromptColors.length > 0 || explicitColorTransferIntent;
   const rerankDesiredColorsRaw = imageAnchoredColorPhrase
     ? []
     : promptAnchoredColorIntent
-      ? [...new Set(fromAstColors.filter(Boolean))]
+      ? [...new Set([...fromAstColors, ...fromPromptColors].filter(Boolean))]
       : [...new Set([...fromAstColors, ...fromImageColors].filter(Boolean))];
-  const promptAnchoredColorIntent =
-    fromAstColors.length > 0 || fromPromptColors.length > 0 || explicitColorTransferIntent;
-  const rerankDesiredColorsRaw = promptAnchoredColorIntent
-    ? [...new Set([...fromAstColors, ...fromPromptColors].filter(Boolean))]
-    : [...new Set([...fromAstColors, ...fromImageColors].filter(Boolean))];
 
   const rerankDesiredColors = [
     ...new Set(

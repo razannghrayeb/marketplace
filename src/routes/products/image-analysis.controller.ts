@@ -186,6 +186,10 @@ router.post(
           ? parseInt(req.query.product_id as string, 10)
           : undefined,
         isPrimary: req.query.is_primary === "true",
+        sessionId: (req.query.session_id as string) || (req.headers["x-session-id"] as string | undefined),
+        userId: Number.isFinite(Number((req.query.user_id as string) || (req as any).userId))
+          ? Number((req.query.user_id as string) || (req as any).userId)
+          : undefined,
       };
 
       const result = await analysisService.analyzeImage(
@@ -311,6 +315,10 @@ router.post(
         filterByDetectedCategory: req.query.filter_category !== "false",
         groupByDetection: req.query.group_by_detection !== "false",
         includeEmptyDetectionGroups: req.query.include_empty_groups === "true",
+        sessionId: (req.query.session_id as string) || (req.headers["x-session-id"] as string | undefined),
+        userId: Number.isFinite(Number((req.query.user_id as string) || (req as any).userId))
+          ? Number((req.query.user_id as string) || (req as any).userId)
+          : undefined,
         preprocessing:
           req.query.enhance_contrast === "true" ||
           req.query.enhance_sharpness === "true" ||

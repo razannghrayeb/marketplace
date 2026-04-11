@@ -159,6 +159,7 @@ export async function getOutfitRecommendations(
     userId ?? 0,
     anchorProductIds,
     retrievalPoolSize,
+    undefined,
     { 
       audienceGenderHint, 
       ageGroupHint,

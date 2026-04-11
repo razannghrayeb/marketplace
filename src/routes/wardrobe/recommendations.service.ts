@@ -739,6 +739,8 @@ type CompleteLookAnchorRow = {
   embedding?: unknown;
   dominant_colors?: Array<{ hex?: string }>;
   name?: string | null;
+  title?: string | null;
+  gender?: string | null;
   image_url?: string | null;
   image_cdn?: string | null;
   category_name?: string | null;
@@ -749,12 +751,6 @@ type CompleteLookAnchorRow = {
 export type CompleteLookCatalogFilters = {
   audience_gender?: string;
   age_group?: string;
-  title?: string | null;
-  gender?: string | null;
-  age_group?: string | null;
-  style_tags?: string[] | null;
-  occasion_tags?: string[] | null;
-  season_tags?: string[] | null;
 };
 
 type AudienceGender = "men" | "women" | "unisex";
@@ -804,7 +800,7 @@ async function runCompleteLookCore(
   userId: number,
   currentItems: CompleteLookAnchorRow[],
   limit: number,
-  catalogFilters?: CompleteLookCatalogFilters
+  catalogFilters: CompleteLookCatalogFilters | undefined,
   completionMode: CompleteLookSuggestionsResult["completionMode"],
   audienceOptions: CompleteLookAudienceOptions = {}
 ): Promise<CompleteLookSuggestionsResult> {
@@ -989,6 +985,7 @@ async function runCompleteLookCore(
         }
         if (catalogFilters?.age_group) {
           f.push({ term: { age_group: catalogFilters.age_group } });
+        }
         if (inferredAudienceGender && inferredAudienceGender !== "unisex") {
           f.push(buildAudienceGenderFilter(inferredAudienceGender));
         }
@@ -1575,11 +1572,7 @@ export async function completeLookSuggestions(
   userId: number,
   currentItemIds: number[],
   limit: number = 10,
-  requestCatalogFilters?: CompleteLookCatalogFilters
-): Promise<CompleteLookSuggestionsResult> {
-  const currentItemsResult = await pg.query(
-    `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, wi.name, wi.image_url, wi.image_cdn,
-            wi.audience_gender, wi.age_group,
+  requestCatalogFilters?: CompleteLookCatalogFilters,
   options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint"> = {}
 ): Promise<CompleteLookSuggestionsResult> {
   const currentItemsResult = await pg.query(
@@ -1611,8 +1604,7 @@ export async function completeLookSuggestions(
         }
       : undefined;
 
-  return runCompleteLookCore(userId, currentItems, limit, effectiveFilters);
-  return await runCompleteLookCore(userId, currentItemsResult.rows as CompleteLookAnchorRow[], limit, "wardrobe", {
+  return await runCompleteLookCore(userId, currentItems, limit, effectiveFilters, "wardrobe", {
     audienceGenderHint: options.audienceGenderHint,
     ageGroupHint: options.ageGroupHint,
     occasionHint: options.occasionHint,
@@ -1626,7 +1618,7 @@ export async function completeLookSuggestionsForCatalogProducts(
   userId: number,
   productIds: number[],
   limit: number = 10,
-  requestCatalogFilters?: CompleteLookCatalogFilters
+  requestCatalogFilters?: CompleteLookCatalogFilters,
   options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint"> & { detectedCategories?: Map<number, string> } = {}
 ): Promise<CompleteLookSuggestionsResult> {
   if (!Array.isArray(productIds) || productIds.length === 0) {
@@ -1659,17 +1651,6 @@ export async function completeLookSuggestionsForCatalogProducts(
     [productIds]
   );
 
-  const currentItems = currentItemsResult.rows as CompleteLookAnchorRow[];
-  const ag = requestCatalogFilters?.audience_gender;
-  const age = requestCatalogFilters?.age_group;
-  const effectiveFilters: CompleteLookCatalogFilters | undefined =
-    ag || age
-      ? {
-          ...(ag ? { audience_gender: ag } : {}),
-          ...(age ? { age_group: age } : {}),
-        }
-      : undefined;
-  return runCompleteLookCore(userId, currentItems, limit, effectiveFilters);
   // Attach detected categories to rows if provided
   const rows = productResult.rows as Array<CompleteLookAnchorRow & { detected_category?: string }>;
   if (options.detectedCategories) {
@@ -1679,7 +1660,17 @@ export async function completeLookSuggestionsForCatalogProducts(
     }
   }
 
-  return await runCompleteLookCore(userId, rows, limit, "catalog-product", {
+  const ag = requestCatalogFilters?.audience_gender;
+  const age = requestCatalogFilters?.age_group;
+  const effectiveFilters: CompleteLookCatalogFilters | undefined =
+    ag || age
+      ? {
+          ...(ag ? { audience_gender: ag } : {}),
+          ...(age ? { age_group: age } : {}),
+        }
+      : undefined;
+
+  return await runCompleteLookCore(userId, rows, limit, effectiveFilters, "catalog-product", {
     audienceGenderHint: options.audienceGenderHint,
     ageGroupHint: options.ageGroupHint,
     occasionHint: options.occasionHint,

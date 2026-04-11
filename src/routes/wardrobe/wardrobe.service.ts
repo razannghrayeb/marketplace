@@ -33,11 +33,6 @@ export interface WardrobeItem {
   attributes_extracted: boolean;
   extraction_version?: string;
   extraction_confidence?: number;
-  audience_gender?: "men" | "women" | "unisex" | null;
-  age_group?: "kids" | "adult" | null;
-  style_tags?: string[];
-  occasion_tags?: string[];
-  season_tags?: string[];
   created_at: Date;
   updated_at: Date;
 }
