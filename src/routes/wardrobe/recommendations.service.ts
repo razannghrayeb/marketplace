@@ -56,6 +56,13 @@ export interface CompleteLookSuggestion extends ProductRecommendation {
     materialAlignment?: number;
 
   };
+  stylistSignals?: {
+    slot?: string;
+    color?: string | null;
+    formalityScore?: number;
+    aesthetic?: string;
+    styleTokens?: string[];
+  };
 }
 
 export interface OutfitSetSuggestion {
@@ -264,6 +271,9 @@ function sourceMatchesSlot(slot: string, source: any): boolean {
   if (slot === "bottoms" && /\b(shoe|shoes|sneaker|boot|heel|loafer|sandal|bag|bags|handbag|tote|clutch|purse|wallet)\b/.test(blob)) {
     return false;
   }
+  if (slot === "bottoms" && /\b(top|tops|shirt|shirts|blouse|blouses|t-?shirt|tee|polo|hoodie|sweater|sweatshirt|cardigan|tank|camisole|knitwear|short sleeves?|long sleeves?)\b/.test(blob)) {
+    return false;
+  }
   if (slot === "tops" && /\b(shoe|shoes|sneaker|boot|heel|loafer|sandal|bag|bags|handbag|tote|clutch|purse|wallet)\b/.test(blob)) {
     return false;
   }
@@ -281,11 +291,19 @@ function sourceMatchesSlot(slot: string, source: any): boolean {
   return true;
 }
 
+function inferStrongTitleSlot(source: any): string | null {
+  const titleSlots = inferSlotsFromFreeText(String(source?.title || ""));
+  if (titleSlots.size === 1) {
+    return Array.from(titleSlots)[0] || null;
+  }
+  return null;
+}
+
 function buildSlotIntentFilter(slot: string): any | null {
   const bagTerms = ["bag", "handbag", "tote", "clutch", "purse", "crossbody", "satchel", "messenger", "shoulder bag", "bucket bag", "hobo bag"];
   const accessoryTerms = ["accessories", "jewelry", "watch", "scarf", "belt", "sunglasses", "hat", "earrings", "necklace", "bracelet", "ring"];
   const outerwearTerms = ["outerwear", "jacket", "coat", "blazer", "cardigan", "parka", "trench", "bomber"];
-  const topTerms = ["top", "tops", "shirt", "shirts", "blouse", "blouses", "t-shirt", "tee", "hoodie", "sweater", "sweatshirt", "cardigan", "tank", "camisole", "polo"];
+  const topTerms = ["top", "tops", "shirt", "shirts", "blouse", "blouses", "t-shirt", "tee", "hoodie", "sweater", "sweatshirt", "cardigan", "tank", "camisole", "polo", "knitwear", "short sleeve", "short sleeves", "long sleeve", "long sleeves"];
   const bottomTerms = ["bottom", "bottoms", "pant", "pants", "trouser", "trousers", "jeans", "joggers", "leggings", "skirt", "skirts", "shorts"];
   const shoeTerms = ["shoe", "shoes", "sneaker", "sneakers", "boot", "boots", "heel", "heels", "loafer", "loafers", "sandal", "sandals", "flat", "flats", "pump", "pumps", "mule", "mules", "trainer", "trainers", "footwear"];
 
@@ -919,6 +937,8 @@ async function runCompleteLookCore(
         for (const hit of hits) {
           const source = hit._source || {};
           if (!sourceMatchesSlot(category, source)) continue;
+          const strongTitleSlot = inferStrongTitleSlot(source);
+          if (strongTitleSlot && strongTitleSlot !== category) continue;
           if (!audienceGenderMatchesForSlot(inferredAudienceGender, source, category, enforceNeutralAudienceWhenUnknown, {
             allowUnknownForBags: false,
           })) continue;
@@ -929,6 +949,10 @@ async function runCompleteLookCore(
           if (!productId || ownedProductIds.has(String(productId))) continue;
 
           const embeddingNorm = Number.isFinite(hit._score) ? Math.min(1, hit._score / maxRawScore) : 0.35;
+          const displayCategory =
+            strongTitleSlot ||
+            normalizeWardrobeCategory(source.category_canonical || source.category) ||
+            category;
           const categoryCompat = computeCategoryCompatibility(
             category,
             currentCategoryList.length > 0 ? currentCategoryList : ["other"]
@@ -972,7 +996,7 @@ async function runCompleteLookCore(
             product_id: productId,
             title: source.title,
             brand: source.brand,
-            category,
+            category: displayCategory,
             price_cents:
               source.price_usd != null && Number.isFinite(Number(source.price_usd))
                 ? Math.round(Number(source.price_usd) * 100)
@@ -990,6 +1014,14 @@ async function runCompleteLookCore(
               patternAlignment: Math.round(patternAlignment * 1000) / 1000,
               materialAlignment: Math.round(materialAlignment * 1000) / 1000,
               formalityAlignment: Math.round(formalityAlignment * 1000) / 1000,
+            },
+            stylistSignals: {
+              slot: displayCategory,
+              color: candidateColor,
+              formalityScore: preferredFormalityToScore(inferCandidateFormality(source)),
+              styleTokens: extractStyleTokensFromText(
+                `${String(source.title || "")} ${String(source.category || "")} ${String(source.attr_style || "")}`
+              ),
             },
           });
         }
@@ -1316,6 +1348,15 @@ async function rerankCompleteLookFashionAware(params: {
       ...s,
       score: final,
       reason: `Add ${String(s.category || categoryNorm)} to complete the look (${reasons.join(", ")})`,
+      stylistSignals: {
+        slot: categoryNorm,
+        color: candidateColor,
+        formalityScore: style.formality,
+        aesthetic: String(style.aesthetic || ""),
+        styleTokens: extractStyleTokensFromText(
+          `${product.title} ${product.category || ""} ${String(style.aesthetic || "")} ${String(style.occasion || "")}`
+        ),
+      },
     };
   }));
 
@@ -2063,6 +2104,8 @@ async function fetchCategoryTopUpSuggestions(params: {
     const matchedSlot =
       params.missingCategories.find((slot) => sourceMatchesSlot(slot, source)) || "accessories";
     if (!params.missingCategories.some((slot) => sourceMatchesSlot(slot, source))) continue;
+    const strongTitleSlot = inferStrongTitleSlot(source);
+    if (strongTitleSlot && strongTitleSlot !== matchedSlot) continue;
     if (!audienceGenderMatchesForSlot(
       params.inferredAudienceGender,
       source,
@@ -2078,7 +2121,7 @@ async function fetchCategoryTopUpSuggestions(params: {
     const productKey = String(productId);
     if (params.ownedProductIds.has(productKey) || params.existingProductIds.has(productKey)) continue;
 
-    const guessedSlot = categoryLabelToSlot(source.category_canonical || source.category);
+    const guessedSlot = strongTitleSlot || categoryLabelToSlot(source.category_canonical || source.category);
     const embeddingNorm = Number.isFinite(hit._score) ? Math.min(1, hit._score / maxRawScore) : 0.52;
     const categoryCompat = computeCategoryCompatibility(
       guessedSlot,
@@ -2108,7 +2151,7 @@ async function fetchCategoryTopUpSuggestions(params: {
       product_id: productId,
       title: source.title,
       brand: source.brand,
-      category: matchedSlot,
+      category: guessedSlot,
       price_cents:
         source.price_usd != null && Number.isFinite(Number(source.price_usd))
           ? Math.round(Number(source.price_usd) * 100)
@@ -2126,6 +2169,14 @@ async function fetchCategoryTopUpSuggestions(params: {
         patternAlignment: Math.round(patternAlignment * 1000) / 1000,
         materialAlignment: Math.round(materialAlignment * 1000) / 1000,
         formalityAlignment: Math.round(formalityAlignment * 1000) / 1000,
+      },
+      stylistSignals: {
+        slot: guessedSlot,
+        color: normalizeColorName(source.color_primary_canonical || source.attr_color),
+        formalityScore: preferredFormalityToScore(inferCandidateFormality(source)),
+        styleTokens: extractStyleTokensFromText(
+          `${String(source.title || "")} ${String(source.category || "")} ${String(source.attr_style || "")}`
+        ),
       },
     });
   }
@@ -2323,6 +2374,9 @@ function buildOutfitSets(
   const walk = (idx: number) => {
     if (idx >= pools.length) {
       const scored = scoreOutfitSet(current, pools.map((p) => p.category));
+      if (scored.coherenceScore < 0.58) {
+        return;
+      }
       results.push(scored);
       return;
     }
@@ -2337,14 +2391,91 @@ function buildOutfitSets(
   return results.sort((a, b) => b.totalScore - a.totalScore).slice(0, 5);
 }
 
+function scoreColorPair(colorA: string | null | undefined, colorB: string | null | undefined): number {
+  const a = normalizeColorName(colorA || undefined);
+  const b = normalizeColorName(colorB || undefined);
+  if (!a || !b) return 0.56;
+  if (a === b) return 0.88;
+  const familyA = COLOR_FAMILIES_BY_NAME[a] || "other";
+  const familyB = COLOR_FAMILIES_BY_NAME[b] || "other";
+  if (familyA === "neutral" || familyB === "neutral") return 0.9;
+  if (familyA === familyB) return 0.82;
+  const complementary: Record<string, string[]> = {
+    blue: ["earth", "red"],
+    green: ["pink", "red"],
+    red: ["blue", "green"],
+    earth: ["blue"],
+    pink: ["green"],
+  };
+  if ((complementary[familyA] || []).includes(familyB)) return 0.75;
+  return 0.45;
+}
+
+function scoreStyleTokenOverlap(a: string[] | undefined, b: string[] | undefined): number {
+  const aa = new Set((a || []).map((x) => String(x || "").toLowerCase().trim()).filter(Boolean));
+  const bb = new Set((b || []).map((x) => String(x || "").toLowerCase().trim()).filter(Boolean));
+  if (aa.size === 0 || bb.size === 0) return 0.62;
+  let overlap = 0;
+  for (const t of aa) {
+    if (bb.has(t)) overlap += 1;
+  }
+  const union = aa.size + bb.size - overlap;
+  if (union <= 0) return 0.62;
+  const jaccard = overlap / union;
+  return 0.44 + jaccard * 0.56;
+}
+
+function extractFormalityScore(item: CompleteLookSuggestion): number {
+  if (Number.isFinite(item.stylistSignals?.formalityScore)) {
+    return Number(item.stylistSignals?.formalityScore);
+  }
+  const aligned = Number(item.fitBreakdown?.formalityAlignment);
+  if (Number.isFinite(aligned)) {
+    return 2.5 + aligned * 6;
+  }
+  return 5;
+}
+
 function scoreOutfitSet(items: CompleteLookSuggestion[], categories: string[]): OutfitSetSuggestion {
   const avgItemScore = items.reduce((sum, item) => sum + item.score, 0) / Math.max(items.length, 1);
   const avgColorHarmony =
     items.reduce((sum, i) => sum + (i.fitBreakdown?.colorHarmony ?? 0.6), 0) /
     Math.max(items.length, 1);
 
-  const coherenceScore = Math.round((avgItemScore * 0.75 + avgColorHarmony * 0.25) * 1000) / 1000;
-  const reasons = [`balanced across ${categories.join(", ")}`, "ranked by style+compatibility+color"];
+  const pairScores: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      const left = items[i];
+      const right = items[j];
+      const leftSlot = normalizeWardrobeCategory(left.stylistSignals?.slot || left.category) || "accessories";
+      const rightSlot = normalizeWardrobeCategory(right.stylistSignals?.slot || right.category) || "accessories";
+
+      const categoryCompat = Math.min(
+        computeCategoryCompatibility(leftSlot, [rightSlot]),
+        computeCategoryCompatibility(rightSlot, [leftSlot])
+      );
+      const colorPair = scoreColorPair(left.stylistSignals?.color, right.stylistSignals?.color);
+      const formalityPair = scoreFormalityCompatibility(extractFormalityScore(left), extractFormalityScore(right));
+      const stylePair = scoreStyleTokenOverlap(left.stylistSignals?.styleTokens, right.stylistSignals?.styleTokens);
+      const pairScore =
+        categoryCompat * 0.34 +
+        colorPair * 0.26 +
+        formalityPair * 0.24 +
+        stylePair * 0.16;
+      pairScores.push(pairScore);
+    }
+  }
+
+  const avgPairScore =
+    pairScores.length > 0 ? pairScores.reduce((sum, v) => sum + v, 0) / pairScores.length : 0.62;
+
+  const coherenceScore = Math.round((avgItemScore * 0.58 + avgPairScore * 0.32 + avgColorHarmony * 0.1) * 1000) / 1000;
+  const reasons = [`balanced across ${categories.join(", ")}`, "ranked by pairwise stylist compatibility"];
+  if (avgPairScore < 0.62) {
+    reasons.push("pairwise coherence is moderate");
+  } else {
+    reasons.push("pairwise coherence is strong");
+  }
 
   return {
     productIds: items.map((i) => i.product_id),
