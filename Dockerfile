@@ -19,6 +19,7 @@ ENV HF_HUB_DOWNLOAD_TIMEOUT=240
 ENV HF_HUB_ETAG_TIMEOUT=60
 RUN pip install --no-cache-dir huggingface_hub hf_transfer
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
+RUN test -n "${HF_TOKEN}" || (echo "ERROR: HF_TOKEN is required for reliable model download. Pass --build-arg HF_TOKEN=..." && exit 1)
 RUN set -eux; \
   attempts=8; \
   for attempt in $(seq 1 ${attempts}); do \

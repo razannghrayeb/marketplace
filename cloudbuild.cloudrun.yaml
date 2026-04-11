@@ -32,6 +32,10 @@ steps:
         if [ -n "${HF_TOKEN:-}" ]; then
           HF_TOKEN_VALUE="${HF_TOKEN}"
         fi
+        if [ -z "${HF_TOKEN_VALUE}" ]; then
+          echo "ERROR: HF token is missing. Configure Secret Manager secret 'hf-token' or pass _HF_TOKEN substitution." >&2
+          exit 1
+        fi
 
         docker build \
           --build-arg HF_TOKEN="${HF_TOKEN_VALUE}" \
