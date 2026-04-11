@@ -61,7 +61,7 @@ export interface TryOnBatchResult {
 export interface TryOnOptions {
   garmentDescription?: string;
   category?: "upper_body" | "lower_body" | "dresses";
-  numberOfImages?: number;     // Vertex AI param (default 1)
+  numberOfImages?: number;     // Vertex AI `sampleCount` (1..4)
 }
 
 // ============================================================================
@@ -171,23 +171,15 @@ export class TryOnClient {
 
     const sampleCount = Math.min(4, Math.max(1, options.numberOfImages ?? 1));
     const cfg = config.tryon;
-
     const parameters: Record<string, unknown> = {
       sampleCount,
-      baseSteps: cfg.baseSteps,
-      addWatermark: cfg.addWatermark,
-      personGeneration: cfg.personGeneration,
-      safetySetting: cfg.safetySetting,
     };
     if (cfg.storageUri) {
       parameters.storageUri = cfg.storageUri;
     }
-    if (cfg.outputMimeType) {
-      parameters.outputOptions = { mimeType: cfg.outputMimeType };
-    }
 
     // Vertex AI Virtual Try-On — publishers/google/models/MODEL:predict
-    // https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/virtual-try-on-api
+    // https://cloud.google.com/vertex-ai/generative-ai/docs/image/generate-virtual-try-on-images
     const body = {
       instances: [
         {
