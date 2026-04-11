@@ -1,12 +1,12 @@
 'use client'
 
 import { useSearchParams } from 'next/navigation'
-import { Suspense, useState, useCallback, useEffect } from 'react'
+import { Suspense, useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery, useInfiniteQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import Link from 'next/link'
 import NextImage from 'next/image'
-import { Search, Image, Sparkles, Layers, Camera, Upload, TrendingUp, ArrowRight, Shirt, Palette, Zap, Eye, ChevronDown } from 'lucide-react'
+import { Search, Image, Sparkles, Layers, Camera, Upload, TrendingUp, ArrowRight, Shirt, Palette, Zap, Eye, ChevronDown, ScanSearch } from 'lucide-react'
 import { api } from '@/lib/api/client'
 import { endpoints } from '@/lib/api/endpoints'
 import { ProductCard } from '@/components/product/ProductCard'
@@ -166,10 +166,34 @@ function toProducts(results: unknown[]): Product[] {
     })
 }
 
+interface DetectionBox {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+}
+
+interface DetectionMeta {
+  label?: string
+  confidence?: number
+  box?: DetectionBox
+  area_ratio?: number
+  style?: { occasion?: string; aesthetic?: string; formality?: number }
+}
+
 interface DetectionGroup {
-  detection?: { label?: string; confidence?: number }
+  detection?: DetectionMeta
   category?: string
   products: Product[]
+  count?: number
+  detectionIndex?: number
+}
+
+interface ShopTheLookStats {
+  totalDetections: number
+  coveredDetections: number
+  emptyDetections: number
+  coverageRatio: number
 }
 
 const CATEGORY_STYLES: Record<string, { icon: typeof Shirt; gradient: string; bg: string }> = {
@@ -189,123 +213,388 @@ function formatDetectionLabel(label: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
-function dedupeGroups(groups: DetectionGroup[]): DetectionGroup[] {
-  const merged = new Map<string, DetectionGroup>()
-  for (const g of groups) {
-    const key = g.category || g.detection?.label || 'unknown'
-    const existing = merged.get(key)
-    if (existing) {
-      const seenIds = new Set(
-        toProducts(existing.products as unknown as unknown[]).map((p) => p.id),
-      )
-      const newProducts = toProducts(g.products as unknown as unknown[]).filter(
-        (p) => !seenIds.has(p.id),
-      )
-      existing.products = [...existing.products, ...newProducts as unknown as Product[]]
-    } else {
-      merged.set(key, { ...g })
-    }
-  }
-  return Array.from(merged.values())
+function formatConfidence(confidence: number | undefined): string | null {
+  if (confidence == null || !Number.isFinite(confidence)) return null
+  const pct = confidence <= 1 ? Math.round(confidence * 100) : Math.round(confidence)
+  return `${Math.min(100, Math.max(0, pct))}%`
 }
+
+function boxStylePercents(box: DetectionBox, refW: number, refH: number) {
+  const w = Math.max(1, refW)
+  const h = Math.max(1, refH)
+  const left = Math.max(0, Math.min(100, (box.x1 / w) * 100))
+  const top = Math.max(0, Math.min(100, (box.y1 / h) * 100))
+  const width = Math.max(0, Math.min(100 - left, ((box.x2 - box.x1) / w) * 100))
+  const height = Math.max(0, Math.min(100 - top, ((box.y2 - box.y1) / h) * 100))
+  return { left, top, width, height }
+}
+
+const DETECTION_PALETTE = [
+  { border: 'border-fuchsia-500', fill: 'bg-fuchsia-500/25', ring: 'ring-fuchsia-400/90', bar: 'border-l-fuchsia-500', chip: 'bg-fuchsia-600' },
+  { border: 'border-sky-500', fill: 'bg-sky-500/25', ring: 'ring-sky-400/90', bar: 'border-l-sky-500', chip: 'bg-sky-600' },
+  { border: 'border-amber-500', fill: 'bg-amber-500/25', ring: 'ring-amber-400/90', bar: 'border-l-amber-500', chip: 'bg-amber-600' },
+  { border: 'border-emerald-500', fill: 'bg-emerald-500/25', ring: 'ring-emerald-400/90', bar: 'border-l-emerald-500', chip: 'bg-emerald-600' },
+  { border: 'border-violet-500', fill: 'bg-violet-500/25', ring: 'ring-violet-400/90', bar: 'border-l-violet-500', chip: 'bg-violet-600' },
+  { border: 'border-rose-500', fill: 'bg-rose-500/25', ring: 'ring-rose-400/90', bar: 'border-l-rose-500', chip: 'bg-rose-600' },
+] as const
 
 const SHOP_THE_LOOK_INITIAL = 6
 const SHOP_THE_LOOK_STEP = 6
 
-function ShopTheLookResults({ groups, outfitImageUrl }: { groups: DetectionGroup[]; outfitImageUrl: string }) {
+function ShopTheLookResults({
+  groups,
+  outfitImageUrl,
+  imageMeta,
+  shopTheLookStats,
+}: {
+  groups: DetectionGroup[]
+  outfitImageUrl: string
+  imageMeta?: { width: number; height: number }
+  shopTheLookStats?: ShopTheLookStats
+}) {
   const [visibleByKey, setVisibleByKey] = useState<Record<string, number>>({})
-  const deduped = dedupeGroups(groups.filter((g) => g.products && g.products.length > 0))
-  if (deduped.length === 0) return null
+  const [imgNatural, setImgNatural] = useState<{ w: number; h: number } | null>(null)
+  const [activeIdx, setActiveIdx] = useState<number | null>(null)
+  const [selectedIdx, setSelectedIdx] = useState<number | null>(null)
+  const sectionRefs = useRef<(HTMLElement | null)[]>([])
+
+  const rows = groups.filter((g) => g.products && g.products.length > 0)
+  if (rows.length === 0) return null
+
+  useEffect(() => {
+    setSelectedIdx(null)
+    setActiveIdx(null)
+    sectionRefs.current = []
+  }, [outfitImageUrl])
+
+  const refW = imgNatural?.w ?? imageMeta?.width ?? 0
+  const refH = imgNatural?.h ?? imageMeta?.height ?? 0
+  const canDrawBoxes = refW > 0 && refH > 0
+
+  const displayIndices =
+    selectedIdx !== null && selectedIdx >= 0 && selectedIdx < rows.length
+      ? [selectedIdx]
+      : rows.map((_, i) => i)
+
+  const focusDetection = useCallback((i: number) => {
+    setSelectedIdx((cur) => {
+      const next = cur === i ? null : i
+      if (next !== null) {
+        requestAnimationFrame(() => {
+          sectionRefs.current[i]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+        })
+      }
+      return next
+    })
+  }, [])
+
+  const boxHighlight = (i: number) => selectedIdx === i || (selectedIdx === null && activeIdx === i)
+  const boxDimmed = (i: number) => selectedIdx !== null && selectedIdx !== i
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }}>
-      <div className="grid lg:grid-cols-[320px_1fr] gap-8 lg:gap-12">
-        {/* ── Left column: outfit image (sticky on desktop) ── */}
+      {/* YOLO-aligned category strip: model label + catalog category per detection */}
+      <div className="mb-6 rounded-2xl border border-neutral-200/80 bg-white/90 backdrop-blur-sm px-3 py-3 sm:px-4 shadow-sm">
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <p className="text-xs font-bold text-neutral-800 tracking-tight">Shop by detection</p>
+          {selectedIdx !== null ? (
+            <button
+              type="button"
+              onClick={() => setSelectedIdx(null)}
+              className="text-[11px] font-semibold text-violet-600 hover:text-violet-700 shrink-0"
+            >
+              Show all
+            </button>
+          ) : null}
+        </div>
+        <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1" role="tablist" aria-label="Detected fashion items">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={selectedIdx === null}
+            onClick={() => setSelectedIdx(null)}
+            className={`shrink-0 rounded-xl px-3 py-2 text-left text-xs font-semibold transition-all border ${
+              selectedIdx === null
+                ? 'border-violet-400 bg-violet-50 text-violet-900 shadow-sm'
+                : 'border-neutral-200 bg-neutral-50/80 text-neutral-600 hover:border-violet-200 hover:bg-violet-50/50'
+            }`}
+          >
+            All items
+            <span className="block text-[10px] font-normal text-neutral-500 mt-0.5">{rows.length} regions</span>
+          </button>
+          {rows.map((group, i) => {
+            const yoloLabel = formatDetectionLabel(String(group.detection?.label || group.category || 'Item'))
+            const catalog =
+              group.category && String(group.category) !== String(group.detection?.label)
+                ? formatDetectionLabel(String(group.category))
+                : null
+            const pal = DETECTION_PALETTE[i % DETECTION_PALETTE.length]
+            const n = toProducts(group.products as unknown[]).filter(
+              (p, idx, arr) => arr.findIndex((x) => x.id === p.id) === idx,
+            ).length
+            const pressed = selectedIdx === i
+            return (
+              <button
+                key={`det-chip-${i}-${group.detectionIndex ?? ''}`}
+                type="button"
+                role="tab"
+                aria-selected={pressed}
+                onClick={() => focusDetection(i)}
+                className={`shrink-0 min-w-[140px] max-w-[200px] rounded-xl px-3 py-2 text-left text-xs font-semibold transition-all border ${
+                  pressed
+                    ? `${pal.border} bg-white text-neutral-900 shadow-md ring-2 ring-offset-1 ring-offset-white ${pal.ring}`
+                    : 'border-neutral-200 bg-white/80 text-neutral-700 hover:border-violet-200 hover:shadow-sm'
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${pal.chip}`} aria-hidden />
+                  <span className="truncate">{yoloLabel}</span>
+                  <span
+                    className={`ml-auto shrink-0 text-[10px] font-bold tabular-nums px-1.5 py-0.5 rounded-md ${
+                      pressed ? 'bg-violet-100 text-violet-800' : 'bg-neutral-100 text-neutral-500'
+                    }`}
+                  >
+                    {n}
+                  </span>
+                </span>
+                {catalog ? (
+                  <span className="mt-1 block text-[10px] font-medium text-neutral-500 truncate pl-4">
+                    Category · {catalog}
+                  </span>
+                ) : (
+                  <span className="mt-1 block text-[10px] text-neutral-400 pl-4">Tap for similar picks</span>
+                )}
+              </button>
+            )
+          })}
+        </div>
+        {selectedIdx !== null && rows[selectedIdx] ? (
+          <p className="mt-2 text-[11px] text-neutral-500">
+            Showing similar products for{' '}
+            <span className="font-semibold text-neutral-800">
+              {formatDetectionLabel(String(rows[selectedIdx].detection?.label || rows[selectedIdx].category || 'item'))}
+            </span>
+            {rows[selectedIdx].category ? (
+              <>
+                {' '}
+                · catalog{' '}
+                <span className="font-medium">{formatDetectionLabel(String(rows[selectedIdx].category))}</span>
+              </>
+            ) : null}
+          </p>
+        ) : (
+          <p className="mt-2 text-[11px] text-neutral-400">
+            Select a detection to focus that region on the photo and see only its matches.
+          </p>
+        )}
+      </div>
+
+      <div
+        className="grid lg:grid-cols-[minmax(0,340px)_1fr] gap-8 lg:gap-12"
+        onMouseLeave={() => setActiveIdx(null)}
+      >
+        {/* ── Left: outfit + YOLO boxes (intrinsic aspect, boxes in image pixel space) ── */}
         <div className="lg:sticky lg:top-24 lg:self-start flex flex-col items-center">
           <motion.div
-            initial={{ opacity: 0, scale: 0.92 }}
+            initial={{ opacity: 0, scale: 0.96 }}
             animate={{ opacity: 1, scale: 1 }}
-            transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-            className="relative w-full max-w-[280px]"
+            transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+            className="relative w-full max-w-[340px]"
           >
-            <div className="absolute -inset-3 rounded-3xl bg-gradient-to-br from-violet-400 via-fuchsia-400 to-rose-400 opacity-20 blur-xl" />
-            <div className="relative aspect-[3/4] rounded-2xl overflow-hidden ring-2 ring-white shadow-2xl shadow-violet-500/15">
-              <img src={outfitImageUrl} alt="Your outfit" className="w-full h-full object-cover" />
+            <div className="absolute -inset-3 rounded-3xl bg-gradient-to-br from-violet-400/30 via-fuchsia-400/25 to-sky-400/20 blur-xl" />
+            <div className="relative rounded-2xl overflow-hidden ring-2 ring-white shadow-2xl shadow-violet-500/15 bg-neutral-900/[0.03]">
+              <div className="relative inline-block w-full">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={outfitImageUrl}
+                  alt="Your outfit — detected regions highlighted"
+                  className="w-full h-auto max-h-[min(72vh,520px)] object-contain object-top bg-neutral-950/[0.04] block"
+                  onLoad={(e) => {
+                    const el = e.currentTarget
+                    setImgNatural({ w: el.naturalWidth, h: el.naturalHeight })
+                  }}
+                />
+                {canDrawBoxes &&
+                  rows.map((group, i) => {
+                    const box = group.detection?.box
+                    if (
+                      !box ||
+                      ![box.x1, box.y1, box.x2, box.y2].every((n) => typeof n === 'number' && Number.isFinite(n))
+                    ) {
+                      return null
+                    }
+                    const pal = DETECTION_PALETTE[i % DETECTION_PALETTE.length]
+                    const { left, top, width, height } = boxStylePercents(box, refW, refH)
+                    if (width <= 0 || height <= 0) return null
+                    const label = group.detection?.label || group.category || 'Item'
+                    const hi = boxHighlight(i)
+                    const dim = boxDimmed(i)
+                    return (
+                      <button
+                        key={`box-${i}`}
+                        type="button"
+                        aria-label={`Select region: ${formatDetectionLabel(String(label))}`}
+                        aria-pressed={selectedIdx === i}
+                        className={`absolute rounded-md border-2 transition-all duration-200 ${pal.border} ${pal.fill} ${
+                          hi ? `ring-2 ${pal.ring} ring-offset-2 ring-offset-white/90 scale-[1.02] z-10` : 'hover:opacity-100'
+                        } ${dim ? 'opacity-40' : 'opacity-90'}`}
+                        style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%` }}
+                        onClick={() => focusDetection(i)}
+                        onMouseEnter={() => setActiveIdx(i)}
+                        onFocus={() => setActiveIdx(i)}
+                        onBlur={() => setActiveIdx((cur) => (cur === i ? null : cur))}
+                      />
+                    )
+                  })}
+              </div>
             </div>
           </motion.div>
 
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.2 }}
-            className="mt-5 text-center"
+            transition={{ delay: 0.15 }}
+            className="mt-5 w-full max-w-[340px] space-y-3"
           >
-            <span className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-500 text-white text-xs font-bold shadow-lg shadow-violet-500/25">
-              <Sparkles className="w-3.5 h-3.5" />
-              {deduped.length} item{deduped.length > 1 ? 's' : ''} detected
-            </span>
-            <p className="text-xs text-neutral-400 mt-2">AI-detected clothing items with similar products</p>
+            <div className="flex flex-wrap items-center gap-2 justify-center">
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-neutral-900 text-white text-[11px] font-bold">
+                <ScanSearch className="w-3.5 h-3.5" />
+                {rows.length} region{rows.length !== 1 ? 's' : ''} with matches
+              </span>
+              {shopTheLookStats && shopTheLookStats.totalDetections > 0 ? (
+                <span className="text-[11px] text-neutral-500 font-medium">
+                  {shopTheLookStats.coveredDetections}/{shopTheLookStats.totalDetections} detections matched
+                  {shopTheLookStats.coverageRatio != null && Number.isFinite(shopTheLookStats.coverageRatio)
+                    ? ` · ${Math.round(shopTheLookStats.coverageRatio * 100)}% coverage`
+                    : ''}
+                </span>
+              ) : null}
+            </div>
+            <p className="text-center text-[11px] text-neutral-400 leading-relaxed px-1">
+              Boxes match YOLO regions. Use the chips above or tap a box to show only that item&apos;s matches.
+            </p>
           </motion.div>
         </div>
 
-        {/* ── Right column: category sections ── */}
-        <div className="space-y-10 min-w-0">
-          {deduped.map((group, i) => {
+        {/* ── Right: panels per detection (all, or single when a category chip is selected) ── */}
+        <div className="space-y-8 min-w-0">
+          {displayIndices.map((i) => {
+            const group = rows[i]
             const label = group.detection?.label || group.category || 'Item'
-            const formatted = formatDetectionLabel(label)
+            const formatted = formatDetectionLabel(String(label))
             const catKey = group.category || 'default'
             const style = CATEGORY_STYLES[catKey] || CATEGORY_STYLES.default
             const Icon = style.icon
+            const pal = DETECTION_PALETTE[i % DETECTION_PALETTE.length]
+            const confStr = formatConfidence(group.detection?.confidence)
+            const st = group.detection?.style
+            const areaPct =
+              group.detection?.area_ratio != null && Number.isFinite(group.detection.area_ratio)
+                ? `${Math.round(Math.min(1, Math.max(0, group.detection.area_ratio)) * 100)}%`
+                : null
 
             const parsed = toProducts(group.products as unknown as unknown[])
             const seen = new Set<number>()
-            const unique = parsed.filter((p) => { if (seen.has(p.id)) return false; seen.add(p.id); return true })
+            const unique = parsed.filter((p) => {
+              if (seen.has(p.id)) return false
+              seen.add(p.id)
+              return true
+            })
             if (unique.length === 0) return null
 
-            const sectionKey = `${catKey}-${i}-${group.detection?.label ?? ''}`
+            const sectionKey = `stl-${group.detectionIndex ?? i}-${i}`
             const visibleCap = visibleByKey[sectionKey] ?? SHOP_THE_LOOK_INITIAL
             const visibleProducts = unique.slice(0, visibleCap)
             const hasMoreInSection = unique.length > visibleProducts.length
+            const sectionActive = selectedIdx === i || (selectedIdx === null && activeIdx === i)
 
             return (
               <motion.section
-                key={`${catKey}-${i}-${group.detection?.label ?? ''}-${group.detection?.confidence ?? 0}`}
-                initial={{ opacity: 0, y: 20 }}
+                key={sectionKey}
+                ref={(el) => {
+                  sectionRefs.current[i] = el
+                }}
+                initial={{ opacity: 0, y: 16 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.15 + i * 0.1, duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+                transition={{ delay: 0.08 + i * 0.06, duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+                className={`rounded-2xl border border-neutral-200/80 bg-white/90 backdrop-blur-sm pl-4 pr-4 pt-4 pb-5 shadow-sm transition-shadow duration-200 border-l-4 ${pal.bar} ${
+                  sectionActive ? 'shadow-lg shadow-violet-500/10 ring-1 ring-violet-200/80' : ''
+                }`}
+                onMouseEnter={() => setActiveIdx(i)}
               >
-                {/* Section header */}
-                <div className="flex items-center justify-between mb-5">
-                  <div className="flex items-center gap-3">
-                    <div className={`w-9 h-9 rounded-xl bg-gradient-to-br ${style.gradient} flex items-center justify-center shadow-md`}>
-                      <Icon className="w-4.5 h-4.5 text-white" />
-                    </div>
-                    <div>
+                <div className="flex flex-wrap items-start gap-3 mb-4">
+                  <div
+                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br ${style.gradient} text-white shadow-md`}
+                  >
+                    <Icon className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
                       <h3 className="text-base font-bold text-neutral-900">{formatted}</h3>
-                      <p className="text-[11px] text-neutral-400">
-                        {unique.length} similar product{unique.length !== 1 ? 's' : ''} found
-                        {visibleProducts.length < unique.length ? ` · showing ${visibleProducts.length}` : ''}
-                      </p>
+                      <span className={`text-[10px] font-bold uppercase tracking-wide text-white px-2 py-0.5 rounded-md ${pal.chip}`}>
+                        #{i + 1}
+                      </span>
+                      {group.category ? (
+                        <span className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">
+                          Catalog · {formatDetectionLabel(String(group.category))}
+                        </span>
+                      ) : null}
                     </div>
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-neutral-500">
+                      {confStr != null ? <span>Confidence {confStr}</span> : null}
+                      {areaPct != null ? <span>Area {areaPct} of frame</span> : null}
+                      {typeof group.count === 'number' ? <span>API count {group.count}</span> : null}
+                    </div>
+                    {(st?.occasion || st?.aesthetic || st?.formality != null) && (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {st.occasion ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-neutral-100 text-neutral-600 font-medium">
+                            {st.occasion}
+                          </span>
+                        ) : null}
+                        {st.aesthetic ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-neutral-100 text-neutral-600 font-medium">
+                            {st.aesthetic}
+                          </span>
+                        ) : null}
+                        {st.formality != null && Number.isFinite(st.formality) ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-neutral-100 text-neutral-600 font-medium">
+                            Formality {st.formality}/10
+                          </span>
+                        ) : null}
+                      </div>
+                    )}
+                    <p className="text-[11px] text-neutral-400 mt-2">
+                      {unique.length} similar product{unique.length !== 1 ? 's' : ''}
+                      {visibleProducts.length < unique.length ? ` · showing ${visibleProducts.length}` : ''}
+                    </p>
                   </div>
                 </div>
 
-                {/* Product cards grid */}
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                   {visibleProducts.map((product, j) => {
                     const imgUrl = product.image_cdn || product.image_url || ''
-                    const cents = typeof product.price_cents === 'string' ? parseInt(product.price_cents, 10) : product.price_cents
-                    const price = cents > 0
-                      ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0 }).format(cents / 100)
-                      : null
+                    const cents =
+                      typeof product.price_cents === 'string' ? parseInt(product.price_cents, 10) : product.price_cents
+                    const price =
+                      cents > 0
+                        ? new Intl.NumberFormat('en-US', {
+                            style: 'currency',
+                            currency: 'USD',
+                            minimumFractionDigits: 0,
+                          }).format(cents / 100)
+                        : null
                     return (
                       <motion.div
                         key={product.id}
-                        initial={{ opacity: 0, y: 12 }}
+                        initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: 0.2 + i * 0.1 + j * 0.04, duration: 0.35 }}
+                        transition={{ delay: 0.12 + i * 0.05 + j * 0.03, duration: 0.3 }}
                       >
-                        <Link href={`/products/${product.id}`} className="group block rounded-2xl bg-white border border-neutral-200/80 overflow-hidden shadow-sm hover:shadow-xl hover:shadow-violet-500/10 hover:border-violet-200 hover:-translate-y-1 transition-all duration-300">
+                        <Link
+                          href={`/products/${product.id}`}
+                          className="group block rounded-2xl bg-white border border-neutral-200/80 overflow-hidden shadow-sm hover:shadow-lg hover:border-violet-200/90 hover:-translate-y-0.5 transition-all duration-300"
+                        >
                           <div className="relative aspect-[3/4] bg-neutral-50">
                             {imgUrl && (
                               <NextImage
@@ -314,13 +603,20 @@ function ShopTheLookResults({ groups, outfitImageUrl }: { groups: DetectionGroup
                                 fill
                                 className="object-cover group-hover:scale-105 transition-transform duration-500"
                                 sizes="(max-width: 640px) 45vw, 200px"
-                                onError={(e) => { e.currentTarget.src = 'https://placehold.co/320x426/f5f5f5/737373?text=No+Image' }}
+                                onError={(e) => {
+                                  e.currentTarget.src =
+                                    'https://placehold.co/320x426/f5f5f5/737373?text=No+Image'
+                                }}
                               />
                             )}
                           </div>
                           <div className="p-3">
-                            {product.brand && <p className="text-[10px] font-semibold text-violet-600 uppercase tracking-wider truncate">{product.brand}</p>}
-                            <p className="text-sm font-medium text-neutral-800 line-clamp-1 mt-0.5">{product.title}</p>
+                            {product.brand && (
+                              <p className="text-[10px] font-semibold text-violet-600 uppercase tracking-wider truncate">
+                                {product.brand}
+                              </p>
+                            )}
+                            <p className="text-sm font-medium text-neutral-800 line-clamp-2 mt-0.5">{product.title}</p>
                             {price && <p className="text-sm font-bold text-neutral-900 mt-1">{price}</p>}
                           </div>
                         </Link>
@@ -345,11 +641,6 @@ function ShopTheLookResults({ groups, outfitImageUrl }: { groups: DetectionGroup
                       Show more
                     </button>
                   </div>
-                )}
-
-                {/* Divider between sections */}
-                {i < deduped.length - 1 && (
-                  <div className="border-b border-neutral-200/60 mt-8" />
                 )}
               </motion.section>
             )
@@ -497,17 +788,30 @@ function SearchContent() {
           const msg = typeof err === 'string' ? err : err?.message
           throw new Error(msg ?? 'Shop the look failed')
         }
-        const sp = (raw.similarProducts ?? raw.data) as { byDetection?: unknown[] } | undefined
+        const sp = (raw.similarProducts ?? raw.data) as {
+          byDetection?: unknown[]
+          shopTheLookStats?: ShopTheLookStats
+        } | undefined
         let byDetection = sp?.byDetection ?? raw.byDetection
         if (!Array.isArray(byDetection)) byDetection = []
-        const groups = byDetection as Array<{
-          detection?: { label?: string; confidence?: number }
-          category?: string
-          products?: unknown[]
-          count?: number
-        }>
+        const shopTheLookStats =
+          sp && typeof sp.shopTheLookStats === 'object' && sp.shopTheLookStats !== null
+            ? (sp.shopTheLookStats as ShopTheLookStats)
+            : undefined
+        const ri = raw.image as { width?: number; height?: number } | undefined
+        const shopImageMeta =
+          ri && typeof ri.width === 'number' && typeof ri.height === 'number' && ri.width > 0 && ri.height > 0
+            ? { width: ri.width, height: ri.height }
+            : undefined
+        const groups = byDetection as DetectionGroup[]
         const results = groups.flatMap((d) => (Array.isArray(d.products) ? d.products : []))
-        return { results, query: { shopTheLook: true }, byDetection: groups }
+        return {
+          results,
+          query: { shopTheLook: true },
+          byDetection: groups,
+          shopImageMeta,
+          shopTheLookStats,
+        }
       }
       if (mode === 'image' && imageFile) {
         const formData = new FormData()
@@ -546,7 +850,14 @@ function SearchContent() {
   const products = textSearchActive
     ? toProducts(textSearchInfinite.data?.pages.flatMap((p) => p.results) ?? [])
     : toProducts(Array.isArray(rawResults) ? rawResults : [])
-  const shopDetections: DetectionGroup[] = (data as { byDetection?: DetectionGroup[] })?.byDetection ?? []
+  const shopPayload = data as {
+    byDetection?: DetectionGroup[]
+    shopImageMeta?: { width: number; height: number }
+    shopTheLookStats?: ShopTheLookStats
+  } | null
+  const shopDetections: DetectionGroup[] = shopPayload?.byDetection ?? []
+  const shopImageMeta = shopPayload?.shopImageMeta
+  const shopTheLookStats = shopPayload?.shopTheLookStats
 
   const isLoadingState =
     textSearchActive
@@ -850,7 +1161,12 @@ function SearchContent() {
               </div>
             )
           ) : mode === 'shop' && shopDetections.length > 0 && imagePreviewUrl ? (
-            <ShopTheLookResults groups={shopDetections} outfitImageUrl={imagePreviewUrl} />
+            <ShopTheLookResults
+              groups={shopDetections}
+              outfitImageUrl={imagePreviewUrl}
+              imageMeta={shopImageMeta}
+              shopTheLookStats={shopTheLookStats}
+            />
           ) : products.length > 0 ? (
             <>
               <div className="flex items-center justify-between mb-6">
