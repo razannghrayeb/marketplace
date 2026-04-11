@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 #
 # Default: embedded YOLO (PyTorch venv + entrypoint uvicorn on loopback) so detection always works in one container.
 #
@@ -19,12 +20,13 @@ ENV HF_HOME=/root/.cache/huggingface
 ENV HF_HUB_DOWNLOAD_TIMEOUT=240
 ENV HF_HUB_ETAG_TIMEOUT=60
 RUN pip install --no-cache-dir huggingface_hub hf_transfer
-ENV HF_HUB_ENABLE_HF_TRANSFER=0
-RUN set -eux; \
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+RUN --mount=type=cache,id=hf-cache,target=/root/.cache/huggingface \
+  set -eux; \
   attempts=8; \
   for attempt in $(seq 1 ${attempts}); do \
   echo "Downloading models (attempt ${attempt}/${attempts})"; \
-  python -c "from huggingface_hub import snapshot_download; import os; token = os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, resume_download=True, max_workers=1, allow_patterns=['*.onnx', '*.onnx.data', '*.json', '*.pkl', '*.txt'], ignore_patterns=['*.gitattributes', '.gitattributes', 'README.md']); print('Models downloaded successfully to /models')" && break; \
+  python -c "from huggingface_hub import snapshot_download; import os; token = os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, max_workers=8, allow_patterns=['*.onnx', '*.onnx.data', '*.json', '*.pkl', '*.txt'], ignore_patterns=['*.gitattributes', '.gitattributes', 'README.md']); print('Models downloaded successfully to /models')" && break; \
   if [ "${attempt}" -eq "${attempts}" ]; then \
   echo "Model download failed after ${attempts} attempts"; \
   exit 1; \
@@ -38,7 +40,8 @@ RUN set -eux; \
 # Pre-download tokenizer vocab files via huggingface_hub (already installed,
 # handles auth + redirects). CLIP BPE: openai/clip-vit-base-patch32 (public).
 # BLIP WordPiece: google-bert/bert-base-uncased (public, same BERT vocab).
-RUN python3 -c "from huggingface_hub import hf_hub_download; import os, shutil; os.makedirs('/models/.cache', exist_ok=True); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'vocab.json'), '/models/.cache/vocab.json'); print('vocab.json ok'); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'merges.txt'), '/models/.cache/merges.txt'); print('merges.txt ok'); shutil.copy(hf_hub_download('google-bert/bert-base-uncased', 'vocab.txt'), '/models/.cache/blip-vocab.txt'); print('blip-vocab.txt ok')"
+RUN --mount=type=cache,id=hf-cache,target=/root/.cache/huggingface \
+  python3 -c "from huggingface_hub import hf_hub_download; import os, shutil; os.makedirs('/models/.cache', exist_ok=True); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'vocab.json'), '/models/.cache/vocab.json'); print('vocab.json ok'); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'merges.txt'), '/models/.cache/merges.txt'); print('merges.txt ok'); shutil.copy(hf_hub_download('google-bert/bert-base-uncased', 'vocab.txt'), '/models/.cache/blip-vocab.txt'); print('blip-vocab.txt ok')"
 
 # Stage 1: Build
 FROM node:20-alpine AS builder
