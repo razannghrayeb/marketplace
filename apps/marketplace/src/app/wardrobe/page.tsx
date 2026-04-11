@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useState, useRef, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Shirt, Plus, X, Upload, Camera, Sparkles, Trash2, ChevronRight, Wand2, ShoppingBag, Pencil, ChevronDown } from 'lucide-react'
@@ -32,6 +32,13 @@ interface CompleteLookSuggestion {
   reason?: string
 }
 
+const COMPLETE_LOOK_FETCH_CAP = 48
+
+function suggestionProductId(s: CompleteLookSuggestion): number | null {
+  const n = Number(s.id ?? s.product_id)
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : null
+}
+
 export default function WardrobePage() {
   const isAuth = useAuthStore((s) => s.isAuthenticated())
   const queryClient = useQueryClient()
@@ -44,9 +51,8 @@ export default function WardrobePage() {
   const [uploadMeta, setUploadMeta] = useState<WardrobeItemMetaForm>(() => emptyWardrobeMetaForm())
   const [editingItem, setEditingItem] = useState<WardrobeItem | null>(null)
   const [editMeta, setEditMeta] = useState<WardrobeItemMetaForm>(() => emptyWardrobeMetaForm())
-  const [completeAudience, setCompleteAudience] = useState<WardrobeItemMetaForm['audience_gender']>('')
-  const [completeAge, setCompleteAge] = useState<WardrobeItemMetaForm['age_group']>('')
-  const [completeLookLimit, setCompleteLookLimit] = useState(8)
+  /** Visible count only; suggestions are fetched once (cap below) and sliced client-side so “Show more” does not refetch. */
+  const [completeLookVisible, setCompleteLookVisible] = useState(8)
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['wardrobe'],
@@ -89,6 +95,7 @@ export default function WardrobePage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['wardrobe'] })
+      queryClient.invalidateQueries({ queryKey: ['complete-style'] })
       setEditingItem(null)
     },
   })
@@ -108,15 +115,20 @@ export default function WardrobePage() {
   })
 
   const completeStyleQuery = useQuery({
-    queryKey: ['complete-style', selectedItem?.id, completeAudience, completeAge, completeLookLimit],
+    queryKey: [
+      'complete-style',
+      selectedItem?.id,
+      selectedItem?.audience_gender ?? '',
+      selectedItem?.age_group ?? '',
+    ],
     queryFn: async () => {
       if (!selectedItem) return null
       const body: Record<string, unknown> = {
         item_ids: [selectedItem.id],
-        limit: completeLookLimit,
+        limit: COMPLETE_LOOK_FETCH_CAP,
       }
-      if (completeAudience) body.audience_gender = completeAudience
-      if (completeAge) body.age_group = completeAge
+      if (selectedItem.audience_gender) body.audience_gender = selectedItem.audience_gender
+      if (selectedItem.age_group) body.age_group = selectedItem.age_group
       const res = await api.post<{ suggestions?: CompleteLookSuggestion[] }>(endpoints.wardrobe.completeLook, body)
       const r = res as { success?: boolean; suggestions?: CompleteLookSuggestion[]; data?: CompleteLookSuggestion[]; error?: { message?: string } }
       if (r?.success === false) throw new Error(r?.error?.message ?? 'Failed to get suggestions')
@@ -124,6 +136,17 @@ export default function WardrobePage() {
     },
     enabled: showCompleteStyle && !!selectedItem,
   })
+
+  const completeStyleSuggestionsAll = useMemo(() => {
+    const raw = completeStyleQuery.data
+    if (!raw || !Array.isArray(raw)) return [] as CompleteLookSuggestion[]
+    return (raw as CompleteLookSuggestion[]).filter((s) => suggestionProductId(s) != null)
+  }, [completeStyleQuery.data])
+
+  const completeStyleSuggestionsVisible = useMemo(
+    () => completeStyleSuggestionsAll.slice(0, completeLookVisible),
+    [completeStyleSuggestionsAll, completeLookVisible],
+  )
 
   const openUploadModal = (file: File) => {
     setPendingUploadFile(file)
@@ -215,11 +238,6 @@ export default function WardrobePage() {
   const formatPrice = (cents: number, currency = 'USD') =>
     new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 0 }).format(cents / 100)
 
-  const suggestionProductId = (s: CompleteLookSuggestion) => {
-    const n = Number(s.id ?? s.product_id)
-    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : null
-  }
-
   if (!isAuth) {
     return (
       <div className="min-h-[60vh] flex items-center justify-center px-4">
@@ -261,9 +279,7 @@ export default function WardrobePage() {
 
   const openCompleteStyle = (item: WardrobeItem) => {
     setSelectedItem(item)
-    setCompleteAudience((item.audience_gender as WardrobeItemMetaForm['audience_gender']) || '')
-    setCompleteAge((item.age_group as WardrobeItemMetaForm['age_group']) || '')
-    setCompleteLookLimit(8)
+    setCompleteLookVisible(8)
     setShowCompleteStyle(true)
   }
 
@@ -503,42 +519,6 @@ export default function WardrobePage() {
               </div>
 
                 <div className="p-6">
-                <div className="grid sm:grid-cols-2 gap-3 mb-5">
-                  <div>
-                    <label className="block text-xs font-semibold text-neutral-500 uppercase mb-1">Catalog filter · audience</label>
-                    <select
-                      className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm"
-                      value={completeAudience}
-                      onChange={(e) => {
-                        setCompleteAudience(e.target.value as WardrobeItemMetaForm['audience_gender'])
-                        setCompleteLookLimit(8)
-                      }}
-                    >
-                      <option value="">From item / any</option>
-                      <option value="men">Men (strict)</option>
-                      <option value="women">Women (strict)</option>
-                      <option value="unisex">Unisex (strict)</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-neutral-500 uppercase mb-1">Catalog filter · age</label>
-                    <select
-                      className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm"
-                      value={completeAge}
-                      onChange={(e) => {
-                        setCompleteAge(e.target.value as WardrobeItemMetaForm['age_group'])
-                        setCompleteLookLimit(8)
-                      }}
-                    >
-                      <option value="">From item / any</option>
-                      <option value="adult">Adult (strict)</option>
-                      <option value="kids">Kids (strict)</option>
-                    </select>
-                  </div>
-                </div>
-                <p className="text-[11px] text-neutral-400 mb-5">
-                  Optional: set strict audience/age to bias catalog results. Leave as “From item” to use metadata saved on this piece (or no filter).
-                </p>
                 {/* Selected item */}
                 <div className="flex items-center gap-4 p-3 rounded-2xl bg-neutral-50 border border-neutral-200/60 mb-6">
                   <div className="w-16 h-16 rounded-xl overflow-hidden bg-neutral-100 flex-shrink-0 ring-1 ring-neutral-200/60">
@@ -574,7 +554,7 @@ export default function WardrobePage() {
                     <p className="text-neutral-800 font-medium mb-1">Could not load suggestions</p>
                     <p className="text-sm text-neutral-500">{(completeStyleQuery.error as Error)?.message}</p>
                   </div>
-                ) : completeStyleQuery.data && completeStyleQuery.data.length > 0 ? (
+                ) : completeStyleSuggestionsAll.length > 0 ? (
                   <>
                   <motion.div
                     initial="hidden"
@@ -582,9 +562,7 @@ export default function WardrobePage() {
                     variants={{ visible: { transition: { staggerChildren: 0.06 } }, hidden: {} }}
                     className="grid grid-cols-2 gap-4"
                   >
-                    {(completeStyleQuery.data as CompleteLookSuggestion[])
-                      .filter((s) => suggestionProductId(s) != null)
-                      .map((s) => {
+                    {completeStyleSuggestionsVisible.map((s) => {
                         const pid = suggestionProductId(s)!
                         const cents = s.price_cents
                         const priceLabel =
@@ -632,21 +610,22 @@ export default function WardrobePage() {
                         )
                       })}
                   </motion.div>
-                  {(completeStyleQuery.data as CompleteLookSuggestion[]).filter((s) => suggestionProductId(s) != null)
-                    .length >= completeLookLimit &&
-                    completeLookLimit < 48 && (
+                  {completeStyleSuggestionsAll.length > completeLookVisible ? (
                       <div className="flex justify-center mt-6">
                         <button
                           type="button"
-                          onClick={() => setCompleteLookLimit((n) => Math.min(n + 8, 48))}
-                          disabled={completeStyleQuery.isFetching}
-                          className="inline-flex items-center gap-2 px-6 py-2.5 rounded-full border border-violet-200 bg-white text-sm font-semibold text-violet-700 hover:bg-violet-50 disabled:opacity-60"
+                          onClick={() =>
+                            setCompleteLookVisible((n) =>
+                              Math.min(n + 8, completeStyleSuggestionsAll.length, COMPLETE_LOOK_FETCH_CAP),
+                            )
+                          }
+                          className="inline-flex items-center gap-2 px-6 py-2.5 rounded-full border border-violet-200 bg-white text-sm font-semibold text-violet-700 hover:bg-violet-50"
                         >
                           <ChevronDown className="w-4 h-4" />
-                          {completeStyleQuery.isFetching ? 'Loading…' : 'Show more'}
+                          Show more
                         </button>
                       </div>
-                    )}
+                    ) : null}
                   </>
                 ) : (
                   <div className="text-center py-12">

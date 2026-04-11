@@ -1,12 +1,12 @@
 'use client'
 
-import { useSearchParams } from 'next/navigation'
-import { Suspense, useState, useCallback, useEffect, useRef } from 'react'
-import { useQuery, useInfiniteQuery } from '@tanstack/react-query'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
+import { Suspense, useState, useCallback, useEffect, useMemo, useRef } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import Link from 'next/link'
 import NextImage from 'next/image'
-import { Search, Image, Sparkles, Layers, Camera, Upload, TrendingUp, ArrowRight, Shirt, Palette, Zap, Eye, ChevronDown, ScanSearch } from 'lucide-react'
+import { Search, Image, Sparkles, Layers, Camera, Upload, TrendingUp, ArrowRight, Shirt, Palette, Zap, Eye, ChevronDown, ChevronLeft, ChevronRight, ScanSearch } from 'lucide-react'
 import { api } from '@/lib/api/client'
 import { endpoints } from '@/lib/api/endpoints'
 import { ProductCard } from '@/components/product/ProductCard'
@@ -18,10 +18,12 @@ function SearchProductGrid({
   products,
   addToCompare,
   inCompare,
+  fromReturnPath,
 }: {
   products: Product[]
   addToCompare: (id: number) => void
   inCompare: (id: number) => boolean
+  fromReturnPath?: string
 }) {
   const ids = products.map((p) => p.id)
   const { data: variantsData } = useQuery({
@@ -59,6 +61,7 @@ function SearchProductGrid({
             <ProductCard
               product={product}
               index={i}
+              fromReturnPath={fromReturnPath}
               onAddToCompare={addToCompare}
               inCompare={inCompare(product.id)}
               variantPrice={variantPrice}
@@ -187,6 +190,8 @@ interface DetectionGroup {
   products: Product[]
   count?: number
   detectionIndex?: number
+  /** Extra YOLO regions merged into this row (e.g. two shoe detections → one panel). */
+  secondaryDetections?: DetectionMeta[]
 }
 
 interface ShopTheLookStats {
@@ -219,6 +224,81 @@ function formatConfidence(confidence: number | undefined): string | null {
   return `${Math.min(100, Math.max(0, pct))}%`
 }
 
+function isShoeDetectionGroup(group: DetectionGroup): boolean {
+  const cat = String(group.category || '').toLowerCase()
+  const lab = String(group.detection?.label || '').toLowerCase()
+  const blob = `${cat} ${lab}`
+  return (
+    /footwear|shoe|sneaker|boot|sandal|heel|pump|loafer|oxford|mule|slide|stiletto|wedge|flats?\b|clog|espadrilles?/.test(blob) ||
+    /\bfoot\b/.test(cat)
+  )
+}
+
+function mergeShoeDetectionRun(list: DetectionGroup[]): DetectionGroup {
+  const [first, ...rest] = list
+  const seen = new Set<number>()
+  const products: Product[] = []
+  for (const g of list) {
+    for (const p of toProducts(Array.isArray(g.products) ? g.products : [])) {
+      if (p.id >= 1 && !seen.has(p.id)) {
+        seen.add(p.id)
+        products.push(p)
+      }
+    }
+  }
+  const secondary: DetectionMeta[] = []
+  for (const g of rest) {
+    if (g.detection) secondary.push(g.detection)
+  }
+  let apiCount = 0
+  for (const g of list) {
+    if (typeof g.count === 'number' && Number.isFinite(g.count)) apiCount += g.count
+    else apiCount += Array.isArray(g.products) ? g.products.length : 0
+  }
+  const baseDet: DetectionMeta = first.detection
+    ? { ...first.detection, label: 'shoes' }
+    : { label: 'shoes' }
+  return {
+    ...first,
+    detection: baseDet,
+    category: first.category,
+    products: products as unknown as Product[],
+    count: apiCount,
+    secondaryDetections: secondary.length ? secondary : undefined,
+    detectionIndex: first.detectionIndex,
+  }
+}
+
+/** Merge adjacent shoe/footwear detections into one row (one “Shoes” category, combined products, all boxes). */
+function mergeConsecutiveShoeDetectionGroups(groups: DetectionGroup[]): DetectionGroup[] {
+  const rows = groups.filter((g) => Array.isArray(g.products) && g.products.length > 0)
+  if (rows.length <= 1) return rows
+  const out: DetectionGroup[] = []
+  let shoeRun: DetectionGroup[] = []
+  const flush = () => {
+    if (shoeRun.length === 0) return
+    if (shoeRun.length === 1) out.push(shoeRun[0]!)
+    else out.push(mergeShoeDetectionRun(shoeRun))
+    shoeRun = []
+  }
+  for (const g of rows) {
+    if (isShoeDetectionGroup(g)) shoeRun.push(g)
+    else {
+      flush()
+      out.push(g)
+    }
+  }
+  flush()
+  return out
+}
+
+function detectionMetasWithBoxes(group: DetectionGroup): DetectionMeta[] {
+  const list: DetectionMeta[] = []
+  if (group.detection) list.push(group.detection)
+  for (const d of group.secondaryDetections ?? []) list.push(d)
+  return list
+}
+
 function boxStylePercents(box: DetectionBox, refW: number, refH: number) {
   const w = Math.max(1, refW)
   const h = Math.max(1, refH)
@@ -246,11 +326,14 @@ function ShopTheLookResults({
   outfitImageUrl,
   imageMeta,
   shopTheLookStats,
+  returnPath,
 }: {
   groups: DetectionGroup[]
   outfitImageUrl: string
   imageMeta?: { width: number; height: number }
   shopTheLookStats?: ShopTheLookStats
+  /** Full `/search?...` URL for product links (back to Discover). */
+  returnPath?: string
 }) {
   const [visibleByKey, setVisibleByKey] = useState<Record<string, number>>({})
   const [imgNatural, setImgNatural] = useState<{ w: number; h: number } | null>(null)
@@ -415,36 +498,40 @@ function ShopTheLookResults({
                   }}
                 />
                 {canDrawBoxes &&
-                  rows.map((group, i) => {
-                    const box = group.detection?.box
-                    if (
-                      !box ||
-                      ![box.x1, box.y1, box.x2, box.y2].every((n) => typeof n === 'number' && Number.isFinite(n))
-                    ) {
-                      return null
-                    }
+                  rows.flatMap((group, i) => {
                     const pal = DETECTION_PALETTE[i % DETECTION_PALETTE.length]
-                    const { left, top, width, height } = boxStylePercents(box, refW, refH)
-                    if (width <= 0 || height <= 0) return null
-                    const label = group.detection?.label || group.category || 'Item'
                     const hi = boxHighlight(i)
                     const dim = boxDimmed(i)
-                    return (
-                      <button
-                        key={`box-${i}`}
-                        type="button"
-                        aria-label={`Select region: ${formatDetectionLabel(String(label))}`}
-                        aria-pressed={selectedIdx === i}
-                        className={`absolute rounded-md border-2 transition-all duration-200 ${pal.border} ${pal.fill} ${
-                          hi ? `ring-2 ${pal.ring} ring-offset-2 ring-offset-white/90 scale-[1.02] z-10` : 'hover:opacity-100'
-                        } ${dim ? 'opacity-40' : 'opacity-90'}`}
-                        style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%` }}
-                        onClick={() => focusDetection(i)}
-                        onMouseEnter={() => setActiveIdx(i)}
-                        onFocus={() => setActiveIdx(i)}
-                        onBlur={() => setActiveIdx((cur) => (cur === i ? null : cur))}
-                      />
-                    )
+                    return detectionMetasWithBoxes(group)
+                      .map((meta, bi) => {
+                        const box = meta.box
+                        if (
+                          !box ||
+                          ![box.x1, box.y1, box.x2, box.y2].every((n) => typeof n === 'number' && Number.isFinite(n))
+                        ) {
+                          return null
+                        }
+                        const { left, top, width, height } = boxStylePercents(box, refW, refH)
+                        if (width <= 0 || height <= 0) return null
+                        const label = meta.label || group.category || 'Item'
+                        return (
+                          <button
+                            key={`box-${i}-${bi}`}
+                            type="button"
+                            aria-label={`Select region: ${formatDetectionLabel(String(label))}`}
+                            aria-pressed={selectedIdx === i}
+                            className={`absolute rounded-md border-2 transition-all duration-200 ${pal.border} ${pal.fill} ${
+                              hi ? `ring-2 ${pal.ring} ring-offset-2 ring-offset-white/90 scale-[1.02] z-10` : 'hover:opacity-100'
+                            } ${dim ? 'opacity-40' : 'opacity-90'}`}
+                            style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%` }}
+                            onClick={() => focusDetection(i)}
+                            onMouseEnter={() => setActiveIdx(i)}
+                            onFocus={() => setActiveIdx(i)}
+                            onBlur={() => setActiveIdx((cur) => (cur === i ? null : cur))}
+                          />
+                        )
+                      })
+                      .filter(Boolean)
                   })}
               </div>
             </div>
@@ -544,6 +631,9 @@ function ShopTheLookResults({
                       {confStr != null ? <span>Confidence {confStr}</span> : null}
                       {areaPct != null ? <span>Area {areaPct} of frame</span> : null}
                       {typeof group.count === 'number' ? <span>API count {group.count}</span> : null}
+                      {group.secondaryDetections?.length ? (
+                        <span>{1 + group.secondaryDetections.length} regions merged</span>
+                      ) : null}
                     </div>
                     {(st?.occasion || st?.aesthetic || st?.formality != null) && (
                       <div className="mt-2 flex flex-wrap gap-1.5">
@@ -592,7 +682,11 @@ function ShopTheLookResults({
                         transition={{ delay: 0.12 + i * 0.05 + j * 0.03, duration: 0.3 }}
                       >
                         <Link
-                          href={`/products/${product.id}`}
+                          href={
+                            returnPath && returnPath.startsWith('/search')
+                              ? `/products/${product.id}?from=${encodeURIComponent(returnPath)}`
+                              : `/products/${product.id}`
+                          }
                           className="group block rounded-2xl bg-white border border-neutral-200/80 overflow-hidden shadow-sm hover:shadow-lg hover:border-violet-200/90 hover:-translate-y-0.5 transition-all duration-300"
                         >
                           <div className="relative aspect-[3/4] bg-neutral-50">
@@ -652,9 +746,28 @@ function ShopTheLookResults({
 }
 
 function SearchContent() {
+  const router = useRouter()
+  const pathname = usePathname()
   const searchParams = useSearchParams()
   const q = searchParams.get('q') || ''
   const mode = searchParams.get('mode') || 'text'
+  const pageFromUrl = Math.max(1, Math.min(999, parseInt(searchParams.get('page') || '1', 10) || 1))
+
+  const discoverReturnPath = useMemo(() => {
+    const qs = searchParams.toString()
+    return qs ? `/search?${qs}` : '/search'
+  }, [searchParams])
+
+  const goSearchPage = useCallback(
+    (p: number) => {
+      const next = new URLSearchParams(searchParams.toString())
+      if (p <= 1) next.delete('page')
+      else next.set('page', String(p))
+      const qs = next.toString()
+      router.push(qs ? `${pathname}?${qs}` : pathname)
+    },
+    [router, pathname, searchParams],
+  )
   const [imageFile, setImageFile] = useState<File | null>(null)
   const [multiImages, setMultiImages] = useState<File[]>([])
   const [multiPrompt, setMultiPrompt] = useState('')
@@ -719,33 +832,26 @@ function SearchContent() {
 
   const textSearchActive = mode === 'text' && !!q.trim()
 
-  const textSearchInfinite = useInfiniteQuery({
-    queryKey: ['search', 'text', 'paged', q.trim(), TEXT_SEARCH_PAGE_SIZE],
-    initialPageParam: 1,
-    queryFn: async ({ pageParam }) => {
+  const textSearchPaged = useQuery({
+    queryKey: ['search', 'text', 'page', q.trim(), TEXT_SEARCH_PAGE_SIZE, pageFromUrl],
+    queryFn: async () => {
       let res = await api.get<unknown>(endpoints.search.text, {
         q: q.trim(),
         limit: TEXT_SEARCH_PAGE_SIZE,
-        page: pageParam,
+        page: pageFromUrl,
       })
       if ((res as { success?: boolean }).success === false) {
         res = await api.get<unknown>(endpoints.products.search, {
           q: q.trim(),
           limit: TEXT_SEARCH_PAGE_SIZE,
-          page: pageParam,
+          page: pageFromUrl,
         })
       }
       const { results, total } = extractTextSearchPage(res)
-      return { results, page: pageParam, total }
-    },
-    getNextPageParam: (lastPage, allPages) => {
-      if (lastPage.results.length < TEXT_SEARCH_PAGE_SIZE) return undefined
-      const loaded = allPages.reduce((acc, p) => acc + p.results.length, 0)
-      const reportedTotal = allPages[0]?.total ?? 0
-      if (reportedTotal > 0 && loaded >= reportedTotal) return undefined
-      return lastPage.page + 1
+      return { results, page: pageFromUrl, total }
     },
     enabled: textSearchActive,
+    placeholderData: (previousData) => previousData,
   })
 
   const { data, isLoading, isFetching, isError, error } = useQuery({
@@ -803,7 +909,7 @@ function SearchContent() {
           ri && typeof ri.width === 'number' && typeof ri.height === 'number' && ri.width > 0 && ri.height > 0
             ? { width: ri.width, height: ri.height }
             : undefined
-        const groups = byDetection as DetectionGroup[]
+        const groups = mergeConsecutiveShoeDetectionGroups((byDetection as DetectionGroup[]) || [])
         const results = groups.flatMap((d) => (Array.isArray(d.products) ? d.products : []))
         return {
           results,
@@ -848,7 +954,7 @@ function SearchContent() {
 
   const rawResults = data && (data as { results?: unknown[] }).results
   const products = textSearchActive
-    ? toProducts(textSearchInfinite.data?.pages.flatMap((p) => p.results) ?? [])
+    ? toProducts(textSearchPaged.data?.results ?? [])
     : toProducts(Array.isArray(rawResults) ? rawResults : [])
   const shopPayload = data as {
     byDetection?: DetectionGroup[]
@@ -860,11 +966,20 @@ function SearchContent() {
   const shopTheLookStats = shopPayload?.shopTheLookStats
 
   const isLoadingState =
-    textSearchActive
-      ? textSearchInfinite.isLoading || textSearchInfinite.isFetching
-      : isLoading || isFetching
-  const searchFailed = textSearchActive ? textSearchInfinite.isError : isError
-  const searchError = textSearchActive ? textSearchInfinite.error : error
+    textSearchActive ? textSearchPaged.isLoading || textSearchPaged.isFetching : isLoading || isFetching
+  const searchFailed = textSearchActive ? textSearchPaged.isError : isError
+  const searchError = textSearchActive ? textSearchPaged.error : error
+
+  const textReportedTotal = textSearchPaged.data?.total ?? 0
+  const textPageResultCount = textSearchPaged.data?.results?.length ?? 0
+  const textTotalPages =
+    textReportedTotal > 0 ? Math.max(1, Math.ceil(textReportedTotal / TEXT_SEARCH_PAGE_SIZE)) : null
+  const textHasPrevPage = textSearchActive && pageFromUrl > 1
+  const textHasNextPage = textSearchActive
+    ? textTotalPages != null
+      ? pageFromUrl < textTotalPages
+      : textPageResultCount >= TEXT_SEARCH_PAGE_SIZE
+    : false
 
   const modeTabs = [
     { key: 'text', label: 'Text', Icon: Search, href: '/search', desc: 'Describe what you want' },
@@ -1166,34 +1281,65 @@ function SearchContent() {
               outfitImageUrl={imagePreviewUrl}
               imageMeta={shopImageMeta}
               shopTheLookStats={shopTheLookStats}
+              returnPath={discoverReturnPath}
             />
           ) : products.length > 0 ? (
             <>
               <div className="flex items-center justify-between mb-6">
                 <p className="text-sm font-medium text-neutral-500">
-                  {products.length} result{products.length !== 1 ? 's' : ''} shown
-                  {textSearchActive && (textSearchInfinite.data?.pages[0]?.total ?? 0) > 0
-                    ? ` · ${textSearchInfinite.data!.pages[0].total.toLocaleString()} total matches`
-                    : null}
+                  {textSearchActive ? (
+                    products.length === 0 ? (
+                      <>No results on this page</>
+                    ) : (
+                      <>
+                        Showing {(pageFromUrl - 1) * TEXT_SEARCH_PAGE_SIZE + 1}–
+                        {(pageFromUrl - 1) * TEXT_SEARCH_PAGE_SIZE + products.length}
+                        {textReportedTotal > 0 ? ` of ${textReportedTotal.toLocaleString()}` : ''}
+                      </>
+                    )
+                  ) : (
+                    <>
+                      {products.length} result{products.length !== 1 ? 's' : ''} shown
+                    </>
+                  )}
                 </p>
               </div>
               <SearchProductGrid
                 products={products}
                 addToCompare={addToCompare}
                 inCompare={inCompare}
+                fromReturnPath={discoverReturnPath}
               />
-              {textSearchActive && textSearchInfinite.hasNextPage ? (
-                <div className="flex flex-col items-center gap-2 mt-10">
-                  <button
-                    type="button"
-                    onClick={() => textSearchInfinite.fetchNextPage()}
-                    disabled={textSearchInfinite.isFetchingNextPage}
-                    className="inline-flex items-center gap-2 px-8 py-3 rounded-full border-2 border-violet-200 bg-white text-sm font-semibold text-violet-700 hover:bg-violet-50 disabled:opacity-60 transition-colors"
-                  >
-                    <ChevronDown className="w-4 h-4" />
-                    {textSearchInfinite.isFetchingNextPage ? 'Loading…' : 'Load more results'}
-                  </button>
-                </div>
+              {textSearchActive && (textHasPrevPage || textHasNextPage) ? (
+                <nav
+                  className="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4"
+                  aria-label="Search results pagination"
+                >
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => goSearchPage(pageFromUrl - 1)}
+                      disabled={!textHasPrevPage || textSearchPaged.isFetching}
+                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-full border border-violet-200 bg-white text-sm font-semibold text-violet-700 hover:bg-violet-50 disabled:opacity-40 disabled:pointer-events-none transition-colors"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => goSearchPage(pageFromUrl + 1)}
+                      disabled={!textHasNextPage || textSearchPaged.isFetching}
+                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-full border border-violet-200 bg-white text-sm font-semibold text-violet-700 hover:bg-violet-50 disabled:opacity-40 disabled:pointer-events-none transition-colors"
+                    >
+                      Next
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <p className="text-sm text-neutral-500 tabular-nums">
+                    Page {pageFromUrl}
+                    {textTotalPages != null ? ` of ${textTotalPages}` : null}
+                  </p>
+                </nav>
               ) : null}
             </>
           ) : searchFailed ? (

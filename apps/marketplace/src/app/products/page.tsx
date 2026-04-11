@@ -2,7 +2,7 @@
 
 import { useSearchParams, useRouter, usePathname } from 'next/navigation'
 import { Suspense, useState, useEffect, useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { Search, SlidersHorizontal, ArrowUpDown, X, ChevronLeft, ChevronRight, ShoppingBag } from 'lucide-react'
 import { api } from '@/lib/api/client'
@@ -10,6 +10,8 @@ import { endpoints } from '@/lib/api/endpoints'
 import { getStablePagination } from '@/lib/shopPagination'
 import { ProductCard } from '@/components/product/ProductCard'
 import { useCompareStore } from '@/store/compare'
+import { useAuthStore } from '@/store/auth'
+import { addCatalogProductToWardrobe } from '@/lib/wardrobe/addCatalogProduct'
 import type { Product } from '@/types/product'
 
 function chipClass(active: boolean) {
@@ -24,6 +26,8 @@ function ProductsContent() {
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
+  const queryClient = useQueryClient()
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
 
   const q = searchParams.get('q') ?? ''
   const gender = searchParams.get('gender') ?? ''
@@ -36,6 +40,24 @@ function ProductsContent() {
   const limit = 24
   const addToCompare = useCompareStore((s) => s.add)
   const inCompare = useCompareStore((s) => s.has)
+
+  const [wardrobeAddedIds, setWardrobeAddedIds] = useState<Set<number>>(() => new Set())
+  const addToWardrobeMutation = useMutation({
+    mutationFn: (product: Product) => addCatalogProductToWardrobe(product),
+    onSuccess: (_, product) => {
+      void queryClient.invalidateQueries({ queryKey: ['wardrobe'] })
+      setWardrobeAddedIds((prev) => new Set(prev).add(product.id))
+    },
+  })
+
+  const handleAddToWardrobe = (product: Product) => {
+    if (!isAuthenticated()) {
+      const qs = new URLSearchParams({ next: `${pathname}${searchParams.toString() ? `?${searchParams}` : ''}` })
+      router.push(`/login?${qs.toString()}`)
+      return
+    }
+    addToWardrobeMutation.mutate(product)
+  }
 
   useEffect(() => { setSearchDraft(q) }, [q])
   useEffect(() => { setPage(1); setPageJump('') }, [q, gender, sort, category])
@@ -235,6 +257,14 @@ function ProductsContent() {
                     index={i}
                     onAddToCompare={addToCompare}
                     inCompare={inCompare(product.id)}
+                    onAddToWardrobe={handleAddToWardrobe}
+                    wardrobeStatus={
+                      addToWardrobeMutation.isPending && addToWardrobeMutation.variables?.id === product.id
+                        ? 'loading'
+                        : wardrobeAddedIds.has(product.id)
+                          ? 'added'
+                          : 'idle'
+                    }
                   />
                 </motion.div>
               ))}

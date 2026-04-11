@@ -84,6 +84,27 @@ export async function listProducts(req: Request, res: Response) {
 }
 
 /**
+ * GET /products/sales — catalog items with sales_price_cents < price_cents
+ */
+export async function listSaleProducts(req: Request, res: Response) {
+  try {
+    const { page, limit } = parsePagination(req.query);
+    const sort = typeof req.query.sort === "string" ? req.query.sort : undefined;
+    const { listProductsOnSale } = await import("./products.saleList.service");
+    const { products, total } = await listProductsOnSale({ page, limit, sort });
+    const pages = Math.max(1, Math.ceil(total / limit));
+    res.json({
+      success: true,
+      data: products,
+      pagination: { page, limit, total, pages },
+    });
+  } catch (error) {
+    console.error("Error listing sale products:", error);
+    res.status(500).json({ success: false, error: "Failed to fetch sale products" });
+  }
+}
+
+/**
  * GET /products/search?q=query
  * Enhanced text search with related products
  * Query params:

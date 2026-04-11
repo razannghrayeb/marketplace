@@ -66,14 +66,61 @@ function BulletList({ items, icon: Icon, tone }: { items: string[]; icon: typeof
   const iconCls =
     tone === 'violet' ? 'text-violet-500' : tone === 'amber' ? 'text-amber-500' : 'text-neutral-400'
   return (
-    <ul className="space-y-1.5">
+    <ul className="space-y-2">
       {items.map((line, i) => (
-        <li key={i} className="flex items-start gap-2 text-sm text-neutral-700">
+        <li
+          key={i}
+          className="flex items-start gap-3 rounded-xl bg-neutral-50/90 px-3 py-2.5 text-sm text-neutral-700 ring-1 ring-neutral-200/50"
+        >
           <Icon className={`w-4 h-4 flex-shrink-0 mt-0.5 ${iconCls}`} />
-          <span>{line}</span>
+          <span className="leading-relaxed">{line}</span>
         </li>
       ))}
     </ul>
+  )
+}
+
+function SectionHeader({
+  icon: Icon,
+  title,
+  subtitle,
+}: {
+  icon: typeof Sparkles
+  title: string
+  subtitle?: string
+}) {
+  return (
+    <div className="mb-5">
+      <div className="flex items-start gap-3">
+        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500/12 to-fuchsia-500/12 text-violet-600 ring-1 ring-inset ring-violet-200/50 shadow-sm">
+          <Icon className="h-[22px] w-[22px]" strokeWidth={2} />
+        </span>
+        <div className="min-w-0 pt-0.5">
+          <h3 className="font-display text-xl font-bold tracking-tight text-neutral-900">{title}</h3>
+          {subtitle ? <p className="text-sm text-neutral-500 mt-1 leading-relaxed">{subtitle}</p> : null}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function MetricBar({ label, value }: { label: string; value: number }) {
+  const v = Math.max(0, Math.min(100, value))
+  return (
+    <div>
+      <div className="flex justify-between items-baseline gap-2 mb-1">
+        <span className="text-[11px] font-medium text-neutral-500">{label}</span>
+        <span className="text-[11px] font-bold tabular-nums text-neutral-800">{v}</span>
+      </div>
+      <div className="h-2 rounded-full bg-neutral-100 overflow-hidden ring-1 ring-inset ring-neutral-200/40">
+        <motion.div
+          className="h-full rounded-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-rose-400"
+          initial={{ width: 0 }}
+          animate={{ width: `${v}%` }}
+          transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1], delay: 0.08 }}
+        />
+      </div>
+    </div>
   )
 }
 
@@ -84,27 +131,40 @@ function TensionAxisRow({
   axis: CompareDecisionResponse['tensionAxes'][number]
   productIds: number[]
 }) {
-  const colors = ['bg-violet-500', 'bg-fuchsia-500', 'bg-rose-500', 'bg-amber-500', 'bg-cyan-500']
+  const colors = [
+    'bg-violet-500 shadow-violet-500/40',
+    'bg-fuchsia-500 shadow-fuchsia-500/40',
+    'bg-rose-500 shadow-rose-500/40',
+    'bg-amber-500 shadow-amber-500/40',
+    'bg-sky-500 shadow-sky-500/40',
+  ]
   return (
-    <div className="rounded-2xl border border-neutral-200/80 bg-white p-4 shadow-sm">
-      <p className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-3">{axis.axis.replace(/_/g, ' ')}</p>
-      <div className="flex justify-between text-xs text-neutral-600 mb-2">
-        <span>{axis.leftLabel}</span>
-        <span>{axis.rightLabel}</span>
+    <div className="rounded-2xl border border-neutral-200/70 bg-gradient-to-b from-white to-neutral-50/80 p-5 shadow-md shadow-neutral-200/40 ring-1 ring-inset ring-white/60">
+      <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-violet-600/90 mb-4">
+        {axis.axis.replace(/_/g, ' ')}
+      </p>
+      <div className="flex justify-between text-xs font-medium text-neutral-600 mb-3 gap-4">
+        <span className="text-left leading-snug text-violet-800/90">{axis.leftLabel}</span>
+        <span className="text-right leading-snug text-fuchsia-800/90">{axis.rightLabel}</span>
       </div>
-      <div className="relative h-8 rounded-full bg-neutral-100 border border-neutral-200/80">
+      <div className="relative h-11 rounded-full bg-gradient-to-r from-violet-100 via-neutral-100 to-fuchsia-100 border border-neutral-200/60 overflow-visible shadow-inner">
+        <div className="absolute inset-y-2 left-3 right-3 rounded-full bg-white/60" aria-hidden />
         {axis.positions.map((p, i) => {
           const pct = Math.max(0, Math.min(100, p.value <= 1 ? p.value * 100 : p.value))
           const color = colors[i % colors.length]
           return (
             <div
               key={p.productId}
-              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 flex flex-col items-center"
+              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 z-10 flex flex-col items-center group"
               style={{ left: `${pct}%` }}
               title={`${productLetter(productIds, p.productId)}: ${Math.round(pct)}`}
             >
-              <span className={`w-3 h-3 rounded-full ${color} ring-2 ring-white shadow`} />
-              <span className="mt-1 text-[10px] font-bold text-neutral-600">{productLetter(productIds, p.productId)}</span>
+              <span
+                className={`w-4 h-4 rounded-full ${color} ring-[3px] ring-white shadow-lg transition-transform group-hover:scale-110`}
+              />
+              <span className="mt-1.5 text-[10px] font-bold tabular-nums text-neutral-700 bg-white/95 px-1.5 py-0.5 rounded-md border border-neutral-200/80 shadow-sm">
+                {productLetter(productIds, p.productId)}
+              </span>
             </div>
           )
         })}
@@ -130,80 +190,123 @@ export function CompareDecisionResults({
       transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
       className="space-y-8"
     >
-      {/* Context strip */}
-      <div className="rounded-2xl border border-neutral-200/60 bg-white/90 p-4 sm:p-5 shadow-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-violet-100 text-violet-800 text-xs font-bold uppercase tracking-wide">
-            <GitCompare className="w-3.5 h-3.5" />
-            {MODE_COPY[result.comparisonMode]}
-          </span>
-          {result.requestedGoal && (
-            <span className="text-xs text-neutral-600">
-              Goal: <span className="font-medium text-neutral-800">{result.requestedGoal.replace(/_/g, ' ')}</span>
+      {/* Context + summary strip */}
+      <div className="relative overflow-hidden rounded-3xl border border-neutral-200/50 bg-gradient-to-br from-white via-violet-50/30 to-fuchsia-50/20 p-6 sm:p-7 shadow-lg shadow-violet-500/5 ring-1 ring-inset ring-white/80">
+        <div className="pointer-events-none absolute -right-20 -top-20 h-56 w-56 rounded-full bg-fuchsia-300/20 blur-3xl" aria-hidden />
+        <div className="pointer-events-none absolute -left-16 bottom-0 h-40 w-40 rounded-full bg-violet-300/15 blur-3xl" aria-hidden />
+        <div className="relative flex flex-col lg:flex-row lg:items-start lg:justify-between gap-5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-neutral-900 text-white text-xs font-bold uppercase tracking-wide shadow-md">
+              <GitCompare className="w-4 h-4 opacity-90" />
+              {MODE_COPY[result.comparisonMode]}
             </span>
-          )}
-          {result.requestedOccasion && (
-            <span className="text-xs text-neutral-600">
-              Occasion:{' '}
-              <span className="font-medium text-neutral-800">{result.requestedOccasion}</span>
-            </span>
-          )}
+            {result.requestedGoal && (
+              <span className="inline-flex items-center rounded-xl border border-violet-200/80 bg-white/90 px-3 py-1.5 text-xs font-medium text-neutral-700 shadow-sm">
+                Goal ·{' '}
+                <span className="ml-1 font-semibold text-violet-800">{result.requestedGoal.replace(/_/g, ' ')}</span>
+              </span>
+            )}
+            {result.requestedOccasion && (
+              <span className="inline-flex items-center rounded-xl border border-fuchsia-200/80 bg-white/90 px-3 py-1.5 text-xs font-medium text-neutral-700 shadow-sm">
+                Occasion ·{' '}
+                <span className="ml-1 font-semibold text-fuchsia-800">{result.requestedOccasion}</span>
+              </span>
+            )}
+          </div>
+          <p className="text-sm text-neutral-600 leading-relaxed max-w-2xl lg:text-right lg:max-w-md">
+            {result.comparisonContext.modeReason}
+          </p>
         </div>
-        <p className="text-sm text-neutral-600 max-w-xl">{result.comparisonContext.modeReason}</p>
       </div>
 
       {/* Data quality */}
       {result.comparisonContext.dataQuality && (
-        <div className="rounded-2xl border border-amber-100 bg-amber-50/50 px-4 py-3 text-sm text-amber-950">
-          <span className="font-semibold">Data quality {normalizeScoreDisplay(result.comparisonContext.dataQuality.overallScore)}</span>
+        <div className="rounded-3xl border border-amber-200/60 bg-gradient-to-br from-amber-50 to-orange-50/40 px-5 py-4 shadow-md shadow-amber-500/5">
+          <div className="flex items-center gap-2 mb-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+            <span className="font-display font-bold text-amber-950">
+              Data quality · {normalizeScoreDisplay(result.comparisonContext.dataQuality.overallScore)}
+            </span>
+          </div>
           {result.comparisonContext.dataQuality.notes?.length > 0 && (
             <BulletList items={result.comparisonContext.dataQuality.notes} icon={AlertTriangle} tone="amber" />
           )}
         </div>
       )}
 
-      {/* Decision confidence — replaces single-winner verdict */}
-      <div className="relative overflow-hidden rounded-3xl border border-neutral-200/60 bg-white shadow-lg">
-        <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-violet-500 via-fuchsia-500 to-rose-400" />
-        <div className="p-6 sm:p-8">
-          <div className="flex items-start gap-4 mb-4">
-            <div className="p-2.5 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-md flex-shrink-0">
-              <BarChart3 className="w-5 h-5" />
-            </div>
+      {/* Decision confidence */}
+      <div className="relative overflow-hidden rounded-3xl border border-neutral-200/50 bg-white shadow-xl shadow-violet-500/10 ring-1 ring-inset ring-violet-100/50">
+        <div className="absolute inset-x-0 top-0 h-1.5 bg-gradient-to-r from-violet-500 via-fuchsia-500 to-rose-400" />
+        <div className="p-6 sm:p-8 lg:p-10">
+          <div className="flex flex-col md:flex-row md:items-center gap-8 md:gap-10">
             <div className="flex-1 min-w-0">
-              <h2 className="font-display text-xl sm:text-2xl font-bold text-neutral-900">
+              <div className="inline-flex items-center gap-2 rounded-full bg-violet-100 px-3 py-1 text-xs font-bold uppercase tracking-wider text-violet-800 mb-4">
+                <BarChart3 className="w-3.5 h-3.5" />
+                Decision read
+              </div>
+              <h2 className="font-display text-3xl sm:text-4xl font-bold text-neutral-900 tracking-tight">
                 {CONFIDENCE_COPY[result.decisionConfidence.level]}
               </h2>
-              <p className="text-neutral-500 mt-1">
-                Confidence score: {normalizeScoreDisplay(result.decisionConfidence.score)}
+              <p className="text-neutral-500 mt-2 text-sm sm:text-base max-w-prose">
+                How strongly the model separates these options for your goal and signals.
               </p>
+            </div>
+            <div className="flex justify-center md:justify-end shrink-0">
+              <ScoreRing
+                score={normalizeScoreDisplay(result.decisionConfidence.score)}
+                color={scoreToLevelColor(normalizeScoreDisplay(result.decisionConfidence.score))}
+                size={112}
+                label="Confidence"
+              />
             </div>
           </div>
           {result.decisionConfidence.explanation?.length > 0 && (
-            <BulletList items={result.decisionConfidence.explanation} icon={Sparkles} tone="violet" />
+            <div className="mt-8 pt-8 border-t border-neutral-100">
+              <p className="text-xs font-bold uppercase tracking-wider text-neutral-400 mb-4">Why</p>
+              <BulletList items={result.decisionConfidence.explanation} icon={Sparkles} tone="violet" />
+            </div>
           )}
         </div>
       </div>
 
       {/* Winners by context */}
-      <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 shadow-sm">
-        <h3 className="font-display font-bold text-lg text-neutral-900 mb-4">Winners by context</h3>
-        <div className="flex flex-wrap gap-2">
+      <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-lg shadow-neutral-200/30">
+        <SectionHeader icon={GitCompare} title="Winners by context" subtitle="Who leads for each lens — tap through to the product cards below." />
+        <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
           {(Object.keys(WINNER_CONTEXT_LABELS) as Array<keyof typeof WINNER_CONTEXT_LABELS>).map((key) => {
             const pid = result.winnersByContext[key]
             if (typeof pid !== 'number') return null
             const label = WINNER_CONTEXT_LABELS[key]
             const letter = productLetter(ids, pid)
             const title = products?.find((p) => p.id === pid)?.title
+            const img = products?.find((p) => p.id === pid)
             return (
-              <span
+              <div
                 key={key}
-                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-neutral-100 text-sm text-neutral-800 border border-neutral-200/80"
+                className="group flex gap-3 rounded-2xl border border-neutral-200/70 bg-gradient-to-br from-white to-neutral-50/80 p-4 shadow-sm transition-all hover:border-violet-200 hover:shadow-md hover:shadow-violet-500/10"
               >
-                <span className="font-semibold text-violet-700">{label}:</span>
-                <span className="font-mono text-xs bg-white px-1.5 py-0.5 rounded border border-neutral-200">{letter}</span>
-                {title && <span className="text-xs text-neutral-600 truncate max-w-[140px]">{title}</span>}
-              </span>
+                <div className="relative h-16 w-12 shrink-0 overflow-hidden rounded-xl bg-neutral-100 ring-1 ring-neutral-200/60">
+                  {img && (
+                    <Image
+                      src={img.image_cdn || img.image_url || 'https://placehold.co/48x64'}
+                      alt={img.title}
+                      fill
+                      className="object-cover transition-transform group-hover:scale-105"
+                    />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-violet-600">{label}</p>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-violet-600 to-fuchsia-500 text-xs font-bold text-white shadow-sm">
+                      {letter}
+                    </span>
+                    {title ? (
+                      <p className="text-sm font-semibold text-neutral-900 line-clamp-2 leading-snug">{title}</p>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
             )
           })}
         </div>
@@ -214,11 +317,8 @@ export function CompareDecisionResults({
         (attraction.explanation.length > 0 ||
           attraction.scores.length > 0 ||
           attraction.firstAttractionProductId != null) && (
-        <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 shadow-sm">
-          <h3 className="font-display font-bold text-lg text-neutral-900 mb-3 flex items-center gap-2">
-            <Eye className="w-5 h-5 text-violet-600" />
-            Attraction
-          </h3>
+        <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-lg shadow-neutral-200/20">
+          <SectionHeader icon={Eye} title="Attraction" subtitle="First visual pull and relative draw between options." />
           {attraction.firstAttractionProductId != null && (
             <p className="text-sm text-neutral-700 mb-3">
               First pull:{' '}
@@ -246,16 +346,16 @@ export function CompareDecisionResults({
 
       {/* Visual differences */}
       {result.stepInsights.visualDifferences?.length > 0 && (
-        <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 shadow-sm">
-          <h3 className="font-display font-bold text-lg text-neutral-900 mb-3">Visual differences</h3>
+        <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-lg shadow-neutral-200/20">
+          <SectionHeader icon={Sparkles} title="Visual differences" subtitle="What changes most when you look at these side by side." />
           <BulletList items={result.stepInsights.visualDifferences} icon={CheckCircle} tone="neutral" />
         </div>
       )}
 
       {/* Tension axes */}
       {result.tensionAxes?.length > 0 && (
-        <div className="space-y-3">
-          <h3 className="font-display font-bold text-lg text-neutral-900">Tension axes</h3>
+        <div className="space-y-5">
+          <SectionHeader icon={Split} title="Tension axes" subtitle="Where each option sits between two style poles." />
           <div className="grid md:grid-cols-2 gap-4">
             {result.tensionAxes.map((axis) => (
               <TensionAxisRow key={axis.axis} axis={axis} productIds={ids} />
@@ -266,11 +366,8 @@ export function CompareDecisionResults({
 
       {/* Why not both */}
       {result.whyNotBoth?.enabled && (
-        <div className="rounded-3xl border border-fuchsia-200/80 bg-fuchsia-50/40 p-6 shadow-sm">
-          <h3 className="font-display font-bold text-lg text-neutral-900 mb-3 flex items-center gap-2">
-            <Split className="w-5 h-5 text-fuchsia-600" />
-            Why not both?
-          </h3>
+        <div className="rounded-3xl border border-fuchsia-200/70 bg-gradient-to-br from-fuchsia-50/90 via-white to-violet-50/50 p-6 sm:p-8 shadow-lg shadow-fuchsia-500/10">
+          <SectionHeader icon={Split} title="Why not both?" subtitle="Sometimes the best move is a split role — not a single winner." />
           {result.whyNotBoth.explanation?.length > 0 && (
             <BulletList items={result.whyNotBoth.explanation} icon={Sparkles} tone="violet" />
           )}
@@ -290,11 +387,8 @@ export function CompareDecisionResults({
 
       {/* Outfit impact */}
       {result.outfitImpact?.enabled && (
-        <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 shadow-sm">
-          <h3 className="font-display font-bold text-lg text-neutral-900 mb-3 flex items-center gap-2">
-            <Shirt className="w-5 h-5 text-violet-600" />
-            Outfit impact
-          </h3>
+        <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-lg shadow-neutral-200/20">
+          <SectionHeader icon={Shirt} title="Outfit impact" subtitle="Versatility and how well each piece fills wardrobe gaps." />
           {result.outfitImpact.explanation?.length > 0 && (
             <BulletList items={result.outfitImpact.explanation} icon={CheckCircle} tone="violet" />
           )}
@@ -325,11 +419,8 @@ export function CompareDecisionResults({
 
       {/* Social mirror */}
       {result.socialMirror?.enabled && result.socialMirror.explanation?.length > 0 && (
-        <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 shadow-sm">
-          <h3 className="font-display font-bold text-lg text-neutral-900 mb-3 flex items-center gap-2">
-            <Users className="w-5 h-5 text-violet-600" />
-            Social mirror
-          </h3>
+        <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-lg shadow-neutral-200/20">
+          <SectionHeader icon={Users} title="Social mirror" subtitle="How others might read each choice." />
           <ul className="space-y-2">
             {result.socialMirror.explanation.map((row) => (
               <li key={row.productId} className="text-sm text-neutral-700">
@@ -343,8 +434,8 @@ export function CompareDecisionResults({
 
       {/* People like you */}
       {result.peopleLikeYou?.enabled && (
-        <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 shadow-sm">
-          <h3 className="font-display font-bold text-lg text-neutral-900 mb-3">People like you</h3>
+        <div className="rounded-3xl border border-neutral-200/60 bg-white p-6 sm:p-8 shadow-lg shadow-neutral-200/20">
+          <SectionHeader icon={Sparkles} title="People like you" subtitle="Patterns from similar shoppers." />
           {(result.peopleLikeYou.explanation?.length ?? 0) > 0 && (
             <BulletList items={result.peopleLikeYou.explanation ?? []} icon={CheckCircle} tone="neutral" />
           )}
@@ -359,7 +450,13 @@ export function CompareDecisionResults({
       )}
 
       {/* Per-product insights */}
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
+      <div>
+        <SectionHeader
+          icon={BarChart3}
+          title="Per-product breakdown"
+          subtitle="Scores, friction, and story for each item — winners in a context show a ribbon."
+        />
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
         {ids.map((productId, idx) => {
           const insight = getProductInsightById(result, productId)
           const product = products?.find((p) => p.id === productId)
@@ -377,59 +474,68 @@ export function CompareDecisionResults({
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.15 + idx * 0.08, duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
-              className={`relative rounded-2xl border bg-white shadow-sm overflow-hidden transition-shadow hover:shadow-lg ${
-                contexts.includes('overall') ? 'border-violet-300 ring-2 ring-violet-200/50' : 'border-neutral-200/80'
+              className={`relative rounded-3xl border bg-white overflow-hidden transition-all duration-300 hover:-translate-y-0.5 ${
+                contexts.includes('overall')
+                  ? 'border-violet-300 shadow-xl shadow-violet-500/15 ring-2 ring-violet-200/60'
+                  : 'border-neutral-200/70 shadow-md shadow-neutral-200/40 hover:shadow-lg hover:border-violet-200/80'
               }`}
             >
               {contexts.length > 0 && (
-                <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-violet-500 to-fuchsia-500" />
+                <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-violet-500 via-fuchsia-500 to-rose-400" />
               )}
-              <div className="p-5">
+              {contexts.includes('overall') && (
+                <div className="absolute top-3 right-3 z-10 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-500 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-white shadow-md">
+                  Top overall
+                </div>
+              )}
+              <div className="p-5 sm:p-6">
                 <div className="flex items-start gap-4">
                   {product && (
-                    <Link href={`/products/${product.id}`} className="block flex-shrink-0">
-                      <div className="relative w-16 h-20 rounded-xl overflow-hidden bg-neutral-100 ring-1 ring-neutral-200/60">
+                    <Link href={`/products/${product.id}`} className="block flex-shrink-0 group/img">
+                      <div className="relative w-[4.5rem] h-28 sm:w-24 sm:h-32 rounded-2xl overflow-hidden bg-neutral-100 ring-2 ring-white shadow-md ring-offset-2 ring-offset-neutral-50 group-hover/img:ring-violet-200 transition-all">
                         <Image
-                          src={product.image_cdn || product.image_url || 'https://placehold.co/64x80'}
+                          src={product.image_cdn || product.image_url || 'https://placehold.co/96x128'}
                           alt={product.title}
                           fill
-                          className="object-cover"
+                          className="object-cover transition-transform duration-500 group-hover/img:scale-105"
                         />
                       </div>
                     </Link>
                   )}
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1 flex-wrap">
-                      <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-gradient-to-br from-violet-100 to-fuchsia-100 text-sm font-bold text-violet-700">
+                    <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                      <span className="inline-flex items-center justify-center w-8 h-8 rounded-xl bg-gradient-to-br from-violet-600 to-fuchsia-500 text-sm font-bold text-white shadow-sm">
                         {letter}
                       </span>
                       {contexts.slice(0, 3).map((c) => (
                         <span
                           key={c}
-                          className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-100 text-amber-800"
+                          className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 ring-1 ring-amber-200/60"
                         >
                           {WINNER_CONTEXT_LABELS[c]}
                         </span>
                       ))}
                     </div>
-                    <p className="font-semibold text-neutral-900 text-sm line-clamp-1">{product?.title ?? `Product ${productId}`}</p>
-                    <p className="text-xs text-neutral-500 mt-0.5">{product?.brand ?? ''}</p>
+                    <p className="font-display font-bold text-neutral-900 text-sm sm:text-base line-clamp-2 leading-snug">
+                      {product?.title ?? `Product ${productId}`}
+                    </p>
+                    <p className="text-xs font-medium text-violet-600/90 mt-1">{product?.brand ?? ''}</p>
                   </div>
-                  {insight && <ScoreRing score={overall} color={ringColor} />}
+                  {insight && <ScoreRing score={overall} color={ringColor} size={88} label="Overall" />}
                 </div>
 
                 {insight && (
                   <>
-                    <div className="mt-4 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-neutral-600">
-                      <span>Value {normalizeScoreDisplay(insight.scores.value)}</span>
-                      <span>Quality {normalizeScoreDisplay(insight.scores.quality)}</span>
-                      <span>Style {normalizeScoreDisplay(insight.scores.style)}</span>
-                      <span>Risk {normalizeScoreDisplay(insight.scores.risk)}</span>
-                      <span>Practical {normalizeScoreDisplay(insight.scores.practical)}</span>
-                      <span>Expressive {normalizeScoreDisplay(insight.scores.expressive)}</span>
+                    <div className="mt-5 grid grid-cols-2 gap-3">
+                      <MetricBar label="Value" value={normalizeScoreDisplay(insight.scores.value)} />
+                      <MetricBar label="Quality" value={normalizeScoreDisplay(insight.scores.quality)} />
+                      <MetricBar label="Style" value={normalizeScoreDisplay(insight.scores.style)} />
+                      <MetricBar label="Risk" value={normalizeScoreDisplay(insight.scores.risk)} />
+                      <MetricBar label="Practical" value={normalizeScoreDisplay(insight.scores.practical)} />
+                      <MetricBar label="Expressive" value={normalizeScoreDisplay(insight.scores.expressive)} />
                     </div>
 
-                    <div className="mt-4 space-y-3 text-sm border-t border-neutral-100 pt-4">
+                    <div className="mt-5 space-y-3 text-sm border-t border-neutral-100 pt-5">
                       <p className="text-xs font-semibold text-neutral-500 uppercase">Friction</p>
                       <p className="text-neutral-800">
                         Index {insight.frictionIndex}{' '}
@@ -507,6 +613,7 @@ export function CompareDecisionResults({
             </motion.div>
           )
         })}
+        </div>
       </div>
     </motion.div>
   )

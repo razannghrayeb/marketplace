@@ -12,7 +12,9 @@ import { config } from '../../config';
 import {
   IntentParserService,
   ParsedIntent,
+  ImageIntent,
   createClipOnlyParsedIntent,
+  MAX_MULTI_IMAGE_UPLOADS,
 } from '../../lib/prompt/gemeni';
 import { preprocessMultiImageBuffers } from '../../lib/search/multiImagePreprocess';
 import { reconcileIntentNegativeCollisions } from '../../lib/search/intentReconciliation';
@@ -1826,17 +1828,22 @@ export async function multiImageSearch(
   try {
     let multiImageEffectiveFinalMin = config.search.finalAcceptMinImage;
     const prepared = await preprocessMultiImageBuffers(images);
-    const { parsedIntent, geminiDegraded } = await parseMultiImageIntentWithGuards(
-      prepared,
-      userPrompt,
-    );
+    const intentParse = await parseMultiImageIntentWithGuards(prepared, userPrompt);
+    const geminiDegraded = intentParse.geminiDegraded;
+    let parsedIntent = intentParse.parsedIntent;
     reconcileIntentNegativeCollisions(parsedIntent);
+    parsedIntent = applyOrdinalMixMatchToIntent(parsedIntent, prepared.length, userPrompt);
 
     const imageEmbeddings = await Promise.all(
       prepared.map((img) => processImageForEmbedding(img)),
     );
 
     const compositeQuery = await queryBuilder.buildQuery(parsedIntent, imageEmbeddings);
+    const compositeColorFiltersForRank = compositeQuery.filters.filter((f) => f.attribute === "color");
+
+    if (multiImageUsesImageAnchoredColorPhrasing(userPrompt)) {
+      compositeQuery.filters = compositeQuery.filters.filter((f) => f.attribute !== "color");
+    }
 
     // Same CLIP text embedding path as text search: bridges language in the prompt to image-indexed vectors.
     await blendPromptClipIntoCompositeGlobal(compositeQuery, userPrompt, parsedIntent);
@@ -1979,11 +1986,13 @@ export async function multiImageSearch(
     }
 
     const productIds = hits.map((hit: any) => hit._source?.product_id);
-    const multiImageQueryColorHints = [
-      ...new Set(
-        (ast.entities.colors ?? []).map((c) => String(c).trim().toLowerCase()).filter(Boolean),
-      ),
-    ];
+    const multiImageQueryColorHints = multiImageUsesImageAnchoredColorPhrasing(userPrompt)
+      ? []
+      : [
+          ...new Set(
+            (ast.entities.colors ?? []).map((c) => String(c).trim().toLowerCase()).filter(Boolean),
+          ),
+        ];
     const hydratedResults = await hydrateProductDetails(productIds, queryBundle.sqlFilters, {
       primaryColorByProductId: primaryColorByProductIdMulti,
       queryColorHints: multiImageQueryColorHints,
@@ -2069,8 +2078,10 @@ export async function multiImageSearch(
         };
       })
       .sort((a: any, b: any) => {
-        const fa = a.finalRelevance01 ?? 0;
-        const fb = b.finalRelevance01 ?? 0;
+        const ca = colorCompositeFilterBoost(a, compositeColorFiltersForRank);
+        const cb = colorCompositeFilterBoost(b, compositeColorFiltersForRank);
+        const fa = (a.finalRelevance01 ?? 0) + ca;
+        const fb = (b.finalRelevance01 ?? 0) + cb;
         if (Math.abs(fb - fa) > 1e-8) return fb - fa;
         const ta = a.textSearchRerankScore ?? 0;
         const tb = b.textSearchRerankScore ?? 0;
@@ -2082,7 +2093,11 @@ export async function multiImageSearch(
       (r: any) =>
         typeof r.finalRelevance01 === "number" && r.finalRelevance01 >= multiImageEffectiveFinalMin,
     );
-    finalResults.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
+    finalResults.sort((a: any, b: any) => {
+      const ca = colorCompositeFilterBoost(a, compositeColorFiltersForRank);
+      const cb = colorCompositeFilterBoost(b, compositeColorFiltersForRank);
+      return (b.finalRelevance01 ?? 0) + cb - ((a.finalRelevance01 ?? 0) + ca);
+    });
 
     if (finalResults.length > 0) {
       const maxVs = Math.max(
@@ -2140,11 +2155,11 @@ export async function multiVectorWeightedSearch(
 
   try {
     const prepared = await preprocessMultiImageBuffers(images);
-    const { parsedIntent, geminiDegraded } = await parseMultiImageIntentWithGuards(
-      prepared,
-      userPrompt,
-    );
+    const mvIntentParse = await parseMultiImageIntentWithGuards(prepared, userPrompt);
+    const geminiDegraded = mvIntentParse.geminiDegraded;
+    let parsedIntent = mvIntentParse.parsedIntent;
     reconcileIntentNegativeCollisions(parsedIntent);
+    parsedIntent = applyOrdinalMixMatchToIntent(parsedIntent, prepared.length, userPrompt);
 
     const attributeEmbedList: AttributeEmbedding[] = [];
 
@@ -2301,6 +2316,94 @@ function clampEnv01(raw: string | undefined, fallback: number, max: number): num
 const MULTI_IMAGE_GEMINI_BUDGET_EXCEEDED = "MULTI_IMAGE_GEMINI_BUDGET";
 
 /**
+ * Detect ordinal references like "color from the first", "style from the second" (0-based indices).
+ * Drives embedding merge when Gemini is missing or ignores upload order.
+ */
+function parseOrdinalAttributeRefsFromPrompt(
+  prompt: string,
+): Array<{ imageIndex: number; attributes: string[] }> {
+  const lowerPrompt = prompt.toLowerCase();
+  const ordinals = [
+    String.raw`(?:first|1st|image\s*1|pic\s*1|picture\s*1|photo\s*1)`,
+    String.raw`(?:second|2nd|image\s*2|pic\s*2|picture\s*2|photo\s*2)`,
+    String.raw`(?:third|3rd|image\s*3|pic\s*3|picture\s*3|photo\s*3)`,
+    String.raw`(?:fourth|4th|image\s*4|pic\s*4|picture\s*4|photo\s*4)`,
+    String.raw`(?:fifth|5th|image\s*5|pic\s*5|picture\s*5|photo\s*5)`,
+  ];
+  // "from/of/in/for" — users often say "color *for* the second" (not only "from").
+  const link = String.raw`(?:from|of|in|for)\s+(?:the\s+)?`;
+  const refsMap = new Map<number, Set<string>>();
+  for (let idx = 0; idx < ordinals.length; idx++) {
+    const o = ordinals[idx];
+    // Allow "the color from the first" / "use the style from the second" (article before attribute).
+    const checks: Array<{ re: RegExp; attr: string }> = [
+      { re: new RegExp(`(?:the\\s+)?(?:color|colour)s?\\s+${link}${o}`, "i"), attr: "color" },
+      { re: new RegExp(`(?:the\\s+)?(?:texture|material|fabric)\\s+${link}${o}`, "i"), attr: "texture" },
+      { re: new RegExp(`(?:the\\s+)?(?:style|vibe|aesthetic)s?\\s+${link}${o}`, "i"), attr: "style" },
+      {
+        re: new RegExp(
+          `(?:the\\s+)?(?:fit|silhouette|shape|cut)\\s+(?:from|of|like|in|for)\\s+(?:the\\s+)?${o}`,
+          "i",
+        ),
+        attr: "silhouette",
+      },
+      { re: new RegExp(`(?:the\\s+)?(?:pattern|print)\\s+${link}${o}`, "i"), attr: "pattern" },
+    ];
+    for (const { re, attr } of checks) {
+      if (re.test(lowerPrompt)) {
+        if (!refsMap.has(idx)) refsMap.set(idx, new Set());
+        refsMap.get(idx)!.add(attr);
+      }
+    }
+  }
+  return [...refsMap.entries()]
+    .map(([imageIndex, attrs]) => ({ imageIndex, attributes: [...attrs] }))
+    .sort((a, b) => a.imageIndex - b.imageIndex);
+}
+
+function applyOrdinalMixMatchToIntent(
+  parsedIntent: ParsedIntent,
+  imageCount: number,
+  userPrompt: string,
+): ParsedIntent {
+  const refsFlat = parseOrdinalAttributeRefsFromPrompt(userPrompt);
+  const n = Math.max(1, Math.min(imageCount, MAX_MULTI_IMAGE_UPLOADS));
+  const byIdx = new Map<number, Set<string>>();
+  for (const r of refsFlat) {
+    if (r.imageIndex < 0 || r.imageIndex >= n) continue;
+    if (!byIdx.has(r.imageIndex)) byIdx.set(r.imageIndex, new Set());
+    for (const a of r.attributes) byIdx.get(r.imageIndex)!.add(a);
+  }
+  if (byIdx.size === 0) return parsedIntent;
+
+  const prevByIdx = new Map<number, ImageIntent>();
+  for (const ii of parsedIntent.imageIntents ?? []) {
+    prevByIdx.set(ii.imageIndex, ii);
+  }
+
+  const keys = [...byIdx.keys()].sort((a, b) => a - b);
+  const w = 1 / keys.length;
+  const imageIntents: ImageIntent[] = keys.map((idx) => {
+    const attrs = [...(byIdx.get(idx) ?? new Set())];
+    const prev = prevByIdx.get(idx);
+    return {
+      imageIndex: idx,
+      primaryAttributes: attrs.length > 0 ? attrs : ["style", "silhouette"],
+      extractedValues: prev?.extractedValues ?? {},
+      weight: w,
+      reasoning: `Prompt: ${attrs.join(", ")} from image ${idx}`,
+    };
+  });
+
+  return {
+    ...parsedIntent,
+    imageIntents,
+    searchStrategy: `Mix & match: ${imageIntents.map((ii) => `#${ii.imageIndex} → ${ii.primaryAttributes.join("+")}`).join(" · ")}`,
+    confidence: Math.max(parsedIntent.confidence ?? 0, 0.52),
+  };
+}
+
+/**
  * Bounded Gemini intent parse: missing key / outer budget → CLIP-only ParsedIntent (retrieval still runs).
  */
 async function parseMultiImageIntentWithGuards(
@@ -2424,11 +2527,27 @@ function multiImageStrictPromptEnabled(): boolean {
   return v !== "0" && v !== "false" && v !== "off";
 }
 
+/**
+ * Phrases like "color from the first image" mean palette comes from uploads, not literal
+ * color tokens in the text. QueryAST often invents bogus colors; do not treat them as strict intent.
+ */
+function multiImageUsesImageAnchoredColorPhrasing(raw: string): boolean {
+  const p = raw.toLowerCase().trim();
+  if (!p) return false;
+  const ord =
+    "(?:first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|image\\s*[1-5]|pic\\s*[1-5]|picture\\s*[1-5]|photo\\s*[1-5]|last)";
+  const link = "(?:from|of|in|for)\\s+(?:the\\s+)?";
+  return new RegExp(`\\b(?:color|colours?|shade|hue|tone|palette)\\s+${link}${ord}\\b`, "i").test(
+    p,
+  );
+}
+
 function multiImageHasStrictPromptSignals(ast: QueryAST, rawPrompt: string): boolean {
   const t = rawPrompt?.trim() ?? "";
   if (t.length < 10) return false;
   if (parseNegations(t).negations.length > 0) return true;
-  if ((ast.entities?.colors ?? []).length > 0) return true;
+  if (!multiImageUsesImageAnchoredColorPhrasing(t) && (ast.entities?.colors ?? []).length > 0)
+    return true;
   if ((ast.entities?.productTypes ?? []).length > 0) return true;
   if ((ast.entities?.categories ?? []).length > 0) return true;
   const pr = ast.filters?.priceRange;
@@ -2499,7 +2618,10 @@ function buildMultiImageSearchHitRelevanceIntent(
         ? merged.category[0]
         : undefined);
 
-  const fromAstColors = (ast.entities.colors ?? []).map((c) => String(c).toLowerCase());
+  const imageAnchoredColorPhrase = multiImageUsesImageAnchoredColorPhrasing(rawPrompt);
+  const fromAstColors = imageAnchoredColorPhrase
+    ? []
+    : (ast.entities.colors ?? []).map((c) => String(c).toLowerCase());
   const fromImageColors: string[] = [];
   for (const ii of parsedIntent.imageIntents || []) {
     const ev = ii.extractedValues as Record<string, unknown> | undefined;
@@ -2513,10 +2635,13 @@ function buildMultiImageSearchHitRelevanceIntent(
   }
 
   // When the user names colors in the prompt, those are restrictions — do not dilute with hues from uploads.
-  const promptAnchoredColorIntent = fromAstColors.length > 0;
-  const rerankDesiredColorsRaw = promptAnchoredColorIntent
-    ? [...new Set(fromAstColors.filter(Boolean))]
-    : [...new Set([...fromAstColors, ...fromImageColors].filter(Boolean))];
+  // When they say "color from image N", literal AST colors are unreliable — use embeddings, not bogus tokens.
+  const promptAnchoredColorIntent = !imageAnchoredColorPhrase && fromAstColors.length > 0;
+  const rerankDesiredColorsRaw = imageAnchoredColorPhrase
+    ? []
+    : promptAnchoredColorIntent
+      ? [...new Set(fromAstColors.filter(Boolean))]
+      : [...new Set([...fromAstColors, ...fromImageColors].filter(Boolean))];
 
   const rerankDesiredColors = [
     ...new Set(
@@ -2591,6 +2716,7 @@ async function hydrateProductDetails(
   if (numericIds.length === 0) return [];
   const query = `
     SELECT p.id, p.title AS name, p.brand,
+           p.price_cents,
            ROUND(p.price_cents / 100.0, 2) AS price,
            COALESCE(p.image_cdn, p.image_url) AS image_url,
            p.category, p.description, p.vendor_id, p.size, p.color
@@ -2599,10 +2725,21 @@ async function hydrateProductDetails(
   `;
   const result = await pool.query(query, [numericIds]);
   const colorMap = variantOptions?.primaryColorByProductId;
-  return result.rows.map((row: any) => ({
-    ...row,
-    color: colorMap?.get(String(row.id)) ?? row.color ?? null,
-  }));
+  return result.rows.map((row: any) => {
+    const fixedCents = deflateInflatedPriceCents(row.price_cents);
+    if (fixedCents != null) {
+      return {
+        ...row,
+        price_cents: fixedCents,
+        price: Math.round((fixedCents / 100) * 100) / 100,
+        color: colorMap?.get(String(row.id)) ?? row.color ?? null,
+      };
+    }
+    return {
+      ...row,
+      color: colorMap?.get(String(row.id)) ?? row.color ?? null,
+    };
+  });
 }
 
 function productSearchTextBlob(product: any): string {
@@ -2631,6 +2768,33 @@ function productMatchesCompositeFilter(product: any, filter: { attribute: string
     }
   }
   return false;
+}
+
+/** Tie-break / re-rank: when composite query encodes colors, prefer SKUs whose title/color blob matches. */
+function colorCompositeFilterBoost(
+  product: any,
+  filters: Array<{ attribute: string; values: string[]; operator?: string; weight?: number }> | undefined,
+): number {
+  if (!filters?.length) return 0;
+  let best = 0;
+  for (const f of filters) {
+    if (f.attribute !== "color" || f.operator === "exclude") continue;
+    if (productMatchesCompositeFilter(product, { attribute: f.attribute, values: f.values })) {
+      best = Math.max(best, 0.15 * (typeof f.weight === "number" ? f.weight : 1));
+    }
+  }
+  return best;
+}
+
+/** Some feeds store price_cents at 1000× (e.g. 7618000 instead of 7618 for ~$76). Only adjust obvious outliers. */
+function deflateInflatedPriceCents(raw: unknown): number | undefined {
+  const n = typeof raw === "string" ? parseFloat(raw) : Number(raw);
+  if (!Number.isFinite(n) || n < 1_000_000) return undefined;
+  let c = Math.round(n);
+  while (c >= 1_000_000) {
+    c = Math.round(c / 1000);
+  }
+  return c;
 }
 
 function calculateCompositeScore(

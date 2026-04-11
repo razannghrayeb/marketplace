@@ -1,6 +1,7 @@
 'use client'
 
-import { useParams } from 'next/navigation'
+import { Suspense } from 'react'
+import { useParams, useSearchParams } from 'next/navigation'
 import Image from 'next/image'
 import Link from 'next/link'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -52,8 +53,26 @@ function parseProductPayload(res: { success?: boolean; data?: unknown; error?: {
   } as Product
 }
 
-export default function ProductDetailPage() {
+/** Only allow in-app return to Discover (avoid open redirects). */
+function safeDiscoverReturn(raw: string | null): string | null {
+  if (!raw) return null
+  try {
+    const decoded = decodeURIComponent(raw)
+    if (!/^\/search(\?|$)/.test(decoded)) return null
+    if (decoded.includes('..')) return null
+    return decoded
+  } catch {
+    return null
+  }
+}
+
+function ProductDetailContent() {
   const params = useParams()
+  const searchParams = useSearchParams()
+  const discoverBack = safeDiscoverReturn(searchParams.get('from'))
+  const backHref = discoverBack ?? '/products'
+  const backLabel = discoverBack ? 'Back to Discover' : 'Back to shop'
+
   const id = params.id as string
   const numericId = id ? Number(id) : NaN
   const qc = useQueryClient()
@@ -127,8 +146,8 @@ export default function ProductDetailPage() {
       <div className="max-w-7xl mx-auto px-4 py-10 text-center">
         <p className="text-neutral-800 font-medium mb-2">Could not load this product</p>
         <p className="text-neutral-600 text-sm mb-6">{(error as Error)?.message ?? 'It may have been removed or the link is invalid.'}</p>
-        <Link href="/products" className="text-neutral-800 font-medium hover:underline">
-          ← Back to shop
+        <Link href={backHref} className="text-neutral-800 font-medium hover:underline">
+          ← {backLabel}
         </Link>
       </div>
     )
@@ -148,11 +167,11 @@ export default function ProductDetailPage() {
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
       <Link
-        href="/products"
+        href={backHref}
         className="inline-flex items-center gap-2 text-neutral-600 hover:text-neutral-800 mb-8 transition-colors"
       >
         <ArrowLeft className="w-4 h-4" />
-        Back to products
+        {backLabel}
       </Link>
 
       <motion.div
@@ -265,5 +284,27 @@ export default function ProductDetailPage() {
         </div>
       </motion.div>
     </div>
+  )
+}
+
+export default function ProductDetailPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="max-w-7xl mx-auto px-4 py-10">
+          <div className="h-4 w-40 bg-neutral-100 rounded animate-pulse mb-8" />
+          <div className="grid lg:grid-cols-2 gap-12">
+            <div className="aspect-[3/4] rounded-2xl bg-neutral-100 animate-pulse" />
+            <div className="space-y-4">
+              <div className="h-8 bg-neutral-100 rounded animate-pulse w-3/4" />
+              <div className="h-4 bg-neutral-100 rounded animate-pulse w-1/2" />
+              <div className="h-12 bg-neutral-100 rounded animate-pulse w-1/4" />
+            </div>
+          </div>
+        </div>
+      }
+    >
+      <ProductDetailContent />
+    </Suspense>
   )
 }

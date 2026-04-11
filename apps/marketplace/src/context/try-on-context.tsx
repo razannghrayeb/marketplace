@@ -13,7 +13,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { Loader2, Shirt } from 'lucide-react'
 import { useAuthStore } from '@/store/auth'
-import { api } from '@/lib/api/client'
+import { api, type ApiResponse } from '@/lib/api/client'
 import { endpoints } from '@/lib/api/endpoints'
 
 const TRYON_JOB_STORAGE_KEY = 'styleai_tryon_job_id'
@@ -59,6 +59,20 @@ function extractJobPayload(res: unknown): TryOnJobPayload | null {
   return null
 }
 
+/** POST /tryon returns `{ data: { job, jobId } }` (ApiResponse); older clients may return job fields at top level. */
+function extractTryOnSubmitJobId(res: ApiResponse<unknown>): string | null {
+  const r = res as Record<string, unknown>
+  const container =
+    r.data != null && typeof r.data === 'object' ? (r.data as Record<string, unknown>) : r
+  const job = container.job
+  const fromJob =
+    job && typeof job === 'object' ? (job as Record<string, unknown>).id : undefined
+  const raw = fromJob ?? container.jobId ?? container.job_id
+  if (raw == null || raw === '') return null
+  const s = String(raw).trim()
+  return s === '' ? null : s
+}
+
 type TryOnContextValue = {
   jobId: string | null
   job: TryOnJobPayload | undefined
@@ -69,6 +83,8 @@ type TryOnContextValue = {
   stuckNotice: boolean
   isSubmitting: boolean
   submitError: Error | null
+  /** Garment from the last submitted try-on (for “complete the look” after a session restore may be null). */
+  lastGarmentFile: File | null
   /** Start try-on; continues in background if user navigates away */
   submitTryOn: (personFile: File, garmentFile: File) => void
   clearTryOn: () => void
@@ -179,6 +195,7 @@ export function TryOnProvider({ children }: { children: React.ReactNode }) {
   const isAuth = useAuthStore((s) => s.isAuthenticated())
   const user = useAuthStore((s) => s.user)
   const [jobId, setJobId] = useState<string | null>(null)
+  const [lastGarmentFile, setLastGarmentFile] = useState<File | null>(null)
 
   useEffect(() => {
     try {
@@ -201,6 +218,7 @@ export function TryOnProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!isAuth) {
       setJobId(null)
+      setLastGarmentFile(null)
       try {
         sessionStorage.removeItem(TRYON_JOB_STORAGE_KEY)
       } catch {
@@ -217,6 +235,7 @@ export function TryOnProvider({ children }: { children: React.ReactNode }) {
       personFile: File
       garmentFile: File
     }) => {
+      setLastGarmentFile(garmentFile)
       if (!user?.id) throw new Error('You must be signed in to use try-on')
       const formData = new FormData()
       formData.append('person_image', personFile)
@@ -224,20 +243,12 @@ export function TryOnProvider({ children }: { children: React.ReactNode }) {
       formData.append('category', 'upper_body')
       formData.append('user_id', String(user.id))
       const res = await api.postForm(endpoints.tryon.submit, formData)
-      const payload = res as {
-        success?: boolean
-        job?: { id?: string | number }
-        jobId?: string | number
-        error?: string | { message?: string }
+      if (res.success === false && res.error) {
+        throw new Error(res.error.message ?? 'Try-on request failed')
       }
-      const err = payload.error
-      if (payload.success === false && err) {
-        const msg = typeof err === 'string' ? err : err?.message
-        throw new Error(msg ?? 'Try-on request failed')
-      }
-      const jid = payload.job?.id ?? payload.jobId
-      if (jid == null || jid === '') throw new Error('No job ID returned from try-on API')
-      return String(jid)
+      const jid = extractTryOnSubmitJobId(res)
+      if (!jid) throw new Error('No job ID returned from try-on API')
+      return jid
     },
     onSuccess: (id) => setJobId(String(id)),
   })
@@ -281,6 +292,7 @@ export function TryOnProvider({ children }: { children: React.ReactNode }) {
 
   const clearTryOn = useCallback(() => {
     setJobId(null)
+    setLastGarmentFile(null)
     submitMutation.reset()
     try {
       sessionStorage.removeItem(TRYON_JOB_STORAGE_KEY)
@@ -309,6 +321,7 @@ export function TryOnProvider({ children }: { children: React.ReactNode }) {
       stuckNotice,
       isSubmitting: submitMutation.isPending,
       submitError: submitMutation.error as Error | null,
+      lastGarmentFile,
       submitTryOn,
       clearTryOn,
     }),
@@ -322,6 +335,7 @@ export function TryOnProvider({ children }: { children: React.ReactNode }) {
       stuckNotice,
       submitMutation.isPending,
       submitMutation.error,
+      lastGarmentFile,
       submitTryOn,
       clearTryOn,
     ],

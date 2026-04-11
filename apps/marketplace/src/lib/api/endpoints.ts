@@ -14,6 +14,7 @@ export const endpoints = {
   },
   products: {
     list: '/products',
+    sales: '/products/sales',
     facets: '/products/facets',
     search: '/products/search',
     searchImage: '/products/search/image',

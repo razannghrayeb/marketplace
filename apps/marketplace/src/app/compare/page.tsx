@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { GitCompare, X, AlertTriangle, ArrowRight, Sparkles, SlidersHorizontal } from 'lucide-react'
@@ -43,6 +43,35 @@ const defaultForm = (): CompareDecisionFormState => ({
 export default function ComparePage() {
   const { productIds, remove, clear } = useCompareStore()
   const [form, setForm] = useState<CompareDecisionFormState>(defaultForm)
+  /** Subset of `productIds` to send to the compare API (2–5). */
+  const [selectedIds, setSelectedIds] = useState<number[]>([])
+
+  const productIdsKey = useMemo(() => [...productIds].sort((a, b) => a - b).join(','), [productIds])
+
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      const inTray = new Set(productIds)
+      const kept = prev.filter((id) => inTray.has(id))
+      for (const id of productIds) {
+        if (!kept.includes(id)) kept.push(id)
+      }
+      return kept
+    })
+  }, [productIdsKey, productIds])
+
+  const selectedForCompare = useMemo(
+    () => selectedIds.filter((id) => productIds.includes(id)),
+    [selectedIds, productIds],
+  )
+
+  useEffect(() => {
+    setForm((f) => {
+      if (f.firstAttractionProductId != null && !selectedForCompare.includes(f.firstAttractionProductId)) {
+        return { ...f, firstAttractionProductId: undefined }
+      }
+      return f
+    })
+  }, [selectedForCompare])
 
   const { data: products, isLoading: loadingProducts } = useQuery({
     queryKey: ['compare-products', productIds],
@@ -59,8 +88,8 @@ export default function ComparePage() {
   })
 
   const compareMutation = useMutation({
-    mutationFn: async (): Promise<CompareDecisionResponse> => {
-      const body = buildCompareDecisionRequest(productIds, form)
+    mutationFn: async (ids: number[]): Promise<CompareDecisionResponse> => {
+      const body = buildCompareDecisionRequest(ids, form)
       const res = await api.post<unknown>(endpoints.compare.decision, body)
       if (res.success === false) {
         throw new Error(res.error?.message ?? 'Compare decision failed')
@@ -75,11 +104,26 @@ export default function ComparePage() {
   })
 
   const compareResult = compareMutation.data
-  const canCompare = productIds.length >= 2 && productIds.length <= 5
+  const canCompare = selectedForCompare.length >= 2 && selectedForCompare.length <= 5
+
+  const selectedKey = selectedForCompare.join(',')
+  useEffect(() => {
+    compareMutation.reset()
+  }, [selectedKey, productIdsKey])
 
   const runCompare = () => {
-    if (canCompare) compareMutation.mutate()
+    if (canCompare) compareMutation.mutate(selectedForCompare)
   }
+
+  const toggleCompareSelection = (id: number) => {
+    setSelectedIds((prev) => {
+      if (prev.includes(id)) return prev.filter((x) => x !== id)
+      return [...prev, id]
+    })
+  }
+
+  const selectAllInTray = () => setSelectedIds([...productIds])
+  const clearCompareSelection = () => setSelectedIds([])
 
   const formatPrice = (cents: number) =>
     new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0 }).format(cents / 100)
@@ -94,21 +138,26 @@ export default function ComparePage() {
 
   return (
     <>
-      <div className="relative overflow-hidden bg-gradient-to-b from-violet-50 via-fuchsia-50/40 to-neutral-100 border-b border-neutral-200/60">
-        <div className="pointer-events-none absolute -top-16 -right-16 h-64 w-64 rounded-full bg-violet-200/40 blur-3xl" aria-hidden />
-        <div className="pointer-events-none absolute top-8 -left-12 h-48 w-48 rounded-full bg-fuchsia-200/30 blur-3xl" aria-hidden />
+      <div className="relative overflow-hidden bg-gradient-to-b from-violet-100/80 via-fuchsia-50/50 to-neutral-100 border-b border-neutral-200/60">
+        <div className="pointer-events-none absolute -top-20 -right-10 h-72 w-72 rounded-full bg-violet-300/35 blur-3xl" aria-hidden />
+        <div className="pointer-events-none absolute top-10 -left-16 h-56 w-56 rounded-full bg-fuchsia-300/25 blur-3xl" aria-hidden />
+        <div className="pointer-events-none absolute bottom-0 left-1/3 h-32 w-96 rounded-full bg-rose-200/20 blur-3xl" aria-hidden />
 
-        <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-6">
-          <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
-            <div className="flex items-center gap-3 mb-2">
-              <div className="p-2.5 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-md shadow-violet-500/20">
-                <GitCompare className="w-5 h-5" />
-              </div>
-              <div>
-                <h1 className="font-display text-2xl sm:text-3xl font-bold text-neutral-900">Compare Products</h1>
-                <p className="text-sm text-neutral-500 mt-0.5">
-                  Decision journey — select 2–5 products, tune goal & signals, then analyze
-                </p>
+        <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-10 pb-8">
+          <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45 }}>
+            <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+              <div className="flex items-start gap-4">
+                <div className="p-3.5 rounded-2xl bg-gradient-to-br from-violet-600 to-fuchsia-500 text-white shadow-lg shadow-violet-500/30 ring-4 ring-white/50">
+                  <GitCompare className="w-6 h-6" />
+                </div>
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-violet-600/80 mb-1">Style decision lab</p>
+                  <h1 className="font-display text-3xl sm:text-4xl font-bold text-neutral-900 tracking-tight">Compare</h1>
+                  <p className="text-sm text-neutral-600 mt-2 max-w-lg leading-relaxed">
+                    Pick 2–5 pieces, set your goal and vibe sliders, then get a structured read — not just a single
+                    &quot;winner.&quot;
+                  </p>
+                </div>
               </div>
             </div>
           </motion.div>
@@ -140,14 +189,38 @@ export default function ComparePage() {
           </motion.div>
         ) : (
           <>
-            <div className="flex items-center justify-between mb-5">
-              <p className="text-sm font-medium text-neutral-500">
-                {productIds.length} product{productIds.length !== 1 ? 's' : ''} selected
-                {!canCompare && <span className="ml-1.5 text-amber-600">(need at least 2)</span>}
-              </p>
-              <div className="flex items-center gap-2.5">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
+              <div>
+                <p className="text-sm font-medium text-neutral-500">
+                  {productIds.length} in compare tray ·{' '}
+                  <span className="text-neutral-800">{selectedForCompare.length} selected for analysis</span>
+                  {!canCompare && selectedForCompare.length > 0 && (
+                    <span className="ml-1.5 text-amber-600">(pick at least 2)</span>
+                  )}
+                </p>
+                <div className="flex flex-wrap items-center gap-2 mt-2">
+                  <button
+                    type="button"
+                    onClick={selectAllInTray}
+                    className="text-xs font-semibold text-violet-600 hover:text-violet-800"
+                  >
+                    Select all
+                  </button>
+                  <span className="text-neutral-300" aria-hidden>
+                    |
+                  </span>
+                  <button
+                    type="button"
+                    onClick={clearCompareSelection}
+                    className="text-xs font-semibold text-neutral-500 hover:text-neutral-800"
+                  >
+                    Clear selection
+                  </button>
+                </div>
+              </div>
+              <div className="flex items-center gap-2.5 shrink-0">
                 <button type="button" onClick={clear} className="text-sm text-neutral-400 hover:text-rose-500 transition-colors">
-                  Clear all
+                  Remove all from tray
                 </button>
                 {canCompare && (
                   <button
@@ -182,6 +255,7 @@ export default function ComparePage() {
                   ))
                 : products?.map((p, i) => {
                     const isFirstPick = form.firstAttractionProductId === p.id
+                    const isSelectedForRun = selectedForCompare.includes(p.id)
                     return (
                       <motion.div
                         key={p.id}
@@ -192,24 +266,47 @@ export default function ComparePage() {
                       >
                         <button
                           type="button"
+                          onClick={() => toggleCompareSelection(p.id)}
+                          className={`absolute top-2 left-2 z-10 flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide shadow-md border transition-all ${
+                            isSelectedForRun
+                              ? 'bg-violet-600 text-white border-violet-500'
+                              : 'bg-white/95 text-neutral-500 border-neutral-200 hover:border-violet-300'
+                          }`}
+                          aria-pressed={isSelectedForRun}
+                        >
+                          <span
+                            className={`flex h-3.5 w-3.5 items-center justify-center rounded border ${
+                              isSelectedForRun ? 'border-white bg-white/20' : 'border-neutral-300 bg-white'
+                            }`}
+                            aria-hidden
+                          >
+                            {isSelectedForRun ? '✓' : ''}
+                          </span>
+                          Compare
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => remove(p.id)}
                           className="absolute -top-1.5 -right-1.5 z-10 p-1.5 rounded-full bg-white shadow-md border border-neutral-200 text-neutral-400 hover:text-rose-500 hover:border-rose-200 transition-all opacity-0 group-hover:opacity-100"
-                          aria-label="Remove from compare"
+                          aria-label="Remove from compare tray"
                         >
                           <X className="w-3.5 h-3.5" />
                         </button>
                         <button
                           type="button"
+                          disabled={!isSelectedForRun}
                           onClick={() =>
                             setForm((f) => ({
                               ...f,
                               firstAttractionProductId: f.firstAttractionProductId === p.id ? undefined : p.id,
                             }))
                           }
-                          className={`absolute top-10 -right-1.5 z-10 px-2 py-1 rounded-full text-[10px] font-bold uppercase shadow border transition-all ${
-                            isFirstPick
-                              ? 'bg-violet-600 text-white border-violet-500'
-                              : 'bg-white/95 text-neutral-500 border-neutral-200 opacity-0 group-hover:opacity-100'
+                          className={`absolute top-10 right-2 z-10 px-2 py-1 rounded-full text-[10px] font-bold uppercase shadow border transition-all ${
+                            !isSelectedForRun
+                              ? 'bg-neutral-100/90 text-neutral-400 border-neutral-200 cursor-not-allowed'
+                              : isFirstPick
+                                ? 'bg-violet-600 text-white border-violet-500'
+                                : 'bg-white/95 text-neutral-500 border-neutral-200 opacity-0 group-hover:opacity-100'
                           }`}
                         >
                           1st glance
@@ -235,19 +332,24 @@ export default function ComparePage() {
                   })}
             </div>
 
-            <div className="rounded-3xl border border-neutral-200/70 bg-white p-5 sm:p-6 shadow-sm mb-8">
-              <div className="flex items-center gap-2 mb-4 text-neutral-800 font-semibold">
-                <SlidersHorizontal className="w-4 h-4 text-violet-600" />
-                Decision inputs
+            <div className="relative rounded-3xl mb-8 p-[1px] bg-gradient-to-br from-violet-200 via-fuchsia-200/80 to-rose-200/60 shadow-xl shadow-violet-500/10">
+              <div className="rounded-[1.4rem] bg-white p-5 sm:p-7">
+              <div className="flex items-center gap-3 mb-2">
+                <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-100 text-violet-700">
+                  <SlidersHorizontal className="w-5 h-5" />
+                </span>
+                <div>
+                  <h2 className="font-display font-bold text-lg text-neutral-900">Tune the decision</h2>
+                  <p className="text-xs text-neutral-500 mt-0.5">
+                    Optional — goal, occasion, alter ego, and three vibe axes shape the API read.
+                  </p>
+                </div>
               </div>
-              <p className="text-xs text-neutral-500 mb-4">
-                Optional: set goal and occasion, mark which piece grabbed you first (&quot;1st glance&quot; on cards), or open Alter ego for a bolder read.
-              </p>
-              <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-6">
                 <div>
                   <label className="block text-xs font-semibold text-neutral-500 uppercase mb-1.5">Goal</label>
                   <select
-                    className="w-full rounded-xl border border-neutral-200 bg-neutral-50/80 px-3 py-2 text-sm text-neutral-900"
+                    className="w-full rounded-xl border border-neutral-200 bg-neutral-50/90 px-3 py-2.5 text-sm text-neutral-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-300"
                     value={form.compareGoal ?? ''}
                     onChange={(e) =>
                       setForm((f) => ({
@@ -267,7 +369,7 @@ export default function ComparePage() {
                 <div>
                   <label className="block text-xs font-semibold text-neutral-500 uppercase mb-1.5">Occasion</label>
                   <select
-                    className="w-full rounded-xl border border-neutral-200 bg-neutral-50/80 px-3 py-2 text-sm text-neutral-900"
+                    className="w-full rounded-xl border border-neutral-200 bg-neutral-50/90 px-3 py-2.5 text-sm text-neutral-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-300"
                     value={form.occasion ?? ''}
                     onChange={(e) =>
                       setForm((f) => ({
@@ -299,7 +401,7 @@ export default function ComparePage() {
                   <label className="block text-xs font-semibold text-neutral-500 uppercase mb-1.5">Current self (tags)</label>
                   <input
                     type="text"
-                    className="w-full rounded-xl border border-neutral-200 bg-neutral-50/80 px-3 py-2 text-sm"
+                    className="w-full rounded-xl border border-neutral-200 bg-neutral-50/90 px-3 py-2.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-300"
                     placeholder="e.g. minimal, practical, office"
                     value={form.currentSelfRaw}
                     onChange={(e) => setForm((f) => ({ ...f, currentSelfRaw: e.target.value }))}
@@ -309,28 +411,34 @@ export default function ComparePage() {
                   <label className="block text-xs font-semibold text-neutral-500 uppercase mb-1.5">Aspirational self (tags)</label>
                   <input
                     type="text"
-                    className="w-full rounded-xl border border-neutral-200 bg-neutral-50/80 px-3 py-2 text-sm"
+                    className="w-full rounded-xl border border-neutral-200 bg-neutral-50/90 px-3 py-2.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-300"
                     placeholder="e.g. bold, artful, statement"
                     value={form.aspirationalSelfRaw}
                     onChange={(e) => setForm((f) => ({ ...f, aspirationalSelfRaw: e.target.value }))}
                   />
                 </div>
               </div>
-              <div className="grid sm:grid-cols-3 gap-4 mt-5 pt-5 border-t border-neutral-100">
-                <div>
-                  <label className="block text-xs text-neutral-600 mb-1">Safe ↔ bold ({sliderPct(form.safeBoldPreference)}%)</label>
+              <div className="grid sm:grid-cols-3 gap-5 mt-6 pt-6 border-t border-neutral-100">
+                <div className="rounded-2xl bg-neutral-50/80 px-3 py-3 ring-1 ring-neutral-200/60">
+                  <label className="block text-xs font-medium text-neutral-700 mb-2">
+                    Safe <span className="text-neutral-400">↔</span> bold{' '}
+                    <span className="float-right tabular-nums font-bold text-violet-700">{sliderPct(form.safeBoldPreference)}%</span>
+                  </label>
                   <input
                     type="range"
                     min={0}
                     max={100}
                     value={sliderPct(form.safeBoldPreference)}
                     onChange={(e) => setPreferenceSlider('safeBoldPreference', Number(e.target.value) / 100)}
-                    className="w-full accent-violet-600"
+                    className="w-full h-2 rounded-full accent-violet-600"
                   />
                 </div>
-                <div>
-                  <label className="block text-xs text-neutral-600 mb-1">
-                    Practical ↔ expressive ({sliderPct(form.practicalExpressivePreference)}%)
+                <div className="rounded-2xl bg-neutral-50/80 px-3 py-3 ring-1 ring-neutral-200/60">
+                  <label className="block text-xs font-medium text-neutral-700 mb-2">
+                    Practical <span className="text-neutral-400">↔</span> expressive{' '}
+                    <span className="float-right tabular-nums font-bold text-violet-700">
+                      {sliderPct(form.practicalExpressivePreference)}%
+                    </span>
                   </label>
                   <input
                     type="range"
@@ -338,12 +446,15 @@ export default function ComparePage() {
                     max={100}
                     value={sliderPct(form.practicalExpressivePreference)}
                     onChange={(e) => setPreferenceSlider('practicalExpressivePreference', Number(e.target.value) / 100)}
-                    className="w-full accent-violet-600"
+                    className="w-full h-2 rounded-full accent-violet-600"
                   />
                 </div>
-                <div>
-                  <label className="block text-xs text-neutral-600 mb-1">
-                    Polished ↔ effortless ({sliderPct(form.polishedEffortlessPreference)}%)
+                <div className="rounded-2xl bg-neutral-50/80 px-3 py-3 ring-1 ring-neutral-200/60">
+                  <label className="block text-xs font-medium text-neutral-700 mb-2">
+                    Polished <span className="text-neutral-400">↔</span> effortless{' '}
+                    <span className="float-right tabular-nums font-bold text-violet-700">
+                      {sliderPct(form.polishedEffortlessPreference)}%
+                    </span>
                   </label>
                   <input
                     type="range"
@@ -351,9 +462,10 @@ export default function ComparePage() {
                     max={100}
                     value={sliderPct(form.polishedEffortlessPreference)}
                     onChange={(e) => setPreferenceSlider('polishedEffortlessPreference', Number(e.target.value) / 100)}
-                    className="w-full accent-violet-600"
+                    className="w-full h-2 rounded-full accent-violet-600"
                   />
                 </div>
+              </div>
               </div>
             </div>
 
@@ -369,7 +481,12 @@ export default function ComparePage() {
             )}
 
             <AnimatePresence>
-              {compareResult && <CompareDecisionResults result={compareResult} products={products} />}
+              {compareResult && (
+                <CompareDecisionResults
+                  result={compareResult}
+                  products={products?.filter((p) => selectedForCompare.includes(p.id)) ?? []}
+                />
+              )}
             </AnimatePresence>
           </>
         )}
