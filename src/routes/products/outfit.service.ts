@@ -178,14 +178,21 @@ export async function getOutfitRecommendations(
     rerankedSuggestions,
     options,
     sourceProduct
-  ).slice(0, maxTotal);
+  );
 
-  if (filteredSuggestions.length > 0) {
+  const balancedSuggestions = balanceSuggestionsForCoverage(
+    filteredSuggestions,
+    completeLookResult.missingCategories || [],
+    maxTotal,
+    maxPerCategory
+  );
+
+  if (balancedSuggestions.length > 0) {
     return mapCompleteLookToStyleResponse({
       sourceProduct,
       completeLookResult: {
         ...completeLookResult,
-        suggestions: filteredSuggestions,
+        suggestions: balancedSuggestions,
       },
       maxPerCategory,
       detectedCategory: resolvedSourceCategory,
@@ -205,6 +212,20 @@ export async function getOutfitRecommendations(
   if (!result) return null;
 
   const response = formatOutfitCompletion(userId ? await mergeWardrobeOwnedIntoCompletion(result, userId, options) : result);
+
+  if ((response.totalRecommendations || 0) === 0) {
+    const rescue = await completeOutfitFromProductId(productId, {
+      maxPerCategory: Math.max(4, options.maxPerCategory ?? 5),
+      maxTotal: Math.max(16, options.maxTotal ?? 20),
+      priceRange: options.priceRange,
+      excludeBrands: options.excludeBrands,
+      preferSameBrand: options.preferSameBrand,
+      disablePriceFilter: true,
+    });
+    if (rescue) {
+      return formatOutfitCompletion(userId ? await mergeWardrobeOwnedIntoCompletion(rescue, userId, options) : rescue);
+    }
+  }
 
   // Log impressions for training data (async, non-blocking)
   logOutfitImpressions(productId, result).catch((err) =>
@@ -807,6 +828,66 @@ function completeStylePriorityFromCategory(categoryLabel: string, missingCategor
   if (resolvedIdx === 0) return 1;
   if (resolvedIdx >= 1) return 2;
   return 3;
+}
+
+function balanceSuggestionsForCoverage(
+  suggestions: CompleteLookMappedSuggestion[],
+  missingCategories: string[],
+  maxTotal: number,
+  maxPerCategory: number
+): CompleteLookMappedSuggestion[] {
+  if (!Array.isArray(suggestions) || suggestions.length === 0) return [];
+  const slotPriority = missingCategories.map((m) => String(m || "").toLowerCase().trim()).filter(Boolean);
+  const bySlot = new Map<string, CompleteLookMappedSuggestion[]>();
+
+  for (const s of suggestions.slice().sort((a, b) => (b.score || 0) - (a.score || 0))) {
+    const slot = String(s.category || "").toLowerCase().trim() || "accessories";
+    if (!bySlot.has(slot)) bySlot.set(slot, []);
+    bySlot.get(slot)!.push(s);
+  }
+
+  const out: CompleteLookMappedSuggestion[] = [];
+  const used = new Set<number>();
+
+  // Pass 1: ensure each missing slot gets at least one recommendation when available.
+  for (const slot of slotPriority) {
+    const pool = bySlot.get(slot) || [];
+    const pick = pool.find((p) => !used.has(p.product_id));
+    if (pick && out.length < maxTotal) {
+      out.push(pick);
+      used.add(pick.product_id);
+    }
+  }
+
+  // Pass 2: round-robin by missing slots up to per-category cap.
+  let progressed = true;
+  while (out.length < maxTotal && progressed) {
+    progressed = false;
+    for (const slot of slotPriority) {
+      if (out.length >= maxTotal) break;
+      const slotCount = out.filter((x) => String(x.category || "").toLowerCase().trim() === slot).length;
+      if (slotCount >= maxPerCategory) continue;
+      const pool = bySlot.get(slot) || [];
+      const pick = pool.find((p) => !used.has(p.product_id));
+      if (!pick) continue;
+      out.push(pick);
+      used.add(pick.product_id);
+      progressed = true;
+    }
+  }
+
+  // Pass 3: fill remaining with best global suggestions.
+  for (const s of suggestions) {
+    if (out.length >= maxTotal) break;
+    if (used.has(s.product_id)) continue;
+    const slot = String(s.category || "").toLowerCase().trim();
+    const slotCount = out.filter((x) => String(x.category || "").toLowerCase().trim() === slot).length;
+    if (slot && slotCount >= maxPerCategory) continue;
+    out.push(s);
+    used.add(s.product_id);
+  }
+
+  return out.slice(0, maxTotal);
 }
 
 function inferSourceCategoryFallback(sourceProduct: {

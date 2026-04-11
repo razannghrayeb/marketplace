@@ -257,6 +257,17 @@ function sourceMatchesSlot(slot: string, source: any): boolean {
   const textMatches = allow.test(blob);
   if (!textMatches) return false;
 
+  // Hard cross-slot contamination guards (e.g. "Shoe Bag" should not be classified as shoes).
+  if (slot === "shoes" && /\b(bag|bags|handbag|tote|clutch|purse|wallet|backpack|crossbody|satchel|messenger)\b/.test(blob)) {
+    return false;
+  }
+  if (slot === "bottoms" && /\b(shoe|shoes|sneaker|boot|heel|loafer|sandal|bag|bags|handbag|tote|clutch|purse|wallet)\b/.test(blob)) {
+    return false;
+  }
+  if (slot === "tops" && /\b(shoe|shoes|sneaker|boot|heel|loafer|sandal|bag|bags|handbag|tote|clutch|purse|wallet)\b/.test(blob)) {
+    return false;
+  }
+
   // Require the text intent to agree with the canonical slot when the index is noisy.
   // This prevents mislabeled items (e.g. shirts indexed as shoes) from leaking through.
   if (canonical && canonical !== slot) {
@@ -392,7 +403,9 @@ function minimumSlotScore(slot: string): number {
   const normalized = normalizeWardrobeCategory(slot) || String(slot || "").toLowerCase().trim();
   if (normalized === "bags" || normalized === "accessories") return 0.62;
   if (normalized === "shoes") return 0.58;
-  if (normalized === "tops" || normalized === "bottoms" || normalized === "outerwear" || normalized === "dresses") return 0.57;
+  // Slightly lower floor for bottoms to avoid under-recommendation while preserving precision.
+  if (normalized === "bottoms") return 0.54;
+  if (normalized === "tops" || normalized === "outerwear" || normalized === "dresses") return 0.57;
   return 0.56;
 }
 
@@ -813,8 +826,6 @@ async function runCompleteLookCore(
     warmWeatherLikely,
     shouldOfferOuterwear,
   });
-  const relaxedBagAudienceMode =
-    missingCategories.length === 1 && normalizeWardrobeCategory(missingCategories[0]) === "bags";
 
   const userPriceTier = await inferPriceTier(userId).catch(() => null);
   const ownedProductIds = new Set<string>(
@@ -868,19 +879,19 @@ async function runCompleteLookCore(
       const minPerCategory = Math.max(6, Math.ceil(limit / Math.max(1, missingCategories.length)));
       const canonical = wardrobeSlotToCategoryCanonical(category);
 
-      const buildFilters = (applyPriceTier: boolean): any[] => {
+      const buildFilters = (applyPriceTier: boolean, includeSlotIntent: boolean = true): any[] => {
         const f: any[] = [
           // Allow BOTH in_stock and out_of_stock products (availability status doesn't affect outfit recommendations)
           { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } },
           { term: { category_canonical: canonical } },
         ];
-        if (inferredAudienceGender && inferredAudienceGender !== "unisex" && !(relaxedBagAudienceMode && category === "bags")) {
+        if (inferredAudienceGender && inferredAudienceGender !== "unisex") {
           f.push(buildAudienceGenderFilter(inferredAudienceGender));
         }
-        if (inferredAgeGroup && !(relaxedBagAudienceMode && category === "bags")) {
+        if (inferredAgeGroup) {
           f.push(buildAgeGroupFilter(inferredAgeGroup));
         }
-        const slotIntentFilter = buildSlotIntentFilter(category);
+        const slotIntentFilter = includeSlotIntent ? buildSlotIntentFilter(category) : null;
         if (slotIntentFilter) {
           f.push(slotIntentFilter);
         }
@@ -900,7 +911,8 @@ async function runCompleteLookCore(
         return f;
       };
 
-      const scoreHits = (hits: any[]): CompleteLookSuggestion[] => {
+      const scoreHits = (hits: any[], options: { relaxedFloor?: boolean } = {}): CompleteLookSuggestion[] => {
+        const relaxedFloor = Boolean(options.relaxedFloor);
         const maxRawScore = Math.max(1, ...hits.map((h: any) => (Number.isFinite(h._score) ? h._score : 0)));
         const scored: CompleteLookSuggestion[] = [];
 
@@ -908,10 +920,10 @@ async function runCompleteLookCore(
           const source = hit._source || {};
           if (!sourceMatchesSlot(category, source)) continue;
           if (!audienceGenderMatchesForSlot(inferredAudienceGender, source, category, enforceNeutralAudienceWhenUnknown, {
-            allowUnknownForBags: categoryLabelToSlot(source.category_canonical || source.category) === "bags",
+            allowUnknownForBags: false,
           })) continue;
           if (!audienceAgeGroupMatchesWithOptions(inferredAgeGroup, source, {
-            allowUnknown: categoryLabelToSlot(source.category_canonical || source.category) === "bags",
+            allowUnknown: false,
           })) continue;
           const productId = parseInt(source.product_id, 10);
           if (!productId || ownedProductIds.has(String(productId))) continue;
@@ -933,16 +945,18 @@ async function runCompleteLookCore(
             continue;
           }
 
+          // Fashion-aware blend: emphasize style/color over raw retrieval.
           const finalScore =
-            embeddingNorm * 0.28 +
-            categoryCompat * 0.22 +
-            colorHarmony * 0.16 +
-            styleAlignment * 0.16 +
+            embeddingNorm * 0.24 +
+            categoryCompat * 0.2 +
+            colorHarmony * 0.2 +
+            styleAlignment * 0.2 +
             patternAlignment * 0.08 +
-            materialAlignment * 0.05 +
-            formalityAlignment * 0.05;
+            materialAlignment * 0.04 +
+            formalityAlignment * 0.04;
 
-          if (finalScore < minimumSlotScore(category)) {
+          const floor = relaxedFloor ? Math.max(0.5, minimumSlotScore(category) - 0.04) : minimumSlotScore(category);
+          if (finalScore < floor) {
             continue;
           }
 
@@ -1045,6 +1059,18 @@ async function runCompleteLookCore(
           scored = dedupeCompleteLookSuggestions(scored.concat(scoreHits(relaxedLexicalHits)).sort((a, b) => b.score - a.score));
         }
       }
+      // Safety-net recall path: keep strict gender/age, but remove slot-intent filter
+      // and relax floor slightly to prevent zero-result categories.
+      if (scored.length < minPerCategory) {
+        const recallVectorHits = await runSearch(buildFilters(false, false), true);
+        const recallLexicalHits = await runSearch(buildFilters(false, false), false);
+        scored = dedupeCompleteLookSuggestions(
+          scored
+            .concat(scoreHits(recallVectorHits, { relaxedFloor: true }))
+            .concat(scoreHits(recallLexicalHits, { relaxedFloor: true }))
+            .sort((a, b) => b.score - a.score)
+        );
+      }
 
       scored.sort((a, b) => b.score - a.score);
       suggestionsByCategory.set(category, scored.slice(0, Math.max(minPerCategory * 2, 12)));
@@ -1072,7 +1098,6 @@ async function runCompleteLookCore(
       inferredAudienceGender,
       inferredAgeGroup,
       enforceNeutralAudienceWhenUnknown,
-      relaxedBagAudienceMode,
       wardrobeColorFamilies,
       currentCategoryList,
       needed: limit - mergedSuggestions.length,
@@ -1883,7 +1908,7 @@ function inferStyleTermsFromCurrentItems(
 
 function computeStyleAlignment(source: any, preferredStyleTerms: string[]): number {
   if (preferredStyleTerms.length === 0) return 0.62;
-  const blob = `${String(source?.attr_style || "")} ${String(source?.title || "")}`.toLowerCase();
+  const blob = `${String(source?.attr_style || "")} ${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.product_types || "")}`.toLowerCase();
   if (!blob.trim()) return 0.58;
 
   let best = 0.45;
@@ -1950,7 +1975,6 @@ async function fetchCategoryTopUpSuggestions(params: {
   inferredAudienceGender: AudienceGender | null;
   inferredAgeGroup: AudienceAgeGroup | null;
   enforceNeutralAudienceWhenUnknown?: boolean;
-  relaxedBagAudienceMode?: boolean;
   wardrobeColorFamilies: Set<string>;
   currentCategoryList: string[];
   needed: number;
@@ -1971,11 +1995,10 @@ async function fetchCategoryTopUpSuggestions(params: {
   if (slotIntentFilters.length > 0) {
     filter.push({ bool: { should: slotIntentFilters, minimum_should_match: 1 } });
   }
-  const topUpBagOnlyRelaxed = Boolean(params.relaxedBagAudienceMode) && params.missingCategories.length === 1;
-  if (params.inferredAudienceGender && params.inferredAudienceGender !== "unisex" && !topUpBagOnlyRelaxed) {
+  if (params.inferredAudienceGender && params.inferredAudienceGender !== "unisex") {
     filter.push(buildAudienceGenderFilter(params.inferredAudienceGender));
   }
-  if (params.inferredAgeGroup && !topUpBagOnlyRelaxed) {
+  if (params.inferredAgeGroup) {
     filter.push(buildAgeGroupFilter(params.inferredAgeGroup));
   }
 
@@ -2262,7 +2285,8 @@ function computeCategoryCompatibility(targetCategory: string, currentCategories:
 }
 
 function computeColorHarmonyWithWardrobe(wardrobeFamilies: Set<string>, candidateColor: string | null): number {
-  if (!candidateColor || wardrobeFamilies.size === 0) return 0.6;
+  if (wardrobeFamilies.size === 0) return 0.6;
+  if (!candidateColor) return 0.52;
   const candidateFamily = COLOR_FAMILIES_BY_NAME[candidateColor] || "other";
   if (candidateFamily === "neutral" || wardrobeFamilies.has("neutral")) return 0.9;
   if (wardrobeFamilies.has(candidateFamily)) return 0.82;
@@ -2277,7 +2301,7 @@ function computeColorHarmonyWithWardrobe(wardrobeFamilies: Set<string>, candidat
   for (const fam of wardrobeFamilies) {
     if (comp.includes(fam)) return 0.75;
   }
-  return 0.5;
+  return 0.46;
 }
 
 function buildOutfitSets(

@@ -98,6 +98,7 @@ export interface CompareDecisionRequest {
   productIds: number[];
   compareGoal?: CompareGoal;
   occasion?: CompareOccasion;
+  comparisonMode?: ComparisonMode;
   mode?: CompareBusinessMode;
   identityContext?: {
     currentSelf?: string[];
