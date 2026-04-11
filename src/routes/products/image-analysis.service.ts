@@ -679,19 +679,19 @@ async function extractDetectionCropColorsForRanking(params: {
           height = Math.max(24, Math.floor(h * 0.72));
         } else if (bottoms) {
           // Bottom boxes often include torso at the top and shoes at the bottom.
-          // Keep a centered vertical band and trim side edges to reduce bleed.
-          left = Math.floor(w * 0.1);
-          width = Math.max(18, Math.floor(w * 0.8));
-          top = Math.floor(h * 0.16);
-          const bottom = Math.floor(h * 0.82);
+          // Use a tighter center-lower band to avoid shirt and footwear bleed.
+          left = Math.floor(w * 0.14);
+          width = Math.max(16, Math.floor(w * 0.72));
+          top = Math.floor(h * 0.24);
+          const bottom = Math.floor(h * 0.76);
           height = Math.max(24, bottom - top);
         } else if (topLike) {
           // Top/outerwear boxes can include pants near the lower edge.
-          // Sample upper-mid torso where garment color is usually most stable.
-          left = Math.floor(w * 0.08);
-          width = Math.max(18, Math.floor(w * 0.84));
-          top = Math.floor(h * 0.1);
-          const bottom = Math.floor(h * 0.74);
+          // Sample upper-mid torso and trim side edges to avoid background/pants bleed.
+          left = Math.floor(w * 0.12);
+          width = Math.max(16, Math.floor(w * 0.76));
+          top = Math.floor(h * 0.08);
+          const bottom = Math.floor(h * 0.66);
           height = Math.max(24, bottom - top);
         }
 
@@ -2370,9 +2370,12 @@ export class ImageAnalysisService {
     // Prefer BLIP caption color when explicit (e.g. "white dress") — full-image dominant can pick up sky/background.
     const captionPrimaryColor = resolveCaptionPrimaryColor(blipCaption ?? "", captionColors, blipStructured);
     const allowDominantFallback = shouldUseDominantColorFallback(captionColors, blipStructured);
+    const allowFullImageDominantFallback =
+      allowDominantFallback &&
+      analysisResult.detection.items.length <= 1;
     const inferredPrimaryColor =
       captionPrimaryColor ??
-      (allowDominantFallback && imageInferDominantColorEnv() && analysisResult.services?.blip
+      (allowFullImageDominantFallback && imageInferDominantColorEnv() && analysisResult.services?.blip
         ? await extractDominantColorNames(buffer, { maxColors: 2, minShare: 0.12 })
             .then((c) => c[0] ?? null)
             .catch(() => null)
@@ -2428,6 +2431,11 @@ export class ImageAnalysisService {
       ]);
 
       const filters: Partial<import("./types").SearchFilters> = {};
+      // Apply global inferred gender from full-image BLIP as baseline for all detections.
+      // Per-detection BLIP can override only if detected with strong confidence.
+      if (inferredAudience.gender) {
+        filters.gender = inferredAudience.gender;
+      }
       // Keep inferred type tokens as soft hints so image search stays recall-first.
       // Hard product-type filters can suppress visually similar neighbors across categories.
       const typeSeedSource =
@@ -2471,6 +2479,25 @@ export class ImageAnalysisService {
       if (!(itemColorKey in inferredColorsByItem)) inferredColorsByItem[itemColorKey] = null;
       if (!(itemColorKey in inferredColorsByItemConfidence)) inferredColorsByItemConfidence[itemColorKey] = 0;
       if (!(itemColorKey in inferredColorsByItemSource)) inferredColorsByItemSource[itemColorKey] = 0;
+
+      // Preserve category-slot color from full-image caption (e.g. "blue jeans")
+      // as a high-priority semantic fallback for this detection.
+      const fullCaptionSlotColor = captionColorForProductCategory(
+        categoryMapping.productCategory,
+        captionColors,
+      );
+      if (fullCaptionSlotColor && blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
+        const slotColorConfidence = Math.max(0.62, Math.min(0.9, blipStructuredConfidence));
+        setDetectionColorIfHigherConfidence(
+          inferredColorsByItem,
+          inferredColorsByItemConfidence,
+          inferredColorsByItemSource,
+          itemColorKey,
+          fullCaptionSlotColor,
+          slotColorConfidence,
+          3,
+        );
+      }
 
       // "Closet similar" constraints: always enforce inferred audience gender when available.
       // Confidence gating here causes frequent cross-gender leakage (e.g. men query returning women items).
@@ -2616,7 +2643,10 @@ export class ImageAnalysisService {
           detectionCaptionAcceptedForLock = true;
           detectionBlipSignal = buildBlipSignal(detStruct, detConfidence);
           if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
-          if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
+          // Per-detection BLIP can override global gender only if detected with strong confidence.
+          if (detStruct.audience.gender && detConfidence >= imageBlipSoftHintConfidenceStrong()) {
+            filters.gender = detStruct.audience.gender;
+          }
           if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
             const mergedTypes = [...new Set([...softProductTypeHints, ...detStruct.productTypeHints])];
           const filteredTypes = filterProductTypeSeedsByMappedCategory(
@@ -2654,6 +2684,8 @@ export class ImageAnalysisService {
             : undefined,
         imageBuffer: clipBuffer,
         pHash: sourceImagePHash,
+        detectionYoloConfidence: detection.confidence,
+        detectionProductCategory: categoryMapping.productCategory,
         filters,
         softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
         limit: retrievalLimit,
@@ -2698,6 +2730,8 @@ export class ImageAnalysisService {
               : undefined,
           imageBuffer: clipBuffer,
           pHash: sourceImagePHash,
+          detectionYoloConfidence: detection.confidence,
+          detectionProductCategory: categoryMapping.productCategory,
           filters: filtersRetry,
           softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
           limit: retrievalLimit,
@@ -2731,6 +2765,8 @@ export class ImageAnalysisService {
               : undefined,
           imageBuffer: clipBuffer,
           pHash: sourceImagePHash,
+          detectionYoloConfidence: detection.confidence,
+          detectionProductCategory: categoryMapping.productCategory,
           filters: filtersNoHardTypes,
           softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
           limit: retrievalLimit,
@@ -2768,6 +2804,8 @@ export class ImageAnalysisService {
               : undefined,
           imageBuffer: clipBuffer,
           pHash: sourceImagePHash,
+          detectionYoloConfidence: detection.confidence,
+          detectionProductCategory: categoryMapping.productCategory,
           filters: filtersSansCategory,
           limit: retrievalLimit,
           similarityThreshold,
@@ -2791,6 +2829,8 @@ export class ImageAnalysisService {
                 : undefined,
             imageBuffer: clipBuffer,
             pHash: sourceImagePHash,
+            detectionYoloConfidence: detection.confidence,
+            detectionProductCategory: categoryMapping.productCategory,
             // Keep crop-derived structural intent even in last-resort fallback.
             filters: {
               length: (filters as any).length,
@@ -3449,9 +3489,12 @@ export class ImageAnalysisService {
     const inferredColorsByItemSource: Record<string, number> = {};
     const captionPrimaryColor = resolveCaptionPrimaryColor(blipCaption ?? "", captionColors, blipStructured);
     const allowDominantFallback = shouldUseDominantColorFallback(captionColors, blipStructured);
+    const allowFullImageDominantFallback =
+      allowDominantFallback &&
+      allItemsToProcess.length <= 1;
     const inferredPrimaryColor =
       captionPrimaryColor ??
-      (allowDominantFallback && imageInferDominantColorEnv() && fullResult.services?.blip
+      (allowFullImageDominantFallback && imageInferDominantColorEnv() && fullResult.services?.blip
         ? await extractDominantColorNames(buffer, { maxColors: 2, minShare: 0.12 })
             .then((c) => c[0] ?? null)
             .catch(() => null)
@@ -3487,6 +3530,25 @@ export class ImageAnalysisService {
         if (!(itemColorKey in inferredColorsByItem)) inferredColorsByItem[itemColorKey] = null;
         if (!(itemColorKey in inferredColorsByItemConfidence)) inferredColorsByItemConfidence[itemColorKey] = 0;
         if (!(itemColorKey in inferredColorsByItemSource)) inferredColorsByItemSource[itemColorKey] = 0;
+
+        // Preserve category-slot color from full-image caption (e.g. "blue jeans")
+        // as a high-priority semantic fallback for this detection.
+        const fullCaptionSlotColor = captionColorForProductCategory(
+          categoryMapping.productCategory,
+          captionColors,
+        );
+        if (fullCaptionSlotColor && blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
+          const slotColorConfidence = Math.max(0.62, Math.min(0.9, blipStructuredConfidence));
+          setDetectionColorIfHigherConfidence(
+            inferredColorsByItem,
+            inferredColorsByItemConfidence,
+            inferredColorsByItemSource,
+            itemColorKey,
+            fullCaptionSlotColor,
+            slotColorConfidence,
+            3,
+          );
+        }
 
         const filters: Partial<import("./types").SearchFilters> = {};
         const typeSeedSourceForSelection =

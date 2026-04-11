@@ -104,6 +104,10 @@ export interface ImageSearchParams extends SearchParams {
    * `knnField` / `SEARCH_IMAGE_KNN_FIELD` is `embedding_garment` (shop-the-look detection crops vs catalog).
    */
   imageEmbeddingGarment?: number[];
+  /** YOLO detection confidence for this item (0-1); used to relax type floor for high-confidence bottoms. */
+  detectionYoloConfidence?: number;
+  /** Product category from detection (e.g. 'tops', 'bottoms'); enables category-specific type flooring. */
+  detectionProductCategory?: string;
   /** Raw bytes when embedding is computed by the callee (unified image search path). */
   imageBuffer?: Buffer;
   /** Soft rerank hints when SEARCH_IMAGE_SOFT_CATEGORY=1 */
@@ -542,6 +546,15 @@ function computeExplicitFinalRelevance(params: {
   const styleStretched = stretchSim(styleSimRaw, subFloor);
   const patternStretched = stretchSim(patternSimRaw, subFloor);
 
+  // Intent-aware channel coherence: avoid rewarding high embedding similarity
+  // when the corresponding metadata compliance clearly disagrees.
+  const colorChannelCoherence = params.hasColorIntent
+    ? 0.2 + 0.8 * Math.max(0, Math.min(1, params.colorMatch))
+    : 1;
+  const styleChannelCoherence = params.hasStyleIntent
+    ? 0.25 + 0.75 * Math.max(0, Math.min(1, params.styleMatch))
+    : 1;
+
   // Sub-channels are independently gated with a soft floor so that
   // moderate CLIP similarity does not zero out strong color/style/pattern signals.
   const subChannelGate = Math.min(1, 0.3 + clipStretched * 1.4);
@@ -550,8 +563,8 @@ function computeExplicitFinalRelevance(params: {
     Math.min(
       1,
       0.52 * clipStretched +
-        0.19 * colorStretched * subChannelGate +
-        0.16 * styleStretched * subChannelGate +
+        0.19 * colorStretched * subChannelGate * colorChannelCoherence +
+        0.16 * styleStretched * subChannelGate * styleChannelCoherence +
         0.13 * patternStretched * subChannelGate,
     ),
   );
@@ -595,10 +608,10 @@ function computeExplicitFinalRelevance(params: {
   // ── Intent coverage gate ─────────────────────────────────────────
   const intentWeights = {
     color: 0.28,
-    style: 0.24,
+    style: 0.18,
     // Sleeve inferred from vision can be noisy; keep it informative but less punitive.
     // When visual similarity is very high (>0.65), reduce sleeve weight since it's often a detection artifact.
-    sleeve: params.simVisual >= 0.65 ? 0.06 : 0.12,
+    sleeve: params.simVisual >= 0.65 ? 0.04 : 0.08,
     length: 0.12,
     audience: 0.16,
   };
@@ -610,11 +623,19 @@ function computeExplicitFinalRelevance(params: {
   }
   if (params.hasStyleIntent) {
     activeIntentWeight += intentWeights.style;
-    coveredIntentWeight += intentWeights.style * Math.max(0, Math.min(1, params.styleMatch));
+    const styleCoverage = Math.max(
+      Math.max(0, Math.min(1, params.styleMatch)),
+      Math.min(0.22, clipStretched * 0.28),
+    );
+    coveredIntentWeight += intentWeights.style * styleCoverage;
   }
   if (params.hasSleeveIntent) {
     activeIntentWeight += intentWeights.sleeve;
-    coveredIntentWeight += intentWeights.sleeve * Math.max(0, Math.min(1, params.sleeveMatch));
+    const sleeveCoverage = Math.max(
+      Math.max(0, Math.min(1, params.sleeveMatch)),
+      Math.min(0.18, clipStretched * 0.22),
+    );
+    coveredIntentWeight += intentWeights.sleeve * sleeveCoverage;
   }
   if (params.hasLengthIntent) {
     activeIntentWeight += intentWeights.length;
@@ -1138,13 +1159,31 @@ function collectConfidentColorTokenMap(params: {
     scores.set(norm, Math.max(scores.get(norm) ?? 0, next));
   };
 
-  add(params.inferredPrimary, 0.5);
-
   const itemColors = params.inferredByItem ?? {};
   const itemConfs = params.inferredByItemConfidence ?? {};
-  for (const [key, value] of Object.entries(itemColors)) {
+
+  const accessoryKeyRe = /(shoe|sandal|sneaker|heel|boot|bag|wallet|hat|cap|belt|watch|ring|earring|necklace|bracelet|jewel|scarf)/i;
+  const apparelKeyRe = /(trouser|pant|jean|skirt|dress|gown|top|shirt|blouse|sleeve|outwear|outerwear|jacket|coat|hoodie|sweater|cardigan|short|legging|romper|jumpsuit)/i;
+
+  const hasConfidentApparelColor = Object.entries(itemColors).some(([key, value]) => {
     const rawConf = Number(itemConfs[key]);
     const conf = Number.isFinite(rawConf) ? rawConf : defaultItemColorConfidence;
+    const norm = normalizeColorToken(String(value ?? "").toLowerCase().trim()) ?? String(value ?? "").toLowerCase().trim();
+    return Boolean(norm) && conf >= colorConfidenceThreshold() && apparelKeyRe.test(key);
+  });
+
+  // Full-image dominant color is noisy in multi-item scenes; trust it mainly when
+  // confident item-level colors are unavailable.
+  if (!hasConfidentApparelColor) {
+    add(params.inferredPrimary, 0.58);
+  }
+
+  for (const [key, value] of Object.entries(itemColors)) {
+    const rawConf = Number(itemConfs[key]);
+    let conf = Number.isFinite(rawConf) ? rawConf : defaultItemColorConfidence;
+    if (hasConfidentApparelColor && accessoryKeyRe.test(key) && !apparelKeyRe.test(key)) {
+      conf *= 0.72;
+    }
     if (conf >= colorConfidenceThreshold()) {
       add(value, conf);
     }
@@ -1158,7 +1197,10 @@ function collectConfidentColorTokenMap(params: {
   if (fi && typeof fi === "object") {
     for (const [key, value] of Object.entries(fi)) {
       const rawConf = Number(fci?.[key]);
-      const conf = Number.isFinite(rawConf) ? rawConf : defaultItemColorConfidence;
+      let conf = Number.isFinite(rawConf) ? rawConf : defaultItemColorConfidence;
+      if (hasConfidentApparelColor && accessoryKeyRe.test(key) && !apparelKeyRe.test(key)) {
+        conf *= 0.72;
+      }
       if (conf >= colorConfidenceThreshold()) {
         add(value, conf);
       }
@@ -2786,7 +2828,20 @@ export async function searchByImageWithSimilarity(
         if ((hasExplicitTypeFilter || hasExplicitCategoryFilter) && exactType < 1 && typeComp < 0.28) {
           return false;
         }
-        if (hasDetectionAnchoredTypeIntent && exactType < 1 && typeComp < 0.22 && !visualStrong) {
+        // Category-specific type floor: relax for bottoms with high YOLO confidence to handle jeans/denims
+        // with low productTypeCompliance to 'trousers' detection label (0.928 confidence).
+        let detAnchoredTypeFloor = hasColorIntentForFinal ? 0.3 : 0.26;
+        if (hasDetectionAnchoredTypeIntent && params.detectionProductCategory === 'bottoms') {
+          const yoloConfidence = params.detectionYoloConfidence ?? 0;
+          if (yoloConfidence >= 0.9) {
+            // High-confidence bottoms detection: allow lower type compliance (jeans as denims/pants)
+            detAnchoredTypeFloor = 0.15;
+          } else if (yoloConfidence >= 0.8) {
+            // Medium-high confidence: moderate relaxation
+            detAnchoredTypeFloor = 0.19;
+          }
+        }
+        if (hasDetectionAnchoredTypeIntent && exactType < 1 && typeComp < detAnchoredTypeFloor && !visualStrong) {
           return false;
         }
         return true;
@@ -3255,27 +3310,67 @@ export async function searchByImageWithSimilarity(
       let explainMatchedColor = compliance?.matchedColor;
       let explainColorTier = compliance?.colorTier;
 
-      if (hasColorIntentForFinal && authoritativeColorNorm && compliance) {
+      // Hard gate: reject sport/athletic brand products when fashion (non-sport) intent is detected.
+      // Sport brands (Adidas, Nike, Puma, etc.) are only relevant for explicit sportswear searches.
+      const isSportBrand = /adidas|nike|puma|reebok|asics|under armour|newbalance|new balance|lululemon|columbia|the north face|patagonia|asics|vibram|mizuno/i.test(
+        String(p.brand ?? ""),
+      );
+      const isSportKeyword = /sport|athletic|training|workout|gym|fitness|crossfit|yoga|jogger|track|runner|climber|climax|dri-fit|dryfit/i.test(
+        String(p.title ?? "") + " " + String(p.description ?? ""),
+      );
+      const isSportContext = isSportBrand && isSportKeyword;
+      const isExplicitSportIntent =
+        hasExplicitStyleIntent &&
+        /sport|athletic|training|casual|active|workout/i.test(desiredStyleForRelevance ?? "");
+      if (
+        hasDetectionAnchoredTypeIntent &&
+        isSportContext &&
+        !isExplicitSportIntent &&
+        (compliance?.colorCompliance ?? 0) <= 0
+      ) {
+        // Sport product with color contradiction in non-sport context: hard reject to top-20
+        finalRelevance01 = 0;
+        finalRelevanceSource = "sport_keyword_hard_gate";
+      } else if (hasColorIntentForFinal && authoritativeColorNorm && compliance) {
         const authoritativeColor = tieredColorListCompliance(
           desiredColorsTierForRelevance,
           [authoritativeColorNorm],
           rerankColorModeForRelevance,
         );
         if (authoritativeColor.compliance <= 0) {
-          const colorPenalty = hasExplicitColorIntent
-            ? 0.72
+          const blipColorConflict = blipColorConflictFactorById.get(idStr) ?? 1;
+          const conflictStrength = Math.max(0, Math.min(1, 1 - blipColorConflict));
+          const baseConflictCap = hasExplicitColorIntent
+            ? similarityScore * 0.36
             : hasInferredColorSignal
-              ? 0.82
-              : 0.9;
-          finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore * colorPenalty);
+              ? similarityScore * 0.48
+              : similarityScore * 0.62;
+          const conflictAdjustedCap = baseConflictCap * (1 - 0.35 * conflictStrength);
+          const maxConflictCap = hasExplicitColorIntent
+            ? 0.2
+            : hasInferredColorSignal
+              ? 0.28
+              : 0.36;
+          const nearDuplicateRelax = similarityScore >= nearIdenticalRawMin ? 0.06 : 0;
+          // Keep contradictory colors visible for sparse catalogs, but never with inflated relevance.
+          const conservativeCap = Math.min(
+            maxConflictCap + nearDuplicateRelax,
+            Math.max(0.05, conflictAdjustedCap),
+          );
+          finalRelevance01 = Math.min(finalRelevance01 ?? 0, conservativeCap);
           finalRelevanceSource = "catalog_color_correction";
           explainColorCompliance = 0;
           explainMatchedColor = authoritativeColorNorm;
           explainColorTier = "none";
         } else if ((compliance.colorCompliance ?? 0) + 0.05 < authoritativeColor.compliance) {
-          const colorLift = 0.88 + 0.12 * authoritativeColor.compliance;
-          finalRelevance01 = Math.max(finalRelevance01 ?? 0, Math.min(1, similarityScore * colorLift));
-          finalRelevanceSource = "catalog_color_correction";
+          const canApplyColorLift =
+            hasExplicitColorIntent ||
+            authoritativeColor.tier === "exact";
+          if (canApplyColorLift) {
+            const colorLift = 0.88 + 0.12 * authoritativeColor.compliance;
+            finalRelevance01 = Math.max(finalRelevance01 ?? 0, Math.min(1, similarityScore * colorLift));
+            finalRelevanceSource = "catalog_color_correction";
+          }
           explainColorCompliance = authoritativeColor.compliance;
           explainMatchedColor = authoritativeColor.bestMatch ?? authoritativeColorNorm;
           explainColorTier = authoritativeColor.tier;
@@ -3454,6 +3549,22 @@ export async function searchByImageWithSimilarity(
       })
       .sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0))
       .slice(0, limit) as ProductResult[];
+  }
+
+  if (hasDetectionAnchoredTypeIntent) {
+    const filtered = results.filter((p: any) => {
+      const ex = (p.explain ?? {}) as any;
+      const typeComp = Number(ex.productTypeCompliance ?? 0);
+      const exactType = Number(ex.exactTypeScore ?? 0);
+      const crossFamily = Number(ex.crossFamilyPenalty ?? 0);
+      const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+      if (crossFamily >= 0.5) return false;
+      if (exactType >= 1 || typeComp >= 0.3) return true;
+      return sim >= 0.96 && crossFamily < 0.35;
+    });
+    if (filtered.length > 0) {
+      results = filtered as ProductResult[];
+    }
   }
   // Always sort by finalRelevance01 descending as the primary signal.
   // For visual-primary (broad) searches, use similarity_score as a tie-breaker
