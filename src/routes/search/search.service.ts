@@ -522,6 +522,7 @@ async function enrichPromptAnchoredIntentFromImages(
   parsedIntent: ParsedIntent,
   preparedImages: Buffer[],
   userPrompt: string,
+  
 ): Promise<void> {
   if (!preparedImages.length || !userPrompt?.trim()) return;
   const imageCount = preparedImages.length;
