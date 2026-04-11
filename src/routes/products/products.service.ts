@@ -501,6 +501,8 @@ function computeExplicitFinalRelevance(params: {
   colorWeightScale?: number;
   /** Strength of color intent for the final multiplicative gate [0,1]. */
   colorIntentStrength?: number;
+  /** Part matching factor from Phase 1 (optional, defaults to 1.0 for no-op). */
+  partMatchingFactor?: number;
 }): { score: number; fusedVisual: number; metadataCompliance: number } {
     const colorWeightScale = Math.max(0.2, Math.min(1, params.colorWeightScale ?? 1));
   const colorIntentStrength = Math.max(0, Math.min(1, params.colorIntentStrength ?? 0));
@@ -655,6 +657,11 @@ function computeExplicitFinalRelevance(params: {
   const blipMatch = Math.max(0, Math.min(1, params.blipMatchScore ?? 0));
   const blipFactor = 0.85 + 0.15 * blipMatch;
 
+  // ── Part-level matching multiplier (Phase 1) ────────────────────
+  // Part matching contributes a soft boosting factor when parts align well.
+  // Default: no-op (factor = 1.0) when parts disabled or unavailable.
+  const partMatchingFactor = Math.max(1.0, Math.min(1.15, params.partMatchingFactor ?? 1.0));
+
   // ── Composite contribution ─────────────────────────────────────
   const compositeScore01 = Math.max(0, Math.min(1, params.imageCompositeScore01 ?? 0));
   const compositeInfluence = Math.max(
@@ -670,7 +677,7 @@ function computeExplicitFinalRelevance(params: {
   const withComposite =
     (1 - compositeInfluence) * coreBlend + compositeInfluence * compositeScore01;
 
-  const raw = withComposite * typeGate * crossSoft * intentGate * colorGate * colorTierFactor * blipFactor;
+  const raw = withComposite * typeGate * crossSoft * intentGate * colorGate * colorTierFactor * blipFactor * partMatchingFactor;
   return {
     score: Math.max(0, Math.min(1, raw)),
     fusedVisual,
@@ -2024,7 +2031,7 @@ export async function searchByImageWithSimilarity(
 
   if (hasQueryPartEmbeddings && Array.isArray(hits) && hits.length > 0) {
     try {
-      const { cosineSimilarityRaw } = await import("../../lib/image/clip");
+      const { cosineSimilarity } = await import("../../lib/image/clip");
       
       for (const hit of hits) {
         const partSims: Record<string, number> = {};
@@ -2046,7 +2053,7 @@ export async function searchByImageWithSimilarity(
           if (docPartVec) {
             // Compute cosine similarity between query and document part vectors
             try {
-              const rawSim = cosineSimilarityRaw(queryPartVec, docPartVec);
+              const rawSim = cosineSimilarity(queryPartVec, docPartVec);
               partSims[partType] = normalizeTo01ByVersion(rawSim, "v2");
             } catch {
               partSims[partType] = 0;
@@ -2735,6 +2742,25 @@ export async function searchByImageWithSimilarity(
     const lengthCompliance = lengthComplianceById.get(idStr) ?? 0;
     const hasLengthIntentForHit = hasLengthIntentById.get(idStr) ?? false;
     const crossFamilyPenaltyVal = comp.crossFamilyPenalty ?? 0;
+    
+    // ────────────────────────────────────────────────────────────────
+    // Compute part matching factor (Phase 1)
+    // ────────────────────────────────────────────────────────────────
+    let partMatchingFactor = 1.0; // default: no-op
+    const partSims = partSimByDocId.get(idStr);
+    if (partSims && typeof partSims === 'object') {
+      // Average non-zero part similarities
+      const nonZeroSims = Object.values(partSims).filter((s) => typeof s === 'number' && s > 0);
+      if (nonZeroSims.length > 0) {
+        const avgPartSim = nonZeroSims.reduce((a, b) => a + b, 0) / nonZeroSims.length;
+        // Weight of part matching (tunable via env var, default 80 = 8% max boost)
+        const wPart = Math.max(0, Number(process.env.SEARCH_IMAGE_PART_WEIGHT ?? '80') || 80);
+        // Part matching multiplier: add up to (wPart/1000) to the base 1.0
+        // E.g., wPart=80 means up to 1 + 0.08 = 1.08 boost
+        partMatchingFactor = 1.0 + (avgPartSim * wPart / 1000);
+      }
+    }
+
     const explicitResult = computeExplicitFinalRelevance({
       simVisual: effectiveVisualForScoring,
       typeMatch,
@@ -2770,6 +2796,7 @@ export async function searchByImageWithSimilarity(
             ? 0.55
             : 0.35,
       colorIntentStrength: colorIntentStrengthForFinal,
+      partMatchingFactor,
     });
     comp.finalRelevance01 = Math.min(1, explicitResult.score + subtypeKeywordSignal.boost);
     (comp as any).colorContradictionPenalty = Math.round(colorContradictionPenalty * 1000) / 1000;
