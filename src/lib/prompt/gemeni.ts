@@ -1314,12 +1314,16 @@ Respond ONLY with valid JSON (no markdown, no explanation, no extra text):
       'jacket', 'coat', 'dress', 'shirt', 'pants', 'jeans', 'skirt', 'top',
       'leather', 'cotton', 'silk', 'denim', 'wool', 'linen',
       'black', 'white', 'red', 'blue', 'green', 'brown', 'beige', 'navy',
+      'cream', 'ivory', 'tan', 'camel', 'charcoal', 'burgundy',
       'fitted', 'oversized', 'cropped', 'slim', 'loose',
-      'casual', 'formal', 'vintage', 'modern', 'minimalist', 'streetwear'
-    ];
+      'casual', 'formal', 'vintage', 'modern', 'minimalist', 'streetwear',
+    ]
 
-    const lowerPrompt = prompt.toLowerCase();
-    return fashionKeywords.filter(keyword => lowerPrompt.includes(keyword));
+    const lower = prompt.toLowerCase();
+    return fashionKeywords.filter((keyword) => {
+      const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`\\b${escaped}\\b`, 'i').test(lower);
+    });
   }
 
   private sleep(ms: number): Promise<void> {

@@ -57,13 +57,13 @@ export type Database = {
       }
     }
     Functions: {
-      get_overview_kpis: { Args: Record<never, never>; Returns: import('../../types').OverviewKPIs }
-      get_vendor_stats: { Args: Record<never, never>; Returns: import('../../types').VendorStats[] }
-      get_freshness_stats: { Args: Record<never, never>; Returns: import('../../types').FreshnessStats }
-      get_category_counts: { Args: Record<never, never>; Returns: import('../../types').CategoryCount[] }
-      get_vendor_product_counts: { Args: Record<never, never>; Returns: import('../../types').VendorProductCount[] }
-      get_price_change_events: { Args: { limit_rows?: number }; Returns: import('../../types').PriceChangeEvent[] }
-      get_daily_scrape_volume: { Args: { days_back?: number }; Returns: import('../../types').DailyScrapeStat[] }
+      get_overview_kpis: { Args: Record<never, never>; Returns: import('@/types/catalog-admin').OverviewKPIs }
+      get_vendor_stats: { Args: Record<never, never>; Returns: import('@/types/catalog-admin').VendorStats[] }
+      get_freshness_stats: { Args: Record<never, never>; Returns: import('@/types/catalog-admin').FreshnessStats }
+      get_category_counts: { Args: Record<never, never>; Returns: import('@/types/catalog-admin').CategoryCount[] }
+      get_vendor_product_counts: { Args: Record<never, never>; Returns: import('@/types/catalog-admin').VendorProductCount[] }
+      get_price_change_events: { Args: { limit_rows?: number }; Returns: import('@/types/catalog-admin').PriceChangeEvent[] }
+      get_daily_scrape_volume: { Args: { days_back?: number }; Returns: import('@/types/catalog-admin').DailyScrapeStat[] }
     }
     Enums: Record<never, never>
   }

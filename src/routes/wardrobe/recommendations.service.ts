@@ -742,6 +742,13 @@ type CompleteLookAnchorRow = {
   image_url?: string | null;
   image_cdn?: string | null;
   category_name?: string | null;
+  audience_gender?: string | null;
+  age_group?: string | null;
+};
+
+export type CompleteLookCatalogFilters = {
+  audience_gender?: string;
+  age_group?: string;
   title?: string | null;
   gender?: string | null;
   age_group?: string | null;
@@ -797,6 +804,7 @@ async function runCompleteLookCore(
   userId: number,
   currentItems: CompleteLookAnchorRow[],
   limit: number,
+  catalogFilters?: CompleteLookCatalogFilters
   completionMode: CompleteLookSuggestionsResult["completionMode"],
   audienceOptions: CompleteLookAudienceOptions = {}
 ): Promise<CompleteLookSuggestionsResult> {
@@ -976,6 +984,11 @@ async function runCompleteLookCore(
           { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } },
           { term: { category_canonical: canonical } },
         ];
+        if (catalogFilters?.audience_gender) {
+          f.push({ term: { audience_gender: catalogFilters.audience_gender } });
+        }
+        if (catalogFilters?.age_group) {
+          f.push({ term: { age_group: catalogFilters.age_group } });
         if (inferredAudienceGender && inferredAudienceGender !== "unisex") {
           f.push(buildAudienceGenderFilter(inferredAudienceGender));
         }
@@ -1562,6 +1575,11 @@ export async function completeLookSuggestions(
   userId: number,
   currentItemIds: number[],
   limit: number = 10,
+  requestCatalogFilters?: CompleteLookCatalogFilters
+): Promise<CompleteLookSuggestionsResult> {
+  const currentItemsResult = await pg.query(
+    `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, wi.name, wi.image_url, wi.image_cdn,
+            wi.audience_gender, wi.age_group,
   options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint"> = {}
 ): Promise<CompleteLookSuggestionsResult> {
   const currentItemsResult = await pg.query(
@@ -1581,6 +1599,19 @@ export async function completeLookSuggestions(
     [currentItemIds, userId]
   );
 
+  const currentItems = currentItemsResult.rows as CompleteLookAnchorRow[];
+  const row = currentItems[0];
+  const ag = requestCatalogFilters?.audience_gender ?? row?.audience_gender ?? undefined;
+  const age = requestCatalogFilters?.age_group ?? row?.age_group ?? undefined;
+  const effectiveFilters: CompleteLookCatalogFilters | undefined =
+    ag || age
+      ? {
+          ...(ag ? { audience_gender: ag } : {}),
+          ...(age ? { age_group: age } : {}),
+        }
+      : undefined;
+
+  return runCompleteLookCore(userId, currentItems, limit, effectiveFilters);
   return await runCompleteLookCore(userId, currentItemsResult.rows as CompleteLookAnchorRow[], limit, "wardrobe", {
     audienceGenderHint: options.audienceGenderHint,
     ageGroupHint: options.ageGroupHint,
@@ -1595,6 +1626,7 @@ export async function completeLookSuggestionsForCatalogProducts(
   userId: number,
   productIds: number[],
   limit: number = 10,
+  requestCatalogFilters?: CompleteLookCatalogFilters
   options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint"> & { detectedCategories?: Map<number, string> } = {}
 ): Promise<CompleteLookSuggestionsResult> {
   if (!Array.isArray(productIds) || productIds.length === 0) {
@@ -1627,6 +1659,17 @@ export async function completeLookSuggestionsForCatalogProducts(
     [productIds]
   );
 
+  const currentItems = currentItemsResult.rows as CompleteLookAnchorRow[];
+  const ag = requestCatalogFilters?.audience_gender;
+  const age = requestCatalogFilters?.age_group;
+  const effectiveFilters: CompleteLookCatalogFilters | undefined =
+    ag || age
+      ? {
+          ...(ag ? { audience_gender: ag } : {}),
+          ...(age ? { age_group: age } : {}),
+        }
+      : undefined;
+  return runCompleteLookCore(userId, currentItems, limit, effectiveFilters);
   // Attach detected categories to rows if provided
   const rows = productResult.rows as Array<CompleteLookAnchorRow & { detected_category?: string }>;
   if (options.detectedCategories) {

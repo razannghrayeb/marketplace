@@ -1,6 +1,14 @@
 /node_modules
 /models
 /.venv
+.env
+.env.*
+!.env.example
+node_modules/
+.next/
+.next-3010/
+dist/
+build/
 /src/lib/model/__pycache__
 /src/lib/model/.venv
 /src/lib/model/.venv311

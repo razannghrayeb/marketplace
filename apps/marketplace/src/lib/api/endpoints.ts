@@ -14,6 +14,7 @@ export const endpoints = {
   },
   products: {
     list: '/products',
+    sales: '/products/sales',
     facets: '/products/facets',
     search: '/products/search',
     searchImage: '/products/search/image',
@@ -130,6 +131,8 @@ export const endpoints = {
   },
   compare: {
     root: '/api/compare',
+    /** Decision journey — POST body: CompareDecisionRequest (camelCase). */
+    decision: '/api/compare',
     quality: (productId: string) => `/api/compare/quality/${productId}`,
     analyzeText: '/api/compare/analyze-text',
     price: (productId: string) => `/api/compare/price/${productId}`,

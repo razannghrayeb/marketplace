@@ -161,9 +161,13 @@ export class TryOnClient {
     options: TryOnOptions = {}
   ): Promise<TryOnResult> {
     if (!this.project) {
-      throw new Error(
-        "GCLOUD_PROJECT env var is required for Vertex AI Virtual Try-On"
+      const err = new Error(
+        "Virtual try-on is not configured. Set GCLOUD_PROJECT (or GOOGLE_CLOUD_PROJECT) environment variable. " +
+        "See: https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/virtual-try-on-api"
       );
+      (err as any).statusCode = 503;
+      (err as any).code = "TRYON_NOT_CONFIGURED";
+      throw err;
     }
 
     const start = Date.now();

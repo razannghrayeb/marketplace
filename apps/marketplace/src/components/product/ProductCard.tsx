@@ -3,16 +3,21 @@
 import Image from 'next/image'
 import Link from 'next/link'
 import { motion } from 'framer-motion'
-import { Heart, GitCompare, Check } from 'lucide-react'
+import { Heart, GitCompare, Check, Shirt } from 'lucide-react'
 import type { Product } from '@/types/product'
 
 interface ProductCardProps {
   product: Product
   index?: number
+  /** When set, product link includes `?from=` so the detail page can return to Discover with the same query. */
+  fromReturnPath?: string
   onFavorite?: (productId: number) => void
   isFavorite?: boolean
   onAddToCompare?: (productId: number) => void
   inCompare?: boolean
+  /** Add catalog product to wardrobe (shop). */
+  onAddToWardrobe?: (product: Product) => void
+  wardrobeStatus?: 'idle' | 'loading' | 'added'
   variantPrice?: { minPriceCents: number; maxPriceCents: number }
 }
 
@@ -30,12 +35,31 @@ function formatPrice(cents: number, currency = 'USD') {
   }).format(cents / 100)
 }
 
-export function ProductCard({ product, index = 0, onFavorite, isFavorite, onAddToCompare, inCompare, variantPrice }: ProductCardProps) {
+export function ProductCard({
+  product,
+  index = 0,
+  fromReturnPath,
+  onFavorite,
+  isFavorite,
+  onAddToCompare,
+  inCompare,
+  onAddToWardrobe,
+  wardrobeStatus = 'idle',
+  variantPrice,
+}: ProductCardProps) {
   const imgUrl = product.image_cdn || product.image_url || '/placeholder-product.jpg'
+  const productHref =
+    fromReturnPath && fromReturnPath.startsWith('/search')
+      ? `/products/${product.id}?from=${encodeURIComponent(fromReturnPath)}`
+      : `/products/${product.id}`
   const priceCents = toCents(product.price_cents)
   const saleCents = toCents(product.sales_price_cents)
   const hasSale = saleCents > 0 && saleCents < priceCents
   const showMinMax = variantPrice && variantPrice.minPriceCents !== variantPrice.maxPriceCents
+  const hasCompare = Boolean(onAddToCompare)
+  const hasWardrobe = Boolean(onAddToWardrobe)
+  const showActionBar = hasCompare || hasWardrobe
+  const wardrobePinned = wardrobeStatus === 'added' || wardrobeStatus === 'loading'
 
   return (
     <motion.article
@@ -46,7 +70,7 @@ export function ProductCard({ product, index = 0, onFavorite, isFavorite, onAddT
       whileHover={{ y: -6 }}
       className="group"
     >
-      <Link href={`/products/${product.id}`} className="block">
+      <Link href={productHref} className="block">
         <div className="relative aspect-[3/4] overflow-hidden rounded-2xl bg-gradient-to-br from-neutral-100 to-neutral-150 ring-1 ring-neutral-200/90 shadow-sm transition-all duration-300 group-hover:ring-violet-300/60 group-hover:shadow-xl group-hover:shadow-violet-500/10">
           <Image
             src={imgUrl}
@@ -80,41 +104,79 @@ export function ProductCard({ product, index = 0, onFavorite, isFavorite, onAddT
             </button>
           )}
 
-          {/* Compare button — always visible when added, slides up on hover otherwise */}
-          {onAddToCompare && (
-            <div className={`absolute bottom-0 inset-x-0 transition-transform duration-300 ease-out ${
-              inCompare ? 'translate-y-0' : 'translate-y-full group-hover:translate-y-0'
-            }`}>
-              <button
-                onClick={(e) => {
-                  e.preventDefault()
-                  onAddToCompare(product.id)
-                }}
-                className={`w-full flex items-center justify-center gap-2 py-2.5 text-xs font-bold uppercase tracking-wide backdrop-blur-md transition-colors
-                  ${inCompare
-                    ? 'bg-violet-600/95 text-white'
-                    : 'bg-white/90 text-violet-800 hover:bg-violet-100/95'
-                  }`}
-              >
-                {inCompare ? (
-                  <motion.span
-                    key="added"
-                    initial={{ scale: 0 }}
-                    animate={{ scale: 1 }}
-                    className="flex items-center gap-1.5"
-                  >
-                    <span className="flex items-center justify-center w-4 h-4 rounded-full bg-white/25">
-                      <Check className="w-3 h-3" strokeWidth={3} />
+          {/* Compare / Wardrobe — pinned when active, else reveal on hover */}
+          {showActionBar && (
+            <div
+              className={`absolute bottom-0 inset-x-0 flex transition-transform duration-300 ease-out ${
+                inCompare || wardrobePinned ? 'translate-y-0' : 'translate-y-full group-hover:translate-y-0'
+              }`}
+            >
+              {hasWardrobe && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault()
+                    if (wardrobeStatus === 'loading' || wardrobeStatus === 'added') return
+                    onAddToWardrobe!(product)
+                  }}
+                  disabled={wardrobeStatus === 'loading' || wardrobeStatus === 'added'}
+                  className={`flex flex-1 items-center justify-center gap-1.5 py-2.5 text-[10px] sm:text-xs font-bold uppercase tracking-wide backdrop-blur-md transition-colors border-r border-white/20
+                    ${wardrobeStatus === 'added'
+                      ? 'bg-emerald-600/95 text-white'
+                      : wardrobeStatus === 'loading'
+                        ? 'bg-neutral-700/90 text-white'
+                        : 'bg-white/90 text-emerald-800 hover:bg-emerald-50/95'
+                    }
+                    disabled:opacity-90`}
+                >
+                  {wardrobeStatus === 'loading' ? (
+                    <span className="w-3.5 h-3.5 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+                  ) : wardrobeStatus === 'added' ? (
+                    <>
+                      <Check className="w-3.5 h-3.5" strokeWidth={3} />
+                      In wardrobe
+                    </>
+                  ) : (
+                    <>
+                      <Shirt className="w-3.5 h-3.5" />
+                      Wardrobe
+                    </>
+                  )}
+                </button>
+              )}
+              {hasCompare && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault()
+                    onAddToCompare!(product.id)
+                  }}
+                  className={`flex flex-1 items-center justify-center gap-2 py-2.5 text-xs font-bold uppercase tracking-wide backdrop-blur-md transition-colors
+                    ${inCompare
+                      ? 'bg-violet-600/95 text-white'
+                      : 'bg-white/90 text-violet-800 hover:bg-violet-100/95'
+                    }`}
+                >
+                  {inCompare ? (
+                    <motion.span
+                      key="added"
+                      initial={{ scale: 0 }}
+                      animate={{ scale: 1 }}
+                      className="flex items-center gap-1.5"
+                    >
+                      <span className="flex items-center justify-center w-4 h-4 rounded-full bg-white/25">
+                        <Check className="w-3 h-3" strokeWidth={3} />
+                      </span>
+                      Added to compare
+                    </motion.span>
+                  ) : (
+                    <span className="flex items-center gap-1.5">
+                      <GitCompare className="w-3.5 h-3.5" />
+                      Compare
                     </span>
-                    Added to compare
-                  </motion.span>
-                ) : (
-                  <span className="flex items-center gap-1.5">
-                    <GitCompare className="w-3.5 h-3.5" />
-                    Compare
-                  </span>
-                )}
-              </button>
+                  )}
+                </button>
+              )}
             </div>
           )}
         </div>

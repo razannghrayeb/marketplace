@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { motion } from 'framer-motion'
 import { api } from '@/lib/api/client'
 import { endpoints } from '@/lib/api/endpoints'
@@ -15,7 +15,14 @@ export default function LoginPage() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const router = useRouter()
+  const searchParams = useSearchParams()
   const setAuth = useAuthStore((s) => s.setAuth)
+
+  const safeReturnPath = (): string => {
+    const next = searchParams.get('next')
+    if (next && next.startsWith('/') && !next.startsWith('//') && !next.includes('..')) return next
+    return '/'
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -42,7 +49,7 @@ export default function LoginPage() {
         }
         if (user.is_admin) router.push('/admin')
         else if (user.user_type === 'business') router.push('/dashboard')
-        else router.push('/')
+        else router.push(safeReturnPath())
         router.refresh()
       } else {
         const err = (res as any).error

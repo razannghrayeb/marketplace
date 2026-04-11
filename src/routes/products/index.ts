@@ -14,7 +14,7 @@ import "dotenv/config";
 
 import { Router } from "express";
 import multer from "multer";
-import { listProducts, searchProductsByTitle, searchProductsByImage, getProductById, getProductPriceHistory, getProductFacets, getPriceDrops, getSimilarProducts } from "./products.controller";
+import { listProducts, listSaleProducts, searchProductsByTitle, searchProductsByImage, getProductById, getProductPriceHistory, getProductFacets, getPriceDrops, getSimilarProducts } from "./products.controller";
 import { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
 import { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller";
 import { getRecommendations, getBatchRecommendationsHandler } from "./recommendations.controller";
@@ -75,6 +75,7 @@ router.post("/variants/batch", getVariantsBatch);
 // ============================================================================
 
 router.get("/price-drops", getPriceDrops);
+router.get("/sales", listSaleProducts);
 
 // ============================================================================
 // Complete My Style - Outfit Recommendations
@@ -97,7 +98,7 @@ router.delete("/:id/images/:imageId", removeImage);
 router.get("/:id", getProductById);
 
 export default router;
-export { listProducts, searchProductsByTitle, searchProductsByImage, getProductById, getProductPriceHistory, getProductFacets, getPriceDrops } from "./products.controller";
+export { listProducts, listSaleProducts, searchProductsByTitle, searchProductsByImage, getProductById, getProductPriceHistory, getProductFacets, getPriceDrops } from "./products.controller";
 export { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
 export { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller";
 
