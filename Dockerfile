@@ -50,8 +50,8 @@ RUN corepack enable && corepack prepare pnpm@9 --activate
 # Copy package files
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
-# Install dependencies
-RUN pnpm install --frozen-lockfile
+# Install only root workspace dependencies required for API build.
+RUN pnpm install --frozen-lockfile --filter .
 
 # Copy source
 COPY tsconfig.json tsconfig.base.json ./
@@ -90,8 +90,8 @@ RUN groupadd -g 1001 nodejs && \
 # Copy package files
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
-# Install production dependencies only
-RUN pnpm install --frozen-lockfile --prod
+# Install only root production dependencies for runtime.
+RUN pnpm install --frozen-lockfile --prod --filter .
 
 # Copy built files
 COPY --from=builder /app/dist ./dist
