@@ -211,6 +211,13 @@ function shopLookTinyFootwearRecoveryThreshold(baseThreshold: number): number {
   return Math.max(0.35, Math.min(baseThreshold, Math.min(0.9, floor)));
 }
 
+/** Minimum finalRelevance01 score (0-1) for products to be included in results. Default: 0.4 */
+function shopLookMinFinalRelevanceThreshold(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_MIN_FINAL_RELEVANCE ?? "0.4");
+  if (!Number.isFinite(raw)) return 0.4;
+  return Math.max(0, Math.min(1, raw));
+}
+
 /**
  * Skip auto hard-category for accessory/bag noise and ambiguous top silhouettes.
  * `SEARCH_IMAGE_SHOP_HARD_CATEGORY_STRICT` still forces hard filtering when needed.
@@ -570,6 +577,23 @@ function formalityToAttrStyleToken(formality: number): string {
   if (formality >= 7) return "semi-formal";
   if (formality >= 5) return "smart-casual";
   return "casual";
+}
+
+/** Extract formality intent from BLIP full-image caption. Returns 8+ for formal wear, 0 for no formal cue. */
+function inferFormalityFromCaption(caption: string): number {
+  const s = String(caption || "").toLowerCase();
+  if (!s) return 0;
+  // Formal wear cues: suit, tie, tuxedo, black-tie, formal event, business, etc.
+  if (/\b(suit|suits|tuxedo|black-tie|formal|formal wear|dress code|business suit|elegance|elegant)\b/.test(s)) {
+    return 9; // High formality score for explicit formal cues
+  }
+  if (/\b(tie|dress shirt|dress pants|dress jacket|blazer|sport coat|coat)\b/.test(s)) {
+    // Moderate formal cue — could be formal or smart-casual context
+    // If combined with other formal markers, boost to 8; otherwise conservative 7
+    const formalMarkers = (s.match(/\b(suit|tuxedo|formal|black-tie|elegant|business)\b/g) || []).length;
+    if (formalMarkers >= 1) return 8;
+  }
+  return 0;
 }
 
 function inferStyleForDetectionLabel(label: string): {
@@ -1235,6 +1259,49 @@ function applyShopLookVisualPrecisionGuard(
 
   // Never return below the endpoint threshold, even if lower-fidelity fallback paths ran.
   return products.filter((p) => scoreOf(p) >= baseMin);
+}
+
+/** Filter products by minimum formality requirement (when formal wear is detected from BLIP). */
+function applyFormalityFilter(products: ProductResult[], minFormality: number | undefined): ProductResult[] {
+  if (!minFormality || minFormality <= 0 || !Array.isArray(products) || products.length === 0) {
+    return products;
+  }
+
+  // Filter products by checking their formality score in the structure.
+  // Product detection style contains formality (1-10 scale).
+  const filtered = products.filter((p) => {
+    const productFormality = Number((p as any)?.style?.formality ?? 0);
+    return productFormality >= minFormality;
+  });
+
+  if (filtered.length !== products.length) {
+    console.log(`[formality-filter] filtered ${products.length} → ${filtered.length} (minFormality=${minFormality})`);
+  }
+  
+  return filtered;
+}
+
+/** Filter products by minimum finalRelevance01 score. Removes low-relevance matches from results. */
+function applyRelevanceThresholdFilter(
+  products: ProductResult[],
+  minRelevance: number | undefined,
+): ProductResult[] {
+  if (!minRelevance || minRelevance <= 0 || !Array.isArray(products) || products.length === 0) {
+    return products;
+  }
+
+  const filtered = products.filter((p) => {
+    const relevance = Number((p as any)?.finalRelevance01 ?? 0);
+    return relevance >= minRelevance;
+  });
+
+  if (filtered.length !== products.length) {
+    console.log(
+      `[relevance-threshold-filter] filtered ${products.length} → ${filtered.length} (minRelevance=${minRelevance})`,
+    );
+  }
+
+  return filtered;
 }
 
 function paginateDetectionGroups(
@@ -2243,6 +2310,8 @@ export class ImageAnalysisService {
       shopLookPerDetectionConcurrency(),
       async ({ detection, detectionIndex }) => {
       const label = detection.label;
+      console.log(`[detection-trace] started label="${label}" conf=${(detection.confidence ?? 0).toFixed(3)} area=${(detection.area_ratio ?? 0).toFixed(3)}`);
+      
       let clipBuffer: Buffer;
       let finalEmbedding: number[];
       let queryProcessBuf: Buffer;
@@ -2334,6 +2403,19 @@ export class ImageAnalysisService {
       } else if (inferredStyle.attrStyle && shouldApplyInferredStyleFallback(categoryMapping.productCategory, label)) {
         filters.softStyle = inferredStyle.attrStyle;
       }
+
+      // Extract formality intent from BLIP caption: if formal wear is detected (suit, tie, tuxedo),
+      // override softStyle to "formal" to ensure proper product ranking (no casual sport coats, blazers).
+      const blipFormalityScore = blipCaption ? inferFormalityFromCaption(blipCaption) : 0;
+      if (blipCaption && blipFormalityScore > 0) {
+        console.log(`[formality-intent] caption="${blipCaption.substring(0, 60)}..." score=${blipFormalityScore}`);
+      }
+      if (blipFormalityScore >= 8) {
+        filters.softStyle = "formal"; // Override previous style inference with formal
+        (filters as any).minFormality = 8; // Hard filter: only rank products with formality >= 8
+        console.log(`[formality-intent][APPLIED] enforcing formal-wear-only for detection="${label}"`);
+      }
+
       if (categoryMapping.attributes.sleeveLength) {
         filters.sleeve = categoryMapping.attributes.sleeveLength;
       }
@@ -2699,21 +2781,41 @@ export class ImageAnalysisService {
         }
       }
 
+      console.log(`[skip-trace] detection="${label}" after_knn_search=${similarResult.results.length}`);
+
       const precisionSafeResults = applyShopLookVisualPrecisionGuard(
         similarResult.results,
         categoryMapping.productCategory === "footwear" && (detection.area_ratio ?? 0) <= 0.02
           ? shopLookTinyFootwearRecoveryThreshold(similarityThreshold)
           : similarityThreshold,
       );
+      
+      console.log(`[skip-trace] detection="${label}" after_precision_guard=${precisionSafeResults.length} (filtered_by=${similarResult.results.length - precisionSafeResults.length})`);
 
       const categorySafeResults = applyDetectionCategoryGuard(
         precisionSafeResults,
         detection.label,
         categoryMapping,
       );
+      
+      console.log(`[skip-trace] detection="${label}" after_category_guard=${categorySafeResults.length} (filtered_by=${precisionSafeResults.length - categorySafeResults.length})`);
+      
+      // Apply formality filter if formal wear was detected from BLIP caption
+      const minFormality = (filters as any).minFormality;
+      if (minFormality) {
+        console.log(`[formality-apply-main] detection="${detection.label}" minFormality=${minFormality} incoming=${categorySafeResults.length}`);
+      }
+      const formalitySafeResults = applyFormalityFilter(categorySafeResults, minFormality);
+      
+      console.log(`[skip-trace] detection="${label}" after_formality_filter=${formalitySafeResults.length} (filtered_by=${categorySafeResults.length - formalitySafeResults.length})`);
+      
+      if (formalitySafeResults.length === 0) {
+        console.log(`[skip-trace-WARN] detection="${label}" ZERO_RESULTS filters={category:"${filters.category}", productTypes:[${filters.productTypes?.join(",")}], softStyle:"${filters.softStyle}", minFormality:${minFormality}}`);
+      }
+      
       similarResult = {
         ...similarResult,
-        results: categorySafeResults,
+        results: formalitySafeResults,
       };
 
       // Tiny footwear boxes often produce weak crop embeddings. If footwear search is empty,
@@ -2723,6 +2825,7 @@ export class ImageAnalysisService {
         categoryMapping.productCategory === "footwear" &&
         (detection.area_ratio ?? 0) <= 0.02
       ) {
+        console.log(`[recovery-attempt] detection="${label}" type=footwear_tiny reason="empty + tiny area"`);
         const footwearTerms = hardCategoryTermsForDetection(label, categoryMapping);
         const footwearFilters: Partial<import("./types").SearchFilters> = {};
         if (footwearTerms.length > 0) {
@@ -2760,6 +2863,7 @@ export class ImageAnalysisService {
           });
 
           if (footwearRecovery.results.length > 0) {
+            console.log(`[recovery-result] detection="${label}" type=footwear_tiny recovered=${footwearRecovery.results.length} products`);
             similarResult = {
               ...similarResult,
               results: mergeImageSearchResultsById(
@@ -2782,6 +2886,7 @@ export class ImageAnalysisService {
         (detection.confidence ?? 0) >= 0.82 &&
         (detection.area_ratio ?? 0) >= 0.08
       ) {
+        console.log(`[recovery-attempt] detection="${label}" type=tops_recovery reason="empty + high conf + sufficient area"`);
         const topTerms = hardCategoryTermsForDetection(label, categoryMapping);
         const topFilters: Partial<import("./types").SearchFilters> = {};
         if (topTerms.length > 0) {
@@ -2815,6 +2920,7 @@ export class ImageAnalysisService {
           });
 
           if (topRecovery.results.length > 0) {
+            console.log(`[recovery-result] detection="${label}" type=tops_recovery recovered=${topRecovery.results.length} products`);
             similarResult = {
               ...similarResult,
               results: mergeImageSearchResultsById(
@@ -2832,9 +2938,12 @@ export class ImageAnalysisService {
       }
 
       if (similarResult.results.length === 0 && !includeEmptyDetectionGroups) {
+        console.log(`[detection-skip] label="${label}" reason="empty_and_includeEmpty=false"`);
         return null;
       }
 
+      console.log(`[detection-result] label="${label}" final_count=${similarResult.results.length}`);
+      
       return {
         detection: {
           label: detection.label,
@@ -2874,20 +2983,41 @@ export class ImageAnalysisService {
 
     const postRanked = applyGroupedPostRanking(groupedResults, imageCrossGroupDedupeEnabled());
     const finalGroupedResults = postRanked.rows;
-    totalProducts = postRanked.totalProducts;
-
+    
+    // Apply minimum relevance threshold filter to each detection's products
+    const minRelevanceThreshold = shopLookMinFinalRelevanceThreshold();
+    console.log(`[relevance-gate] applying minRelevance=${minRelevanceThreshold} to filter low-relevance products`);
+    
+    const relevanceFilteredResults = finalGroupedResults.map((detection) => ({
+      ...detection,
+      products: applyRelevanceThresholdFilter(detection.products, minRelevanceThreshold),
+      count: 0, // Will be recalculated below
+    }));
+    
+    // Recalculate counts and total after filtering
+    let newTotalProducts = 0;
+    for (const result of relevanceFilteredResults) {
+      result.count = result.products.length;
+      newTotalProducts += result.count;
+    }
+    
+    console.log(
+      `[relevance-gate] total products before=${totalProducts} → after=${newTotalProducts} (threshold=${minRelevanceThreshold})`,
+    );
+    
     const totalDetectionJobs = detectionJobs.length;
     let coveredDetections = 0;
-    for (const outcome of settled) {
-      if (outcome.status === "fulfilled" && outcome.value && outcome.value.count > 0) {
+    for (const result of relevanceFilteredResults) {
+      if (result.count > 0) {
         coveredDetections += 1;
       }
     }
+    
     const emptyDetections = totalDetectionJobs - coveredDetections;
     const coverageRatio =
       totalDetectionJobs > 0 ? coveredDetections / totalDetectionJobs : 0;
 
-    const itemsForCoherence = finalGroupedResults
+    const itemsForCoherence = relevanceFilteredResults
       .filter((r) => r.count > 0 && r.detectionIndex !== undefined)
       .map(
         (r) =>
@@ -2915,8 +3045,8 @@ export class ImageAnalysisService {
       inferredColorsByItem,
       inferredColorsByItemConfidence,
       similarProducts: {
-        byDetection: finalGroupedResults,
-        totalProducts,
+        byDetection: relevanceFilteredResults,
+        totalProducts: newTotalProducts,
         threshold: similarityThreshold,
         detectedCategories,
         shopTheLookStats: {
@@ -3311,6 +3441,19 @@ export class ImageAnalysisService {
         ) {
           filters.softStyle = inferredStyle.attrStyle;
         }
+
+        // Extract formality intent from BLIP caption: if formal wear is detected (suit, tie, tuxedo),
+        // override softStyle to "formal" to ensure proper product ranking (no casual sport coats, blazers).
+        const blipFormalityScore = blipCaption ? inferFormalityFromCaption(blipCaption) : 0;
+        if (blipCaption && blipFormalityScore > 0) {
+          console.log(`[formality-intent-alt] caption="${blipCaption.substring(0, 60)}..." score=${blipFormalityScore}`);
+        }
+        if (blipFormalityScore >= 8) {
+          filters.softStyle = "formal"; // Override previous style inference with formal
+          (filters as any).minFormality = 8; // Hard filter: only rank products with formality >= 8
+          console.log(`[formality-intent-alt][APPLIED] enforcing formal-wear-only for detection="${categorySource}"`);
+        }
+
         const detectionLength = inferLengthIntentFromDetection(detection, imageHeight);
         if (detectionLength) (filters as any).length = detectionLength;
 
@@ -3658,19 +3801,42 @@ export class ImageAnalysisService {
 
         const effectiveSimilarityThreshold =
           options.similarityThreshold ?? config.clip.imageSimilarityThreshold;
+        
+        console.log(`[skip-trace] detection="${categorySource}" after_knn_search=${similarResult.results.length}`);
+        
         const precisionSafeResults = applyShopLookVisualPrecisionGuard(
           similarResult.results,
           categoryMapping.productCategory === "footwear" && (detection.area_ratio ?? 0) <= 0.02
             ? shopLookTinyFootwearRecoveryThreshold(effectiveSimilarityThreshold)
             : effectiveSimilarityThreshold,
         );
+        
+        console.log(`[skip-trace] detection="${categorySource}" after_precision_guard=${precisionSafeResults.length} (filtered_by=${similarResult.results.length - precisionSafeResults.length})`);
+        
+        const categorySafeResults = applyDetectionCategoryGuard(
+          precisionSafeResults,
+          categorySource,
+          categoryMapping,
+        );
+        
+        console.log(`[skip-trace] detection="${categorySource}" after_category_guard=${categorySafeResults.length} (filtered_by=${precisionSafeResults.length - categorySafeResults.length})`);
+        
+        // Apply formality filter if formal wear was detected from BLIP caption
+        const minFormality = (filters as any).minFormality;
+        if (minFormality) {
+          console.log(`[formality-apply-alt] detection="${categorySource}" minFormality=${minFormality} incoming=${categorySafeResults.length}`);
+        }
+        const formalitySafeResults = applyFormalityFilter(categorySafeResults, minFormality);
+        
+        console.log(`[skip-trace] detection="${categorySource}" after_formality_filter=${formalitySafeResults.length} (filtered_by=${categorySafeResults.length - formalitySafeResults.length})`);
+        
+        if (formalitySafeResults.length === 0) {
+          console.log(`[skip-trace-WARN] detection="${categorySource}" ZERO_RESULTS filters={category:"${filters.category}", productTypes:[${filters.productTypes?.join(",")}], softStyle:"${filters.softStyle}", minFormality:${minFormality}}`);
+        }
+        
         similarResult = {
           ...similarResult,
-          results: applyDetectionCategoryGuard(
-            precisionSafeResults,
-            categorySource,
-            categoryMapping,
-          ),
+          results: formalitySafeResults,
         };
 
         const includeEmpty = options.includeEmptyDetectionGroups === true;
@@ -3713,9 +3879,31 @@ export class ImageAnalysisService {
     );
     const finalGroupedResults = pagedSel.rows as SelectiveDetectionResult[];
     totalProducts = pagedSel.totalProducts;
+    
+    // Apply minimum relevance threshold filter to paginated results as well
+    const minRelevanceThresholdSel = shopLookMinFinalRelevanceThreshold();
+    console.log(`[relevance-gate-sel] applying minRelevance=${minRelevanceThresholdSel} to paginated results`);
+    
+    const relevanceFilteredResultsSel = finalGroupedResults.map((detection) => ({
+      ...detection,
+      products: applyRelevanceThresholdFilter(detection.products, minRelevanceThresholdSel),
+      count: 0, // Will be recalculated below
+    }));
+    
+    // Recalculate counts and total after filtering
+    let newTotalProductsSel = 0;
+    for (const result of relevanceFilteredResultsSel) {
+      result.count = result.products.length;
+      newTotalProductsSel += result.count;
+    }
+    
+    console.log(
+      `[relevance-gate-sel] total products before=${totalProducts} → after=${newTotalProductsSel} (threshold=${minRelevanceThresholdSel})`,
+    );
+    totalProducts = newTotalProductsSel;
 
     const itemsForCoherence: DetectionWithColor[] = [];
-    for (const r of finalGroupedResults) {
+    for (const r of relevanceFilteredResultsSel) {
       if (r.count === 0) continue;
       if (
         r.source === "yolo" &&
@@ -3751,7 +3939,7 @@ export class ImageAnalysisService {
       });
     }
 
-    const coveredSel = finalGroupedResults.filter((r) => r.count > 0).length;
+    const coveredSel = relevanceFilteredResultsSel.filter((r) => r.count > 0).length;
     const totalSel = allItemsToProcess.length;
 
     return {
@@ -3762,11 +3950,11 @@ export class ImageAnalysisService {
       inferredColorsByItem,
       inferredColorsByItemConfidence,
       similarProducts: {
-        byDetection: finalGroupedResults,
-        totalProducts,
+        byDetection: relevanceFilteredResultsSel,
+        totalProducts: newTotalProductsSel,
         totalAvailableProducts: pagedSel.totalAvailableProducts,
         threshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
-        detectedCategories: [...new Set(finalGroupedResults.map((r) => r.category))],
+        detectedCategories: [...new Set(relevanceFilteredResultsSel.map((r) => r.category))],
         pagination: {
           mode: "per_detection",
           page: resolvedResultsPage,
