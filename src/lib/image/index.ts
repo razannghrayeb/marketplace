@@ -45,7 +45,45 @@ export {
   computePHash,
   loadAndNormalize,
   initImageProcessing,
+  // Part-level embeddings (Phase 1)
+  computeAllPartEmbeddingsFromDetection,
+  computeAndGenerateQueryPartEmbeddings,
 } from "./processor";
+
+// Part extraction (Phase 1)
+export {
+  PartType,
+  type PartSlot,
+  CANONICAL_PART_SLOTS,
+  getApplicablePartTypesForLabel,
+  isPartApplicableToLabel,
+  getPartSlot,
+  getAllPartTypes,
+  MINIMUM_PART_CROP_DIMENSION,
+  PART_TYPES_ARRAY,
+  PART_TYPES_COUNT,
+  type PartEmbeddingsMap,
+  createEmptyPartEmbeddingsMap,
+  countValidPartEmbeddings,
+  isValidPartEmbeddingsMap,
+  type PartEmbeddingFields,
+  partEmbeddingsToOsFields,
+} from "./partExtraction";
+
+// Part cropping (Phase 1)
+export {
+  extractPartCropBuffer,
+  extractAllApplicablePartCrops,
+  type PartExtractionSummary,
+  summarizePartExtractions,
+  computePartRelativeBounds,
+  computePartPixelBounds,
+  canExtractPart,
+  extractValidPartCrops,
+  validatePartBuffers,
+  type PartExtractionMetrics,
+  aggregatePartMetrics,
+} from "./partCropping";
 
 export {
   prepareBufferForPrimaryCatalogEmbedding,

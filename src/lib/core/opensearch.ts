@@ -280,6 +280,135 @@ export async function ensureIndex() {
                 },
               },
             },
+            // ====================================================================
+            // PART-LEVEL EMBEDDINGS (Phase 1)
+            // ====================================================================
+            // Sleeve area of tops/dresses
+            embedding_part_sleeve: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
+            // Neckline area of tops
+            embedding_part_neckline: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
+            // Hem/bottom edge of garments
+            embedding_part_hem: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
+            // Waistline area of pants/skirts
+            embedding_part_waistline: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
+            // Heel area of shoes
+            embedding_part_heel: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
+            // Toe area of shoes
+            embedding_part_toe: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
+            // Handle area of bags
+            embedding_part_bag_handle: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
+            // Main body area of bags
+            embedding_part_bag_body: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
+            // Pattern/texture patch for detailed matching
+            embedding_part_pattern_patch: {
+              type: "knn_vector",
+              dimension: EMBEDDING_DIM,
+              method: {
+                name: "hnsw",
+                space_type: "cosinesimil",
+                engine: "faiss",
+                parameters: {
+                  ef_construction: 128,
+                  m: 16,
+                },
+              },
+            },
           },
         },
       },
