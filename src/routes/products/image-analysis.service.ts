@@ -836,6 +836,35 @@ function tightenTypeSeedsForDetection(
     return bagLike.length > 0 ? bagLike : normalized;
   }
 
+  if (category === "outerwear") {
+    const formalOuterwearLabel = /\b(suit|blazer|sport\s*coat|dress\s*jacket)\b/.test(label);
+    const outerwearLike = normalized.filter((t) => {
+      if (/\bdress\b/.test(t) && !/\bdress\s*jacket\b/.test(t)) return false;
+      if (/\b(suit|suits|sport\s*coat|sportcoat|dress\s*jacket)\b/.test(t) && !formalOuterwearLabel) {
+        return false;
+      }
+      return /\b(jacket|jackets|coat|coats|parka|parkas|trench|windbreaker|windbreakers|vest|vests|gilet|poncho|anorak|bomber|blazer|blazers|outerwear|outwear)\b/.test(
+        t,
+      );
+    });
+    return outerwearLike.length > 0 ? outerwearLike : normalized;
+  }
+
+  if (category === "dresses") {
+    const isJumpLike = /\b(jumpsuit|romper|playsuit)\b/.test(label);
+    const isGownLike = /\bgown\b/.test(label);
+    if (isJumpLike) {
+      const jumpLike = normalized.filter((t) => /\b(jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits)\b/.test(t));
+      return jumpLike.length > 0 ? jumpLike : normalized;
+    }
+    const dressLike = normalized.filter((t) => {
+      if (/\b(jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits)\b/.test(t)) return false;
+      if (/\b(gown|gowns)\b/.test(t) && !isGownLike) return false;
+      return /\b(dress|dresses|vest dress|midi dress|maxi dress|mini dress|frock)\b/.test(t);
+    });
+    if (dressLike.length > 0) return dressLike;
+  }
+
   return normalized;
 }
 
@@ -868,6 +897,38 @@ function imageMinAccessoryConfidence(): number {
   const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_CONFIDENCE ?? "0.8");
   if (!Number.isFinite(raw)) return 0.8;
   return Math.max(0, Math.min(1, raw));
+}
+
+/** Use clear detection/type hints as hard type filters (default on for accuracy). */
+function imageStrongHintsForceTypeFilterEnv(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_STRONG_HINTS_FORCE_TYPE_FILTER ?? "1").toLowerCase();
+  return raw === "1" || raw === "true";
+}
+
+function imageStrongHintsTypeConfMin(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_STRONG_HINTS_TYPE_CONF_MIN ?? "0.82");
+  if (!Number.isFinite(raw)) return 0.82;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function imageStrongHintsTypeAreaMin(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_STRONG_HINTS_TYPE_AREA_MIN ?? "0.07");
+  if (!Number.isFinite(raw)) return 0.07;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function shouldForceTypeFilterForDetection(
+  detection: Detection,
+  categoryMapping: CategoryMapping,
+  typeHints: string[],
+): boolean {
+  if (!imageStrongHintsForceTypeFilterEnv()) return false;
+  if (!Array.isArray(typeHints) || typeHints.length === 0) return false;
+  const category = String(categoryMapping.productCategory || "").toLowerCase();
+  if (category === "accessories" || category === "bags") return false;
+  const confOk = (detection.confidence ?? 0) >= imageStrongHintsTypeConfMin();
+  const areaOk = (detection.area_ratio ?? 0) >= imageStrongHintsTypeAreaMin();
+  return confOk && areaOk;
 }
 
 function shouldKeepDetectionForShopTheLook(detection: Detection): boolean {
@@ -2186,6 +2247,9 @@ export class ImageAnalysisService {
       typeSeeds = filterProductTypeSeedsByMappedCategory(typeSeeds, categoryMapping.productCategory);
       typeSeeds = tightenTypeSeedsForDetection(label, categoryMapping, typeSeeds);
       let softProductTypeHints = [...new Set([...typeSeeds, ...expandedTypeHints.slice(0, 8)])];
+      if (shouldForceTypeFilterForDetection(detection, categoryMapping, typeSeeds)) {
+        filters.productTypes = typeSeeds.slice(0, 10);
+      }
 
       // If the full-image caption explicitly mentions jeans, bias bottoms retrieval
       // toward jeans/denim so non-denim sporty pants do not outrank true jeans.
@@ -2280,6 +2344,8 @@ export class ImageAnalysisService {
           const typeHints = Array.isArray(filters.productTypes) ? filters.productTypes : [];
           predictedCategoryAisles = typeHints.length
             ? typeHints
+            : softProductTypeHints.length
+              ? softProductTypeHints
             : expandedTypeHints.length
               ? expandedTypeHints
               : searchCategories;
@@ -2339,6 +2405,9 @@ export class ImageAnalysisService {
             categoryMapping.productCategory,
           ).slice(0, 10);
             softProductTypeHints = tightenTypeSeedsForDetection(label, categoryMapping, filteredTypes);
+            if (shouldForceTypeFilterForDetection(detection, categoryMapping, softProductTypeHints)) {
+              filters.productTypes = softProductTypeHints.slice(0, 10);
+            }
         } else {
           obs.detectionCaptionRejected += 1;
         }
@@ -2371,6 +2440,7 @@ export class ImageAnalysisService {
         blipSignal: detectionBlipSignal,
         inferredPrimaryColor,
         inferredColorsByItem,
+        inferredColorsByItemConfidence,
         debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
       });
 
@@ -2414,6 +2484,7 @@ export class ImageAnalysisService {
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor,
           inferredColorsByItem,
+          inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
         });
       }
@@ -2449,6 +2520,7 @@ export class ImageAnalysisService {
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor,
           inferredColorsByItem,
+          inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
         });
         if (similarResult.results.length === 0) {
@@ -2474,6 +2546,7 @@ export class ImageAnalysisService {
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor,
             inferredColorsByItem,
+            inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
           });
         }
@@ -2522,6 +2595,7 @@ export class ImageAnalysisService {
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor,
             inferredColorsByItem,
+            inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
           });
           similarResult = {
@@ -2590,6 +2664,7 @@ export class ImageAnalysisService {
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor,
             inferredColorsByItem,
+            inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
           });
 
@@ -3060,6 +3135,9 @@ export class ImageAnalysisService {
           categoryMapping.productCategory,
         );
         browseTypeSeeds = tightenTypeSeedsForDetection(categorySource, categoryMapping, browseTypeSeeds);
+        if (shouldForceTypeFilterForDetection(detection, categoryMapping, browseTypeSeeds)) {
+          filters.productTypes = browseTypeSeeds.slice(0, 10);
+        }
         let softProductTypeHints = browseTypeSeeds.length > 0 ? browseTypeSeeds : undefined;
 
         // "Closet similar" constraints: enforce audience gender + add optional style/color.
@@ -3120,7 +3198,12 @@ export class ImageAnalysisService {
           ]);
           const shouldHardCategory = accessoryLikeCategory || !(imageSoftCategoryEnv() || shopLookSoftCategoryEnv());
           if (!shouldHardCategory) {
-            predictedCategoryAisles = expandedTypeHints.length ? expandedTypeHints : softCategories;
+            predictedCategoryAisles =
+              browseTypeSeeds.length > 0
+                ? browseTypeSeeds
+                : expandedTypeHints.length > 0
+                  ? expandedTypeHints
+                  : softCategories;
           } else {
             const terms = hardCategoryTermsForDetection(categorySource, categoryMapping);
             filters.category = terms.length === 1 ? terms[0] : terms;
@@ -3178,6 +3261,9 @@ export class ImageAnalysisService {
               categoryMapping,
               filteredTypes,
             );
+            if (shouldForceTypeFilterForDetection(detection, categoryMapping, softProductTypeHints)) {
+              filters.productTypes = softProductTypeHints.slice(0, 10);
+            }
           } else {
             obs.detectionCaptionRejected += 1;
           }
@@ -3210,6 +3296,7 @@ export class ImageAnalysisService {
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor,
           inferredColorsByItem,
+          inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
         });
 
@@ -3252,6 +3339,7 @@ export class ImageAnalysisService {
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor,
             inferredColorsByItem,
+            inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
           });
         }
@@ -3288,6 +3376,7 @@ export class ImageAnalysisService {
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor,
             inferredColorsByItem,
+            inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
           });
           if (similarResult.results.length === 0) {
@@ -3312,6 +3401,7 @@ export class ImageAnalysisService {
               blipSignal: detectionBlipSignal,
               inferredPrimaryColor,
               inferredColorsByItem,
+              inferredColorsByItemConfidence,
               debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
             });
           }
@@ -3360,6 +3450,7 @@ export class ImageAnalysisService {
               blipSignal: detectionBlipSignal,
               inferredPrimaryColor,
               inferredColorsByItem,
+              inferredColorsByItemConfidence,
               debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
             });
             similarResult = {
