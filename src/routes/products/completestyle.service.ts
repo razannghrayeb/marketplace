@@ -986,12 +986,58 @@ async function findProductsForCategory(
     });
     
     const hits = response.body.hits.hits || [];
+
+    const isCategoryAligned = (product: Product): boolean => {
+      const detected = detectCategory(product.title || "", product.description);
+      if (detected !== "unknown") {
+        return categories.includes(detected);
+      }
+
+      const blob = `${String(product.title || "")} ${String(product.category || "")} ${String(product.description || "")}`.toLowerCase();
+      return categoryKeywords.some((keyword) => {
+        const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return new RegExp(`\\b${escaped}\\b`, "i").test(blob);
+      });
+    };
+
+    const normalizePriceCents = (value: unknown): number => {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n <= 0) return 0;
+      const rounded = Math.round(n);
+      // Some catalog feeds index cents scaled by 100; normalize obvious outliers.
+      if (rounded >= 500_000 && rounded % 100 === 0) {
+        return Math.round(rounded / 100);
+      }
+      return rounded;
+    };
     
     // Score and rank products
     const scoredProducts: OutfitRecommendedProduct[] = [];
+    const seen = new Set<string>();
     
     for (const hit of hits) {
-      const product = hit._source as Product;
+      const source = (hit && hit._source ? hit._source : {}) as any;
+      const product: Product = {
+        id: Number(source.id ?? source.product_id ?? hit?._id ?? 0),
+        title: String(source.title || ""),
+        brand: source.brand != null ? String(source.brand) : undefined,
+        category: source.category != null ? String(source.category) : undefined,
+        color: source.color != null ? String(source.color) : undefined,
+        price_cents: normalizePriceCents(source.price_cents),
+        currency: source.currency != null ? String(source.currency) : "USD",
+        image_url: source.image_url != null ? String(source.image_url) : undefined,
+        image_cdn: source.image_cdn != null ? String(source.image_cdn) : undefined,
+        description: source.description != null ? String(source.description) : undefined,
+      };
+
+      if (!product.id || !product.title) continue;
+      if (!isCategoryAligned(product)) continue;
+
+      const imageKey = String(product.image_cdn || product.image_url || "").split("?")[0].toLowerCase().trim();
+      const dedupeKey = imageKey || `${String(product.brand || "").toLowerCase().trim()}|${product.title.toLowerCase().trim()}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+
       const matchReasons: string[] = [];
       let matchScore = hit._score || 0;
       

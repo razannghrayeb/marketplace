@@ -1650,6 +1650,11 @@ export async function searchByImageWithSimilarity(
     const shouldClauses: any[] = [
       { terms: { attr_gender: genderVariants } },
       { terms: { audience_gender: genderVariants } },
+      {
+        bool: {
+          must_not: [{ exists: { field: "attr_gender" } }, { exists: { field: "audience_gender" } }],
+        },
+      },
     ];
     if (imageGenderSoftEnv()) {
       // In "soft gender" mode, we also allow a title keyword match.

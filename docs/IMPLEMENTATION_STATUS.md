@@ -178,6 +178,12 @@ All routes require `requireAuth`. Mounted at `/api/wardrobe`.
 - GET `/api/wardrobe/compatibility/graph`
 - POST `/api/wardrobe/compatibility/learn`
 
+### April 2026 quality hardening (complete-look)
+- Pairwise stylist-coherence scoring added for complete-look outfit sets.
+- Low-coherence outfit combinations are filtered before returning `outfitSets`.
+- Compatibility style-similarity heuristic adjusted to a stylist sweet spot (moderate-to-high similarity).
+- Validation run: `pnpm -s tsc -p . --noEmit` and `pnpm test:complete-look-matrix --timeout=60000`.
+
 ---
 
 ## Virtual Try-On — COMPLETE ✓ (Feature #7)

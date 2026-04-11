@@ -1267,11 +1267,24 @@ function applyFormalityFilter(products: ProductResult[], minFormality: number | 
     return products;
   }
 
-  // Filter products by checking their formality score in the structure.
-  // Product detection style contains formality (1-10 scale).
+  // Only enforce a hard numeric gate when the product actually carries structured
+  // formality metadata. Missing metadata should not zero out otherwise valid matches.
+  const hasStructuredFormality = products.some((p) => {
+    const v = Number((p as any)?.style?.formality);
+    return Number.isFinite(v);
+  });
+
+  if (!hasStructuredFormality) {
+    console.log(
+      `[formality-filter] skipped hard filter (no structured formality metadata, minFormality=${minFormality})`,
+    );
+    return products;
+  }
+
   const filtered = products.filter((p) => {
-    const productFormality = Number((p as any)?.style?.formality ?? 0);
-    return productFormality >= minFormality;
+    const formalityRaw = Number((p as any)?.style?.formality);
+    if (!Number.isFinite(formalityRaw)) return true;
+    return formalityRaw >= minFormality;
   });
 
   if (filtered.length !== products.length) {
@@ -1285,6 +1298,11 @@ function applyFormalityFilter(products: ProductResult[], minFormality: number | 
 function applyRelevanceThresholdFilter(
   products: ProductResult[],
   minRelevance: number | undefined,
+  options?: {
+    preserveAtLeastOne?: boolean;
+    detectionLabel?: string;
+    category?: string;
+  },
 ): ProductResult[] {
   if (!minRelevance || minRelevance <= 0 || !Array.isArray(products) || products.length === 0) {
     return products;
@@ -1301,7 +1319,32 @@ function applyRelevanceThresholdFilter(
     );
   }
 
+  if (filtered.length === 0 && options?.preserveAtLeastOne) {
+    const sorted = [...products].sort((a, b) => {
+      const ar = Number((a as any)?.finalRelevance01 ?? Number.NEGATIVE_INFINITY);
+      const br = Number((b as any)?.finalRelevance01 ?? Number.NEGATIVE_INFINITY);
+      return br - ar;
+    });
+    const best = sorted[0];
+    const bestRelevance = Number((best as any)?.finalRelevance01 ?? 0);
+    console.log(
+      `[relevance-threshold-fallback] preserved 1 product for detection="${options.detectionLabel ?? "unknown"}" category="${options.category ?? "unknown"}" bestFinalRelevance01=${bestRelevance.toFixed(3)} threshold=${minRelevance}`,
+    );
+    return best ? [best] : [];
+  }
+
   return filtered;
+}
+
+function isCoreOutfitCategory(category: string | undefined): boolean {
+  const normalized = String(category ?? "").trim().toLowerCase();
+  return (
+    normalized === "tops" ||
+    normalized === "bottoms" ||
+    normalized === "dresses" ||
+    normalized === "footwear" ||
+    normalized === "outerwear"
+  );
 }
 
 function paginateDetectionGroups(
@@ -2990,7 +3033,11 @@ export class ImageAnalysisService {
     
     const relevanceFilteredResults = finalGroupedResults.map((detection) => ({
       ...detection,
-      products: applyRelevanceThresholdFilter(detection.products, minRelevanceThreshold),
+      products: applyRelevanceThresholdFilter(detection.products, minRelevanceThreshold, {
+        preserveAtLeastOne: isCoreOutfitCategory(detection.category),
+        detectionLabel: detection.detection?.label,
+        category: detection.category,
+      }),
       count: 0, // Will be recalculated below
     }));
     
@@ -3886,7 +3933,11 @@ export class ImageAnalysisService {
     
     const relevanceFilteredResultsSel = finalGroupedResults.map((detection) => ({
       ...detection,
-      products: applyRelevanceThresholdFilter(detection.products, minRelevanceThresholdSel),
+      products: applyRelevanceThresholdFilter(detection.products, minRelevanceThresholdSel, {
+        preserveAtLeastOne: isCoreOutfitCategory(detection.category),
+        detectionLabel: detection.detection?.label,
+        category: detection.category,
+      }),
       count: 0, // Will be recalculated below
     }));
     

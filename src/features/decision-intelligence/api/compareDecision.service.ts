@@ -68,6 +68,7 @@ async function loadProducts(productIds: number[]): Promise<RawProduct[]> {
             title,
             COALESCE(brand, '') AS brand,
             COALESCE(category, 'other') AS category,
+          COALESCE(gender, '') AS gender,
             description,
             color,
             currency,
@@ -99,6 +100,7 @@ async function loadProducts(productIds: number[]): Promise<RawProduct[]> {
       brand: String(row.brand || "Unknown"),
       category: String(row.category || "other"),
       subcategory: undefined,
+      gender: row.gender ? String(row.gender) : undefined,
       price,
       salePrice,
       colors: parseOptionalArray(row.color),
@@ -168,9 +170,14 @@ export async function compareProductsWithDecisionIntelligence(
       ok: false,
       error: {
         code: "INVALID_REQUEST",
-        message:
-          "Compare supports fashion-like products only. Remove unrelated items (for example beauty/home/electronics) and retry.",
-        details: { nonComparableProductIds: comparability.nonFashionProductIds },
+        message: "Comparison blocked: products must be audience-compatible (gender/age) and category-compatible.",
+        details: {
+          nonComparableProductIds: comparability.nonFashionProductIds,
+          crossGenderPairs: comparability.crossGenderPairs,
+          crossAgePairs: comparability.crossAgePairs,
+          categoryMismatchPairs: comparability.categoryMismatchPairs,
+          reasons: comparability.reasons,
+        },
       },
     };
   }

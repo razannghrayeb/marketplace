@@ -122,6 +122,7 @@ export async function getOutfitRecommendations(
   // and user wardrobe context influence the recommendations.
   const maxTotal = Math.max(1, Math.min(options.maxTotal ?? 20, 50));
   const maxPerCategory = Math.max(1, Math.min(options.maxPerCategory ?? 5, 20));
+  const retrievalPoolSize = Math.max(maxTotal * 3, 30);
   const anchorProductIds = [productId];
   
   const detected = await detectCategory(sourceProduct.title, sourceProduct.description);
@@ -157,7 +158,7 @@ export async function getOutfitRecommendations(
   const completeLookResult = await completeLookSuggestionsForCatalogProducts(
     userId ?? 0,
     anchorProductIds,
-    maxTotal,
+    retrievalPoolSize,
     { 
       audienceGenderHint, 
       ageGroupHint,
@@ -171,7 +172,7 @@ export async function getOutfitRecommendations(
     sourceCategory: resolvedSourceCategory,
     suggestions: completeLookResult.suggestions,
     userId,
-    maxSuggestions: maxTotal * 2,
+    maxSuggestions: Math.max(retrievalPoolSize * 2, maxTotal * 2),
   });
 
   const filteredSuggestions = applyCompleteStyleOptionFilters(
@@ -662,6 +663,52 @@ function scoreFootwearOccasionCompatibility(
   return 0.74;
 }
 
+function scoreOccasionGarmentCompatibility(
+  sourceOccasion: StyleProfile["occasion"],
+  candidateFamily: string,
+  candidateTitle: string,
+  candidateCategory?: string | null
+): number {
+  const text = `${String(candidateTitle || "")} ${String(candidateCategory || "")}`.toLowerCase();
+  const isBottomFormal = /\b(dress pant|dress pants|trouser|trousers|slacks|tailored pant)\b/.test(text);
+  const isBottomCasual = /\b(short|shorts|jogger|joggers|cargo|linen short|swim short)\b/.test(text);
+  const isTopFormal = /\b(dress shirt|oxford shirt|blazer|tailored|formal shirt)\b/.test(text);
+  const isTopCasual = /\b(t-?shirt|tee|tank|polo|linen shirt|hawaiian|resort shirt)\b/.test(text);
+
+  if (sourceOccasion === "beach") {
+    if (candidateFamily === "bottoms") {
+      if (isBottomCasual) return 0.95;
+      if (isBottomFormal) return 0.24;
+      return 0.68;
+    }
+    if (candidateFamily === "tops") {
+      if (isTopCasual) return 0.92;
+      if (isTopFormal) return 0.28;
+      return 0.7;
+    }
+    if (candidateFamily === "outerwear") return 0.36;
+    return 0.78;
+  }
+
+  if (sourceOccasion === "formal" || sourceOccasion === "semi-formal") {
+    if (candidateFamily === "bottoms") {
+      if (isBottomFormal) return 0.95;
+      if (isBottomCasual) return 0.38;
+    }
+    if (candidateFamily === "tops") {
+      if (isTopFormal) return 0.94;
+      if (isTopCasual) return 0.54;
+    }
+  }
+
+  if (sourceOccasion === "casual") {
+    if (candidateFamily === "bottoms" && isBottomCasual) return 0.9;
+    if (candidateFamily === "tops" && isTopCasual) return 0.9;
+  }
+
+  return 0.74;
+}
+
 function buildFashionReasons(params: {
   categoryScore: number;
   colorScore: number;
@@ -743,6 +790,12 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       candidateFamily === "shoes"
         ? scoreFootwearOccasionCompatibility(params.sourceStyle.occasion, candidateProduct.title, candidateProduct.category)
         : 1;
+    const garmentOccasionScore = scoreOccasionGarmentCompatibility(
+      params.sourceStyle.occasion,
+      candidateFamily,
+      candidateProduct.title,
+      candidateProduct.category
+    );
 
     const sourcePattern = splitStyleTokens(`${params.sourceProduct.category || ""} ${params.sourceProduct.title || ""}`);
     const candidatePattern = splitStyleTokens(`${candidateProduct.category || ""} ${candidateProduct.title || ""}`);
@@ -754,11 +807,12 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
 
     const fashionScore =
       categoryScore * 0.24 +
-      aestheticScore * 0.22 +
-      colorScore * 0.18 +
-      formalityScore * 0.16 +
+      aestheticScore * 0.2 +
+      colorScore * 0.16 +
+      formalityScore * 0.14 +
       seasonScore * 0.08 +
-      footwearOccasionScore * 0.14 +
+      footwearOccasionScore * 0.12 +
+      garmentOccasionScore * 0.12 +
       patternOverlap * 0.06 +
       materialOverlap * 0.04 +
       priceScore * 0.02;
@@ -796,11 +850,37 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
 
 function normalizeAudienceHint(raw: unknown): string | undefined {
   if (raw == null) return undefined;
-  const s = String(raw).toLowerCase().trim();
-  if (!s) return undefined;
-  if (["men", "man", "male", "mens", "men's", "gents"].includes(s)) return "men";
-  if (["women", "woman", "female", "womens", "women's", "ladies"].includes(s)) return "women";
-  if (["unisex", "neutral"].includes(s)) return "unisex";
+  const tokens = Array.isArray(raw)
+    ? raw.flatMap((v) => String(v).split(/[|,;/]+/g))
+    : String(raw).split(/[|,;/]+/g);
+
+  let hasMen = false;
+  let hasWomen = false;
+  let hasUnisex = false;
+
+  for (const token of tokens) {
+    const s = String(token).toLowerCase().trim();
+    if (!s) continue;
+
+    if (["unisex", "neutral", "all", "all-gender", "all gender", "all genders"].includes(s)) {
+      hasUnisex = true;
+      continue;
+    }
+
+    if (["men", "man", "male", "mens", "men's", "gents", "gentlemen", "boy", "boys", "boys-kids", "boys_kids", "m", "male-adult"].includes(s)) {
+      hasMen = true;
+      continue;
+    }
+
+    if (["women", "woman", "female", "womens", "women's", "ladies", "lady", "girl", "girls", "girls-kids", "girls_kids", "f", "female-adult"].includes(s)) {
+      hasWomen = true;
+      continue;
+    }
+  }
+
+  if (hasUnisex || (hasMen && hasWomen)) return "unisex";
+  if (hasMen) return "men";
+  if (hasWomen) return "women";
   return undefined;
 }
 
@@ -838,10 +918,21 @@ function balanceSuggestionsForCoverage(
 ): CompleteLookMappedSuggestion[] {
   if (!Array.isArray(suggestions) || suggestions.length === 0) return [];
   const slotPriority = missingCategories.map((m) => String(m || "").toLowerCase().trim()).filter(Boolean);
+  const normalizedSlot = (value?: string | null) => {
+    const family = categoryFamily(value);
+    if (family === "dress") return "dresses";
+    return family || "accessories";
+  };
+
+  const deduped = suggestions.filter((s, idx, arr) => {
+    const key = `${String(s.brand || "").toLowerCase().trim()}|${String(s.title || "").toLowerCase().replace(/\s+/g, " ").trim().slice(0, 90)}`;
+    return arr.findIndex((x) => `${String(x.brand || "").toLowerCase().trim()}|${String(x.title || "").toLowerCase().replace(/\s+/g, " ").trim().slice(0, 90)}` === key) === idx;
+  });
+
   const bySlot = new Map<string, CompleteLookMappedSuggestion[]>();
 
-  for (const s of suggestions.slice().sort((a, b) => (b.score || 0) - (a.score || 0))) {
-    const slot = String(s.category || "").toLowerCase().trim() || "accessories";
+  for (const s of deduped.slice().sort((a, b) => (b.score || 0) - (a.score || 0))) {
+    const slot = normalizedSlot(s.category);
     if (!bySlot.has(slot)) bySlot.set(slot, []);
     bySlot.get(slot)!.push(s);
   }
@@ -865,7 +956,7 @@ function balanceSuggestionsForCoverage(
     progressed = false;
     for (const slot of slotPriority) {
       if (out.length >= maxTotal) break;
-      const slotCount = out.filter((x) => String(x.category || "").toLowerCase().trim() === slot).length;
+      const slotCount = out.filter((x) => normalizedSlot(x.category) === slot).length;
       if (slotCount >= maxPerCategory) continue;
       const pool = bySlot.get(slot) || [];
       const pick = pool.find((p) => !used.has(p.product_id));
@@ -877,11 +968,11 @@ function balanceSuggestionsForCoverage(
   }
 
   // Pass 3: fill remaining with best global suggestions.
-  for (const s of suggestions) {
+  for (const s of deduped) {
     if (out.length >= maxTotal) break;
     if (used.has(s.product_id)) continue;
-    const slot = String(s.category || "").toLowerCase().trim();
-    const slotCount = out.filter((x) => String(x.category || "").toLowerCase().trim() === slot).length;
+    const slot = normalizedSlot(s.category);
+    const slotCount = out.filter((x) => normalizedSlot(x.category) === slot).length;
     if (slot && slotCount >= maxPerCategory) continue;
     out.push(s);
     used.add(s.product_id);
