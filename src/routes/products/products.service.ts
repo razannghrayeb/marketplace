@@ -2244,7 +2244,10 @@ export async function searchByImageWithSimilarity(
       : "";
   const hasExplicitStyleIntent = explicitStyleForRelevance.length > 0;
   const hasSoftStyleHint = softStyleForRelevance.length > 0;
-  const styleIntentGatesFinalRelevance = hasExplicitStyleIntent;
+  const softStyleGateEnabled = String(process.env.SEARCH_IMAGE_SOFT_STYLE_GATE ?? "1").toLowerCase() !== "0";
+  const styleIntentGatesFinalRelevance =
+    hasExplicitStyleIntent ||
+    (softStyleGateEnabled && hasSoftStyleHint && hasDetectionAnchoredTypeIntent);
   // Soft style hints from detection/BLIP should still guide final relevance for
   // image search when explicit style is absent.
   const desiredStyleForRelevance = hasExplicitStyleIntent

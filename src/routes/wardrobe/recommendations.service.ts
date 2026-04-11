@@ -482,7 +482,8 @@ async function getGapBasedRecommendations(
   for (const gap of gapRecs.slice(0, 3)) {
     try {
       const filter: any[] = [
-        { term: { availability: "in_stock" } },
+        // Allow BOTH in_stock and out_of_stock products
+        { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } },
         ...priceFilter
       ];
 
@@ -555,7 +556,8 @@ async function getStyleBasedRecommendations(
               }
             },
             filter: [
-              { term: { availability: "in_stock" } },
+              // Allow BOTH in_stock and out_of_stock products
+              { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } },
               ...priceFilter
             ]
           }
@@ -623,7 +625,8 @@ async function getCompatibilityBasedRecommendations(
               }
             },
             filter: [
-              { term: { availability: "in_stock" } },
+              // Allow BOTH in_stock and out_of_stock products
+              { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } },
               ...priceFilter
             ]
           }
@@ -867,7 +870,8 @@ async function runCompleteLookCore(
 
       const buildFilters = (applyPriceTier: boolean): any[] => {
         const f: any[] = [
-          { term: { availability: "in_stock" } },
+          // Allow BOTH in_stock and out_of_stock products (availability status doesn't affect outfit recommendations)
+          { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } },
           { term: { category_canonical: canonical } },
         ];
         if (inferredAudienceGender && inferredAudienceGender !== "unisex" && !(relaxedBagAudienceMode && category === "bags")) {
@@ -1404,7 +1408,10 @@ async function inferVisualContextFromCentroid(
   centroid: number[],
   currentCategoryList: string[]
 ): Promise<{ inferredAudienceGender: AudienceGender | null; inferredAgeGroup: AudienceAgeGroup | null; styleTerms: string[] }> {
-  const filter: any[] = [{ term: { availability: "in_stock" } }];
+  const filter: any[] = [
+    // Allow BOTH in_stock and out_of_stock products
+    { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } }
+  ];
   const canonicalCandidates = Array.from(
     new Set(currentCategoryList.map((slot) => wardrobeSlotToCategoryCanonical(slot)))
   ).filter(Boolean);
@@ -1954,7 +1961,8 @@ async function fetchCategoryTopUpSuggestions(params: {
   );
 
   const filter: any[] = [
-    { term: { availability: "in_stock" } },
+    // Allow BOTH in_stock and out_of_stock products
+    { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } },
     { terms: { category_canonical: canonicalCategories } },
   ];
   const slotIntentFilters = params.missingCategories

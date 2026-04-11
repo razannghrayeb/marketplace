@@ -1204,8 +1204,8 @@ async function findProductsForCategory(
         })),
         minimum_should_match: 1,
         filter: [
-          // Index uses string enum (see searchDocument.ts); boolean true matches nothing.
-          { term: { availability: "in_stock" } },
+          // Allow BOTH in_stock and out_of_stock products for outfit recommendations
+          { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } },
         ]
       }
     };
@@ -1248,6 +1248,15 @@ async function findProductsForCategory(
         });
       }
     }
+    
+    // Allow both in_stock and out_of_stock products for recommendations
+    query.bool.filter = query.bool.filter || [];
+    query.bool.filter.push({
+      bool: {
+        should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }],
+        minimum_should_match: 1,
+      },
+    });
     
     // Execute search
     const response = await osClient.search({
