@@ -115,10 +115,21 @@ export function runCompareDecisionEngine(
   });
 
   const profiles = normalizeProducts(rawProducts);
-  const { comparisonMode, reason } = resolveComparisonMode(profiles);
+  const resolvedMode = resolveComparisonMode(profiles);
+  const comparisonMode = request.comparisonMode ?? resolvedMode.comparisonMode;
+  const reason = request.comparisonMode
+    ? request.comparisonMode === resolvedMode.comparisonMode
+      ? `Requested mode '${request.comparisonMode}' matches auto-resolved mode. ${resolvedMode.reason}`
+      : `Requested mode '${request.comparisonMode}' was applied. Auto-resolved mode would have been '${resolvedMode.comparisonMode}'. ${resolvedMode.reason}`
+    : resolvedMode.reason;
   options.publisher?.publish({
     name: "compare_mode_resolved",
-    payload: { mode: comparisonMode, reason },
+    payload: {
+      mode: comparisonMode,
+      reason,
+      requestedMode: request.comparisonMode,
+      autoResolvedMode: resolvedMode.comparisonMode,
+    },
   });
 
   if (profiles.some((p) => !p.sourceMeta.hasVisionSignals)) {

@@ -7,6 +7,7 @@ import type {
 } from "../types";
 import { CompareDecisionRequestSchema } from "./schemas";
 import { runCompareDecisionEngine } from "../engine/compareEngine";
+import { validateComparableProductSet } from "./comparability";
 
 class ConsoleDecisionPublisher implements DecisionEventPublisher {
   publish(event: { name: string; payload: Record<string, unknown> }): void {
@@ -157,6 +158,19 @@ export async function compareProductsWithDecisionIntelligence(
       error: {
         code: "INSUFFICIENT_PRODUCT_DATA",
         message: "At least 2 products are required after normalization.",
+      },
+    };
+  }
+
+  const comparability = validateComparableProductSet(products);
+  if (!comparability.valid) {
+    return {
+      ok: false,
+      error: {
+        code: "INVALID_REQUEST",
+        message:
+          "Compare supports fashion-like products only. Remove unrelated items (for example beauty/home/electronics) and retry.",
+        details: { nonComparableProductIds: comparability.nonFashionProductIds },
       },
     };
   }
