@@ -1023,7 +1023,7 @@ async function runCompleteLookCore(
             allowUnknownForBags: false,
           })) continue;
           if (!audienceAgeGroupMatchesWithOptions(inferredAgeGroup, source, {
-            allowUnknown: false,
+            allowUnknown: true,
           })) continue;
           const productId = parseInt(source.product_id, 10);
           if (!productId || ownedProductIds.has(String(productId))) continue;
@@ -1321,9 +1321,11 @@ async function runCompleteLookCore(
   const narrativeStart = Date.now();
   const outfitNarrative = await generateOutfitNarrativeWithCache({
     seedProduct,
-    detectedCategory: "unknown" as ProductCategory,
+    detectedCategory: (normalizeWardrobeCategory(seedAnchor?.category_name) || "unknown") as ProductCategory,
     style: styleForNarrative,
     recommendations: styleRecommendations,
+    userGender: seedAnchor?.gender,
+    userAgeGroup: seedAnchor?.age_group,
   });
   outfitNarrativeLatencyMs.observe(
     { generated_by: outfitNarrative.generatedBy },

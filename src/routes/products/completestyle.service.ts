@@ -132,11 +132,11 @@ export const CATEGORY_KEYWORDS: Record<ProductCategory, string[]> = {
   flats: ["flats", "flat shoes", "ballet flats", "ballerinas"],
   
   // Bags
-  bag: ["bag", "handbag", "شنطة", "purse"],
-  clutch: ["clutch", "evening bag", "كلتش"],
-  tote: ["tote", "tote bag", "shopper"],
-  backpack: ["backpack", "rucksack", "باكباك"],
-  crossbody: ["crossbody", "cross body", "shoulder bag", "messenger"],
+  bag: ["bag", "bags", "handbag", "handbags", "شنطة", "purse", "purses", "satchel", "satchels", "wallet", "wallets"],
+  clutch: ["clutch", "clutches", "evening bag", "evening bags", "كلتش"],
+  tote: ["tote", "totes", "tote bag", "tote bags", "shopper"],
+  backpack: ["backpack", "backpacks", "rucksack", "باكباك"],
+  crossbody: ["crossbody", "cross body", "cross-body", "shoulder bag", "shoulder bags", "messenger"],
   
   // Accessories - Jewelry
   watch: ["watch", "ساعة", "timepiece"],
@@ -916,9 +916,10 @@ async function findProductsForCategory(
 ): Promise<OutfitRecommendedProduct[]> {
   try {
     // Build category keywords
-    const categoryKeywords = categories
+    const categoryKeywords = [...new Set(categories
       .flatMap(cat => CATEGORY_KEYWORDS[cat] || [])
-      .filter(k => k.length > 2);
+      .map(k => String(k).toLowerCase().trim())
+      .filter(k => k.length > 2))];
     
     if (categoryKeywords.length === 0) return [];
     
@@ -926,12 +927,35 @@ async function findProductsForCategory(
     const query: any = {
       bool: {
         should: categoryKeywords.map(keyword => ({
-          match: {
-            title: {
-              query: keyword,
-              boost: 2,
-            }
-          }
+          bool: {
+            should: [
+              {
+                match: {
+                  title: {
+                    query: keyword,
+                    boost: 2,
+                  }
+                }
+              },
+              {
+                match: {
+                  category: {
+                    query: keyword,
+                    boost: 2,
+                  }
+                }
+              },
+              {
+                match: {
+                  description: {
+                    query: keyword,
+                    boost: 0.8,
+                  }
+                }
+              },
+            ],
+            minimum_should_match: 1,
+          },
         })),
         minimum_should_match: 1,
         filter: [
@@ -988,7 +1012,10 @@ async function findProductsForCategory(
     const hits = response.body.hits.hits || [];
 
     const isCategoryAligned = (product: Product): boolean => {
-      const detected = detectCategory(product.title || "", product.description);
+      const detected = detectCategory(
+        `${String(product.title || "")} ${String(product.category || "")}`,
+        product.description,
+      );
       if (detected !== "unknown") {
         return categories.includes(detected);
       }
