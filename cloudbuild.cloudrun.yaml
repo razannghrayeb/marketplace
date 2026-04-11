@@ -28,7 +28,7 @@ steps:
         export BUILDKIT_PROGRESS=plain
         IMAGE_BASE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}"
         CACHE_IMAGE="${IMAGE_BASE}:latest"
-        HF_TOKEN_VALUE="${_HF_TOKEN}"
+        HF_TOKEN_VALUE="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"
         if [ -n "${HF_TOKEN:-}" ]; then
           HF_TOKEN_VALUE="${HF_TOKEN}"
         fi
