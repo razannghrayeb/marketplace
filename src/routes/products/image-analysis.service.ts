@@ -829,9 +829,11 @@ function hardCategoryTermsForDetection(
     );
     if (isShortTop) {
       const shortTopTerms = baseTerms.filter((t) =>
-        /\b(t-?shirt|tshirt|tee|top|tops|tank|camisole|cami|crop top|polo|polos)\b/.test(t),
+        /\b(t-?shirt|tshirt|tee|tees|tank|camisole|cami|crop top|polo|polos)\b/.test(t),
       );
-      return shortTopTerms.length > 0 ? shortTopTerms : baseTerms;
+      return shortTopTerms.length > 0
+        ? shortTopTerms
+        : ["tshirt", "tee", "tank", "camisole", "cami", "crop top", "polo"];
     }
 
     const isLongTop = /\blong sleeve top\b|\bshirt\b|\bblouse\b|\bovershirt\b|\bhoodie\b|\bsweatshirt\b|\bsweater\b/.test(
@@ -839,11 +841,13 @@ function hardCategoryTermsForDetection(
     );
     if (isLongTop) {
       const longTopTerms = baseTerms.filter((t) =>
-        /\b(shirt|shirts|blouse|blouses|overshirt|sweater|hoodie|sweatshirt|pullover|cardigan|knitwear|top|tops)\b/.test(
+        /\b(shirt|shirts|blouse|blouses|overshirt|sweater|hoodie|sweatshirt|pullover|cardigan|knitwear)\b/.test(
           t,
         ),
       );
-      return longTopTerms.length > 0 ? longTopTerms : baseTerms;
+      return longTopTerms.length > 0
+        ? longTopTerms
+        : ["shirt", "blouse", "overshirt", "sweater", "hoodie", "sweatshirt", "pullover", "cardigan", "knitwear"];
     }
   }
 
@@ -921,15 +925,19 @@ function tightenTypeSeedsForDetection(
   if (category === "tops") {
     if (/\bshort sleeve top\b|\btee\b|\bt-?shirt\b/.test(label)) {
       const shortTop = normalized.filter((t) =>
-        /\b(tshirt|t-?shirt|tee|tees|top|tops|tank|camisole|cami|crop top|polo|polos)\b/.test(t),
+        /\b(tshirt|t-?shirt|tee|tees|tank|camisole|cami|crop top|polo|polos)\b/.test(t),
       );
-      return shortTop.length > 0 ? shortTop : normalized;
+      return shortTop.length > 0
+        ? shortTop
+        : ["tshirt", "tee", "tank", "camisole", "cami", "crop top", "polo"];
     }
     if (/\blong sleeve top\b|\bshirt\b|\bblouse\b/.test(label)) {
       const longTop = normalized.filter((t) =>
-        /\b(shirt|shirts|blouse|blouses|top|tops|sweater|hoodie|sweatshirt|pullover|cardigan|knitwear)\b/.test(t),
+        /\b(shirt|shirts|blouse|blouses|sweater|hoodie|sweatshirt|pullover|cardigan|knitwear)\b/.test(t),
       );
-      return longTop.length > 0 ? longTop : normalized;
+      return longTop.length > 0
+        ? longTop
+        : ["shirt", "blouse", "sweater", "hoodie", "sweatshirt", "pullover", "cardigan", "knitwear"];
     }
   }
 
@@ -1225,6 +1233,14 @@ function isSleeveContradiction(
   observed: "short" | "long" | "sleeveless" | null,
 ): boolean {
   if (!desired || !observed) return false;
+  // Treat short and sleeveless as near-compatible to reduce false negatives
+  // from noisy product metadata and detector sleeve subtyping.
+  if (
+    (desired === "short" && observed === "sleeveless") ||
+    (desired === "sleeveless" && observed === "short")
+  ) {
+    return false;
+  }
   return desired !== observed;
 }
 
@@ -1252,10 +1268,19 @@ function applyDetectionCategoryGuard(
   categoryMapping: CategoryMapping,
 ): ProductResult[] {
   const guardEnabled = imageDetectionCategoryGuardEnabled();
+  const normalizedLabel = String(detectionLabel || "").toLowerCase();
+  const isShortTopDetection = /\bshort sleeve top\b|\btee\b|\bt-?shirt\b|\btshirt\b|\btank\b|\bcamisole\b|\bcrop top\b/.test(
+    normalizedLabel,
+  );
+  const isLongTopDetection = /\blong sleeve top\b|\bshirt\b|\bblouse\b|\bovershirt\b|\bhoodie\b|\bsweatshirt\b|\bsweater\b/.test(
+    normalizedLabel,
+  );
   const strictAlwaysOn =
     categoryMapping.productCategory === "footwear" ||
     categoryMapping.productCategory === "bags" ||
-    categoryMapping.productCategory === "accessories";
+    categoryMapping.productCategory === "accessories" ||
+    isShortTopDetection ||
+    isLongTopDetection;
   if (!guardEnabled && !strictAlwaysOn) return products;
   if (!shouldUseStrictDetectionCategoryGuard(categoryMapping.productCategory)) return products;
 
@@ -1298,9 +1323,21 @@ function applyDetectionCategoryGuard(
     const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, term));
     if (!allowByTerm) return false;
 
-    // Sleeve contradiction guard: when detection is explicitly sleeve-typed,
-    // reject products that explicitly indicate a conflicting sleeve type.
-    if (categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses") {
+    // Avoid generic shirt/turtleneck drift for specific short-sleeve-top detections.
+    if (categoryMapping.productCategory === "tops" && isShortTopDetection) {
+      const hasShortTopCue = /\b(t-?shirt|tshirt|tee|tees|tank|camisole|cami|crop top|polo|polos)\b/.test(haystack);
+      const hasLongTopCue = /\b(shirt|shirts|blouse|blouses|turtleneck|turtle neck|sweater|hoodie|sweatshirt|pullover|cardigan|knitwear)\b/.test(haystack);
+      if (hasLongTopCue && !hasShortTopCue) return false;
+    }
+
+    if (categoryMapping.productCategory === "tops" && isLongTopDetection) {
+      const hasLongTopCue = /\b(shirt|shirts|blouse|blouses|turtleneck|turtle neck|sweater|hoodie|sweatshirt|pullover|cardigan|knitwear)\b/.test(haystack);
+      if (!hasLongTopCue) return false;
+    }
+
+    // Sleeve contradiction guard: keep strict for tops, but avoid hard-rejecting dresses
+    // because YOLO sleeve subtype is often noisy on dress silhouettes.
+    if (categoryMapping.productCategory === "tops") {
       const observedSleeve = inferSleeveFromProductText(haystack);
       if (isSleeveContradiction(desiredSleeveIntent, observedSleeve)) {
         return false;
@@ -1389,6 +1426,8 @@ function applyRelevanceThresholdFilter(
   minRelevance: number | undefined,
   options?: {
     preserveAtLeastOne?: boolean;
+    minKeepCount?: number;
+    minKeepFloor?: number;
     detectionLabel?: string;
     category?: string;
   },
@@ -1408,6 +1447,29 @@ function applyRelevanceThresholdFilter(
     );
   }
 
+  const targetKeep = Math.max(0, Math.floor(options?.minKeepCount ?? 0));
+  if (targetKeep > 0 && filtered.length < targetKeep) {
+    const existing = new Set(filtered.map((p: any) => String((p as any)?.id ?? "")));
+    const keepFloor = Math.max(0, Number(options?.minKeepFloor ?? minRelevance * 0.72));
+    const supplements = products
+      .filter((p) => !existing.has(String((p as any)?.id ?? "")))
+      .map((p) => ({ p, rel: Number((p as any)?.finalRelevance01 ?? 0) }))
+      .filter(({ rel }) => rel >= keepFloor)
+      .sort((a, b) => b.rel - a.rel)
+      .slice(0, targetKeep - filtered.length)
+      .map(({ p }) => ({
+        ...p,
+        relevanceFallbackPreserved: true,
+      }));
+
+    if (supplements.length > 0) {
+      console.log(
+        `[relevance-threshold-supplement] added ${supplements.length} product(s) for detection="${options?.detectionLabel ?? "unknown"}" category="${options?.category ?? "unknown"}" keepFloor=${keepFloor.toFixed(3)}`,
+      );
+      return [...filtered, ...supplements];
+    }
+  }
+
   if (filtered.length === 0 && options?.preserveAtLeastOne) {
     const sorted = [...products].sort((a, b) => {
       const ar = Number((a as any)?.finalRelevance01 ?? Number.NEGATIVE_INFINITY);
@@ -1419,7 +1481,12 @@ function applyRelevanceThresholdFilter(
     console.log(
       `[relevance-threshold-fallback] preserved 1 product for detection="${options.detectionLabel ?? "unknown"}" category="${options.category ?? "unknown"}" bestFinalRelevance01=${bestRelevance.toFixed(3)} threshold=${minRelevance}`,
     );
-    return best ? [best] : [];
+    return best
+      ? [{
+          ...best,
+          relevanceFallbackPreserved: true,
+        }]
+      : [];
   }
 
   return filtered;
@@ -1464,7 +1531,7 @@ function paginateDetectionGroups(
       count: products.length,
       totalAvailable: totalItems,
       pagination: {
-        page: safePage,
+                finalRelevanceAdjusted01: lifted,
         pageSize: safePageSize,
         totalItems,
         totalPages,
@@ -3190,6 +3257,7 @@ export class ImageAnalysisService {
       ...detection,
       products: applyRelevanceThresholdFilter(detection.products, minRelevanceThreshold, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category),
+        minKeepCount: detection.category === "dresses" ? 2 : 0,
         detectionLabel: detection.detection?.label,
         category: detection.category,
       }),
@@ -4119,6 +4187,7 @@ export class ImageAnalysisService {
       ...detection,
       products: applyRelevanceThresholdFilter(detection.products, minRelevanceThresholdSel, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category),
+        minKeepCount: detection.category === "dresses" ? 2 : 0,
         detectionLabel: detection.detection?.label,
         category: detection.category,
       }),

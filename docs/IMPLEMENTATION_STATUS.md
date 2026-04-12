@@ -125,6 +125,32 @@ Mounted at `/search` (not `/api/search`).
 | POST | `/search/prompt-analyze` | Analyze and improve a search prompt |
 | GET | `/search/prompt-suggestions` | Prompt writing suggestions by type |
 
+### April 2026 search pipeline upgrades (implemented)
+
+1. Session-aware image search context propagation
+- `session_id` / `x-session-id` now propagates through controllers into unified image search.
+- Session filters can be inherited and merged as defaults (request filters take precedence).
+
+2. User-personalized image ranking
+- `user_id` / authenticated identity now flows into image search.
+- Wardrobe lifestyle preferences can softly boost ranking (brands/categories/colors/style/price affinity).
+- Personalization path is fail-safe: missing profile data does not break search.
+
+3. Variant-group collapse in image responses
+- Same-family variants are collapsed into a representative item.
+- Representative metadata is exposed in result payload (`variant_group_key`, `variant_group_size`, `variant_group_ids`).
+
+4. Shop-the-look context alignment
+- `/api/images/search` per-detection search now supports `sessionId`, `userId`, inherited session filters, and variant collapse controls.
+
+5. Rich ranking diagnostics
+- Image response meta now includes deep-fusion settings, diversity-rerank state, personalization flags, variant-group counters, and pipeline drop/recovery counts.
+
+6. Reindex schema resilience
+- `scripts/resume-reindex.ts` now handles missing detection metadata gracefully:
+	- no `product_image_detections` table: continue baseline reindex, skip detection ROI path
+	- no `product_image_detections.label` column: continue baseline reindex, skip part-level embedding path
+
 ---
 
 ## Image Analysis — COMPLETE ✓

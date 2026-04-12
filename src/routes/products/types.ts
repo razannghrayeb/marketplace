@@ -183,6 +183,8 @@ export interface ProductResult {
   rerankScore?: number;
   /** Calibrated 0..1 relevance (text search acceptance gating). */
   finalRelevance01?: number;
+  /** True when the product was preserved by a fallback gate despite scoring below the requested relevance threshold. */
+  relevanceFallbackPreserved?: boolean;
   mlRerankScore?: number;
   explain?: {
     // ── Raw signals ──────────────────────────────────────────
@@ -269,8 +271,12 @@ export interface ProductResult {
     /** Same payload as `meta.relevance_intent` on image search responses. */
     relevanceIntentDebug?: ImageSearchRelevanceIntentDebug;
 
-    // ── Final score ──────────────────────────────────────────
-    finalRelevance01?: number;
+    // ── Final score diagnostics ──────────────────────────────
+    /**
+     * Diagnostic snapshot of relevance after in-loop corrections.
+     * The authoritative score for ranking/response is top-level `product.finalRelevance01`.
+     */
+    finalRelevanceSnapshot01?: number;
 
     // ── Legacy / text-search fields (omitted in image results) ─
     /** @deprecated Use clipCosine. Omitted when there is no separate lexical signal. */
