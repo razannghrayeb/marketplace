@@ -37,6 +37,7 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 
 | File | Purpose | Audience |
 |------|---------|----------|
+| **PIPELINE_COMPLETE_DETAILED_2026_04.md** | Most detailed end-to-end pipeline behavior (request context, ranking stages, diagnostics, reindex resilience) | Backend, ML, search engineers, ops |
 | **embeddings-and-search-pipelines.md** | **Embeddings, OpenSearch fields, ingest vs query paths (text + image)** | Backend, ML, search engineers |
 | **SEARCH_API_COMPLETE.md** | All search features (user guide + technical) | Everyone |
 | **multi-image-attribute-transfer.md** | Multi-image attribute transfer feature architecture and build details | Backend, search engineers, integrators |
@@ -74,6 +75,7 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 | ...all API endpoints | `api-reference.md` (full spec) or `SEARCH_API_COMPLETE.md` |
 | ...intelligent fashion compare | `compare-intelligent-shopping.md` |
 | ...search capabilities | `SEARCH_API_COMPLETE.md` (user guide + technical) |
+| ...the full runtime behavior in one place | `PIPELINE_COMPLETE_DETAILED_2026_04.md` |
 | ...embeddings & how search uses vectors | **`embeddings-and-search-pipelines.md`** |
 | ...recommendations | `ml-models.md` → section on XGBoost Ranker |
 | ...virtual try-on | `../EXECUTIVE_SUMMARY.md` → Feature #7 section |
@@ -93,6 +95,7 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 | Task | Read |
 |------|------|
 | Implement a new search feature | **`embeddings-and-search-pipelines.md`** + `SEARCH_API_COMPLETE.md` + `api-reference.md` |
+| Debug end-to-end ranking behavior | `PIPELINE_COMPLETE_DETAILED_2026_04.md` + `embeddings-and-search-pipelines.md` |
 | Add a new API endpoint | `architecture.md` (patterns) + `api-reference.md` (reference) |
 | Implement/adjust compare behavior | `compare-intelligent-shopping.md` + `api-reference.md` |
 | Fix a bug | `../IMPLEMENTATION_STATUS.md` (known bugs) |
@@ -124,6 +127,8 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 
 ## 🔄 Recent Changes
 
+**April 2026:** Added **`PIPELINE_COMPLETE_DETAILED_2026_04.md`** with full end-to-end behavior including session-aware image search, personalization, variant-group collapse, diagnostics contract, and reindex resilience for missing detection metadata.
+
 **April 2026:** Image-ranking hardening in **`embeddings-and-search-pipelines.md`**: unified `v1`/`v2` score normalization, calibrated dual-kNN blend, stage-8 relevance, BLIP consistency/alignment tuning, intent-aware rescue; optional **`BLIP_API_URL`** in **`deploy-cloud-run.md`**.
 
 **March 2026:** Added **`embeddings-and-search-pipelines.md`** and **`FEATURES.md`** — vector field map, ingest/query pipelines, feature ↔ endpoint map.
@@ -154,6 +159,13 @@ Consolidated comprehensive guide covering:
 - Part 1: User Guide & Examples (Normal, YOLO, Multi-Image search)
 - Part 2: Technical Deep-Dive (5-phase pipeline, performance, tuning)
 Consolidated from older search guides; use **`FEATURES.md`** for endpoint paths.
+
+### PIPELINE_COMPLETE_DETAILED_2026_04.md
+Comprehensive single-source pipeline reference documenting:
+- Request-context flow (`session_id`, `user_id`) across controllers/facade/service
+- Ranking stages (retrieval, rerank, gates, dedupe, variant collapse, diversity)
+- Response diagnostics fields for image search
+- Reindex behavior and schema-optional detection metadata fallback
 
 ### multi-vector-search.md
 Specialized deep-dive on multi-vector kNN architecture and weighting strategies.
@@ -192,6 +204,7 @@ XGBoost ranker operations: training, serving, fallback behavior, health checks.
 
 ### Good Starting Points by Interest
 - **Search enthusiasts** → **`embeddings-and-search-pipelines.md`** → `SEARCH_API_COMPLETE.md`
+- **Search/ranking debuggers** → `PIPELINE_COMPLETE_DETAILED_2026_04.md`
 - **ML engineers** → `ml-models.md`
 - **Ops/DevOps** → `deployment.md` + `ranker-runbook.md`
 - **Full-stack devs** → `api-reference.md` + `database.md`

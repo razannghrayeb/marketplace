@@ -81,6 +81,7 @@ const DEFAULT_CONCURRENCY = 3;
 const BULK_FLUSH_SIZE = 20;
 
 const DB_RETRY = { attempts: 8, baseDelayMs: 2_000 } as const;
+const MAX_CONNECTION_WAIT_MS = 10 * 60 * 1000; // 10 minutes
 
 // ============================================================================
 // Types
@@ -261,15 +262,30 @@ async function queryWithRetry<T = any>(
   label = "query"
 ): Promise<T> {
   let lastErr: unknown;
-  for (let attempt = 1; attempt <= DB_RETRY.attempts; attempt++) {
+  const startedAt = Date.now();
+  for (let attempt = 1; ; attempt++) {
     try {
       return (await reindexPg.query(sql, params)) as T;
     } catch (err: unknown) {
       lastErr = err;
-      if (!isTransientPgError(err) || attempt === DB_RETRY.attempts) throw err;
-      const delay = DB_RETRY.baseDelayMs * attempt;
-      console.warn(`⚠️  DB [${label}] attempt ${attempt}/${DB_RETRY.attempts} failed, retrying in ${delay}ms`);
-      await sleep(delay);
+      const elapsed = Date.now() - startedAt;
+      if (!isTransientPgError(err) || elapsed >= MAX_CONNECTION_WAIT_MS) {
+        if (isTransientPgError(err) && elapsed >= MAX_CONNECTION_WAIT_MS) {
+          console.error(
+            `❌ DB [${label}] retry window exceeded (${Math.round(elapsed / 1000)}s >= ${Math.round(MAX_CONNECTION_WAIT_MS / 1000)}s)`
+          );
+        }
+        throw err;
+      }
+      const delay = Math.min(DB_RETRY.baseDelayMs * attempt, 30_000);
+      const remaining = Math.max(0, MAX_CONNECTION_WAIT_MS - elapsed);
+      const sleepMs = Math.min(delay, remaining);
+      console.warn(
+        `⚠️  DB [${label}] attempt ${attempt} failed, retrying in ${sleepMs}ms ` +
+        `(elapsed ${Math.round(elapsed / 1000)}s / ${Math.round(MAX_CONNECTION_WAIT_MS / 1000)}s)`
+      );
+      if (sleepMs <= 0) throw err;
+      await sleep(sleepMs);
     }
   }
   throw lastErr;
@@ -340,9 +356,11 @@ async function getGarmentBox(productId: number, hasDetectionsTable: boolean): Pr
  */
 async function getGarmentBoxWithLabel(
   productId: number,
-  hasDetectionsTable: boolean
+  hasDetectionsTable: boolean,
+  hasDetectionLabelColumn: boolean,
 ): Promise<{ box: PixelBox; label: string } | null> {
   if (!hasDetectionsTable) return null;
+  if (!hasDetectionLabelColumn) return null;
   try {
     const res = await queryWithRetry(
       `SELECT d.box_x1, d.box_y1, d.box_x2, d.box_y2, d.label
@@ -601,6 +619,7 @@ async function processProduct(
   product: ProductRow,
   cfg: ReindexConfig,
   hasDetectionsTable: boolean,
+  hasDetectionLabelColumn: boolean,
   sidecarAvailable: boolean,
   enrichMap: Map<number, any>
 ): Promise<ProductResult> {
@@ -626,7 +645,11 @@ async function processProduct(
       return { success: true, bgRemoved: false, attrEmbFailed: false };
     }
 
-    const garmentBoxWithLabel = await getGarmentBoxWithLabel(id, hasDetectionsTable);
+    const garmentBoxWithLabel = await getGarmentBoxWithLabel(
+      id,
+      hasDetectionsTable,
+      hasDetectionLabelColumn,
+    );
     const garmentBox = garmentBoxWithLabel?.box ?? null;
     const yoloLabel = garmentBoxWithLabel?.label ?? null;
     const emb = await generateEmbeddings(rawBuf, id, garmentBox, yoloLabel, cfg, sidecarAvailable);
@@ -752,26 +775,36 @@ async function saveProgress(progress: Progress, file: string): Promise<void> {
 // Database wait
 // ============================================================================
 
-async function waitForDatabase(cfg: ReindexConfig): Promise<void> {
-  const maxAttempts = parseInt(process.env.REINDEX_DB_WAIT_ATTEMPTS || "40", 10);
+async function waitForDatabase(): Promise<void> {
   const baseDelay = parseInt(process.env.REINDEX_DB_WAIT_MS || "8000", 10);
+  const maxWaitMs = MAX_CONNECTION_WAIT_MS;
+  const startedAt = Date.now();
 
   console.log(`🔌 DB pool: max ${REINDEX_PG_MAX} connection(s)`);
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  for (let attempt = 1; ; attempt++) {
     try {
       await reindexPg.query("SELECT 1");
       console.log("✅ Database connected\n");
       return;
     } catch (err: any) {
-      console.warn(`   Attempt ${attempt}/${maxAttempts} failed: ${err.message}`);
-      if (attempt >= maxAttempts) break;
+      const elapsed = Date.now() - startedAt;
+      console.warn(
+        `   Attempt ${attempt} failed (${Math.round(elapsed / 1000)}s/${Math.round(maxWaitMs / 1000)}s): ${err.message}`
+      );
+      if (elapsed >= maxWaitMs) break;
       const isMaxClients = String(err.message).toLowerCase().includes("maxclientsin");
       const delay = Math.min(120_000, baseDelay * (isMaxClients ? Math.min(attempt, 6) : 1));
-      console.log(`   Retrying in ${Math.round(delay / 1000)}s...`);
-      await sleep(delay);
+      const remaining = Math.max(0, maxWaitMs - elapsed);
+      const sleepMs = Math.min(delay, remaining);
+      if (sleepMs <= 0) break;
+      console.log(`   Retrying in ${Math.round(sleepMs / 1000)}s...`);
+      await sleep(sleepMs);
     }
   }
-  throw new Error("Could not connect to database. Free a PgBouncer slot or use a direct connection URL.");
+  throw new Error(
+    `Could not connect to database within ${Math.round(maxWaitMs / 1000)}s. ` +
+    "Free a PgBouncer slot or use a direct connection URL."
+  );
 }
 
 async function closeReindexPool(): Promise<void> {
@@ -917,7 +950,7 @@ async function main() {
   }
 
   // ── 4. Database readiness ──────────────────────────────────────────────────
-  await waitForDatabase(cfg);
+  await waitForDatabase();
 
   // ── 5. Schema introspection ────────────────────────────────────────────────
   if (!(await columnExists("products", "image_url"))) {
@@ -927,8 +960,14 @@ async function main() {
   const hasIsHidden    = await columnExists("products", "is_hidden");
   const hasCanonicalId = await columnExists("products", "canonical_id");
   const hasDetectionsTable = await tableExists("product_image_detections");
+  const hasDetectionLabelColumn = hasDetectionsTable
+    ? await columnExists("product_image_detections", "label")
+    : false;
   if (!hasDetectionsTable) {
     console.warn("⚠️  product_image_detections table not found — YOLO bounding box crop disabled");
+  }
+  if (hasDetectionsTable && !hasDetectionLabelColumn) {
+    console.warn("⚠️  product_image_detections.label column not found — part-level embeddings disabled");
   }
 
   const optionalCols = [
@@ -1047,7 +1086,15 @@ async function main() {
 
     const results = await pMap(
       toProcess,
-      (product) => processProduct(product, cfg, hasDetectionsTable, sidecarAvailable, enrichMap),
+      (product) =>
+        processProduct(
+          product,
+          cfg,
+          hasDetectionsTable,
+          hasDetectionLabelColumn,
+          sidecarAvailable,
+          enrichMap,
+        ),
       cfg.concurrency
     );
 

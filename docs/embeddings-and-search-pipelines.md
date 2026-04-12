@@ -1,6 +1,6 @@
 # Embeddings & search pipelines
 
-**Last updated:** April 2026 (R1 image-ranking hardening)
+**Last updated:** April 2026 (R2 context-aware ranking + reindex resilience)
 
 This document is the **architecture reference** for how **vector embeddings** are produced, stored in **OpenSearch**, and consumed by **text** and **image** search. It complements:
 
@@ -87,6 +87,32 @@ At index time, **attribute vectors** (`embedding_color`, …) are included when 
 8. **Relevance layer (explicit stage-8 math)** — final relevance is explicit and auditable (visual + compliance with hard cross-family/type gates), then filtered by `config.search.finalAcceptMinImage`.
 9. **Optional related** — `findSimilarByPHash` when `includeRelated` and pHash present.
 
+### 4.2 April 2026 context-aware upgrades (what changed recently)
+
+Recent changes extended image search beyond pure visual relevance:
+
+1. **Session-context propagation end-to-end**
+  - `sessionId` and `sessionFilters` now flow from controllers into `fashionSearchFacade.ts` and then into `products.service.ts`.
+  - Inherited session filters are merged as **fill-missing defaults**, while explicit request filters still win.
+
+2. **User-personalization in final ranking**
+  - `userId` is now forwarded from API entry points and used to load wardrobe lifestyle snapshots.
+  - Preferred brands/categories/colors/style tags and price-band affinity now softly influence ranking.
+  - Missing lifestyle signals are non-fatal; search degrades safely to base ranking.
+
+3. **Variant-group collapsing before final return**
+  - Same-family variants are collapsed into one representative result.
+  - Representative selection uses `finalRelevance01`, then `similarity_score`, then rerank tiebreakers.
+  - Response includes `variant_group_key`, `variant_group_size`, and `variant_group_ids`.
+
+4. **Expanded observability metadata**
+  - `meta` now includes `session_id`, `user_id`, `personalization_applied`, and variant-group diagnostics.
+  - Deep-fusion and diversity-rerank diagnostics are also exposed in `meta` to simplify tuning and A/B analysis.
+
+5. **Shop-the-look context alignment**
+  - `/api/images/search` detection flows now pass `sessionId`/`userId` and merge session filters into per-detection search filters.
+  - This keeps per-item recommendations behaviorally aligned with single-image search.
+
 ### 4.1 April 2026 ranking hardening (what changed)
 
 1. **Unified score normalization** — version-aware normalizer (`v1` legacy / `v2` cosine); new docs indexed with `embedding_score_version=v2` and `embedding_garment_score_version=v2`.
@@ -151,6 +177,10 @@ At index time, **attribute vectors** (`embedding_color`, …) are included when 
 2. If **image search** is slow: check BLIP cap, YOLO timeout, attribute embedding cache (`src/lib/cache/embeddingCache.ts`), and OpenSearch latency.
 3. If **results ignore color**: ensure **query** passes color intent or quick hints run; confirm index has `attr_colors` / `color_*` and rerank weights; verify `embedding_color` backfill for older docs.
 4. **After April 2026 preprocessing fix**: run a **full reindex** (`npx tsx scripts/resume-reindex.ts`) to regenerate embeddings with the corrected `fit: "cover"` + raw-image pipeline. Without reindexing, older stored vectors may misalign with new query-time vectors.
+5. **Detection schema is optional for baseline reindex**:
+  - If `product_image_detections` is missing: reindex continues, YOLO ROI crop path is skipped.
+  - If `product_image_detections.label` is missing: reindex continues, label-dependent part embeddings are skipped.
+  - Reindex now logs warnings instead of failing hard on these schema differences.
 
 ---
 
@@ -158,6 +188,7 @@ At index time, **attribute vectors** (`embedding_color`, …) are included when 
 
 | Task | Doc |
 |------|-----|
+| Complete end-to-end (most detailed) | `PIPELINE_COMPLETE_DETAILED_2026_04.md` |
 | ONNX / resize / crop details | `image-embedding-pipeline.md` |
 | QueryAST & bool query mermaid | `text-search-architecture.md` |
 | Multi-vector fusion math | `multi-vector-search.md` |

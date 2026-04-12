@@ -575,12 +575,12 @@ For YOLO-based product detection ("shop the look"), see [Image Analysis API](#im
 | Feature                   | Endpoint                      | Input               | Best For                              |
 | ------------------------- | ----------------------------- | ------------------- | ------------------------------------- |
 | **Text Search**           | `GET /search`                 | Query + filters     | Keyword search, filtering             |
-| **Image Search**          | `POST /search/image`          | 1 image             | "Find similar to this"                |
+| **Image Search**          | `POST /products/search/image` | 1 image             | "Find similar to this" (storefront)   |
 | **Multi-Image**           | `POST /search/multi-image`    | 1-5 images + prompt | "Color from first, style from second" |
 | **YOLO Detection**        | `POST /api/images/search`     | 1 image             | "Shop this outfit"                    |
-| **Discover (storefront)** | `POST /products/search/image` | 1 image             | Same CLIP pipeline as `/search/image` |
+| **Image Search (alt)**    | `POST /search/image`          | 1 image             | Same unified image engine              |
 
-📚 **See [SEARCH_API_COMPLETE.md](./SEARCH_API_COMPLETE.md) and [FEATURES.md](./FEATURES.md) for guides and examples.**
+📚 **See [SEARCH_API_COMPLETE.md](./SEARCH_API_COMPLETE.md), [FEATURES.md](./FEATURES.md), and [PIPELINE_COMPLETE_DETAILED_2026_04.md](./PIPELINE_COMPLETE_DETAILED_2026_04.md) for guides and full internals.**
 
 ---
 
@@ -620,8 +620,12 @@ curl "http://0.0.0.0:4000/search?q=red+dress&brand=Nike&maxPrice=15000&limit=10"
 Find visually similar products using image uploads.
 
 ```http
-POST /search/image
+POST /products/search/image
 ```
+
+Also supported: `POST /search/image` (same unified backend engine).
+
+The storefront image-search path and the search-module image-search path share the same ranking engine. The YOLO/shop-the-look API uses `POST /api/images/search` and then calls this same engine per detected item.
 
 #### Request
 
@@ -633,13 +637,19 @@ POST /search/image
 | Parameter | Type    | Description     | Default |
 | --------- | ------- | --------------- | ------- |
 | `limit`   | integer | Maximum results | 50      |
+| `session_id` | string | Optional conversational session ID for filter inheritance | - |
+| `user_id` | number | Optional user ID for personalization hints | - |
+
+Header alternative:
+- `x-session-id`: session context alternative to `session_id` query parameter
 
 #### Example Request
 
 ```bash
-curl -X POST http://0.0.0.0:4000/search/image \
+curl -X POST http://0.0.0.0:4000/products/search/image \
   -F "image=@dress.jpg" \
-  -F "limit=20"
+  -F "limit=20" \
+  -F "session_id=session-123"
 ```
 
 #### Example Response
@@ -661,6 +671,13 @@ curl -X POST http://0.0.0.0:4000/search/image \
   "tookMs": 45
 }
 ```
+
+#### Result Semantics
+
+- Each returned product has one `finalRelevance01` value.
+- A high value means the item ranked strongly after gating and reranking.
+- A low value usually means the item came from a fallback or rescue branch that was preserved to avoid empty results.
+- Seeing both high and low values in the same response is normal for a ranked list; it does not mean the same product contains two `finalRelevance01` fields.
 
 ---
 
