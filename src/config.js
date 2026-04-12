@@ -32,7 +32,7 @@ exports.config = {
         ssl: { rejectUnauthorized: false },
     },
     opensearch: {
-        node: process.env.OS_NODE || "https://avnadmin:AVNS_seqtyHr-NLC1nO4M5Yt@os-270aa11c-lau-6d81.j.aivencloud.com:12588",
+        node: process.env.OS_NODE || "https://avnadmin:AVNS_QJfJVot3ZhsDwtSsqZR@os-2bd583f8-ghrazan2006-96c3.j.aivencloud.com:13309",
         index: process.env.OS_INDEX || "products",
         username: process.env.OS_USERNAME || "",
         password: process.env.OS_PASSWORD || "",

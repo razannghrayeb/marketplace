@@ -591,7 +591,7 @@ const FORMALITY_MAP: Record<string, number> = {
   bomber: 3,
 
   // Footwear
-  shoe: 5,
+  shoe: 3,
   heels: 8,
   loafers: 6,
   boots: 4,
@@ -899,6 +899,31 @@ function hardCategoryTermsForDetection(
     );
   }
 
+  if (categoryMapping.productCategory === "footwear") {
+    const isBootLike = /\b(boot|boots|ankle boot|combat boot|chelsea)\b/.test(l);
+    const isHeelLike = /\b(heel|heels|pump|pumps|stiletto|stilettos|wedge|wedges|slingback)\b/.test(l);
+    const isSandalLike = /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(l);
+
+    if (isBootLike) {
+      const bootsOnly = baseTerms.filter((t) => /\b(boot|boots)\b/.test(t));
+      return bootsOnly.length > 0 ? bootsOnly : baseTerms;
+    }
+    if (isHeelLike) {
+      const heelsOnly = baseTerms.filter((t) => /\b(heel|heels|pump|pumps|stiletto|wedge)\b/.test(t));
+      return heelsOnly.length > 0 ? heelsOnly : baseTerms;
+    }
+    if (isSandalLike) {
+      const sandalsOnly = baseTerms.filter((t) => /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(t));
+      return sandalsOnly.length > 0 ? sandalsOnly : baseTerms;
+    }
+
+    // Generic "shoe" detections should prefer everyday sneakers/trainers/shoes and avoid winter boots/heels.
+    const sneakerLike = baseTerms.filter((t) =>
+      /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|running shoes|casual shoes|flats?)\b/.test(t),
+    );
+    return sneakerLike.length > 0 ? sneakerLike : baseTerms;
+  }
+
   // Prefer hat/cap-family over generic `accessories`.
   if (categoryMapping.productCategory === "accessories") {
     if (/\b(headband|head covering|hair accessory|hairband|headwear)\b/.test(l)) {
@@ -977,6 +1002,30 @@ function tightenTypeSeedsForDetection(
       ),
     );
     return bagLike.length > 0 ? bagLike : normalized;
+  }
+
+  if (category === "footwear") {
+    const isBootLike = /\b(boot|boots|ankle boot|chelsea|combat boot)\b/.test(label);
+    const isHeelLike = /\b(heel|heels|pump|pumps|stiletto|stilettos|wedge|wedges|slingback)\b/.test(label);
+    const isSandalLike = /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(label);
+
+    if (isBootLike) {
+      const bootsOnly = normalized.filter((t) => /\b(boot|boots)\b/.test(t));
+      return bootsOnly.length > 0 ? bootsOnly : normalized;
+    }
+    if (isHeelLike) {
+      const heelsOnly = normalized.filter((t) => /\b(heel|heels|pump|pumps|stiletto|wedge)\b/.test(t));
+      return heelsOnly.length > 0 ? heelsOnly : normalized;
+    }
+    if (isSandalLike) {
+      const sandalsOnly = normalized.filter((t) => /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(t));
+      return sandalsOnly.length > 0 ? sandalsOnly : normalized;
+    }
+
+    const sneakerLike = normalized.filter((t) =>
+      /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|running shoes|casual shoes|flats?)\b/.test(t),
+    );
+    return sneakerLike.length > 0 ? sneakerLike : normalized;
   }
 
   if (category === "outerwear") {
@@ -1058,14 +1107,14 @@ function imageMinFootwearConfidence(): number {
 }
 
 function imageMinAccessoryAreaRatio(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_AREA_RATIO ?? "0.01");
-  if (!Number.isFinite(raw)) return 0.01;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_AREA_RATIO ?? "0.003");
+  if (!Number.isFinite(raw)) return 0.003;
   return Math.max(0, Math.min(1, raw));
 }
 
 function imageMinAccessoryConfidence(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_CONFIDENCE ?? "0.8");
-  if (!Number.isFinite(raw)) return 0.8;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_CONFIDENCE ?? "0.65");
+  if (!Number.isFinite(raw)) return 0.65;
   return Math.max(0, Math.min(1, raw));
 }
 
@@ -1122,6 +1171,40 @@ function shouldKeepDetectionForShopTheLook(detection: Detection): boolean {
     return false;
   }
   return true;
+}
+
+function accessoryRecoveryConfidenceThreshold(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_ACCESSORY_RECOVERY_CONFIDENCE ?? "0.2");
+  if (!Number.isFinite(raw)) return 0.2;
+  return Math.max(0.05, Math.min(0.6, raw));
+}
+
+function accessoryRecoveryAreaRatioThreshold(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_ACCESSORY_RECOVERY_AREA_RATIO ?? "0.001");
+  if (!Number.isFinite(raw)) return 0.001;
+  return Math.max(0.0001, Math.min(0.02, raw));
+}
+
+function shouldKeepAccessoryRecoveryDetection(detection: Detection): boolean {
+  const mapped = mapDetectionToCategory(detection.label, detection.confidence).productCategory;
+  if (mapped !== "bags" && mapped !== "accessories") return false;
+
+  const areaRatio = Number.isFinite(detection.area_ratio) ? detection.area_ratio : 0;
+  const confidence = Number.isFinite(detection.confidence) ? detection.confidence : 0;
+  const isBag = mapped === "bags";
+  const isHeadAccessory = /\b(headband|head covering|hair accessory|hairband|headwear)\b/.test(
+    String(detection.label || "").toLowerCase(),
+  );
+
+  if (isBag) {
+    return confidence >= accessoryRecoveryConfidenceThreshold() || areaRatio >= accessoryRecoveryAreaRatioThreshold();
+  }
+
+  if (isHeadAccessory) {
+    return confidence >= accessoryRecoveryConfidenceThreshold() && areaRatio >= accessoryRecoveryAreaRatioThreshold() * 0.75;
+  }
+
+  return confidence >= accessoryRecoveryConfidenceThreshold() && areaRatio >= accessoryRecoveryAreaRatioThreshold();
 }
 
 function shouldForceHardCategoryForDetection(
@@ -2313,6 +2396,45 @@ export class ImageAnalysisService {
           count: filteredDetections.length,
           summary: summarizeDetectionsByLabel(filteredDetections),
         };
+      }
+
+      const hasBagOrAccessory = detectionResult.detections.some((detection) => {
+        const mapped = mapDetectionToCategory(detection.label, detection.confidence).productCategory;
+        return mapped === "bags" || mapped === "accessories";
+      });
+
+      if (!hasBagOrAccessory && services.yolo) {
+        try {
+          const accessoryRetryConfidence = accessoryRecoveryConfidenceThreshold();
+          const accessoryRetry = await this.yoloClient.detectFromBuffer(buffer, filename, {
+            confidence: accessoryRetryConfidence,
+            preprocessing: {
+              enhanceContrast: preprocessing?.enhanceContrast ?? true,
+              enhanceSharpness: preprocessing?.enhanceSharpness ?? true,
+              bilateralFilter: preprocessing?.bilateralFilter ?? true,
+            },
+          });
+
+          const accessoryDetections = (accessoryRetry?.detections ?? []).filter((detection) =>
+            shouldKeepAccessoryRecoveryDetection(detection),
+          );
+
+          if (accessoryDetections.length > 0) {
+            const mergedDetections = dedupeDetectionsBySameLabelIou(
+              [...detectionResult.detections, ...accessoryDetections],
+              yoloShopDedupeIouThreshold(),
+            ).map((row) => ensureStyleAndMask(row.detection, imageWidth, imageHeight));
+
+            detectionResult = {
+              ...detectionResult,
+              detections: mergedDetections,
+              count: mergedDetections.length,
+              summary: summarizeDetectionsByLabel(mergedDetections),
+            };
+          }
+        } catch (err) {
+          console.warn("[YOLOv8] accessory recovery retry failed:", err);
+        }
       }
 
       // Ensure clients always receive `style` + `mask` (YOLO service returns them as null currently).
