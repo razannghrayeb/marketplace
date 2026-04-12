@@ -74,6 +74,21 @@ type BlipSignal = {
   confidence?: number;
 };
 
+function inferApparelAudienceFallback(params: {
+  caption?: string | null;
+  detections: Array<{ label?: string; raw_label?: string }>;
+}): { ageGroup?: "adult" } {
+  const blob = [params.caption ?? "", ...params.detections.map((d) => `${d.label ?? ""} ${d.raw_label ?? ""}`)]
+    .join(" ")
+    .toLowerCase();
+  if (!blob.trim()) return {};
+  if (/\b(kids?|children|child|baby|babies|toddler|toddlers|youth|junior|girls?|boys?)\b/.test(blob)) return {};
+  if (/\b(dress|top|shirt|blouse|skirt|pants|trousers|jeans|shorts|hoodie|sweater|cardigan|jacket|coat|tshirt|t-shirt|jumpsuit|romper|abaya|kaftan)\b/.test(blob)) {
+    return { ageGroup: "adult" };
+  }
+  return {};
+}
+
 /** Default on when unset — soft category + aisle rerank is the normal image path. */
 function imageSoftCategoryEnv(): boolean {
   const raw = process.env.SEARCH_IMAGE_SOFT_CATEGORY;
@@ -2412,7 +2427,7 @@ export class ImageAnalysisService {
       blipStructuredConfidence = blipStructured.confidence;
       fullBlipSignal = buildBlipSignal(blipStructured, blipStructuredConfidence);
     }
-    const inferredAudience: ReturnType<typeof inferAudienceFromCaption> =
+    let inferredAudience: ReturnType<typeof inferAudienceFromCaption> =
       imageInferAudienceGenderEnv() && blipCaption
         ? blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()
           ? {
@@ -2421,6 +2436,18 @@ export class ImageAnalysisService {
             }
           : inferAudienceFromCaption(blipCaption)
         : ({} as ReturnType<typeof inferAudienceFromCaption>);
+    if (!inferredAudience.gender && !inferredAudience.ageGroup) {
+      const fallbackAudience = inferApparelAudienceFallback({
+        caption: blipCaption,
+        detections: analysisResult.detection.items,
+      });
+      if (fallbackAudience.ageGroup) {
+        inferredAudience = {
+          ...inferredAudience,
+          ageGroup: fallbackAudience.ageGroup,
+        };
+      }
+    }
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
     const inferredColorsByItem: Record<string, string | null> = {};
@@ -2475,7 +2502,9 @@ export class ImageAnalysisService {
       }
       const finalGarmentEmbedding = finalEmbedding;
 
-      const categoryMapping = mapDetectionToCategory(label, detection.confidence);
+      const categoryMapping = mapDetectionToCategory(label, detection.confidence, {
+        box_normalized: (detection as any).box_normalized,
+      });
       const searchCategories = shouldUseAlternatives(categoryMapping)
         ? getSearchCategories(categoryMapping)
         : [categoryMapping.productCategory];
@@ -3550,13 +3579,25 @@ export class ImageAnalysisService {
       blipStructuredConfidence = blipStructured.confidence;
       fullBlipSignal = buildBlipSignal(blipStructured, blipStructuredConfidence);
     }
-    const inferredAudience: ReturnType<typeof inferAudienceFromCaption> =
+    let inferredAudience: ReturnType<typeof inferAudienceFromCaption> =
       imageInferAudienceGenderEnv() && blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()
         ? {
             gender: blipStructured.audience.gender,
             ageGroup: blipStructured.audience.ageGroup,
           }
         : ({} as ReturnType<typeof inferAudienceFromCaption>);
+    if (!inferredAudience.gender && !inferredAudience.ageGroup) {
+      const fallbackAudience = inferApparelAudienceFallback({
+        caption: blipCaption,
+        detections: fullResult.detection.items,
+      });
+      if (fallbackAudience.ageGroup) {
+        inferredAudience = {
+          ...inferredAudience,
+          ageGroup: fallbackAudience.ageGroup,
+        };
+      }
+    }
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
     const inferredColorsByItem: Record<string, string | null> = {};
@@ -3600,7 +3641,9 @@ export class ImageAnalysisService {
           isUserDefined && userDefinedBoxes[i - itemsToProcess.length].categoryHint
             ? userDefinedBoxes[i - itemsToProcess.length].categoryHint!
             : detection.label;
-        const categoryMapping = mapDetectionToCategory(categorySource, detection.confidence);
+        const categoryMapping = mapDetectionToCategory(categorySource, detection.confidence, {
+          box_normalized: (detection as any).box_normalized,
+        });
         const itemColorKey = detectionColorKey(categorySource, i);
         if (!(itemColorKey in inferredColorsByItem)) inferredColorsByItem[itemColorKey] = null;
         if (!(itemColorKey in inferredColorsByItemConfidence)) inferredColorsByItemConfidence[itemColorKey] = 0;

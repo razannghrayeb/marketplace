@@ -745,10 +745,16 @@ export function computeHitRelevance(
   const sleeveIntentApplicable = docSupportsSleeveIntent(src);
   const hasSleeveIntentForDoc = Boolean(wantedSleeve) && sleeveIntentApplicable;
   if (hasSleeveIntentForDoc) {
-    const docSleeveRaw = typeof hit?._source?.attr_sleeve === "string" ? hit._source.attr_sleeve : "";
+    const description = typeof hit?._source?.description === "string" ? hit._source.description : "";
+    const docSleeveRaw =
+      typeof hit?._source?.attr_sleeve === "string"
+        ? hit._source.attr_sleeve
+        : typeof hit?._source?.sleeve === "string"
+          ? hit._source.sleeve
+          : `${description}`;
     const docSleeve = normalizeSleeveToken(docSleeveRaw);
     const titleSleeve = normalizeSleeveToken(title);
-    const observed = docSleeve ?? titleSleeve;
+    const observed = docSleeve ?? titleSleeve ?? normalizeSleeveToken(description);
     if (!observed) {
       sleeveCompliance = 0.15;
     } else if (observed === wantedSleeve) {

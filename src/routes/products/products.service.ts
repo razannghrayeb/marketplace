@@ -1525,6 +1525,30 @@ function docColorPaletteForHit(hit: { _source?: Record<string, unknown> }): stri
   return raw;
 }
 
+function hasChildAudienceSignals(src: Record<string, unknown>): boolean {
+  const fields = [
+    src.title,
+    src.brand,
+    src.category,
+    src.category_canonical,
+    src.audience_gender,
+    src.attr_gender,
+    src.age_group,
+    src.gender,
+    src.description,
+    src.size,
+    Array.isArray(src.product_types) ? src.product_types.join(" ") : "",
+  ]
+    .map((value) => String(value ?? "").toLowerCase())
+    .join(" ");
+
+  if (!fields.trim()) return false;
+  if (/\b(kids?|children|child|baby|babies|toddler|toddlers|youth|junior)\b/.test(fields)) return true;
+  if (/\b(girls?|boys?)\b/.test(fields)) return true;
+  if (/\b(?:\d{1,2}\s?(?:m|mo|months?|y|yr|yrs|years?))\b/.test(fields)) return true;
+  return false;
+}
+
 /**
  * When BLIP primary color is confident and contradicts indexed catalog colors,
  * dampen the color embedding channel (CLIP can still match lighting/layout).
@@ -1697,16 +1721,21 @@ function computeColorContradictionPenalty(params: {
   );
   if ((tier?.compliance ?? 0) > 0) return 1;
 
+  // Reduced color penalties: Instead of aggressive 0.72-0.82, use more lenient 0.85-0.90
+  // This allows visually similar items with different colors to still be relevant
+  // Color mismatch is handled at gating level, not scoring level
   if (params.rawVisual >= params.nearIdenticalRawMin) {
-    if (params.hasExplicitColorIntent) return 0.74;
-    if (params.hasInferredColorSignal) return 0.84;
-    if (params.hasCropColorSignal) return 0.92;
+    if (params.hasExplicitColorIntent) return 0.88;  // Was 0.74: only 12% penalty for near-identical
+    if (params.hasInferredColorSignal) return 0.92;  // Was 0.84: only 8% penalty
+    if (params.hasCropColorSignal) return 0.95;      // Was 0.92: only 5% penalty
     return 1;
   }
 
-  if (params.hasExplicitColorIntent) return 0.72;
-  if (params.hasInferredColorSignal) return 0.82;
-  if (params.hasCropColorSignal) return 0.9;
+  // For non-near-identical matches, color mismatch should still allow visibility
+  // if there's strong visual similarity
+  if (params.hasExplicitColorIntent) return 0.85;  // Was 0.72: 15% penalty instead of 28%
+  if (params.hasInferredColorSignal) return 0.90;  // Was 0.82: 10% penalty instead of 18%
+  if (params.hasCropColorSignal) return 0.93;      // Was 0.90: 7% penalty instead of 10%
   return 1;
 }
 
@@ -2816,6 +2845,8 @@ export async function searchByImageWithSimilarity(
     typeof filtersRecord.ageGroup === "string" ? filtersRecord.ageGroup : undefined;
   const queryGenderNorm = normalizeQueryGender(filtersAny.gender);
   const hasAudienceIntentForRelevance = Boolean(queryAgeGroupForRelevance || queryGenderNorm);
+  const queryAgeGroupNormForSafety = normalizeSimpleToken(queryAgeGroupForRelevance);
+  const hasKidsAudienceIntent = queryAgeGroupNormForSafety === "kids";
 
   const explicitStyleForRelevance =
     typeof filtersRecord.style === "string"
@@ -2840,6 +2871,7 @@ export async function searchByImageWithSimilarity(
       : undefined;
   const desiredSleeveForRelevance =
     typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
+  const enforceSleeveGate = desiredSleeveForRelevance === "short" || desiredSleeveForRelevance === "sleeveless";
 
   const hasColorIntentForFinal = hasExplicitColorIntent || hasInferredColorSignal;
   const hasInferredColorIntentForRescue = !hasExplicitColorIntent && hasInferredColorSignal;
@@ -3418,6 +3450,7 @@ export async function searchByImageWithSimilarity(
         const comp = complianceById.get(String(h._source.product_id));
         if (!comp) return false;
         if (comp.hardBlocked) return false;
+        if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) return false;
         const crossFamily = comp.crossFamilyPenalty ?? 0;
         if (crossFamily >= 0.55) return false;
         const typeComp = comp.productTypeCompliance ?? 0;
@@ -3545,6 +3578,7 @@ export async function searchByImageWithSimilarity(
       const preferredTypeAligned = visualGatedHits.filter((h: any) => {
         const comp = complianceById.get(String(h._source.product_id));
         if (!comp) return false;
+        if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) return false;
         if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
         
         // Must pass type intent
@@ -3575,6 +3609,7 @@ export async function searchByImageWithSimilarity(
         const fallbackTypeAligned = visualGatedHits.filter((h: any) => {
           const comp = complianceById.get(String(h._source.product_id));
           if (!comp) return false;
+          if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) return false;
           // Stronger gender gate: when gender is explicitly filtered, reject hard mismatches (audienceCompliance === 0)
           // and also reject low compliance (< 0.75) to prevent women's shoes from appearing in men's searches
           const minAudienceCompliance = filtersAny.gender ? 0.75 : 0.55;
@@ -3599,6 +3634,7 @@ export async function searchByImageWithSimilarity(
         rescuePool = visualGatedHits.filter((h: any) => {
           const comp = complianceById.get(String(h._source.product_id));
           if (!comp) return false;
+          if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) return false;
           if ((comp.hardBlocked ?? false) === true) return false;
           if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
           const typeComp = comp.productTypeCompliance ?? 0;
@@ -3621,6 +3657,7 @@ export async function searchByImageWithSimilarity(
     for (const h of rescuePool) {
       const comp = complianceById.get(String(h._source.product_id));
       if (comp) {
+        if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) continue;
         if (hasDetectionAnchoredTypeIntent) {
           const typeComp = comp.productTypeCompliance ?? 0;
           const exactType = comp.exactTypeScore ?? 0;
@@ -3944,21 +3981,26 @@ export async function searchByImageWithSimilarity(
           const blipColorConflict = blipColorConflictFactorById.get(idStr) ?? 1;
           const conflictStrength = Math.max(0, Math.min(1, 1 - blipColorConflict));
           const baseConflictCap = hasExplicitColorIntent
-            ? similarityScore * 0.36
+            ? similarityScore * 0.46  // Was 0.36: more lenient
             : hasInferredColorSignal
-              ? similarityScore * 0.48
-              : similarityScore * 0.62;
-          const conflictAdjustedCap = baseConflictCap * (1 - 0.35 * conflictStrength);
+              ? similarityScore * 0.58  // Was 0.48: more lenient
+              : similarityScore * 0.72;  // Was 0.62: more lenient
+          const conflictAdjustedCap = baseConflictCap * (1 - 0.25 * conflictStrength);  // Was 0.35: softer adjustment
+          // Increased maxConflictCap: From 0.2/0.28/0.36 to 0.45/0.55/0.65
+          // This allows wrong-colored but visually similar items to be more relevant
+          // - Explicit color intent: up to 45% relevance (user specifically wanted color)
+          // - Inferred color: up to 55% relevance (color came from image analysis)
+          // - Crop color: up to 65% relevance (weakest color signal)
           const maxConflictCap = hasExplicitColorIntent
-            ? 0.2
+            ? 0.45  // Was 0.2: giving more credit to visual similarity
             : hasInferredColorSignal
-              ? 0.28
-              : 0.36;
-          const nearDuplicateRelax = similarityScore >= nearIdenticalRawMin ? 0.06 : 0;
-          // Keep contradictory colors visible for sparse catalogs, but never with inflated relevance.
+              ? 0.55  // Was 0.28: color was inferred, so be more lenient
+              : 0.65;  // Was 0.36: color was just detected, most lenient
+          const nearDuplicateRelax = similarityScore >= nearIdenticalRawMin ? 0.08 : 0;  // Was 0.06
+          // Keep contradictory colors visible for sparse catalogs, but with realistic caps
           const conservativeCap = Math.min(
             maxConflictCap + nearDuplicateRelax,
-            Math.max(0.05, conflictAdjustedCap),
+            Math.max(0.15, conflictAdjustedCap),  // Was 0.05: higher floor
           );
           finalRelevance01 = Math.min(finalRelevance01 ?? 0, conservativeCap);
           finalRelevanceSource = "catalog_color_correction";
@@ -4127,6 +4169,7 @@ export async function searchByImageWithSimilarity(
         if (sim < strongVisualOverrideMinSim) return false;
         const explainAny = p.explain as any;
         if ((explainAny?.hardBlocked ?? false) === true) return false;
+        if (!hasKidsAudienceIntent && hasChildAudienceSignals(p as Record<string, unknown>)) return false;
         const crossFamily = Number(explainAny?.crossFamilyPenalty ?? 0);
         if (crossFamily >= 0.55) return false;
         if (strongColorIntent) {
@@ -4186,6 +4229,8 @@ export async function searchByImageWithSimilarity(
       const exactType = Number(ex.exactTypeScore ?? 0);
       const crossFamily = Number(ex.crossFamilyPenalty ?? 0);
       const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+      if (!hasKidsAudienceIntent && hasChildAudienceSignals(p as Record<string, unknown>)) return false;
+      if (enforceSleeveGate && Number(ex.sleeveCompliance ?? 0) < 0.55) return false;
       if (crossFamily >= 0.5) return false;
       if (exactType >= 1 || typeComp >= 0.3) return true;
       return sim >= 0.96 && crossFamily < 0.35;
