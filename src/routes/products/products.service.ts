@@ -2871,11 +2871,21 @@ export async function searchByImageWithSimilarity(
       : undefined;
   const desiredSleeveForRelevance =
     typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
-  const enforceSleeveGate = desiredSleeveForRelevance === "short" || desiredSleeveForRelevance === "sleeveless";
+  const enforceSleeveGate =
+    (desiredSleeveForRelevance === "short" || desiredSleeveForRelevance === "sleeveless") &&
+    !hasDetectionAnchoredTypeIntent;
 
   const hasColorIntentForFinal = hasExplicitColorIntent || hasInferredColorSignal;
   const hasInferredColorIntentForRescue = !hasExplicitColorIntent && hasInferredColorSignal;
   const hasSoftColorIntentForRescue = !hasExplicitColorIntent && desiredColorsForRelevance.length > 0;
+  const strictInferredOnePieceColorGate =
+    !hasExplicitColorIntent &&
+    hasInferredColorSignal &&
+    hasDetectionAnchoredTypeIntent &&
+    (
+      params.detectionProductCategory === "dresses" ||
+      desiredProductTypes.some((t) => /\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(String(t).toLowerCase()))
+    );
   // Crop-dominant colors affect reranking but should not gate final relevance
   // unless we also have inferred semantic color evidence (e.g., BLIP "blue jeans").
   const softColorBiasOnly =
@@ -3475,6 +3485,18 @@ export async function searchByImageWithSimilarity(
         if (hasDetectionAnchoredTypeIntent && exactType < 1 && typeComp < detAnchoredTypeFloor && !visualStrong) {
           return false;
         }
+        const lengthComp = Number((comp as any).lengthCompliance ?? 0);
+        const hasLengthIntentForHit = Boolean((comp as any).hasLengthIntent);
+        if (
+          hasDetectionAnchoredTypeIntent &&
+          params.detectionProductCategory === "dresses" &&
+          Boolean(desiredLengthForRelevance) &&
+          hasLengthIntentForHit &&
+          lengthComp < 0.42 &&
+          !visualStrong
+        ) {
+          return false;
+        }
         return true;
       })
     : rankedHitsCandidates;
@@ -3565,7 +3587,9 @@ export async function searchByImageWithSimilarity(
       // Start empty and admit only type-safe candidates.
       rescuePool = [];
       const desiredSleeveNorm = String(desiredSleeveForRelevance ?? "").toLowerCase();
-      const enforceSleeveGate = desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless";
+      const enforceSleeveGate =
+        (desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless") &&
+        !hasDetectionAnchoredTypeIntent;
       const preferredSleeveMin = enforceSleeveGate ? 0.55 : 0.25;
       const fallbackSleeveMin = enforceSleeveGate ? 0.4 : 0.1;
       const minTypeCompliance = hasDetectionAnchoredTypeIntent
@@ -3592,7 +3616,7 @@ export async function searchByImageWithSimilarity(
         }
         
         // Must pass color intent if set (avoid color mismatches in rescue)
-        if (hasColorIntentForFinal && (comp.colorCompliance ?? 0) < 0.4) {
+        if (hasExplicitColorIntent && (comp.colorCompliance ?? 0) < 0.4) {
           return false;
         }
         if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < 0.18) {
@@ -3617,7 +3641,7 @@ export async function searchByImageWithSimilarity(
           if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
           if ((comp.exactTypeScore ?? 0) < 1 && (comp.productTypeCompliance ?? 0) < 0.22) return false;
           if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < fallbackSleeveMin) return false;
-          if (hasColorIntentForFinal && (comp.colorCompliance ?? 0) < 0.18) return false;
+          if (hasExplicitColorIntent && (comp.colorCompliance ?? 0) < 0.18) return false;
           if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < 0.08) return false;
           // Soft color intent does not gate fallback — only explicit color does.
           // This prevents crop-derived colors from blocking valid type matches.
@@ -3959,18 +3983,31 @@ export async function searchByImageWithSimilarity(
         String(p.title ?? "") + " " + String(p.description ?? ""),
       );
       const isSportContext = isSportBrand && isSportKeyword;
-      const isExplicitSportIntent =
-        hasExplicitStyleIntent &&
-        /sport|athletic|training|casual|active|workout/i.test(desiredStyleForRelevance ?? "");
+      const isStyleSportIntent = /\b(sport|athletic|training|active|workout|gym|fitness|running|jogging)\b/i.test(
+        desiredStyleForRelevance ?? "",
+      );
+      const isTypeSportIntent = desiredProductTypes.some((t) => {
+        const x = String(t ?? "").toLowerCase();
+        if (!x) return false;
+        if (x.includes("sport coat")) return false;
+        return /\b(sport|sportswear|athletic|training|workout|gym|fitness|jogger|track|legging|running)\b/.test(x);
+      });
+      const isExplicitSportIntent = isStyleSportIntent || isTypeSportIntent;
+      const isFormalIntent = /\b(formal|business|tailored|smart)\b/i.test(desiredStyleForRelevance ?? "");
       if (
         hasDetectionAnchoredTypeIntent &&
         isSportContext &&
-        !isExplicitSportIntent &&
-        (compliance?.colorCompliance ?? 0) <= 0
+        !isExplicitSportIntent
       ) {
-        // Sport product with color contradiction in non-sport context: hard reject to top-20
-        finalRelevance01 = 0;
-        finalRelevanceSource = "sport_keyword_hard_gate";
+        if (isFormalIntent || params.detectionProductCategory === "tops" || params.detectionProductCategory === "bottoms" || params.detectionProductCategory === "outerwear") {
+          // In formal or non-sport apparel flows, sportswear should not survive due visual similarity.
+          finalRelevance01 = 0;
+          finalRelevanceSource = "sport_keyword_hard_gate";
+        } else {
+          // For weaker contexts, keep as low-confidence fallback only.
+          finalRelevance01 = Math.min(finalRelevance01 ?? 0, 0.22);
+          finalRelevanceSource = "sport_keyword_soft_cap";
+        }
       } else if (hasColorIntentForFinal && authoritativeColorNorm && compliance) {
         const authoritativeColor = tieredColorListCompliance(
           desiredColorsTierForRelevance,
@@ -3996,11 +4033,16 @@ export async function searchByImageWithSimilarity(
             : hasInferredColorSignal
               ? 0.55  // Was 0.28: color was inferred, so be more lenient
               : 0.65;  // Was 0.36: color was just detected, most lenient
-          const nearDuplicateRelax = similarityScore >= nearIdenticalRawMin ? 0.08 : 0;  // Was 0.06
+          const strictOnePieceCap = strictInferredOnePieceColorGate ? 0.26 : maxConflictCap;
+          const nearDuplicateRelax = similarityScore >= nearIdenticalRawMin
+            ? strictInferredOnePieceColorGate
+              ? 0.03
+              : 0.08
+            : 0;
           // Keep contradictory colors visible for sparse catalogs, but with realistic caps
           const conservativeCap = Math.min(
-            maxConflictCap + nearDuplicateRelax,
-            Math.max(0.15, conflictAdjustedCap),  // Was 0.05: higher floor
+            strictOnePieceCap + nearDuplicateRelax,
+            Math.max(strictInferredOnePieceColorGate ? 0.08 : 0.15, conflictAdjustedCap),
           );
           finalRelevance01 = Math.min(finalRelevance01 ?? 0, conservativeCap);
           finalRelevanceSource = "catalog_color_correction";
@@ -4008,9 +4050,14 @@ export async function searchByImageWithSimilarity(
           explainMatchedColor = authoritativeColorNorm;
           explainColorTier = "none";
         } else if ((compliance.colorCompliance ?? 0) + 0.05 < authoritativeColor.compliance) {
+          const strongTypeForColorLift =
+            (compliance.exactTypeScore ?? 0) >= 1 || (compliance.productTypeCompliance ?? 0) >= 0.9;
+          const styleCompatibleForColorLift =
+            !hasDetectionAnchoredTypeIntent || !hasSoftStyleHint || (compliance.styleCompliance ?? 0) >= 0.25;
           const canApplyColorLift =
-            hasExplicitColorIntent ||
-            authoritativeColor.tier === "exact";
+            (hasExplicitColorIntent || authoritativeColor.tier === "exact") &&
+            strongTypeForColorLift &&
+            styleCompatibleForColorLift;
           if (canApplyColorLift) {
             const colorLift = 0.88 + 0.12 * authoritativeColor.compliance;
             finalRelevance01 = Math.max(finalRelevance01 ?? 0, Math.min(1, similarityScore * colorLift));

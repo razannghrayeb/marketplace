@@ -53,6 +53,7 @@ import {
   mapDetectionToCategory,
   getSearchCategories,
   shouldUseAlternatives,
+  inferDressLengthFromBox,
   type CategoryMapping,
 } from "../../lib/detection/categoryMapper";
 import {
@@ -125,6 +126,8 @@ function shopLookDebugRawCosineFirstEnv(): boolean {
   // Never allow raw-cosine bypass outside local/dev debugging.
   const nodeEnv = String(process.env.NODE_ENV ?? "").toLowerCase();
   if (nodeEnv === "production") return false;
+  const branchEnabled = String(process.env.SEARCH_ENABLE_DEBUG_RAW_BRANCH ?? "").toLowerCase();
+  if (!(branchEnabled === "1" || branchEnabled === "true")) return false;
   const v = String(process.env.SEARCH_IMAGE_DEBUG_RAW_EXACT_COSINE_FIRST ?? "").toLowerCase();
   return v === "1" || v === "true";
 }
@@ -1379,6 +1382,28 @@ function applyFormalityFilter(products: ProductResult[], minFormality: number | 
   });
 
   if (!hasStructuredFormality) {
+    if (minFormality >= 8) {
+      const casualFormalConflictRe = /\b(drawstring|jogger|sweatpants?|track\s?pant|trackpant|athletic|sportswear|sport|workout|gym|training|yoga|legging|hoodie)\b/i;
+      const lexFiltered = products.filter((p) => {
+        const blob = [
+          (p as any).title,
+          (p as any).description,
+          (p as any).category,
+          (p as any).brand,
+          Array.isArray((p as any).product_types) ? (p as any).product_types.join(" ") : (p as any).product_types,
+        ]
+          .filter((x) => x != null)
+          .map((x) => String(x))
+          .join(" ");
+        return !casualFormalConflictRe.test(blob);
+      });
+      if (lexFiltered.length !== products.length) {
+        console.log(
+          `[formality-filter] lexical fallback filtered ${products.length} -> ${lexFiltered.length} (minFormality=${minFormality})`,
+        );
+      }
+      return lexFiltered;
+    }
     console.log(
       `[formality-filter] skipped hard filter (no structured formality metadata, minFormality=${minFormality})`,
     );
@@ -1395,6 +1420,62 @@ function applyFormalityFilter(products: ProductResult[], minFormality: number | 
     console.log(`[formality-filter] filtered ${products.length} → ${filtered.length} (minFormality=${minFormality})`);
   }
   
+  return filtered;
+}
+
+function applyAthleticMismatchGuard(params: {
+  products: ProductResult[];
+  detectionLabel: string;
+  productCategory: string;
+  softStyle?: string;
+  minFormality?: number;
+}): ProductResult[] {
+  const products = Array.isArray(params.products) ? params.products : [];
+  if (products.length === 0) return products;
+
+  const detectionLabel = String(params.detectionLabel ?? "").toLowerCase();
+  const productCategory = String(params.productCategory ?? "").toLowerCase();
+  const softStyle = String(params.softStyle ?? "").toLowerCase();
+  const minFormality = Number(params.minFormality ?? 0);
+
+  const isAthleticIntent =
+    /\b(sport|athlet|training|workout|gym|fitness|running|jogging|activewear|sportswear)\b/.test(softStyle) ||
+    /\b(sport|athlet|training|workout|gym|fitness|running|jogger|track|sportswear|legging)\b/.test(detectionLabel);
+  if (isAthleticIntent) return products;
+
+  const shouldGuardCategory =
+    productCategory === "tops" ||
+    productCategory === "bottoms" ||
+    productCategory === "outerwear" ||
+    (productCategory === "footwear" && minFormality >= 8);
+  if (!shouldGuardCategory) return products;
+
+  const athleticTokenRe = /\b(sport|sportswear|athlet|training|workout|gym|fitness|crossfit|yoga|jogger|track\s?pant|trackpant|running|runner|dry\s?-?fit|dri\s?-?fit|leggings?)\b/i;
+  const athleticBrandRe = /\b(adidas|nike|puma|reebok|asics|under\s?armour|new\s?balance|lululemon|gymshark)\b/i;
+
+  const filtered = products.filter((p) => {
+    const blob = [
+      (p as any).title,
+      (p as any).description,
+      (p as any).category,
+      (p as any).category_canonical,
+      (p as any).brand,
+      Array.isArray((p as any).product_types) ? (p as any).product_types.join(" ") : (p as any).product_types,
+    ]
+      .filter((x) => x != null)
+      .map((x) => String(x))
+      .join(" ");
+    const athleticByKeywords = athleticTokenRe.test(blob);
+    const athleticByBrandAndText = athleticBrandRe.test(String((p as any).brand ?? "")) && athleticTokenRe.test(blob);
+    return !(athleticByKeywords || athleticByBrandAndText);
+  });
+
+  if (filtered.length !== products.length) {
+    console.log(
+      `[athletic-guard] detection="${params.detectionLabel}" category=${params.productCategory} filtered ${products.length} -> ${filtered.length}`,
+    );
+  }
+
   return filtered;
 }
 
@@ -1517,12 +1598,29 @@ function inferLengthIntentFromDetection(
 ): "mini" | "midi" | "maxi" | "long" | null {
   const label = String(detection.label || "").toLowerCase();
   if (!label.includes("dress")) return null;
-  // Use lexical evidence only; bbox-height heuristics over-constrain retrieval
-  // (e.g. vest dress inferred as long/maxi because of framing/crop).
+  // Prefer lexical evidence when present.
   if (/\bmini\b/.test(label)) return "mini";
   if (/\bmidi\b/.test(label)) return "midi";
   if (/\bmaxi\b/.test(label)) return "maxi";
   if (/\blong\b/.test(label)) return "long";
+
+  // Fallback to bbox-based inference only for confident, sufficiently large dress detections.
+  // This restores useful length intent for labels like "vest dress" without over-constraining tiny crops.
+  const conf = Number(detection.confidence ?? 0);
+  const area = Number((detection as any).area_ratio ?? 0);
+  const box = (detection as any).box_normalized;
+  if (
+    conf >= 0.72 &&
+    area >= 0.14 &&
+    box &&
+    typeof box.y1 === "number" &&
+    typeof box.y2 === "number"
+  ) {
+    const inferred = inferDressLengthFromBox({ y1: box.y1, y2: box.y2 });
+    if (inferred === "maxi") return "long";
+    if (inferred) return inferred;
+  }
+
   return null;
 }
 
@@ -2373,6 +2471,9 @@ export class ImageAnalysisService {
         includeRelated: false,
         knnField: "embedding",
         relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+        sessionId: options.sessionId,
+        userId: options.userId,
+        sessionFilters: options.sessionFilters ?? undefined,
       });
       const fallbackRows: DetectionSimilarProducts[] = fallback.results.length > 0 ? [{
         detection: { label: "full_image", confidence: 1.0, box: { x1: 0, y1: 0, x2: imageWidth, y2: imageHeight }, area_ratio: 1.0 },
@@ -2703,7 +2804,7 @@ export class ImageAnalysisService {
       // Do not inherit full-image BLIP hints by default for a specific detection.
       // A full-image caption can describe a different region entirely (e.g. top vs trousers)
       // and will poison per-detection retrieval if used as the fallback signal.
-      let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
+      let detectionBlipSignal: BlipSignal | undefined;
       let detectionCaptionAcceptedForLock = false;
       if (detCaption.trim().length > 0) {
         const captionLength = inferLengthIntentFromCaption(detCaption);
@@ -2739,7 +2840,7 @@ export class ImageAnalysisService {
           detectionBlipSignal = buildBlipSignal(detStruct, detConfidence);
           if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
           // Per-detection BLIP can override global gender only if detected with strong confidence.
-          if (detStruct.audience.gender && detConfidence >= imageBlipSoftHintConfidenceStrong()) {
+          if (!filters.gender && detStruct.audience.gender && detConfidence >= imageBlipSoftHintConfidenceStrong()) {
             filters.gender = detStruct.audience.gender;
           }
           if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
@@ -2779,6 +2880,7 @@ export class ImageAnalysisService {
             : undefined,
         imageBuffer: clipBuffer,
         pHash: sourceImagePHash,
+        detectionYoloConfidence: detection.confidence,
         detectionProductCategory: categoryMapping.productCategory,
         filters,
         softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
@@ -2794,6 +2896,9 @@ export class ImageAnalysisService {
         inferredColorsByItem,
         inferredColorsByItemConfidence,
         debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+        sessionId: options.sessionId,
+        userId: options.userId,
+        sessionFilters: options.sessionFilters ?? undefined,
       });
 
       // If BLIP-derived audience/style filters are too strict and remove all hits,
@@ -2824,6 +2929,7 @@ export class ImageAnalysisService {
               : undefined,
           imageBuffer: clipBuffer,
           pHash: sourceImagePHash,
+          detectionYoloConfidence: detection.confidence,
           detectionProductCategory: categoryMapping.productCategory,
           filters: filtersRetry,
           softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
@@ -2839,6 +2945,9 @@ export class ImageAnalysisService {
           inferredColorsByItem,
           inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+          sessionId: options.sessionId,
+          userId: options.userId,
+          sessionFilters: options.sessionFilters ?? undefined,
         });
       }
 
@@ -2858,6 +2967,7 @@ export class ImageAnalysisService {
               : undefined,
           imageBuffer: clipBuffer,
           pHash: sourceImagePHash,
+          detectionYoloConfidence: detection.confidence,
           detectionProductCategory: categoryMapping.productCategory,
           filters: filtersNoHardTypes,
           softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
@@ -2873,6 +2983,9 @@ export class ImageAnalysisService {
           inferredColorsByItem,
           inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+          sessionId: options.sessionId,
+          userId: options.userId,
+          sessionFilters: options.sessionFilters ?? undefined,
         });
       }
 
@@ -2896,6 +3009,7 @@ export class ImageAnalysisService {
               : undefined,
           imageBuffer: clipBuffer,
           pHash: sourceImagePHash,
+          detectionYoloConfidence: detection.confidence,
           detectionProductCategory: categoryMapping.productCategory,
           filters: filtersSansCategory,
           limit: retrievalLimit,
@@ -2910,6 +3024,9 @@ export class ImageAnalysisService {
           inferredColorsByItem,
           inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+          sessionId: options.sessionId,
+          userId: options.userId,
+          sessionFilters: options.sessionFilters ?? undefined,
         });
         if (similarResult.results.length === 0) {
           similarResult = await searchByImageWithSimilarity({
@@ -2920,6 +3037,7 @@ export class ImageAnalysisService {
                 : undefined,
             imageBuffer: clipBuffer,
             pHash: sourceImagePHash,
+            detectionYoloConfidence: detection.confidence,
             detectionProductCategory: categoryMapping.productCategory,
             // Keep crop-derived structural intent even in last-resort fallback.
             filters: {
@@ -2937,6 +3055,9 @@ export class ImageAnalysisService {
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+            sessionId: options.sessionId,
+            userId: options.userId,
+            sessionFilters: options.sessionFilters ?? undefined,
           });
         }
       }
@@ -2971,10 +3092,12 @@ export class ImageAnalysisService {
             imageEmbedding: alt,
             imageEmbeddingGarment: alt,
             imageBuffer: queryProcessBuf,
-              pHash: sourceImagePHash,
+            pHash: sourceImagePHash,
+            detectionYoloConfidence: detection.confidence,
+            detectionProductCategory: categoryMapping.productCategory,
             filters,
             softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
-              limit: retrievalLimit,
+            limit: retrievalLimit,
             similarityThreshold,
             includeRelated: false,
             predictedCategoryAisles,
@@ -2986,6 +3109,9 @@ export class ImageAnalysisService {
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+            sessionId: options.sessionId,
+            userId: options.userId,
+            sessionFilters: options.sessionFilters ?? undefined,
           });
           similarResult = {
             ...similarResult,
@@ -3024,16 +3150,25 @@ export class ImageAnalysisService {
         console.log(`[formality-apply-main] detection="${detection.label}" minFormality=${minFormality} incoming=${categorySafeResults.length}`);
       }
       const formalitySafeResults = applyFormalityFilter(categorySafeResults, minFormality);
+
+      const athleticSafeResults = applyAthleticMismatchGuard({
+        products: formalitySafeResults,
+        detectionLabel: label,
+        productCategory: categoryMapping.productCategory,
+        softStyle: String((filters as any).softStyle ?? ""),
+        minFormality,
+      });
       
       console.log(`[skip-trace] detection="${label}" after_formality_filter=${formalitySafeResults.length} (filtered_by=${categorySafeResults.length - formalitySafeResults.length})`);
+      console.log(`[skip-trace] detection="${label}" after_athletic_guard=${athleticSafeResults.length} (filtered_by=${formalitySafeResults.length - athleticSafeResults.length})`);
       
-      if (formalitySafeResults.length === 0) {
+      if (athleticSafeResults.length === 0) {
         console.log(`[skip-trace-WARN] detection="${label}" ZERO_RESULTS filters={category:"${filters.category}", productTypes:[${filters.productTypes?.join(",")}], softStyle:"${filters.softStyle}", minFormality:${minFormality}}`);
       }
       
       similarResult = {
         ...similarResult,
-        results: formalitySafeResults,
+        results: athleticSafeResults,
       };
 
       // Tiny footwear boxes often produce weak crop embeddings. If footwear search is empty,
@@ -3073,6 +3208,8 @@ export class ImageAnalysisService {
             imageEmbedding: recoveryVector,
             imageBuffer: queryProcessBuf,
             pHash: sourceImagePHash,
+            detectionYoloConfidence: detection.confidence,
+            detectionProductCategory: categoryMapping.productCategory,
             filters: footwearFilters,
             limit: retrievalLimit,
             similarityThreshold: shopLookTinyFootwearRecoveryThreshold(similarityThreshold),
@@ -3085,6 +3222,9 @@ export class ImageAnalysisService {
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+            sessionId: options.sessionId,
+            userId: options.userId,
+            sessionFilters: options.sessionFilters ?? undefined,
           });
 
           if (footwearRecovery.results.length > 0) {
@@ -3137,6 +3277,8 @@ export class ImageAnalysisService {
             imageEmbedding: recoveryVector,
             imageBuffer: queryProcessBuf,
             pHash: sourceImagePHash,
+            detectionYoloConfidence: detection.confidence,
+            detectionProductCategory: categoryMapping.productCategory,
             filters: topFilters,
             limit: retrievalLimit,
             similarityThreshold: shopLookTopRecoverySimilarityThreshold(similarityThreshold),
@@ -3149,6 +3291,9 @@ export class ImageAnalysisService {
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+            sessionId: options.sessionId,
+            userId: options.userId,
+            sessionFilters: options.sessionFilters ?? undefined,
           });
 
           if (topRecovery.results.length > 0) {
@@ -3788,7 +3933,7 @@ export class ImageAnalysisService {
           (filters as { category?: string | string[] }).category != null;
 
         const detCaption = fullResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
-        let detectionBlipSignal: BlipSignal | undefined = fullBlipSignal;
+        let detectionBlipSignal: BlipSignal | undefined;
         let detectionCaptionAcceptedForLock = false;
         if (detCaption.trim().length > 0) {
           const captionLength = inferLengthIntentFromCaption(detCaption);
@@ -3865,6 +4010,8 @@ export class ImageAnalysisService {
               : undefined,
           imageBuffer: clipBuffer,
           pHash: sourceImagePHash,
+          detectionYoloConfidence: detection.confidence,
+          detectionProductCategory: categoryMapping.productCategory,
           filters,
           softProductTypeHints,
           limit: retrievalLimit,
@@ -3879,6 +4026,9 @@ export class ImageAnalysisService {
           inferredColorsByItem,
           inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+          sessionId: options.sessionId,
+          userId: options.userId,
+          sessionFilters: options.sessionFilters ?? undefined,
         });
 
         // Retry without inferred attribute filters if they removed all hits.
@@ -3908,6 +4058,8 @@ export class ImageAnalysisService {
                 : undefined,
             imageBuffer: clipBuffer,
             pHash: sourceImagePHash,
+            detectionYoloConfidence: detection.confidence,
+            detectionProductCategory: categoryMapping.productCategory,
             filters: filtersRetry,
             softProductTypeHints,
             limit: retrievalLimit,
@@ -3922,6 +4074,9 @@ export class ImageAnalysisService {
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+            sessionId: options.sessionId,
+            userId: options.userId,
+            sessionFilters: options.sessionFilters ?? undefined,
           });
         }
 
@@ -3946,6 +4101,8 @@ export class ImageAnalysisService {
                 : undefined,
             imageBuffer: clipBuffer,
             pHash: sourceImagePHash,
+            detectionYoloConfidence: detection.confidence,
+            detectionProductCategory: categoryMapping.productCategory,
             filters: filtersSansCategory,
             softProductTypeHints,
             limit: retrievalLimit,
@@ -3959,6 +4116,9 @@ export class ImageAnalysisService {
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+            sessionId: options.sessionId,
+            userId: options.userId,
+            sessionFilters: options.sessionFilters ?? undefined,
           });
           if (similarResult.results.length === 0) {
             similarResult = await searchByImageWithSimilarity({
@@ -3969,6 +4129,8 @@ export class ImageAnalysisService {
                   : undefined,
               imageBuffer: clipBuffer,
               pHash: sourceImagePHash,
+              detectionYoloConfidence: detection.confidence,
+              detectionProductCategory: categoryMapping.productCategory,
               // Keep crop-derived structural intent even in last-resort fallback.
               filters: {
                 length: (filters as any).length,
@@ -3983,6 +4145,9 @@ export class ImageAnalysisService {
               inferredColorsByItem,
               inferredColorsByItemConfidence,
               debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+              sessionId: options.sessionId,
+              userId: options.userId,
+              sessionFilters: options.sessionFilters ?? undefined,
             });
           }
         }
@@ -4003,6 +4168,8 @@ export class ImageAnalysisService {
                 : undefined,
             imageBuffer: clipBuffer,
             pHash: sourceImagePHash,
+            detectionYoloConfidence: detection.confidence,
+            detectionProductCategory: categoryMapping.productCategory,
             filters: filtersNoHardTypes,
             softProductTypeHints,
             limit: retrievalLimit,
@@ -4017,6 +4184,9 @@ export class ImageAnalysisService {
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+            sessionId: options.sessionId,
+            userId: options.userId,
+            sessionFilters: options.sessionFilters ?? undefined,
           });
         }
 
@@ -4051,6 +4221,8 @@ export class ImageAnalysisService {
               imageEmbeddingGarment: alt,
               imageBuffer: queryProcessBuf,
               pHash: sourceImagePHash,
+              detectionYoloConfidence: detection.confidence,
+              detectionProductCategory: categoryMapping.productCategory,
               filters,
               softProductTypeHints,
               limit: retrievalLimit,
@@ -4065,6 +4237,9 @@ export class ImageAnalysisService {
               inferredColorsByItem,
               inferredColorsByItemConfidence,
               debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+              sessionId: options.sessionId,
+              userId: options.userId,
+              sessionFilters: options.sessionFilters ?? undefined,
             });
             similarResult = {
               ...similarResult,
@@ -4106,16 +4281,25 @@ export class ImageAnalysisService {
           console.log(`[formality-apply-alt] detection="${categorySource}" minFormality=${minFormality} incoming=${categorySafeResults.length}`);
         }
         const formalitySafeResults = applyFormalityFilter(categorySafeResults, minFormality);
+
+        const athleticSafeResults = applyAthleticMismatchGuard({
+          products: formalitySafeResults,
+          detectionLabel: categorySource,
+          productCategory: categoryMapping.productCategory,
+          softStyle: String((filters as any).softStyle ?? ""),
+          minFormality,
+        });
         
         console.log(`[skip-trace] detection="${categorySource}" after_formality_filter=${formalitySafeResults.length} (filtered_by=${categorySafeResults.length - formalitySafeResults.length})`);
+        console.log(`[skip-trace] detection="${categorySource}" after_athletic_guard=${athleticSafeResults.length} (filtered_by=${formalitySafeResults.length - athleticSafeResults.length})`);
         
-        if (formalitySafeResults.length === 0) {
+        if (athleticSafeResults.length === 0) {
           console.log(`[skip-trace-WARN] detection="${categorySource}" ZERO_RESULTS filters={category:"${filters.category}", productTypes:[${filters.productTypes?.join(",")}], softStyle:"${filters.softStyle}", minFormality:${minFormality}}`);
         }
         
         similarResult = {
           ...similarResult,
-          results: formalitySafeResults,
+          results: athleticSafeResults,
         };
 
         const includeEmpty = options.includeEmptyDetectionGroups === true;
@@ -4360,3 +4544,4 @@ export function getImageAnalysisService(): ImageAnalysisService {
 }
 
 export default ImageAnalysisService;
+
