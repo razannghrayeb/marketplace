@@ -2757,44 +2757,21 @@ export class ImageAnalysisService {
         }
       } catch { /* non-critical: color embedding channel still works */ }
       let predictedCategoryAisles: string[] | undefined;
-      const noisyCat = isNoisyCategoryForAutoHardCategory(categoryMapping, label);
-      const baseHardAuto =
-        categoryMapping.confidence >= shopLookHardCategoryConfThreshold() &&
-        (detection.area_ratio ?? 0) >= shopLookHardCategoryAreaRatioThreshold();
-      const relaxedGarmentHardAuto =
-        categoryMapping.confidence >= 0.85 &&
-        (detection.area_ratio ?? 0) >= 0.12 &&
-        (detection.confidence ?? 0) >= 0.75;
-      const detectionMeetsAutoHardHeuristics =
-        !noisyCat && (baseHardAuto || relaxedGarmentHardAuto);
-      const accessoryLikeCategory = isAccessoryLikeCategory(categoryMapping.productCategory);
-      const shouldHardCategory =
-        filterByDetectedCategory &&
-        (
-          accessoryLikeCategory ||
-          shopLookHardCategoryStrictEnv() ||
-          detectionMeetsAutoHardHeuristics ||
-          shouldForceHardCategoryForDetection(detection, categoryMapping)
-        );
-      const forceHardCategoryFilterUsed = Boolean(shouldHardCategory);
+      const forceHardCategoryFilterUsed = Boolean(filterByDetectedCategory);
       if (filterByDetectedCategory) {
-        if (shouldHardCategory) {
-          // Apply hard OpenSearch category filtering, even when global soft-category is enabled.
-          const terms = hardCategoryTermsForDetection(label, categoryMapping);
-          filters.category = terms.length === 1 ? terms[0] : terms;
-        } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
-          const typeHints = Array.isArray(filters.productTypes) ? filters.productTypes : [];
-          predictedCategoryAisles = typeHints.length
-            ? typeHints
-            : softProductTypeHints.length
-              ? softProductTypeHints
-            : expandedTypeHints.length
-              ? expandedTypeHints
-              : searchCategories;
-        } else {
-          filters.category =
-            searchCategories.length === 1 ? searchCategories[0] : searchCategories;
-        }
+        // Always hard-filter detection-driven searches by mapped category terms.
+        const terms = hardCategoryTermsForDetection(label, categoryMapping);
+        filters.category = terms.length === 1 ? terms[0] : terms;
+
+        // Keep soft aisle/type hints for rerank quality while hard category stays enforced.
+        const typeHints = Array.isArray(filters.productTypes) ? filters.productTypes : [];
+        predictedCategoryAisles = typeHints.length
+          ? typeHints
+          : softProductTypeHints.length
+            ? softProductTypeHints
+          : expandedTypeHints.length
+            ? expandedTypeHints
+            : searchCategories;
       }
 
       const knnFieldUsed = shopTheLookKnnField();
@@ -2872,6 +2849,13 @@ export class ImageAnalysisService {
         blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong() &&
         detectionCaptionAcceptedForLock;
 
+      const inferredPrimaryColorForDetection = (() => {
+        const detColor = inferredColorsByItem[itemColorKey];
+        const detColorConfidence = inferredColorsByItemConfidence[itemColorKey] ?? 0;
+        if (detColor && detColorConfidence >= 0.45) return detColor;
+        return undefined;
+      })();
+
       let similarResult = await searchByImageWithSimilarity({
         imageEmbedding: finalEmbedding,
         imageEmbeddingGarment:
@@ -2892,7 +2876,7 @@ export class ImageAnalysisService {
         forceHardCategoryFilter: forceHardCategoryFilterUsed,
         relaxThresholdWhenEmpty: shopLookRelaxEnv(),
         blipSignal: detectionBlipSignal,
-        inferredPrimaryColor,
+        inferredPrimaryColor: inferredPrimaryColorForDetection,
         inferredColorsByItem,
         inferredColorsByItemConfidence,
         debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -2941,7 +2925,7 @@ export class ImageAnalysisService {
           forceHardCategoryFilter: forceHardCategoryFilterUsed,
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
           blipSignal: detectionBlipSignal,
-          inferredPrimaryColor,
+          inferredPrimaryColor: inferredPrimaryColorForDetection,
           inferredColorsByItem,
           inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -2979,7 +2963,7 @@ export class ImageAnalysisService {
           forceHardCategoryFilter: forceHardCategoryFilterUsed,
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
           blipSignal: detectionBlipSignal,
-          inferredPrimaryColor,
+          inferredPrimaryColor: inferredPrimaryColorForDetection,
           inferredColorsByItem,
           inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -3017,10 +3001,10 @@ export class ImageAnalysisService {
           includeRelated: false,
           predictedCategoryAisles,
           knnField: shopTheLookKnnField(),
-          forceHardCategoryFilter: false,
+          forceHardCategoryFilter: true,
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
           blipSignal: detectionBlipSignal,
-          inferredPrimaryColor,
+          inferredPrimaryColor: inferredPrimaryColorForDetection,
           inferredColorsByItem,
           inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -3048,10 +3032,10 @@ export class ImageAnalysisService {
             similarityThreshold,
             includeRelated: false,
             knnField: shopTheLookKnnField(),
-            forceHardCategoryFilter: false,
+            forceHardCategoryFilter: true,
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
-            inferredPrimaryColor,
+            inferredPrimaryColor: inferredPrimaryColorForDetection,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -3105,7 +3089,7 @@ export class ImageAnalysisService {
             forceHardCategoryFilter: forceHardCategoryFilterUsed,
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
-            inferredPrimaryColor,
+            inferredPrimaryColor: inferredPrimaryColorForDetection,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -3218,7 +3202,7 @@ export class ImageAnalysisService {
             forceHardCategoryFilter: true,
             relaxThresholdWhenEmpty: true,
             blipSignal: detectionBlipSignal,
-            inferredPrimaryColor,
+            inferredPrimaryColor: inferredPrimaryColorForDetection,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -3287,7 +3271,7 @@ export class ImageAnalysisService {
             forceHardCategoryFilter: true,
             relaxThresholdWhenEmpty: true,
             blipSignal: detectionBlipSignal,
-            inferredPrimaryColor,
+            inferredPrimaryColor: inferredPrimaryColorForDetection,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -3915,22 +3899,19 @@ export class ImageAnalysisService {
             ...softCategories,
             ...browseTypeSeeds,
           ]);
-          const shouldHardCategory = accessoryLikeCategory || !(imageSoftCategoryEnv() || shopLookSoftCategoryEnv());
-          if (!shouldHardCategory) {
-            predictedCategoryAisles =
-              browseTypeSeeds.length > 0
-                ? browseTypeSeeds
-                : expandedTypeHints.length > 0
-                  ? expandedTypeHints
-                  : softCategories;
-          } else {
-            const terms = hardCategoryTermsForDetection(categorySource, categoryMapping);
-            filters.category = terms.length === 1 ? terms[0] : terms;
-          }
+          // Keep hard category guard always on for detection-driven searches.
+          const terms = hardCategoryTermsForDetection(categorySource, categoryMapping);
+          filters.category = terms.length === 1 ? terms[0] : terms;
+
+          // Preserve aisle/type hints for rerank quality.
+          predictedCategoryAisles =
+            browseTypeSeeds.length > 0
+              ? browseTypeSeeds
+              : expandedTypeHints.length > 0
+                ? expandedTypeHints
+                : softCategories;
         }
-        const forceHardCategoryFilterUsed =
-          options.filterByDetectedCategory !== false &&
-          (filters as { category?: string | string[] }).category != null;
+        const forceHardCategoryFilterUsed = options.filterByDetectedCategory !== false;
 
         const detCaption = fullResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
         let detectionBlipSignal: BlipSignal | undefined;
@@ -4002,6 +3983,13 @@ export class ImageAnalysisService {
           blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong() &&
           detectionCaptionAcceptedForLock;
 
+        const inferredPrimaryColorForDetection = (() => {
+          const detColor = inferredColorsByItem[itemColorKey];
+          const detColorConfidence = inferredColorsByItemConfidence[itemColorKey] ?? 0;
+          if (detColor && detColorConfidence >= 0.45) return detColor;
+          return undefined;
+        })();
+
         let similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
           imageEmbeddingGarment:
@@ -4022,7 +4010,7 @@ export class ImageAnalysisService {
           forceHardCategoryFilter: forceHardCategoryFilterUsed,
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
           blipSignal: detectionBlipSignal,
-          inferredPrimaryColor,
+          inferredPrimaryColor: inferredPrimaryColorForDetection,
           inferredColorsByItem,
           inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -4070,7 +4058,7 @@ export class ImageAnalysisService {
             forceHardCategoryFilter: forceHardCategoryFilterUsed,
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
-            inferredPrimaryColor,
+            inferredPrimaryColor: inferredPrimaryColorForDetection,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -4112,7 +4100,7 @@ export class ImageAnalysisService {
             knnField: shopTheLookKnnField(),
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
-            inferredPrimaryColor,
+            inferredPrimaryColor: inferredPrimaryColorForDetection,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -4141,7 +4129,7 @@ export class ImageAnalysisService {
               knnField: shopTheLookKnnField(),
               relaxThresholdWhenEmpty: shopLookRelaxEnv(),
               blipSignal: detectionBlipSignal,
-              inferredPrimaryColor,
+              inferredPrimaryColor: inferredPrimaryColorForDetection,
               inferredColorsByItem,
               inferredColorsByItemConfidence,
               debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -4180,7 +4168,7 @@ export class ImageAnalysisService {
             forceHardCategoryFilter: forceHardCategoryFilterUsed,
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
-            inferredPrimaryColor,
+            inferredPrimaryColor: inferredPrimaryColorForDetection,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -4233,7 +4221,7 @@ export class ImageAnalysisService {
               forceHardCategoryFilter: forceHardCategoryFilterUsed,
               relaxThresholdWhenEmpty: shopLookRelaxEnv(),
               blipSignal: detectionBlipSignal,
-              inferredPrimaryColor,
+              inferredPrimaryColor: inferredPrimaryColorForDetection,
               inferredColorsByItem,
               inferredColorsByItemConfidence,
               debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
