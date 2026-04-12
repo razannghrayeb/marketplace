@@ -4097,8 +4097,8 @@ export async function searchByImageWithSimilarity(
               colorMode: rerankColorModeForRelevance,
               relevanceIntentDebug,
 
-              // ── Final score diagnostics ──────────────────────────
-              finalRelevanceSnapshot01: finalRelevance01,
+              // ── Final score ──────────────────────────────────────
+              finalRelevance01,
               finalRelevanceSource,
             }
           : undefined,
@@ -4152,7 +4152,7 @@ export async function searchByImageWithSimilarity(
           explain: p.explain
             ? {
                 ...(p.explain as any),
-                finalRelevanceSnapshot01: lifted,
+                finalRelevance01: lifted,
                 finalRelevanceSource: "strong_visual_override",
               }
             : p.explain,
