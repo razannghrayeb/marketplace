@@ -170,7 +170,13 @@ export function computeFinalRelevance01(params: {
 export function normalizeQueryGender(g: string | undefined): string | null {
   if (!g) return null;
   const x = g.toLowerCase().trim();
-  if (x === "men" || x === "women" || x === "unisex") return x;
+  if (["men", "man", "male", "mens", "men's", "boy", "boys", "boys-kids", "boys_kids"].includes(x)) {
+    return "men";
+  }
+  if (["women", "woman", "female", "womens", "women's", "girl", "girls", "girls-kids", "girls_kids", "lady", "ladies"].includes(x)) {
+    return "women";
+  }
+  if (x === "unisex") return "unisex";
   return null;
 }
 
@@ -183,9 +189,7 @@ function docAgeGroup(hit: { _source?: Record<string, unknown> }): string | null 
 function docAudienceGender(hit: { _source?: Record<string, unknown> }): string | null {
   const raw = hit?._source?.audience_gender ?? hit?._source?.attr_gender;
   if (raw === undefined || raw === null) return null;
-  const s = String(raw).toLowerCase().trim();
-  if (s === "men" || s === "women" || s === "unisex") return s;
-  return null;
+  return normalizeQueryGender(String(raw));
 }
 
 /**

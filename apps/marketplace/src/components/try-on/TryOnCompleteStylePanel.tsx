@@ -2,6 +2,7 @@
 
 import Image from 'next/image'
 import Link from 'next/link'
+import { useEffect, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { Loader2, Shirt, Sparkles, AlertCircle } from 'lucide-react'
@@ -88,12 +89,18 @@ export function TryOnCompleteStylePanel({ garmentFile, jobId, enabled }: Props) 
     )
   }
 
-  return <CompleteStyleSections data={data} />
+  return <CompleteStyleSections data={data} garmentFile={garmentFile} />
 }
 
-function CompleteStyleSections({ data }: { data: TryOnCompleteStyleData }) {
+function CompleteStyleSections({ data, garmentFile }: { data: TryOnCompleteStyleData; garmentFile: File }) {
   const source = data.sourceProduct
-  const imgUrl = source.image_cdn || source.image_url
+  const garmentPreviewUrl = useMemo(() => URL.createObjectURL(garmentFile), [garmentFile])
+
+  useEffect(() => {
+    return () => {
+      URL.revokeObjectURL(garmentPreviewUrl)
+    }
+  }, [garmentPreviewUrl])
 
   return (
     <div className="space-y-6">
@@ -115,13 +122,7 @@ function CompleteStyleSections({ data }: { data: TryOnCompleteStyleData }) {
 
       <div className="flex gap-4 rounded-2xl border border-neutral-100 bg-neutral-50/80 p-4">
         <div className="relative h-20 w-16 shrink-0 overflow-hidden rounded-lg bg-neutral-200">
-          {imgUrl ? (
-            <Image src={imgUrl} alt="" fill className="object-cover" sizes="64px" />
-          ) : (
-            <div className="flex h-full items-center justify-center">
-              <Shirt className="h-6 w-6 text-neutral-400" />
-            </div>
-          )}
+          <Image src={garmentPreviewUrl} alt="Uploaded garment" fill className="object-cover" sizes="64px" />
         </div>
         <div className="min-w-0">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-violet-600">Anchor piece</p>
