@@ -271,12 +271,8 @@ export interface ProductResult {
     /** Same payload as `meta.relevance_intent` on image search responses. */
     relevanceIntentDebug?: ImageSearchRelevanceIntentDebug;
 
-    // ── Final score diagnostics ──────────────────────────────
-    /**
-     * Diagnostic snapshot of relevance after in-loop corrections.
-     * The authoritative score for ranking/response is top-level `product.finalRelevance01`.
-     */
-    finalRelevanceSnapshot01?: number;
+    // ── Final score ──────────────────────────────────────────
+    finalRelevance01?: number;
 
     // ── Legacy / text-search fields (omitted in image results) ─
     /** @deprecated Use clipCosine. Omitted when there is no separate lexical signal. */

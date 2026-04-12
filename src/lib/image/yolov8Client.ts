@@ -587,7 +587,9 @@ export function extractOutfitComposition(
   const accessories: Detection[] = [];
 
   for (const detection of detections) {
-    const mapped = mapDetectionToCategory(detection.label, detection.confidence).productCategory;
+    const mapped = mapDetectionToCategory(detection.label, detection.confidence, {
+      box_normalized: (detection as any).box_normalized,
+    }).productCategory;
     if (mapped === "tops") {
       tops.push(detection);
     } else if (mapped === "bottoms") {

@@ -259,7 +259,9 @@ async function detectAndCategorizeItem(
     }
 
     // Map YOLO label to our category system
-    const categoryMapping = mapDetectionToCategory(bestDetection.label, bestDetection.confidence);
+    const categoryMapping = mapDetectionToCategory(bestDetection.label, bestDetection.confidence, {
+      box_normalized: (bestDetection as any).box_normalized,
+    });
 
     return {
       category: categoryMapping.productCategory,

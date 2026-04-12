@@ -29,6 +29,57 @@ export interface CategoryAttributes {
   formalityHint?: number;
 }
 
+/**
+ * Detection box in normalized coordinates (0-1 range)
+ * Used to infer dress length from vertical coverage
+ */
+export interface NormalizedBox {
+  y1: number; // Top edge normalized (0 = image top)
+  y2: number; // Bottom edge normalized (1 = image bottom)
+}
+
+/**
+ * Infers dress length from bounding box height in normalized coordinates.
+ * 
+ * On a typical full-body fashion image (person standing):
+ * - 0.0 = top of image (head)
+ * - ~0.5 = waist/hip level
+ * - 1.0 = bottom of image (feet)
+ * 
+ * Dress length calculation:
+ * - dress_hemisphere = (y2_norm - 0.5) / 0.5  →  how far dress extends from waist
+ * - If > 0.35 of leg height: maxi/long (covers >35% of legs)
+ * - If 0.15-0.35: midi (covers 15-35% of legs)
+ * - If < 0.15: mini/short (covers <15% of legs)
+ * 
+ * @param box - Bounding box with normalized Y coordinates
+ * @returns "maxi" | "midi" | "mini" | undefined if box data insufficient
+ */
+export function inferDressLengthFromBox(box: NormalizedBox | undefined): "maxi" | "midi" | "mini" | undefined {
+  if (!box || typeof box.y2 !== 'number') return undefined;
+  
+  // Estimate leg coverage: how much of the lower body does dress cover?
+  // Assume waist is at ~0.5 and feet at ~1.0 (±0.05 for pose variation)
+  const assumedWaistLevel = 0.50;
+  const assumedFeetLevel = 0.98;
+  const legHeight = Math.max(0.01, assumedFeetLevel - assumedWaistLevel);
+  
+  // How far down the legs does the dress go?
+  const dressHemLevel = Math.min(1.0, box.y2);
+  const dressLegCoverage = Math.max(0, dressHemLevel - assumedWaistLevel) / legHeight;
+  
+  // Classify based on coverage:
+  if (dressLegCoverage > 0.35) {
+    return "maxi";  // Covers >35% of legs → to ankles
+  } else if (dressLegCoverage > 0.15) {
+    return "midi";  // Covers 15-35% of legs → knee area
+  } else if (dressLegCoverage >= 0) {
+    return "mini";  // Covers <15% of legs → thighs/short
+  }
+  
+  return undefined;
+}
+
 // ============================================================================
 // Primary Mappings (Exact Match)
 // ============================================================================
@@ -557,14 +608,17 @@ const FUZZY_PATTERNS: FuzzyPattern[] = [
 
 /**
  * Maps a detection label to a product category with confidence scoring.
+ * Optionally infers dress length from bounding box geometry.
  *
  * @param label - The YOLO detection label (e.g., "long sleeve top", "shoe")
  * @param detectionConfidence - YOLO detection confidence (0-1), defaults to 1.0
+ * @param detectionBox - Optional normalized bounding box to infer dress length from
  * @returns CategoryMapping with category, confidence, alternatives, and attributes
  */
 export function mapDetectionToCategory(
   label: string,
-  detectionConfidence: number = 1.0
+  detectionConfidence: number = 1.0,
+  detectionBox?: { box_normalized?: { y1?: number; y2?: number } }
 ): CategoryMapping {
   const normalized = label.toLowerCase().trim();
 
@@ -574,6 +628,18 @@ export function mapDetectionToCategory(
     mapping.attributes = { ...mapping.attributes };
     mapping.alternativeCategories = [...mapping.alternativeCategories];
     mapping.confidence = mapping.confidence * detectionConfidence;
+    
+    // Try to infer dress length from bounding box if this is a dress
+    if (mapping.productCategory === "dresses" && detectionBox?.box_normalized) {
+      const inferredLength = inferDressLengthFromBox({
+        y1: detectionBox.box_normalized.y1 ?? 0,
+        y2: detectionBox.box_normalized.y2 ?? 1,
+      });
+      if (inferredLength) {
+        mapping.attributes.dressLength = inferredLength;
+      }
+    }
+    
     return mapping;
   }
 
@@ -585,6 +651,18 @@ export function mapDetectionToCategory(
       result.alternativeCategories = [...mapping.alternativeCategories];
       // Slight confidence penalty for fuzzy match
       result.confidence = result.confidence * detectionConfidence * 0.9;
+      
+      // Try to infer dress length from bounding box
+      if (result.productCategory === "dresses" && detectionBox?.box_normalized) {
+        const inferredLength = inferDressLengthFromBox({
+          y1: detectionBox.box_normalized.y1 ?? 0,
+          y2: detectionBox.box_normalized.y2 ?? 1,
+        });
+        if (inferredLength) {
+          result.attributes.dressLength = inferredLength;
+        }
+      }
+      
       return result;
     }
   }
