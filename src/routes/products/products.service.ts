@@ -3774,7 +3774,6 @@ export async function searchByImageWithSimilarity(
         const comp = complianceById.get(String(h._source.product_id));
         if (!comp) return false;
         if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) return false;
-        if (nonAthleticIntent && isAthleticCatalogCandidate((h as any)?._source ?? {})) return false;
         if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
         
         // Must pass type intent
@@ -3794,14 +3793,6 @@ export async function searchByImageWithSimilarity(
         if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < 0.18) {
           return false;
         }
-        if (
-          params.detectionProductCategory === "dresses" &&
-          Boolean(desiredLengthForRelevance) &&
-          Boolean((comp as any).hasLengthIntent) &&
-          Number((comp as any).lengthCompliance ?? 0) < 0.35
-        ) {
-          return false;
-        }
         // Soft color intent should NOT gate rescue admission — only explicit color gates.
         // This prevents crop-dominant colors from pulling wrong categories (e.g., blue into white-dress search).
         
@@ -3814,7 +3805,6 @@ export async function searchByImageWithSimilarity(
           const comp = complianceById.get(String(h._source.product_id));
           if (!comp) return false;
           if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) return false;
-          if (nonAthleticIntent && isAthleticCatalogCandidate((h as any)?._source ?? {})) return false;
           // Stronger gender gate: when gender is explicitly filtered, reject hard mismatches (audienceCompliance === 0)
           // and also reject low compliance (< 0.75) to prevent women's shoes from appearing in men's searches
           const minAudienceCompliance = filtersAny.gender ? 0.75 : 0.55;
@@ -3824,12 +3814,6 @@ export async function searchByImageWithSimilarity(
           if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < fallbackSleeveMin) return false;
           if (hasExplicitColorIntent && (comp.colorCompliance ?? 0) < 0.18) return false;
           if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < 0.08) return false;
-          if (
-            params.detectionProductCategory === "dresses" &&
-            Boolean(desiredLengthForRelevance) &&
-            Boolean((comp as any).hasLengthIntent) &&
-            Number((comp as any).lengthCompliance ?? 0) < 0.2
-          ) return false;
           // Soft color intent does not gate fallback — only explicit color does.
           // This prevents crop-derived colors from blocking valid type matches.
           return true;
@@ -3846,7 +3830,6 @@ export async function searchByImageWithSimilarity(
           const comp = complianceById.get(String(h._source.product_id));
           if (!comp) return false;
           if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) return false;
-          if (nonAthleticIntent && isAthleticCatalogCandidate((h as any)?._source ?? {})) return false;
           if ((comp.hardBlocked ?? false) === true) return false;
           if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
           const typeComp = comp.productTypeCompliance ?? 0;
@@ -3914,23 +3897,22 @@ export async function searchByImageWithSimilarity(
         const hasOnlySoftColorHint = softColorBiasOnly && !hasReliableTypeIntentForRelevance && !hasDetectionAnchoredTypeIntent;
         const rescueFloor = intentAwareRescue
           ? hasOnlySoftColorHint
-            ? Math.min(effectiveFinalAcceptMin, 0.28)  // Very conservative for crop-color-only cases
+            ? Math.min(effectiveFinalAcceptMin, 0.35)  // Very conservative for crop-color-only cases
             : hasColorIntentForFinal
-              ? Math.min(effectiveFinalAcceptMin, hasExplicitColorIntent ? 0.42 : 0.38)
-              : Math.min(effectiveFinalAcceptMin, 0.34)
+              ? Math.min(effectiveFinalAcceptMin, hasExplicitColorIntent ? 0.48 : 0.44)
+              : Math.min(effectiveFinalAcceptMin, 0.56)
           : effectiveFinalAcceptMin;
         comp.finalRelevance01 = Math.max(rescueScore, rescueFloor);
         finalScoreSourceById.set(String(h._source.product_id), "final_accept_rescue");
       }
     }
-    const rescueCap = Math.max(limit, Math.min(12, Math.ceil(limit * 1.4)));
     rankedHits = [...rescuePool]
       .sort((a: any, b: any) => {
         const fa = complianceById.get(String(a._source.product_id))?.finalRelevance01 ?? 0;
         const fb = complianceById.get(String(b._source.product_id))?.finalRelevance01 ?? 0;
         return fb - fa;
       })
-      .slice(0, rescueCap);
+      .slice(0, Math.max(limit, 20));
   }
 
   // Keep a small high-visual slice even when metadata-based relevance is noisy.
@@ -3938,8 +3920,7 @@ export async function searchByImageWithSimilarity(
   // dropped solely due to weak/missing type/color fields.
   const rescueMinSim = imageVisualRescueMinSimilarity();
   const rescueMaxCount = imageVisualRescueMaxCount();
-  const sparseResultCutoff = Math.max(4, Math.ceil(limit * 0.45));
-  if (rescueMaxCount > 0 && rankedHits.length < sparseResultCutoff) {
+  if (rescueMaxCount > 0) {
     const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
     const rescueAudienceMin = imageVisualRescueAudienceMin();
     const rescueTypeMinIntent = hasReliableTypeIntentForRelevance
@@ -3976,7 +3957,6 @@ export async function searchByImageWithSimilarity(
         if (softColorBiasOnly && typeComp < 0.3) return false;
         return true;
       })
-      .filter(({ h }) => !(nonAthleticIntent && isAthleticCatalogCandidate((h as any)?._source ?? {})))
       .sort((a, b) => b.visualSim - a.visualSim)
       .slice(0, rescueMaxCount)
       .map((x) => x.h);
@@ -3989,7 +3969,7 @@ export async function searchByImageWithSimilarity(
   // by metadata noise, while still respecting audience and type/category safety.
   const mustKeepVisualMin = imageMustKeepVisualMinSimilarity();
   const mustKeepVisualMax = imageMustKeepVisualMaxCount();
-  if (!imageSearchVisualPrimaryRanking && mustKeepVisualMax > 0 && visualGatedHits.length > 0 && rankedHits.length < sparseResultCutoff) {
+  if (!imageSearchVisualPrimaryRanking && mustKeepVisualMax > 0 && visualGatedHits.length > 0) {
     const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
     const mustKeepAudienceMin = imageMustKeepVisualAudienceMin();
     const mustKeepTypeMin = hasReliableTypeIntentForRelevance
@@ -4020,7 +4000,6 @@ export async function searchByImageWithSimilarity(
         if (crossFamily >= 0.55) return false;
         return true;
       })
-      .filter(({ h }) => !(nonAthleticIntent && isAthleticCatalogCandidate((h as any)?._source ?? {})))
       .sort((a, b) => b.visualSim - a.visualSim)
       .slice(0, mustKeepVisualMax)
       .map((x) => x.h);
@@ -4140,56 +4119,6 @@ export async function searchByImageWithSimilarity(
     }
   }
 
-  // Stage 3: business filters (availability, duplicate collapse, bad metadata suppression).
-  if (rankedHits.length > 0) {
-    const stage3Enabled = String(process.env.SEARCH_IMAGE_STAGE3_BUSINESS_FILTERS ?? "1").toLowerCase() !== "0";
-    if (stage3Enabled) {
-      const deduped: any[] = [];
-      const seen = new Set<string>();
-      for (const h of rankedHits) {
-        const src = (h as any)?._source ?? {};
-        const key = String(src.parent_product_url ?? src.product_url ?? src.variant_group_key ?? src.product_id ?? "");
-        if (key && seen.has(key)) continue;
-        if (key) seen.add(key);
-        deduped.push(h);
-      }
-      rankedHits = deduped;
-
-      const availableHits = rankedHits.filter((h: any) => {
-        const v = (h as any)?._source?.availability;
-        return v === true || v === 1 || String(v).toLowerCase() === "true";
-      });
-      const minAvailableKeep = rankedHits.length >= 8 ? 4 : 1;
-      if (availableHits.length >= minAvailableKeep) {
-        rankedHits = availableHits;
-      }
-
-      if (hasColorIntentForFinal) {
-        const metadataSafe = rankedHits.filter((h: any) => {
-          const src = ((h as any)?._source ?? {}) as Record<string, unknown>;
-          const colorInfo = extractCanonicalColorTokensFromSource(src);
-          const normTypes = normalizedCatalogTypeTokens(src);
-          const normSleeve = inferCatalogSleeveToken(src);
-          const normLength = inferCatalogLengthToken(src);
-          // Keep if color is resolvable; drop unresolved bad color codes when color intent exists.
-          if (colorInfo.hasBadColorCode && colorInfo.tokens.length === 0) return false;
-          if (hasDetectionAnchoredTypeIntent && normTypes.length === 0) return false;
-          if (enforceSleeveGate && desiredSleeveForRelevance && normSleeve && normSleeve !== desiredSleeveForRelevance) return false;
-          if (
-            params.detectionProductCategory === "dresses" &&
-            Boolean(desiredLengthForRelevance) &&
-            normLength &&
-            normLength !== desiredLengthForRelevance
-          ) return false;
-          return true;
-        });
-        const minMetadataKeep = rankedHits.length >= 8 ? 3 : 1;
-        if (metadataSafe.length >= minMetadataKeep) {
-          rankedHits = metadataSafe;
-        }
-      }
-    }
-  }
   const countAfterColorPostfilter = rankedHits.length;
 
   // Hard gate for explicit gender intent: filter out products with hard gender mismatches.
@@ -4264,9 +4193,8 @@ export async function searchByImageWithSimilarity(
         is_primary: img.is_primary,
         p_hash: img.p_hash ?? undefined,
       }));
-      const hitSource = (hitsForHydrate.find((h: any) => String(h?._source?.product_id) === idStr)?._source ?? {}) as Record<string, unknown>;
-      const sourceColorInfo = extractCanonicalColorTokensFromSource(hitSource);
-      const authoritativeColorTokens = sourceColorInfo.tokens;
+      const authoritativeColorRaw = typeof p.color === "string" ? p.color : "";
+      const authoritativeColorTokens = extractCanonicalColorTokensFromRawColor(authoritativeColorRaw);
       const authoritativeColorNorm = authoritativeColorTokens[0] ?? "";
       let finalRelevance01 = compliance?.finalRelevance01;
       let finalRelevanceSource = finalScoreSourceById.get(idStr) ?? "computed";
@@ -4276,14 +4204,13 @@ export async function searchByImageWithSimilarity(
 
       // Hard gate: reject sport/athletic brand products when fashion (non-sport) intent is detected.
       // Sport brands (Adidas, Nike, Puma, etc.) are only relevant for explicit sportswear searches.
-      const isSportContext = isAthleticCatalogCandidate({
-        title: p.title,
-        description: p.description,
-        category: p.category,
-        category_canonical: (p as any).category_canonical,
-        brand: p.brand,
-        product_types: (p as any).product_types,
-      });
+      const isSportBrand = /adidas|nike|puma|reebok|asics|under armour|newbalance|new balance|lululemon|columbia|the north face|patagonia|asics|vibram|mizuno/i.test(
+        String(p.brand ?? ""),
+      );
+      const isSportKeyword = /sport|athletic|training|workout|gym|fitness|crossfit|yoga|jogger|track|runner|climber|climax|dri-fit|dryfit/i.test(
+        String(p.title ?? "") + " " + String(p.description ?? ""),
+      );
+      const isSportContext = isSportBrand && isSportKeyword;
       const isStyleSportIntent = /\b(sport|athletic|training|active|workout|gym|fitness|running|jogging)\b/i.test(
         desiredStyleForRelevance ?? "",
       );
@@ -4421,11 +4348,6 @@ export async function searchByImageWithSimilarity(
         }
       }
 
-      const metadataQualityFlags = {
-        badColorCode: sourceColorInfo.hasBadColorCode,
-        unresolvedColor: sourceColorInfo.hasBadColorCode && authoritativeColorTokens.length === 0,
-      };
-
       return {
         ...p,
         // Never overwrite canonical catalog color with query-time matched color.
@@ -4522,7 +4444,6 @@ export async function searchByImageWithSimilarity(
               desiredLength: (compliance as any).hasLengthIntent ? (desiredLengthForRelevance ?? undefined) : undefined,
               colorMode: rerankColorModeForRelevance,
               relevanceIntentDebug,
-              metadataQualityFlags,
 
               // ── Final score ──────────────────────────────────────
               finalRelevance01,

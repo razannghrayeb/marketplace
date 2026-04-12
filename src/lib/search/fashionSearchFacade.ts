@@ -180,6 +180,52 @@ function finiteEnvNumber(
   return Math.min(max, Math.max(min, n));
 }
 
+const ATHLETIC_INTENT_RE = /\b(sport|sportswear|athlet|training|workout|gym|fitness|running|jogging|activewear|yoga|crossfit)\b/i;
+const ATHLETIC_PRODUCT_RE = /\b(sport|sportswear|athlet|training|workout|gym|fitness|running|runner|jogger|track\s?pant|trackpant|activewear|yoga|crossfit|dry\s?-?fit|dri\s?-?fit|leggings?)\b/i;
+const ATHLETIC_BRAND_RE = /\b(adidas|nike|puma|reebok|asics|under\s?armou?r|new\s?balance|lululemon|gymshark)\b/i;
+
+function isExplicitAthleticIntent(query: string | undefined, filters: Partial<LegacySearchFilters> | undefined): boolean {
+  const parts: string[] = [];
+  if (query) parts.push(query);
+  const f: any = filters ?? {};
+  if (typeof f.style === "string") parts.push(f.style);
+  if (typeof f.softStyle === "string") parts.push(f.softStyle);
+  if (Array.isArray(f.productTypes)) parts.push(f.productTypes.join(" "));
+  if (typeof f.category === "string") parts.push(f.category);
+  if (Array.isArray(f.category)) parts.push(f.category.join(" "));
+  const blob = parts.join(" ").toLowerCase();
+  if (!blob.trim()) return false;
+  return ATHLETIC_INTENT_RE.test(blob);
+}
+
+function isAthleticProductCandidate(p: ProductResult): boolean {
+  const blob = [p.title, p.description, p.category, p.brand]
+    .filter((x) => x != null)
+    .map((x) => String(x))
+    .join(" ")
+    .toLowerCase();
+  if (!blob.trim()) return false;
+  const byKeyword = ATHLETIC_PRODUCT_RE.test(blob);
+  const byBrandAndSignal = ATHLETIC_BRAND_RE.test(String(p.brand ?? "")) && ATHLETIC_PRODUCT_RE.test(blob);
+  return byKeyword || byBrandAndSignal;
+}
+
+function applyNonSportGuardToNormalSearch(
+  items: ProductResult[] | undefined,
+  query: string | undefined,
+  filters: Partial<LegacySearchFilters> | undefined,
+): ProductResult[] | undefined {
+  if (!items || items.length === 0) return items;
+  const guardEnabled = String(process.env.SEARCH_TEXT_NONSPORT_GUARD ?? "1").toLowerCase() !== "0";
+  if (!guardEnabled) return items;
+  if (isExplicitAthleticIntent(query, filters)) return items;
+
+  const filtered = items.filter((p) => !isAthleticProductCandidate(p));
+  // Keep recall: only apply when enough non-sport items remain.
+  const minKeep = items.length >= 8 ? 4 : 1;
+  return filtered.length >= minKeep ? filtered : items;
+}
+
 export async function searchBrowse(params: {
   filters?: Partial<LegacySearchFilters>;
   page?: number;
@@ -202,7 +248,8 @@ export async function searchBrowse(params: {
     page,
     limit,
   })) as ProductResult[];
-  return filterByFinalRelevance(results, config.search.finalAcceptMinText) ?? [];
+  const relevanceFiltered = filterByFinalRelevance(results, config.search.finalAcceptMinText) ?? [];
+  return applyNonSportGuardToNormalSearch(relevanceFiltered, undefined, filters) ?? [];
 }
 
 /**
@@ -266,8 +313,10 @@ export async function searchText(params: UnifiedTextSearchParams): Promise<Searc
   } as any);
 
   const output = rest as SearchResultWithRelated;
-  const filteredResults = filterByFinalRelevance(output.results, config.search.finalAcceptMinText) ?? [];
-  const filteredRelated = filterByFinalRelevance(output.related, config.search.finalAcceptMinText);
+  const filteredResultsBase = filterByFinalRelevance(output.results, config.search.finalAcceptMinText) ?? [];
+  const filteredRelatedBase = filterByFinalRelevance(output.related, config.search.finalAcceptMinText);
+  const filteredResults = applyNonSportGuardToNormalSearch(filteredResultsBase, query, filters) ?? [];
+  const filteredRelated = applyNonSportGuardToNormalSearch(filteredRelatedBase, query, filters);
   const meta = {
     ...(output.meta ?? {}),
     total_results: filteredResults.length,
