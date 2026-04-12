@@ -1531,7 +1531,7 @@ function paginateDetectionGroups(
       count: products.length,
       totalAvailable: totalItems,
       pagination: {
-                finalRelevanceAdjusted01: lifted,
+        page: safePage,
         pageSize: safePageSize,
         totalItems,
         totalPages,
