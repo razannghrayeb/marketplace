@@ -1351,6 +1351,23 @@ function normalizeSimpleToken(x: unknown): string {
   return String(x ?? "").toLowerCase().trim();
 }
 
+function normalizeAudienceAgeGroupValue(x: unknown): string | undefined {
+  const s = normalizeSimpleToken(x);
+  if (!s) return undefined;
+  if (["kids", "kid", "children", "child", "junior", "youth", "toddler", "baby", "boys", "girls", "boy", "girl"].includes(s)) {
+    return "kids";
+  }
+  if (["adult", "adults", "men", "women", "unisex"].includes(s)) return "adult";
+  if (["teen", "teens", "teenager", "teenagers"].includes(s)) return "teen";
+  return s;
+}
+
+function hasKidsAudienceToken(x: unknown): boolean {
+  const s = normalizeSimpleToken(x);
+  if (!s) return false;
+  return /\b(boy|boys|girl|girls|kid|kids|child|children|toddler|baby|youth|junior)\b/.test(s);
+}
+
 function normalizeLexicalToken(x: string): string {
   const t = x.toLowerCase().trim();
   if (t.endsWith("ies") && t.length > 4) return `${t.slice(0, -3)}y`;
@@ -2284,23 +2301,34 @@ export async function searchByImageWithSimilarity(
   const filtersAny = filters as { gender?: string; color?: string; softColor?: string; style?: string; softStyle?: string };
   const visualPrimaryBroad = isBroadImageSearchVisualPrimaryRanking(filters, imageSearchTextQuery);
   if (filtersAny.gender) {
-    const g = String(filtersAny.gender).toLowerCase().trim();
+    const rawGender = String(filtersAny.gender).toLowerCase().trim();
+    const g = normalizeQueryGender(rawGender) ?? rawGender;
+    const normalizedAgeGroup = normalizeAudienceAgeGroupValue((filters as { ageGroup?: string }).ageGroup);
+    const kidsAudienceIntent = normalizedAgeGroup === "kids" || hasKidsAudienceToken(rawGender);
     // For image-search we need to be resilient to occasional index attribute mistakes.
     // We therefore:
     // - allow either `attr_gender` match OR title keyword match for the desired gender
     // - but explicitly exclude the opposite gender keyword in title.
     const titleGenderShould =
       g === "women"
-        ? ["women", "womens", "female", "ladies", "woman"]
+        ? kidsAudienceIntent
+          ? ["girls", "girl", "women", "womens", "female", "ladies", "woman"]
+          : ["women", "womens", "female", "ladies", "woman"]
         : g === "men"
-          ? ["men", "mens", "male", "man"]
+          ? kidsAudienceIntent
+            ? ["boys", "boy", "men", "mens", "male", "man"]
+            : ["men", "mens", "male", "man"]
           : ["unisex"];
 
     const titleOppShould =
       g === "women"
-        ? ["men", "mens", "male", "boy", "boys", "man", "kid", "kids", "youth", "toddler", "baby"]
+        ? kidsAudienceIntent
+          ? ["men", "mens", "male", "boy", "boys", "man", "gents", "gentlemen"]
+          : ["men", "mens", "male", "boy", "boys", "man", "kid", "kids", "youth", "toddler", "baby"]
         : g === "men"
-          ? ["women", "womens", "female", "ladies", "woman", "girls", "girl", "boy", "boys", "kid", "kids", "youth", "toddler", "baby"]
+          ? kidsAudienceIntent
+            ? ["women", "womens", "female", "ladies", "woman", "girls", "girl"]
+            : ["women", "womens", "female", "ladies", "woman", "girls", "girl", "boy", "boys", "kid", "kids", "youth", "toddler", "baby"]
           : [];
 
     const genderVariants = attrGenderFilterClause(g).terms.attr_gender;
@@ -2345,6 +2373,27 @@ export async function searchByImageWithSimilarity(
         must_not: mustNot.length ? mustNot : undefined,
       },
     });
+  }
+  {
+    const normalizedAgeGroup = normalizeAudienceAgeGroupValue((filters as { ageGroup?: string }).ageGroup);
+    if (normalizedAgeGroup === "kids") {
+      filter.push({
+        bool: {
+          should: [
+            { terms: { age_group: ["kids", "kid", "children", "child", "youth", "junior", "toddler", "baby"] } },
+            { match: { title: "kids" } },
+            { match: { title: "children" } },
+            { match: { title: "boys" } },
+            { match: { title: "girls" } },
+            { match: { title: "baby" } },
+            { match: { title: "toddler" } },
+            { match: { title: "junior" } },
+            { match: { title: "youth" } },
+          ],
+          minimum_should_match: 1,
+        },
+      });
+    }
   }
   if (filtersAny.style) {
     const s = String(filtersAny.style).toLowerCase();
@@ -3000,12 +3049,14 @@ export async function searchByImageWithSimilarity(
   const desiredColorsTierForRelevance =
     allColorsForRelevance.length > 0 ? allColorsForRelevance : desiredColorsForRelevance;
 
-  const queryAgeGroupForRelevance =
+  const queryAgeGroupRawForRelevance =
     typeof filtersRecord.ageGroup === "string" ? filtersRecord.ageGroup : undefined;
+  const queryAgeGroupForRelevance =
+    normalizeAudienceAgeGroupValue(queryAgeGroupRawForRelevance) ?? queryAgeGroupRawForRelevance;
   const queryGenderNorm = normalizeQueryGender(filtersAny.gender);
   const hasAudienceIntentForRelevance = Boolean(queryAgeGroupForRelevance || queryGenderNorm);
   const queryAgeGroupNormForSafety = normalizeSimpleToken(queryAgeGroupForRelevance);
-  const hasKidsAudienceIntent = queryAgeGroupNormForSafety === "kids";
+  const hasKidsAudienceIntent = queryAgeGroupNormForSafety === "kids" || hasKidsAudienceToken(filtersAny.gender);
 
   const explicitStyleForRelevance =
     typeof filtersRecord.style === "string"
@@ -3022,6 +3073,12 @@ export async function searchByImageWithSimilarity(
     (hasSoftStyleHint && !athleticIntentRe.test(softStyleForRelevance)) ||
     (hasExplicitStyleIntent && !athleticIntentRe.test(explicitStyleForRelevance)) ||
     (desiredProductTypes.length > 0 && !desiredProductTypes.some((t) => athleticIntentRe.test(String(t))));
+  const shouldSuppressAthleticCandidates =
+    hasDetectionAnchoredTypeIntent &&
+    (params.detectionProductCategory === "tops" ||
+      params.detectionProductCategory === "bottoms" ||
+      params.detectionProductCategory === "outerwear") &&
+    (nonAthleticIntent || hasSoftStyleHint || hasExplicitStyleIntent);
   const softStyleGateEnabled = String(process.env.SEARCH_IMAGE_SOFT_STYLE_GATE ?? "1").toLowerCase() !== "0";
   const styleIntentGatesFinalRelevance =
     hasExplicitStyleIntent ||
@@ -3814,6 +3871,7 @@ export async function searchByImageWithSimilarity(
           if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < fallbackSleeveMin) return false;
           if (hasExplicitColorIntent && (comp.colorCompliance ?? 0) < 0.18) return false;
           if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < 0.08) return false;
+          if (shouldSuppressAthleticCandidates && isAthleticCatalogCandidate(h._source ?? {})) return false;
           // Soft color intent does not gate fallback — only explicit color does.
           // This prevents crop-derived colors from blocking valid type matches.
           return true;
@@ -3853,6 +3911,7 @@ export async function searchByImageWithSimilarity(
       const comp = complianceById.get(String(h._source.product_id));
       if (comp) {
         if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) continue;
+        if (shouldSuppressAthleticCandidates && isAthleticCatalogCandidate(h._source ?? {})) continue;
         if (hasDetectionAnchoredTypeIntent) {
           const typeComp = comp.productTypeCompliance ?? 0;
           const exactType = comp.exactTypeScore ?? 0;
@@ -3983,6 +4042,7 @@ export async function searchByImageWithSimilarity(
         const id = String(h._source.product_id);
         const visualSim = visualSimFromHit(h);
         const comp = complianceById.get(id);
+        const athleticCandidate = isAthleticCatalogCandidate(h._source ?? {});
         return {
           h,
           id,
@@ -3990,11 +4050,13 @@ export async function searchByImageWithSimilarity(
           audience: comp?.audienceCompliance ?? 1,
           typeComp: comp?.productTypeCompliance ?? 0,
           crossFamily: comp?.crossFamilyPenalty ?? 0,
+          athleticCandidate,
         };
       })
-      .filter(({ visualSim, audience, typeComp, crossFamily }) => {
+      .filter(({ visualSim, audience, typeComp, crossFamily, athleticCandidate }) => {
         if (visualSim < mustKeepVisualMin) return false;
         if (hasAudienceIntentForRelevance && audience < mustKeepAudienceMin) return false;
+        if (shouldSuppressAthleticCandidates && athleticCandidate) return false;
         if ((hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) && crossFamily >= 0.5) return false;
         if ((hasExplicitTypeFilter || hasExplicitCategoryFilter || hasDetectionAnchoredTypeIntent) && typeComp < mustKeepTypeMin) return false;
         if (crossFamily >= 0.55) return false;
@@ -4043,7 +4105,6 @@ export async function searchByImageWithSimilarity(
     }
   }
   const countAfterFinalAcceptMin = rankedHits.length;
-
   const belowFinalRelevanceGate = visualGatedHits.length > 0 && rankedHits.length === 0;
 
   if (hasExplicitColorIntent && desiredColorsForRelevance.length > 0) {
@@ -4112,7 +4173,7 @@ export async function searchByImageWithSimilarity(
           (h: any) => !isAthleticCatalogCandidate((h as any)?._source ?? {}),
         );
         const minKeep = rankedHits.length >= 8 ? 3 : 1;
-        if (nonAthleticHits.length >= minKeep) {
+        if (shouldSuppressAthleticCandidates || nonAthleticHits.length >= minKeep) {
           rankedHits = nonAthleticHits;
         }
       }

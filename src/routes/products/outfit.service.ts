@@ -413,6 +413,68 @@ async function inferGenderFromImageUrl(imageUrl: string, productTitle?: string |
 
 // ============================================================================
 function formatOutfitCompletion(result: OutfitCompletion): StyleRecommendationResponse {
+  const seenProductIds = new Set<number>();
+  const seenNearDuplicateKeys = new Set<string>();
+
+  const recommendations = result.recommendations
+    .map((rec) => {
+      const products = rec.products
+        .map((p) => {
+          const raw = p as Product & { product_id?: number };
+          const id = raw.id ?? raw.product_id;
+          const priceCents =
+            typeof raw.price_cents === "number" && Number.isFinite(raw.price_cents)
+              ? Math.max(0, Math.round(raw.price_cents))
+              : 0;
+
+          const normalizedTitle = String(p.title || "")
+            .toLowerCase()
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 120);
+          const normalizedBrand = String(p.brand || "")
+            .toLowerCase()
+            .replace(/\s+/g, " ")
+            .trim();
+          const normalizedImage = String(p.image_cdn || p.image_url || "")
+            .toLowerCase()
+            .replace(/^https?:\/\//, "")
+            .trim();
+
+          const resolvedId = typeof id === "number" && Number.isFinite(id) ? id : 0;
+          const nearDuplicateKey = `${normalizedBrand}|${normalizedTitle}|${normalizedImage}`;
+
+          if (resolvedId < 1) return null;
+          if (seenProductIds.has(resolvedId)) return null;
+          if (seenNearDuplicateKeys.has(nearDuplicateKey)) return null;
+
+          seenProductIds.add(resolvedId);
+          seenNearDuplicateKeys.add(nearDuplicateKey);
+
+          return {
+            id: resolvedId,
+            title: p.title,
+            brand: p.brand,
+            price: priceCents,
+            currency: p.currency || "USD",
+            image: p.image_cdn || p.image_url,
+            matchScore: Math.round(p.matchScore),
+            matchReasons: p.matchReasons,
+            owned: (p as any).owned === true ? true : undefined,
+          };
+        })
+        .filter((row): row is NonNullable<typeof row> => Boolean(row));
+
+      return {
+        category: rec.category,
+        reason: rec.reason,
+        priority: rec.priority,
+        priorityLabel: getPriorityLabel(rec.priority),
+        products,
+      };
+    })
+    .filter((rec) => rec.products.length > 0);
+
   return {
     completionMode: "product",
     sourceProduct: result.sourceProduct,
@@ -428,32 +490,8 @@ function formatOutfitCompletion(result: OutfitCompletion): StyleRecommendationRe
       },
     },
     outfitSuggestion: result.outfitSuggestion,
-    recommendations: result.recommendations.map(rec => ({
-      category: rec.category,
-      reason: rec.reason,
-      priority: rec.priority,
-      priorityLabel: getPriorityLabel(rec.priority),
-      products: rec.products.map(p => {
-        const raw = p as Product & { product_id?: number };
-        const id = raw.id ?? raw.product_id;
-        const priceCents =
-          typeof raw.price_cents === "number" && Number.isFinite(raw.price_cents)
-            ? Math.round(raw.price_cents)
-            : 0;
-        return {
-          id: typeof id === "number" && Number.isFinite(id) ? id : 0,
-          title: p.title,
-          brand: p.brand,
-          price: priceCents,
-          currency: p.currency || "USD",
-          image: p.image_cdn || p.image_url,
-          matchScore: Math.round(p.matchScore),
-          matchReasons: p.matchReasons,
-          owned: (p as any).owned === true ? true : undefined,
-        };
-      }).filter((row) => row.id >= 1),
-    })),
-    totalRecommendations: result.recommendations.reduce((sum, r) => sum + r.products.length, 0),
+    recommendations,
+    totalRecommendations: recommendations.reduce((sum, r) => sum + r.products.length, 0),
   };
 }
 

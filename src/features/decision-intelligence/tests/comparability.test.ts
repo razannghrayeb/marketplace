@@ -87,3 +87,13 @@ test("accepts unisex with gendered item", () => {
   assert.equal(result.valid, true);
   assert.equal(result.crossGenderPairs.length, 0);
 });
+
+test("does not treat 'distressed' as dress token", () => {
+  const result = validateComparableProductSet([
+    p(501, "Distressed Knitwear Top", "tops", { description: "Distressed texture knitwear" }),
+    p(502, "Crew Sweatshirt", "tops", { description: "Cotton sweatshirt" }),
+  ]);
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.categoryMismatchPairs, []);
+});

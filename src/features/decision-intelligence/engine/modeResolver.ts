@@ -4,6 +4,15 @@ function normalize(value: string | undefined): string {
   return (value || "").trim().toLowerCase();
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasToken(value: string, token: string): boolean {
+  const re = new RegExp(`(?:^|[^a-z0-9])${escapeRegExp(token)}(?:$|[^a-z0-9])`, "i");
+  return re.test(value);
+}
+
 const groupMap: Record<string, string> = {
   dress: "one_piece",
   jumpsuit: "one_piece",
@@ -36,7 +45,7 @@ export function inferMajorCategory(profile: ProductDecisionProfile): string {
   const cat = normalize(profile.category);
   const sub = normalize(profile.subcategory);
   for (const [token, group] of Object.entries(groupMap)) {
-    if (cat.includes(token) || sub.includes(token)) return group;
+    if (hasToken(cat, token) || hasToken(sub, token)) return group;
   }
   return cat || "other";
 }

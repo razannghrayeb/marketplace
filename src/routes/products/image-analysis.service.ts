@@ -1264,10 +1264,24 @@ function isAccessoryLikeCategory(productCategory: string): boolean {
   return c === "bags" || c === "accessories";
 }
 
+function normalizeBinaryGender(gender: string | undefined): "men" | "women" | null {
+  const g = String(gender ?? "").toLowerCase();
+  if (/\b(men|mens|man|male|boy|boys)\b/.test(g)) return "men";
+  if (/\b(women|womens|woman|female|lady|ladies|girl|girls)\b/.test(g)) return "women";
+  return null;
+}
+
+function isFeminineFootwearCue(text: string): boolean {
+  return /\b(heel|heels|high heel|stiletto|stilettos|pump|pumps|kitten heel|kitten heels|mule|mules|slingback|slingbacks|mary jane|mary janes|ballet flat|ballet flats|wedge|wedges)\b/.test(
+    text,
+  );
+}
+
 function applyDetectionCategoryGuard(
   products: ProductResult[],
   detectionLabel: string,
   categoryMapping: CategoryMapping,
+  queryGender?: string,
 ): ProductResult[] {
   const guardEnabled = imageDetectionCategoryGuardEnabled();
   const strictAlwaysOn =
@@ -1282,6 +1296,7 @@ function applyDetectionCategoryGuard(
   const baseAllowed = strictTerms.length > 0 ? strictTerms : fallbackTerms;
   const allowedTerms = [...new Set(baseAllowed.map((t) => normalizeLooseText(t)).filter(Boolean))];
   const desiredSleeveIntent = inferSleeveIntentFromDetectionLabel(detectionLabel);
+  const queryGenderNorm = normalizeBinaryGender(queryGender);
   if (allowedTerms.length === 0) return products;
 
   return products.filter((p) => {
@@ -1315,6 +1330,18 @@ function applyDetectionCategoryGuard(
 
     const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, term));
     if (!allowByTerm) return false;
+
+    // Gender-aware footwear subtype safety:
+    // generic "shoe" detections should not surface clearly feminine footwear
+    // when query audience is men.
+    if (categoryMapping.productCategory === "footwear" && queryGenderNorm === "men") {
+      if (/\b(women|womens|woman|female|lady|ladies|girl|girls)\b/.test(haystack)) {
+        return false;
+      }
+      if (isFeminineFootwearCue(haystack)) {
+        return false;
+      }
+    }
 
     // Sleeve contradiction guard: when detection is explicitly sleeve-typed,
     // reject products that explicitly indicate a conflicting sleeve type.
@@ -2549,6 +2576,15 @@ export class ImageAnalysisService {
         };
       }
     }
+    if (
+      !inferredAudience.ageGroup &&
+      (inferredAudience.gender === "boys" || inferredAudience.gender === "girls")
+    ) {
+      inferredAudience = {
+        ...inferredAudience,
+        ageGroup: "kids",
+      };
+    }
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
     const inferredColorsByItem: Record<string, string | null> = {};
@@ -3147,6 +3183,7 @@ export class ImageAnalysisService {
         precisionSafeResults,
         detection.label,
         categoryMapping,
+        String((filters as any).gender ?? ""),
       );
       
       console.log(`[skip-trace] detection="${label}" after_category_guard=${categorySafeResults.length} (filtered_by=${precisionSafeResults.length - categorySafeResults.length})`);
@@ -3750,6 +3787,15 @@ export class ImageAnalysisService {
         };
       }
     }
+    if (
+      !inferredAudience.ageGroup &&
+      (inferredAudience.gender === "boys" || inferredAudience.gender === "girls")
+    ) {
+      inferredAudience = {
+        ...inferredAudience,
+        ageGroup: "kids",
+      };
+    }
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
     const inferredColorsByItem: Record<string, string | null> = {};
@@ -4285,6 +4331,7 @@ export class ImageAnalysisService {
           precisionSafeResults,
           categorySource,
           categoryMapping,
+          String((filters as any).gender ?? ""),
         );
         
         console.log(`[skip-trace] detection="${categorySource}" after_category_guard=${categorySafeResults.length} (filtered_by=${precisionSafeResults.length - categorySafeResults.length})`);

@@ -48,9 +48,18 @@ function toBlob(product: RawProduct): string {
     .trim();
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasToken(blob: string, token: string): boolean {
+  const re = new RegExp(`(?:^|[^a-z0-9])${escapeRegExp(token)}(?:$|[^a-z0-9])`, "i");
+  return re.test(blob);
+}
+
 function isFashionProduct(product: RawProduct): boolean {
   const blob = toBlob(product);
-  return FASHION_TOKENS.some((token) => blob.includes(token));
+  return FASHION_TOKENS.some((token) => hasToken(blob, token));
 }
 
 function normalizeToken(value: string | undefined): string {
@@ -127,7 +136,7 @@ const MAJOR_CATEGORY_TOKENS: Array<{ token: string; major: string }> = [
 
 function inferMajorCategory(product: RawProduct): string {
   const blob = toBlob(product);
-  const match = MAJOR_CATEGORY_TOKENS.find((entry) => blob.includes(entry.token));
+  const match = MAJOR_CATEGORY_TOKENS.find((entry) => hasToken(blob, entry.token));
   if (match) return match.major;
   return normalizeToken(product.category) || "other";
 }
