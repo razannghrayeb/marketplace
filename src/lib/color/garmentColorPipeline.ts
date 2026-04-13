@@ -283,6 +283,31 @@ export async function extractGarmentFashionColors(
   const secondaryCanonical = canonList.length > 1 ? canonList[1] : null;
   const accentCanonical = canonList.length > 2 ? canonList[2] : null;
 
+  const promotableNeutralColors = new Set([
+    "gray",
+    "charcoal",
+    "white",
+    "off-white",
+    "cream",
+    "ivory",
+    "beige",
+    "tan",
+    "silver",
+  ]);
+  if (
+    primaryCanonical === "black" &&
+    secondaryCanonical &&
+    promotableNeutralColors.has(secondaryCanonical) &&
+    (weights[1] ?? 0) >= 0.2 &&
+    (weights[0] ?? 0) - (weights[1] ?? 0) <= 0.25
+  ) {
+    canonList[0] = secondaryCanonical;
+    canonList[1] = primaryCanonical;
+    const primaryWeight = weights[0] ?? 1;
+    weights[0] = weights[1] ?? 0;
+    weights[1] = primaryWeight;
+  }
+
   const w0 = weights[0] ?? 1;
   const w1 = weights[1] ?? 0;
   const separation =

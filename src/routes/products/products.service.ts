@@ -3261,6 +3261,7 @@ export async function searchByImageWithSimilarity(
       : undefined;
   const desiredSleeveForRelevance =
     typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
+  const desiredSleeveNorm = desiredSleeveForRelevance;
   const isTopDetectionIntent =
     params.detectionProductCategory === "tops" ||
     desiredProductTypes.some((t) => /\b(top|tee|tshirt|shirt|blouse|tank|cami)\b/.test(String(t).toLowerCase()));
@@ -3271,13 +3272,13 @@ export async function searchByImageWithSimilarity(
     (!hasDetectionAnchoredTypeIntent || isTopDetectionIntent);
   const preferredSleeveMin =
     desiredSleeveForRelevance === "long"
-      ? 0.52
+      ? 0.68
       : desiredSleeveForRelevance === "short" || desiredSleeveForRelevance === "sleeveless"
         ? 0.55
         : 0.25;
   const fallbackSleeveMin =
     desiredSleeveForRelevance === "long"
-      ? 0.38
+      ? 0.6
       : desiredSleeveForRelevance === "short" || desiredSleeveForRelevance === "sleeveless"
         ? 0.4
         : 0.1;
@@ -3289,10 +3290,7 @@ export async function searchByImageWithSimilarity(
     !hasExplicitColorIntent &&
     hasInferredColorSignal &&
     hasDetectionAnchoredTypeIntent &&
-    (
-      params.detectionProductCategory === "dresses" ||
-      desiredProductTypes.some((t) => /\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(String(t).toLowerCase()))
-    );
+    desiredProductTypes.some((t) => /\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(String(t).toLowerCase()));
   // Crop-dominant colors affect reranking but should not gate final relevance
   // unless we also have inferred semantic color evidence (e.g., BLIP "blue jeans").
   const softColorBiasOnly =
@@ -4012,12 +4010,11 @@ export async function searchByImageWithSimilarity(
       // In intent-constrained searches, never fall back to the full visual pool.
       // Start empty and admit only type-safe candidates.
       rescuePool = [];
-      const desiredSleeveNorm = String(desiredSleeveForRelevance ?? "").toLowerCase();
       const isTopDetectionIntent =
         params.detectionProductCategory === "tops" ||
         desiredProductTypes.some((t) => /\b(top|tee|tshirt|shirt|blouse|tank|cami)\b/.test(String(t).toLowerCase()));
       const enforceSleeveGate =
-        (desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless") &&
+        (desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless" || desiredSleeveNorm === "long") &&
         (!hasDetectionAnchoredTypeIntent || isTopDetectionIntent);
       const minTypeCompliance = hasDetectionAnchoredTypeIntent
         ? visualGatedHits.length >= 30
@@ -4864,7 +4861,10 @@ export async function searchByImageWithSimilarity(
       const styleComp = Number(ex.styleCompliance ?? 0);
       const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
       if (!hasKidsAudienceIntent && hasChildAudienceSignals(p as Record<string, unknown>)) return false;
-      if (enforceSleeveGate && Number(ex.sleeveCompliance ?? 0) < 0.55) return false;
+      if (enforceSleeveGate) {
+        const sleeveMin = desiredSleeveNorm === "long" ? 0.68 : 0.55;
+        if (Number(ex.sleeveCompliance ?? 0) < sleeveMin) return false;
+      }
       if (params.detectionProductCategory === "tops" && (hasExplicitStyleIntent || hasSoftStyleHint) && styleComp < 0.2 && sim < 0.96) return false;
       if (crossFamily >= 0.5) return false;
       if (exactType >= 1 || typeComp >= 0.3) return true;
