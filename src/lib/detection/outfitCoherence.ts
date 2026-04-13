@@ -140,6 +140,72 @@ function getItemGroup(label: string): string {
   return "unknown";
 }
 
+function getPairingCategoryKey(label: string): ProductCategory {
+  const normalized = label.toLowerCase();
+  const group = getItemGroup(label);
+
+  if (group === "tops") {
+    if (/\bhoodie\b/.test(normalized)) return "hoodie";
+    if (/\bsweatshirt\b/.test(normalized)) return "sweatshirt";
+    if (/\bsweater\b/.test(normalized)) return "sweater";
+    if (/\bcardigan\b/.test(normalized)) return "cardigan";
+    if (/\bblouse\b/.test(normalized)) return "blouse";
+    if (/\bshirt\b|\bboxford\b|\bbutton[- ]?down\b/.test(normalized)) return "shirt";
+    if (/\bt[- ]?shirt\b|\btee\b/.test(normalized)) return "tshirt";
+    if (/\btank\b|\bcamisole\b|\bcami\b/.test(normalized)) return "tank_top";
+    if (/\bcrop\b/.test(normalized)) return "crop_top";
+    return "top";
+  }
+
+  if (group === "bottoms") {
+    if (/\bjean\b|\bdenim\b/.test(normalized)) return "jeans";
+    if (/\btrouser\b|\bpant\b|\bcargo\b/.test(normalized)) return "pants";
+    if (/\bshort\b/.test(normalized)) return "shorts";
+    if (/\blegging\b|\btight\b/.test(normalized)) return "leggings";
+    return "skirt";
+  }
+
+  if (group === "outerwear") {
+    if (/\bblazer\b/.test(normalized)) return "blazer";
+    if (/\bcoat\b/.test(normalized)) return "coat";
+    if (/\bparka\b/.test(normalized)) return "parka";
+    if (/\bbomber\b/.test(normalized)) return "bomber";
+    return "jacket";
+  }
+
+  if (group === "footwear") {
+    if (/\bheel\b|\bpump\b/.test(normalized)) return "heels";
+    if (/\bboot\b/.test(normalized)) return "boots";
+    if (/\bsandal\b/.test(normalized)) return "sandals";
+    if (/\bloafer\b|\boxford\b/.test(normalized)) return "loafers";
+    if (/\bflat\b/.test(normalized)) return "flats";
+    return "sneakers";
+  }
+
+  if (group === "bags") {
+    if (/\bclutch\b/.test(normalized)) return "clutch";
+    if (/\btote\b/.test(normalized)) return "tote";
+    if (/\bbackpack\b/.test(normalized)) return "backpack";
+    if (/\bcrossbody\b/.test(normalized)) return "crossbody";
+    return "bag";
+  }
+
+  if (group === "accessories") {
+    if (/\bwatch\b/.test(normalized)) return "watch";
+    if (/\bnecklace|pendant|chain\b/.test(normalized)) return "necklace";
+    if (/\bbracelet|bangle|cuff\b/.test(normalized)) return "bracelet";
+    if (/\bearring|hoop|stud\b/.test(normalized)) return "earrings";
+    if (/\bhat|cap|beanie|beret\b/.test(normalized)) return "hat";
+    if (/\bscarf|shawl|wrap|stole\b/.test(normalized)) return "scarf";
+    if (/\bbelt\b/.test(normalized)) return "belt";
+    return "jewelry";
+  }
+
+  if (group === "dresses") return "dress";
+
+  return "top";
+}
+
 // ============================================================================
 // Category Compatibility
 // ============================================================================
@@ -166,13 +232,13 @@ function computeCategoryCompatibility(labelA: string, labelB: string): { score: 
   }
 
   // Check if there's a defined pairing
-  const categoryA = mapDetectionToCategory(labelA).productCategory as ProductCategory;
+  const categoryA = getPairingCategoryKey(labelA);
   const pairings = CATEGORY_PAIRINGS[categoryA] || [];
 
   for (const pairing of pairings) {
     const pairingCategories = pairing.categories.map(c => c.toLowerCase());
     const targetGroup = getItemGroup(labelB);
-    const targetCategory = mapDetectionToCategory(labelB).productCategory;
+    const targetCategory = getPairingCategoryKey(labelB);
 
     if (pairingCategories.some(c => c === targetCategory || getItemGroup(c) === targetGroup)) {
       // Priority 1 = essential = 0.95, Priority 2 = recommended = 0.8, Priority 3 = optional = 0.65
@@ -185,13 +251,13 @@ function computeCategoryCompatibility(labelA: string, labelB: string): { score: 
   }
 
   // Check reverse pairing
-  const categoryB = mapDetectionToCategory(labelB).productCategory as ProductCategory;
+  const categoryB = getPairingCategoryKey(labelB);
   const reversePairings = CATEGORY_PAIRINGS[categoryB] || [];
 
   for (const pairing of reversePairings) {
     const pairingCategories = pairing.categories.map(c => c.toLowerCase());
     const targetGroup = getItemGroup(labelA);
-    const targetCategory = mapDetectionToCategory(labelA).productCategory;
+    const targetCategory = getPairingCategoryKey(labelA);
 
     if (pairingCategories.some(c => c === targetCategory || getItemGroup(c) === targetGroup)) {
       const scoreMap: Record<number, number> = { 1: 0.95, 2: 0.8, 3: 0.65 };
