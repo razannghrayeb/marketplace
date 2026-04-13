@@ -1857,6 +1857,7 @@ function collectConfidentColorTokenMap(params: {
   const category = String(params.mergedCategoryForRelevance ?? "").toLowerCase().trim();
   const isBottomsLike = /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|short|shorts|skirt|skirts|legging|leggings|cargo|chino|chinos)\b/.test(category);
   const isBagLike = /\b(bag|bags|wallet|wallets|purse|purses|handbag|handbags|tote|totes|backpack|backpacks|clutch|clutches|crossbody|satchel|satchels)\b/.test(category);
+  const isFootwearLike = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|flat|flats)\b/.test(category);
   const isTopLike = /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|sweater|hoodie|cardigan|jacket|coat|blazer|outerwear)\b/.test(category);
 
   const add = (value: string | null | undefined, confidence: number) => {
@@ -1887,6 +1888,12 @@ function collectConfidentColorTokenMap(params: {
       if (/(top|shirt|blouse|sweater|hoodie|jacket|coat|blazer)/i.test(key)) return 0.6;
       return 1;
     }
+    if (isFootwearLike) {
+      if (/(shoe|sandal|sneaker|heel|boot|loafer|trainer|flat)/i.test(key)) return 1.3;
+      if (apparelKeyRe.test(key)) return 0.45;
+      if (/(bag|wallet|purse|handbag|tote|backpack|clutch|crossbody|satchel)/i.test(key)) return 0.6;
+      return 1;
+    }
     if (isTopLike) {
       if (/(top|shirt|blouse|tee|t-?shirt|sweater|hoodie|cardigan)/i.test(key)) return 1.2;
       if (/(trouser|pant|jean|skirt|short|legging|cargo|shoe|sandal|sneaker|bag|wallet)/i.test(key)) return 0.7;
@@ -1912,7 +1919,7 @@ function collectConfidentColorTokenMap(params: {
     const rawConf = Number(itemConfs[key]);
     let conf = Number.isFinite(rawConf) ? rawConf : defaultItemColorConfidence;
     conf *= keyConfidenceWeight(key);
-    if (hasConfidentApparelColor && accessoryKeyRe.test(key) && !apparelKeyRe.test(key)) {
+    if (!isFootwearLike && hasConfidentApparelColor && accessoryKeyRe.test(key) && !apparelKeyRe.test(key)) {
       conf *= 0.72;
     }
     if (conf >= colorConfidenceThreshold()) {
@@ -1930,7 +1937,7 @@ function collectConfidentColorTokenMap(params: {
       const rawConf = Number(fci?.[key]);
       let conf = Number.isFinite(rawConf) ? rawConf : defaultItemColorConfidence;
       conf *= keyConfidenceWeight(key);
-      if (hasConfidentApparelColor && accessoryKeyRe.test(key) && !apparelKeyRe.test(key)) {
+      if (!isFootwearLike && hasConfidentApparelColor && accessoryKeyRe.test(key) && !apparelKeyRe.test(key)) {
         conf *= 0.72;
       }
       if (conf >= colorConfidenceThreshold()) {

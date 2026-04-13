@@ -33,6 +33,7 @@ import {
 } from "../../lib/image/captionAttributeInference";
 import { buildStructuredBlipOutput } from "../../lib/image/blipStructured";
 import { extractDominantColorNames } from "../../lib/color/dominantColor";
+import { inferMaterialFromTextureCrop } from "../../lib/image/materialInference";
 import {
   YOLOv8Client,
   getYOLOv8Client,
@@ -1192,14 +1193,14 @@ function shouldKeepDetectionForShopTheLook(detection: Detection): boolean {
 }
 
 function accessoryRecoveryConfidenceThreshold(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_ACCESSORY_RECOVERY_CONFIDENCE ?? "0.2");
-  if (!Number.isFinite(raw)) return 0.2;
+  const raw = Number(process.env.SEARCH_IMAGE_ACCESSORY_RECOVERY_CONFIDENCE ?? "0.15");
+  if (!Number.isFinite(raw)) return 0.15;
   return Math.max(0.05, Math.min(0.6, raw));
 }
 
 function accessoryRecoveryAreaRatioThreshold(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_ACCESSORY_RECOVERY_AREA_RATIO ?? "0.001");
-  if (!Number.isFinite(raw)) return 0.001;
+  const raw = Number(process.env.SEARCH_IMAGE_ACCESSORY_RECOVERY_AREA_RATIO ?? "0.0006");
+  if (!Number.isFinite(raw)) return 0.0006;
   return Math.max(0.0001, Math.min(0.02, raw));
 }
 
@@ -1474,6 +1475,57 @@ function applyDetectionCategoryGuard(
 
     return true;
   });
+}
+
+function applySleeveIntentGuard(params: {
+  products: ProductResult[];
+  detectionLabel: string;
+  categoryMapping: CategoryMapping;
+}): ProductResult[] {
+  const products = Array.isArray(params.products) ? params.products : [];
+  if (products.length === 0) return products;
+
+  const category = String(params.categoryMapping.productCategory ?? "").toLowerCase();
+  if (category !== "tops" && category !== "dresses" && category !== "outerwear") {
+    return products;
+  }
+
+  const desiredSleeve =
+    params.categoryMapping.attributes.sleeveLength ??
+    inferSleeveIntentFromDetectionLabel(params.detectionLabel);
+  if (!desiredSleeve) return products;
+
+  const minCompliance = desiredSleeve === "short" || desiredSleeve === "sleeveless" ? 0.5 : 0.4;
+
+  const filtered = products.filter((p) => {
+    const sleeveCompliance = Number((p as any)?.explain?.sleeveCompliance);
+    if (Number.isFinite(sleeveCompliance)) {
+      return sleeveCompliance >= minCompliance;
+    }
+
+    const blob = [
+      (p as any)?.title,
+      (p as any)?.description,
+      (p as any)?.attr_sleeve,
+      Array.isArray((p as any)?.product_types)
+        ? (p as any).product_types.join(" ")
+        : (p as any)?.product_types,
+    ]
+      .filter((x) => x != null)
+      .map((x) => String(x).toLowerCase())
+      .join(" ");
+
+    const observedSleeve = inferSleeveFromProductText(blob);
+    return !isSleeveContradiction(desiredSleeve, observedSleeve);
+  });
+
+  if (filtered.length !== products.length) {
+    console.log(
+      `[sleeve-guard] detection="${params.detectionLabel}" desired=${desiredSleeve} filtered ${products.length} -> ${filtered.length}`,
+    );
+  }
+
+  return filtered;
 }
 
 function applyShopLookVisualPrecisionGuard(
@@ -2937,12 +2989,38 @@ export class ImageAnalysisService {
         });
         if (cropColors.length > 0) {
           (filters as any).cropDominantColors = cropColors;
+          
+          // For bottoms (trousers, pants, etc.), prefer secondary neutral colors over black
+          // when primary is black, as shadow/crop edges can skew toward black.
+          let selectedColor = cropColors[0];
+          const cropColorConfidence = estimateCropColorConfidence(detection);
+          
+          if (cropColors.length > 1 && cropColorConfidence < 0.65) {
+            const isBottoms = /\b(bottoms?|pants?|trousers?|chinos?|cargo|jeans?|skirt|leggings?)\b/.test(label.toLowerCase());
+            const isFootwear = /\b(shoes?|sneakers?|boots?|heels?|flats?|sandals?|loafers?)\b/.test(label.toLowerCase());
+            
+            // For bottoms: if primary is black but secondary is gray/charcoal, prefer gray
+            if (isBottoms && cropColors[0].toLowerCase() === "black") {
+              const secondaryLower = cropColors[1].toLowerCase();
+              if (secondaryLower === "gray" || secondaryLower === "charcoal" || secondaryLower === "dark-gray") {
+                selectedColor = cropColors[1];
+              }
+            }
+            // For footwear: if primary is black but secondary is white/off-white, prefer white
+            else if (isFootwear && cropColors[0].toLowerCase() === "black") {
+              const secondaryLower = cropColors[1].toLowerCase();
+              if (secondaryLower === "white" || secondaryLower === "off-white" || secondaryLower === "cream") {
+                selectedColor = cropColors[1];
+              }
+            }
+          }
+          
           setDetectionColorIfHigherConfidence(
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             inferredColorsByItemSource,
             itemColorKey,
-            cropColors[0],
+            selectedColor,
             estimateCropColorConfidence(detection),
             1,
           );
@@ -2990,6 +3068,14 @@ export class ImageAnalysisService {
       }
 
       const knnFieldUsed = shopTheLookKnnField();
+      const textureMaterial = await inferMaterialFromTextureCrop({
+        clipBuffer,
+        productCategory: categoryMapping.productCategory,
+        detectionLabel: label,
+      });
+      if (textureMaterial.material) {
+        (filters as any).material = textureMaterial.material;
+      }
 
       // Per-detection BLIP captioning + CLIP consistency gate.
       const detCaption = analysisResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
@@ -3348,15 +3434,21 @@ export class ImageAnalysisService {
         categoryMapping,
         String((filters as any).gender ?? ""),
       );
+
+      const sleeveSafeResults = applySleeveIntentGuard({
+        products: categorySafeResults,
+        detectionLabel: detection.label,
+        categoryMapping,
+      });
       
       console.log(`[skip-trace] detection="${label}" after_category_guard=${categorySafeResults.length} (filtered_by=${precisionSafeResults.length - categorySafeResults.length})`);
       
       // Apply formality filter if formal wear was detected from BLIP caption
       const minFormality = (filters as any).minFormality;
       if (minFormality) {
-        console.log(`[formality-apply-main] detection="${detection.label}" minFormality=${minFormality} incoming=${categorySafeResults.length}`);
+        console.log(`[formality-apply-main] detection="${detection.label}" minFormality=${minFormality} incoming=${sleeveSafeResults.length}`);
       }
-      const formalitySafeResults = applyFormalityFilter(categorySafeResults, minFormality);
+      const formalitySafeResults = applyFormalityFilter(sleeveSafeResults, minFormality);
 
       const athleticSafeResults = applyAthleticMismatchGuard({
         products: formalitySafeResults,
@@ -3366,7 +3458,8 @@ export class ImageAnalysisService {
         minFormality,
       });
       
-      console.log(`[skip-trace] detection="${label}" after_formality_filter=${formalitySafeResults.length} (filtered_by=${categorySafeResults.length - formalitySafeResults.length})`);
+      console.log(`[skip-trace] detection="${label}" after_sleeve_guard=${sleeveSafeResults.length} (filtered_by=${categorySafeResults.length - sleeveSafeResults.length})`);
+      console.log(`[skip-trace] detection="${label}" after_formality_filter=${formalitySafeResults.length} (filtered_by=${sleeveSafeResults.length - formalitySafeResults.length})`);
       console.log(`[skip-trace] detection="${label}" after_athletic_guard=${athleticSafeResults.length} (filtered_by=${formalitySafeResults.length - athleticSafeResults.length})`);
       
       if (athleticSafeResults.length === 0) {
@@ -3452,13 +3545,14 @@ export class ImageAnalysisService {
         }
       }
 
+      const vestLikeRecovery = /\bvest\b/.test(String(label ?? "").toLowerCase());
       if (
         similarResult.results.length === 0 &&
         categoryMapping.productCategory === "tops" &&
-        (detection.confidence ?? 0) >= 0.82 &&
-        (detection.area_ratio ?? 0) >= 0.08
+        (((detection.confidence ?? 0) >= 0.82 && (detection.area_ratio ?? 0) >= 0.08) ||
+          (vestLikeRecovery && (detection.confidence ?? 0) >= 0.3 && (detection.area_ratio ?? 0) >= 0.04))
       ) {
-        console.log(`[recovery-attempt] detection="${label}" type=tops_recovery reason="empty + high conf + sufficient area"`);
+        console.log(`[recovery-attempt] detection="${label}" type=tops_recovery reason="empty + confidence/area qualified"`);
         const topTerms = hardCategoryTermsForDetection(label, categoryMapping);
         const topFilters: Partial<import("./types").SearchFilters> = {};
         Object.assign(
@@ -3503,13 +3597,21 @@ export class ImageAnalysisService {
             sessionFilters: options.sessionFilters ?? undefined,
           });
 
-          if (topRecovery.results.length > 0) {
-            console.log(`[recovery-result] detection="${label}" type=tops_recovery recovered=${topRecovery.results.length} products`);
+          const topRecoverySafeResults = applyAthleticMismatchGuard({
+            products: topRecovery.results,
+            detectionLabel: label,
+            productCategory: categoryMapping.productCategory,
+            softStyle: String((filters as any).softStyle ?? ""),
+            minFormality: Number((filters as any).minFormality ?? 0),
+          });
+
+          if (topRecoverySafeResults.length > 0) {
+            console.log(`[recovery-result] detection="${label}" type=tops_recovery recovered=${topRecoverySafeResults.length} products`);
             similarResult = {
               ...similarResult,
               results: mergeImageSearchResultsById(
                 similarResult.results,
-                topRecovery.results,
+                topRecoverySafeResults,
                 retrievalLimit,
               ),
             };
@@ -4109,12 +4211,38 @@ export class ImageAnalysisService {
           });
           if (cropColors.length > 0) {
             (filters as any).cropDominantColors = cropColors;
+            
+            // For bottoms (trousers, pants, etc.), prefer secondary neutral colors over black
+            // when primary is black, as shadow/crop edges can skew toward black.
+            let selectedColor = cropColors[0];
+            const cropColorConfidence = estimateCropColorConfidence(detection);
+            
+            if (cropColors.length > 1 && cropColorConfidence < 0.65) {
+              const isBottoms = /\b(bottoms?|pants?|trousers?|chinos?|cargo|jeans?|skirt|leggings?)\b/.test(categorySource.toLowerCase());
+              const isFootwear = /\b(shoes?|sneakers?|boots?|heels?|flats?|sandals?|loafers?)\b/.test(categorySource.toLowerCase());
+              
+              // For bottoms: if primary is black but secondary is gray/charcoal, prefer gray
+              if (isBottoms && cropColors[0].toLowerCase() === "black") {
+                const secondaryLower = cropColors[1].toLowerCase();
+                if (secondaryLower === "gray" || secondaryLower === "charcoal" || secondaryLower === "dark-gray") {
+                  selectedColor = cropColors[1];
+                }
+              }
+              // For footwear: if primary is black but secondary is white/off-white, prefer white
+              else if (isFootwear && cropColors[0].toLowerCase() === "black") {
+                const secondaryLower = cropColors[1].toLowerCase();
+                if (secondaryLower === "white" || secondaryLower === "off-white" || secondaryLower === "cream") {
+                  selectedColor = cropColors[1];
+                }
+              }
+            }
+            
             setDetectionColorIfHigherConfidence(
               inferredColorsByItem,
               inferredColorsByItemConfidence,
               inferredColorsByItemSource,
               itemColorKey,
-              cropColors[0],
+              selectedColor,
               estimateCropColorConfidence(detection),
               1,
             );
@@ -4147,6 +4275,15 @@ export class ImageAnalysisService {
         const forceHardCategoryFilterUsed =
           options.filterByDetectedCategory !== false &&
           (filters as { category?: string | string[] }).category != null;
+
+        const textureMaterial = await inferMaterialFromTextureCrop({
+          clipBuffer,
+          productCategory: categoryMapping.productCategory,
+          detectionLabel: categorySource,
+        });
+        if (textureMaterial.material) {
+          (filters as any).material = textureMaterial.material;
+        }
 
         const detCaption = fullResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
         let detectionBlipSignal: BlipSignal | undefined;
@@ -4496,15 +4633,21 @@ export class ImageAnalysisService {
           categoryMapping,
           String((filters as any).gender ?? ""),
         );
+
+        const sleeveSafeResults = applySleeveIntentGuard({
+          products: categorySafeResults,
+          detectionLabel: categorySource,
+          categoryMapping,
+        });
         
         console.log(`[skip-trace] detection="${categorySource}" after_category_guard=${categorySafeResults.length} (filtered_by=${precisionSafeResults.length - categorySafeResults.length})`);
         
         // Apply formality filter if formal wear was detected from BLIP caption
         const minFormality = (filters as any).minFormality;
         if (minFormality) {
-          console.log(`[formality-apply-alt] detection="${categorySource}" minFormality=${minFormality} incoming=${categorySafeResults.length}`);
+          console.log(`[formality-apply-alt] detection="${categorySource}" minFormality=${minFormality} incoming=${sleeveSafeResults.length}`);
         }
-        const formalitySafeResults = applyFormalityFilter(categorySafeResults, minFormality);
+        const formalitySafeResults = applyFormalityFilter(sleeveSafeResults, minFormality);
 
         const athleticSafeResults = applyAthleticMismatchGuard({
           products: formalitySafeResults,
@@ -4514,7 +4657,8 @@ export class ImageAnalysisService {
           minFormality,
         });
         
-        console.log(`[skip-trace] detection="${categorySource}" after_formality_filter=${formalitySafeResults.length} (filtered_by=${categorySafeResults.length - formalitySafeResults.length})`);
+        console.log(`[skip-trace] detection="${categorySource}" after_sleeve_guard=${sleeveSafeResults.length} (filtered_by=${categorySafeResults.length - sleeveSafeResults.length})`);
+        console.log(`[skip-trace] detection="${categorySource}" after_formality_filter=${formalitySafeResults.length} (filtered_by=${sleeveSafeResults.length - formalitySafeResults.length})`);
         console.log(`[skip-trace] detection="${categorySource}" after_athletic_guard=${athleticSafeResults.length} (filtered_by=${formalitySafeResults.length - athleticSafeResults.length})`);
         
         if (athleticSafeResults.length === 0) {
