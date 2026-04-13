@@ -275,7 +275,11 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
   const categoryLower = toLowerTrim(input.category);
   const categoryCanonical = inferCategoryCanonical(input.category ?? null, input.title || "");
 
-  const titleTypes = extractProductTypesFromTitle(input.title || "");
+  const titleTypesRaw = extractProductTypesFromTitle(input.title || "");
+  const titleTypes =
+    categoryCanonical && categoryCanonical !== "all"
+      ? filterProductTypeSeedsByMappedCategory(titleTypesRaw, categoryCanonical)
+      : titleTypesRaw;
   const descriptionSeedsLexicalRaw = input.description
     ? extractLexicalProductTypeSeeds(input.description)
     : [];
