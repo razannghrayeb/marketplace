@@ -158,3 +158,61 @@ describe("computeHitRelevance - type intent reliability", () => {
     expect(rel.finalRelevance01).toBeLessThan(0.2);
   });
 });
+
+describe("computeHitRelevance - color typo normalization", () => {
+  test("pink intent matches catalog color typo fuhsia", () => {
+    const hit = {
+      _source: {
+        title: "Women Satin Slip Dress",
+        category: "dresses",
+        category_canonical: "dresses",
+        product_types: ["dress"],
+        color: "fuhsia",
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.84, {
+      desiredProductTypes: ["dress"],
+      desiredColors: ["pink"],
+      desiredColorsTier: ["pink"],
+      rerankColorMode: "any",
+      mergedCategory: "dresses",
+      astCategories: ["dresses"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.colorCompliance).toBeGreaterThan(0.7);
+    expect(rel.colorTier === "exact" || rel.colorTier === "family").toBe(true);
+  });
+
+  test("pink intent matches color list typo fuschia", () => {
+    const hit = {
+      _source: {
+        title: "Women Pleated Skirt",
+        category: "skirts",
+        category_canonical: "bottoms",
+        product_types: ["skirt"],
+        attr_colors: ["fuschia"],
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.81, {
+      desiredProductTypes: ["skirt"],
+      desiredColors: ["pink"],
+      desiredColorsTier: ["pink"],
+      rerankColorMode: "any",
+      mergedCategory: "bottoms",
+      astCategories: ["bottoms"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.colorCompliance).toBeGreaterThan(0.7);
+    expect(rel.colorTier === "exact" || rel.colorTier === "family").toBe(true);
+  });
+});

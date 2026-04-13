@@ -12,10 +12,17 @@ export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
   beige: ["beige", "camel", "tan", "taupe", "stone", "sand", "light khaki"],
   brown: ["brown", "mocha", "chocolate", "coffee"],
   purple: ["purple", "violet", "plum", "lavender", "lilac", "mauve"],
-  pink: ["pink", "blush", "fuchsia", "magenta", "rose"],
+  pink: ["pink", "blush", "fuchsia", "fuschia", "fushia", "fuhsia", "magenta", "rose", "hot pink"],
   yellow: ["yellow", "mustard", "golden", "gold"],
   orange: ["orange", "rust", "peach", "coral", "burnt orange"],
   multicolor: ["multicolor", "multi color", "multi-color", "colour block", "color block"],
+};
+
+const COLOR_COMMON_MISSPELLINGS: Record<string, string> = {
+  fuschia: "fuchsia",
+  fushia: "fuchsia",
+  fuhsia: "fuchsia",
+  magentaa: "magenta",
 };
 
 const COLOR_ALIAS_TO_CANONICAL = (() => {
@@ -29,7 +36,8 @@ const COLOR_ALIAS_TO_CANONICAL = (() => {
 
 export function normalizeColorToken(raw: string | null | undefined): string | null {
   if (!raw) return null;
-  const key = raw.toLowerCase().replace(/[_-]/g, " ").replace(/\s+/g, " ").trim();
+  const keyBase = raw.toLowerCase().replace(/[_-]/g, " ").replace(/\s+/g, " ").trim();
+  const key = COLOR_COMMON_MISSPELLINGS[keyBase] ?? keyBase;
   const direct = COLOR_ALIAS_TO_CANONICAL.get(key);
   if (direct) return direct;
 

@@ -715,6 +715,15 @@ function isTopLikeColorSensitiveCategory(productCategory: string, detectionLabel
   return /\b(top|shirt|tee|t-?shirt|blouse|sweater|hoodie|jacket|coat|blazer|outerwear|cardigan)\b/.test(label);
 }
 
+function isFootwearColorSensitiveCategory(productCategory: string, detectionLabel: string): boolean {
+  const cat = String(productCategory || "").toLowerCase();
+  const label = String(detectionLabel || "").toLowerCase();
+  if (cat === "footwear" || cat === "shoes") return true;
+  return /\b(shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals|trainer|trainers|flats?)\b/.test(
+    label,
+  );
+}
+
 async function extractDetectionCropColorsForRanking(params: {
   clipBuffer: Buffer;
   productCategory: string;
@@ -723,9 +732,10 @@ async function extractDetectionCropColorsForRanking(params: {
   const onePiece = isOnePieceColorSensitiveCategory(params.productCategory, params.detectionLabel);
   const bottoms = isBottomColorSensitiveCategory(params.productCategory, params.detectionLabel);
   const topLike = isTopLikeColorSensitiveCategory(params.productCategory, params.detectionLabel);
+  const footwear = isFootwearColorSensitiveCategory(params.productCategory, params.detectionLabel);
   let colorBuffer = params.clipBuffer;
 
-  if (onePiece || bottoms || topLike) {
+  if (onePiece || bottoms || topLike || footwear) {
     try {
       const meta = await sharp(params.clipBuffer).metadata();
       const w = meta.width ?? 0;
@@ -742,10 +752,10 @@ async function extractDetectionCropColorsForRanking(params: {
         } else if (bottoms) {
           // Bottom boxes often include torso at the top and shoes at the bottom.
           // Use a tighter center-lower band to avoid shirt and footwear bleed.
-          left = Math.floor(w * 0.14);
-          width = Math.max(16, Math.floor(w * 0.72));
-          top = Math.floor(h * 0.24);
-          const bottom = Math.floor(h * 0.76);
+          left = Math.floor(w * 0.16);
+          width = Math.max(16, Math.floor(w * 0.68));
+          top = Math.floor(h * 0.3);
+          const bottom = Math.floor(h * 0.72);
           height = Math.max(24, bottom - top);
         } else if (topLike) {
           // Top/outerwear boxes can include pants near the lower edge.
@@ -755,6 +765,14 @@ async function extractDetectionCropColorsForRanking(params: {
           top = Math.floor(h * 0.08);
           const bottom = Math.floor(h * 0.66);
           height = Math.max(24, bottom - top);
+        } else if (footwear) {
+          // Shoe boxes frequently include floor pixels around edges.
+          // Use an inner crop to prioritize the shoe body over surrounding ground.
+          left = Math.floor(w * 0.12);
+          width = Math.max(14, Math.floor(w * 0.76));
+          top = Math.floor(h * 0.1);
+          const bottom = Math.floor(h * 0.9);
+          height = Math.max(16, bottom - top);
         }
 
         left = Math.max(0, Math.min(left, Math.max(0, w - 1)));
@@ -774,7 +792,7 @@ async function extractDetectionCropColorsForRanking(params: {
 
   return extractDominantColorNames(colorBuffer, {
     maxColors: 2,
-    minShare: onePiece ? 0.18 : bottoms ? 0.17 : 0.15,
+    minShare: onePiece ? 0.18 : bottoms ? 0.2 : footwear ? 0.2 : 0.15,
   });
 }
 
@@ -1311,7 +1329,7 @@ function inferSleeveFromProductText(
   const txt = normalizeLooseText(haystack);
   if (!txt) return null;
 
-  const hasSleeveless = /\b(sleeveless|tank|camisole|cami|strapless|halter)\b/.test(txt);
+  const hasSleeveless = /\b(sleeveless|tank|camisole|cami|strapless|halter|strap top|spaghetti strap|thin strap|strappy)\b/.test(txt);
   const hasShort = /\b(short sleeve|short sleeved|ss)\b/.test(txt);
   const hasLong = /\b(long sleeve|long sleeved|ls)\b/.test(txt);
 
@@ -2676,6 +2694,22 @@ export class ImageAnalysisService {
       blipStructured = buildStructuredBlipOutput(blipCaption);
       blipStructuredConfidence = blipStructured.confidence;
       fullBlipSignal = buildBlipSignal(blipStructured, blipStructuredConfidence);
+
+      // Full-image BLIP occasionally collapses a top+bottom outfit into "dress".
+      // In that case, suppress this caption so it cannot bias downstream hints.
+      const detectionLabels = analysisResult.detection.items
+        .map((d) => normalizeLooseText(d.label))
+        .filter(Boolean)
+        .join(" ");
+      const hasTop = /\b(top|shirt|blouse|tshirt|tee|sweater|hoodie|sweatshirt|cami|tank)\b/.test(detectionLabels);
+      const hasBottom = /\b(skirt|pants|trousers|jeans|shorts|bottom)\b/.test(detectionLabels);
+      const captionMainItem = normalizeLooseText(blipStructured.mainItem);
+      if (captionMainItem.includes("dress") && hasTop && hasBottom) {
+        blipCaption = null;
+        blipStructured = buildStructuredBlipOutput("");
+        blipStructuredConfidence = 0;
+        fullBlipSignal = undefined;
+      }
     }
     let inferredAudience: ReturnType<typeof inferAudienceFromCaption> =
       imageInferAudienceGenderEnv() && blipCaption
@@ -3158,7 +3192,14 @@ export class ImageAnalysisService {
         shopLookCategoryFallbackEnv() &&
         similarResult.results.length === 0 &&
         filterByDetectedCategory &&
-        !isAccessoryLikeCategory(categoryMapping.productCategory) &&
+        (
+          !isAccessoryLikeCategory(categoryMapping.productCategory) ||
+          (
+            isAccessoryLikeCategory(categoryMapping.productCategory) &&
+            (detection.confidence ?? 0) >= 0.72 &&
+            (detection.area_ratio ?? 0) >= 0.015
+          )
+        ) &&
         !(categoryMapping.productCategory === "accessories" && isHeadwearLabel(label)) &&
         (filters as { category?: string | string[] }).category
       ) {
