@@ -79,16 +79,20 @@ type BlipSignal = {
 function inferApparelAudienceFallback(params: {
   caption?: string | null;
   detections: Array<{ label?: string; raw_label?: string }>;
-}): { ageGroup?: "adult" } {
+}): { gender?: string; ageGroup?: "adult" } {
   const blob = [params.caption ?? "", ...params.detections.map((d) => `${d.label ?? ""} ${d.raw_label ?? ""}`)]
     .join(" ")
     .toLowerCase();
   if (!blob.trim()) return {};
   if (/\b(kids?|children|child|baby|babies|toddler|toddlers|youth|junior|girls?|boys?)\b/.test(blob)) return {};
+  const audience = inferAudienceFromCaption(blob);
   if (/\b(dress|top|shirt|blouse|skirt|pants|trousers|jeans|shorts|hoodie|sweater|cardigan|jacket|coat|tshirt|t-shirt|jumpsuit|romper|abaya|kaftan)\b/.test(blob)) {
-    return { ageGroup: "adult" };
+    return {
+      gender: audience.gender,
+      ageGroup: "adult",
+    };
   }
-  return {};
+  return audience.gender ? { gender: audience.gender } : {};
 }
 
 /** Default on when unset — soft category + aisle rerank is the normal image path. */
@@ -792,9 +796,69 @@ async function extractDetectionCropColorsForRanking(params: {
   }
 
   return extractDominantColorNames(colorBuffer, {
-    maxColors: 2,
+    maxColors: 3,
     minShare: onePiece ? 0.18 : bottoms ? 0.2 : footwear ? 0.2 : 0.15,
   });
+}
+
+function selectDetectionColorByCategory(params: {
+  cropColors: string[];
+  productCategory: string;
+  detectionLabel: string;
+  cropColorConfidence: number;
+}): string | null {
+  const colors = params.cropColors
+    .map((c) => String(c || "").toLowerCase().trim())
+    .filter(Boolean);
+  if (colors.length === 0) return null;
+
+  const category = String(params.productCategory || "").toLowerCase();
+  const label = String(params.detectionLabel || "").toLowerCase();
+  const isBottoms = isBottomColorSensitiveCategory(category, label);
+  const isFootwear = isFootwearColorSensitiveCategory(category, label);
+  const confidence = Number.isFinite(params.cropColorConfidence) ? params.cropColorConfidence : 0;
+
+  const primary = colors[0];
+  const alternatives = colors.slice(1);
+  const pickFirst = (allowed: Set<string>): string | null => {
+    for (const c of alternatives) {
+      if (allowed.has(c)) return c;
+    }
+    return null;
+  };
+
+  if (isBottoms && primary === "black") {
+    const bottomAlternatives = new Set([
+      "gray",
+      "charcoal",
+      "blue",
+      "navy",
+      "brown",
+      "beige",
+      "tan",
+      "white",
+      "off-white",
+      "cream",
+    ]);
+    const replacement = pickFirst(bottomAlternatives);
+    if (replacement && confidence < 0.78) return replacement;
+  }
+
+  if (isFootwear && primary === "black") {
+    const footwearAlternatives = new Set([
+      "white",
+      "off-white",
+      "cream",
+      "beige",
+      "tan",
+      "gray",
+      "silver",
+    ]);
+    const replacement = pickFirst(footwearAlternatives);
+    if (replacement && confidence < 0.82) return replacement;
+  }
+
+  return primary;
 }
 
 function requiresSlotSpecificColor(productCategory: string): boolean {
@@ -936,11 +1000,9 @@ function hardCategoryTermsForDetection(
       return sandalsOnly.length > 0 ? sandalsOnly : baseTerms;
     }
 
-    // Generic "shoe" detections should prefer everyday sneakers/trainers/shoes and avoid winter boots/heels.
-    const sneakerLike = baseTerms.filter((t) =>
-      /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|running shoes|casual shoes|flats?)\b/.test(t),
-    );
-    return sneakerLike.length > 0 ? sneakerLike : baseTerms;
+    // Generic "shoe" detections should not assume sneaker-like subtype.
+    // Let reranking use the broader footwear family so heels/boots/sandals remain reachable.
+    return baseTerms;
   }
 
   // Prefer hat/cap-family over generic `accessories`.
@@ -1246,10 +1308,10 @@ function shouldForceHardCategoryForDetection(
     return confidence >= 0.8;
   }
   if (category === "bags") {
-    return confidence >= 0.85 && areaRatio >= 0.003;
+    return confidence >= 0.75 && areaRatio >= 0.0015;
   }
   if (category === "accessories") {
-    return confidence >= 0.88 && areaRatio >= 0.0025;
+    return confidence >= 0.8 && areaRatio >= 0.0012;
   }
 
   return false;
@@ -2989,39 +3051,21 @@ export class ImageAnalysisService {
         });
         if (cropColors.length > 0) {
           (filters as any).cropDominantColors = cropColors;
-          
-          // For bottoms (trousers, pants, etc.), prefer secondary neutral colors over black
-          // when primary is black, as shadow/crop edges can skew toward black.
-          let selectedColor = cropColors[0];
-          const cropColorConfidence = estimateCropColorConfidence(detection);
-          
-          if (cropColors.length > 1 && cropColorConfidence < 0.65) {
-            const isBottoms = /\b(bottoms?|pants?|trousers?|chinos?|cargo|jeans?|skirt|leggings?)\b/.test(label.toLowerCase());
-            const isFootwear = /\b(shoes?|sneakers?|boots?|heels?|flats?|sandals?|loafers?)\b/.test(label.toLowerCase());
-            
-            // For bottoms: if primary is black but secondary is gray/charcoal, prefer gray
-            if (isBottoms && cropColors[0].toLowerCase() === "black") {
-              const secondaryLower = cropColors[1].toLowerCase();
-              if (secondaryLower === "gray" || secondaryLower === "charcoal" || secondaryLower === "dark-gray") {
-                selectedColor = cropColors[1];
-              }
-            }
-            // For footwear: if primary is black but secondary is white/off-white, prefer white
-            else if (isFootwear && cropColors[0].toLowerCase() === "black") {
-              const secondaryLower = cropColors[1].toLowerCase();
-              if (secondaryLower === "white" || secondaryLower === "off-white" || secondaryLower === "cream") {
-                selectedColor = cropColors[1];
-              }
-            }
-          }
-          
+            const cropColorConfidence = estimateCropColorConfidence(detection);
+            const selectedColor =
+              selectDetectionColorByCategory({
+                cropColors,
+                productCategory: categoryMapping.productCategory,
+                detectionLabel: label,
+                cropColorConfidence,
+              }) ?? cropColors[0];
           setDetectionColorIfHigherConfidence(
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             inferredColorsByItemSource,
             itemColorKey,
             selectedColor,
-            estimateCropColorConfidence(detection),
+              cropColorConfidence,
             1,
           );
         }
@@ -4211,39 +4255,21 @@ export class ImageAnalysisService {
           });
           if (cropColors.length > 0) {
             (filters as any).cropDominantColors = cropColors;
-            
-            // For bottoms (trousers, pants, etc.), prefer secondary neutral colors over black
-            // when primary is black, as shadow/crop edges can skew toward black.
-            let selectedColor = cropColors[0];
             const cropColorConfidence = estimateCropColorConfidence(detection);
-            
-            if (cropColors.length > 1 && cropColorConfidence < 0.65) {
-              const isBottoms = /\b(bottoms?|pants?|trousers?|chinos?|cargo|jeans?|skirt|leggings?)\b/.test(categorySource.toLowerCase());
-              const isFootwear = /\b(shoes?|sneakers?|boots?|heels?|flats?|sandals?|loafers?)\b/.test(categorySource.toLowerCase());
-              
-              // For bottoms: if primary is black but secondary is gray/charcoal, prefer gray
-              if (isBottoms && cropColors[0].toLowerCase() === "black") {
-                const secondaryLower = cropColors[1].toLowerCase();
-                if (secondaryLower === "gray" || secondaryLower === "charcoal" || secondaryLower === "dark-gray") {
-                  selectedColor = cropColors[1];
-                }
-              }
-              // For footwear: if primary is black but secondary is white/off-white, prefer white
-              else if (isFootwear && cropColors[0].toLowerCase() === "black") {
-                const secondaryLower = cropColors[1].toLowerCase();
-                if (secondaryLower === "white" || secondaryLower === "off-white" || secondaryLower === "cream") {
-                  selectedColor = cropColors[1];
-                }
-              }
-            }
-            
+            const selectedColor =
+              selectDetectionColorByCategory({
+                cropColors,
+                productCategory: categoryMapping.productCategory,
+                detectionLabel: categorySource,
+                cropColorConfidence,
+              }) ?? cropColors[0];
             setDetectionColorIfHigherConfidence(
               inferredColorsByItem,
               inferredColorsByItemConfidence,
               inferredColorsByItemSource,
               itemColorKey,
               selectedColor,
-              estimateCropColorConfidence(detection),
+              cropColorConfidence,
               1,
             );
           }
