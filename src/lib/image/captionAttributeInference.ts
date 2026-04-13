@@ -55,15 +55,16 @@ export function inferColorFromCaption(caption: string): {
     if (x === "black") return "black";
     if (x === "grey" || x === "gray") return "gray";
     if (x === "white" || x === "ivory" || x === "cream" || x === "off-white" || x === "off white") return "off-white";
-    if (x === "tan" || x === "camel" || x === "brown") return "tan";
+    if (x === "beige" || x === "tan" || x === "camel" || x === "brown") return x === "beige" ? "beige" : "tan";
     if (x === "green" || x === "olive") return "green";
     if (x === "red" || x === "burgundy") return "red";
     if (x === "pink") return "pink";
+    if (x === "yellow" || x === "gold") return "yellow";
     return null;
   };
 
   const colorTokens =
-    "black|navy|blue|denim|grey|gray|white|ivory|cream|off[- ]white|tan|camel|brown|green|olive|red|pink";
+    "black|navy|blue|denim|grey|gray|white|ivory|cream|off[- ]white|beige|tan|camel|brown|green|olive|red|burgundy|pink|yellow|gold";
 
   let topColor: string | null = null;
   const topMatch = s.match(
@@ -72,7 +73,9 @@ export function inferColorFromCaption(caption: string): {
   if (topMatch?.[1]) topColor = mapColorWord(topMatch[1]);
 
   let jeansColor: string | null = null;
-  const jeansMatch = s.match(/\b(black|navy|blue|denim|grey|gray)\b[^.]{0,20}\bjeans\b/);
+  const jeansMatch = s.match(
+    /\b(black|navy|blue|denim|grey|gray|beige|tan|camel|brown|white|off[- ]white|cream|olive|green|red|pink|yellow|gold)\b[^.]{0,30}\b(jeans|pants|trousers|chinos|cargo)\b/,
+  );
   if (jeansMatch?.[1]) jeansColor = mapColorWord(jeansMatch[1]);
 
   let garmentColor: string | null = null;
