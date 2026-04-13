@@ -93,6 +93,14 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
   const chroma = Math.sqrt(lab[1] * lab[1] + lab[2] * lab[2]);
   const blueLead = b - Math.max(r, g);
 
+  // Preserve neutral separation: dark gray/charcoal should not collapse to black
+  // unless luminance is truly near-black.
+  if (chroma < 9) {
+    if (lab[0] < 14) return "black";
+    if (lab[0] < 36) return "charcoal";
+    if (lab[0] < 72) return "gray";
+  }
+
   // Dark denim / navy fabrics can be low-light and get pulled to black by LAB distance.
   // Keep them in the blue family when channel evidence is clearly blue-leaning.
   if (lab[0] < 42 && blueLead >= 8 && chroma >= 10) {

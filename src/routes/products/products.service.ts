@@ -3145,7 +3145,14 @@ export async function searchByImageWithSimilarity(
     }
   }
   hasDetectionAnchoredTypeIntent =
-    desiredProductTypes.length > 0 && (Boolean(predictedCategoryAisles?.length) || useAisleRerank);
+    Boolean(String(params.detectionProductCategory ?? "").trim()) ||
+    (
+      desiredProductTypes.length > 0 &&
+      (
+        Boolean(predictedCategoryAisles?.length) ||
+        useAisleRerank
+      )
+    );
 
   const explicitColorsForRelevance =
     Array.isArray(filtersRecord.colors) && filtersRecord.colors.length > 0
@@ -3251,8 +3258,22 @@ export async function searchByImageWithSimilarity(
     params.detectionProductCategory === "tops" ||
     desiredProductTypes.some((t) => /\b(top|tee|tshirt|shirt|blouse|tank|cami)\b/.test(String(t).toLowerCase()));
   const enforceSleeveGate =
-    (desiredSleeveForRelevance === "short" || desiredSleeveForRelevance === "sleeveless") &&
+    (desiredSleeveForRelevance === "short" ||
+      desiredSleeveForRelevance === "sleeveless" ||
+      desiredSleeveForRelevance === "long") &&
     (!hasDetectionAnchoredTypeIntent || isTopDetectionIntent);
+  const preferredSleeveMin =
+    desiredSleeveForRelevance === "long"
+      ? 0.52
+      : desiredSleeveForRelevance === "short" || desiredSleeveForRelevance === "sleeveless"
+        ? 0.55
+        : 0.25;
+  const fallbackSleeveMin =
+    desiredSleeveForRelevance === "long"
+      ? 0.38
+      : desiredSleeveForRelevance === "short" || desiredSleeveForRelevance === "sleeveless"
+        ? 0.4
+        : 0.1;
 
   const hasColorIntentForFinal = hasExplicitColorIntent || hasInferredColorSignal;
   const hasInferredColorIntentForRescue = !hasExplicitColorIntent && hasInferredColorSignal;
@@ -3991,8 +4012,6 @@ export async function searchByImageWithSimilarity(
       const enforceSleeveGate =
         (desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless") &&
         (!hasDetectionAnchoredTypeIntent || isTopDetectionIntent);
-      const preferredSleeveMin = enforceSleeveGate ? 0.55 : 0.25;
-      const fallbackSleeveMin = enforceSleeveGate ? 0.4 : 0.1;
       const minTypeCompliance = hasDetectionAnchoredTypeIntent
         ? visualGatedHits.length >= 30
           ? 0.5
@@ -4520,27 +4539,29 @@ export async function searchByImageWithSimilarity(
         if (authoritativeColor.compliance <= 0 || bucketOnlyCatalogConflict) {
           const blipColorConflict = blipColorConflictFactorById.get(idStr) ?? 1;
           const conflictStrength = Math.max(0, Math.min(1, 1 - blipColorConflict));
+          const strictDetectionColor = hasDetectionAnchoredTypeIntent;
           const baseConflictCap = hasExplicitColorIntent
-            ? similarityScore * 0.46  // Was 0.36: more lenient
+            ? similarityScore * (strictDetectionColor ? 0.34 : 0.46)
             : hasInferredColorSignal
-              ? similarityScore * 0.58  // Was 0.48: more lenient
-              : similarityScore * 0.72;  // Was 0.62: more lenient
-          const conflictAdjustedCap = baseConflictCap * (1 - 0.25 * conflictStrength);  // Was 0.35: softer adjustment
-          // Increased maxConflictCap: From 0.2/0.28/0.36 to 0.45/0.55/0.65
-          // This allows wrong-colored but visually similar items to be more relevant
-          // - Explicit color intent: up to 45% relevance (user specifically wanted color)
-          // - Inferred color: up to 55% relevance (color came from image analysis)
-          // - Crop color: up to 65% relevance (weakest color signal)
+              ? similarityScore * (strictDetectionColor ? 0.42 : 0.58)
+              : similarityScore * (strictDetectionColor ? 0.54 : 0.72);
+          const conflictAdjustedCap = baseConflictCap * (1 - 0.25 * conflictStrength);
           const maxConflictCap = hasExplicitColorIntent
-            ? 0.45  // Was 0.2: giving more credit to visual similarity
+            ? strictDetectionColor
+              ? 0.24
+              : 0.45
             : hasInferredColorSignal
-              ? 0.55  // Was 0.28: color was inferred, so be more lenient
-              : 0.65;  // Was 0.36: color was just detected, most lenient
-          const strictOnePieceCap = strictInferredOnePieceColorGate ? 0.26 : maxConflictCap;
+              ? strictDetectionColor
+                ? 0.30
+                : 0.55
+              : strictDetectionColor
+                ? 0.36
+                : 0.65;
+          const strictOnePieceCap = strictInferredOnePieceColorGate ? 0.22 : maxConflictCap;
           const nearDuplicateRelax = similarityScore >= nearIdenticalRawMin
             ? strictInferredOnePieceColorGate
-              ? 0.03
-              : 0.08
+              ? 0.02
+              : 0.05
             : 0;
           // Keep contradictory colors visible for sparse catalogs, but with realistic caps
           const conservativeCap = Math.min(
@@ -4603,8 +4624,32 @@ export async function searchByImageWithSimilarity(
         }
       }
 
+      if (hasDetectionAnchoredTypeIntent && compliance) {
+        const sleeveComp = Math.max(0, Math.min(1, compliance.sleeveCompliance ?? 0));
+        const typeComp = Math.max(0, Math.min(1, compliance.productTypeCompliance ?? 0));
+        const isTopDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops";
+
+        if (isTopDetection && (compliance.hasSleeveIntent ?? false) && sleeveComp < 0.35) {
+          finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.34 : 0.28);
+          finalRelevanceSource = "sleeve_conflict_cap";
+        }
+
+        if (typeComp < 0.28) {
+          finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.36 : 0.3);
+          finalRelevanceSource = "type_conflict_cap";
+        }
+      }
+
       const canApplyPersonalization =
-        finalRelevanceSource === "computed" || finalRelevanceSource === "catalog_color_correction";
+        (finalRelevanceSource === "computed" || finalRelevanceSource === "catalog_color_correction") &&
+        !(
+          hasDetectionAnchoredTypeIntent &&
+          compliance &&
+          (
+            ((compliance.hasSleeveIntent ?? false) && (compliance.sleeveCompliance ?? 0) < 0.35) ||
+            ((compliance.productTypeCompliance ?? 0) < 0.28)
+          )
+        );
       if (canApplyPersonalization) {
         const contextBoost01 = scoreImageSearchContext01({
           product: p,
