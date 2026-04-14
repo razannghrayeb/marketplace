@@ -2318,11 +2318,45 @@ async function opensearchImageKnnHits(
   }
 }
 
+function normalizeImageCategoryIntent(raw: unknown): string {
+  const s = String(raw ?? "")
+    .toLowerCase()
+    .trim()
+    .replace(/[\s_-]+/g, " ");
+  if (!s) return "";
+  if (/\b(dreses|drsses|dresss|dress|dresses|gown|gowns|frock|frocks)\b/.test(s)) return "dresses";
+  return s;
+}
+
+function normalizeImageCategoryIntentArray(values: string[]): string[] {
+  return [...new Set(values.map((v) => normalizeImageCategoryIntent(v)).filter(Boolean))];
+}
+
+function categoryFilterTermsWithAliases(input: string | string[]): string[] {
+  const raw = Array.isArray(input) ? input : [input];
+  const out = new Set<string>();
+  for (const item of raw) {
+    const source = String(item ?? "").toLowerCase().trim();
+    if (!source) continue;
+    out.add(source);
+    const normalized = normalizeImageCategoryIntent(source);
+    if (normalized) out.add(normalized);
+    if (normalized && normalized !== source && normalized === "dresses") {
+      out.add("dress");
+    }
+  }
+  return [...out];
+}
+
 function buildDesiredCatalogTermSet(aisles: string[]): Set<string> {
   const s = new Set<string>();
   for (const a of aisles) {
-    for (const t of getCategorySearchTerms(a)) {
-      s.add(t.toLowerCase());
+    const normalized = normalizeImageCategoryIntent(a);
+    const candidates = [a, normalized].filter(Boolean);
+    for (const candidate of candidates) {
+      for (const t of getCategorySearchTerms(candidate)) {
+        s.add(t.toLowerCase());
+      }
     }
   }
   return s;
@@ -2434,10 +2468,15 @@ export async function searchByImageWithSimilarity(
   if (!softCategory || !desiredCatalogTerms || desiredCatalogTerms.size === 0) {
     if (cat) {
       if (Array.isArray(cat)) {
-        const terms = cat.map((c) => String(c).toLowerCase()).filter(Boolean);
+        const terms = categoryFilterTermsWithAliases(cat);
         if (terms.length > 0) filter.push({ terms: { category: terms } });
       } else {
-        filter.push({ term: { category: String(cat).toLowerCase() } });
+        const terms = categoryFilterTermsWithAliases(String(cat));
+        if (terms.length === 1) {
+          filter.push({ term: { category: terms[0] } });
+        } else if (terms.length > 1) {
+          filter.push({ terms: { category: terms } });
+        }
       }
     }
   }
@@ -3079,7 +3118,7 @@ export async function searchByImageWithSimilarity(
   const hasExplicitCategoryFilter = filterCategory != null;
   const hasTextTypeIntent = Boolean(textQueryForRelevance);
   let hasDetectionAnchoredTypeIntent = false;
-  const astCategoriesForRelevance = [
+  const astCategoriesForRelevance = normalizeImageCategoryIntentArray([
     ...new Set(
       [
         ...(predictedCategoryAisles ?? []).map((x) => String(x).toLowerCase().trim()).filter(Boolean),
@@ -3091,7 +3130,7 @@ export async function searchByImageWithSimilarity(
         ).map((x) => String(x).toLowerCase().trim()),
       ].filter(Boolean),
     ),
-  ];
+  ]);
   if (Array.isArray(filtersRecord.productTypes) && filtersRecord.productTypes.length > 0) {
     desiredProductTypes = [
       ...new Set(
@@ -3186,7 +3225,6 @@ export async function searchByImageWithSimilarity(
     typeof mergedCategoryForRelevance === "string" ? mergedCategoryForRelevance : undefined,
     desiredProductTypes,
   );
-  const hasInferredColorSignal = inferredColorTokens.length > 0;
   const normalizedCropColors = [
     ...new Set(
       cropDominantColorsRaw.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
@@ -3200,10 +3238,21 @@ export async function searchByImageWithSimilarity(
   const normalizedCropColorsForMerge =
     normalizedCropColors.filter((c) => !["black", "gray", "charcoal"].includes(String(c).toLowerCase()));
 
+  // If inferred color disagrees with crop-local colors, prefer crop colors for
+  // detection-anchored image search. This avoids top-color bleed (e.g. yellow)
+  // incorrectly gating bottom items that are beige/tan.
+  const inferredCropColorConflict =
+    normalizedInferredColors.length > 0 &&
+    normalizedCropColorsForMerge.length > 0 &&
+    tieredColorListCompliance(normalizedInferredColors, normalizedCropColorsForMerge, "any").compliance <= 0;
+  const hasTrustedInferredColorSignal =
+    inferredColorTokens.length > 0 && !inferredCropColorConflict;
+  const hasInferredColorSignal = hasTrustedInferredColorSignal;
+
   let allColorsForRelevance: string[];
   if (hasExplicitColorIntent) {
     allColorsForRelevance = [...explicitColorsForRelevance];
-  } else if (normalizedInferredColors.length > 0) {
+  } else if (hasTrustedInferredColorSignal && normalizedInferredColors.length > 0) {
     allColorsForRelevance = [...normalizedInferredColors];
   } else {
     allColorsForRelevance = [...normalizedCropColorsForMerge];
@@ -3312,7 +3361,7 @@ export async function searchByImageWithSimilarity(
     desiredStyle: desiredStyleForRelevance,
     desiredSleeve: desiredSleeveForRelevance,
     mergedCategory: mergedCategoryForRelevance
-      ? String(mergedCategoryForRelevance).toLowerCase()
+      ? normalizeImageCategoryIntent(mergedCategoryForRelevance)
       : undefined,
     astCategories: astCategoriesForRelevance,
     queryAgeGroup: queryAgeGroupForRelevance,
@@ -3332,6 +3381,7 @@ export async function searchByImageWithSimilarity(
       hasTextTypeIntent,
   };
   const hasReliableTypeIntentForRelevance = Boolean(relevanceIntent.reliableTypeIntent);
+  const hasDerivedTypeIntentForSafetyGate = desiredProductTypes.length > 0;
   const shouldUseVisualPrimarySort =
     imageSearchVisualPrimaryRanking &&
     !hasReliableTypeIntentForRelevance &&
@@ -3358,6 +3408,8 @@ export async function searchByImageWithSimilarity(
       gatesFinalRelevance01: hasColorIntentForFinal,
       cropDominantTokens: hasCropColorSignal ? [...cropDominantColorsRaw] : undefined,
       inferredTokens: inferredColorTokens.length > 0 ? [...inferredColorTokens] : undefined,
+      inferredVsCropConflict: inferredCropColorConflict,
+      inferredColorTrusted: hasTrustedInferredColorSignal,
       softBiasOnly: softColorBiasOnly,
       explicitFilters: [...explicitColorsForRelevance],
       effectiveDesired: [...desiredColorsForRelevance],
@@ -3890,7 +3942,7 @@ export async function searchByImageWithSimilarity(
         const typeComp = comp.productTypeCompliance ?? 0;
         const exactType = comp.exactTypeScore ?? 0;
         const visualStrong = visualSimFromHit(h) >= strongVisualOverrideMinSim;
-        if ((hasExplicitTypeFilter || hasExplicitCategoryFilter) && exactType < 1 && typeComp < 0.28) {
+        if ((hasExplicitTypeFilter || (hasExplicitCategoryFilter && hasDerivedTypeIntentForSafetyGate)) && exactType < 1 && typeComp < 0.28) {
           return false;
         }
         // Category-specific type floor: relax for bottoms with high YOLO confidence to handle jeans/denims
