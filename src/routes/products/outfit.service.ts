@@ -683,23 +683,62 @@ function scoreFootwearOccasionCompatibility(
   const isDressyFootwear = /\b(heel|heels|pump|pumps|stiletto|stilettos|sandal|sandals|mule|mules|loafer|loafers|boot|boots|flat|flats|oxford|oxfords)\b/.test(text);
 
   if (sourceOccasion === "party") {
-    if (isSneakerLike) return 0.22;
+    if (isSneakerLike) return 0.2;
     if (isDressyFootwear) return 0.98;
-    return 0.72;
+    return 0.7;
   }
 
   if (sourceOccasion === "formal" || sourceOccasion === "semi-formal") {
-    if (isSneakerLike) return 0.3;
-    if (isDressyFootwear) return 0.95;
-    return 0.68;
+    if (isSneakerLike) return 0.24;
+    if (isDressyFootwear) return 0.96;
+    return 0.66;
   }
 
   if (sourceOccasion === "casual") {
-    if (isSneakerLike) return 0.95;
-    if (isDressyFootwear) return 0.72;
+    if (isSneakerLike) return 0.96;
+    if (isDressyFootwear) return 0.7;
   }
 
-  return 0.74;
+  if (sourceOccasion === "beach") {
+    if (/\b(sandal|sandals|slides?|flip flop|espadrille)\b/.test(text)) return 0.95;
+    if (isSneakerLike) return 0.74;
+    if (isDressyFootwear) return 0.46;
+  }
+
+  return 0.72;
+}
+
+function scoreBagOccasionCompatibility(
+  sourceOccasion: StyleProfile["occasion"],
+  candidateTitle: string,
+  candidateCategory?: string | null
+): number {
+  const text = `${String(candidateTitle || "")} ${String(candidateCategory || "")}`.toLowerCase();
+  const isFormalBag = /\b(clutch|evening bag|mini bag|top handle|satchel)\b/.test(text);
+  const isCasualBag = /\b(tote|crossbody|backpack|hobo|messenger|shoulder bag)\b/.test(text);
+  const isTravelBag = /\b(duffle|luggage|suitcase|travel)\b/.test(text);
+
+  if (isTravelBag) return 0.2;
+
+  if (sourceOccasion === "formal" || sourceOccasion === "semi-formal" || sourceOccasion === "party") {
+    if (isFormalBag) return 0.95;
+    if (isCasualBag) return 0.48;
+    return 0.7;
+  }
+
+  if (sourceOccasion === "casual") {
+    if (isCasualBag) return 0.92;
+    if (isFormalBag) return 0.64;
+    return 0.74;
+  }
+
+  if (sourceOccasion === "beach") {
+    if (/\b(tote|straw|woven|canvas|crossbody)\b/.test(text)) return 0.9;
+    if (isFormalBag) return 0.42;
+    return 0.72;
+  }
+
+  return 0.72;
 }
 
 function scoreOccasionGarmentCompatibility(
@@ -829,6 +868,10 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       candidateFamily === "shoes"
         ? scoreFootwearOccasionCompatibility(params.sourceStyle.occasion, candidateProduct.title, candidateProduct.category)
         : 1;
+    const bagOccasionScore =
+      candidateFamily === "bags"
+        ? scoreBagOccasionCompatibility(params.sourceStyle.occasion, candidateProduct.title, candidateProduct.category)
+        : 1;
     const garmentOccasionScore = scoreOccasionGarmentCompatibility(
       params.sourceStyle.occasion,
       candidateFamily,
@@ -845,41 +888,58 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     const materialOverlap = sourceMaterial && candidateMaterial && sourceMaterial === candidateMaterial ? 0.88 : 0.65;
 
     const fashionScore =
-      categoryScore * 0.24 +
-      aestheticScore * 0.2 +
-      colorScore * 0.16 +
+      categoryScore * 0.23 +
+      aestheticScore * 0.18 +
+      colorScore * 0.14 +
       formalityScore * 0.14 +
-      seasonScore * 0.08 +
-      footwearOccasionScore * 0.12 +
-      garmentOccasionScore * 0.12 +
+      seasonScore * 0.07 +
+      footwearOccasionScore * 0.16 +
+      bagOccasionScore * 0.1 +
+      garmentOccasionScore * 0.1 +
       patternOverlap * 0.06 +
       materialOverlap * 0.04 +
       priceScore * 0.02;
 
     const retrievalScore = Math.max(0, Math.min(1, s.score || 0));
-    const finalScore = Math.round((fashionScore * 0.7 + retrievalScore * 0.3) * 1000) / 1000;
+    let finalScore = Math.round((fashionScore * 0.7 + retrievalScore * 0.3) * 1000) / 1000;
+
+    if (candidateFamily === "shoes" && footwearOccasionScore < 0.45) {
+      finalScore = Math.round(finalScore * 0.72 * 1000) / 1000;
+    }
+    if (candidateFamily === "bags" && bagOccasionScore < 0.45) {
+      finalScore = Math.round(finalScore * 0.76 * 1000) / 1000;
+    }
+
+    const matchReasons = buildFashionReasons({
+      categoryScore,
+      colorScore,
+      aestheticScore,
+      formalityScore,
+      seasonScore,
+      priceScore,
+      patternScore: patternOverlap,
+      materialScore: materialOverlap,
+    });
+    if (candidateFamily === "shoes") {
+      matchReasons.push(
+        footwearOccasionScore < 0.45
+          ? "footwear is less suitable for this occasion"
+          : "footwear matches the occasion"
+      );
+    }
+    if (candidateFamily === "bags") {
+      matchReasons.push(
+        bagOccasionScore < 0.45
+          ? "bag style is less suitable for this occasion"
+          : "bag style matches the occasion"
+      );
+    }
 
     return {
       ...s,
       score: finalScore,
       fashionScore: Math.round(fashionScore * 1000) / 1000,
-      matchReasons: buildFashionReasons({
-        categoryScore,
-        colorScore,
-        aestheticScore,
-        formalityScore,
-        seasonScore,
-        priceScore,
-        patternScore: patternOverlap,
-        materialScore: materialOverlap,
-      }),
-      ...(candidateFamily === "shoes"
-        ? [
-            params.sourceStyle.occasion === "party" && /\b(sneaker|sneakers|trainer|trainers)\b/i.test(`${candidateProduct.title} ${candidateProduct.category || ""}`)
-              ? "too casual for a party look"
-              : "footwear matches the occasion",
-          ]
-        : []),
+      matchReasons: matchReasons.slice(0, 5),
       reason: s.reason || "fashion-aware match",
     };
   }));
