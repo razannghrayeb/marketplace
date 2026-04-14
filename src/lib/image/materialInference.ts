@@ -36,11 +36,58 @@ function defaultMaterialForCategory(text: string): string {
 
 type Candidate = { material: string; score: number };
 
+/**
+ * Extract material from BLIP caption when available (high confidence since it's
+ * text-stated, not inferred from pixel statistics).
+ */
+export function inferMaterialFromCaption(
+  caption: string | null | undefined,
+): TextureMaterialInference | null {
+  const c = String(caption ?? "").toLowerCase();
+  if (!c || c.length < 5) return null;
+
+  const materialPatterns: [RegExp, string][] = [
+    [/\b(denim|jean)\b/, "denim"],
+    [/\b(leather)\b/, "leather"],
+    [/\b(suede)\b/, "suede"],
+    [/\b(silk)\b/, "silk"],
+    [/\b(satin)\b/, "satin"],
+    [/\b(linen)\b/, "linen"],
+    [/\b(wool|woolen|woollen|cashmere|merino)\b/, "wool"],
+    [/\b(knit|knitted|knitwear|crochet)\b/, "knit"],
+    [/\b(velvet)\b/, "velvet"],
+    [/\b(cotton)\b/, "cotton"],
+    [/\b(nylon)\b/, "nylon"],
+    [/\b(polyester)\b/, "polyester"],
+    [/\b(canvas)\b/, "canvas"],
+    [/\b(mesh)\b/, "mesh"],
+    [/\b(lace|lacey)\b/, "lace"],
+    [/\b(chiffon)\b/, "chiffon"],
+    [/\b(tweed)\b/, "tweed"],
+    [/\b(corduroy)\b/, "corduroy"],
+    [/\b(fleece)\b/, "fleece"],
+  ];
+
+  for (const [re, material] of materialPatterns) {
+    if (re.test(c)) {
+      return { material, confidence: 0.82, candidates: [material] };
+    }
+  }
+  return null;
+}
+
 export async function inferMaterialFromTextureCrop(params: {
   clipBuffer: Buffer;
   productCategory: string;
   detectionLabel: string;
+  caption?: string | null;
 }): Promise<TextureMaterialInference> {
+  // Text-based material from caption takes priority (much more reliable than pixel stats).
+  const captionMaterial = inferMaterialFromCaption(params.caption);
+  if (captionMaterial && captionMaterial.confidence >= 0.7) {
+    return captionMaterial;
+  }
+
   const categoryText = `${params.productCategory} ${params.detectionLabel}`.toLowerCase();
   const topLike = isTopLike(categoryText);
   const bottomLike = isBottomLike(categoryText);
@@ -158,7 +205,7 @@ export async function inferMaterialFromTextureCrop(params: {
       },
       {
         material: "denim",
-        score: 0.16 + edgeScore * 0.24 + blueBias * 0.42 + (bottomLike ? 0.14 : 0) + (/\b(jean|jeans|denim)\b/.test(categoryText) ? 0.18 : 0),
+        score: 0.16 + edgeScore * 0.24 + blueBias * 0.32 + (bottomLike ? 0.16 : 0) + (/\b(jean|jeans|denim)\b/.test(categoryText) ? 0.28 : 0) + (bottomLike && edgeScore > 0.3 ? 0.08 : 0),
       },
       {
         material: "mesh",

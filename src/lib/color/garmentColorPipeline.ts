@@ -92,19 +92,45 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
   const lab = rgbToLab(r, g, b);
   const chroma = Math.sqrt(lab[1] * lab[1] + lab[2] * lab[2]);
   const blueLead = b - Math.max(r, g);
+  const redLead = r - Math.max(g, b);
+  const greenLead = g - Math.max(r, b);
 
-  // Preserve neutral separation: dark gray/charcoal should not collapse to black
-  // unless luminance is truly near-black.
-  if (chroma < 9) {
+  // Achromatic neutrals — widen gate to chroma < 11 so very desaturated
+  // darks (near-black leather, dark charcoal wool) don't bleed into navy/brown.
+  if (chroma < 11) {
     if (lab[0] < 14) return "black";
     if (lab[0] < 36) return "charcoal";
-    if (lab[0] < 72) return "gray";
+    if (lab[0] < 60) return "gray";
+    if (lab[0] < 78) return "silver";
+    if (lab[0] > 92) return "white";
+    return "off-white";
   }
 
-  // Dark denim / navy fabrics can be low-light and get pulled to black by LAB distance.
-  // Keep them in the blue family when channel evidence is clearly blue-leaning.
+  // Dark saturated: detect via channel dominance before LAB distance
+  // which otherwise collapses dark red/green/brown → black.
   if (lab[0] < 42 && blueLead >= 8 && chroma >= 10) {
     return lab[0] < 30 ? "navy" : "blue";
+  }
+  if (lab[0] < 30 && redLead >= 10 && chroma >= 12) {
+    return "burgundy";
+  }
+  if (lab[0] < 35 && greenLead >= 5 && chroma >= 10) {
+    return "olive";
+  }
+
+  // Light desaturated: cream/off-white/beige before LAB distance rounds to white/gray.
+  if (lab[0] > 82 && chroma >= 9 && chroma < 22) {
+    if (lab[1] > 3 && lab[2] > 8) return "cream";
+    if (lab[1] < -2 && lab[2] < 4) return "off-white";
+    if (lab[2] > 12) return "beige";
+    if (Math.abs(lab[1]) < 6 && Math.abs(lab[2]) < 8) return "white";
+  }
+
+  // Light saturated pastels: LAB distance otherwise rounds to white/cream.
+  if (lab[0] > 75 && chroma >= 15 && chroma < 30) {
+    if (lab[1] > 8) return "pink";
+    if (lab[2] > 20 && lab[1] > -2) return "gold";
+    if (lab[2] < -10 || lab[1] < -8) return "light-blue";
   }
 
   let bestName = "gray";
@@ -117,14 +143,22 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
       bestName = name;
     }
   }
-  // Very dark neutral values map to black.
+
   if (lab[0] < 18 && chroma < 8 && bestD > 18) return "black";
-  // Very light near-neutral → white/off-white/cream
-  if (lab[0] > 88 && Math.abs(lab[1]) < 10 && Math.abs(lab[2]) < 10) {
+
+  // Widen light-neutral gate (was L>88 abs<10 — missed many light fabrics).
+  if (lab[0] > 85 && Math.abs(lab[1]) < 12 && Math.abs(lab[2]) < 12) {
     if (lab[2] > 6) return "cream";
     if (lab[2] < -4) return "off-white";
-    return "white";
+    if (chroma < 12) return "white";
   }
+
+  // Multicolor ref is neutral gray; huge LAB distance = real color didn't match.
+  if (bestName === "multicolor" && bestD > 25) {
+    if (lab[0] < 35) return "charcoal";
+    if (lab[0] > 70) return "gray";
+  }
+
   return bestName;
 }
 

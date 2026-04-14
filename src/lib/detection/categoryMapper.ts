@@ -57,26 +57,24 @@ export interface NormalizedBox {
  */
 export function inferDressLengthFromBox(box: NormalizedBox | undefined): "maxi" | "midi" | "mini" | undefined {
   if (!box || typeof box.y2 !== 'number') return undefined;
-  
-  // Estimate leg coverage: how much of the lower body does dress cover?
-  // Assume waist is at ~0.5 and feet at ~1.0 (±0.05 for pose variation)
-  const assumedWaistLevel = 0.50;
-  const assumedFeetLevel = 0.98;
-  const legHeight = Math.max(0.01, assumedFeetLevel - assumedWaistLevel);
-  
-  // How far down the legs does the dress go?
-  const dressHemLevel = Math.min(1.0, box.y2);
-  const dressLegCoverage = Math.max(0, dressHemLevel - assumedWaistLevel) / legHeight;
-  
-  // Classify based on coverage:
-  if (dressLegCoverage > 0.35) {
-    return "maxi";  // Covers >35% of legs → to ankles
-  } else if (dressLegCoverage > 0.15) {
-    return "midi";  // Covers 15-35% of legs → knee area
-  } else if (dressLegCoverage >= 0) {
-    return "mini";  // Covers <15% of legs → thighs/short
+
+  const boxHeight = Math.max(0, (box.y2 ?? 0) - (box.y1 ?? 0));
+  // Skip length inference when the dress box is small (likely not full-body)
+  // or when the detection covers the entire image (no reliable framing).
+  if (boxHeight < 0.25 || boxHeight > 0.95) return undefined;
+
+  // Use box-relative proportions instead of assuming fixed waist position:
+  // the bottom 60% of the dress box is hem area.
+  const hemRatio = box.y2;
+
+  if (hemRatio > 0.88) {
+    return "maxi";
+  } else if (hemRatio > 0.72) {
+    return "midi";
+  } else if (hemRatio > 0.0) {
+    return "mini";
   }
-  
+
   return undefined;
 }
 
