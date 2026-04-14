@@ -959,6 +959,7 @@ function hardCategoryTermsForDetection(
   categoryMapping: CategoryMapping,
 ): string[] {
   const l = String(detectionLabel || "").toLowerCase();
+  const hasLongSleeveCue = /\blong sleeve\b|\bfull sleeve\b/.test(l);
   const baseTerms = getCategorySearchTerms(categoryMapping.productCategory).map((t) =>
     String(t).toLowerCase().trim(),
   );
@@ -983,6 +984,15 @@ function hardCategoryTermsForDetection(
           t,
         ),
       );
+      const longTopWithoutSleeveless = longTopTerms.filter(
+        (t) =>
+          !/\b(tank|camisole|cami|crop top|sleeveless|strapless|halter|tee|t-?shirt|tshirt|polo)\b/.test(
+            t,
+          ),
+      );
+      if (hasLongSleeveCue && longTopWithoutSleeveless.length > 0) {
+        return longTopWithoutSleeveless;
+      }
       return longTopTerms.length > 0 ? longTopTerms : baseTerms;
     }
   }
@@ -1022,6 +1032,10 @@ function hardCategoryTermsForDetection(
   }
 
   if (categoryMapping.productCategory === "footwear") {
+    const isGenericShoeLike = /\bshoe\b|\bshoes\b/.test(l) &&
+      !/\b(sneaker|sneakers|trainer|trainers|boot|boots|heel|heels|pump|pumps|sandal|sandals|loafer|loafers|flat|flats|mule|mules|oxford|oxfords|clog|clogs)\b/.test(
+        l,
+      );
     const isBootLike = /\b(boot|boots|ankle boot|combat boot|chelsea)\b/.test(l);
     const isHeelLike = /\b(heel|heels|pump|pumps|stiletto|stilettos|wedge|wedges|slingback)\b/.test(l);
     const isSandalLike = /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(l);
@@ -1037,6 +1051,22 @@ function hardCategoryTermsForDetection(
     if (isSandalLike) {
       const sandalsOnly = baseTerms.filter((t) => /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(t));
       return sandalsOnly.length > 0 ? sandalsOnly : baseTerms;
+    }
+
+    if (isGenericShoeLike) {
+      const closedShoeTerms = baseTerms.filter((t) =>
+        /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|loafer|loafers|flat|flats|oxford|oxfords|pump|pumps|heel|heels|footwear)\b/.test(
+          t,
+        ),
+      );
+      const withoutOpenOrBoot = closedShoeTerms.filter(
+        (t) => !/\b(boot|boots|sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(t),
+      );
+      return withoutOpenOrBoot.length > 0
+        ? withoutOpenOrBoot
+        : closedShoeTerms.length > 0
+          ? closedShoeTerms
+          : baseTerms;
     }
 
     // Generic "shoe" detections should keep broad footwear recall until subtype is explicit.
@@ -1079,6 +1109,7 @@ function tightenTypeSeedsForDetection(
   seeds: string[],
 ): string[] {
   const label = String(detectionLabel || "").toLowerCase();
+  const hasLongSleeveCue = /\blong sleeve\b|\bfull sleeve\b/.test(label);
   const category = String(categoryMapping.productCategory || "").toLowerCase();
   const normalized = [...new Set(seeds.map((s) => String(s).toLowerCase().trim()).filter(Boolean))];
   if (normalized.length === 0) return normalized;
@@ -1094,6 +1125,12 @@ function tightenTypeSeedsForDetection(
       const longTop = normalized.filter((t) =>
         /\b(shirt|shirts|blouse|blouses|top|tops|sweater|hoodie|sweatshirt|pullover|cardigan|knitwear)\b/.test(t),
       );
+      const longTopWithoutSleeveless = longTop.filter(
+        (t) => !/\b(tank|camisole|cami|crop top|sleeveless|strapless|halter|tee|t-?shirt|tshirt|polo)\b/.test(t),
+      );
+      if (hasLongSleeveCue && longTopWithoutSleeveless.length > 0) {
+        return longTopWithoutSleeveless;
+      }
       return longTop.length > 0 ? longTop : normalized;
     }
   }
@@ -1127,6 +1164,10 @@ function tightenTypeSeedsForDetection(
   }
 
   if (category === "footwear") {
+    const isGenericShoeLike = /\bshoe\b|\bshoes\b/.test(label) &&
+      !/\b(sneaker|sneakers|trainer|trainers|boot|boots|heel|heels|pump|pumps|sandal|sandals|loafer|loafers|flat|flats|mule|mules|oxford|oxfords|clog|clogs)\b/.test(
+        label,
+      );
     const isBootLike = /\b(boot|boots|ankle boot|chelsea|combat boot)\b/.test(label);
     const isHeelLike = /\b(heel|heels|pump|pumps|stiletto|stilettos|wedge|wedges|slingback)\b/.test(label);
     const isSandalLike = /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(label);
@@ -1142,6 +1183,22 @@ function tightenTypeSeedsForDetection(
     if (isSandalLike) {
       const sandalsOnly = normalized.filter((t) => /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(t));
       return sandalsOnly.length > 0 ? sandalsOnly : normalized;
+    }
+
+    if (isGenericShoeLike) {
+      const closedShoe = normalized.filter((t) =>
+        /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|loafer|loafers|flat|flats|oxford|oxfords|pump|pumps|heel|heels|footwear)\b/.test(
+          t,
+        ),
+      );
+      const withoutOpenOrBoot = closedShoe.filter(
+        (t) => !/\b(boot|boots|sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(t),
+      );
+      return withoutOpenOrBoot.length > 0
+        ? withoutOpenOrBoot
+        : closedShoe.length > 0
+          ? closedShoe
+          : normalized;
     }
 
     const footwearBroad = normalized.filter((t) =>
@@ -1625,7 +1682,7 @@ function applyDetectionCategoryGuard(
                 haystack,
               )
             : categoryMapping.productCategory === "tops"
-              ? /\b(dress|dresses|gown|gowns|pant|pants|trouser|trousers|jean|jeans|shorts?|skirt|skirts|shoe|shoes|boot|boots)\b/.test(
+              ? /\b(dress|dresses|gown|gowns|pant|pants|trouser|trousers|jean|jeans|shorts?|skirt|skirts|shoe|shoes|boot|boots|jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber)\b/.test(
                   haystack,
                 )
               : categoryMapping.productCategory === "bottoms"
@@ -1673,6 +1730,20 @@ function applyDetectionCategoryGuard(
     }
     if (categoryMapping.productCategory === "bottoms") {
       if (productCategoryMacro === "outerwear" || /\b(jacket|coat|blazer|outerwear)\b/.test(haystack)) {
+        return false;
+      }
+    }
+    if (categoryMapping.productCategory === "tops") {
+      const strictTopLabel = /\b(long sleeve top|short sleeve top|top|tops|t-?shirt|tee|tank|camisole|cami|crop top|blouse|blouses)\b/.test(
+        String(detectionLabel).toLowerCase(),
+      );
+      if (
+        strictTopLabel &&
+        (productCategoryMacro === "outerwear" ||
+          /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|sport coat|dress jacket|shirt jacket)\b/.test(
+            haystack,
+          ))
+      ) {
         return false;
       }
     }
@@ -1874,6 +1945,7 @@ function applyRelevanceThresholdFilter(
   minRelevance: number | undefined,
   options?: {
     preserveAtLeastOne?: boolean;
+    preserveAtLeastCount?: number;
     detectionLabel?: string;
     category?: string;
   },
@@ -1893,23 +1965,28 @@ function applyRelevanceThresholdFilter(
     );
   }
 
-  if (filtered.length === 0 && options?.preserveAtLeastOne) {
+  const preserveCount = Math.max(
+    options?.preserveAtLeastOne ? 1 : 0,
+    Number.isFinite(options?.preserveAtLeastCount as number)
+      ? Math.max(0, Math.floor(options?.preserveAtLeastCount as number))
+      : 0,
+  );
+
+  if (filtered.length < preserveCount && preserveCount > 0) {
     const sorted = [...products].sort((a, b) => {
       const ar = Number((a as any)?.finalRelevance01 ?? Number.NEGATIVE_INFINITY);
       const br = Number((b as any)?.finalRelevance01 ?? Number.NEGATIVE_INFINITY);
       return br - ar;
     });
-    const best = sorted[0];
-    const bestRelevance = Number((best as any)?.finalRelevance01 ?? 0);
+    const recovered = sorted.slice(0, preserveCount).map((item) => ({
+      ...item,
+      relevanceFallbackPreserved: true,
+    }));
+    const bestRelevance = Number((recovered[0] as any)?.finalRelevance01 ?? 0);
     console.log(
-      `[relevance-threshold-fallback] preserved 1 product for detection="${options.detectionLabel ?? "unknown"}" category="${options.category ?? "unknown"}" bestFinalRelevance01=${bestRelevance.toFixed(3)} threshold=${minRelevance}`,
+      `[relevance-threshold-fallback] preserved ${recovered.length} product(s) for detection="${options?.detectionLabel ?? "unknown"}" category="${options?.category ?? "unknown"}" bestFinalRelevance01=${bestRelevance.toFixed(3)} threshold=${minRelevance}`,
     );
-    return best
-      ? [{
-          ...best,
-          relevanceFallbackPreserved: true,
-        }]
-      : [];
+    return recovered;
   }
 
   return filtered;
@@ -3732,6 +3809,9 @@ export class ImageAnalysisService {
             // Keep crop-derived structural intent even in last-resort fallback.
             filters: {
               length: (filters as any).length,
+              sleeve: (filters as any).sleeve,
+              gender: (filters as any).gender,
+              ageGroup: (filters as any).ageGroup,
             } as any,
             softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
             limit: retrievalLimit,
@@ -4047,6 +4127,7 @@ export class ImageAnalysisService {
           gender: filters.gender,
           ageGroup: filters.ageGroup,
           softStyle: filters.softStyle,
+          sleeve: (filters as any).sleeve,
           length: (filters as any).length,
         },
       } as DetectionSimilarProducts;
@@ -4076,6 +4157,9 @@ export class ImageAnalysisService {
       ...detection,
       products: applyRelevanceThresholdFilter(detection.products, minRelevanceThreshold, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category),
+        preserveAtLeastCount: isCoreOutfitCategory(detection.category)
+          ? Math.min(6, Math.max(2, resolvedLimitPerItem))
+          : 0,
         detectionLabel: detection.detection?.label,
         category: detection.category,
       }),
@@ -4906,6 +4990,9 @@ export class ImageAnalysisService {
               // Keep crop-derived structural intent even in last-resort fallback.
               filters: {
                 length: (filters as any).length,
+                sleeve: (filters as any).sleeve,
+                gender: (filters as any).gender,
+                ageGroup: (filters as any).ageGroup,
               } as any,
               limit: retrievalLimit,
               similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
@@ -5102,6 +5189,7 @@ export class ImageAnalysisService {
               gender: filters.gender,
               ageGroup: filters.ageGroup,
               softStyle: filters.softStyle,
+              sleeve: (filters as any).sleeve,
               length: (filters as any).length,
             },
             source: isUserDefined ? "user_defined" : "yolo",
@@ -5131,6 +5219,9 @@ export class ImageAnalysisService {
       ...detection,
       products: applyRelevanceThresholdFilter(detection.products, minRelevanceThresholdSel, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category),
+        preserveAtLeastCount: isCoreOutfitCategory(detection.category)
+          ? Math.min(6, Math.max(2, resolvedLimitPerItem))
+          : 0,
         detectionLabel: detection.detection?.label,
         category: detection.category,
       }),
