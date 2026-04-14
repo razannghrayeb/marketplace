@@ -69,7 +69,8 @@ export interface CompleteLookSuggestion extends ProductRecommendation {
     patternAlignment?: number;
     formalityAlignment?: number;
     materialAlignment?: number;
-
+    footwearStyleAlignment?: number;
+    bagStyleAlignment?: number;
   };
   stylistSignals?: {
     slot?: string;
@@ -263,7 +264,7 @@ function slotMismatchRegex(slot: string): RegExp | null {
   if (slot !== "dresses" && slot !== "outerwear") {
     if (sleepwear.test(slot)) return sleepwear;
   }
-  if (slot === "bags") return /\b(headband|hair accessory|hairband|headwear|hat|cap|beanie|wallet|backpack|duffle|luggage|suitcase|travel accessory|key ring|keychain)\b/;
+  if (slot === "bags") return /\b(headband|hair accessory|hairband|headwear|hat|cap|beanie|duffle|luggage|suitcase|travel accessory|key ring|keychain)\b/;
   if (slot === "accessories") {
     return /\b(handbag|bag|tote|clutch|wallet|crossbody|backpack|satchel|messenger)\b/;
   }
@@ -318,7 +319,21 @@ function inferStrongTitleSlot(source: any): string | null {
 }
 
 function buildSlotIntentFilter(slot: string): any | null {
-  const bagTerms = ["bag", "handbag", "tote", "clutch", "purse", "crossbody", "satchel", "messenger", "shoulder bag", "bucket bag", "hobo bag"];
+  const bagTerms = [
+    "bag",
+    "handbag",
+    "tote",
+    "clutch",
+    "purse",
+    "crossbody",
+    "satchel",
+    "messenger",
+    "shoulder bag",
+    "bucket bag",
+    "hobo bag",
+    "backpack",
+    "mini bag",
+  ];
   const accessoryTerms = ["accessories", "jewelry", "watch", "scarf", "belt", "sunglasses", "hat", "earrings", "necklace", "bracelet", "ring"];
   const outerwearTerms = ["outerwear", "jacket", "coat", "blazer", "cardigan", "parka", "trench", "bomber"];
   const topTerms = ["top", "tops", "shirt", "shirts", "blouse", "blouses", "t-shirt", "tee", "hoodie", "sweater", "sweatshirt", "cardigan", "tank", "camisole", "polo", "knitwear", "short sleeve", "short sleeves", "long sleeve", "long sleeves"];
@@ -348,8 +363,6 @@ function buildSlotIntentFilter(slot: string): any | null {
                 { match_phrase: { title: "hair accessory" } },
                 { match_phrase: { title: "headwear" } },
                 { match_phrase: { title: "headband" } },
-                { match_phrase: { title: "wallet" } },
-                { match_phrase: { title: "backpack" } },
                 { match_phrase: { title: "duffle" } },
                 { match_phrase: { title: "luggage" } },
                 { match_phrase: { title: "suitcase" } },
@@ -410,6 +423,73 @@ function buildSlotIntentFilter(slot: string): any | null {
   }
 
   return null;
+}
+
+function scoreFootwearStyleCompatibility(
+  inferredOccasion: InferredOccasion,
+  preferredStyleTerms: string[],
+  source: any
+): number {
+  const blob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.attr_style || "")} ${String(source?.product_types || "")}`.toLowerCase();
+  const isSporty = /\b(sneaker|sneakers|trainer|trainers|running shoe|athletic|gym|sport|canvas shoe|basketball shoe)\b/.test(blob);
+  const isDressy = /\b(heel|heels|pump|pumps|stiletto|mule|mules|loafer|loafers|oxford|oxfords|dress shoe|kitten heel)\b/.test(blob);
+  const styleSet = new Set(preferredStyleTerms.map((t) => String(t || "").toLowerCase().trim()).filter(Boolean));
+  const prefersSporty = styleSet.has("sporty") || styleSet.has("athleisure") || styleSet.has("streetwear");
+  const prefersFormal = styleSet.has("business") || styleSet.has("elegant") || styleSet.has("classic") || styleSet.has("formal");
+
+  if (inferredOccasion === "formal" || inferredOccasion === "semi-formal" || inferredOccasion === "party") {
+    if (isSporty && !prefersSporty) return 0.24;
+    if (isDressy) return 0.96;
+    return 0.68;
+  }
+
+  if (inferredOccasion === "casual") {
+    if (isSporty) return prefersFormal ? 0.72 : 0.96;
+    if (isDressy) return prefersFormal ? 0.84 : 0.7;
+  }
+
+  if (inferredOccasion === "beach") {
+    if (/\b(sandal|sandals|slides?|flip flop|espadrille)\b/.test(blob)) return 0.95;
+    if (isSporty) return 0.74;
+    if (isDressy) return 0.48;
+  }
+
+  return 0.74;
+}
+
+function scoreBagStyleCompatibility(
+  inferredOccasion: InferredOccasion,
+  preferredStyleTerms: string[],
+  source: any
+): number {
+  const blob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.attr_style || "")} ${String(source?.product_types || "")}`.toLowerCase();
+  const isFormalBag = /\b(clutch|evening bag|top handle|mini bag|satchel)\b/.test(blob);
+  const isCasualBag = /\b(backpack|crossbody|hobo|tote|messenger|shoulder bag)\b/.test(blob);
+  const isTravel = /\b(duffle|luggage|suitcase|travel)\b/.test(blob);
+  const styleSet = new Set(preferredStyleTerms.map((t) => String(t || "").toLowerCase().trim()).filter(Boolean));
+  const prefersFormal = styleSet.has("business") || styleSet.has("elegant") || styleSet.has("classic") || styleSet.has("formal");
+
+  if (isTravel) return 0.22;
+
+  if (inferredOccasion === "formal" || inferredOccasion === "semi-formal" || inferredOccasion === "party") {
+    if (isFormalBag) return 0.95;
+    if (isCasualBag) return prefersFormal ? 0.42 : 0.58;
+    return 0.7;
+  }
+
+  if (inferredOccasion === "casual") {
+    if (isCasualBag) return 0.92;
+    if (isFormalBag) return prefersFormal ? 0.74 : 0.6;
+    return 0.72;
+  }
+
+  if (inferredOccasion === "beach") {
+    if (/\b(tote|straw|woven|canvas|crossbody)\b/.test(blob)) return 0.9;
+    if (isFormalBag) return 0.44;
+    return 0.72;
+  }
+
+  return 0.72;
 }
 
 function dedupeCompleteLookSuggestions(items: CompleteLookSuggestion[]): CompleteLookSuggestion[] {
@@ -1030,7 +1110,7 @@ async function runCompleteLookCore(
           const strongTitleSlot = inferStrongTitleSlot(source);
           if (strongTitleSlot && strongTitleSlot !== category) continue;
           if (!audienceGenderMatchesForSlot(inferredAudienceGender, source, category, enforceNeutralAudienceWhenUnknown, {
-            allowUnknownForBags: false,
+            allowUnknownForBags: category === "bags",
           })) continue;
           if (!audienceAgeGroupMatchesWithOptions(inferredAgeGroup, source, {
             allowUnknown: true,
@@ -1053,6 +1133,14 @@ async function runCompleteLookCore(
           const patternAlignment = computeTokenAffinity(source.attr_pattern, preferredPatterns);
           const materialAlignment = computeTokenAffinity(source.attr_material, preferredMaterials);
           const formalityAlignment = computeFormalityAlignment(source, preferredFormality);
+          const footwearStyleAlignment =
+            category === "shoes"
+              ? scoreFootwearStyleCompatibility(inferredOccasion, preferredStyleTerms, source)
+              : 1;
+          const bagStyleAlignment =
+            category === "bags"
+              ? scoreBagStyleCompatibility(inferredOccasion, preferredStyleTerms, source)
+              : 1;
 
           // Enforce style/occasion compatibility when we have a reliable style intent.
           if (preferredStyleTerms.length > 0 && styleAlignment < 0.52 && formalityAlignment < 0.5) {
@@ -1069,8 +1157,11 @@ async function runCompleteLookCore(
             materialAlignment * 0.04 +
             formalityAlignment * 0.04;
 
+          const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment);
+          const slotAwareFinalScore = Math.round((finalScore * (0.7 + slotStyleScore * 0.3)) * 1000) / 1000;
+
           const floor = relaxedFloor ? Math.max(0.5, minimumSlotScore(category) - 0.04) : minimumSlotScore(category);
-          if (finalScore < floor) {
+          if (slotAwareFinalScore < floor) {
             continue;
           }
 
@@ -1080,6 +1171,8 @@ async function runCompleteLookCore(
           if (colorHarmony >= 0.75) reasons.push("good color harmony");
           if (styleAlignment >= 0.75) reasons.push("style-aware match");
           if (formalityAlignment >= 0.8) reasons.push("occasion/formality aligned");
+          if (category === "shoes" && footwearStyleAlignment >= 0.85) reasons.push("footwear fits the occasion");
+          if (category === "bags" && bagStyleAlignment >= 0.85) reasons.push("bag style suits the outfit");
           if (reasons.length === 0) reasons.push("balances the current outfit");
 
           const fitBreakdown = {
@@ -1090,6 +1183,8 @@ async function runCompleteLookCore(
             patternAlignment: Math.round(patternAlignment * 1000) / 1000,
             materialAlignment: Math.round(materialAlignment * 1000) / 1000,
             formalityAlignment: Math.round(formalityAlignment * 1000) / 1000,
+            footwearStyleAlignment: Math.round(footwearStyleAlignment * 1000) / 1000,
+            bagStyleAlignment: Math.round(bagStyleAlignment * 1000) / 1000,
           };
 
           scored.push({
@@ -1103,7 +1198,7 @@ async function runCompleteLookCore(
                 : undefined,
             image_url: source.image_cdn,
             image_cdn: source.image_cdn,
-            score: Math.round(finalScore * 1000) / 1000,
+            score: slotAwareFinalScore,
             reason: `Add ${category} to complete the look (${reasons.join(", ")})`,
             reason_type: "compatible",
             fitBreakdown,
@@ -2284,6 +2379,13 @@ async function fetchCategoryTopUpSuggestions(params: {
     .join(" ")
     .trim();
 
+  const topupOccasion: InferredOccasion =
+    params.preferredFormality === "formal"
+      ? "formal"
+      : params.preferredFormality === "business"
+        ? "semi-formal"
+        : "casual";
+
   const response = await osClient.search({
     index: config.opensearch.index,
     body: {
@@ -2363,6 +2465,14 @@ async function fetchCategoryTopUpSuggestions(params: {
     const patternAlignment = computeTokenAffinity(source.attr_pattern, params.preferredPatterns);
     const materialAlignment = computeTokenAffinity(source.attr_material, params.preferredMaterials);
     const formalityAlignment = computeFormalityAlignment(source, params.preferredFormality);
+    const footwearStyleAlignment =
+      matchedSlot === "shoes"
+        ? scoreFootwearStyleCompatibility(topupOccasion, params.preferredStyleTerms, source)
+        : 1;
+    const bagStyleAlignment =
+      matchedSlot === "bags"
+        ? scoreBagStyleCompatibility(topupOccasion, params.preferredStyleTerms, source)
+        : 1;
 
     const score =
       embeddingNorm * 0.28 +
@@ -2373,7 +2483,10 @@ async function fetchCategoryTopUpSuggestions(params: {
       materialAlignment * 0.05 +
       formalityAlignment * 0.05;
 
-    if (score < minimumSlotScore(matchedSlot)) continue;
+    const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment);
+    const slotAwareScore = Math.round((score * (0.72 + slotStyleScore * 0.28)) * 1000) / 1000;
+
+    if (slotAwareScore < minimumSlotScore(matchedSlot)) continue;
 
     out.push({
       product_id: productId,
@@ -2386,7 +2499,7 @@ async function fetchCategoryTopUpSuggestions(params: {
           : undefined,
       image_url: source.image_cdn,
       image_cdn: source.image_cdn,
-      score: Math.round(score * 1000) / 1000,
+      score: slotAwareScore,
       reason: `Add ${matchedSlot} to complete the look (fashion-aware top-up match)`,
       reason_type: "compatible",
       fitBreakdown: {
@@ -2397,6 +2510,8 @@ async function fetchCategoryTopUpSuggestions(params: {
         patternAlignment: Math.round(patternAlignment * 1000) / 1000,
         materialAlignment: Math.round(materialAlignment * 1000) / 1000,
         formalityAlignment: Math.round(formalityAlignment * 1000) / 1000,
+        footwearStyleAlignment: Math.round(footwearStyleAlignment * 1000) / 1000,
+        bagStyleAlignment: Math.round(bagStyleAlignment * 1000) / 1000,
       },
       stylistSignals: {
         slot: guessedSlot,
