@@ -78,19 +78,47 @@ type BlipSignal = {
 
 function inferApparelAudienceFallback(params: {
   caption?: string | null;
-  detections: Array<{ label?: string; raw_label?: string }>;
+  detections: Array<{ label?: string; raw_label?: string; box_normalized?: { y1?: number; y2?: number; x1?: number; x2?: number } }>;
 }): { gender?: "men" | "women"; ageGroup?: "adult" } {
-  const blob = [params.caption ?? "", ...params.detections.map((d) => `${d.label ?? ""} ${d.raw_label ?? ""}`)]
-    .join(" ")
-    .toLowerCase();
+  const labels = params.detections.map((d) => `${d.label ?? ""} ${d.raw_label ?? ""}`);
+  const blob = [params.caption ?? "", ...labels].join(" ").toLowerCase();
   if (!blob.trim()) return {};
   if (/\b(kids?|children|child|baby|babies|toddler|toddlers|youth|junior)\b/.test(blob)) return {};
+
+  // --- Level 1: explicit text cues from YOLO labels + caption ---
   const womenCue = /\b(women|womens|woman|female|lady|ladies|girl|girls|dress|dresses|gown|skirt|blouse|heels?|pumps?|sandals?|clutch|handbag|tote|sling\s*dress|vest\s*dress|sling|jumpsuit|romper|playsuit|legging|leggings|bikini|crop\s*top|camisole|cami|mini\s*dress|midi\s*dress|maxi\s*dress|abaya|kaftan)\b/.test(
     blob,
   );
   const menCue = /\b(men|mens|man|male|gent|gents|suit|tie|oxford|loafer|dress\s*shirt|cargo\s*pants|chino|chinos|boxer|briefs)\b/.test(blob);
   if (womenCue && !menCue) return { gender: "women", ageGroup: "adult" };
   if (menCue && !womenCue) return { gender: "men", ageGroup: "adult" };
+
+  // --- Level 2: detection composition heuristics (no BLIP needed) ---
+  // When a dress-type detection exists, it's overwhelmingly women's clothing.
+  const detLabels = labels.map((l) => l.toLowerCase());
+  const hasDress = detLabels.some((l) => /\b(dress|sling dress|vest dress|short sleeve dress|long sleeve dress)\b/.test(l));
+  const hasSkirt = detLabels.some((l) => /\bskirt\b/.test(l));
+  const hasSling = detLabels.some((l) => /\bsling\b/.test(l) && !/\bsling\s*bag\b/.test(l));
+  const hasCropTop = detLabels.some((l) => /\bcrop.?top\b/.test(l));
+  if (hasDress || hasSkirt || hasSling || hasCropTop) {
+    return { gender: "women", ageGroup: "adult" };
+  }
+
+  // --- Level 3: footwear-box aspect ratio ---
+  // High heels have a distinctive tall narrow aspect ratio.
+  for (const det of params.detections) {
+    const l = String(det.label ?? "").toLowerCase();
+    if (/\bshoe\b/.test(l) && det.box_normalized) {
+      const bw = (det.box_normalized.x2 ?? 0) - (det.box_normalized.x1 ?? 0);
+      const bh = (det.box_normalized.y2 ?? 0) - (det.box_normalized.y1 ?? 0);
+      if (bw > 0 && bh > 0) {
+        const aspect = bh / bw;
+        // Heels are taller than wide; sneakers are wider than tall.
+        if (aspect > 1.3) return { gender: "women", ageGroup: "adult" };
+      }
+    }
+  }
+
   if (/\b(dress|top|shirt|blouse|skirt|pants|trousers|jeans|shorts|hoodie|sweater|cardigan|jacket|coat|tshirt|t-shirt|jumpsuit|romper|abaya|kaftan)\b/.test(blob)) {
     return { ageGroup: "adult" };
   }
@@ -896,27 +924,56 @@ function shopLookPerDetectionConcurrency(): number {
 }
 
 /**
- * Infer specific footwear subtype from BLIP caption when YOLO returns generic "shoe".
- * Returns a more specific label to feed into `hardCategoryTermsForDetection`.
+ * Infer specific footwear subtype from multiple signals (YOLO label, BLIP caption, box geometry).
+ * Does NOT require BLIP — falls back to raw label keywords and detection box aspect ratio.
  */
-function inferFootwearSubtypeFromCaption(
+function inferFootwearSubtype(
   detectionLabel: string,
   caption: string | null | undefined,
+  boxNormalized?: { y1?: number; y2?: number; x1?: number; x2?: number } | null,
 ): string {
   const label = String(detectionLabel || "").toLowerCase();
+  // If YOLO already gave a specific subtype, keep it.
   if (label !== "shoe" && label !== "shoes") return label;
 
+  // --- Signal 1: BLIP caption keywords (when available) ---
   const cap = String(caption ?? "").toLowerCase();
-  if (!cap) return label;
+  if (cap.length >= 5) {
+    if (/\b(sneaker|sneakers|trainer|trainers|running\s*shoe|athletic\s*shoe|sport\s*shoe)\b/.test(cap)) return "sneakers";
+    if (/\b(boot|boots|ankle\s*boot|combat\s*boot|chelsea|hiking\s*boot|rain\s*boot)\b/.test(cap)) return "boots";
+    if (/\b(heel|heels|pump|pumps|stiletto|stilettos|wedge|wedges|platform|slingback|kitten\s*heel)\b/.test(cap)) return "heels";
+    if (/\b(sandal|sandals|slide|slides|mule|mules|flip\s*flop|espadrille|gladiator)\b/.test(cap)) return "sandals";
+    if (/\b(loafer|loafers|moccasin|moccasins|penny\s*loafer|driving\s*shoe)\b/.test(cap)) return "loafers";
+    if (/\b(flat|flats|ballet|ballerina)\b/.test(cap)) return "flats";
+    if (/\b(oxford|oxfords|brogue|brogues|derby|dress\s*shoe)\b/.test(cap)) return "oxfords";
+    if (/\b(clog|clogs)\b/.test(cap)) return "clogs";
+  }
 
-  if (/\b(sneaker|sneakers|trainer|trainers|running\s*shoe|athletic\s*shoe|sport\s*shoe)\b/.test(cap)) return "sneakers";
-  if (/\b(boot|boots|ankle\s*boot|combat\s*boot|chelsea|hiking\s*boot|rain\s*boot)\b/.test(cap)) return "boots";
-  if (/\b(heel|heels|pump|pumps|stiletto|stilettos|wedge|wedges|platform|slingback|kitten\s*heel)\b/.test(cap)) return "heels";
-  if (/\b(sandal|sandals|slide|slides|mule|mules|flip\s*flop|espadrille|gladiator)\b/.test(cap)) return "sandals";
-  if (/\b(loafer|loafers|moccasin|moccasins|penny\s*loafer|driving\s*shoe)\b/.test(cap)) return "loafers";
-  if (/\b(flat|flats|ballet|ballerina)\b/.test(cap)) return "flats";
-  if (/\b(oxford|oxfords|brogue|brogues|derby|dress\s*shoe)\b/.test(cap)) return "oxfords";
-  if (/\b(clog|clogs)\b/.test(cap)) return "clogs";
+  // --- Signal 2: YOLO raw_label keywords (many YOLO fashion models emit sub-labels) ---
+  const rawLabelLower = label;
+  if (/\b(sneaker|trainer|athletic|sport)\b/.test(rawLabelLower)) return "sneakers";
+  if (/\b(boot|ankle boot|chelsea|combat)\b/.test(rawLabelLower)) return "boots";
+  if (/\b(heel|pump|stiletto|wedge|platform)\b/.test(rawLabelLower)) return "heels";
+  if (/\b(sandal|slide|mule|flip.?flop|espadrille)\b/.test(rawLabelLower)) return "sandals";
+  if (/\b(loafer|moccasin)\b/.test(rawLabelLower)) return "loafers";
+  if (/\b(flat|ballet|ballerina)\b/.test(rawLabelLower)) return "flats";
+
+  // --- Signal 3: detection box aspect ratio (BLIP-free visual heuristic) ---
+  if (boxNormalized) {
+    const bw = Math.max(0, (boxNormalized.x2 ?? 0) - (boxNormalized.x1 ?? 0));
+    const bh = Math.max(0, (boxNormalized.y2 ?? 0) - (boxNormalized.y1 ?? 0));
+    if (bw > 0.01 && bh > 0.01) {
+      const aspect = bh / bw;
+      // Boots are tall (aspect > 1.6) — clearly extends above ankle.
+      if (aspect > 1.6) return "boots";
+      // Heels are taller than wide (1.2–1.6) due to raised heel.
+      if (aspect > 1.2) return "heels";
+      // Very flat/wide boxes (aspect < 0.4) are typically slides/sandals/flats.
+      if (aspect < 0.4) return "sandals";
+      // Moderately wide (0.4–0.7) with low placement on image → sneakers or loafers.
+      if (aspect < 0.7) return "sneakers";
+    }
+  }
 
   return label;
 }
@@ -3096,9 +3153,9 @@ export class ImageAnalysisService {
       detectionJobs,
       shopLookPerDetectionConcurrency(),
       async ({ detection, detectionIndex }) => {
-      // Refine generic "shoe" label using BLIP caption for footwear subtype specificity.
+      // Refine generic "shoe" label using BLIP caption + box geometry for footwear subtype specificity.
       const rawLabel = detection.label;
-      const label = inferFootwearSubtypeFromCaption(rawLabel, blipCaption);
+      const label = inferFootwearSubtype(rawLabel, blipCaption, (detection as any).box_normalized);
       console.log(`[detection-trace] started label="${label}"${label !== rawLabel ? ` (refined from "${rawLabel}")` : ""} conf=${(detection.confidence ?? 0).toFixed(3)} area=${(detection.area_ratio ?? 0).toFixed(3)}`);
       
       let clipBuffer: Buffer;
@@ -3217,7 +3274,9 @@ export class ImageAnalysisService {
       if (!isAccessoryOrBag && inferredAudience.gender) {
         filters.gender = inferredAudience.gender;
       }
-      if (!isAccessoryOrBag && inferredAudience.ageGroup && blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong()) {
+      // Apply ageGroup: trust BLIP when confident, but also trust detection-based
+      // fallback (seeing real clothing items implies adult audience).
+      if (!isAccessoryOrBag && inferredAudience.ageGroup) {
         filters.ageGroup = inferredAudience.ageGroup;
       }
 
@@ -3230,15 +3289,17 @@ export class ImageAnalysisService {
         filters.softStyle = inferredStyle.attrStyle;
       }
 
-      // Extract formality intent from BLIP caption: if formal wear is detected (suit, tie, tuxedo),
-      // override softStyle to "formal" to ensure proper product ranking (no casual sport coats, blazers).
+      // Extract formality from BLIP caption + detection label (whichever is stronger).
+      // This ensures formal enforcement works even when BLIP returns nothing.
       const blipFormalityScore = blipCaption ? inferFormalityFromCaption(blipCaption) : 0;
-      if (blipCaption && blipFormalityScore > 0) {
-        console.log(`[formality-intent] caption="${blipCaption.substring(0, 60)}..." score=${blipFormalityScore}`);
+      const labelFormalityScore = inferFormalityFromLabel(label);
+      const effectiveFormalityScore = Math.max(blipFormalityScore, labelFormalityScore);
+      if (effectiveFormalityScore > 0) {
+        console.log(`[formality-intent] label="${label}" blipScore=${blipFormalityScore} labelScore=${labelFormalityScore} effective=${effectiveFormalityScore}`);
       }
-      if (blipFormalityScore >= 8) {
-        filters.softStyle = "formal"; // Override previous style inference with formal
-        (filters as any).minFormality = 8; // Hard filter: only rank products with formality >= 8
+      if (effectiveFormalityScore >= 8) {
+        filters.softStyle = "formal";
+        (filters as any).minFormality = 8;
         console.log(`[formality-intent][APPLIED] enforcing formal-wear-only for detection="${label}"`);
       }
 
@@ -3341,8 +3402,11 @@ export class ImageAnalysisService {
       let detectionBlipSignal: BlipSignal | undefined;
       let detectionCaptionAcceptedForLock = false;
       if (detCaption.trim().length > 0) {
-        const captionLength = inferLengthIntentFromCaption(detCaption);
-        if (captionLength) (filters as any).length = captionLength;
+        // Caption length only supplements — never overrides bbox-inferred length.
+        if (!(filters as any).length) {
+          const captionLength = inferLengthIntentFromCaption(detCaption);
+          if (captionLength) (filters as any).length = captionLength;
+        }
       }
       if (detCaption.trim().length > 0) {
         obs.detectionCaptionHits += 1;
@@ -4500,15 +4564,16 @@ export class ImageAnalysisService {
           filters.softStyle = inferredStyle.attrStyle;
         }
 
-        // Extract formality intent from BLIP caption: if formal wear is detected (suit, tie, tuxedo),
-        // override softStyle to "formal" to ensure proper product ranking (no casual sport coats, blazers).
+        // Extract formality from BLIP caption + detection label (whichever is stronger).
         const blipFormalityScore = blipCaption ? inferFormalityFromCaption(blipCaption) : 0;
-        if (blipCaption && blipFormalityScore > 0) {
-          console.log(`[formality-intent-alt] caption="${blipCaption.substring(0, 60)}..." score=${blipFormalityScore}`);
+        const labelFormalityScore = inferFormalityFromLabel(categorySource);
+        const effectiveFormalityScore = Math.max(blipFormalityScore, labelFormalityScore);
+        if (effectiveFormalityScore > 0) {
+          console.log(`[formality-intent-alt] label="${categorySource}" blipScore=${blipFormalityScore} labelScore=${labelFormalityScore} effective=${effectiveFormalityScore}`);
         }
-        if (blipFormalityScore >= 8) {
-          filters.softStyle = "formal"; // Override previous style inference with formal
-          (filters as any).minFormality = 8; // Hard filter: only rank products with formality >= 8
+        if (effectiveFormalityScore >= 8) {
+          filters.softStyle = "formal";
+          (filters as any).minFormality = 8;
           console.log(`[formality-intent-alt][APPLIED] enforcing formal-wear-only for detection="${categorySource}"`);
         }
 
@@ -4579,8 +4644,10 @@ export class ImageAnalysisService {
         let detectionBlipSignal: BlipSignal | undefined;
         let detectionCaptionAcceptedForLock = false;
         if (detCaption.trim().length > 0) {
-          const captionLength = inferLengthIntentFromCaption(detCaption);
-          if (captionLength) (filters as any).length = captionLength;
+          if (!(filters as any).length) {
+            const captionLength = inferLengthIntentFromCaption(detCaption);
+            if (captionLength) (filters as any).length = captionLength;
+          }
         }
         if (detCaption.trim().length > 0) {
           obs.detectionCaptionHits += 1;

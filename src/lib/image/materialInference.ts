@@ -76,16 +76,63 @@ export function inferMaterialFromCaption(
   return null;
 }
 
+/**
+ * Infer material from the YOLO detection label alone (no BLIP needed).
+ * Many YOLO fashion labels embed material cues: "denim jeans", "leather jacket", etc.
+ */
+export function inferMaterialFromDetectionLabel(
+  detectionLabel: string,
+  productCategory?: string,
+): TextureMaterialInference | null {
+  const text = `${detectionLabel ?? ""} ${productCategory ?? ""}`.toLowerCase();
+  if (!text.trim()) return null;
+
+  const labelMaterials: [RegExp, string][] = [
+    [/\b(jean|jeans|denim)\b/, "denim"],
+    [/\b(leather)\b/, "leather"],
+    [/\b(suede)\b/, "suede"],
+    [/\b(knit|knitted|knitwear|crochet|sweater|cardigan|pullover|jumper)\b/, "knit"],
+    [/\b(wool|woolen|cashmere|merino)\b/, "wool"],
+    [/\b(silk)\b/, "silk"],
+    [/\b(satin)\b/, "satin"],
+    [/\b(velvet)\b/, "velvet"],
+    [/\b(linen)\b/, "linen"],
+    [/\b(cotton)\b/, "cotton"],
+    [/\b(lace|lacey)\b/, "lace"],
+    [/\b(chiffon)\b/, "chiffon"],
+    [/\b(tweed)\b/, "tweed"],
+    [/\b(corduroy)\b/, "corduroy"],
+    [/\b(fleece)\b/, "fleece"],
+    [/\b(mesh)\b/, "mesh"],
+    [/\b(canvas)\b/, "canvas"],
+    [/\b(nylon)\b/, "nylon"],
+    [/\b(polyester)\b/, "polyester"],
+  ];
+
+  for (const [re, material] of labelMaterials) {
+    if (re.test(text)) {
+      return { material, confidence: 0.75, candidates: [material] };
+    }
+  }
+  return null;
+}
+
 export async function inferMaterialFromTextureCrop(params: {
   clipBuffer: Buffer;
   productCategory: string;
   detectionLabel: string;
   caption?: string | null;
 }): Promise<TextureMaterialInference> {
-  // Text-based material from caption takes priority (much more reliable than pixel stats).
+  // Priority 1: BLIP caption material (when available and confident).
   const captionMaterial = inferMaterialFromCaption(params.caption);
   if (captionMaterial && captionMaterial.confidence >= 0.7) {
     return captionMaterial;
+  }
+
+  // Priority 2: YOLO detection label material (BLIP-free, but still reliable).
+  const labelMaterial = inferMaterialFromDetectionLabel(params.detectionLabel, params.productCategory);
+  if (labelMaterial && labelMaterial.confidence >= 0.7) {
+    return labelMaterial;
   }
 
   const categoryText = `${params.productCategory} ${params.detectionLabel}`.toLowerCase();
@@ -166,6 +213,10 @@ export async function inferMaterialFromTextureCrop(params: {
     const matteScore = clamp01(1 - meanSat * 0.95);
     const glossScore = clamp01(brightRatio * 0.7 + (1 - meanSat) * 0.15 + Math.max(0, meanLum - 0.65) * 0.35);
 
+    // Texture variability: high lumStd means varied texture (knit, tweed), low = smooth fabric.
+    const textureVar = clamp01(lumStd / 0.18);
+    const darkSmooth = meanLum < 0.35 && smoothScore > 0.6 ? 0.12 : 0;
+
     const candidates: Candidate[] = [
       {
         material: "cotton",
@@ -177,11 +228,11 @@ export async function inferMaterialFromTextureCrop(params: {
       },
       {
         material: "knit",
-        score: 0.18 + edgeScore * 0.48 + matteScore * 0.08 + (topLike ? 0.14 : 0),
+        score: 0.18 + edgeScore * 0.44 + textureVar * 0.16 + matteScore * 0.08 + (topLike ? 0.14 : 0),
       },
       {
         material: "wool",
-        score: 0.17 + edgeScore * 0.38 + matteScore * 0.14 + (outerwear || /\b(sweater|cardigan|pullover|jumper)\b/.test(categoryText) ? 0.12 : 0),
+        score: 0.17 + edgeScore * 0.34 + textureVar * 0.12 + matteScore * 0.14 + (outerwear || /\b(sweater|cardigan|pullover|jumper)\b/.test(categoryText) ? 0.12 : 0),
       },
       {
         material: "linen",
@@ -197,11 +248,11 @@ export async function inferMaterialFromTextureCrop(params: {
       },
       {
         material: "leather",
-        score: 0.22 + smoothScore * 0.34 + glossScore * 0.14 + (footwear ? 0.14 : 0) + (outerwear ? 0.08 : 0),
+        score: 0.22 + smoothScore * 0.34 + glossScore * 0.14 + darkSmooth + (footwear ? 0.14 : 0) + (outerwear ? 0.1 : 0),
       },
       {
         material: "suede",
-        score: 0.18 + edgeScore * 0.2 + matteScore * 0.24 + (footwear ? 0.16 : 0) + (outerwear ? 0.08 : 0),
+        score: 0.18 + edgeScore * 0.2 + matteScore * 0.24 + (meanLum < 0.4 && matteScore > 0.6 ? 0.08 : 0) + (footwear ? 0.16 : 0) + (outerwear ? 0.08 : 0),
       },
       {
         material: "denim",
@@ -222,6 +273,14 @@ export async function inferMaterialFromTextureCrop(params: {
       {
         material: "silk",
         score: 0.14 + smoothScore * 0.28 + glossScore * 0.4 + (meanLum > 0.6 ? 0.08 : 0),
+      },
+      {
+        material: "tweed",
+        score: 0.12 + edgeScore * 0.3 + textureVar * 0.22 + (outerwear ? 0.12 : 0),
+      },
+      {
+        material: "corduroy",
+        score: 0.12 + edgeScore * 0.35 + textureVar * 0.18 + (bottomLike ? 0.1 : 0),
       },
     ];
 
