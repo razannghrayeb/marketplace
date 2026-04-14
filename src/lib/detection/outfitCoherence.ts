@@ -676,13 +676,14 @@ function createSingleItemResult(detection: DetectionWithColor): OutfitCoherenceR
   const hasTop = group === "tops";
   const hasBottom = group === "bottoms";
   const hasDress = group === "dresses";
+  const hasFootwear = group === "footwear";
 
   const missingEssentials: string[] = [];
   if (!hasDress) {
     if (!hasTop) missingEssentials.push("top");
     if (!hasBottom) missingEssentials.push("bottom");
   }
-  missingEssentials.push("footwear");
+  if (!hasFootwear) missingEssentials.push("footwear");
 
   return {
     overallScore: 0.5,

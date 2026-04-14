@@ -46,9 +46,11 @@ function isCacheDisabled(): boolean {
          process.env.EMBEDDING_CACHE_ENABLED === "false";
 }
 
-/** After Upstash hits max DB size, SET fails — stop trying writes for this process (reindex still works). */
+/** After Upstash limits are hit, stop cache Redis ops for this process to avoid log storms. */
 let redisWritesSuppressedDueToCapacity = false;
+let redisOpsSuppressedDueToRequestLimit = false;
 let loggedCapacityNotice = false;
+let loggedRequestLimitNotice = false;
 
 function isQuotaExceededError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -57,6 +59,39 @@ function isQuotaExceededError(err: unknown): boolean {
       msg
     )
   );
+}
+
+function isRequestLimitExceededError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /max requests limit exceeded/i.test(msg);
+}
+
+function handleRedisLimitError(err: unknown): boolean {
+  if (isRequestLimitExceededError(err)) {
+    redisOpsSuppressedDueToRequestLimit = true;
+    if (!loggedRequestLimitNotice) {
+      loggedRequestLimitNotice = true;
+      console.warn(
+        "[EmbeddingCache] Upstash request quota exceeded - cache reads/writes disabled for this process. " +
+          "Fix: upgrade plan, wait for quota reset, or set DISABLE_EMBEDDING_CACHE=1."
+      );
+    }
+    return true;
+  }
+
+  if (isQuotaExceededError(err)) {
+    redisWritesSuppressedDueToCapacity = true;
+    if (!loggedCapacityNotice) {
+      loggedCapacityNotice = true;
+      console.warn(
+        "[EmbeddingCache] Redis/Upstash storage quota exceeded - cache writes disabled for this process (reindex continues). " +
+          "Fix: upgrade plan, flush old keys in Upstash console, or set DISABLE_EMBEDDING_CACHE=1."
+      );
+    }
+    return true;
+  }
+
+  return false;
 }
 
 // In-memory stats
@@ -102,7 +137,7 @@ export async function getCachedImageEmbedding(
   imageBuffer: Buffer,
   attribute: SemanticAttribute
 ): Promise<number[] | null> {
-  if (isCacheDisabled() || !isRedisAvailable()) return null;
+  if (isCacheDisabled() || !isRedisAvailable() || redisOpsSuppressedDueToRequestLimit) return null;
   
   const redis = getRedis();
   if (!redis) return null;
@@ -119,6 +154,7 @@ export async function getCachedImageEmbedding(
     cacheStats.misses++;
     return null;
   } catch (err) {
+    if (handleRedisLimitError(err)) return null;
     console.warn("[EmbeddingCache] Get error:", err);
     return null;
   }
@@ -132,7 +168,12 @@ export async function cacheImageEmbedding(
   attribute: SemanticAttribute,
   embedding: number[]
 ): Promise<void> {
-  if (isCacheDisabled() || !isRedisAvailable() || redisWritesSuppressedDueToCapacity) return;
+  if (
+    isCacheDisabled() ||
+    !isRedisAvailable() ||
+    redisWritesSuppressedDueToCapacity ||
+    redisOpsSuppressedDueToRequestLimit
+  ) return;
 
   const redis = getRedis();
   if (!redis) return;
@@ -148,17 +189,7 @@ export async function cacheImageEmbedding(
 
     await redis.setex(key, CACHE_CONFIG.ttlSeconds, value);
   } catch (err) {
-    if (isQuotaExceededError(err)) {
-      redisWritesSuppressedDueToCapacity = true;
-      if (!loggedCapacityNotice) {
-        loggedCapacityNotice = true;
-        console.warn(
-          "[EmbeddingCache] Redis/Upstash storage quota exceeded — cache writes disabled for this process (reindex continues). " +
-            "Fix: upgrade plan, flush old keys in Upstash console, or set DISABLE_EMBEDDING_CACHE=1."
-        );
-      }
-      return;
-    }
+    if (handleRedisLimitError(err)) return;
     console.warn("[EmbeddingCache] Set error:", err);
   }
 }
@@ -170,7 +201,7 @@ export async function getCachedTextEmbedding(
   text: string,
   attribute: SemanticAttribute
 ): Promise<number[] | null> {
-  if (isCacheDisabled() || !isRedisAvailable()) return null;
+  if (isCacheDisabled() || !isRedisAvailable() || redisOpsSuppressedDueToRequestLimit) return null;
   
   const redis = getRedis();
   if (!redis) return null;
@@ -187,6 +218,7 @@ export async function getCachedTextEmbedding(
     cacheStats.misses++;
     return null;
   } catch (err) {
+    if (handleRedisLimitError(err)) return null;
     console.warn("[EmbeddingCache] Get error:", err);
     return null;
   }
@@ -200,7 +232,12 @@ export async function cacheTextEmbedding(
   attribute: SemanticAttribute,
   embedding: number[]
 ): Promise<void> {
-  if (isCacheDisabled() || !isRedisAvailable() || redisWritesSuppressedDueToCapacity) return;
+  if (
+    isCacheDisabled() ||
+    !isRedisAvailable() ||
+    redisWritesSuppressedDueToCapacity ||
+    redisOpsSuppressedDueToRequestLimit
+  ) return;
 
   const redis = getRedis();
   if (!redis) return;
@@ -216,17 +253,7 @@ export async function cacheTextEmbedding(
 
     await redis.setex(key, CACHE_CONFIG.ttlSeconds, value);
   } catch (err) {
-    if (isQuotaExceededError(err)) {
-      redisWritesSuppressedDueToCapacity = true;
-      if (!loggedCapacityNotice) {
-        loggedCapacityNotice = true;
-        console.warn(
-          "[EmbeddingCache] Redis/Upstash storage quota exceeded — cache writes disabled for this process (reindex continues). " +
-            "Fix: upgrade plan, flush old keys in Upstash console, or set DISABLE_EMBEDDING_CACHE=1."
-        );
-      }
-      return;
-    }
+    if (handleRedisLimitError(err)) return;
     console.warn("[EmbeddingCache] Set error:", err);
   }
 }
@@ -278,7 +305,7 @@ export async function batchGetImageEmbeddings(
 ): Promise<Map<SemanticAttribute, number[] | null>> {
   const results = new Map<SemanticAttribute, number[] | null>();
   
-  if (isCacheDisabled() || !isRedisAvailable()) {
+  if (isCacheDisabled() || !isRedisAvailable() || redisOpsSuppressedDueToRequestLimit) {
     for (const attr of attributes) {
       results.set(attr, null);
     }
@@ -311,6 +338,12 @@ export async function batchGetImageEmbeddings(
       }
     }
   } catch (err) {
+    if (handleRedisLimitError(err)) {
+      for (const attr of attributes) {
+        results.set(attr, null);
+      }
+      return results;
+    }
     console.warn("[EmbeddingCache] Batch get error:", err);
     for (const attr of attributes) {
       results.set(attr, null);
