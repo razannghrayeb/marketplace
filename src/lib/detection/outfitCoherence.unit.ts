@@ -54,4 +54,20 @@ describe("computeOutfitCoherence", () => {
 
     expect(result.pairwiseScores[0].colorHarmony).toBeGreaterThan(0.8);
   });
+
+  test("does not mark footwear as missing for a single shoe detection", () => {
+    const result = computeOutfitCoherence([
+      {
+        label: "shoe",
+        raw_label: "shoe",
+        confidence: 0.95,
+        box: { x1: 0, y1: 0, x2: 100, y2: 100 } as any,
+        style: { occasion: "casual", formality: 3 },
+        dominantColor: "brown",
+      } as any,
+    ]);
+
+    expect(result.categoryAnalysis.hasFootwear).toBe(true);
+    expect(result.categoryAnalysis.missingEssentials).toEqual(["top", "bottom"]);
+  });
 });
