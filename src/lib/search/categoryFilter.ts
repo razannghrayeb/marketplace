@@ -354,7 +354,8 @@ export function inferCategoryCanonical(rawCategory: string | null | undefined, t
     if (/\b(shorts|bermuda|bermudas|cargo shorts|denim shorts|jeans|trousers|pants|chinos|leggings|skirt|skirts|culottes|sweatpants)\b/.test(norm)) {
       return "bottoms";
     }
-    if (/\b(top|tops|shirt|shirts|blouse|blouses|tshirt|t-shirt|tee|tank top|polo|henley|tunic|crop top|camisole|sweater|pullover|hoodie|sweatshirt)\b/.test(norm)) {
+    const hasTopAccessoryPhrase = /\btop(?:\s|-)+(handle|zip|zipper|stitch|stitching|coat|bag|satchel|clutch|pouch|wallet|case|cover|closure)\b/.test(norm);
+    if (!hasTopAccessoryPhrase && /\b(top|tops|shirt|shirts|blouse|blouses|tshirt|t-shirt|tee|tank top|polo|henley|tunic|crop top|camisole|sweater|pullover|hoodie|sweatshirt)\b/.test(norm)) {
       return "tops";
     }
 

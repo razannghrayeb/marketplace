@@ -98,6 +98,10 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
   // Achromatic neutrals — widen gate to chroma < 11 so very desaturated
   // darks (near-black leather, dark charcoal wool) don't bleed into navy/brown.
   if (chroma < 11) {
+    // Keep very light cool tones from collapsing into white/off-white.
+    if (lab[0] > 78 && lab[2] <= -3 && blueLead >= 6) return "light-blue";
+    // Pale yellows are often low-chroma in studio lighting; avoid mapping to beige/off-white.
+    if (lab[0] > 72 && lab[2] >= 12 && lab[1] >= -2) return "yellow";
     if (lab[0] < 14) return "black";
     if (lab[0] < 36) return "charcoal";
     if (lab[0] < 60) return "gray";
@@ -122,6 +126,8 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
   if (lab[0] > 82 && chroma >= 9 && chroma < 22) {
     // Baby blue / powder blue often lives in this range but should not collapse into off-white.
     if (lab[2] <= -6 || (blueLead >= 10 && lab[1] <= 2)) return "light-blue";
+    // Very light yellow fabric can be weakly saturated and otherwise map to beige.
+    if (lab[2] >= 18 && lab[1] >= -2 && lab[1] <= 10) return "yellow";
     if (lab[1] > 3 && lab[2] > 8) return "cream";
     // Keep off-white narrowly neutral; strong negative b* indicates cool blue, not white.
     if (lab[1] < -2 && lab[2] > -4 && lab[2] < 4) return "off-white";
@@ -319,10 +325,6 @@ export async function extractGarmentFashionColors(
     };
   }
 
-  const primaryCanonical = canonList[0];
-  const secondaryCanonical = canonList.length > 1 ? canonList[1] : null;
-  const accentCanonical = canonList.length > 2 ? canonList[2] : null;
-
   const promotableNeutralColors = new Set([
     "gray",
     "charcoal",
@@ -335,18 +337,24 @@ export async function extractGarmentFashionColors(
     "silver",
   ]);
   if (
-    primaryCanonical === "black" &&
-    secondaryCanonical &&
-    promotableNeutralColors.has(secondaryCanonical) &&
+    canonList[0] === "black" &&
+    canonList.length > 1 &&
+    promotableNeutralColors.has(canonList[1]) &&
     (weights[1] ?? 0) >= 0.2 &&
     (weights[0] ?? 0) - (weights[1] ?? 0) <= 0.25
   ) {
-    canonList[0] = secondaryCanonical;
-    canonList[1] = primaryCanonical;
+    const first = canonList[0];
+    const second = canonList[1];
+    canonList[0] = second;
+    canonList[1] = first;
     const primaryWeight = weights[0] ?? 1;
     weights[0] = weights[1] ?? 0;
     weights[1] = primaryWeight;
   }
+
+  const primaryCanonical = canonList[0];
+  const secondaryCanonical = canonList.length > 1 ? canonList[1] : null;
+  const accentCanonical = canonList.length > 2 ? canonList[2] : null;
 
   const w0 = weights[0] ?? 1;
   const w1 = weights[1] ?? 0;
