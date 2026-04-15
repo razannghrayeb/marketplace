@@ -752,6 +752,29 @@ function scoreOccasionGarmentCompatibility(
   const isBottomCasual = /\b(short|shorts|jogger|joggers|cargo|linen short|swim short)\b/.test(text);
   const isTopFormal = /\b(dress shirt|oxford shirt|blazer|tailored|formal shirt)\b/.test(text);
   const isTopCasual = /\b(t-?shirt|tee|tank|polo|linen shirt|hawaiian|resort shirt)\b/.test(text);
+  const isAccessoryFormal = /\b(watch|pearl|gold|silver|leather belt|silk scarf|fine jewelry|necklace|bracelet|ring|earring)\b/.test(text);
+  const isAccessoryCasual = /\b(cap|beanie|canvas belt|woven belt|sport watch|sunglasses|bucket hat)\b/.test(text);
+  const isAccessoryNoise = /\b(key ?ring|keychain|phone case|hair accessory|scrunchie|headband)\b/.test(text);
+
+  if (candidateFamily === "accessories") {
+    if (isAccessoryNoise) return 0.38;
+    if (sourceOccasion === "beach") {
+      if (/\b(straw|woven|raffia|sunglasses|cap|hat|scarf)\b/.test(text)) return 0.9;
+      if (isAccessoryFormal) return 0.52;
+      return 0.72;
+    }
+    if (sourceOccasion === "formal" || sourceOccasion === "semi-formal" || sourceOccasion === "party") {
+      if (isAccessoryFormal) return 0.92;
+      if (isAccessoryCasual) return 0.62;
+      return 0.74;
+    }
+    if (sourceOccasion === "casual") {
+      if (isAccessoryCasual) return 0.9;
+      if (isAccessoryFormal) return 0.7;
+      return 0.76;
+    }
+    return 0.74;
+  }
 
   if (sourceOccasion === "beach") {
     if (candidateFamily === "bottoms") {
@@ -932,6 +955,13 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
         bagOccasionScore < 0.45
           ? "bag style is less suitable for this occasion"
           : "bag style matches the occasion"
+      );
+    }
+    if (candidateFamily === "accessories") {
+      matchReasons.push(
+        garmentOccasionScore < 0.5
+          ? "accessory style is less suitable for this occasion"
+          : "accessory style matches the occasion"
       );
     }
 

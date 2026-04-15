@@ -760,15 +760,47 @@ async function pMap<T, R>(
 
 async function loadProgress(file: string): Promise<Progress | null> {
   try {
-    return JSON.parse(await fs.readFile(file, "utf-8"));
-  } catch {
-    return null;
+    const raw = await fs.readFile(file, "utf-8");
+    if (!raw.trim()) {
+      throw new Error("progress file is empty");
+    }
+    return JSON.parse(raw);
+  } catch (err: any) {
+    const backupFile = `${file}.bak`;
+    try {
+      const backupRaw = await fs.readFile(backupFile, "utf-8");
+      if (!backupRaw.trim()) {
+        throw new Error("backup progress file is empty");
+      }
+      const recovered = JSON.parse(backupRaw) as Progress;
+      console.warn(
+        `⚠️  Could not read progress file (${err?.message ?? "unknown error"}). ` +
+        `Recovered from backup: ${backupFile}`
+      );
+      return recovered;
+    } catch {
+      return null;
+    }
   }
 }
 
 async function saveProgress(progress: Progress, file: string): Promise<void> {
   progress.lastUpdatedAt = new Date().toISOString();
-  await fs.writeFile(file, JSON.stringify(progress, null, 2));
+  const payload = JSON.stringify(progress, null, 2);
+  const tempFile = `${file}.tmp`;
+  const backupFile = `${file}.bak`;
+
+  // Atomic-style update to avoid truncated/empty progress after abrupt exits.
+  await fs.writeFile(tempFile, payload, "utf-8");
+  try {
+    await fs.rename(tempFile, file);
+  } catch {
+    try { await fs.unlink(file); } catch { /* file may not exist yet */ }
+    await fs.rename(tempFile, file);
+  }
+
+  // Keep a recoverable backup in case the main file becomes unreadable.
+  await fs.writeFile(backupFile, payload, "utf-8");
 }
 
 // ============================================================================
