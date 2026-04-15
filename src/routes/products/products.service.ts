@@ -873,6 +873,33 @@ function isTopLikeCategory(category: string): boolean {
   );
 }
 
+function isOnePieceCatalogCandidate(product: Record<string, unknown>): boolean {
+  const blob = [
+    product.category,
+    product.category_canonical,
+    product.title,
+    product.description,
+    ...(Array.isArray(product.product_types) ? product.product_types : []),
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x).toLowerCase())
+    .join(" ");
+
+  if (!blob.trim()) return false;
+
+  const onePieceCue = /\b(dress|dresses|gown|gowns|frock|frocks|sundress|maxi dress|midi dress|mini dress|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|abaya|abayas|kaftan|kaftans|caftan|caftans)\b/.test(
+    blob,
+  );
+  if (!onePieceCue) return false;
+
+  const strongNonOnePieceCue = /\b(shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|bag|bags|wallet|wallets|belt|belts|hat|hats|cap|caps|trouser|trousers|pants|shorts|skirt|skirts|tee|t-?shirt|shirt|shirts|blouse|blouses|hoodie|sweater|cardigan|jacket|coat|blazer)\b/.test(
+    blob,
+  );
+
+  // If both cues exist (e.g., styling text), keep the candidate and let similarity/type score decide.
+  return onePieceCue || !strongNonOnePieceCue;
+}
+
 function hasBucketOnlyColorConflict(
   desiredColors: string[],
   docColors: string[],
@@ -3099,9 +3126,14 @@ export async function searchByImageWithSimilarity(
   );
   const filtersRecord = filters as Record<string, unknown>;
   const filterCategory = (filters as { category?: string | string[] }).category;
-  const mergedCategoryForRelevance = Array.isArray(filterCategory)
-    ? filterCategory[0]
-    : filterCategory;
+  const mergedCategoryForRelevance = (
+    Array.isArray(filterCategory)
+      ? filterCategory[0]
+      : filterCategory
+  ) ??
+    (typeof params.detectionProductCategory === "string" && params.detectionProductCategory.trim()
+      ? params.detectionProductCategory
+      : predictedCategoryAisles?.[0]);
 
   const textQueryForRelevance =
     typeof imageSearchTextQuery === "string" && imageSearchTextQuery.trim()
@@ -4403,7 +4435,9 @@ export async function searchByImageWithSimilarity(
           : category === "bags"
             ? 0.3
           : category === "tops" || category === "dresses"
-            ? 0.26
+            ? category === "dresses"
+              ? 0.18
+              : 0.26
             : category === "bottoms" || category === "outerwear"
               ? 0.24
               : 0.22;
@@ -4684,13 +4718,25 @@ export async function searchByImageWithSimilarity(
         const sleeveComp = Math.max(0, Math.min(1, compliance.sleeveCompliance ?? 0));
         const typeComp = Math.max(0, Math.min(1, compliance.productTypeCompliance ?? 0));
         const isTopDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops";
+        const isDressDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses";
+        const onePieceCandidate = isDressDetection
+          ? isOnePieceCatalogCandidate(p as unknown as Record<string, unknown>)
+          : false;
 
         if (isTopDetection && (compliance.hasSleeveIntent ?? false) && sleeveComp < 0.35) {
           finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.34 : 0.28);
           finalRelevanceSource = "sleeve_conflict_cap";
         }
 
-        if (typeComp < 0.28) {
+        if (isDressDetection) {
+          if (!onePieceCandidate) {
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.22 : 0.16);
+            finalRelevanceSource = "one_piece_mismatch_cap";
+          } else if (typeComp < 0.18) {
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.5 : 0.44);
+            finalRelevanceSource = "type_conflict_cap";
+          }
+        } else if (typeComp < 0.28) {
           finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.36 : 0.3);
           finalRelevanceSource = "type_conflict_cap";
         }
@@ -4905,6 +4951,7 @@ export async function searchByImageWithSimilarity(
   }
 
   if (hasDetectionAnchoredTypeIntent) {
+    const isDressDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses";
     const filtered = results.filter((p: any) => {
       const ex = (p.explain ?? {}) as any;
       const typeComp = Number(ex.productTypeCompliance ?? 0);
@@ -4912,13 +4959,29 @@ export async function searchByImageWithSimilarity(
       const crossFamily = Number(ex.crossFamilyPenalty ?? 0);
       const styleComp = Number(ex.styleCompliance ?? 0);
       const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+      const onePieceCandidate = isDressDetection
+        ? isOnePieceCatalogCandidate(p as unknown as Record<string, unknown>)
+        : false;
       if (!hasKidsAudienceIntent && hasChildAudienceSignals(p as Record<string, unknown>)) return false;
       if (enforceSleeveGate) {
         const sleeveMin = desiredSleeveNorm === "long" ? 0.68 : 0.55;
         if (Number(ex.sleeveCompliance ?? 0) < sleeveMin) return false;
+        const observedSleeve = inferCatalogSleeveToken(p as unknown as Record<string, unknown>);
+        if (
+          (desiredSleeveNorm === "long" || desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless") &&
+          observedSleeve &&
+          observedSleeve !== desiredSleeveNorm
+        ) {
+          return false;
+        }
       }
       if (params.detectionProductCategory === "tops" && (hasExplicitStyleIntent || hasSoftStyleHint) && styleComp < 0.2 && sim < 0.96) return false;
       if (crossFamily >= 0.5) return false;
+      if (isDressDetection) {
+        if (!onePieceCandidate && sim < 0.985) return false;
+        if (exactType >= 1 || typeComp >= 0.18 || onePieceCandidate) return true;
+        return sim >= 0.975 && crossFamily < 0.3;
+      }
       if (exactType >= 1 || typeComp >= 0.3) return true;
       return sim >= 0.96 && crossFamily < 0.35;
     });

@@ -769,6 +769,9 @@ async function extractDetectionCropColorsForRanking(params: {
   const trousersLikeBottom = /\b(trouser|trousers|pant|pants|jean|jeans|denim|chino|chinos|slack|slacks|cargo)\b/.test(
     String(params.detectionLabel || "").toLowerCase(),
   );
+  const longSleeveTopLike = /\b(long sleeve top|long sleeve|shirt|blouse|button\s*down|button-down)\b/.test(
+    String(params.detectionLabel || "").toLowerCase(),
+  );
   const topLike = isTopLikeColorSensitiveCategory(params.productCategory, params.detectionLabel);
   const footwear = isFootwearColorSensitiveCategory(params.productCategory, params.detectionLabel);
   let colorBuffer = params.clipBuffer;
@@ -799,10 +802,10 @@ async function extractDetectionCropColorsForRanking(params: {
         } else if (topLike) {
           // Top/outerwear boxes can include pants near the lower edge.
           // Sample upper-mid torso and trim side edges to avoid background/pants bleed.
-          left = Math.floor(w * 0.12);
-          width = Math.max(16, Math.floor(w * 0.76));
-          top = Math.floor(h * 0.08);
-          const bottom = Math.floor(h * 0.66);
+          left = Math.floor(w * (longSleeveTopLike ? 0.14 : 0.12));
+          width = Math.max(16, Math.floor(w * (longSleeveTopLike ? 0.72 : 0.76)));
+          top = Math.floor(h * (longSleeveTopLike ? 0.06 : 0.08));
+          const bottom = Math.floor(h * (longSleeveTopLike ? 0.58 : 0.62));
           height = Math.max(24, bottom - top);
         } else if (footwear) {
           // Shoe boxes frequently include floor pixels around edges.
@@ -949,8 +952,6 @@ function inferFootwearSubtypeFromCaption(
   if (/\b(flat|flats|ballet|ballerina)\b/.test(cap)) return "flats";
   if (/\b(oxford|oxfords|brogue|brogues|derby|dress\s*shoe)\b/.test(cap)) return "oxfords";
   if (/\b(clog|clogs)\b/.test(cap)) return "clogs";
-
-  if (/\b(dress|gown|formal|elegant|evening|cocktail|wedding|prom|party|occasion)\b/.test(cap)) return "heels";
 
   return label;
 }
@@ -1403,9 +1404,6 @@ function shouldKeepDetectionForShopTheLook(detection: Detection, allDetections?:
 
   if (mapped === "accessories" || mapped === "bags") {
     const isHeadAccessory = /\b(headband|head covering|hair accessory|hairband|headwear)\b/.test(label);
-    if (mapped === "bags" && isImplausibleBagGeometry(detection)) {
-      return false;
-    }
     // Head accessories are very noisy at low confidence — keep the gate.
     if (isHeadAccessory && confidence < imageMinAccessoryConfidence()) {
       return false;
@@ -1451,9 +1449,6 @@ function shouldKeepAccessoryRecoveryDetection(detection: Detection): boolean {
   );
 
   if (isBag) {
-    if (isImplausibleBagGeometry(detection)) {
-      return false;
-    }
     return confidence >= accessoryRecoveryConfidenceThreshold() || areaRatio >= accessoryRecoveryAreaRatioThreshold();
   }
 
@@ -1462,34 +1457,6 @@ function shouldKeepAccessoryRecoveryDetection(detection: Detection): boolean {
   }
 
   return confidence >= accessoryRecoveryConfidenceThreshold() || areaRatio >= accessoryRecoveryAreaRatioThreshold() * 1.35;
-}
-
-function isImplausibleBagGeometry(detection: Detection): boolean {
-  const bn = (detection as any).box_normalized as
-    | { x1?: number; y1?: number; x2?: number; y2?: number }
-    | undefined;
-  if (!bn) return false;
-
-  const x1 = Number(bn.x1);
-  const x2 = Number(bn.x2);
-  const y1 = Number(bn.y1);
-  const y2 = Number(bn.y2);
-  if (![x1, x2, y1, y2].every(Number.isFinite)) return false;
-
-  const width = Math.max(0, x2 - x1);
-  const height = Math.max(0, y2 - y1);
-  if (width <= 0 || height <= 0) return false;
-
-  const areaRatio = Number.isFinite(detection.area_ratio) ? Number(detection.area_ratio) : width * height;
-  const tallness = height / Math.max(width, 1e-6);
-  const centeredY = (y1 + y2) / 2;
-
-  // Suppress common false positives where a narrow torso-side strip is mislabeled as a bag.
-  const strapLikeTallSliver = tallness >= 4.2 && width <= 0.16 && areaRatio <= 0.12;
-  const tinyNeedleBox = tallness >= 3.2 && width <= 0.08 && areaRatio <= 0.02;
-  const torsoStripBias = centeredY >= 0.3 && centeredY <= 0.72 && tallness >= 3.8 && width <= 0.14;
-
-  return strapLikeTallSliver || tinyNeedleBox || torsoStripBias;
 }
 
 function imageEnableGeometricDressLengthEnv(): boolean {
@@ -1852,15 +1819,24 @@ function applyDetectionCategoryGuard(
       }
     }
     if (categoryMapping.productCategory === "tops") {
-      const strictTopLabel = /\b(long sleeve top|short sleeve top|top|tops|t-?shirt|tee|tank|camisole|cami|crop top|blouse|blouses)\b/.test(
-        String(detectionLabel).toLowerCase(),
-      );
+      const detectionLabelNorm = String(detectionLabel).toLowerCase();
+      const requestsOuterwear =
+        /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|sport coat|dress jacket|shirt jacket|shacket|overshirt)\b/.test(
+          detectionLabelNorm,
+        );
+      const isLongSleeveTopDetection = /\b(long sleeve top|long sleeve|shirt|blouse)\b/.test(detectionLabelNorm);
       if (
-        strictTopLabel &&
+        !requestsOuterwear &&
         (productCategoryMacro === "outerwear" ||
-          /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|sport coat|dress jacket|shirt jacket)\b/.test(
+          /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|sport coat|dress jacket|shirt jacket|shacket|overshirt)\b/.test(
             haystack,
           ))
+      ) {
+        return false;
+      }
+      if (
+        isLongSleeveTopDetection &&
+        /\b(shirt jacket|shacket|overshirt|lightweight jacket|jacket shirt)\b/.test(haystack)
       ) {
         return false;
       }
@@ -3704,7 +3680,13 @@ export class ImageAnalysisService {
         clipBuffer,
         productCategory: categoryMapping.productCategory,
         detectionLabel: label,
-        caption: blipCaption,
+        caption:
+          categoryMapping.productCategory === "tops" ||
+          categoryMapping.productCategory === "bottoms" ||
+          categoryMapping.productCategory === "dresses" ||
+          categoryMapping.productCategory === "outerwear"
+            ? null
+            : blipCaption,
       });
       if (textureMaterial.material && textureMaterial.confidence >= imageMinMaterialConfidenceEnv()) {
         (filters as any).material = textureMaterial.material;
@@ -3740,7 +3722,16 @@ export class ImageAnalysisService {
         const existingSource = Number(inferredColorsByItemSource[itemColorKey] ?? 0);
         const hasReliableCropColor = existingColor.length > 0 && existingSource === 1 && existingConf >= 0.6;
         const categoryNeedsStableSlotColor = requiresSlotSpecificColor(categoryMapping.productCategory);
-        if (!(categoryNeedsStableSlotColor && hasReliableCropColor)) {
+        const detCaptionColorNorm = String(detCaptionColor ?? "").toLowerCase().trim();
+        const existingColorNorm = String(existingColor ?? "").toLowerCase().trim();
+        const allowCaptionOverrideNeutralCrop =
+          categoryNeedsStableSlotColor &&
+          hasReliableCropColor &&
+          detCaptionColorNorm.length > 0 &&
+          !isNeutralFashionColor(detCaptionColorNorm) &&
+          isLightNeutralFashionColor(existingColorNorm) &&
+          detConfidence >= 0.76;
+        if (!(categoryNeedsStableSlotColor && hasReliableCropColor && !allowCaptionOverrideNeutralCrop)) {
           setDetectionColorIfHigherConfidence(
             inferredColorsByItem,
             inferredColorsByItemConfidence,
@@ -3766,8 +3757,15 @@ export class ImageAnalysisService {
           if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
           // Apply material hints from per-detection BLIP caption if present
           const detMaterialHints = (detStruct as any)?.materialHints as string[] | undefined;
-          if (detMaterialHints && detMaterialHints.length > 0 && detConfidence >= imageBlipSoftHintConfidenceMin()) {
-            (filters as any).material = detMaterialHints[0];
+          if (detMaterialHints && detMaterialHints.length > 0 && detConfidence >= imageBlipSoftHintConfidenceStrong()) {
+            const hasTextureMaterial = Boolean(textureMaterial.material);
+            const keepTextureForTopLike =
+              (categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "outerwear") &&
+              hasTextureMaterial &&
+              textureMaterial.confidence >= imageMinMaterialConfidenceEnv() + 0.08;
+            if (!keepTextureForTopLike) {
+              (filters as any).material = detMaterialHints[0];
+            }
           }
             const mergedTypes = [...new Set([...softProductTypeHints, ...detStruct.productTypeHints])];
           const filteredTypes = filterProductTypeSeedsByMappedCategory(
@@ -4297,8 +4295,21 @@ export class ImageAnalysisService {
             sessionFilters: options.sessionFilters ?? undefined,
           });
 
+          const topRecoveryCategorySafe = applyDetectionCategoryGuard(
+            topRecovery.results,
+            detection.label,
+            categoryMapping,
+            String((filters as any).gender ?? ""),
+          );
+
+          const topRecoverySleeveSafe = applySleeveIntentGuard({
+            products: topRecoveryCategorySafe,
+            detectionLabel: detection.label,
+            categoryMapping,
+          });
+
           const topRecoverySafeResults = applyAthleticMismatchGuard({
-            products: topRecovery.results,
+            products: topRecoverySleeveSafe,
             detectionLabel: label,
             productCategory: categoryMapping.productCategory,
             softStyle: String((filters as any).softStyle ?? ""),
@@ -4960,7 +4971,13 @@ export class ImageAnalysisService {
           clipBuffer,
           productCategory: categoryMapping.productCategory,
           detectionLabel: categorySource,
-          caption: blipCaption,
+          caption:
+            categoryMapping.productCategory === "tops" ||
+            categoryMapping.productCategory === "bottoms" ||
+            categoryMapping.productCategory === "dresses" ||
+            categoryMapping.productCategory === "outerwear"
+              ? null
+              : blipCaption,
         });
         if (textureMaterial.material && textureMaterial.confidence >= imageMinMaterialConfidenceEnv()) {
           (filters as any).material = textureMaterial.material;

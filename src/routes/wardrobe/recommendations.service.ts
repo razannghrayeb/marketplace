@@ -71,6 +71,7 @@ export interface CompleteLookSuggestion extends ProductRecommendation {
     materialAlignment?: number;
     footwearStyleAlignment?: number;
     bagStyleAlignment?: number;
+    accessoryStyleAlignment?: number;
   };
   stylistSignals?: {
     slot?: string;
@@ -489,6 +490,47 @@ function scoreBagStyleCompatibility(
     return 0.72;
   }
 
+  return 0.72;
+}
+
+function scoreAccessoryStyleCompatibility(
+  inferredOccasion: InferredOccasion,
+  preferredStyleTerms: string[],
+  source: any
+): number {
+  const blob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.attr_style || "")} ${String(source?.product_types || "")}`.toLowerCase();
+  const isStatement = /\b(statement|chunky|oversized|bold|layered|gem|crystal|embellished|drop earring)\b/.test(blob);
+  const isFormal = /\b(watch|pearl|gold|silver|leather belt|silk scarf|minimal|dainty|fine jewelry|cufflink|brooch)\b/.test(blob);
+  const isCasual = /\b(cap|baseball cap|beanie|canvas belt|woven belt|cotton scarf|sport watch|sunglasses)\b/.test(blob);
+  const isNoisy = /\b(key ?ring|keychain|phone case|hair accessory|scrunchie|headband)\b/.test(blob);
+  const styleSet = new Set(preferredStyleTerms.map((t) => String(t || "").toLowerCase().trim()).filter(Boolean));
+  const prefersMinimal = styleSet.has("minimalist") || styleSet.has("classic") || styleSet.has("business");
+  const prefersBold = styleSet.has("edgy") || styleSet.has("streetwear") || styleSet.has("boho");
+
+  if (isNoisy) return 0.38;
+
+  if (inferredOccasion === "formal" || inferredOccasion === "semi-formal" || inferredOccasion === "party") {
+    if (isFormal) return 0.94;
+    if (isCasual) return 0.6;
+    if (isStatement) return inferredOccasion === "party" ? 0.9 : 0.76;
+    return 0.74;
+  }
+
+  if (inferredOccasion === "casual") {
+    if (isCasual) return 0.9;
+    if (isFormal) return prefersMinimal ? 0.8 : 0.66;
+    if (isStatement) return prefersBold ? 0.86 : 0.72;
+    return 0.74;
+  }
+
+  if (inferredOccasion === "beach") {
+    if (/\b(straw|woven|canvas|raffia|sunglasses|cap|hat|scarf)\b/.test(blob)) return 0.9;
+    if (isFormal) return 0.52;
+    return 0.7;
+  }
+
+  if (prefersBold && isStatement) return 0.86;
+  if (prefersMinimal && isFormal) return 0.84;
   return 0.72;
 }
 
@@ -1141,6 +1183,10 @@ async function runCompleteLookCore(
             category === "bags"
               ? scoreBagStyleCompatibility(inferredOccasion, preferredStyleTerms, source)
               : 1;
+          const accessoryStyleAlignment =
+            category === "accessories"
+              ? scoreAccessoryStyleCompatibility(inferredOccasion, preferredStyleTerms, source)
+              : 1;
 
           // Enforce style/occasion compatibility when we have a reliable style intent.
           if (preferredStyleTerms.length > 0 && styleAlignment < 0.52 && formalityAlignment < 0.5) {
@@ -1157,7 +1203,7 @@ async function runCompleteLookCore(
             materialAlignment * 0.04 +
             formalityAlignment * 0.04;
 
-          const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment);
+          const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment * accessoryStyleAlignment);
           const slotAwareFinalScore = Math.round((finalScore * (0.7 + slotStyleScore * 0.3)) * 1000) / 1000;
 
           const floor = relaxedFloor ? Math.max(0.5, minimumSlotScore(category) - 0.04) : minimumSlotScore(category);
@@ -1173,6 +1219,7 @@ async function runCompleteLookCore(
           if (formalityAlignment >= 0.8) reasons.push("occasion/formality aligned");
           if (category === "shoes" && footwearStyleAlignment >= 0.85) reasons.push("footwear fits the occasion");
           if (category === "bags" && bagStyleAlignment >= 0.85) reasons.push("bag style suits the outfit");
+          if (category === "accessories" && accessoryStyleAlignment >= 0.82) reasons.push("accessories suit the occasion");
           if (reasons.length === 0) reasons.push("balances the current outfit");
 
           const fitBreakdown = {
@@ -1185,6 +1232,7 @@ async function runCompleteLookCore(
             formalityAlignment: Math.round(formalityAlignment * 1000) / 1000,
             footwearStyleAlignment: Math.round(footwearStyleAlignment * 1000) / 1000,
             bagStyleAlignment: Math.round(bagStyleAlignment * 1000) / 1000,
+            accessoryStyleAlignment: Math.round(accessoryStyleAlignment * 1000) / 1000,
           };
 
           scored.push({
@@ -2211,7 +2259,7 @@ function audienceGenderMatchesForSlot(
 
   if (slot === "bags") {
     const bagBlob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.category_canonical || "")}`.toLowerCase();
-    if (/\b(wallet|backpack|duffle|luggage|suitcase|travel accessory|key ring|keychain)\b/.test(bagBlob)) {
+    if (/\b(duffle|luggage|suitcase|travel accessory|key ring|keychain)\b/.test(bagBlob)) {
       return false;
     }
   }
@@ -2473,6 +2521,10 @@ async function fetchCategoryTopUpSuggestions(params: {
       matchedSlot === "bags"
         ? scoreBagStyleCompatibility(topupOccasion, params.preferredStyleTerms, source)
         : 1;
+    const accessoryStyleAlignment =
+      matchedSlot === "accessories"
+        ? scoreAccessoryStyleCompatibility(topupOccasion, params.preferredStyleTerms, source)
+        : 1;
 
     const score =
       embeddingNorm * 0.28 +
@@ -2483,7 +2535,7 @@ async function fetchCategoryTopUpSuggestions(params: {
       materialAlignment * 0.05 +
       formalityAlignment * 0.05;
 
-    const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment);
+    const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment * accessoryStyleAlignment);
     const slotAwareScore = Math.round((score * (0.72 + slotStyleScore * 0.28)) * 1000) / 1000;
 
     if (slotAwareScore < minimumSlotScore(matchedSlot)) continue;
@@ -2512,6 +2564,7 @@ async function fetchCategoryTopUpSuggestions(params: {
         formalityAlignment: Math.round(formalityAlignment * 1000) / 1000,
         footwearStyleAlignment: Math.round(footwearStyleAlignment * 1000) / 1000,
         bagStyleAlignment: Math.round(bagStyleAlignment * 1000) / 1000,
+        accessoryStyleAlignment: Math.round(accessoryStyleAlignment * 1000) / 1000,
       },
       stylistSignals: {
         slot: guessedSlot,
