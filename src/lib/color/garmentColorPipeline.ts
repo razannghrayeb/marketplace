@@ -120,8 +120,11 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
 
   // Light desaturated: cream/off-white/beige before LAB distance rounds to white/gray.
   if (lab[0] > 82 && chroma >= 9 && chroma < 22) {
+    // Baby blue / powder blue often lives in this range but should not collapse into off-white.
+    if (lab[2] <= -6 || (blueLead >= 10 && lab[1] <= 2)) return "light-blue";
     if (lab[1] > 3 && lab[2] > 8) return "cream";
-    if (lab[1] < -2 && lab[2] < 4) return "off-white";
+    // Keep off-white narrowly neutral; strong negative b* indicates cool blue, not white.
+    if (lab[1] < -2 && lab[2] > -4 && lab[2] < 4) return "off-white";
     if (lab[2] > 12) return "beige";
     if (Math.abs(lab[1]) < 6 && Math.abs(lab[2]) < 8) return "white";
   }
@@ -129,7 +132,8 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
   // Light saturated pastels: LAB distance otherwise rounds to white/cream.
   if (lab[0] > 75 && chroma >= 15 && chroma < 30) {
     if (lab[1] > 8) return "pink";
-    if (lab[2] > 20 && lab[1] > -2) return "gold";
+    // Restrict gold to muted mustard / metallic yellow tones, not ordinary bright yellow.
+    if (lab[2] > 20 && lab[1] > 6 && lab[0] < 86) return "gold";
     if (lab[2] < -10 || lab[1] < -8) return "light-blue";
   }
 
@@ -148,8 +152,10 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
 
   // Widen light-neutral gate (was L>88 abs<10 — missed many light fabrics).
   if (lab[0] > 85 && Math.abs(lab[1]) < 12 && Math.abs(lab[2]) < 12) {
+    // Preserve cool light-blue tones from collapsing to off-white.
+    if (lab[2] <= -6 || (blueLead >= 10 && chroma >= 8)) return "light-blue";
     if (lab[2] > 6) return "cream";
-    if (lab[2] < -4) return "off-white";
+    if (lab[2] < -4 && chroma < 10) return "off-white";
     if (chroma < 12) return "white";
   }
 
