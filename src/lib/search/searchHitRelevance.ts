@@ -187,7 +187,7 @@ function docAgeGroup(hit: { _source?: Record<string, unknown> }): string | null 
 }
 
 function docAudienceGender(hit: { _source?: Record<string, unknown> }): string | null {
-  const raw = hit?._source?.audience_gender ?? hit?._source?.attr_gender;
+  const raw = hit?._source?.audience_gender ?? hit?._source?.attr_gender ?? hit?._source?.gender;
   if (raw === undefined || raw === null) return null;
   return normalizeQueryGender(String(raw));
 }

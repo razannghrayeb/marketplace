@@ -215,6 +215,24 @@ function resolveShopLookLimit(explicit?: number): number {
   return defaultShopLookResultBudget();
 }
 
+/**
+ * Retrieval-only pool cap for per-detection kNN search before rerank/guards.
+ * Keep this higher than the final per-detection output cap to improve recall.
+ */
+function shopLookRetrievalCap(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_RETRIEVAL_CAP ?? "220");
+  if (!Number.isFinite(raw)) return 220;
+  return Math.max(80, Math.min(500, Math.floor(raw)));
+}
+
+function resolveShopLookRetrievalLimit(explicit?: number): number {
+  const cap = shopLookRetrievalCap();
+  if (typeof explicit === "number" && Number.isFinite(explicit) && explicit >= 1) {
+    return Math.min(cap, Math.floor(explicit));
+  }
+  return Math.min(cap, defaultShopLookResultBudget());
+}
+
 function resolveShopLookPage(explicit?: number): number {
   if (typeof explicit === "number" && Number.isFinite(explicit) && explicit >= 1) {
     return Math.floor(explicit);
@@ -1275,6 +1293,22 @@ function recoverFormalOuterwearTypes(
   return [...new Set([...FORMAL_OUTERWEAR_RECOVERY_TYPES, ...normalized])];
 }
 
+function shouldPreserveHardCategoryOnFallback(mapping: CategoryMapping): boolean {
+  const category = String(mapping.productCategory || "").toLowerCase();
+  return category === "dresses" || category === "footwear" || category === "bags" || category === "accessories";
+}
+
+function fallbackCategoryTermsForDetection(
+  detectionLabel: string,
+  mapping: CategoryMapping,
+): string[] {
+  const category = String(mapping.productCategory || "").toLowerCase();
+  if (category === "dresses") {
+    return getCategorySearchTerms("dresses");
+  }
+  return hardCategoryTermsForDetection(detectionLabel, mapping);
+}
+
 /** IoU threshold for merging same-label detections when `groupByDetection` is false (default 0.5). */
 function yoloShopDedupeIouThreshold(): number {
   const raw = Number(process.env.YOLO_SHOP_DEDUPE_IOU_THRESHOLD);
@@ -1505,6 +1539,8 @@ function accessoryRecoveryAreaRatioThreshold(): number {
 function shouldKeepAccessoryRecoveryDetection(detection: Detection): boolean {
   const mapped = mapDetectionToCategory(detection.label, detection.confidence).productCategory;
   if (mapped !== "bags" && mapped !== "accessories") return false;
+
+  if (shouldRejectImplausibleBagDetection(detection)) return false;
 
   const areaRatio = Number.isFinite(detection.area_ratio) ? detection.area_ratio : 0;
   const confidence = Number.isFinite(detection.confidence) ? detection.confidence : 0;
@@ -3108,10 +3144,14 @@ export class ImageAnalysisService {
           );
 
           if (accessoryDetections.length > 0) {
-            const mergedDetections = dedupeDetectionsBySameLabelIou(
+            const mergedDetectionsRaw = dedupeDetectionsBySameLabelIou(
               [...detectionResult.detections, ...accessoryDetections],
               yoloShopDedupeIouThreshold(),
-            ).map((row) => ensureStyleAndMask(row.detection, imageWidth, imageHeight));
+            ).map((row) => row.detection);
+
+            const mergedDetections = mergedDetectionsRaw
+              .filter((d) => shouldKeepDetectionForShopTheLook(d, mergedDetectionsRaw))
+              .map((d) => ensureStyleAndMask(d, imageWidth, imageHeight));
 
             detectionResult = {
               ...detectionResult,
@@ -3238,7 +3278,7 @@ export class ImageAnalysisService {
     const resolvedLimitPerItem = resolveShopLookLimit(similarLimitPerItem);
     const resolvedResultsPage = resolveShopLookPage(resultsPage);
     const resolvedResultsPageSize = resolveShopLookPageSize(resultsPageSize, resolvedLimitPerItem);
-    const retrievalLimit = resolveShopLookLimit(
+    const retrievalLimit = resolveShopLookRetrievalLimit(
       Math.max(resolvedLimitPerItem, resolvedResultsPage * resolvedResultsPageSize) *
         shopLookRecallMultiplier(),
     );
@@ -4073,6 +4113,19 @@ export class ImageAnalysisService {
           category?: string | string[];
           productTypes?: string[];
         };
+        const preserveHardCategoryInFallback = shouldPreserveHardCategoryOnFallback(categoryMapping);
+        const fallbackCategoryTerms = preserveHardCategoryInFallback
+          ? fallbackCategoryTermsForDetection(label, categoryMapping)
+          : [];
+        const fallbackFilters = preserveHardCategoryInFallback && fallbackCategoryTerms.length > 0
+          ? {
+              ...filtersSansCategory,
+              category:
+                fallbackCategoryTerms.length === 1
+                  ? fallbackCategoryTerms[0]
+                  : fallbackCategoryTerms,
+            }
+          : filtersSansCategory;
         similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
           imageEmbeddingGarment:
@@ -4083,13 +4136,13 @@ export class ImageAnalysisService {
           pHash: sourceImagePHash,
           detectionYoloConfidence: detection.confidence,
           detectionProductCategory: categoryMapping.productCategory,
-          filters: filtersSansCategory,
+          filters: fallbackFilters,
           limit: retrievalLimit,
           similarityThreshold,
           includeRelated: false,
-          predictedCategoryAisles,
+          predictedCategoryAisles: preserveHardCategoryInFallback ? undefined : predictedCategoryAisles,
           knnField: shopTheLookKnnField(),
-          forceHardCategoryFilter: false,
+          forceHardCategoryFilter: preserveHardCategoryInFallback,
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor: inferredPrimaryColorForDetection,
@@ -4101,6 +4154,21 @@ export class ImageAnalysisService {
           sessionFilters: options.sessionFilters ?? undefined,
         });
         if (similarResult.results.length === 0) {
+          const fallbackStructuralFilters = preserveHardCategoryInFallback && fallbackCategoryTerms.length > 0
+            ? {
+                category:
+                  fallbackCategoryTerms.length === 1
+                    ? fallbackCategoryTerms[0]
+                    : fallbackCategoryTerms,
+                gender: (filters as any).gender,
+                ageGroup: (filters as any).ageGroup,
+              }
+            : {
+                length: (filters as any).length,
+                sleeve: (filters as any).sleeve,
+                gender: (filters as any).gender,
+                ageGroup: (filters as any).ageGroup,
+              };
           similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalEmbedding,
             imageEmbeddingGarment:
@@ -4112,18 +4180,13 @@ export class ImageAnalysisService {
             detectionYoloConfidence: detection.confidence,
             detectionProductCategory: categoryMapping.productCategory,
             // Keep crop-derived structural intent even in last-resort fallback.
-            filters: {
-              length: (filters as any).length,
-              sleeve: (filters as any).sleeve,
-              gender: (filters as any).gender,
-              ageGroup: (filters as any).ageGroup,
-            } as any,
+            filters: fallbackStructuralFilters as any,
             softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
             limit: retrievalLimit,
             similarityThreshold,
             includeRelated: false,
             knnField: shopTheLookKnnField(),
-            forceHardCategoryFilter: false,
+            forceHardCategoryFilter: preserveHardCategoryInFallback,
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor: inferredPrimaryColorForDetection,
@@ -4747,7 +4810,7 @@ export class ImageAnalysisService {
     const resolvedLimitPerItem = resolveShopLookLimit(options.similarLimitPerItem);
     const resolvedResultsPage = resolveShopLookPage(resultsPage);
     const resolvedResultsPageSize = resolveShopLookPageSize(resultsPageSize, resolvedLimitPerItem);
-    const retrievalLimit = resolveShopLookLimit(
+    const retrievalLimit = resolveShopLookRetrievalLimit(
       Math.max(resolvedLimitPerItem, resolvedResultsPage * resolvedResultsPageSize) *
         shopLookRecallMultiplier(),
     );
@@ -5288,6 +5351,19 @@ export class ImageAnalysisService {
             category?: string | string[];
             productTypes?: string[];
           };
+          const preserveHardCategoryInFallback = shouldPreserveHardCategoryOnFallback(categoryMapping);
+          const fallbackCategoryTerms = preserveHardCategoryInFallback
+            ? fallbackCategoryTermsForDetection(categorySource, categoryMapping)
+            : [];
+          const fallbackFilters = preserveHardCategoryInFallback && fallbackCategoryTerms.length > 0
+            ? {
+                ...filtersSansCategory,
+                category:
+                  fallbackCategoryTerms.length === 1
+                    ? fallbackCategoryTerms[0]
+                    : fallbackCategoryTerms,
+              }
+            : filtersSansCategory;
           similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalEmbedding,
             imageEmbeddingGarment:
@@ -5298,13 +5374,14 @@ export class ImageAnalysisService {
             pHash: sourceImagePHash,
             detectionYoloConfidence: detection.confidence,
             detectionProductCategory: categoryMapping.productCategory,
-            filters: filtersSansCategory,
+            filters: fallbackFilters,
             softProductTypeHints,
             limit: retrievalLimit,
             similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
             includeRelated: false,
-            predictedCategoryAisles,
+            predictedCategoryAisles: preserveHardCategoryInFallback ? undefined : predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
+            forceHardCategoryFilter: preserveHardCategoryInFallback,
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor: inferredPrimaryColorForDetection,
@@ -5316,6 +5393,21 @@ export class ImageAnalysisService {
             sessionFilters: options.sessionFilters ?? undefined,
           });
           if (similarResult.results.length === 0) {
+            const fallbackStructuralFilters = preserveHardCategoryInFallback && fallbackCategoryTerms.length > 0
+              ? {
+                  category:
+                    fallbackCategoryTerms.length === 1
+                      ? fallbackCategoryTerms[0]
+                      : fallbackCategoryTerms,
+                  gender: (filters as any).gender,
+                  ageGroup: (filters as any).ageGroup,
+                }
+              : {
+                  length: (filters as any).length,
+                  sleeve: (filters as any).sleeve,
+                  gender: (filters as any).gender,
+                  ageGroup: (filters as any).ageGroup,
+                };
             similarResult = await searchByImageWithSimilarity({
               imageEmbedding: finalEmbedding,
               imageEmbeddingGarment:
@@ -5327,16 +5419,12 @@ export class ImageAnalysisService {
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
               // Keep crop-derived structural intent even in last-resort fallback.
-              filters: {
-                length: (filters as any).length,
-                sleeve: (filters as any).sleeve,
-                gender: (filters as any).gender,
-                ageGroup: (filters as any).ageGroup,
-              } as any,
+              filters: fallbackStructuralFilters as any,
               limit: retrievalLimit,
               similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
               includeRelated: false,
               knnField: shopTheLookKnnField(),
+              forceHardCategoryFilter: preserveHardCategoryInFallback,
               relaxThresholdWhenEmpty: shopLookRelaxEnv(),
               blipSignal: detectionBlipSignal,
               inferredPrimaryColor: inferredPrimaryColorForDetection,

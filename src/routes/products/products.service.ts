@@ -1714,6 +1714,69 @@ function hasChildAudienceSignals(src: Record<string, unknown>): boolean {
   return false;
 }
 
+function hasOppositeGenderSignalForQuery(
+  src: Record<string, unknown>,
+  queryGenderRaw: string | null,
+): boolean {
+  const queryGender = normalizeQueryGender(queryGenderRaw ?? "");
+  if (!queryGender || queryGender === "unisex") return false;
+
+  const explicitSignals = [src.audience_gender, src.attr_gender, src.gender]
+    .map((value) => normalizeQueryGender(String(value ?? "")))
+    .filter((value): value is "men" | "women" | "unisex" => Boolean(value));
+
+  if (explicitSignals.some((g) => g !== "unisex" && g !== queryGender)) {
+    return true;
+  }
+
+  const blob = [
+    src.title,
+    src.brand,
+    src.category,
+    src.category_canonical,
+    src.description,
+    Array.isArray(src.product_types) ? src.product_types.join(" ") : src.product_types,
+  ]
+    .map((value) => String(value ?? "").toLowerCase())
+    .join(" ");
+
+  if (!blob.trim()) return false;
+
+  const menRe = /\b(men|mens|male|man|gents?|gentlemen)\b/;
+  const womenRe = /\b(women|womens|female|lady|ladies|woman)\b/;
+  const hasMenCue = menRe.test(blob);
+  const hasWomenCue = womenRe.test(blob);
+
+  if (queryGender === "men") return hasWomenCue && !hasMenCue;
+  if (queryGender === "women") return hasMenCue && !hasWomenCue;
+  return false;
+}
+
+function hasStrictTrouserIntent(desiredProductTypes: string[]): boolean {
+  const desired = desiredProductTypes
+    .map((t) => String(t ?? "").toLowerCase().trim())
+    .filter(Boolean)
+    .join(" ");
+  if (!desired) return false;
+
+  const hasTrouserLike = /\b(trouser|trousers|pant|pants|slack|slacks|chino|chinos|cargo|cargo pants?)\b/.test(desired);
+  const hasShortLike = /\b(short|shorts|bermuda|bermudas)\b/.test(desired);
+  return hasTrouserLike && !hasShortLike;
+}
+
+function isShortsCatalogCandidate(src: Record<string, unknown>): boolean {
+  const blob = [
+    src.title,
+    src.category,
+    src.category_canonical,
+    Array.isArray(src.product_types) ? src.product_types.join(" ") : src.product_types,
+  ]
+    .map((value) => String(value ?? "").toLowerCase())
+    .join(" ");
+  if (!blob.trim()) return false;
+  return /\b(shorts?|bermudas?|board\s?shorts?)\b/.test(blob);
+}
+
 function isAthleticCatalogCandidate(src: Record<string, unknown>): boolean {
   const blob = [
     src.title,
@@ -2012,7 +2075,7 @@ function hasHighConfidenceDarkFootwearConsensus(params: {
   const footwearKeyRe = /(shoe|sandal|sneaker|heel|boot|loafer|trainer|flat|footwear)/i;
   const darkColorSet = new Set(["black", "charcoal", "gray", "dark gray"]);
   const defaultConfidence = 0.62;
-  const minStrongConfidence = Math.max(colorConfidenceThreshold(), 0.78);
+  const minStrongConfidence = Math.max(colorConfidenceThreshold(), 0.74);
 
   const strongFootwearColors: string[] = [];
   for (const [key, value] of Object.entries(itemColors)) {
@@ -2545,6 +2608,7 @@ export async function searchByImageWithSimilarity(
     }
   }
   const filtersAny = filters as { gender?: string; color?: string; softColor?: string; style?: string; softStyle?: string };
+  const queryGenderNormForPost = normalizeQueryGender(filtersAny.gender);
   const visualPrimaryBroad = isBroadImageSearchVisualPrimaryRanking(filters, imageSearchTextQuery);
   if (filtersAny.gender) {
     const rawGender = String(filtersAny.gender).toLowerCase().trim();
@@ -3303,8 +3367,9 @@ export async function searchByImageWithSimilarity(
       inferredColorTokens.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
     ),
   ];
-  const normalizedCropColorsForMerge =
-    normalizedCropColors.filter((c) => !["black", "gray", "charcoal"].includes(String(c).toLowerCase()));
+  const normalizedCropColorsForMerge = isFootwearDetectionIntent
+    ? normalizedCropColors
+    : normalizedCropColors.filter((c) => !["black", "gray", "charcoal"].includes(String(c).toLowerCase()));
 
   // If inferred color disagrees with crop-local colors, prefer crop colors for
   // detection-anchored image search. This avoids top-color bleed (e.g. yellow)
@@ -4589,6 +4654,15 @@ export async function searchByImageWithSimilarity(
   }
   const countAfterGenderPostfilter = rankedHits.length;
 
+  // Detection-anchored bottoms with trouser intent should reject shorts candidates.
+  const shouldRejectShortsForTrouserIntent =
+    hasDetectionAnchoredTypeIntent &&
+    String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms" &&
+    hasStrictTrouserIntent(desiredProductTypes);
+  if (shouldRejectShortsForTrouserIntent && rankedHits.length > 0) {
+    rankedHits = rankedHits.filter((h: any) => !isShortsCatalogCandidate((h as any)?._source ?? {}));
+  }
+
   const maxHydrate = Math.min(
     rankedHits.length,
     Math.max(limit * 10, 150),
@@ -4940,6 +5014,21 @@ export async function searchByImageWithSimilarity(
       };
     }) as ProductResult[];
   }
+  // Final hard contradiction guard on hydrated product metadata.
+  // This prevents opposite-gender and shorts-vs-trousers leaks when index fields are sparse/noisy.
+  if ((queryGenderNormForPost || shouldRejectShortsForTrouserIntent) && results.length > 0) {
+    results = results.filter((p: any) => {
+      const src = p as Record<string, unknown>;
+      if (queryGenderNormForPost && hasOppositeGenderSignalForQuery(src, queryGenderNormForPost)) {
+        return false;
+      }
+      if (shouldRejectShortsForTrouserIntent && isShortsCatalogCandidate(src)) {
+        return false;
+      }
+      return true;
+    });
+  }
+
   const countAfterHydration = results.length;
 
   const resultsBeforeFinalRelevanceFilter = results;

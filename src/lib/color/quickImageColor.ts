@@ -83,7 +83,12 @@ export async function extractQuickFashionColorHints(
     if (l > 0.75 && s >= 0.12 && s < 0.45) {
       if (h >= 340 || h < 15) return ["pink", "red"].slice(0, maxHints);
       if (h >= 15 && h < 45) return ["beige", "tan"].slice(0, maxHints);
-      if (h >= 45 && h < 80) return ["cream", "gold"].slice(0, maxHints);
+      if (h >= 45 && h < 80) {
+        const mutedMustard = l < 0.86 && s >= 0.18 && s < 0.36 && h < 68;
+        const metallicGold = l >= 0.72 && l < 0.92 && s >= 0.16 && s < 0.28 && h >= 40 && h < 66;
+        if (mutedMustard || metallicGold) return ["gold", "yellow"].slice(0, maxHints);
+        return ["yellow"].slice(0, maxHints);
+      }
       if (h >= 80 && h < 165) return ["green", "sage"].slice(0, maxHints);
       if (h >= 165 && h < 260) return ["light-blue", "blue"].slice(0, maxHints);
       if (h >= 260 && h < 300) return ["purple", "lavender"].slice(0, maxHints);
@@ -93,7 +98,7 @@ export async function extractQuickFashionColorHints(
     const hints: string[] = [];
     if (h >= 345 || h < 18) hints.push("red");
     else if (h < 45) hints.push("orange", "red");
-    else if (h < 75) hints.push("yellow", "gold");
+    else if (h < 75) hints.push("yellow");
     else if (h < 165) hints.push("green", "olive");
     else if (h < 200) hints.push("teal");
     else if (h < 260) hints.push("blue", "navy");
