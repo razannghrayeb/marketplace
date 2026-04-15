@@ -1368,6 +1368,68 @@ function shouldForceTypeFilterForDetection(
   return confOk && areaOk;
 }
 
+function detectionBoxArea(box: BoundingBox): number {
+  return Math.max(0, box.x2 - box.x1) * Math.max(0, box.y2 - box.y1);
+}
+
+function intersectionArea(a: BoundingBox, b: BoundingBox): number {
+  const x1 = Math.max(a.x1, b.x1);
+  const y1 = Math.max(a.y1, b.y1);
+  const x2 = Math.min(a.x2, b.x2);
+  const y2 = Math.min(a.y2, b.y2);
+  const w = Math.max(0, x2 - x1);
+  const h = Math.max(0, y2 - y1);
+  return w * h;
+}
+
+function isBagLikeLabel(label: string): boolean {
+  return /\b(bag|wallet|purse|clutch|tote|backpack|crossbody|satchel|handbag)\b/.test(label);
+}
+
+function shouldRejectImplausibleBagDetection(detection: Detection, allDetections?: Detection[]): boolean {
+  const label = String(detection.label || "").toLowerCase();
+  if (!isBagLikeLabel(label)) return false;
+
+  const areaRatio = Number.isFinite(detection.area_ratio) ? detection.area_ratio : 0;
+  const confidence = Number.isFinite(detection.confidence) ? detection.confidence : 0;
+  const bn = detection.box_normalized;
+  if (!bn) return false;
+
+  const widthNorm = Math.max(0, bn.x2 - bn.x1);
+  const heightNorm = Math.max(0, bn.y2 - bn.y1);
+
+  // Very thin/tall, low-confidence "bag" boxes are often straps/body parts.
+  if (confidence < 0.72 && areaRatio >= 0.045 && widthNorm <= 0.15 && heightNorm >= 0.42) {
+    return true;
+  }
+
+  if (!Array.isArray(allDetections) || allDetections.length <= 1) return false;
+
+  const thisArea = detectionBoxArea(detection.box);
+  if (thisArea <= 0) return false;
+
+  // If a tighter, higher-confidence bag-like detection sits mostly inside this one,
+  // drop the oversized outer box.
+  for (const other of allDetections) {
+    if (other === detection) continue;
+    const otherLabel = String(other.label || "").toLowerCase();
+    if (!isBagLikeLabel(otherLabel)) continue;
+
+    const otherArea = detectionBoxArea(other.box);
+    if (otherArea <= 0 || thisArea < otherArea * 2.5) continue;
+
+    const overlap = intersectionArea(detection.box, other.box);
+    const containedRatio = overlap / Math.max(1e-6, Math.min(thisArea, otherArea));
+    const otherConfidence = Number.isFinite(other.confidence) ? other.confidence : 0;
+
+    if (containedRatio >= 0.78 && otherConfidence >= confidence + 0.08) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function shouldKeepDetectionForShopTheLook(detection: Detection, allDetections?: Detection[]): boolean {
   const mapped = mapDetectionToCategory(detection.label, detection.confidence).productCategory;
   const label = String(detection.label || "").toLowerCase();
@@ -1404,6 +1466,9 @@ function shouldKeepDetectionForShopTheLook(detection: Detection, allDetections?:
 
   if (mapped === "accessories" || mapped === "bags") {
     const isHeadAccessory = /\b(headband|head covering|hair accessory|hairband|headwear)\b/.test(label);
+    if (shouldRejectImplausibleBagDetection(detection, allDetections)) {
+      return false;
+    }
     // Head accessories are very noisy at low confidence — keep the gate.
     if (isHeadAccessory && confidence < imageMinAccessoryConfidence()) {
       return false;
@@ -1898,6 +1963,32 @@ function applySleeveIntentGuard(params: {
     }
     return !isSleeveContradiction(desiredSleeve, observedSleeve);
   });
+
+  // If strict sleeve-compliance filtering collapses recall, fall back to
+  // contradiction-only filtering to keep non-conflicting tops.
+  if (!isDressCategory && filtered.length < Math.max(2, Math.ceil(products.length * 0.2))) {
+    const contradictionOnly = products.filter((p) => {
+      const blob = [
+        (p as any)?.title,
+        (p as any)?.description,
+        (p as any)?.attr_sleeve,
+        Array.isArray((p as any)?.product_types)
+          ? (p as any).product_types.join(" ")
+          : (p as any)?.product_types,
+      ]
+        .filter((x) => x != null)
+        .map((x) => String(x).toLowerCase())
+        .join(" ");
+      const observedSleeve = inferSleeveFromProductText(blob);
+      return !isSleeveContradiction(desiredSleeve, observedSleeve);
+    });
+    if (contradictionOnly.length > filtered.length) {
+      console.log(
+        `[sleeve-guard-fallback] detection="${params.detectionLabel}" desired=${desiredSleeve} recovered ${filtered.length} -> ${contradictionOnly.length}`,
+      );
+      return contradictionOnly;
+    }
+  }
 
   if (filtered.length !== products.length) {
     console.log(

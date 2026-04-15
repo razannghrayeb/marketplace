@@ -2003,6 +2003,33 @@ function collectInferredColorTokens(
   return top ? [top[0]] : [];
 }
 
+function hasHighConfidenceDarkFootwearConsensus(params: {
+  inferredByItem?: Record<string, string | null>;
+  inferredByItemConfidence?: Record<string, number>;
+}): boolean {
+  const itemColors = params.inferredByItem ?? {};
+  const itemConfs = params.inferredByItemConfidence ?? {};
+  const footwearKeyRe = /(shoe|sandal|sneaker|heel|boot|loafer|trainer|flat|footwear)/i;
+  const darkColorSet = new Set(["black", "charcoal", "gray", "dark gray"]);
+  const defaultConfidence = 0.62;
+  const minStrongConfidence = Math.max(colorConfidenceThreshold(), 0.78);
+
+  const strongFootwearColors: string[] = [];
+  for (const [key, value] of Object.entries(itemColors)) {
+    if (!footwearKeyRe.test(String(key))) continue;
+    const confRaw = Number(itemConfs[key]);
+    const conf = Number.isFinite(confRaw) ? confRaw : defaultConfidence;
+    if (conf < minStrongConfidence) continue;
+    const raw = String(value ?? "").toLowerCase().trim();
+    const norm = normalizeColorToken(raw) ?? raw;
+    if (!norm) continue;
+    strongFootwearColors.push(norm);
+  }
+
+  if (strongFootwearColors.length < 2) return false;
+  return strongFootwearColors.every((c) => darkColorSet.has(String(c).toLowerCase()));
+}
+
 function shouldPreferInferredColorWhenConflict(params: {
   mergedCategoryForRelevance?: string;
   desiredProductTypes: string[];
@@ -3232,6 +3259,10 @@ export async function searchByImageWithSimilarity(
       )
     );
 
+  const isFootwearDetectionIntent =
+    String(params.detectionProductCategory ?? "").toLowerCase().trim() === "footwear" ||
+    desiredProductTypes.some((t) => /\b(shoe|shoes|sandal|sandals|sneaker|sneakers|heel|heels|boot|boots|loafer|loafers|trainer|trainers|flat|flats|footwear|oxford|oxfords|pump|pumps)\b/.test(String(t).toLowerCase()));
+
   const explicitColorsForRelevance =
     Array.isArray(filtersRecord.colors) && filtersRecord.colors.length > 0
       ? filtersRecord.colors.map((c: unknown) => String(c).toLowerCase())
@@ -3248,12 +3279,17 @@ export async function searchByImageWithSimilarity(
     : [];
   const hasCropColorSignal = cropDominantColorsRaw.length > 0;
   const hasExplicitColorIntent = explicitColorsForRelevance.length > 0;
+  const inferredByItemForRelevance =
+    inferredByItemFromParams ??
+    (filtersRecord as { inferredColorsByItem?: Record<string, string | null> }).inferredColorsByItem;
+  const inferredByItemConfidenceForRelevance =
+    (params as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence ??
+    (filtersRecord as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence;
   const inferredColorTokens = collectInferredColorTokens(
     filtersRecord,
     inferredPrimaryFromParams ?? (filtersRecord as { inferredPrimaryColor?: string | null }).inferredPrimaryColor,
-    inferredByItemFromParams ?? (filtersRecord as { inferredColorsByItem?: Record<string, string | null> }).inferredColorsByItem,
-    (params as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence ??
-      (filtersRecord as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence,
+    inferredByItemForRelevance,
+    inferredByItemConfidenceForRelevance,
     typeof mergedCategoryForRelevance === "string" ? mergedCategoryForRelevance : undefined,
     desiredProductTypes,
   );
@@ -3277,8 +3313,15 @@ export async function searchByImageWithSimilarity(
     normalizedInferredColors.length > 0 &&
     normalizedCropColorsForMerge.length > 0 &&
     tieredColorListCompliance(normalizedInferredColors, normalizedCropColorsForMerge, "any").compliance <= 0;
+  const forceTrustInferredFootwearColor =
+    isFootwearDetectionIntent &&
+    inferredCropColorConflict &&
+    hasHighConfidenceDarkFootwearConsensus({
+      inferredByItem: inferredByItemForRelevance,
+      inferredByItemConfidence: inferredByItemConfidenceForRelevance,
+    });
   const hasTrustedInferredColorSignal =
-    inferredColorTokens.length > 0 && !inferredCropColorConflict;
+    inferredColorTokens.length > 0 && (!inferredCropColorConflict || forceTrustInferredFootwearColor);
   const hasInferredColorSignal = hasTrustedInferredColorSignal;
 
   let allColorsForRelevance: string[];
@@ -3353,15 +3396,15 @@ export async function searchByImageWithSimilarity(
     (!hasDetectionAnchoredTypeIntent || isTopDetectionIntent);
   const preferredSleeveMin =
     desiredSleeveForRelevance === "long"
-      ? 0.68
+      ? 0.52
       : desiredSleeveForRelevance === "short" || desiredSleeveForRelevance === "sleeveless"
-        ? 0.55
+        ? 0.38
         : 0.25;
   const fallbackSleeveMin =
     desiredSleeveForRelevance === "long"
-      ? 0.6
+      ? 0.42
       : desiredSleeveForRelevance === "short" || desiredSleeveForRelevance === "sleeveless"
-        ? 0.4
+        ? 0.26
         : 0.1;
 
   const hasColorIntentForFinal = hasExplicitColorIntent || hasInferredColorSignal;
@@ -3442,6 +3485,7 @@ export async function searchByImageWithSimilarity(
       inferredTokens: inferredColorTokens.length > 0 ? [...inferredColorTokens] : undefined,
       inferredVsCropConflict: inferredCropColorConflict,
       inferredColorTrusted: hasTrustedInferredColorSignal,
+      inferredColorForcedForFootwear: forceTrustInferredFootwearColor,
       softBiasOnly: softColorBiasOnly,
       explicitFilters: [...explicitColorsForRelevance],
       effectiveDesired: [...desiredColorsForRelevance],
@@ -3979,7 +4023,15 @@ export async function searchByImageWithSimilarity(
         }
         // Category-specific type floor: relax for bottoms with high YOLO confidence to handle jeans/denims
         // with low productTypeCompliance to 'trousers' detection label (0.928 confidence).
-        let detAnchoredTypeFloor = hasColorIntentForFinal ? 0.3 : 0.26;
+        let detAnchoredTypeFloor = hasColorIntentForFinal ? 0.26 : 0.22;
+        if (hasDetectionAnchoredTypeIntent && params.detectionProductCategory === 'tops') {
+          const yoloConfidence = params.detectionYoloConfidence ?? 0;
+          if (yoloConfidence >= 0.9) {
+            detAnchoredTypeFloor = 0.16;
+          } else if (yoloConfidence >= 0.8) {
+            detAnchoredTypeFloor = 0.19;
+          }
+        }
         if (hasDetectionAnchoredTypeIntent && params.detectionProductCategory === 'bottoms') {
           const yoloConfidence = params.detectionYoloConfidence ?? 0;
           if (yoloConfidence >= 0.9) {
@@ -3995,12 +4047,18 @@ export async function searchByImageWithSimilarity(
         }
         const lengthComp = Number((comp as any).lengthCompliance ?? 0);
         const hasLengthIntentForHit = Boolean((comp as any).hasLengthIntent);
+        const dressLengthMin = (() => {
+          const yoloConfidence = params.detectionYoloConfidence ?? 0;
+          if (yoloConfidence >= 0.9) return 0.24;
+          if (yoloConfidence >= 0.8) return 0.3;
+          return 0.36;
+        })();
         if (
           hasDetectionAnchoredTypeIntent &&
           params.detectionProductCategory === "dresses" &&
           Boolean(desiredLengthForRelevance) &&
           hasLengthIntentForHit &&
-          lengthComp < 0.42 &&
+          lengthComp < dressLengthMin &&
           !visualStrong
         ) {
           return false;
@@ -4198,6 +4256,7 @@ export async function searchByImageWithSimilarity(
           if (exactType < 1 && typeComp < 0.16) continue;
           if ((comp.crossFamilyPenalty ?? 0) >= 0.62) continue;
         }
+        if (hasColorIntentForFinal && isFootwearDetectionIntent && (comp.colorCompliance ?? 0) < 0.42) continue;
         const v = visualSimFromHit(h);
         const existing = comp.finalRelevance01 ?? 0;
         const colorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
@@ -4292,7 +4351,12 @@ export async function searchByImageWithSimilarity(
         // visually similar yet intent-contradicting products.
         if ((hasExplicitTypeFilter || hasReliableTypeIntentForRelevance) && typeComp < rescueTypeMinIntent) return false;
         if (hasDetectionAnchoredTypeIntent && typeComp < 0.3) return false;
-        if (hasColorIntentForFinal && colorComp < rescueColorMinIntent) return false;
+        if (hasColorIntentForFinal) {
+          const effectiveRescueColorMin = isFootwearDetectionIntent
+            ? Math.max(rescueColorMinIntent, 0.42)
+            : rescueColorMinIntent;
+          if (colorComp < effectiveRescueColorMin) return false;
+        }
         if (hasInferredColorIntentForRescue && colorComp < 0.16) return false;
         if (hasExplicitStyleIntent && styleComp < rescueStyleMinIntent) return false;
         if (params.detectionProductCategory === "tops" && (hasExplicitStyleIntent || hasSoftStyleHint) && styleComp < topsStyleMinIntent) return false;
@@ -4729,11 +4793,11 @@ export async function searchByImageWithSimilarity(
         }
 
         if (isDressDetection) {
-          if (!onePieceCandidate) {
-            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.22 : 0.16);
+          if (!onePieceCandidate && similarityScore < 0.97) {
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.34 : 0.26);
             finalRelevanceSource = "one_piece_mismatch_cap";
-          } else if (typeComp < 0.18) {
-            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.5 : 0.44);
+          } else if (typeComp < 0.12) {
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.58 : 0.5);
             finalRelevanceSource = "type_conflict_cap";
           }
         } else if (typeComp < 0.28) {
@@ -4903,7 +4967,9 @@ export async function searchByImageWithSimilarity(
         if (strongColorIntent) {
           const colorCompliance = Number(explainAny?.colorCompliance ?? 0);
           const colorTier = String(explainAny?.colorTier ?? "none").toLowerCase();
-          const minColorCompliance = hasExplicitColorIntent ? 0.42 : 0.28;
+          const minColorCompliance = isFootwearDetectionIntent
+            ? (hasExplicitColorIntent ? 0.46 : 0.42)
+            : (hasExplicitColorIntent ? 0.42 : 0.28);
           if (colorTier === "exact" && colorCompliance < 0.24) return false;
           if (colorTier === "family" && colorCompliance < 0.46) return false;
           if (colorTier === "bucket" && colorCompliance < 0.58) return false;
@@ -4964,9 +5030,12 @@ export async function searchByImageWithSimilarity(
         : false;
       if (!hasKidsAudienceIntent && hasChildAudienceSignals(p as Record<string, unknown>)) return false;
       if (enforceSleeveGate) {
-        const sleeveMin = desiredSleeveNorm === "long" ? 0.68 : 0.55;
-        if (Number(ex.sleeveCompliance ?? 0) < sleeveMin) return false;
         const observedSleeve = inferCatalogSleeveToken(p as unknown as Record<string, unknown>);
+        const sleeveMin = desiredSleeveNorm === "long" ? 0.55 : 0.42;
+        const sleeveCompliance = Number(ex.sleeveCompliance ?? 0);
+        if (Number.isFinite(sleeveCompliance) && sleeveCompliance < sleeveMin && sim < 0.93 && !observedSleeve) {
+          return false;
+        }
         if (
           (desiredSleeveNorm === "long" || desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless") &&
           observedSleeve &&
@@ -4978,9 +5047,15 @@ export async function searchByImageWithSimilarity(
       if (params.detectionProductCategory === "tops" && (hasExplicitStyleIntent || hasSoftStyleHint) && styleComp < 0.2 && sim < 0.96) return false;
       if (crossFamily >= 0.5) return false;
       if (isDressDetection) {
-        if (!onePieceCandidate && sim < 0.985) return false;
-        if (exactType >= 1 || typeComp >= 0.18 || onePieceCandidate) return true;
-        return sim >= 0.975 && crossFamily < 0.3;
+        const dressVisualOverrideMin = (() => {
+          const yoloConfidence = params.detectionYoloConfidence ?? 0;
+          if (yoloConfidence >= 0.9) return 0.91;
+          if (yoloConfidence >= 0.8) return 0.93;
+          return 0.95;
+        })();
+        if (!onePieceCandidate && sim < dressVisualOverrideMin) return false;
+        if (exactType >= 1 || typeComp >= 0.14 || onePieceCandidate) return true;
+        return sim >= dressVisualOverrideMin && crossFamily < 0.42;
       }
       if (exactType >= 1 || typeComp >= 0.3) return true;
       return sim >= 0.96 && crossFamily < 0.35;
