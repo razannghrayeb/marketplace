@@ -7,6 +7,7 @@ import {
   extractFashionTypeNounTokens,
   extractLexicalProductTypeSeeds,
   filterProductTypeSeedsByMappedCategory,
+  inferMacroFamiliesFromListingCategoryFields,
   scoreRerankProductTypeBreakdown,
 } from "./productTypeTaxonomy";
 
@@ -95,5 +96,13 @@ describe("filterProductTypeSeedsByMappedCategory - accessory isolation", () => {
     const seeds = ["headband, head covering, hair accessory", "bag", "hat", "accessories"];
     const filtered = filterProductTypeSeedsByMappedCategory(seeds, "accessories");
     expect(filtered).not.toContain("bag");
+  });
+});
+
+describe("inferMacroFamiliesFromListingCategoryFields", () => {
+  test("does not infer tops from top handle bag phrases", () => {
+    const fams = inferMacroFamiliesFromListingCategoryFields("bags", "Top Handle Bag");
+    expect(fams.has("tops")).toBe(false);
+    expect(fams.has("bags")).toBe(true);
   });
 });

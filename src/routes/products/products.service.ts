@@ -150,6 +150,8 @@ export interface ImageSearchParams extends SearchParams {
   inferredColorsByItem?: Record<string, string | null>;
   /** Confidence for each inferred item color (same keys as inferredColorsByItem). */
   inferredColorsByItemConfidence?: Record<string, number>;
+  /** Preferred item color key for the current detection, if the caller has one. */
+  inferredColorKey?: string | null;
   /** Debug path: bypass rerank/final gates and return top-k raw exact-cosine hits. */
   debugRawCosineFirst?: boolean;
   /** Optional session context used to inherit conversational filters. */
@@ -1939,6 +1941,7 @@ function collectConfidentColorTokenMap(params: {
   inferredPrimary?: string | null;
   inferredByItem?: Record<string, string | null>;
   inferredByItemConfidence?: Record<string, number>;
+  preferredItemKey?: string | null;
   filtersRecord: Record<string, unknown>;
   mergedCategoryForRelevance?: string;
 }): Map<string, number> {
@@ -1961,6 +1964,7 @@ function collectConfidentColorTokenMap(params: {
 
   const itemColors = params.inferredByItem ?? {};
   const itemConfs = params.inferredByItemConfidence ?? {};
+  const preferredItemKey = String(params.preferredItemKey ?? "").trim();
 
   const accessoryKeyRe = /(shoe|sandal|sneaker|heel|boot|bag|wallet|hat|cap|belt|watch|ring|earring|necklace|bracelet|jewel|scarf)/i;
   const apparelKeyRe = /(trouser|pant|jean|skirt|dress|gown|top|shirt|blouse|sleeve|outwear|outerwear|jacket|coat|hoodie|sweater|cardigan|short|legging|romper|jumpsuit)/i;
@@ -1998,6 +2002,16 @@ function collectConfidentColorTokenMap(params: {
     const norm = normalizeColorToken(String(value ?? "").toLowerCase().trim()) ?? String(value ?? "").toLowerCase().trim();
     return Boolean(norm) && conf >= colorConfidenceThreshold() && apparelKeyRe.test(key);
   });
+
+  if (preferredItemKey && preferredItemKey in itemColors) {
+    const rawConf = Number(itemConfs[preferredItemKey]);
+    const conf = Number.isFinite(rawConf) ? rawConf : defaultItemColorConfidence;
+    const rawValue = String(itemColors[preferredItemKey] ?? "").toLowerCase().trim();
+    const norm = normalizeColorToken(rawValue) ?? rawValue;
+    if (norm && conf >= colorConfidenceThreshold()) {
+      add(norm, Math.min(1, conf * 1.12));
+    }
+  }
 
   // Full-image dominant color is noisy in multi-item scenes; trust it mainly when
   // confident item-level colors are unavailable.
@@ -2044,6 +2058,7 @@ function collectInferredColorTokens(
   inferredPrimary?: string | null,
   inferredByItem?: Record<string, string | null>,
   inferredByItemConfidence?: Record<string, number>,
+  preferredItemKey?: string | null,
   mergedCategoryForRelevance?: string,
   desiredProductTypes?: string[],
 ): string[] {
@@ -2055,10 +2070,21 @@ function collectInferredColorTokens(
     return [normalizedPrimary];
   }
 
+  const preferredKey = String(preferredItemKey ?? "").trim();
+  if (preferredKey) {
+    const preferredValue = String(inferredByItem?.[preferredKey] ?? "").toLowerCase().trim();
+    const preferredColor = normalizeColorToken(preferredValue) ?? preferredValue;
+    const preferredConf = Number(inferredByItemConfidence?.[preferredKey] ?? 0);
+    if (preferredColor && preferredConf >= colorConfidenceThreshold()) {
+      return [preferredColor];
+    }
+  }
+
   const scored = collectConfidentColorTokenMap({
     inferredPrimary,
     inferredByItem,
     inferredByItemConfidence,
+    preferredItemKey,
     filtersRecord,
     mergedCategoryForRelevance: merged,
   });
@@ -3354,6 +3380,7 @@ export async function searchByImageWithSimilarity(
     inferredPrimaryFromParams ?? (filtersRecord as { inferredPrimaryColor?: string | null }).inferredPrimaryColor,
     inferredByItemForRelevance,
     inferredByItemConfidenceForRelevance,
+    (params as { inferredColorKey?: string | null }).inferredColorKey ?? (filtersRecord as { inferredColorKey?: string | null }).inferredColorKey,
     typeof mergedCategoryForRelevance === "string" ? mergedCategoryForRelevance : undefined,
     desiredProductTypes,
   );

@@ -860,6 +860,46 @@ function requiresSlotSpecificColor(productCategory: string): boolean {
   return productCategory === "tops" || productCategory === "bottoms" || productCategory === "dresses";
 }
 
+function isChromaticFashionColor(color: string): boolean {
+  const c = String(color || "").toLowerCase().trim();
+  return c.length > 0 && !isNeutralFashionColor(c);
+}
+
+function canPromoteCaptionSlotColor(params: {
+  productCategory: string;
+  detectionLabel: string;
+  existingColor: string | null | undefined;
+  existingSource: number;
+  existingConfidence: number;
+  captionColor: string | null | undefined;
+  captionConfidence: number;
+  minCaptionConfidence?: number;
+}): boolean {
+  if (!requiresSlotSpecificColor(params.productCategory)) return false;
+
+  const captionColor = String(params.captionColor || "").toLowerCase().trim();
+  if (!captionColor || !isChromaticFashionColor(captionColor)) return false;
+
+  const minCaptionConfidence = Number.isFinite(params.minCaptionConfidence)
+    ? Math.max(0, Math.min(1, Number(params.minCaptionConfidence)))
+    : 0.62;
+  const captionConfidence = clamp01(Number(params.captionConfidence ?? 0));
+  if (captionConfidence < minCaptionConfidence) return false;
+
+  const existingColor = String(params.existingColor || "").toLowerCase().trim();
+  const existingSource = Number(params.existingSource ?? 0);
+  const existingConfidence = clamp01(Number(params.existingConfidence ?? 0));
+
+  if (!existingColor) return true;
+  if (!isNeutralFashionColor(existingColor)) return false;
+
+  const reliableCropNeutral = existingSource === 1 && existingConfidence >= 0.58;
+  if (reliableCropNeutral) return true;
+
+  // Also allow replacing weak neutral slot colors from lower-priority signals.
+  return existingConfidence <= captionConfidence + 0.12;
+}
+
 function ensureStyleAndMask(detection: Detection, imageWidth: number, imageHeight: number): Detection {
   const next: Detection = { ...detection };
 
@@ -1039,7 +1079,10 @@ function hardCategoryTermsForDetection(
       return merged.length > 0 ? merged : baseTerms;
     }
     if (isJeansLike) {
-      return baseTerms.filter((t) => /\b(jean|jeans|denim|denims)\b/.test(t));
+      const jeansLike = baseTerms.filter((t) => /\b(jean|jeans|denim|denims)\b/.test(t));
+      const trousersLike = baseTerms.filter((t) => /\b(pant|pants|trouser|trousers|chino|chinos|slack|slacks|cargo)\b/.test(t));
+      const merged = [...new Set([...jeansLike, ...trousersLike])];
+      return merged.length > 0 ? merged : baseTerms;
     }
     const isSkirtLike = /\b(skirt|skirts|mini skirt|midi skirt|maxi skirt)\b/.test(l);
     if (isSkirtLike) {
@@ -1128,6 +1171,19 @@ function expandPredictedTypeHints(seeds: string[]): string[] {
   return expandProductTypesForQuery(normalized);
 }
 
+function pruneAthleticFootwearTerms(terms: string[]): string[] {
+  const normalized = [...new Set(terms.map((t) => String(t).toLowerCase().trim()).filter(Boolean))];
+  if (normalized.length === 0) return normalized;
+
+  const pruned = normalized.filter(
+    (t) =>
+      !/\b(sneaker|sneakers|trainer|trainers|running\s*shoe|athletic\s*shoe|sport\s*shoe|tennis\s*shoe|canvas\s*shoe)\b/.test(
+        t,
+      ),
+  );
+  return pruned.length > 0 ? pruned : normalized;
+}
+
 function tightenTypeSeedsForDetection(
   detectionLabel: string,
   categoryMapping: CategoryMapping,
@@ -1171,7 +1227,9 @@ function tightenTypeSeedsForDetection(
     }
     if (/\bjean|jeans|denim\b/.test(label)) {
       const jeansLike = normalized.filter((t) => /\b(jean|jeans|denim)\b/.test(t));
-      return jeansLike.length > 0 ? jeansLike : normalized;
+      const trousersLike = normalized.filter((t) => /\b(trouser|trousers|pant|pants|chino|chinos|slack|slacks|cargo)\b/.test(t));
+      const merged = [...new Set([...jeansLike, ...trousersLike])];
+      return merged.length > 0 ? merged : normalized;
     }
     if (/\bskirt|skirts\b/.test(label)) {
       const skirtLike = normalized.filter((t) => /\b(skirt|skirts)\b/.test(t));
@@ -3677,8 +3735,11 @@ export class ImageAnalysisService {
         categoryMapping.productCategory,
         captionColors,
       );
-      if (fullCaptionSlotColor && blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
-        const slotColorConfidence = Math.max(0.62, Math.min(0.9, blipStructuredConfidence));
+      const slotColorConfidence =
+        fullCaptionSlotColor && blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()
+          ? Math.max(0.62, Math.min(0.9, blipStructuredConfidence))
+          : 0;
+      if (fullCaptionSlotColor && slotColorConfidence > 0) {
         setDetectionColorIfHigherConfidence(
           inferredColorsByItem,
           inferredColorsByItemConfidence,
@@ -3724,6 +3785,16 @@ export class ImageAnalysisService {
         console.log(`[formality-intent][APPLIED] enforcing formal-wear-only for detection="${label}"`);
       }
 
+      const formalFootwearIntent =
+        categoryMapping.productCategory === "footwear" &&
+        (blipFormalityScore >= 8 || filters.softStyle === "formal");
+      if (formalFootwearIntent) {
+        softProductTypeHints = pruneAthleticFootwearTerms(softProductTypeHints);
+        if (Array.isArray((filters as any).productTypes)) {
+          (filters as any).productTypes = pruneAthleticFootwearTerms((filters as any).productTypes);
+        }
+      }
+
       const detectionSleeve =
         categoryMapping.attributes.sleeveLength ?? inferSleeveIntentFromDetectionLabel(label);
       if (detectionSleeve) {
@@ -3763,6 +3834,35 @@ export class ImageAnalysisService {
             cropColorConfidence,
             1,
           );
+
+          // For slot-specific apparel, if crop picks a neutral but caption explicitly names
+          // a chromatic slot color (e.g. yellow shirt), promote caption color.
+          const existingColor = inferredColorsByItem[itemColorKey];
+          const existingConf = Number(inferredColorsByItemConfidence[itemColorKey] ?? 0);
+          const existingSource = Number(inferredColorsByItemSource[itemColorKey] ?? 0);
+          const captionPromoteConfidence = Math.max(slotColorConfidence, Math.min(0.92, cropColorConfidence + 0.02));
+          if (
+            fullCaptionSlotColor &&
+            canPromoteCaptionSlotColor({
+              productCategory: categoryMapping.productCategory,
+              detectionLabel: label,
+              existingColor,
+              existingSource,
+              existingConfidence: existingConf,
+              captionColor: fullCaptionSlotColor,
+              captionConfidence: captionPromoteConfidence,
+            })
+          ) {
+            setDetectionColorIfHigherConfidence(
+              inferredColorsByItem,
+              inferredColorsByItemConfidence,
+              inferredColorsByItemSource,
+              itemColorKey,
+              fullCaptionSlotColor,
+              captionPromoteConfidence,
+              2,
+            );
+          }
         }
       } catch { /* non-critical: color embedding channel still works */ }
       let predictedCategoryAisles: string[] | undefined;
@@ -3790,7 +3890,8 @@ export class ImageAnalysisService {
         if (shouldHardCategory) {
           // Apply hard OpenSearch category filtering, even when global soft-category is enabled.
           const terms = hardCategoryTermsForDetection(label, categoryMapping);
-          filters.category = terms.length === 1 ? terms[0] : terms;
+          const categoryTerms = formalFootwearIntent ? pruneAthleticFootwearTerms(terms) : terms;
+          filters.category = categoryTerms.length === 1 ? categoryTerms[0] : categoryTerms;
         } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
           const typeHints = Array.isArray(filters.productTypes) ? filters.productTypes : [];
           predictedCategoryAisles = typeHints.length
@@ -3800,6 +3901,9 @@ export class ImageAnalysisService {
             : expandedTypeHints.length
               ? expandedTypeHints
               : searchCategories;
+          if (formalFootwearIntent && Array.isArray(predictedCategoryAisles) && predictedCategoryAisles.length > 0) {
+            predictedCategoryAisles = pruneAthleticFootwearTerms(predictedCategoryAisles);
+          }
         } else {
           filters.category =
             searchCategories.length === 1 ? searchCategories[0] : searchCategories;
@@ -3855,13 +3959,16 @@ export class ImageAnalysisService {
         const categoryNeedsStableSlotColor = requiresSlotSpecificColor(categoryMapping.productCategory);
         const detCaptionColorNorm = String(detCaptionColor ?? "").toLowerCase().trim();
         const existingColorNorm = String(existingColor ?? "").toLowerCase().trim();
-        const allowCaptionOverrideNeutralCrop =
-          categoryNeedsStableSlotColor &&
-          hasReliableCropColor &&
-          detCaptionColorNorm.length > 0 &&
-          !isNeutralFashionColor(detCaptionColorNorm) &&
-          isLightNeutralFashionColor(existingColorNorm) &&
-          detConfidence >= 0.76;
+        const allowCaptionOverrideNeutralCrop = canPromoteCaptionSlotColor({
+          productCategory: categoryMapping.productCategory,
+          detectionLabel: label,
+          existingColor,
+          existingSource,
+          existingConfidence: existingConf,
+          captionColor: detCaptionColorNorm,
+          captionConfidence: detConfidence,
+          minCaptionConfidence: 0.62,
+        });
         if (!(categoryNeedsStableSlotColor && hasReliableCropColor && !allowCaptionOverrideNeutralCrop)) {
           setDetectionColorIfHigherConfidence(
             inferredColorsByItem,
@@ -3954,6 +4061,7 @@ export class ImageAnalysisService {
         relaxThresholdWhenEmpty: shopLookRelaxEnv(),
         blipSignal: detectionBlipSignal,
         inferredPrimaryColor: inferredPrimaryColorForDetection,
+        inferredColorKey: itemColorKey,
         inferredColorsByItem,
         inferredColorsByItemConfidence,
         debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -4003,6 +4111,7 @@ export class ImageAnalysisService {
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor: inferredPrimaryColorForDetection,
+          inferredColorKey: itemColorKey,
           inferredColorsByItem,
           inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -4041,6 +4150,7 @@ export class ImageAnalysisService {
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor: inferredPrimaryColorForDetection,
+          inferredColorKey: itemColorKey,
           inferredColorsByItem,
           inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -4146,6 +4256,7 @@ export class ImageAnalysisService {
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor: inferredPrimaryColorForDetection,
+          inferredColorKey: itemColorKey,
           inferredColorsByItem,
           inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -4190,6 +4301,7 @@ export class ImageAnalysisService {
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor: inferredPrimaryColorForDetection,
+            inferredColorKey: itemColorKey,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -4244,6 +4356,7 @@ export class ImageAnalysisService {
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor: inferredPrimaryColorForDetection,
+            inferredColorKey: itemColorKey,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -4371,6 +4484,7 @@ export class ImageAnalysisService {
             relaxThresholdWhenEmpty: true,
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor: inferredPrimaryColorForDetection,
+            inferredColorKey: itemColorKey,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -4441,6 +4555,7 @@ export class ImageAnalysisService {
             relaxThresholdWhenEmpty: true,
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor: inferredPrimaryColorForDetection,
+            inferredColorKey: itemColorKey,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -5003,8 +5118,11 @@ export class ImageAnalysisService {
           categoryMapping.productCategory,
           captionColors,
         );
-        if (fullCaptionSlotColor && blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
-          const slotColorConfidence = Math.max(0.62, Math.min(0.9, blipStructuredConfidence));
+        const slotColorConfidence =
+          fullCaptionSlotColor && blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()
+            ? Math.max(0.62, Math.min(0.9, blipStructuredConfidence))
+            : 0;
+        if (fullCaptionSlotColor && slotColorConfidence > 0) {
           setDetectionColorIfHigherConfidence(
             inferredColorsByItem,
             inferredColorsByItemConfidence,
@@ -5079,6 +5197,17 @@ export class ImageAnalysisService {
           console.log(`[formality-intent-alt][APPLIED] enforcing formal-wear-only for detection="${categorySource}"`);
         }
 
+        const formalFootwearIntent =
+          categoryMapping.productCategory === "footwear" &&
+          (effectiveFormalityScore >= 8 || filters.softStyle === "formal");
+        if (formalFootwearIntent) {
+          browseTypeSeeds = pruneAthleticFootwearTerms(browseTypeSeeds);
+          softProductTypeHints = browseTypeSeeds.length > 0 ? browseTypeSeeds : undefined;
+          if (Array.isArray((filters as any).productTypes)) {
+            (filters as any).productTypes = pruneAthleticFootwearTerms((filters as any).productTypes);
+          }
+        }
+
         const detectionSleeve =
           categoryMapping.attributes.sleeveLength ?? inferSleeveIntentFromDetectionLabel(categorySource);
         if (detectionSleeve) {
@@ -5118,6 +5247,33 @@ export class ImageAnalysisService {
               cropColorConfidence,
               1,
             );
+
+            const existingColor = inferredColorsByItem[itemColorKey];
+            const existingConf = Number(inferredColorsByItemConfidence[itemColorKey] ?? 0);
+            const existingSource = Number(inferredColorsByItemSource[itemColorKey] ?? 0);
+            const captionPromoteConfidence = Math.max(slotColorConfidence, Math.min(0.92, cropColorConfidence + 0.02));
+            if (
+              fullCaptionSlotColor &&
+              canPromoteCaptionSlotColor({
+                productCategory: categoryMapping.productCategory,
+                detectionLabel: categorySource,
+                existingColor,
+                existingSource,
+                existingConfidence: existingConf,
+                captionColor: fullCaptionSlotColor,
+                captionConfidence: captionPromoteConfidence,
+              })
+            ) {
+              setDetectionColorIfHigherConfidence(
+                inferredColorsByItem,
+                inferredColorsByItemConfidence,
+                inferredColorsByItemSource,
+                itemColorKey,
+                fullCaptionSlotColor,
+                captionPromoteConfidence,
+                2,
+              );
+            }
           }
         } catch { /* non-critical: color embedding channel still works */ }
 
@@ -5156,9 +5312,13 @@ export class ImageAnalysisService {
                 : expandedTypeHints.length > 0
                   ? expandedTypeHints
                   : softCategories;
+            if (formalFootwearIntent && Array.isArray(predictedCategoryAisles) && predictedCategoryAisles.length > 0) {
+              predictedCategoryAisles = pruneAthleticFootwearTerms(predictedCategoryAisles);
+            }
           } else {
             const terms = hardCategoryTermsForDetection(categorySource, categoryMapping);
-            filters.category = terms.length === 1 ? terms[0] : terms;
+            const categoryTerms = formalFootwearIntent ? pruneAthleticFootwearTerms(terms) : terms;
+            filters.category = categoryTerms.length === 1 ? categoryTerms[0] : categoryTerms;
           }
         }
         const forceHardCategoryFilterUsed =
@@ -5191,7 +5351,17 @@ export class ImageAnalysisService {
           const existingSource = Number(inferredColorsByItemSource[itemColorKey] ?? 0);
           const hasReliableCropColor = existingColor.length > 0 && existingSource === 1 && existingConf >= 0.6;
           const categoryNeedsStableSlotColor = requiresSlotSpecificColor(categoryMapping.productCategory);
-          if (!(categoryNeedsStableSlotColor && hasReliableCropColor)) {
+          const allowCaptionOverrideNeutralCrop = canPromoteCaptionSlotColor({
+            productCategory: categoryMapping.productCategory,
+            detectionLabel: categorySource,
+            existingColor,
+            existingSource,
+            existingConfidence: existingConf,
+            captionColor: detCaptionColor,
+            captionConfidence: detConfidence,
+            minCaptionConfidence: 0.62,
+          });
+          if (!(categoryNeedsStableSlotColor && hasReliableCropColor && !allowCaptionOverrideNeutralCrop)) {
             setDetectionColorIfHigherConfidence(
               inferredColorsByItem,
               inferredColorsByItemConfidence,
@@ -5272,6 +5442,7 @@ export class ImageAnalysisService {
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor: inferredPrimaryColorForDetection,
+          inferredColorKey: itemColorKey,
           inferredColorsByItem,
           inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -5320,6 +5491,7 @@ export class ImageAnalysisService {
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor: inferredPrimaryColorForDetection,
+            inferredColorKey: itemColorKey,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -5385,6 +5557,7 @@ export class ImageAnalysisService {
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor: inferredPrimaryColorForDetection,
+            inferredColorKey: itemColorKey,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -5428,6 +5601,7 @@ export class ImageAnalysisService {
               relaxThresholdWhenEmpty: shopLookRelaxEnv(),
               blipSignal: detectionBlipSignal,
               inferredPrimaryColor: inferredPrimaryColorForDetection,
+              inferredColorKey: itemColorKey,
               inferredColorsByItem,
               inferredColorsByItemConfidence,
               debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -5520,6 +5694,7 @@ export class ImageAnalysisService {
               relaxThresholdWhenEmpty: shopLookRelaxEnv(),
               blipSignal: detectionBlipSignal,
               inferredPrimaryColor: inferredPrimaryColorForDetection,
+              inferredColorKey: itemColorKey,
               inferredColorsByItem,
               inferredColorsByItemConfidence,
               debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),

@@ -1155,8 +1155,12 @@ export function inferMacroFamiliesFromListingCategoryFields(
   ) {
     out.add("footwear");
   }
+  const hasTopAccessoryPhrase = /\btop(?:\s|-)+(handle|zip|zipper|stitch|stitching|coat|bag|satchel|clutch|pouch|wallet|case|cover|closure)\b/.test(
+    combined,
+  );
   if (
-    /\b(shirt|shirts|blouse|blouses|tee|tees|t-?shirt|tshirt|polos?|sweater|sweaters|hoodie|hoodies|cardigan|cardigans|tank|tanks|camisole|bodysuit)\b/.test(
+    !hasTopAccessoryPhrase &&
+    /\b(shirt|shirts|blouse|blouses|tee|tees|t-?shirt|tshirt|polos?|sweater|sweaters|hoodie|hoodies|cardigan|cardigans|tank|tanks|camisole|bodysuit|top|tops)\b/.test(
       combined,
     )
   ) {

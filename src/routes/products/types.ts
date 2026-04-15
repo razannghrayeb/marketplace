@@ -122,6 +122,8 @@ export interface ImageSearchParams extends SearchParams {
   inferredPrimaryColor?: string | null;
   inferredColorsByItem?: Record<string, string | null>;
   inferredColorsByItemConfidence?: Record<string, number>;
+  /** Preferred item color key for the current detection, if the caller has one. */
+  inferredColorKey?: string | null;
   /** Debug path: bypass rerank/final gates and return top-k by raw exact cosine (with existing category constraints). */
   debugRawCosineFirst?: boolean;
   /** Optional session context used to inherit conversational filters. */
