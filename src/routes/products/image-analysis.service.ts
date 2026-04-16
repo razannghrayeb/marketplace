@@ -343,7 +343,6 @@ function isNoisyCategoryForAutoHardCategory(mapping: CategoryMapping, detectionL
   const lb = String(detectionLabel || "").toLowerCase();
   if (pc === "tops") {
     if (lb.includes("sling") || lb.includes("crop") || lb.includes("tank")) return true;
-    if (lb.includes("short sleeve top") || lb.includes("long sleeve top")) return true;
   }
   return false;
 }
@@ -812,10 +811,10 @@ async function extractDetectionCropColorsForRanking(params: {
           // Bottom boxes often include torso at the top and shoes at the bottom.
           // Use a tighter center-lower band to avoid shirt and footwear bleed.
           // Trousers/jeans are especially prone to top overlap, so sample lower.
-          left = Math.floor(w * 0.16);
-          width = Math.max(16, Math.floor(w * 0.68));
-          top = Math.floor(h * (trousersLikeBottom ? 0.42 : 0.3));
-          const bottom = Math.floor(h * (trousersLikeBottom ? 0.86 : 0.72));
+          left = Math.floor(w * 0.2);
+          width = Math.max(16, Math.floor(w * 0.6));
+          top = Math.floor(h * (trousersLikeBottom ? 0.5 : 0.34));
+          const bottom = Math.floor(h * (trousersLikeBottom ? 0.94 : 0.78));
           height = Math.max(24, bottom - top);
         } else if (topLike) {
           // Top/outerwear boxes can include pants near the lower edge.
@@ -975,6 +974,21 @@ function correctDetectionByPosition(detection: Detection): Detection {
     const corrected = { ...detection };
     corrected.label = "shorts";
     corrected.raw_label = `${detection.raw_label ?? detection.label} [corrected:position]`;
+    return corrected;
+  }
+
+  // Shirts are sometimes emitted as outwear by the detector on layered collages.
+  // Recover a top label when the box is clearly upper-body and not coat-length.
+  if (
+    /\b(outwear|outerwear|jacket)\b/.test(label) &&
+    centerY >= 0.2 &&
+    centerY <= 0.58 &&
+    boxHeight >= 0.16 &&
+    boxHeight <= 0.7
+  ) {
+    const corrected = { ...detection };
+    corrected.label = /\blong\b/.test(label) ? "long sleeve top" : "short sleeve top";
+    corrected.raw_label = `${detection.raw_label ?? detection.label} [corrected:shirt-recovery]`;
     return corrected;
   }
 
@@ -1677,7 +1691,7 @@ function shouldKeepAccessoryRecoveryDetection(detection: Detection): boolean {
 }
 
 function imageEnableGeometricDressLengthEnv(): boolean {
-  const raw = String(process.env.SEARCH_IMAGE_ENABLE_GEOMETRIC_DRESS_LENGTH ?? "0").toLowerCase();
+  const raw = String(process.env.SEARCH_IMAGE_ENABLE_GEOMETRIC_DRESS_LENGTH ?? "1").toLowerCase();
   return raw === "1" || raw === "true";
 }
 
@@ -1789,8 +1803,8 @@ function inferSleeveFromProductText(
   if (!txt) return null;
 
   const hasSleeveless = /\b(sleeveless|tank|camisole|cami|strapless|halter|strap top|spaghetti strap|thin strap|strappy)\b/.test(txt);
-  const hasShort = /\b(short sleeve|short sleeved|half sleeve|half-sleeve|3\/?4 sleeve|ss)\b/.test(txt);
-  const hasLong = /\b(long sleeve|long sleeved|full sleeve|full-sleeve|ls)\b/.test(txt);
+  const hasShort = /\b(short sleeves?|short sleeved|half sleeves?|half-sleeve|3\/?4 sleeves?|ss)\b/.test(txt);
+  const hasLong = /\b(long sleeves?|long sleeved|full sleeves?|full-sleeve|ls)\b/.test(txt);
 
   if (hasSleeveless && !hasShort && !hasLong) return "sleeveless";
   if (hasShort && !hasLong) return "short";
@@ -3960,10 +3974,12 @@ export class ImageAnalysisService {
       const detectionMeetsAutoHardHeuristics =
         !noisyCat && (baseHardAuto || relaxedGarmentHardAuto);
       const accessoryLikeCategory = isAccessoryLikeCategory(categoryMapping.productCategory);
+      const footwearLikeCategory = categoryMapping.productCategory === "footwear";
       const shouldHardCategory =
         filterByDetectedCategory &&
         (
           accessoryLikeCategory ||
+          footwearLikeCategory ||
           shopLookHardCategoryStrictEnv() ||
           detectionMeetsAutoHardHeuristics ||
           shouldForceHardCategoryForDetection(detection, categoryMapping)
@@ -5437,6 +5453,7 @@ export class ImageAnalysisService {
 
         let predictedCategoryAisles: string[] | undefined;
         const accessoryLikeCategory = isAccessoryLikeCategory(categoryMapping.productCategory);
+        const footwearLikeCategory = categoryMapping.productCategory === "footwear";
         if (options.filterByDetectedCategory !== false) {
           const softCategories = shouldUseAlternatives(categoryMapping)
             ? getSearchCategories(categoryMapping)
@@ -5446,7 +5463,10 @@ export class ImageAnalysisService {
             ...softCategories,
             ...browseTypeSeeds,
           ]);
-          const shouldHardCategory = accessoryLikeCategory || !(imageSoftCategoryEnv() || shopLookSoftCategoryEnv());
+          const shouldHardCategory =
+            accessoryLikeCategory ||
+            footwearLikeCategory ||
+            !(imageSoftCategoryEnv() || shopLookSoftCategoryEnv());
           if (!shouldHardCategory) {
             predictedCategoryAisles =
               browseTypeSeeds.length > 0
