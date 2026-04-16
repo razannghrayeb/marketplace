@@ -93,6 +93,7 @@ export interface UnifiedImageSearchParams {
   inferredPrimaryColor?: string | null;
   inferredColorsByItem?: Record<string, string | null>;
   inferredColorsByItemConfidence?: Record<string, number>;
+  inferredColorKey?: string | null;
   /** Debug path: bypass rerank/final gates in products.service and return top-k raw exact-cosine hits. */
   debugRawCosineFirst?: boolean;
   sessionId?: string;
@@ -364,6 +365,7 @@ export async function searchImage(
     inferredPrimaryColor,
     inferredColorsByItem,
     inferredColorsByItemConfidence,
+    inferredColorKey,
     debugRawCosineFirst,
     sessionId,
     userId,
@@ -476,6 +478,7 @@ export async function searchImage(
     inferredPrimaryColor,
     inferredColorsByItem,
     inferredColorsByItemConfidence,
+    inferredColorKey,
     debugRawCosineFirst,
     sessionId,
     userId,

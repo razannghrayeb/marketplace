@@ -2015,7 +2015,7 @@ function collectConfidentColorTokenMap(params: {
 
   // Full-image dominant color is noisy in multi-item scenes; trust it mainly when
   // confident item-level colors are unavailable.
-  if (!hasConfidentApparelColor && !isBagLike && !isBottomsLike) {
+  if (!hasConfidentApparelColor && !isBagLike && !isBottomsLike && !isFootwearLike) {
     add(params.inferredPrimary, 0.58);
   }
 
@@ -2089,7 +2089,44 @@ function collectInferredColorTokens(
     mergedCategoryForRelevance: merged,
   });
   const top = [...scored.entries()].sort((a, b) => b[1] - a[1])[0];
-  return top ? [top[0]] : [];
+  if (top) return [top[0]];
+
+  // Footwear often depends on crop-local color when caption/item-color signals are sparse.
+  // Promote a sensible crop token so inferred-color postfilter can avoid cross-color leakage.
+  const isFootwearLike =
+    /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|flat|flats)\b/.test(
+      merged,
+    ) ||
+    /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|flat|flats)\b/.test(
+      typeText,
+    );
+  if (isFootwearLike) {
+    const cropColors = Array.isArray(filtersRecord.cropDominantColors)
+      ? filtersRecord.cropDominantColors
+          .map((c: unknown) => {
+            const raw = String(c ?? "").toLowerCase().trim();
+            return normalizeColorToken(raw) ?? raw;
+          })
+          .filter(Boolean)
+      : [];
+    if (cropColors.length > 0) {
+      let selected = cropColors[0];
+      const alternatives = cropColors.slice(1);
+      if (selected === "black" && alternatives.length > 0) {
+        const lightNeutral = alternatives.find((c) =>
+          ["white", "off-white", "cream", "ivory", "beige", "tan", "silver"].includes(c),
+        );
+        if (lightNeutral) selected = lightNeutral;
+        else {
+          const nonBlack = alternatives.find((c) => c !== "black");
+          if (nonBlack) selected = nonBlack;
+        }
+      }
+      if (selected) return [selected];
+    }
+  }
+
+  return [];
 }
 
 function hasHighConfidenceDarkFootwearConsensus(params: {
@@ -4608,7 +4645,12 @@ export async function searchByImageWithSimilarity(
           : rankedHits.length >= 8
             ? 3
             : 1;
-      if (inferredColorCompliantHits.length >= minKeep) {
+      const enforceInferredColorStrictly =
+        category === "footwear" ||
+        category === "shoes";
+      if (inferredColorCompliantHits.length > 0 && enforceInferredColorStrictly) {
+        rankedHits = inferredColorCompliantHits;
+      } else if (inferredColorCompliantHits.length >= minKeep) {
         rankedHits = inferredColorCompliantHits;
       } else if (rankedHits.length >= 10) {
         // Fallback trim: remove zero/near-zero color compliance tails when list is long.
@@ -5070,6 +5112,8 @@ export async function searchByImageWithSimilarity(
   if (strongVisualOverrideMax > 0 && resultsBeforeFinalRelevanceFilter.length > results.length) {
     const existingIds = new Set(results.map((p) => String((p as any).id)));
     const strongColorIntent = hasExplicitColorIntent || hasInferredColorSignal;
+    const isDressDetectionForOverride =
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses";
     const strongMisses = resultsBeforeFinalRelevanceFilter
       .filter((p: any) => !existingIds.has(String(p.id)))
       .filter((p: any) => {
@@ -5080,6 +5124,17 @@ export async function searchByImageWithSimilarity(
         if (!hasKidsAudienceIntent && hasChildAudienceSignals(p as Record<string, unknown>)) return false;
         const crossFamily = Number(explainAny?.crossFamilyPenalty ?? 0);
         if (crossFamily >= 0.55) return false;
+        if (hasDetectionAnchoredTypeIntent) {
+          const typeComp = Number(explainAny?.productTypeCompliance ?? 0);
+          const exactType = Number(explainAny?.exactTypeScore ?? 0);
+          if (isDressDetectionForOverride) {
+            const onePieceCandidate = isOnePieceCatalogCandidate(p as Record<string, unknown>);
+            if (!onePieceCandidate && sim < 0.985) return false;
+            if (exactType < 1 && typeComp < 0.14 && !onePieceCandidate) return false;
+          } else if (exactType < 1 && typeComp < 0.2) {
+            return false;
+          }
+        }
         if (strongColorIntent) {
           const colorCompliance = Number(explainAny?.colorCompliance ?? 0);
           const colorTier = String(explainAny?.colorTier ?? "none").toLowerCase();
@@ -5178,6 +5233,28 @@ export async function searchByImageWithSimilarity(
     });
     if (filtered.length > 0) {
       results = filtered as ProductResult[];
+    } else {
+      // Bug fix: do not keep the full unfiltered list when strict late filtering
+      // returns zero. Keep a small safe fallback instead.
+      const safeFallback = results.filter((p: any) => {
+        const ex = (p.explain ?? {}) as any;
+        const typeComp = Number(ex.productTypeCompliance ?? 0);
+        const exactType = Number(ex.exactTypeScore ?? 0);
+        const crossFamily = Number(ex.crossFamilyPenalty ?? 0);
+        const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+        if (crossFamily >= 0.45) return false;
+        if (isDressDetection) {
+          const onePieceCandidate = isOnePieceCatalogCandidate(p as Record<string, unknown>);
+          if (!onePieceCandidate && sim < 0.985) return false;
+          if (exactType >= 1 || typeComp >= 0.12 || onePieceCandidate) return true;
+          return sim >= 0.98;
+        }
+        if (exactType >= 1 || typeComp >= 0.18) return true;
+        return sim >= 0.97;
+      });
+      if (safeFallback.length > 0) {
+        results = safeFallback as ProductResult[];
+      }
     }
   }
   // Always sort by finalRelevance01 descending as the primary signal.
