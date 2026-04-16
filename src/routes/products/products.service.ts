@@ -934,12 +934,12 @@ function computeTopPartSimilarity01(partSims: Record<string, number> | null | un
   const patternPatch = Math.max(0, Math.min(1, Number(partSims.pattern_patch ?? 0)));
 
   const weighted =
-    (sleeve > 0 ? 0.45 * sleeve : 0) +
-    (neckline > 0 ? 0.4 * neckline : 0) +
+    (sleeve > 0 ? 0.5 * sleeve : 0) +
+    (neckline > 0 ? 0.35 * neckline : 0) +
     (patternPatch > 0 ? 0.15 * patternPatch : 0);
   const denom =
-    (sleeve > 0 ? 0.45 : 0) +
-    (neckline > 0 ? 0.4 : 0) +
+    (sleeve > 0 ? 0.5 : 0) +
+    (neckline > 0 ? 0.35 : 0) +
     (patternPatch > 0 ? 0.15 : 0);
   if (denom <= 1e-6) return 0;
   return Math.max(0, Math.min(1, weighted / denom));
@@ -1132,7 +1132,7 @@ function computeExplicitFinalRelevance(params: {
     sleeve: isBagLikeIntent
       ? 0.02
       : isTopLikeIntent
-      ? (params.simVisual >= 0.65 ? 0.08 : 0.12)
+      ? (params.simVisual >= 0.65 ? 0.1 : 0.14)
       : (params.simVisual >= 0.65 ? 0.04 : 0.08),
     length: isBagLikeIntent ? 0.04 : 0.12,
     audience: isBagLikeIntent ? 0.14 : isTopLikeIntent ? 0.14 : 0.16,
@@ -1180,7 +1180,7 @@ function computeExplicitFinalRelevance(params: {
   // ── Part-level matching multiplier (Phase 1) ────────────────────
   // Part matching contributes a soft boosting factor when parts align well.
   // Default: no-op (factor = 1.0) when parts disabled or unavailable.
-  const partMatchingFactor = Math.max(1.0, Math.min(1.15, params.partMatchingFactor ?? 1.0));
+  const partMatchingFactor = Math.max(1.0, Math.min(isTopLikeIntent ? 1.22 : 1.15, params.partMatchingFactor ?? 1.0));
 
   // ── Composite contribution ─────────────────────────────────────
   const compositeScore01 = Math.max(0, Math.min(1, params.imageCompositeScore01 ?? 0));
@@ -3951,12 +3951,12 @@ export async function searchByImageWithSimilarity(
             ? Math.max(avgPartSim * 0.8, topPartSim)
             : avgPartSim;
         // Weight of part matching (tunable via env var, default 80 = 8% max boost).
-        // Tops can use a slightly stronger default because sleeve/neckline parts are highly diagnostic.
+        // Tops use a stronger default because sleeve/neckline parts are highly diagnostic.
         const wPart = Math.max(
           0,
           Number(
             isTopIntentForPartBoost
-              ? process.env.SEARCH_IMAGE_TOP_PART_WEIGHT ?? process.env.SEARCH_IMAGE_PART_WEIGHT ?? '100'
+              ? process.env.SEARCH_IMAGE_TOP_PART_WEIGHT ?? process.env.SEARCH_IMAGE_PART_WEIGHT ?? '140'
               : process.env.SEARCH_IMAGE_PART_WEIGHT ?? '80',
           ) || (isTopIntentForPartBoost ? 100 : 80),
         );
