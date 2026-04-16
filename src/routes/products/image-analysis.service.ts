@@ -1032,6 +1032,35 @@ function strictFootwearSubtypeFallbackTerms(
   return null;
 }
 
+function strictDressFallbackTerms(detectionLabel: string): string[] | null {
+  const label = String(detectionLabel || "").toLowerCase();
+  if (!label) return null;
+
+  if (!/\b(dress|gown|one[-\s]?piece|onepiece|sundress|sun dress|slip dress|bodycon|cocktail dress|evening dress|party dress|maxi dress|midi dress|mini dress|frock)\b/.test(label)) {
+    return null;
+  }
+
+  return [
+    "dress",
+    "dresses",
+    "gown",
+    "gowns",
+    "one piece",
+    "one-piece",
+    "sundress",
+    "sun dress",
+    "slip dress",
+    "bodycon dress",
+    "cocktail dress",
+    "evening dress",
+    "party dress",
+    "maxi dress",
+    "midi dress",
+    "mini dress",
+    "frock",
+  ];
+}
+
 /**
  * Build a hard OpenSearch `filters.category` term set that matches catalog category values.
  * We use the label as the source of specificity, because the macro aisle (e.g. `bottoms`)
@@ -1115,6 +1144,16 @@ function hardCategoryTermsForDetection(
         t,
       ),
     );
+  }
+
+  if (categoryMapping.productCategory === "dresses") {
+    const dressTerms = baseTerms.filter((t) =>
+      /\b(dress|dresses|gown|gowns|one piece|one-piece|sundress|sun dress|slip dress|bodycon|cocktail dress|evening dress|party dress|maxi dress|midi dress|mini dress|frock)\b/.test(
+        t,
+      ),
+    );
+    const fallback = strictDressFallbackTerms(l);
+    return dressTerms.length > 0 ? dressTerms : (fallback ?? baseTerms);
   }
 
   if (categoryMapping.productCategory === "footwear") {
@@ -1334,7 +1373,7 @@ function tightenTypeSeedsForDetection(
     const dressLike = normalized.filter((t) => {
       if (/\b(jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits)\b/.test(t)) return false;
       if (/\b(gown|gowns)\b/.test(t) && !isGownLike) return false;
-      return /\b(dress|dresses|vest dress|midi dress|maxi dress|mini dress|frock)\b/.test(t);
+      return /\b(dress|dresses|gown|gowns|one piece|one-piece|sundress|sun dress|slip dress|bodycon|cocktail dress|evening dress|party dress|maxi dress|midi dress|mini dress|frock)\b/.test(t);
     });
     if (dressLike.length > 0) return dressLike;
   }
@@ -1393,26 +1432,26 @@ function yoloShopDedupeIouThreshold(): number {
 }
 
 function imageMinFootwearAreaRatio(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_FOOTWEAR_AREA_RATIO ?? "0.0045");
-  if (!Number.isFinite(raw)) return 0.0045;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_FOOTWEAR_AREA_RATIO ?? "0.0035");
+  if (!Number.isFinite(raw)) return 0.0035;
   return Math.max(0, Math.min(1, raw));
 }
 
 function imageMinFootwearConfidence(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_FOOTWEAR_CONFIDENCE ?? "0.72");
-  if (!Number.isFinite(raw)) return 0.72;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_FOOTWEAR_CONFIDENCE ?? "0.68");
+  if (!Number.isFinite(raw)) return 0.68;
   return Math.max(0, Math.min(1, raw));
 }
 
 function imageMinAccessoryAreaRatio(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_AREA_RATIO ?? "0.002");
-  if (!Number.isFinite(raw)) return 0.002;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_AREA_RATIO ?? "0.0015");
+  if (!Number.isFinite(raw)) return 0.0015;
   return Math.max(0, Math.min(1, raw));
 }
 
 function imageMinAccessoryConfidence(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_CONFIDENCE ?? "0.58");
-  if (!Number.isFinite(raw)) return 0.58;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_CONFIDENCE ?? "0.54");
+  if (!Number.isFinite(raw)) return 0.54;
   return Math.max(0, Math.min(1, raw));
 }
 
@@ -1507,9 +1546,10 @@ function shouldRejectImplausibleBagDetection(detection: Detection, allDetections
 
   const widthNorm = Math.max(0, bn.x2 - bn.x1);
   const heightNorm = Math.max(0, bn.y2 - bn.y1);
+  const slenderness = heightNorm / Math.max(widthNorm, 1e-6);
 
   // Very thin/tall, low-confidence "bag" boxes are often straps/body parts.
-  if (confidence < 0.72 && areaRatio >= 0.045 && widthNorm <= 0.15 && heightNorm >= 0.42) {
+  if (confidence < 0.66 && areaRatio >= 0.055 && widthNorm <= 0.12 && heightNorm >= 0.5 && slenderness >= 2.75) {
     return true;
   }
 
@@ -1526,13 +1566,13 @@ function shouldRejectImplausibleBagDetection(detection: Detection, allDetections
     if (!isBagLikeLabel(otherLabel)) continue;
 
     const otherArea = detectionBoxArea(other.box);
-    if (otherArea <= 0 || thisArea < otherArea * 2.5) continue;
+    if (otherArea <= 0 || thisArea < otherArea * 2.0) continue;
 
     const overlap = intersectionArea(detection.box, other.box);
     const containedRatio = overlap / Math.max(1e-6, Math.min(thisArea, otherArea));
     const otherConfidence = Number.isFinite(other.confidence) ? other.confidence : 0;
 
-    if (containedRatio >= 0.78 && otherConfidence >= confidence + 0.08) {
+    if (containedRatio >= 0.74 && otherConfidence >= confidence + 0.05) {
       return true;
     }
   }
@@ -1652,19 +1692,19 @@ function shouldForceHardCategoryForDetection(
   // Clear garment detections should constrain retrieval hard once the detector is confident enough.
   // Without this, shop-the-look returns visually plausible but wrong categories for items like trousers.
   if (category === "tops" || category === "bottoms" || category === "dresses" || category === "outerwear") {
-    return confidence >= 0.9 && areaRatio >= 0.01;
+    return confidence >= 0.84 && areaRatio >= 0.01;
   }
 
   // Exact accessory detections are often small, but when they are high-confidence we must
   // treat them as hard retrieval constraints or the visual search drifts into unrelated items.
   if (category === "footwear") {
-    return confidence >= 0.8;
+    return confidence >= 0.76 && areaRatio >= 0.005;
   }
   if (category === "bags") {
-    return confidence >= 0.85 && areaRatio >= 0.003;
+    return confidence >= 0.72 && areaRatio >= 0.0025;
   }
   if (category === "accessories") {
-    return confidence >= 0.88 && areaRatio >= 0.0025;
+    return confidence >= 0.82 && areaRatio >= 0.002;
   }
 
   return false;
