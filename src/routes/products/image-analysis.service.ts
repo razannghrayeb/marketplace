@@ -5563,7 +5563,7 @@ export class ImageAnalysisService {
           const detColorNorm = String(detColor ?? "").toLowerCase().trim();
           const onePieceDetection =
             categoryMapping.productCategory === "dresses" ||
-            /\b(dress|gown|jumpsuit|romper|playsuit|sundress)\b/.test(String(label).toLowerCase());
+            /\b(dress|gown|jumpsuit|romper|playsuit|sundress)\b/.test(String(detCaption).toLowerCase());
           if (onePieceDetection && globalPrimary) {
             if (!detColorNorm || (isLightNeutralFashionColor(globalPrimary) && !isLightNeutralFashionColor(detColorNorm))) {
               return globalPrimary;
