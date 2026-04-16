@@ -485,6 +485,27 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
   },
 };
 
+function canonicalizeLabelForLookup(value: string): string {
+  return String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[\/_-]+/g, " ")
+    .replace(/[^a-z0-9\s]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const PRIMARY_MAPPINGS_CANONICAL: Record<string, CategoryMapping> = Object.entries(PRIMARY_MAPPINGS).reduce(
+  (acc, [label, mapping]) => {
+    const key = canonicalizeLabelForLookup(label);
+    if (key && !acc[key]) {
+      acc[key] = mapping;
+    }
+    return acc;
+  },
+  {} as Record<string, CategoryMapping>,
+);
+
 // ============================================================================
 // Fuzzy Pattern Matching (for missing/ambiguous categories)
 // ============================================================================
@@ -619,10 +640,12 @@ export function mapDetectionToCategory(
   detectionBox?: { box_normalized?: { y1?: number; y2?: number } }
 ): CategoryMapping {
   const normalized = label.toLowerCase().trim();
+  const canonical = canonicalizeLabelForLookup(label);
 
   // 1. Try exact match in primary mappings
-  if (PRIMARY_MAPPINGS[normalized]) {
-    const mapping = { ...PRIMARY_MAPPINGS[normalized] };
+  if (PRIMARY_MAPPINGS[normalized] || (canonical && PRIMARY_MAPPINGS_CANONICAL[canonical])) {
+    const baseMapping = PRIMARY_MAPPINGS[normalized] ?? PRIMARY_MAPPINGS_CANONICAL[canonical];
+    const mapping = { ...baseMapping };
     mapping.attributes = { ...mapping.attributes };
     mapping.alternativeCategories = [...mapping.alternativeCategories];
     mapping.confidence = mapping.confidence * detectionConfidence;

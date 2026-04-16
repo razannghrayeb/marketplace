@@ -1014,6 +1014,24 @@ function inferFootwearSubtypeFromCaption(
   return label;
 }
 
+function strictFootwearSubtypeFallbackTerms(
+  detectionLabel: string,
+): string[] | null {
+  const label = String(detectionLabel || "").toLowerCase();
+  if (!label) return null;
+
+  if (/\b(boot|boots|ankle\s*boot|combat\s*boot|chelsea)\b/.test(label)) {
+    return ["boots", "boot"];
+  }
+  if (/\b(heel|heels|pump|pumps|stiletto|stilettos|wedge|wedges|slingback|kitten\s*heel)\b/.test(label)) {
+    return ["heels", "heel", "pumps", "pump", "stiletto", "wedge", "slingback"];
+  }
+  if (/\b(sandal|sandals|slide|slides|mule|mules|flip\s*flop|flip-flop)\b/.test(label)) {
+    return ["sandals", "sandal", "slides", "slide", "mules", "mule", "flip flop"];
+  }
+  return null;
+}
+
 /**
  * Build a hard OpenSearch `filters.category` term set that matches catalog category values.
  * We use the label as the source of specificity, because the macro aisle (e.g. `bottoms`)
@@ -1110,15 +1128,15 @@ function hardCategoryTermsForDetection(
 
     if (isBootLike) {
       const bootsOnly = baseTerms.filter((t) => /\b(boot|boots)\b/.test(t));
-      return bootsOnly.length > 0 ? bootsOnly : baseTerms;
+      return bootsOnly.length > 0 ? bootsOnly : (strictFootwearSubtypeFallbackTerms(l) ?? baseTerms);
     }
     if (isHeelLike) {
       const heelsOnly = baseTerms.filter((t) => /\b(heel|heels|pump|pumps|stiletto|wedge)\b/.test(t));
-      return heelsOnly.length > 0 ? heelsOnly : baseTerms;
+      return heelsOnly.length > 0 ? heelsOnly : (strictFootwearSubtypeFallbackTerms(l) ?? baseTerms);
     }
     if (isSandalLike) {
       const sandalsOnly = baseTerms.filter((t) => /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(t));
-      return sandalsOnly.length > 0 ? sandalsOnly : baseTerms;
+      return sandalsOnly.length > 0 ? sandalsOnly : (strictFootwearSubtypeFallbackTerms(l) ?? baseTerms);
     }
 
     if (isGenericShoeLike) {
@@ -1257,15 +1275,15 @@ function tightenTypeSeedsForDetection(
 
     if (isBootLike) {
       const bootsOnly = normalized.filter((t) => /\b(boot|boots)\b/.test(t));
-      return bootsOnly.length > 0 ? bootsOnly : normalized;
+      return bootsOnly.length > 0 ? bootsOnly : (strictFootwearSubtypeFallbackTerms(label) ?? normalized);
     }
     if (isHeelLike) {
       const heelsOnly = normalized.filter((t) => /\b(heel|heels|pump|pumps|stiletto|wedge)\b/.test(t));
-      return heelsOnly.length > 0 ? heelsOnly : normalized;
+      return heelsOnly.length > 0 ? heelsOnly : (strictFootwearSubtypeFallbackTerms(label) ?? normalized);
     }
     if (isSandalLike) {
       const sandalsOnly = normalized.filter((t) => /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(t));
-      return sandalsOnly.length > 0 ? sandalsOnly : normalized;
+      return sandalsOnly.length > 0 ? sandalsOnly : (strictFootwearSubtypeFallbackTerms(label) ?? normalized);
     }
 
     if (isGenericShoeLike) {
@@ -3638,7 +3656,7 @@ export class ImageAnalysisService {
       async ({ detection, detectionIndex }) => {
       // Refine generic "shoe" label using BLIP caption for footwear subtype specificity.
       const rawLabel = detection.label;
-      const label = inferFootwearSubtypeFromCaption(rawLabel, blipCaption);
+      let label = inferFootwearSubtypeFromCaption(rawLabel, blipCaption);
       console.log(`[detection-trace] started label="${label}"${label !== rawLabel ? ` (refined from "${rawLabel}")` : ""} conf=${(detection.confidence ?? 0).toFixed(3)} area=${(detection.area_ratio ?? 0).toFixed(3)}`);
       
       let clipBuffer: Buffer;
@@ -4028,6 +4046,54 @@ export class ImageAnalysisService {
         obs.detectionCaptionMisses += 1;
       }
 
+      // Refine generic footwear after per-detection caption arrives.
+      // Full-image caption can miss shoe subtype cues (heel/boot/sandal), while
+      // detection caption is usually more local to the item crop.
+      if (categoryMapping.productCategory === "footwear") {
+        const refinedFootwearLabel = inferFootwearSubtypeFromCaption(label, detCaption || blipCaption);
+        if (refinedFootwearLabel !== label) {
+          const previousLabel = label;
+          label = refinedFootwearLabel;
+          console.log(
+            `[detection-trace] footwear subtype refined from "${previousLabel}" to "${label}" via detection caption`,
+          );
+
+          softProductTypeHints = tightenTypeSeedsForDetection(
+            label,
+            categoryMapping,
+            [...new Set([label, ...softProductTypeHints])],
+          );
+          if (formalFootwearIntent) {
+            softProductTypeHints = pruneAthleticFootwearTerms(softProductTypeHints);
+          }
+
+          if (Array.isArray((filters as any).productTypes) && (filters as any).productTypes.length > 0) {
+            (filters as any).productTypes = tightenTypeSeedsForDetection(
+              label,
+              categoryMapping,
+              (filters as any).productTypes,
+            );
+            if (formalFootwearIntent) {
+              (filters as any).productTypes = pruneAthleticFootwearTerms((filters as any).productTypes);
+            }
+          }
+
+          if (filterByDetectedCategory) {
+            if (shouldHardCategory) {
+              const terms = hardCategoryTermsForDetection(label, categoryMapping);
+              const categoryTerms = formalFootwearIntent ? pruneAthleticFootwearTerms(terms) : terms;
+              filters.category = categoryTerms.length === 1 ? categoryTerms[0] : categoryTerms;
+            } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
+              const typeHints = Array.isArray(filters.productTypes) ? filters.productTypes : [];
+              predictedCategoryAisles = typeHints.length > 0 ? typeHints : softProductTypeHints;
+              if (formalFootwearIntent && Array.isArray(predictedCategoryAisles) && predictedCategoryAisles.length > 0) {
+                predictedCategoryAisles = pruneAthleticFootwearTerms(predictedCategoryAisles);
+              }
+            }
+          }
+        }
+      }
+
       const strictAudienceLock =
         Boolean(inferredAudience.gender) &&
         blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong() &&
@@ -4191,6 +4257,7 @@ export class ImageAnalysisService {
           relaxThresholdWhenEmpty: shopLookRelaxEnv(),
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor: inferredPrimaryColorForDetection,
+          inferredColorKey: itemColorKey,
           inferredColorsByItem,
           inferredColorsByItemConfidence,
           debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
@@ -5641,6 +5708,7 @@ export class ImageAnalysisService {
             relaxThresholdWhenEmpty: shopLookRelaxEnv(),
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor: inferredPrimaryColorForDetection,
+            inferredColorKey: itemColorKey,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
             debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
