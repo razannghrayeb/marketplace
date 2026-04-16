@@ -3452,6 +3452,12 @@ export async function searchByImageWithSimilarity(
       inferredByItem: inferredByItemForRelevance,
       inferredByItemConfidence: inferredByItemConfidenceForRelevance,
     });
+  const preferInferredColorForConflict = shouldPreferInferredColorWhenConflict({
+    mergedCategoryForRelevance: typeof mergedCategoryForRelevance === "string" ? mergedCategoryForRelevance : undefined,
+    desiredProductTypes,
+    inferredPrimary: inferredPrimaryFromParams ?? (filtersRecord as { inferredPrimaryColor?: string | null }).inferredPrimaryColor,
+    inferredColorTokens,
+  });
   const preferredInferredColorConfidence = Number(
     preferredInferredColorKey ? inferredByItemConfidenceForRelevance?.[preferredInferredColorKey] : 0,
   );
@@ -3465,7 +3471,7 @@ export async function searchByImageWithSimilarity(
     preferredInferredColorConfidence >= Math.max(colorConfidenceThreshold(), 0.84);
   const hasTrustedInferredColorSignal =
     inferredColorTokens.length > 0 &&
-    (!inferredCropColorConflict || forceTrustInferredFootwearColor || hasStrongTopItemColor);
+    (!inferredCropColorConflict || forceTrustInferredFootwearColor || hasStrongTopItemColor || preferInferredColorForConflict);
   const hasInferredColorSignal = hasTrustedInferredColorSignal;
 
   let allColorsForRelevance: string[];
@@ -4938,6 +4944,7 @@ export async function searchByImageWithSimilarity(
 
       if (hasDetectionAnchoredTypeIntent && compliance) {
         const sleeveComp = Math.max(0, Math.min(1, compliance.sleeveCompliance ?? 0));
+        const lengthComp = Math.max(0, Math.min(1, (compliance as any).lengthCompliance ?? 0));
         const typeComp = Math.max(0, Math.min(1, compliance.productTypeCompliance ?? 0));
         const isTopDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops";
         const isDressDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses";
@@ -4945,12 +4952,22 @@ export async function searchByImageWithSimilarity(
           ? isOnePieceCatalogCandidate(p as unknown as Record<string, unknown>)
           : false;
 
-        if (isTopDetection && (compliance.hasSleeveIntent ?? false) && sleeveComp < 0.35) {
+        // `sleeveCompliance` around 0.15 commonly means sleeve metadata is missing/uncertain,
+        // not an explicit contradiction. Only cap when we have a strong mismatch signal.
+        if (isTopDetection && (compliance.hasSleeveIntent ?? false) && sleeveComp < 0.12) {
           finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.34 : 0.28);
           finalRelevanceSource = "sleeve_conflict_cap";
         }
 
         if (isDressDetection) {
+          if ((compliance.hasSleeveIntent ?? false) && sleeveComp < 0.12) {
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.34 : 0.28);
+            finalRelevanceSource = "dress_sleeve_conflict_cap";
+          }
+          if (((compliance as any).hasLengthIntent ?? false) && lengthComp < 0.35) {
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.32 : 0.26);
+            finalRelevanceSource = "dress_length_conflict_cap";
+          }
           if (!onePieceCandidate && similarityScore < 0.94) {
             finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.52 : 0.42);
             finalRelevanceSource = "dress_silhouette_cap";
@@ -4970,7 +4987,7 @@ export async function searchByImageWithSimilarity(
           hasDetectionAnchoredTypeIntent &&
           compliance &&
           (
-            ((compliance.hasSleeveIntent ?? false) && (compliance.sleeveCompliance ?? 0) < 0.35) ||
+            ((compliance.hasSleeveIntent ?? false) && (compliance.sleeveCompliance ?? 0) < 0.12) ||
             ((compliance.productTypeCompliance ?? 0) < 0.28)
           )
         );

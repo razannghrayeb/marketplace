@@ -249,7 +249,9 @@ class DualDetector:
                 })
 
         # --- Model B: accessories ---
-        raw_b = self._model_b(pil_img)
+        # Explicit threshold is required: HF object-detection pipeline default is high
+        # and can suppress valid small accessories (bags/wallets) before post-processing.
+        raw_b = self._model_b(pil_img, threshold=effective_conf_b)
         acc   = []
         for det in raw_b:
             lbl, score = det["label"], det["score"]
