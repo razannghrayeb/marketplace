@@ -508,12 +508,31 @@ export function dedupeDetectionsBySameLabelIou(
   }
   const kept: typeof withIdx = [];
   for (const group of byLabel.values()) {
+    const groupLabel = String(group[0]?.detection.label ?? "").toLowerCase();
+    const isTopLikeLabel = /\b(top|shirt|blouse|tee|t-?shirt|tank|cami|camisole|sleeveless|vest)\b/.test(groupLabel);
     const sorted = [...group].sort((a, b) => b.detection.confidence - a.detection.confidence);
     const groupKept: typeof withIdx = [];
     for (const row of sorted) {
-      const overlaps = groupKept.some(
-        (k) => boundingBoxIou(row.detection.box, k.detection.box) >= iouThreshold,
-      );
+      const overlaps = groupKept.some((k) => {
+        const iou = boundingBoxIou(row.detection.box, k.detection.box);
+        if (iou < iouThreshold) return false;
+
+        if (!isTopLikeLabel) return true;
+
+        // Keep layered top instances (e.g., shirt over tank) when one box is
+        // substantially smaller than the other, even if IoU is high.
+        const rowArea = Math.max(0, row.detection.box.x2 - row.detection.box.x1) * Math.max(0, row.detection.box.y2 - row.detection.box.y1);
+        const keptArea = Math.max(0, k.detection.box.x2 - k.detection.box.x1) * Math.max(0, k.detection.box.y2 - k.detection.box.y1);
+        const minArea = Math.min(rowArea, keptArea);
+        const maxArea = Math.max(rowArea, keptArea);
+        const relativeArea = maxArea > 0 ? minArea / maxArea : 1;
+
+        if (relativeArea <= 0.72 && iou <= 0.88) {
+          return false;
+        }
+
+        return true;
+      });
       if (!overlaps) groupKept.push(row);
     }
     kept.push(...groupKept);

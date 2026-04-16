@@ -3412,12 +3412,15 @@ export async function searchByImageWithSimilarity(
   const inferredByItemConfidenceForRelevance =
     (params as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence ??
     (filtersRecord as { inferredColorsByItemConfidence?: Record<string, number> }).inferredColorsByItemConfidence;
+  const preferredInferredColorKey =
+    (params as { inferredColorKey?: string | null }).inferredColorKey ??
+    (filtersRecord as { inferredColorKey?: string | null }).inferredColorKey;
   const inferredColorTokens = collectInferredColorTokens(
     filtersRecord,
     inferredPrimaryFromParams ?? (filtersRecord as { inferredPrimaryColor?: string | null }).inferredPrimaryColor,
     inferredByItemForRelevance,
     inferredByItemConfidenceForRelevance,
-    (params as { inferredColorKey?: string | null }).inferredColorKey ?? (filtersRecord as { inferredColorKey?: string | null }).inferredColorKey,
+    preferredInferredColorKey,
     typeof mergedCategoryForRelevance === "string" ? mergedCategoryForRelevance : undefined,
     desiredProductTypes,
   );
@@ -3449,8 +3452,20 @@ export async function searchByImageWithSimilarity(
       inferredByItem: inferredByItemForRelevance,
       inferredByItemConfidence: inferredByItemConfidenceForRelevance,
     });
+  const preferredInferredColorConfidence = Number(
+    preferredInferredColorKey ? inferredByItemConfidenceForRelevance?.[preferredInferredColorKey] : 0,
+  );
+  const hasStrongTopItemColor =
+    (String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops" ||
+      desiredProductTypes.some((t) =>
+        /\b(top|tee|tshirt|t-?shirt|shirt|blouse|tank|cami|camisole|sleeveless)\b/.test(
+          String(t).toLowerCase(),
+        ),
+      )) &&
+    preferredInferredColorConfidence >= Math.max(colorConfidenceThreshold(), 0.84);
   const hasTrustedInferredColorSignal =
-    inferredColorTokens.length > 0 && (!inferredCropColorConflict || forceTrustInferredFootwearColor);
+    inferredColorTokens.length > 0 &&
+    (!inferredCropColorConflict || forceTrustInferredFootwearColor || hasStrongTopItemColor);
   const hasInferredColorSignal = hasTrustedInferredColorSignal;
 
   let allColorsForRelevance: string[];
@@ -4936,11 +4951,11 @@ export async function searchByImageWithSimilarity(
         }
 
         if (isDressDetection) {
-          if (!onePieceCandidate && similarityScore < 0.97) {
-            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.34 : 0.26);
-            finalRelevanceSource = "one_piece_mismatch_cap";
+          if (!onePieceCandidate && similarityScore < 0.94) {
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.52 : 0.42);
+            finalRelevanceSource = "dress_silhouette_cap";
           } else if (typeComp < 0.12) {
-            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.58 : 0.5);
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.7 : 0.58);
             finalRelevanceSource = "type_conflict_cap";
           }
         } else if (typeComp < 0.28) {

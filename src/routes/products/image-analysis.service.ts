@@ -2001,6 +2001,22 @@ function applyDetectionCategoryGuard(
       return false;
     }
 
+    if (categoryMapping.productCategory === "footwear") {
+      const detectionNorm = normalizeLooseText(detectionLabel);
+      const wantsHeels = /\b(heel|heels|high heel|stiletto|stilettos|pump|pumps|kitten heel|wedge|wedges|slingback|slingbacks)\b/.test(
+        detectionNorm,
+      );
+      const wantsSandalsOrFlats = /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip flops|flat|flats|ballet)\b/.test(
+        detectionNorm,
+      );
+      const productIsHeelLed = /\b(heel|heels|high heel|stiletto|stilettos|pump|pumps|kitten heel|wedge|wedges)\b/.test(
+        haystack,
+      );
+      if (wantsSandalsOrFlats && !wantsHeels && productIsHeelLed) {
+        return false;
+      }
+    }
+
     // Gender-aware footwear subtype safety:
     // generic "shoe" detections should not surface clearly feminine footwear
     // when query audience is men.
@@ -2569,9 +2585,18 @@ function selectDetectionColorFromPalette(params: {
   const lowConfidence = confidence < 0.65;
   const mediumConfidence = confidence < 0.78;
   const isTopLike =
-    isApparelFamilyCategory(category) ||
+    category === "tops" ||
     /\b(top|shirt|blouse|tee|t-?shirt|sweater|hoodie|sweatshirt|vest|tank|camisole)\b/.test(label);
+  const isOnePieceLike =
+    category === "dresses" ||
+    /\b(dress|gown|jumpsuit|romper|playsuit|sundress|vest dress)\b/.test(label);
   const primaryIsLightNeutral = isLightNeutralFashionColor(primary);
+
+  // One-piece garments frequently include background/sky bleed in upper regions.
+  // Keep a confident light-neutral primary color for dresses/jumpsuits.
+  if (isOnePieceLike && primaryIsLightNeutral && confidence >= 0.55) {
+    return primary;
+  }
 
   // For tops, studio/product-collage backgrounds frequently dominate the crop with white/off-white.
   // If we still captured a non-neutral secondary color, prefer it as item color even at high confidence.
@@ -4142,6 +4167,16 @@ export class ImageAnalysisService {
       const inferredPrimaryColorForDetection = (() => {
         const detColor = inferredColorsByItem[itemColorKey];
         const detColorConfidence = inferredColorsByItemConfidence[itemColorKey] ?? 0;
+        const globalPrimary = String(inferredPrimaryColor ?? "").toLowerCase().trim();
+        const detColorNorm = String(detColor ?? "").toLowerCase().trim();
+        const onePieceDetection =
+          categoryMapping.productCategory === "dresses" ||
+          /\b(dress|gown|jumpsuit|romper|playsuit|sundress)\b/.test(String(label).toLowerCase());
+        if (onePieceDetection && globalPrimary) {
+          if (!detColorNorm || (isLightNeutralFashionColor(globalPrimary) && !isLightNeutralFashionColor(detColorNorm))) {
+            return globalPrimary;
+          }
+        }
         if (detColor && detColorConfidence >= 0.45) return detColor;
         return inferredPrimaryColor;
       })();
@@ -5524,6 +5559,16 @@ export class ImageAnalysisService {
         const inferredPrimaryColorForDetection = (() => {
           const detColor = inferredColorsByItem[itemColorKey];
           const detColorConfidence = inferredColorsByItemConfidence[itemColorKey] ?? 0;
+          const globalPrimary = String(inferredPrimaryColor ?? "").toLowerCase().trim();
+          const detColorNorm = String(detColor ?? "").toLowerCase().trim();
+          const onePieceDetection =
+            categoryMapping.productCategory === "dresses" ||
+            /\b(dress|gown|jumpsuit|romper|playsuit|sundress)\b/.test(String(label).toLowerCase());
+          if (onePieceDetection && globalPrimary) {
+            if (!detColorNorm || (isLightNeutralFashionColor(globalPrimary) && !isLightNeutralFashionColor(detColorNorm))) {
+              return globalPrimary;
+            }
+          }
           if (detColor && detColorConfidence >= 0.45) return detColor;
           return inferredPrimaryColor;
         })();
