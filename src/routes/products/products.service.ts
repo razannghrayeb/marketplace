@@ -875,6 +875,79 @@ function isTopLikeCategory(category: string): boolean {
   );
 }
 
+function imageStrictFinalDetectionCategoryGateEnabled(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_STRICT_FINAL_DETECTION_CATEGORY_GATE ?? "1").toLowerCase();
+  return raw === "1" || raw === "true";
+}
+
+function productCategoryFamilyBlob(product: Record<string, unknown>): string {
+  return [
+    product.category,
+    product.category_canonical,
+    product.title,
+    product.description,
+    product.attr_sleeve,
+    product.attr_length,
+    ...(Array.isArray(product.product_types) ? product.product_types : []),
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x).toLowerCase())
+    .join(" ");
+}
+
+function isStrictDetectionCategory(cat: string): boolean {
+  const c = String(cat || "").toLowerCase().trim();
+  return c === "tops" || c === "dresses" || c === "footwear" || c === "bottoms" || c === "outerwear";
+}
+
+function passesStrictDetectionCategoryFamily(
+  product: Record<string, unknown>,
+  detectionProductCategory: string,
+): boolean {
+  const d = String(detectionProductCategory || "").toLowerCase().trim();
+  if (!isStrictDetectionCategory(d)) return true;
+
+  const blob = productCategoryFamilyBlob(product);
+  if (!blob.trim()) return false;
+
+  const hasFootwear = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|flat|flats|oxford|oxfords|pump|pumps|mule|mules|clog|clogs)\b/.test(blob);
+  const hasTop = /\b(top|tops|shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|tank|cami|camisole|sweater|cardigan|hoodie|pullover|jumper)\b/.test(blob);
+  const hasOuterwear = /\b(outerwear|outwear|jacket|jackets|coat|coats|blazer|blazers|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers)\b/.test(blob);
+  const hasBottom = /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|shorts?|skirt|skirts|legging|leggings)\b/.test(blob);
+  const hasDressOnePiece = /\b(dress|dresses|gown|gowns|frock|frocks|sundress|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|abaya|abayas|kaftan|kaftans|caftan|caftans)\b/.test(blob);
+  const hasAccessory = /\b(bag|bags|wallet|wallets|belt|belts|hat|hats|cap|caps|jewelry|jewellery|ring|rings|earring|earrings|necklace|necklaces|bracelet|bracelets|watch|watches|sunglasses|glasses|scarf|scarves)\b/.test(blob);
+
+  if (d === "footwear") {
+    return hasFootwear;
+  }
+
+  if (d === "dresses") {
+    if (!hasDressOnePiece && !isOnePieceCatalogCandidate(product)) return false;
+    if (hasFootwear || hasAccessory) return false;
+    return true;
+  }
+
+  if (d === "tops") {
+    if (!hasTop) return false;
+    if (hasFootwear || hasAccessory) return false;
+    return true;
+  }
+
+  if (d === "outerwear") {
+    if (!hasOuterwear) return false;
+    if (hasFootwear || hasAccessory) return false;
+    return true;
+  }
+
+  if (d === "bottoms") {
+    if (!hasBottom) return false;
+    if (hasFootwear || hasAccessory) return false;
+    return true;
+  }
+
+  return true;
+}
+
 function isOnePieceCatalogCandidate(product: Record<string, unknown>): boolean {
   const blob = [
     product.category,
@@ -5289,6 +5362,40 @@ export async function searchByImageWithSimilarity(
       }
     }
   }
+
+  // Final hard family gate: rescue/override paths can re-introduce visually-similar
+  // but category-incorrect items. Clamp to detection category family at the end.
+  const detectionCategoryForFinalGate = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  if (
+    imageStrictFinalDetectionCategoryGateEnabled() &&
+    detectionCategoryForFinalGate &&
+    isStrictDetectionCategory(detectionCategoryForFinalGate)
+  ) {
+    const familyStrict = results.filter((p: any) =>
+      passesStrictDetectionCategoryFamily(
+        p as unknown as Record<string, unknown>,
+        detectionCategoryForFinalGate,
+      ),
+    );
+
+    if (familyStrict.length > 0) {
+      results = familyStrict as ProductResult[];
+    } else {
+      // Keep only very strong, low-contradiction candidates when metadata is sparse.
+      const familySafeFallback = results.filter((p: any) => {
+        const ex = (p.explain ?? {}) as any;
+        const typeComp = Number(ex.productTypeCompliance ?? 0);
+        const exactType = Number(ex.exactTypeScore ?? 0);
+        const crossFamily = Number(ex.crossFamilyPenalty ?? 0);
+        const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+        return crossFamily < 0.22 && (exactType >= 1 || typeComp >= 0.82 || sim >= 0.985);
+      });
+      if (familySafeFallback.length > 0) {
+        results = familySafeFallback as ProductResult[];
+      }
+    }
+  }
+
   // Always sort by finalRelevance01 descending as the primary signal.
   // For visual-primary (broad) searches, use similarity_score as a tie-breaker
   // only when finalRelevance01 values are very close.
