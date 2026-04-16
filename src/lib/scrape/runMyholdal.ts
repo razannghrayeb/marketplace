@@ -88,7 +88,7 @@ async function getAllProductUrlsFromSitemap(): Promise<string[]> {
   return Array.from(productUrls);
 }
 
-async function run() {
+export async function runMyholdal() {
   console.log(`\n=== MYHOLDAL sitemap crawl ===`);
   const productUrls = await getAllProductUrlsFromSitemap();
 
@@ -134,7 +134,4 @@ async function run() {
   console.log(`\nDone. TotalUrls=${productUrls.length}, Saved=${saved}, Failed=${failed}`);
 }
 
-run().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// runMyholdal is exported above — the worker calls it automatically.

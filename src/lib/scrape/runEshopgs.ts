@@ -1,6 +1,6 @@
 import fetch from "node-fetch";
 import { CATEGORY_URLS, listCategoryUrls, listProductUrls, parseProduct } from "./vendors/eshopgs_lb";
-import { getOrCreateVendorId, markProductsUnavailableBefore, upsertProduct } from "./ingest";//Saves the product into Postgres
+import { getOrCreateVendorId, markUnseenProductsUnavailable, upsertProduct } from "./ingest";//Saves the product into Postgres
 import { pg } from "../core/db"; //Used to check if product already exists
 
 const VENDOR_NAME = "eshopgs";
@@ -33,7 +33,6 @@ export async function runEshopgsCrawl(opts?: { maxPages?: number; delayMs?: numb
   let found = 0;
   let inserted = 0;
   let updated = 0;
-  const crawlStartedAt = new Date().toISOString();
   let debugLogged = 0;
   const DEBUG_LIMIT = 10;
 
@@ -136,18 +135,9 @@ export async function runEshopgsCrawl(opts?: { maxPages?: number; delayMs?: numb
   }
 
   const vendorId = await getOrCreateVendorId(VENDOR_NAME, VENDOR_URL);
-  await markProductsUnavailableBefore(vendorId, crawlStartedAt);
+  await markUnseenProductsUnavailable(vendorId, seenListingUrls);
 
   return { found, inserted, updated };
 }
 
-// run directly
-runEshopgsCrawl({ maxPages: 50, delayMs: 400 })
-  .then(({ found, inserted, updated }) => {
-    console.log(`\nDone. Found=${found}, Inserted=${inserted}, Updated=${updated}`);
-    process.exit(0);
-  })
-  .catch((err) => {
-    console.error("Crawl failed", err);
-    process.exit(1);
-  });
+// runEshopgsCrawl is already exported above — the worker calls it automatically.

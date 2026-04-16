@@ -11,6 +11,11 @@ import { recomputeAllCanonicals } from "../products/canonical";
 import { computeAllCategoryBaselines } from "../compare/priceAnomalyDetector";
 import { pg } from "../core";
 import { getRedis } from "../redis";
+import { runEshopgsCrawl } from "../scrape/runEshopgs";
+import { runMoustache } from "../scrape/runMoustache";
+import { runMyholdal } from "../scrape/runMyholdal";
+import { runHm } from "../scrape/runHm";
+import { runMikesport } from "../scrape/runMikesport";
 
 // ============================================================================
 // Job Handlers
@@ -24,8 +29,31 @@ async function handleCanonicalRecompute(): Promise<{ processed: number; new_cano
   return recomputeAllCanonicals();
 }
 
-async function handleNightlyCrawl(): Promise<{ message: string }> {
-  return { message: "Nightly crawl completed (stub)" };
+async function handleNightlyCrawl(): Promise<{ vendors: Record<string, string> }> {
+  console.log(`[Worker] Nightly crawl started — running all vendors...`);
+  const results: Record<string, string> = {};
+
+  const vendors: Array<{ name: string; fn: () => Promise<any> }> = [
+    { name: "eshopgs",   fn: () => runEshopgsCrawl({ maxPages: 50, delayMs: 400 }) },
+    { name: "moustache", fn: () => runMoustache() },
+    { name: "myholdal",  fn: () => runMyholdal() },
+    { name: "hm",        fn: () => runHm() },
+    { name: "mikesport", fn: () => runMikesport() },
+  ];
+
+  for (const { name, fn } of vendors) {
+    try {
+      console.log(`[Worker] Crawling vendor: ${name}`);
+      await fn();
+      results[name] = "ok";
+    } catch (err: any) {
+      console.error(`[Worker] Vendor ${name} failed:`, err?.message ?? err);
+      results[name] = `failed: ${err?.message ?? err}`;
+    }
+  }
+
+  console.log(`[Worker] Nightly crawl complete:`, results);
+  return { vendors: results };
 }
 
 async function handleCleanupOldData(): Promise<{ deletedPrices: number; deletedJobs: number }> {

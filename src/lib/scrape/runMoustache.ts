@@ -113,7 +113,7 @@ function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
-async function run() {
+export async function runMoustache() {
   const allProductUrls = new Set<string>();
 
   const sitemapUrls = await discoverProductUrlsFromSitemap();
@@ -201,7 +201,4 @@ async function run() {
   console.log(`\nDone. TotalUrls=${allProductUrls.size}, Saved=${saved}, Failed=${failed}`);
 }
 
-run().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// runMoustache is exported above — the worker calls it automatically.
