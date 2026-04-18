@@ -140,4 +140,3 @@ export async function runEshopgsCrawl(opts?: { maxPages?: number; delayMs?: numb
   return { found, inserted, updated };
 }
 
-// runEshopgsCrawl is already exported above — the worker calls it automatically.

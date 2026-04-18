@@ -201,4 +201,3 @@ export async function runMoustache() {
   console.log(`\nDone. TotalUrls=${allProductUrls.size}, Saved=${saved}, Failed=${failed}`);
 }
 
-// runMoustache is exported above — the worker calls it automatically.

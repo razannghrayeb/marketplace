@@ -134,4 +134,3 @@ export async function runMyholdal() {
   console.log(`\nDone. TotalUrls=${productUrls.length}, Saved=${saved}, Failed=${failed}`);
 }
 
-// runMyholdal is exported above — the worker calls it automatically.

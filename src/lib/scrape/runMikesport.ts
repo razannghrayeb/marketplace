@@ -42,4 +42,3 @@ export async function runMikesport() {
   console.log(`Done. Successful: ${ok}, Failed: ${fail}`);
 }
 
-// runMikesport is exported above — the worker calls it automatically.

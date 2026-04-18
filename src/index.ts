@@ -2,7 +2,7 @@ import "dotenv/config";
 import { createServer } from "./server";
 import { testConnection } from "./lib/core/db";
 import { setupSchedules } from "./lib/scheduler";
-import { createWorker } from "./lib/worker";
+import { runWorkerLoop } from "./lib/worker";
 
 /**
  * Without DATABASE_URL, `pg` falls back to localhost:5432 and every route that
@@ -53,8 +53,8 @@ async function main() {
   await setupSchedules();
   console.log("Scheduler started.");
 
-  // Start the worker (listens for jobs and runs them)
-  createWorker();
+  // Start the worker (polls Upstash queue and runs jobs)
+  runWorkerLoop();
   console.log("Worker started.");
 }
 
