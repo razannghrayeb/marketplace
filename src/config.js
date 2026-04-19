@@ -32,7 +32,7 @@ exports.config = {
         ssl: { rejectUnauthorized: false },
     },
     opensearch: {
-        node: process.env.OS_NODE || "https://avnadmin:AVNS_seqtyHr-NLC1nO4M5Yt@os-270aa11c-lau-6d81.j.aivencloud.com:12588",
+        node: process.env.OS_NODE || "https://avnadmin:AVNS_QJfJVot3ZhsDwtSsqZR@os-2bd583f8-ghrazan2006-96c3.j.aivencloud.com:13309",
         index: process.env.OS_INDEX || "products",
         username: process.env.OS_USERNAME || "",
         password: process.env.OS_PASSWORD || "",
@@ -58,7 +58,7 @@ exports.config = {
         // Auth: gcloud auth application-default login  OR  GOOGLE_APPLICATION_CREDENTIALS=/key.json
         project: process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || "",
         location: process.env.TRYON_LOCATION || "us-central1",
-        model: process.env.TRYON_MODEL || "virtual-try-on@002",
+        model: process.env.TRYON_MODEL || "virtual-try-on-001",
         timeout: Number(process.env.TRYON_TIMEOUT || 60000),
     },
     jwt: {

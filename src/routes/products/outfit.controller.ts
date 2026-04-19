@@ -94,19 +94,64 @@ export async function completeStyle(req: Request, res: Response) {
 /**
  * POST /products/complete-style
  * 
- * Get outfit recommendations for a product passed in body
- * (useful for products not in database)
+ * Get outfit recommendations from body input.
+ * Preferred path: pass `product_id` (or `product.id`) so POST shares
+ * the same DB-backed complete-look logic as GET /products/:id/complete-style.
+ * Fallback path: pass `product` object for items not in database.
  * 
  * Body:
+ * - product_id?: number
  * - product: { title, brand?, category?, color?, price_cents?, currency?, image_url?, description? }
  * - options?: { maxPerCategory?, maxTotal?, preferSameBrand?, priceRange?, excludeBrands? }
  */
 export async function completeStyleFromBody(req: Request, res: Response) {
   try {
-    const { product, options: bodyOptions } = req.body;
+    const { product, product_id: productIdRaw, options: bodyOptions } = req.body;
 
-    if (!product || !product.title) {
+    const productIdCandidate =
+      productIdRaw !== undefined && productIdRaw !== null
+        ? parseInt(String(productIdRaw), 10)
+        : parseInt(String((product as { id?: unknown } | undefined)?.id ?? ""), 10);
+
+    if (!Number.isFinite(productIdCandidate) && (!product || !product.title)) {
       return res.status(400).json({ success: false, error: { message: "Product with title is required" } });
+    }
+
+    const queryOptions = parseCompleteStyleOptions(req.query);
+    const bodyMaxPer = Number(bodyOptions?.maxPerCategory);
+    const bodyMaxTotal = Number(bodyOptions?.maxTotal);
+    const hasBodyMaxPer = Number.isFinite(bodyMaxPer) && bodyMaxPer >= 1;
+    const hasBodyMaxTotal = Number.isFinite(bodyMaxTotal) && bodyMaxTotal >= 1;
+
+    const options: CompleteStyleOptions = {
+      ...queryOptions,
+      maxPerCategory: hasBodyMaxPer ? Math.min(Math.floor(bodyMaxPer), 20) : queryOptions.maxPerCategory,
+      maxTotal: hasBodyMaxTotal ? Math.min(Math.floor(bodyMaxTotal), 50) : queryOptions.maxTotal,
+      preferSameBrand:
+        typeof bodyOptions?.preferSameBrand === "boolean"
+          ? bodyOptions.preferSameBrand
+          : queryOptions.preferSameBrand,
+      disablePriceFilter:
+        typeof bodyOptions?.disablePriceFilter === "boolean"
+          ? bodyOptions.disablePriceFilter
+          : queryOptions.disablePriceFilter,
+      priceRange: bodyOptions?.priceRange || queryOptions.priceRange,
+      excludeBrands:
+        Array.isArray(bodyOptions?.excludeBrands) && bodyOptions.excludeBrands.length > 0
+          ? bodyOptions.excludeBrands
+          : queryOptions.excludeBrands,
+    };
+
+    const userId = getOptionalUserId(req);
+
+    // Prefer DB-backed product flow when ID is provided so POST and GET share
+    // the same complete-look recommendation pipeline.
+    if (Number.isFinite(productIdCandidate) && productIdCandidate >= 1) {
+      const result = await getOutfitRecommendations(productIdCandidate, options, userId);
+      if (!result) {
+        return res.status(404).json({ success: false, error: { message: "Product not found" } });
+      }
+      return res.json({ success: true, data: result });
     }
 
     const productInput: Product = {
@@ -121,15 +166,6 @@ export async function completeStyleFromBody(req: Request, res: Response) {
       description: product.description,
     };
 
-    const options: CompleteStyleOptions = {
-      maxPerCategory: Math.min(bodyOptions?.maxPerCategory || 5, 20),
-      maxTotal: Math.min(bodyOptions?.maxTotal || 20, 50),
-      preferSameBrand: bodyOptions?.preferSameBrand || false,
-      priceRange: bodyOptions?.priceRange,
-      excludeBrands: bodyOptions?.excludeBrands,
-    };
-
-    const userId = getOptionalUserId(req);
     const result = await getOutfitRecommendationsFromProduct(productInput, options, userId);
 
     return res.json({ success: true, data: result });

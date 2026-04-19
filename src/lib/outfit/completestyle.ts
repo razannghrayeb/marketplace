@@ -29,6 +29,8 @@ export interface Product {
   brand?: string;
   category?: string;
   color?: string;
+  gender?: string | null;
+  age_group?: string | null;
   price_cents: number;
   currency: string;
   image_url?: string;
@@ -303,6 +305,94 @@ export function getColorHarmonies(color: string): ColorHarmony[] {
   });
   
   return harmonies;
+}
+
+type AudienceGender = "men" | "women" | "unisex";
+type AudienceAgeGroup = "kids" | "adult";
+
+function normalizeAudienceGender(raw: unknown): AudienceGender | null {
+  if (raw == null) return null;
+  const tokens = Array.isArray(raw)
+    ? raw.flatMap((value) => String(value).split(/[|,;/]+/g))
+    : String(raw).split(/[|,;/]+/g);
+
+  let hasMen = false;
+  let hasWomen = false;
+  let hasUnisex = false;
+
+  for (const token of tokens) {
+    const value = String(token).toLowerCase().trim();
+    if (!value) continue;
+    if (["unisex", "neutral", "all", "all-gender", "all gender", "all genders"].includes(value)) {
+      hasUnisex = true;
+      continue;
+    }
+    if (["men", "man", "male", "mens", "men's", "gents", "gentlemen", "boy", "boys", "boys-kids", "boys_kids"].includes(value)) {
+      hasMen = true;
+      continue;
+    }
+    if (["women", "woman", "female", "womens", "women's", "ladies", "lady", "girl", "girls", "girls-kids", "girls_kids"].includes(value)) {
+      hasWomen = true;
+      continue;
+    }
+  }
+
+  if (hasUnisex || (hasMen && hasWomen)) return "unisex";
+  if (hasMen) return "men";
+  if (hasWomen) return "women";
+  return null;
+}
+
+function inferAudienceGenderFromText(text: string): AudienceGender | null {
+  const value = String(text || "").toLowerCase();
+  const menHits = (value.match(/\bmen\b|\bmens\b|\bmen's\b|\bmale\b|\bman\b|\bgents?\b|\bboys?\b/g) || []).length;
+  const womenHits = (value.match(/\bwomen\b|\bwomens\b|\bwomen's\b|\bfemale\b|\bwoman\b|\bladies\b|\blady\b|\bgirls?\b/g) || []).length;
+  if (menHits > womenHits) return "men";
+  if (womenHits > menHits) return "women";
+  return null;
+}
+
+function inferAudienceAgeGroupFromText(text: string): AudienceAgeGroup | null {
+  const value = String(text || "").toLowerCase();
+  if (/\bkids?\b|\bchildren\b|\bchild\b|\bbaby\b|\btoddler\b|\byouth\b|\bjunior\b/.test(value)) {
+    return "kids";
+  }
+  if (/\badult\b|\bmen\b|\bwomen\b|\bmale\b|\bfemale\b|\bladies\b|\bgents\b/.test(value)) {
+    return "adult";
+  }
+  return null;
+}
+
+function inferSourceAudience(product: Product): { gender: AudienceGender | null; ageGroup: AudienceAgeGroup | null } {
+  const text = `${String(product.gender || "")} ${String(product.title || "")} ${String(product.category || "")} ${String(product.description || "")}`;
+  const gender = normalizeAudienceGender(product.gender) || inferAudienceGenderFromText(text);
+  const hasExplicitKidsCue = /\bkids?\b|\bchildren\b|\bchild\b|\bbaby\b|\btoddler\b|\byouth\b|\bjunior\b/.test(text.toLowerCase());
+  const ageGroup = hasExplicitKidsCue ? "kids" : gender ? "adult" : inferAudienceAgeGroupFromText(text);
+  return { gender, ageGroup };
+}
+
+function inferCandidateAgeGroup(product: Product): AudienceAgeGroup | null {
+  return inferAudienceAgeGroupFromText(`${String(product.gender || "")} ${String(product.title || "")} ${String(product.category || "")} ${String(product.description || "")}`);
+}
+
+function isAudienceCompatible(sourceProduct: Product, candidateProduct: Product): boolean {
+  const sourceAudience = inferSourceAudience(sourceProduct);
+  const candidateGender = normalizeAudienceGender(candidateProduct.gender) || inferAudienceGenderFromText(`${String(candidateProduct.gender || "")} ${String(candidateProduct.title || "")} ${String(candidateProduct.category || "")} ${String(candidateProduct.description || "")}`);
+  const candidateAgeGroup = inferCandidateAgeGroup(candidateProduct);
+
+  if (sourceAudience.gender && sourceAudience.gender !== "unisex" && candidateGender && candidateGender !== "unisex" && candidateGender !== sourceAudience.gender) {
+    return false;
+  }
+
+  if (sourceAudience.gender && candidateAgeGroup === "kids") {
+    return false;
+  }
+
+  if (sourceAudience.ageGroup === "kids" && candidateAgeGroup === "adult") {
+    return false;
+  }
+
+  return true;
 }
 
 // ============================================================================
@@ -860,6 +950,25 @@ function detectCategoryFallback(text: string): { category: ProductCategory; conf
     }
   }
   
+  // Direct "shoes" keyword match → prioritize footwear
+  if (/\b(shoes?|footwear)\b/.test(lowerText)) {
+    const footwearCategories = ['loafers', 'flats', 'boots', 'heels', 'sandals', 'sneakers'];
+    for (const cat of footwearCategories) {
+      if (categoryScores[cat as ProductCategory] > 0) {
+        // High confidence if "shoes" is mentioned + any footwear match found
+        return {
+          category: cat as ProductCategory,
+          confidence: 0.85,
+        };
+      }
+    }
+    // If "shoes" is mentioned but no specific type found, return unknown with shoes note
+    return {
+      category: 'unknown',
+      confidence: 0.5,
+    };
+  }
+  
   // Find highest scoring category
   let bestCategory: ProductCategory = "unknown";
   let bestScore = 0;
@@ -1149,6 +1258,51 @@ export async function completeMyStyle(
   };
 }
 
+function normalizeOutfitText(value: unknown): string {
+  return String(value || "").toLowerCase();
+}
+
+function isRelevantForRequestedCategories(product: Product, categories: ProductCategory[]): boolean {
+  const haystack = normalizeOutfitText(`${product.title} ${product.category || ""} ${product.description || ""}`);
+  if (!haystack.trim()) return false;
+
+  return categories.some((cat) => {
+    const keywords = CATEGORY_KEYWORDS[cat] || [];
+    return keywords.some((keyword) => {
+      const token = normalizeOutfitText(keyword).trim();
+      return token.length >= 3 && haystack.includes(token);
+    });
+  });
+}
+
+function productNearDuplicateKey(product: Product): string {
+  const normalizedTitle = normalizeOutfitText(product.title)
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+  const normalizedBrand = normalizeOutfitText(product.brand).replace(/\s+/g, " ").trim();
+  const normalizedImage = normalizeOutfitText(product.image_cdn || product.image_url)
+    .replace(/^https?:\/\//, "")
+    .trim();
+  return `${normalizedBrand}|${normalizedTitle}|${normalizedImage}`;
+}
+
+function normalizePriceCentsFromSearchSource(raw: Record<string, unknown>): number {
+  if (typeof raw.price_cents === "number" && Number.isFinite(raw.price_cents)) {
+    return Math.max(0, Math.round(raw.price_cents));
+  }
+
+  if (typeof raw.price_usd === "number" && Number.isFinite(raw.price_usd)) {
+    const priceUsd = Number(raw.price_usd);
+    if (priceUsd > 1000) {
+      return Math.max(0, Math.round(priceUsd));
+    }
+    return Math.max(0, Math.round(priceUsd * 100));
+  }
+
+  return 0;
+}
+
 /**
  * Find products matching category and style criteria
  */
@@ -1172,21 +1326,29 @@ async function findProductsForCategory(
     
     if (categoryKeywords.length === 0) return [];
     
+    const categoryShouldClauses = categoryKeywords.map((keyword) => ({
+      multi_match: {
+        query: keyword,
+        fields: ["title^3", "category^2", "description"],
+        operator: "or",
+      },
+    }));
+
     // Build OpenSearch query
     const query: any = {
       bool: {
-        should: categoryKeywords.map(keyword => ({
-          match: {
-            title: {
-              query: keyword,
-              boost: 2,
-            }
-          }
-        })),
-        minimum_should_match: 1,
+        must: [
+          {
+            bool: {
+              should: categoryShouldClauses,
+              minimum_should_match: 1,
+            },
+          },
+        ],
+        should: [],
         filter: [
-          // Index uses string enum (see searchDocument.ts); boolean true matches nothing.
-          { term: { availability: "in_stock" } },
+          // Allow BOTH in_stock and out_of_stock products for outfit recommendations
+          { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } },
         ]
       }
     };
@@ -1241,6 +1403,7 @@ async function findProductsForCategory(
           "title",
           "brand",
           "category",
+          "gender",
           "color",
           "price_usd",
           "currency",
@@ -1263,23 +1426,22 @@ async function findProductsForCategory(
       sourceEmbeddings = await generateEnsembleEmbeddings(options.sourceProduct);
     }
     
+    const seenNearDuplicateKeys = new Set<string>();
+
     for (const hit of hits) {
       const raw = (hit._source || {}) as Record<string, unknown>;
       const pid = parseInt(String(raw.product_id ?? raw.id ?? ""), 10);
       if (!Number.isFinite(pid) || pid < 1) continue;
+      if (pid === options.sourceProduct.id) continue;
 
-      const priceCents =
-        typeof raw.price_cents === "number" && Number.isFinite(raw.price_cents)
-          ? Math.round(raw.price_cents)
-          : typeof raw.price_usd === "number" && Number.isFinite(raw.price_usd)
-            ? Math.round(raw.price_usd * 100)
-            : 0;
+      const priceCents = normalizePriceCentsFromSearchSource(raw);
 
       const product: Product = {
         id: pid,
         title: String(raw.title ?? ""),
         brand: raw.brand != null ? String(raw.brand) : undefined,
         category: raw.category != null ? String(raw.category) : undefined,
+        gender: raw.gender != null ? String(raw.gender) : undefined,
         color: raw.color != null ? String(raw.color) : undefined,
         price_cents: priceCents,
         currency: raw.currency != null ? String(raw.currency) : "USD",
@@ -1292,6 +1454,20 @@ async function findProductsForCategory(
               : undefined,
         description: raw.description != null ? String(raw.description) : undefined,
       };
+
+      if (!isAudienceCompatible(options.sourceProduct, product)) {
+        continue;
+      }
+
+      if (!isRelevantForRequestedCategories(product, categories)) {
+        continue;
+      }
+
+      const nearDuplicateKey = productNearDuplicateKey(product);
+      if (seenNearDuplicateKeys.has(nearDuplicateKey)) {
+        continue;
+      }
+      seenNearDuplicateKeys.add(nearDuplicateKey);
 
       const matchReasons: string[] = [];
       let baseScore = hit._score || 0;
@@ -1647,7 +1823,7 @@ export async function getProductForOutfit(productId: number): Promise<Product | 
     const hiddenClause = hasIsHidden ? "AND (p.is_hidden IS NOT TRUE)" : "";
     const result = await pg.query<Product>(`
       SELECT 
-        p.id, p.title, p.brand, p.category, p.color, 
+        p.id, p.title, p.brand, p.category, p.color, p.gender,
         p.price_cents, p.currency, p.image_url, p.image_cdn, p.description
       FROM products p
       WHERE p.id = $1 ${hiddenClause}

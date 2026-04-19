@@ -55,15 +55,16 @@ export function inferColorFromCaption(caption: string): {
     if (x === "black") return "black";
     if (x === "grey" || x === "gray") return "gray";
     if (x === "white" || x === "ivory" || x === "cream" || x === "off-white" || x === "off white") return "off-white";
-    if (x === "tan" || x === "camel" || x === "brown") return "tan";
+    if (x === "beige" || x === "tan" || x === "camel" || x === "brown") return x === "beige" ? "beige" : "tan";
     if (x === "green" || x === "olive") return "green";
     if (x === "red" || x === "burgundy") return "red";
     if (x === "pink") return "pink";
+    if (x === "yellow" || x === "gold") return "yellow";
     return null;
   };
 
   const colorTokens =
-    "black|navy|blue|denim|grey|gray|white|ivory|cream|off[- ]white|tan|camel|brown|green|olive|red|pink";
+    "black|navy|blue|denim|grey|gray|white|ivory|cream|off[- ]white|beige|tan|camel|brown|green|olive|red|burgundy|pink|yellow|gold";
 
   let topColor: string | null = null;
   const topMatch = s.match(
@@ -72,7 +73,9 @@ export function inferColorFromCaption(caption: string): {
   if (topMatch?.[1]) topColor = mapColorWord(topMatch[1]);
 
   let jeansColor: string | null = null;
-  const jeansMatch = s.match(/\b(black|navy|blue|denim|grey|gray)\b[^.]{0,20}\bjeans\b/);
+  const jeansMatch = s.match(
+    /\b(black|navy|blue|denim|grey|gray|beige|tan|camel|brown|white|off[- ]white|cream|olive|green|red|pink|yellow|gold)\b[^.]{0,30}\b(jeans|pants|trousers|chinos|cargo)\b/,
+  );
   if (jeansMatch?.[1]) jeansColor = mapColorWord(jeansMatch[1]);
 
   let garmentColor: string | null = null;
@@ -90,6 +93,67 @@ export function inferColorFromCaption(caption: string): {
 export function primaryColorHintFromCaption(caption: string): string | null {
   const { topColor, jeansColor, garmentColor } = inferColorFromCaption(caption);
   return garmentColor ?? topColor ?? jeansColor ?? null;
+}
+
+function normalizeProductText(...texts: Array<string | null | undefined>): string {
+  return texts.map((t) => String(t || "").trim()).filter(Boolean).join(" ");
+}
+
+function inferCatalogStyleAndOccasionFromText(text: string): { attrStyle?: string; occasion?: string } {
+  const s = String(text || "").toLowerCase();
+  if (!s) return {};
+
+  if (/\b(formal|elegant|evening|black tie|gown|tailored|ceremony)\b/.test(s)) {
+    return { attrStyle: "formal", occasion: "formal" };
+  }
+  if (/\b(smart casual|smart-casual|office|workwear|business|blazer|tailored|semi formal|semi-formal)\b/.test(s)) {
+    return { attrStyle: "smart-casual", occasion: "work" };
+  }
+  if (/\b(active|athletic|gym|running|training|sport|sports|workout|yoga)\b/.test(s)) {
+    return { attrStyle: "casual", occasion: "active" };
+  }
+  if (/\b(party|night out|cocktail|occasion|event|evening wear|statement)\b/.test(s)) {
+    return { attrStyle: "formal", occasion: "party" };
+  }
+  if (/\b(travel|airport|vacation|weekend|everyday|casual|streetwear|denim|relaxed|lounge)\b/.test(s)) {
+    return { attrStyle: "casual", occasion: "casual" };
+  }
+
+  return {};
+}
+
+/** Text-first product description extraction for DB fields such as title/description/details. */
+export function productDescriptionFromProductText(...texts: Array<string | null | undefined>): string | null {
+  return productDescriptionFromCaption(normalizeProductText(...texts));
+}
+
+/** Text-first primary color extraction for DB fields such as title/description/details. */
+export function primaryColorHintFromProductText(...texts: Array<string | null | undefined>): string | null {
+  return primaryColorHintFromCaption(normalizeProductText(...texts));
+}
+
+/** Text-first style extraction for DB fields such as title/description/details. */
+export function catalogStyleFromProductText(...texts: Array<string | null | undefined>): string | null {
+  const { attrStyle } = inferCatalogStyleAndOccasionFromText(normalizeProductText(...texts));
+  return attrStyle ?? null;
+}
+
+/** Text-first occasion extraction for DB fields such as title/description/details. */
+export function catalogOccasionFromProductText(...texts: Array<string | null | undefined>): string | null {
+  const { occasion } = inferCatalogStyleAndOccasionFromText(normalizeProductText(...texts));
+  return occasion ?? null;
+}
+
+/** Text-first material extraction for DB fields such as title/description/details. */
+export function catalogMaterialFromProductText(...texts: Array<string | null | undefined>): string | null {
+  const normalizedCaption = normalizeProductText(...texts).toLowerCase();
+  if (/\b(denim|jean)\b/.test(normalizedCaption)) return "denim";
+  if (/\b(cotton)\b/.test(normalizedCaption)) return "cotton";
+  if (/\b(linen)\b/.test(normalizedCaption)) return "linen";
+  if (/\b(leather|suede)\b/.test(normalizedCaption)) return "leather";
+  if (/\b(wool|knit|knitted|cashmere)\b/.test(normalizedCaption)) return "wool";
+  if (/\b(silk|satin)\b/.test(normalizedCaption)) return "silk";
+  return null;
 }
 
 /**
@@ -120,13 +184,7 @@ export function productDescriptionFromCaption(caption: string): string | null {
 
 const GENDER_ENUM = new Set(["men", "women", "unisex", "boys", "girls"]);
 
-/**
- * Value for `products.gender` only. Uses caption + optional product title (titles often
- * carry "Men's / Women's / Kids'" signals when the image caption does not).
- * Still requires apparel/product context so random scene captions do not set gender alone.
- */
-export function catalogGenderFromCaption(caption: string, productTitle?: string | null): string | null {
-  const combined = [String(productTitle || "").trim(), String(caption || "").trim()].filter(Boolean).join(" ");
+function inferCatalogGenderFromCombinedText(combined: string): string | null {
   if (!combined) return null;
 
   const { gender } = inferAudienceFromCaption(combined);
@@ -137,11 +195,51 @@ export function catalogGenderFromCaption(caption: string, productTitle?: string 
     CATALOG_PRODUCT_CONTEXT_RE.test(combined) ||
     primaryColorHintFromCaption(combined) != null ||
     /\b(wearing|dressed|outfit|fashion|style|clothes|clothing|apparel|garment)\b/.test(s);
-  /** Titles like "Men's Cologne" / "Women's Watch" — gender signal without garment vocabulary. */
+  /** Titles like "Men's Cologne" / "Women's Watch" provide explicit retail audience context. */
   const explicitRetailGender =
     /\b(men's|mens\b|women's|womens\b|ladies'|boys'|girls'|boy's|girl's|unisex|for men\b|for women\b|for boys\b|for girls\b)\b/i.test(
       combined,
     );
   if (!apparelContext && !explicitRetailGender) return null;
   return gender;
+}
+
+/**
+ * Detect catalog gender from product text fields (title/description/details).
+ * Returns normalized values: men | women | unisex | boys | girls.
+ */
+export function catalogGenderFromProductText(...texts: Array<string | null | undefined>): string | null {
+  const combined = normalizeProductText(...texts);
+  return inferCatalogGenderFromCombinedText(combined);
+}
+
+export function inferCatalogFieldsFromProductText(
+  title?: string | null,
+  description?: string | null,
+  details?: string | null,
+): {
+  description?: string | null;
+  color?: string | null;
+  gender?: string | null;
+  style?: string | null;
+  occasion?: string | null;
+  material?: string | null;
+} {
+  return {
+    description: productDescriptionFromProductText(title, description, details),
+    color: primaryColorHintFromProductText(title, description, details),
+    gender: catalogGenderFromProductText(title, description, details),
+    style: catalogStyleFromProductText(title, description, details),
+    occasion: catalogOccasionFromProductText(title, description, details),
+    material: catalogMaterialFromProductText(title, description, details),
+  };
+}
+
+/**
+ * Value for `products.gender` only. Uses caption + optional product title (titles often
+ * carry "Men's / Women's / Kids'" signals when the image caption does not).
+ * Still requires apparel/product context so random scene captions do not set gender alone.
+ */
+export function catalogGenderFromCaption(caption: string, productTitle?: string | null): string | null {
+  return catalogGenderFromProductText(productTitle, caption);
 }

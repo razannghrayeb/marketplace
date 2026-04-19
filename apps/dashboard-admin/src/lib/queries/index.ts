@@ -33,6 +33,25 @@ type ProductAggregateRow = {
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const BATCH_SIZE = 1000
+const BAG_SEARCH_TERMS = [
+  'bag',
+  'bags',
+  'handbag',
+  'handbags',
+  'purse',
+  'purses',
+  'wallet',
+  'wallets',
+  'tote',
+  'totes',
+  'backpack',
+  'backpacks',
+  'clutch',
+  'clutches',
+  'crossbody',
+  'satchel',
+  'satchels',
+]
 
 function isBlank(value: string | null | undefined): boolean {
   return !value || value.trim() === ''
@@ -47,6 +66,25 @@ function isMissingImageUrls(value: unknown): boolean {
     return entries.length === 0
   }
   return false
+}
+
+function buildProductsSearchOrClause(rawTerm: string): string {
+  const term = rawTerm.trim()
+  const baseClauses = [
+    `title.ilike.%${term}%`,
+    `brand.ilike.%${term}%`,
+    `category.ilike.%${term}%`,
+  ]
+
+  const normalized = term.toLowerCase()
+  const isBagSearch = /\b(bag|bags|handbag|handbags|purse|purses|wallet|wallets|tote|totes|backpack|backpacks|clutch|clutches|crossbody|satchel|satchels)\b/.test(
+    normalized
+  )
+
+  if (!isBagSearch) return baseClauses.join(',')
+
+  const bagCategoryClauses = BAG_SEARCH_TERMS.map((word) => `category.ilike.%${word}%`)
+  return [...baseClauses, 'title.ilike.%bag%', ...bagCategoryClauses].join(',')
 }
 
 async function fetchProductAggregateRows(): Promise<ProductAggregateRow[]> {
@@ -349,7 +387,7 @@ export async function fetchProducts(
 
   if (filters.search) {
     const term = filters.search.trim()
-    query = query.or(`title.ilike.%${term}%,brand.ilike.%${term}%,category.ilike.%${term}%`)
+    query = query.or(buildProductsSearchOrClause(term))
   }
 
   if (filters.vendor_id) query = query.eq('vendor_id', filters.vendor_id)

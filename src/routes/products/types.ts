@@ -47,8 +47,10 @@ export interface SearchFilters {
   cropDominantColors?: string[];
   /** Caption / vision primary color token merged with crop for soft tier matching. */
   inferredPrimaryColor?: string | null;
-  /** Per-slot caption colors (e.g. topColor, jeansColor). */
+  /** Per-detection item colors keyed by detection label/index. */
   inferredColorsByItem?: Record<string, string | null>;
+  /** Confidence for each inferred item color (same keys as inferredColorsByItem). */
+  inferredColorsByItemConfidence?: Record<string, number>;
 }
 
 // ============================================================================
@@ -78,10 +80,19 @@ export interface ImageSearchParams extends SearchParams {
    */
   predictedCategoryAisles?: string[];
   /**
+   * Product-type soft hints from detection/BLIP (e.g. ['jeans', 'denim']).
+   * Used for ranking only; do NOT hard-filter candidates (preserves recall).
+   */
+  softProductTypeHints?: string[];
+  /**
    * OpenSearch kNN vector field name (e.g. `embedding` vs `embedding_garment`).
    * Shop-the-Look / detection crops often match `embedding_garment` when the index is built with garment ROI vectors.
    */
   knnField?: string;
+  /** YOLO confidence for detection-driven searches; used by category-specific ranking relaxations. */
+  detectionYoloConfidence?: number;
+  /** Detection-mapped product category (e.g. tops, bottoms); enables category-aware ranking rules. */
+  detectionProductCategory?: string;
   /**
    * Forces image search into "hard category" mode for this call.
    * When enabled, the OpenSearch `filters.category` terms are applied even if
@@ -110,6 +121,19 @@ export interface ImageSearchParams extends SearchParams {
   /** Merged with crop k-means into soft color tier intent (Shop-the-Look / caption). */
   inferredPrimaryColor?: string | null;
   inferredColorsByItem?: Record<string, string | null>;
+  inferredColorsByItemConfidence?: Record<string, number>;
+  /** Preferred item color key for the current detection, if the caller has one. */
+  inferredColorKey?: string | null;
+  /** Debug path: bypass rerank/final gates and return top-k by raw exact cosine (with existing category constraints). */
+  debugRawCosineFirst?: boolean;
+  /** Optional session context used to inherit conversational filters. */
+  sessionId?: string;
+  /** Optional authenticated user used for wardrobe-driven personalization. */
+  userId?: number;
+  /** Optional precomputed session filters to merge into image search. */
+  sessionFilters?: Partial<SearchFilters>;
+  /** When true, merge same variant family into one representative result. */
+  collapseVariantGroups?: boolean;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -147,6 +171,10 @@ export interface ProductResult {
   image_url?: string;
   image_cdn?: string;
   images?: ProductImage[];
+  parent_product_url?: string | null;
+  variant_group_key?: string | null;
+  variant_group_size?: number;
+  variant_group_ids?: string[];
   embedding?: number[]; // Optional vector payload when returned from vector search
   created_at?: string | Date; // Optional for exploration/cold-start logic
   interaction_count?: number; // Optional interaction signal for ranking/boosting
@@ -157,6 +185,8 @@ export interface ProductResult {
   rerankScore?: number;
   /** Calibrated 0..1 relevance (text search acceptance gating). */
   finalRelevance01?: number;
+  /** True when the product was preserved by a fallback gate despite scoring below the requested relevance threshold. */
+  relevanceFallbackPreserved?: boolean;
   mlRerankScore?: number;
   explain?: {
     // ── Raw signals ──────────────────────────────────────────
@@ -172,6 +202,14 @@ export interface ProductResult {
     styleEmbeddingSim?: number;
     /** Raw cosine of pattern embedding channel [0,1]. */
     patternEmbeddingSim?: number;
+    /** Raw cosine of texture embedding channel [0,1]. */
+    textureEmbeddingSim?: number;
+    /** Raw cosine of material embedding channel [0,1]. */
+    materialEmbeddingSim?: number;
+    /** Query/doc lexical-intent overlap used in deep fusion [0,1]. */
+    deepFusionTextAlignment?: number;
+    /** Phase 8 deep visual+text fusion score [0,1]. */
+    deepFusionScore?: number;
 
     // ── Blended effective similarities ───────────────────────
     /** Color embedding blended with keyword compliance (attenuated when intent conflicts). */
@@ -333,6 +371,22 @@ export interface SearchResultWithRelated {
     relevance_intent?: ImageSearchRelevanceIntentDebug;
     /** OpenSearch kNN field used for retrieval (`embedding` | `embedding_garment`). */
     image_knn_field?: string;
+    /** True only when raw-cosine debug bypass branch was explicitly used. */
+    debug_raw_cosine_bypass_used?: boolean;
+    /** Phase 8 deep fusion toggle + effective blend weight. */
+    deep_fusion_enabled?: boolean;
+    deep_fusion_weight?: number;
+    /** Phase 9 diversity rerank diagnostics. */
+    diversity_rerank_applied?: boolean;
+    diversity_lambda?: number;
+    diversity_pool_cap?: number;
+    /** Session/user personalization and variant handling diagnostics. */
+    session_id?: string;
+    user_id?: number;
+    personalization_applied?: boolean;
+    variant_group_collapsing_applied?: boolean;
+    variant_group_count?: number;
+    variant_group_representatives?: number;
     recall_size?: number;
     final_accept_min?: number;
     /** Floor used after sparse recall when strict gate yields too few hits (≤ `image_min_results_target`). */
@@ -352,12 +406,18 @@ export interface SearchResultWithRelated {
       raw_open_search_hits: number;
       base_candidates: number;
       ranked_candidates: number;
+      dropped_by_category_safety: number;
       threshold_passed_visual: number;
       visual_gated_hits: number;
+      dropped_by_visual_threshold: number;
       hits_after_final_accept_min: number;
+      dropped_by_final_relevance_before_override: number;
+      rescued_by_strong_visual_override: number;
       hits_after_color_postfilter: number;
       hits_after_hydration: number;
+      dropped_by_dedupe: number;
       hits_after_dedupe: number;
+      dropped_by_limit: number;
       final_returned_count: number;
     };
   };

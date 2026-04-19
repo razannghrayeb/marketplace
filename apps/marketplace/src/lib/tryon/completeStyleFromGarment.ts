@@ -34,6 +34,19 @@ export interface TryOnCompleteStyleData {
   totalRecommendations: number
 }
 
+function inferFallbackCategoryFromTitle(value: string): string | undefined {
+  const text = value.toLowerCase()
+
+  if (/\b(maxi\s*dress|mini\s*dress|midi\s*dress|dress|gown|jumpsuit|romper)\b/.test(text)) return 'dress'
+  if (/\b(skirt|skorts?)\b/.test(text)) return 'skirt'
+  if (/\b(pants?|trousers?|jeans?|denim|leggings?)\b/.test(text)) return 'pants'
+  if (/\b(shorts?|bermuda)\b/.test(text)) return 'shorts'
+  if (/\b(blazer|jacket|coat|cardigan|hoodie|sweatshirt|sweater|top|shirt|blouse|tee|t-?shirt|tank|crop)\b/.test(text)) return 'top'
+  if (/\b(clutch|tote|backpack|crossbody|shoulder bag|handbag|purse|bag|wallet)\b/.test(text)) return 'bag'
+
+  return undefined
+}
+
 function firstSearchProductId(results: unknown[]): { id: number; title?: string } | null {
   const first = results[0]
   if (!first || typeof first !== 'object') return null
@@ -53,6 +66,7 @@ export async function fetchCompleteStyleForGarmentFile(
   const options = { maxPerCategory: 5, maxTotal: 20 }
   const fallbackTitle =
     garmentFile.name.replace(/\.[^/.]+$/, '').replace(/[-_]+/g, ' ').trim() || 'Your try-on piece'
+  const inferredCategory = inferFallbackCategoryFromTitle(fallbackTitle)
 
   let matchedId: number | null = null
   let matchedTitle = fallbackTitle
@@ -85,7 +99,7 @@ export async function fetchCompleteStyleForGarmentFile(
   const res2 = await api.post<TryOnCompleteStyleData>(endpoints.products.completeStylePost, {
     product: {
       title: matchedTitle,
-      category: 'tops',
+      ...(inferredCategory ? { category: inferredCategory } : {}),
     },
     options,
   })

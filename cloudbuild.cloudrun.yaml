@@ -17,6 +17,7 @@ steps:
 
   - name: gcr.io/cloud-builders/docker
     id: Build image
+    secretEnv: ['HF_TOKEN']
     entrypoint: bash
     args:
       - -c
@@ -27,9 +28,18 @@ steps:
         export BUILDKIT_PROGRESS=plain
         IMAGE_BASE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}"
         CACHE_IMAGE="${IMAGE_BASE}:latest"
+        HF_TOKEN_VALUE="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"
+        if [ -n "${HF_TOKEN:-}" ]; then
+          HF_TOKEN_VALUE="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}"
+        fi
+        if [ -z "${HF_TOKEN:-}" ]; then
+          echo "ERROR: HF_TOKEN is required at build time for model download."
+          echo "Set Secret Manager secret 'hf-token' and grant Cloud Build access, or pass _HF_TOKEN substitution."
+          exit 1
+        fi
 
         docker build \
-          --build-arg HF_TOKEN=${_HF_TOKEN} \
+          --build-arg HF_TOKEN="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" \
           --build-arg EMBEDDED_YOLO=${_EMBEDDED_YOLO} \
           --build-arg BUILDKIT_INLINE_CACHE=1 \
           --cache-from "${CACHE_IMAGE}" \
@@ -103,7 +113,7 @@ substitutions:
   _IMAGE_NAME: marketplace
   _SERVICE: marketplace
 
-  _HF_TOKEN: ""
+  _HF_TOKEN: "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"
   # 1 = monolith with in-container YOLO (slower/larger build). 0 = API-only; set YOLO_API_URL to a separate service.
   _EMBEDDED_YOLO: "1"
 
@@ -129,6 +139,11 @@ options:
   # Ensure docker build uses BuildKit (needed for Dockerfile # syntax=docker/dockerfile:1.x and --mount cache)
   env:
     - DOCKER_BUILDKIT=1
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/hf-token/versions/latest
+      env: HF_TOKEN
 
 # Global Cloud Build timeout (covers long image pushes).
 timeout: "3600s"

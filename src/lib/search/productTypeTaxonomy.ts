@@ -32,8 +32,8 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   ["tshirt", "tee", "tees", "t-shirt", "tank", "camisole", "camis"],
   ["top", "tops", "cami"],
   ["polo", "polos", "polo shirt"],
-  // Outerwear (2)
-  ["blazer", "blazers", "sport coat", "sportcoat", "suit jacket"],
+  // Outerwear (3)
+  ["blazer", "blazers", "suit", "suits", "sport coat", "sportcoat", "suit jacket", "dress jacket"],
   [
     "jacket",
     "jackets",
@@ -218,6 +218,8 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
 
   blazer: "outerwear",
   blazers: "outerwear",
+  suit: "outerwear",
+  suits: "outerwear",
   jacket: "outerwear",
   jackets: "outerwear",
   coat: "outerwear",
@@ -338,12 +340,12 @@ const FAMILY_PAIR_PENALTY: Record<string, Record<string, number>> = {
   },
   head_covering: {
     modest_full: 0.2,
-    tops: 0.42,
-    dress: 0.35,
+    tops: 0.9,
+    dress: 0.85,
     bottoms: 0.92,
     shorts_skirt: 0.8,
     footwear: 0.52,
-    outerwear: 0.3,
+    outerwear: 0.9,
     bags: 0.85,
     jewellery: 0.78,
   },
@@ -1153,8 +1155,12 @@ export function inferMacroFamiliesFromListingCategoryFields(
   ) {
     out.add("footwear");
   }
+  const hasTopAccessoryPhrase = /\btop(?:\s|-)+(handle|zip|zipper|stitch|stitching|coat|bag|satchel|clutch|pouch|wallet|case|cover|closure)\b/.test(
+    combined,
+  );
   if (
-    /\b(shirt|shirts|blouse|blouses|tee|tees|t-?shirt|tshirt|polos?|sweater|sweaters|hoodie|hoodies|cardigan|cardigans|tank|tanks|camisole|bodysuit)\b/.test(
+    !hasTopAccessoryPhrase &&
+    /\b(shirt|shirts|blouse|blouses|tee|tees|t-?shirt|tshirt|polos?|sweater|sweaters|hoodie|hoodies|cardigan|cardigans|tank|tanks|camisole|bodysuit|top|tops)\b/.test(
       combined,
     )
   ) {

@@ -204,6 +204,44 @@ The compare feature meets current requirements. Future enhancements could includ
 
 ---
 
+## Wardrobe Complete Look Stylist Hardening (April 11, 2026)
+
+### Problem Addressed
+
+Complete-look recommendations were producing items that looked individually relevant but did not work well together as a full outfit.
+
+### Backend Changes Implemented
+
+- Added stylist metadata on recommendation candidates (`stylistSignals`) to preserve outfit-level context across ranking stages.
+- Strengthened complete-look set construction with pairwise compatibility scoring between recommended items:
+  - category compatibility
+  - color pair harmony
+  - formality consistency
+  - style-token overlap
+- Added a coherence floor for outfit sets so weak combinations are filtered out before response.
+- Corrected compatibility style-similarity math so the model rewards a realistic stylist sweet spot instead of accidental extremes.
+
+### API/Response Impact
+
+- `POST /api/wardrobe/complete-look` now includes richer recommendation detail for styling behavior:
+  - `fitBreakdown` (expanded scoring factors)
+  - `stylistSignals` (slot, color, formality score, aesthetic, style tokens)
+- `outfitSets` are now pairwise-coherence-aware and may exclude low-quality combinations.
+
+### Validation Completed
+
+```bash
+# Type safety check
+pnpm -s tsc -p . --noEmit
+
+# Complete-look category matrix regression
+pnpm test:complete-look-matrix --timeout=60000
+```
+
+Result: matrix regression passed across all slot combinations and weather contexts.
+
+---
+
 ## 4. Testing Recommendations
 
 ### Complete Style Feature

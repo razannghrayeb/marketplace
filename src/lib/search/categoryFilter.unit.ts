@@ -31,6 +31,7 @@ describe("categoryFilter", () => {
   test("inferCategoryCanonical maps vendor label to aisle", () => {
     expect(inferCategoryCanonical("Bags", "")).toBe("accessories");
     expect(inferCategoryCanonical(null, "Men crew neck tee shirt")).toBe("tops");
+    expect(inferCategoryCanonical(null, "Top Handle Bag")).toBe("accessories");
     expect(inferCategoryCanonical("CONCEALERS", "")).toBe("beauty");
   });
 });

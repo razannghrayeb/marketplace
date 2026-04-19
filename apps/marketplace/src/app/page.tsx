@@ -5,7 +5,7 @@ import Link from 'next/link'
 import Image from 'next/image'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  ArrowRight, Image as ImageIcon, Layers, Search, Shirt,
+  ArrowRight, Camera, Image as ImageIcon, Layers, Search, Shirt,
   TrendingUp, Zap, Eye, BarChart3, Sparkles,
 } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
@@ -27,9 +27,9 @@ const heroSlides = [
         <span className="text-neutral-900"> and AI</span>
       </>
     ),
-    desc: 'See it, search it, save it. Describe what you want in plain language and browse products that match.',
+    desc: 'See it, search it, save it. Text, photos, or blended references — find exactly what you\'re looking for.',
     cta: { label: 'Start exploring', href: '/search' },
-    secondary: { label: 'Browse products', href: '/products', Icon: Shirt },
+    secondary: { label: 'Visual search', href: '/search?mode=image', Icon: Camera },
     hasSearch: true,
   },
   {
@@ -147,19 +147,19 @@ const features = [
     strip: 'from-violet-500 via-fuchsia-500 to-indigo-500',
   },
   {
-    icon: Shirt,
-    title: 'Virtual Try-On',
-    desc: 'Preview garments on yourself with AI before you buy — from the catalog or your wardrobe.',
-    href: '/try-on',
+    icon: Camera,
+    title: 'Photo Upload',
+    desc: 'Upload your own images to find matching products across the entire catalog instantly.',
+    href: '/search?mode=image',
     image: 'https://images.unsplash.com/photo-1542272604-787c3835535d?w=900&h=700&fit=crop&q=80',
     iconBg: 'from-fuchsia-500 to-pink-600',
     strip: 'from-fuchsia-500 via-rose-500 to-pink-600',
   },
   {
     icon: Layers,
-    title: 'Compare & Decide',
-    desc: 'Side-by-side comparison helps you pick sizes, colors, and prices with confidence.',
-    href: '/compare',
+    title: 'Mix References',
+    desc: 'Blend multiple images to steer search towards the style you have in mind.',
+    href: '/search?mode=multi',
     image: 'https://images.unsplash.com/photo-1523381210434-271e8be1f52b?w=900&h=700&fit=crop&q=80',
     iconBg: 'from-sky-500 to-cyan-600',
     strip: 'from-sky-500 via-cyan-500 to-emerald-500',
@@ -178,7 +178,7 @@ const benefits = [
   {
     icon: Eye,
     title: 'Visual & Intuitive',
-    desc: 'Clear layouts and smart search so you spend less time hunting and more time deciding.',
+    desc: 'Eliminates the need for complex keywords — find what you want using images or natural language.',
     bg: 'bg-fuchsia-50/90',
     border: 'border-fuchsia-200/60',
     iconWrap: 'bg-fuchsia-100 text-fuchsia-700',
@@ -212,11 +212,11 @@ const capabilities = [
   },
   {
     icon: ImageIcon,
-    title: 'Curated browsing',
-    desc: 'Explore categories, filters, and facets to narrow in on the right look.',
+    title: 'Style Matching',
+    desc: 'Matches product styles and fits based on image analysis of silhouettes and shapes.',
     gradient: 'from-sky-500 via-cyan-500 to-emerald-500',
     borderAccent: 'border-l-sky-500',
-    href: '/products',
+    href: '/search?mode=image',
   },
 ]
 
@@ -419,7 +419,7 @@ function HeroCarousel() {
   )
 }
 
-function TrendingSpotlight() {
+function ShopTheLook() {
   const { data, isLoading } = useQuery({
     queryKey: ['trending-looks'],
     queryFn: async () => {
@@ -553,10 +553,10 @@ export default function HomePage() {
             <div className="section-divider" />
             <p className="section-eyebrow mb-3">Fashion search</p>
             <h2 className="heading-display text-3xl sm:text-4xl lg:text-[2.85rem] leading-tight">
-              Find what fits your moment
+              Turn images into instant finds
             </h2>
             <p className="mt-5 text-lg text-neutral-600 leading-relaxed">
-              Search by mood, occasion, or silhouette — then browse try-on and comparison tools when you want to go deeper.
+              Every path starts with something visual — editorials, selfies, or mood boards. We match the vibe to real products.
             </p>
           </Reveal>
 
@@ -622,8 +622,8 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* ───── Trending spotlight ───── */}
-      <TrendingSpotlight />
+      {/* ───── Shop the Look ───── */}
+      <ShopTheLook />
 
       {/* ───── AI + side image ───── */}
       <section className="relative py-20 lg:py-28 bg-white overflow-hidden">
@@ -636,7 +636,7 @@ export default function HomePage() {
                 Intelligence that understands style
               </h2>
               <p className="text-lg text-neutral-600 leading-relaxed mb-10 max-w-lg">
-                StyleAI connects search, try-on, and comparison so you can move from inspiration to a confident pick.
+                From texture to silhouette, StyleAI reads what matters in an image — then surfaces pieces that feel right together.
               </p>
               <div className="space-y-5">
                 {capabilities.map((c) => (

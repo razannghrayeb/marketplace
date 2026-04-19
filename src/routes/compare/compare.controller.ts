@@ -7,7 +7,6 @@
 import express, { Router, Request, Response } from "express";
 import multer from "multer";
 import {
-  compareProductsWithVerdict,
   coerceCompareProductIdsInput,
   getProductQuality,
   analyzeText,
@@ -21,6 +20,7 @@ import {
   getProductReviewAnalysis,
   compareReviews,
 } from "./compare.service";
+import { compareProductsWithDecisionIntelligence } from "../../features/decision-intelligence";
 import {
   getEnhancedComparison,
   getProductInventory,
@@ -37,6 +37,27 @@ import { runCompareDecision } from "./compare-decision.service";
 
 const router = Router();
 const compareBodyMultipart = multer().none();
+
+function parsePositiveInt(value: unknown): number | null {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const i = Math.floor(n);
+  return i > 0 ? i : null;
+}
+
+function parsePaginationQuery(query: Request["query"]): {
+  enabled: boolean;
+  page: number;
+  limit: number;
+  offset: number;
+} {
+  const paginateRaw = String(query.paginate ?? "").toLowerCase();
+  const enabled = paginateRaw === "1" || paginateRaw === "true";
+  const page = parsePositiveInt(query.page) ?? 1;
+  const limit = Math.min(200, parsePositiveInt(query.limit) ?? 50);
+  const offset = (page - 1) * limit;
+  return { enabled, page, limit, offset };
+}
 
 // ============================================================================
 // Compare decision (new contract — camelCase JSON)
@@ -88,21 +109,36 @@ router.post("/decision", express.json({ limit: "512kb" }), async (req: Request, 
  */
 router.post("/", compareBodyMultipart, async (req: Request, res: Response) => {
   try {
-    const product_ids = coerceCompareProductIdsInput(req.body);
+    const payload = {
+      ...req.body,
+      product_ids: coerceCompareProductIdsInput(req.body),
+    };
 
-    const parsed = validateCompareInput(product_ids);
-    if (!parsed.ok) {
-      return res.status(400).json({ error: parsed.error, example: parsed.example });
+    const result = await compareProductsWithDecisionIntelligence(payload);
+    if (!result.ok) {
+      const status =
+        result.error.code === "INVALID_REQUEST"
+          ? 400
+          : result.error.code === "PRODUCTS_NOT_FOUND"
+            ? 404
+            : result.error.code === "INSUFFICIENT_PRODUCT_DATA"
+              ? 422
+              : 500;
+      return res.status(status).json({
+        error: result.error.message,
+        code: result.error.code,
+        details: result.error.details,
+      });
     }
 
-    const result = await compareProductsWithVerdict(parsed.productIds);
+    const decisionResponse = result.response;
     
     // Optionally add enhanced data (inventory, shipping, reputation, pricing)
     if (req.query.enhanced === "true" || req.body.enhanced === true) {
       try {
-        const enhanced = await getEnhancedComparison(parsed.productIds);
+        const enhanced = await getEnhancedComparison(decisionResponse.comparisonContext.productIds);
         return res.json({
-          ...result,
+          ...decisionResponse,
           enhanced_data: {
             comparisons: enhanced,
             recommendations: {
@@ -117,8 +153,8 @@ router.post("/", compareBodyMultipart, async (req: Request, res: Response) => {
         // Fall through to return basic verdict anyway
       }
     }
-    
-    res.json(result);
+
+    res.json(decisionResponse);
   } catch (error) {
     console.error("Compare error:", error);
     if (error instanceof InsufficientProductsForCompareError) {
@@ -273,7 +309,26 @@ router.post("/admin/compute-baselines", async (req: Request, res: Response) => {
  */
 router.get("/tooltips", async (_req: Request, res: Response) => {
   const tooltips = getAllTooltips();
-  res.json(tooltips);
+  const pagination = parsePaginationQuery(_req.query);
+  if (!pagination.enabled) {
+    return res.json(tooltips);
+  }
+
+  const entries = Object.entries(tooltips).map(([reason, tooltip]) => ({ reason, tooltip }));
+  const total = entries.length;
+  const items = entries.slice(pagination.offset, pagination.offset + pagination.limit);
+
+  return res.json({
+    items,
+    pagination: {
+      page: pagination.page,
+      limit: pagination.limit,
+      total,
+      total_pages: Math.max(1, Math.ceil(total / pagination.limit)),
+      has_next: pagination.offset + items.length < total,
+      has_prev: pagination.page > 1,
+    },
+  });
 });
 
 // ============================================================================
@@ -323,8 +378,31 @@ router.post("/reviews", async (req: Request, res: Response) => {
     comparison.forEach((analysis, id) => {
       result[id] = analysis;
     });
-    
-    res.json({ reviews: result });
+
+    const pagination = parsePaginationQuery(req.query);
+    if (!pagination.enabled) {
+      return res.json({ reviews: result });
+    }
+
+    const entries = Object.entries(result);
+    const total = entries.length;
+    const sliced = entries.slice(pagination.offset, pagination.offset + pagination.limit);
+    const pagedReviews: Record<number, any> = {};
+    for (const [id, analysis] of sliced) {
+      pagedReviews[Number(id)] = analysis;
+    }
+
+    return res.json({
+      reviews: pagedReviews,
+      pagination: {
+        page: pagination.page,
+        limit: pagination.limit,
+        total,
+        total_pages: Math.max(1, Math.ceil(total / pagination.limit)),
+        has_next: pagination.offset + sliced.length < total,
+        has_prev: pagination.page > 1,
+      },
+    });
   } catch (error) {
     console.error("Review comparison error:", error);
     res.status(500).json({ error: "Failed to compare reviews" });

@@ -61,7 +61,8 @@ export function scalePixelBoxToImageDims(
 
 /**
  * Crop garment ROI from an already query/catalog-prepared buffer (same geometry as garment index).
- * Returns null only when dimensions are unusable.
+ * Falls back to a center crop when no reliable box is available so the garment vector stays
+ * garment-focused instead of degrading to the full prepared frame.
  */
 async function resolveGarmentEmbedBufferFromPrepared(
   processBuf: Buffer,
@@ -107,10 +108,10 @@ async function resolveGarmentEmbedBufferFromPrepared(
         }
       }
     } catch {
-      // fall through to full frame
+      // fall through to center crop
     }
   }
-  return processBuf;
+  return extractGarmentCenterCropBuffer(processBuf);
 }
 
 /**
@@ -453,6 +454,173 @@ export async function loadAndNormalize(buffer: Buffer, targetWidth = 224, target
     std: [0.26862954, 0.26130258, 0.27577711],
   });
   return { normalized, width: info.width, height: info.height, channels: info.channels };
+}
+
+// ============================================================================
+// PART-LEVEL EMBEDDINGS (Phase 1)
+// ============================================================================
+
+/**
+ * Generate CLIP embeddings for all applicable parts of a detected garment ROI.
+ *
+ * @param roiBuf - Buffer containing the detected garment ROI (already cropped via YOLO)
+ * @param yoloLabel - YOLO detection label (e.g., 'dress', 'shoe', 'bag')
+ * @returns Map of PartType → CLIP embedding (or null if extraction/embedding failed)
+ *
+ * STRATEGY:
+ * 1. Extract all applicable part crops (parallel)
+ * 2. Generate CLIP embeddings for each valid crop (parallel)
+ * 3. Return map of partType → embedding
+ *
+ * SAFETY:
+ * - Gracefully skips failed extractions (logged as warning)
+ * - Part embedding pipeline mirrors main embedding for consistency
+ * - Returns empty map if all parts fail (allows graceful degradation)
+ */
+export async function computeAllPartEmbeddingsFromDetection(
+  roiBuf: Buffer,
+  yoloLabel: string
+): Promise<Record<string, number[] | null>> {
+  if (!Buffer.isBuffer(roiBuf) || roiBuf.length === 0) {
+    return {};
+  }
+
+  try {
+    const { extractAllApplicablePartCrops } = await import("./partCropping");
+    
+    // Step 1: Extract all applicable part crops (parallel)
+    const partCropsByType = await extractAllApplicablePartCrops(roiBuf, yoloLabel);
+    if (partCropsByType.size === 0) {
+      return {};
+    }
+
+    // Step 2: Generate embeddings for each extracted part (parallel, with error handling)
+    const embeddingPromises: Promise<{ partType: string; embedding: number[] | null }>[] = [];
+
+    for (const [partType, cropBuf] of partCropsByType) {
+      const promise = (async () => {
+        if (cropBuf === null) {
+          return { partType: String(partType), embedding: null };
+        }
+
+        try {
+          const embedding = await processImageForEmbedding(cropBuf);
+          return {
+            partType: String(partType),
+            embedding: Array.isArray(embedding) && embedding.length > 0 ? embedding : null,
+          };
+        } catch (err) {
+          console.warn(
+            `[part-embedding] failed to embed part ${partType}: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          );
+          return { partType: String(partType), embedding: null };
+        }
+      })();
+
+      embeddingPromises.push(promise);
+    }
+
+    // Step 3: Collect results
+    const results: Record<string, number[] | null> = {};
+    const outcomes = await Promise.allSettled(embeddingPromises);
+
+    for (const outcome of outcomes) {
+      if (outcome.status === "fulfilled") {
+        const { partType, embedding } = outcome.value;
+        results[partType] = embedding;
+      }
+    }
+
+    return results;
+  } catch (err) {
+    console.warn(
+      `[part-embedding] pipeline error: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return {};
+  }
+}
+
+/**
+ * Query-time part embedding extraction & generation.
+ *
+ * Similar to computeAllPartEmbeddingsFromDetection, but tailored for query images:
+ * 1. May not have YOLO labels, so extracts ALL possible parts
+ * 2. Returns embeddings for parts that successfully extract
+ * 3. Useful for image-search queries where we want to match against all part types
+ *
+ * @param imageBuffer - Raw query image buffer
+ * @returns Map of part name → embedding (only non-null values included)
+ */
+export async function computeAndGenerateQueryPartEmbeddings(
+  imageBuffer: Buffer
+): Promise<Record<string, number[] | null>> {
+  if (!Buffer.isBuffer(imageBuffer) || imageBuffer.length === 0) {
+    return {};
+  }
+
+  try {
+    const { extractAllApplicablePartCrops } = await import("./partCropping");
+    const { getAllPartTypes } = await import("./partExtraction");
+
+    // For query, assume "generic outfit" label that matches all parts
+    const allParts = getAllPartTypes();
+    
+    // Step 1: Extract parts from full query image (not from ROI, since we don't have one)
+    // Use standard garment center crop to focus on main fashion item
+    const garmentBuf = await extractGarmentCenterCropBuffer(imageBuffer);
+    
+    // Step 2: Extract all parts from this garment crop
+    const partCropsByType = await extractAllApplicablePartCrops(garmentBuf, "generic");
+    
+    if (partCropsByType.size === 0) {
+      return {};
+    }
+
+    // Step 3: Generate embeddings (parallel)
+    const embeddingPromises: Promise<{ partType: string; embedding: number[] | null }>[] = [];
+
+    for (const [partType, cropBuf] of partCropsByType) {
+      const promise = (async () => {
+        if (cropBuf === null) {
+          return { partType: String(partType), embedding: null };
+        }
+
+        try {
+          const embedding = await processImageForEmbedding(cropBuf);
+          return {
+            partType: String(partType),
+            embedding: Array.isArray(embedding) && embedding.length > 0 ? embedding : null,
+          };
+        } catch {
+          return { partType: String(partType), embedding: null };
+        }
+      })();
+
+      embeddingPromises.push(promise);
+    }
+
+    // Step 4: Collect results (only non-null)
+    const results: Record<string, number[] | null> = {};
+    const outcomes = await Promise.allSettled(embeddingPromises);
+
+    for (const outcome of outcomes) {
+      if (outcome.status === "fulfilled") {
+        const { partType, embedding } = outcome.value;
+        if (embedding) {
+          results[partType] = embedding;
+        }
+      }
+    }
+
+    return results;
+  } catch (err) {
+    console.warn(
+      `[query-part-embedding] pipeline error: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return {};
+  }
 }
 
 /**

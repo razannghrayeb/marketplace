@@ -112,6 +112,13 @@ class DualDetector:
         """
         self.conf        = conf
         self.overlap_iou = overlap_iou
+        # Accessories (especially bags/wallets) tend to be smaller and lower-confidence
+        # than apparel; use a dedicated floor to improve recall without affecting clothing.
+        try:
+            acc = float(os.getenv("YOLO_ACCESSORY_MIN_CONF", "0.35"))
+        except Exception:
+            acc = 0.35
+        self.accessory_min_conf = max(0.05, min(0.95, acc))
         self._model_a    = None
         self._model_b    = None
         self._font       = self._load_font()
@@ -163,6 +170,11 @@ class DualDetector:
             return self._COLORS["hat"]
         return self._COLORS["clothing"]
 
+    @staticmethod
+    def _is_bag_like_label(lbl: str) -> bool:
+        s = str(lbl).lower()
+        return "bag" in s or "wallet" in s or "purse" in s or "clutch" in s or "tote" in s
+
     def _to_pil(self, image) -> tuple[Image.Image, str | None]:
         """
         Accept: file path str, URL str, PIL.Image, numpy array.
@@ -211,6 +223,7 @@ class DualDetector:
             "a_plot"      : np.ndarray HxWx3 RGB Model A annotated frame
         """
         effective_conf = float(conf) if conf is not None else self.conf
+        effective_conf_b = min(effective_conf, self.accessory_min_conf)
 
         # Resolve to a file path for Model A (YOLO needs a path or array)
         pil_img, tmp = self._to_pil(image)
@@ -236,12 +249,14 @@ class DualDetector:
                 })
 
         # --- Model B: accessories ---
-        raw_b = self._model_b(pil_img)
+        # Explicit threshold is required: HF object-detection pipeline default is high
+        # and can suppress valid small accessories (bags/wallets) before post-processing.
+        raw_b = self._model_b(pil_img, threshold=effective_conf_b)
         acc   = []
         for det in raw_b:
             lbl, score = det["label"], det["score"]
             if lbl not in self._KEEP_B: continue
-            if score < effective_conf:       continue
+            if score < effective_conf_b:     continue
             b = det["box"]
             acc.append({
                 "label":  lbl,
@@ -253,8 +268,10 @@ class DualDetector:
         # --- Cross-model NMS ---
         suppressed = {
             ai for ai, a in enumerate(acc)
-            if any(self._iou(a["box"], c["box"]) > self.overlap_iou
-                   for c in clothing)
+            # Bags/wallets naturally overlap torso clothing and should not be suppressed.
+            if (not self._is_bag_like_label(a["label"])) and any(
+                self._iou(a["box"], c["box"]) > self.overlap_iou for c in clothing
+            )
         }
         acc = [p for i, p in enumerate(acc) if i not in suppressed]
 

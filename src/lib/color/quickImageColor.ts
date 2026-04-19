@@ -61,18 +61,44 @@ export async function extractQuickFashionColorHints(
 
     const { h, s, l } = rgbToHsl(r, g, b);
 
-    if (l < 0.12) return ["black"].slice(0, maxHints);
-    if (l > 0.92 && s < 0.12) return ["white"].slice(0, maxHints);
-    if (s < 0.14) {
-      if (l > 0.55) return ["off-white", "cream"].slice(0, maxHints);
+    if (l < 0.10) return ["black"].slice(0, maxHints);
+    if (l < 0.18 && s < 0.15) return ["charcoal", "black"].slice(0, maxHints);
+    if (l > 0.92 && s < 0.10) return ["white"].slice(0, maxHints);
+    if (l > 0.85 && s < 0.12) return ["off-white", "cream"].slice(0, maxHints);
+    if (s < 0.12) {
+      if (l > 0.65) return ["silver", "gray"].slice(0, maxHints);
       if (l > 0.35) return ["gray"].slice(0, maxHints);
       return ["charcoal", "black"].slice(0, maxHints);
+    }
+
+    // Dark saturated — detect before hue mapping which misses dark red/green/blue
+    if (l < 0.22 && s >= 0.15) {
+      if (h >= 340 || h < 20) return ["burgundy", "red"].slice(0, maxHints);
+      if (h >= 200 && h < 260) return ["navy", "blue"].slice(0, maxHints);
+      if (h >= 60 && h < 160) return ["olive", "green"].slice(0, maxHints);
+      return ["brown", "black"].slice(0, maxHints);
+    }
+
+    // Light saturated pastels
+    if (l > 0.75 && s >= 0.12 && s < 0.45) {
+      if (h >= 340 || h < 15) return ["pink", "red"].slice(0, maxHints);
+      if (h >= 15 && h < 45) return ["beige", "tan"].slice(0, maxHints);
+      if (h >= 45 && h < 80) {
+        const mutedMustard = l < 0.86 && s >= 0.18 && s < 0.36 && h < 68;
+        const metallicGold = l >= 0.72 && l < 0.92 && s >= 0.16 && s < 0.28 && h >= 40 && h < 66;
+        if (mutedMustard || metallicGold) return ["gold", "yellow"].slice(0, maxHints);
+        return ["yellow"].slice(0, maxHints);
+      }
+      if (h >= 80 && h < 165) return ["green", "sage"].slice(0, maxHints);
+      if (h >= 165 && h < 260) return ["light-blue", "blue"].slice(0, maxHints);
+      if (h >= 260 && h < 300) return ["purple", "lavender"].slice(0, maxHints);
+      return ["pink"].slice(0, maxHints);
     }
 
     const hints: string[] = [];
     if (h >= 345 || h < 18) hints.push("red");
     else if (h < 45) hints.push("orange", "red");
-    else if (h < 75) hints.push("yellow", "gold");
+    else if (h < 75) hints.push("yellow");
     else if (h < 165) hints.push("green", "olive");
     else if (h < 200) hints.push("teal");
     else if (h < 260) hints.push("blue", "navy");

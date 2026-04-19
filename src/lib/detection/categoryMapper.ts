@@ -29,6 +29,55 @@ export interface CategoryAttributes {
   formalityHint?: number;
 }
 
+/**
+ * Detection box in normalized coordinates (0-1 range)
+ * Used to infer dress length from vertical coverage
+ */
+export interface NormalizedBox {
+  y1: number; // Top edge normalized (0 = image top)
+  y2: number; // Bottom edge normalized (1 = image bottom)
+}
+
+/**
+ * Infers dress length from bounding box height in normalized coordinates.
+ * 
+ * On a typical full-body fashion image (person standing):
+ * - 0.0 = top of image (head)
+ * - ~0.5 = waist/hip level
+ * - 1.0 = bottom of image (feet)
+ * 
+ * Dress length calculation:
+ * - dress_hemisphere = (y2_norm - 0.5) / 0.5  →  how far dress extends from waist
+ * - If > 0.35 of leg height: maxi/long (covers >35% of legs)
+ * - If 0.15-0.35: midi (covers 15-35% of legs)
+ * - If < 0.15: mini/short (covers <15% of legs)
+ * 
+ * @param box - Bounding box with normalized Y coordinates
+ * @returns "maxi" | "midi" | "mini" | undefined if box data insufficient
+ */
+export function inferDressLengthFromBox(box: NormalizedBox | undefined): "maxi" | "midi" | "mini" | undefined {
+  if (!box || typeof box.y2 !== 'number') return undefined;
+
+  const boxHeight = Math.max(0, (box.y2 ?? 0) - (box.y1 ?? 0));
+  // Skip length inference when the dress box is small (likely not full-body)
+  // or when the detection covers the entire image (no reliable framing).
+  if (boxHeight < 0.25 || boxHeight > 0.95) return undefined;
+
+  // Use box-relative proportions instead of assuming fixed waist position:
+  // the bottom 60% of the dress box is hem area.
+  const hemRatio = box.y2;
+
+  if (hemRatio > 0.88) {
+    return "maxi";
+  } else if (hemRatio > 0.72) {
+    return "midi";
+  } else if (hemRatio > 0.0) {
+    return "mini";
+  }
+
+  return undefined;
+}
+
 // ============================================================================
 // Primary Mappings (Exact Match)
 // ============================================================================
@@ -56,7 +105,7 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
   "long sleeve outwear": {
     productCategory: "outerwear",
     confidence: 0.9,
-    alternativeCategories: ["jackets", "coats"],
+    alternativeCategories: ["jackets", "coats", "blazers"],
     attributes: { sleeveLength: "long" },
   },
   "short sleeve outwear": {
@@ -66,9 +115,9 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
     attributes: { sleeveLength: "short" },
   },
   vest: {
-    productCategory: "outerwear",
+    productCategory: "tops",
     confidence: 0.8,
-    alternativeCategories: ["tops", "activewear"],
+    alternativeCategories: ["outerwear", "activewear"],
     attributes: { sleeveLength: "sleeveless" },
   },
   sling: {
@@ -436,6 +485,27 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
   },
 };
 
+function canonicalizeLabelForLookup(value: string): string {
+  return String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[\/_-]+/g, " ")
+    .replace(/[^a-z0-9\s]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const PRIMARY_MAPPINGS_CANONICAL: Record<string, CategoryMapping> = Object.entries(PRIMARY_MAPPINGS).reduce(
+  (acc, [label, mapping]) => {
+    const key = canonicalizeLabelForLookup(label);
+    if (key && !acc[key]) {
+      acc[key] = mapping;
+    }
+    return acc;
+  },
+  {} as Record<string, CategoryMapping>,
+);
+
 // ============================================================================
 // Fuzzy Pattern Matching (for missing/ambiguous categories)
 // ============================================================================
@@ -557,23 +627,40 @@ const FUZZY_PATTERNS: FuzzyPattern[] = [
 
 /**
  * Maps a detection label to a product category with confidence scoring.
+ * Optionally infers dress length from bounding box geometry.
  *
  * @param label - The YOLO detection label (e.g., "long sleeve top", "shoe")
  * @param detectionConfidence - YOLO detection confidence (0-1), defaults to 1.0
+ * @param detectionBox - Optional normalized bounding box to infer dress length from
  * @returns CategoryMapping with category, confidence, alternatives, and attributes
  */
 export function mapDetectionToCategory(
   label: string,
-  detectionConfidence: number = 1.0
+  detectionConfidence: number = 1.0,
+  detectionBox?: { box_normalized?: { y1?: number; y2?: number } }
 ): CategoryMapping {
   const normalized = label.toLowerCase().trim();
+  const canonical = canonicalizeLabelForLookup(label);
 
   // 1. Try exact match in primary mappings
-  if (PRIMARY_MAPPINGS[normalized]) {
-    const mapping = { ...PRIMARY_MAPPINGS[normalized] };
+  if (PRIMARY_MAPPINGS[normalized] || (canonical && PRIMARY_MAPPINGS_CANONICAL[canonical])) {
+    const baseMapping = PRIMARY_MAPPINGS[normalized] ?? PRIMARY_MAPPINGS_CANONICAL[canonical];
+    const mapping = { ...baseMapping };
     mapping.attributes = { ...mapping.attributes };
     mapping.alternativeCategories = [...mapping.alternativeCategories];
     mapping.confidence = mapping.confidence * detectionConfidence;
+    
+    // Try to infer dress length from bounding box if this is a dress
+    if (mapping.productCategory === "dresses" && detectionBox?.box_normalized) {
+      const inferredLength = inferDressLengthFromBox({
+        y1: detectionBox.box_normalized.y1 ?? 0,
+        y2: detectionBox.box_normalized.y2 ?? 1,
+      });
+      if (inferredLength) {
+        mapping.attributes.dressLength = inferredLength;
+      }
+    }
+    
     return mapping;
   }
 
@@ -585,6 +672,18 @@ export function mapDetectionToCategory(
       result.alternativeCategories = [...mapping.alternativeCategories];
       // Slight confidence penalty for fuzzy match
       result.confidence = result.confidence * detectionConfidence * 0.9;
+      
+      // Try to infer dress length from bounding box
+      if (result.productCategory === "dresses" && detectionBox?.box_normalized) {
+        const inferredLength = inferDressLengthFromBox({
+          y1: detectionBox.box_normalized.y1 ?? 0,
+          y2: detectionBox.box_normalized.y2 ?? 1,
+        });
+        if (inferredLength) {
+          result.attributes.dressLength = inferredLength;
+        }
+      }
+      
       return result;
     }
   }

@@ -50,7 +50,7 @@ export class QueryMapper {
       category: 'category',
       brand: 'brand',
       price: 'price_cents',
-      gender: 'color',
+      gender: 'gender',
     };
 
     this.fuzzyThreshold = 0.7; // Similarity threshold for fuzzy matching
@@ -68,6 +68,8 @@ export class QueryMapper {
       vectorWeight?: number;
       filterWeight?: number;
       priceWeight?: number;
+      /** Treat parsed constraints as hard filters (multi-image strict prompt mode). */
+      strictConstraints?: boolean;
     } = {}
   ): SearchQueryBundle {
     const {
@@ -76,10 +78,16 @@ export class QueryMapper {
       vectorWeight = 0.7,
       filterWeight = 0.2,
       priceWeight = 0.1,
+      strictConstraints = false,
     } = options;
 
     // Build OpenSearch query
-    const opensearch = this.buildOpenSearchQuery(compositeQuery, maxResults, vectorK);
+    const opensearch = this.buildOpenSearchQuery(
+      compositeQuery,
+      maxResults,
+      vectorK,
+      strictConstraints,
+    );
 
     // Build SQL filters for additional filtering/hydration
     const sqlFilters = this.buildSQLFilters(compositeQuery);
@@ -101,7 +109,8 @@ export class QueryMapper {
   private buildOpenSearchQuery(
     query: CompositeQuery,
     maxResults: number,
-    vectorK?: number
+    vectorK?: number,
+    strictConstraints = false,
   ): OpenSearchQuery {
     const must: any[] = [];
     const filter: any[] = [];
@@ -135,42 +144,72 @@ export class QueryMapper {
     // explanation text still looked correct. Prefer soft boosts so kNN recall stays intact.
     if (query.constraints.category) {
       const c = query.constraints.category.toLowerCase();
-      should.push(
-        { term: { category: { value: c, boost: 2.5 } } },
-        { match: { "category.search": { query: c, boost: 1.2 } } },
-      );
-    }
-
-    if (query.constraints.brands && query.constraints.brands.length > 0) {
-      const brands = query.constraints.brands.map((b) => b.toLowerCase());
-      for (const b of brands) {
-        should.push({
+      if (strictConstraints) {
+        filter.push({
           bool: {
             should: [
-              { term: { brand: { value: b, boost: 2.0 } } },
-              { match: { "brand.search": { query: b, boost: 1.0 } } },
+              { term: { category: c } },
+              { term: { category_canonical: c } },
+              { match: { category: { query: c, operator: 'and' } } },
             ],
             minimum_should_match: 1,
           },
         });
+      } else {
+        should.push(
+          { term: { category: { value: c, boost: 2.5 } } },
+          { match: { "category.search": { query: c, boost: 1.2 } } },
+        );
+      }
+    }
+
+    if (query.constraints.brands && query.constraints.brands.length > 0) {
+      const brands = query.constraints.brands.map((b) => b.toLowerCase());
+      if (strictConstraints) {
+        filter.push({ terms: { brand: brands } });
+      } else {
+        for (const b of brands) {
+          should.push({
+            bool: {
+              should: [
+                { term: { brand: { value: b, boost: 2.0 } } },
+                { match: { "brand.search": { query: b, boost: 1.0 } } },
+              ],
+              minimum_should_match: 1,
+            },
+          });
+        }
       }
     }
 
     if (query.constraints.gender) {
       const g = query.constraints.gender.toLowerCase();
-      should.push(
-        { term: { attr_gender: { value: g, boost: 2.0 } } },
-        { term: { audience_gender: { value: g, boost: 1.5 } } },
-      );
+      if (strictConstraints) {
+        filter.push({
+          bool: {
+            should: [
+              { term: { attr_gender: g } },
+              { term: { audience_gender: g } },
+            ],
+            minimum_should_match: 1,
+          },
+        });
+      } else {
+        should.push(
+          { term: { attr_gender: { value: g, boost: 2.0 } } },
+          { term: { audience_gender: { value: g, boost: 1.5 } } },
+        );
+      }
     }
 
     if (query.constraints.price) {
       const pr = query.constraints.price;
       if (pr.min !== undefined || pr.max !== undefined) {
-        const range: Record<string, number> = { boost: 2.0 };
+        const range: Record<string, number> = strictConstraints ? {} : { boost: 2.0 };
         if (pr.min !== undefined) range.gte = pr.min;
         if (pr.max !== undefined) range.lte = pr.max;
-        should.push({ range: { price_usd: range } });
+        if (strictConstraints) filter.push({ range: { price_usd: range } });
+        else should.push({ range: { price_usd: range } });
       }
     }
 
@@ -248,6 +287,7 @@ export class QueryMapper {
         'product_id',
         'title',
         'brand',
+        'description',
         'price_usd',
         'image_cdn',
         'category',
@@ -263,8 +303,8 @@ export class QueryMapper {
         'color_accent_canonical',
         'color_confidence_text',
         'color_confidence_image',
-        'attr_gender',
         'audience_gender',
+        'attr_gender',
         'age_group',
         'norm_confidence',
         'type_confidence',

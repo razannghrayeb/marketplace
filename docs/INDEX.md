@@ -29,15 +29,18 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 | **IMPLEMENTATION_STATUS.md** | What's implemented, bugs, gaps | Tech leads |
 | **architecture.md** | Module structure & patterns | Backend engineers |
 | **api-reference.md** | Complete API specification | API consumers |
+| **compare-intelligent-shopping.md** | Intelligent compare goals, modes, and response contract | Product, backend, frontend |
 
 ---
 
-### Search & Discovery (4 files)
+### Search & Discovery (5 files)
 
 | File | Purpose | Audience |
 |------|---------|----------|
+| **PIPELINE_COMPLETE_DETAILED_2026_04.md** | Most detailed end-to-end pipeline behavior (request context, ranking stages, diagnostics, reindex resilience) | Backend, ML, search engineers, ops |
 | **embeddings-and-search-pipelines.md** | **Embeddings, OpenSearch fields, ingest vs query paths (text + image)** | Backend, ML, search engineers |
 | **SEARCH_API_COMPLETE.md** | All search features (user guide + technical) | Everyone |
+| **multi-image-attribute-transfer.md** | Multi-image attribute transfer feature architecture and build details | Backend, search engineers, integrators |
 | **multi-vector-search.md** | Multi-vector kNN deep-dive | ML engineers |
 | **composite-query-system.md** | Advanced composite query details | Architecture |
 
@@ -70,11 +73,14 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 |----------|------|
 | ...the whole system | `../README.md` → **`FEATURES.md`** → `SEARCH_API_COMPLETE.md` |
 | ...all API endpoints | `api-reference.md` (full spec) or `SEARCH_API_COMPLETE.md` |
+| ...intelligent fashion compare | `compare-intelligent-shopping.md` |
 | ...search capabilities | `SEARCH_API_COMPLETE.md` (user guide + technical) |
+| ...the full runtime behavior in one place | `PIPELINE_COMPLETE_DETAILED_2026_04.md` |
 | ...embeddings & how search uses vectors | **`embeddings-and-search-pipelines.md`** |
 | ...recommendations | `ml-models.md` → section on XGBoost Ranker |
 | ...virtual try-on | `../EXECUTIVE_SUMMARY.md` → Feature #7 section |
 | ...wardrobe | `../FEATURE_ANALYSIS.md` → Feature #6 section |
+| ...how complete-look stylist is built | `outfit-stylist-pipeline.md` |
 | ...code architecture | `architecture.md` |
 | ...database | `database.md` |
 | ...ML models | `ml-models.md` |
@@ -89,13 +95,17 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 | Task | Read |
 |------|------|
 | Implement a new search feature | **`embeddings-and-search-pipelines.md`** + `SEARCH_API_COMPLETE.md` + `api-reference.md` |
+| Debug end-to-end ranking behavior | `PIPELINE_COMPLETE_DETAILED_2026_04.md` + `embeddings-and-search-pipelines.md` |
 | Add a new API endpoint | `architecture.md` (patterns) + `api-reference.md` (reference) |
+| Implement/adjust compare behavior | `compare-intelligent-shopping.md` + `api-reference.md` |
 | Fix a bug | `../IMPLEMENTATION_STATUS.md` (known bugs) |
 | Deploy to production | `deployment.md` + `database.md` |
 | Monitor models | `ranker-runbook.md` + `ml-models.md` |
 | Train/retrain ML models | `ml-models.md` → Intent Classification Evaluation section |
 | Understand wardrobe features | `../FEATURE_ANALYSIS.md` → Feature #6 |
+| Understand complete-look stylist internals | `outfit-stylist-pipeline.md` |
 | Use multi-image search API | `SEARCH_API_COMPLETE.md` (Part 1: User Guide) |
+| Understand how multi-image transfer is built | `multi-image-attribute-transfer.md` |
 | Integrate with database | `database.md` → Schema section |
 | Test search quality | `SEARCH_API_COMPLETE.md` (testing section) |
 | Setup CI/CD | `../ACTION_PLAN_30_DAYS.md` → Week 4 |
@@ -116,6 +126,8 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 ---
 
 ## 🔄 Recent Changes
+
+**April 2026:** Added **`PIPELINE_COMPLETE_DETAILED_2026_04.md`** with full end-to-end behavior including session-aware image search, personalization, variant-group collapse, diagnostics contract, and reindex resilience for missing detection metadata.
 
 **April 2026:** Image-ranking hardening in **`embeddings-and-search-pipelines.md`**: unified `v1`/`v2` score normalization, calibrated dual-kNN blend, stage-8 relevance, BLIP consistency/alignment tuning, intent-aware rescue; optional **`BLIP_API_URL`** in **`deploy-cloud-run.md`**.
 
@@ -148,6 +160,13 @@ Consolidated comprehensive guide covering:
 - Part 2: Technical Deep-Dive (5-phase pipeline, performance, tuning)
 Consolidated from older search guides; use **`FEATURES.md`** for endpoint paths.
 
+### PIPELINE_COMPLETE_DETAILED_2026_04.md
+Comprehensive single-source pipeline reference documenting:
+- Request-context flow (`session_id`, `user_id`) across controllers/facade/service
+- Ranking stages (retrieval, rerank, gates, dedupe, variant collapse, diversity)
+- Response diagnostics fields for image search
+- Reindex behavior and schema-optional detection metadata fallback
+
 ### multi-vector-search.md
 Specialized deep-dive on multi-vector kNN architecture and weighting strategies.
 
@@ -156,6 +175,9 @@ Technical documentation on composite query system, attribute extraction, reranki
 
 ### embeddings-and-search-pipelines.md
 How **CLIP (and related) embeddings** land in **OpenSearch**, and how **image** vs **text** search **pipelines** call kNN, BM25, reranking, and supporting services.
+
+### outfit-stylist-pipeline.md
+Technical deep-dive of wardrobe complete-look stylist pipeline: slot inference, retrieval filters, scoring weights, reranking, pairwise set coherence, and validation steps.
 
 ### ml-models.md
 Overview of all ML models: CLIP, YOLOv8, XGBoost, Gemini, Vertex AI.
@@ -182,6 +204,7 @@ XGBoost ranker operations: training, serving, fallback behavior, health checks.
 
 ### Good Starting Points by Interest
 - **Search enthusiasts** → **`embeddings-and-search-pipelines.md`** → `SEARCH_API_COMPLETE.md`
+- **Search/ranking debuggers** → `PIPELINE_COMPLETE_DETAILED_2026_04.md`
 - **ML engineers** → `ml-models.md`
 - **Ops/DevOps** → `deployment.md` + `ranker-runbook.md`
 - **Full-stack devs** → `api-reference.md` + `database.md`

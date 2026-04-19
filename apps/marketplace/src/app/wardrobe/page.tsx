@@ -44,6 +44,8 @@ export default function WardrobePage() {
   const queryClient = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
+  const COMPLETE_STYLE_LIMIT_STEP = 8
+  const COMPLETE_STYLE_LIMIT_MAX = 48
   const [selectedItem, setSelectedItem] = useState<WardrobeItem | null>(null)
   const [showCompleteStyle, setShowCompleteStyle] = useState(false)
   const [showUploadModal, setShowUploadModal] = useState(false)
@@ -280,6 +282,8 @@ export default function WardrobePage() {
   const openCompleteStyle = (item: WardrobeItem) => {
     setSelectedItem(item)
     setCompleteLookVisible(8)
+    setCompleteStyleLimit(COMPLETE_STYLE_LIMIT_STEP)
+    setCompleteStyleAudienceGender(undefined)
     setShowCompleteStyle(true)
   }
 
@@ -539,6 +543,37 @@ export default function WardrobePage() {
                   <span className="text-xs font-medium text-neutral-400 uppercase tracking-wider">Styling for</span>
                 </div>
 
+                <div className="flex flex-wrap items-center gap-2 mb-6">
+                  {(['men', 'women', 'unisex'] as const).map((gender) => {
+                    const active = completeStyleAudienceGender === gender
+                    return (
+                      <button
+                        key={gender}
+                        type="button"
+                        onClick={() => setCompleteStyleAudienceGender(gender)}
+                        className={`px-3 py-1.5 rounded-full text-sm font-semibold border transition-colors ${
+                          active
+                            ? 'bg-violet-600 text-white border-violet-600'
+                            : 'bg-white text-neutral-600 border-neutral-200 hover:border-violet-200 hover:text-violet-700'
+                        }`}
+                      >
+                        {gender === 'men' ? 'Men' : gender === 'women' ? 'Women' : 'Unisex'}
+                      </button>
+                    )
+                  })}
+                  <button
+                    type="button"
+                    onClick={() => setCompleteStyleAudienceGender(undefined)}
+                    className={`px-3 py-1.5 rounded-full text-sm font-semibold border transition-colors ${
+                      completeStyleAudienceGender === undefined
+                        ? 'bg-violet-600 text-white border-violet-600'
+                        : 'bg-white text-neutral-600 border-neutral-200 hover:border-violet-200 hover:text-violet-700'
+                    }`}
+                  >
+                    Auto
+                  </button>
+                </div>
+
                 {/* Suggestions */}
                 {completeStyleQuery.isLoading ? (
                   <div className="grid grid-cols-2 gap-4">
@@ -563,6 +598,17 @@ export default function WardrobePage() {
                     className="grid grid-cols-2 gap-4"
                   >
                     {completeStyleSuggestionsVisible.map((s) => {
+                ) : completeStyleQuery.data && completeStyleQuery.data.length > 0 ? (
+                  <>
+                    <motion.div
+                      initial="hidden"
+                      animate="visible"
+                      variants={{ visible: { transition: { staggerChildren: 0.06 } }, hidden: {} }}
+                      className="grid grid-cols-2 gap-4"
+                    >
+                      {(completeStyleQuery.data as CompleteLookSuggestion[])
+                        .filter((s) => suggestionProductId(s) != null)
+                        .map((s) => {
                         const pid = suggestionProductId(s)!
                         const cents = s.price_cents
                         const priceLabel =
@@ -626,6 +672,30 @@ export default function WardrobePage() {
                         </button>
                       </div>
                     ) : null}
+                    </motion.div>
+
+                    {(() => {
+                      const dataLen = Array.isArray(completeStyleQuery.data) ? completeStyleQuery.data.length : 0
+                      const canLoadMore =
+                        dataLen >= completeStyleLimit && completeStyleLimit < COMPLETE_STYLE_LIMIT_MAX
+                      if (!canLoadMore) return null
+                      return (
+                        <div className="mt-5 flex justify-center">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCompleteStyleLimit((prev) =>
+                                Math.min(COMPLETE_STYLE_LIMIT_MAX, prev + COMPLETE_STYLE_LIMIT_STEP)
+                              )
+                            }
+                            disabled={completeStyleQuery.isFetching}
+                            className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-violet-200 bg-violet-50 text-violet-700 font-semibold text-sm hover:bg-violet-100 transition-colors disabled:opacity-60"
+                          >
+                            {completeStyleQuery.isFetching ? 'Loading…' : 'Load more'}
+                          </button>
+                        </div>
+                      )
+                    })()}
                   </>
                 ) : (
                   <div className="text-center py-12">

@@ -20,6 +20,7 @@ import { textSearch as enhancedTextSearch } from "../../routes/search/search.ser
 
 import { searchByImageWithSimilarity as legacyImageSearch } from "../../routes/products/products.service";
 import { searchProductsFilteredBrowse } from "./filteredBrowseSearch";
+import { getSession } from "../queryProcessor/conversationalContext";
 
 import {
   processImageForEmbedding,
@@ -65,6 +66,8 @@ export interface UnifiedImageSearchParams {
   includeRelated?: boolean;
   pHash?: string;
   predictedCategoryAisles?: string[];
+  detectionYoloConfidence?: number;
+  detectionProductCategory?: string;
   knnField?: string;
   /**
    * Forces image search into hard category mode for this call.
@@ -89,6 +92,14 @@ export interface UnifiedImageSearchParams {
   };
   inferredPrimaryColor?: string | null;
   inferredColorsByItem?: Record<string, string | null>;
+  inferredColorsByItemConfidence?: Record<string, number>;
+  inferredColorKey?: string | null;
+  /** Debug path: bypass rerank/final gates in products.service and return top-k raw exact-cosine hits. */
+  debugRawCosineFirst?: boolean;
+  sessionId?: string;
+  userId?: number;
+  sessionFilters?: Partial<LegacySearchFilters>;
+  collapseVariantGroups?: boolean;
 }
 
 function filterByFinalRelevance<T extends { finalRelevance01?: number }>(
@@ -170,6 +181,52 @@ function finiteEnvNumber(
   return Math.min(max, Math.max(min, n));
 }
 
+const ATHLETIC_INTENT_RE = /\b(sport|sportswear|athlet|training|workout|gym|fitness|running|jogging|activewear|yoga|crossfit)\b/i;
+const ATHLETIC_PRODUCT_RE = /\b(sport|sportswear|athlet|training|workout|gym|fitness|running|runner|jogger|track\s?pant|trackpant|activewear|yoga|crossfit|dry\s?-?fit|dri\s?-?fit|leggings?)\b/i;
+const ATHLETIC_BRAND_RE = /\b(adidas|nike|puma|reebok|asics|under\s?armou?r|new\s?balance|lululemon|gymshark)\b/i;
+
+function isExplicitAthleticIntent(query: string | undefined, filters: Partial<LegacySearchFilters> | undefined): boolean {
+  const parts: string[] = [];
+  if (query) parts.push(query);
+  const f: any = filters ?? {};
+  if (typeof f.style === "string") parts.push(f.style);
+  if (typeof f.softStyle === "string") parts.push(f.softStyle);
+  if (Array.isArray(f.productTypes)) parts.push(f.productTypes.join(" "));
+  if (typeof f.category === "string") parts.push(f.category);
+  if (Array.isArray(f.category)) parts.push(f.category.join(" "));
+  const blob = parts.join(" ").toLowerCase();
+  if (!blob.trim()) return false;
+  return ATHLETIC_INTENT_RE.test(blob);
+}
+
+function isAthleticProductCandidate(p: ProductResult): boolean {
+  const blob = [p.title, p.description, p.category, p.brand]
+    .filter((x) => x != null)
+    .map((x) => String(x))
+    .join(" ")
+    .toLowerCase();
+  if (!blob.trim()) return false;
+  const byKeyword = ATHLETIC_PRODUCT_RE.test(blob);
+  const byBrandAndSignal = ATHLETIC_BRAND_RE.test(String(p.brand ?? "")) && ATHLETIC_PRODUCT_RE.test(blob);
+  return byKeyword || byBrandAndSignal;
+}
+
+function applyNonSportGuardToNormalSearch(
+  items: ProductResult[] | undefined,
+  query: string | undefined,
+  filters: Partial<LegacySearchFilters> | undefined,
+): ProductResult[] | undefined {
+  if (!items || items.length === 0) return items;
+  const guardEnabled = String(process.env.SEARCH_TEXT_NONSPORT_GUARD ?? "1").toLowerCase() !== "0";
+  if (!guardEnabled) return items;
+  if (isExplicitAthleticIntent(query, filters)) return items;
+
+  const filtered = items.filter((p) => !isAthleticProductCandidate(p));
+  // Keep recall: only apply when enough non-sport items remain.
+  const minKeep = items.length >= 8 ? 4 : 1;
+  return filtered.length >= minKeep ? filtered : items;
+}
+
 export async function searchBrowse(params: {
   filters?: Partial<LegacySearchFilters>;
   page?: number;
@@ -192,7 +249,8 @@ export async function searchBrowse(params: {
     page,
     limit,
   })) as ProductResult[];
-  return filterByFinalRelevance(results, config.search.finalAcceptMinText) ?? [];
+  const relevanceFiltered = filterByFinalRelevance(results, config.search.finalAcceptMinText) ?? [];
+  return applyNonSportGuardToNormalSearch(relevanceFiltered, undefined, filters) ?? [];
 }
 
 /**
@@ -256,8 +314,10 @@ export async function searchText(params: UnifiedTextSearchParams): Promise<Searc
   } as any);
 
   const output = rest as SearchResultWithRelated;
-  const filteredResults = filterByFinalRelevance(output.results, config.search.finalAcceptMinText) ?? [];
-  const filteredRelated = filterByFinalRelevance(output.related, config.search.finalAcceptMinText);
+  const filteredResultsBase = filterByFinalRelevance(output.results, config.search.finalAcceptMinText) ?? [];
+  const filteredRelatedBase = filterByFinalRelevance(output.related, config.search.finalAcceptMinText);
+  const filteredResults = applyNonSportGuardToNormalSearch(filteredResultsBase, query, filters) ?? [];
+  const filteredRelated = applyNonSportGuardToNormalSearch(filteredRelatedBase, query, filters);
   const meta = {
     ...(output.meta ?? {}),
     total_results: filteredResults.length,
@@ -295,6 +355,8 @@ export async function searchImage(
     includeRelated = false,
     pHash,
     predictedCategoryAisles,
+    detectionYoloConfidence,
+    detectionProductCategory,
     knnField,
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty,
@@ -302,6 +364,13 @@ export async function searchImage(
     blipSignal,
     inferredPrimaryColor,
     inferredColorsByItem,
+    inferredColorsByItemConfidence,
+    inferredColorKey,
+    debugRawCosineFirst,
+    sessionId,
+    userId,
+    sessionFilters,
+    collapseVariantGroups,
   } = params;
 
   if ((!imageEmbedding || imageEmbedding.length === 0) && !imageBuffer) {
@@ -334,6 +403,12 @@ export async function searchImage(
     imageEmbedding && imageEmbedding.length > 0
       ? imageEmbedding
       : await processImageForEmbedding(catalogAlignedBuffer!);
+
+  const inheritedSessionFilters =
+    sessionFilters ?? (sessionId ? (getSession(sessionId).accumulatedFilters as Partial<LegacySearchFilters>) : undefined);
+  const mergedFilters = inheritedSessionFilters
+    ? { ...inheritedSessionFilters, ...filters }
+    : filters;
 
   const inferAislesEnv = () => {
     const v = String(process.env.SEARCH_IMAGE_INFER_YOLO_AISLES ?? "1").toLowerCase();
@@ -387,12 +462,14 @@ export async function searchImage(
         : imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0
           ? imageBuffer
           : undefined,
-    filters: filters as any,
+    filters: mergedFilters as any,
     limit,
     similarityThreshold,
     includeRelated,
     pHash: effectivePHash,
     predictedCategoryAisles: derivedAisleHints,
+    detectionYoloConfidence,
+    detectionProductCategory,
     knnField,
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty: relaxThresholdWhenEmpty ?? false,
@@ -400,6 +477,13 @@ export async function searchImage(
     blipSignal,
     inferredPrimaryColor,
     inferredColorsByItem,
+    inferredColorsByItemConfidence,
+    inferredColorKey,
+    debugRawCosineFirst,
+    sessionId,
+    userId,
+    sessionFilters: inheritedSessionFilters as any,
+    collapseVariantGroups,
   } as any);
 
   const metaAny = res.meta as Record<string, unknown> | undefined;

@@ -12,7 +12,8 @@ import {
   updateWardrobeItem,
   deleteWardrobeItem,
   findSimilarWardrobeItems,
-  backfillMissingEmbeddings
+  backfillMissingEmbeddings,
+  upsertWardrobeItemAudienceMetadata,
 } from "./wardrobe.service";
 import {
   getStyleProfile,
@@ -36,6 +37,133 @@ import {
   getAdaptedEssentialsForUser,
   getUserPriceTier
 } from "./recommendations.service";
+import { recordOutfitFeedback, type OutfitFeedbackEvent } from "../../lib/outfit/outfitFeedback";
+import { outfitFeedbackActionsTotal } from "../../lib/metrics";
+
+function refreshStyleProfileInBackground(userId: number): void {
+  void computeStyleProfile(userId).catch((err) => {
+    console.warn("Wardrobe: failed to refresh style profile after mutation", {
+      userId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+}
+
+function parseOptionalInt(raw: unknown): number | undefined {
+  if (raw === null || raw === undefined || raw === "") return undefined;
+  const n = parseInt(String(raw), 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function parseStringArray(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return Array.from(new Set(raw.map((v) => String(v || "").trim()).filter(Boolean))).slice(0, 20);
+  }
+  if (typeof raw === "string") {
+    const s = raw.trim();
+    if (!s) return [];
+    try {
+      const parsed = JSON.parse(s);
+      if (Array.isArray(parsed)) {
+        return Array.from(new Set(parsed.map((v) => String(v || "").trim()).filter(Boolean))).slice(0, 20);
+      }
+    } catch {
+      // fall through to delimiter split
+    }
+    return Array.from(new Set(s.split(/[|,;]+/g).map((v) => v.trim()).filter(Boolean))).slice(0, 20);
+  }
+  return [];
+}
+
+function parseAudienceGender(raw: unknown): "men" | "women" | "unisex" | undefined {
+  if (raw == null) return undefined;
+  const s = String(raw).toLowerCase().trim();
+  if (["men", "male", "man", "mens", "men's"].includes(s)) return "men";
+  if (["women", "female", "woman", "womens", "women's"].includes(s)) return "women";
+  if (["unisex", "neutral"].includes(s)) return "unisex";
+  return undefined;
+}
+
+function parseAgeGroup(raw: unknown): "kids" | "adult" | undefined {
+  if (raw == null) return undefined;
+  const s = String(raw).toLowerCase().trim();
+  if (["kids", "kid", "children", "child", "junior", "youth", "toddler", "baby"].includes(s)) return "kids";
+  if (["adult", "adults", "men", "women", "unisex"].includes(s)) return "adult";
+  return undefined;
+}
+
+function parseOccasionHint(raw: unknown): "formal" | "semi-formal" | "casual" | "active" | "party" | "beach" | undefined {
+  if (raw == null) return undefined;
+  const s = String(raw).toLowerCase().trim();
+  if (s === "formal") return "formal";
+  if (["semi-formal", "semiformal", "business"].includes(s)) return "semi-formal";
+  if (s === "casual") return "casual";
+  if (["active", "sport"].includes(s)) return "active";
+  if (["party", "date"].includes(s)) return "party";
+  if (["beach", "resort"].includes(s)) return "beach";
+  return undefined;
+}
+
+function normalizeAnalysisCategory(raw: unknown): string | null {
+  const s = String(raw || "").toLowerCase().trim();
+  if (!s) return null;
+  if (s.includes("dress") || s.includes("gown") || s.includes("jumpsuit") || s.includes("romper")) return "dresses";
+  if (s.includes("outer") || s.includes("jacket") || s.includes("coat") || s.includes("blazer") || s.includes("cardigan")) return "outerwear";
+  if (s.includes("shoe") || s.includes("sneaker") || s.includes("heel") || s.includes("boot") || s.includes("sandal") || s.includes("loafer") || s.includes("footwear")) return "shoes";
+  if (s.includes("bag") || s.includes("tote") || s.includes("clutch") || s.includes("wallet") || s.includes("backpack") || s.includes("purse")) return "bags";
+  if (s.includes("accessor") || s.includes("jewel") || s.includes("watch") || s.includes("belt") || s.includes("scarf") || s.includes("hat") || s.includes("sunglass")) return "accessories";
+  if (s.includes("pant") || s.includes("trouser") || s.includes("jean") || s.includes("skirt") || s.includes("short") || s.includes("legging") || s.includes("bottom")) return "bottoms";
+  if (s.includes("top") || s.includes("shirt") || s.includes("blouse") || s.includes("hoodie") || s.includes("sweater") || s.includes("tee") || s.includes("tank")) return "tops";
+  return null;
+}
+
+async function lookupCategoryIdFromAnalysis(categoryRaw: unknown, subcategoryRaw: unknown): Promise<number | undefined> {
+  const normalized = normalizeAnalysisCategory(categoryRaw) || normalizeAnalysisCategory(subcategoryRaw);
+  if (!normalized) return undefined;
+  const result = await pg.query<{ id: number }>(
+    `SELECT id FROM categories WHERE lower(name) = $1 ORDER BY id ASC LIMIT 1`,
+    [normalized]
+  );
+  return result.rows[0]?.id;
+}
+
+async function lookupPatternId(patternRaw: unknown): Promise<number | undefined> {
+  const normalized = String(patternRaw || "").toLowerCase().trim();
+  if (!normalized) return undefined;
+  const alias: Record<string, string> = {
+    striped: "stripes",
+    stripe: "stripes",
+    plaid: "plaid",
+    polka: "polka-dots",
+    "polka dots": "polka-dots",
+    geometric: "geometric",
+    floral: "floral",
+    solid: "solid",
+    camo: "camo",
+  };
+  const key = alias[normalized] || normalized;
+  const result = await pg.query<{ id: number }>(
+    `SELECT id FROM patterns WHERE lower(name) = $1 ORDER BY id ASC LIMIT 1`,
+    [key]
+  );
+  return result.rows[0]?.id;
+}
+
+async function lookupMaterialId(materialRaw: unknown): Promise<number | undefined> {
+  const normalized = String(materialRaw || "").toLowerCase().trim();
+  if (!normalized) return undefined;
+  const alias: Record<string, string> = {
+    "faux leather": "leather",
+    "soft knit": "jersey",
+    knit: "jersey",
+  };
+  const key = alias[normalized] || normalized;
+  const result = await pg.query<{ id: number }>(
+    `SELECT id FROM materials WHERE lower(name) = $1 ORDER BY id ASC LIMIT 1`,
+    [key]
+  );
+  return result.rows[0]?.id;
+}
 
 const ALLOWED_AUDIENCE_GENDER = new Set(["men", "women", "unisex"]);
 const ALLOWED_AGE_GROUP = new Set(["kids", "adult"]);
@@ -126,23 +254,95 @@ export async function createItem(req: Request, res: Response, next: NextFunction
   try {
     const userId = req.user!.id;
 
+    const providedCategoryId = parseOptionalInt(req.body.category_id);
+    const providedPatternId = parseOptionalInt(req.body.pattern_id);
+    const providedMaterialId = parseOptionalInt(req.body.material_id);
+
+    let derivedCategoryId = providedCategoryId;
+    let derivedPatternId = providedPatternId;
+    let derivedMaterialId = providedMaterialId;
+    let derivedName = typeof req.body.name === "string" && req.body.name.trim().length > 0 ? req.body.name.trim() : undefined;
+    let derivedDominantColors: Array<{ color_id: number; hex: string; percent: number }> | undefined;
+
+    // Auto-enrich uploaded images so complete-look has reliable category/style anchors.
+    if (req.file?.buffer && (!derivedCategoryId || !derivedPatternId || !derivedMaterialId || !derivedName)) {
+      try {
+        const { analyzeWardrobePhoto } = await import("../../lib/wardrobe/imageRecognition");
+        const analysis = await analyzeWardrobePhoto(req.file.buffer, {
+          useGemini: true,
+          extractEmbedding: false,
+          minConfidence: 0.5,
+        });
+
+        if (!derivedCategoryId) {
+          derivedCategoryId = await lookupCategoryIdFromAnalysis(analysis.category, analysis.subcategory);
+        }
+        if (!derivedPatternId) {
+          derivedPatternId = await lookupPatternId(analysis.pattern);
+        }
+        if (!derivedMaterialId) {
+          derivedMaterialId = await lookupMaterialId(analysis.material);
+        }
+        if (!derivedName && analysis.suggestedName) {
+          derivedName = analysis.suggestedName;
+        }
+
+        if (Array.isArray(analysis.colors?.dominantHex) && analysis.colors.dominantHex.length > 0) {
+          const palette = analysis.colors.dominantHex.slice(0, 3).filter((hex) => typeof hex === "string" && /^#[0-9a-f]{6}$/i.test(hex));
+          if (palette.length > 0) {
+            const pct = Math.round((100 / palette.length) * 1000) / 1000;
+            derivedDominantColors = palette.map((hex) => ({ color_id: 0, hex, percent: pct }));
+          }
+        }
+      } catch (analysisErr) {
+        console.warn("Wardrobe: create item auto-analysis failed, continuing with provided metadata", {
+          userId,
+          error: analysisErr instanceof Error ? analysisErr.message : String(analysisErr),
+        });
+      }
+    }
+
     const item = await createWardrobeItem({
       user_id: userId,
       source: req.body.source || "manual",
-      product_id: req.body.product_id ? parseInt(req.body.product_id, 10) : undefined,
+      product_id: parseOptionalInt(req.body.product_id),
       image_buffer: req.file?.buffer,
       image_url: req.body.image_url,
-      name: req.body.name,
-      category_id: req.body.category_id ? parseInt(req.body.category_id, 10) : undefined,
+      name: derivedName,
+      category_id: derivedCategoryId,
       brand: req.body.brand,
-      pattern_id: req.body.pattern_id ? parseInt(req.body.pattern_id, 10) : undefined,
-      material_id: req.body.material_id ? parseInt(req.body.material_id, 10) : undefined,
+      pattern_id: derivedPatternId,
+      material_id: derivedMaterialId,
       audience_gender: parseAudienceGenderBody(req.body.audience_gender) ?? null,
       age_group: parseAgeGroupBody(req.body.age_group) ?? null,
       style_tags: parseTagArrayField(req.body.style_tags) ?? null,
       occasion_tags: parseTagArrayField(req.body.occasion_tags) ?? null,
-      season_tags: parseTagArrayField(req.body.season_tags) ?? null
+      season_tags: parseTagArrayField(req.body.season_tags) ?? null,
     });
+
+    const audienceGender = parseAudienceGender(req.body.audience_gender ?? req.body.gender);
+    const ageGroup = parseAgeGroup(req.body.age_group ?? req.body.ageGroup ?? req.body.audience_age_group);
+    const styleTags = parseStringArray(req.body.style_tags ?? req.body.styleTags);
+    const occasionTags = parseStringArray(req.body.occasion_tags ?? req.body.occasionTags);
+    const seasonTags = parseStringArray(req.body.season_tags ?? req.body.seasonTags);
+
+    if (audienceGender || ageGroup || styleTags.length > 0 || occasionTags.length > 0 || seasonTags.length > 0) {
+      await upsertWardrobeItemAudienceMetadata(item.id, userId, {
+        audience_gender: audienceGender,
+        age_group: ageGroup,
+        style_tags: styleTags,
+        occasion_tags: occasionTags,
+        season_tags: seasonTags,
+      });
+    }
+
+    if (derivedDominantColors && derivedDominantColors.length > 0) {
+      await updateWardrobeItem(item.id, userId, {
+        dominant_colors: derivedDominantColors,
+      });
+    }
+
+    refreshStyleProfileInBackground(userId);
 
     res.status(201).json({ success: true, item });
   } catch (err) {
@@ -202,6 +402,24 @@ export async function updateItem(req: Request, res: Response, next: NextFunction
       return res.status(404).json({ success: false, error: "Item not found" });
     }
 
+    const audienceGender = parseAudienceGender(req.body.audience_gender ?? req.body.gender);
+    const ageGroup = parseAgeGroup(req.body.age_group ?? req.body.ageGroup ?? req.body.audience_age_group);
+    const styleTags = parseStringArray(req.body.style_tags ?? req.body.styleTags);
+    const occasionTags = parseStringArray(req.body.occasion_tags ?? req.body.occasionTags);
+    const seasonTags = parseStringArray(req.body.season_tags ?? req.body.seasonTags);
+
+    if (audienceGender || ageGroup || styleTags.length > 0 || occasionTags.length > 0 || seasonTags.length > 0) {
+      await upsertWardrobeItemAudienceMetadata(itemId, userId, {
+        audience_gender: audienceGender,
+        age_group: ageGroup,
+        style_tags: styleTags,
+        occasion_tags: occasionTags,
+        season_tags: seasonTags,
+      });
+    }
+
+    refreshStyleProfileInBackground(userId);
+
     res.json({ success: true, item });
   } catch (err) {
     next(err);
@@ -220,6 +438,8 @@ export async function deleteItem(req: Request, res: Response, next: NextFunction
     if (!deleted) {
       return res.status(404).json({ success: false, error: "Item not found" });
     }
+
+    refreshStyleProfileInBackground(userId);
 
     res.json({ success: true, deleted: true });
   } catch (err) {
@@ -400,6 +620,17 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
       ? productIdsRaw.map((n) => parseInt(String(n), 10)).filter((n) => Number.isFinite(n) && n >= 1)
       : [];
     const limit = req.body.limit || 10;
+    const audienceGenderHintRaw = req.body.audience_gender ?? req.body.gender;
+    const audienceGenderHint =
+      typeof audienceGenderHintRaw === "string" && audienceGenderHintRaw.trim().length > 0
+        ? audienceGenderHintRaw.trim()
+        : undefined;
+    const ageGroupHintRaw = req.body.age_group ?? req.body.ageGroup ?? req.body.audience_age_group;
+    const ageGroupHint =
+      typeof ageGroupHintRaw === "string" && ageGroupHintRaw.trim().length > 0
+        ? ageGroupHintRaw.trim()
+        : undefined;
+    const occasionHint = parseOccasionHint(req.body.occasion ?? req.body.occasion_hint);
 
     const hasItems = Array.isArray(itemIds) && itemIds.length > 0;
     if (!hasItems && productIds.length === 0) {
@@ -414,21 +645,92 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
     const catalogFilter: { audience_gender?: string; age_group?: string } = {};
     if (catalogAudience) catalogFilter.audience_gender = catalogAudience;
     if (catalogAge) catalogFilter.age_group = catalogAge;
-    const audienceOpts = Object.keys(catalogFilter).length > 0 ? catalogFilter : undefined;
+    const requestCatalogFilters =
+      Object.keys(catalogFilter).length > 0 ? catalogFilter : undefined;
 
     const result = hasItems
-      ? await completeLookSuggestions(userId, itemIds!, limit, audienceOpts)
-      : await completeLookSuggestionsForCatalogProducts(userId, productIds, limit, audienceOpts);
+      ? await completeLookSuggestions(userId, itemIds!, limit, requestCatalogFilters, {
+          audienceGenderHint,
+          ageGroupHint,
+          occasionHint,
+        })
+      : await completeLookSuggestionsForCatalogProducts(
+          userId,
+          productIds,
+          limit,
+          requestCatalogFilters,
+          {
+            audienceGenderHint,
+            ageGroupHint,
+            occasionHint,
+          },
+        );
     const suggestions = result.suggestions.map((s) => ({
       ...s,
       id: s.product_id,
     }));
     res.json({
       success: true,
+      completionMode: result.completionMode,
       suggestions,
       outfitSets: result.outfitSets,
       missingCategories: result.missingCategories,
+      outfitNarrative: result.outfitNarrative,
+      inferredOccasion: result.inferredOccasion,
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/wardrobe/outfit-feedback - persist outfit interaction feedback
+ */
+export async function outfitFeedback(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = req.user!.id;
+    const sessionId = String(req.body.sessionId || "").trim();
+    const seedProductId = parseInt(String(req.body.seedProductId), 10);
+    const eventsRaw = Array.isArray(req.body.events) ? req.body.events : [];
+
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: "sessionId is required" });
+    }
+    if (!Number.isFinite(seedProductId) || seedProductId < 1) {
+      return res.status(400).json({ success: false, error: "seedProductId is required" });
+    }
+
+    const allowedActions = new Set(["click", "add_to_cart", "purchase", "dismiss", "hover"]);
+    const events: OutfitFeedbackEvent[] = eventsRaw
+      .map((e: any) => ({
+        productId: parseInt(String(e?.productId), 10),
+        bucketCategory: String(e?.bucketCategory || "").trim() || "unknown",
+        action: String(e?.action || "").trim(),
+        rankPosition: parseInt(String(e?.rankPosition ?? 0), 10),
+        matchScore: Number(e?.matchScore ?? 0),
+      }))
+      .filter((e: any) => Number.isFinite(e.productId) && e.productId >= 1)
+      .filter((e: any) => allowedActions.has(e.action))
+      .map((e: any) => ({
+        productId: e.productId,
+        bucketCategory: e.bucketCategory,
+        action: e.action,
+        rankPosition: Number.isFinite(e.rankPosition) ? e.rankPosition : 0,
+        matchScore: Number.isFinite(e.matchScore) ? e.matchScore : 0,
+      }));
+
+    const saved = await recordOutfitFeedback({
+      sessionId,
+      userId,
+      seedProductId,
+      events,
+    });
+
+    for (const e of events) {
+      outfitFeedbackActionsTotal.inc({ action: e.action });
+    }
+
+    res.status(201).json({ success: true, inserted: saved.inserted });
   } catch (err) {
     next(err);
   }

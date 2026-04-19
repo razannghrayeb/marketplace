@@ -11,6 +11,9 @@ import {
   CompareVerdict,
   ProductComparison,
   CompareReason,
+  CompareGoal,
+  CompareOccasion,
+  CompareRequestOptions,
 } from "../../lib/compare/compareEngine";
 import { 
   generateVerdict, 
@@ -68,10 +71,11 @@ export interface BaselineComputeResult {
  * Compare 2-5 products and generate a verdict
  */
 export async function compareProductsWithVerdict(
-  productIds: number[]
+  productIds: number[],
+  options: CompareRequestOptions = {}
 ): Promise<CompareProductsResult> {
   // Run comparison
-  const comparison = await compareProducts(productIds);
+  const comparison = await compareProducts(productIds, options);
   
   // Generate verdict with letters
   const letterMap = new Map<number, string>();
@@ -182,8 +186,22 @@ export interface ValidationError {
   example?: unknown;
 }
 
+const VALID_COMPARE_GOALS: CompareGoal[] = [
+  "best_value",
+  "premium_quality",
+  "style_match",
+  "low_risk_return",
+  "occasion_fit",
+];
+
+const VALID_OCCASIONS: CompareOccasion[] = ["casual", "work", "formal", "party", "travel"];
+
 export type CompareIdsValidation =
   | { ok: true; productIds: number[] }
+  | ({ ok: false } & ValidationError);
+
+export type CompareOptionsValidation =
+  | { ok: true; options: CompareRequestOptions }
   | ({ ok: false } & ValidationError);
 
 function parsePositiveInt(raw: unknown): number | null {
@@ -261,6 +279,43 @@ export function validateCompareInput(productIds: unknown): CompareIdsValidation 
   }
 
   return { ok: true, productIds: ids };
+}
+
+/**
+ * Validate and normalize compare options for intelligent mode.
+ */
+export function validateCompareOptions(raw: unknown): CompareOptionsValidation {
+  if (!raw || typeof raw !== "object") {
+    return { ok: true, options: {} };
+  }
+  const input = raw as Record<string, unknown>;
+  const options: CompareRequestOptions = {};
+
+  if (input.compare_goal !== undefined && input.compare_goal !== null && input.compare_goal !== "") {
+    const goal = String(input.compare_goal).trim() as CompareGoal;
+    if (!VALID_COMPARE_GOALS.includes(goal)) {
+      return {
+        ok: false,
+        error: `Invalid compare_goal. Allowed: ${VALID_COMPARE_GOALS.join(", ")}`,
+        example: { compare_goal: "best_value" },
+      };
+    }
+    options.goal = goal;
+  }
+
+  if (input.occasion !== undefined && input.occasion !== null && input.occasion !== "") {
+    const occasion = String(input.occasion).trim() as CompareOccasion;
+    if (!VALID_OCCASIONS.includes(occasion)) {
+      return {
+        ok: false,
+        error: `Invalid occasion. Allowed: ${VALID_OCCASIONS.join(", ")}`,
+        example: { occasion: "work" },
+      };
+    }
+    options.occasion = occasion;
+  }
+
+  return { ok: true, options };
 }
 
 /**

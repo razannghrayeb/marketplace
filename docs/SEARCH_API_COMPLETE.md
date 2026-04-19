@@ -6,15 +6,33 @@
 
 **Embeddings & pipelines (maintainers):** **`embeddings-and-search-pipelines.md`** — OpenSearch vector fields, ingestion vs query-time CLIP/BLIP/YOLO. The storefront typically uses **`POST /products/search/image`** and **`GET /search?q=`**; Part 1 examples may still cite `/search/image` only.
 
+**Most detailed end-to-end pipeline:** **`PIPELINE_COMPLETE_DETAILED_2026_04.md`** — full behavior from request context propagation to final ranking metadata and reindex resilience.
+
+---
+
+## April 2026: Important Behavior Updates
+
+This guide now reflects the current search runtime:
+
+1. Session-aware image search: `session_id` / `x-session-id` flows into unified image search and can inherit conversational filters.
+2. User personalization: `user_id` / authenticated user identity can apply wardrobe-lifestyle ranking boosts.
+3. Variant collapse: image results can collapse variant families into one representative item with group metadata.
+4. Rich diagnostics: image search `meta` now includes deep fusion, diversity rerank, personalization, and variant collapse counters.
+5. Reindex resilience: missing `product_image_detections` or missing `label` column no longer hard-fails baseline indexing.
+
 ---
 
 ## 📋 Quick Overview
 
 | Feature | Endpoint | Input | Use Case |
 |---------|----------|-------|----------|
-| **Normal Search** | `POST /search/image` | Single image | Find similar products to one image |
+| **Normal Search** | `POST /products/search/image` or `POST /search/image` | Single image | Find similar products to one image |
 | **YOLO Detection** | `POST /api/images/search` | Single image | Upload outfit → detect items → find similar for each |
 | **Multi-Image Composite** | `POST /search/multi-image` | Multiple images + prompt | Mix attributes from multiple images (industry-leading!) |
+
+Notes:
+- Storefront integrations should generally prefer `POST /products/search/image`.
+- `POST /search/image` uses the same unified backend engine and is valid for search-module integrations.
 
 ---
 
@@ -32,10 +50,15 @@
 
 **Basic Usage:**
 ```bash
-curl -X POST http://0.0.0.0:4000/search/image \
+curl -X POST http://0.0.0.0:4000/products/search/image \
   -F "image=@dress.jpg" \
-  -F "limit=20"
+  -F "limit=20" \
+  -F "session_id=session-123"
 ```
+
+Also supported:
+- `POST /search/image` (same image engine)
+- `x-session-id` header as an alternative to `session_id`
 
 **Response:**
 ```json
@@ -61,12 +84,25 @@ curl -X POST http://0.0.0.0:4000/search/image \
 |-----------|------|----------|-------------|
 | `image` | File | ✅ | Image file (JPEG/PNG) |
 | `limit` | Number | | Max results (default: 50, max: 200) |
+| `session_id` | String | | Optional conversational context for inherited filters |
+| `user_id` | Number | | Optional user context for personalization |
 
 ---
 
 ### 2️⃣ YOLO Detection Search (Shop the Look)
 
 **Purpose**: Upload outfit photos, auto-detect items, find similar products for each.
+
+**API path:** `POST /api/images/search`
+
+**Pipeline linkage:**
+1. Upload image through the image-analysis controller
+2. Run YOLO detection on the full image
+3. Build per-detection crop embeddings and soft attribute hints
+4. Call unified image search for each detected item
+5. Apply category, style, color, formality, and session-context filtering
+6. Apply final relevance filtering, variant collapse, and pagination
+7. Return grouped results under `similarProducts.byDetection`
 
 **When to Use:**
 - Upload lookbook/outfit images
@@ -118,6 +154,15 @@ curl -X POST http://0.0.0.0:4000/api/images/search \
 | `image` | File | ✅ | Image file (JPEG/PNG) |
 | `confidence` | Number | | Detection threshold (0-1, default: 0.25) |
 | `limit_per_item` | Number | | Results per detected item (default: 10) |
+| `session_id` | String | | Optional session context propagated into per-detection search |
+| `user_id` | Number | | Optional user context for personalization in per-detection ranking |
+
+**Result semantics:**
+- Each product has a single `finalRelevance01` field.
+- High values mean the item passed retrieval and ranking strongly.
+- Very low values usually mean the item survived a fallback/rescue branch or barely cleared a threshold.
+- If you see a mix of high and low values in the same response, that is expected in a ranked list; it is not a duplicate field.
+- The YOLO endpoint may preserve one weaker product per detection to avoid returning an empty group when the visual match is still the best available option.
 
 ---
 
@@ -185,6 +230,18 @@ curl -X POST http://0.0.0.0:4000/search/multi-vector \
 ---
 
 ## PART 2: TECHNICAL DEEP-DIVE
+
+### What is new in ranking internals
+
+The image pipeline now includes additional post-retrieval stages beyond base kNN:
+
+1. Context merge: request filters + inherited session filters
+2. Personalization scoring using wardrobe lifestyle profile
+3. Variant-group collapse with representative selection
+4. Optional diversity rerank (MMR style)
+5. Extended `meta` diagnostics for each of the above
+
+For detailed field-level behavior and diagnostics contract, see `PIPELINE_COMPLETE_DETAILED_2026_04.md`.
 
 ### Architecture Overview
 

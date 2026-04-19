@@ -90,6 +90,59 @@ function labDist(a: [number, number, number], b: [number, number, number]): numb
 
 function mapRgbToCanonical(r: number, g: number, b: number): string {
   const lab = rgbToLab(r, g, b);
+  const chroma = Math.sqrt(lab[1] * lab[1] + lab[2] * lab[2]);
+  const blueLead = b - Math.max(r, g);
+  const redLead = r - Math.max(g, b);
+  const greenLead = g - Math.max(r, b);
+
+  // Achromatic neutrals — widen gate to chroma < 11 so very desaturated
+  // darks (near-black leather, dark charcoal wool) don't bleed into navy/brown.
+  if (chroma < 11) {
+    // Keep very light cool tones from collapsing into white/off-white.
+    if (lab[0] > 78 && lab[2] <= -3 && blueLead >= 6) return "light-blue";
+    // Pale yellows are often low-chroma in studio lighting; avoid mapping to beige/off-white.
+    if (lab[0] > 72 && lab[2] >= 12 && lab[1] >= -2) return "yellow";
+    if (lab[0] < 14) return "black";
+    if (lab[0] < 36) return "charcoal";
+    if (lab[0] < 60) return "gray";
+    if (lab[0] < 78) return "silver";
+    if (lab[0] > 92) return "white";
+    return "off-white";
+  }
+
+  // Dark saturated: detect via channel dominance before LAB distance
+  // which otherwise collapses dark red/green/brown → black.
+  if (lab[0] < 42 && blueLead >= 8 && chroma >= 10) {
+    return lab[0] < 30 ? "navy" : "blue";
+  }
+  if (lab[0] < 30 && redLead >= 10 && chroma >= 12) {
+    return "burgundy";
+  }
+  if (lab[0] < 35 && greenLead >= 5 && chroma >= 10) {
+    return "olive";
+  }
+
+  // Light desaturated: cream/off-white/beige before LAB distance rounds to white/gray.
+  if (lab[0] > 82 && chroma >= 9 && chroma < 22) {
+    // Baby blue / powder blue often lives in this range but should not collapse into off-white.
+    if (lab[2] <= -6 || (blueLead >= 10 && lab[1] <= 2)) return "light-blue";
+    // Very light yellow fabric can be weakly saturated and otherwise map to beige.
+    if (lab[2] >= 18 && lab[1] >= -2 && lab[1] <= 10) return "yellow";
+    if (lab[1] > 3 && lab[2] > 8) return "cream";
+    // Keep off-white narrowly neutral; strong negative b* indicates cool blue, not white.
+    if (lab[1] < -2 && lab[2] > -4 && lab[2] < 4) return "off-white";
+    if (lab[2] > 12) return "beige";
+    if (Math.abs(lab[1]) < 6 && Math.abs(lab[2]) < 8) return "white";
+  }
+
+  // Light saturated pastels: LAB distance otherwise rounds to white/cream.
+  if (lab[0] > 75 && chroma >= 15 && chroma < 30) {
+    if (lab[1] > 8) return "pink";
+    // Restrict gold to muted mustard / metallic yellow tones, not ordinary bright yellow.
+    if (lab[2] > 20 && lab[1] > 6 && lab[0] < 86) return "gold";
+    if (lab[2] < -10 || lab[1] < -8) return "light-blue";
+  }
+
   let bestName = "gray";
   let bestD = Infinity;
   for (const [name, rgb] of Object.entries(CANONICAL_REF_RGB)) {
@@ -100,14 +153,24 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
       bestName = name;
     }
   }
-  // Very dark → black
-  if (lab[0] < 18 && bestD > 18) return "black";
-  // Very light near-neutral → white/off-white/cream
-  if (lab[0] > 88 && Math.abs(lab[1]) < 10 && Math.abs(lab[2]) < 10) {
+
+  if (lab[0] < 18 && chroma < 8 && bestD > 18) return "black";
+
+  // Widen light-neutral gate (was L>88 abs<10 — missed many light fabrics).
+  if (lab[0] > 85 && Math.abs(lab[1]) < 12 && Math.abs(lab[2]) < 12) {
+    // Preserve cool light-blue tones from collapsing to off-white.
+    if (lab[2] <= -6 || (blueLead >= 10 && chroma >= 8)) return "light-blue";
     if (lab[2] > 6) return "cream";
-    if (lab[2] < -4) return "off-white";
-    return "white";
+    if (lab[2] < -4 && chroma < 10) return "off-white";
+    if (chroma < 12) return "white";
   }
+
+  // Multicolor ref is neutral gray; huge LAB distance = real color didn't match.
+  if (bestName === "multicolor" && bestD > 25) {
+    if (lab[0] < 35) return "charcoal";
+    if (lab[0] > 70) return "gray";
+  }
+
   return bestName;
 }
 
@@ -260,6 +323,33 @@ export async function extractGarmentFashionColors(
       confidencePrimary: 0.2,
       clusterWeights: [1],
     };
+  }
+
+  const promotableNeutralColors = new Set([
+    "gray",
+    "charcoal",
+    "white",
+    "off-white",
+    "cream",
+    "ivory",
+    "beige",
+    "tan",
+    "silver",
+  ]);
+  if (
+    canonList[0] === "black" &&
+    canonList.length > 1 &&
+    promotableNeutralColors.has(canonList[1]) &&
+    (weights[1] ?? 0) >= 0.2 &&
+    (weights[0] ?? 0) - (weights[1] ?? 0) <= 0.25
+  ) {
+    const first = canonList[0];
+    const second = canonList[1];
+    canonList[0] = second;
+    canonList[1] = first;
+    const primaryWeight = weights[0] ?? 1;
+    weights[0] = weights[1] ?? 0;
+    weights[1] = primaryWeight;
   }
 
   const primaryCanonical = canonList[0];

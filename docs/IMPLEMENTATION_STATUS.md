@@ -99,7 +99,7 @@ Implemented in `src/routes/favorites/`. All routes require `requireAuth`.
 | POST | `/products/recommendations/batch` | Batch recommendations |
 | GET | `/products/:id/complete-style` | Outfit completion suggestions |
 | GET | `/products/:id/style-profile` | Style profile for product |
-| POST | `/products/complete-style` | Outfit completion from body |
+| POST | `/products/complete-style` | Outfit completion from body (preferred: `product_id`; fallback: `product`) |
 | GET | `/products/:id/images` | List product images |
 | POST | `/products/:id/images` | Upload product image |
 | PUT | `/products/:id/images/:imageId/primary` | Set primary image |
@@ -124,6 +124,32 @@ Mounted at `/search` (not `/api/search`).
 | GET | `/search/prompt-templates` | Multi-image prompt templates |
 | POST | `/search/prompt-analyze` | Analyze and improve a search prompt |
 | GET | `/search/prompt-suggestions` | Prompt writing suggestions by type |
+
+### April 2026 search pipeline upgrades (implemented)
+
+1. Session-aware image search context propagation
+- `session_id` / `x-session-id` now propagates through controllers into unified image search.
+- Session filters can be inherited and merged as defaults (request filters take precedence).
+
+2. User-personalized image ranking
+- `user_id` / authenticated identity now flows into image search.
+- Wardrobe lifestyle preferences can softly boost ranking (brands/categories/colors/style/price affinity).
+- Personalization path is fail-safe: missing profile data does not break search.
+
+3. Variant-group collapse in image responses
+- Same-family variants are collapsed into a representative item.
+- Representative metadata is exposed in result payload (`variant_group_key`, `variant_group_size`, `variant_group_ids`).
+
+4. Shop-the-look context alignment
+- `/api/images/search` per-detection search now supports `sessionId`, `userId`, inherited session filters, and variant collapse controls.
+
+5. Rich ranking diagnostics
+- Image response meta now includes deep-fusion settings, diversity-rerank state, personalization flags, variant-group counters, and pipeline drop/recovery counts.
+
+6. Reindex schema resilience
+- `scripts/resume-reindex.ts` now handles missing detection metadata gracefully:
+	- no `product_image_detections` table: continue baseline reindex, skip detection ROI path
+	- no `product_image_detections.label` column: continue baseline reindex, skip part-level embedding path
 
 ---
 
@@ -177,6 +203,12 @@ All routes require `requireAuth`. Mounted at `/api/wardrobe`.
 - GET `/api/wardrobe/compatibility/:category/learned`
 - GET `/api/wardrobe/compatibility/graph`
 - POST `/api/wardrobe/compatibility/learn`
+
+### April 2026 quality hardening (complete-look)
+- Pairwise stylist-coherence scoring added for complete-look outfit sets.
+- Low-coherence outfit combinations are filtered before returning `outfitSets`.
+- Compatibility style-similarity heuristic adjusted to a stylist sweet spot (moderate-to-high similarity).
+- Validation run: `pnpm -s tsc -p . --noEmit` and `pnpm test:complete-look-matrix --timeout=60000`.
 
 ---
 

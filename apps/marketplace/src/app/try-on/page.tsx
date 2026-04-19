@@ -119,11 +119,11 @@ export default function TryOnPage() {
               </p>
             </div>
             <Link
-              href="/search"
+              href="/search?mode=shop"
               className="inline-flex shrink-0 items-center gap-2 self-start rounded-xl border border-neutral-200 bg-white px-4 py-2.5 text-sm font-medium text-neutral-700 shadow-sm transition hover:border-violet-200 hover:text-violet-700"
             >
               <ImageIcon className="h-4 w-4" />
-              Discover
+              Shop the look
             </Link>
           </div>
 
@@ -202,8 +202,8 @@ export default function TryOnPage() {
                     <Link href="/sales" className="rounded-lg bg-white px-3 py-2 text-xs font-semibold text-rose-700 shadow-sm ring-1 ring-neutral-200 hover:ring-rose-200">
                       Sale
                     </Link>
-                    <Link href="/search" className="rounded-lg bg-white px-3 py-2 text-xs font-semibold text-neutral-700 shadow-sm ring-1 ring-neutral-200 hover:ring-violet-200">
-                      Discover
+                    <Link href="/search?mode=image" className="rounded-lg bg-white px-3 py-2 text-xs font-semibold text-neutral-700 shadow-sm ring-1 ring-neutral-200 hover:ring-violet-200">
+                      Image search
                     </Link>
                   </div>
                 </div>

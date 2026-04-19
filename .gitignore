@@ -1,4 +1,5 @@
 /node_modules
+/models
 /.venv
 .env
 .env.*
@@ -14,6 +15,7 @@ build/
 /data
 /dist
 /src/lib/model/data
+.reindex-progress.json
 /dist/
 # ML models are stored on HuggingFace: razangh/fashion-models
 # Run `pnpm models:download` (or `python scripts/download-models.py`) to restore them locally.
@@ -21,4 +23,7 @@ build/
 .reindex-progress.json
 
 
+*/node_modules/*
+.env
 
+.env.example
