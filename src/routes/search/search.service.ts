@@ -672,7 +672,7 @@ function extractLengthIntents(rawQuery: string, processedQuery: string): LengthI
     "dress", "dresses", "skirt", "skirts", "abaya", "abayas", "kaftan", "kaftans",
     "gown", "gowns", "jumpsuit", "romper", "tunic",
   ]);
-  const NON_LENGTH_NEIGHBORS = new Set(["sleeve", "sleeves", "shirt", "shirts", "tee", "tshirt", "t-shirt"]);
+  const NON_LENGTH_NEIGHBORS = new Set(["sleeve", "sleeves", "shirt", "shirts", "tee", "tshirt", "t-shirt", "shorts", "short"]);
 
   for (let i = 0; i < words.length; i++) {
     const w = words[i];
@@ -684,7 +684,7 @@ function extractLengthIntents(rawQuery: string, processedQuery: string): LengthI
     if (w === "maxi") out.add("maxi");
 
     if (w === "short") {
-      // "short sleeve shirt" is not garment-length intent.
+      // "short sleeve shirt" or "short shorts" is not garment-length intent.
       if (NON_LENGTH_NEIGHBORS.has(next) || NON_LENGTH_NEIGHBORS.has(prev)) continue;
       // Prefer length interpretation when attached to dress-like nouns.
       if (DRESSLIKE.has(next) || DRESSLIKE.has(prev) || !next) out.add("short");
