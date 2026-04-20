@@ -24,7 +24,7 @@ import { attrGenderFilterClause } from "./opensearchFilters";
  */
 export async function getAttributeFacets(filters: SearchFilters = {}): Promise<AttributeFacets> {
   // Build filter array based on current filters
-  const filter: any[] = [{ term: { is_hidden: false } }];
+  const filter: any[] = [{ bool: { must_not: [{ term: { is_hidden: true } }] } }];
 
   if (filters.category) filter.push({ term: { category: filters.category } });
   if (filters.brand) filter.push({ term: { brand: filters.brand } });

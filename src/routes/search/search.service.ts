@@ -901,7 +901,7 @@ export async function textSearch(
     const shouldClauses: any[] = [];
 
     // Always exclude hidden products from public search.
-    filterClauses.push({ term: { is_hidden: false } });
+    filterClauses.push({ bool: { must_not: [{ term: { is_hidden: true } }] } });
 
     // Primary text match — use corrected searchQuery against text fields
     if (ast.searchQuery) {

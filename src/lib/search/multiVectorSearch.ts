@@ -432,7 +432,7 @@ export class MultiVectorSearchEngine {
     const filterClauses: any[] = [];
 
     if (filters.excludeHidden !== false) {
-      filterClauses.push({ term: { is_hidden: false } });
+      filterClauses.push({ bool: { must_not: [{ term: { is_hidden: true } }] } });
     }
 
     if (filters.categories && filters.categories.length > 0) {

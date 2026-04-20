@@ -57,7 +57,7 @@ export async function searchProductsFilteredBrowse(params: {
   limit: number;
 }): Promise<any[]> {
   const { filters = {}, page, limit } = params;
-  const filter: any[] = [{ term: { is_hidden: false } }];
+  const filter: any[] = [{ bool: { must_not: [{ term: { is_hidden: true } }] } }];
   appendBrowseFilters(filter, filters as SearchFilters);
 
   const searchBody = {

@@ -504,7 +504,7 @@ export function buildSemanticOpenSearchQuery(
   const { entities, expandedTerms, semanticQuery, intent } = parsedQuery;
 
   // Base filter
-  const filter: any[] = [{ term: { is_hidden: false } }];
+  const filter: any[] = [{ bool: { must_not: [{ term: { is_hidden: true } }] } }];
 
   // Add entity filters
   if (entities.brands.length === 1) {
