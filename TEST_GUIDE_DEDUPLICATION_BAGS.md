@@ -3,7 +3,6 @@
 ## Overview
 
 This document demonstrates how the fixes address the two main issues:
-
 1. Deduplicating same-category detections (keeping highest confidence)
 2. Enabling bag search when initial results are empty
 
@@ -15,31 +14,20 @@ The user provided this response showing the problem:
 {
   "detection": {
     "items": [
-      { "label": "long sleeve top", "confidence": 0.9257 }, // Index 0
-      { "label": "skirt", "confidence": 0.9047 }, // Index 1
-      { "label": "bag, wallet", "confidence": 0.4609 }, // Index 2 ← LOWER CONFIDENCE
-      { "label": "shoe", "confidence": 0.2663 }, // Index 3 ← LOWER CONFIDENCE
-      { "label": "bag, wallet", "confidence": 0.7833 }, // Index 4 ← HIGHER CONFIDENCE (this one was also searched)
-      { "label": "shoe", "confidence": 0.9293 } // Index 5 ← HIGHER CONFIDENCE
+      { "label": "long sleeve top", "confidence": 0.9257 },    // Index 0
+      { "label": "skirt", "confidence": 0.9047 },              // Index 1
+      { "label": "bag, wallet", "confidence": 0.4609 },        // Index 2 ← LOWER CONFIDENCE
+      { "label": "shoe", "confidence": 0.2663 },               // Index 3 ← LOWER CONFIDENCE
+      { "label": "bag, wallet", "confidence": 0.7833 },        // Index 4 ← HIGHER CONFIDENCE (this one was also searched)
+      { "label": "shoe", "confidence": 0.9293 }                // Index 5 ← HIGHER CONFIDENCE
     ]
   },
   "similarProducts": {
     "byDetection": [
       { "detection": { "label": "skirt", "confidence": 0.9047 }, "count": 1 },
-      {
-        "detection": { "label": "long sleeve top", "confidence": 0.9257 },
-        "count": 1
-      },
-      {
-        "detection": { "label": "bag, wallet", "confidence": 0.7833 },
-        "products": [],
-        "count": 0
-      }, // NO RESULTS
-      {
-        "detection": { "label": "bag, wallet", "confidence": 0.4609 },
-        "products": [],
-        "count": 0
-      } // NO RESULTS (shouldn't be searched)
+      { "detection": { "label": "long sleeve top", "confidence": 0.9257 }, "count": 1 },
+      { "detection": { "label": "bag, wallet", "confidence": 0.7833 }, "products": [], "count": 0 },  // NO RESULTS
+      { "detection": { "label": "bag, wallet", "confidence": 0.4609 }, "products": [], "count": 0 },  // NO RESULTS (shouldn't be searched)
       // ... other detections
     ]
   }
@@ -113,20 +101,20 @@ FINAL RESULTS:
 
 ### 1. Deduplication Benefits
 
-| Metric              | Before    | After   |
-| ------------------- | --------- | ------- |
-| Detections searched | 6         | 4       |
-| Redundant searches  | 2         | 0       |
-| Processing time     | ~100-120s | ~50-60s |
-| Duplicate results   | Yes       | No      |
+| Metric | Before | After |
+|--------|--------|-------|
+| Detections searched | 6 | 4 |
+| Redundant searches | 2 | 0 |
+| Processing time | ~100-120s | ~50-60s |
+| Duplicate results | Yes | No |
 
 ### 2. Bag Recovery Benefits
 
-| Aspect                 | Before           | After                                    |
-| ---------------------- | ---------------- | ---------------------------------------- |
-| Bag search results     | 0                | 2-3                                      |
-| Recovery fallback      | None             | Full-image embedding + relaxed threshold |
-| Shop-the-look coverage | 50% (5/10 items) | 90% (9/10 items)                         |
+| Aspect | Before | After |
+|--------|--------|-------|
+| Bag search results | 0 | 2-3 |
+| Recovery fallback | None | Full-image embedding + relaxed threshold |
+| Shop-the-look coverage | 50% (5/10 items) | 90% (9/10 items) |
 
 ## Implementation Details
 
@@ -135,9 +123,9 @@ FINAL RESULTS:
 ```typescript
 // Groups detections by category, keeps highest confidence
 dedupeDetectionsByCategoryHighestConfidence(detections: Detection[]): Detection[] {
-
+  
   // Example with provided data:
-
+  
   Input detections:
   [
     { label: "bag, wallet", confidence: 0.4609 },
@@ -146,15 +134,15 @@ dedupeDetectionsByCategoryHighestConfidence(detections: Detection[]): Detection[
     { label: "shoe", confidence: 0.9293 },
     ...
   ]
-
+  
   // Group by category:
   bags: [0.4609, 0.7833]
   footwear: [0.2663, 0.9293]
-
+  
   // Keep highest per category:
   bags: 0.7833 (max)
   footwear: 0.9293 (max)
-
+  
   Output: [0.7833 bag, 0.9293 shoe, ...]
 }
 ```
@@ -164,11 +152,11 @@ dedupeDetectionsByCategoryHighestConfidence(detections: Detection[]): Detection[
 ```typescript
 if (categoryMapping.productCategory === "bags" && similarResult.results.length === 0) {
   console.log("[recovery-attempt] bag search failed, trying recovery");
-
+  
   // Prepare relaxed search parameters
   const bagFilters = { category: ["bag", "bags", "wallet", ...] };
   const relaxedThreshold = 0.63 * 0.75; // ~0.47
-
+  
   // Try with full-image embedding (wider visual range)
   const recovery = await searchWithSimilarity({
     imageEmbedding: finalEmbedding,  // Full-frame instead of crop
@@ -176,7 +164,7 @@ if (categoryMapping.productCategory === "bags" && similarResult.results.length =
     forceHardCategoryFilter: true,
     relaxThresholdWhenEmpty: true,
   });
-
+  
   if (recovery.results.length > 0) {
     console.log(`[recovery-result] recovered ${recovery.results.length} bags`);
   }
@@ -304,13 +292,11 @@ Savings: ~72s per image (33% faster)
 ### Bags still returning 0 results?
 
 1. **Check logs for recovery attempts:**
-
    ```
    grep "recovery-attempt.*bag" logs.txt
    ```
 
 2. **Verify bag inventory in database:**
-
    ```sql
    SELECT COUNT(*) FROM products WHERE category IN ('bag', 'bags', 'wallet', ...);
    ```
@@ -323,7 +309,6 @@ Savings: ~72s per image (33% faster)
 ### Deduplication not working?
 
 1. **Verify category mapping:**
-
    ```bash
    # Check logs for category mapping
    grep "mapDetectionToCategory" logs.txt
