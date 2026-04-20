@@ -727,6 +727,62 @@ function imageSearchKnnPoolLimit(): number {
   return Math.max(200, cap);
 }
 
+function isDressLikeDetectionCategory(category?: string): boolean {
+  const c = String(category ?? "").toLowerCase().trim();
+  if (!c) return false;
+  return c === "dresses" || c === "dress" || c === "gowns" || c === "gown";
+}
+
+function imageCategoryAwareKnnPoolLimit(detectionProductCategory?: string): number {
+  const base = imageSearchKnnPoolLimit();
+  if (!isDressLikeDetectionCategory(detectionProductCategory)) return base;
+
+  // One-piece garments need a wider recall pool because strict type/length/color gates
+  // can remove many candidates before final ranking.
+  const dressCapEnv = Number(process.env.SEARCH_IMAGE_DRESS_MERCH_CANDIDATE_CAP);
+  const widenedDefault = Math.min(1600, Math.max(base, Math.floor(base * 1.35)));
+  if (Number.isFinite(dressCapEnv) && dressCapEnv >= 200) {
+    return Math.max(200, Math.min(1600, Math.floor(dressCapEnv)));
+  }
+  return widenedDefault;
+}
+
+function imageCategoryAwareMinResultsPolicy(params: {
+  detectionProductCategory?: string;
+  baseTarget: number;
+  baseDelta: number;
+  baseMinFraction: number;
+}): {
+  target: number;
+  delta: number;
+  minFraction: number;
+} {
+  const { detectionProductCategory, baseTarget, baseDelta, baseMinFraction } = params;
+  if (!isDressLikeDetectionCategory(detectionProductCategory)) {
+    return {
+      target: baseTarget,
+      delta: baseDelta,
+      minFraction: baseMinFraction,
+    };
+  }
+
+  const targetEnv = Number(process.env.SEARCH_IMAGE_DRESS_MIN_RESULTS);
+  const deltaEnv = Number(process.env.SEARCH_IMAGE_DRESS_RELEVANCE_RELAX_DELTA);
+  const minFractionEnv = Number(process.env.SEARCH_IMAGE_DRESS_RELEVANCE_RELAX_MIN_FRACTION);
+
+  const target = Number.isFinite(targetEnv)
+    ? Math.max(0, Math.min(80, Math.floor(targetEnv)))
+    : Math.max(baseTarget, 8);
+  const delta = Number.isFinite(deltaEnv)
+    ? Math.max(0.02, Math.min(0.18, deltaEnv))
+    : Math.min(Math.max(baseDelta, 0.04), 0.06);
+  const minFraction = Number.isFinite(minFractionEnv)
+    ? Math.max(0.72, Math.min(0.96, minFractionEnv))
+    : Math.max(baseMinFraction, 0.86);
+
+  return { target, delta, minFraction };
+}
+
 /** OpenSearch kNN field for image search: `embedding` (full-frame CLIP) or `embedding_garment` (garment-focused). */
 function resolveImageSearchKnnField(explicit?: string): "embedding" | "embedding_garment" {
   const fromCaller = explicit != null ? String(explicit).trim().toLowerCase() : "";
@@ -2860,7 +2916,7 @@ export async function searchByImageWithSimilarity(
   }
 
   /** kNN size — wider when SEARCH_IMAGE_MERCHANDISE_SIMILARITY is on (see imageSearchKnnPoolLimit). */
-  const retrievalK = imageSearchKnnPoolLimit();
+  const retrievalK = imageCategoryAwareKnnPoolLimit(params.detectionProductCategory);
 
   let colorQueryEmbedding: number[] | null = null;
   let textureQueryEmbedding: number[] | null = null;
@@ -3101,6 +3157,36 @@ export async function searchByImageWithSimilarity(
     };
 
     hits = await opensearchImageKnnHits(knnBody, knnTimeoutMs);
+
+    // Guard against over-sparse garment embeddings in some categories (notably footwear)
+    // under strict filters: retry once on global embedding with identical filters.
+    if (knnFieldResolved === "embedding_garment" && (!Array.isArray(hits) || hits.length === 0)) {
+      if (breakdownDebug) {
+        console.warn(
+          "[image-knn] embedding_garment returned no hits; retrying with embedding field",
+        );
+      }
+      knnFieldResolved = "embedding";
+      queryVector = imageEmbedding;
+      const knnBodyEmbeddingFallback = {
+        size: retrievalK,
+        _source: [
+          ...baseImageKnnSourceFields,
+          ...(imageExactCosineRerankEnabled() ? [knnFieldResolved] : []),
+        ],
+        query: {
+          bool: {
+            must: {
+              knn: {
+                [knnFieldResolved]: knnQueryInner(queryVector, retrievalK, ef),
+              },
+            },
+            filter,
+          },
+        },
+      };
+      hits = await opensearchImageKnnHits(knnBodyEmbeddingFallback, knnTimeoutMs);
+    }
 
     if (imageExactCosineRerankEnabled() && Array.isArray(hits)) {
       for (const hit of hits) {
@@ -4582,8 +4668,9 @@ export async function searchByImageWithSimilarity(
         }
         if (hasInferredColorIntentForRescue && colorComp < 0.16) return false;
         if (hasExplicitStyleIntent && styleComp < rescueStyleMinIntent) return false;
-        if (params.detectionProductCategory === "tops" && (hasExplicitStyleIntent || hasSoftStyleHint) && styleComp < topsStyleMinIntent) return false;
-        if (params.detectionProductCategory === "tops" && (hasExplicitStyleIntent || hasSoftStyleHint)) {
+        // Soft inferred style for tops is often noisy; only hard-gate on explicit style intent.
+        if (params.detectionProductCategory === "tops" && hasExplicitStyleIntent && styleComp < topsStyleMinIntent) return false;
+        if (params.detectionProductCategory === "tops" && hasExplicitStyleIntent) {
           const topsStyleMaterialBlend = 0.72 * styleComp + 0.28 * materialSim;
           if (topsStyleMaterialBlend < 0.24 && visualSim < 0.95) return false;
         }
@@ -4657,14 +4744,20 @@ export async function searchByImageWithSimilarity(
   }
 
   let relevanceRelaxedForMinCount = false;
-  const imageMinResultsTarget = config.search.imageSearchMinResults;
-  const relevanceRelaxDelta = config.search.imageSearchRelevanceRelaxDelta;
+  const minResultsPolicy = imageCategoryAwareMinResultsPolicy({
+    detectionProductCategory: params.detectionProductCategory,
+    baseTarget: config.search.imageSearchMinResults,
+    baseDelta: config.search.imageSearchRelevanceRelaxDelta,
+    baseMinFraction: config.search.imageSearchRelevanceRelaxMinFraction,
+  });
+  const imageMinResultsTarget = minResultsPolicy.target;
+  const relevanceRelaxDelta = minResultsPolicy.delta;
   if (
     imageMinResultsTarget > 0 &&
     rankedHits.length < imageMinResultsTarget &&
     visualGatedHits.length > rankedHits.length
   ) {
-    const relaxFloorFrac = config.search.imageSearchRelevanceRelaxMinFraction;
+    const relaxFloorFrac = minResultsPolicy.minFraction;
     const relaxedMin = Math.max(
       finalAcceptMin * relaxFloorFrac,
       finalAcceptMin - relevanceRelaxDelta,
@@ -4728,10 +4821,16 @@ export async function searchByImageWithSimilarity(
             : category === "bottoms" || category === "outerwear"
               ? 0.24
               : 0.22;
+      const hasStrongDetectionScopedColor =
+        preferredInferredColorConfidence >= 0.82 &&
+        (category === "tops" || category === "bottoms" || category === "dresses" || category === "outerwear");
+      const effectiveMinInferredColorCompliance = hasStrongDetectionScopedColor
+        ? Math.min(0.4, minInferredColorCompliance + 0.08)
+        : minInferredColorCompliance;
       const inferredColorCompliantHits = rankedHits.filter(
         (h: any) =>
           (complianceById.get(String(h._source.product_id))?.colorCompliance ?? 0) >=
-          minInferredColorCompliance,
+          effectiveMinInferredColorCompliance,
       );
       const minKeep =
         rankedHits.length >= 12
@@ -4743,6 +4842,8 @@ export async function searchByImageWithSimilarity(
         category === "footwear" ||
         category === "shoes";
       if (inferredColorCompliantHits.length > 0 && enforceInferredColorStrictly) {
+        rankedHits = inferredColorCompliantHits;
+      } else if (hasStrongDetectionScopedColor && inferredColorCompliantHits.length > 0) {
         rankedHits = inferredColorCompliantHits;
       } else if (inferredColorCompliantHits.length >= minKeep) {
         rankedHits = inferredColorCompliantHits;
@@ -5279,7 +5380,26 @@ export async function searchByImageWithSimilarity(
 
   if (results.length === 0 && resultsBeforeFinalRelevanceFilter.length > 0) {
     imageSearchPipelineDegraded = true;
-    results = resultsBeforeFinalRelevanceFilter
+    const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+    const topFocusedFallback = detectionCategoryNorm === "tops"
+      ? resultsBeforeFinalRelevanceFilter.filter((p: any) => {
+          const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+          const ex = (p.explain ?? {}) as any;
+          const typeComp = Number(ex.productTypeCompliance ?? 0);
+          const exactType = Number(ex.exactTypeScore ?? 0);
+          const crossFamily = Number(ex.crossFamilyPenalty ?? 0);
+          const styleComp = Number(ex.styleCompliance ?? 0);
+          const sleeveComp = Number(ex.sleeveCompliance ?? 0);
+
+          if (crossFamily >= 0.5) return false;
+          if (exactType >= 1) return true;
+          if (typeComp >= 0.5 && sim >= 0.62) return true;
+          if (typeComp >= 0.36 && sim >= 0.7 && (styleComp >= 0.12 || sleeveComp >= 0.12)) return true;
+          return sim >= 0.9 && typeComp >= 0.28;
+        })
+      : resultsBeforeFinalRelevanceFilter;
+    const fallbackPool = topFocusedFallback.length > 0 ? topFocusedFallback : resultsBeforeFinalRelevanceFilter;
+    results = fallbackPool
       .map((p: any) => {
         const currentRel = typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : 0;
         const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
@@ -5320,7 +5440,8 @@ export async function searchByImageWithSimilarity(
           return false;
         }
       }
-      if (params.detectionProductCategory === "tops" && (hasExplicitStyleIntent || hasSoftStyleHint) && styleComp < 0.2 && sim < 0.96) return false;
+      // Keep tops robust when style is inferred (soft); hard-gate only on explicit style intent.
+      if (params.detectionProductCategory === "tops" && hasExplicitStyleIntent && styleComp < 0.2 && sim < 0.96) return false;
       if (crossFamily >= 0.5) return false;
       if (isDressDetection) {
         const dressVisualOverrideMin = (() => {
