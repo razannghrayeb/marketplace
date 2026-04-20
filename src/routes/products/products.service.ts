@@ -2688,12 +2688,6 @@ function categoryFilterTermsWithAliases(input: string | string[]): string[] {
     const source = String(item ?? "").toLowerCase().trim();
     if (!source) continue;
     out.add(source);
-    // Expand alias families so detection-scoped hard terms (e.g. "sneaker")
-    // still match catalogs indexed with canonical buckets (e.g. "footwear").
-    for (const alias of getCategorySearchTerms(source)) {
-      const aliasNorm = String(alias ?? "").toLowerCase().trim();
-      if (aliasNorm) out.add(aliasNorm);
-    }
     const normalized = normalizeImageCategoryIntent(source);
     if (normalized) out.add(normalized);
     if (normalized && normalized !== source && normalized === "dresses") {

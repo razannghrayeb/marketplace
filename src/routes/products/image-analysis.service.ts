@@ -150,6 +150,14 @@ function shopLookRelaxEnv(): boolean {
   return v === "1" || v === "true";
 }
 
+/** Detection-scoped searches are recall-first; default to relaxed visual-threshold rescue when empty. */
+function shopLookDetectionRelaxEnv(): boolean {
+  const raw = process.env.SEARCH_IMAGE_DETECTION_RELAX;
+  if (raw === undefined || String(raw).trim() === "") return true;
+  const v = String(raw).toLowerCase();
+  return v === "1" || v === "true";
+}
+
 /** When true: if category-filtered search returns nothing, retry without category (default off — can look irrelevant). */
 function shopLookCategoryFallbackEnv(): boolean {
   const v = String(process.env.SEARCH_IMAGE_SHOP_CATEGORY_FALLBACK ?? "").toLowerCase();
@@ -234,6 +242,13 @@ function shopLookRetrievalCap(): number {
   return Math.max(80, Math.min(500, Math.floor(raw)));
 }
 
+/** Smaller retrieval cap for non-initial retry/fallback calls (default 36) to bound tail latency. */
+function shopLookRetryRetrievalCap(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_RETRY_RETRIEVAL_CAP ?? "36");
+  if (!Number.isFinite(raw)) return 36;
+  return Math.max(12, Math.min(160, Math.floor(raw)));
+}
+
 function resolveShopLookRetrievalLimit(explicit?: number): number {
   const cap = shopLookRetrievalCap();
   if (typeof explicit === "number" && Number.isFinite(explicit) && explicit >= 1) {
@@ -286,6 +301,12 @@ function shopLookTopRecoverySimilarityThreshold(baseThreshold: number): number {
   return Math.max(0.35, Math.min(baseThreshold, Math.min(0.9, floor)));
 }
 
+/** Expensive multi-crop fallback toggle. Default off to minimize latency tails. */
+function shopLookLowQualityMultiCropFallbackEnabled(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_SHOP_LOW_QUALITY_MULTICROP_FALLBACK ?? "").toLowerCase();
+  return v === "1" || v === "true";
+}
+
 function shopLookTopRecoveryMinKeep(limitPerItem: number): number {
   const env = Number(process.env.SEARCH_IMAGE_SHOP_TOP_RECOVERY_MIN_KEEP);
   if (Number.isFinite(env)) {
@@ -298,6 +319,13 @@ function shopLookTopRecoveryMinKeep(limitPerItem: number): number {
 function shopLookTinyFootwearRecoveryThreshold(baseThreshold: number): number {
   const raw = Number(process.env.SEARCH_IMAGE_SHOP_TINY_FOOTWEAR_MIN_SIM ?? "0.55");
   const floor = Number.isFinite(raw) ? raw : 0.55;
+  return Math.max(0.35, Math.min(baseThreshold, Math.min(0.9, floor)));
+}
+
+function shopLookFootwearRecoveryThreshold(baseThreshold: number, areaRatio: number): number {
+  if (areaRatio <= 0.02) return shopLookTinyFootwearRecoveryThreshold(baseThreshold);
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_FOOTWEAR_RECOVERY_MIN_SIM ?? "0.52");
+  const floor = Number.isFinite(raw) ? raw : 0.52;
   return Math.max(0.35, Math.min(baseThreshold, Math.min(0.9, floor)));
 }
 
@@ -1021,6 +1049,20 @@ function shopLookPerDetectionConcurrency(): number {
   const allowSerial = String(process.env.SEARCH_IMAGE_SHOP_ALLOW_SERIAL_DETECTION ?? "").toLowerCase() === "1";
   const minConcurrency = allowSerial ? 1 : 2;
   return Math.min(16, Math.max(minConcurrency, n));
+}
+
+/** Max search calls per detection (initial + retries/fallbacks). Default 3 to bound tail latency. */
+function shopLookMaxSearchCallsPerDetection(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_MAX_SEARCH_CALLS ?? "2");
+  if (!Number.isFinite(raw)) return 2;
+  return Math.max(1, Math.min(8, Math.floor(raw)));
+}
+
+/** Hard wall-clock budget per detection task in ms (default 25000) to prevent long stragglers. */
+function shopLookMaxDetectionTaskMs(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_MAX_DETECTION_TASK_MS ?? "25000");
+  if (!Number.isFinite(raw)) return 25000;
+  return Math.max(5000, Math.min(120000, Math.floor(raw)));
 }
 
 /**
@@ -3082,16 +3124,6 @@ export interface ImageSimilarityStageTimings {
   detectionSearchTotalMaxMs?: number;
   detectionSearchCallsAvg?: number;
   detectionSearchCallsMax?: number;
-  detectionSearchInnerTotalAvgMs?: number;
-  detectionSearchInnerTotalMaxMs?: number;
-  detectionSearchOpenSearchAvgMs?: number;
-  detectionSearchOpenSearchMaxMs?: number;
-  detectionSearchAttributeAvgMs?: number;
-  detectionSearchAttributeMaxMs?: number;
-  detectionSearchRerankAvgMs?: number;
-  detectionSearchRerankMaxMs?: number;
-  detectionSearchPostGateAvgMs?: number;
-  detectionSearchPostGateMaxMs?: number;
   postProcessingMs?: number;
 }
 
@@ -3736,6 +3768,10 @@ export class ImageAnalysisService {
       Math.max(resolvedLimitPerItem, resolvedResultsPage * resolvedResultsPageSize) *
         shopLookRecallMultiplier(),
     );
+    const retryRetrievalLimit = Math.max(
+      resolvedResultsPageSize,
+      Math.min(retrievalLimit, shopLookRetryRetrievalCap()),
+    );
 
     // Get image dimensions first
     const metadata = await sharp(buffer).metadata();
@@ -4070,12 +4106,10 @@ export class ImageAnalysisService {
     const detectionSearchFirstDurations: number[] = [];
     const detectionSearchTotalDurations: number[] = [];
     const detectionSearchCallCounts: number[] = [];
-    const detectionSearchInnerTotalDurations: number[] = [];
-    const detectionSearchOpenSearchDurations: number[] = [];
-    const detectionSearchAttributeDurations: number[] = [];
-    const detectionSearchRerankDurations: number[] = [];
-    const detectionSearchPostGateDurations: number[] = [];
     const detectionTaskDurations: number[] = [];
+    const maxSearchCallsPerDetection = shopLookMaxSearchCallsPerDetection();
+    const maxDetectionTaskMs = shopLookMaxDetectionTaskMs();
+    const hotPathDebug = String(process.env.SEARCH_DEBUG ?? "") === "1";
     const detectionTaskWallStartedAt = Date.now();
     if (process.env.NODE_ENV !== "production" || String(process.env.SEARCH_DEBUG ?? "") === "1") {
       console.info("[image-search][detection-runtime]", {
@@ -4092,49 +4126,65 @@ export class ImageAnalysisService {
       const detectionTaskStartedAt = Date.now();
       let detectionSearchTotalMs = 0;
       let detectionSearchCalls = 0;
+      let lastSearchResult: Awaited<ReturnType<typeof searchByImageWithSimilarity>> | null = null;
       try {
       const runDetectionSearch = async (
         reason: string,
         payload: Parameters<typeof searchByImageWithSimilarity>[0],
       ) => {
+        const elapsedTaskMs = Date.now() - detectionTaskStartedAt;
+        if (elapsedTaskMs >= maxDetectionTaskMs) {
+          if (hotPathDebug) {
+            console.warn(
+              `[detection-search-time-budget] label="${detection.label}" reason="${reason}" task_ms=${elapsedTaskMs} max_ms=${maxDetectionTaskMs}`,
+            );
+          }
+          return (
+            lastSearchResult ??
+            ({ results: [], meta: { total_results: 0, threshold: similarityThreshold } } as Awaited<
+              ReturnType<typeof searchByImageWithSimilarity>
+            >)
+          );
+        }
+        if (detectionSearchCalls >= maxSearchCallsPerDetection) {
+          if (hotPathDebug) {
+            console.warn(
+              `[detection-search-call-skipped] label="${detection.label}" reason="${reason}" max_calls=${maxSearchCallsPerDetection}`,
+            );
+          }
+          return (
+            lastSearchResult ??
+            ({ results: [], meta: { total_results: 0, threshold: similarityThreshold } } as Awaited<
+              ReturnType<typeof searchByImageWithSimilarity>
+            >)
+          );
+        }
+        const payloadForCall =
+          reason === "initial"
+            ? payload
+            : {
+                ...payload,
+                limit: Math.max(1, Math.min(Number(payload.limit ?? retryRetrievalLimit), retryRetrievalLimit)),
+              };
         const startedAt = Date.now();
-        const result = await searchByImageWithSimilarity(payload);
+        const result = await searchByImageWithSimilarity(payloadForCall);
         const elapsedMs = Date.now() - startedAt;
         detectionSearchTotalMs += elapsedMs;
         detectionSearchCalls += 1;
-        console.info(
-          `[detection-search-call] label="${detection.label}" reason="${reason}" ms=${elapsedMs} calls=${detectionSearchCalls}`,
-        );
-
-        const timingMeta = (result as any)?.meta?.timing;
-        if (timingMeta && typeof timingMeta === "object") {
-          const innerTotalMs = Number((timingMeta as any).totalMs);
-          if (Number.isFinite(innerTotalMs) && innerTotalMs >= 0) {
-            detectionSearchInnerTotalDurations.push(innerTotalMs);
-          }
-          const openSearchMs = Number((timingMeta as any).openSearchMs);
-          if (Number.isFinite(openSearchMs) && openSearchMs >= 0) {
-            detectionSearchOpenSearchDurations.push(openSearchMs);
-          }
-          const attributeMs = Number((timingMeta as any).attributeMs);
-          if (Number.isFinite(attributeMs) && attributeMs >= 0) {
-            detectionSearchAttributeDurations.push(attributeMs);
-          }
-          const rerankMs = Number((timingMeta as any).rerankMs);
-          if (Number.isFinite(rerankMs) && rerankMs >= 0) {
-            detectionSearchRerankDurations.push(rerankMs);
-          }
-          const postGateMs = Number((timingMeta as any).postGateMs);
-          if (Number.isFinite(postGateMs) && postGateMs >= 0) {
-            detectionSearchPostGateDurations.push(postGateMs);
-          }
+        lastSearchResult = result;
+        if (hotPathDebug) {
+          console.info(
+            `[detection-search-call] label="${detection.label}" reason="${reason}" ms=${elapsedMs} calls=${detectionSearchCalls}`,
+          );
         }
         return result;
       };
       // Refine generic "shoe" label using BLIP caption for footwear subtype specificity.
       const rawLabel = detection.label;
       let label = inferFootwearSubtypeFromCaption(rawLabel, blipCaption);
-      console.log(`[detection-trace] started label="${label}"${label !== rawLabel ? ` (refined from "${rawLabel}")` : ""} conf=${(detection.confidence ?? 0).toFixed(3)} area=${(detection.area_ratio ?? 0).toFixed(3)}`);
+      if (hotPathDebug) {
+        console.log(`[detection-trace] started label="${label}"${label !== rawLabel ? ` (refined from "${rawLabel}")` : ""} conf=${(detection.confidence ?? 0).toFixed(3)} area=${(detection.area_ratio ?? 0).toFixed(3)}`);
+      }
       
       let clipBuffer: Buffer;
       let finalEmbedding: number[];
@@ -4595,9 +4645,11 @@ export class ImageAnalysisService {
         if (refinedFootwearLabel !== label) {
           const previousLabel = label;
           label = refinedFootwearLabel;
-          console.log(
-            `[detection-trace] footwear subtype refined from "${previousLabel}" to "${label}" via detection caption`,
-          );
+          if (hotPathDebug) {
+            console.log(
+              `[detection-trace] footwear subtype refined from "${previousLabel}" to "${label}" via detection caption`,
+            );
+          }
 
           softProductTypeHints = tightenTypeSeedsForDetection(
             label,
@@ -4661,6 +4713,8 @@ export class ImageAnalysisService {
         return inferredPrimaryColor;
       })();
 
+      const detectionRelaxThreshold = shopLookDetectionRelaxEnv();
+
       const searchFirstStartedAt = Date.now();
       let similarResult = await runDetectionSearch("initial", {
         imageEmbedding: finalEmbedding,
@@ -4680,7 +4734,7 @@ export class ImageAnalysisService {
         predictedCategoryAisles,
         knnField: knnFieldUsed,
         forceHardCategoryFilter: forceHardCategoryFilterUsed,
-        relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+        relaxThresholdWhenEmpty: detectionRelaxThreshold,
         blipSignal: detectionBlipSignal,
         inferredPrimaryColor: inferredPrimaryColorForDetection,
         inferredColorKey: itemColorKey,
@@ -4732,7 +4786,7 @@ export class ImageAnalysisService {
           predictedCategoryAisles,
           knnField: knnFieldUsed,
           forceHardCategoryFilter: forceHardCategoryFilterUsed,
-          relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          relaxThresholdWhenEmpty: detectionRelaxThreshold,
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor: inferredPrimaryColorForDetection,
           inferredColorKey: itemColorKey,
@@ -4771,7 +4825,7 @@ export class ImageAnalysisService {
           predictedCategoryAisles,
           knnField: knnFieldUsed,
           forceHardCategoryFilter: forceHardCategoryFilterUsed,
-          relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          relaxThresholdWhenEmpty: detectionRelaxThreshold,
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor: inferredPrimaryColorForDetection,
           inferredColorKey: itemColorKey,
@@ -4812,68 +4866,7 @@ export class ImageAnalysisService {
           predictedCategoryAisles,
           knnField: knnFieldUsed,
           forceHardCategoryFilter: forceHardCategoryFilterUsed,
-          relaxThresholdWhenEmpty: shopLookRelaxEnv(),
-          blipSignal: detectionBlipSignal,
-          inferredPrimaryColor: inferredPrimaryColorForDetection,
-          inferredColorKey: itemColorKey,
-          inferredColorsByItem,
-          inferredColorsByItemConfidence,
-          debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
-          sessionId: options.sessionId,
-          userId: options.userId,
-          sessionFilters: options.sessionFilters ?? undefined,
-        });
-      }
-
-      // Retrieval-level zero-hit rescue: keep canonical category hard, but relax
-      // brittle metadata filters that can zero OpenSearch kNN before reranking.
-      if (
-        similarResult.results.length === 0 &&
-        filterByDetectedCategory
-      ) {
-        const retrievalRescueFilters = { ...filters } as any;
-        const canonicalCategory = String(categoryMapping.productCategory || "").toLowerCase().trim();
-        if (canonicalCategory) {
-          retrievalRescueFilters.category = canonicalCategory;
-        }
-
-        // Keep kNN recall-first: drop secondary constraints that frequently cause
-        // sparse-catalog false negatives in detection-scoped retrieval.
-        delete retrievalRescueFilters.productTypes;
-        delete retrievalRescueFilters.style;
-        delete retrievalRescueFilters.softStyle;
-        delete retrievalRescueFilters.length;
-        delete retrievalRescueFilters.sleeve;
-        delete retrievalRescueFilters.material;
-        delete retrievalRescueFilters.cropDominantColors;
-
-        // For accessory-like detections, audience metadata is often noisy/sparse.
-        if (isAccessoryLikeCategory(canonicalCategory) || canonicalCategory === "footwear") {
-          delete retrievalRescueFilters.gender;
-          delete retrievalRescueFilters.ageGroup;
-        } else if (!strictAudienceLock) {
-          delete retrievalRescueFilters.ageGroup;
-        }
-
-        similarResult = await runDetectionSearch("retry_knn_canonical_category", {
-          imageEmbedding: finalEmbedding,
-          imageEmbeddingGarment:
-            Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
-              ? finalGarmentEmbedding
-              : undefined,
-          imageBuffer: clipBuffer,
-          pHash: sourceImagePHash,
-          detectionYoloConfidence: detection.confidence,
-          detectionProductCategory: categoryMapping.productCategory,
-          filters: retrievalRescueFilters,
-          softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
-          limit: retrievalLimit,
-          similarityThreshold,
-          includeRelated: false,
-          predictedCategoryAisles: undefined,
-          knnField: knnFieldUsed,
-          forceHardCategoryFilter: true,
-          relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          relaxThresholdWhenEmpty: detectionRelaxThreshold,
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor: inferredPrimaryColorForDetection,
           inferredColorKey: itemColorKey,
@@ -4939,7 +4932,7 @@ export class ImageAnalysisService {
           predictedCategoryAisles: preserveHardCategoryInFallback ? undefined : predictedCategoryAisles,
           knnField: shopTheLookKnnField(),
           forceHardCategoryFilter: preserveHardCategoryInFallback,
-          relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          relaxThresholdWhenEmpty: detectionRelaxThreshold,
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor: inferredPrimaryColorForDetection,
           inferredColorKey: itemColorKey,
@@ -4984,7 +4977,7 @@ export class ImageAnalysisService {
             includeRelated: false,
             knnField: shopTheLookKnnField(),
             forceHardCategoryFilter: preserveHardCategoryInFallback,
-            relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+            relaxThresholdWhenEmpty: detectionRelaxThreshold,
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor: inferredPrimaryColorForDetection,
             inferredColorKey: itemColorKey,
@@ -4999,8 +4992,10 @@ export class ImageAnalysisService {
       }
 
       const lowQualityFallbackWanted =
+        shopLookLowQualityMultiCropFallbackEnabled() &&
+        detectionSearchCalls < maxSearchCallsPerDetection &&
         shouldUseLowQualityMultiCropFallback(detection) &&
-        similarResult.results.length < Math.max(3, Math.floor(retrievalLimit * 0.35));
+        similarResult.results.length === 0;
       if (lowQualityFallbackWanted) {
         const expandedRaw = expandDetectionBox(detection.box, imageWidth, imageHeight, 0.22);
         let expandedBox = expandedRaw;
@@ -5023,8 +5018,9 @@ export class ImageAnalysisService {
         const altVectors = [expandedEmb, centerEmb].filter(
           (v): v is number[] => Array.isArray(v) && v.length > 0,
         );
+        const remainingSearchBudget = Math.max(0, maxSearchCallsPerDetection - detectionSearchCalls);
         const altResults = await Promise.all(
-          altVectors.map((alt, idx) =>
+          altVectors.slice(0, remainingSearchBudget).map((alt, idx) =>
             runDetectionSearch(`fallback_multicrop_${idx + 1}`, {
               imageEmbedding: alt,
               imageEmbeddingGarment: alt,
@@ -5040,7 +5036,7 @@ export class ImageAnalysisService {
               predictedCategoryAisles,
               knnField: knnFieldUsed,
               forceHardCategoryFilter: forceHardCategoryFilterUsed,
-              relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+              relaxThresholdWhenEmpty: detectionRelaxThreshold,
               blipSignal: detectionBlipSignal,
               inferredPrimaryColor: inferredPrimaryColorForDetection,
               inferredColorKey: itemColorKey,
@@ -5066,7 +5062,9 @@ export class ImageAnalysisService {
         }
       }
 
-      console.log(`[skip-trace] detection="${label}" after_knn_search=${similarResult.results.length}`);
+      if (hotPathDebug) {
+        console.log(`[skip-trace] detection="${label}" after_knn_search=${similarResult.results.length}`);
+      }
 
       const precisionSafeResults = applyShopLookVisualPrecisionGuard(
         similarResult.results,
@@ -5076,7 +5074,9 @@ export class ImageAnalysisService {
         categoryMapping.productCategory,
       );
       
-      console.log(`[skip-trace] detection="${label}" after_precision_guard=${precisionSafeResults.length} (filtered_by=${similarResult.results.length - precisionSafeResults.length})`);
+      if (hotPathDebug) {
+        console.log(`[skip-trace] detection="${label}" after_precision_guard=${precisionSafeResults.length} (filtered_by=${similarResult.results.length - precisionSafeResults.length})`);
+      }
 
       const categorySafeResults = applyDetectionCategoryGuard(
         precisionSafeResults,
@@ -5091,11 +5091,13 @@ export class ImageAnalysisService {
         categoryMapping,
       });
       
-      console.log(`[skip-trace] detection="${label}" after_category_guard=${categorySafeResults.length} (filtered_by=${precisionSafeResults.length - categorySafeResults.length})`);
+      if (hotPathDebug) {
+        console.log(`[skip-trace] detection="${label}" after_category_guard=${categorySafeResults.length} (filtered_by=${precisionSafeResults.length - categorySafeResults.length})`);
+      }
       
       // Apply formality filter if formal wear was detected from BLIP caption
       const minFormality = (filters as any).minFormality;
-      if (minFormality) {
+      if (minFormality && hotPathDebug) {
         console.log(`[formality-apply-main] detection="${detection.label}" minFormality=${minFormality} incoming=${sleeveSafeResults.length}`);
       }
       const formalitySafeResults = applyFormalityFilter(sleeveSafeResults, minFormality);
@@ -5108,11 +5110,13 @@ export class ImageAnalysisService {
         minFormality,
       });
       
-      console.log(`[skip-trace] detection="${label}" after_sleeve_guard=${sleeveSafeResults.length} (filtered_by=${categorySafeResults.length - sleeveSafeResults.length})`);
-      console.log(`[skip-trace] detection="${label}" after_formality_filter=${formalitySafeResults.length} (filtered_by=${sleeveSafeResults.length - formalitySafeResults.length})`);
-      console.log(`[skip-trace] detection="${label}" after_athletic_guard=${athleticSafeResults.length} (filtered_by=${formalitySafeResults.length - athleticSafeResults.length})`);
+      if (hotPathDebug) {
+        console.log(`[skip-trace] detection="${label}" after_sleeve_guard=${sleeveSafeResults.length} (filtered_by=${categorySafeResults.length - sleeveSafeResults.length})`);
+        console.log(`[skip-trace] detection="${label}" after_formality_filter=${formalitySafeResults.length} (filtered_by=${sleeveSafeResults.length - formalitySafeResults.length})`);
+        console.log(`[skip-trace] detection="${label}" after_athletic_guard=${athleticSafeResults.length} (filtered_by=${formalitySafeResults.length - athleticSafeResults.length})`);
+      }
       
-      if (athleticSafeResults.length === 0) {
+      if (athleticSafeResults.length === 0 && hotPathDebug) {
         const debugCategory = Array.isArray((filters as any).category)
           ? (filters as any).category.map((c: unknown) => String(c ?? "").trim()).filter(Boolean).join("|")
           : String((filters as any).category ?? "").trim();
@@ -5120,6 +5124,13 @@ export class ImageAnalysisService {
           ? (filters as any).productTypes.map((t: unknown) => String(t ?? "").trim()).filter(Boolean)
           : [];
         console.log(`[skip-trace-WARN] detection="${label}" ZERO_RESULTS filters={category:"${debugCategory || "none"}", productTypes:[${debugProductTypes.join(",")}], softStyle:"${filters.softStyle}", minFormality:${minFormality}}`);
+        const meta = (similarResult as any)?.meta;
+        const pc = meta?.pipeline_counts;
+        if (meta && pc) {
+          console.log(
+            `[skip-trace-meta] detection="${label}" raw_hits=${pc.raw_open_search_hits ?? 0} ranked=${pc.ranked_candidates ?? 0} visual_pass=${pc.threshold_passed_visual ?? 0} final_accept=${pc.hits_after_final_accept_min ?? 0} dedupe=${pc.hits_after_dedupe ?? 0} relaxed=${meta.threshold_relaxed ? 1 : 0} below_relevance=${meta.below_relevance_threshold ? 1 : 0} below_final_gate=${meta.below_final_relevance_gate ? 1 : 0}`,
+          );
+        }
       }
       
       similarResult = {
@@ -5127,14 +5138,16 @@ export class ImageAnalysisService {
         results: athleticSafeResults,
       };
 
-      // Tiny footwear boxes often produce weak crop embeddings. If footwear search is empty,
-      // retry once with a broader query embedding while keeping strict footwear category terms.
+      // Footwear can go sparse with crop-only embeddings; run recovery when the group
+      // is empty or too small, not only for tiny boxes.
       if (
-        similarResult.results.length === 0 &&
-        categoryMapping.productCategory === "footwear" &&
-        (detection.area_ratio ?? 0) <= 0.02
+        detectionSearchCalls < maxSearchCallsPerDetection &&
+        similarResult.results.length < Math.max(2, Math.floor(resolvedLimitPerItem * 0.2)) &&
+        categoryMapping.productCategory === "footwear"
       ) {
-        console.log(`[recovery-attempt] detection="${label}" type=footwear_tiny reason="empty + tiny area"`);
+        if (hotPathDebug) {
+          console.log(`[recovery-attempt] detection="${label}" type=footwear_recovery reason="low_count(${similarResult.results.length})"`);
+        }
         const footwearTerms = hardCategoryTermsForDetection(label, categoryMapping);
         const footwearFilters: Partial<import("./types").SearchFilters> = {};
         Object.assign(
@@ -5159,8 +5172,9 @@ export class ImageAnalysisService {
           recoveryVectors.push(finalEmbedding);
         }
 
+        const footwearSearchBudget = Math.max(0, maxSearchCallsPerDetection - detectionSearchCalls);
         const footwearRecoveries = await Promise.all(
-          recoveryVectors.map((recoveryVector, idx) =>
+          recoveryVectors.slice(0, footwearSearchBudget).map((recoveryVector, idx) =>
             runDetectionSearch(`recovery_footwear_${idx + 1}`, {
               imageEmbedding: recoveryVector,
               imageBuffer: queryProcessBuf,
@@ -5169,7 +5183,7 @@ export class ImageAnalysisService {
               detectionProductCategory: categoryMapping.productCategory,
               filters: footwearFilters,
               limit: retrievalLimit,
-              similarityThreshold: shopLookTinyFootwearRecoveryThreshold(similarityThreshold),
+              similarityThreshold: shopLookFootwearRecoveryThreshold(similarityThreshold, detection.area_ratio ?? 0),
               includeRelated: false,
               knnField: "embedding",
               forceHardCategoryFilter: true,
@@ -5190,7 +5204,9 @@ export class ImageAnalysisService {
         for (const footwearRecovery of footwearRecoveries) {
 
           if (footwearRecovery.results.length > 0) {
-            console.log(`[recovery-result] detection="${label}" type=footwear_tiny recovered=${footwearRecovery.results.length} products`);
+            if (hotPathDebug) {
+              console.log(`[recovery-result] detection="${label}" type=footwear_recovery recovered=${footwearRecovery.results.length} products`);
+            }
             similarResult = {
               ...similarResult,
               results: mergeImageSearchResultsById(
@@ -5210,14 +5226,19 @@ export class ImageAnalysisService {
       const vestLikeRecovery = /\bvest\b/.test(String(label ?? "").toLowerCase());
       const topsRecoveryMinKeep = shopLookTopRecoveryMinKeep(resolvedLimitPerItem);
       if (
+        detectionSearchCalls < maxSearchCallsPerDetection &&
         similarResult.results.length < topsRecoveryMinKeep &&
         categoryMapping.productCategory === "tops" &&
-        (((detection.confidence ?? 0) >= 0.82 && (detection.area_ratio ?? 0) >= 0.08) ||
-          (vestLikeRecovery && (detection.confidence ?? 0) >= shopLookVestRecoveryMinConfidence() && (detection.area_ratio ?? 0) >= 0.04))
+        (((detection.confidence ?? 0) >= 0.45 && (detection.area_ratio ?? 0) >= 0.02) ||
+          (vestLikeRecovery &&
+            (detection.confidence ?? 0) >= Math.min(shopLookVestRecoveryMinConfidence(), 0.45) &&
+            (detection.area_ratio ?? 0) >= 0.02))
       ) {
-        console.log(
-          `[recovery-attempt] detection="${label}" type=tops_recovery reason="low_count(${similarResult.results.length}<${topsRecoveryMinKeep}) + confidence/area qualified"`,
-        );
+        if (hotPathDebug) {
+          console.log(
+            `[recovery-attempt] detection="${label}" type=tops_recovery reason="low_count(${similarResult.results.length}<${topsRecoveryMinKeep}) + confidence/area qualified"`,
+          );
+        }
         const topTerms = hardCategoryTermsForDetection(label, categoryMapping);
         const topFilters: Partial<import("./types").SearchFilters> = {};
         Object.assign(
@@ -5238,8 +5259,9 @@ export class ImageAnalysisService {
         if (Array.isArray(finalEmbedding) && finalEmbedding.length > 0) recoveryVectors.push(finalEmbedding);
         if (Array.isArray(recoveryEmbedding) && recoveryEmbedding.length > 0) recoveryVectors.push(recoveryEmbedding);
 
+        const topsSearchBudget = Math.max(0, maxSearchCallsPerDetection - detectionSearchCalls);
         const topRecoveries = await Promise.all(
-          recoveryVectors.map((recoveryVector, idx) =>
+          recoveryVectors.slice(0, topsSearchBudget).map((recoveryVector, idx) =>
             runDetectionSearch(`recovery_tops_${idx + 1}`, {
               imageEmbedding: recoveryVector,
               imageBuffer: queryProcessBuf,
@@ -5290,7 +5312,9 @@ export class ImageAnalysisService {
           });
 
           if (topRecoverySafeResults.length > 0) {
-            console.log(`[recovery-result] detection="${label}" type=tops_recovery recovered=${topRecoverySafeResults.length} products`);
+            if (hotPathDebug) {
+              console.log(`[recovery-result] detection="${label}" type=tops_recovery recovered=${topRecoverySafeResults.length} products`);
+            }
             similarResult = {
               ...similarResult,
               results: mergeImageSearchResultsById(
@@ -5313,10 +5337,13 @@ export class ImageAnalysisService {
       // 2. Crop embedding may not capture bag handle/texture well
       // 3. Catalog may have limited bag inventory
       if (
+        detectionSearchCalls < maxSearchCallsPerDetection &&
         similarResult.results.length === 0 &&
         categoryMapping.productCategory === "bags"
       ) {
-        console.log(`[recovery-attempt] detection="${label}" type=bag_recovery reason="empty bag search"`);
+        if (hotPathDebug) {
+          console.log(`[recovery-attempt] detection="${label}" type=bag_recovery reason="empty bag search"`);
+        }
         const bagTerms = hardCategoryTermsForDetection(label, categoryMapping);
         const bagFilters: Partial<import("./types").SearchFilters> = {};
         Object.assign(
@@ -5341,8 +5368,9 @@ export class ImageAnalysisService {
           bagRecoveryVectors.push(finalGarmentEmbedding);
         }
 
+        const bagSearchBudget = Math.max(0, maxSearchCallsPerDetection - detectionSearchCalls);
         const bagRecoveries = await Promise.all(
-          bagRecoveryVectors.map((recoveryVector, idx) =>
+          bagRecoveryVectors.slice(0, bagSearchBudget).map((recoveryVector, idx) =>
             runDetectionSearch(`recovery_bag_${idx + 1}`, {
               imageEmbedding: recoveryVector,
               imageEmbeddingGarment: recoveryVector,
@@ -5382,7 +5410,9 @@ export class ImageAnalysisService {
           });
 
           if (bagRecoverySafeResults.length > 0) {
-            console.log(`[recovery-result] detection="${label}" type=bag_recovery recovered=${bagRecoverySafeResults.length} products`);
+            if (hotPathDebug) {
+              console.log(`[recovery-result] detection="${label}" type=bag_recovery recovered=${bagRecoverySafeResults.length} products`);
+            }
             similarResult = {
               ...similarResult,
               results: mergeImageSearchResultsById(
@@ -5400,15 +5430,18 @@ export class ImageAnalysisService {
       }
 
       if (similarResult.results.length === 0 && !includeEmptyDetectionGroups) {
-        console.log(`[detection-skip] label="${label}" reason="empty_and_includeEmpty=false"`);
+        if (hotPathDebug) {
+          console.log(`[detection-skip] label="${label}" reason="empty_and_includeEmpty=false"`);
+        }
         return null;
       }
 
-      console.info(
-        `[detection-substep-timing] label="${label}" crop_clip_ms=${cropEmbedMs} blip_ms=${detCaptionMs} search_first_ms=${searchFirstMs} total_task_ms=${Date.now() - detectionTaskStartedAt}`,
-      );
-
-      console.log(`[detection-result] label="${label}" final_count=${similarResult.results.length}`);
+      if (hotPathDebug) {
+        console.info(
+          `[detection-substep-timing] label="${label}" crop_clip_ms=${cropEmbedMs} blip_ms=${detCaptionMs} search_first_ms=${searchFirstMs} total_task_ms=${Date.now() - detectionTaskStartedAt}`,
+        );
+        console.log(`[detection-result] label="${label}" final_count=${similarResult.results.length}`);
+      }
       
       return {
         detection: {
@@ -5472,31 +5505,6 @@ export class ImageAnalysisService {
       similarityTimings.detectionSearchCallsAvg = Math.round((total / detectionSearchCallCounts.length) * 100) / 100;
       similarityTimings.detectionSearchCallsMax = Math.max(...detectionSearchCallCounts);
     }
-    if (detectionSearchInnerTotalDurations.length > 0) {
-      const total = detectionSearchInnerTotalDurations.reduce((sum, value) => sum + value, 0);
-      similarityTimings.detectionSearchInnerTotalAvgMs = Math.round(total / detectionSearchInnerTotalDurations.length);
-      similarityTimings.detectionSearchInnerTotalMaxMs = Math.max(...detectionSearchInnerTotalDurations);
-    }
-    if (detectionSearchOpenSearchDurations.length > 0) {
-      const total = detectionSearchOpenSearchDurations.reduce((sum, value) => sum + value, 0);
-      similarityTimings.detectionSearchOpenSearchAvgMs = Math.round(total / detectionSearchOpenSearchDurations.length);
-      similarityTimings.detectionSearchOpenSearchMaxMs = Math.max(...detectionSearchOpenSearchDurations);
-    }
-    if (detectionSearchAttributeDurations.length > 0) {
-      const total = detectionSearchAttributeDurations.reduce((sum, value) => sum + value, 0);
-      similarityTimings.detectionSearchAttributeAvgMs = Math.round(total / detectionSearchAttributeDurations.length);
-      similarityTimings.detectionSearchAttributeMaxMs = Math.max(...detectionSearchAttributeDurations);
-    }
-    if (detectionSearchRerankDurations.length > 0) {
-      const total = detectionSearchRerankDurations.reduce((sum, value) => sum + value, 0);
-      similarityTimings.detectionSearchRerankAvgMs = Math.round(total / detectionSearchRerankDurations.length);
-      similarityTimings.detectionSearchRerankMaxMs = Math.max(...detectionSearchRerankDurations);
-    }
-    if (detectionSearchPostGateDurations.length > 0) {
-      const total = detectionSearchPostGateDurations.reduce((sum, value) => sum + value, 0);
-      similarityTimings.detectionSearchPostGateAvgMs = Math.round(total / detectionSearchPostGateDurations.length);
-      similarityTimings.detectionSearchPostGateMaxMs = Math.max(...detectionSearchPostGateDurations);
-    }
 
     const groupedResults: DetectionSimilarProducts[] = [];
     let totalProducts = 0;
@@ -5516,7 +5524,9 @@ export class ImageAnalysisService {
     
     // Apply minimum relevance threshold filter to each detection's products
     const minRelevanceThreshold = shopLookMinFinalRelevanceThreshold();
-    console.log(`[relevance-gate] applying minRelevance=${minRelevanceThreshold} to filter low-relevance products`);
+    if (hotPathDebug) {
+      console.log(`[relevance-gate] applying minRelevance=${minRelevanceThreshold} to filter low-relevance products`);
+    }
     
     const relevanceFilteredResults = finalGroupedResults.map((detection) => ({
       ...detection,
@@ -5538,9 +5548,11 @@ export class ImageAnalysisService {
       newTotalProducts += result.count;
     }
     
-    console.log(
-      `[relevance-gate] total products before=${totalProducts} → after=${newTotalProducts} (threshold=${minRelevanceThreshold})`,
-    );
+    if (hotPathDebug) {
+      console.log(
+        `[relevance-gate] total products before=${totalProducts} -> after=${newTotalProducts} (threshold=${minRelevanceThreshold})`,
+      );
+    }
     
     const totalDetectionJobs = detectionJobs.length;
     let coveredDetections = 0;
@@ -6382,7 +6394,7 @@ export class ImageAnalysisService {
           predictedCategoryAisles,
           knnField: shopTheLookKnnField(),
           forceHardCategoryFilter: forceHardCategoryFilterUsed,
-          relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor: inferredPrimaryColorForDetection,
           inferredColorKey: itemColorKey,
@@ -6431,7 +6443,7 @@ export class ImageAnalysisService {
             predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
             forceHardCategoryFilter: forceHardCategoryFilterUsed,
-            relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+            relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor: inferredPrimaryColorForDetection,
             inferredColorKey: itemColorKey,
@@ -6497,7 +6509,7 @@ export class ImageAnalysisService {
             predictedCategoryAisles: preserveHardCategoryInFallback ? undefined : predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
             forceHardCategoryFilter: preserveHardCategoryInFallback,
-            relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+            relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor: inferredPrimaryColorForDetection,
             inferredColorKey: itemColorKey,
@@ -6541,7 +6553,7 @@ export class ImageAnalysisService {
               includeRelated: false,
               knnField: shopTheLookKnnField(),
               forceHardCategoryFilter: preserveHardCategoryInFallback,
-              relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+              relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
               blipSignal: detectionBlipSignal,
               inferredPrimaryColor: inferredPrimaryColorForDetection,
               inferredColorKey: itemColorKey,
@@ -6581,7 +6593,7 @@ export class ImageAnalysisService {
             predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
             forceHardCategoryFilter: forceHardCategoryFilterUsed,
-            relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+            relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor: inferredPrimaryColorForDetection,
             inferredColorKey: itemColorKey,
@@ -6595,6 +6607,7 @@ export class ImageAnalysisService {
         }
 
         const lowQualityFallbackWanted =
+          shopLookLowQualityMultiCropFallbackEnabled() &&
           shouldUseLowQualityMultiCropFallback(detection) &&
           similarResult.results.length < Math.max(3, Math.floor(retrievalLimit * 0.35));
         if (lowQualityFallbackWanted) {
@@ -6636,7 +6649,7 @@ export class ImageAnalysisService {
                 predictedCategoryAisles,
                 knnField: shopTheLookKnnField(),
                 forceHardCategoryFilter: forceHardCategoryFilterUsed,
-                relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+                relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
                 blipSignal: detectionBlipSignal,
                 inferredPrimaryColor: inferredPrimaryColorForDetection,
                 inferredColorKey: itemColorKey,
@@ -6719,6 +6732,13 @@ export class ImageAnalysisService {
             ? (filters as any).productTypes.map((t: unknown) => String(t ?? "").trim()).filter(Boolean)
             : [];
           console.log(`[skip-trace-WARN] detection="${categorySource}" ZERO_RESULTS filters={category:"${debugCategory || "none"}", productTypes:[${debugProductTypes.join(",")}], softStyle:"${filters.softStyle}", minFormality:${minFormality}}`);
+          const meta = (similarResult as any)?.meta;
+          const pc = meta?.pipeline_counts;
+          if (meta && pc) {
+            console.log(
+              `[skip-trace-meta] detection="${categorySource}" raw_hits=${pc.raw_open_search_hits ?? 0} ranked=${pc.ranked_candidates ?? 0} visual_pass=${pc.threshold_passed_visual ?? 0} final_accept=${pc.hits_after_final_accept_min ?? 0} dedupe=${pc.hits_after_dedupe ?? 0} relaxed=${meta.threshold_relaxed ? 1 : 0} below_relevance=${meta.below_relevance_threshold ? 1 : 0} below_final_gate=${meta.below_final_relevance_gate ? 1 : 0}`,
+            );
+          }
         }
         
         similarResult = {
