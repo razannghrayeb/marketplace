@@ -769,6 +769,16 @@ function imageCategoryAwareKnnPoolLimit(detectionProductCategory?: string): numb
   return widenedDefault;
 }
 
+/**
+ * Detection-scoped rerank candidate cap.
+ * Keeps per-call latency bounded for Shop-the-Look without changing final output size.
+ */
+function imageDetectionRerankCandidateCap(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_RERANK_CANDIDATE_CAP ?? "280");
+  if (!Number.isFinite(raw)) return 280;
+  return Math.max(120, Math.min(600, Math.floor(raw)));
+}
+
 function imageCategoryAwareMinResultsPolicy(params: {
   detectionProductCategory?: string;
   baseTarget: number;
@@ -3432,13 +3442,19 @@ export async function searchByImageWithSimilarity(
   const hitsByKnnScore = [...hits].sort(
     (a: any, b: any) => visualSimFromHit(b) - visualSimFromHit(a),
   );
-  // Score at least max(limit*5, 500) when possible; cap by pool + actual hit count (redundant aisle pre-sort
-  // removed — sortedByRelevance + composite use catalog-bound visual after compliance).
-  const fetchLimit = Math.min(
+  // Score at least max(limit*5, 500) when possible; cap by pool + actual hit count.
+  // Detection-scoped searches use an additional cap to bound rerank CPU without changing output size.
+  const fetchLimitBase = Math.min(
     retrievalK,
     hitsByKnnScore.length,
     Math.max(limit * 5, 500),
   );
+  const detectionScoped =
+    typeof params.detectionProductCategory === "string" &&
+    params.detectionProductCategory.trim().length > 0;
+  const fetchLimit = detectionScoped
+    ? Math.max(limit, Math.min(fetchLimitBase, imageDetectionRerankCandidateCap()))
+    : fetchLimitBase;
   const baseCandidates = hitsByKnnScore.slice(0, fetchLimit);
 
   /** Per-hit soft signals for ranking + explain (visual + category + optional attribute embeddings). */
