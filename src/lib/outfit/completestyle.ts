@@ -493,7 +493,7 @@ export const CATEGORY_PAIRINGS: Record<ProductCategory, CategoryPairing[]> = {
     { categories: ["sunglasses", "scarf"], priority: 3, reason: "Finishing touches" },
   ],
   gown: [
-    { categories: ["heels"], priority: 1, reason: "Elegant heels for formal occasions" },
+    { categories: ["heels", "flats", "boots", "loafers"], priority: 1, reason: "Elegant formal footwear options" },
     { categories: ["clutch"], priority: 1, reason: "An evening clutch for essentials" },
     { categories: ["earrings", "necklace", "bracelet"], priority: 1, reason: "Statement jewelry for the occasion" },
     { categories: ["ring"], priority: 3, reason: "Subtle jewelry accents" },
@@ -720,7 +720,7 @@ export const CATEGORY_PAIRINGS: Record<ProductCategory, CategoryPairing[]> = {
   ],
   clutch: [
     { categories: ["dress", "gown", "skirt"], priority: 1, reason: "Evening outfit" },
-    { categories: ["heels"], priority: 1, reason: "Formal footwear" },
+    { categories: ["heels", "flats", "loafers", "boots"], priority: 1, reason: "Formal footwear" },
     { categories: ["earrings", "necklace", "bracelet"], priority: 2, reason: "Statement jewelry" },
   ],
   tote: [
