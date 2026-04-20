@@ -396,6 +396,7 @@ export interface SearchResultWithRelated {
     /** Count after relevance gate + dedupe (before pagination slice). */
     total_above_threshold?: number;
     open_search_total_estimate?: number;
+    timing?: Record<string, number>;
     pipeline_counts?: {
       /** True when kNN hits were re-scored with exact cosine(query, stored vector). */
       exact_cosine_rerank: boolean;
