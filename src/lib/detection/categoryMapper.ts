@@ -558,6 +558,19 @@ const FUZZY_PATTERNS: FuzzyPattern[] = [
     },
   },
 
+  // Bag-specific patterns that frequently appear in captions / detector outputs.
+  // Keep these before generic footwear so bag-like labels do not fall through to
+  // unknown categories and get dropped by strict bag recovery filters.
+  {
+    pattern: /\b(handbag|hand bags?|purse|purses|wallet|wallets|tote bag|tote bags?|backpack|backpacks|crossbody bag|crossbody bags?|satchel|satchels|messenger bag|messenger bags?|shoulder bag|shoulder bags?|bucket bag|bucket bags?|hobo bag|hobo bags?|clutch|clutches)\b/i,
+    mapping: {
+      productCategory: "bags",
+      confidence: 0.88,
+      alternativeCategories: ["bags", "accessories"],
+      attributes: {},
+    },
+  },
+
   // Ambiguous category disambiguation
   {
     pattern: /\bblazer\b|\bsuit\s*jacket\b|\bsport\s*coat\b/i,

@@ -36,6 +36,14 @@ describe("scoreRerankProductTypeBreakdown", () => {
     expect(r.combinedTypeCompliance).toBeLessThan(0.55);
   });
 
+  test("generic shoe stays neutral between sneakers and heels", () => {
+    const sneakerMatch = scoreRerankProductTypeBreakdown(["shoes"], ["sneakers"]);
+    const heelMatch = scoreRerankProductTypeBreakdown(["shoes"], ["heels"]);
+
+    expect(sneakerMatch.combinedTypeCompliance).toBeGreaterThanOrEqual(heelMatch.combinedTypeCompliance - 0.01);
+    expect(Math.abs(sneakerMatch.combinedTypeCompliance - heelMatch.combinedTypeCompliance)).toBeLessThanOrEqual(0.15);
+  });
+
   test("hoodie vs dress shirt are distinct tops", () => {
     const r = scoreRerankProductTypeBreakdown(["hoodie"], ["shirt", "shirts"]);
     expect(r.exactTypeScore).toBe(0);

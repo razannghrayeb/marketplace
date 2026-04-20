@@ -18,13 +18,14 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   ["shorts", "short", "bermuda", "board shorts"],
   ["skirt", "skirts", "mini skirt", "midi skirt"],
   // Footwear (7) — was one mega-cluster; now siblings are distinguishable in rerank
-  ["sneaker", "sneakers", "trainer", "trainers", "shoe", "shoes"],
+  ["sneaker", "sneakers", "trainer", "trainers"],
   ["boot", "boots", "ankle boot", "chelsea boot"],
   ["sandal", "sandals", "flip flop", "flip flops"],
   ["heel", "heels", "pump", "pumps", "stiletto", "stilettos"],
   ["flat", "flats", "ballerina", "ballet flat", "loafer", "loafers", "oxford", "oxfords", "brogue", "brogues"],
   ["mule", "mules", "slide", "slides", "clog", "clogs"],
   ["slipper", "slippers", "slip-on", "slip on", "slip ons", "slip-ons", "espadrille", "espadrilles"],
+  ["shoe", "shoes"],
   // Tops (6)
   ["hoodie", "hoodies", "sweatshirt", "sweatshirts", "pullover", "pullovers"],
   ["sweater", "sweaters", "cardigan", "cardigans", "jumper", "jumpers", "knitwear"],
@@ -574,7 +575,8 @@ const FOOTWEAR_MICRO = {
 export function footwearMicroGroup(token: string): keyof typeof FOOTWEAR_MICRO | null {
   const t = token.toLowerCase().trim();
   if (!t) return null;
-  const athletic = new Set(["sneaker", "sneakers", "trainer", "trainers", "shoe", "shoes"]);
+  const athletic = new Set(["sneaker", "sneakers", "trainer", "trainers"]);
+  const genericShoe = new Set(["shoe", "shoes"]);
   const boot = new Set(["boot", "boots", "ankle boot", "chelsea boot"]);
   const sandal = new Set(["sandal", "sandals", "flip flop", "flip flops"]);
   const heel = new Set(["heel", "heels", "pump", "pumps", "stiletto", "stilettos"]);
@@ -602,6 +604,7 @@ export function footwearMicroGroup(token: string): keyof typeof FOOTWEAR_MICRO |
     "espadrilles",
   ]);
   if (athletic.has(t)) return "athletic";
+  if (genericShoe.has(t)) return null;
   if (boot.has(t)) return "boot";
   if (sandal.has(t)) return "sandal";
   if (heel.has(t)) return "heel";
