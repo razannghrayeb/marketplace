@@ -3,7 +3,7 @@
 import { scrapeAllMikesport } from "./vendors/mikesport_lb";
 import { getOrCreateVendorId, markUnseenProductsUnavailable, upsertProduct } from "./ingest";
 
-async function run() {
+export async function runMikesport() {
   console.log("Starting MikeSport scrape (ALL products via products.json pagination)...");
 
   const products = await scrapeAllMikesport();
@@ -42,7 +42,3 @@ async function run() {
   console.log(`Done. Successful: ${ok}, Failed: ${fail}`);
 }
 
-run().catch((e) => {
-  console.error("Run crashed:", e);
-  process.exit(1);
-});

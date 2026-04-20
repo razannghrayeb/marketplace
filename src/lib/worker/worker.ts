@@ -11,6 +11,12 @@ import { recomputeAllCanonicals } from "../products/canonical";
 import { computeAllCategoryBaselines } from "../compare/priceAnomalyDetector";
 import { pg } from "../core";
 import { getRedis } from "../redis";
+import { runEshopgsCrawl } from "../scrape/runEshopgs";
+import { runMoustache } from "../scrape/runMoustache";
+import { runMyholdal } from "../scrape/runMyholdal";
+import { runHm } from "../scrape/runHm";
+import { runMikesport } from "../scrape/runMikesport";
+import { generateAlerts } from "../dsr/alertGenerator";
 
 // ============================================================================
 // Job Handlers
@@ -24,8 +30,47 @@ async function handleCanonicalRecompute(): Promise<{ processed: number; new_cano
   return recomputeAllCanonicals();
 }
 
-async function handleNightlyCrawl(): Promise<{ message: string }> {
-  return { message: "Nightly crawl completed (stub)" };
+async function handleNightlyCrawl(): Promise<{ vendors: Record<string, string> }> {
+  console.log(`[Worker] Nightly crawl started — running all vendors in parallel...`);
+
+  const vendors: Array<{ name: string; fn: () => Promise<any> }> = [
+    { name: "eshopgs",   fn: () => runEshopgsCrawl({ maxPages: 50, delayMs: 400 }) },
+    { name: "moustache", fn: () => runMoustache() },
+    { name: "myholdal",  fn: () => runMyholdal() },
+    { name: "hm",        fn: () => runHm() },
+    { name: "mikesport", fn: () => runMikesport() },
+  ];
+
+  const settled = await Promise.allSettled(
+    vendors.map(({ name, fn }) => {
+      console.log(`[Worker] Crawling vendor: ${name}`);
+      return fn();
+    })
+  );
+
+  const results: Record<string, string> = {};
+  settled.forEach((outcome, i) => {
+    const name = vendors[i].name;
+    if (outcome.status === "fulfilled") {
+      results[name] = "ok";
+    } else {
+      const msg = outcome.reason?.message ?? String(outcome.reason);
+      console.error(`[Worker] Vendor ${name} failed:`, msg);
+      results[name] = `failed: ${msg}`;
+    }
+  });
+
+  console.log(`[Worker] Nightly crawl complete:`, results);
+
+  // Generate DSR alerts now that fresh product data is in the database
+  try {
+    const alertResult = await generateAlerts();
+    console.log(`[Worker] Alert generation complete:`, alertResult);
+  } catch (err) {
+    console.error(`[Worker] Alert generation failed:`, err);
+  }
+
+  return { vendors: results };
 }
 
 async function handleCleanupOldData(): Promise<{ deletedPrices: number; deletedJobs: number }> {
@@ -43,27 +88,22 @@ async function handleCleanupOldData(): Promise<{ deletedPrices: number; deletedJ
 
 async function handlePriceDropDetection(): Promise<{ dropsFound: number; inserted: number }> {
   const drops = await findPriceDrops(10, 1);
-  let inserted = 0;
-  for (const drop of drops) {
-    try {
-      const existing = await pg.query(
-        `SELECT id FROM price_drop_events 
-         WHERE product_id = $1 AND detected_at > NOW() - INTERVAL '24 hours'`,
-        [drop.product_id]
-      );
-      if (existing.rowCount === 0) {
-        await pg.query(
-          `INSERT INTO price_drop_events (product_id, old_price_cents, new_price_cents, drop_percent)
-           VALUES ($1, $2, $3, $4)`,
-          [drop.product_id, drop.old_price, drop.new_price, drop.drop_percent]
-        );
-        inserted++;
-      }
-    } catch (err) {
-      console.error(`Failed to insert price drop for product ${drop.product_id}:`, err);
-    }
-  }
-  return { dropsFound: drops.length, inserted };
+  if (drops.length === 0) return { dropsFound: 0, inserted: 0 };
+
+  // Single INSERT for all drops — ON CONFLICT skips duplicates detected in the last 24h
+  const values = drops
+    .map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`)
+    .join(", ");
+  const params = drops.flatMap((d) => [d.product_id, d.old_price, d.new_price, d.drop_percent]);
+
+  const res = await pg.query(
+    `INSERT INTO price_drop_events (product_id, old_price_cents, new_price_cents, drop_percent)
+     VALUES ${values}
+     ON CONFLICT DO NOTHING`,
+    params
+  );
+
+  return { dropsFound: drops.length, inserted: res.rowCount ?? 0 };
 }
 
 async function handleCategoryBaselineCompute(): Promise<{ computed: number; errors: string[] }> {

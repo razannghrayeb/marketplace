@@ -150,39 +150,10 @@ export async function upsertProduct(p: ScrapedProduct): Promise<number> {
   return productId;
 }
 
-function buildInList(values: string[]): string {
-  const quoted = values.map((v) => `'${String(v).replace(/'/g, "''")}'`);
-  return `(${quoted.join(",")})`;
-}
-
 /**
  * Mark products for a vendor as unavailable if they were not seen in a crawl.
  * Uses Supabase (NOT pg).
  */
-// export async function markUnseenProductsUnavailable(
-//   vendorId: number,
-//   seenUrls: Iterable<string>
-// ): Promise<void> {
-//   const urls = Array.from(new Set(seenUrls)).filter(Boolean);
-
-//   if (urls.length === 0) {
-//     const { error } = await supabaseAdmin
-//       .from("products")
-//       .update({ availability: false })
-//       .eq("vendor_id", vendorId);
-//     if (error) throw error;
-//     return;
-//   }
-
-//   const inList = buildInList(urls);
-//   const { error } = await supabaseAdmin
-//     .from("products")
-//     .update({ availability: false })
-//     .eq("vendor_id", vendorId)
-//     .not("product_url", "in", inList);
-
-//   if (error) throw error;
-// }
 export async function markUnseenProductsUnavailable(
   vendorId: number,
   seenUrls: Iterable<string>

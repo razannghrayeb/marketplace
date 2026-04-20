@@ -6,6 +6,7 @@ import { config } from "./config";
 import { healthRouter } from "./routes/health/index";
 import adminRouter from "./routes/admin";
 import compareRouter from "./routes/compare/index";
+import { dashboardRouter } from "./routes/dashboard/index";
 import { tryonRouter } from "./routes/tryon/index";
 import { metricsRouter } from "./routes/metrics/index";
 import { authRouter } from "./routes/auth/index";
@@ -88,6 +89,7 @@ export async function createServer() {
 
   app.use("/admin", adminRouter);
   app.use("/api/compare", compareRouter);
+  app.use("/api/dashboard", dashboardRouter);
   app.use("/api/tryon", tryonRouter);
   app.use("/api/auth", authRouter);
   app.use("/api/cart", cartRouter);

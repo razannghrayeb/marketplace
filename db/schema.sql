@@ -240,4 +240,18 @@ CREATE TABLE IF NOT EXISTS user_saved_items (
 CREATE INDEX IF NOT EXISTS idx_user_saved_items_user_id ON user_saved_items(user_id);
 
 CREATE INDEX IF NOT EXISTS idx_price_drop_events_product_id ON price_drop_events(product_id);
-CREATE INDEX IF NOT EXISTS idx_price_drop_events_detected_at ON price_drop_events(detected_at DESC)
+CREATE INDEX IF NOT EXISTS idx_price_drop_events_detected_at ON price_drop_events(detected_at DESC);
+
+-- Vendor Alerts (for the business dashboard)
+-- Stores alerts generated when a product's DSR score crosses a threshold.
+CREATE TABLE IF NOT EXISTS vendor_alerts (
+    id SERIAL PRIMARY KEY,
+    product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    alert_type TEXT NOT NULL CHECK (alert_type IN ('early_risk', 'critical', 'recovery')),
+    message TEXT NOT NULL,
+    dismissed BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_vendor_alerts_product_id ON vendor_alerts(product_id);
+CREATE INDEX IF NOT EXISTS idx_vendor_alerts_dismissed ON vendor_alerts(dismissed);
+CREATE INDEX IF NOT EXISTS idx_vendor_alerts_created_at ON vendor_alerts(created_at DESC);
