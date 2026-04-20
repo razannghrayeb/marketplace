@@ -550,7 +550,7 @@ export function bottomMicroGroup(token: string): keyof typeof BOTTOM_MICRO | nul
   return null;
 }
 
-const SHORTS_MICRO = new Set(["shorts", "short", "bermuda", "board shorts"]);
+const SHORTS_MICRO = new Set(["shorts", "bermuda", "bermudas", "board shorts"]);
 const SKIRT_MICRO = new Set(["skirt", "skirts", "mini skirt", "midi skirt"]);
 
 function shortsSkirtMicro(token: string): "shorts" | "skirt" | null {
