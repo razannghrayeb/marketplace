@@ -307,6 +307,131 @@ export function getColorHarmonies(color: string): ColorHarmony[] {
   return harmonies;
 }
 
+const COLOR_TOKEN_ALIASES: Record<string, string> = {
+  "off white": "white",
+  "off-white": "white",
+  "light blue": "blue",
+  "light-blue": "blue",
+  "navy blue": "navy",
+  "dark blue": "navy",
+  "hot pink": "pink",
+  "rose gold": "gold",
+};
+
+const COLOR_FAMILY_BY_TOKEN: Record<string, string> = {
+  black: "neutral",
+  white: "neutral",
+  gray: "neutral",
+  grey: "neutral",
+  beige: "neutral",
+  cream: "neutral",
+  ivory: "neutral",
+  tan: "earth",
+  camel: "earth",
+  brown: "earth",
+  gold: "earth",
+  yellow: "earth",
+  orange: "earth",
+  blue: "blue",
+  navy: "blue",
+  teal: "blue",
+  turquoise: "blue",
+  aqua: "blue",
+  cyan: "blue",
+  red: "red",
+  burgundy: "red",
+  maroon: "red",
+  wine: "red",
+  green: "green",
+  olive: "green",
+  mint: "green",
+  sage: "green",
+  emerald: "green",
+  pink: "pink",
+  blush: "pink",
+  magenta: "pink",
+  fuchsia: "pink",
+  purple: "purple",
+  violet: "purple",
+  lavender: "purple",
+  lilac: "purple",
+  plum: "purple",
+};
+
+const CORE_GARMENT_HINT = /\b(top|shirt|blouse|hoodie|sweater|cardigan|pants?|trousers?|jeans?|skirt|shorts?|dress|gown|jumpsuit|romper|jacket|coat|blazer|outerwear)\b/;
+
+function extractColorTokens(value?: string): string[] {
+  const raw = String(value || "").toLowerCase().trim();
+  if (!raw) return [];
+
+  const normalized = raw
+    .replace(/[()\[\],]/g, " ")
+    .replace(/[|/\\;+]/g, " ")
+    .replace(/[_-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return [];
+
+  const tokens: string[] = [];
+  const parts = normalized.split(" ").filter(Boolean);
+  for (let i = 0; i < parts.length; i++) {
+    const one = parts[i];
+    const two = i + 1 < parts.length ? `${parts[i]} ${parts[i + 1]}` : "";
+    if (two && COLOR_TOKEN_ALIASES[two]) tokens.push(COLOR_TOKEN_ALIASES[two]);
+    if (two && COLOR_WHEEL[two]) tokens.push(two);
+    if (COLOR_TOKEN_ALIASES[one]) tokens.push(COLOR_TOKEN_ALIASES[one]);
+    if (COLOR_WHEEL[one]) tokens.push(one);
+  }
+
+  return Array.from(new Set(tokens));
+}
+
+function colorFamiliesFromTokens(tokens: string[]): Set<string> {
+  const out = new Set<string>();
+  for (const t of tokens) {
+    const key = String(t || "").toLowerCase().trim();
+    if (!key) continue;
+    const family = COLOR_FAMILY_BY_TOKEN[key];
+    if (family) out.add(family);
+  }
+  return out;
+}
+
+function isCoreGarmentProduct(product: Product): boolean {
+  const blob = `${String(product.category || "")} ${String(product.title || "")}`.toLowerCase();
+  return CORE_GARMENT_HINT.test(blob);
+}
+
+function colorCompatibilityScore(
+  sourceFamilies: Set<string>,
+  candidateFamilies: Set<string>,
+  coreGarment: boolean,
+): number {
+  if (candidateFamilies.size === 0) return coreGarment ? 0.25 : 0.45;
+  if (sourceFamilies.size === 0) return 0.6;
+  if (candidateFamilies.has("neutral") || sourceFamilies.has("neutral")) return 0.82;
+  for (const f of candidateFamilies) {
+    if (sourceFamilies.has(f)) return 0.9;
+  }
+
+  const complementary: Record<string, string[]> = {
+    blue: ["earth", "red", "green"],
+    green: ["earth", "blue"],
+    red: ["blue", "earth", "green"],
+    pink: ["green", "blue", "earth"],
+    purple: ["blue", "pink", "earth"],
+    earth: ["blue", "green", "red"],
+  };
+  for (const s of sourceFamilies) {
+    const comp = complementary[s] || [];
+    for (const c of candidateFamilies) {
+      if (comp.includes(c)) return coreGarment ? 0.68 : 0.74;
+    }
+  }
+
+  return coreGarment ? 0.1 : 0.28;
+}
+
 type AudienceGender = "men" | "women" | "unisex";
 type AudienceAgeGroup = "kids" | "adult";
 
@@ -1568,18 +1693,28 @@ async function findProductsForCategory(
         productColor = colorResult.primary;
       }
       
-      let colorScore = 0;
-      if (productColor) {
-        const isHarmonious = style.colorProfile.harmonies.some(h => 
-          h.colors.includes(productColor!.toLowerCase())
-        );
-        if (isHarmonious) {
-          colorScore = 1.0;
-          matchReasons.push("Color harmony match");
-        } else if (productColor.toLowerCase() === style.colorProfile.primary.toLowerCase()) {
-          colorScore = 0.5;
-          matchReasons.push("Matching color");
-        }
+      const sourceColorTokens = extractColorTokens(
+        `${style.colorProfile.primary} ${(style.colorProfile.harmonies || []).map((h) => h.colors.join(" ")).join(" ")}`
+      );
+      const productColorTokens = extractColorTokens(
+        `${productColor || ""} ${product.title || ""} ${product.category || ""}`
+      );
+      const sourceColorFamilies = colorFamiliesFromTokens(sourceColorTokens);
+      const candidateColorFamilies = colorFamiliesFromTokens(productColorTokens);
+      const isCoreGarment = isCoreGarmentProduct(product);
+
+      let colorScore = colorCompatibilityScore(sourceColorFamilies, candidateColorFamilies, isCoreGarment);
+      if (colorScore >= 0.85) {
+        matchReasons.push("Color harmony match");
+      } else if (colorScore >= 0.65) {
+        matchReasons.push("Good color compatibility");
+      } else if (isCoreGarment && colorScore < 0.22) {
+        matchReasons.push("Risky color clash for a core piece");
+      }
+
+      // Hard reject obvious color clashes for core garments to prevent low-fashion recommendations.
+      if (isCoreGarment && sourceColorFamilies.size > 0 && colorScore < 0.18) {
+        continue;
       }
       
       explainability.colorHarmony = colorScore;
