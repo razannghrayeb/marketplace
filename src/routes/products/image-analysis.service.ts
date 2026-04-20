@@ -1006,7 +1006,7 @@ function shopLookPerDetectionConcurrency(): number {
  * Infer specific footwear subtype from BLIP caption when YOLO returns generic "shoe".
  * Returns a more specific label to feed into `hardCategoryTermsForDetection`.
  */
-function inferFootwearSubtypeFromCaption(
+export function inferFootwearSubtypeFromCaption(
   detectionLabel: string,
   caption: string | null | undefined,
 ): string {
@@ -1024,6 +1024,7 @@ function inferFootwearSubtypeFromCaption(
   if (/\b(flat|flats|ballet|ballerina)\b/.test(cap)) return "flats";
   if (/\b(oxford|oxfords|brogue|brogues|derby|dress\s*shoe)\b/.test(cap)) return "oxfords";
   if (/\b(clog|clogs)\b/.test(cap)) return "clogs";
+  if (/\b(formal|formal\s*wear|business|suit|tuxedo|dress\s*shoe|dress\s*shoes|formal\s*shoe|formal\s*shoes)\b/.test(cap)) return "oxfords";
 
   return label;
 }
@@ -1690,6 +1691,10 @@ function shouldKeepAccessoryRecoveryDetection(detection: Detection): boolean {
   return confidence >= accessoryRecoveryConfidenceThreshold() || areaRatio >= accessoryRecoveryAreaRatioThreshold() * 1.35;
 }
 
+function isMappedBagDetection(detection: Detection): boolean {
+  return mapDetectionToCategory(detection.label, detection.confidence).productCategory === "bags";
+}
+
 function imageEnableGeometricDressLengthEnv(): boolean {
   const raw = String(process.env.SEARCH_IMAGE_ENABLE_GEOMETRIC_DRESS_LENGTH ?? "1").toLowerCase();
   return raw === "1" || raw === "true";
@@ -2067,17 +2072,19 @@ function applyDetectionCategoryGuard(
     }
     if (categoryMapping.productCategory === "tops") {
       const detectionLabelNorm = String(detectionLabel).toLowerCase();
-      const requestsOuterwear =
+      const detectionRequestsOuterwear =
         /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|sport coat|dress jacket|shirt jacket|shacket|overshirt)\b/.test(
           detectionLabelNorm,
         );
+      const productMentionsOuterwear =
+        /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|sport coat|dress jacket|shirt jacket|shacket|overshirt)\b/.test(
+          haystack,
+        );
       const isLongSleeveTopDetection = /\b(long sleeve top|long sleeve|shirt|blouse)\b/.test(detectionLabelNorm);
       if (
-        !requestsOuterwear &&
+        !detectionRequestsOuterwear &&
         (productCategoryMacro === "outerwear" ||
-          /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|sport coat|dress jacket|shirt jacket|shacket|overshirt)\b/.test(
-            haystack,
-          ))
+          productMentionsOuterwear)
       ) {
         return false;
       }
@@ -2862,6 +2869,41 @@ export interface ImageAnalysisResult {
     /** Set when `yolo` is false — why detection is off and how to fix it locally */
     yoloHint?: string;
   };
+
+  /** Timing breakdown for the image-search pipeline. */
+  timings?: ImagePipelineTimings;
+}
+
+export interface ImageAnalysisStageTimings {
+  totalMs: number;
+  validateMs?: number;
+  serviceStatusMs?: number;
+  metadataMs?: number;
+  pHashMs?: number;
+  storageMs?: number;
+  clipEmbeddingMs?: number;
+  yoloInitialMs?: number;
+  yoloRetryMs?: number;
+  accessoryRecoveryMs?: number;
+  deferredFullFrameEmbeddingMs?: number;
+  postProcessMs?: number;
+}
+
+export interface ImageSimilarityStageTimings {
+  totalMs: number;
+  fullCaptionMs?: number;
+  detectionSetupMs?: number;
+  detectionTaskWallMs?: number;
+  detectionTaskTotalMs?: number;
+  detectionTaskAvgMs?: number;
+  detectionTaskMaxMs?: number;
+  postProcessingMs?: number;
+}
+
+export interface ImagePipelineTimings {
+  totalMs: number;
+  analysis?: ImageAnalysisStageTimings;
+  similarity?: ImageSimilarityStageTimings;
 }
 
 function detectionColorKey(label: string, index?: number): string {
@@ -3150,6 +3192,8 @@ export class ImageAnalysisService {
     filename: string,
     options: AnalyzeOptions = {}
   ): Promise<ImageAnalysisResult> {
+    const analysisStartedAt = Date.now();
+    const analysisTimings: ImageAnalysisStageTimings = { totalMs: 0 };
     const {
       store = true,
       generateEmbedding = true,
@@ -3162,19 +3206,27 @@ export class ImageAnalysisService {
     } = options;
 
     // Validate image first
+    const validateStartedAt = Date.now();
     const validation = await validateImage(buffer);
+    analysisTimings.validateMs = Date.now() - validateStartedAt;
     if (!validation.valid) {
       throw new Error(validation.error || "Invalid image");
     }
 
     // Check service availability
+    const serviceStatusStartedAt = Date.now();
     const services = await this.getServiceStatus();
+    analysisTimings.serviceStatusMs = Date.now() - serviceStatusStartedAt;
 
     // Get image metadata first
+    const metadataStartedAt = Date.now();
     const metadata = await sharp(buffer).metadata();
+    analysisTimings.metadataMs = Date.now() - metadataStartedAt;
     const imageWidth = metadata.width || 0;
     const imageHeight = metadata.height || 0;
+    const pHashStartedAt = Date.now();
     const pHash = await computePHash(buffer);
+    analysisTimings.pHashMs = Date.now() - pHashStartedAt;
 
     const deferClip =
       deferFullImageEmbedding &&
@@ -3184,39 +3236,61 @@ export class ImageAnalysisService {
       services.yolo;
 
     // Run operations in parallel where possible
-    const [storageResult, embeddingResult, initialDetectionResult] = await Promise.all([
-      // Storage
-      store ? this.storeImage(buffer, filename, productId, isPrimary, pHash) : null,
+    const storagePromise = store
+      ? (async () => {
+          const startedAt = Date.now();
+          try {
+            return await this.storeImage(buffer, filename, productId, isPrimary, pHash);
+          } finally {
+            analysisTimings.storageMs = Date.now() - startedAt;
+          }
+        })()
+      : Promise.resolve(null);
 
-      // Full-frame CLIP (skipped when deferClip — computed only if YOLO finds no instances)
-      generateEmbedding && services.clip && !deferClip
-        ? processImageForEmbedding(buffer).catch((err) => {
+    const embeddingPromise = generateEmbedding && services.clip && !deferClip
+      ? (async () => {
+          const startedAt = Date.now();
+          try {
+            return await processImageForEmbedding(buffer);
+          } catch (err) {
             console.error("CLIP embedding failed:", err);
             return null;
-          })
-        : Promise.resolve(null),
+          } finally {
+            analysisTimings.clipEmbeddingMs = Date.now() - startedAt;
+          }
+        })()
+      : Promise.resolve(null);
 
-      // YOLO detection
-      runDetection && services.yolo
-        ? this.yoloClient
-            .detectFromBuffer(buffer, filename, { confidence, preprocessing })
-            .catch((err) => {
-              if (isYoloCircuitOpenError(err)) {
-                console.warn("[YOLOv8] circuit open, detection skipped:", err.message);
-              } else {
-                const name = (err as any)?.name;
-                const msg = err instanceof Error ? err.message : String(err);
-                if (name === "TimeoutError" || /timeout/i.test(msg)) {
-                  services.yoloHint =
-                    `YOLO request timed out while waiting for detections. ` +
-                    `Try increasing YOLO_DETECT_TIMEOUT_MS (current: ${process.env.YOLO_DETECT_TIMEOUT_MS || "default"}). ` +
-                    `Falling back to full_image search.`;
-                }
-                console.error("YOLO detection failed:", err);
+    const detectionPromise = runDetection && services.yolo
+      ? (async () => {
+          const startedAt = Date.now();
+          try {
+            return await this.yoloClient.detectFromBuffer(buffer, filename, { confidence, preprocessing });
+          } catch (err) {
+            if (isYoloCircuitOpenError(err)) {
+              console.warn("[YOLOv8] circuit open, detection skipped:", err instanceof Error ? err.message : String(err));
+            } else {
+              const name = (err as any)?.name;
+              const msg = err instanceof Error ? err.message : String(err);
+              if (name === "TimeoutError" || /timeout/i.test(msg)) {
+                services.yoloHint =
+                  `YOLO request timed out while waiting for detections. ` +
+                  `Try increasing YOLO_DETECT_TIMEOUT_MS (current: ${process.env.YOLO_DETECT_TIMEOUT_MS || "default"}). ` +
+                  `Falling back to full_image search.`;
               }
-              return null;
-            })
-        : Promise.resolve(null),
+              console.error("YOLO detection failed:", err);
+            }
+            return null;
+          } finally {
+            analysisTimings.yoloInitialMs = Date.now() - startedAt;
+          }
+        })()
+      : Promise.resolve(null);
+
+    const [storageResult, embeddingResult, initialDetectionResult] = await Promise.all([
+      storagePromise,
+      embeddingPromise,
+      detectionPromise,
     ]);
 
     let detectionResult = initialDetectionResult;
@@ -3234,6 +3308,7 @@ export class ImageAnalysisService {
     ) {
       const retryConfidence = Math.max(0.05, confidence * 0.6);
       let didRetryFindDetections = false;
+      const retryStartedAt = Date.now();
       try {
         const retry = await this.yoloClient.detectFromBuffer(buffer, filename, {
           confidence: retryConfidence,
@@ -3251,6 +3326,8 @@ export class ImageAnalysisService {
         }
       } catch (err) {
         console.warn("[YOLOv8] retry-on-empty failed:", err);
+      } finally {
+        analysisTimings.yoloRetryMs = Date.now() - retryStartedAt;
       }
 
       if (!didRetryFindDetections) {
@@ -3274,15 +3351,13 @@ export class ImageAnalysisService {
         };
       }
 
-      const initialAccessoryDetections = detectionResult.detections.filter((detection) => {
-        const mapped = mapDetectionToCategory(detection.label, detection.confidence).productCategory;
-        return mapped === "bags" || mapped === "accessories";
-      });
+      const initialBagDetections = detectionResult.detections.filter((detection) => isMappedBagDetection(detection));
       const shouldRunAccessoryRecovery =
-        initialAccessoryDetections.length === 0 ||
-        initialAccessoryDetections.every((detection) => Number(detection.confidence ?? 0) < 0.78);
+        initialBagDetections.length === 0 ||
+        initialBagDetections.every((detection) => Number(detection.confidence ?? 0) < 0.78);
 
       if (shouldRunAccessoryRecovery && services.yolo) {
+        const accessoryRecoveryStartedAt = Date.now();
         try {
           const accessoryRetryConfidence = accessoryRecoveryConfidenceThreshold();
           const accessoryRetry = await this.yoloClient.detectFromBuffer(buffer, filename, {
@@ -3317,16 +3392,20 @@ export class ImageAnalysisService {
           }
         } catch (err) {
           console.warn("[YOLOv8] accessory recovery retry failed:", err);
+        } finally {
+          analysisTimings.accessoryRecoveryMs = Date.now() - accessoryRecoveryStartedAt;
         }
       }
 
       // Ensure clients always receive `style` + `mask` (YOLO service returns them as null currently).
+      const postProcessStartedAt = Date.now();
       detectionResult = {
         ...detectionResult,
         detections: detectionResult.detections
           .map((d) => correctDetectionByPosition(d))
           .map((d) => ensureStyleAndMask(d, imageWidth, imageHeight)),
       };
+      analysisTimings.postProcessMs = Date.now() - postProcessStartedAt;
     }
 
     let embeddingFinal = embeddingResult;
@@ -3336,10 +3415,12 @@ export class ImageAnalysisService {
         Array.isArray(detectionResult.detections) &&
         detectionResult.detections.length > 0;
       if (!hasDetections) {
+        const deferredClipStartedAt = Date.now();
         embeddingFinal = await processImageForEmbedding(buffer).catch((err) => {
           console.error("CLIP embedding failed (deferred full-frame):", err);
           return null;
         });
+        analysisTimings.deferredFullFrameEmbeddingMs = Date.now() - deferredClipStartedAt;
       }
     }
 
@@ -3386,6 +3467,8 @@ export class ImageAnalysisService {
       console.error("Error persisting detections:", err);
     }
 
+    analysisTimings.totalMs = Date.now() - analysisStartedAt;
+
     return {
       image: {
         ...imageInfo,
@@ -3402,6 +3485,10 @@ export class ImageAnalysisService {
           }
         : null,
       services,
+      timings: {
+        totalMs: analysisTimings.totalMs,
+        analysis: analysisTimings,
+      },
     };
   }
 
@@ -3419,6 +3506,7 @@ export class ImageAnalysisService {
     filename: string,
     options: AnalyzeAndFindSimilarOptions = {}
   ): Promise<FullAnalysisResult> {
+    const pipelineStartedAt = Date.now();
     const {
       findSimilar = true,
       similarityThreshold = config.clip.imageSimilarityThreshold,
@@ -3450,6 +3538,8 @@ export class ImageAnalysisService {
       deferFullImageEmbedding: findSimilar,
     });
     const sourceImagePHash = await computePHash(buffer).catch(() => undefined);
+    const similarityStartedAt = Date.now();
+    const similarityTimings: ImageSimilarityStageTimings = { totalMs: 0 };
 
     // Similarity search disabled — return early
     if (!findSimilar) {
@@ -3466,6 +3556,11 @@ export class ImageAnalysisService {
             page: resolvedResultsPage,
             pageSize: resolvedResultsPageSize,
           },
+        },
+        timings: {
+          ...(analysisResult.timings ?? { totalMs: 0 }),
+          totalMs: Date.now() - pipelineStartedAt,
+          similarity: { totalMs: 0 },
         },
       };
     }
@@ -3616,6 +3711,13 @@ export class ImageAnalysisService {
             pageSize: resolvedResultsPageSize,
           },
         },
+        timings: {
+          ...(analysisResult.timings ?? { totalMs: 0 }),
+          totalMs: Date.now() - pipelineStartedAt,
+          similarity: {
+            totalMs: Date.now() - similarityStartedAt,
+          },
+        },
       };
     }
 
@@ -3696,6 +3798,8 @@ export class ImageAnalysisService {
       };
     }
 
+    const detectionSetupStartedAt = Date.now();
+
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
     const inferredColorsByItem: Record<string, string | null> = {};
     const inferredColorsByItemConfidence: Record<string, number> = {};
@@ -3727,12 +3831,17 @@ export class ImageAnalysisService {
             detection,
             detectionIndex: originalIndex,
           }));
+    similarityTimings.detectionSetupMs = Date.now() - detectionSetupStartedAt;
 
     // Per-detection work is concurrency-limited to avoid OpenSearch kNN pile-ups; CLIP still serializes in-process.
+    const detectionTaskDurations: number[] = [];
+    const detectionTaskWallStartedAt = Date.now();
     const settled = await mapPoolSettled(
       detectionJobs,
       shopLookPerDetectionConcurrency(),
       async ({ detection, detectionIndex }) => {
+      const detectionTaskStartedAt = Date.now();
+      try {
       // Refine generic "shoe" label using BLIP caption for footwear subtype specificity.
       const rawLabel = detection.label;
       let label = inferFootwearSubtypeFromCaption(rawLabel, blipCaption);
@@ -3750,6 +3859,9 @@ export class ImageAnalysisService {
         return null;
       }
       const finalGarmentEmbedding = finalEmbedding;
+      const detCaptionPromise = analysisResult.services?.blip
+        ? getCachedCaption(clipBuffer, "det")
+        : Promise.resolve("");
 
       const categoryMapping = mapDetectionToCategory(label, detection.confidence, {
         box_normalized: (detection as any).box_normalized,
@@ -3825,6 +3937,25 @@ export class ImageAnalysisService {
       if (!(itemColorKey in inferredColorsByItem)) inferredColorsByItem[itemColorKey] = null;
       if (!(itemColorKey in inferredColorsByItemConfidence)) inferredColorsByItemConfidence[itemColorKey] = 0;
       if (!(itemColorKey in inferredColorsByItemSource)) inferredColorsByItemSource[itemColorKey] = 0;
+
+      const cropColorsPromise = extractDetectionCropColorsForRanking({
+        clipBuffer,
+        productCategory: categoryMapping.productCategory,
+        detectionLabel: label,
+      }).catch(() => []);
+
+      const textureMaterialPromise = inferMaterialFromTextureCrop({
+        clipBuffer,
+        productCategory: categoryMapping.productCategory,
+        detectionLabel: label,
+        caption:
+          categoryMapping.productCategory === "tops" ||
+          categoryMapping.productCategory === "bottoms" ||
+          categoryMapping.productCategory === "dresses" ||
+          categoryMapping.productCategory === "outerwear"
+            ? null
+            : blipCaption,
+      }).catch(() => ({ material: null, confidence: 0 }));
 
       // Preserve category-slot color from full-image caption (e.g. "blue jeans")
       // only as a low-priority fallback for this detection.
@@ -3905,11 +4036,7 @@ export class ImageAnalysisService {
       // from background/other items. These colors feed into soft color compliance
       // (rerankScore boost) but do not hard-gate final relevance.
       try {
-        const cropColors = await extractDetectionCropColorsForRanking({
-          clipBuffer,
-          productCategory: categoryMapping.productCategory,
-          detectionLabel: label,
-        });
+        const cropColors = await cropColorsPromise;
         if (cropColors.length > 0) {
           (filters as any).cropDominantColors = cropColors;
           
@@ -4010,24 +4137,13 @@ export class ImageAnalysisService {
       }
 
       const knnFieldUsed = shopTheLookKnnField();
-      const textureMaterial = await inferMaterialFromTextureCrop({
-        clipBuffer,
-        productCategory: categoryMapping.productCategory,
-        detectionLabel: label,
-        caption:
-          categoryMapping.productCategory === "tops" ||
-          categoryMapping.productCategory === "bottoms" ||
-          categoryMapping.productCategory === "dresses" ||
-          categoryMapping.productCategory === "outerwear"
-            ? null
-            : blipCaption,
-      });
+      const textureMaterial = await textureMaterialPromise;
       if (textureMaterial.material && textureMaterial.confidence >= imageMinMaterialConfidenceEnv()) {
         (filters as any).material = textureMaterial.material;
       }
 
       // Per-detection BLIP captioning + CLIP consistency gate.
-      const detCaption = analysisResult.services?.blip ? await getCachedCaption(clipBuffer, "det") : "";
+      const detCaption = await detCaptionPromise;
       // Do not inherit full-image BLIP hints by default for a specific detection.
       // A full-image caption can describe a different region entirely (e.g. top vs trousers)
       // and will poison per-detection retrieval if used as the fallback signal.
@@ -4092,12 +4208,18 @@ export class ImageAnalysisService {
             filters.gender = detStruct.audience.gender;
           }
           if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
-          // Apply material hints from per-detection BLIP caption if present
+          // Apply material hints from per-detection BLIP caption if present.
           const detMaterialHints = (detStruct as any)?.materialHints as string[] | undefined;
-          if (detMaterialHints && detMaterialHints.length > 0 && detConfidence >= imageBlipSoftHintConfidenceStrong()) {
+          const materialHintMinConfidence =
+            categoryMapping.productCategory === "dresses"
+              ? Math.max(0.58, imageBlipSoftHintConfidenceMin())
+              : imageBlipSoftHintConfidenceStrong();
+          if (detMaterialHints && detMaterialHints.length > 0 && detConfidence >= materialHintMinConfidence) {
             const hasTextureMaterial = Boolean(textureMaterial.material);
             const keepTextureForTopLike =
-              (categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "outerwear") &&
+              (categoryMapping.productCategory === "tops" ||
+                categoryMapping.productCategory === "outerwear" ||
+                categoryMapping.productCategory === "dresses") &&
               hasTextureMaterial &&
               textureMaterial.confidence >= imageMinMaterialConfidenceEnv() + 0.08;
             if (!keepTextureForTopLike) {
@@ -4791,12 +4913,23 @@ export class ImageAnalysisService {
           length: (filters as any).length,
         },
       } as DetectionSimilarProducts;
+      } finally {
+        detectionTaskDurations.push(Date.now() - detectionTaskStartedAt);
+      }
     },
     );
+    similarityTimings.detectionTaskWallMs = Date.now() - detectionTaskWallStartedAt;
+    if (detectionTaskDurations.length > 0) {
+      const detectionTaskTotalMs = detectionTaskDurations.reduce((sum, value) => sum + value, 0);
+      similarityTimings.detectionTaskTotalMs = detectionTaskTotalMs;
+      similarityTimings.detectionTaskAvgMs = Math.round(detectionTaskTotalMs / detectionTaskDurations.length);
+      similarityTimings.detectionTaskMaxMs = Math.max(...detectionTaskDurations);
+    }
 
     const groupedResults: DetectionSimilarProducts[] = [];
     let totalProducts = 0;
 
+    const postProcessingStartedAt = Date.now();
     for (const outcome of settled) {
       if (outcome.status === "fulfilled" && outcome.value) {
         groupedResults.push(outcome.value);
@@ -4873,6 +5006,8 @@ export class ImageAnalysisService {
         ...obs,
       });
     }
+    similarityTimings.postProcessingMs = Date.now() - postProcessingStartedAt;
+    similarityTimings.totalMs = Date.now() - similarityStartedAt;
 
     const resolvedPrimaryColor =
       inferredPrimaryColor ??
@@ -4898,6 +5033,12 @@ export class ImageAnalysisService {
         },
       },
       outfitCoherence,
+      timings: {
+        ...(analysisResult.timings ?? { totalMs: 0 }),
+        totalMs: Date.now() - pipelineStartedAt,
+        analysis: analysisResult.timings?.analysis,
+        similarity: similarityTimings,
+      },
     };
   }
 
@@ -5544,6 +5685,23 @@ export class ImageAnalysisService {
             if (!filters.softStyle && detStruct.style.attrStyle) filters.softStyle = detStruct.style.attrStyle;
             if (!filters.gender && detStruct.audience.gender) filters.gender = detStruct.audience.gender;
             if (!filters.ageGroup && detStruct.audience.ageGroup) filters.ageGroup = detStruct.audience.ageGroup;
+            const detMaterialHints = (detStruct as any)?.materialHints as string[] | undefined;
+            const materialHintMinConfidence =
+              categoryMapping.productCategory === "dresses"
+                ? Math.max(0.58, imageBlipSoftHintConfidenceMin())
+                : imageBlipSoftHintConfidenceStrong();
+            if (detMaterialHints && detMaterialHints.length > 0 && detConfidence >= materialHintMinConfidence) {
+              const hasTextureMaterial = Boolean(textureMaterial.material);
+              const keepTextureForTopLike =
+                (categoryMapping.productCategory === "tops" ||
+                  categoryMapping.productCategory === "outerwear" ||
+                  categoryMapping.productCategory === "dresses") &&
+                hasTextureMaterial &&
+                textureMaterial.confidence >= imageMinMaterialConfidenceEnv() + 0.08;
+              if (!keepTextureForTopLike) {
+                (filters as any).material = detMaterialHints[0];
+              }
+            }
             const mergedTypes = [...new Set([...(softProductTypeHints ?? []), ...detStruct.productTypeHints])];
             const filteredTypes = filterProductTypeSeedsByMappedCategory(
               mergedTypes,
@@ -6159,8 +6317,21 @@ export class ImageAnalysisService {
       return { id: 0, url: cdnUrl, width: 0, height: 0, pHash };
     }
 
+    const primaryState = await pg.query<{
+      has_primary_image: boolean;
+      has_product_primary: boolean;
+    }>(
+      `SELECT
+          EXISTS(SELECT 1 FROM product_images WHERE product_id = $1 AND is_primary = true) AS has_primary_image,
+          EXISTS(SELECT 1 FROM products WHERE id = $1 AND primary_image_id IS NOT NULL) AS has_product_primary`,
+      [productId],
+    );
+    const hasPrimaryImage = Boolean(primaryState.rows[0]?.has_primary_image);
+    const hasProductPrimary = Boolean(primaryState.rows[0]?.has_product_primary);
+    const effectiveIsPrimary = isPrimary || (!hasPrimaryImage && !hasProductPrimary);
+
     // If primary, unset other primary images
-    if (isPrimary) {
+    if (effectiveIsPrimary) {
       await pg.query(
         "UPDATE product_images SET is_primary = FALSE WHERE product_id = $1",
         [productId]
@@ -6172,10 +6343,18 @@ export class ImageAnalysisService {
       `INSERT INTO product_images (product_id, r2_key, cdn_url, p_hash, is_primary)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id`,
-      [productId, key, cdnUrl, pHash, isPrimary]
+      [productId, key, cdnUrl, pHash, effectiveIsPrimary]
     );
+    const insertedId = result.rows[0].id;
 
-    return { id: result.rows[0].id, url: cdnUrl, width: 0, height: 0, pHash };
+    if (effectiveIsPrimary) {
+      await pg.query(
+        `UPDATE products SET primary_image_id = $1, image_cdn = $2 WHERE id = $3`,
+        [insertedId, cdnUrl, productId],
+      );
+    }
+
+    return { id: insertedId, url: cdnUrl, width: 0, height: 0, pHash };
   }
 
   private getContentType(ext: string): string {
