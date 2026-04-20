@@ -1557,26 +1557,26 @@ function yoloShopDedupeIouThreshold(): number {
 }
 
 function imageMinFootwearAreaRatio(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_FOOTWEAR_AREA_RATIO ?? "0.002");
-  if (!Number.isFinite(raw)) return 0.002;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_FOOTWEAR_AREA_RATIO ?? "0.0035");
+  if (!Number.isFinite(raw)) return 0.0035;
   return Math.max(0, Math.min(1, raw));
 }
 
 function imageMinFootwearConfidence(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_FOOTWEAR_CONFIDENCE ?? "0.55");
-  if (!Number.isFinite(raw)) return 0.55;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_FOOTWEAR_CONFIDENCE ?? "0.68");
+  if (!Number.isFinite(raw)) return 0.68;
   return Math.max(0, Math.min(1, raw));
 }
 
 function imageMinAccessoryAreaRatio(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_AREA_RATIO ?? "0.0008");
-  if (!Number.isFinite(raw)) return 0.0008;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_AREA_RATIO ?? "0.0015");
+  if (!Number.isFinite(raw)) return 0.0015;
   return Math.max(0, Math.min(1, raw));
 }
 
 function imageMinAccessoryConfidence(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_CONFIDENCE ?? "0.45");
-  if (!Number.isFinite(raw)) return 0.45;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_CONFIDENCE ?? "0.54");
+  if (!Number.isFinite(raw)) return 0.54;
   return Math.max(0, Math.min(1, raw));
 }
 
@@ -1587,14 +1587,14 @@ function imageMinMaterialConfidenceEnv(): number {
 }
 
 function imageMinApparelConfidence(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_APPAREL_CONFIDENCE ?? "0.35");
-  if (!Number.isFinite(raw)) return 0.35;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_APPAREL_CONFIDENCE ?? "0.42");
+  if (!Number.isFinite(raw)) return 0.42;
   return Math.max(0, Math.min(1, raw));
 }
 
 function imageMinApparelAreaRatio(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_APPAREL_AREA_RATIO ?? "0.008");
-  if (!Number.isFinite(raw)) return 0.008;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_APPAREL_AREA_RATIO ?? "0.015");
+  if (!Number.isFinite(raw)) return 0.015;
   return Math.max(0, Math.min(1, raw));
 }
 
@@ -1821,19 +1821,19 @@ function shouldForceHardCategoryForDetection(
   // Clear garment detections should constrain retrieval hard once the detector is confident enough.
   // Without this, shop-the-look returns visually plausible but wrong categories for items like trousers.
   if (category === "tops" || category === "bottoms" || category === "dresses" || category === "outerwear") {
-    return confidence >= 0.65 && areaRatio >= 0.005;
+    return confidence >= 0.84 && areaRatio >= 0.01;
   }
 
   // Exact accessory detections are often small, but when they are high-confidence we must
   // treat them as hard retrieval constraints or the visual search drifts into unrelated items.
   if (category === "footwear") {
-    return confidence >= 0.60 && areaRatio >= 0.002;
+    return confidence >= 0.76 && areaRatio >= 0.005;
   }
   if (category === "bags") {
-    return confidence >= 0.65 && areaRatio >= 0.001;
+    return confidence >= 0.72 && areaRatio >= 0.0025;
   }
   if (category === "accessories") {
-    return confidence >= 0.70 && areaRatio >= 0.001;
+    return confidence >= 0.82 && areaRatio >= 0.002;
   }
 
   return false;
@@ -2619,12 +2619,11 @@ function inferLengthIntentFromDetection(
 ): "mini" | "midi" | "maxi" | "long" | null {
   const label = String(detection.label || "").toLowerCase();
   if (!label.includes("dress")) return null;
-  // Prefer lexical evidence when present (but avoid confusing sleeve length with hem length).
-  if (/\bmini\s*dress\b/.test(label)) return "mini";
-  if (/\bmidi\s*dress\b/.test(label)) return "midi";
-  if (/\bmaxi\s*dress\b/.test(label)) return "maxi";
-  // "long dress" means long hem, not long sleeves
-  if (/\blong\s*dress\b/.test(label) && !label.includes("sleeve")) return "long";
+  // Prefer lexical evidence when present.
+  if (/\bmini\b/.test(label)) return "mini";
+  if (/\bmidi\b/.test(label)) return "midi";
+  if (/\bmaxi\b/.test(label)) return "maxi";
+  if (/\blong\b/.test(label)) return "long";
 
   // Geometric length inference is intentionally opt-in because it can over-constrain
   // dress retrieval under non-standard framing.
@@ -2635,8 +2634,8 @@ function inferLengthIntentFromDetection(
   const area = Number((detection as any).area_ratio ?? 0);
   const box = (detection as any).box_normalized;
   if (
-    conf >= 0.50 &&
-    area >= 0.08 &&
+    conf >= 0.72 &&
+    area >= 0.14 &&
     box &&
     typeof box.y1 === "number" &&
     typeof box.y2 === "number"
@@ -3083,6 +3082,16 @@ export interface ImageSimilarityStageTimings {
   detectionSearchTotalMaxMs?: number;
   detectionSearchCallsAvg?: number;
   detectionSearchCallsMax?: number;
+  detectionSearchInnerTotalAvgMs?: number;
+  detectionSearchInnerTotalMaxMs?: number;
+  detectionSearchOpenSearchAvgMs?: number;
+  detectionSearchOpenSearchMaxMs?: number;
+  detectionSearchAttributeAvgMs?: number;
+  detectionSearchAttributeMaxMs?: number;
+  detectionSearchRerankAvgMs?: number;
+  detectionSearchRerankMaxMs?: number;
+  detectionSearchPostGateAvgMs?: number;
+  detectionSearchPostGateMaxMs?: number;
   postProcessingMs?: number;
 }
 
@@ -4061,6 +4070,11 @@ export class ImageAnalysisService {
     const detectionSearchFirstDurations: number[] = [];
     const detectionSearchTotalDurations: number[] = [];
     const detectionSearchCallCounts: number[] = [];
+    const detectionSearchInnerTotalDurations: number[] = [];
+    const detectionSearchOpenSearchDurations: number[] = [];
+    const detectionSearchAttributeDurations: number[] = [];
+    const detectionSearchRerankDurations: number[] = [];
+    const detectionSearchPostGateDurations: number[] = [];
     const detectionTaskDurations: number[] = [];
     const detectionTaskWallStartedAt = Date.now();
     if (process.env.NODE_ENV !== "production" || String(process.env.SEARCH_DEBUG ?? "") === "1") {
@@ -4091,6 +4105,30 @@ export class ImageAnalysisService {
         console.info(
           `[detection-search-call] label="${detection.label}" reason="${reason}" ms=${elapsedMs} calls=${detectionSearchCalls}`,
         );
+
+        const timingMeta = (result as any)?.meta?.timing;
+        if (timingMeta && typeof timingMeta === "object") {
+          const innerTotalMs = Number((timingMeta as any).totalMs);
+          if (Number.isFinite(innerTotalMs) && innerTotalMs >= 0) {
+            detectionSearchInnerTotalDurations.push(innerTotalMs);
+          }
+          const openSearchMs = Number((timingMeta as any).openSearchMs);
+          if (Number.isFinite(openSearchMs) && openSearchMs >= 0) {
+            detectionSearchOpenSearchDurations.push(openSearchMs);
+          }
+          const attributeMs = Number((timingMeta as any).attributeMs);
+          if (Number.isFinite(attributeMs) && attributeMs >= 0) {
+            detectionSearchAttributeDurations.push(attributeMs);
+          }
+          const rerankMs = Number((timingMeta as any).rerankMs);
+          if (Number.isFinite(rerankMs) && rerankMs >= 0) {
+            detectionSearchRerankDurations.push(rerankMs);
+          }
+          const postGateMs = Number((timingMeta as any).postGateMs);
+          if (Number.isFinite(postGateMs) && postGateMs >= 0) {
+            detectionSearchPostGateDurations.push(postGateMs);
+          }
+        }
         return result;
       };
       // Refine generic "shoe" label using BLIP caption for footwear subtype specificity.
@@ -4787,6 +4825,67 @@ export class ImageAnalysisService {
         });
       }
 
+      // Retrieval-level zero-hit rescue: keep canonical category hard, but relax
+      // brittle metadata filters that can zero OpenSearch kNN before reranking.
+      if (
+        similarResult.results.length === 0 &&
+        filterByDetectedCategory
+      ) {
+        const retrievalRescueFilters = { ...filters } as any;
+        const canonicalCategory = String(categoryMapping.productCategory || "").toLowerCase().trim();
+        if (canonicalCategory) {
+          retrievalRescueFilters.category = canonicalCategory;
+        }
+
+        // Keep kNN recall-first: drop secondary constraints that frequently cause
+        // sparse-catalog false negatives in detection-scoped retrieval.
+        delete retrievalRescueFilters.productTypes;
+        delete retrievalRescueFilters.style;
+        delete retrievalRescueFilters.softStyle;
+        delete retrievalRescueFilters.length;
+        delete retrievalRescueFilters.sleeve;
+        delete retrievalRescueFilters.material;
+        delete retrievalRescueFilters.cropDominantColors;
+
+        // For accessory-like detections, audience metadata is often noisy/sparse.
+        if (isAccessoryLikeCategory(canonicalCategory) || canonicalCategory === "footwear") {
+          delete retrievalRescueFilters.gender;
+          delete retrievalRescueFilters.ageGroup;
+        } else if (!strictAudienceLock) {
+          delete retrievalRescueFilters.ageGroup;
+        }
+
+        similarResult = await runDetectionSearch("retry_knn_canonical_category", {
+          imageEmbedding: finalEmbedding,
+          imageEmbeddingGarment:
+            Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+              ? finalGarmentEmbedding
+              : undefined,
+          imageBuffer: clipBuffer,
+          pHash: sourceImagePHash,
+          detectionYoloConfidence: detection.confidence,
+          detectionProductCategory: categoryMapping.productCategory,
+          filters: retrievalRescueFilters,
+          softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
+          limit: retrievalLimit,
+          similarityThreshold,
+          includeRelated: false,
+          predictedCategoryAisles: undefined,
+          knnField: knnFieldUsed,
+          forceHardCategoryFilter: true,
+          relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          blipSignal: detectionBlipSignal,
+          inferredPrimaryColor: inferredPrimaryColorForDetection,
+          inferredColorKey: itemColorKey,
+          inferredColorsByItem,
+          inferredColorsByItemConfidence,
+          debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+          sessionId: options.sessionId,
+          userId: options.userId,
+          sessionFilters: options.sessionFilters ?? undefined,
+        });
+      }
+
       if (
         shopLookCategoryFallbackEnv() &&
         similarResult.results.length === 0 &&
@@ -5335,6 +5434,8 @@ export class ImageAnalysisService {
         },
       } as DetectionSimilarProducts;
       } finally {
+        detectionSearchTotalDurations.push(detectionSearchTotalMs);
+        detectionSearchCallCounts.push(detectionSearchCalls);
         detectionTaskDurations.push(Date.now() - detectionTaskStartedAt);
       }
     },
@@ -5370,6 +5471,31 @@ export class ImageAnalysisService {
       const total = detectionSearchCallCounts.reduce((sum, value) => sum + value, 0);
       similarityTimings.detectionSearchCallsAvg = Math.round((total / detectionSearchCallCounts.length) * 100) / 100;
       similarityTimings.detectionSearchCallsMax = Math.max(...detectionSearchCallCounts);
+    }
+    if (detectionSearchInnerTotalDurations.length > 0) {
+      const total = detectionSearchInnerTotalDurations.reduce((sum, value) => sum + value, 0);
+      similarityTimings.detectionSearchInnerTotalAvgMs = Math.round(total / detectionSearchInnerTotalDurations.length);
+      similarityTimings.detectionSearchInnerTotalMaxMs = Math.max(...detectionSearchInnerTotalDurations);
+    }
+    if (detectionSearchOpenSearchDurations.length > 0) {
+      const total = detectionSearchOpenSearchDurations.reduce((sum, value) => sum + value, 0);
+      similarityTimings.detectionSearchOpenSearchAvgMs = Math.round(total / detectionSearchOpenSearchDurations.length);
+      similarityTimings.detectionSearchOpenSearchMaxMs = Math.max(...detectionSearchOpenSearchDurations);
+    }
+    if (detectionSearchAttributeDurations.length > 0) {
+      const total = detectionSearchAttributeDurations.reduce((sum, value) => sum + value, 0);
+      similarityTimings.detectionSearchAttributeAvgMs = Math.round(total / detectionSearchAttributeDurations.length);
+      similarityTimings.detectionSearchAttributeMaxMs = Math.max(...detectionSearchAttributeDurations);
+    }
+    if (detectionSearchRerankDurations.length > 0) {
+      const total = detectionSearchRerankDurations.reduce((sum, value) => sum + value, 0);
+      similarityTimings.detectionSearchRerankAvgMs = Math.round(total / detectionSearchRerankDurations.length);
+      similarityTimings.detectionSearchRerankMaxMs = Math.max(...detectionSearchRerankDurations);
+    }
+    if (detectionSearchPostGateDurations.length > 0) {
+      const total = detectionSearchPostGateDurations.reduce((sum, value) => sum + value, 0);
+      similarityTimings.detectionSearchPostGateAvgMs = Math.round(total / detectionSearchPostGateDurations.length);
+      similarityTimings.detectionSearchPostGateMaxMs = Math.max(...detectionSearchPostGateDurations);
     }
 
     const groupedResults: DetectionSimilarProducts[] = [];

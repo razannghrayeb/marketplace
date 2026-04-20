@@ -2688,6 +2688,12 @@ function categoryFilterTermsWithAliases(input: string | string[]): string[] {
     const source = String(item ?? "").toLowerCase().trim();
     if (!source) continue;
     out.add(source);
+    // Expand alias families so detection-scoped hard terms (e.g. "sneaker")
+    // still match catalogs indexed with canonical buckets (e.g. "footwear").
+    for (const alias of getCategorySearchTerms(source)) {
+      const aliasNorm = String(alias ?? "").toLowerCase().trim();
+      if (aliasNorm) out.add(aliasNorm);
+    }
     const normalized = normalizeImageCategoryIntent(source);
     if (normalized) out.add(normalized);
     if (normalized && normalized !== source && normalized === "dresses") {
@@ -2763,11 +2769,6 @@ export async function searchByImageWithSimilarity(
     sessionFilters: sessionFiltersFromParams,
     collapseVariantGroups: collapseVariantGroupsRequested = true,
   } = params;
-
-  // ─── Timing Instrumentation ─────────────────────────────
-  const timing: Record<string, number> = {};
-  const tStart = Date.now();
-  let tLast = tStart;
 
   if (!imageEmbedding || imageEmbedding.length === 0) {
     return { results: [], meta: { threshold: similarityThreshold, total_results: 0 } };
@@ -3287,9 +3288,6 @@ export async function searchByImageWithSimilarity(
     }
   }
 
-  // ─── Timing: After OpenSearch kNN ───────────────────────
-  timing.openSearchMs = Date.now() - tLast; tLast = Date.now();
-
   const exactCosineRerank = imageExactCosineRerankEnabled();
   
   // ────────────────────────────────────────────────────────────────────────────
@@ -3343,9 +3341,6 @@ export async function searchByImageWithSimilarity(
       });
     }
   }
-
-  // ─── Timing: After attribute/part similarity ────────────
-  timing.attributeMs = Date.now() - tLast; tLast = Date.now();
 
   const visualSimFromHit = (hit: any): number => {
     if (typeof hit?._exactCosineRaw === "number") {
@@ -3428,7 +3423,6 @@ export async function searchByImageWithSimilarity(
         total_results: results.length,
         image_knn_field: knnFieldResolved,
         debug_raw_cosine_bypass_used: true,
-        timing,
       },
     };
   }
@@ -4280,9 +4274,6 @@ export async function searchByImageWithSimilarity(
       }
     }
   }
-
-  // ─── Timing: After rerank/composite ─────────────────────
-  timing.rerankMs = Date.now() - tLast; tLast = Date.now();
 
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
@@ -5780,12 +5771,6 @@ export async function searchByImageWithSimilarity(
     });
   }
 
-  // ─── Timing: After post-gate ────────────────────────────
-  timing.postGateMs = Date.now() - tLast; tLast = Date.now();
-
-  // ─── Timing: Total ──────────────────────────────────────
-  timing.totalMs = Date.now() - tStart;
-
   return {
     results,
     related: related.length > 0 ? related : undefined,
@@ -5839,7 +5824,6 @@ export async function searchByImageWithSimilarity(
         dropped_by_limit: droppedByLimit,
         final_returned_count: finalReturnedCount,
       },
-      timing,
     },
   };
 }
