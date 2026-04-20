@@ -301,6 +301,12 @@ function shopLookTopRecoverySimilarityThreshold(baseThreshold: number): number {
   return Math.max(0.35, Math.min(baseThreshold, Math.min(0.9, floor)));
 }
 
+function shopLookDressRecoverySimilarityThreshold(baseThreshold: number): number {
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_DRESS_RECOVERY_MIN_SIM ?? "0.54");
+  const floor = Number.isFinite(raw) ? raw : 0.54;
+  return Math.max(0.35, Math.min(baseThreshold, Math.min(0.9, floor)));
+}
+
 /** Expensive multi-crop fallback toggle. Default off to minimize latency tails. */
 function shopLookLowQualityMultiCropFallbackEnabled(): boolean {
   const v = String(process.env.SEARCH_IMAGE_SHOP_LOW_QUALITY_MULTICROP_FALLBACK ?? "").toLowerCase();
@@ -314,6 +320,17 @@ function shopLookTopRecoveryMinKeep(limitPerItem: number): number {
   }
   const base = Number.isFinite(limitPerItem) ? limitPerItem : 0;
   return Math.max(2, Math.min(6, Math.floor(base * 0.2)));
+}
+
+function detectionResultStrength(products: ProductResult[]): number {
+  if (!Array.isArray(products) || products.length === 0) return 0;
+  const top = products.slice(0, 6);
+  const total = top.reduce((sum, p) => {
+    const sim = Number((p as any).similarity_score ?? 0);
+    const rel = Number((p as any).finalRelevance01 ?? 0);
+    return sum + Math.max(sim, rel);
+  }, 0);
+  return total / top.length;
 }
 
 function shopLookTinyFootwearRecoveryThreshold(baseThreshold: number): number {
@@ -2661,23 +2678,26 @@ function inferLengthIntentFromDetection(
 ): "mini" | "midi" | "maxi" | "long" | null {
   const label = String(detection.label || "").toLowerCase();
   if (!label.includes("dress")) return null;
-  // Prefer lexical evidence when present.
-  if (/\bmini\b/.test(label)) return "mini";
-  if (/\bmidi\b/.test(label)) return "midi";
-  if (/\bmaxi\b/.test(label)) return "maxi";
-  if (/\blong\b/.test(label)) return "long";
+  // Prefer lexical evidence, but avoid confusing sleeve length with hem length.
+  if (/\bmini\s*dress\b|\bmini\b/.test(label)) return "mini";
+  if (/\bmidi\s*dress\b|\bmidi\b/.test(label)) return "midi";
+  if (/\bmaxi\s*dress\b|\bmaxi\b/.test(label)) return "maxi";
+  if (/\blong\s*(dress|gown|frock|abaya|kaftan)\b/.test(label) && !/\bsleeve\b/.test(label)) {
+    return "long";
+  }
 
   // Geometric length inference is intentionally opt-in because it can over-constrain
   // dress retrieval under non-standard framing.
   if (!imageEnableGeometricDressLengthEnv()) return null;
 
   // Fallback to bbox-based inference only for confident, sufficiently large dress detections.
+  // Fallback to bbox-based inference only for very confident, large dress detections.
   const conf = Number(detection.confidence ?? 0);
   const area = Number((detection as any).area_ratio ?? 0);
   const box = (detection as any).box_normalized;
   if (
-    conf >= 0.72 &&
-    area >= 0.14 &&
+    conf >= 0.82 &&
+    area >= 0.18 &&
     box &&
     typeof box.y1 === "number" &&
     typeof box.y2 === "number"
@@ -4404,7 +4424,12 @@ export class ImageAnalysisService {
 
       const detectionSleeve =
         categoryMapping.attributes.sleeveLength ?? inferSleeveIntentFromDetectionLabel(label);
-      if (detectionSleeve) {
+      const normalizedLabelForSleeve = normalizeLooseText(label);
+      const hasExplicitSleeveCue =
+        /\b(short sleeve|long sleeve|half sleeve|3\/?4 sleeve|sleeveless)\b/.test(normalizedLabelForSleeve);
+      const sleeveSensitiveCategory =
+        categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses";
+      if (detectionSleeve && (!sleeveSensitiveCategory || hasExplicitSleeveCue)) {
         filters.sleeve = detectionSleeve;
       }
       const detectionLength = inferLengthIntentFromDetection(detection, imageHeight);
@@ -4608,7 +4633,9 @@ export class ImageAnalysisService {
               (categoryMapping.productCategory === "tops" ||
                 categoryMapping.productCategory === "outerwear" ||
                 categoryMapping.productCategory === "dresses") &&
-              hasTextureMaterial &&
+              categoryMapping.productCategory === "outerwear" ||
+              categoryMapping.productCategory === "footwear" ||
+              categoryMapping.productCategory === "bags";
               textureMaterial.confidence >= imageMinMaterialConfidenceEnv() + 0.08;
             if (!keepTextureForTopLike) {
               (filters as any).material = detMaterialHints[0];
@@ -5328,6 +5355,99 @@ export class ImageAnalysisService {
           if (similarResult.results.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) {
             break;
           }
+        }
+      }
+
+      const topOrDressCategory =
+        categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses";
+      const topOrDressMinKeep = categoryMapping.productCategory === "tops"
+        ? topsRecoveryMinKeep
+        : Math.max(3, Math.min(8, Math.floor(resolvedLimitPerItem * 0.35)));
+      if (
+        detectionSearchCalls < maxSearchCallsPerDetection &&
+        topOrDressCategory &&
+        similarResult.results.length < topOrDressMinKeep
+      ) {
+        const ablationTerms = hardCategoryTermsForDetection(label, categoryMapping);
+        const ablationFilters: Partial<import("./types").SearchFilters> = {};
+        if (ablationTerms.length > 0) {
+          ablationFilters.category = ablationTerms.length === 1 ? ablationTerms[0] : ablationTerms;
+        }
+        if (strictAudienceLock && filters.gender) {
+          ablationFilters.gender = filters.gender;
+        }
+        if (strictAudienceLock && filters.ageGroup) {
+          ablationFilters.ageGroup = filters.ageGroup;
+        }
+
+        const ablationThreshold = categoryMapping.productCategory === "tops"
+          ? shopLookTopRecoverySimilarityThreshold(similarityThreshold)
+          : shopLookDressRecoverySimilarityThreshold(similarityThreshold);
+
+        const ablation = await runDetectionSearch(`recovery_${categoryMapping.productCategory}_ablation`, {
+          imageEmbedding: finalEmbedding,
+          imageBuffer: queryProcessBuf,
+          pHash: sourceImagePHash,
+          detectionYoloConfidence: detection.confidence,
+          detectionProductCategory: categoryMapping.productCategory,
+          filters: ablationFilters,
+          softProductTypeHints,
+          limit: retrievalLimit,
+          similarityThreshold: ablationThreshold,
+          includeRelated: false,
+          knnField: "embedding",
+          forceHardCategoryFilter: true,
+          relaxThresholdWhenEmpty: true,
+          blipSignal: detectionBlipSignal,
+          inferredPrimaryColor: inferredPrimaryColorForDetection,
+          inferredColorKey: itemColorKey,
+          inferredColorsByItem,
+          inferredColorsByItemConfidence,
+          debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+          sessionId: options.sessionId,
+          userId: options.userId,
+          sessionFilters: options.sessionFilters ?? undefined,
+        });
+
+        const ablationCategorySafe = applyDetectionCategoryGuard(
+          ablation.results,
+          detection.label,
+          categoryMapping,
+          String((ablationFilters as any).gender ?? ""),
+        );
+        const ablationSleeveSafe = applySleeveIntentGuard({
+          products: ablationCategorySafe,
+          detectionLabel: detection.label,
+          categoryMapping,
+        });
+        const ablationFormalitySafe = applyFormalityFilter(
+          ablationSleeveSafe,
+          Number((filters as any).minFormality ?? 0),
+        );
+        const ablationSafeResults = applyAthleticMismatchGuard({
+          products: ablationFormalitySafe,
+          detectionLabel: label,
+          productCategory: categoryMapping.productCategory,
+          softStyle: String((filters as any).softStyle ?? ""),
+          minFormality: Number((filters as any).minFormality ?? 0),
+        });
+
+        const currentStrength = detectionResultStrength(similarResult.results);
+        const ablationStrength = detectionResultStrength(ablationSafeResults);
+        const shouldUseAblation =
+          ablationSafeResults.length > similarResult.results.length ||
+          (ablationSafeResults.length >= Math.max(2, similarResult.results.length) && ablationStrength > currentStrength + 0.03);
+
+        if (shouldUseAblation) {
+          if (hotPathDebug) {
+            console.log(
+              `[recovery-result] detection="${label}" type=${categoryMapping.productCategory}_ablation switched count=${similarResult.results.length}->${ablationSafeResults.length} strength=${currentStrength.toFixed(3)}->${ablationStrength.toFixed(3)}`,
+            );
+          }
+          similarResult = {
+            ...similarResult,
+            results: ablationSafeResults,
+          };
         }
       }
 
@@ -6131,7 +6251,12 @@ export class ImageAnalysisService {
 
         const detectionSleeve =
           categoryMapping.attributes.sleeveLength ?? inferSleeveIntentFromDetectionLabel(categorySource);
-        if (detectionSleeve) {
+        const normalizedSourceForSleeve = normalizeLooseText(categorySource);
+        const hasExplicitSleeveCue =
+          /\b(short sleeve|long sleeve|half sleeve|3\/?4 sleeve|sleeveless)\b/.test(normalizedSourceForSleeve);
+        const sleeveSensitiveCategory =
+          categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses";
+        if (detectionSleeve && (!sleeveSensitiveCategory || hasExplicitSleeveCue)) {
           filters.sleeve = detectionSleeve;
         }
 
@@ -6672,6 +6797,97 @@ export class ImageAnalysisService {
               ),
             };
             if (similarResult.results.length >= Math.max(4, Math.floor(retrievalLimit * 0.5))) break;
+          }
+        }
+
+        const topOrDressCategory =
+          categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses";
+        const topOrDressMinKeep = categoryMapping.productCategory === "tops"
+          ? shopLookTopRecoveryMinKeep(resolvedLimitPerItem)
+          : Math.max(3, Math.min(8, Math.floor(resolvedLimitPerItem * 0.35)));
+        if (topOrDressCategory && similarResult.results.length < topOrDressMinKeep) {
+          const ablationTerms = hardCategoryTermsForDetection(categorySource, categoryMapping);
+          const ablationFilters: Partial<import("./types").SearchFilters> = {};
+          if (ablationTerms.length > 0) {
+            ablationFilters.category = ablationTerms.length === 1 ? ablationTerms[0] : ablationTerms;
+          }
+          if (strictAudienceLock && filters.gender) {
+            ablationFilters.gender = filters.gender;
+          }
+          if (strictAudienceLock && filters.ageGroup) {
+            ablationFilters.ageGroup = filters.ageGroup;
+          }
+
+          const ablationThreshold = categoryMapping.productCategory === "tops"
+            ? shopLookTopRecoverySimilarityThreshold(options.similarityThreshold ?? config.clip.imageSimilarityThreshold)
+            : shopLookDressRecoverySimilarityThreshold(options.similarityThreshold ?? config.clip.imageSimilarityThreshold);
+
+          const ablation = await searchByImageWithSimilarity({
+            imageEmbedding: finalEmbedding,
+            imageEmbeddingGarment:
+              Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+                ? finalGarmentEmbedding
+                : undefined,
+            imageBuffer: queryProcessBuf,
+            pHash: sourceImagePHash,
+            detectionYoloConfidence: detection.confidence,
+            detectionProductCategory: categoryMapping.productCategory,
+            filters: ablationFilters,
+            softProductTypeHints,
+            limit: retrievalLimit,
+            similarityThreshold: ablationThreshold,
+            includeRelated: false,
+            knnField: "embedding",
+            forceHardCategoryFilter: true,
+            relaxThresholdWhenEmpty: true,
+            blipSignal: detectionBlipSignal,
+            inferredPrimaryColor: inferredPrimaryColorForDetection,
+            inferredColorKey: itemColorKey,
+            inferredColorsByItem,
+            inferredColorsByItemConfidence,
+            debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+            sessionId: options.sessionId,
+            userId: options.userId,
+            sessionFilters: options.sessionFilters ?? undefined,
+          });
+
+          const ablationCategorySafe = applyDetectionCategoryGuard(
+            ablation.results,
+            categorySource,
+            categoryMapping,
+            String((ablationFilters as any).gender ?? ""),
+          );
+          const ablationSleeveSafe = applySleeveIntentGuard({
+            products: ablationCategorySafe,
+            detectionLabel: categorySource,
+            categoryMapping,
+          });
+          const ablationFormalitySafe = applyFormalityFilter(
+            ablationSleeveSafe,
+            Number((filters as any).minFormality ?? 0),
+          );
+          const ablationSafeResults = applyAthleticMismatchGuard({
+            products: ablationFormalitySafe,
+            detectionLabel: categorySource,
+            productCategory: categoryMapping.productCategory,
+            softStyle: String((filters as any).softStyle ?? ""),
+            minFormality: Number((filters as any).minFormality ?? 0),
+          });
+
+          const currentStrength = detectionResultStrength(similarResult.results);
+          const ablationStrength = detectionResultStrength(ablationSafeResults);
+          const shouldUseAblation =
+            ablationSafeResults.length > similarResult.results.length ||
+            (ablationSafeResults.length >= Math.max(2, similarResult.results.length) && ablationStrength > currentStrength + 0.03);
+
+          if (shouldUseAblation) {
+            console.log(
+              `[recovery-result] detection="${categorySource}" type=${categoryMapping.productCategory}_ablation switched count=${similarResult.results.length}->${ablationSafeResults.length} strength=${currentStrength.toFixed(3)}->${ablationStrength.toFixed(3)}`,
+            );
+            similarResult = {
+              ...similarResult,
+              results: ablationSafeResults,
+            };
           }
         }
 
