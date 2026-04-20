@@ -1557,26 +1557,26 @@ function yoloShopDedupeIouThreshold(): number {
 }
 
 function imageMinFootwearAreaRatio(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_FOOTWEAR_AREA_RATIO ?? "0.0035");
-  if (!Number.isFinite(raw)) return 0.0035;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_FOOTWEAR_AREA_RATIO ?? "0.002");
+  if (!Number.isFinite(raw)) return 0.002;
   return Math.max(0, Math.min(1, raw));
 }
 
 function imageMinFootwearConfidence(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_FOOTWEAR_CONFIDENCE ?? "0.68");
-  if (!Number.isFinite(raw)) return 0.68;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_FOOTWEAR_CONFIDENCE ?? "0.55");
+  if (!Number.isFinite(raw)) return 0.55;
   return Math.max(0, Math.min(1, raw));
 }
 
 function imageMinAccessoryAreaRatio(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_AREA_RATIO ?? "0.0015");
-  if (!Number.isFinite(raw)) return 0.0015;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_AREA_RATIO ?? "0.0008");
+  if (!Number.isFinite(raw)) return 0.0008;
   return Math.max(0, Math.min(1, raw));
 }
 
 function imageMinAccessoryConfidence(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_CONFIDENCE ?? "0.54");
-  if (!Number.isFinite(raw)) return 0.54;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_ACCESSORY_CONFIDENCE ?? "0.45");
+  if (!Number.isFinite(raw)) return 0.45;
   return Math.max(0, Math.min(1, raw));
 }
 
@@ -1587,14 +1587,14 @@ function imageMinMaterialConfidenceEnv(): number {
 }
 
 function imageMinApparelConfidence(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_APPAREL_CONFIDENCE ?? "0.42");
-  if (!Number.isFinite(raw)) return 0.42;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_APPAREL_CONFIDENCE ?? "0.35");
+  if (!Number.isFinite(raw)) return 0.35;
   return Math.max(0, Math.min(1, raw));
 }
 
 function imageMinApparelAreaRatio(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_APPAREL_AREA_RATIO ?? "0.015");
-  if (!Number.isFinite(raw)) return 0.015;
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_APPAREL_AREA_RATIO ?? "0.008");
+  if (!Number.isFinite(raw)) return 0.008;
   return Math.max(0, Math.min(1, raw));
 }
 
@@ -1821,19 +1821,19 @@ function shouldForceHardCategoryForDetection(
   // Clear garment detections should constrain retrieval hard once the detector is confident enough.
   // Without this, shop-the-look returns visually plausible but wrong categories for items like trousers.
   if (category === "tops" || category === "bottoms" || category === "dresses" || category === "outerwear") {
-    return confidence >= 0.84 && areaRatio >= 0.01;
+    return confidence >= 0.65 && areaRatio >= 0.005;
   }
 
   // Exact accessory detections are often small, but when they are high-confidence we must
   // treat them as hard retrieval constraints or the visual search drifts into unrelated items.
   if (category === "footwear") {
-    return confidence >= 0.76 && areaRatio >= 0.005;
+    return confidence >= 0.60 && areaRatio >= 0.002;
   }
   if (category === "bags") {
-    return confidence >= 0.72 && areaRatio >= 0.0025;
+    return confidence >= 0.65 && areaRatio >= 0.001;
   }
   if (category === "accessories") {
-    return confidence >= 0.82 && areaRatio >= 0.002;
+    return confidence >= 0.70 && areaRatio >= 0.001;
   }
 
   return false;
@@ -2619,11 +2619,12 @@ function inferLengthIntentFromDetection(
 ): "mini" | "midi" | "maxi" | "long" | null {
   const label = String(detection.label || "").toLowerCase();
   if (!label.includes("dress")) return null;
-  // Prefer lexical evidence when present.
-  if (/\bmini\b/.test(label)) return "mini";
-  if (/\bmidi\b/.test(label)) return "midi";
-  if (/\bmaxi\b/.test(label)) return "maxi";
-  if (/\blong\b/.test(label)) return "long";
+  // Prefer lexical evidence when present (but avoid confusing sleeve length with hem length).
+  if (/\bmini\s*dress\b/.test(label)) return "mini";
+  if (/\bmidi\s*dress\b/.test(label)) return "midi";
+  if (/\bmaxi\s*dress\b/.test(label)) return "maxi";
+  // "long dress" means long hem, not long sleeves
+  if (/\blong\s*dress\b/.test(label) && !label.includes("sleeve")) return "long";
 
   // Geometric length inference is intentionally opt-in because it can over-constrain
   // dress retrieval under non-standard framing.
@@ -2634,8 +2635,8 @@ function inferLengthIntentFromDetection(
   const area = Number((detection as any).area_ratio ?? 0);
   const box = (detection as any).box_normalized;
   if (
-    conf >= 0.72 &&
-    area >= 0.14 &&
+    conf >= 0.50 &&
+    area >= 0.08 &&
     box &&
     typeof box.y1 === "number" &&
     typeof box.y2 === "number"

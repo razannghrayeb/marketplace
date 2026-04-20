@@ -2764,6 +2764,11 @@ export async function searchByImageWithSimilarity(
     collapseVariantGroups: collapseVariantGroupsRequested = true,
   } = params;
 
+  // ─── Timing Instrumentation ─────────────────────────────
+  const timing: Record<string, number> = {};
+  const tStart = Date.now();
+  let tLast = tStart;
+
   if (!imageEmbedding || imageEmbedding.length === 0) {
     return { results: [], meta: { threshold: similarityThreshold, total_results: 0 } };
   }
@@ -3282,6 +3287,9 @@ export async function searchByImageWithSimilarity(
     }
   }
 
+  // ─── Timing: After OpenSearch kNN ───────────────────────
+  timing.openSearchMs = Date.now() - tLast; tLast = Date.now();
+
   const exactCosineRerank = imageExactCosineRerankEnabled();
   
   // ────────────────────────────────────────────────────────────────────────────
@@ -3335,6 +3343,9 @@ export async function searchByImageWithSimilarity(
       });
     }
   }
+
+  // ─── Timing: After attribute/part similarity ────────────
+  timing.attributeMs = Date.now() - tLast; tLast = Date.now();
 
   const visualSimFromHit = (hit: any): number => {
     if (typeof hit?._exactCosineRaw === "number") {
@@ -3417,6 +3428,7 @@ export async function searchByImageWithSimilarity(
         total_results: results.length,
         image_knn_field: knnFieldResolved,
         debug_raw_cosine_bypass_used: true,
+        timing,
       },
     };
   }
@@ -4269,6 +4281,9 @@ export async function searchByImageWithSimilarity(
     }
   }
 
+  // ─── Timing: After rerank/composite ─────────────────────
+  timing.rerankMs = Date.now() - tLast; tLast = Date.now();
+
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
     const idb = String(b._source.product_id);
@@ -4867,11 +4882,19 @@ export async function searchByImageWithSimilarity(
       const effectiveMinInferredColorCompliance = hasStrongDetectionScopedColor
         ? Math.min(0.4, minInferredColorCompliance + 0.08)
         : minInferredColorCompliance;
-      const inferredColorCompliantHits = rankedHits.filter(
-        (h: any) =>
-          (complianceById.get(String(h._source.product_id))?.colorCompliance ?? 0) >=
-          effectiveMinInferredColorCompliance,
-      );
+      // Allow hits with high colorSimEff to pass even if colorCompliance is slightly below threshold
+      const inferredColorCompliantHits = rankedHits.filter((h: any) => {
+        const compliance = complianceById.get(String(h._source.product_id))?.colorCompliance ?? 0;
+        const colorSimEff = colorSimById.get(String(h._source.product_id)) ?? 0;
+        return (
+          compliance >= effectiveMinInferredColorCompliance ||
+          (
+            (category === "bottoms" || category === "outerwear") &&
+            hasStrongDetectionScopedColor &&
+            colorSimEff >= 0.7 // allow visually strong matches
+          )
+        );
+      });
       const minKeep =
         rankedHits.length >= 12
           ? 4
@@ -4880,11 +4903,28 @@ export async function searchByImageWithSimilarity(
             : 1;
       const enforceInferredColorStrictly =
         category === "footwear" ||
-        category === "shoes";
+        category === "shoes" ||
+        ((category === "bottoms" || category === "outerwear") &&
+          hasStrongDetectionScopedColor &&
+          desiredColorsForRelevance.length === 1);
       if (inferredColorCompliantHits.length > 0 && enforceInferredColorStrictly) {
         rankedHits = inferredColorCompliantHits;
       } else if (hasStrongDetectionScopedColor && inferredColorCompliantHits.length > 0) {
         rankedHits = inferredColorCompliantHits;
+      } else if (
+        (category === "bottoms" || category === "outerwear") &&
+        hasStrongDetectionScopedColor &&
+        inferredColorCompliantHits.length === 0
+      ) {
+        // Strong bottoms/outerwear color signal should still prune obvious mismatches
+        // instead of keeping a fully unconstrained color tail.
+        const softColorSafeHits = rankedHits.filter(
+          (h: any) =>
+            (complianceById.get(String(h._source.product_id))?.colorCompliance ?? 0) >= 0.12,
+        );
+        if (softColorSafeHits.length > 0) {
+          rankedHits = softColorSafeHits;
+        }
       } else if (inferredColorCompliantHits.length >= minKeep) {
         rankedHits = inferredColorCompliantHits;
       } else if (rankedHits.length >= 10) {
@@ -5195,8 +5235,13 @@ export async function searchByImageWithSimilarity(
         }
       }
 
+      const hasHardColorConflictAfterCorrection =
+        finalRelevanceSource === "catalog_color_correction" &&
+        hasColorIntentForFinal &&
+        (explainColorCompliance ?? 0) <= 0.01;
       const canApplyPersonalization =
         (finalRelevanceSource === "computed" || finalRelevanceSource === "catalog_color_correction") &&
+        !hasHardColorConflictAfterCorrection &&
         !(
           hasDetectionAnchoredTypeIntent &&
           compliance &&
@@ -5735,6 +5780,12 @@ export async function searchByImageWithSimilarity(
     });
   }
 
+  // ─── Timing: After post-gate ────────────────────────────
+  timing.postGateMs = Date.now() - tLast; tLast = Date.now();
+
+  // ─── Timing: Total ──────────────────────────────────────
+  timing.totalMs = Date.now() - tStart;
+
   return {
     results,
     related: related.length > 0 ? related : undefined,
@@ -5788,6 +5839,7 @@ export async function searchByImageWithSimilarity(
         dropped_by_limit: droppedByLimit,
         final_returned_count: finalReturnedCount,
       },
+      timing,
     },
   };
 }
