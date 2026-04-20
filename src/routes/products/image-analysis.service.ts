@@ -1405,6 +1405,20 @@ const FORMAL_OUTERWEAR_RECOVERY_TYPES = [
   "blazers",
 ];
 
+const TAILORED_TOP_RECOVERY_TYPES = [
+  "suit",
+  "suits",
+  "blazer",
+  "blazers",
+  "dress jacket",
+  "sport coat",
+  "waistcoat",
+  "vest",
+  "vests",
+  "shirt",
+  "shirts",
+];
+
 function hasFormalTailoringCue(text: string): boolean {
   const s = String(text || "").toLowerCase();
   if (!s) return false;
@@ -1421,6 +1435,81 @@ function recoverFormalOuterwearTypes(
   if (category !== "outerwear") return normalized;
   if (!cueTexts.some((t) => hasFormalTailoringCue(String(t ?? "")))) return normalized;
   return [...new Set([...FORMAL_OUTERWEAR_RECOVERY_TYPES, ...normalized])];
+}
+
+function hasTailoredBottomCue(label: string): boolean {
+  const s = normalizeLooseText(label);
+  if (!s) return false;
+  if (/\b(jean|jeans|denim|short|shorts|legging|leggings|jogger|joggers|cargo|cargo pants)\b/.test(s)) return false;
+  return /\b(trouser|trousers|pant|pants|slack|slacks|chino|chinos|dress pants)\b/.test(s);
+}
+
+function hasStructuredTopCue(label: string): boolean {
+  const s = normalizeLooseText(label);
+  if (!s) return false;
+  if (/\b(t ?shirt|tee|tank|camisole|cami|hoodie|sweatshirt|sweat shirt|crop top|polo)\b/.test(s)) return false;
+  return /\b(long sleeve top|shirt|blouse|overshirt|button down|button-down|outerwear|outwear|jacket|coat|blazer|cardigan|sweater)\b/.test(s);
+}
+
+function hasShirtRecoveryCue(rawLabel: string): boolean {
+  const s = normalizeLooseText(rawLabel);
+  if (!s) return false;
+  return /\bcorrected\b/.test(s) && /\bshirt\b/.test(s) && /\brecovery\b/.test(s) && /\b(outwear|outerwear|jacket)\b/.test(s);
+}
+
+function inferContextualFormalityFromDetections(detections: Detection[]): number {
+  if (!Array.isArray(detections) || detections.length === 0) return 0;
+
+  let hasStrongTailoringCue = false;
+  let hasStructuredTop = false;
+  let hasTailoredBottom = false;
+  let hasShirtRecovery = false;
+
+  for (const detection of detections) {
+    const label = String(detection.label || "");
+    const rawLabel = String(detection.raw_label || "");
+    const joined = `${label} ${rawLabel}`;
+
+    if (hasFormalTailoringCue(joined)) {
+      hasStrongTailoringCue = true;
+    }
+    if (hasStructuredTopCue(label) || hasStructuredTopCue(rawLabel)) {
+      hasStructuredTop = true;
+    }
+    if (hasTailoredBottomCue(label) || hasTailoredBottomCue(rawLabel)) {
+      hasTailoredBottom = true;
+    }
+    if (hasShirtRecoveryCue(rawLabel)) {
+      hasShirtRecovery = true;
+    }
+  }
+
+  if (hasStrongTailoringCue) return 9;
+  if (hasStructuredTop && hasTailoredBottom) {
+    // Shirt-recovery from outerwear is a strong proxy for missed blazer/suit detection.
+    return hasShirtRecovery ? 8 : 7;
+  }
+  return 0;
+}
+
+function recoverTailoredTopTypes(
+  seeds: string[],
+  productCategory: string,
+  detectionLabel: string,
+  rawLabel: string | undefined,
+  contextualFormalityScore: number,
+): string[] {
+  const category = String(productCategory || "").toLowerCase();
+  const normalized = [...new Set(seeds.map((s) => String(s).toLowerCase().trim()).filter(Boolean))];
+  if (category !== "tops") return normalized;
+
+  const cueText = `${String(detectionLabel || "")} ${String(rawLabel || "")}`;
+  const shouldRecover =
+    contextualFormalityScore >= 8 ||
+    (contextualFormalityScore >= 7 && (hasFormalTailoringCue(cueText) || hasShirtRecoveryCue(String(rawLabel || ""))));
+
+  if (!shouldRecover) return normalized;
+  return [...new Set([...TAILORED_TOP_RECOVERY_TYPES, ...normalized])];
 }
 
 function shouldPreserveHardCategoryOnFallback(mapping: CategoryMapping): boolean {
@@ -3831,6 +3920,7 @@ export class ImageAnalysisService {
             detection,
             detectionIndex: originalIndex,
           }));
+    const contextualFormalityScore = inferContextualFormalityFromDetections(analysisResult.detection.items);
     similarityTimings.detectionSetupMs = Date.now() - detectionSetupStartedAt;
 
     // Per-detection work is concurrency-limited to avoid OpenSearch kNN pile-ups; CLIP still serializes in-process.
@@ -3919,6 +4009,13 @@ export class ImageAnalysisService {
         label,
         blipCaption ?? "",
       );
+      softProductTypeHints = recoverTailoredTopTypes(
+        softProductTypeHints,
+        categoryMapping.productCategory,
+        label,
+        detection.raw_label,
+        contextualFormalityScore,
+      );
       if (shouldForceTypeFilterForDetection(detection, categoryMapping, strongTypeSeeds)) {
         filters.productTypes = strongTypeSeeds.slice(0, 10);
       }
@@ -4001,21 +4098,30 @@ export class ImageAnalysisService {
         filters.softStyle = inferredStyle.attrStyle;
       }
 
-      // Extract formality intent from BLIP caption: if formal wear is detected (suit, tie, tuxedo),
-      // override softStyle to "formal" to ensure proper product ranking (no casual sport coats, blazers).
+      // Combine BLIP, label, and outfit-context formality. This preserves formalwear intent
+      // even when full-image BLIP is empty and YOLO emitted shirt-recovery labels.
       const blipFormalityScore = blipCaption ? inferFormalityFromCaption(blipCaption) : 0;
+      const labelFormalityScore = inferFormalityFromLabel(label);
+      const effectiveFormalityScore = Math.max(
+        blipFormalityScore,
+        labelFormalityScore,
+        isAccessoryOrBag ? 0 : contextualFormalityScore,
+      );
       if (blipCaption && blipFormalityScore > 0) {
         console.log(`[formality-intent] caption="${blipCaption.substring(0, 60)}..." score=${blipFormalityScore}`);
       }
-      if (blipFormalityScore >= 8) {
+      if (effectiveFormalityScore >= 8) {
         filters.softStyle = "formal"; // Override previous style inference with formal
         (filters as any).minFormality = 8; // Hard filter: only rank products with formality >= 8
         console.log(`[formality-intent][APPLIED] enforcing formal-wear-only for detection="${label}"`);
+      } else if (!isAccessoryOrBag && effectiveFormalityScore >= 7) {
+        // Keep this softer than strict formal: improves suit/blazer recall without over-pruning.
+        filters.softStyle = "semi-formal";
       }
 
       const formalFootwearIntent =
         categoryMapping.productCategory === "footwear" &&
-        (blipFormalityScore >= 8 || filters.softStyle === "formal");
+        (effectiveFormalityScore >= 7 || filters.softStyle === "formal" || filters.softStyle === "semi-formal");
       if (formalFootwearIntent) {
         softProductTypeHints = pruneAthleticFootwearTerms(softProductTypeHints);
         if (Array.isArray((filters as any).productTypes)) {
@@ -5378,6 +5484,7 @@ export class ImageAnalysisService {
         : null);
     // Avoid TS "never" narrowing when caption inference is type-proved unreachable.
     const captionWantsJeans = blipStructured.productTypeHints.includes("jeans");
+    const contextualFormalityScore = inferContextualFormalityFromDetections(allItemsToProcess);
 
     for (let i = 0; i < allItemsToProcess.length; i++) {
       const detection = allItemsToProcess[i];
@@ -5461,6 +5568,13 @@ export class ImageAnalysisService {
           categorySource,
           blipCaption ?? "",
         );
+        browseTypeSeeds = recoverTailoredTopTypes(
+          browseTypeSeeds,
+          categoryMapping.productCategory,
+          categorySource,
+          detection.raw_label,
+          contextualFormalityScore,
+        );
         if (shouldForceTypeFilterForDetection(detection, categoryMapping, browseTypeSeeds)) {
           filters.productTypes = browseTypeSeeds.slice(0, 10);
         }
@@ -5489,16 +5603,22 @@ export class ImageAnalysisService {
         // Use the stronger of BLIP caption formality and detection-label formality.
         const blipFormalityScore = blipCaption ? inferFormalityFromCaption(blipCaption) : 0;
         const labelFormalityScore = inferFormalityFromLabel(categorySource);
-        const effectiveFormalityScore = Math.max(blipFormalityScore, labelFormalityScore);
+        const effectiveFormalityScore = Math.max(
+          blipFormalityScore,
+          labelFormalityScore,
+          contextualFormalityScore,
+        );
         if (effectiveFormalityScore >= 8) {
           filters.softStyle = "formal";
           (filters as any).minFormality = 8;
           console.log(`[formality-intent-alt][APPLIED] enforcing formal-wear-only for detection="${categorySource}"`);
+        } else if (effectiveFormalityScore >= 7) {
+          filters.softStyle = "semi-formal";
         }
 
         const formalFootwearIntent =
           categoryMapping.productCategory === "footwear" &&
-          (effectiveFormalityScore >= 8 || filters.softStyle === "formal");
+          (effectiveFormalityScore >= 7 || filters.softStyle === "formal" || filters.softStyle === "semi-formal");
         if (formalFootwearIntent) {
           browseTypeSeeds = pruneAthleticFootwearTerms(browseTypeSeeds);
           softProductTypeHints = browseTypeSeeds.length > 0 ? browseTypeSeeds : undefined;
