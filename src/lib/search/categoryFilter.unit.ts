@@ -28,6 +28,12 @@ describe("categoryFilter", () => {
     expect(r.includes("tops")).toBe(true);
   });
 
+  test("getCategorySearchTerms expands bags aliases", () => {
+    const t = getCategorySearchTerms("bags");
+    expect(t.includes("handbag")).toBe(true);
+    expect(t.includes("wallet")).toBe(true);
+  });
+
   test("inferCategoryCanonical maps vendor label to aisle", () => {
     expect(inferCategoryCanonical("Bags", "")).toBe("accessories");
     expect(inferCategoryCanonical(null, "Men crew neck tee shirt")).toBe("tops");

@@ -21,6 +21,7 @@ import {
   type RecommendationImpression,
 } from "../../lib/recommendations";
 import { catalogGenderFromCaption } from "../../lib/image/captionAttributeInference";
+import { coarseColorBucket } from "../../lib/color/colorCanonical";
 
 // ============================================================================
 // Types
@@ -656,6 +657,103 @@ function scoreColorHarmony(sourceStyle: StyleProfile, candidateColor: string | u
   return 0.46;
 }
 
+const FASHION_COLOR_LEXICON = [
+  "black", "white", "off white", "off-white", "cream", "ivory", "beige", "brown", "camel", "tan",
+  "gray", "grey", "charcoal", "silver", "navy", "blue", "light blue", "light-blue", "green", "olive",
+  "red", "burgundy", "pink", "purple", "yellow", "orange", "gold", "teal", "multicolor", "multi color",
+];
+
+const CORE_GARMENT_FAMILIES = new Set(["tops", "bottoms", "dress", "outerwear"]);
+const NEUTRAL_COLOR_BUCKETS = new Set(["black", "white", "gray", "brown"]);
+
+const COLOR_BUCKET_COMPATIBILITY: Record<string, string[]> = {
+  blue: ["earth", "red", "green"],
+  green: ["earth", "blue"],
+  red: ["blue", "earth", "green"],
+  pink: ["green", "blue", "earth"],
+  purple: ["blue", "pink", "earth"],
+  yellow: ["blue", "earth"],
+  orange: ["blue", "earth"],
+  brown: ["blue", "green", "red"],
+};
+
+function extractColorBucketsFromText(value?: string | null): Set<string> {
+  const out = new Set<string>();
+  const raw = String(value || "").toLowerCase();
+  if (!raw) return out;
+
+  const normalized = raw
+    .replace(/[()\[\],]/g, " ")
+    .replace(/[|/\\;+]/g, " ")
+    .replace(/[_-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return out;
+
+  const phrases: string[] = [];
+  for (const phrase of FASHION_COLOR_LEXICON) {
+    if (normalized.includes(phrase)) phrases.push(phrase);
+  }
+
+  const tokens = normalized.split(" ").filter(Boolean);
+  for (let i = 0; i < tokens.length; i++) {
+    phrases.push(tokens[i]);
+    if (i + 1 < tokens.length) phrases.push(`${tokens[i]} ${tokens[i + 1]}`);
+  }
+
+  for (const phrase of phrases) {
+    const bucket = coarseColorBucket(phrase);
+    if (bucket) out.add(bucket);
+  }
+
+  return out;
+}
+
+function isCoreGarmentFamily(family: string): boolean {
+  return CORE_GARMENT_FAMILIES.has(String(family || "").toLowerCase());
+}
+
+function hasChromaticColor(bucketSet: Set<string>): boolean {
+  if (bucketSet.size === 0) return false;
+  for (const b of bucketSet) {
+    if (!NEUTRAL_COLOR_BUCKETS.has(b)) return true;
+  }
+  return false;
+}
+
+function scoreColorCompatibilityByBuckets(
+  sourceBuckets: Set<string>,
+  candidateBuckets: Set<string>,
+  candidateFamily: string,
+): number {
+  const sourceHasColor = sourceBuckets.size > 0;
+  const candidateHasColor = candidateBuckets.size > 0;
+  const coreFamily = isCoreGarmentFamily(candidateFamily);
+
+  if (!sourceHasColor && !candidateHasColor) return 0.6;
+  if (!candidateHasColor) return coreFamily ? 0.46 : 0.54;
+
+  // Neutral candidates are generally safe anchors.
+  for (const c of candidateBuckets) {
+    if (NEUTRAL_COLOR_BUCKETS.has(c)) return 0.82;
+  }
+  if (!sourceHasColor) return 0.7;
+
+  for (const c of candidateBuckets) {
+    if (sourceBuckets.has(c)) return 0.88;
+  }
+
+  for (const s of sourceBuckets) {
+    const comp = COLOR_BUCKET_COMPATIBILITY[s] || [];
+    for (const c of candidateBuckets) {
+      if (comp.includes(c)) return coreFamily ? 0.68 : 0.72;
+    }
+  }
+
+  // Chromatic mismatch should be strongly discouraged for core garments.
+  return coreFamily ? 0.18 : 0.34;
+}
+
 function scoreCategoryCompatibility(sourceFamily: string, candidateFamily: string): number {
   if (!sourceFamily || !candidateFamily) return 0.5;
   if (sourceFamily === candidateFamily) return sourceFamily === "accessories" ? 0.82 : 0.92;
@@ -853,6 +951,16 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     rowById.set(row.id, row);
   }
 
+  const sourceColorBuckets = new Set<string>();
+  for (const b of extractColorBucketsFromText(params.sourceProduct.color)) sourceColorBuckets.add(b);
+  for (const b of extractColorBucketsFromText(params.sourceStyle.colorProfile.primary)) sourceColorBuckets.add(b);
+  for (const h of params.sourceStyle.colorProfile.harmonies || []) {
+    for (const c of h.colors || []) {
+      for (const b of extractColorBucketsFromText(c)) sourceColorBuckets.add(b);
+    }
+  }
+  const sourceHasChromaticColor = hasChromaticColor(sourceColorBuckets);
+
   const enriched = await Promise.all(topSuggestions.map(async (s) => {
     const row = rowById.get(s.product_id);
     if (!row) {
@@ -882,7 +990,11 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     const sourceFamily = categoryFamily(params.sourceCategory);
     const candidateFamily = categoryFamily(candidateCategory.category);
     const categoryScore = scoreCategoryCompatibility(sourceFamily, candidateFamily);
-    const colorScore = scoreColorHarmony(params.sourceStyle, candidateStyle.colorProfile.primary);
+    const candidateColorBuckets = new Set<string>();
+    for (const b of extractColorBucketsFromText(candidateProduct.color)) candidateColorBuckets.add(b);
+    for (const b of extractColorBucketsFromText(candidateStyle.colorProfile.primary)) candidateColorBuckets.add(b);
+    for (const b of extractColorBucketsFromText(candidateProduct.title)) candidateColorBuckets.add(b);
+    const colorScore = scoreColorCompatibilityByBuckets(sourceColorBuckets, candidateColorBuckets, candidateFamily);
     const aestheticScore = scoreAestheticCompatibility(params.sourceStyle.aesthetic, candidateStyle.aesthetic);
     const formalityScore = scoreFormalityCompatibility(params.sourceStyle.formality, candidateStyle.formality);
     const seasonScore = scoreSeasonCompatibility(params.sourceStyle.season, candidateStyle.season);
@@ -910,7 +1022,7 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     const candidateMaterial = normalizeStyleToken(candidateProduct.description);
     const materialOverlap = sourceMaterial && candidateMaterial && sourceMaterial === candidateMaterial ? 0.88 : 0.65;
 
-    const fashionScore =
+    const fashionScoreRaw =
       categoryScore * 0.23 +
       aestheticScore * 0.18 +
       colorScore * 0.14 +
@@ -922,6 +1034,7 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       patternOverlap * 0.06 +
       materialOverlap * 0.04 +
       priceScore * 0.02;
+    const fashionScore = Math.max(0, Math.min(1, fashionScoreRaw / 1.24));
 
     const retrievalScore = Math.max(0, Math.min(1, s.score || 0));
     let finalScore = Math.round((fashionScore * 0.7 + retrievalScore * 0.3) * 1000) / 1000;
@@ -931,6 +1044,23 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     }
     if (candidateFamily === "bags" && bagOccasionScore < 0.45) {
       finalScore = Math.round(finalScore * 0.76 * 1000) / 1000;
+    }
+
+    // Strongly penalize chromatic clashes for core garments (tops, bottoms, dresses, outerwear).
+    if (
+      sourceHasChromaticColor &&
+      isCoreGarmentFamily(candidateFamily) &&
+      colorScore < 0.28
+    ) {
+      finalScore = Math.round(finalScore * 0.48 * 1000) / 1000;
+    }
+
+    if (
+      sourceHasChromaticColor &&
+      candidateFamily === "bottoms" &&
+      colorScore < 0.2
+    ) {
+      finalScore = Math.round(finalScore * 0.4 * 1000) / 1000;
     }
 
     const matchReasons = buildFashionReasons({
@@ -963,6 +1093,9 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
           ? "accessory style is less suitable for this occasion"
           : "accessory style matches the occasion"
       );
+    }
+    if (sourceHasChromaticColor && isCoreGarmentFamily(candidateFamily) && colorScore < 0.28) {
+      matchReasons.push("color contrast is risky for this core piece");
     }
 
     return {

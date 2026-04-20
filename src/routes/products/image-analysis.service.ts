@@ -3741,6 +3741,7 @@ export class ImageAnalysisService {
     const sourceImagePHash = await computePHash(buffer).catch(() => undefined);
     const similarityStartedAt = Date.now();
     const similarityTimings: ImageSimilarityStageTimings = { totalMs: 0 };
+    const { buffer: fullProcessBuf } = await prepareBufferForImageSearchQuery(buffer);
 
     // Similarity search disabled — return early
     if (!findSimilar) {
@@ -3770,7 +3771,6 @@ export class ImageAnalysisService {
     if (!analysisResult.detection || analysisResult.detection.items.length === 0) {
       const fallbackDetection = syntheticFullImageDetectionBlock(imageWidth, imageHeight);
       const fallbackDetectedCategories = [...new Set(fallbackDetection.items.map((item) => item.label))];
-      const { buffer: fullProcessBuf } = await prepareBufferForImageSearchQuery(buffer);
       const fallbackEmbedding = await processImageForEmbedding(fullProcessBuf).catch(() => null);
       if (!fallbackEmbedding || fallbackEmbedding.length === 0) {
         return {
@@ -4102,7 +4102,7 @@ export class ImageAnalysisService {
       let queryProcessBuf: Buffer;
       const cropEmbedStartedAt = Date.now();
       try {
-        const aligned = await computeShopTheLookGarmentEmbeddingFromDetection(buffer, detection.box);
+        const aligned = await computeShopTheLookGarmentEmbeddingFromDetection(buffer, detection.box, fullProcessBuf);
         finalEmbedding = aligned.embedding;
         clipBuffer = aligned.clipBufferForAttributes;
         queryProcessBuf = aligned.processBuf;
@@ -5686,6 +5686,7 @@ export class ImageAnalysisService {
       preprocessing,
     });
     const sourceImagePHash = await computePHash(buffer).catch(() => undefined);
+    const { buffer: fullProcessBuf } = await prepareBufferForImageSearchQuery(buffer);
 
     if (!fullResult.detection) {
       return {
@@ -5825,21 +5826,27 @@ export class ImageAnalysisService {
     const captionWantsJeans = blipStructured.productTypeHints.includes("jeans");
     const contextualFormalityScore = inferContextualFormalityFromDetections(allItemsToProcess);
 
-    for (let i = 0; i < allItemsToProcess.length; i++) {
-      const detection = allItemsToProcess[i];
-      const isUserDefined = i >= itemsToProcess.length;
-
+    const selectiveDetectionJobs = allItemsToProcess.map((detection, i) => ({
+      detection,
+      i,
+      isUserDefined: i >= itemsToProcess.length,
+    }));
+    const selectiveDetectionConcurrency = shopLookPerDetectionConcurrency();
+    const selectiveSettled = await mapPoolSettled(
+      selectiveDetectionJobs,
+      selectiveDetectionConcurrency,
+      async ({ detection, i, isUserDefined }) => {
       try {
         let clipBuffer: Buffer;
         let finalEmbedding: number[];
         let queryProcessBuf: Buffer;
         try {
-          const aligned = await computeShopTheLookGarmentEmbeddingFromDetection(buffer, detection.box);
+          const aligned = await computeShopTheLookGarmentEmbeddingFromDetection(buffer, detection.box, fullProcessBuf);
           finalEmbedding = aligned.embedding;
           clipBuffer = aligned.clipBufferForAttributes;
           queryProcessBuf = aligned.processBuf;
         } catch {
-          continue;
+          return null;
         }
         const finalGarmentEmbedding = finalEmbedding;
 
@@ -6485,33 +6492,37 @@ export class ImageAnalysisService {
           const altVectors = [expandedEmb, centerEmb].filter(
             (v): v is number[] => Array.isArray(v) && v.length > 0,
           );
-          for (const alt of altVectors) {
-            const altResult = await searchByImageWithSimilarity({
-              imageEmbedding: alt,
-              imageEmbeddingGarment: alt,
-              imageBuffer: queryProcessBuf,
-              pHash: sourceImagePHash,
-              detectionYoloConfidence: detection.confidence,
-              detectionProductCategory: categoryMapping.productCategory,
-              filters,
-              softProductTypeHints,
-              limit: retrievalLimit,
-              similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
-              includeRelated: false,
-              predictedCategoryAisles,
-              knnField: shopTheLookKnnField(),
-              forceHardCategoryFilter: forceHardCategoryFilterUsed,
-              relaxThresholdWhenEmpty: shopLookRelaxEnv(),
-              blipSignal: detectionBlipSignal,
-              inferredPrimaryColor: inferredPrimaryColorForDetection,
-              inferredColorKey: itemColorKey,
-              inferredColorsByItem,
-              inferredColorsByItemConfidence,
-              debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
-              sessionId: options.sessionId,
-              userId: options.userId,
-              sessionFilters: options.sessionFilters ?? undefined,
-            });
+          const altResults = await Promise.all(
+            altVectors.map((alt) =>
+              searchByImageWithSimilarity({
+                imageEmbedding: alt,
+                imageEmbeddingGarment: alt,
+                imageBuffer: queryProcessBuf,
+                pHash: sourceImagePHash,
+                detectionYoloConfidence: detection.confidence,
+                detectionProductCategory: categoryMapping.productCategory,
+                filters,
+                softProductTypeHints,
+                limit: retrievalLimit,
+                similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
+                includeRelated: false,
+                predictedCategoryAisles,
+                knnField: shopTheLookKnnField(),
+                forceHardCategoryFilter: forceHardCategoryFilterUsed,
+                relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+                blipSignal: detectionBlipSignal,
+                inferredPrimaryColor: inferredPrimaryColorForDetection,
+                inferredColorKey: itemColorKey,
+                inferredColorsByItem,
+                inferredColorsByItemConfidence,
+                debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+                sessionId: options.sessionId,
+                userId: options.userId,
+                sessionFilters: options.sessionFilters ?? undefined,
+              })
+            ),
+          );
+          for (const altResult of altResults) {
             similarResult = {
               ...similarResult,
               results: mergeImageSearchResultsById(
@@ -6590,7 +6601,7 @@ export class ImageAnalysisService {
 
         const includeEmpty = options.includeEmptyDetectionGroups === true;
         if (similarResult.results.length > 0 || includeEmpty) {
-          groupedResults.push({
+          return {
             detection: {
               label: detection.label,
               confidence: detection.confidence,
@@ -6613,11 +6624,22 @@ export class ImageAnalysisService {
             },
             source: isUserDefined ? "user_defined" : "yolo",
             originalIndex: isUserDefined ? undefined : originalIndices[i],
-          });
-          totalProducts += similarResult.results.length;
+          } as SelectiveDetectionResult;
         }
+        return null;
       } catch (err) {
         console.error(`Failed to process detection ${detection.label}:`, err);
+        return null;
+      }
+    },
+    );
+
+    for (const outcome of selectiveSettled) {
+      if (outcome.status === "fulfilled" && outcome.value) {
+        groupedResults.push(outcome.value);
+        totalProducts += outcome.value.count;
+      } else if (outcome.status === "rejected") {
+        console.error("Failed to process detection in selective flow:", outcome.reason);
       }
     }
 

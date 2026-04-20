@@ -316,8 +316,9 @@ export async function processImageForGarmentEmbeddingWithOptionalBox(
 export async function computeShopTheLookGarmentEmbeddingFromDetection(
   rawBuffer: Buffer,
   detectionBox: PixelBox,
+  preparedProcessBuf?: Buffer,
 ): Promise<{ embedding: number[]; clipBufferForAttributes: Buffer; processBuf: Buffer }> {
-  const { buffer: processBuf } = await prepareBufferForImageSearchQuery(rawBuffer);
+  const processBuf = preparedProcessBuf ?? (await prepareBufferForImageSearchQuery(rawBuffer)).buffer;
   const [rawMeta, procMeta] = await Promise.all([
     sharp(rawBuffer).metadata(),
     sharp(processBuf).metadata(),
@@ -330,8 +331,8 @@ export async function computeShopTheLookGarmentEmbeddingFromDetection(
   if (rw > 0 && rh > 0 && pw > 0 && ph > 0 && (rw !== pw || rh !== ph)) {
     box = scalePixelBoxToImageDims(detectionBox, rw, rh, pw, ph);
   }
-  const embedding = await processImageForGarmentEmbeddingWithOptionalBox(rawBuffer, processBuf, box);
-  const clipBufferForAttributes = await extractGarmentPaddedRoiFromPreparedImage(processBuf, box);
+  const clipBufferForAttributes = await resolveGarmentEmbedBufferFromPrepared(processBuf, box);
+  const embedding = await processImageForEmbedding(clipBufferForAttributes);
   return { embedding, clipBufferForAttributes, processBuf };
 }
 

@@ -733,8 +733,30 @@ function isDressLikeDetectionCategory(category?: string): boolean {
   return c === "dresses" || c === "dress" || c === "gowns" || c === "gown";
 }
 
+function isTopLikeDetectionCategory(category?: string): boolean {
+  const c = String(category ?? "").toLowerCase().trim();
+  if (!c) return false;
+  return c === "tops" || c === "top";
+}
+
 function imageCategoryAwareKnnPoolLimit(detectionProductCategory?: string): number {
   const base = imageSearchKnnPoolLimit();
+  const category = String(detectionProductCategory ?? "").toLowerCase().trim();
+
+  if (isTopLikeDetectionCategory(category)) {
+    const topsCapEnv = Number(process.env.SEARCH_IMAGE_TOPS_MERCH_CANDIDATE_CAP);
+    const widenedDefault = Math.min(1400, Math.max(base, Math.floor(base * 1.2)));
+    if (Number.isFinite(topsCapEnv) && topsCapEnv >= 200) {
+      return Math.max(200, Math.min(1400, Math.floor(topsCapEnv)));
+    }
+    return widenedDefault;
+  }
+
+  if (category === "footwear" || category === "bags" || category === "accessories") {
+    const widenedDefault = Math.min(1300, Math.max(base, Math.floor(base * 1.15)));
+    return widenedDefault;
+  }
+
   if (!isDressLikeDetectionCategory(detectionProductCategory)) return base;
 
   // One-piece garments need a wider recall pool because strict type/length/color gates
@@ -758,6 +780,24 @@ function imageCategoryAwareMinResultsPolicy(params: {
   minFraction: number;
 } {
   const { detectionProductCategory, baseTarget, baseDelta, baseMinFraction } = params;
+  if (isTopLikeDetectionCategory(detectionProductCategory)) {
+    const targetEnv = Number(process.env.SEARCH_IMAGE_TOPS_MIN_RESULTS);
+    const deltaEnv = Number(process.env.SEARCH_IMAGE_TOPS_RELEVANCE_RELAX_DELTA);
+    const minFractionEnv = Number(process.env.SEARCH_IMAGE_TOPS_RELEVANCE_RELAX_MIN_FRACTION);
+
+    const target = Number.isFinite(targetEnv)
+      ? Math.max(0, Math.min(80, Math.floor(targetEnv)))
+      : Math.max(baseTarget, 8);
+    const delta = Number.isFinite(deltaEnv)
+      ? Math.max(0.02, Math.min(0.12, deltaEnv))
+      : Math.min(Math.max(baseDelta, 0.03), 0.05);
+    const minFraction = Number.isFinite(minFractionEnv)
+      ? Math.max(0.74, Math.min(0.97, minFractionEnv))
+      : Math.max(baseMinFraction, 0.88);
+
+    return { target, delta, minFraction };
+  }
+
   if (!isDressLikeDetectionCategory(detectionProductCategory)) {
     return {
       target: baseTarget,

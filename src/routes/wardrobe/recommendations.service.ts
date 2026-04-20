@@ -860,6 +860,7 @@ type CompleteLookAnchorRow = {
   product_id?: number | null;
   embedding?: unknown;
   dominant_colors?: Array<{ hex?: string }>;
+  color?: string | null;
   name?: string | null;
   title?: string | null;
   gender?: string | null;
@@ -1025,7 +1026,7 @@ async function runCompleteLookCore(
       currentItems.map((row) => ({
         title: String(row.title || row.name || ""),
         category: String(row.category_name || ""),
-        color: undefined,
+        color: String(row.color || "") || undefined,
         styleTokens: extractStyleTokensFromText(
           `${String(row.title || "")} ${String(row.name || "")} ${String(row.category_name || "")}`,
         ),
@@ -1721,6 +1722,7 @@ export async function completeLookSuggestions(
   const currentItemsResult = await pg.query(
     `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, wi.name, wi.image_url, wi.image_cdn,
             p.title,
+            p.color,
             COALESCE(wam.audience_gender, p.gender) as gender,
             wam.age_group,
             wam.style_tags,
@@ -1781,6 +1783,7 @@ export async function completeLookSuggestionsForCatalogProducts(
             NULL::text as embedding,
             p.title as name,
             p.title,
+            p.color,
             p.image_url as image_url,
             p.image_cdn,
             p.gender,
@@ -2695,9 +2698,15 @@ function rgbToFamily(r: number, g: number, b: number): string {
   return "blue";
 }
 
-function extractWardrobeColorFamilies(items: Array<{ dominant_colors?: Array<{ hex?: string }> }>): Set<string> {
+function extractWardrobeColorFamilies(items: Array<{ dominant_colors?: Array<{ hex?: string }>; color?: string | null }>): Set<string> {
   const families = new Set<string>();
   for (const item of items) {
+    const namedColor = normalizeColorName(item.color || undefined);
+    if (namedColor) {
+      const namedFamily = COLOR_FAMILIES_BY_NAME[namedColor];
+      if (namedFamily) families.add(namedFamily);
+    }
+
     if (!item.dominant_colors || !Array.isArray(item.dominant_colors)) continue;
     for (const c of item.dominant_colors) {
       if (!c?.hex) continue;
