@@ -160,7 +160,9 @@ function shopLookDetectionRelaxEnv(): boolean {
 
 /** When true: if category-filtered search returns nothing, retry without category (default off — can look irrelevant). */
 function shopLookCategoryFallbackEnv(): boolean {
-  const v = String(process.env.SEARCH_IMAGE_SHOP_CATEGORY_FALLBACK ?? "").toLowerCase();
+  const raw = process.env.SEARCH_IMAGE_SHOP_CATEGORY_FALLBACK;
+  if (raw === undefined || String(raw).trim() === "") return true;
+  const v = String(raw).toLowerCase();
   return v === "1" || v === "true";
 }
 
@@ -1068,10 +1070,10 @@ function shopLookPerDetectionConcurrency(): number {
   return Math.min(16, Math.max(minConcurrency, n));
 }
 
-/** Max search calls per detection (initial + retries/fallbacks). Default 3 to bound tail latency. */
+/** Max search calls per detection (initial + retries/fallbacks). Default 3 to preserve recall on hard detections. */
 function shopLookMaxSearchCallsPerDetection(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_SHOP_MAX_SEARCH_CALLS ?? "2");
-  if (!Number.isFinite(raw)) return 2;
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_MAX_SEARCH_CALLS ?? "3");
+  if (!Number.isFinite(raw)) return 3;
   return Math.max(1, Math.min(8, Math.floor(raw)));
 }
 

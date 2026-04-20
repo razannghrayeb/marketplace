@@ -270,7 +270,7 @@ export class QueryMapper {
     };
     const mustClauses = [knnMust, ...must];
 
-    filter.push({ term: { is_hidden: false } });
+    filter.push({ bool: { must_not: [{ term: { is_hidden: true } }] } });
 
     return {
       size: maxResults,

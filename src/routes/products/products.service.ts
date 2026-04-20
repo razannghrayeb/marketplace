@@ -779,6 +779,16 @@ function imageDetectionRerankCandidateCap(): number {
   return Math.max(120, Math.min(600, Math.floor(raw)));
 }
 
+/**
+ * Detection-scoped kNN retrieval cap. This bounds OpenSearch latency for per-detection
+ * calls while keeping a broader default pool for non-detection image searches.
+ */
+function imageDetectionKnnPoolCap(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "520");
+  if (!Number.isFinite(raw)) return 520;
+  return Math.max(180, Math.min(900, Math.floor(raw)));
+}
+
 function imageCategoryAwareMinResultsPolicy(params: {
   detectionProductCategory?: string;
   baseTarget: number;
@@ -2698,6 +2708,12 @@ function categoryFilterTermsWithAliases(input: string | string[]): string[] {
     const source = String(item ?? "").toLowerCase().trim();
     if (!source) continue;
     out.add(source);
+    // Expand alias families so detection-scoped hard terms (e.g. "sneaker")
+    // still match catalogs indexed with canonical buckets (e.g. "footwear").
+    for (const alias of getCategorySearchTerms(source)) {
+      const aliasNorm = String(alias ?? "").toLowerCase().trim();
+      if (aliasNorm) out.add(aliasNorm);
+    }
     const normalized = normalizeImageCategoryIntent(source);
     if (normalized) out.add(normalized);
     if (normalized && normalized !== source && normalized === "dresses") {
@@ -2966,7 +2982,13 @@ export async function searchByImageWithSimilarity(
   }
 
   /** kNN size — wider when SEARCH_IMAGE_MERCHANDISE_SIMILARITY is on (see imageSearchKnnPoolLimit). */
-  const retrievalK = imageCategoryAwareKnnPoolLimit(params.detectionProductCategory);
+  const retrievalKBase = imageCategoryAwareKnnPoolLimit(params.detectionProductCategory);
+  const detectionScoped =
+    typeof params.detectionProductCategory === "string" &&
+    params.detectionProductCategory.trim().length > 0;
+  const retrievalK = detectionScoped
+    ? Math.min(retrievalKBase, imageDetectionKnnPoolCap())
+    : retrievalKBase;
 
   let colorQueryEmbedding: number[] | null = null;
   let textureQueryEmbedding: number[] | null = null;
@@ -3449,9 +3471,6 @@ export async function searchByImageWithSimilarity(
     hitsByKnnScore.length,
     Math.max(limit * 5, 500),
   );
-  const detectionScoped =
-    typeof params.detectionProductCategory === "string" &&
-    params.detectionProductCategory.trim().length > 0;
   const fetchLimit = detectionScoped
     ? Math.max(limit, Math.min(fetchLimitBase, imageDetectionRerankCandidateCap()))
     : fetchLimitBase;
@@ -5956,7 +5975,7 @@ export async function searchByTextWithRelated(
   const { entities, expandedTerms, semanticQuery, intent } = parsedQuery;
 
   // Build filter array - combine explicit filters with extracted entities
-  const filter: any[] = [{ term: { is_hidden: false } }];
+  const filter: any[] = [{ bool: { must_not: [{ term: { is_hidden: true } }] } }];
   
   // Use explicit filter OR extracted entity
   const effectiveBrand = mergedFilters.brand || (entities.brands.length === 1 ? entities.brands[0] : undefined);
@@ -6181,7 +6200,7 @@ export interface AttributeFacets {
  */
 export async function getAttributeFacets(filters: SearchFilters = {}): Promise<AttributeFacets> {
   // Build filter array based on current filters
-  const filter: any[] = [{ term: { is_hidden: false } }];
+  const filter: any[] = [{ bool: { must_not: [{ term: { is_hidden: true } }] } }];
   
   if (filters.category) filter.push({ term: { category: filters.category } });
   if (filters.brand) filter.push({ term: { brand: filters.brand } });
@@ -6377,7 +6396,7 @@ export async function getCandidateScoresForProducts(
                 [embeddingField]: { vector: embedding, k: fetchLimit },
               },
             },
-            filter: [{ term: { is_hidden: false } }],
+            filter: [{ bool: { must_not: [{ term: { is_hidden: true } }] } }],
           },
         },
       };
@@ -6412,7 +6431,7 @@ export async function getCandidateScoresForProducts(
         // Add hidden filter
         if (!textQuery.query.bool) textQuery.query = { bool: { must: textQuery.query } };
         if (!textQuery.query.bool.filter) textQuery.query.bool.filter = [];
-        textQuery.query.bool.filter.push({ term: { is_hidden: false } });
+        textQuery.query.bool.filter.push({ bool: { must_not: [{ term: { is_hidden: true } }] } });
 
         const resp = await osClient.search({ index: config.opensearch.index, body: textQuery });
         const hits = resp.body.hits.hits || [];
