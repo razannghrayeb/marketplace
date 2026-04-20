@@ -4825,6 +4825,67 @@ export class ImageAnalysisService {
         });
       }
 
+      // Retrieval-level zero-hit rescue: keep canonical category hard, but relax
+      // brittle metadata filters that can zero OpenSearch kNN before reranking.
+      if (
+        similarResult.results.length === 0 &&
+        filterByDetectedCategory
+      ) {
+        const retrievalRescueFilters = { ...filters } as any;
+        const canonicalCategory = String(categoryMapping.productCategory || "").toLowerCase().trim();
+        if (canonicalCategory) {
+          retrievalRescueFilters.category = canonicalCategory;
+        }
+
+        // Keep kNN recall-first: drop secondary constraints that frequently cause
+        // sparse-catalog false negatives in detection-scoped retrieval.
+        delete retrievalRescueFilters.productTypes;
+        delete retrievalRescueFilters.style;
+        delete retrievalRescueFilters.softStyle;
+        delete retrievalRescueFilters.length;
+        delete retrievalRescueFilters.sleeve;
+        delete retrievalRescueFilters.material;
+        delete retrievalRescueFilters.cropDominantColors;
+
+        // For accessory-like detections, audience metadata is often noisy/sparse.
+        if (isAccessoryLikeCategory(canonicalCategory) || canonicalCategory === "footwear") {
+          delete retrievalRescueFilters.gender;
+          delete retrievalRescueFilters.ageGroup;
+        } else if (!strictAudienceLock) {
+          delete retrievalRescueFilters.ageGroup;
+        }
+
+        similarResult = await runDetectionSearch("retry_knn_canonical_category", {
+          imageEmbedding: finalEmbedding,
+          imageEmbeddingGarment:
+            Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+              ? finalGarmentEmbedding
+              : undefined,
+          imageBuffer: clipBuffer,
+          pHash: sourceImagePHash,
+          detectionYoloConfidence: detection.confidence,
+          detectionProductCategory: categoryMapping.productCategory,
+          filters: retrievalRescueFilters,
+          softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
+          limit: retrievalLimit,
+          similarityThreshold,
+          includeRelated: false,
+          predictedCategoryAisles: undefined,
+          knnField: knnFieldUsed,
+          forceHardCategoryFilter: true,
+          relaxThresholdWhenEmpty: shopLookRelaxEnv(),
+          blipSignal: detectionBlipSignal,
+          inferredPrimaryColor: inferredPrimaryColorForDetection,
+          inferredColorKey: itemColorKey,
+          inferredColorsByItem,
+          inferredColorsByItemConfidence,
+          debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+          sessionId: options.sessionId,
+          userId: options.userId,
+          sessionFilters: options.sessionFilters ?? undefined,
+        });
+      }
+
       if (
         shopLookCategoryFallbackEnv() &&
         similarResult.results.length === 0 &&
