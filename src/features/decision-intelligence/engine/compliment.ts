@@ -39,10 +39,14 @@ export function predictCompliment(
     };
   }
   if (score >= 0.45) {
+    const primaryDriver =
+      profile.styleSignals.polished >= profile.styleSignals.expressive
+        ? "polished consistency"
+        : "expressive styling cues";
     return {
       score,
       type: "subtle_admiration",
-      explanation: ["Likely to be appreciated more for consistency than for statement impact."],
+      explanation: [`Likely to be appreciated more for ${primaryDriver} than for statement impact.`],
     };
   }
   return {

@@ -71,12 +71,16 @@ export function buildRegretFlash(
   }
   return {
     shortTermFeeling:
-      practicalStrength >= 0.68
-        ? "Feels dependable right away without forcing a bold styling leap."
-        : "Feels easy to like now, with low emotional overcommitment.",
+      practicalStrength >= 0.72
+        ? "Feels dependable right away with clear day-to-day wear confidence."
+        : practicalStrength >= 0.6
+          ? "Feels dependable right away without forcing a bold styling leap."
+          : "Feels easy to like now, with low emotional overcommitment.",
     longTermReality:
-      practicalStrength >= 0.68
-        ? "Sustains repeat wear with low regret pressure across regular outfit cycles."
-        : `Should hold up over time, though ${dominantDriver}.`,
+      practicalStrength >= 0.72
+        ? "Sustains repeat wear with low regret pressure; likely to stay active in regular cycles."
+        : practicalStrength >= 0.6
+          ? `Sustains repeat wear with generally low regret pressure, though ${dominantDriver}.`
+          : `Should hold up over time, though ${dominantDriver}.`,
   };
 }

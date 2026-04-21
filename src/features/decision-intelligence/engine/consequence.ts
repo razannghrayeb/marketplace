@@ -46,15 +46,25 @@ function formatExpressionLever(key: keyof ProductDecisionProfile["styleSignals"]
   }
 }
 
+function secondKey<T extends Record<string, number>>(obj: T): keyof T {
+  const sorted = Object.entries(obj).sort((a, b) => b[1] - a[1]);
+  return (sorted[1]?.[0] ?? sorted[0][0]) as keyof T;
+}
+
 export function buildConsequences(
   profile: ProductDecisionProfile,
   scores: { practical: number; expressive: number; overall: number }
 ): string[] {
   const bullets: string[] = [];
   const primaryUsageLever = formatUsageLever(topKey(profile.usageSignals));
+  const secondaryUsageLever = formatUsageLever(secondKey(profile.usageSignals));
   const primaryExpressionLever = formatExpressionLever(topKey(profile.styleSignals));
 
-  if (scores.practical >= 0.75) {
+  if (scores.practical >= 0.8) {
+    bullets.push(
+      `Very high daily utility driven by ${primaryUsageLever} plus ${secondaryUsageLever}, so this integrates quickly into outfit rotation.`
+    );
+  } else if (scores.practical >= 0.72) {
     bullets.push(`High daily utility driven by ${primaryUsageLever}, so this integrates quickly into outfit rotation.`);
   } else if (scores.practical >= 0.6) {
     bullets.push(`Practical enough for steady weekly use, with ${primaryUsageLever} doing most of the work.`);
@@ -62,9 +72,9 @@ export function buildConsequences(
     bullets.push(`More deliberate piece: weaker ${primaryUsageLever} means styling effort stays higher day to day.`);
   }
 
-  if (scores.expressive >= 0.7) {
+  if (scores.expressive >= 0.72) {
     bullets.push(`Strong statement direction anchored by ${primaryExpressionLever}, likely to draw more social attention.`);
-  } else if (scores.expressive >= 0.5) {
+  } else if (scores.expressive >= 0.58) {
     bullets.push(`Balanced expression: ${primaryExpressionLever} adds personality without dominating the whole look.`);
   } else {
     bullets.push(`Lower statement pressure overall; ${primaryExpressionLever} reads subtle rather than spotlight-seeking.`);

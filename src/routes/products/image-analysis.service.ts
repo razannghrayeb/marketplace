@@ -1914,22 +1914,21 @@ function shouldForceHardCategoryForDetection(
   const areaRatio = Number.isFinite(detection.area_ratio) ? detection.area_ratio : 0;
   const category = String(categoryMapping.productCategory || "").toLowerCase();
 
-  // Clear garment detections should constrain retrieval hard once the detector is confident enough.
-  // Without this, shop-the-look returns visually plausible but wrong categories for items like trousers.
-  if (category === "tops" || category === "bottoms" || category === "dresses" || category === "outerwear") {
+  // Root fix: hard category at retrieval stage collapses recall when catalog category
+  // metadata is noisy/inconsistent. Keep retrieval broad for most categories and rely on
+  // post-retrieval category guards + type compliance to enforce precision.
+  if (
+    category === "tops" ||
+    category === "bottoms" ||
+    category === "footwear" ||
+    category === "bags" ||
+    category === "accessories"
+  ) {
+    return false;
+  }
+  // Keep hard category only for one-piece/formal outer layers where cross-family drift is highest.
+  if (category === "dresses" || category === "outerwear") {
     return confidence >= 0.84 && areaRatio >= 0.01;
-  }
-
-  // Exact accessory detections are often small, but when they are high-confidence we must
-  // treat them as hard retrieval constraints or the visual search drifts into unrelated items.
-  if (category === "footwear") {
-    return confidence >= 0.76 && areaRatio >= 0.005;
-  }
-  if (category === "bags") {
-    return confidence >= 0.72 && areaRatio >= 0.0025;
-  }
-  if (category === "accessories") {
-    return confidence >= 0.82 && areaRatio >= 0.002;
   }
 
   return false;

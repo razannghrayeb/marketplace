@@ -16,6 +16,7 @@ export function scoreFrictionIndex(
   };
 
   const index = weightedSum(values, decisionScoringConfig.frictionWeights);
+  const clampedIndex = clamp01(index);
 
   const explanation: string[] = [];
   if (values.inverseStylingEase > 0.55) {
@@ -32,8 +33,14 @@ export function scoreFrictionIndex(
   }
 
   if (explanation.length === 0) {
-    explanation.push("Low-friction item with strong repeat-wear practicality.");
+    if (clampedIndex <= 0.24) {
+      explanation.push("Very low-friction profile with easy repeat-wear across weekly outfits.");
+    } else if (clampedIndex <= 0.34) {
+      explanation.push("Low-friction item with strong repeat-wear practicality.");
+    } else {
+      explanation.push("Moderately low-friction profile; practical overall with a few styling constraints.");
+    }
   }
 
-  return { index: clamp01(index), explanation };
+  return { index: clampedIndex, explanation };
 }
