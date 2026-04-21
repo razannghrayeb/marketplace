@@ -4974,7 +4974,6 @@ export async function searchByImageWithSimilarity(
   const droppedByVisualThreshold = Math.max(0, rankedHitsForGates.length - visualGatedHits.length);
 
   const finalAcceptMin = acceptMinImage;
-  const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
   const inferredColorSoftGateCategory =
     hasDetectionAnchoredTypeIntent &&
     hasInferredColorSignal &&
