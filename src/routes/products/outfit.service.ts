@@ -586,6 +586,16 @@ function splitStyleTokens(value: string): string[] {
     .filter(Boolean);
 }
 
+function hasPatternCue(value: string): boolean {
+  const text = normalizeStyleToken(value);
+  if (!text) return false;
+  return /\b(stripe|striped|plaid|check|checked|tartan|print|printed|pattern|patterned|floral|animal|leopard|zebra|paisley|polka)\b/.test(text);
+}
+
+function isPatternHeavyPair(sourceText: string, candidateText: string): boolean {
+  return hasPatternCue(sourceText) && hasPatternCue(candidateText);
+}
+
 function categoryFamily(label?: string | null): string {
   const text = normalizeStyleToken(label);
   if (!text) return "unknown";
@@ -597,6 +607,163 @@ function categoryFamily(label?: string | null): string {
   if (text.includes("bag") || text.includes("clutch") || text.includes("tote") || text.includes("backpack") || text.includes("crossbody")) return "bags";
   if (text.includes("accessor") || text.includes("watch") || text.includes("scarf") || text.includes("hat") || text.includes("sunglass") || text.includes("jewel") || text.includes("belt")) return "accessories";
   return text;
+}
+
+function footwearSubtypeLabel(value: string): string {
+  const text = normalizeStyleToken(value);
+  if (/\b(heel|pump|stiletto|mule)\b/.test(text)) return "heels";
+  if (/\b(loafer|moccasin|oxford)\b/.test(text)) return "loafers";
+  if (/\b(flat|ballerina)\b/.test(text)) return "flats";
+  if (/\b(sandal|slide|flip flop|espadrille)\b/.test(text)) return "sandals";
+  if (/\b(sneaker|trainer|running shoe|canvas)\b/.test(text)) return "sneakers";
+  if (/\b(boot|ankle boot|knee boot|combat)\b/.test(text)) return "boots";
+  return "other";
+}
+
+function isWinterAnchorProduct(source: { title?: string | null; category?: string | null; description?: string | null }, sourceStyle: StyleProfile): boolean {
+  if (sourceStyle.season === "winter") return true;
+  const text = normalizeStyleToken(`${source.title || ""} ${source.category || ""} ${source.description || ""}`);
+  return /\b(wool|knit|knitted|cardigan|sweater|cashmere|fleece|thermal|heavy)\b/.test(text);
+}
+
+function isWarmSeasonItem(title?: string | null, category?: string | null): boolean {
+  const text = normalizeStyleToken(`${title || ""} ${category || ""}`);
+  return /\b(short|shorts|mini skirt|linen short|swim|bikini|tank|sleeveless|sandal|flip flop|slide|espadrille)\b/.test(text);
+}
+
+function hasAnyCue(text: string, cues: RegExp): boolean {
+  return cues.test(normalizeStyleToken(text));
+}
+
+function violatesFormalPolicy(candidateFamily: string, candidateText: string): boolean {
+  const sportCue = /\b(track|tracksuit|jogger|jogging|gym|running|training|athletic|basketball|football|sport)\b/;
+  const beachCue = /\b(swim|bikini|flip flop|slide sandal|beach short|tank top)\b/;
+  const loudCasualCue = /\b(ripped|distressed|cargo short|graphic tee|hoodie)\b/;
+
+  if (candidateFamily === "shoes") {
+    const formalShoes = /\b(heel|pump|stiletto|loafer|oxford|derby|ankle boot|boot|flat|mule)\b/;
+    if (!hasAnyCue(candidateText, formalShoes)) return true;
+  }
+  if (candidateFamily === "bags") {
+    const formalBags = /\b(clutch|satchel|top handle|structured|mini bag|shoulder bag|crossbody)\b/;
+    if (!hasAnyCue(candidateText, formalBags)) return true;
+  }
+  if (candidateFamily === "bottoms") {
+    const formalBottoms = /\b(trouser|tailored|pleat|slack|straight pant|wide leg pant|midi skirt|pencil skirt)\b/;
+    if (!hasAnyCue(candidateText, formalBottoms) && hasAnyCue(candidateText, loudCasualCue)) return true;
+  }
+  if (hasAnyCue(candidateText, sportCue) || hasAnyCue(candidateText, beachCue)) return true;
+  return false;
+}
+
+function violatesSportPolicy(candidateFamily: string, candidateText: string): boolean {
+  const formalCue = /\b(stiletto|pump|oxford|evening|cocktail|gown|tailored blazer|clutch)\b/;
+  const athleticCue = /\b(sneaker|trainer|running|track|jogger|legging|sports bra|active|gym|sport|hoodie|tee|tank|backpack|duffle)\b/;
+
+  if (candidateFamily === "shoes" && !hasAnyCue(candidateText, /\b(sneaker|trainer|running|training|sport shoe)\b/)) {
+    return true;
+  }
+  if (candidateFamily === "bags" && !hasAnyCue(candidateText, /\b(backpack|duffle|crossbody|belt bag|gym bag)\b/)) {
+    return true;
+  }
+  if ((candidateFamily === "tops" || candidateFamily === "bottoms") && !hasAnyCue(candidateText, athleticCue) && hasAnyCue(candidateText, formalCue)) {
+    return true;
+  }
+  if (hasAnyCue(candidateText, formalCue) && !hasAnyCue(candidateText, athleticCue)) return true;
+  return false;
+}
+
+function violatesCasualPolicy(candidateFamily: string, candidateText: string): boolean {
+  const ultraFormalCue = /\b(gown|black tie|evening gown|stiletto|ceremony|cocktail dress)\b/;
+  const beachOnlyCue = /\b(swim|bikini|beachwear|flip flop)\b/;
+
+  if (candidateFamily === "shoes") {
+    if (hasAnyCue(candidateText, /\b(stiletto)\b/)) return true;
+  }
+  if (hasAnyCue(candidateText, ultraFormalCue)) return true;
+  if (hasAnyCue(candidateText, beachOnlyCue)) return true;
+  return false;
+}
+
+function violatesOccasionPolicy(
+  sourceOccasion: StyleProfile["occasion"],
+  candidateFamily: string,
+  candidateTitle?: string | null,
+  candidateCategory?: string | null
+): boolean {
+  const candidateText = `${String(candidateTitle || "")} ${String(candidateCategory || "")}`;
+  if (sourceOccasion === "formal" || sourceOccasion === "semi-formal" || sourceOccasion === "party") {
+    return violatesFormalPolicy(candidateFamily, candidateText);
+  }
+  if (sourceOccasion === "active") {
+    return violatesSportPolicy(candidateFamily, candidateText);
+  }
+  if (sourceOccasion === "casual") {
+    return violatesCasualPolicy(candidateFamily, candidateText);
+  }
+  return false;
+}
+
+function isVividColorBucketSet(bucketSet: Set<string>): boolean {
+  for (const bucket of bucketSet) {
+    if (["red", "pink", "purple", "yellow", "orange"].includes(bucket)) return true;
+  }
+  return false;
+}
+
+function shouldHardRejectFashionCandidate(params: {
+  sourceFamily: string;
+  candidateFamily: string;
+  sourceStyle: StyleProfile;
+  sourceProduct: CompleteLookMappedSourceProduct;
+  candidateProduct: Product;
+  colorScore: number;
+  patternHeavyPair: boolean;
+  candidateColorBuckets: Set<string>;
+  footwearOccasionScore: number;
+  bagOccasionScore: number;
+  garmentOccasionScore: number;
+}): boolean {
+  const {
+    sourceFamily,
+    candidateFamily,
+    sourceStyle,
+    sourceProduct,
+    candidateProduct,
+    colorScore,
+    patternHeavyPair,
+    candidateColorBuckets,
+    footwearOccasionScore,
+    bagOccasionScore,
+    garmentOccasionScore,
+  } = params;
+
+  if (candidateFamily === "shoes" && footwearOccasionScore < 0.28) return true;
+  if (candidateFamily === "bags" && bagOccasionScore < 0.26) return true;
+  if ((candidateFamily === "tops" || candidateFamily === "bottoms" || candidateFamily === "outerwear" || candidateFamily === "accessories") && garmentOccasionScore < 0.3) return true;
+  if (violatesOccasionPolicy(sourceStyle.occasion, candidateFamily, candidateProduct.title, candidateProduct.category)) return true;
+
+  // Prevent strong chromatic clashes on core garment recommendations.
+  if ((candidateFamily === "tops" || candidateFamily === "bottoms" || candidateFamily === "dress" || candidateFamily === "outerwear") && colorScore < 0.2) {
+    return true;
+  }
+
+  // If source is top/outerwear, keep bottoms mostly neutral unless compatibility is strong.
+  if ((sourceFamily === "tops" || sourceFamily === "outerwear") && candidateFamily === "bottoms" && colorScore < 0.42 && isVividColorBucketSet(candidateColorBuckets)) {
+    return true;
+  }
+
+  // Pattern-heavy pairings on core garments are usually noisy in catalog data.
+  if (patternHeavyPair && (candidateFamily === "tops" || candidateFamily === "bottoms" || candidateFamily === "outerwear" || candidateFamily === "dress")) {
+    return true;
+  }
+
+  // Winter anchors should not receive summer-only pieces.
+  if (isWinterAnchorProduct(sourceProduct, sourceStyle) && isWarmSeasonItem(candidateProduct.title, candidateProduct.category)) {
+    return true;
+  }
+
+  return false;
 }
 
 function scoreRangeMatch(source: number, candidate: number): number {
@@ -1014,9 +1181,10 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       candidateProduct.category
     );
 
-    const sourcePattern = splitStyleTokens(`${params.sourceProduct.category || ""} ${params.sourceProduct.title || ""}`);
-    const candidatePattern = splitStyleTokens(`${candidateProduct.category || ""} ${candidateProduct.title || ""}`);
-    const patternOverlap = candidatePattern.some((token) => sourcePattern.includes(token)) ? 0.9 : 0.62;
+    const sourcePatternText = `${params.sourceProduct.category || ""} ${params.sourceProduct.title || ""} ${params.sourceProduct.description || ""}`;
+    const candidatePatternText = `${candidateProduct.category || ""} ${candidateProduct.title || ""} ${candidateProduct.description || ""}`;
+    const patternHeavyPair = isPatternHeavyPair(sourcePatternText, candidatePatternText);
+    const patternOverlap = patternHeavyPair ? 0.28 : 0.82;
 
     const sourceMaterial = normalizeStyleToken(params.sourceProduct.description);
     const candidateMaterial = normalizeStyleToken(candidateProduct.description);
@@ -1062,6 +1230,24 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     ) {
       finalScore = Math.round(finalScore * 0.4 * 1000) / 1000;
     }
+    if (patternHeavyPair && isCoreGarmentFamily(candidateFamily)) {
+      finalScore = Math.round(finalScore * 0.62 * 1000) / 1000;
+    }
+    if (shouldHardRejectFashionCandidate({
+      sourceFamily,
+      candidateFamily,
+      sourceStyle: params.sourceStyle,
+      sourceProduct: params.sourceProduct,
+      candidateProduct,
+      colorScore,
+      patternHeavyPair,
+      candidateColorBuckets,
+      footwearOccasionScore,
+      bagOccasionScore,
+      garmentOccasionScore,
+    })) {
+      return null;
+    }
 
     const matchReasons = buildFashionReasons({
       categoryScore,
@@ -1097,6 +1283,9 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     if (sourceHasChromaticColor && isCoreGarmentFamily(candidateFamily) && colorScore < 0.28) {
       matchReasons.push("color contrast is risky for this core piece");
     }
+    if (patternHeavyPair && isCoreGarmentFamily(candidateFamily)) {
+      matchReasons.push("pattern clash risk with your anchor piece");
+    }
 
     return {
       ...s,
@@ -1107,7 +1296,14 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     };
   }));
 
-  return enriched.sort((a, b) => b.score - a.score);
+  return enriched
+    .filter((row): row is CompleteLookMappedSuggestion => Boolean(row))
+    .filter((row) => {
+      const family = categoryFamily(row.category);
+      const minScore = family === "shoes" || family === "bags" || family === "accessories" ? 0.43 : 0.5;
+      return (row.score || 0) >= minScore;
+    })
+    .sort((a, b) => b.score - a.score);
 }
 
 function normalizeAudienceHint(raw: unknown): string | undefined {
@@ -1296,6 +1492,13 @@ function mapCompleteLookToStyleResponse(params: {
     if (!groups.has(categoryLabel)) groups.set(categoryLabel, []);
     const bucket = groups.get(categoryLabel)!;
     if (bucket.length >= maxPerCategory) continue;
+    if (categoryLabel === "Shoes") {
+      const subtype = footwearSubtypeLabel(`${s.title || ""} ${s.category || ""}`);
+      const sameSubtypeCount = bucket.filter((item) =>
+        footwearSubtypeLabel(item.title) === subtype
+      ).length;
+      if (sameSubtypeCount >= 2) continue;
+    }
 
     bucket.push({
       id: s.product_id,
