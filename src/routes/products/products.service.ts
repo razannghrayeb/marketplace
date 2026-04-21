@@ -5626,9 +5626,9 @@ export async function searchByImageWithSimilarity(
           const inferredCoreCategoryFloor =
             !hasExplicitColorIntent &&
             hasDetectionAnchoredTypeIntent &&
-            (params.detectionProductCategory === "tops" ||
-              params.detectionProductCategory === "footwear" ||
-              params.detectionProductCategory === "bags")
+            // Keep a small fail-open floor only for tops to avoid full collapse.
+            // For bags/footwear, strong inferred color should remain authoritative.
+            params.detectionProductCategory === "tops"
               ? 0.42
               : 0;
           const conservativeCapAdjusted = Math.max(conservativeCap, inferredCoreCategoryFloor);
