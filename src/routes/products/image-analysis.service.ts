@@ -110,6 +110,18 @@ function inferApparelAudienceFallback(params: {
     if (/\b(tie|oxford|oxfords|loafer|loafers|suit)\b/.test(lb)) menScore += 1.1;
   }
 
+  // Formal menswear fallback when captions are weak/missing:
+  // trousers + long-sleeve upper body detections are a strong proxy for men's tailoring
+  // in business/suit-like photos and should prevent cross-gender leakage.
+  const hasTrouserCue = /\b(trouser|trousers|pant|pants|chino|chinos)\b/.test(detectionBlob);
+  const hasUpperFormalCue = /\b(long\s*sleeve\s*top|shirt|dress\s*shirt|blazer|sport\s*coat|suit|jacket)\b/.test(
+    detectionBlob,
+  );
+  const hasStrongWomenCue = /\b(dress|skirt|heels?|pumps?|blouse|camisole|cami)\b/.test(detectionBlob);
+  if (hasTrouserCue && hasUpperFormalCue && !hasStrongWomenCue) {
+    menScore += 1.3;
+  }
+
   const apparelCue = /\b(dress|top|shirt|blouse|skirt|pants|trousers|jeans|shorts|hoodie|sweater|cardigan|jacket|coat|tshirt|t-shirt|jumpsuit|romper|abaya|kaftan|shoe|sneaker|boot|heel)\b/.test(
     blob,
   );
@@ -1091,9 +1103,14 @@ function shopLookMaxDetectionTaskMs(): number {
 export function inferFootwearSubtypeFromCaption(
   detectionLabel: string,
   caption: string | null | undefined,
+  opts?: { confidence?: number; areaRatio?: number },
 ): string {
   const label = String(detectionLabel || "").toLowerCase();
   if (label !== "shoe" && label !== "shoes") return label;
+  const confidence = Number(opts?.confidence ?? 0);
+  const areaRatio = Number(opts?.areaRatio ?? 0);
+  const refineEligible = confidence >= 0.9 || areaRatio >= 0.02;
+  if (!refineEligible) return label;
 
   const cap = String(caption ?? "").toLowerCase();
   if (!cap) return label;
@@ -1166,6 +1183,7 @@ function strictDressFallbackTerms(detectionLabel: string): string[] | null {
 function hardCategoryTermsForDetection(
   detectionLabel: string,
   categoryMapping: CategoryMapping,
+  opts?: { confidence?: number; areaRatio?: number },
 ): string[] {
   const l = String(detectionLabel || "").toLowerCase();
   const hasLongSleeveCue = /\blong sleeve\b|\bfull sleeve\b/.test(l);
@@ -1184,7 +1202,7 @@ function hardCategoryTermsForDetection(
       return shortTopTerms.length > 0 ? shortTopTerms : baseTerms;
     }
 
-    const isLongTop = /\blong sleeve top\b|\bshirt\b|\bblouse\b|\bovershirt\b|\bhoodie\b|\bsweatshirt\b|\bsweater\b/.test(
+    const isLongTop = /\blong sleeve top\b|\blong sleeve\b|\bfull sleeve\b/.test(
       l,
     );
     if (isLongTop) {
@@ -1236,11 +1254,24 @@ function hardCategoryTermsForDetection(
   }
 
   if (categoryMapping.productCategory === "bags") {
-    return baseTerms.filter((t) =>
+    const confidence = Number(opts?.confidence ?? 0);
+    const areaRatio = Number(opts?.areaRatio ?? 0);
+    const refineEligible = !opts || confidence >= 0.86 || areaRatio >= 0.025;
+    const genericBagLike =
+      /\b(bag\b|bags\b|bag,\s*wallet|wallet,\s*bag)\b/.test(l) &&
+      !/\b(handbag|tote|backpack|crossbody|satchel|clutch|purse)\b/.test(l);
+    const bagLike = baseTerms.filter((t) =>
       /\b(bag|bags|wallet|purse|handbag|handbags|tote|totes|backpack|backpacks|clutch|clutches|crossbody|satchel|satchels)\b/.test(
         t,
       ),
     );
+    if (!refineEligible && genericBagLike) {
+      const broadBag = bagLike.filter(
+        (t) => !/\b(wallet|cardholder|coin\s*purse|pouch|pouches)\b/.test(t),
+      );
+      return broadBag.length > 0 ? broadBag : bagLike;
+    }
+    return bagLike;
   }
 
   if (categoryMapping.productCategory === "dresses") {
@@ -1337,6 +1368,7 @@ function tightenTypeSeedsForDetection(
   detectionLabel: string,
   categoryMapping: CategoryMapping,
   seeds: string[],
+  opts?: { confidence?: number; areaRatio?: number },
 ): string[] {
   const label = String(detectionLabel || "").toLowerCase();
   const hasLongSleeveCue = /\blong sleeve\b|\bfull sleeve\b/.test(label);
@@ -1351,7 +1383,7 @@ function tightenTypeSeedsForDetection(
       );
       return shortTop.length > 0 ? shortTop : normalized;
     }
-    if (/\blong sleeve top\b|\bshirt\b|\bblouse\b/.test(label)) {
+    if (/\blong sleeve top\b|\blong sleeve\b|\bfull sleeve\b/.test(label)) {
       const longTop = normalized.filter((t) =>
         /\b(shirt|shirts|blouse|blouses|top|tops|sweater|hoodie|sweatshirt|pullover|cardigan|knitwear)\b/.test(t),
       );
@@ -1387,11 +1419,23 @@ function tightenTypeSeedsForDetection(
   }
 
   if (category === "bags") {
+    const confidence = Number(opts?.confidence ?? 0);
+    const areaRatio = Number(opts?.areaRatio ?? 0);
+    const refineEligible = !opts || confidence >= 0.86 || areaRatio >= 0.025;
+    const genericBagLike =
+      /\b(bag\b|bags\b|bag,\s*wallet|wallet,\s*bag)\b/.test(label) &&
+      !/\b(handbag|tote|backpack|crossbody|satchel|clutch|purse)\b/.test(label);
     const bagLike = normalized.filter((t) =>
       /\b(bag|bags|wallet|purse|handbag|handbags|tote|totes|backpack|backpacks|clutch|clutches|crossbody|satchel|satchels)\b/.test(
         t,
       ),
     );
+    if (!refineEligible && genericBagLike) {
+      const broadBag = bagLike.filter(
+        (t) => !/\b(wallet|cardholder|coin\s*purse|pouch|pouches)\b/.test(t),
+      );
+      return broadBag.length > 0 ? broadBag : bagLike;
+    }
     return bagLike.length > 0 ? bagLike : normalized;
   }
 
@@ -4215,7 +4259,10 @@ export class ImageAnalysisService {
       };
       // Refine generic "shoe" label using BLIP caption for footwear subtype specificity.
       const rawLabel = detection.label;
-      let label = inferFootwearSubtypeFromCaption(rawLabel, blipCaption);
+      let label = inferFootwearSubtypeFromCaption(rawLabel, blipCaption, {
+        confidence: detection.confidence,
+        areaRatio: detection.area_ratio,
+      });
       if (hotPathDebug) {
         console.log(`[detection-trace] started label="${label}"${label !== rawLabel ? ` (refined from "${rawLabel}")` : ""} conf=${(detection.confidence ?? 0).toFixed(3)} area=${(detection.area_ratio ?? 0).toFixed(3)}`);
       }
@@ -4283,7 +4330,10 @@ export class ImageAnalysisService {
         typeSeeds = [...new Set([...typeSeeds, ...blipStructured.productTypeHints])];
       }
       typeSeeds = filterProductTypeSeedsByMappedCategory(typeSeeds, categoryMapping.productCategory);
-      typeSeeds = tightenTypeSeedsForDetection(label, categoryMapping, typeSeeds);
+      typeSeeds = tightenTypeSeedsForDetection(label, categoryMapping, typeSeeds, {
+        confidence: detection.confidence,
+        areaRatio: detection.area_ratio,
+      });
       const strongTypeSeeds = recoverFormalOuterwearTypes(
         typeSeeds,
         categoryMapping.productCategory,
@@ -4443,7 +4493,12 @@ export class ImageAnalysisService {
         /\b(short sleeve|long sleeve|half sleeve|3\/?4 sleeve|sleeveless)\b/.test(normalizedLabelForSleeve);
       const sleeveSensitiveCategory =
         categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses";
-      if (detectionSleeve && (!sleeveSensitiveCategory || hasExplicitSleeveCue)) {
+      const sleeveSignalStrong =
+        (detection.confidence ?? 0) >= 0.94 || (detection.area_ratio ?? 0) >= 0.12;
+      if (
+        detectionSleeve &&
+        (!sleeveSensitiveCategory || (hasExplicitSleeveCue && sleeveSignalStrong))
+      ) {
         filters.sleeve = detectionSleeve;
       }
       const detectionLength = inferLengthIntentFromDetection(detection, imageHeight);
@@ -4537,7 +4592,10 @@ export class ImageAnalysisService {
       if (filterByDetectedCategory) {
         if (shouldHardCategory) {
           // Apply hard OpenSearch category filtering, even when global soft-category is enabled.
-          const terms = hardCategoryTermsForDetection(label, categoryMapping);
+        const terms = hardCategoryTermsForDetection(label, categoryMapping, {
+          confidence: detection.confidence,
+          areaRatio: detection.area_ratio,
+        });
           const categoryTerms = formalFootwearIntent ? pruneAthleticFootwearTerms(terms) : terms;
           filters.category = categoryTerms.length === 1 ? categoryTerms[0] : categoryTerms;
         } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
@@ -4660,7 +4718,15 @@ export class ImageAnalysisService {
             mergedTypes,
             categoryMapping.productCategory,
           ).slice(0, 10);
-            softProductTypeHints = tightenTypeSeedsForDetection(label, categoryMapping, filteredTypes);
+            softProductTypeHints = tightenTypeSeedsForDetection(
+              label,
+              categoryMapping,
+              filteredTypes,
+              {
+                confidence: detection.confidence,
+                areaRatio: detection.area_ratio,
+              },
+            );
             softProductTypeHints = recoverFormalOuterwearTypes(
               softProductTypeHints,
               categoryMapping.productCategory,
@@ -4682,7 +4748,10 @@ export class ImageAnalysisService {
       // Full-image caption can miss shoe subtype cues (heel/boot/sandal), while
       // detection caption is usually more local to the item crop.
       if (categoryMapping.productCategory === "footwear") {
-        const refinedFootwearLabel = inferFootwearSubtypeFromCaption(label, detCaption || blipCaption);
+        const refinedFootwearLabel = inferFootwearSubtypeFromCaption(label, detCaption || blipCaption, {
+          confidence: detection.confidence,
+          areaRatio: detection.area_ratio,
+        });
         if (refinedFootwearLabel !== label) {
           const previousLabel = label;
           label = refinedFootwearLabel;
@@ -4696,6 +4765,10 @@ export class ImageAnalysisService {
             label,
             categoryMapping,
             [...new Set([label, ...softProductTypeHints])],
+            {
+              confidence: detection.confidence,
+              areaRatio: detection.area_ratio,
+            },
           );
           if (formalFootwearIntent) {
             softProductTypeHints = pruneAthleticFootwearTerms(softProductTypeHints);
@@ -4706,6 +4779,10 @@ export class ImageAnalysisService {
               label,
               categoryMapping,
               (filters as any).productTypes,
+              {
+                confidence: detection.confidence,
+                areaRatio: detection.area_ratio,
+              },
             );
             if (formalFootwearIntent) {
               (filters as any).productTypes = pruneAthleticFootwearTerms((filters as any).productTypes);
@@ -4714,7 +4791,10 @@ export class ImageAnalysisService {
 
           if (filterByDetectedCategory) {
             if (shouldHardCategory) {
-              const terms = hardCategoryTermsForDetection(label, categoryMapping);
+              const terms = hardCategoryTermsForDetection(label, categoryMapping, {
+                confidence: detection.confidence,
+                areaRatio: detection.area_ratio,
+              });
               const categoryTerms = formalFootwearIntent ? pruneAthleticFootwearTerms(terms) : terms;
               filters.category = categoryTerms.length === 1 ? categoryTerms[0] : categoryTerms;
             } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
@@ -5191,7 +5271,10 @@ export class ImageAnalysisService {
         if (hotPathDebug) {
           console.log(`[recovery-attempt] detection="${label}" type=footwear_recovery reason="low_count(${similarResult.results.length})"`);
         }
-        const footwearTerms = hardCategoryTermsForDetection(label, categoryMapping);
+        const footwearTerms = hardCategoryTermsForDetection(label, categoryMapping, {
+          confidence: detection.confidence,
+          areaRatio: detection.area_ratio,
+        });
         const footwearFilters: Partial<import("./types").SearchFilters> = {};
         Object.assign(
           footwearFilters,
@@ -5282,7 +5365,10 @@ export class ImageAnalysisService {
             `[recovery-attempt] detection="${label}" type=tops_recovery reason="low_count(${similarResult.results.length}<${topsRecoveryMinKeep}) + confidence/area qualified"`,
           );
         }
-        const topTerms = hardCategoryTermsForDetection(label, categoryMapping);
+        const topTerms = hardCategoryTermsForDetection(label, categoryMapping, {
+          confidence: detection.confidence,
+          areaRatio: detection.area_ratio,
+        });
         const topFilters: Partial<import("./types").SearchFilters> = {};
         Object.assign(
           topFilters,
@@ -5384,7 +5470,10 @@ export class ImageAnalysisService {
         topOrDressCategory &&
         similarResult.results.length < topOrDressMinKeep
       ) {
-        const ablationTerms = hardCategoryTermsForDetection(label, categoryMapping);
+        const ablationTerms = hardCategoryTermsForDetection(label, categoryMapping, {
+          confidence: detection.confidence,
+          areaRatio: detection.area_ratio,
+        });
         const ablationFilters: Partial<import("./types").SearchFilters> = {};
         if (ablationTerms.length > 0) {
           ablationFilters.category = ablationTerms.length === 1 ? ablationTerms[0] : ablationTerms;
@@ -5480,7 +5569,10 @@ export class ImageAnalysisService {
         if (hotPathDebug) {
           console.log(`[recovery-attempt] detection="${label}" type=bag_recovery reason="empty bag search"`);
         }
-        const bagTerms = hardCategoryTermsForDetection(label, categoryMapping);
+        const bagTerms = hardCategoryTermsForDetection(label, categoryMapping, {
+          confidence: detection.confidence,
+          areaRatio: detection.area_ratio,
+        });
         const bagFilters: Partial<import("./types").SearchFilters> = {};
         Object.assign(
           bagFilters,
@@ -6175,7 +6267,10 @@ export class ImageAnalysisService {
           isUserDefined && userDefinedBoxes[i - itemsToProcess.length].categoryHint
             ? userDefinedBoxes[i - itemsToProcess.length].categoryHint!
             : detection.label;
-        const categorySource = inferFootwearSubtypeFromCaption(rawCategorySource, blipCaption);
+        const categorySource = inferFootwearSubtypeFromCaption(rawCategorySource, blipCaption, {
+          confidence: detection.confidence,
+          areaRatio: detection.area_ratio,
+        });
         const categoryMapping = mapDetectionToCategory(categorySource, detection.confidence, {
           box_normalized: (detection as any).box_normalized,
         });
@@ -6228,7 +6323,10 @@ export class ImageAnalysisService {
           browseTypeSeeds,
           categoryMapping.productCategory,
         );
-        browseTypeSeeds = tightenTypeSeedsForDetection(categorySource, categoryMapping, browseTypeSeeds);
+        browseTypeSeeds = tightenTypeSeedsForDetection(categorySource, categoryMapping, browseTypeSeeds, {
+          confidence: detection.confidence,
+          areaRatio: detection.area_ratio,
+        });
         browseTypeSeeds = recoverFormalOuterwearTypes(
           browseTypeSeeds,
           categoryMapping.productCategory,
@@ -6317,7 +6415,12 @@ export class ImageAnalysisService {
           /\b(short sleeve|long sleeve|half sleeve|3\/?4 sleeve|sleeveless)\b/.test(normalizedSourceForSleeve);
         const sleeveSensitiveCategory =
           categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses";
-        if (detectionSleeve && (!sleeveSensitiveCategory || hasExplicitSleeveCue)) {
+        const sleeveSignalStrong =
+          (detection.confidence ?? 0) >= 0.94 || (detection.area_ratio ?? 0) >= 0.12;
+        if (
+          detectionSleeve &&
+          (!sleeveSensitiveCategory || (hasExplicitSleeveCue && sleeveSignalStrong))
+        ) {
           filters.sleeve = detectionSleeve;
         }
 
@@ -6431,7 +6534,10 @@ export class ImageAnalysisService {
               predictedCategoryAisles = pruneAthleticFootwearTerms(predictedCategoryAisles);
             }
           } else {
-            const terms = hardCategoryTermsForDetection(categorySource, categoryMapping);
+            const terms = hardCategoryTermsForDetection(categorySource, categoryMapping, {
+              confidence: detection.confidence,
+              areaRatio: detection.area_ratio,
+            });
             const categoryTerms = formalFootwearIntent ? pruneAthleticFootwearTerms(terms) : terms;
             filters.category = categoryTerms.length === 1 ? categoryTerms[0] : categoryTerms;
           }
@@ -6524,6 +6630,10 @@ export class ImageAnalysisService {
               categorySource,
               categoryMapping,
               filteredTypes,
+              {
+                confidence: detection.confidence,
+                areaRatio: detection.area_ratio,
+              },
             );
             softProductTypeHints = recoverFormalOuterwearTypes(
               softProductTypeHints,
@@ -6869,7 +6979,10 @@ export class ImageAnalysisService {
           ? shopLookTopRecoveryMinKeep(resolvedLimitPerItem)
           : Math.max(3, Math.min(8, Math.floor(resolvedLimitPerItem * 0.35)));
         if (topOrDressCategory && similarResult.results.length < topOrDressMinKeep) {
-          const ablationTerms = hardCategoryTermsForDetection(categorySource, categoryMapping);
+          const ablationTerms = hardCategoryTermsForDetection(categorySource, categoryMapping, {
+            confidence: detection.confidence,
+            areaRatio: detection.area_ratio,
+          });
           const ablationFilters: Partial<import("./types").SearchFilters> = {};
           if (ablationTerms.length > 0) {
             ablationFilters.category = ablationTerms.length === 1 ? ablationTerms[0] : ablationTerms;

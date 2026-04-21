@@ -108,10 +108,14 @@ export async function completeStyleFromBody(req: Request, res: Response) {
   try {
     const { product, product_id: productIdRaw, options: bodyOptions } = req.body;
 
+    // Only an explicit top-level `product_id` should trigger DB-backed mode.
+    // If callers send a `product` object (even with an `id`), treat it as
+    // an external/image-derived anchor and keep recommendation context local
+    // to the provided payload.
     const productIdCandidate =
       productIdRaw !== undefined && productIdRaw !== null
         ? parseInt(String(productIdRaw), 10)
-        : parseInt(String((product as { id?: unknown } | undefined)?.id ?? ""), 10);
+        : Number.NaN;
 
     if (!Number.isFinite(productIdCandidate) && (!product || !product.title)) {
       return res.status(400).json({ success: false, error: { message: "Product with title is required" } });

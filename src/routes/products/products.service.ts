@@ -1290,6 +1290,33 @@ function isBagLikeCategory(category: string): boolean {
   );
 }
 
+function isBagCatalogCandidate(source: Record<string, unknown> | null | undefined): boolean {
+  const src = (source ?? {}) as Record<string, unknown>;
+  const blob = [
+    src.category,
+    src.category_canonical,
+    src.title,
+    src.description,
+    ...(Array.isArray(src.product_types) ? src.product_types : []),
+  ]
+    .map((v) => String(v ?? "").toLowerCase())
+    .join(" ");
+  if (!blob.trim()) return false;
+
+  const hasBagCue =
+    /\b(bag|bags|wallet|wallets|purse|purses|handbag|handbags|tote|totes|backpack|backpacks|clutch|clutches|crossbody|satchel|satchels|pouch|pouches)\b/.test(
+      blob,
+    );
+  if (!hasBagCue) return false;
+
+  // Reject frequent non-bag false positives that still pass visual similarity.
+  const hasNonBagCue =
+    /\b(makeup|cosmetic|skincare|serum|mascara|eyeliner|lipstick|gift\s*set|beauty\s*box|perfume|fragrance|strap|shoulder\s*strap|belt|watch|jewelry|jewellery)\b/.test(
+      blob,
+    );
+  return !hasNonBagCue;
+}
+
 function computeExplicitFinalRelevance(params: {
   simVisual: number;
   typeMatch: boolean;
@@ -1403,10 +1430,10 @@ function computeExplicitFinalRelevance(params: {
     0,
     Math.min(
       1,
-      0.52 * clipStretched +
-        0.19 * colorStretched * subChannelGate * colorChannelCoherence +
+      0.45 * clipStretched +
+        0.27 * colorStretched * subChannelGate * colorChannelCoherence +
         0.16 * styleStretched * subChannelGate * styleChannelCoherence +
-        0.13 * patternStretched * subChannelGate,
+        0.12 * patternStretched * subChannelGate,
     ),
   );
 
@@ -1418,27 +1445,27 @@ function computeExplicitFinalRelevance(params: {
       1,
       isTopLikeIntent
         ? 0.12 * params.catSoft +
-          0.26 * params.colorMatch * colorWeightScale +
+          0.34 * params.colorMatch * colorWeightScale +
           0.27 * params.styleMatch +
           0.17 * params.sleeveMatch +
           0.06 * params.lengthMatch +
           0.05 * params.audienceMatch +
-          0.07 * patternMatch
+          0.03 * patternMatch
         : isBagLikeIntent
           ? 0.14 * params.catSoft +
-            0.42 * params.colorMatch * colorWeightScale +
+            0.5 * params.colorMatch * colorWeightScale +
             0.14 * params.styleMatch +
             0.03 * params.sleeveMatch +
             0.02 * params.lengthMatch +
             0.05 * params.audienceMatch +
-            0.2 * patternMatch
+            0.12 * patternMatch
         : 0.12 * params.catSoft +
-          0.32 * params.colorMatch * colorWeightScale +
+          0.4 * params.colorMatch * colorWeightScale +
           0.22 * params.styleMatch +
           0.14 * params.sleeveMatch +
           0.08 * params.lengthMatch +
           0.05 * params.audienceMatch +
-          0.07 * patternMatch,
+          0.01 * patternMatch,
     ),
   );
 
@@ -1449,22 +1476,22 @@ function computeExplicitFinalRelevance(params: {
 
   const colorGate =
     colorIntentStrength > 0
-      ? Math.max(0.55, 1 - 0.45 * colorIntentStrength * (1 - params.colorMatch))
+      ? Math.max(0.35, 1 - 0.65 * colorIntentStrength * (1 - params.colorMatch))
       : 1;
   const colorTierFactor =
     colorIntentStrength > 0
       ? colorTier === "exact"
-        ? 1.1 + 0.05 * colorIntentStrength
+        ? 1.12 + 0.08 * colorIntentStrength
         : colorTier === "family"
-          ? 1.04 + 0.03 * colorIntentStrength
+          ? 1.06 + 0.05 * colorIntentStrength
           : colorTier === "bucket"
-            ? 0.93 - 0.03 * colorIntentStrength
-            : 0.83 - 0.08 * colorIntentStrength
+            ? 0.88 - 0.06 * colorIntentStrength
+            : 0.74 - 0.12 * colorIntentStrength
       : 1;
 
   // ── Intent coverage gate ─────────────────────────────────────────
   const intentWeights = {
-    color: isBagLikeIntent ? 0.36 : isTopLikeIntent ? 0.24 : 0.28,
+    color: isBagLikeIntent ? 0.46 : isTopLikeIntent ? 0.34 : 0.4,
     style: isBagLikeIntent ? 0.14 : isTopLikeIntent ? 0.24 : 0.18,
     // Sleeve inferred from vision can be noisy; keep it informative but less punitive.
     // When visual similarity is very high (>0.65), reduce sleeve weight since it's often a detection artifact.
@@ -4086,7 +4113,13 @@ export async function searchByImageWithSimilarity(
       forceStrictInferredTypeIntentEnv() ||
       hasExplicitTypeFilter ||
       hasExplicitCategoryFilter ||
-      hasTextTypeIntent,
+      hasTextTypeIntent ||
+      (hasDetectionAnchoredTypeIntent &&
+        desiredProductTypes.some((t) =>
+          /\b(suit|suits|blazer|blazers|sport\s*coat|dress\s*jacket|waistcoat|vest|tuxedo)\b/.test(
+            String(t).toLowerCase(),
+          ),
+        )),
   };
   const hasReliableTypeIntentForRelevance = Boolean(relevanceIntent.reliableTypeIntent);
   const hasDerivedTypeIntentForSafetyGate = desiredProductTypes.length > 0;
@@ -5175,7 +5208,10 @@ export async function searchByImageWithSimilarity(
       const enforceInferredColorStrictly =
         category === "footwear" ||
         category === "shoes" ||
-        ((category === "bottoms" || category === "outerwear") &&
+        ((category === "tops" || category === "bags") &&
+          hasStrongDetectionScopedColor &&
+          desiredColorsForRelevance.length === 1) ||
+        ((category === "bottoms" || category === "outerwear" || category === "dresses") &&
           hasStrongDetectionScopedColor &&
           desiredColorsForRelevance.length === 1);
       if (inferredColorCompliantHits.length > 0 && enforceInferredColorStrictly) {
@@ -5268,6 +5304,23 @@ export async function searchByImageWithSimilarity(
     }
   }
   const countAfterGenderPostfilter = rankedHits.length;
+
+  const isBagDetectionIntent =
+    hasDetectionAnchoredTypeIntent &&
+    String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bags";
+  if (isBagDetectionIntent && rankedHits.length > 0) {
+    const bagSafeHits = rankedHits.filter((h: any) => isBagCatalogCandidate((h as any)?._source ?? {}));
+    if (bagSafeHits.length > 0) {
+      const bagCategoryAlignedHits = bagSafeHits.filter((h: any) => {
+        const comp = complianceById.get(String(h?._source?.product_id));
+        const categoryScore = Number(comp?.categoryRelevance01 ?? 0);
+        const exactType = Number(comp?.exactTypeScore ?? 0);
+        const typeComp = Number(comp?.productTypeCompliance ?? 0);
+        return categoryScore >= 0.35 || exactType >= 1 || typeComp >= 0.9;
+      });
+      rankedHits = bagCategoryAlignedHits.length > 0 ? bagCategoryAlignedHits : bagSafeHits;
+    }
+  }
 
   // Detection-anchored bottoms with trouser intent should reject shorts candidates.
   const shouldRejectShortsForTrouserIntent =
