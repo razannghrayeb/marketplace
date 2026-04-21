@@ -1,10 +1,10 @@
 {
-  "lastProcessedId": "251502",
-  "totalProcessed": 49163,
-  "totalSuccess": 48784,
-  "totalFailed": 379,
+  "lastProcessedId": "251621",
+  "totalProcessed": 49283,
+  "totalSuccess": 48894,
+  "totalFailed": 389,
   "totalSkipped": 0,
-  "totalBgRemoved": 6247,
+  "totalBgRemoved": 6297,
   "totalAttrEmbFailures": 0,
   "failedIds": [
     "155619",
@@ -385,9 +385,19 @@
     "251499",
     "251500",
     "251501",
-    "251502"
+    "251502",
+    "251511",
+    "251519",
+    "251522",
+    "251523",
+    "251524",
+    "251525",
+    "251526",
+    "251527",
+    "251528",
+    "251529"
   ],
   "modelType": "fashion-clip",
   "startedAt": "2026-04-14T17:40:58.364Z",
-  "lastUpdatedAt": "2026-04-20T19:04:09.986Z"
+  "lastUpdatedAt": "2026-04-20T19:33:57.098Z"
 }

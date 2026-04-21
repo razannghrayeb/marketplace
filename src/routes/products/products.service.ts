@@ -51,6 +51,7 @@ import {
 import { attrGenderFilterClause } from "./opensearchFilters";
 import type { SearchResultWithRelated } from "./types";
 import { findRelatedProducts } from "../../lib/search/relatedProducts";
+import { createHash } from "crypto";
 
 // ============================================================================
 // Types
@@ -356,6 +357,151 @@ type ImageSearchContext = {
 type UserLifestyleSnapshot = Awaited<ReturnType<typeof learnUserLifestyle>>;
 
 const userLifestyleCache = new Map<number, Promise<UserLifestyleSnapshot | null>>();
+
+type ImageQuerySignals = {
+  colorQueryEmbedding: number[] | null;
+  textureQueryEmbedding: number[] | null;
+  materialQueryEmbedding: number[] | null;
+  styleQueryEmbedding: number[] | null;
+  patternQueryEmbedding: number[] | null;
+  partQueryEmbeddings: Record<string, number[] | null>;
+};
+
+const imageQuerySignalCache = new Map<
+  string,
+  { createdAt: number; promise: Promise<ImageQuerySignals> }
+>();
+const IMAGE_QUERY_SIGNAL_CACHE_TTL_MS = 10 * 60 * 1000;
+const IMAGE_QUERY_SIGNAL_CACHE_MAX = 240;
+
+function imageQuerySignalCacheKey(buffer: Buffer): string {
+  const digest = createHash("sha1").update(buffer).digest("hex");
+  return `${buffer.length}:${digest}`;
+}
+
+function pruneImageQuerySignalCache(now: number): void {
+  for (const [key, entry] of imageQuerySignalCache.entries()) {
+    if (now - entry.createdAt > IMAGE_QUERY_SIGNAL_CACHE_TTL_MS) {
+      imageQuerySignalCache.delete(key);
+    }
+  }
+  if (imageQuerySignalCache.size <= IMAGE_QUERY_SIGNAL_CACHE_MAX) return;
+  const overflow = imageQuerySignalCache.size - IMAGE_QUERY_SIGNAL_CACHE_MAX;
+  let dropped = 0;
+  for (const key of imageQuerySignalCache.keys()) {
+    imageQuerySignalCache.delete(key);
+    dropped += 1;
+    if (dropped >= overflow) break;
+  }
+}
+
+async function computeImageQuerySignals(imageBuffer: Buffer): Promise<ImageQuerySignals> {
+  let colorQueryEmbedding: number[] | null = null;
+  let textureQueryEmbedding: number[] | null = null;
+  let materialQueryEmbedding: number[] | null = null;
+  let styleQueryEmbedding: number[] | null = null;
+  let patternQueryEmbedding: number[] | null = null;
+  let partQueryEmbeddings: Record<string, number[] | null> = {};
+
+  try {
+    const { attributeEmbeddings } = await import("../../lib/search/attributeEmbeddings");
+    const [cEmb, tEmb, mEmb, sEmb, pEmb] = await Promise.all([
+      attributeEmbeddings
+        .generateImageAttributeEmbedding(imageBuffer, "color")
+        .catch((error) => {
+          console.warn("[image-search] color attribute embedding failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return [] as number[];
+        }),
+      attributeEmbeddings
+        .generateImageAttributeEmbedding(imageBuffer, "texture")
+        .catch((error) => {
+          console.warn("[image-search] texture attribute embedding failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return [] as number[];
+        }),
+      attributeEmbeddings
+        .generateImageAttributeEmbedding(imageBuffer, "material")
+        .catch((error) => {
+          console.warn("[image-search] material attribute embedding failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return [] as number[];
+        }),
+      attributeEmbeddings
+        .generateImageAttributeEmbedding(imageBuffer, "style")
+        .catch((error) => {
+          console.warn("[image-search] style attribute embedding failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return [] as number[];
+        }),
+      attributeEmbeddings
+        .generateImageAttributeEmbedding(imageBuffer, "pattern")
+        .catch((error) => {
+          console.warn("[image-search] pattern attribute embedding failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return [] as number[];
+        }),
+    ]);
+    colorQueryEmbedding = cEmb.length > 0 ? cEmb : null;
+    textureQueryEmbedding = tEmb.length > 0 ? tEmb : null;
+    materialQueryEmbedding = mEmb.length > 0 ? mEmb : null;
+    styleQueryEmbedding = sEmb.length > 0 ? sEmb : null;
+    patternQueryEmbedding = pEmb.length > 0 ? pEmb : null;
+  } catch (error) {
+    console.warn("[image-search] attribute embedding pipeline failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  try {
+    const { computeAndGenerateQueryPartEmbeddings } = await import("../../lib/image/processor");
+    partQueryEmbeddings = await computeAndGenerateQueryPartEmbeddings(imageBuffer).catch(
+      (error) => {
+        console.warn("[image-search] part embeddings generation failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return {};
+      },
+    );
+  } catch (error) {
+    console.warn("[image-search] part embedding import failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    partQueryEmbeddings = {};
+  }
+
+  return {
+    colorQueryEmbedding,
+    textureQueryEmbedding,
+    materialQueryEmbedding,
+    styleQueryEmbedding,
+    patternQueryEmbedding,
+    partQueryEmbeddings,
+  };
+}
+
+async function getCachedImageQuerySignals(imageBuffer: Buffer): Promise<ImageQuerySignals> {
+  const now = Date.now();
+  pruneImageQuerySignalCache(now);
+  const key = imageQuerySignalCacheKey(imageBuffer);
+  const existing = imageQuerySignalCache.get(key);
+  if (existing && now - existing.createdAt <= IMAGE_QUERY_SIGNAL_CACHE_TTL_MS) {
+    return existing.promise;
+  }
+  const promise = computeImageQuerySignals(imageBuffer);
+  imageQuerySignalCache.set(key, { createdAt: now, promise });
+  try {
+    return await promise;
+  } catch (error) {
+    imageQuerySignalCache.delete(key);
+    throw error;
+  }
+}
 
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -774,9 +920,11 @@ function imageCategoryAwareKnnPoolLimit(detectionProductCategory?: string): numb
  * Keeps per-call latency bounded for Shop-the-Look without changing final output size.
  */
 function imageDetectionRerankCandidateCap(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_RERANK_CANDIDATE_CAP ?? "280");
-  if (!Number.isFinite(raw)) return 280;
-  return Math.max(120, Math.min(600, Math.floor(raw)));
+  // Detection search needs a wider rerank pool to avoid early recall collapse
+  // for tops/footwear/bags where true matches are often not in the first ANN slice.
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_RERANK_CANDIDATE_CAP ?? "420");
+  if (!Number.isFinite(raw)) return 420;
+  return Math.max(180, Math.min(900, Math.floor(raw)));
 }
 
 /**
@@ -784,9 +932,11 @@ function imageDetectionRerankCandidateCap(): number {
  * calls while keeping a broader default pool for non-detection image searches.
  */
 function imageDetectionKnnPoolCap(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "520");
-  if (!Number.isFinite(raw)) return 520;
-  return Math.max(180, Math.min(900, Math.floor(raw)));
+  // Raise default detection kNN pool to improve first-stage recall.
+  // Keep bounded to avoid unbounded latency growth.
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "780");
+  if (!Number.isFinite(raw)) return 780;
+  return Math.max(260, Math.min(1300, Math.floor(raw)));
 }
 
 function imageCategoryAwareMinResultsPolicy(params: {
@@ -1494,6 +1644,31 @@ function imageKnnEfSearch(): number {
   if (Number.isFinite(raw) && raw === 0) return 0;
   if (Number.isFinite(raw) && raw > 0) return Math.max(64, Math.min(512, Math.floor(raw)));
   return 128;
+}
+
+function mergeKnnHitsByProductId(primary: any[], extra: any[], cap: number): any[] {
+  const byId = new Map<string, any>();
+  const mergeOne = (hit: any) => {
+    const id = String(hit?._source?.product_id ?? "").trim();
+    if (!id) return;
+    const prev = byId.get(id);
+    if (!prev) {
+      byId.set(id, hit);
+      return;
+    }
+    const prevScore = Number(prev?._score ?? Number.NEGATIVE_INFINITY);
+    const nextScore = Number(hit?._score ?? Number.NEGATIVE_INFINITY);
+    if (nextScore > prevScore) {
+      byId.set(id, { ...prev, ...hit, _source: { ...(prev?._source ?? {}), ...(hit?._source ?? {}) } });
+    }
+  };
+
+  for (const hit of primary ?? []) mergeOne(hit);
+  for (const hit of extra ?? []) mergeOne(hit);
+
+  return [...byId.values()]
+    .sort((a, b) => Number((b as any)?._score ?? Number.NEGATIVE_INFINITY) - Number((a as any)?._score ?? Number.NEGATIVE_INFINITY))
+    .slice(0, Math.max(1, cap));
 }
 
 function knnQueryInner(vector: number[], k: number, ef: number): Record<string, unknown> {
@@ -2535,10 +2710,14 @@ function imageSearchNearIdenticalRawCosineMin(): number {
   return Math.max(0.55, Math.min(0.999, n));
 }
 
-function imageKnnTimeoutMs(): number {
+function imageKnnTimeoutMs(detectionScoped = false): number {
+  const scopedEnv = Number(process.env.SEARCH_IMAGE_KNN_TIMEOUT_MS_DETECTION);
+  if (detectionScoped && Number.isFinite(scopedEnv) && scopedEnv >= 500) {
+    return Math.min(120_000, Math.floor(scopedEnv));
+  }
   const raw = Number(process.env.SEARCH_IMAGE_KNN_TIMEOUT_MS);
   if (Number.isFinite(raw) && raw >= 500) return Math.min(120_000, Math.floor(raw));
-  return 12_000;
+  return detectionScoped ? 8_000 : 12_000;
 }
 
 /**
@@ -2723,6 +2902,21 @@ function categoryFilterTermsWithAliases(input: string | string[]): string[] {
   return [...out];
 }
 
+function buildHardCategoryFilterClause(input: string | string[]): Record<string, unknown> | null {
+  const terms = categoryFilterTermsWithAliases(input);
+  if (terms.length === 0) return null;
+  return {
+    bool: {
+      should: [
+        { terms: { category: terms } },
+        { terms: { category_canonical: terms } },
+        { terms: { product_types: terms } },
+      ],
+      minimum_should_match: 1,
+    },
+  };
+}
+
 function buildDesiredCatalogTermSet(aisles: string[]): Set<string> {
   const s = new Set<string>();
   for (const a of aisles) {
@@ -2810,6 +3004,10 @@ export async function searchByImageWithSimilarity(
       (sessionFiltersFromParams && Object.keys(sessionFiltersFromParams).length > 0),
   );
 
+  const detectionScoped =
+    typeof params.detectionProductCategory === "string" &&
+    params.detectionProductCategory.trim().length > 0;
+
   const softCategory = forceHardCategoryFilter ? false : imageSoftCategoryEnv();
   const aisleHints = predictedCategoryAisles?.length
     ? predictedCategoryAisles
@@ -2842,17 +3040,8 @@ export async function searchByImageWithSimilarity(
   ];
   if (!softCategory || !desiredCatalogTerms || desiredCatalogTerms.size === 0) {
     if (cat) {
-      if (Array.isArray(cat)) {
-        const terms = categoryFilterTermsWithAliases(cat);
-        if (terms.length > 0) filter.push({ terms: { category: terms } });
-      } else {
-        const terms = categoryFilterTermsWithAliases(String(cat));
-        if (terms.length === 1) {
-          filter.push({ term: { category: terms[0] } });
-        } else if (terms.length > 1) {
-          filter.push({ terms: { category: terms } });
-        }
-      }
+      const clause = buildHardCategoryFilterClause(cat);
+      if (clause) filter.push(clause);
     }
   }
   if (filters.brand) filter.push({ term: { brand: String(filters.brand).toLowerCase() } });
@@ -2861,14 +3050,16 @@ export async function searchByImageWithSimilarity(
     const productTypeTerms = ((filters as { productTypes?: string[] }).productTypes ?? [])
       .map((t) => String(t).toLowerCase().trim())
       .filter(Boolean);
-    if (productTypeTerms.length > 0) {
+    if (productTypeTerms.length > 0 && !detectionScoped) {
+      // Root fix: detection-derived product types are noisy and can zero-out KNN retrieval.
+      // Keep hard type filters for non-detection image search, but not for per-detection stage.
       filter.push({ terms: { product_types: productTypeTerms } });
     }
   }
   const filtersAny = filters as { gender?: string; color?: string; softColor?: string; style?: string; softStyle?: string };
   const queryGenderNormForPost = normalizeQueryGender(filtersAny.gender);
   const visualPrimaryBroad = isBroadImageSearchVisualPrimaryRanking(filters, imageSearchTextQuery);
-  if (filtersAny.gender) {
+  if (filtersAny.gender && !detectionScoped) {
     const rawGender = String(filtersAny.gender).toLowerCase().trim();
     const g = normalizeQueryGender(rawGender) ?? rawGender;
     const normalizedAgeGroup = normalizeAudienceAgeGroupValue((filters as { ageGroup?: string }).ageGroup);
@@ -2944,7 +3135,7 @@ export async function searchByImageWithSimilarity(
   }
   {
     const normalizedAgeGroup = normalizeAudienceAgeGroupValue((filters as { ageGroup?: string }).ageGroup);
-    if (normalizedAgeGroup === "kids") {
+    if (normalizedAgeGroup === "kids" && !detectionScoped) {
       filter.push({
         bool: {
           should: [
@@ -2981,11 +3172,25 @@ export async function searchByImageWithSimilarity(
     });
   }
 
+  // Relaxed KNN filter used only for sparse detection retrieval fallback.
+  // Keep hard category constraints while dropping restrictive metadata clauses.
+  const relaxedKnnFilter: any[] = [
+    { bool: { must_not: [{ term: { is_hidden: true } }] } },
+    {
+      bool: {
+        must_not: [
+          { terms: { category: ["candles & holders", "pots & plants", "home decor"] } },
+        ],
+      },
+    },
+  ];
+  if (cat) {
+    const hardCategoryOnly = buildHardCategoryFilterClause(cat);
+    if (hardCategoryOnly) relaxedKnnFilter.push(hardCategoryOnly);
+  }
+
   /** kNN size — wider when SEARCH_IMAGE_MERCHANDISE_SIMILARITY is on (see imageSearchKnnPoolLimit). */
   const retrievalKBase = imageCategoryAwareKnnPoolLimit(params.detectionProductCategory);
-  const detectionScoped =
-    typeof params.detectionProductCategory === "string" &&
-    params.detectionProductCategory.trim().length > 0;
   const retrievalK = detectionScoped
     ? Math.min(retrievalKBase, imageDetectionKnnPoolCap())
     : retrievalKBase;
@@ -2995,90 +3200,15 @@ export async function searchByImageWithSimilarity(
   let materialQueryEmbedding: number[] | null = null;
   let styleQueryEmbedding: number[] | null = null;
   let patternQueryEmbedding: number[] | null = null;
-  if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
-    try {
-      const { attributeEmbeddings } = await import("../../lib/search/attributeEmbeddings");
-      const [cEmb, tEmb, mEmb, sEmb, pEmb] = await Promise.all([
-        attributeEmbeddings
-          .generateImageAttributeEmbedding(imageBuffer, "color")
-          .catch((error) => {
-            console.warn("[image-search] color attribute embedding failed", {
-              message: error instanceof Error ? error.message : String(error),
-            });
-            return [] as number[];
-          }),
-        attributeEmbeddings
-          .generateImageAttributeEmbedding(imageBuffer, "texture")
-          .catch((error) => {
-            console.warn("[image-search] texture attribute embedding failed", {
-              message: error instanceof Error ? error.message : String(error),
-            });
-            return [] as number[];
-          }),
-        attributeEmbeddings
-          .generateImageAttributeEmbedding(imageBuffer, "material")
-          .catch((error) => {
-            console.warn("[image-search] material attribute embedding failed", {
-              message: error instanceof Error ? error.message : String(error),
-            });
-            return [] as number[];
-          }),
-        attributeEmbeddings
-          .generateImageAttributeEmbedding(imageBuffer, "style")
-          .catch((error) => {
-            console.warn("[image-search] style attribute embedding failed", {
-              message: error instanceof Error ? error.message : String(error),
-            });
-            return [] as number[];
-          }),
-        attributeEmbeddings
-          .generateImageAttributeEmbedding(imageBuffer, "pattern")
-          .catch((error) => {
-            console.warn("[image-search] pattern attribute embedding failed", {
-              message: error instanceof Error ? error.message : String(error),
-            });
-            return [] as number[];
-          }),
-      ]);
-      colorQueryEmbedding = cEmb.length > 0 ? cEmb : null;
-      textureQueryEmbedding = tEmb.length > 0 ? tEmb : null;
-      materialQueryEmbedding = mEmb.length > 0 ? mEmb : null;
-      styleQueryEmbedding = sEmb.length > 0 ? sEmb : null;
-      patternQueryEmbedding = pEmb.length > 0 ? pEmb : null;
-    } catch (error) {
-      console.warn("[image-search] attribute embedding pipeline failed", {
-        message: error instanceof Error ? error.message : String(error),
-      });
-      colorQueryEmbedding = null;
-      textureQueryEmbedding = null;
-      materialQueryEmbedding = null;
-      styleQueryEmbedding = null;
-      patternQueryEmbedding = null;
-    }
-  }
-
-  // ────────────────────────────────────────────────────────────────────────────
-  // PART-LEVEL EMBEDDINGS (Phase 1)
-  // ────────────────────────────────────────────────────────────────────────────
-  // Generate embeddings for canonical parts (sleeves, necklines, heels, bag handles, etc.)
   let partQueryEmbeddings: Record<string, number[] | null> = {};
   if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
-    try {
-      const { computeAndGenerateQueryPartEmbeddings } = await import("../../lib/image/processor");
-      partQueryEmbeddings = await computeAndGenerateQueryPartEmbeddings(imageBuffer).catch(
-        (error) => {
-          console.warn("[image-search] part embeddings generation failed", {
-            message: error instanceof Error ? error.message : String(error),
-          });
-          return {};
-        }
-      );
-    } catch (error) {
-      console.warn("[image-search] part embedding import failed", {
-        message: error instanceof Error ? error.message : String(error),
-      });
-      partQueryEmbeddings = {};
-    }
+    const signals = await getCachedImageQuerySignals(imageBuffer);
+    colorQueryEmbedding = signals.colorQueryEmbedding;
+    textureQueryEmbedding = signals.textureQueryEmbedding;
+    materialQueryEmbedding = signals.materialQueryEmbedding;
+    styleQueryEmbedding = signals.styleQueryEmbedding;
+    patternQueryEmbedding = signals.patternQueryEmbedding;
+    partQueryEmbeddings = signals.partQueryEmbeddings;
   }
 
   const runColor = Boolean(colorQueryEmbedding && colorQueryEmbedding.length > 0);
@@ -3145,13 +3275,20 @@ export async function searchByImageWithSimilarity(
     }
   }
 
-  const useDualKnn =
-    imageDualKnnFusionEnabled() &&
+  const dualKnnEligible =
     garmentQueryVector !== null &&
     garmentQueryVector.length === imageEmbedding.length;
+  const useDualKnn =
+    dualKnnEligible &&
+    (
+      imageDualKnnFusionEnabled() ||
+      // For detection-scoped retrieval, dual knn improves recall materially
+      // without changing category safety (filters/rerank still apply).
+      detectionScoped
+    );
 
   const ef = imageKnnEfSearch();
-  const knnTimeoutMs = imageKnnTimeoutMs();
+  const knnTimeoutMs = imageKnnTimeoutMs(detectionScoped);
 
   let knnFieldResolved: string;
   let hits: any[];
@@ -3310,6 +3447,88 @@ export async function searchByImageWithSimilarity(
           (hit as any)._exactCosineRaw = cosineSimilarityRaw(queryVector, docVec);
           (hit as any)._exactCosine01 = normalizeTo01ByVersion((hit as any)._exactCosineRaw, "v2");
         }
+      }
+    }
+  }
+
+  // KNN sparse-recall fallback: when strict detection filters over-prune ANN candidates,
+  // run one additional retrieval with category-safe relaxed filters and merge by product id.
+  const sparseKnnMinHits = detectionScoped ? Math.min(retrievalK, Math.max(limit * 2, 24)) : 0;
+  const sparseKnnDetected =
+    detectionScoped &&
+    Array.isArray(hits) &&
+    (hits.length === 0 || hits.length < sparseKnnMinHits / 2);
+
+  if (sparseKnnDetected && relaxedKnnFilter.length > 0) {
+    const relaxedTimeoutMs = Math.min(12000, Math.max(knnTimeoutMs, 8000));
+    let relaxedHits: any[] = [];
+
+    if (useDualKnn && dualKnnEligible) {
+      const bodyGlobalRelaxed = {
+        size: retrievalK,
+        _source: [...baseImageKnnSourceFields, "embedding", "embedding_garment"],
+        query: {
+          bool: {
+            must: {
+              knn: {
+                embedding: knnQueryInner(imageEmbedding, retrievalK, ef),
+              },
+            },
+            filter: relaxedKnnFilter,
+          },
+        },
+      };
+      const bodyGarmentRelaxed = {
+        size: retrievalK,
+        _source: [...baseImageKnnSourceFields, "embedding", "embedding_garment"],
+        query: {
+          bool: {
+            must: {
+              knn: {
+                embedding_garment: knnQueryInner(garmentQueryVector!, retrievalK, ef),
+              },
+            },
+            filter: relaxedKnnFilter,
+          },
+        },
+      };
+      const [hgRelaxed, hgrRelaxed] = await Promise.all([
+        opensearchImageKnnHits(bodyGlobalRelaxed, relaxedTimeoutMs),
+        opensearchImageKnnHits(bodyGarmentRelaxed, relaxedTimeoutMs),
+      ]);
+      relaxedHits = mergeDualKnnHitsForImageSearch(hgRelaxed, hgrRelaxed, imageEmbedding, garmentQueryVector!);
+    } else {
+      const relaxedBody = {
+        size: retrievalK,
+        _source: [
+          ...baseImageKnnSourceFields,
+          ...(imageExactCosineRerankEnabled() ? [knnFieldResolved] : []),
+        ],
+        query: {
+          bool: {
+            must: {
+              knn: {
+                [knnFieldResolved]: knnQueryInner(queryVector, retrievalK, ef),
+              },
+            },
+            filter: relaxedKnnFilter,
+          },
+        },
+      };
+      relaxedHits = await opensearchImageKnnHits(relaxedBody, relaxedTimeoutMs);
+    }
+
+    if (Array.isArray(relaxedHits) && relaxedHits.length > 0) {
+      const beforeCount = Array.isArray(hits) ? hits.length : 0;
+      hits = mergeKnnHitsByProductId(Array.isArray(hits) ? hits : [], relaxedHits, retrievalK);
+      if (breakdownDebug) {
+        console.log("[image-knn][sparse-fallback]", {
+          detectionScoped,
+          before: beforeCount,
+          relaxed: relaxedHits.length,
+          afterMerge: hits.length,
+          sparseKnnMinHits,
+        });
       }
     }
   }
@@ -4433,9 +4652,10 @@ export async function searchByImageWithSimilarity(
         const hasLengthIntentForHit = Boolean((comp as any).hasLengthIntent);
         const dressLengthMin = (() => {
           const yoloConfidence = params.detectionYoloConfidence ?? 0;
-          if (yoloConfidence >= 0.9) return 0.24;
-          if (yoloConfidence >= 0.8) return 0.3;
-          return 0.36;
+          // Dress length metadata is sparse in many catalogs; keep this gate soft.
+          if (yoloConfidence >= 0.9) return 0.18;
+          if (yoloConfidence >= 0.8) return 0.24;
+          return 0.3;
         })();
         if (
           hasDetectionAnchoredTypeIntent &&
@@ -4640,7 +4860,8 @@ export async function searchByImageWithSimilarity(
           if (exactType < 1 && typeComp < 0.16) continue;
           if ((comp.crossFamilyPenalty ?? 0) >= 0.62) continue;
         }
-        if (hasColorIntentForFinal && isFootwearDetectionIntent && (comp.colorCompliance ?? 0) < 0.42) continue;
+        const footwearColorFloor = hasExplicitColorIntent ? 0.42 : hasInferredColorSignal ? 0.22 : 0.12;
+        if (hasColorIntentForFinal && isFootwearDetectionIntent && (comp.colorCompliance ?? 0) < footwearColorFloor) continue;
         const v = visualSimFromHit(h);
         const existing = comp.finalRelevance01 ?? 0;
         const colorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
@@ -5160,7 +5381,16 @@ export async function searchByImageWithSimilarity(
             strictOnePieceCap + nearDuplicateRelax,
             Math.max(strictInferredOnePieceColorGate ? 0.08 : 0.15, conflictAdjustedCap),
           );
-          finalRelevance01 = Math.min(finalRelevance01 ?? 0, conservativeCap);
+          const inferredCoreCategoryFloor =
+            !hasExplicitColorIntent &&
+            hasDetectionAnchoredTypeIntent &&
+            (params.detectionProductCategory === "tops" ||
+              params.detectionProductCategory === "footwear" ||
+              params.detectionProductCategory === "bags")
+              ? 0.42
+              : 0;
+          const conservativeCapAdjusted = Math.max(conservativeCap, inferredCoreCategoryFloor);
+          finalRelevance01 = Math.min(finalRelevance01 ?? 0, conservativeCapAdjusted);
           finalRelevanceSource = "catalog_color_correction";
           explainColorCompliance = 0;
           explainMatchedColor = authoritativeColorNorm;
@@ -5238,12 +5468,12 @@ export async function searchByImageWithSimilarity(
             finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.34 : 0.28);
             finalRelevanceSource = "dress_sleeve_conflict_cap";
           }
-          if (((compliance as any).hasLengthIntent ?? false) && lengthComp < 0.35) {
-            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.32 : 0.26);
+          if (((compliance as any).hasLengthIntent ?? false) && lengthComp < 0.24) {
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.38 : 0.3);
             finalRelevanceSource = "dress_length_conflict_cap";
           }
-          if (!onePieceCandidate && similarityScore < 0.94) {
-            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.52 : 0.42);
+          if (!onePieceCandidate && similarityScore < 0.9) {
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.62 : 0.5);
             finalRelevanceSource = "dress_silhouette_cap";
           } else if (typeComp < 0.12) {
             finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.7 : 0.58);
@@ -5440,7 +5670,8 @@ export async function searchByImageWithSimilarity(
           const exactType = Number(explainAny?.exactTypeScore ?? 0);
           if (isDressDetectionForOverride) {
             const onePieceCandidate = isOnePieceCatalogCandidate(p as Record<string, unknown>);
-            if (!onePieceCandidate && sim < 0.985) return false;
+            // Dress metadata can miss one-piece cues; keep visually strong candidates.
+            if (!onePieceCandidate && sim < 0.95) return false;
             if (exactType < 1 && typeComp < 0.14 && !onePieceCandidate) return false;
           } else if (exactType < 1 && typeComp < 0.2) {
             return false;
@@ -5551,9 +5782,9 @@ export async function searchByImageWithSimilarity(
       if (isDressDetection) {
         const dressVisualOverrideMin = (() => {
           const yoloConfidence = params.detectionYoloConfidence ?? 0;
-          if (yoloConfidence >= 0.9) return 0.91;
-          if (yoloConfidence >= 0.8) return 0.93;
-          return 0.95;
+          if (yoloConfidence >= 0.9) return 0.88;
+          if (yoloConfidence >= 0.8) return 0.9;
+          return 0.92;
         })();
         if (!onePieceCandidate && sim < dressVisualOverrideMin) return false;
         if (exactType >= 1 || typeComp >= 0.14 || onePieceCandidate) return true;
@@ -5576,9 +5807,9 @@ export async function searchByImageWithSimilarity(
         if (crossFamily >= 0.45) return false;
         if (isDressDetection) {
           const onePieceCandidate = isOnePieceCatalogCandidate(p as Record<string, unknown>);
-          if (!onePieceCandidate && sim < 0.985) return false;
+          if (!onePieceCandidate && sim < 0.95) return false;
           if (exactType >= 1 || typeComp >= 0.12 || onePieceCandidate) return true;
-          return sim >= 0.98;
+          return sim >= 0.94;
         }
         if (exactType >= 1 || typeComp >= 0.18) return true;
         return sim >= 0.97;
@@ -5614,7 +5845,10 @@ export async function searchByImageWithSimilarity(
         const exactType = Number(ex.exactTypeScore ?? 0);
         const crossFamily = Number(ex.crossFamilyPenalty ?? 0);
         const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
-        return crossFamily < 0.22 && (exactType >= 1 || typeComp >= 0.82 || sim >= 0.985);
+        const isDressFinalGate = detectionCategoryForFinalGate === "dresses";
+        const typeFloor = isDressFinalGate ? 0.72 : 0.82;
+        const simFloor = isDressFinalGate ? 0.95 : 0.985;
+        return crossFamily < 0.22 && (exactType >= 1 || typeComp >= typeFloor || sim >= simFloor);
       });
       if (familySafeFallback.length > 0) {
         results = familySafeFallback as ProductResult[];
@@ -6618,3 +6852,8 @@ export async function getCandidateScoresForProducts(
     },
   };
 }
+
+
+
+
+

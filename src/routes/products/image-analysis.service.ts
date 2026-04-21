@@ -279,7 +279,7 @@ function resolveShopLookPageSize(explicit: number | undefined, fallback: number)
  */
 function shopLookRecallMultiplier(): number {
   const raw = Number(process.env.SEARCH_IMAGE_SHOP_RECALL_MULTIPLIER ?? "3");
-  if (!Number.isFinite(raw)) return 3;
+  if (!Number.isFinite(raw)) return 2;
   return Math.max(1, Math.min(5, Math.floor(raw)));
 }
 
@@ -1072,8 +1072,8 @@ function shopLookPerDetectionConcurrency(): number {
 
 /** Max search calls per detection (initial + retries/fallbacks). Default 3 to preserve recall on hard detections. */
 function shopLookMaxSearchCallsPerDetection(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_SHOP_MAX_SEARCH_CALLS ?? "3");
-  if (!Number.isFinite(raw)) return 3;
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_MAX_SEARCH_CALLS ?? "2");
+  if (!Number.isFinite(raw)) return 2;
   return Math.max(1, Math.min(8, Math.floor(raw)));
 }
 
@@ -1276,19 +1276,14 @@ function hardCategoryTermsForDetection(
     }
 
     if (isGenericShoeLike) {
-      const closedShoeTerms = baseTerms.filter((t) =>
-        /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|loafer|loafers|flat|flats|oxford|oxfords|pump|pumps|heel|heels|footwear)\b/.test(
+      // Generic "shoe" label is ambiguous; keep broad footwear recall and let
+      // downstream ranking/guards choose the best subtype.
+      const footwearBroad = baseTerms.filter((t) =>
+        /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|boot|boots|heel|heels|pump|pumps|sandal|sandals|loafer|loafers|flat|flats|mule|mules|oxford|oxfords|clog|clogs|footwear)\b/.test(
           t,
         ),
       );
-      const withoutOpenOrBoot = closedShoeTerms.filter(
-        (t) => !/\b(boot|boots|sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(t),
-      );
-      return withoutOpenOrBoot.length > 0
-        ? withoutOpenOrBoot
-        : closedShoeTerms.length > 0
-          ? closedShoeTerms
-          : baseTerms;
+      return footwearBroad.length > 0 ? footwearBroad : baseTerms;
     }
 
     // Generic "shoe" detections should keep broad footwear recall until subtype is explicit.
@@ -1423,19 +1418,13 @@ function tightenTypeSeedsForDetection(
     }
 
     if (isGenericShoeLike) {
-      const closedShoe = normalized.filter((t) =>
-        /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|loafer|loafers|flat|flats|oxford|oxfords|pump|pumps|heel|heels|footwear)\b/.test(
+      // Keep generic shoe intent broad; subtype narrowing happens in rerank.
+      const footwearBroad = normalized.filter((t) =>
+        /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|boot|boots|heel|heels|pump|pumps|sandal|sandals|loafer|loafers|flat|flats|mule|mules|oxford|oxfords|clog|clogs|footwear)\b/.test(
           t,
         ),
       );
-      const withoutOpenOrBoot = closedShoe.filter(
-        (t) => !/\b(boot|boots|sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(t),
-      );
-      return withoutOpenOrBoot.length > 0
-        ? withoutOpenOrBoot
-        : closedShoe.length > 0
-          ? closedShoe
-          : normalized;
+      return footwearBroad.length > 0 ? footwearBroad : normalized;
     }
 
     const footwearBroad = normalized.filter((t) =>
@@ -2302,11 +2291,16 @@ function applyDetectionCategoryGuard(
         /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|sport coat|dress jacket|shirt jacket|shacket|overshirt)\b/.test(
           haystack,
         );
+      const productTopCue =
+        /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|cardigan|hoodie|pullover|jumper)\b/.test(
+          haystack,
+        );
       const isLongSleeveTopDetection = /\b(long sleeve top|long sleeve|shirt|blouse)\b/.test(detectionLabelNorm);
       if (
         !detectionRequestsOuterwear &&
-        (productCategoryMacro === "outerwear" ||
-          productMentionsOuterwear)
+        (productCategoryMacro === "outerwear"
+          ? !productTopCue
+          : productMentionsOuterwear && !productTopCue)
       ) {
         return false;
       }
@@ -2615,7 +2609,8 @@ function isCoreOutfitCategory(category: string | undefined): boolean {
     normalized === "bottoms" ||
     normalized === "dresses" ||
     normalized === "footwear" ||
-    normalized === "outerwear"
+    normalized === "outerwear" ||
+    normalized === "bags"
   );
 }
 
@@ -3266,6 +3261,19 @@ export interface SimilarProductsResult {
 }
 
 /** Similar products for a single detected item */
+export interface DetectionSearchDebug {
+  knnCandidateCount: number;
+  afterPrecisionGuard: number;
+  afterCategoryGuard: number;
+  afterSleeveGuard: number;
+  afterFormalityFilter: number;
+  afterAthleticGuard: number;
+  afterRecovery: number;
+  droppedByOtherGates: number;
+  droppedByFinalRelevance: number;
+  droppedByColorGate: number;
+}
+
 export interface DetectionSimilarProducts {
   /** The detected item */
   detection: {
@@ -3301,6 +3309,8 @@ export interface DetectionSimilarProducts {
    * Helps validate that `color` / `style` / `gender` are actually affecting retrieval.
    */
   appliedFilters?: Partial<import("./types").SearchFilters>;
+  /** Temporary stage-by-stage drop counters for search debugging. */
+  debug?: DetectionSearchDebug;
 }
 
 /** Grouped similar products by detection */
@@ -5095,6 +5105,8 @@ export class ImageAnalysisService {
         console.log(`[skip-trace] detection="${label}" after_knn_search=${similarResult.results.length}`);
       }
 
+      const knnCandidateCount = similarResult.results.length;
+
       const precisionSafeResults = applyShopLookVisualPrecisionGuard(
         similarResult.results,
         categoryMapping.productCategory === "footwear" && (detection.area_ratio ?? 0) <= 0.02
@@ -5522,9 +5534,14 @@ export class ImageAnalysisService {
         );
 
         for (const bagRecovery of bagRecoveries) {
-          // Apply lighter guards for bag recovery (bag category is already constrained)
+          const bagRecoveryCategorySafe = applyDetectionCategoryGuard(
+            bagRecovery.results,
+            detection.label,
+            categoryMapping,
+            String((filters as any).gender ?? ""),
+          );
           const bagRecoverySafeResults = applyAthleticMismatchGuard({
-            products: bagRecovery.results,
+            products: bagRecoveryCategorySafe,
             detectionLabel: label,
             productCategory: categoryMapping.productCategory,
             softStyle: String((filters as any).softStyle ?? ""),
@@ -5565,6 +5582,8 @@ export class ImageAnalysisService {
         console.log(`[detection-result] label="${label}" final_count=${similarResult.results.length}`);
       }
       
+      const droppedByOtherGates = Math.max(0, knnCandidateCount - athleticSafeResults.length);
+
       return {
         detection: {
           label: detection.label,
@@ -5586,6 +5605,18 @@ export class ImageAnalysisService {
           softStyle: filters.softStyle,
           sleeve: (filters as any).sleeve,
           length: (filters as any).length,
+        },
+        debug: {
+          knnCandidateCount,
+          afterPrecisionGuard: precisionSafeResults.length,
+          afterCategoryGuard: categorySafeResults.length,
+          afterSleeveGuard: sleeveSafeResults.length,
+          afterFormalityFilter: formalitySafeResults.length,
+          afterAthleticGuard: athleticSafeResults.length,
+          afterRecovery: similarResult.results.length,
+          droppedByOtherGates,
+          droppedByFinalRelevance: 0,
+          droppedByColorGate: 0,
         },
       } as DetectionSimilarProducts;
       } finally {
@@ -5650,18 +5681,44 @@ export class ImageAnalysisService {
       console.log(`[relevance-gate] applying minRelevance=${minRelevanceThreshold} to filter low-relevance products`);
     }
     
-    const relevanceFilteredResults = finalGroupedResults.map((detection) => ({
-      ...detection,
-      products: applyRelevanceThresholdFilter(detection.products, minRelevanceThreshold, {
+    const relevanceFilteredResults = finalGroupedResults.map((detection) => {
+      const beforeProducts = Array.isArray(detection.products) ? detection.products : [];
+      const afterProducts = applyRelevanceThresholdFilter(beforeProducts, minRelevanceThreshold, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category),
         preserveAtLeastCount: isCoreOutfitCategory(detection.category)
           ? Math.min(6, Math.max(2, resolvedLimitPerItem))
           : 0,
         detectionLabel: detection.detection?.label,
         category: detection.category,
-      }),
-      count: 0, // Will be recalculated below
-    }));
+      });
+      const droppedByFinalRelevance = Math.max(0, beforeProducts.length - afterProducts.length);
+      const droppedByColorGate = beforeProducts.filter((prod) => {
+        const relevance = Number((prod as any)?.finalRelevance01 ?? 0);
+        const source = String((prod as any)?.explain?.finalRelevanceSource ?? "").toLowerCase();
+        return relevance < minRelevanceThreshold && source.includes("color");
+      }).length;
+      return {
+        ...detection,
+        products: afterProducts,
+        count: 0, // Will be recalculated below
+        debug: {
+          ...(detection.debug ?? {
+            knnCandidateCount: beforeProducts.length,
+            afterPrecisionGuard: beforeProducts.length,
+            afterCategoryGuard: beforeProducts.length,
+            afterSleeveGuard: beforeProducts.length,
+            afterFormalityFilter: beforeProducts.length,
+            afterAthleticGuard: beforeProducts.length,
+            afterRecovery: beforeProducts.length,
+            droppedByOtherGates: 0,
+            droppedByFinalRelevance: 0,
+            droppedByColorGate: 0,
+          }),
+          droppedByFinalRelevance,
+          droppedByColorGate,
+        },
+      };
+    });
     
     // Recalculate counts and total after filtering
     let newTotalProducts = 0;
@@ -6897,6 +6954,7 @@ export class ImageAnalysisService {
           options.similarityThreshold ?? config.clip.imageSimilarityThreshold;
         
         console.log(`[skip-trace] detection="${categorySource}" after_knn_search=${similarResult.results.length}`);
+        const knnCandidates = similarResult.results.length;
         
         const precisionSafeResults = applyShopLookVisualPrecisionGuard(
           similarResult.results,
@@ -6966,6 +7024,7 @@ export class ImageAnalysisService {
 
         const includeEmpty = options.includeEmptyDetectionGroups === true;
         if (similarResult.results.length > 0 || includeEmpty) {
+          const droppedByOtherGates = Math.max(0, knnCandidates - athleticSafeResults.length);
           return {
             detection: {
               label: detection.label,
@@ -6986,6 +7045,18 @@ export class ImageAnalysisService {
               softStyle: filters.softStyle,
               sleeve: (filters as any).sleeve,
               length: (filters as any).length,
+            },
+            debug: {
+              knnCandidateCount: knnCandidates,
+              afterPrecisionGuard: precisionSafeResults.length,
+              afterCategoryGuard: categorySafeResults.length,
+              afterSleeveGuard: sleeveSafeResults.length,
+              afterFormalityFilter: formalitySafeResults.length,
+              afterAthleticGuard: athleticSafeResults.length,
+              afterRecovery: similarResult.results.length,
+              droppedByOtherGates,
+              droppedByFinalRelevance: 0,
+              droppedByColorGate: 0,
             },
             source: isUserDefined ? "user_defined" : "yolo",
             originalIndex: isUserDefined ? undefined : originalIndices[i],
@@ -7021,18 +7092,44 @@ export class ImageAnalysisService {
     const minRelevanceThresholdSel = shopLookMinFinalRelevanceThreshold();
     console.log(`[relevance-gate-sel] applying minRelevance=${minRelevanceThresholdSel} to paginated results`);
     
-    const relevanceFilteredResultsSel = finalGroupedResults.map((detection) => ({
-      ...detection,
-      products: applyRelevanceThresholdFilter(detection.products, minRelevanceThresholdSel, {
+    const relevanceFilteredResultsSel = finalGroupedResults.map((detection) => {
+      const beforeProducts = Array.isArray(detection.products) ? detection.products : [];
+      const afterProducts = applyRelevanceThresholdFilter(beforeProducts, minRelevanceThresholdSel, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category),
         preserveAtLeastCount: isCoreOutfitCategory(detection.category)
           ? Math.min(6, Math.max(2, resolvedLimitPerItem))
           : 0,
         detectionLabel: detection.detection?.label,
         category: detection.category,
-      }),
-      count: 0, // Will be recalculated below
-    }));
+      });
+      const droppedByFinalRelevance = Math.max(0, beforeProducts.length - afterProducts.length);
+      const droppedByColorGate = beforeProducts.filter((prod) => {
+        const relevance = Number((prod as any)?.finalRelevance01 ?? 0);
+        const source = String((prod as any)?.explain?.finalRelevanceSource ?? "").toLowerCase();
+        return relevance < minRelevanceThresholdSel && source.includes("color");
+      }).length;
+      return {
+        ...detection,
+        products: afterProducts,
+        count: 0, // Will be recalculated below
+        debug: {
+          ...(detection.debug ?? {
+            knnCandidateCount: beforeProducts.length,
+            afterPrecisionGuard: beforeProducts.length,
+            afterCategoryGuard: beforeProducts.length,
+            afterSleeveGuard: beforeProducts.length,
+            afterFormalityFilter: beforeProducts.length,
+            afterAthleticGuard: beforeProducts.length,
+            afterRecovery: beforeProducts.length,
+            droppedByOtherGates: 0,
+            droppedByFinalRelevance: 0,
+            droppedByColorGate: 0,
+          }),
+          droppedByFinalRelevance,
+          droppedByColorGate,
+        },
+      };
+    });
     
     // Recalculate counts and total after filtering
     let newTotalProductsSel = 0;
@@ -7234,4 +7331,7 @@ export function getImageAnalysisService(): ImageAnalysisService {
 }
 
 export default ImageAnalysisService;
+
+
+
 
