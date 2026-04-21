@@ -5354,16 +5354,29 @@ export async function searchByImageWithSimilarity(
       const enforceInferredColorStrictly =
         category === "footwear" ||
         category === "shoes" ||
-        ((category === "tops" || category === "bags") &&
+        ((category === "bags") &&
           hasStrongDetectionScopedColor &&
           desiredColorsForRelevance.length === 1) ||
-        ((category === "bottoms" || category === "outerwear" || category === "dresses") &&
+        ((category === "outerwear" || category === "dresses") &&
           hasStrongDetectionScopedColor &&
           desiredColorsForRelevance.length === 1);
-      if (inferredColorCompliantHits.length > 0 && enforceInferredColorStrictly) {
+      if (
+        inferredColorCompliantHits.length > 0 &&
+        enforceInferredColorStrictly &&
+        (category === "footwear" || category === "shoes" || inferredColorCompliantHits.length >= minKeep)
+      ) {
         rankedHits = inferredColorCompliantHits;
       } else if (hasStrongDetectionScopedColor && inferredColorCompliantHits.length > 0) {
-        rankedHits = inferredColorCompliantHits;
+        // For tops/bottoms, don't collapse to tiny sets just because color is strong.
+        // Keep recall, and let color remain a strong ordering signal downstream.
+        if (
+          (category === "tops" || category === "bottoms") &&
+          inferredColorCompliantHits.length < minKeep
+        ) {
+          // no-op
+        } else {
+          rankedHits = inferredColorCompliantHits;
+        }
       } else if (
         (category === "bottoms" || category === "outerwear") &&
         hasStrongDetectionScopedColor &&
@@ -5860,6 +5873,16 @@ export async function searchByImageWithSimilarity(
       const src = p as Record<string, unknown>;
       if (queryGenderNormForPost && hasOppositeGenderSignalForQuery(src, queryGenderNormForPost)) {
         return false;
+      }
+      // Detection-scoped image search needs a hard numeric audience guard because many
+      // catalog rows don't carry clean gender keywords for the heuristic checker.
+      if (queryGenderNormForPost && hasDetectionAnchoredTypeIntent) {
+        const audienceCompliance = Number((p as any)?.explain?.audienceCompliance ?? 1);
+        const isFootwearDetection =
+          String(params.detectionProductCategory ?? "").toLowerCase().trim() === "footwear" ||
+          String(params.detectionProductCategory ?? "").toLowerCase().trim() === "shoes";
+        const minAudienceCompliance = isFootwearDetection ? 0.75 : 0.45;
+        if (audienceCompliance < minAudienceCompliance) return false;
       }
       if (shouldRejectShortsForTrouserIntent && isShortsCatalogCandidate(src)) {
         return false;
