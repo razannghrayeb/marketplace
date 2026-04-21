@@ -279,7 +279,7 @@ function resolveShopLookPageSize(explicit: number | undefined, fallback: number)
  */
 function shopLookRecallMultiplier(): number {
   const raw = Number(process.env.SEARCH_IMAGE_SHOP_RECALL_MULTIPLIER ?? "3");
-  if (!Number.isFinite(raw)) return 2;
+  if (!Number.isFinite(raw)) return 3;
   return Math.max(1, Math.min(5, Math.floor(raw)));
 }
 
@@ -1060,20 +1060,20 @@ function correctDetectionByPosition(detection: Detection): Detection {
   return detection;
 }
 
-/** Max concurrent OpenSearch kNN calls per shop-the-look request (default 3). */
+/** Max concurrent OpenSearch kNN calls per shop-the-look request (default 6). */
 function shopLookPerDetectionConcurrency(): number {
   const raw = Number(process.env.SEARCH_IMAGE_SHOP_DETECTION_CONCURRENCY);
-  const n = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 3;
+  const n = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 6;
   // Avoid accidental fully-serial per-detection execution unless explicitly allowed.
   const allowSerial = String(process.env.SEARCH_IMAGE_SHOP_ALLOW_SERIAL_DETECTION ?? "").toLowerCase() === "1";
-  const minConcurrency = allowSerial ? 1 : 2;
+  const minConcurrency = allowSerial ? 1 : 3;
   return Math.min(16, Math.max(minConcurrency, n));
 }
 
 /** Max search calls per detection (initial + retries/fallbacks). Default 3 to preserve recall on hard detections. */
 function shopLookMaxSearchCallsPerDetection(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_SHOP_MAX_SEARCH_CALLS ?? "2");
-  if (!Number.isFinite(raw)) return 2;
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_MAX_SEARCH_CALLS ?? "3");
+  if (!Number.isFinite(raw)) return 3;
   return Math.max(1, Math.min(8, Math.floor(raw)));
 }
 
@@ -1686,7 +1686,9 @@ function shouldForceTypeFilterForDetection(
   if (!imageStrongHintsForceTypeFilterEnv()) return false;
   if (!Array.isArray(typeHints) || typeHints.length === 0) return false;
   const category = String(categoryMapping.productCategory || "").toLowerCase();
-  if (category === "accessories" || category === "bags") return false;
+  // Root fix: hard product_types filtering is too brittle for detection-driven retrieval
+  // in catalogs with sparse/heterogeneous typing. Keep it only for one-piece/tailored lanes.
+  if (category === "accessories" || category === "bags" || category === "footwear" || category === "tops" || category === "bottoms") return false;
   const confOk = (detection.confidence ?? 0) >= imageStrongHintsTypeConfMin();
   const areaOk = (detection.area_ratio ?? 0) >= imageStrongHintsTypeAreaMin();
   return confOk && areaOk;
@@ -4520,11 +4522,13 @@ export class ImageAnalysisService {
         !noisyCat && (baseHardAuto || relaxedGarmentHardAuto);
       const accessoryLikeCategory = isAccessoryLikeCategory(categoryMapping.productCategory);
       const footwearLikeCategory = categoryMapping.productCategory === "footwear";
+      const accessoryOrFootwearConfident =
+        (accessoryLikeCategory || footwearLikeCategory) &&
+        (((detection.confidence ?? 0) >= 0.72) || ((detection.area_ratio ?? 0) >= 0.025));
       const shouldHardCategory =
         filterByDetectedCategory &&
         (
-          accessoryLikeCategory ||
-          footwearLikeCategory ||
+          accessoryOrFootwearConfident ||
           shopLookHardCategoryStrictEnv() ||
           detectionMeetsAutoHardHeuristics ||
           shouldForceHardCategoryForDetection(detection, categoryMapping)
@@ -4645,9 +4649,7 @@ export class ImageAnalysisService {
               (categoryMapping.productCategory === "tops" ||
                 categoryMapping.productCategory === "outerwear" ||
                 categoryMapping.productCategory === "dresses") &&
-              categoryMapping.productCategory === "outerwear" ||
-              categoryMapping.productCategory === "footwear" ||
-              categoryMapping.productCategory === "bags";
+              hasTextureMaterial &&
               textureMaterial.confidence >= imageMinMaterialConfidenceEnv() + 0.08;
             if (!keepTextureForTopLike) {
               (filters as any).material = detMaterialHints[0];
@@ -6412,9 +6414,11 @@ export class ImageAnalysisService {
             ...softCategories,
             ...browseTypeSeeds,
           ]);
-          const shouldHardCategory =
-            accessoryLikeCategory ||
-            footwearLikeCategory ||
+          const accessoryOrFootwearConfident =
+            (accessoryLikeCategory || footwearLikeCategory) &&
+            (((detection.confidence ?? 0) >= 0.72) || ((detection.area_ratio ?? 0) >= 0.025));
+        const shouldHardCategory =
+            accessoryOrFootwearConfident ||
             !(imageSoftCategoryEnv() || shopLookSoftCategoryEnv());
           if (!shouldHardCategory) {
             predictedCategoryAisles =
@@ -7331,6 +7335,8 @@ export function getImageAnalysisService(): ImageAnalysisService {
 }
 
 export default ImageAnalysisService;
+
+
 
 
 
