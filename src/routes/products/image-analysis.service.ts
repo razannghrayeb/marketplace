@@ -5310,6 +5310,7 @@ export class ImageAnalysisService {
         softStyle: String((filters as any).softStyle ?? ""),
         minFormality,
       });
+      const guardedCountForRecovery = athleticSafeResults.length;
       
       if (hotPathDebug) {
         console.log(`[skip-trace] detection="${label}" after_sleeve_guard=${sleeveSafeResults.length} (filtered_by=${categorySafeResults.length - sleeveSafeResults.length})`);
@@ -5431,7 +5432,7 @@ export class ImageAnalysisService {
       const topsRecoveryMinKeep = shopLookTopRecoveryMinKeep(resolvedLimitPerItem);
       if (
         detectionSearchCalls < maxSearchCallsPerDetection &&
-        similarResult.results.length < topsRecoveryMinKeep &&
+        guardedCountForRecovery < topsRecoveryMinKeep &&
         categoryMapping.productCategory === "tops" &&
         (((detection.confidence ?? 0) >= 0.45 && (detection.area_ratio ?? 0) >= 0.02) ||
           (vestLikeRecovery &&
@@ -5546,7 +5547,7 @@ export class ImageAnalysisService {
       if (
         detectionSearchCalls < maxSearchCallsPerDetection &&
         topOrDressCategory &&
-        similarResult.results.length < topOrDressMinKeep
+        guardedCountForRecovery < topOrDressMinKeep
       ) {
         const ablationTerms = hardCategoryTermsForDetection(label, categoryMapping, {
           confidence: detection.confidence,
@@ -5639,7 +5640,7 @@ export class ImageAnalysisService {
       if (
         detectionSearchCalls < maxSearchCallsPerDetection &&
         categoryMapping.productCategory === "tops" &&
-        similarResult.results.length === 0
+        guardedCountForRecovery === 0
       ) {
         const broadTopFilters: Partial<import("./types").SearchFilters> = {};
         Object.assign(
