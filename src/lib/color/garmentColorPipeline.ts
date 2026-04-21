@@ -174,6 +174,25 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
   return bestName;
 }
 
+/**
+ * Reuse garment color canonical mapping for pre-extracted hex colors.
+ */
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  const cleaned = String(hex || "").replace("#", "").trim();
+  if (cleaned.length !== 6) return null;
+  const n = Number.parseInt(cleaned, 16);
+  if (!Number.isFinite(n)) return null;
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+export function mapHexToFashionCanonical(hex?: string | null): string | null {
+  const raw = String(hex || "").trim();
+  if (!raw) return null;
+  const rgb = hexToRgb(raw);
+  if (!rgb) return null;
+  return mapRgbToCanonical(rgb.r, rgb.g, rgb.b);
+}
+
 type Cluster = { r: number; g: number; b: number; w: number };
 
 function kMeansRgb(pixels: [number, number, number][], k: number, iterations: number): Cluster[] {

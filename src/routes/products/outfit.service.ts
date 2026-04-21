@@ -1297,13 +1297,13 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
   }));
 
   return enriched
-    .filter((row): row is CompleteLookMappedSuggestion => Boolean(row))
+    .filter((row): row is NonNullable<typeof row> => row !== null)
     .filter((row) => {
       const family = categoryFamily(row.category);
       const minScore = family === "shoes" || family === "bags" || family === "accessories" ? 0.43 : 0.5;
       return (row.score || 0) >= minScore;
     })
-    .sort((a, b) => b.score - a.score);
+    .sort((a, b) => (b.score || 0) - (a.score || 0));
 }
 
 function normalizeAudienceHint(raw: unknown): string | undefined {
