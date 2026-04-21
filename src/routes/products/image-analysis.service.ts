@@ -1086,7 +1086,9 @@ function shopLookPerDetectionConcurrency(): number {
 function shopLookMaxSearchCallsPerDetection(): number {
   const raw = Number(process.env.SEARCH_IMAGE_SHOP_MAX_SEARCH_CALLS ?? "3");
   if (!Number.isFinite(raw)) return 3;
-  return Math.max(1, Math.min(8, Math.floor(raw)));
+  // A value of 1 collapses recall for hard categories (tops/bottoms/footwear) because
+  // no retry/recovery path can run. Keep at least 2 calls to preserve pipeline robustness.
+  return Math.max(2, Math.min(8, Math.floor(raw)));
 }
 
 /** Hard wall-clock budget per detection task in ms (default 25000) to prevent long stragglers. */
@@ -1180,6 +1182,50 @@ function strictDressFallbackTerms(detectionLabel: string): string[] | null {
  * We use the label as the source of specificity, because the macro aisle (e.g. `bottoms`)
  * often does not exist as a concrete `products.category` value in the catalog.
  */
+function parseTopDetectionIntent(detectionLabel: string): {
+  isShortTop: boolean;
+  isLongTop: boolean;
+  requestsOuterwear: boolean;
+} {
+  const l = String(detectionLabel || "").toLowerCase();
+  return {
+    isShortTop: /\bshort sleeve top\b|\btee\b|\bt-?shirt\b|\btshirt\b|\btank\b|\bcamisole\b|\bcrop top\b/.test(l),
+    isLongTop: /\blong sleeve top\b|\blong sleeve\b|\bfull sleeve\b/.test(l),
+    requestsOuterwear:
+      /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|sport coat|dress jacket|shirt jacket|shacket|overshirt)\b/.test(
+        l,
+      ),
+  };
+}
+
+function isTopCatalogCue(text: string): boolean {
+  return /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|cardigan|hoodie|pullover|jumper)\b/.test(
+    text,
+  );
+}
+
+function parseBottomDetectionIntent(detectionLabel: string): {
+  isTrousersLike: boolean;
+  isJeansLike: boolean;
+  isSkirtLike: boolean;
+} {
+  const l = String(detectionLabel || "").toLowerCase();
+  return {
+    isTrousersLike:
+      /\b(trouser|trousers|pants|pant|chino|chinos|slack|slacks|cargo|cargo pants|sweatpants)\b/.test(
+        l,
+      ),
+    isJeansLike: /\b(jean|jeans|denim|denims)\b/.test(l),
+    isSkirtLike: /\b(skirt|skirts|mini skirt|midi skirt|maxi skirt)\b/.test(l),
+  };
+}
+
+function isBottomCatalogCue(text: string): boolean {
+  return /\b(pant|pants|trouser|trousers|jean|jeans|denim|chino|chinos|slack|slacks|cargo|skirt|skirts|short|shorts|legging|leggings)\b/.test(
+    text,
+  );
+}
+
 function hardCategoryTermsForDetection(
   detectionLabel: string,
   categoryMapping: CategoryMapping,
@@ -1192,9 +1238,8 @@ function hardCategoryTermsForDetection(
   );
 
   if (categoryMapping.productCategory === "tops") {
-    const isShortTop = /\bshort sleeve top\b|\btee\b|\bt-?shirt\b|\btshirt\b|\btank\b|\bcamisole\b|\bcrop top\b/.test(
-      l,
-    );
+    const topIntent = parseTopDetectionIntent(detectionLabel);
+    const isShortTop = topIntent.isShortTop;
     if (isShortTop) {
       const shortTopTerms = baseTerms.filter((t) =>
         /\b(t-?shirt|tshirt|tee|top|tops|tank|camisole|cami|crop top|polo|polos)\b/.test(t),
@@ -1202,9 +1247,7 @@ function hardCategoryTermsForDetection(
       return shortTopTerms.length > 0 ? shortTopTerms : baseTerms;
     }
 
-    const isLongTop = /\blong sleeve top\b|\blong sleeve\b|\bfull sleeve\b/.test(
-      l,
-    );
+    const isLongTop = topIntent.isLongTop;
     if (isLongTop) {
       const longTopTerms = baseTerms.filter((t) =>
         /\b(shirt|shirts|blouse|blouses|overshirt|sweater|hoodie|sweatshirt|pullover|cardigan|knitwear|top|tops)\b/.test(
@@ -1227,10 +1270,9 @@ function hardCategoryTermsForDetection(
   // Keep trousers/pants as primary, but allow jeans/denim candidates when the
   // detector says "trousers" so denim bottoms are not over-pruned.
   if (categoryMapping.productCategory === "bottoms") {
-    const isTrousersLike = /\b(trouser|trousers|pants|pant|chino|chinos|slack|slacks|cargo|cargo pants|sweatpants|sweatpants)\b/.test(
-      l,
-    );
-    const isJeansLike = /\b(jean|jeans|denim|denims)\b/.test(l);
+    const bottomIntent = parseBottomDetectionIntent(detectionLabel);
+    const isTrousersLike = bottomIntent.isTrousersLike;
+    const isJeansLike = bottomIntent.isJeansLike;
 
     if (isTrousersLike) {
       const trouserLike = baseTerms.filter((t) =>
@@ -1246,7 +1288,7 @@ function hardCategoryTermsForDetection(
       const merged = [...new Set([...jeansLike, ...trousersLike])];
       return merged.length > 0 ? merged : baseTerms;
     }
-    const isSkirtLike = /\b(skirt|skirts|mini skirt|midi skirt|maxi skirt)\b/.test(l);
+    const isSkirtLike = bottomIntent.isSkirtLike;
     if (isSkirtLike) {
       return baseTerms.filter((t) => /\b(skirt|skirts)\b/.test(t));
     }
@@ -1377,13 +1419,14 @@ function tightenTypeSeedsForDetection(
   if (normalized.length === 0) return normalized;
 
   if (category === "tops") {
-    if (/\bshort sleeve top\b|\btee\b|\bt-?shirt\b/.test(label)) {
+    const topIntent = parseTopDetectionIntent(detectionLabel);
+    if (topIntent.isShortTop) {
       const shortTop = normalized.filter((t) =>
         /\b(tshirt|t-?shirt|tee|tees|top|tops|tank|camisole|cami|crop top|polo|polos)\b/.test(t),
       );
       return shortTop.length > 0 ? shortTop : normalized;
     }
-    if (/\blong sleeve top\b|\blong sleeve\b|\bfull sleeve\b/.test(label)) {
+    if (topIntent.isLongTop) {
       const longTop = normalized.filter((t) =>
         /\b(shirt|shirts|blouse|blouses|top|tops|sweater|hoodie|sweatshirt|pullover|cardigan|knitwear)\b/.test(t),
       );
@@ -1398,7 +1441,8 @@ function tightenTypeSeedsForDetection(
   }
 
   if (category === "bottoms") {
-    if (/\btrouser|trousers|pant|pants|chino|chinos|slack|slacks|cargo\b/.test(label)) {
+    const bottomIntent = parseBottomDetectionIntent(detectionLabel);
+    if (bottomIntent.isTrousersLike) {
       const trouserLike = normalized.filter((t) =>
         /\b(trouser|trousers|pant|pants|chino|chinos|slack|slacks|cargo)\b/.test(t),
       );
@@ -1406,13 +1450,13 @@ function tightenTypeSeedsForDetection(
       const merged = [...new Set([...trouserLike, ...jeansLike])];
       return merged.length > 0 ? merged : normalized;
     }
-    if (/\bjean|jeans|denim\b/.test(label)) {
+    if (bottomIntent.isJeansLike) {
       const jeansLike = normalized.filter((t) => /\b(jean|jeans|denim)\b/.test(t));
       const trousersLike = normalized.filter((t) => /\b(trouser|trousers|pant|pants|chino|chinos|slack|slacks|cargo)\b/.test(t));
       const merged = [...new Set([...jeansLike, ...trousersLike])];
       return merged.length > 0 ? merged : normalized;
     }
-    if (/\bskirt|skirts\b/.test(label)) {
+    if (bottomIntent.isSkirtLike) {
       const skirtLike = normalized.filter((t) => /\b(skirt|skirts)\b/.test(t));
       return skirtLike.length > 0 ? skirtLike : normalized;
     }
@@ -1945,11 +1989,11 @@ function summarizeDetectionsByLabel(detections: Detection[]): Record<string, num
 }
 
 /**
- * Deduplicate detections by their mapped product CATEGORY.
- * When multiple detections map to the same category (e.g., two bag/wallet detections),
- * keep only the one with the highest confidence.
- * 
- * This ensures that shop-the-look searches each category only once, using the best detection.
+ * Deduplicate detections by mapped CATEGORY while preserving distinct multi-item cases.
+ *
+ * Old behavior kept only one detection per category, which drops valid outfits with
+ * multiple garments from the same category (e.g., two tops, two shoes) and can cause
+ * complete miss when the kept crop is the weaker one.
  */
 function dedupeDetectionsByCategoryHighestConfidence(detections: Detection[]): Detection[] {
   if (!detections || detections.length === 0) return [];
@@ -1967,28 +2011,61 @@ function dedupeDetectionsByCategoryHighestConfidence(detections: Detection[]): D
     categoryGroups.get(category)!.push(detection);
   }
   
-  // For each category, keep only the detection with highest confidence
+  const shouldAllowMultiPerCategory = (category: string): boolean =>
+    category === "tops" || category === "bottoms" || category === "footwear";
+
+  const maxKeepForCategory = (category: string): number => {
+    if (category === "tops") return 2;
+    if (category === "bottoms") return 2;
+    if (category === "footwear") return 2;
+    return 1;
+  };
+
+  const isDistinctDetection = (kept: Detection[], candidate: Detection): boolean => {
+    for (const existing of kept) {
+      const iou = boundingBoxIou(existing.box, candidate.box);
+      if (iou >= 0.42) return false;
+    }
+    return true;
+  };
+
+  // For each category, keep strongest distinct detections.
   const result: Detection[] = [];
   
   for (const [category, categoryDetections] of categoryGroups) {
-    // Sort by confidence descending, take the first one
+    // Sort by confidence descending.
     const sorted = [...categoryDetections].sort((a, b) => {
       const confA = Number.isFinite(a.confidence) ? Number(a.confidence) : 0;
       const confB = Number.isFinite(b.confidence) ? Number(b.confidence) : 0;
-      return confB - confA; // Descending order (highest confidence first)
+      return confB - confA;
     });
     
     if (sorted.length > 0) {
-      const kept = sorted[0];
-      const skipped = sorted.slice(1);
+      const keepLimit = maxKeepForCategory(category);
+      const kept: Detection[] = [];
+      for (const candidate of sorted) {
+        if (kept.length >= keepLimit) break;
+        if (!shouldAllowMultiPerCategory(category)) {
+          kept.push(candidate);
+          break;
+        }
+        if (isDistinctDetection(kept, candidate)) {
+          kept.push(candidate);
+        }
+      }
+
+      // Safety fallback: keep at least the strongest one.
+      if (kept.length === 0) kept.push(sorted[0]);
+
+      const skipped = sorted.filter((d) => !kept.includes(d));
       
       if (skipped.length > 0) {
         console.log(
-          `[dedupe-by-category] category="${category}" kept="${kept.label}" (conf=${kept.confidence?.toFixed(3)}) skipped=${skipped.length} items (lower confidence)`
+          `[dedupe-by-category] category="${category}" kept=${kept.length}/${sorted.length} skipped=${skipped.length}`
         );
       }
       
-      result.push(kept);
+      result.push(...kept);
     }
   }
   
@@ -2322,25 +2399,24 @@ function applyDetectionCategoryGuard(
       }
     }
     if (categoryMapping.productCategory === "bottoms") {
+      const productBottomCue = isBottomCatalogCue(haystack);
       if (productCategoryMacro === "outerwear" || /\b(jacket|coat|blazer|outerwear)\b/.test(haystack)) {
+        return false;
+      }
+      if (!productBottomCue && /\b(top|tops|shirt|shirts|blouse|blouses|dress|dresses|gown|gowns)\b/.test(haystack)) {
         return false;
       }
     }
     if (categoryMapping.productCategory === "tops") {
       const detectionLabelNorm = String(detectionLabel).toLowerCase();
-      const detectionRequestsOuterwear =
-        /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|sport coat|dress jacket|shirt jacket|shacket|overshirt)\b/.test(
-          detectionLabelNorm,
-        );
+      const topIntent = parseTopDetectionIntent(detectionLabelNorm);
+      const detectionRequestsOuterwear = topIntent.requestsOuterwear;
       const productMentionsOuterwear =
         /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|sport coat|dress jacket|shirt jacket|shacket|overshirt)\b/.test(
           haystack,
         );
-      const productTopCue =
-        /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|cardigan|hoodie|pullover|jumper)\b/.test(
-          haystack,
-        );
-      const isLongSleeveTopDetection = /\b(long sleeve top|long sleeve|shirt|blouse)\b/.test(detectionLabelNorm);
+      const productTopCue = isTopCatalogCue(haystack);
+      const isLongSleeveTopDetection = topIntent.isLongTop;
       if (
         !detectionRequestsOuterwear &&
         (productCategoryMacro === "outerwear"
