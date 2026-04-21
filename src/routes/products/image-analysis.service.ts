@@ -348,15 +348,15 @@ function detectionResultStrength(products: ProductResult[]): number {
 }
 
 function shopLookTinyFootwearRecoveryThreshold(baseThreshold: number): number {
-  const raw = Number(process.env.SEARCH_IMAGE_SHOP_TINY_FOOTWEAR_MIN_SIM ?? "0.55");
-  const floor = Number.isFinite(raw) ? raw : 0.55;
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_TINY_FOOTWEAR_MIN_SIM ?? "0.53");
+  const floor = Number.isFinite(raw) ? raw : 0.53;
   return Math.max(0.35, Math.min(baseThreshold, Math.min(0.9, floor)));
 }
 
 function shopLookFootwearRecoveryThreshold(baseThreshold: number, areaRatio: number): number {
   if (areaRatio <= 0.02) return shopLookTinyFootwearRecoveryThreshold(baseThreshold);
-  const raw = Number(process.env.SEARCH_IMAGE_SHOP_FOOTWEAR_RECOVERY_MIN_SIM ?? "0.52");
-  const floor = Number.isFinite(raw) ? raw : 0.52;
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_FOOTWEAR_RECOVERY_MIN_SIM ?? "0.5");
+  const floor = Number.isFinite(raw) ? raw : 0.5;
   return Math.max(0.35, Math.min(baseThreshold, Math.min(0.9, floor)));
 }
 
@@ -2270,6 +2270,14 @@ function isFeminineFootwearCue(text: string): boolean {
   );
 }
 
+function hasExplicitWomenCue(text: string): boolean {
+  return /\b(women|womens|woman|female|lady|ladies|girl|girls)\b/.test(text);
+}
+
+function hasExplicitMenCue(text: string): boolean {
+  return /\b(men|mens|man|male|gent|gents|boy|boys)\b/.test(text);
+}
+
 function applyDetectionCategoryGuard(
   products: ProductResult[],
   detectionLabel: string,
@@ -2371,7 +2379,7 @@ function applyDetectionCategoryGuard(
     // generic "shoe" detections should not surface clearly feminine footwear
     // when query audience is men.
     if (categoryMapping.productCategory === "footwear" && queryGenderNorm === "men") {
-      if (/\b(women|womens|woman|female|lady|ladies|girl|girls)\b/.test(haystack)) {
+      if (hasExplicitWomenCue(haystack)) {
         return false;
       }
       if (isFeminineFootwearCue(haystack)) {
@@ -2404,6 +2412,9 @@ function applyDetectionCategoryGuard(
       if (!productBottomCue && /\b(top|tops|shirt|shirts|blouse|blouses|dress|dresses|gown|gowns)\b/.test(haystack)) {
         return false;
       }
+      // Keep bottoms audience-safe to prevent cross-gender leakage when query audience is known.
+      if (queryGenderNorm === "men" && hasExplicitWomenCue(haystack)) return false;
+      if (queryGenderNorm === "women" && hasExplicitMenCue(haystack)) return false;
     }
     if (categoryMapping.productCategory === "tops") {
       const detectionLabelNorm = String(detectionLabel).toLowerCase();
@@ -2429,6 +2440,9 @@ function applyDetectionCategoryGuard(
       ) {
         return false;
       }
+      // Keep tops audience-safe to prevent cross-gender leakage when query audience is known.
+      if (queryGenderNorm === "men" && hasExplicitWomenCue(haystack)) return false;
+      if (queryGenderNorm === "women" && hasExplicitMenCue(haystack)) return false;
     }
     if (categoryMapping.productCategory === "bags") {
       if (/\b(belt|belts|scarf|scarves|hat|hats|cap|caps|jewelry|bracelet|necklace|earrings)\b/.test(haystack)) {
@@ -2559,7 +2573,21 @@ function applyShopLookVisualPrecisionGuard(
   const fallbackMin = isDressCategory
     ? Math.max(0.58, baseMin - 0.03)
     : baseMin;
-  return products.filter((p) => scoreOf(p) >= fallbackMin);
+  const fallback = products.filter((p) => scoreOf(p) >= fallbackMin);
+  if (fallback.length >= strictKeepMin) return fallback;
+
+  // Precision-oriented adaptive backfill:
+  // keep result volume healthy for core apparel categories without opening low-similarity drift.
+  const isCoreCategory =
+    categoryNorm === "tops" ||
+    categoryNorm === "bottoms" ||
+    categoryNorm === "footwear" ||
+    categoryNorm === "outerwear";
+  if (!isCoreCategory) return fallback;
+
+  const adaptiveFloor = Math.max(0.52, baseMin - 0.02);
+  const adaptive = products.filter((p) => scoreOf(p) >= adaptiveFloor);
+  return adaptive.length > 0 ? adaptive : fallback;
 }
 
 /** Filter products by minimum formality requirement (when formal wear is detected from BLIP). */
@@ -2671,6 +2699,32 @@ function applyAthleticMismatchGuard(params: {
   }
 
   return filtered;
+}
+
+function buildSafeNonEmptyFallback(params: {
+  candidates: ProductResult[];
+  productCategory: string;
+  similarityThreshold: number;
+  limit: number;
+}): ProductResult[] {
+  const candidates = Array.isArray(params.candidates) ? params.candidates : [];
+  if (candidates.length === 0) return [];
+  const category = String(params.productCategory || "").toLowerCase().trim();
+  const baseMin = Math.max(0, Math.min(1, params.similarityThreshold));
+  const floor =
+    category === "tops" || category === "bottoms" || category === "footwear" || category === "outerwear"
+      ? Math.max(0.56, baseMin - 0.02)
+      : Math.max(0.58, baseMin - 0.01);
+  const scoreOf = (p: ProductResult): number => {
+    const sim = Number((p as any).similarity_score ?? 0);
+    const rel = Number((p as any).finalRelevance01 ?? 0);
+    return Math.max(0, Math.min(1, Math.max(sim, rel)));
+  };
+  const filtered = candidates.filter((p) => scoreOf(p) >= floor);
+  if (filtered.length === 0) return [];
+  const ranked = [...filtered].sort((a, b) => scoreOf(b) - scoreOf(a));
+  const safeCap = Math.max(1, Math.min(Math.floor(params.limit || 1), 8));
+  return ranked.slice(0, safeCap);
 }
 
 /** Filter products by minimum finalRelevance01 score. Removes low-relevance matches from results. */
@@ -2945,6 +2999,12 @@ function isLightNeutralFashionColor(color: string): boolean {
   return LIGHT_NEUTRAL_COLORS.has(String(color || "").toLowerCase().trim());
 }
 
+function isBottomLikeLabel(label: string): boolean {
+  return /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|short|shorts|skirt|skirts|legging|leggings)\b/.test(
+    String(label || "").toLowerCase(),
+  );
+}
+
 function selectDetectionColorFromPalette(params: {
   cropColors: string[];
   productCategory: string;
@@ -2966,6 +3026,7 @@ function selectDetectionColorFromPalette(params: {
   const isTopLike =
     category === "tops" ||
     /\b(top|shirt|blouse|tee|t-?shirt|sweater|hoodie|sweatshirt|vest|tank|camisole)\b/.test(label);
+  const isBottomLike = category === "bottoms" || isBottomLikeLabel(label);
   const isOnePieceLike =
     category === "dresses" ||
     /\b(dress|gown|jumpsuit|romper|playsuit|sundress|vest dress)\b/.test(label);
@@ -2983,6 +3044,16 @@ function selectDetectionColorFromPalette(params: {
     const chromaticAlt = alternatives.find((c) => !isNeutralFashionColor(c));
     if (chromaticAlt) return chromaticAlt;
   }
+  // Bottom crops often include dark shadows/background and default to black.
+  // Prefer a neutral/chromatic alternative when available to reduce false-black bias.
+  if (isBottomLike && primary === "black" && alternatives.length > 0) {
+    const preferredNeutralAlt = alternatives.find((c) =>
+      ["gray", "charcoal", "navy", "beige", "tan", "white", "off-white", "cream"].includes(c),
+    );
+    if (preferredNeutralAlt) return preferredNeutralAlt;
+    const chromaticAlt = alternatives.find((c) => !isNeutralFashionColor(c));
+    if (chromaticAlt) return chromaticAlt;
+  }
 
   if (mediumConfidence && primary === "black" && alternatives.length > 0) {
     if (category === "footwear") {
@@ -2992,7 +3063,7 @@ function selectDetectionColorFromPalette(params: {
       if (preferred) return preferred;
     }
 
-    if (category === "bottoms") {
+    if (isBottomLike) {
       const preferred = alternatives.find((c) =>
         ["gray", "charcoal", "navy", "beige", "tan", "white", "off-white", "cream"].includes(c),
       );
@@ -3011,7 +3082,7 @@ function selectDetectionColorFromPalette(params: {
       if (preferred) return preferred;
     }
 
-    if (category === "bottoms" && primary === "black") {
+    if (isBottomLike && primary === "black") {
       const preferred = alternatives.find((c) => ["gray", "charcoal", "navy", "beige", "tan", "white", "off-white", "cream"].includes(c));
       if (preferred) return preferred;
     }
@@ -4320,7 +4391,18 @@ export class ImageAnalysisService {
             ? payload
             : {
                 ...payload,
-                limit: Math.max(1, Math.min(Number(payload.limit ?? retryRetrievalLimit), retryRetrievalLimit)),
+                // Keep retry/fallback searches broad enough for 10k-catalog recall,
+                // then rely on downstream precision guards instead of tiny retry pools.
+                limit: Math.max(
+                  1,
+                  Math.min(
+                    Number(payload.limit ?? retrievalLimit),
+                    Math.max(
+                      retryRetrievalLimit,
+                      Math.min(retrievalLimit, Math.max(resolvedLimitPerItem * 4, resolvedResultsPageSize * 3)),
+                    ),
+                  ),
+                ),
               };
         const startedAt = Date.now();
         const result = await searchByImageWithSimilarity(payloadForCall);
@@ -5813,6 +5895,33 @@ export class ImageAnalysisService {
 
           if (similarResult.results.length >= Math.max(1, Math.floor(resolvedLimitPerItem * 0.15))) {
             break;
+          }
+        }
+      }
+
+      if (similarResult.results.length === 0) {
+        // Fail-safe: avoid zero-result detections when we already have category-safe
+        // candidates, but keep quality by using a strict score floor.
+        const fallbackPool = mergeImageSearchResultsById(
+          mergeImageSearchResultsById(formalitySafeResults, sleeveSafeResults, retrievalLimit),
+          categorySafeResults,
+          retrievalLimit,
+        );
+        const safeFallback = buildSafeNonEmptyFallback({
+          candidates: fallbackPool,
+          productCategory: categoryMapping.productCategory,
+          similarityThreshold,
+          limit: Math.max(1, Math.min(resolvedLimitPerItem, 4)),
+        });
+        if (safeFallback.length > 0) {
+          similarResult = {
+            ...similarResult,
+            results: safeFallback,
+          };
+          if (hotPathDebug) {
+            console.log(
+              `[nonempty-fallback] detection="${label}" recovered=${safeFallback.length} category=${categoryMapping.productCategory}`,
+            );
           }
         }
       }
