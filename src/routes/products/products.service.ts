@@ -3443,8 +3443,10 @@ export async function searchByImageWithSimilarity(
     };
 
     if (knnFieldResolved === "embedding_garment") {
-      // Run garment + global fallback in parallel; keep the same decision rule as before:
-      // prefer garment hits when non-empty, otherwise use embedding hits.
+      // Run garment + global fallback in parallel.
+      // Root recall fix: for detection-scoped queries, garment vectors can be sparse for some
+      // categories (notably tops/bottoms). If we only switch on zero hits, main-path recall
+      // collapses. Merge in global embedding candidates when garment recall is too low.
       const knnBodyEmbeddingFallback = {
         size: retrievalK,
         _source: [
@@ -3466,8 +3468,25 @@ export async function searchByImageWithSimilarity(
         opensearchImageKnnHits(knnBody, knnTimeoutMs),
         opensearchImageKnnHits(knnBodyEmbeddingFallback, knnTimeoutMs),
       ]);
-      if (Array.isArray(garmentHits) && garmentHits.length > 0) {
-        hits = garmentHits;
+      const garmentCount = Array.isArray(garmentHits) ? garmentHits.length : 0;
+      const embeddingCount = Array.isArray(embeddingHits) ? embeddingHits.length : 0;
+      const lowRecallFloor = detectionScoped
+        ? Math.max(24, Math.min(96, Math.floor(retrievalK * 0.18)))
+        : 0;
+      if (garmentCount > 0) {
+        if (detectionScoped && garmentCount < lowRecallFloor && embeddingCount > garmentCount) {
+          hits = mergeKnnHitsByProductId(garmentHits, embeddingHits, retrievalK);
+          if (breakdownDebug) {
+            console.warn("[image-knn] low garment recall; merged embedding fallback", {
+              garmentCount,
+              embeddingCount,
+              lowRecallFloor,
+              mergedCount: hits.length,
+            });
+          }
+        } else {
+          hits = garmentHits;
+        }
       } else {
         if (breakdownDebug) {
           console.warn(
@@ -4796,9 +4815,11 @@ export async function searchByImageWithSimilarity(
         if (hasDetectionAnchoredTypeIntent && params.detectionProductCategory === 'tops') {
           const yoloConfidence = params.detectionYoloConfidence ?? 0;
           if (yoloConfidence >= 0.9) {
-            detAnchoredTypeFloor = 0.16;
+            detAnchoredTypeFloor = 0.08;
           } else if (yoloConfidence >= 0.8) {
-            detAnchoredTypeFloor = 0.19;
+            detAnchoredTypeFloor = 0.12;
+          } else {
+            detAnchoredTypeFloor = 0.16;
           }
         }
         if (hasDetectionAnchoredTypeIntent && params.detectionProductCategory === 'bottoms') {
@@ -5164,7 +5185,11 @@ export async function searchByImageWithSimilarity(
         // Intent-aware rescue: keep sparse-result protection, but do not inject
         // visually similar yet intent-contradicting products.
         if ((hasExplicitTypeFilter || hasReliableTypeIntentForRelevance) && typeComp < rescueTypeMinIntent) return false;
-        if (hasDetectionAnchoredTypeIntent && typeComp < 0.3) return false;
+        if (hasDetectionAnchoredTypeIntent) {
+          const detectionTypeRescueFloor =
+            params.detectionProductCategory === "tops" ? 0.12 : 0.3;
+          if (typeComp < detectionTypeRescueFloor) return false;
+        }
         if (hasColorIntentForFinal) {
           const effectiveRescueColorMin = isFootwearDetectionIntent
             ? Math.max(rescueColorMinIntent, 0.42)
@@ -5203,7 +5228,7 @@ export async function searchByImageWithSimilarity(
     const mustKeepTypeMin = hasReliableTypeIntentForRelevance
       ? 0.45
       : hasExplicitTypeFilter || hasExplicitCategoryFilter || hasDetectionAnchoredTypeIntent
-        ? 0.45
+        ? (params.detectionProductCategory === "tops" ? 0.2 : 0.45)
         : 0.28;
     const mustKeep: any[] = visualGatedHits
       .filter((h: any) => !existingIds.has(String(h._source.product_id)))
