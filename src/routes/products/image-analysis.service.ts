@@ -5634,6 +5634,70 @@ export class ImageAnalysisService {
         }
       }
 
+      // Final top fail-open rescue: if top remains empty after normal retries/ablation,
+      // run one broad top retrieval pass to avoid silent top disappearance.
+      if (
+        detectionSearchCalls < maxSearchCallsPerDetection &&
+        categoryMapping.productCategory === "tops" &&
+        similarResult.results.length === 0
+      ) {
+        const broadTopFilters: Partial<import("./types").SearchFilters> = {};
+        Object.assign(
+          broadTopFilters,
+          mergeImageSearchSessionFilters(
+            broadTopFilters,
+            options.sessionFilters ?? (options.sessionId ? (getSession(options.sessionId).accumulatedFilters as Record<string, unknown>) : null),
+          ),
+        );
+        broadTopFilters.category = ["tops", "top", "shirt", "blouse", "t-shirt", "sweater", "hoodie"];
+        if (filters.gender) broadTopFilters.gender = filters.gender;
+        if (filters.ageGroup) broadTopFilters.ageGroup = filters.ageGroup;
+
+        const topFailOpen = await runDetectionSearch("recovery_tops_fail_open", {
+          imageEmbedding: finalEmbedding,
+          imageBuffer: queryProcessBuf,
+          pHash: sourceImagePHash,
+          detectionYoloConfidence: detection.confidence,
+          detectionProductCategory: categoryMapping.productCategory,
+          filters: broadTopFilters,
+          limit: retrievalLimit,
+          similarityThreshold: Math.max(0.35, shopLookTopRecoverySimilarityThreshold(similarityThreshold) - 0.04),
+          includeRelated: false,
+          knnField: "embedding",
+          forceHardCategoryFilter: false,
+          relaxThresholdWhenEmpty: true,
+          blipSignal: detectionBlipSignal,
+          inferredPrimaryColor: inferredPrimaryColorForDetection,
+          inferredColorKey: itemColorKey,
+          inferredColorsByItem,
+          inferredColorsByItemConfidence,
+          debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+          sessionId: options.sessionId,
+          userId: options.userId,
+          sessionFilters: options.sessionFilters ?? undefined,
+        });
+
+        const topFailOpenCategorySafe = applyDetectionCategoryGuard(
+          topFailOpen.results,
+          detection.label,
+          categoryMapping,
+          String((broadTopFilters as any).gender ?? ""),
+        );
+        const topFailOpenAthleticSafe = applyAthleticMismatchGuard({
+          products: topFailOpenCategorySafe,
+          detectionLabel: label,
+          productCategory: categoryMapping.productCategory,
+          softStyle: String((filters as any).softStyle ?? ""),
+          minFormality: Number((filters as any).minFormality ?? 0),
+        });
+        if (topFailOpenAthleticSafe.length > 0) {
+          similarResult = {
+            ...similarResult,
+            results: mergeImageSearchResultsById(similarResult.results, topFailOpenAthleticSafe, retrievalLimit),
+          };
+        }
+      }
+
       // Bag recovery: when bag search returns no results, retry with relaxed filters
       // Bags are often tricky because:
       // 1. They can be small/partial in framing
