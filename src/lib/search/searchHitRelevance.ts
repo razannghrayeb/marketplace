@@ -974,6 +974,32 @@ export function computeHitRelevance(
     finalRelevance01 = Math.min(finalRelevance01, semScore01 * 0.22);
   }
 
+  // Precision safety for image-led fashion retrieval:
+  // when bottoms/footwear color intent is present, mismatched color should not survive
+  // as a strong final match even if visual similarity is high.
+  const intentBlob = [
+    mergedCategory ?? "",
+    ...(Array.isArray(astCategories) ? astCategories : []),
+    ...(Array.isArray(desiredProductTypes) ? desiredProductTypes : []),
+  ]
+    .map((x) => String(x).toLowerCase())
+    .join(" ");
+  const isBottomLikeIntent =
+    /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts?|skirt|skirts|leggings?)\b/.test(intentBlob);
+  const isFootwearLikeIntent =
+    /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(intentBlob);
+  if (hasColorIntentForFinalRelevance && (isBottomLikeIntent || isFootwearLikeIntent)) {
+    if (colorTier === "none") {
+      finalRelevance01 = Math.min(finalRelevance01, isBottomLikeIntent ? 0.06 : 0.08);
+    } else if (colorCompliance < 0.2) {
+      finalRelevance01 = Math.min(finalRelevance01, isBottomLikeIntent ? 0.1 : 0.12);
+    } else if (isBottomLikeIntent && colorTier === "bucket") {
+      // Bottom color is high-value for perceived similarity; bucket-level match is
+      // acceptable but should not be treated as near-exact.
+      finalRelevance01 = Math.min(finalRelevance01, 0.32);
+    }
+  }
+
   let negationBlocked = false;
   if (negationExcludeTerms && negationExcludeTerms.length > 0) {
     const desc = typeof src.description === "string" ? src.description : "";

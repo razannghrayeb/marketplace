@@ -4974,7 +4974,15 @@ export async function searchByImageWithSimilarity(
   const droppedByVisualThreshold = Math.max(0, rankedHitsForGates.length - visualGatedHits.length);
 
   const finalAcceptMin = acceptMinImage;
-  let effectiveFinalAcceptMin = finalAcceptMin;
+  const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  const inferredColorSoftGateCategory =
+    hasDetectionAnchoredTypeIntent &&
+    hasInferredColorSignal &&
+    !hasExplicitColorIntent &&
+    (detectionCategoryNorm === "tops" || detectionCategoryNorm === "bottoms");
+  let effectiveFinalAcceptMin = inferredColorSoftGateCategory
+    ? Math.min(finalAcceptMin, 0.28)
+    : finalAcceptMin;
   let rankedHits = visualGatedHits.filter(
     (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= effectiveFinalAcceptMin,
   );
@@ -5025,7 +5033,9 @@ export async function searchByImageWithSimilarity(
         if (hasExplicitColorIntent && (comp.colorCompliance ?? 0) < 0.4) {
           return false;
         }
-        if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < 0.18) {
+        const inferredRescueColorFloor =
+          inferredColorSoftGateCategory ? 0.02 : 0.18;
+        if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < inferredRescueColorFloor) {
           return false;
         }
         // Soft color intent should NOT gate rescue admission — only explicit color gates.
@@ -5049,7 +5059,9 @@ export async function searchByImageWithSimilarity(
           if ((comp.exactTypeScore ?? 0) < 1 && (comp.productTypeCompliance ?? 0) < fallbackTypeFloor) return false;
           if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < fallbackSleeveMin) return false;
           if (hasExplicitColorIntent && (comp.colorCompliance ?? 0) < 0.18) return false;
-          if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < 0.08) return false;
+          const inferredFallbackColorFloor =
+            inferredColorSoftGateCategory ? 0.01 : 0.08;
+          if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < inferredFallbackColorFloor) return false;
           if (shouldSuppressAthleticCandidates && isAthleticCatalogCandidate(h._source ?? {})) return false;
           // Soft color intent does not gate fallback — only explicit color does.
           // This prevents crop-derived colors from blocking valid type matches.
@@ -5232,7 +5244,9 @@ export async function searchByImageWithSimilarity(
             : rescueColorMinIntent;
           if (colorComp < effectiveRescueColorMin) return false;
         }
-        if (hasInferredColorIntentForRescue && colorComp < 0.16) return false;
+        const inferredVisualRescueColorFloor =
+          inferredColorSoftGateCategory ? 0.02 : 0.16;
+        if (hasInferredColorIntentForRescue && colorComp < inferredVisualRescueColorFloor) return false;
         if (hasExplicitStyleIntent && styleComp < rescueStyleMinIntent) return false;
         // Soft inferred style for tops is often noisy; only hard-gate on explicit style intent.
         if (params.detectionProductCategory === "tops" && hasExplicitStyleIntent && styleComp < topsStyleMinIntent) return false;
