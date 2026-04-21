@@ -5595,8 +5595,14 @@ export async function searchByImageWithSimilarity(
           const blipColorConflict = blipColorConflictFactorById.get(idStr) ?? 1;
           const conflictStrength = Math.max(0, Math.min(1, 1 - blipColorConflict));
           const strictDetectionColor = hasDetectionAnchoredTypeIntent;
+          const isTopDetectionColorFallback =
+            !hasExplicitColorIntent &&
+            strictDetectionColor &&
+            String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops";
           const baseConflictCap = hasExplicitColorIntent
             ? similarityScore * (strictDetectionColor ? 0.34 : 0.46)
+            : isTopDetectionColorFallback
+              ? similarityScore * 0.82
             : hasInferredColorSignal
               ? similarityScore * (strictDetectionColor ? 0.42 : 0.58)
               : similarityScore * (strictDetectionColor ? 0.54 : 0.72);
@@ -5612,7 +5618,8 @@ export async function searchByImageWithSimilarity(
               : strictDetectionColor
                 ? 0.36
                 : 0.65;
-          const strictOnePieceCap = strictInferredOnePieceColorGate ? 0.22 : maxConflictCap;
+          const topFallbackMaxConflictCap = isTopDetectionColorFallback ? 0.78 : maxConflictCap;
+          const strictOnePieceCap = strictInferredOnePieceColorGate ? 0.22 : topFallbackMaxConflictCap;
           const nearDuplicateRelax = similarityScore >= nearIdenticalRawMin
             ? strictInferredOnePieceColorGate
               ? 0.02
@@ -5623,14 +5630,7 @@ export async function searchByImageWithSimilarity(
             strictOnePieceCap + nearDuplicateRelax,
             Math.max(strictInferredOnePieceColorGate ? 0.08 : 0.15, conflictAdjustedCap),
           );
-          const inferredCoreCategoryFloor =
-            !hasExplicitColorIntent &&
-            hasDetectionAnchoredTypeIntent &&
-            // Keep a small fail-open floor only for tops to avoid full collapse.
-            // For bags/footwear, strong inferred color should remain authoritative.
-            params.detectionProductCategory === "tops"
-              ? 0.42
-              : 0;
+          const inferredCoreCategoryFloor = 0;
           const conservativeCapAdjusted = Math.max(conservativeCap, inferredCoreCategoryFloor);
           finalRelevance01 = Math.min(finalRelevance01 ?? 0, conservativeCapAdjusted);
           finalRelevanceSource = "catalog_color_correction";
