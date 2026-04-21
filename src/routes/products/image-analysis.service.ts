@@ -1991,9 +1991,8 @@ function summarizeDetectionsByLabel(detections: Detection[]): Record<string, num
 /**
  * Deduplicate detections by mapped CATEGORY while preserving distinct multi-item cases.
  *
- * Old behavior kept only one detection per category, which drops valid outfits with
- * multiple garments from the same category (e.g., two tops, two shoes) and can cause
- * complete miss when the kept crop is the weaker one.
+ * Keeping only one detection per category can suppress valid outfit recalls (e.g. two tops
+ * or layered bottoms regions), so we keep multiple distinct detections for core apparel.
  */
 function dedupeDetectionsByCategoryHighestConfidence(detections: Detection[]): Detection[] {
   if (!detections || detections.length === 0) return [];
@@ -2012,12 +2011,11 @@ function dedupeDetectionsByCategoryHighestConfidence(detections: Detection[]): D
   }
   
   const shouldAllowMultiPerCategory = (category: string): boolean =>
-    category === "tops" || category === "bottoms" || category === "footwear";
+    category === "tops" || category === "bottoms";
 
   const maxKeepForCategory = (category: string): number => {
     if (category === "tops") return 2;
     if (category === "bottoms") return 2;
-    if (category === "footwear") return 2;
     return 1;
   };
 
@@ -2061,7 +2059,7 @@ function dedupeDetectionsByCategoryHighestConfidence(detections: Detection[]): D
       
       if (skipped.length > 0) {
         console.log(
-          `[dedupe-by-category] category="${category}" kept=${kept.length}/${sorted.length} skipped=${skipped.length}`
+          `[dedupe-by-category] category="${category}" kept=${kept.length}/${sorted.length} skipped=${skipped.length}`,
         );
       }
       
@@ -2461,7 +2459,12 @@ function applySleeveIntentGuard(params: {
   if (!desiredSleeve) return products;
 
   const isDressCategory = category === "dresses";
-  const minCompliance = desiredSleeve === "short" || desiredSleeve === "sleeveless" ? 0.5 : 0.4;
+  const isTopCategory = category === "tops";
+  const minCompliance = isTopCategory
+    ? (desiredSleeve === "short" || desiredSleeve === "sleeveless" ? 0.34 : 0.3)
+    : desiredSleeve === "short" || desiredSleeve === "sleeveless"
+      ? 0.5
+      : 0.4;
 
   const filtered = products.filter((p) => {
     const blob = [
@@ -2492,7 +2495,7 @@ function applySleeveIntentGuard(params: {
 
   // If strict sleeve-compliance filtering collapses recall, fall back to
   // contradiction-only filtering to keep non-conflicting tops.
-  if (!isDressCategory && filtered.length < Math.max(2, Math.ceil(products.length * 0.2))) {
+  if (!isDressCategory && filtered.length < Math.max(2, Math.ceil(products.length * (isTopCategory ? 0.45 : 0.2)))) {
     const contradictionOnly = products.filter((p) => {
       const blob = [
         (p as any)?.title,
@@ -5477,7 +5480,7 @@ export class ImageAnalysisService {
               similarityThreshold: shopLookTopRecoverySimilarityThreshold(similarityThreshold),
               includeRelated: false,
               knnField: "embedding",
-              forceHardCategoryFilter: true,
+              forceHardCategoryFilter: false,
               relaxThresholdWhenEmpty: true,
               blipSignal: detectionBlipSignal,
               inferredPrimaryColor: inferredPrimaryColorForDetection,
@@ -5576,7 +5579,7 @@ export class ImageAnalysisService {
           similarityThreshold: ablationThreshold,
           includeRelated: false,
           knnField: "embedding",
-          forceHardCategoryFilter: true,
+          forceHardCategoryFilter: categoryMapping.productCategory !== "tops",
           relaxThresholdWhenEmpty: true,
           blipSignal: detectionBlipSignal,
           inferredPrimaryColor: inferredPrimaryColorForDetection,
