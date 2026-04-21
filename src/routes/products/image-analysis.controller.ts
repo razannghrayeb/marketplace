@@ -313,7 +313,9 @@ router.post(
           ? parseInt(req.query.products_limit as string, 10)
           : undefined,
         filterByDetectedCategory: req.query.filter_category !== "false",
-        groupByDetection: req.query.group_by_detection !== "false",
+        // Default to merged detection groups to avoid duplicate full search passes
+        // for near-identical detections (e.g. two shoes), which increases latency.
+        groupByDetection: req.query.group_by_detection === "true",
         includeEmptyDetectionGroups: req.query.include_empty_groups === "true",
         sessionId: (req.query.session_id as string) || (req.headers["x-session-id"] as string | undefined),
         userId: Number.isFinite(Number((req.query.user_id as string) || (req as any).userId))

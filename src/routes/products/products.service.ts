@@ -922,9 +922,9 @@ function imageCategoryAwareKnnPoolLimit(detectionProductCategory?: string): numb
 function imageDetectionRerankCandidateCap(): number {
   // Detection search needs a wider rerank pool to avoid early recall collapse
   // for tops/footwear/bags where true matches are often not in the first ANN slice.
-  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_RERANK_CANDIDATE_CAP ?? "420");
-  if (!Number.isFinite(raw)) return 420;
-  return Math.max(180, Math.min(900, Math.floor(raw)));
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_RERANK_CANDIDATE_CAP ?? "320");
+  if (!Number.isFinite(raw)) return 320;
+  return Math.max(140, Math.min(700, Math.floor(raw)));
 }
 
 /**
@@ -934,9 +934,9 @@ function imageDetectionRerankCandidateCap(): number {
 function imageDetectionKnnPoolCap(): number {
   // Raise default detection kNN pool to improve first-stage recall.
   // Keep bounded to avoid unbounded latency growth.
-  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "780");
-  if (!Number.isFinite(raw)) return 780;
-  return Math.max(260, Math.min(1300, Math.floor(raw)));
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "560");
+  if (!Number.isFinite(raw)) return 560;
+  return Math.max(200, Math.min(900, Math.floor(raw)));
 }
 
 function imageCategoryAwareMinResultsPolicy(params: {
@@ -3201,21 +3201,25 @@ export async function searchByImageWithSimilarity(
   let styleQueryEmbedding: number[] | null = null;
   let patternQueryEmbedding: number[] | null = null;
   let partQueryEmbeddings: Record<string, number[] | null> = {};
-  if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
-    const signals = await getCachedImageQuerySignals(imageBuffer);
-    colorQueryEmbedding = signals.colorQueryEmbedding;
-    textureQueryEmbedding = signals.textureQueryEmbedding;
-    materialQueryEmbedding = signals.materialQueryEmbedding;
-    styleQueryEmbedding = signals.styleQueryEmbedding;
-    patternQueryEmbedding = signals.patternQueryEmbedding;
-    partQueryEmbeddings = signals.partQueryEmbeddings;
-  }
+  // Kick off expensive query-signal extraction in parallel with first kNN retrieval.
+  // We only block on this promise right before rerank/compliance stages need it.
+  const signalsPromise =
+    imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0
+      ? getCachedImageQuerySignals(imageBuffer)
+      : Promise.resolve<ImageQuerySignals>({
+          colorQueryEmbedding: null,
+          textureQueryEmbedding: null,
+          materialQueryEmbedding: null,
+          styleQueryEmbedding: null,
+          patternQueryEmbedding: null,
+          partQueryEmbeddings: {},
+        });
 
-  const runColor = Boolean(colorQueryEmbedding && colorQueryEmbedding.length > 0);
-  const runTexture = Boolean(textureQueryEmbedding && textureQueryEmbedding.length > 0);
-  const runMaterial = Boolean(materialQueryEmbedding && materialQueryEmbedding.length > 0);
-  const runStyle = Boolean(styleQueryEmbedding && styleQueryEmbedding.length > 0);
-  const runPattern = Boolean(patternQueryEmbedding && patternQueryEmbedding.length > 0);
+  let runColor = false;
+  let runTexture = false;
+  let runMaterial = false;
+  let runStyle = false;
+  let runPattern = false;
 
   const baseImageKnnSourceFields = [
     "product_id",
@@ -3280,12 +3284,7 @@ export async function searchByImageWithSimilarity(
     garmentQueryVector.length === imageEmbedding.length;
   const useDualKnn =
     dualKnnEligible &&
-    (
-      imageDualKnnFusionEnabled() ||
-      // For detection-scoped retrieval, dual knn improves recall materially
-      // without changing category safety (filters/rerank still apply).
-      detectionScoped
-    );
+    imageDualKnnFusionEnabled();
 
   const ef = imageKnnEfSearch();
   const knnTimeoutMs = imageKnnTimeoutMs(detectionScoped);
@@ -3532,6 +3531,19 @@ export async function searchByImageWithSimilarity(
       }
     }
   }
+
+  const signals = await signalsPromise;
+  colorQueryEmbedding = signals.colorQueryEmbedding;
+  textureQueryEmbedding = signals.textureQueryEmbedding;
+  materialQueryEmbedding = signals.materialQueryEmbedding;
+  styleQueryEmbedding = signals.styleQueryEmbedding;
+  patternQueryEmbedding = signals.patternQueryEmbedding;
+  partQueryEmbeddings = signals.partQueryEmbeddings;
+  runColor = Boolean(colorQueryEmbedding && colorQueryEmbedding.length > 0);
+  runTexture = Boolean(textureQueryEmbedding && textureQueryEmbedding.length > 0);
+  runMaterial = Boolean(materialQueryEmbedding && materialQueryEmbedding.length > 0);
+  runStyle = Boolean(styleQueryEmbedding && styleQueryEmbedding.length > 0);
+  runPattern = Boolean(patternQueryEmbedding && patternQueryEmbedding.length > 0);
 
   const exactCosineRerank = imageExactCosineRerankEnabled();
   
@@ -3914,17 +3926,27 @@ export async function searchByImageWithSimilarity(
   const preferredInferredColorConfidence = Number(
     preferredInferredColorKey ? inferredByItemConfidenceForRelevance?.[preferredInferredColorKey] : 0,
   );
+  const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
   const hasStrongTopItemColor =
-    (String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops" ||
+    (detectionCategoryNorm === "tops" ||
       desiredProductTypes.some((t) =>
         /\b(top|tee|tshirt|t-?shirt|shirt|blouse|tank|cami|camisole|sleeveless)\b/.test(
           String(t).toLowerCase(),
         ),
       )) &&
     preferredInferredColorConfidence >= Math.max(colorConfidenceThreshold(), 0.84);
+  const hasStrongAccessoryItemColor =
+    (detectionCategoryNorm === "bags" || detectionCategoryNorm === "footwear") &&
+    preferredInferredColorConfidence >= Math.max(colorConfidenceThreshold(), 0.72);
   const hasTrustedInferredColorSignal =
     inferredColorTokens.length > 0 &&
-    (!inferredCropColorConflict || forceTrustInferredFootwearColor || hasStrongTopItemColor || preferInferredColorForConflict);
+    (
+      !inferredCropColorConflict ||
+      forceTrustInferredFootwearColor ||
+      hasStrongTopItemColor ||
+      hasStrongAccessoryItemColor ||
+      preferInferredColorForConflict
+    );
   const hasInferredColorSignal = hasTrustedInferredColorSignal;
 
   let allColorsForRelevance: string[];
@@ -4860,7 +4882,7 @@ export async function searchByImageWithSimilarity(
           if (exactType < 1 && typeComp < 0.16) continue;
           if ((comp.crossFamilyPenalty ?? 0) >= 0.62) continue;
         }
-        const footwearColorFloor = hasExplicitColorIntent ? 0.42 : hasInferredColorSignal ? 0.22 : 0.12;
+        const footwearColorFloor = hasExplicitColorIntent ? 0.42 : hasInferredColorSignal ? 0.08 : 0.05;
         if (hasColorIntentForFinal && isFootwearDetectionIntent && (comp.colorCompliance ?? 0) < footwearColorFloor) continue;
         const v = visualSimFromHit(h);
         const existing = comp.finalRelevance01 ?? 0;
@@ -6852,6 +6874,7 @@ export async function getCandidateScoresForProducts(
     },
   };
 }
+
 
 
 
