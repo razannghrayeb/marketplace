@@ -82,6 +82,55 @@ function toTensionAxes(
   ];
 }
 
+function metricDeltaLabel(delta: number, metric: string): string {
+  const points = Math.abs(Math.round(delta * 100));
+  if (points >= 12) return `a strong ${points}-point edge in ${metric}`;
+  if (points >= 6) return `a ${points}-point edge in ${metric}`;
+  if (points >= 3) return `a slight ${points}-point edge in ${metric}`;
+  return `near-parity in ${metric}`;
+}
+
+function buildRelativeDecisionNudge(
+  current: {
+    profile: ProductDecisionProfile;
+    scores: { practical: number; expressive: number; quality: number; value: number; overall: number };
+  },
+  peers: Array<{
+    profile: ProductDecisionProfile;
+    scores: { practical: number; expressive: number; quality: number; value: number; overall: number };
+  }>
+): string {
+  if (peers.length === 0) {
+    return "Best fit if you want a balanced profile without major tradeoffs.";
+  }
+  const topPeer = peers.sort((a, b) => b.scores.overall - a.scores.overall)[0];
+  const practicalDelta = current.scores.practical - topPeer.scores.practical;
+  const expressiveDelta = current.scores.expressive - topPeer.scores.expressive;
+  const qualityDelta = current.scores.quality - topPeer.scores.quality;
+  const valueDelta = current.scores.value - topPeer.scores.value;
+
+  const advantages: Array<{ metric: string; delta: number }> = [
+    { metric: "daily practicality", delta: practicalDelta },
+    { metric: "expressive style", delta: expressiveDelta },
+    { metric: "quality confidence", delta: qualityDelta },
+    { metric: "value for price", delta: valueDelta },
+  ].sort((a, b) => b.delta - a.delta);
+
+  const best = advantages[0];
+  const weakest = advantages[advantages.length - 1];
+
+  if (best.delta <= 0.02) {
+    return `Compared with ${topPeer.profile.title}, this is mostly a preference call with only small metric differences.`;
+  }
+
+  const tradeoff =
+    weakest.delta < -0.03
+      ? `Tradeoff: ${metricDeltaLabel(weakest.delta, weakest.metric)}.`
+      : "Tradeoff profile is minimal versus the closest alternative.";
+
+  return `Compared with ${topPeer.profile.title}, this shows ${metricDeltaLabel(best.delta, best.metric)}. ${tradeoff}`;
+}
+
 function scoreDataQuality(profiles: ProductDecisionProfile[]): { overallScore: number; notes: string[] } {
   const notes: string[] = [];
   const qualityScores = profiles.map((p) => {
@@ -288,7 +337,33 @@ export function runCompareDecisionEngine(
       visualDifferences: buildVisualDifferences(profiles),
       consequences: productResults.map((r) => ({
         productId: r.profile.id,
-        ifYouChooseThis: r.consequence,
+        ifYouChooseThis: [
+          ...r.consequence,
+          buildRelativeDecisionNudge(
+            {
+              profile: r.profile,
+              scores: {
+                practical: r.scores.practical,
+                expressive: r.scores.expressive,
+                quality: r.scores.quality,
+                value: r.scores.value,
+                overall: r.scores.overall,
+              },
+            },
+            productResults
+              .filter((candidate) => candidate.profile.id !== r.profile.id)
+              .map((candidate) => ({
+                profile: candidate.profile,
+                scores: {
+                  practical: candidate.scores.practical,
+                  expressive: candidate.scores.expressive,
+                  quality: candidate.scores.quality,
+                  value: candidate.scores.value,
+                  overall: candidate.scores.overall,
+                },
+              }))
+          ),
+        ],
       })),
       regretFlash: productResults.map((r) => ({
         productId: r.profile.id,
@@ -368,6 +443,15 @@ export function runCompareDecisionEngine(
         }
       : undefined,
   };
+
+  response.decisionConfidence.explanation = [
+    ...response.decisionConfidence.explanation,
+    response.decisionConfidence.level === "toss_up"
+      ? "Recommendation: prioritize your top metric (value, quality, or expression) to break this close tie."
+      : response.decisionConfidence.level === "leaning_choice"
+        ? "Recommendation: lead option is stronger, but verify fit details and return comfort before final purchase."
+        : "Recommendation: confidence is high enough to choose the lead product unless your personal style preference differs.",
+  ];
 
   options.publisher?.publish({
     name: "response_generated",
