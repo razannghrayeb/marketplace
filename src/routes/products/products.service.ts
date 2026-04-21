@@ -1655,6 +1655,11 @@ function imageDualKnnFusionEnabled(): boolean {
   return v === "1" || v === "true";
 }
 
+function imageDualKnnDetectionEnabled(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_DETECTION_DUAL_KNN ?? "1").toLowerCase();
+  return v !== "0" && v !== "false";
+}
+
 /**
  * HNSW ef_search for image kNN. Improves recall vs default index ef_search for hard self-match queries.
  * Set SEARCH_IMAGE_EF_SEARCH=0 to omit (some managed clusters reject per-query ef_search).
@@ -3362,7 +3367,7 @@ export async function searchByImageWithSimilarity(
     garmentQueryVector.length === imageEmbedding.length;
   const useDualKnn =
     dualKnnEligible &&
-    imageDualKnnFusionEnabled();
+    (detectionScoped ? imageDualKnnDetectionEnabled() : imageDualKnnFusionEnabled());
 
   const ef = imageKnnEfSearch();
   const knnTimeoutMs = imageKnnTimeoutMs(detectionScoped);
@@ -3473,14 +3478,28 @@ export async function searchByImageWithSimilarity(
       const lowRecallFloor = detectionScoped
         ? Math.max(24, Math.min(96, Math.floor(retrievalK * 0.18)))
         : 0;
+      const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+      const detectionApparelCategory =
+        detectionCategoryNorm === "tops" ||
+        detectionCategoryNorm === "bottoms" ||
+        detectionCategoryNorm === "dresses" ||
+        detectionCategoryNorm === "outerwear";
       if (garmentCount > 0) {
-        if (detectionScoped && garmentCount < lowRecallFloor && embeddingCount > garmentCount) {
+        if (
+          detectionScoped &&
+          embeddingCount > 0 &&
+          (
+            garmentCount < lowRecallFloor ||
+            (detectionApparelCategory && embeddingCount >= Math.max(12, Math.floor(garmentCount * 0.35)))
+          )
+        ) {
           hits = mergeKnnHitsByProductId(garmentHits, embeddingHits, retrievalK);
           if (breakdownDebug) {
             console.warn("[image-knn] low garment recall; merged embedding fallback", {
               garmentCount,
               embeddingCount,
               lowRecallFloor,
+              detectionCategoryNorm,
               mergedCount: hits.length,
             });
           }
@@ -4729,6 +4748,9 @@ export async function searchByImageWithSimilarity(
     if (!filtersAny.gender) return sortedByRelevance;
     const wantG = normalizeQueryGender(filtersAny.gender);
     if (!wantG) return sortedByRelevance;
+    const footwearDetectionForGenderGate =
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "footwear" ||
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "shoes";
 
     const title = (t: any) => (typeof t === "string" ? t.toLowerCase() : "");
     const docGender = (hit: any) => {
@@ -4760,8 +4782,12 @@ export async function searchByImageWithSimilarity(
       if (dg === "unisex") return true;
       if (dg) return false;
       const hasWant = wantKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(t));
+      const hasUnisexCue = /\b(unisex|all\s*gender|all-gender)\b/.test(t);
       if (oppKw.length > 0 && oppKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(t))) return false;
       if (hasWant) return true;
+      // For footwear, unknown-gender docs should not pass on visual similarity only.
+      // This prevents men/women leakage when catalog gender metadata is sparse.
+      if (footwearDetectionForGenderGate) return hasUnisexCue;
       if (!dg && visualSimFromHit(hit) >= unknownGenderMinSim) return true;
       return false;
     };
@@ -4830,6 +4856,16 @@ export async function searchByImageWithSimilarity(
           } else if (yoloConfidence >= 0.8) {
             // Medium-high confidence: moderate relaxation
             detAnchoredTypeFloor = 0.19;
+          }
+        }
+        if (hasDetectionAnchoredTypeIntent && params.detectionProductCategory === 'dresses') {
+          const yoloConfidence = params.detectionYoloConfidence ?? 0;
+          if (yoloConfidence >= 0.9) {
+            detAnchoredTypeFloor = 0.14;
+          } else if (yoloConfidence >= 0.8) {
+            detAnchoredTypeFloor = 0.18;
+          } else {
+            detAnchoredTypeFloor = 0.2;
           }
         }
         if (hasDetectionAnchoredTypeIntent && exactType < 1 && typeComp < detAnchoredTypeFloor && !visualStrong) {
@@ -6129,6 +6165,10 @@ export async function searchByImageWithSimilarity(
       });
       if (familySafeFallback.length > 0) {
         results = familySafeFallback as ProductResult[];
+      } else {
+        // Fail closed for strict detection categories: if no family-safe candidates
+        // remain, do not return unrelated category leakage.
+        results = [];
       }
     }
   }
@@ -6156,7 +6196,16 @@ export async function searchByImageWithSimilarity(
     : { results: dedupedResults, groupCount: 0, representativeCount: dedupedResults.length };
   const variantGroupCount = variantCollapsed.groupCount;
   const variantRepresentativeCount = variantCollapsed.representativeCount;
-  const diversityRerankApplied = imageDiversityRerankEnabled() && variantCollapsed.results.length > 2;
+  const preserveColorCohesionForDetection =
+    hasDetectionAnchoredTypeIntent &&
+    hasColorIntentForFinal &&
+    (detectionCategoryForFinalGate === "tops" ||
+      detectionCategoryForFinalGate === "bottoms" ||
+      detectionCategoryForFinalGate === "dresses");
+  const diversityRerankApplied =
+    imageDiversityRerankEnabled() &&
+    variantCollapsed.results.length > 2 &&
+    !preserveColorCohesionForDetection;
   const diversityLambda = imageDiversityLambda();
   const diversityPoolCap = imageDiversityPoolCap();
   if (diversityRerankApplied) {
