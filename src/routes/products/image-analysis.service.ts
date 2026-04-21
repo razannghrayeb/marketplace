@@ -5472,6 +5472,10 @@ export class ImageAnalysisService {
           recoveryVectors.slice(0, topsSearchBudget).map((recoveryVector, idx) =>
             runDetectionSearch(`recovery_tops_${idx + 1}`, {
               imageEmbedding: recoveryVector,
+              imageEmbeddingGarment:
+                Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+                  ? finalGarmentEmbedding
+                  : undefined,
               imageBuffer: queryProcessBuf,
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
@@ -5480,7 +5484,7 @@ export class ImageAnalysisService {
               limit: retrievalLimit,
               similarityThreshold: shopLookTopRecoverySimilarityThreshold(similarityThreshold),
               includeRelated: false,
-              knnField: "embedding",
+              knnField: shopTheLookKnnField(),
               forceHardCategoryFilter: false,
               relaxThresholdWhenEmpty: true,
               blipSignal: detectionBlipSignal,
@@ -5570,6 +5574,10 @@ export class ImageAnalysisService {
 
         const ablation = await runDetectionSearch(`recovery_${categoryMapping.productCategory}_ablation`, {
           imageEmbedding: finalEmbedding,
+          imageEmbeddingGarment:
+            Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+              ? finalGarmentEmbedding
+              : undefined,
           imageBuffer: queryProcessBuf,
           pHash: sourceImagePHash,
           detectionYoloConfidence: detection.confidence,
@@ -5579,7 +5587,7 @@ export class ImageAnalysisService {
           limit: retrievalLimit,
           similarityThreshold: ablationThreshold,
           includeRelated: false,
-          knnField: "embedding",
+          knnField: shopTheLookKnnField(),
           forceHardCategoryFilter: categoryMapping.productCategory !== "tops",
           relaxThresholdWhenEmpty: true,
           blipSignal: detectionBlipSignal,
@@ -5656,6 +5664,10 @@ export class ImageAnalysisService {
 
         const topFailOpen = await runDetectionSearch("recovery_tops_fail_open", {
           imageEmbedding: finalEmbedding,
+          imageEmbeddingGarment:
+            Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+              ? finalGarmentEmbedding
+              : undefined,
           imageBuffer: queryProcessBuf,
           pHash: sourceImagePHash,
           detectionYoloConfidence: detection.confidence,
@@ -5664,7 +5676,7 @@ export class ImageAnalysisService {
           limit: retrievalLimit,
           similarityThreshold: Math.max(0.35, shopLookTopRecoverySimilarityThreshold(similarityThreshold) - 0.04),
           includeRelated: false,
-          knnField: "embedding",
+          knnField: shopTheLookKnnField(),
           forceHardCategoryFilter: false,
           relaxThresholdWhenEmpty: true,
           blipSignal: detectionBlipSignal,
@@ -7156,8 +7168,8 @@ export class ImageAnalysisService {
             limit: retrievalLimit,
             similarityThreshold: ablationThreshold,
             includeRelated: false,
-            knnField: "embedding",
-            forceHardCategoryFilter: true,
+            knnField: shopTheLookKnnField(),
+            forceHardCategoryFilter: categoryMapping.productCategory !== "tops",
             relaxThresholdWhenEmpty: true,
             blipSignal: detectionBlipSignal,
             inferredPrimaryColor: inferredPrimaryColorForDetection,
