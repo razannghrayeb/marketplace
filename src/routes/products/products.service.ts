@@ -3154,11 +3154,11 @@ export async function searchByImageWithSimilarity(
       });
     }
   }
-  if (filtersAny.style) {
+  if (filtersAny.style && !detectionScoped) {
     const s = String(filtersAny.style).toLowerCase();
     if (s.length > 0) filter.push({ term: { attr_style: s } });
   }
-  if (filtersAny.color) {
+  if (filtersAny.color && !detectionScoped) {
     const expanded = expandColorTermsForFilter(String(filtersAny.color));
     filter.push({
       bool: {
@@ -3184,7 +3184,7 @@ export async function searchByImageWithSimilarity(
       },
     },
   ];
-  if (cat) {
+  if (cat && !detectionScoped) {
     const hardCategoryOnly = buildHardCategoryFilterClause(cat);
     if (hardCategoryOnly) relaxedKnnFilter.push(hardCategoryOnly);
   }
@@ -3364,36 +3364,44 @@ export async function searchByImageWithSimilarity(
       },
     };
 
-    hits = await opensearchImageKnnHits(knnBody, knnTimeoutMs);
-
-    // Guard against over-sparse garment embeddings in some categories (notably footwear)
-    // under strict filters: retry once on global embedding with identical filters.
-    if (knnFieldResolved === "embedding_garment" && (!Array.isArray(hits) || hits.length === 0)) {
-      if (breakdownDebug) {
-        console.warn(
-          "[image-knn] embedding_garment returned no hits; retrying with embedding field",
-        );
-      }
-      knnFieldResolved = "embedding";
-      queryVector = imageEmbedding;
+    if (knnFieldResolved === "embedding_garment") {
+      // Run garment + global fallback in parallel; keep the same decision rule as before:
+      // prefer garment hits when non-empty, otherwise use embedding hits.
       const knnBodyEmbeddingFallback = {
         size: retrievalK,
         _source: [
           ...baseImageKnnSourceFields,
-          ...(imageExactCosineRerankEnabled() ? [knnFieldResolved] : []),
+          ...(imageExactCosineRerankEnabled() ? ["embedding"] : []),
         ],
         query: {
           bool: {
             must: {
               knn: {
-                [knnFieldResolved]: knnQueryInner(queryVector, retrievalK, ef),
+                embedding: knnQueryInner(imageEmbedding, retrievalK, ef),
               },
             },
             filter,
           },
         },
       };
-      hits = await opensearchImageKnnHits(knnBodyEmbeddingFallback, knnTimeoutMs);
+      const [garmentHits, embeddingHits] = await Promise.all([
+        opensearchImageKnnHits(knnBody, knnTimeoutMs),
+        opensearchImageKnnHits(knnBodyEmbeddingFallback, knnTimeoutMs),
+      ]);
+      if (Array.isArray(garmentHits) && garmentHits.length > 0) {
+        hits = garmentHits;
+      } else {
+        if (breakdownDebug) {
+          console.warn(
+            "[image-knn] embedding_garment returned no hits; using parallel embedding fallback",
+          );
+        }
+        knnFieldResolved = "embedding";
+        queryVector = imageEmbedding;
+        hits = embeddingHits;
+      }
+    } else {
+      hits = await opensearchImageKnnHits(knnBody, knnTimeoutMs);
     }
 
     if (imageExactCosineRerankEnabled() && Array.isArray(hits)) {
