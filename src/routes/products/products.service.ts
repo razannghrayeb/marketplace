@@ -5398,6 +5398,10 @@ export async function searchByImageWithSimilarity(
       String(process.env.SEARCH_INFERRED_COLOR_POSTFILTER ?? "1").toLowerCase() !== "0";
     if (inferredColorPostEnabled) {
       const category = String(params.detectionProductCategory ?? "").toLowerCase();
+      const desiredPrimaryColor = String(desiredColorsForRelevance[0] ?? "").toLowerCase().trim();
+      const whiteIntentForBottoms =
+        category === "bottoms" &&
+        /^(white|off[\s-]?white|ivory|cream|ecru)$/.test(desiredPrimaryColor);
       const minInferredColorCompliance =
         category === "footwear"
           ? 0.3
@@ -5420,6 +5424,20 @@ export async function searchByImageWithSimilarity(
       const inferredColorCompliantHits = rankedHits.filter((h: any) => {
         const compliance = complianceById.get(String(h._source.product_id))?.colorCompliance ?? 0;
         const colorSimEff = colorSimById.get(String(h._source.product_id)) ?? 0;
+        const sourceColor = extractCanonicalColorTokensFromSource((h as any)?._source ?? {});
+        const sourceTokens = sourceColor.tokens;
+        const hasWhiteFamilyToken = sourceTokens.some((t) => /^(white|off[\s-]?white|ivory|cream|ecru)$/.test(String(t)));
+        const hasWarmNeutralToken = sourceTokens.some((t) => /^(beige|camel|tan|taupe|khaki|stone|nude)$/.test(String(t)));
+
+        if (whiteIntentForBottoms) {
+          if (hasWhiteFamilyToken) {
+            return compliance >= Math.max(0.12, effectiveMinInferredColorCompliance - 0.12) || colorSimEff >= 0.64;
+          }
+          if (hasWarmNeutralToken) {
+            return compliance >= 0.34 || colorSimEff >= 0.86;
+          }
+        }
+
         return (
           compliance >= effectiveMinInferredColorCompliance ||
           (
@@ -5435,6 +5453,9 @@ export async function searchByImageWithSimilarity(
           : rankedHits.length >= 8
             ? 3
             : 1;
+      const whiteBottomMinKeep = whiteIntentForBottoms
+        ? (rankedHits.length >= 12 ? 3 : rankedHits.length >= 8 ? 2 : 1)
+        : 0;
       const enforceInferredColorStrictly =
         category === "footwear" ||
         category === "shoes" ||
@@ -5444,7 +5465,17 @@ export async function searchByImageWithSimilarity(
         ((category === "outerwear" || category === "dresses") &&
           hasStrongDetectionScopedColor &&
           desiredColorsForRelevance.length === 1);
-      if (
+      if (whiteIntentForBottoms) {
+        const whiteLikeBottomHits = inferredColorCompliantHits.filter((h: any) => {
+          const sourceColor = extractCanonicalColorTokensFromSource((h as any)?._source ?? {});
+          return sourceColor.tokens.some((t) => /^(white|off[\s-]?white|ivory|cream|ecru)$/.test(String(t)));
+        });
+        if (whiteLikeBottomHits.length >= whiteBottomMinKeep) {
+          rankedHits = whiteLikeBottomHits;
+        } else if (inferredColorCompliantHits.length > 0) {
+          rankedHits = inferredColorCompliantHits;
+        }
+      } else if (
         inferredColorCompliantHits.length > 0 &&
         enforceInferredColorStrictly &&
         (category === "footwear" || category === "shoes" || inferredColorCompliantHits.length >= minKeep)
@@ -5487,6 +5518,7 @@ export async function searchByImageWithSimilarity(
         if (softColorSafeHits.length >= softMinKeep) {
           rankedHits = softColorSafeHits;
         }
+      }
       }
     }
   }
@@ -5750,6 +5782,7 @@ export async function searchByImageWithSimilarity(
           authoritativeColor.compliance > 0
         ) {
           const desiredSingle = String(desiredColorsForRelevance[0] ?? "").toLowerCase().trim();
+          const isBottomsDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms";
           const nonMatching = authoritativeColorTokens.filter(
             (c) => tieredColorListCompliance([desiredSingle], [c], "any").compliance <= 0,
           );
@@ -5757,7 +5790,9 @@ export async function searchByImageWithSimilarity(
             const hasBlackWhiteContrast =
               (desiredSingle === "black" && nonMatching.includes("white")) ||
               (desiredSingle === "white" && nonMatching.includes("black"));
-            const damp = hasBlackWhiteContrast ? 0.74 : 0.84;
+            const damp = isBottomsDetection && desiredSingle === "white"
+              ? (hasBlackWhiteContrast ? 0.68 : 0.78)
+              : (hasBlackWhiteContrast ? 0.74 : 0.84);
             const base = Math.max(0, finalRelevance01 ?? 0);
             finalRelevance01 = Math.min(base, Math.max(0.18, base * damp));
             finalRelevanceSource = "catalog_color_mix_dampen";
