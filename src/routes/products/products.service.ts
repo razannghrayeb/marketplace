@@ -1177,9 +1177,9 @@ function passesStrictDetectionCategoryFamily(
   if (!blob.trim()) return false;
 
   const hasFootwear = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|flat|flats|oxford|oxfords|pump|pumps|mule|mules|clog|clogs)\b/.test(blob);
-  const hasTop = /\b(top|tops|shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|tank|cami|camisole|sweater|cardigan|hoodie|pullover|jumper)\b/.test(blob);
+  const hasTop = /\b(top|tops|shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|tank|cami|camisole|sweater|cardigan|hoodie|pullover|jumper|polo|henley|tunic|knitwear|bodysuit|crop\s*top|button\s*down|button-down)\b/.test(blob);
   const hasOuterwear = /\b(outerwear|outwear|jacket|jackets|coat|coats|blazer|blazers|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers)\b/.test(blob);
-  const hasBottom = /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|shorts?|skirt|skirts|legging|leggings)\b/.test(blob);
+  const hasBottom = /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|skirt|skirts|legging|leggings|jogger|joggers|sweatpants?|slack|slacks|culotte|culottes|palazzo|chino|chinos|cargo|track\s*pants?)\b/.test(blob);
   const hasDressOnePiece = /\b(dress|dresses|gown|gowns|frock|frocks|sundress|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|abaya|abayas|kaftan|kaftans|caftan|caftans)\b/.test(blob);
   const hasAccessory = /\b(bag|bags|wallet|wallets|belt|belts|hat|hats|cap|caps|jewelry|jewellery|ring|rings|earring|earrings|necklace|necklaces|bracelet|bracelets|watch|watches|sunglasses|glasses|scarf|scarves)\b/.test(blob);
 
@@ -3475,24 +3475,33 @@ export async function searchByImageWithSimilarity(
       ]);
       const garmentCount = Array.isArray(garmentHits) ? garmentHits.length : 0;
       const embeddingCount = Array.isArray(embeddingHits) ? embeddingHits.length : 0;
-      const lowRecallFloor = detectionScoped
-        ? Math.max(24, Math.min(96, Math.floor(retrievalK * 0.18)))
-        : 0;
       const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+      const isTopBottomDetection =
+        detectionCategoryNorm === "tops" || detectionCategoryNorm === "bottoms";
+      const lowRecallFloor = detectionScoped
+        ? isTopBottomDetection
+          ? Math.max(36, Math.min(140, Math.floor(retrievalK * 0.24)))
+          : Math.max(24, Math.min(96, Math.floor(retrievalK * 0.18)))
+        : 0;
       const detectionApparelCategory =
         detectionCategoryNorm === "tops" ||
         detectionCategoryNorm === "bottoms" ||
         detectionCategoryNorm === "dresses" ||
         detectionCategoryNorm === "outerwear";
       if (garmentCount > 0) {
-        if (
+        const shouldMergeEmbeddingFallback =
           detectionScoped &&
           embeddingCount > 0 &&
           (
             garmentCount < lowRecallFloor ||
-            (detectionApparelCategory && embeddingCount >= Math.max(12, Math.floor(garmentCount * 0.35)))
-          )
-        ) {
+            (
+              detectionApparelCategory &&
+              !isTopBottomDetection &&
+              embeddingCount >= Math.max(12, Math.floor(garmentCount * 0.35))
+            )
+          );
+
+        if (shouldMergeEmbeddingFallback) {
           hits = mergeKnnHitsByProductId(garmentHits, embeddingHits, retrievalK);
           if (breakdownDebug) {
             console.warn("[image-knn] low garment recall; merged embedding fallback", {
@@ -3500,6 +3509,7 @@ export async function searchByImageWithSimilarity(
               embeddingCount,
               lowRecallFloor,
               detectionCategoryNorm,
+              isTopBottomDetection,
               mergedCount: hits.length,
             });
           }
@@ -6172,8 +6182,18 @@ export async function searchByImageWithSimilarity(
         const crossFamily = Number(ex.crossFamilyPenalty ?? 0);
         const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
         const isDressFinalGate = detectionCategoryForFinalGate === "dresses";
-        const typeFloor = isDressFinalGate ? 0.72 : 0.82;
-        const simFloor = isDressFinalGate ? 0.95 : 0.985;
+        const isTopFinalGate = detectionCategoryForFinalGate === "tops";
+        const isBottomFinalGate = detectionCategoryForFinalGate === "bottoms";
+        const typeFloor = isDressFinalGate
+          ? 0.72
+          : isTopFinalGate || isBottomFinalGate
+            ? 0.42
+            : 0.82;
+        const simFloor = isDressFinalGate
+          ? 0.95
+          : isTopFinalGate || isBottomFinalGate
+            ? 0.94
+            : 0.985;
         return crossFamily < 0.22 && (exactType >= 1 || typeComp >= typeFloor || sim >= simFloor);
       });
       if (familySafeFallback.length > 0) {
