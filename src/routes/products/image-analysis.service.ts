@@ -326,6 +326,20 @@ function shopLookDressRecoverySimilarityThreshold(baseThreshold: number): number
   return Math.max(0.35, Math.min(baseThreshold, Math.min(0.9, floor)));
 }
 
+function shopLookDetectionSimilarityThreshold(baseThreshold: number, productCategory: string): number {
+  const category = String(productCategory || "").toLowerCase().trim();
+  if (category === "tops") {
+    return Math.max(0.35, Math.min(baseThreshold, 0.5));
+  }
+  if (category === "bottoms") {
+    return Math.max(0.35, Math.min(baseThreshold, 0.48));
+  }
+  if (category === "dresses" || category === "outerwear") {
+    return Math.max(0.35, Math.min(baseThreshold, 0.52));
+  }
+  return baseThreshold;
+}
+
 /** Expensive multi-crop fallback toggle. Default off to minimize latency tails. */
 function shopLookLowQualityMultiCropFallbackEnabled(): boolean {
   const v = String(process.env.SEARCH_IMAGE_SHOP_LOW_QUALITY_MULTICROP_FALLBACK ?? "").toLowerCase();
@@ -7197,6 +7211,12 @@ export class ImageAnalysisService {
           return inferredPrimaryColor;
         })();
 
+        const baseSimilarityThreshold = options.similarityThreshold ?? config.clip.imageSimilarityThreshold;
+        const detectionSimilarityThreshold = shopLookDetectionSimilarityThreshold(
+          baseSimilarityThreshold,
+          categoryMapping.productCategory,
+        );
+
         let similarResult = await searchByImageWithSimilarity({
           imageEmbedding: finalEmbedding,
           imageEmbeddingGarment:
@@ -7210,7 +7230,7 @@ export class ImageAnalysisService {
           filters,
           softProductTypeHints,
           limit: retrievalLimit,
-          similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
+          similarityThreshold: detectionSimilarityThreshold,
           includeRelated: false,
           predictedCategoryAisles,
           knnField: shopTheLookKnnField(),
@@ -7259,7 +7279,7 @@ export class ImageAnalysisService {
             filters: filtersRetry,
             softProductTypeHints,
             limit: retrievalLimit,
-            similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
+            similarityThreshold: detectionSimilarityThreshold,
             includeRelated: false,
             predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
@@ -7325,7 +7345,7 @@ export class ImageAnalysisService {
             filters: fallbackFilters,
             softProductTypeHints,
             limit: retrievalLimit,
-            similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
+            similarityThreshold: detectionSimilarityThreshold,
             includeRelated: false,
             predictedCategoryAisles: preserveHardCategoryInFallback ? undefined : predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
@@ -7370,7 +7390,7 @@ export class ImageAnalysisService {
               // Keep crop-derived structural intent even in last-resort fallback.
               filters: fallbackStructuralFilters as any,
               limit: retrievalLimit,
-              similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
+              similarityThreshold: detectionSimilarityThreshold,
               includeRelated: false,
               knnField: shopTheLookKnnField(),
               forceHardCategoryFilter: preserveHardCategoryInFallback,
@@ -7409,7 +7429,7 @@ export class ImageAnalysisService {
             filters: filtersNoHardTypes,
             softProductTypeHints,
             limit: retrievalLimit,
-            similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
+            similarityThreshold: detectionSimilarityThreshold,
             includeRelated: false,
             predictedCategoryAisles,
             knnField: shopTheLookKnnField(),
@@ -7465,7 +7485,7 @@ export class ImageAnalysisService {
                 filters,
                 softProductTypeHints,
                 limit: retrievalLimit,
-                similarityThreshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
+                similarityThreshold: detectionSimilarityThreshold,
                 includeRelated: false,
                 predictedCategoryAisles,
                 knnField: shopTheLookKnnField(),
