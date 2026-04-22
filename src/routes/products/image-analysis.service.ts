@@ -2865,6 +2865,45 @@ function applyRelevanceThresholdFilter(
       relevanceFallbackPreserved: true,
     }));
     if (recovered.length === 0) {
+      const categoryNorm = String(options?.category ?? "").toLowerCase().trim();
+      if (categoryNorm === "bottoms") {
+        const bottomsRescueFloor = Math.max(0.34, minRelevance - 0.14);
+        const rescueLimit = Math.max(1, Math.min(2, preserveCount));
+        const neutralColorRegex = /\b(white|off[\s-]?white|ivory|cream|beige|ecru|stone|taupe|nude)\b/i;
+        const bottomsColorSafeRescue = sorted
+          .filter((item) => {
+            const relevance = Number((item as any)?.finalRelevance01 ?? 0);
+            if (relevance < bottomsRescueFloor) return false;
+            const explain = ((item as any)?.explain ?? {}) as Record<string, unknown>;
+            if (Boolean(explain.hardBlocked)) return false;
+            const contradictionPenalty = Number(explain.colorContradictionPenalty ?? 1);
+            if (Number.isFinite(contradictionPenalty) && contradictionPenalty < 0.75) return false;
+            const colorCompliance = Number(explain.colorCompliance ?? NaN);
+            const colorEvidence = [
+              explain.matchedColor,
+              (item as any)?.color,
+              (item as any)?.title,
+              (item as any)?.description,
+            ]
+              .filter((x) => x != null)
+              .map((x) => String(x))
+              .join(" ");
+            const looksNeutral = neutralColorRegex.test(colorEvidence);
+            const hasModerateColorCompliance = Number.isFinite(colorCompliance) && colorCompliance >= 0.35;
+            return looksNeutral || hasModerateColorCompliance;
+          })
+          .slice(0, rescueLimit)
+          .map((item) => ({
+            ...item,
+            relevanceBottomsColorRescue: true,
+          }));
+        if (bottomsColorSafeRescue.length > 0) {
+          console.log(
+            `[relevance-threshold-bottoms-rescue] preserved ${bottomsColorSafeRescue.length} product(s) for detection="${options?.detectionLabel ?? "unknown"}" floor=${bottomsRescueFloor.toFixed(3)} threshold=${minRelevance}`,
+          );
+          return bottomsColorSafeRescue;
+        }
+      }
       return filtered;
     }
     const bestRelevance = Number((recovered[0] as any)?.finalRelevance01 ?? 0);
@@ -5718,6 +5757,76 @@ export class ImageAnalysisService {
 
           if (similarResult.results.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) {
             break;
+          }
+        }
+
+        // Tops can still collapse to a single weak candidate; run one extra
+        // guarded pass with a slightly relaxed threshold to improve non-zero recall.
+        if (
+          detectionSearchCalls < maxSearchCallsPerDetection &&
+          similarResult.results.length <= 1
+        ) {
+          const topLowCountRecovery = await runDetectionSearch("recovery_tops_low_count", {
+            imageEmbedding: Array.isArray(finalEmbedding) && finalEmbedding.length > 0
+              ? finalEmbedding
+              : (Array.isArray(recoveryEmbedding) && recoveryEmbedding.length > 0 ? recoveryEmbedding : []),
+            imageEmbeddingGarment:
+              Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+                ? finalGarmentEmbedding
+                : undefined,
+            imageBuffer: queryProcessBuf,
+            pHash: sourceImagePHash,
+            detectionYoloConfidence: detection.confidence,
+            detectionProductCategory: categoryMapping.productCategory,
+            filters: topFilters,
+            limit: retrievalLimit,
+            similarityThreshold: Math.max(0.36, shopLookTopRecoverySimilarityThreshold(similarityThreshold) - 0.03),
+            includeRelated: false,
+            knnField: shopTheLookKnnField(),
+            forceHardCategoryFilter: false,
+            relaxThresholdWhenEmpty: true,
+            blipSignal: detectionBlipSignal,
+            inferredPrimaryColor: inferredPrimaryColorForDetection,
+            inferredColorKey: itemColorKey,
+            inferredColorsByItem,
+            inferredColorsByItemConfidence,
+            debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+            sessionId: options.sessionId,
+            userId: options.userId,
+            sessionFilters: options.sessionFilters ?? undefined,
+          });
+          const topLowCountCategorySafe = applyDetectionCategoryGuard(
+            topLowCountRecovery.results,
+            detection.label,
+            categoryMapping,
+            String((filters as any).gender ?? ""),
+          );
+          const topLowCountSleeveSafe = applySleeveIntentGuard({
+            products: topLowCountCategorySafe,
+            detectionLabel: detection.label,
+            categoryMapping,
+          });
+          const topLowCountSafeResults = applyAthleticMismatchGuard({
+            products: topLowCountSleeveSafe,
+            detectionLabel: label,
+            productCategory: categoryMapping.productCategory,
+            softStyle: String((filters as any).softStyle ?? ""),
+            minFormality: Number((filters as any).minFormality ?? 0),
+          });
+          if (topLowCountSafeResults.length > 0) {
+            if (hotPathDebug) {
+              console.log(
+                `[recovery-result] detection="${label}" type=tops_low_count_recovery recovered=${topLowCountSafeResults.length} products`,
+              );
+            }
+            similarResult = {
+              ...similarResult,
+              results: mergeImageSearchResultsById(
+                similarResult.results,
+                topLowCountSafeResults,
+                retrievalLimit,
+              ),
+            };
           }
         }
       }
