@@ -5519,7 +5519,6 @@ export async function searchByImageWithSimilarity(
           rankedHits = softColorSafeHits;
         }
       }
-      }
     }
   }
 
