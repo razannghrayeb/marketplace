@@ -2497,9 +2497,6 @@ function applyDetectionCategoryGuard(
       ) {
         return false;
       }
-      if (formalTailoredDetection && !productMentionsTailoredOuterwear && hasTopCasualConflictCue(haystack)) {
-        return false;
-      }
       // Keep tops audience-safe to prevent cross-gender leakage when query audience is known.
       if (queryGenderNorm === "men" && hasExplicitWomenCue(haystack)) return false;
       if (queryGenderNorm === "women" && hasExplicitMenCue(haystack)) return false;
@@ -2787,20 +2784,6 @@ function buildSafeNonEmptyFallback(params: {
   return ranked.slice(0, safeCap);
 }
 
-function topMetadataTrustScore(row: ProductResult): number {
-  const category = normalizeLooseText(String((row as any)?.category ?? ""));
-  const canonical = normalizeLooseText(String((row as any)?.category_canonical ?? ""));
-  const typesRaw = (row as any)?.product_types;
-  const types = Array.isArray(typesRaw) ? normalizeLooseText(typesRaw.join(" ")) : normalizeLooseText(String(typesRaw ?? ""));
-  const gender = normalizeLooseText(String((row as any)?.gender ?? ""));
-  let score = 0;
-  if (category) score += 0.35;
-  if (canonical) score += 0.2;
-  if (types) score += 0.3;
-  if (gender) score += 0.15;
-  return Math.max(0, Math.min(1, score));
-}
-
 /** Filter products by minimum finalRelevance01 score. Removes low-relevance matches from results. */
 function applyRelevanceThresholdFilter(
   products: ProductResult[],
@@ -2865,24 +2848,6 @@ function applyRelevanceThresholdFilter(
       if (hasTailoredTopProductCue(blob)) return false;
       return hasTopCasualConflictCue(blob);
     };
-    const hasWeakTopMetadataForTailoredIntent = (row: ProductResult): boolean => {
-      const categoryNorm = String(options?.category ?? "").toLowerCase().trim();
-      if (categoryNorm !== "tops") return false;
-      const tailoredIntent = isTailoredTopDetectionIntent(String(options?.detectionLabel ?? ""));
-      if (!tailoredIntent) return false;
-      const blob = [
-        (row as any)?.title,
-        (row as any)?.description,
-        (row as any)?.category,
-        (row as any)?.category_canonical,
-        Array.isArray((row as any)?.product_types) ? (row as any).product_types.join(" ") : (row as any)?.product_types,
-      ]
-        .filter((x) => x != null)
-        .map((x) => String(x).toLowerCase())
-        .join(" ");
-      if (hasTailoredTopProductCue(blob)) return false;
-      return topMetadataTrustScore(row) < 0.45;
-    };
     const sorted = [...products].sort((a, b) => {
       const ar = Number((a as any)?.finalRelevance01 ?? Number.NEGATIVE_INFINITY);
       const br = Number((b as any)?.finalRelevance01 ?? Number.NEGATIVE_INFINITY);
@@ -2893,7 +2858,6 @@ function applyRelevanceThresholdFilter(
       const relevance = Number((item as any)?.finalRelevance01 ?? 0);
       if (hasSevereColorContradiction(item)) return false;
       if (hasSevereTopStyleContradiction(item)) return false;
-      if (hasWeakTopMetadataForTailoredIntent(item)) return false;
       return relevance >= qualityFloor;
     });
     const recovered = fallbackPool.slice(0, preserveCount).map((item) => ({
@@ -5481,23 +5445,12 @@ export class ImageAnalysisService {
       }
 
       const knnCandidateCount = similarResult.results.length;
-      const tailoredTopIntentForDetection =
-        categoryMapping.productCategory === "tops" &&
-        isTailoredTopDetectionIntent(
-          label,
-          String(detection.raw_label ?? ""),
-          Number((filters as any).minFormality ?? 0),
-        );
-      const precisionThresholdForDetection =
-        tailoredTopIntentForDetection
-          ? Math.min(0.95, Math.max(similarityThreshold + 0.02, similarityThreshold))
-          : similarityThreshold;
 
       const precisionSafeResults = applyShopLookVisualPrecisionGuard(
         similarResult.results,
         categoryMapping.productCategory === "footwear" && (detection.area_ratio ?? 0) <= 0.02
-          ? shopLookTinyFootwearRecoveryThreshold(precisionThresholdForDetection)
-          : precisionThresholdForDetection,
+          ? shopLookTinyFootwearRecoveryThreshold(similarityThreshold)
+          : similarityThreshold,
         categoryMapping.productCategory,
       );
       
@@ -5769,6 +5722,116 @@ export class ImageAnalysisService {
         }
       }
 
+      const bottomsRecoveryMinKeep = Math.max(2, Math.min(8, Math.floor(resolvedLimitPerItem * 0.28)));
+      if (
+        detectionSearchCalls < maxSearchCallsPerDetection &&
+        guardedCountForRecovery < bottomsRecoveryMinKeep &&
+        categoryMapping.productCategory === "bottoms" &&
+        ((detection.confidence ?? 0) >= 0.42 || (detection.area_ratio ?? 0) >= 0.018)
+      ) {
+        if (hotPathDebug) {
+          console.log(
+            `[recovery-attempt] detection="${label}" type=bottoms_recovery reason="low_count(${similarResult.results.length}<${bottomsRecoveryMinKeep})"`,
+          );
+        }
+
+        const bottomTerms = hardCategoryTermsForDetection(label, categoryMapping, {
+          confidence: detection.confidence,
+          areaRatio: detection.area_ratio,
+        });
+        const bottomFilters: Partial<import("./types").SearchFilters> = {};
+        Object.assign(
+          bottomFilters,
+          mergeImageSearchSessionFilters(
+            bottomFilters,
+            options.sessionFilters ?? (options.sessionId ? (getSession(options.sessionId).accumulatedFilters as Record<string, unknown>) : null),
+          ),
+        );
+        if (bottomTerms.length > 0) {
+          bottomFilters.category = bottomTerms.length === 1 ? bottomTerms[0] : bottomTerms;
+        }
+        if (filters.gender) bottomFilters.gender = filters.gender;
+        if (filters.ageGroup) bottomFilters.ageGroup = filters.ageGroup;
+
+        const recoveryEmbedding = await processImageForEmbedding(queryProcessBuf).catch(() => null);
+        const recoveryVectors: number[][] = [];
+        if (Array.isArray(finalEmbedding) && finalEmbedding.length > 0) recoveryVectors.push(finalEmbedding);
+        if (Array.isArray(recoveryEmbedding) && recoveryEmbedding.length > 0) recoveryVectors.push(recoveryEmbedding);
+
+        const bottomsSearchBudget = Math.max(0, maxSearchCallsPerDetection - detectionSearchCalls);
+        const bottomRecoveries = await Promise.all(
+          recoveryVectors.slice(0, bottomsSearchBudget).map((recoveryVector, idx) =>
+            runDetectionSearch(`recovery_bottoms_${idx + 1}`, {
+              imageEmbedding: recoveryVector,
+              imageEmbeddingGarment:
+                Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+                  ? finalGarmentEmbedding
+                  : undefined,
+              imageBuffer: queryProcessBuf,
+              pHash: sourceImagePHash,
+              detectionYoloConfidence: detection.confidence,
+              detectionProductCategory: categoryMapping.productCategory,
+              filters: bottomFilters,
+              limit: retrievalLimit,
+              similarityThreshold: Math.max(0.4, shopLookTopRecoverySimilarityThreshold(similarityThreshold) - 0.01),
+              includeRelated: false,
+              knnField: shopTheLookKnnField(),
+              forceHardCategoryFilter: false,
+              relaxThresholdWhenEmpty: true,
+              blipSignal: detectionBlipSignal,
+              inferredPrimaryColor: inferredPrimaryColorForDetection,
+              inferredColorKey: itemColorKey,
+              inferredColorsByItem,
+              inferredColorsByItemConfidence,
+              debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+              sessionId: options.sessionId,
+              userId: options.userId,
+              sessionFilters: options.sessionFilters ?? undefined,
+            }),
+          ),
+        );
+
+        for (const bottomRecovery of bottomRecoveries) {
+          const bottomRecoveryCategorySafe = applyDetectionCategoryGuard(
+            bottomRecovery.results,
+            detection.label,
+            categoryMapping,
+            String((filters as any).gender ?? ""),
+          );
+          const bottomRecoveryFormalitySafe = applyFormalityFilter(
+            bottomRecoveryCategorySafe,
+            Number((filters as any).minFormality ?? 0),
+          );
+          const bottomRecoverySafeResults = applyAthleticMismatchGuard({
+            products: bottomRecoveryFormalitySafe,
+            detectionLabel: label,
+            productCategory: categoryMapping.productCategory,
+            softStyle: String((filters as any).softStyle ?? ""),
+            minFormality: Number((filters as any).minFormality ?? 0),
+          });
+
+          if (bottomRecoverySafeResults.length > 0) {
+            if (hotPathDebug) {
+              console.log(
+                `[recovery-result] detection="${label}" type=bottoms_recovery recovered=${bottomRecoverySafeResults.length} products`,
+              );
+            }
+            similarResult = {
+              ...similarResult,
+              results: mergeImageSearchResultsById(
+                similarResult.results,
+                bottomRecoverySafeResults,
+                retrievalLimit,
+              ),
+            };
+          }
+
+          if (similarResult.results.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) {
+            break;
+          }
+        }
+      }
+
       const topOrDressCategory =
         categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses";
       const topOrDressMinKeep = categoryMapping.productCategory === "tops"
@@ -5883,15 +5946,6 @@ export class ImageAnalysisService {
         guardedCountForRecovery === 0
       ) {
         const topRecoveryBaseThreshold = shopLookTopRecoverySimilarityThreshold(similarityThreshold);
-        const topRecoveryFormality = Number((filters as any).minFormality ?? 0);
-        const tailoredStage1Threshold = Math.max(
-          0.46,
-          topRecoveryBaseThreshold + (topRecoveryFormality >= 9 ? 0.04 : 0.02),
-        );
-        const tailoredStage2Threshold = Math.max(
-          0.43,
-          topRecoveryBaseThreshold + (topRecoveryFormality >= 9 ? 0.02 : 0.01),
-        );
         const stagedTopRecoveries: Array<{
           reason: string;
           categories: string[];
@@ -5901,12 +5955,12 @@ export class ImageAnalysisService {
               {
                 reason: "recovery_tops_tailored_stage1",
                 categories: ["suit", "suits", "blazer", "blazers", "dress jacket", "sport coat", "waistcoat", "vest", "vests"],
-                threshold: tailoredStage1Threshold,
+                threshold: Math.max(0.42, topRecoveryBaseThreshold),
               },
               {
                 reason: "recovery_tops_tailored_stage2",
-                categories: ["shirt", "shirts", "dress shirt", "cardigan", "knitwear"],
-                threshold: tailoredStage2Threshold,
+                categories: ["shirt", "shirts", "dress shirt", "top", "tops", "cardigan", "knitwear"],
+                threshold: Math.max(0.4, topRecoveryBaseThreshold - 0.02),
               },
             ]
           : [
@@ -5992,12 +6046,6 @@ export class ImageAnalysisService {
               ...similarResult,
               results: mergeImageSearchResultsById(similarResult.results, stageAthleticSafe, retrievalLimit),
             };
-          }
-          if (formalTailoredTopIntent && stage.reason === "recovery_tops_tailored_stage1" && stageAthleticSafe.length >= 2) {
-            if (hotPathDebug) {
-              console.log(`[recovery-stage-stop] detection="${label}" reason="tailored_stage1_sufficient"`);
-            }
-            break;
           }
           if (similarResult.results.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) break;
         }
@@ -6252,19 +6300,12 @@ export class ImageAnalysisService {
     
     const relevanceFilteredResults = finalGroupedResults.map((detection) => {
       const beforeProducts = Array.isArray(detection.products) ? detection.products : [];
-      const tailoredTopDetection =
-        detection.category === "tops" &&
-        isTailoredTopDetectionIntent(
-          String(detection.detection?.label ?? ""),
-          "",
-          Number((detection as any)?.appliedFilters?.minFormality ?? 0),
-        );
       const preserveCountForDetection = isCoreOutfitCategory(detection.category)
         ? Math.min(3, Math.max(1, Math.floor(resolvedLimitPerItem * 0.12)))
         : 0;
       const afterProducts = applyRelevanceThresholdFilter(beforeProducts, minRelevanceThreshold, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category),
-        preserveAtLeastCount: tailoredTopDetection ? Math.min(2, preserveCountForDetection) : preserveCountForDetection,
+        preserveAtLeastCount: preserveCountForDetection,
         detectionLabel: detection.detection?.label,
         category: detection.category,
       });
@@ -7694,19 +7735,12 @@ export class ImageAnalysisService {
     
     const relevanceFilteredResultsSel = finalGroupedResults.map((detection) => {
       const beforeProducts = Array.isArray(detection.products) ? detection.products : [];
-      const tailoredTopDetection =
-        detection.category === "tops" &&
-        isTailoredTopDetectionIntent(
-          String(detection.detection?.label ?? ""),
-          "",
-          Number((detection as any)?.appliedFilters?.minFormality ?? 0),
-        );
       const preserveCountForDetection = isCoreOutfitCategory(detection.category)
         ? Math.min(3, Math.max(1, Math.floor(resolvedLimitPerItem * 0.12)))
         : 0;
       const afterProducts = applyRelevanceThresholdFilter(beforeProducts, minRelevanceThresholdSel, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category),
-        preserveAtLeastCount: tailoredTopDetection ? Math.min(2, preserveCountForDetection) : preserveCountForDetection,
+        preserveAtLeastCount: preserveCountForDetection,
         detectionLabel: detection.detection?.label,
         category: detection.category,
       });
