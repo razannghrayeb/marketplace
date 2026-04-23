@@ -31,6 +31,7 @@
     "search:eval": "npx tsx scripts/search-eval.ts",
     "search:eval:image": "npx tsx scripts/eval-image-relevance.ts",
     "search:tune:image": "npx tsx scripts/tune-image-search-profile.ts",
+    "search:verify:phase1": "npx tsx scripts/verify-search-phase1.ts",
     "os:count": "npx tsx scripts/opensearch-count.ts",
     "test:complete-look-matrix": "npx tsx scripts/validate-complete-look-matrix.ts"
   },

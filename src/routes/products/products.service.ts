@@ -2300,6 +2300,44 @@ function hasTailoredTypeIntent(desiredProductTypes: string[]): boolean {
   );
 }
 
+function hasStrictSuitTopIntent(desiredProductTypes: string[]): boolean {
+  const desired = desiredProductTypes
+    .map((t) => String(t ?? "").toLowerCase().trim())
+    .filter(Boolean)
+    .join(" ");
+  if (!desired) return false;
+  return /\b(suit|suits|blazer|blazers|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|vest|vests)\b/.test(desired);
+}
+
+function hasTailoredTopCatalogCue(src: Record<string, unknown>): boolean {
+  const blob = [
+    src.title,
+    src.description,
+    src.category,
+    src.category_canonical,
+    Array.isArray(src.product_types) ? src.product_types.join(" ") : src.product_types,
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x))
+    .join(" ")
+    .toLowerCase();
+  if (!blob.trim()) return false;
+  return /\b(suit|blazer|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|tailored jacket|structured jacket)\b/.test(blob);
+}
+
+function normalizeDetectionCategoryToken(token: string | null | undefined): string {
+  const normalized = String(token ?? "").toLowerCase().trim();
+  if (!normalized) return normalized;
+  if (
+    /\b(oxford|oxfords|loafer|loafers|sneaker|sneakers|heel|heels|boot|boots|sandals?|slippers?|mule|mules|pumps?|flats?|footwear)\b/.test(
+      normalized,
+    )
+  ) return "footwear";
+  if (/\b(trouser|trousers|pants?|slacks?|jeans?|shorts?|bottoms?)\b/.test(normalized)) return "bottoms";
+  if (/\b(blazer|blazers|shirt|shirts|tee|t-?shirt|tops?|sweater|hoodie)\b/.test(normalized)) return "tops";
+  return normalized;
+}
+
 function isTooCasualTopForTailoredIntent(src: Record<string, unknown>): boolean {
   const blob = [
     src.title,
@@ -4179,8 +4217,9 @@ export async function searchByImageWithSimilarity(
       desiredProductTypes = prunedByLength;
     }
   }
+  const detectionCategoryNorm = normalizeDetectionCategoryToken(params.detectionProductCategory);
   hasDetectionAnchoredTypeIntent =
-    Boolean(String(params.detectionProductCategory ?? "").trim()) ||
+    Boolean(String(detectionCategoryNorm ?? "").trim()) ||
     (
       desiredProductTypes.length > 0 &&
       (
@@ -4190,7 +4229,7 @@ export async function searchByImageWithSimilarity(
     );
 
   const isFootwearDetectionIntent =
-    String(params.detectionProductCategory ?? "").toLowerCase().trim() === "footwear" ||
+    detectionCategoryNorm === "footwear" ||
     desiredProductTypes.some((t) => /\b(shoe|shoes|sandal|sandals|sneaker|sneakers|heel|heels|boot|boots|loafer|loafers|trainer|trainers|flat|flats|footwear|oxford|oxfords|pump|pumps)\b/.test(String(t).toLowerCase()));
 
   const explicitColorsForRelevance =
@@ -4264,7 +4303,6 @@ export async function searchByImageWithSimilarity(
   const preferredInferredColorConfidence = Number(
     preferredInferredColorKey ? inferredByItemConfidenceForRelevance?.[preferredInferredColorKey] : 0,
   );
-  const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
   const hasStrongTopItemColor =
     (detectionCategoryNorm === "tops" ||
       desiredProductTypes.some((t) =>
@@ -5255,7 +5293,7 @@ export async function searchByImageWithSimilarity(
     hasDetectionAnchoredTypeIntent &&
     hasInferredColorSignal &&
     !hasExplicitColorIntent &&
-    (detectionCategoryNorm === "tops" || detectionCategoryNorm === "bottoms");
+    (detectionCategoryNorm === "tops" || detectionCategoryNorm === "bottoms" || detectionCategoryNorm === "footwear" || detectionCategoryNorm === "dresses");
   const apparelDetectionCategory =
     detectionCategoryNorm === "tops" ||
     detectionCategoryNorm === "bottoms" ||
@@ -5895,13 +5933,13 @@ export async function searchByImageWithSimilarity(
   // Detection-anchored bottoms with trouser intent should reject shorts candidates.
   const shouldRejectShortsForTrouserIntent =
     hasDetectionAnchoredTypeIntent &&
-    String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms" &&
+    detectionCategoryNorm === "bottoms" &&
     hasStrictTrouserIntent(desiredProductTypes);
   if (shouldRejectShortsForTrouserIntent && rankedHits.length > 0) {
     rankedHits = rankedHits.filter((h: any) => !isShortsCatalogCandidate((h as any)?._source ?? {}));
   }
 
-  const detectionCategoryNormForTailored = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  const detectionCategoryNormForTailored = detectionCategoryNorm;
   const isTailoredStyleIntent =
     /\b(semi-formal|formal|business|tailored|smart)\b/i.test(desiredStyleForRelevance ?? "");
   const isTailoredIntentForDetection =
@@ -5917,6 +5955,17 @@ export async function searchByImageWithSimilarity(
     });
     if (tailoredSafeHits.length > 0) {
       rankedHits = tailoredSafeHits;
+    }
+  }
+  if (
+    hasDetectionAnchoredTypeIntent &&
+    detectionCategoryNormForTailored === "tops" &&
+    hasStrictSuitTopIntent(desiredProductTypes) &&
+    rankedHits.length > 0
+  ) {
+    const suitFirstHits = rankedHits.filter((h: any) => hasTailoredTopCatalogCue((h as any)?._source ?? {}));
+    if (suitFirstHits.length > 0) {
+      rankedHits = suitFirstHits;
     }
   }
 

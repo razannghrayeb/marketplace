@@ -806,6 +806,119 @@ function isFeminineShoeCue(value: string): boolean {
   return /\b(heel|heels|pump|pumps|stiletto|stilettos|sandal|sandals|dress sandal|mule|mules|ballet flat|ballerina|mary jane|slingback|kitten heel|espadrille)\b/.test(text);
 }
 
+function preferredShoeSubtypesByOccasion(
+  occasion: StyleProfile["occasion"],
+  season: StyleProfile["season"]
+): string[] {
+  if (occasion === "party") return ["heels", "sandals", "flats"];
+  if (occasion === "formal" || occasion === "semi-formal") return ["loafers", "heels", "flats", "boots"];
+  if (occasion === "active") return ["sneakers"];
+  if (occasion === "beach") return ["sandals", "flats", "sneakers"];
+  if (season === "winter" || season === "fall") return ["boots", "loafers", "sneakers", "flats"];
+  return ["sneakers", "flats", "sandals", "loafers"];
+}
+
+function topSubtypeLabel(value: string): "tee" | "shirt" | "blouse" | "sweater" | "hoodie" | "tank" | "other" {
+  const text = normalizeStyleToken(value);
+  if (/\b(t-?shirt|tee|crew neck tee|crew-neck tee)\b/.test(text)) return "tee";
+  if (/\b(shirt|oxford|button down|button-down)\b/.test(text)) return "shirt";
+  if (/\b(blouse)\b/.test(text)) return "blouse";
+  if (/\b(sweater|knit|cardigan)\b/.test(text)) return "sweater";
+  if (/\b(hoodie|sweatshirt)\b/.test(text)) return "hoodie";
+  if (/\b(tank|cami|strapless|crop top)\b/.test(text)) return "tank";
+  return "other";
+}
+
+function preferredTopSubtypesByOccasion(
+  occasion: StyleProfile["occasion"]
+): Array<ReturnType<typeof topSubtypeLabel>> {
+  if (occasion === "party") return ["blouse", "shirt", "tank"];
+  if (occasion === "formal" || occasion === "semi-formal") return ["shirt", "blouse", "sweater"];
+  if (occasion === "active") return ["tee", "tank", "hoodie"];
+  if (occasion === "beach") return ["tank", "tee", "shirt"];
+  return ["tee", "shirt", "sweater", "hoodie", "tank"];
+}
+
+function preferredTopSubtypesBySeason(
+  season: StyleProfile["season"]
+): Array<ReturnType<typeof topSubtypeLabel>> {
+  if (season === "summer") return ["tank", "tee", "shirt", "blouse"];
+  if (season === "winter") return ["sweater", "hoodie", "shirt", "blouse"];
+  if (season === "fall") return ["sweater", "shirt", "tee", "hoodie"];
+  return ["tee", "shirt", "blouse", "sweater"];
+}
+
+function assessTopCandidate(params: {
+  sourceStyle: StyleProfile;
+  candidateTitle?: string | null;
+  candidateCategory?: string | null;
+  candidateDescription?: string | null;
+}): {
+  subtype: ReturnType<typeof topSubtypeLabel>;
+  isNoise: boolean;
+  pipelineScore: number;
+} {
+  const { sourceStyle, candidateTitle, candidateCategory, candidateDescription } = params;
+  const text = normalizeStyleToken(`${candidateTitle || ""} ${candidateCategory || ""} ${candidateDescription || ""}`);
+  const subtype = topSubtypeLabel(text);
+  const hasTopCue = /\b(top|t-?shirt|tee|shirt|blouse|sweater|hoodie|sweatshirt|tank|cami|crop top|knit|cardigan)\b/.test(text);
+  const accessoryNoise = /\b(belt|watch|bracelet|earring|ring|necklace|hat|cap|beanie|scarf)\b/.test(text);
+  const preferredByOccasion = preferredTopSubtypesByOccasion(sourceStyle.occasion);
+  const preferredBySeason = preferredTopSubtypesBySeason(sourceStyle.season);
+  const heavyCue = /\b(sweater|hoodie|wool|fleece|thermal|knit)\b/.test(text);
+  const lightCue = /\b(tank|sleeveless|linen|short sleeve|cami)\b/.test(text);
+
+  let pipelineScore = 0.45;
+  if (hasTopCue) pipelineScore += 0.2;
+  if (subtype !== "other") pipelineScore += 0.16;
+  if (preferredByOccasion.includes(subtype)) pipelineScore += 0.12;
+  if (preferredBySeason.includes(subtype)) pipelineScore += 0.1;
+  if (sourceStyle.season === "winter" && lightCue) pipelineScore -= 0.22;
+  if (sourceStyle.season === "summer" && heavyCue) pipelineScore -= 0.18;
+  if (sourceStyle.occasion === "active" && !["tee", "tank", "hoodie"].includes(subtype)) pipelineScore -= 0.18;
+  if (accessoryNoise) pipelineScore -= 0.35;
+
+  return {
+    subtype,
+    isNoise: !hasTopCue || accessoryNoise,
+    pipelineScore: Math.max(0, Math.min(1, pipelineScore)),
+  };
+}
+
+function assessShoeCandidate(params: {
+  sourceStyle: StyleProfile;
+  sourceFamily: string;
+  candidateTitle?: string | null;
+  candidateCategory?: string | null;
+  candidateDescription?: string | null;
+}): {
+  subtype: string;
+  isNoise: boolean;
+  pipelineScore: number;
+} {
+  const { sourceStyle, sourceFamily, candidateTitle, candidateCategory, candidateDescription } = params;
+  const text = normalizeStyleToken(`${candidateTitle || ""} ${candidateCategory || ""} ${candidateDescription || ""}`);
+  const subtype = footwearSubtypeLabel(text);
+  const footwearCue = /\b(shoe|shoes|sneaker|trainer|boot|heel|pump|sandal|loafer|flat|oxford|mule|espadrille)\b/.test(text);
+  const accessoryNoiseCue = /\b(sock|socks|shoe lace|shoelace|insole|insoles|care kit|cleaner|deodorizer)\b/.test(text);
+  const preferred = preferredShoeSubtypesByOccasion(sourceStyle.occasion, sourceStyle.season);
+  const weatherFit = isWeatherSuitableShoeForSeason(sourceStyle.season, text);
+
+  let pipelineScore = 0.45;
+  if (footwearCue) pipelineScore += 0.22;
+  if (subtype !== "other") pipelineScore += 0.2;
+  if (preferred.includes(subtype)) pipelineScore += 0.14;
+  if (!weatherFit) pipelineScore -= 0.28;
+  if (accessoryNoiseCue) pipelineScore -= 0.3;
+  if (sourceFamily === "dress" && sourceStyle.occasion !== "casual" && subtype === "sneakers") pipelineScore -= 0.22;
+
+  return {
+    subtype,
+    isNoise: accessoryNoiseCue || !footwearCue,
+    pipelineScore: Math.max(0, Math.min(1, pipelineScore)),
+  };
+}
+
 function isWeatherSuitableShoeForSeason(
   season: StyleProfile["season"],
   value: string
@@ -883,6 +996,15 @@ function preferredBagSubtypesByOccasion(occasion: StyleProfile["occasion"]): Arr
   return ["crossbody", "tote", "shoulder", "backpack"];
 }
 
+function preferredBagSubtypesBySeason(
+  season: StyleProfile["season"]
+): Array<ReturnType<typeof bagSubtypeLabel>> {
+  if (season === "summer") return ["tote", "crossbody", "shoulder", "clutch"];
+  if (season === "winter") return ["satchel", "shoulder", "crossbody", "backpack"];
+  if (season === "fall") return ["satchel", "crossbody", "shoulder", "tote"];
+  return ["crossbody", "tote", "shoulder", "satchel"];
+}
+
 function scoreFootwearAestheticCompatibility(
   sourceStyle: StyleProfile,
   candidateTitle: string,
@@ -921,6 +1043,15 @@ function isSkirtBottomCue(value: string): boolean {
 function isCozyTopAnchor(source: { title?: string | null; category?: string | null; description?: string | null }): boolean {
   const text = normalizeStyleToken(`${source.title || ""} ${source.category || ""} ${source.description || ""}`);
   return /\b(sweater|hoodie|sweatshirt|cardigan|knit|wool|fleece|crew neck|crew-neck)\b/.test(text);
+}
+
+function isSportAnchorProduct(source: {
+  title?: string | null;
+  category?: string | null;
+  description?: string | null;
+}): boolean {
+  const text = normalizeStyleToken(`${source.title || ""} ${source.category || ""} ${source.description || ""}`);
+  return /\b(legging|leggings|sports legging|activewear|sportswear|workout|gym|training|running|quick-drying|spandex|technical shorts?|track|athletic)\b/.test(text);
 }
 
 function isWinterAnchorProduct(source: { title?: string | null; category?: string | null; description?: string | null }, sourceStyle: StyleProfile): boolean {
@@ -982,7 +1113,7 @@ function calibrateSourceStyleFromAnchor(
   sourceStyle: StyleProfile,
 ): StyleProfile {
   const text = `${String(sourceProduct.title || "")} ${String(sourceProduct.category || "")} ${String(sourceProduct.description || "")}`.toLowerCase();
-  const sportCue = /\b(track|tracksuit|track pant|track pants|jogger|joggers|jogging|sweatpant|sweatpants|athletic|activewear|sportswear|gym|training|running|workout|fleece jogg)\b/;
+  const sportCue = /\b(track|tracksuit|track pant|track pants|jogger|joggers|jogging|sweatpant|sweatpants|athletic|activewear|sportswear|gym|training|running|workout|fleece jogg|legging|leggings|sports legging|technical shorts?|quick-drying|spandex)\b/;
   const formalBottomCue = /\b(tailored|trouser|trousers|slacks|dress pant|office pant|formal pant|pleated)\b/;
   const partyCue = /\b(sequin|metallic|party|cocktail|strapless|corset|bodycon|evening)\b/;
   const coolWeatherCue = /\b(sweater|cardigan|hoodie|sweatshirt|knit|knitted|wool|cashmere|fleece|thermal|long sleeve|long-sleeve|heavyweight)\b/;
@@ -1138,6 +1269,14 @@ function shouldHardRejectFashionCandidate(params: {
   }
 
   if (candidateFamily === "shoes") {
+    const shoeAssessment = assessShoeCandidate({
+      sourceStyle,
+      sourceFamily,
+      candidateTitle: candidateProduct.title,
+      candidateCategory: candidateProduct.category,
+      candidateDescription: candidateProduct.description,
+    });
+    if (shoeAssessment.isNoise || shoeAssessment.pipelineScore < 0.5) return true;
     // Dress anchors should prioritize feminine shoe silhouettes.
     if (sourceFamily === "dress" && !isFeminineShoeCue(candidateText)) {
       return true;
@@ -1151,6 +1290,15 @@ function shouldHardRejectFashionCandidate(params: {
   if (candidateFamily === "shoes" && footwearOccasionScore < minimumOccasionCompatibilityForFamily(sourceStyle.occasion, candidateFamily)) return true;
   if (candidateFamily === "bags" && bagOccasionScore < minimumOccasionCompatibilityForFamily(sourceStyle.occasion, candidateFamily)) return true;
   if (candidateFamily === "bags" && !isStrictBagProduct(candidateProduct.title, candidateProduct.category, candidateProduct.description)) return true;
+  if (candidateFamily === "tops") {
+    const topAssessment = assessTopCandidate({
+      sourceStyle,
+      candidateTitle: candidateProduct.title,
+      candidateCategory: candidateProduct.category,
+      candidateDescription: candidateProduct.description,
+    });
+    if (topAssessment.isNoise || topAssessment.pipelineScore < 0.48) return true;
+  }
   if (candidateFamily === "bags") {
     const bagAssessment = assessBagCandidate(`${candidateProduct.title || ""} ${candidateProduct.category || ""} ${candidateProduct.description || ""}`);
     if (bagAssessment.pipelineScore < 0.58) return true;
@@ -1162,6 +1310,28 @@ function shouldHardRejectFashionCandidate(params: {
     isSportBottomCue(`${candidateProduct.title || ""} ${candidateProduct.category || ""}`)
   ) {
     return true;
+  }
+  if (
+    sourceFamily === "bottoms" &&
+    isSportAnchorProduct(sourceProduct) &&
+    candidateFamily === "tops"
+  ) {
+    const topText = `${candidateProduct.title || ""} ${candidateProduct.category || ""}`;
+    const sportyTopCue = /\b(t-?shirt|tee|tank|sports bra|hoodie|sweatshirt|active|athletic|running|training|gym)\b/;
+    const nonSportTopCue = /\b(strapless|corset|blouse|dress shirt|formal shirt|sequin|party top|silk top)\b/;
+    if (nonSportTopCue.test(normalizeStyleToken(topText))) return true;
+    if (!sportyTopCue.test(normalizeStyleToken(topText))) return true;
+  }
+  if (
+    sourceFamily === "bottoms" &&
+    isSportAnchorProduct(sourceProduct) &&
+    candidateFamily === "accessories"
+  ) {
+    const accText = `${candidateProduct.title || ""} ${candidateProduct.category || ""}`;
+    const allowedActiveAccessoryCue = /\b(cap|beanie|headband|sport watch|fitness watch|sunglasses|wristband)\b/;
+    const blockedAccessoryCue = /\b(belt|necklace|bracelet|earring|ring|pearl|clutch chain)\b/;
+    if (blockedAccessoryCue.test(normalizeStyleToken(accText))) return true;
+    if (!allowedActiveAccessoryCue.test(normalizeStyleToken(accText))) return true;
   }
   if (
     candidateFamily === "bottoms" &&
@@ -1896,9 +2066,28 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       candidateFamily === "shoes"
         ? scoreFootwearOccasionCompatibility(params.sourceStyle.occasion, candidateProduct.title, candidateProduct.category)
         : 1;
+    const shoePipelineScore =
+      candidateFamily === "shoes"
+        ? assessShoeCandidate({
+            sourceStyle: params.sourceStyle,
+            sourceFamily,
+            candidateTitle: candidateProduct.title,
+            candidateCategory: candidateProduct.category,
+            candidateDescription: candidateProduct.description,
+          }).pipelineScore
+        : 1;
     const bagOccasionScore =
       candidateFamily === "bags"
         ? scoreBagOccasionCompatibility(params.sourceStyle.occasion, candidateProduct.title, candidateProduct.category)
+        : 1;
+    const topPipelineScore =
+      candidateFamily === "tops"
+        ? assessTopCandidate({
+            sourceStyle: params.sourceStyle,
+            candidateTitle: candidateProduct.title,
+            candidateCategory: candidateProduct.category,
+            candidateDescription: candidateProduct.description,
+          }).pipelineScore
         : 1;
     const bagPipelineScore =
       candidateFamily === "bags"
@@ -1928,6 +2117,8 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       seasonScore * 0.07 +
       weatherScore * 0.09 +
       aestheticGarmentScore * 0.08 +
+      topPipelineScore * 0.08 +
+      shoePipelineScore * 0.1 +
       footwearAestheticScore * 0.08 +
       footwearOccasionScore * 0.16 +
       bagOccasionScore * 0.1 +
@@ -1936,7 +2127,7 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       patternOverlap * 0.06 +
       materialOverlap * 0.04 +
       priceScore * 0.02;
-    const fashionScore = Math.max(0, Math.min(1, fashionScoreRaw / 1.32));
+    const fashionScore = Math.max(0, Math.min(1, fashionScoreRaw / 1.5));
 
     const retrievalScore = Math.max(0, Math.min(1, s.score || 0));
     let finalScore = Math.round((fashionScore * 0.7 + retrievalScore * 0.3) * 1000) / 1000;
@@ -1946,6 +2137,7 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       const bagAssessment = assessBagCandidate(bagText);
       const subtype = bagAssessment.subtype;
       const preferred = preferredBagSubtypesByOccasion(params.sourceStyle.occasion);
+      const seasonalPreferred = preferredBagSubtypesBySeason(params.sourceStyle.season);
       const hasAccessoryLikeCategory = /\b(accessories?|wallet|card holder|card case|keychain|key ring|strap|charm|coin purse|phone case)\b/.test(
         normalizeStyleToken(candidateProduct.category)
       );
@@ -1961,10 +2153,19 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       if (preferred.includes(subtype)) {
         finalScore = Math.round(Math.min(1, finalScore * 1.08) * 1000) / 1000;
       }
+      if (seasonalPreferred.includes(subtype)) {
+        finalScore = Math.round(Math.min(1, finalScore * 1.05) * 1000) / 1000;
+      }
     }
 
     if (candidateFamily === "shoes" && footwearOccasionScore < 0.45) {
       finalScore = Math.round(finalScore * 0.72 * 1000) / 1000;
+    }
+    if (candidateFamily === "shoes" && shoePipelineScore < 0.52) {
+      finalScore = Math.round(finalScore * 0.62 * 1000) / 1000;
+    }
+    if (candidateFamily === "tops" && topPipelineScore < 0.5) {
+      finalScore = Math.round(finalScore * 0.64 * 1000) / 1000;
     }
     if (candidateFamily === "shoes" && footwearAestheticScore < 0.55) {
       finalScore = Math.round(finalScore * 0.66 * 1000) / 1000;
@@ -2078,7 +2279,7 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     .filter((row) => !isHeadbandLikeRecommendation(row))
     .filter((row) => {
       const family = categoryFamily(row.category);
-      const minScore = family === "bags" ? 0.52 : family === "shoes" || family === "accessories" ? 0.43 : 0.5;
+      const minScore = family === "bags" ? 0.44 : family === "shoes" ? 0.38 : family === "tops" ? 0.42 : family === "accessories" ? 0.43 : 0.5;
       return (row.score || 0) >= minScore;
     })
     .sort((a, b) => (b.score || 0) - (a.score || 0));
@@ -2297,9 +2498,10 @@ function correctDetectedSourceCategory(
   const hasShoeCue = /\b(shoe|sneaker|boot|heel|loafer|sandal|flat|trainer)\b/.test(text);
   const hasBagCue = /\b(bag|crossbody|clutch|tote|backpack)\b/.test(text);
 
-  // Strong correction for obvious bottoms mislabeled as tops.
-  if (hasBottomCue && !hasTopCue) return "pants" as ProductCategory;
+  // Dress cues must win before bottom cues to avoid false "pants" on dress descriptions.
   if (hasDressCue) return "dress" as ProductCategory;
+  // Strong correction for obvious bottoms mislabeled as tops.
+  if (hasBottomCue && !hasTopCue && !hasDressCue) return "pants" as ProductCategory;
   if (hasShoeCue) {
     if (/\b(heel|pump|stiletto)\b/.test(text)) return "heels" as ProductCategory;
     if (/\b(boot|boots)\b/.test(text)) return "boots" as ProductCategory;
@@ -2340,6 +2542,9 @@ function mapCompleteLookToStyleResponse(params: {
   const reasons = new Map<string, string>();
   const sourceText = `${String(sourceProduct.title || "")} ${String(sourceProduct.category || "")} ${String(sourceProduct.description || "")}`.toLowerCase();
   const sourceLooksCozyTop = /\b(cardigan|sweater|sweatshirt|hoodie|knit|wool|cashmere|fleece)\b/.test(sourceText);
+  const sourceIsDressAnchor =
+    /\b(dress|gown|midi dress|mini dress|maxi dress)\b/.test(sourceText) ||
+    categoryFamily(detectedCategory) === "dress";
 
   const shouldKeepMappedSuggestion = (categoryLabel: string, s: CompleteLookMappedSuggestion): boolean => {
     const text = `${String(s.title || "")} ${String(s.category || "")}`.toLowerCase();
@@ -2389,6 +2594,16 @@ function mapCompleteLookToStyleResponse(params: {
       return false;
     }
 
+    // Hard dress-shoe gate in mapped response path.
+    if (categoryLabel === "Shoes" && sourceIsDressAnchor) {
+      const isSneakerLike = /\b(sneaker|sneakers|trainer|trainers|tennis shoe|running shoe|athletic shoes?|sportswear shoes?)\b/.test(text);
+      if (isSneakerLike) return false;
+      const dressyLike = /\b(heel|heels|pump|pumps|stiletto|stilettos|sandal|sandals|dress sandal|mule|mules|ballet flat|ballerina|slingback|kitten heel|espadrille)\b/.test(text);
+      if (!dressyLike && (sourceStyle.occasion === "party" || sourceStyle.occasion === "formal" || sourceStyle.occasion === "semi-formal")) {
+        return false;
+      }
+    }
+
     // Cozy winter-like tops should avoid skirts unless clearly party/formal or summer.
     if (
       categoryLabel === "Bottoms" &&
@@ -2417,19 +2632,38 @@ function mapCompleteLookToStyleResponse(params: {
       const sameSubtypeCount = bucket.filter((item) =>
         footwearSubtypeLabel(item.title) === subtype
       ).length;
-      if (sameSubtypeCount >= 1) continue;
       const normalizedBrand = String(s.brand || "").toLowerCase().trim();
       const sameBrandCount = bucket.filter(
         (item) => String(item.brand || "").toLowerCase().trim() === normalizedBrand
       ).length;
-      if (normalizedBrand && sameBrandCount >= 1) continue;
+      // Diversity-aware caps: prevent monotony but avoid collapsing to too few results.
+      if (bucket.length >= 2 && sameSubtypeCount >= 2) continue;
+      if (bucket.length >= 2 && normalizedBrand && sameBrandCount >= 2) continue;
+    }
+    if (categoryLabel === "Tops") {
+      const subtype = topSubtypeLabel(`${s.title || ""} ${s.category || ""}`);
+      const sameSubtypeCount = bucket.filter(
+        (item) => topSubtypeLabel(item.title) === subtype
+      ).length;
+      const normalizedBrand = String(s.brand || "").toLowerCase().trim();
+      const sameBrandCount = bucket.filter(
+        (item) => String(item.brand || "").toLowerCase().trim() === normalizedBrand
+      ).length;
+      if (bucket.length >= 2 && sameSubtypeCount >= 2) continue;
+      if (bucket.length >= 3 && normalizedBrand && sameBrandCount >= 2) continue;
     }
     if (categoryLabel === "Bags") {
       const normalizedBrand = String(s.brand || "").toLowerCase().trim();
+      const subtype = bagSubtypeLabel(`${s.title || ""} ${s.category || ""}`);
+      const sameSubtypeCount = bucket.filter(
+        (item) => bagSubtypeLabel(item.title) === subtype
+      ).length;
       const sameBrandCount = bucket.filter(
         (item) => String(item.brand || "").toLowerCase().trim() === normalizedBrand
       ).length;
-      if (normalizedBrand && sameBrandCount >= 1) continue;
+      // Diversity-aware caps for bags: allow depth, avoid monotony.
+      if (bucket.length >= 2 && sameSubtypeCount >= 2) continue;
+      if (bucket.length >= 2 && normalizedBrand && sameBrandCount >= 2) continue;
     }
 
     bucket.push({
