@@ -2558,6 +2558,8 @@ function mapCompleteLookToStyleResponse(params: {
     /\b(heel|heels|pump|pumps|stiletto|stilettos|sandal|sandals|dress sandal|mule|mules|ballet flat|ballerina|slingback|kitten heel|espadrille|loafer|loafers)\b/.test(value);
   const isRealBagLike = (value: string): boolean =>
     /\b(tote|crossbody|clutch|satchel|backpack|shoulder bag|handbag|hobo|messenger|bucket bag|top handle|mini bag)\b/.test(value);
+  const looksLikeBagAccessoryNoise = (value: string): boolean =>
+    /\b(wallet|card holder|card case|keychain|key ring|strap|bag charm|coin purse|phone case)\b/.test(value);
 
   const stagedSuggestions = completeLookResult.suggestions
     .slice()
@@ -2571,9 +2573,8 @@ function mapCompleteLookToStyleResponse(params: {
       const bagAccessoryOnly = /\bbag accessories?\b/.test(text);
       const realBagSubtype = /\b(tote|crossbody|clutch|satchel|backpack|shoulder bag|handbag|hobo|messenger|bucket bag|top handle|mini bag)\b/.test(text);
       // Hard ban noisy bag-accessories bucket for bag recommendations.
-      if (bagAccessoryOnly) return false;
-      if (!realBagSubtype) return false;
-      if (/\b(wallet|card holder|card case|keychain|key ring|strap|bag charm|coin purse|phone case)\b/.test(text)) return false;
+      if (bagAccessoryOnly && !realBagSubtype) return false;
+      if (looksLikeBagAccessoryNoise(text)) return false;
     }
 
     // For classic/minimalist moderate+ formality, remove sporty bottoms.
@@ -2714,15 +2715,18 @@ function mapCompleteLookToStyleResponse(params: {
       if (bucket.some((b) => b.id === productId)) continue;
 
       if (categoryLabel === "Shoes") {
-        if (!isShoeLike(text)) continue;
+        const familyLooksShoes = categoryFamily(s.category) === "shoes";
+        if (!isShoeLike(text) && !familyLooksShoes) continue;
         if (sourceIsDressyOccasion && sourceIsDressAnchor) {
           if (isSneakerLike(text)) continue;
-          if (!isDressyShoeLike(text)) continue;
+          // Prefer dressy shoes, but don't force-empty category if metadata is noisy.
+          if (!isDressyShoeLike(text) && bucket.length === 0) continue;
         }
       } else {
-        if (/\bbag accessories?\b/.test(text)) continue;
-        if (!isRealBagLike(text)) continue;
-        if (/\b(wallet|card holder|card case|keychain|key ring|strap|bag charm|coin purse|phone case)\b/.test(text)) continue;
+        const familyLooksBags = categoryFamily(s.category) === "bags";
+        if (looksLikeBagAccessoryNoise(text)) continue;
+        // Accept true bag subtype OR bag family classification for fallback fill.
+        if (!isRealBagLike(text) && !familyLooksBags) continue;
       }
 
       bucket.push({

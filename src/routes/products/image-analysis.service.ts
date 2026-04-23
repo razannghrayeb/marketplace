@@ -2334,6 +2334,43 @@ function normalizeLooseText(v: unknown): string {
     .trim();
 }
 
+function detectionIoU(
+  a: { x1: number; y1: number; x2: number; y2: number },
+  b: { x1: number; y1: number; x2: number; y2: number },
+): number {
+  const x1 = Math.max(a.x1, b.x1);
+  const y1 = Math.max(a.y1, b.y1);
+  const x2 = Math.min(a.x2, b.x2);
+  const y2 = Math.min(a.y2, b.y2);
+  const iw = Math.max(0, x2 - x1);
+  const ih = Math.max(0, y2 - y1);
+  const inter = iw * ih;
+  if (inter <= 0) return 0;
+  const areaA = Math.max(0, a.x2 - a.x1) * Math.max(0, a.y2 - a.y1);
+  const areaB = Math.max(0, b.x2 - b.x1) * Math.max(0, b.y2 - b.y1);
+  const denom = areaA + areaB - inter;
+  if (denom <= 0) return 0;
+  return inter / denom;
+}
+
+function dedupeOverlappingDetections<T extends { label: string; confidence: number; box: { x1: number; y1: number; x2: number; y2: number } }>(
+  detections: T[],
+  iouThreshold = 0.72,
+): T[] {
+  if (!Array.isArray(detections) || detections.length <= 1) return detections;
+  const sorted = [...detections].sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0));
+  const kept: T[] = [];
+  for (const det of sorted) {
+    const normLabel = normalizeLooseText(det.label);
+    const duplicate = kept.some((k) => {
+      if (normalizeLooseText(k.label) !== normLabel) return false;
+      return detectionIoU(det.box, k.box) >= iouThreshold;
+    });
+    if (!duplicate) kept.push(det);
+  }
+  return kept;
+}
+
 function textHasWholePhrase(haystack: string, phrase: string): boolean {
   if (!haystack || !phrase) return false;
   const q = normalizeLooseText(phrase);
@@ -7184,9 +7221,10 @@ export class ImageAnalysisService {
       } as DetectionWithColor;
     });
 
+    const coherenceDetections = dedupeOverlappingDetections(itemsForCoherence);
     const outfitCoherence =
-      itemsForCoherence.length > 0
-        ? computeOutfitCoherence(itemsForCoherence)
+      coherenceDetections.length > 0
+        ? computeOutfitCoherence(coherenceDetections)
         : undefined;
 
     if (process.env.NODE_ENV !== "production" || String(process.env.SEARCH_DEBUG ?? "") === "1") {
@@ -8734,9 +8772,10 @@ export class ImageAnalysisService {
       });
     }
 
+    const coherenceDetections = dedupeOverlappingDetections(itemsForCoherence);
     const outfitCoherence =
-      itemsForCoherence.length > 0
-        ? computeOutfitCoherence(itemsForCoherence)
+      coherenceDetections.length > 0
+        ? computeOutfitCoherence(coherenceDetections)
         : undefined;
 
     if (process.env.NODE_ENV !== "production" || String(process.env.SEARCH_DEBUG ?? "") === "1") {
