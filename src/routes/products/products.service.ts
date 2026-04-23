@@ -4992,12 +4992,13 @@ export async function searchByImageWithSimilarity(
     // Primary: finalRelevance01 descending (incorporates visual + metadata signals).
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
     const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
+    const detectionCategoryForSort = String(params.detectionProductCategory ?? "").toLowerCase().trim();
     const topsColorOrderingWindow =
-      detectionCategoryForFinalGate === "tops" && hasDetectionAnchoredTypeIntent ? 0.08 : 0.04;
+      detectionCategoryForSort === "tops" && hasDetectionAnchoredTypeIntent ? 0.08 : 0.04;
     if (hasColorIntentForFinal && Math.abs(fb - fa) <= topsColorOrderingWindow) {
       const ca = complianceById.get(ida)?.colorCompliance ?? 0;
       const cb = complianceById.get(idb)?.colorCompliance ?? 0;
-      const minColorDelta = detectionCategoryForFinalGate === "tops" ? 0.02 : 0.03;
+      const minColorDelta = detectionCategoryForSort === "tops" ? 0.02 : 0.03;
       if (Math.abs(cb - ca) >= minColorDelta) return cb - ca;
     }
     if (Math.abs(fb - fa) > 1e-6) return fb - fa;
