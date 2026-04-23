@@ -188,6 +188,7 @@ export interface ProductResult {
   image_url?: string;
   image_cdn?: string;
   images?: Array<{ id: number; url: string; is_primary: boolean }>;
+  product_url?: string | null;
   parent_product_url?: string | null;
   variant_group_key?: string | null;
   variant_group_size?: number;
