@@ -102,12 +102,29 @@ export interface UnifiedImageSearchParams {
   collapseVariantGroups?: boolean;
 }
 
+function normalizeParentUrlKey(raw: string | null | undefined): string {
+  const cleaned = String(raw ?? "").trim();
+  if (!cleaned) return "";
+  try {
+    const u = new URL(cleaned);
+    const parts = u.pathname.split("/").filter(Boolean);
+    if (parts.length > 0 && /^[a-z]{2}(?:-[a-z]{2})?$/i.test(parts[0])) {
+      parts.shift();
+    }
+    return `${u.origin.toLowerCase()}/${parts.join("/").toLowerCase()}`;
+  } catch {
+    const withoutFragment = cleaned.split("#")[0];
+    const withoutQuery = withoutFragment.split("?")[0];
+    return withoutQuery.toLowerCase();
+  }
+}
+
 function collapseByParentProduct<T extends ProductResult>(items: T[] | undefined): T[] | undefined {
   if (!items || items.length <= 1) return items;
   const out: T[] = [];
   const seen = new Set<string>();
   for (const item of items) {
-    const parent = String(item.parent_product_url ?? "").trim().toLowerCase();
+    const parent = normalizeParentUrlKey(item.parent_product_url ?? "");
     const vendor = String(item.vendor_id ?? "").trim();
     const key = parent ? `${vendor}|${parent}` : `${vendor}|__id_${String(item.id)}`;
     if (seen.has(key)) continue;

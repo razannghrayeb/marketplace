@@ -12,6 +12,23 @@ import { getImagesForProducts } from "../../routes/products/images.service";
 const LBP_TO_USD = 89000;
 const BROWSE_GROUP_SCAN_CAP = 5000;
 
+function normalizeParentUrlKey(raw: string): string {
+  const cleaned = String(raw ?? "").trim();
+  if (!cleaned) return "";
+  try {
+    const u = new URL(cleaned);
+    const parts = u.pathname.split("/").filter(Boolean);
+    if (parts.length > 0 && /^[a-z]{2}(?:-[a-z]{2})?$/i.test(parts[0])) {
+      parts.shift();
+    }
+    return `${u.origin.toLowerCase()}/${parts.join("/").toLowerCase()}`;
+  } catch {
+    const withoutFragment = cleaned.split("#")[0];
+    const withoutQuery = withoutFragment.split("?")[0];
+    return withoutQuery.toLowerCase();
+  }
+}
+
 function appendBrowseFilters(filter: any[], filters: SearchFilters): void {
   if (filters.category) {
     if (Array.isArray(filters.category)) {
@@ -99,12 +116,8 @@ export async function searchProductsFilteredBrowse(params: {
       const productId = String(src.product_id ?? "").trim();
       if (!productId) continue;
 
-      const parentRaw = String(src.parent_product_url ?? "").trim().toLowerCase();
-      const parentFromUrl = String(src.product_url ?? "")
-        .split("#")[0]
-        .split("?")[0]
-        .trim()
-        .toLowerCase();
+      const parentRaw = normalizeParentUrlKey(String(src.parent_product_url ?? ""));
+      const parentFromUrl = normalizeParentUrlKey(String(src.product_url ?? ""));
       const parentKey = parentRaw || parentFromUrl || `__id_${productId}`;
       const vendorKey = String(src.vendor_id ?? "").trim() || "__vendor";
       const groupKey = `${vendorKey}|${parentKey}`;
