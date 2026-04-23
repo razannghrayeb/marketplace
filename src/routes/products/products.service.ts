@@ -1773,6 +1773,19 @@ function imageKnnEfSearch(): number {
   return 128;
 }
 
+function imageKnnNumCandidates(k: number): number {
+  const rawEnv = process.env.SEARCH_IMAGE_NUM_CANDIDATES;
+  if (rawEnv !== undefined && String(rawEnv).trim() !== "") {
+    const raw = Number(rawEnv);
+    if (Number.isFinite(raw) && raw > 0) {
+      return Math.max(k, Math.min(5000, Math.floor(raw)));
+    }
+  }
+  // Keep ANN neighborhood substantially wider than k so relevant items survive
+  // approximate search before downstream constraints/rerank.
+  return Math.max(k, Math.min(5000, Math.max(k * 4, 800)));
+}
+
 function mergeKnnHitsByProductId(primary: any[], extra: any[], cap: number): any[] {
   const byId = new Map<string, any>();
   const mergeOne = (hit: any) => {
@@ -1799,7 +1812,11 @@ function mergeKnnHitsByProductId(primary: any[], extra: any[], cap: number): any
 }
 
 function knnQueryInner(vector: number[], k: number, ef: number): Record<string, unknown> {
-  const inner: Record<string, unknown> = { vector, k };
+  const inner: Record<string, unknown> = {
+    vector,
+    k,
+    num_candidates: imageKnnNumCandidates(k),
+  };
   if (ef > 0) inner.ef_search = ef;
   return inner;
 }

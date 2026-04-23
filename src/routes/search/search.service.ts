@@ -1813,7 +1813,8 @@ export async function textSearch(
     const countAfterFinalAcceptMin = thresholdPassedIds.length;
 
     const strictColorTypeIntent = hasStrictColorTypeIntent(rawQuery, ast, hasProductTypeConstraint);
-    const relevanceGateSoft = config.search.relevanceGateMode === "soft" && !strictColorTypeIntent;
+    // User preference: always run text search in strict mode.
+    const relevanceGateSoft = false;
     const softFloorMin = config.search.softFinalRelevanceFloorMin;
 
     // #region agent log
