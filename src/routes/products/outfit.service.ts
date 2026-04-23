@@ -1826,6 +1826,7 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
 
   return enriched
     .filter((row): row is NonNullable<typeof row> => row !== null)
+    .filter((row) => !isHeadbandLikeRecommendation(row))
     .filter((row) => {
       const family = categoryFamily(row.category);
       const minScore = family === "shoes" || family === "bags" || family === "accessories" ? 0.43 : 0.5;
@@ -1883,6 +1884,18 @@ function completeStyleCategoryLabel(raw?: string): string {
   if (c.includes("wallet") || c.includes("accessor") || c.includes("watch") || c.includes("scarf") || c.includes("hat") || c.includes("belt") || c.includes("jewel") || c.includes("jewelry") || c.includes("sunglass")) return "Accessories";
   if (c === "recommended") return "Accessories";
   return c.charAt(0).toUpperCase() + c.slice(1);
+}
+
+function isHeadbandLikeRecommendation(item: {
+  title?: string | null;
+  category?: string | null;
+  description?: string | null;
+}): boolean {
+  const text = `${String(item.title || "")} ${String(item.category || "")} ${String(item.description || "")}`
+    .toLowerCase()
+    .trim();
+  if (!text) return false;
+  return /\b(headband|head band|hairband|hair band|hair accessory|scrunchie)\b/.test(text);
 }
 
 function completeStylePriorityFromCategory(categoryLabel: string, missingCategories: string[]): number {
@@ -2092,6 +2105,7 @@ function applyCompleteStyleOptionFilters(
   const sourceBrand = String(sourceProduct.brand || "").toLowerCase().trim();
 
   let out = suggestions.filter((s) => {
+    if (isHeadbandLikeRecommendation(s)) return false;
     const brand = String(s.brand || "").toLowerCase().trim();
     if (excludedBrands.size > 0 && brand && excludedBrands.has(brand)) return false;
     const price = typeof s.price_cents === "number" && Number.isFinite(s.price_cents) ? Math.round(s.price_cents) : null;

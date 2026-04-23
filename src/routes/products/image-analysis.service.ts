@@ -533,7 +533,13 @@ async function getCachedCaption(buffer: Buffer, scope: "full" | "det"): Promise<
     }
   }
 
-  const caption = await captionWithTimeout(buffer);
+  let caption = await captionWithTimeout(buffer);
+  // Full-image captions are more critical for intent; retry once on empty result
+  // to reduce transient nulls from timeout/load spikes.
+  if (!caption.trim() && scope === "full") {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    caption = await captionWithTimeout(buffer);
+  }
   if (caption.trim().length > 0) {
     const ttlSec = imageBlipCacheTtlSec();
     const ttlMs = ttlSec * 1000;
@@ -789,6 +795,12 @@ function formalityToAttrStyleToken(formality: number): string {
   return "casual";
 }
 
+function formalityToOccasionToken(formality: number): "formal" | "semi-formal" | "casual" {
+  if (formality >= 8) return "formal";
+  if (formality >= 6) return "semi-formal";
+  return "casual";
+}
+
 /** Extract formality intent from BLIP full-image caption. Returns 8+ for formal wear, 0 for no formal cue. */
 function inferFormalityFromCaption(caption: string): number {
   const s = String(caption || "").toLowerCase();
@@ -813,7 +825,7 @@ function inferStyleForDetectionLabel(label: string): {
 } {
   const formality = inferFormalityFromLabel(label);
   const attrStyle = formalityToAttrStyleToken(formality);
-  const occasion = formality >= 7 ? "formal" : "casual";
+  const occasion = formalityToOccasionToken(formality);
   const aesthetic = formality >= 8 ? "elegant" : undefined;
   return { formality, attrStyle, style: { occasion, aesthetic, formality } };
 }
@@ -1002,6 +1014,16 @@ function ensureStyleAndMask(detection: Detection, imageWidth: number, imageHeigh
   const needsStyle = !next.style || typeof next.style.formality !== "number";
   if (needsStyle) {
     next.style = inferStyleForDetectionLabel(next.label).style;
+  } else if (next.style) {
+    // Normalize externally provided style so formality and occasion are consistent.
+    const normalizedFormality = Math.max(0, Math.min(10, Number(next.style.formality ?? 0)));
+    const normalizedOccasion = formalityToOccasionToken(normalizedFormality);
+    next.style = {
+      ...next.style,
+      formality: normalizedFormality,
+      occasion: normalizedOccasion,
+      aesthetic: normalizedFormality >= 8 ? next.style.aesthetic ?? "elegant" : next.style.aesthetic,
+    };
   }
 
   // Mask fallback: approximate a segmentation polygon from the bounding box.
@@ -1091,10 +1113,65 @@ function correctDetectionByPosition(detection: Detection): Detection {
   return detection;
 }
 
-/** Max concurrent OpenSearch kNN calls per shop-the-look request (default 6). */
-function shopLookPerDetectionConcurrency(): number {
+function parseDetectionConcurrencyOverride(raw: unknown): number | null {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.floor(n);
+}
+
+function categoryConcurrencyOverride(category: string): number | null {
+  const normalized = String(category || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_");
+  if (!normalized) return null;
+
+  const exact = parseDetectionConcurrencyOverride(
+    process.env[`SEARCH_IMAGE_SHOP_DETECTION_CONCURRENCY_${normalized}`],
+  );
+  if (exact != null) return exact;
+
+  if (normalized === "TOP" || normalized === "TOPS") {
+    return parseDetectionConcurrencyOverride(process.env.SEARCH_IMAGE_SHOP_DETECTION_CONCURRENCY_TOPS);
+  }
+  if (normalized === "DRESS" || normalized === "DRESSES") {
+    return parseDetectionConcurrencyOverride(process.env.SEARCH_IMAGE_SHOP_DETECTION_CONCURRENCY_DRESSES);
+  }
+  if (normalized === "SHOE" || normalized === "SHOES" || normalized === "FOOTWEAR") {
+    return parseDetectionConcurrencyOverride(process.env.SEARCH_IMAGE_SHOP_DETECTION_CONCURRENCY_FOOTWEAR);
+  }
+  if (normalized === "BAG" || normalized === "BAGS") {
+    return parseDetectionConcurrencyOverride(process.env.SEARCH_IMAGE_SHOP_DETECTION_CONCURRENCY_BAGS);
+  }
+  return null;
+}
+
+/** Max concurrent OpenSearch kNN calls per shop-the-look request (default 8). */
+function shopLookPerDetectionConcurrency(detections?: Array<{ label: string; confidence?: number }>): number {
   const raw = Number(process.env.SEARCH_IMAGE_SHOP_DETECTION_CONCURRENCY);
-  const n = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 6;
+  // Slightly higher default improves latency when 3-6 detections are present
+  // without changing retrieval/ranking behavior.
+  let n = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 8;
+
+  if (Array.isArray(detections) && detections.length > 0) {
+    // Use dominant detection category to allow path/category-specific tuning.
+    const byCategory = new Map<string, number>();
+    for (const detection of detections) {
+      const mapped = mapDetectionToCategory(
+        String(detection.label || ""),
+        Number(detection.confidence ?? 0),
+      );
+      const key = String(mapped?.productCategory || "").trim().toLowerCase();
+      if (!key) continue;
+      byCategory.set(key, (byCategory.get(key) ?? 0) + 1);
+    }
+    const dominantCategory = [...byCategory.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+    if (dominantCategory) {
+      const override = categoryConcurrencyOverride(dominantCategory);
+      if (override != null) n = override;
+    }
+  }
+
   // Avoid accidental fully-serial per-detection execution unless explicitly allowed.
   const allowSerial = String(process.env.SEARCH_IMAGE_SHOP_ALLOW_SERIAL_DETECTION ?? "").toLowerCase() === "1";
   const minConcurrency = allowSerial ? 1 : 3;
@@ -4563,7 +4640,7 @@ export class ImageAnalysisService {
       const hasBottom = /\b(skirt|pants|trousers|jeans|shorts|bottom)\b/.test(detectionLabels);
       const captionMainItem = normalizeLooseText(blipStructured.mainItem);
       if (captionMainItem.includes("dress") && hasTop && hasBottom) {
-        blipCaption = null;
+        // Keep raw caption text to avoid null; suppress only structured hints/signals.
         blipStructured = buildStructuredBlipOutput("");
         blipStructuredConfidence = 0;
         fullBlipSignal = undefined;
@@ -4661,7 +4738,9 @@ export class ImageAnalysisService {
     similarityTimings.detectionSetupMs = Date.now() - detectionSetupStartedAt;
 
     // Per-detection work is concurrency-limited to avoid OpenSearch kNN pile-ups; CLIP still serializes in-process.
-    const detectionConcurrency = shopLookPerDetectionConcurrency();
+    const detectionConcurrency = shopLookPerDetectionConcurrency(
+      detectionJobs.map(({ detection }) => detection),
+    );
     const detectionCropEmbedDurations: number[] = [];
     const detectionBlipDurations: number[] = [];
     const detectionSearchFirstDurations: number[] = [];
@@ -7079,7 +7158,9 @@ export class ImageAnalysisService {
       i,
       isUserDefined: i >= itemsToProcess.length,
     }));
-    const selectiveDetectionConcurrency = shopLookPerDetectionConcurrency();
+    const selectiveDetectionConcurrency = shopLookPerDetectionConcurrency(
+      selectiveDetectionJobs.map(({ detection }) => detection),
+    );
     const selectiveSettled = await mapPoolSettled(
       selectiveDetectionJobs,
       selectiveDetectionConcurrency,

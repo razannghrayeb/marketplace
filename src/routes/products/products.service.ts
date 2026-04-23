@@ -2249,6 +2249,49 @@ function isAthleticCatalogCandidate(src: Record<string, unknown>): boolean {
   return athleticTokenRe.test(blob);
 }
 
+function hasTailoredTypeIntent(desiredProductTypes: string[]): boolean {
+  const desired = desiredProductTypes
+    .map((t) => String(t ?? "").toLowerCase().trim())
+    .filter(Boolean)
+    .join(" ");
+  if (!desired) return false;
+  return /\b(suit|suits|blazer|blazers|sport coat|dress jacket|waistcoat|vest|vests|trouser|trousers|dress pant|dress pants|slack|slacks|tailored)\b/.test(
+    desired,
+  );
+}
+
+function isTooCasualTopForTailoredIntent(src: Record<string, unknown>): boolean {
+  const blob = [
+    src.title,
+    src.description,
+    src.category,
+    src.category_canonical,
+    Array.isArray(src.product_types) ? src.product_types.join(" ") : src.product_types,
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x))
+    .join(" ")
+    .toLowerCase();
+  if (!blob.trim()) return false;
+  return /\b(t-?shirt|tee|sweatshirt|hoodie|sweater\s*hoodie|tracksuit top|track top|jersey)\b/.test(blob);
+}
+
+function isTooCasualBottomForTailoredIntent(src: Record<string, unknown>): boolean {
+  const blob = [
+    src.title,
+    src.description,
+    src.category,
+    src.category_canonical,
+    Array.isArray(src.product_types) ? src.product_types.join(" ") : src.product_types,
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x))
+    .join(" ")
+    .toLowerCase();
+  if (!blob.trim()) return false;
+  return /\b(jeans?|denim|jogger|joggers|sweatpants?|track\s*pants?|cargo(?:\s*pants?)?)\b/.test(blob);
+}
+
 const BAD_COLOR_CODE_MAP: Record<string, string> = {
   "20000": "white",
   "11014": "pink",
@@ -3329,15 +3372,20 @@ export async function searchByImageWithSimilarity(
 
   /** kNN size — wider when SEARCH_IMAGE_MERCHANDISE_SIMILARITY is on (see imageSearchKnnPoolLimit). */
   const retrievalKBase = imageCategoryAwareKnnPoolLimit(params.detectionProductCategory);
+  const dynamicDetectionPoolCap = Math.max(
+    320,
+    Math.min(imageDetectionKnnPoolCap(), Math.max(limit * 8, 320)),
+  );
   const retrievalK = detectionScoped
     ? (() => {
       const isTopDetection = isTopLikeDetectionCategory(params.detectionProductCategory);
-      if (!isTopDetection) return Math.min(retrievalKBase, imageDetectionKnnPoolCap());
+      if (!isTopDetection) return Math.min(retrievalKBase, dynamicDetectionPoolCap);
       const topCapEnv = Number(process.env.SEARCH_IMAGE_TOPS_DETECTION_KNN_POOL_CAP ?? "760");
       const topCap = Number.isFinite(topCapEnv)
         ? Math.max(260, Math.min(1200, Math.floor(topCapEnv)))
         : 760;
-      return Math.min(retrievalKBase, topCap);
+      const dynamicTopCap = Math.max(dynamicDetectionPoolCap, Math.max(420, Math.min(topCap, limit * 12)));
+      return Math.min(retrievalKBase, dynamicTopCap);
     })()
     : retrievalKBase;
 
@@ -3650,9 +3698,14 @@ export async function searchByImageWithSimilarity(
   // KNN sparse-recall fallback: when strict detection filters over-prune ANN candidates,
   // run one additional retrieval with category-safe relaxed filters and merge by product id.
   const sparseKnnMinHits = detectionScoped ? Math.min(retrievalK, Math.max(limit * 2, 24)) : 0;
+  const hasSufficientFirstPassCandidates =
+    detectionScoped &&
+    Array.isArray(hits) &&
+    hits.length >= Math.max(limit * 3, Math.min(120, retrievalK));
   const sparseKnnDetected =
     detectionScoped &&
     Array.isArray(hits) &&
+    !hasSufficientFirstPassCandidates &&
     (hits.length === 0 || hits.length < sparseKnnMinHits / 2);
 
   if (sparseKnnDetected && relaxedKnnFilter.length > 0) {
@@ -5726,6 +5779,25 @@ export async function searchByImageWithSimilarity(
     rankedHits = rankedHits.filter((h: any) => !isShortsCatalogCandidate((h as any)?._source ?? {}));
   }
 
+  const detectionCategoryNormForTailored = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  const isTailoredStyleIntent =
+    /\b(semi-formal|formal|business|tailored|smart)\b/i.test(desiredStyleForRelevance ?? "");
+  const isTailoredIntentForDetection =
+    hasDetectionAnchoredTypeIntent &&
+    (detectionCategoryNormForTailored === "tops" || detectionCategoryNormForTailored === "bottoms") &&
+    (isTailoredStyleIntent || hasTailoredTypeIntent(desiredProductTypes));
+  if (isTailoredIntentForDetection && rankedHits.length > 0) {
+    const tailoredSafeHits = rankedHits.filter((h: any) => {
+      const src = (h as any)?._source ?? {};
+      if (detectionCategoryNormForTailored === "tops") return !isTooCasualTopForTailoredIntent(src);
+      if (detectionCategoryNormForTailored === "bottoms") return !isTooCasualBottomForTailoredIntent(src);
+      return true;
+    });
+    if (tailoredSafeHits.length > 0) {
+      rankedHits = tailoredSafeHits;
+    }
+  }
+
   const maxHydrate = Math.min(
     rankedHits.length,
     Math.max(limit * 10, 150),
@@ -5781,6 +5853,13 @@ export async function searchByImageWithSimilarity(
       let explainColorCompliance = compliance?.colorCompliance;
       let explainMatchedColor = compliance?.matchedColor;
       let explainColorTier = compliance?.colorTier;
+      const hydratedBlobSrc = {
+        title: p.title,
+        category: p.category,
+        category_canonical: p.category,
+        description: p.description,
+        product_types: (p as any)?.product_types,
+      } as Record<string, unknown>;
 
       // Hard gate: reject sport/athletic brand products when fashion (non-sport) intent is detected.
       // Sport brands (Adidas, Nike, Puma, etc.) are only relevant for explicit sportswear searches.
@@ -5815,6 +5894,17 @@ export async function searchByImageWithSimilarity(
           // For weaker contexts, keep as low-confidence fallback only.
           finalRelevance01 = Math.min(finalRelevance01 ?? 0, 0.22);
           finalRelevanceSource = "sport_keyword_soft_cap";
+        }
+      } else if (isTailoredIntentForDetection) {
+        const shouldRejectForTailored =
+          detectionCategoryNormForTailored === "tops"
+            ? isTooCasualTopForTailoredIntent(hydratedBlobSrc)
+            : detectionCategoryNormForTailored === "bottoms"
+              ? isTooCasualBottomForTailoredIntent(hydratedBlobSrc)
+              : false;
+        if (shouldRejectForTailored) {
+          finalRelevance01 = 0;
+          finalRelevanceSource = "tailored_intent_casual_hard_gate";
         }
       } else if (
         hasColorIntentForFinal &&
@@ -6502,6 +6592,7 @@ export async function searchByImageWithSimilarity(
     const rescueIds = (exactPhashRows.rows ?? [])
       .map((r: any) => String(r.id))
       .filter((id: string) => !existing.has(id));
+    let exactInjected = false;
     if (rescueIds.length > 0) {
       const rescueProducts = await getProductsByIdsOrdered(rescueIds);
       const rescueNumericIds = rescueIds.map((id: string) => parseInt(id, 10)).filter(Number.isFinite);
@@ -6523,6 +6614,25 @@ export async function searchByImageWithSimilarity(
         };
       }) as ProductResult[];
       results = [...rescued, ...results].slice(0, limit);
+      exactInjected = true;
+    }
+    // Near-exact rescue for re-encoded files: same image can drift by 1-2 pHash bits.
+    if (!exactInjected) {
+      const nearExact = await findSimilarByPHash(ph, [...existing], 10, 2);
+      if (nearExact.length > 0) {
+        const rescuedNearExact = nearExact.map((p: any) => {
+          const sim = Number(p.similarity_score ?? 0);
+          const boosted = Math.max(0.97, Math.min(1, sim));
+          return {
+            ...p,
+            similarity_score: boosted,
+            match_type: "exact" as const,
+            rerankScore: 995,
+            finalRelevance01: boosted,
+          };
+        }) as ProductResult[];
+        results = [...rescuedNearExact, ...results].slice(0, limit);
+      }
     }
   }
 
@@ -6668,10 +6778,11 @@ export async function searchByImageWithSimilarity(
 async function findSimilarByPHash(
   pHash: string,
   excludeIds: string[],
-  limit: number = 10
+  limit: number = 10,
+  maxDistance: number = 12,
 ): Promise<ProductResult[]> {
   const hasIsHidden = await productsTableHasIsHiddenColumn();
-  const hiddenClause = hasIsHidden ? "AND is_hidden = false" : "";
+  const hiddenClause = hasIsHidden ? "AND p.is_hidden = false" : "";
   const excludeNumeric = excludeIds
     .map((id) => parseInt(id, 10))
     .filter(Number.isFinite);
@@ -6679,24 +6790,47 @@ async function findSimilarByPHash(
   const result =
     excludeNumeric.length > 0
       ? await pg.query(
-        `SELECT id, p_hash FROM products
-           WHERE p_hash IS NOT NULL ${hiddenClause}
-           AND id != ALL($1::int[])`,
+        `SELECT id, p_hash FROM (
+           SELECT p.id, p.p_hash
+             FROM products p
+            WHERE p.p_hash IS NOT NULL ${hiddenClause}
+           UNION ALL
+           SELECT p.id, pi.p_hash
+             FROM product_images pi
+             INNER JOIN products p ON p.id = pi.product_id
+            WHERE pi.p_hash IS NOT NULL ${hiddenClause}
+         ) hashes
+         WHERE id != ALL($1::int[])`,
         [excludeNumeric]
       )
       : await pg.query(
-        `SELECT id, p_hash FROM products
-           WHERE p_hash IS NOT NULL ${hiddenClause}`
+        `SELECT id, p_hash FROM (
+           SELECT p.id, p.p_hash
+             FROM products p
+            WHERE p.p_hash IS NOT NULL ${hiddenClause}
+           UNION ALL
+           SELECT p.id, pi.p_hash
+             FROM product_images pi
+             INNER JOIN products p ON p.id = pi.product_id
+            WHERE pi.p_hash IS NOT NULL ${hiddenClause}
+         ) hashes`
       );
 
   // Calculate Hamming distance and filter similar
-  const similar: Array<{ id: number; distance: number }> = [];
+  const bestDistanceById = new Map<number, number>();
   for (const row of result.rows) {
     const distance = hammingDistance(pHash, row.p_hash);
-    if (distance <= 12) { // ~80% similar (12/64 bits different)
-      similar.push({ id: row.id, distance });
+    if (distance <= maxDistance) { // configurable pHash tolerance (default: ~80% similar)
+      const idNum = Number(row.id);
+      const best = bestDistanceById.get(idNum);
+      if (best == null || distance < best) {
+        bestDistanceById.set(idNum, distance);
+      }
     }
   }
+  const similar: Array<{ id: number; distance: number }> = [...bestDistanceById.entries()].map(
+    ([id, distance]) => ({ id, distance }),
+  );
 
   // Sort by similarity (lower distance = more similar)
   similar.sort((a, b) => a.distance - b.distance);
