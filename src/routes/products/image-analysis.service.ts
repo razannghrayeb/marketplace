@@ -2871,6 +2871,8 @@ function applyRelevanceThresholdFilter(
     desiredColor?: string | string[];
   },
 ): ProductResult[] {
+  const relevanceDebugEnabled =
+    process.env.NODE_ENV !== "production" || String(process.env.SEARCH_DEBUG ?? "") === "1";
   if (!minRelevance || minRelevance <= 0 || !Array.isArray(products) || products.length === 0) {
     return products;
   }
@@ -2951,6 +2953,11 @@ function applyRelevanceThresholdFilter(
           .filter((c) => c.length > 0);
         const whiteIntentRegex = /^(white|off[\s-]?white|ivory|cream|ecru)$/;
         const hasStrongWhiteIntent = desiredColors.some((c) => whiteIntentRegex.test(c));
+        if (relevanceDebugEnabled) {
+          console.log(
+            `[relevance-debug] detection="${options?.detectionLabel ?? "unknown"}" category="bottoms" desiredColors=[${desiredColors.join(", ")}] strongWhiteIntent=${hasStrongWhiteIntent}`,
+          );
+        }
         const bottomsRescueFloor = Math.max(0.34, minRelevance - 0.14);
         const rescueLimit = Math.max(1, Math.min(2, preserveCount));
         const whiteFamilyRegex = /\b(white|off[\s-]?white|ivory|cream|ecru)\b/i;
@@ -2992,6 +2999,14 @@ function applyRelevanceThresholdFilter(
           console.log(
             `[relevance-threshold-bottoms-rescue] preserved ${bottomsColorSafeRescue.length} product(s) for detection="${options?.detectionLabel ?? "unknown"}" floor=${bottomsRescueFloor.toFixed(3)} threshold=${minRelevance}`,
           );
+          if (relevanceDebugEnabled) {
+            const selected = bottomsColorSafeRescue
+              .map((item) => String((item as any)?.id ?? "unknown"))
+              .join(", ");
+            console.log(
+              `[relevance-debug] detection="${options?.detectionLabel ?? "unknown"}" bottomsRescueSelected=[${selected}]`,
+            );
+          }
           return bottomsColorSafeRescue;
         }
       }
@@ -6081,6 +6096,11 @@ export class ImageAnalysisService {
               if (filters.gender) stageFilters.gender = filters.gender;
               if (filters.ageGroup) stageFilters.ageGroup = filters.ageGroup;
 
+              // In final top fail-open recovery, relax inferred color gating to avoid zero-result collapse.
+              const stageInferredPrimaryColor =
+                categoryMapping.productCategory === "tops"
+                  ? undefined
+                  : inferredPrimaryColorForDetection;
               const stageResult = await runDetectionSearch(stage.reason, {
                 imageEmbedding: finalEmbedding,
                 imageEmbeddingGarment:
@@ -6099,7 +6119,7 @@ export class ImageAnalysisService {
                 forceHardCategoryFilter: false,
                 relaxThresholdWhenEmpty: true,
                 blipSignal: detectionBlipSignal,
-                inferredPrimaryColor: inferredPrimaryColorForDetection,
+                inferredPrimaryColor: stageInferredPrimaryColor,
                 inferredColorKey: itemColorKey,
                 inferredColorsByItem,
                 inferredColorsByItemConfidence,
@@ -6399,12 +6419,29 @@ export class ImageAnalysisService {
       const preserveCountForDetection = isCoreOutfitCategory(detection.category)
         ? Math.min(3, Math.max(1, Math.floor(resolvedLimitPerItem * 0.12)))
         : 0;
+      const inferredDesiredColor = (() => {
+        const explicitColor = (detection.appliedFilters as any)?.color;
+        if (explicitColor != null && String(explicitColor).trim().length > 0) return explicitColor;
+        const rawIndex = Number((detection as any)?.detectionIndex);
+        const hasIndex = Number.isFinite(rawIndex) && rawIndex >= 0;
+        const detLabel = String((detection as any)?.detection?.label ?? "").trim();
+        if (!hasIndex || !detLabel) return undefined;
+        const colorKey = detectionColorKey(detLabel, Math.floor(rawIndex));
+        const inferred = inferredColorsByItem[colorKey];
+        const inferredConfidence = Number(inferredColorsByItemConfidence[colorKey] ?? 0);
+        return inferred && inferredConfidence >= 0.4 ? inferred : undefined;
+      })();
+      if (hotPathDebug) {
+        console.log(
+          `[relevance-debug] detection="${detection.detection?.label ?? "unknown"}" category="${detection.category}" desiredColor="${String(inferredDesiredColor ?? "")}" source=${(detection.appliedFilters as any)?.color ? "explicit" : "inferred_or_none"}`,
+        );
+      }
       const afterProducts = applyRelevanceThresholdFilter(beforeProducts, minRelevanceThreshold, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category),
         preserveAtLeastCount: preserveCountForDetection,
         detectionLabel: detection.detection?.label,
         category: detection.category,
-        desiredColor: (detection.appliedFilters as any)?.color,
+        desiredColor: inferredDesiredColor,
       });
       const droppedByFinalRelevance = Math.max(0, beforeProducts.length - afterProducts.length);
       const droppedByColorGate = beforeProducts.filter((prod) => {
@@ -7842,12 +7879,27 @@ export class ImageAnalysisService {
       const preserveCountForDetection = isCoreOutfitCategory(detection.category)
         ? Math.min(3, Math.max(1, Math.floor(resolvedLimitPerItem * 0.12)))
         : 0;
+      const inferredDesiredColor = (() => {
+        const explicitColor = (detection.appliedFilters as any)?.color;
+        if (explicitColor != null && String(explicitColor).trim().length > 0) return explicitColor;
+        const rawIndex = Number((detection as any)?.detectionIndex);
+        const hasIndex = Number.isFinite(rawIndex) && rawIndex >= 0;
+        const detLabel = String((detection as any)?.detection?.label ?? "").trim();
+        if (!hasIndex || !detLabel) return undefined;
+        const colorKey = detectionColorKey(detLabel, Math.floor(rawIndex));
+        const inferred = inferredColorsByItem[colorKey];
+        const inferredConfidence = Number(inferredColorsByItemConfidence[colorKey] ?? 0);
+        return inferred && inferredConfidence >= 0.4 ? inferred : undefined;
+      })();
+      console.log(
+        `[relevance-debug-sel] detection="${detection.detection?.label ?? "unknown"}" category="${detection.category}" desiredColor="${String(inferredDesiredColor ?? "")}" source=${(detection.appliedFilters as any)?.color ? "explicit" : "inferred_or_none"}`,
+      );
       const afterProducts = applyRelevanceThresholdFilter(beforeProducts, minRelevanceThresholdSel, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category),
         preserveAtLeastCount: preserveCountForDetection,
         detectionLabel: detection.detection?.label,
         category: detection.category,
-        desiredColor: (detection.appliedFilters as any)?.color,
+        desiredColor: inferredDesiredColor,
       });
       const droppedByFinalRelevance = Math.max(0, beforeProducts.length - afterProducts.length);
       const droppedByColorGate = beforeProducts.filter((prod) => {
