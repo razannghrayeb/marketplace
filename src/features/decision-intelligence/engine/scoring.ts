@@ -100,15 +100,37 @@ export function scoreOccasion(
     (profile.imageSignals.outfitFlexibilityVisual + styleFit) / 2
   );
 
+  const socialFit =
+    requestedOccasion === "party"
+      ? clamp01(profile.derivedSignals.socialVisibility * 0.55 + profile.derivedSignals.statementLevel * 0.45)
+      : clamp01((profile.derivedSignals.socialVisibility + profile.derivedSignals.statementLevel) / 2);
+
   const values = {
     tagRelevance: styleFit,
     styleFit,
     ease: profile.usageSignals.stylingEase,
     categoryAppropriateness,
     visualAppropriateness,
+    socialFit,
   };
 
-  return weightedSum(values, decisionScoringConfig.occasionWeights);
+  const base = weightedSum(values, {
+    ...decisionScoringConfig.occasionWeights,
+    socialFit: 0.14,
+    tagRelevance: decisionScoringConfig.occasionWeights.tagRelevance - 0.06,
+    styleFit: decisionScoringConfig.occasionWeights.styleFit - 0.04,
+    categoryAppropriateness: decisionScoringConfig.occasionWeights.categoryAppropriateness - 0.04,
+  });
+
+  if (requestedOccasion !== "party") return base;
+
+  // For party use-cases, stronger visual/social presence matters more than generic flexibility.
+  return clamp01(
+    base * 0.82 +
+      profile.styleSignals.expressive * 0.08 +
+      profile.imageSignals.visualBoldness * 0.05 +
+      profile.derivedSignals.socialVisibility * 0.05
+  );
 }
 
 export function scorePractical(profile: ProductDecisionProfile): number {

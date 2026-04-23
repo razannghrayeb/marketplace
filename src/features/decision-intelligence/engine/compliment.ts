@@ -26,7 +26,7 @@ export function predictCompliment(
     return {
       score,
       type: "direct_compliments",
-      explanation: ["This look is likely to get immediate compliments because it stands out clearly."],
+      explanation: ["This look is likely to get quick compliments because it stands out in a clear, stylish way."],
     };
   }
   if (score >= 0.62) {
@@ -34,7 +34,7 @@ export function predictCompliment(
       score,
       type: profile.styleSignals.polished > profile.styleSignals.expressive ? "polished_respect" : "stylish_attention",
       explanation: [
-        "People are likely to notice this positively without it feeling too loud.",
+        "People are likely to notice this in a positive way without it feeling too loud.",
       ],
     };
   }
@@ -54,7 +54,7 @@ export function predictCompliment(
     type: "low_reaction_high_utility",
     explanation: [
       occasionScore > 0.6
-        ? "This leans practical and occasion-right more than attention-grabbing."
+        ? "This is more about being useful and occasion-right than grabbing a lot of attention."
         : "Reactions may be quieter, but it stays useful and easy to wear.",
     ],
   };

@@ -55,32 +55,32 @@ export function buildRegretFlash(
     return {
       shortTermFeeling:
         statementLevel >= 0.6
-          ? "It feels exciting right away and has strong first impression energy."
-          : "It feels like a clear upgrade when you first wear it.",
-      longTermReality: `Over time, usage may drop because ${dominantDriver}.`,
+          ? "It gives an instant wow feeling and makes a strong first impression."
+          : "It feels like a noticeable upgrade from your first wear.",
+      longTermReality: `Over time, you might wear it less often because ${dominantDriver}.`,
     };
   }
   if (regretProbability >= 0.45) {
     return {
       shortTermFeeling:
         practicalStrength >= 0.62
-          ? "Feels strong early, with a good mix of payoff and day-to-day usability."
-          : "Feels like a solid change at first, especially for planned outfits.",
-      longTermReality: `Likely best in selected situations; watch for friction because ${dominantDriver}.`,
+          ? "Early on, it feels strong with a nice balance of style payoff and everyday use."
+          : "At first it feels like a good change, especially for planned outfits.",
+      longTermReality: `Best for selected situations over time; keep in mind that ${dominantDriver}.`,
     };
   }
   return {
     shortTermFeeling:
       practicalStrength >= 0.72
-        ? "Feels dependable from day one and easy to keep in rotation."
+        ? "Feels dependable from day one and easy to keep wearing."
         : practicalStrength >= 0.6
-          ? "Feels dependable quickly without forcing a bold style move."
-          : "Easy to like now without feeling like a risky commitment.",
+          ? "Feels dependable quickly without pushing you into a bold style move."
+          : "Easy to like now without feeling like a risky buy.",
     longTermReality:
       practicalStrength >= 0.72
-        ? "Likely to stay in regular rotation with low regret risk."
+        ? "Likely to stay in your regular rotation with low regret risk."
         : practicalStrength >= 0.6
-          ? `Should remain wearable over time, though ${dominantDriver}.`
-          : `Can still hold up long term, though ${dominantDriver}.`,
+          ? `Should stay wearable over time, although ${dominantDriver}.`
+          : `Can still hold up long term, although ${dominantDriver}.`,
   };
 }
