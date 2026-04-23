@@ -38,6 +38,8 @@ interface EngineOptions {
   version?: string;
 }
 
+const OCCASION_OVERALL_WINNER_MIN_SCORE = 0.55;
+
 function resolveOverallWeights(request: CompareDecisionRequest): {
   value: number;
   quality: number;
@@ -49,7 +51,7 @@ function resolveOverallWeights(request: CompareDecisionRequest): {
 } {
   const hasOccasion = Boolean(request.occasion);
   const base = hasOccasion
-    ? { value: 0.18, quality: 0.19, style: 0.17, risk: 0.14, occasion: 0.15, practical: 0.09, expressive: 0.08 }
+    ? { value: 0.16, quality: 0.18, style: 0.14, risk: 0.13, occasion: 0.22, practical: 0.1, expressive: 0.07 }
     : { value: 0.2, quality: 0.2, style: 0.18, risk: 0.16, occasion: 0.1, practical: 0.08, expressive: 0.08 };
 
   switch (request.compareGoal) {
@@ -66,6 +68,22 @@ function resolveOverallWeights(request: CompareDecisionRequest): {
     default:
       return base;
   }
+}
+
+function applyOccasionMismatchPenalty(
+  overallScore: number,
+  occasionScore: number,
+  requestedOccasion?: CompareDecisionRequest["occasion"]
+): number {
+  if (!requestedOccasion) return overallScore;
+  if (occasionScore >= 0.65) return overallScore;
+
+  const severity = clamp01((0.65 - occasionScore) / 0.65);
+  const penaltyWeight =
+    requestedOccasion === "formal" || requestedOccasion === "work" || requestedOccasion === "party"
+      ? 0.28
+      : 0.22;
+  return clamp01(overallScore - severity * penaltyWeight);
 }
 
 function pickWinner(
@@ -347,11 +365,12 @@ export function runCompareDecisionEngine(
         practical * overallWeights.practical +
         expressive * overallWeights.expressive
     );
+    const occasionAdjustedOverall = applyOccasionMismatchPenalty(overall, occasion, request.occasion);
 
     const friction = scoreFrictionIndex(profile);
     const regretProbability = scoreRegretProbability(profile, attraction, friction.index);
     const regret = buildRegretFlash(profile, regretProbability);
-    const consequence = buildConsequences(profile, { practical, expressive, overall });
+    const consequence = buildConsequences(profile, { practical, expressive, overall }, request.occasion, occasion);
     const compliment = predictCompliment(profile, occasion);
     const wearFrequency = estimateWearFrequency(profile, inferMajorCategory(profile));
     const photoRealityGap = analyzePhotoRealityGap(profile);
@@ -366,7 +385,7 @@ export function runCompareDecisionEngine(
         style,
         risk,
         occasion,
-        overall,
+        overall: occasionAdjustedOverall,
         practical,
         expressive,
         currentSelf: identity.currentSelfScore,
@@ -397,6 +416,12 @@ export function runCompareDecisionEngine(
       expressive: r.scores.expressive,
     }));
 
+  const occasionEligible =
+    request.occasion != null
+      ? productResults.filter((r) => r.scores.occasion >= OCCASION_OVERALL_WINNER_MIN_SCORE)
+      : productResults;
+  const overallWinnerPool = occasionEligible.length > 0 ? occasionEligible : productResults;
+
   const winnersByContext: CompareDecisionResponse["winnersByContext"] = {
     practical: pickWinner(productResults.map((r) => ({ productId: r.profile.id, score: r.scores.practical }))),
     expressive: pickWinner(productResults.map((r) => ({ productId: r.profile.id, score: r.scores.expressive }))),
@@ -409,7 +434,7 @@ export function runCompareDecisionEngine(
     style: pickWinner(productResults.map((r) => ({ productId: r.profile.id, score: r.scores.style }))),
     risk: pickWinner(productResults.map((r) => ({ productId: r.profile.id, score: r.scores.risk }))),
     occasion: pickWinner(productResults.map((r) => ({ productId: r.profile.id, score: r.scores.occasion }))),
-    overall: pickWinner(productResults.map((r) => ({ productId: r.profile.id, score: r.scores.overall }))),
+    overall: pickWinner(overallWinnerPool.map((r) => ({ productId: r.profile.id, score: r.scores.overall }))),
   };
 
   const dataQuality = scoreDataQuality(profiles);
