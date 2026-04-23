@@ -214,13 +214,49 @@ export async function getOutfitRecommendations(
     maxPerCategory
   );
 
-  if (balancedSuggestions.length > 0) {
+  const ensureCoreSlotsPresent = (
+    base: CompleteLookMappedSuggestion[],
+    backup: CompleteLookMappedSuggestion[]
+  ): CompleteLookMappedSuggestion[] => {
+    const out = [...base];
+    const hasSlot = (slot: string) =>
+      out.some((s) => categoryFamily(s.category) === slot);
+    const usedIds = new Set(out.map((s) => s.product_id));
+    const needShoes = prioritizedMissingCategories.includes("shoes") && !hasSlot("shoes");
+    const needBags = prioritizedMissingCategories.includes("bags") && !hasSlot("bags");
+    if (!needShoes && !needBags) return out;
+
+    const rankedBackup = [...backup].sort((a, b) => (b.score || 0) - (a.score || 0));
+    for (const candidate of rankedBackup) {
+      if (out.length >= maxTotal) break;
+      if (usedIds.has(candidate.product_id)) continue;
+      const family = categoryFamily(candidate.category);
+      if ((needShoes && family === "shoes") || (needBags && family === "bags")) {
+        out.push(candidate);
+        usedIds.add(candidate.product_id);
+        if (needShoes && family === "shoes") {
+          // no-op: recomputed by hasSlot below
+        }
+        if (needBags && family === "bags") {
+          // no-op: recomputed by hasSlot below
+        }
+        if ((!needShoes || hasSlot("shoes")) && (!needBags || hasSlot("bags"))) break;
+      }
+    }
+    return out;
+  };
+  const balancedWithCoreSlots = ensureCoreSlotsPresent(
+    balancedSuggestions,
+    rerankedSuggestions
+  );
+
+  if (balancedWithCoreSlots.length > 0) {
     return mapCompleteLookToStyleResponse({
       sourceProduct,
       completeLookResult: {
         ...completeLookResult,
         missingCategories: prioritizedMissingCategories,
-        suggestions: balancedSuggestions,
+        suggestions: balancedWithCoreSlots,
       },
       maxPerCategory,
       detectedCategory: resolvedSourceCategory,
@@ -235,13 +271,17 @@ export async function getOutfitRecommendations(
     maxTotal,
     maxPerCategory
   );
-  if (relaxedSuggestions.length > 0) {
+  const relaxedWithCoreSlots = ensureCoreSlotsPresent(
+    relaxedSuggestions,
+    rerankedSuggestions
+  );
+  if (relaxedWithCoreSlots.length > 0) {
     return mapCompleteLookToStyleResponse({
       sourceProduct,
       completeLookResult: {
         ...completeLookResult,
         missingCategories: prioritizedMissingCategories,
-        suggestions: relaxedSuggestions,
+        suggestions: relaxedWithCoreSlots,
       },
       maxPerCategory,
       detectedCategory: resolvedSourceCategory,
