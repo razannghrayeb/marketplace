@@ -1,4 +1,4 @@
-import type { ProductDecisionProfile } from "../types";
+import type { CompareOccasion, ProductDecisionProfile } from "../types";
 
 function topKey<T extends Record<string, number>>(obj: T): keyof T {
   return Object.entries(obj).sort((a, b) => b[1] - a[1])[0][0] as keyof T;
@@ -60,25 +60,73 @@ function categoryNoun(category: string): string {
   return normalized;
 }
 
+function buildOccasionGuidance(
+  requestedOccasion: CompareOccasion | undefined,
+  occasionScore: number
+): string | undefined {
+  if (!requestedOccasion) return undefined;
+
+  if (requestedOccasion === "casual") {
+    if (occasionScore < 0.58) return "For casual plans specifically, this may feel a bit dressier and need more intentional styling.";
+    if (occasionScore >= 0.72) return "For casual days, this should feel easy, relaxed, and low-effort to style.";
+    return undefined;
+  }
+
+  if (requestedOccasion === "work") {
+    if (occasionScore < 0.58) return "For work settings, this can read a bit too expressive, so you may need more polished styling.";
+    if (occasionScore >= 0.72) return "For work, this has a polished, dependable vibe that should be easy to wear confidently.";
+    return undefined;
+  }
+
+  if (requestedOccasion === "formal") {
+    if (occasionScore < 0.58) return "For formal events, this may read a little too relaxed unless you style it up with stronger accessories.";
+    if (occasionScore >= 0.72) return "For formal events, this has the polished presence you usually want in dressier settings.";
+    return undefined;
+  }
+
+  if (requestedOccasion === "party") {
+    if (occasionScore < 0.58) return "For party plans, this can feel more quiet than standout, so styling details will matter more.";
+    if (occasionScore >= 0.72) return "For party plans, this carries strong social energy and should stand out in the right way.";
+    return undefined;
+  }
+
+  if (requestedOccasion === "travel") {
+    if (occasionScore < 0.58) return "For travel, this may need more planning than ideal, especially if you want easy repeat outfits.";
+    if (occasionScore >= 0.72) return "For travel, this looks easy to repeat, pack around, and wear across different plans.";
+    return undefined;
+  }
+
+  return undefined;
+}
+
 export function buildConsequences(
   profile: ProductDecisionProfile,
-  scores: { practical: number; expressive: number; overall: number }
+  scores: { practical: number; expressive: number; overall: number },
+  requestedOccasion?: CompareOccasion,
+  occasionScore: number = 0.5
 ): string[] {
   const bullets: string[] = [];
   const primaryUsageLever = formatUsageLever(topKey(profile.usageSignals));
   const secondaryUsageLever = formatUsageLever(secondKey(profile.usageSignals));
   const primaryExpressionLever = formatExpressionLever(topKey(profile.styleSignals));
+  const contextAdjustedPractical =
+    requestedOccasion != null ? scores.practical * (0.55 + occasionScore * 0.45) : scores.practical;
 
-  if (scores.practical >= 0.8) {
+  if (contextAdjustedPractical >= 0.8) {
     bullets.push(
       `Easy winner for real life: ${primaryUsageLever} and ${secondaryUsageLever} make this one simple to wear on repeat.`
     );
-  } else if (scores.practical >= 0.72) {
+  } else if (contextAdjustedPractical >= 0.72) {
     bullets.push(`Great day-to-day option. ${primaryUsageLever} helps it slide into your weekly outfits with less effort.`);
-  } else if (scores.practical >= 0.6) {
+  } else if (contextAdjustedPractical >= 0.6) {
     bullets.push(`Solid for regular wear, with ${primaryUsageLever} doing most of the work.`);
   } else {
     bullets.push(`More of a planned look than a grab-and-go piece, so you'll likely style it with intention.`);
+  }
+
+  const occasionGuidance = buildOccasionGuidance(requestedOccasion, occasionScore);
+  if (occasionGuidance) {
+    bullets.push(occasionGuidance);
   }
 
   if (scores.expressive >= 0.72) {

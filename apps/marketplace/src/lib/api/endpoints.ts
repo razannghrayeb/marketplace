@@ -31,6 +31,7 @@ export const endpoints = {
     imageDelete: (id: number | string, imageId: number | string) => `/products/${id}/images/${imageId}`,
     recommendationsBatch: '/products/recommendations/batch',
     completeStylePost: '/products/complete-style',
+    completeStyleTryOn: '/products/complete-style/try-on',
     variantsBatch: '/products/variants/batch',
   },
   search: {

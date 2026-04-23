@@ -34,6 +34,13 @@ function parseCompleteStyleOptions(query: any): CompleteStyleOptions {
     disablePriceFilter: query.disablePriceFilter === "true",
   };
 
+  if (query.mode === "tryon") {
+    options.sourceMode = "tryon";
+  }
+  if (query.audienceGenderHint === "men" || query.audienceGenderHint === "women" || query.audienceGenderHint === "unisex") {
+    options.audienceGenderHint = query.audienceGenderHint;
+  }
+
   // Price range (explicit range overrides default 0.5x-2.5x filter)
   if (query.minPrice || query.maxPrice) {
     options.priceRange = {};
@@ -144,6 +151,16 @@ export async function completeStyleFromBody(req: Request, res: Response) {
         Array.isArray(bodyOptions?.excludeBrands) && bodyOptions.excludeBrands.length > 0
           ? bodyOptions.excludeBrands
           : queryOptions.excludeBrands,
+      sourceMode:
+        bodyOptions?.sourceMode === "tryon" || req.query.mode === "tryon"
+          ? "tryon"
+          : queryOptions.sourceMode,
+      audienceGenderHint:
+        bodyOptions?.audienceGenderHint === "men" ||
+        bodyOptions?.audienceGenderHint === "women" ||
+        bodyOptions?.audienceGenderHint === "unisex"
+          ? bodyOptions.audienceGenderHint
+          : queryOptions.audienceGenderHint,
     };
 
     const userId = getOptionalUserId(req);
@@ -179,6 +196,25 @@ export async function completeStyleFromBody(req: Request, res: Response) {
       .status(500)
       .json({ success: false, error: { message: "Failed to generate outfit recommendations" } });
   }
+}
+
+/**
+ * POST /products/complete-style/try-on
+ *
+ * Dedicated try-on mode:
+ * - skips catalog similarity remapping
+ * - keeps recommendations anchored to provided product payload
+ */
+export async function completeStyleTryOn(req: Request, res: Response) {
+  req.query.mode = "tryon";
+  req.body = {
+    ...(req.body || {}),
+    options: {
+      ...((req.body && req.body.options) || {}),
+      sourceMode: "tryon",
+    },
+  };
+  return completeStyleFromBody(req, res);
 }
 
 /**

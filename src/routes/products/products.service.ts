@@ -681,13 +681,52 @@ function scoreImageSearchContext01(params: {
   return clamp01(score);
 }
 
+function normalizeParentGroupKey(raw: unknown): string {
+  const source = String(raw ?? "").trim();
+  if (!source) return "";
+  try {
+    const u = new URL(source);
+    const parts = u.pathname.split("/").filter(Boolean);
+    if (parts.length > 0 && /^[a-z]{2}(?:-[a-z]{2})?$/i.test(parts[0])) {
+      parts.shift();
+    }
+    const normalizedPath = parts.join("/").toLowerCase();
+    return `${u.origin.toLowerCase()}/${normalizedPath}`;
+  } catch {
+    const noHash = source.split("#")[0];
+    const noQuery = noHash.split("?")[0];
+    return noQuery.toLowerCase();
+  }
+}
+
+function normalizeTitleGroupKey(raw: unknown): string {
+  return String(raw ?? "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160);
+}
+
 function getVariantGroupKey(product: ProductResult): string | null {
-  const parent = normalizeStringValue((product as any).parent_product_url);
-  const vendor = normalizeStringValue(product.vendor_id);
-  if (!parent && !vendor) return null;
-  const parentKey = parent || `__single_${product.id}`;
-  const vendorKey = vendor || "__vendor";
-  return `${parentKey}|${vendorKey}`;
+  const vendor = normalizeStringValue(product.vendor_id) || "__vendor";
+  const parent = normalizeParentGroupKey((product as any).parent_product_url || product.product_url);
+  const title = normalizeTitleGroupKey(product.title);
+
+  // Prefer title grouping when title explicitly carries the item/color token
+  // (e.g. "Product Name | Yellow"), which helps collapse duplicate handles.
+  if (title && title.includes("|")) {
+    return `${vendor}|title:${title}`;
+  }
+
+  if (parent) {
+    return `${vendor}|parent:${parent}`;
+  }
+
+  if (title) {
+    return `${vendor}|title:${title}`;
+  }
+
+  return `${vendor}|single:${String(product.id)}`;
 }
 
 function collapseVariantGroups(results: ProductResult[]): {
@@ -1211,7 +1250,7 @@ function passesStrictDetectionCategoryFamily(
   if (!blob.trim()) return false;
 
   const hasFootwear = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|flat|flats|oxford|oxfords|pump|pumps|mule|mules|clog|clogs)\b/.test(blob);
-  const hasTop = /\b(top|tops|shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|tank|cami|camisole|sweater|cardigan|hoodie|pullover|jumper|polo|henley|tunic|knitwear|bodysuit|crop\s*top|button\s*down|button-down)\b/.test(blob);
+  const hasTop = /\b(top|tops|shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|tank|cami|camisole|sweater|cardigan|hoodie|pullover|jumper|polo|henley|tunic|knitwear|bodysuit|crop\s*top|button\s*down|button-down|blazer|blazers|sport coat|dress jacket|suit jacket|waistcoat|vest|vests)\b/.test(blob);
   const hasOuterwear = /\b(outerwear|outwear|jacket|jackets|coat|coats|blazer|blazers|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers)\b/.test(blob);
   const hasBottom = /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|skirt|skirts|legging|leggings|jogger|joggers|sweatpants?|slack|slacks|culotte|culottes|palazzo|chino|chinos|cargo|track\s*pants?)\b/.test(blob);
   const hasDressOnePiece = /\b(dress|dresses|gown|gowns|frock|frocks|sundress|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|abaya|abayas|kaftan|kaftans|caftan|caftans)\b/.test(blob);
@@ -4894,6 +4933,9 @@ export async function searchByImageWithSimilarity(
           // tops to zero when color comes only from inferred intent.
           blendedTopMain *= hasExplicitColorIntent ? 0.45 : 0.85;
         }
+        if (hasTopColorIntent && Number.isFinite(topColorCompliance) && topColorCompliance >= 0.6) {
+          blendedTopMain = Math.min(1, blendedTopMain + 0.035);
+        }
         const exactTopVisualEvidence = (comp.exactTypeScore ?? 0) >= 1 && visualComp >= 0.62;
         const boostedFloor = exactTopVisualEvidence ? 0.36 : 0.24;
         const boosted = Math.min(1, Math.max(boostedFloor, blendedTopMain));
@@ -4949,10 +4991,13 @@ export async function searchByImageWithSimilarity(
     // Primary: finalRelevance01 descending (incorporates visual + metadata signals).
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
     const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
-    if (hasColorIntentForFinal && Math.abs(fb - fa) <= 0.04) {
+    const topsColorOrderingWindow =
+      detectionCategoryForFinalGate === "tops" && hasDetectionAnchoredTypeIntent ? 0.08 : 0.04;
+    if (hasColorIntentForFinal && Math.abs(fb - fa) <= topsColorOrderingWindow) {
       const ca = complianceById.get(ida)?.colorCompliance ?? 0;
       const cb = complianceById.get(idb)?.colorCompliance ?? 0;
-      if (Math.abs(cb - ca) >= 0.03) return cb - ca;
+      const minColorDelta = detectionCategoryForFinalGate === "tops" ? 0.02 : 0.03;
+      if (Math.abs(cb - ca) >= minColorDelta) return cb - ca;
     }
     if (Math.abs(fb - fa) > 1e-6) return fb - fa;
     if (hasExplicitColorIntent || hasInferredColorSignal) {
@@ -5652,7 +5697,7 @@ export async function searchByImageWithSimilarity(
             ? 0.3
             : category === "tops" || category === "dresses"
               ? category === "dresses"
-                ? 0.18
+                ? 0.14
                 : 0.2
               : category === "bottoms" || category === "outerwear"
                 ? category === "bottoms"
@@ -5663,7 +5708,7 @@ export async function searchByImageWithSimilarity(
         preferredInferredColorConfidence >= 0.82 &&
         (category === "tops" || category === "bottoms" || category === "dresses" || category === "outerwear");
       const shouldTightenForStrongInferredColor =
-        hasStrongDetectionScopedColor && category !== "tops" && category !== "bottoms";
+        hasStrongDetectionScopedColor && category !== "tops" && category !== "bottoms" && category !== "dresses";
       const effectiveMinInferredColorCompliance = shouldTightenForStrongInferredColor
         ? Math.min(0.4, minInferredColorCompliance + 0.08)
         : minInferredColorCompliance;
@@ -5695,7 +5740,9 @@ export async function searchByImageWithSimilarity(
         );
       });
       const minKeep =
-        rankedHits.length >= 12
+        category === "dresses"
+          ? (rankedHits.length >= 12 ? 5 : rankedHits.length >= 8 ? 4 : 2)
+          : rankedHits.length >= 12
           ? 4
           : rankedHits.length >= 8
             ? 3
@@ -5709,7 +5756,7 @@ export async function searchByImageWithSimilarity(
         ((category === "bags") &&
           hasStrongDetectionScopedColor &&
           desiredColorsForRelevance.length === 1) ||
-        ((category === "outerwear" || category === "dresses") &&
+        (category === "outerwear" &&
           hasStrongDetectionScopedColor &&
           desiredColorsForRelevance.length === 1);
       if (whiteIntentForBottoms) {
@@ -6640,23 +6687,25 @@ export async function searchByImageWithSimilarity(
   // If the query image already exists in catalog (exact pHash match), make sure it is not
   // lost due to metadata/rerank gates. This is a strong identity signal.
   // pHash is often stored on product_images (primary row) while products.p_hash is unset — union both.
-  if (pHash && /^[0-9a-f]+$/i.test(pHash)) {
+  const normalizedQueryPHash = String(pHash ?? "").toLowerCase().trim().replace(/[^0-9a-f]/g, "");
+  if (normalizedQueryPHash && /^[0-9a-f]+$/i.test(normalizedQueryPHash)) {
     const existing = new Set(results.map((p) => String(p.id)));
     const hasIsHidden = await productsTableHasIsHiddenColumn();
     const hiddenClause = hasIsHidden ? "AND p.is_hidden = false" : "";
-    const ph = String(pHash).toLowerCase();
+    const ph = normalizedQueryPHash;
     const exactPhashRows = await pg.query(
       `SELECT id FROM (
          SELECT p.id
            FROM products p
-          WHERE LOWER(p.p_hash) = $1
+          WHERE p.p_hash IS NOT NULL
+            AND LOWER(TRIM(p.p_hash)) = $1
             ${hiddenClause}
          UNION
          SELECT p.id
            FROM product_images pi
            INNER JOIN products p ON p.id = pi.product_id
           WHERE pi.p_hash IS NOT NULL
-            AND LOWER(pi.p_hash) = $1
+            AND LOWER(TRIM(pi.p_hash)) = $1
             ${hiddenClause}
        ) x
        LIMIT 10`,
@@ -6854,6 +6903,8 @@ async function findSimilarByPHash(
   limit: number = 10,
   maxDistance: number = 12,
 ): Promise<ProductResult[]> {
+  const normalizedInput = String(pHash ?? "").toLowerCase().trim().replace(/[^0-9a-f]/g, "");
+  if (!normalizedInput) return [];
   const hasIsHidden = await productsTableHasIsHiddenColumn();
   const hiddenClause = hasIsHidden ? "AND p.is_hidden = false" : "";
   const excludeNumeric = excludeIds
@@ -6892,7 +6943,9 @@ async function findSimilarByPHash(
   // Calculate Hamming distance and filter similar
   const bestDistanceById = new Map<number, number>();
   for (const row of result.rows) {
-    const distance = hammingDistance(pHash, row.p_hash);
+    const rowHash = String((row as any).p_hash ?? "").toLowerCase().trim().replace(/[^0-9a-f]/g, "");
+    if (!rowHash || rowHash.length !== normalizedInput.length) continue;
+    const distance = hammingDistance(normalizedInput, rowHash);
     if (distance <= maxDistance) { // configurable pHash tolerance (default: ~80% similar)
       const idNum = Number(row.id);
       const best = bestDistanceById.get(idNum);

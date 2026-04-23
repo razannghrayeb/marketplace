@@ -474,10 +474,11 @@ export async function searchImage(
   // When we have raw bytes but no caller-supplied hash, compute pHash once. Used for
   // related-by-pHash, Postgres identity rescue (same catalog image), and self-search — not only when includeRelated is on.
   // Callers that pass only `imageEmbedding` (no buffer) cannot be hashed here.
-  let effectivePHash = pHash;
-  if (effectivePHash === undefined && imageBuffer && imageBuffer.length > 0) {
+  let effectivePHash = typeof pHash === "string" ? pHash.toLowerCase().trim().replace(/[^0-9a-f]/g, "") : pHash;
+  const hasValidPHash = typeof effectivePHash === "string" && effectivePHash.length > 0 && /^[0-9a-f]+$/i.test(effectivePHash);
+  if (!hasValidPHash && imageBuffer && imageBuffer.length > 0) {
     try {
-      effectivePHash = await computePHash(imageBuffer);
+      effectivePHash = (await computePHash(imageBuffer)).toLowerCase().trim().replace(/[^0-9a-f]/g, "");
     } catch (e) {
       console.warn("[searchImage] pHash skipped (invalid or unreadable image bytes):", (e as Error).message);
     }

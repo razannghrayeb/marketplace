@@ -16,7 +16,7 @@ import { Router } from "express";
 import multer from "multer";
 import { listProducts, listSaleProducts, searchProductsByTitle, searchProductsByImage, getProductById, getProductPriceHistory, getProductFacets, getPriceDrops, getSimilarProducts } from "./products.controller";
 import { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
-import { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller";
+import { completeStyle, completeStyleFromBody, completeStyleTryOn, getStyleProfile } from "./outfit.controller";
 import { getRecommendations, getBatchRecommendationsHandler } from "./recommendations.controller";
 import { getVariantsBatch } from "./variants.controller";
 import { optionalAuth } from "../../middleware/auth";
@@ -84,6 +84,7 @@ router.get("/sales", listSaleProducts);
 router.get("/:id/complete-style", optionalAuth, completeStyle);
 router.get("/:id/style-profile", getStyleProfile);
 router.post("/complete-style", optionalAuth, completeStyleFromBody);
+router.post("/complete-style/try-on", optionalAuth, completeStyleTryOn);
 
 // ============================================================================
 // Product Image Routes
@@ -100,7 +101,7 @@ router.get("/:id", getProductById);
 export default router;
 export { listProducts, listSaleProducts, searchProductsByTitle, searchProductsByImage, getProductById, getProductPriceHistory, getProductFacets, getPriceDrops } from "./products.controller";
 export { listProductImages, uploadImage, setAsPrimary, removeImage } from "./images.controller";
-export { completeStyle, completeStyleFromBody, getStyleProfile } from "./outfit.controller";
+export { completeStyle, completeStyleFromBody, completeStyleTryOn, getStyleProfile } from "./outfit.controller";
 
 // Re-export services for other modules
 export * from "./products.service";
