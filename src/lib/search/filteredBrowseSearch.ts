@@ -10,6 +10,7 @@ import type { SearchFilters } from "../../routes/products/types";
 import { getImagesForProducts } from "../../routes/products/images.service";
 
 const LBP_TO_USD = 89000;
+const BROWSE_GROUP_SCAN_CAP = 5000;
 
 function appendBrowseFilters(filter: any[], filters: SearchFilters): void {
   if (filters.category) {
@@ -60,34 +61,71 @@ export async function searchProductsFilteredBrowse(params: {
   const filter: any[] = [{ bool: { must_not: [{ term: { is_hidden: true } }] } }];
   appendBrowseFilters(filter, filters as SearchFilters);
 
-  const searchBody = {
-    size: limit,
-    from: (page - 1) * limit,
-    query: {
-      bool: {
-        must: [{ match_all: {} }],
-        filter: filter.length > 0 ? filter : undefined,
-      },
-    },
-    sort: [{ _score: "desc" }, { price_usd: "asc" }],
-  };
+  const groupedOffset = (page - 1) * limit;
+  const groupedNeeded = groupedOffset + limit;
+  const batchSize = Math.min(200, Math.max(limit * 5, 50));
 
-  const osResponse = await osClient.search({
-    index: config.opensearch.index,
-    body: searchBody,
-  });
-
-  const hits = osResponse.body.hits.hits;
-  const productIds: string[] = hits.map((hit: any) => String(hit._source.product_id));
+  const representativeIds: string[] = [];
+  const seenGroupKeys = new Set<string>();
   const scoreMap = new Map<string, number>();
-  hits.forEach((hit: any) => {
-    scoreMap.set(String(hit._source.product_id), hit._score);
-  });
 
-  if (productIds.length === 0) return [];
+  let from = 0;
+  while (
+    representativeIds.length < groupedNeeded &&
+    from < BROWSE_GROUP_SCAN_CAP
+  ) {
+    const searchBody = {
+      size: batchSize,
+      from,
+      query: {
+        bool: {
+          must: [{ match_all: {} }],
+          filter: filter.length > 0 ? filter : undefined,
+        },
+      },
+      sort: [{ _score: "desc" }, { price_usd: "asc" }],
+    };
 
-  const products = await getProductsByIdsOrdered(productIds);
-  const numericIds = productIds.map((id) => parseInt(id, 10));
+    const osResponse = await osClient.search({
+      index: config.opensearch.index,
+      body: searchBody,
+    });
+
+    const hits = osResponse.body.hits.hits as any[];
+    if (!hits || hits.length === 0) break;
+
+    for (const hit of hits) {
+      const src = hit?._source ?? {};
+      const productId = String(src.product_id ?? "").trim();
+      if (!productId) continue;
+
+      const parentRaw = String(src.parent_product_url ?? "").trim().toLowerCase();
+      const parentFromUrl = String(src.product_url ?? "")
+        .split("#")[0]
+        .split("?")[0]
+        .trim()
+        .toLowerCase();
+      const parentKey = parentRaw || parentFromUrl || `__id_${productId}`;
+      const vendorKey = String(src.vendor_id ?? "").trim() || "__vendor";
+      const groupKey = `${vendorKey}|${parentKey}`;
+
+      if (seenGroupKeys.has(groupKey)) continue;
+      seenGroupKeys.add(groupKey);
+      representativeIds.push(productId);
+      scoreMap.set(productId, Number(hit?._score ?? 0));
+
+      if (representativeIds.length >= groupedNeeded) break;
+    }
+
+    from += hits.length;
+    if (hits.length < batchSize) break;
+  }
+
+  const pagedIds = representativeIds.slice(groupedOffset, groupedOffset + limit);
+  if (pagedIds.length === 0) return [];
+
+  const products = await getProductsByIdsOrdered(pagedIds);
+  const numericIds = pagedIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
   const imagesByProduct = await getImagesForProducts(numericIds);
 
   return products.map((p: any) => {

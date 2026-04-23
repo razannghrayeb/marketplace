@@ -55,6 +55,23 @@ export interface ShopifyVendorConfig {
   delayMs: number;
 }
 
+function canonicalizeParentProductUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    const last = segments[segments.length - 1] ?? "";
+    if (/-lebanon-\d+$/i.test(last)) {
+      segments[segments.length - 1] = last.replace(/-\d+$/i, "");
+      parsed.pathname = `/${segments.join("/")}`;
+    }
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return url.split("#")[0].split("?")[0];
+  }
+}
+
 export async function scrapeShopifyStore(
   config: ShopifyVendorConfig
 ): Promise<ScrapedProduct[]> {
@@ -202,7 +219,9 @@ function mapShopifyProduct(
     )
   );
   const primaryImage = imageUrls[0] ?? null;
-  const parentProductUrl = `${config.vendorUrl}/products/${product.handle}`;
+  const parentProductUrl = canonicalizeParentProductUrl(
+    `${config.vendorUrl}/products/${product.handle}`
+  );
   const brand = config.brand ?? product.vendor ?? config.vendorName;
   const fallbackColor =
     extractColorFromDescription(product.body_html) ??

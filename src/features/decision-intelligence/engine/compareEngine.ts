@@ -120,6 +120,14 @@ function metricDeltaLabel(delta: number, metric: string): string {
   return `almost tied in ${metric}`;
 }
 
+function metricTrailLabel(delta: number, metric: string): string {
+  const points = Math.abs(Math.round(delta * 100));
+  if (points >= 12) return `about ${points} points behind on ${metric}`;
+  if (points >= 6) return `about ${points} points behind on ${metric}`;
+  if (points >= 3) return `slightly behind on ${metric} (about ${points} points)`;
+  return `almost tied in ${metric}`;
+}
+
 function buildRelativeDecisionNudge(
   current: {
     profile: ProductDecisionProfile;
@@ -155,7 +163,7 @@ function buildRelativeDecisionNudge(
 
   const tradeoff =
     weakest.delta < -0.03
-      ? `Main tradeoff: it trails with ${metricDeltaLabel(weakest.delta, weakest.metric)}.`
+      ? `Main tradeoff: it is ${metricTrailLabel(weakest.delta, weakest.metric)}.`
       : "Tradeoff is small versus the closest alternative.";
 
   return `Compared with ${topPeer.profile.title}, this has ${metricDeltaLabel(best.delta, best.metric)}. ${tradeoff}`;
@@ -241,13 +249,13 @@ function buildDecisionRationale(
   const whyThisWon = strengths.map((s) =>
     s.delta > 0.02
       ? `Leads ${nearestPeer.profile.title} with ${metricDeltaLabel(s.delta, metricDisplayLabel(s.metric))}.`
-      : `Stays competitive on ${metricDisplayLabel(s.metric)} with only a small gap versus ${nearestPeer.profile.title}.`
+      : `Stays close to ${nearestPeer.profile.title} on ${metricDisplayLabel(s.metric)}.`
   );
 
   const tradeoffsToKnow = tradeoffs.map((t) =>
     t.delta < -0.02
-      ? `Trails ${nearestPeer.profile.title} with ${metricDeltaLabel(t.delta, metricDisplayLabel(t.metric))}.`
-      : `${metricDisplayLabel(t.metric)} is close to ${nearestPeer.profile.title}, so preference and styling context matter.`
+      ? `Compared with ${nearestPeer.profile.title}, this is ${metricTrailLabel(t.delta, metricDisplayLabel(t.metric))}.`
+      : `${metricDisplayLabel(t.metric)} is very close to ${nearestPeer.profile.title}, so this comes down to your personal preference.`
   );
 
   return { whyThisWon, tradeoffsToKnow };

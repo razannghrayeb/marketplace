@@ -21,6 +21,23 @@ function normalizeUrl(url: string): string {
   return new URL(url, BASE).toString();
 }
 
+function canonicalizeParentProductUrl(url: string): string {
+  try {
+    const parsed = new URL(url, BASE);
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    const last = segments[segments.length - 1] ?? "";
+    if (/-lebanon-\d+$/i.test(last)) {
+      segments[segments.length - 1] = last.replace(/-\d+$/i, "");
+      parsed.pathname = `/${segments.join("/")}`;
+    }
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return url.split("#")[0].split("?")[0];
+  }
+}
+
 function moneyToCents(s: string): number {
   const n = Number(String(s).replace(/[^0-9.]/g, ""));
   return Number.isFinite(n) ? Math.round(n * 100) : 0;
@@ -150,7 +167,9 @@ export function listCategoryUrls(pageHtml: string): string[] {
 export function parseProduct(html: string, productUrl: string): ScrapedProduct[] {
   const $ = load(html);
 
-  const parentProductUrl = productUrl.split("?")[0].split("#")[0];
+  const parentProductUrl = canonicalizeParentProductUrl(
+    productUrl.split("?")[0].split("#")[0]
+  );
 
   // ? Brand (explicit brand link or label on product page)
   const brand =
@@ -425,7 +444,7 @@ export function parseProduct(html: string, productUrl: string): ScrapedProduct[]
       const sizeList =
         group.sizes.size > 0 ? Array.from(group.sizes).join(", ") : size ?? null;
       const variantIdList =
-        group.variantIds.size > 0 ? Array.from(group.variantIds).join(",") : null;
+        group.variantIds.size > 0 ? Array.from(group.variantIds)[0] : null;
       const colorValue = group.color ?? null;
       const productUrl = colorValue
         ? `${parentProductUrl}#color=${encodeURIComponent(colorValue)}`

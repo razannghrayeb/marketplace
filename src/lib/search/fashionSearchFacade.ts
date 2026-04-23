@@ -102,6 +102,21 @@ export interface UnifiedImageSearchParams {
   collapseVariantGroups?: boolean;
 }
 
+function collapseByParentProduct<T extends ProductResult>(items: T[] | undefined): T[] | undefined {
+  if (!items || items.length <= 1) return items;
+  const out: T[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const parent = String(item.parent_product_url ?? "").trim().toLowerCase();
+    const vendor = String(item.vendor_id ?? "").trim();
+    const key = parent ? `${vendor}|${parent}` : `${vendor}|__id_${String(item.id)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
 function filterByFinalRelevance<T extends { finalRelevance01?: number }>(
   items: T[] | undefined,
   min: number,
@@ -318,17 +333,19 @@ export async function searchText(params: UnifiedTextSearchParams): Promise<Searc
   const filteredRelatedBase = filterByFinalRelevance(output.related, config.search.finalAcceptMinText);
   const filteredResults = applyNonSportGuardToNormalSearch(filteredResultsBase, query, filters) ?? [];
   const filteredRelated = applyNonSportGuardToNormalSearch(filteredRelatedBase, query, filters);
+  const collapsedResults = collapseByParentProduct(filteredResults) ?? [];
+  const collapsedRelated = collapseByParentProduct(filteredRelated);
   const meta = {
     ...(output.meta ?? {}),
-    total_results: filteredResults.length,
+    total_results: collapsedResults.length,
   };
 
   return {
     ...output,
-    results: filteredResults,
-    related: filteredRelated,
+    results: collapsedResults,
+    related: collapsedRelated,
     meta,
-    total: filteredResults.length,
+    total: collapsedResults.length,
     tookMs,
   };
 }

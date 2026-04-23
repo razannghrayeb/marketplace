@@ -3330,7 +3330,15 @@ export async function searchByImageWithSimilarity(
   /** kNN size — wider when SEARCH_IMAGE_MERCHANDISE_SIMILARITY is on (see imageSearchKnnPoolLimit). */
   const retrievalKBase = imageCategoryAwareKnnPoolLimit(params.detectionProductCategory);
   const retrievalK = detectionScoped
-    ? Math.min(retrievalKBase, imageDetectionKnnPoolCap())
+    ? (() => {
+      const isTopDetection = isTopLikeDetectionCategory(params.detectionProductCategory);
+      if (!isTopDetection) return Math.min(retrievalKBase, imageDetectionKnnPoolCap());
+      const topCapEnv = Number(process.env.SEARCH_IMAGE_TOPS_DETECTION_KNN_POOL_CAP ?? "760");
+      const topCap = Number.isFinite(topCapEnv)
+        ? Math.max(260, Math.min(1200, Math.floor(topCapEnv)))
+        : 760;
+      return Math.min(retrievalKBase, topCap);
+    })()
     : retrievalKBase;
 
   let colorQueryEmbedding: number[] | null = null;
@@ -4740,11 +4748,42 @@ export async function searchByImageWithSimilarity(
     } else {
       comp.finalRelevance01 = baseFinal;
     }
+    // Main-path tops tuning:
+    // strengthen primary score (before final-accept gate) when visual + type evidence
+    // is strong, so similar tops are not under-ranked due noisy metadata/color cues.
+    if (
+      hasDetectionAnchoredTypeIntent &&
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops"
+    ) {
+      const typeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
+      const sleeveComp = Math.max(0, Math.min(1, comp.sleeveCompliance ?? 0));
+      const partSim = partSimByDocId.get(idStr);
+      const topPartComp = partSim ? computeTopPartSimilarity01(partSim) : 0;
+      const visualComp = Math.max(0, Math.min(1, effectiveVisualForScoring));
+      const strongTopEvidence =
+        ((comp.exactTypeScore ?? 0) >= 1 || typeComp >= 0.34) &&
+        visualComp >= 0.66 &&
+        (comp.crossFamilyPenalty ?? 0) < 0.52;
+      if (strongTopEvidence) {
+        const blendedTopMain =
+          0.68 * visualComp +
+          0.2 * typeComp +
+          0.08 * Math.max(sleeveComp, topPartComp) +
+          0.04 * Math.max(0, Math.min(1, comp.styleCompliance ?? 0));
+        const boosted = Math.min(1, Math.max(0.24, blendedTopMain));
+        if (boosted > (comp.finalRelevance01 ?? 0)) {
+          comp.finalRelevance01 = boosted;
+          finalScoreSourceById.set(idStr, "tops_main_path_tuning");
+        }
+      }
+    }
     (comp as any).colorContradictionPenalty = Math.round(colorContradictionPenalty * 1000) / 1000;
     keywordSubtypeBoostById.set(idStr, Math.round(subtypeKeywordSignal.boost * 1000) / 1000);
     keywordSubtypeOverlapById.set(idStr, subtypeKeywordSignal.overlap);
     keywordSubtypeExactHitById.set(idStr, subtypeKeywordSignal.exactHit);
-    finalScoreSourceById.set(idStr, "computed");
+    if (!finalScoreSourceById.has(idStr)) {
+      finalScoreSourceById.set(idStr, "computed");
+    }
 
     const broadImageIntent =
       !hasExplicitColorIntent &&
@@ -5777,7 +5816,16 @@ export async function searchByImageWithSimilarity(
           finalRelevance01 = Math.min(finalRelevance01 ?? 0, 0.22);
           finalRelevanceSource = "sport_keyword_soft_cap";
         }
-      } else if (hasColorIntentForFinal && authoritativeColorNorm && compliance) {
+      } else if (
+        hasColorIntentForFinal &&
+        authoritativeColorNorm &&
+        compliance &&
+        !(
+          !hasExplicitColorIntent &&
+          hasDetectionAnchoredTypeIntent &&
+          String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops"
+        )
+      ) {
         const authoritativeColor = tieredColorListCompliance(
           desiredColorsTierForRelevance,
           authoritativeColorTokens.length > 0 ? authoritativeColorTokens : [authoritativeColorNorm],

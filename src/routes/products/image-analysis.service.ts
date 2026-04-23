@@ -2876,6 +2876,37 @@ function applyRelevanceThresholdFilter(
   if (!minRelevance || minRelevance <= 0 || !Array.isArray(products) || products.length === 0) {
     return products;
   }
+  const desiredColorTokens = (Array.isArray(options?.desiredColor) ? options?.desiredColor : [options?.desiredColor])
+    .flatMap((c) => String(c ?? "").split(","))
+    .map((c) => c.toLowerCase().trim())
+    .filter((c) => c.length > 0);
+  const prefersWhiteFamily = desiredColorTokens.some((c) => /^(white|off[\s-]?white|ivory|cream|ecru)$/i.test(c));
+  const rankBottomsByDesiredColor = (rows: ProductResult[]): ProductResult[] => {
+    const categoryNorm = String(options?.category ?? "").toLowerCase().trim();
+    if (categoryNorm !== "bottoms" || rows.length <= 1) return rows;
+    const whiteFamilyRegex = /\b(white|off[\s-]?white|ivory|cream|ecru|bone)\b/i;
+    return [...rows].sort((a, b) => {
+      const ar = Number((a as any)?.finalRelevance01 ?? 0);
+      const br = Number((b as any)?.finalRelevance01 ?? 0);
+      const aExplain = ((a as any)?.explain ?? {}) as Record<string, unknown>;
+      const bExplain = ((b as any)?.explain ?? {}) as Record<string, unknown>;
+      const aBlob = [aExplain.matchedColor, (a as any)?.color, (a as any)?.title, (a as any)?.description]
+        .filter((x) => x != null)
+        .map((x) => String(x))
+        .join(" ");
+      const bBlob = [bExplain.matchedColor, (b as any)?.color, (b as any)?.title, (b as any)?.description]
+        .filter((x) => x != null)
+        .map((x) => String(x))
+        .join(" ");
+      const aColorComp = Number(aExplain.colorCompliance ?? 0);
+      const bColorComp = Number(bExplain.colorCompliance ?? 0);
+      const aWhiteHit = whiteFamilyRegex.test(aBlob) ? 1 : 0;
+      const bWhiteHit = whiteFamilyRegex.test(bBlob) ? 1 : 0;
+      if (prefersWhiteFamily && aWhiteHit !== bWhiteHit) return bWhiteHit - aWhiteHit;
+      if (Math.abs(aColorComp - bColorComp) > 1e-6) return bColorComp - aColorComp;
+      return br - ar;
+    });
+  };
 
   const filtered = products.filter((p) => {
     const relevance = Number((p as any)?.finalRelevance01 ?? 0);
@@ -3065,10 +3096,10 @@ function applyRelevanceThresholdFilter(
     console.log(
       `[relevance-threshold-fallback] preserved ${recovered.length} product(s) for detection="${options?.detectionLabel ?? "unknown"}" category="${options?.category ?? "unknown"}" bestFinalRelevance01=${bestRelevance.toFixed(3)} threshold=${minRelevance}`,
     );
-    return recovered;
+    return rankBottomsByDesiredColor(recovered);
   }
 
-  return filtered;
+  return rankBottomsByDesiredColor(filtered);
 }
 
 function isCoreOutfitCategory(category: string | undefined): boolean {
