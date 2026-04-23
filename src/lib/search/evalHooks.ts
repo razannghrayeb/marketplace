@@ -45,6 +45,7 @@ export interface TextSearchEvalPayload {
     embedding_fashion_01?: number | null;
     soft_ast_color?: boolean;
     hard_color_filter?: boolean;
+    strict_color_type_intent?: boolean;
     expansion_term_count?: number;
     recall_size?: number;
     final_accept_min?: number;

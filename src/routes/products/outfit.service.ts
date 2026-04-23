@@ -2545,6 +2545,23 @@ function mapCompleteLookToStyleResponse(params: {
   const sourceIsDressAnchor =
     /\b(dress|gown|midi dress|mini dress|maxi dress)\b/.test(sourceText) ||
     categoryFamily(detectedCategory) === "dress";
+  const sourceIsDressyOccasion =
+    sourceStyle.occasion === "party" ||
+    sourceStyle.occasion === "formal" ||
+    sourceStyle.occasion === "semi-formal";
+
+  const isShoeLike = (value: string): boolean =>
+    /\b(shoe|shoes|sneaker|trainer|heel|pump|stiletto|sandal|loafer|flat|mule|boot|oxford|espadrille)\b/.test(value);
+  const isSneakerLike = (value: string): boolean =>
+    /\b(sneaker|sneakers|trainer|trainers|tennis shoe|running shoe|athletic shoes?|sportswear shoes?)\b/.test(value);
+  const isDressyShoeLike = (value: string): boolean =>
+    /\b(heel|heels|pump|pumps|stiletto|stilettos|sandal|sandals|dress sandal|mule|mules|ballet flat|ballerina|slingback|kitten heel|espadrille|loafer|loafers)\b/.test(value);
+  const isRealBagLike = (value: string): boolean =>
+    /\b(tote|crossbody|clutch|satchel|backpack|shoulder bag|handbag|hobo|messenger|bucket bag|top handle|mini bag)\b/.test(value);
+
+  const stagedSuggestions = completeLookResult.suggestions
+    .slice()
+    .sort((a, b) => (b.score || 0) - (a.score || 0));
 
   const shouldKeepMappedSuggestion = (categoryLabel: string, s: CompleteLookMappedSuggestion): boolean => {
     const text = `${String(s.title || "")} ${String(s.category || "")}`.toLowerCase();
@@ -2553,7 +2570,9 @@ function mapCompleteLookToStyleResponse(params: {
     if (categoryLabel === "Bags") {
       const bagAccessoryOnly = /\bbag accessories?\b/.test(text);
       const realBagSubtype = /\b(tote|crossbody|clutch|satchel|backpack|shoulder bag|handbag|hobo|messenger|bucket bag|top handle|mini bag)\b/.test(text);
-      if (bagAccessoryOnly && !realBagSubtype) return false;
+      // Hard ban noisy bag-accessories bucket for bag recommendations.
+      if (bagAccessoryOnly) return false;
+      if (!realBagSubtype) return false;
       if (/\b(wallet|card holder|card case|keychain|key ring|strap|bag charm|coin purse|phone case)\b/.test(text)) return false;
     }
 
@@ -2596,10 +2615,9 @@ function mapCompleteLookToStyleResponse(params: {
 
     // Hard dress-shoe gate in mapped response path.
     if (categoryLabel === "Shoes" && sourceIsDressAnchor) {
-      const isSneakerLike = /\b(sneaker|sneakers|trainer|trainers|tennis shoe|running shoe|athletic shoes?|sportswear shoes?)\b/.test(text);
-      if (isSneakerLike) return false;
-      const dressyLike = /\b(heel|heels|pump|pumps|stiletto|stilettos|sandal|sandals|dress sandal|mule|mules|ballet flat|ballerina|slingback|kitten heel|espadrille)\b/.test(text);
-      if (!dressyLike && (sourceStyle.occasion === "party" || sourceStyle.occasion === "formal" || sourceStyle.occasion === "semi-formal")) {
+      if (isSneakerLike(text)) return false;
+      const dressyLike = isDressyShoeLike(text);
+      if (!dressyLike && sourceIsDressyOccasion) {
         return false;
       }
     }
@@ -2620,7 +2638,7 @@ function mapCompleteLookToStyleResponse(params: {
     return true;
   };
 
-  for (const s of completeLookResult.suggestions) {
+  for (const s of stagedSuggestions) {
     const categoryLabel = completeStyleCategoryLabel(s.category);
     if (!categoryLabel) continue;
     if (!shouldKeepMappedSuggestion(categoryLabel, s)) continue;
@@ -2681,6 +2699,50 @@ function mapCompleteLookToStyleResponse(params: {
       reasons.set(categoryLabel, s.reason || `Recommended ${categoryLabel.toLowerCase()} for this look`);
     }
   }
+
+  // Pass 2 fallback: ensure shoes/bags are populated with best valid candidates.
+  const ensureCategoryFilled = (categoryLabel: "Shoes" | "Bags") => {
+    const existing = groups.get(categoryLabel) || [];
+    if (existing.length >= Math.min(2, maxPerCategory)) return;
+    if (!groups.has(categoryLabel)) groups.set(categoryLabel, []);
+    const bucket = groups.get(categoryLabel)!;
+
+    for (const s of stagedSuggestions) {
+      if (bucket.length >= Math.min(2, maxPerCategory)) break;
+      const text = `${String(s.title || "")} ${String(s.category || "")}`.toLowerCase();
+      const productId = s.product_id;
+      if (bucket.some((b) => b.id === productId)) continue;
+
+      if (categoryLabel === "Shoes") {
+        if (!isShoeLike(text)) continue;
+        if (sourceIsDressyOccasion && sourceIsDressAnchor) {
+          if (isSneakerLike(text)) continue;
+          if (!isDressyShoeLike(text)) continue;
+        }
+      } else {
+        if (/\bbag accessories?\b/.test(text)) continue;
+        if (!isRealBagLike(text)) continue;
+        if (/\b(wallet|card holder|card case|keychain|key ring|strap|bag charm|coin purse|phone case)\b/.test(text)) continue;
+      }
+
+      bucket.push({
+        id: s.product_id,
+        title: s.title,
+        brand: s.brand,
+        price: typeof s.price_cents === "number" && Number.isFinite(s.price_cents) ? Math.round(s.price_cents) : 0,
+        currency: sourceProduct.currency || "USD",
+        image: s.image_cdn || s.image_url,
+        matchScore: Math.round(Math.max(0, Math.min(1, s.score || 0)) * 100),
+        matchReasons: s.matchReasons?.length ? s.matchReasons : [s.reason || "Complements your selected item"],
+      });
+      if (!reasons.has(categoryLabel)) {
+        reasons.set(categoryLabel, s.reason || `Recommended ${categoryLabel.toLowerCase()} for this look`);
+      }
+    }
+  };
+
+  ensureCategoryFilled("Shoes");
+  ensureCategoryFilled("Bags");
 
   const recommendations = Array.from(groups.entries()).map(([category, products]) => {
     const priority = completeStylePriorityFromCategory(category, completeLookResult.missingCategories || []);

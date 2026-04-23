@@ -649,6 +649,24 @@ function inferredAudienceHardFilterEnabled(): boolean {
   return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
+function strictColorTypeModeEnabled(): boolean {
+  const v = String(process.env.SEARCH_STRICT_COLOR_TYPE_MODE ?? "1").toLowerCase();
+  return !(v === "0" || v === "false" || v === "off" || v === "no");
+}
+
+function hasStrictColorTypeIntent(rawQuery: string, ast: QueryAST, hasProductTypeConstraint: boolean): boolean {
+  if (!strictColorTypeModeEnabled()) return false;
+  const normalizedTokens = (ast.tokens?.normalized ?? []).map((t) => String(t).toLowerCase()).filter(Boolean);
+  const colors = (ast.entities?.colors ?? []).map((c) => String(c).toLowerCase()).filter(Boolean);
+  if (colors.length === 0 || !hasProductTypeConstraint) return false;
+  // Keep this mode for compact filter queries like "red dress", "black maxi dress".
+  const compact = normalizedTokens.length > 0 && normalizedTokens.length <= 4;
+  if (!compact) return false;
+  const hasNegation = /\b(not|except|without|minus)\b/i.test(rawQuery);
+  if (hasNegation) return false;
+  return true;
+}
+
 /** When true, hard/soft gender clauses also allow indexed `unisex` (SEARCH_GENDER_UNISEX_OR). */
 function binaryGenderAllowsUnisexFilter(g: string): boolean {
   if (!config.search.genderUnisexOr) return false;
@@ -1794,7 +1812,8 @@ export async function textSearch(
       .filter((id) => (complianceById.get(id)?.finalRelevance01 ?? 0) >= finalAcceptMin);
     const countAfterFinalAcceptMin = thresholdPassedIds.length;
 
-    const relevanceGateSoft = config.search.relevanceGateMode === "soft";
+    const strictColorTypeIntent = hasStrictColorTypeIntent(rawQuery, ast, hasProductTypeConstraint);
+    const relevanceGateSoft = config.search.relevanceGateMode === "soft" && !strictColorTypeIntent;
     const softFloorMin = config.search.softFinalRelevanceFloorMin;
 
     // #region agent log
@@ -1822,6 +1841,7 @@ export async function textSearch(
             finalAcceptMin,
             relevanceGateMode: config.search.relevanceGateMode,
             relevanceGateSoft,
+            strictColorTypeIntent,
             hitsCount: hits.length,
             sortedByRelevanceCount: sortedByRelevance.length,
             thresholdPassedIdsCount: thresholdPassedIds.length,
@@ -2145,6 +2165,7 @@ export async function textSearch(
           embedding_fashion_01: embeddingFashion01,
           soft_ast_color: useSoftAstColor,
           hard_color_filter: hardColorFilterActive,
+          strict_color_type_intent: strictColorTypeIntent,
           expansion_term_count: expansionTerms.length,
           recall_size: recallSize,
           final_accept_min: finalAcceptMin,
@@ -2207,6 +2228,7 @@ export async function textSearch(
         below_relevance_threshold: belowRelevanceThreshold,
         recall_size: recallSize,
         final_accept_min: finalAcceptMin,
+        strict_color_type_intent: strictColorTypeIntent,
         total_above_threshold: totalAboveThreshold,
         gate_counts: gateCounts,
         open_search_total_estimate: typeof osTotal === "number" ? osTotal : undefined,
