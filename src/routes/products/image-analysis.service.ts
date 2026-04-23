@@ -256,9 +256,9 @@ function resolveShopLookLimit(explicit?: number): number {
  * Keep this higher than the final per-detection output cap to improve recall.
  */
 function shopLookRetrievalCap(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_SHOP_RETRIEVAL_CAP ?? "220");
-  if (!Number.isFinite(raw)) return 220;
-  return Math.max(80, Math.min(500, Math.floor(raw)));
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_RETRIEVAL_CAP ?? "320");
+  if (!Number.isFinite(raw)) return 320;
+  return Math.max(100, Math.min(700, Math.floor(raw)));
 }
 
 /** Smaller retrieval cap for non-initial retry/fallback calls (default 36) to bound tail latency. */
@@ -295,9 +295,9 @@ function resolveShopLookPageSize(explicit: number | undefined, fallback: number)
  * This improves recall for hard detections (e.g. pink long dresses) without changing output size.
  */
 function shopLookRecallMultiplier(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_SHOP_RECALL_MULTIPLIER ?? "4");
-  if (!Number.isFinite(raw)) return 4;
-  return Math.max(1, Math.min(5, Math.floor(raw)));
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_RECALL_MULTIPLIER ?? "5");
+  if (!Number.isFinite(raw)) return 5;
+  return Math.max(1, Math.min(7, Math.floor(raw)));
 }
 
 /** Extra visual floor above threshold to keep Shop-the-Look results precision-first. */
@@ -329,16 +329,16 @@ function shopLookDressRecoverySimilarityThreshold(baseThreshold: number): number
 function shopLookDetectionSimilarityThreshold(baseThreshold: number, productCategory: string): number {
   const category = String(productCategory || "").toLowerCase().trim();
   if (category === "tops") {
-    return Math.max(0.33, Math.min(baseThreshold, 0.48));
+    return Math.max(0.3, Math.min(baseThreshold, 0.46));
   }
   if (category === "bottoms") {
-    return Math.max(0.35, Math.min(baseThreshold, 0.48));
+    return Math.max(0.3, Math.min(baseThreshold, 0.46));
   }
   if (category === "dresses" || category === "outerwear") {
-    return Math.max(0.33, Math.min(baseThreshold, 0.5));
+    return Math.max(0.3, Math.min(baseThreshold, 0.48));
   }
   if (category === "footwear") {
-    return Math.max(0.33, Math.min(baseThreshold, 0.5));
+    return Math.max(0.28, Math.min(baseThreshold, 0.48));
   }
   return baseThreshold;
 }
@@ -5766,15 +5766,15 @@ export class ImageAnalysisService {
             const categoryNorm = String(categoryMapping.productCategory ?? "").toLowerCase().trim();
             const boost =
               categoryNorm === "tops"
-                ? (inferredColorConflictForRetrieval ? 2.4 : 1.7)
-                : categoryNorm === "dresses" ? 2.4
-                  : categoryNorm === "bottoms" ? 2.1
+                ? (inferredColorConflictForRetrieval ? 2.9 : 2.2)
+                : categoryNorm === "dresses" ? 2.9
+                  : categoryNorm === "bottoms" ? 2.6
                   : categoryNorm === "footwear"
-                    ? ((detection.area_ratio ?? 0) < 0.012 ? 2.6 : 1.9)
-                    : 1;
+                    ? ((detection.area_ratio ?? 0) < 0.012 ? 3.2 : 2.3)
+                    : 1.5;
             return Math.max(
               resolvedResultsPageSize,
-              Math.min(resolveShopLookRetrievalLimit(retrievalLimit * boost), retrievalLimit + 180),
+              Math.min(resolveShopLookRetrievalLimit(retrievalLimit * boost), retrievalLimit + 260),
             );
           })();
 
@@ -8068,6 +8068,21 @@ export class ImageAnalysisService {
           if (categoryMapping.productCategory === "footwear" && (detection.area_ratio ?? 0) < 0.012) {
             detectionSimilarityThreshold = Math.max(0.18, detectionSimilarityThreshold - 0.08);
           }
+          const detectionRetrievalLimit = (() => {
+            const categoryNorm = String(categoryMapping.productCategory ?? "").toLowerCase().trim();
+            const boost =
+              categoryNorm === "tops"
+                ? (inferredColorConflictForRetrieval ? 2.7 : 2.1)
+                : categoryNorm === "dresses" ? 2.8
+                  : categoryNorm === "bottoms" ? 2.4
+                    : categoryNorm === "footwear"
+                      ? ((detection.area_ratio ?? 0) < 0.012 ? 3.0 : 2.2)
+                      : 1.4;
+            return Math.max(
+              resolvedResultsPageSize,
+              Math.min(resolveShopLookRetrievalLimit(retrievalLimit * boost), retrievalLimit + 240),
+            );
+          })();
 
           let similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalEmbedding,
@@ -8081,7 +8096,7 @@ export class ImageAnalysisService {
             detectionProductCategory: categoryMapping.productCategory,
             filters,
             softProductTypeHints,
-            limit: retrievalLimit,
+            limit: detectionRetrievalLimit,
             similarityThreshold: detectionSimilarityThreshold,
             includeRelated: false,
             predictedCategoryAisles,
@@ -8136,7 +8151,7 @@ export class ImageAnalysisService {
               detectionProductCategory: categoryMapping.productCategory,
               filters: filtersRetry,
               softProductTypeHints,
-              limit: retrievalLimit,
+              limit: detectionRetrievalLimit,
               similarityThreshold: detectionSimilarityThreshold,
               includeRelated: false,
               predictedCategoryAisles,

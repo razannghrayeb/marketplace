@@ -2680,13 +2680,27 @@ function collectInferredColorTokens(
   }
 
   const preferredKey = String(preferredItemKey ?? "").trim();
+  const isApparelLike =
+    /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|sweater|hoodie|cardigan|jacket|coat|outerwear|trouser|trousers|pant|pants|jean|jeans|skirt|skirts|dress|dresses|gown|gowns|short|shorts|legging|leggings|cargo|chino|chinos)\b/.test(
+      `${merged} ${typeText}`,
+    );
+  const preferredValueRaw = preferredKey
+    ? String(inferredByItem?.[preferredKey] ?? "").toLowerCase().trim()
+    : "";
+  const preferredColorNorm = preferredValueRaw
+    ? (normalizeColorToken(preferredValueRaw) ?? preferredValueRaw)
+    : "";
+  const preferredConf = Number(inferredByItemConfidence?.[preferredKey] ?? 0);
+  const preferredHasConfidentColor =
+    Boolean(preferredColorNorm) && Number.isFinite(preferredConf) && preferredConf >= colorConfidenceThreshold();
   if (preferredKey) {
-    const preferredValue = String(inferredByItem?.[preferredKey] ?? "").toLowerCase().trim();
-    const preferredColor = normalizeColorToken(preferredValue) ?? preferredValue;
-    const preferredConf = Number(inferredByItemConfidence?.[preferredKey] ?? 0);
-    if (preferredColor && preferredConf >= colorConfidenceThreshold()) {
-      return [preferredColor];
+    if (preferredHasConfidentColor) {
+      return [preferredColorNorm];
     }
+    // Critical: for detection-anchored apparel, do not borrow color from other items
+    // (e.g. trousers color leaking into top query). If preferred slot has no usable
+    // color signal, fall back to no inferred-color gating.
+    if (isApparelLike) return [];
   }
 
   const scored = collectConfidentColorTokenMap({
@@ -6036,8 +6050,20 @@ export async function searchByImageWithSimilarity(
     /\b(semi-formal|formal|business|tailored|smart)\b/i.test(desiredStyleForRelevance ?? "");
   const isTailoredIntentForDetection =
     hasDetectionAnchoredTypeIntent &&
-    (detectionCategoryNormForTailored === "tops" || detectionCategoryNormForTailored === "bottoms") &&
-    (isTailoredStyleIntent || hasTailoredTypeIntent(desiredProductTypes));
+    (
+      // Keep tailored gating for tops when type/style cues indicate suit/blazer intent.
+      (
+        detectionCategoryNormForTailored === "tops" &&
+        (isTailoredStyleIntent || hasTailoredTypeIntent(desiredProductTypes))
+      ) ||
+      // For bottoms, only enforce tailored hard-gating when style is explicitly formal.
+      // Inferred trouser/cargo/chino labels are too noisy and were suppressing valid cargo results.
+      (
+        detectionCategoryNormForTailored === "bottoms" &&
+        hasExplicitStyleIntent &&
+        isTailoredStyleIntent
+      )
+    );
   if (isTailoredIntentForDetection && rankedHits.length > 0) {
     const tailoredSafeHits = rankedHits.filter((h: any) => {
       const src = (h as any)?._source ?? {};
@@ -6338,16 +6364,36 @@ export async function searchByImageWithSimilarity(
         (String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops" ||
           String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms")
       ) {
+        const detectionCategoryForFloor = String(params.detectionProductCategory ?? "").toLowerCase().trim();
         const typeComp = Math.max(0, Math.min(1, compliance.productTypeCompliance ?? 0));
         const exactType = Number(compliance.exactTypeScore ?? 0);
         const crossFamily = Math.max(0, Math.min(1, compliance.crossFamilyPenalty ?? 0));
         const sim = Math.max(0, Math.min(1, similarityScore));
+        const categoryComp = Math.max(
+          0,
+          Math.min(
+            1,
+            Number((compliance as any).categoryRelevance01 ?? (compliance as any).categoryScore ?? 0),
+          ),
+        );
         const hasStrongTypeEvidence = exactType >= 1 || typeComp >= 0.42;
         const hasStrongVisualEvidenceForFloor = sim >= 0.68;
         const notCrossFamilyContradiction = crossFamily < 0.55;
         if (hasStrongTypeEvidence && hasStrongVisualEvidenceForFloor && notCrossFamilyContradiction) {
           const typeBoost = exactType >= 1 ? 0.06 : Math.max(0, (typeComp - 0.42) * 0.1);
-          const floor = Math.min(0.58, Math.max(0.26, sim * 0.78 - crossFamily * 0.18 + typeBoost));
+          let floor = Math.min(0.58, Math.max(0.26, sim * 0.78 - crossFamily * 0.18 + typeBoost));
+          // Main-path acceptance floor for bottoms/skirts:
+          // when visual+type+category evidence is very strong, avoid dropping below
+          // the final threshold due secondary caps.
+          if (
+            detectionCategoryForFloor === "bottoms" &&
+            exactType >= 1 &&
+            categoryComp >= 0.95 &&
+            crossFamily < 0.35 &&
+            (sim >= nearIdenticalRawMin || sim >= 0.76)
+          ) {
+            floor = Math.max(floor, Math.min(0.72, Math.max(0.66, sim * 0.9)));
+          }
           const source = String(finalRelevanceSource ?? "").toLowerCase();
           const canLiftFrom =
             source === "computed" ||
