@@ -2728,6 +2728,51 @@ function shouldPreferInferredColorWhenConflict(params: {
   return false;
 }
 
+function expandColorIntentWithNearest(tokens: string[]): string[] {
+  const normalized = tokens
+    .map((t) => String(t ?? "").toLowerCase().trim())
+    .map((t) => normalizeColorToken(t) ?? t)
+    .filter(Boolean);
+  if (normalized.length === 0) return [];
+
+  const nearest: Record<string, string[]> = {
+    "light-pink": ["pink", "rose", "blush"],
+    blush: ["pink", "light-pink", "rose"],
+    rose: ["pink", "light-pink", "blush"],
+    pink: ["light-pink", "blush", "rose"],
+    beige: ["off-white", "white", "cream", "ivory", "tan"],
+    camel: ["beige", "tan", "white", "off-white"],
+    taupe: ["beige", "stone", "off-white", "white"],
+    stone: ["beige", "off-white", "white"],
+    khaki: ["beige", "tan", "off-white"],
+    nude: ["beige", "off-white", "white"],
+    "off-white": ["white", "cream", "ivory", "beige"],
+    cream: ["off-white", "white", "ivory", "beige"],
+    ivory: ["off-white", "white", "cream", "beige"],
+    "light-blue": ["blue", "sky-blue", "powder-blue"],
+    "sky-blue": ["light-blue", "blue"],
+    navy: ["blue", "indigo"],
+    charcoal: ["black", "gray"],
+    gray: ["charcoal", "black"],
+    burgundy: ["maroon", "red"],
+    maroon: ["burgundy", "red"],
+    lavender: ["purple", "lilac"],
+    lilac: ["lavender", "purple"],
+    mint: ["green", "sage"],
+    teal: ["blue", "green"],
+  };
+
+  const out: string[] = [];
+  for (const token of normalized) {
+    if (!out.includes(token)) out.push(token);
+    for (const alt of nearest[token] ?? []) {
+      const normAlt = normalizeColorToken(alt) ?? alt;
+      if (normAlt && !out.includes(normAlt)) out.push(normAlt);
+    }
+  }
+  return out;
+}
+
 function computeColorContradictionPenalty(params: {
   desiredColorsTier: string[];
   rerankColorMode: "any" | "all";
@@ -4225,14 +4270,17 @@ export async function searchByImageWithSimilarity(
     allColorsForRelevance = [...normalizedCropColorsForMerge];
   }
 
-  const desiredColorsForRelevance = [
+  const desiredColorsBaseForRelevance = [
     ...new Set(
       allColorsForRelevance.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
     ),
   ];
+  const desiredColorsForRelevance = expandColorIntentWithNearest(desiredColorsBaseForRelevance);
   const rerankColorModeForRelevance = filtersRecord.colorMode === "all" ? "all" : "any";
   const desiredColorsTierForRelevance =
-    allColorsForRelevance.length > 0 ? allColorsForRelevance : desiredColorsForRelevance;
+    allColorsForRelevance.length > 0
+      ? expandColorIntentWithNearest(allColorsForRelevance)
+      : desiredColorsForRelevance;
 
   const queryAgeGroupRawForRelevance =
     typeof filtersRecord.ageGroup === "string" ? filtersRecord.ageGroup : undefined;
@@ -4813,20 +4861,45 @@ export async function searchByImageWithSimilarity(
       const partSim = partSimByDocId.get(idStr);
       const topPartComp = partSim ? computeTopPartSimilarity01(partSim) : 0;
       const visualComp = Math.max(0, Math.min(1, effectiveVisualForScoring));
+      const categoryComp = Math.max(0, Math.min(1, (comp as any).categoryScore ?? 0));
+      const taxonomyComp = Math.max(0, Math.min(1, (comp as any).taxonomyMatch ?? 0));
+      const audienceComp = Math.max(0, Math.min(1, comp.audienceCompliance ?? 0));
+      const structuralTopComp = Math.max(typeComp, topPartComp, categoryComp, taxonomyComp);
       const strongTopEvidence =
-        ((comp.exactTypeScore ?? 0) >= 1 || typeComp >= 0.34) &&
+        ((comp.exactTypeScore ?? 0) >= 1 || structuralTopComp >= 0.34) &&
         visualComp >= 0.66 &&
         (comp.crossFamilyPenalty ?? 0) < 0.52;
       if (strongTopEvidence) {
-        const blendedTopMain =
-          0.68 * visualComp +
-          0.2 * typeComp +
-          0.08 * Math.max(sleeveComp, topPartComp) +
-          0.04 * Math.max(0, Math.min(1, comp.styleCompliance ?? 0));
-        const boosted = Math.min(1, Math.max(0.24, blendedTopMain));
+        let blendedTopMain =
+          0.58 * visualComp +
+          0.22 * structuralTopComp +
+          0.1 * Math.max(sleeveComp, topPartComp) +
+          0.06 * Math.max(0, Math.min(1, comp.styleCompliance ?? 0)) +
+          0.04 * audienceComp;
+        const weakTopStructure =
+          (comp.exactTypeScore ?? 0) < 1 &&
+          structuralTopComp < 0.46 &&
+          categoryComp < 0.3 &&
+          taxonomyComp < 0.45;
+        if (weakTopStructure) {
+          blendedTopMain *= 0.88;
+        }
+        // Keep tops main-path tuning from overpowering active color intent.
+        // When the query has color intent and product color compliance is none,
+        // dampen the boost so wrong-color tops do not dominate ranking.
+        const hasTopColorIntent = Boolean(comp.hasColorIntent ?? hasColorIntentForFinal);
+        const topColorCompliance = Number(comp.colorCompliance ?? NaN);
+        if (hasTopColorIntent && Number.isFinite(topColorCompliance) && topColorCompliance <= 0) {
+          // Keep stricter damping for explicit color filters, but avoid collapsing
+          // tops to zero when color comes only from inferred intent.
+          blendedTopMain *= hasExplicitColorIntent ? 0.45 : 0.85;
+        }
+        const exactTopVisualEvidence = (comp.exactTypeScore ?? 0) >= 1 && visualComp >= 0.62;
+        const boostedFloor = exactTopVisualEvidence ? 0.36 : 0.24;
+        const boosted = Math.min(1, Math.max(boostedFloor, blendedTopMain));
         if (boosted > (comp.finalRelevance01 ?? 0)) {
           comp.finalRelevance01 = boosted;
-          finalScoreSourceById.set(idStr, "tops_main_path_tuning");
+          finalScoreSourceById.set(idStr, "tops_main_path_tuning_structural_color_aware");
         }
       }
     }

@@ -4919,6 +4919,21 @@ export class ImageAnalysisService {
             label,
             blipCaption ?? "",
           );
+          if (categoryMapping.productCategory === "tops") {
+            const labelNormForTopHints = String(label ?? "").toLowerCase();
+            const isShortSleeveTop = /\bshort sleeve top\b/.test(labelNormForTopHints);
+            const isMenAudience = String(inferredAudience.gender ?? "").toLowerCase().trim() === "men";
+            if (isShortSleeveTop) {
+              const shortTopPriority = ["t-shirt", "tshirt", "tee", "shirt", "polo", "top", "tops"];
+              softProductTypeHints = [...new Set([...shortTopPriority, ...softProductTypeHints])];
+            }
+            // Avoid overly narrow/feminine seeds for men tops; they collapse recall.
+            if (isMenAudience) {
+              softProductTypeHints = softProductTypeHints.filter(
+                (t) => !/\b(camisole|cami|tank|sleeveless|crop top)\b/i.test(String(t)),
+              );
+            }
+          }
           softProductTypeHints = recoverTailoredTopTypes(
             softProductTypeHints,
             categoryMapping.productCategory,
@@ -5146,8 +5161,14 @@ export class ImageAnalysisService {
             categoryMapping.confidence >= 0.85 &&
             (detection.area_ratio ?? 0) >= 0.12 &&
             (detection.confidence ?? 0) >= 0.75;
+          const topsHardAuto =
+            categoryMapping.productCategory === "tops" &&
+            /\b(short sleeve top|long sleeve top|shirt|t-?shirt|tee|polo|blouse|top)\b/i.test(String(label ?? "")) &&
+            categoryMapping.confidence >= 0.8 &&
+            (detection.area_ratio ?? 0) >= 0.09 &&
+            (detection.confidence ?? 0) >= 0.85;
           const detectionMeetsAutoHardHeuristics =
-            !noisyCat && (baseHardAuto || relaxedGarmentHardAuto);
+            !noisyCat && (baseHardAuto || relaxedGarmentHardAuto || topsHardAuto);
           const accessoryLikeCategory = isAccessoryLikeCategory(categoryMapping.productCategory);
           const footwearLikeCategory = categoryMapping.productCategory === "footwear";
           const accessoryOrFootwearConfident =

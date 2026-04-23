@@ -40,24 +40,67 @@ export async function listProductsOnSale(params: {
   const hasIsHidden = await productsTableHasIsHiddenColumn();
   const hiddenClause = hasIsHidden ? "AND p.is_hidden = false" : "";
 
+  const normalizedParentExpr = `
+    CASE
+      WHEN p.parent_product_url IS NOT NULL AND p.parent_product_url <> '' THEN
+        regexp_replace(
+          split_part(split_part(lower(p.parent_product_url), '?', 1), '#', 1),
+          '^(https?://[^/]+)/(?:[a-z]{2}(?:-[a-z]{2})?)/(.*)$',
+          '\\1/\\2'
+        )
+      ELSE
+        regexp_replace(
+          split_part(split_part(lower(p.product_url), '?', 1), '#', 1),
+          '^(https?://[^/]+)/(?:[a-z]{2}(?:-[a-z]{2})?)/(.*)$',
+          '\\1/\\2'
+        )
+    END
+  `;
+
   const countResult = await pg.query<{ c: string }>(
-    `SELECT COUNT(*)::int AS c
-     FROM products p
-     WHERE 1=1
-       ${hiddenClause}
-       AND ${SALE_WHERE.replace(/\n/g, " ")}`,
+    `WITH ranked AS (
+       SELECT
+         p.id,
+         row_number() OVER (
+           PARTITION BY p.vendor_id, ${normalizedParentExpr}
+           ORDER BY
+             CASE WHEN p.availability THEN 1 ELSE 0 END DESC,
+             p.last_seen DESC NULLS LAST,
+             p.id DESC
+         ) AS rn
+       FROM products p
+       WHERE 1=1
+         ${hiddenClause}
+         AND ${SALE_WHERE.replace(/\n/g, " ")}
+     )
+     SELECT COUNT(*)::int AS c
+     FROM ranked
+     WHERE rn = 1`,
   );
   const total = Number(countResult.rows[0]?.c ?? 0);
 
   const orderSql = orderClause(sort);
   const result = await pg.query(
-    `SELECT p.*, v.name as vendor_name
-     FROM products p
-     LEFT JOIN vendors v ON v.id = p.vendor_id
-     WHERE 1=1
-       ${hiddenClause}
-       AND ${SALE_WHERE.replace(/\n/g, " ")}
-     ORDER BY ${orderSql}
+    `WITH ranked AS (
+       SELECT
+         p.*,
+         row_number() OVER (
+           PARTITION BY p.vendor_id, ${normalizedParentExpr}
+           ORDER BY
+             CASE WHEN p.availability THEN 1 ELSE 0 END DESC,
+             p.last_seen DESC NULLS LAST,
+             p.id DESC
+         ) AS rn
+       FROM products p
+       WHERE 1=1
+         ${hiddenClause}
+         AND ${SALE_WHERE.replace(/\n/g, " ")}
+     )
+     SELECT r.*, v.name as vendor_name
+     FROM ranked r
+     LEFT JOIN vendors v ON v.id = r.vendor_id
+     WHERE r.rn = 1
+     ORDER BY ${orderSql.replace(/\bp\./g, "r.")}
      LIMIT $1 OFFSET $2`,
     [limit, offset],
   );
