@@ -394,6 +394,16 @@ export interface SearchResultWithRelated {
     final_accept_min_effective?: number;
     relevance_relaxed_for_min_count?: boolean;
     image_min_results_target?: number;
+    gate_counts?: {
+      open_search_hits: number;
+      ranked_hits: number;
+      accepted_after_final_accept_min: number;
+      accepted_after_soft_gate: number;
+      accepted_after_color_post: number;
+      hydrated_results: number;
+      deduped_results: number;
+      paged_results: number;
+    };
     /** Count after relevance gate + dedupe (before pagination slice). */
     total_above_threshold?: number;
     open_search_total_estimate?: number;

@@ -446,6 +446,28 @@ function isNoisyCategoryForAutoHardCategory(mapping: CategoryMapping, detectionL
   return false;
 }
 
+function normalizeDetectionProductCategoryToken(token: string | null | undefined): string {
+  const normalized = String(token ?? "").toLowerCase().trim();
+  if (!normalized) return normalized;
+  if (
+    /\b(oxford|oxfords|loafer|loafers|sneaker|sneakers|heel|heels|boot|boots|sandals?|slippers?|mule|mules|pumps?|flats?|footwear)\b/.test(
+      normalized,
+    )
+  ) return "footwear";
+  if (/\b(trouser|trousers|pants?|slacks?|jeans?|shorts?|bottoms?)\b/.test(normalized)) return "bottoms";
+  if (/\b(blazer|blazers|shirt|shirts|tee|t-?shirt|tops?|sweater|hoodie|outerwear)\b/.test(normalized)) {
+    return normalized.includes("outerwear") ? "outerwear" : "tops";
+  }
+  return normalized;
+}
+
+function normalizeCategoryMapping(mapping: CategoryMapping): CategoryMapping {
+  return {
+    ...mapping,
+    productCategory: normalizeDetectionProductCategoryToken(mapping.productCategory),
+  };
+}
+
 /** Infer audience gender via BLIP caption (default: enabled). */
 function imageInferAudienceGenderEnv(): boolean {
   const raw = String(process.env.SEARCH_IMAGE_INFER_AUDIENCE_VIA_BLIP ?? "1").toLowerCase();
@@ -1205,6 +1227,31 @@ function shopLookSlowFirstSearchSkipRecoveryMinResults(): number {
   const raw = Number(process.env.SEARCH_IMAGE_SHOP_SLOW_FIRST_SEARCH_SKIP_RECOVERY_MIN_RESULTS ?? "6");
   if (!Number.isFinite(raw)) return 6;
   return Math.max(1, Math.min(40, Math.floor(raw)));
+}
+
+function shopLookSlowFirstSearchSkipRecoveryMinResultsByCategory(productCategory: string): number {
+  const normalized = String(productCategory || "").toLowerCase().trim();
+  if (normalized === "accessories" || normalized === "bags") {
+    const raw = Number(process.env.SEARCH_IMAGE_SHOP_SLOW_FIRST_SEARCH_SKIP_RECOVERY_MIN_RESULTS_ACCESSORIES ?? "3");
+    if (Number.isFinite(raw)) return Math.max(1, Math.min(20, Math.floor(raw)));
+    return 3;
+  }
+  if (normalized === "footwear") {
+    const raw = Number(process.env.SEARCH_IMAGE_SHOP_SLOW_FIRST_SEARCH_SKIP_RECOVERY_MIN_RESULTS_FOOTWEAR ?? "4");
+    if (Number.isFinite(raw)) return Math.max(1, Math.min(20, Math.floor(raw)));
+    return 4;
+  }
+  return shopLookSlowFirstSearchSkipRecoveryMinResults();
+}
+
+function shopLookSkipDetectionBlipCategories(): Set<string> {
+  const raw = String(process.env.SEARCH_IMAGE_SHOP_SKIP_DETECTION_BLIP_CATEGORIES ?? "accessories,bags");
+  return new Set(
+    raw
+      .split(",")
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean),
+  );
 }
 
 /** Hard wall-clock budget per detection task in ms (default 25000) to prevent long stragglers. */
@@ -1990,8 +2037,13 @@ function shouldRejectImplausibleBagDetection(detection: Detection, allDetections
 function shouldKeepDetectionForShopTheLook(detection: Detection, allDetections?: Detection[]): boolean {
   const mapped = mapDetectionToCategory(detection.label, detection.confidence).productCategory;
   const label = String(detection.label || "").toLowerCase();
+  const normalizedLabel = label.replace(/[_\s]+/g, " ").trim();
   const areaRatio = Number.isFinite(detection.area_ratio) ? detection.area_ratio : 0;
   const confidence = Number.isFinite(detection.confidence) ? detection.confidence : 0;
+  // Never search this detector class.
+  if (/\bheadband head covering hair accessory(?:\s*\d+)?\b/.test(normalizedLabel)) {
+    return false;
+  }
 
   if (mapped === "tops" || mapped === "bottoms" || mapped === "dresses" || mapped === "outerwear") {
     // Layered scenario: when outerwear is detected alongside a top (inner layer),
@@ -2062,6 +2114,8 @@ function accessoryRecoveryAreaRatioThreshold(): number {
 function shouldKeepAccessoryRecoveryDetection(detection: Detection): boolean {
   const mapped = mapDetectionToCategory(detection.label, detection.confidence).productCategory;
   if (mapped !== "bags" && mapped !== "accessories") return false;
+  const labelNorm = String(detection.label || "").toLowerCase().replace(/[_\s]+/g, " ").trim();
+  if (/\bheadband head covering hair accessory(?:\s*\d+)?\b/.test(labelNorm)) return false;
 
   if (shouldRejectImplausibleBagDetection(detection)) return false;
 
@@ -3317,6 +3371,39 @@ function isHeadwearLabel(label: string): boolean {
   return /\b(hat|hats|cap|caps|beanie|beanies|beret|berets|headwear|head covering)\b/.test(l);
 }
 
+function normalizeParentDedupKey(urlLike: unknown): string {
+  const raw = String(urlLike ?? "").trim();
+  if (!raw) return "";
+  try {
+    const u = new URL(raw);
+    const parts = u.pathname.split("/").filter(Boolean);
+    if (parts.length > 0 && /^[a-z]{2}(?:-[a-z]{2})?$/i.test(parts[0])) {
+      parts.shift();
+    }
+    return `${u.origin.toLowerCase()}/${parts.join("/").toLowerCase()}`;
+  } catch {
+    return raw.split("#")[0].split("?")[0].toLowerCase();
+  }
+}
+
+function buildProductDedupKey(product: ProductResult): string {
+  const explicitGroupKey = String((product as any)?.variant_group_key ?? "").trim().toLowerCase();
+  if (explicitGroupKey) return `group:${explicitGroupKey}`;
+
+  const vendor = String((product as any)?.vendor_id ?? "").trim() || "__vendor";
+  const parent = normalizeParentDedupKey((product as any)?.parent_product_url || (product as any)?.product_url);
+  if (parent) return `vp:${vendor}|${parent}`;
+
+  const title = String((product as any)?.title ?? "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 180);
+  if (title) return `vt:${vendor}|${title}`;
+
+  return `id:${String((product as any)?.id ?? "")}`;
+}
+
 function applyGroupedPostRanking(
   groupedResults: DetectionSimilarProducts[],
   includeCrossGroupDedupe: boolean,
@@ -3338,10 +3425,10 @@ function applyGroupedPostRanking(
     ? ranked.map((row, rowIdx) => {
       const seen = new Set<string>();
       const deduped = row.products.filter((p) => {
-        const id = String((p as any).id ?? "");
-        if (!id || seen.has(id)) return false;
+        const key = buildProductDedupKey(p as ProductResult);
+        if (!key || seen.has(key)) return false;
         // Keep first seen in ranked group order; dominant group wins ties.
-        seen.add(id);
+        seen.add(key);
         return true;
       });
       if (rowIdx === 0) return { ...row, products: deduped, count: deduped.length };
@@ -3353,9 +3440,9 @@ function applyGroupedPostRanking(
     const globalSeen = new Set<string>();
     const globalRows = rows.map((row) => {
       const products = row.products.filter((p) => {
-        const id = String((p as any).id ?? "");
-        if (!id || globalSeen.has(id)) return false;
-        globalSeen.add(id);
+        const key = buildProductDedupKey(p as ProductResult);
+        if (!key || globalSeen.has(key)) return false;
+        globalSeen.add(key);
         return true;
       });
       return { ...row, products, count: products.length };
@@ -4884,14 +4971,17 @@ export class ImageAnalysisService {
           const cropEmbedMs = Date.now() - cropEmbedStartedAt;
           detectionCropEmbedDurations.push(cropEmbedMs);
           const finalGarmentEmbedding = finalEmbedding;
+          const categoryMapping = normalizeCategoryMapping(mapDetectionToCategory(label, detection.confidence, {
+            box_normalized: (detection as any).box_normalized,
+          }));
+          const skipDetectionBlip =
+            shopLookSkipDetectionBlipCategories().has(
+              String(categoryMapping.productCategory || "").toLowerCase(),
+            );
           const detCaptionStartedAt = Date.now();
-          const detCaptionPromise = analysisResult.services?.blip
+          const detCaptionPromise = analysisResult.services?.blip && !skipDetectionBlip
             ? getCachedCaption(clipBuffer, "det")
             : Promise.resolve("");
-
-          const categoryMapping = mapDetectionToCategory(label, detection.confidence, {
-            box_normalized: (detection as any).box_normalized,
-          });
           const searchCategories = shouldUseAlternatives(categoryMapping)
             ? getSearchCategories(categoryMapping)
             : [categoryMapping.productCategory];
@@ -4970,6 +5060,35 @@ export class ImageAnalysisService {
             detection.raw_label,
             contextualFormalityScore,
           );
+          const blipCaptionNorm = String(blipCaption ?? "").toLowerCase();
+          const hasSuitCaptionCue =
+            /\b(suit|suiting|blazer|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|vest)\b/.test(blipCaptionNorm) ||
+            (/\btie\b/.test(blipCaptionNorm) && contextualFormalityScore >= 6);
+          if (hasSuitCaptionCue && categoryMapping.productCategory === "tops") {
+            const suitTopPriority = [
+              "suit jacket",
+              "blazer",
+              "sport coat",
+              "dress jacket",
+              "waistcoat",
+              "vest",
+              "tailored jacket",
+              "structured jacket",
+            ];
+            softProductTypeHints = [...new Set([...suitTopPriority, ...softProductTypeHints])];
+            // Use main-path type intent instead of fallback-only rescue.
+            const existingTypes = Array.isArray(filters.productTypes) ? filters.productTypes : [];
+            filters.productTypes = [...new Set([...existingTypes, ...suitTopPriority])].slice(0, 10);
+          } else if (hasSuitCaptionCue && categoryMapping.productCategory === "bottoms") {
+            const suitBottomPriority = [
+              "trousers",
+              "dress pants",
+              "slacks",
+              "tailored trousers",
+              "formal pants",
+            ];
+            softProductTypeHints = [...new Set([...suitBottomPriority, ...softProductTypeHints])];
+          }
           if (shouldForceTypeFilterForDetection(detection, categoryMapping, strongTypeSeeds)) {
             filters.productTypes = strongTypeSeeds.slice(0, 10);
           }
@@ -5211,9 +5330,19 @@ export class ImageAnalysisService {
               detectionMeetsAutoHardHeuristics ||
               shouldForceHardCategoryForDetection(detection, categoryMapping)
             );
-          const forceHardCategoryFilterUsed = Boolean(shouldHardCategory);
+          const coreApparelLikeCategory =
+            categoryMapping.productCategory === "tops" ||
+            categoryMapping.productCategory === "bottoms" ||
+            categoryMapping.productCategory === "dresses" ||
+            categoryMapping.productCategory === "outerwear" ||
+            categoryMapping.productCategory === "footwear";
+          const forceCoreMainPathHardCategory =
+            coreApparelLikeCategory &&
+            (detection.confidence ?? 0) >= 0.8 &&
+            (detection.area_ratio ?? 0) >= 0.05;
+          const forceHardCategoryFilterUsed = Boolean(shouldHardCategory || forceCoreMainPathHardCategory);
           if (filterByDetectedCategory) {
-            if (shouldHardCategory) {
+            if (shouldHardCategory || forceCoreMainPathHardCategory) {
               // Apply hard OpenSearch category filtering, even when global soft-category is enabled.
               const terms = hardCategoryTermsForDetection(label, categoryMapping, {
                 confidence: detection.confidence,
@@ -5519,8 +5648,10 @@ export class ImageAnalysisService {
           detectionSearchFirstDurations.push(searchFirstMs);
           const slowFirstSearch =
             searchFirstMs >= shopLookSlowFirstSearchMsThreshold();
+          const slowSearchSkipRecoveryMinResults =
+            shopLookSlowFirstSearchSkipRecoveryMinResultsByCategory(categoryMapping.productCategory);
           const sufficientFirstPassResults =
-            similarResult.results.length >= shopLookSlowFirstSearchSkipRecoveryMinResults();
+            similarResult.results.length >= slowSearchSkipRecoveryMinResults;
           if (slowFirstSearch && sufficientFirstPassResults) {
             // Freeze additional retries/recoveries for this detection only.
             detectionSearchCallLimit = detectionSearchCalls;
@@ -6752,6 +6883,17 @@ export class ImageAnalysisService {
 
     const relevanceFilteredResults = finalGroupedResults.map((detection) => {
       const beforeProducts = Array.isArray(detection.products) ? detection.products : [];
+      const categoryNorm = String(detection.category ?? "").toLowerCase().trim();
+      const detectionMinRelevanceThreshold =
+        categoryNorm === "tops"
+          ? Math.min(minRelevanceThreshold, 0.3)
+          : categoryNorm === "bottoms"
+            ? Math.min(minRelevanceThreshold, 0.3)
+            : categoryNorm === "dresses"
+              ? Math.min(minRelevanceThreshold, 0.28)
+              : categoryNorm === "footwear"
+                ? Math.min(minRelevanceThreshold, 0.28)
+                : minRelevanceThreshold;
       const preserveCountForDetection = isCoreOutfitCategory(detection.category)
         ? Math.min(3, Math.max(1, Math.floor(resolvedLimitPerItem * 0.12)))
         : 0;
@@ -6772,7 +6914,7 @@ export class ImageAnalysisService {
           `[relevance-debug] detection="${detection.detection?.label ?? "unknown"}" category="${detection.category}" desiredColor="${String(inferredDesiredColor ?? "")}" source=${(detection.appliedFilters as any)?.color ? "explicit" : "inferred_or_none"}`,
         );
       }
-      const afterProducts = applyRelevanceThresholdFilter(beforeProducts, minRelevanceThreshold, {
+      const afterProducts = applyRelevanceThresholdFilter(beforeProducts, detectionMinRelevanceThreshold, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category),
         preserveAtLeastCount: preserveCountForDetection,
         detectionLabel: detection.detection?.label,
@@ -6783,7 +6925,7 @@ export class ImageAnalysisService {
       const droppedByColorGate = beforeProducts.filter((prod) => {
         const relevance = Number((prod as any)?.finalRelevance01 ?? 0);
         const source = String((prod as any)?.explain?.finalRelevanceSource ?? "").toLowerCase();
-        return relevance < minRelevanceThreshold && source.includes("color");
+        return relevance < detectionMinRelevanceThreshold && source.includes("color");
       }).length;
       return {
         ...detection,
@@ -7267,9 +7409,9 @@ export class ImageAnalysisService {
             confidence: detection.confidence,
             areaRatio: detection.area_ratio,
           });
-          const categoryMapping = mapDetectionToCategory(categorySource, detection.confidence, {
+          const categoryMapping = normalizeCategoryMapping(mapDetectionToCategory(categorySource, detection.confidence, {
             box_normalized: (detection as any).box_normalized,
-          });
+          }));
           const itemColorKey = detectionColorKey(categorySource, i);
           if (!(itemColorKey in inferredColorsByItem)) inferredColorsByItem[itemColorKey] = null;
           if (!(itemColorKey in inferredColorsByItemConfidence)) inferredColorsByItemConfidence[itemColorKey] = 0;

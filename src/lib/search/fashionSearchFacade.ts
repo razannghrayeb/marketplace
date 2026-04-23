@@ -102,6 +102,8 @@ export interface UnifiedImageSearchParams {
   collapseVariantGroups?: boolean;
 }
 
+type EnhancedTextSearchOutput = SearchResultWithRelated & { total: number; tookMs: number };
+
 function normalizeParentUrlKey(raw: string | null | undefined): string {
   const cleaned = String(raw ?? "").trim();
   if (!cleaned) return "";
@@ -337,7 +339,7 @@ export async function searchText(params: UnifiedTextSearchParams): Promise<Searc
     delete normalizedFilters.currency;
   }
 
-  const { total, tookMs, ...rest } = await enhancedTextSearch(query, normalizedFilters, {
+  const enhancedOutput = await enhancedTextSearch(query, normalizedFilters, {
     limit,
     offset: (page - 1) * limit,
     includeRelated,
@@ -345,25 +347,16 @@ export async function searchText(params: UnifiedTextSearchParams): Promise<Searc
     negationConstraints,
   } as any);
 
-  const output = rest as SearchResultWithRelated;
-  const filteredResultsBase = filterByFinalRelevance(output.results, config.search.finalAcceptMinText) ?? [];
-  const filteredRelatedBase = filterByFinalRelevance(output.related, config.search.finalAcceptMinText);
-  const filteredResults = applyNonSportGuardToNormalSearch(filteredResultsBase, query, filters) ?? [];
-  const filteredRelated = applyNonSportGuardToNormalSearch(filteredRelatedBase, query, filters);
-  const collapsedResults = collapseByParentProduct(filteredResults) ?? [];
-  const collapsedRelated = collapseByParentProduct(filteredRelated);
-  const meta = {
-    ...(output.meta ?? {}),
-    total_results: collapsedResults.length,
-  };
+  return finalizeTextSearchResponse(enhancedOutput as EnhancedTextSearchOutput);
+}
 
+export function finalizeTextSearchResponse(output: EnhancedTextSearchOutput): EnhancedTextSearchOutput {
   return {
     ...output,
-    results: collapsedResults,
-    related: collapsedRelated,
-    meta,
-    total: collapsedResults.length,
-    tookMs,
+    meta: {
+      ...(output.meta ?? {}),
+      total_results: output.total,
+    },
   };
 }
 
