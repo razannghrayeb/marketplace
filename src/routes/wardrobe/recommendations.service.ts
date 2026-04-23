@@ -66,9 +66,11 @@ export interface CompleteLookSuggestion extends ProductRecommendation {
     embeddingNorm: number;
     categoryCompat: number;
     colorHarmony: number;
+    colorPreferenceAlignment?: number;
     styleAlignment?: number;
     patternAlignment?: number;
     formalityAlignment?: number;
+    weatherAlignment?: number;
     materialAlignment?: number;
     footwearStyleAlignment?: number;
     bagStyleAlignment?: number;
@@ -925,11 +927,20 @@ export type CompleteLookCatalogFilters = {
 
 type AudienceGender = "men" | "women" | "unisex";
 type AudienceAgeGroup = "kids" | "adult";
+type WeatherSeason = "spring" | "summer" | "fall" | "winter";
+
+type WeatherHint = {
+  temperatureC?: number;
+  season?: WeatherSeason;
+};
 
 type CompleteLookAudienceOptions = {
   audienceGenderHint?: string | null;
   ageGroupHint?: string | null;
   occasionHint?: string | null;
+  styleHints?: string[];
+  colorHints?: string[];
+  weatherHint?: WeatherHint;
   allowUserAudienceFallback?: boolean;
   enforceNeutralAudienceWhenUnknown?: boolean;
   useDetectedCategoryForCurrentItems?: boolean;
@@ -959,8 +970,10 @@ function buildAttributionTags(
   if (!fitBreakdown) return ["general_complement"];
   const tags: string[] = [];
   if ((fitBreakdown.colorHarmony ?? 0) > 0.75) tags.push("color_match");
+  if ((fitBreakdown.colorPreferenceAlignment ?? 0) > 0.8) tags.push("preferred_color_match");
   if ((fitBreakdown.styleAlignment ?? 0) > 0.75) tags.push("style_match");
   if ((fitBreakdown.formalityAlignment ?? 0) > 0.75) tags.push("formality_match");
+  if ((fitBreakdown.weatherAlignment ?? 0) > 0.75) tags.push("weather_appropriate");
   if ((fitBreakdown.categoryCompat ?? 0) > 0.75) tags.push("category_complement");
   if ((fitBreakdown.embeddingNorm ?? 0) > 0.75) tags.push("visual_similarity");
   return tags.length > 0 ? tags : ["general_complement"];
@@ -1049,6 +1062,18 @@ async function runCompleteLookCore(
   const hintedAudienceGender = normalizeAudienceGenderValue(audienceOptions.audienceGenderHint);
   const hintedAgeGroup = normalizeAudienceAgeGroupValue(audienceOptions.ageGroupHint);
   const hintedOccasion = normalizeOccasionHint(audienceOptions.occasionHint);
+  const hintedStyleTerms = normalizeStyleHints(audienceOptions.styleHints);
+  const inferredStyleTerms = inferStyleTermsFromCurrentItems(currentItems, styleProfile?.occasion_coverage || []);
+  const extractedTitleStyleTerms = currentItems
+    .map((item) =>
+      extractStyleTokensFromText(
+        `${String(item.name || "")} ${String(item.title || "")} ${String(item.category_name || "")}`
+      )
+    )
+    .flat();
+  const preferredStyleTerms = Array.from(
+    new Set(hintedStyleTerms.concat(inferredStyleTerms).concat(visualContext.styleTerms).concat(extractedTitleStyleTerms))
+  ).slice(0, 12);
   const inferredFromAnchors = await inferPreferredAudienceGender(userId, currentItems, {
     allowWardrobeHistory: false,
     allowUserProfile: false,
@@ -1066,6 +1091,11 @@ async function runCompleteLookCore(
 
   let inferredOccasion: InferredOccasion = hintedOccasion || "casual";
   if (!hintedOccasion) {
+    const coverageOccasion = inferOccasionFromCoverageSignals(
+      styleProfile?.occasion_coverage || [],
+      preferredStyleTerms,
+      currentItems,
+    );
     const occasionInference = await inferOccasion(
       currentItems.map((row) => ({
         title: String(row.title || row.name || ""),
@@ -1076,7 +1106,17 @@ async function runCompleteLookCore(
         ),
       })),
     );
-    inferredOccasion = occasionInference.occasion;
+    inferredOccasion =
+      coverageOccasion && occasionInference.confidence < 0.58
+        ? coverageOccasion
+        : occasionInference.occasion;
+    if (
+      coverageOccasion === "active" &&
+      occasionInference.occasion === "casual" &&
+      (preferredStyleTerms.includes("sporty") || preferredStyleTerms.includes("athleisure"))
+    ) {
+      inferredOccasion = "active";
+    }
   }
   const enforceNeutralAudienceWhenUnknown =
     Boolean(audienceOptions.enforceNeutralAudienceWhenUnknown) || !inferredAudienceGender;
@@ -1095,22 +1135,31 @@ async function runCompleteLookCore(
 
   const wardrobeCanonicalColors = extractWardrobeCanonicalColors(currentItems);
   const wardrobeColorFamilies = extractWardrobeColorFamilies(currentItems);
+  const explicitWeather = normalizeWeatherHint(audienceOptions.weatherHint);
+  const inferredWeather = inferWeatherHintFromContext({
+    currentItems,
+    seasonCoverage: styleProfile?.season_coverage || [],
+    inferredOccasion,
+  });
+  const hintedWeather = explicitWeather || inferredWeather;
+  const explicitColorSignals = extractColorHintSignals(
+    audienceOptions.colorHints,
+  );
+  const inferredColorSignals = inferColorPreferenceSignals({
+    wardrobeCanonicalColors,
+    wardrobeColorFamilies,
+    colorPalette: (styleProfile as any)?.color_palette,
+  });
+  const preferredColorHints =
+    explicitColorSignals.colors.size > 0 || explicitColorSignals.families.size > 0
+      ? new Set<string>([...inferredColorSignals.colors, ...explicitColorSignals.colors])
+      : inferredColorSignals.colors;
+  const preferredColorFamilies =
+    explicitColorSignals.colors.size > 0 || explicitColorSignals.families.size > 0
+      ? new Set<string>([...inferredColorSignals.families, ...explicitColorSignals.families])
+      : inferredColorSignals.families;
   const preferredPatterns = topHistogramKeys(styleProfile?.pattern_histogram, 3);
   const preferredMaterials = topHistogramKeys(styleProfile?.material_histogram, 3);
-  const preferredStyleTerms = Array.from(
-    new Set(
-      inferStyleTermsFromCurrentItems(currentItems, styleProfile?.occasion_coverage || [])
-        .concat(visualContext.styleTerms)
-        .concat(
-          // Extract additional style terms from titles and categories for better keyword coverage
-          currentItems
-            .map(item => extractStyleTokensFromText(
-              `${String(item.name || "")} ${String(item.title || "")} ${String(item.category_name || "")}`
-            ))
-            .flat()
-        )
-    )
-  ).slice(0, 12);
   const preferredFormality =
     hintedOccasion || !styleProfile?.occasion_coverage?.length
       ? occasionToFormality(inferredOccasion)
@@ -1229,11 +1278,20 @@ async function runCompleteLookCore(
             candidateColor,
             wardrobeCanonicalColors,
           );
-          const colorHarmony = Math.max(0, Math.min(1, colorHarmonyBase * 0.6 + colorDecisionAlignment * 0.4));
+          const colorPreferenceAlignment = scoreColorPreferenceAlignment(
+            candidateColor,
+            preferredColorHints,
+            preferredColorFamilies,
+          );
+          const colorHarmony = Math.max(
+            0,
+            Math.min(1, colorHarmonyBase * 0.52 + colorDecisionAlignment * 0.28 + colorPreferenceAlignment * 0.2)
+          );
           const styleAlignment = computeStyleAlignment(source, preferredStyleTerms);
           const patternAlignment = computeTokenAffinity(source.attr_pattern, preferredPatterns);
           const materialAlignment = computeTokenAffinity(source.attr_material, preferredMaterials);
           const formalityAlignment = computeFormalityAlignment(source, preferredFormality);
+          const weatherAlignment = scoreWeatherAlignment(category, source, hintedWeather);
           const footwearStyleAlignment =
             category === "shoes"
               ? scoreFootwearStyleCompatibility(inferredOccasion, preferredStyleTerms, source)
@@ -1258,16 +1316,23 @@ async function runCompleteLookCore(
           if (shouldEnforceStrictColorGate(category, currentCategoryList) && colorDecisionAlignment < 0.4) {
             continue;
           }
+          if ((preferredColorHints.size > 0 || preferredColorFamilies.size > 0) && colorPreferenceAlignment < 0.4) {
+            continue;
+          }
+          if (hintedWeather && weatherAlignment < 0.32) {
+            continue;
+          }
 
           // Fashion-aware blend: emphasize style/color over raw retrieval.
           const finalScore =
-            embeddingNorm * 0.24 +
-            categoryCompat * 0.2 +
-            colorHarmony * 0.2 +
-            styleAlignment * 0.2 +
+            embeddingNorm * 0.2 +
+            categoryCompat * 0.18 +
+            colorHarmony * 0.19 +
+            styleAlignment * 0.18 +
             patternAlignment * 0.08 +
             materialAlignment * 0.04 +
-            formalityAlignment * 0.04;
+            formalityAlignment * 0.08 +
+            weatherAlignment * 0.05;
 
           const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment * accessoryStyleAlignment);
           const slotAwareFinalScore = Math.round((finalScore * (0.7 + slotStyleScore * 0.3) * footwearDressAlignment) * 1000) / 1000;
@@ -1283,6 +1348,8 @@ async function runCompleteLookCore(
           if (colorHarmony >= 0.75) reasons.push("good color harmony");
           if (styleAlignment >= 0.75) reasons.push("style-aware match");
           if (formalityAlignment >= 0.8) reasons.push("occasion/formality aligned");
+          if (weatherAlignment >= 0.78) reasons.push("weather appropriate");
+          if (colorPreferenceAlignment >= 0.82) reasons.push("matches preferred colors");
           if (category === "shoes" && footwearStyleAlignment >= 0.85) reasons.push("footwear fits the occasion");
           if (category === "bags" && bagStyleAlignment >= 0.85) reasons.push("bag style suits the outfit");
           if (category === "accessories" && accessoryStyleAlignment >= 0.82) reasons.push("accessories suit the occasion");
@@ -1292,10 +1359,12 @@ async function runCompleteLookCore(
             embeddingNorm: Math.round(embeddingNorm * 1000) / 1000,
             categoryCompat: Math.round(categoryCompat * 1000) / 1000,
             colorHarmony: Math.round(colorHarmony * 1000) / 1000,
+            colorPreferenceAlignment: Math.round(colorPreferenceAlignment * 1000) / 1000,
             styleAlignment: Math.round(styleAlignment * 1000) / 1000,
             patternAlignment: Math.round(patternAlignment * 1000) / 1000,
             materialAlignment: Math.round(materialAlignment * 1000) / 1000,
             formalityAlignment: Math.round(formalityAlignment * 1000) / 1000,
+            weatherAlignment: Math.round(weatherAlignment * 1000) / 1000,
             footwearStyleAlignment: Math.round(footwearStyleAlignment * 1000) / 1000,
             bagStyleAlignment: Math.round(bagStyleAlignment * 1000) / 1000,
             bagColorAlignment: Math.round(bagColorAlignment * 1000) / 1000,
@@ -1445,6 +1514,9 @@ async function runCompleteLookCore(
       preferredPatterns,
       preferredMaterials,
       preferredFormality,
+      preferredColorHints,
+      preferredColorFamilies,
+      weatherHint: hintedWeather,
       inferredAudienceGender,
       inferredAgeGroup,
       enforceNeutralAudienceWhenUnknown,
@@ -1468,6 +1540,9 @@ async function runCompleteLookCore(
     inferredOccasion,
     wardrobeColorFamilies,
     wardrobeCanonicalColors,
+    preferredColorHints,
+    preferredColorFamilies,
+    weatherHint: hintedWeather,
     currentCategoryList,
     inferredAudienceGender,
     inferredAgeGroup,
@@ -1653,6 +1728,9 @@ async function rerankCompleteLookFashionAware(params: {
   inferredOccasion?: InferredOccasion;
   wardrobeColorFamilies: Set<string>;
   wardrobeCanonicalColors: Set<string>;
+  preferredColorHints: Set<string>;
+  preferredColorFamilies: Set<string>;
+  weatherHint?: WeatherHint;
   currentCategoryList: string[];
   inferredAudienceGender: AudienceGender | null;
   inferredAgeGroup: AudienceAgeGroup | null;
@@ -1746,6 +1824,11 @@ async function rerankCompleteLookFashionAware(params: {
       candidateColor,
       params.wardrobeCanonicalColors,
     );
+    const colorPreferenceAlignment = scoreColorPreferenceAlignment(
+      candidateColor,
+      params.preferredColorHints,
+      params.preferredColorFamilies,
+    );
 
     const styleTokenBlob = `${product.title} ${product.category || ""} ${style.aesthetic} ${style.occasion}`.toLowerCase();
     const styleTokenScore =
@@ -1756,14 +1839,22 @@ async function rerankCompleteLookFashionAware(params: {
           : 0.46;
 
     const formalityScore = scoreFormalityCompatibility(targetFormalityScore, style.formality);
+    const weatherAlignment = scoreWeatherAlignment(categoryNorm, {
+      title: product.title,
+      category: product.category,
+      attr_material: product.description,
+      attr_style: style.aesthetic,
+      product_types: style.occasion,
+    }, params.weatherHint);
     const aestheticScore = aestheticCompatibility(preferredAesthetic, style.aesthetic as StyleProfileAesthetic);
     const baseRetrieval = Math.max(0, Math.min(1, Number(s.score || 0)));
 
     const fashionScore =
       categoryCompat * 0.22 +
-      colorHarmony * 0.16 +
-      styleTokenScore * 0.24 +
-      formalityScore * 0.2 +
+      (colorHarmony * 0.65 + colorPreferenceAlignment * 0.35) * 0.18 +
+      styleTokenScore * 0.22 +
+      formalityScore * 0.18 +
+      weatherAlignment * 0.12 +
       aestheticScore * 0.18;
     const slotForSanity = normalizeWardrobeCategory(s.stylistSignals?.slot || s.category || categoryNorm) || categoryNorm;
     const sanity = computeFashionSanityScore({
@@ -1779,6 +1870,8 @@ async function rerankCompleteLookFashionAware(params: {
     if (formalityScore >= 0.86) reasons.push("formality-consistent");
     if (aestheticScore >= 0.84) reasons.push("aesthetic-compatible");
     if (colorHarmony >= 0.78) reasons.push("harmonious palette");
+    if (colorPreferenceAlignment >= 0.82) reasons.push("preferred-color aligned");
+    if (weatherAlignment >= 0.78) reasons.push("weather-appropriate");
     if (reasons.length === 0) reasons.push("fashion-balanced");
 
     return {
@@ -1808,7 +1901,7 @@ export async function completeLookSuggestions(
   currentItemIds: number[],
   limit: number = 10,
   requestCatalogFilters?: CompleteLookCatalogFilters,
-  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint"> = {}
+  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint" | "styleHints" | "colorHints" | "weatherHint"> = {}
 ): Promise<CompleteLookSuggestionsResult> {
   const currentItemsResult = await pg.query(
     `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, wi.name, wi.image_url, wi.image_cdn,
@@ -1845,6 +1938,9 @@ export async function completeLookSuggestions(
     audienceGenderHint: options.audienceGenderHint,
     ageGroupHint: options.ageGroupHint,
     occasionHint: options.occasionHint,
+    styleHints: options.styleHints,
+    colorHints: options.colorHints,
+    weatherHint: options.weatherHint,
   });
 }
 
@@ -1856,7 +1952,7 @@ export async function completeLookSuggestionsForCatalogProducts(
   productIds: number[],
   limit: number = 10,
   requestCatalogFilters?: CompleteLookCatalogFilters,
-  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint"> & { detectedCategories?: Map<number, string> } = {}
+  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint" | "styleHints" | "colorHints" | "weatherHint"> & { detectedCategories?: Map<number, string> } = {}
 ): Promise<CompleteLookSuggestionsResult> {
   if (!Array.isArray(productIds) || productIds.length === 0) {
     return {
@@ -1912,6 +2008,9 @@ export async function completeLookSuggestionsForCatalogProducts(
     audienceGenderHint: options.audienceGenderHint,
     ageGroupHint: options.ageGroupHint,
     occasionHint: options.occasionHint,
+    styleHints: options.styleHints,
+    colorHints: options.colorHints,
+    weatherHint: options.weatherHint,
     allowUserAudienceFallback: false,
     enforceNeutralAudienceWhenUnknown: true,
     useDetectedCategoryForCurrentItems: true,
@@ -2479,6 +2578,9 @@ async function fetchCategoryTopUpSuggestions(params: {
   preferredPatterns: string[];
   preferredMaterials: string[];
   preferredFormality: "casual" | "business" | "formal" | "mixed";
+  preferredColorHints: Set<string>;
+  preferredColorFamilies: Set<string>;
+  weatherHint?: WeatherHint;
   inferredAudienceGender: AudienceGender | null;
   inferredAgeGroup: AudienceAgeGroup | null;
   enforceNeutralAudienceWhenUnknown?: boolean;
@@ -2615,11 +2717,20 @@ async function fetchCategoryTopUpSuggestions(params: {
       candidateColor,
       params.wardrobeCanonicalColors,
     );
-    const colorHarmony = Math.max(0, Math.min(1, colorHarmonyBase * 0.6 + colorDecisionAlignment * 0.4));
+    const colorPreferenceAlignment = scoreColorPreferenceAlignment(
+      candidateColor,
+      params.preferredColorHints,
+      params.preferredColorFamilies,
+    );
+    const colorHarmony = Math.max(
+      0,
+      Math.min(1, colorHarmonyBase * 0.52 + colorDecisionAlignment * 0.28 + colorPreferenceAlignment * 0.2)
+    );
     const styleAlignment = computeStyleAlignment(source, params.preferredStyleTerms);
     const patternAlignment = computeTokenAffinity(source.attr_pattern, params.preferredPatterns);
     const materialAlignment = computeTokenAffinity(source.attr_material, params.preferredMaterials);
     const formalityAlignment = computeFormalityAlignment(source, params.preferredFormality);
+    const weatherAlignment = scoreWeatherAlignment(matchedSlot, source, params.weatherHint);
     const footwearStyleAlignment =
       matchedSlot === "shoes"
         ? scoreFootwearStyleCompatibility(topupOccasion, params.preferredStyleTerms, source)
@@ -2638,15 +2749,18 @@ async function fetchCategoryTopUpSuggestions(params: {
         : 1;
 
     if (shouldEnforceStrictColorGate(matchedSlot, params.currentCategoryList) && colorDecisionAlignment < 0.4) continue;
+    if ((params.preferredColorHints.size > 0 || params.preferredColorFamilies.size > 0) && colorPreferenceAlignment < 0.4) continue;
+    if (params.weatherHint && weatherAlignment < 0.32) continue;
 
     const score =
-      embeddingNorm * 0.28 +
-      categoryCompat * 0.22 +
-      colorHarmony * 0.16 +
+      embeddingNorm * 0.24 +
+      categoryCompat * 0.2 +
+      colorHarmony * 0.18 +
       styleAlignment * 0.16 +
       patternAlignment * 0.08 +
       materialAlignment * 0.05 +
-      formalityAlignment * 0.05;
+      formalityAlignment * 0.06 +
+      weatherAlignment * 0.03;
 
     const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment * accessoryStyleAlignment);
     const slotAwareScore = Math.round((score * (0.72 + slotStyleScore * 0.28) * footwearDressAlignment) * 1000) / 1000;
@@ -2671,10 +2785,12 @@ async function fetchCategoryTopUpSuggestions(params: {
         embeddingNorm: Math.round(embeddingNorm * 1000) / 1000,
         categoryCompat: Math.round(categoryCompat * 1000) / 1000,
         colorHarmony: Math.round(colorHarmony * 1000) / 1000,
+        colorPreferenceAlignment: Math.round(colorPreferenceAlignment * 1000) / 1000,
         styleAlignment: Math.round(styleAlignment * 1000) / 1000,
         patternAlignment: Math.round(patternAlignment * 1000) / 1000,
         materialAlignment: Math.round(materialAlignment * 1000) / 1000,
         formalityAlignment: Math.round(formalityAlignment * 1000) / 1000,
+        weatherAlignment: Math.round(weatherAlignment * 1000) / 1000,
         footwearStyleAlignment: Math.round(footwearStyleAlignment * 1000) / 1000,
         bagStyleAlignment: Math.round(bagStyleAlignment * 1000) / 1000,
         bagColorAlignment: Math.round(bagColorAlignment * 1000) / 1000,
@@ -2795,6 +2911,263 @@ function normalizeColorName(value?: string): string | null {
     if (COLOR_FAMILIES_BY_NAME[part]) return part;
   }
   return parts[0] || null;
+}
+
+function normalizeStyleHints(hints?: string[] | null): string[] {
+  if (!Array.isArray(hints)) return [];
+  const allow = new Set(STYLE_TERMS_LEXICON as readonly string[]);
+  const out = new Set<string>();
+  for (const raw of hints) {
+    const token = String(raw || "").toLowerCase().trim();
+    if (!token) continue;
+    if (allow.has(token)) out.add(token);
+  }
+  return Array.from(out).slice(0, 12);
+}
+
+function inferOccasionFromCoverageSignals(
+  occasionCoverage: string[],
+  preferredStyleTerms: string[],
+  currentItems: CompleteLookAnchorRow[],
+): InferredOccasion | null {
+  const score: Record<InferredOccasion, number> = {
+    formal: 0,
+    "semi-formal": 0,
+    casual: 0,
+    active: 0,
+    party: 0,
+    beach: 0,
+  };
+
+  for (const occ of occasionCoverage || []) {
+    const normalized = normalizeOccasionHint(occ);
+    if (normalized) score[normalized] += 2;
+  }
+
+  for (const t of preferredStyleTerms || []) {
+    if (t === "sporty" || t === "athleisure") score.active += 1.8;
+    if (t === "business" || t === "classic") score["semi-formal"] += 1.4;
+    if (t === "formal" || t === "elegant") score.formal += 1.6;
+    if (t === "streetwear" || t === "casual") score.casual += 1.2;
+    if (t === "chic" || t === "romantic") score.party += 0.9;
+  }
+
+  const text = currentItems
+    .map((i) => `${String(i.name || "")} ${String(i.title || "")} ${String(i.category_name || "")}`)
+    .join(" ")
+    .toLowerCase();
+
+  if (/\b(gym|athletic|training|running|jogger|activewear|track|sport)\b/.test(text)) score.active += 2.2;
+  if (/\b(tuxedo|gown|cocktail|sequin|evening|party|heels?|clutch)\b/.test(text)) score.party += 2.1;
+  if (/\b(office|work|blazer|shirt|trouser|loafer|tailored)\b/.test(text)) score["semi-formal"] += 1.8;
+  if (/\b(formal|wedding|black tie)\b/.test(text)) score.formal += 1.8;
+  if (/\b(beach|resort|swim|sandals?|linen shorts?)\b/.test(text)) score.beach += 2.1;
+  if (/\b(jeans|tee|hoodie|everyday|casual)\b/.test(text)) score.casual += 1.1;
+
+  let winner: InferredOccasion | null = null;
+  let best = 0;
+  for (const key of Object.keys(score) as InferredOccasion[]) {
+    if (score[key] > best) {
+      best = score[key];
+      winner = key;
+    }
+  }
+
+  return best >= 1.8 ? winner : null;
+}
+
+function inferWeatherHintFromContext(params: {
+  currentItems: CompleteLookAnchorRow[];
+  seasonCoverage: string[];
+  inferredOccasion: InferredOccasion;
+}): WeatherHint | undefined {
+  const seasonCounts: Record<WeatherSeason, number> = {
+    spring: 0,
+    summer: 0,
+    fall: 0,
+    winter: 0,
+  };
+  for (const s of params.seasonCoverage || []) {
+    const v = String(s || "").toLowerCase().trim();
+    if (v === "spring") seasonCounts.spring += 1;
+    if (v === "summer") seasonCounts.summer += 1;
+    if (v === "fall" || v === "autumn") seasonCounts.fall += 1;
+    if (v === "winter") seasonCounts.winter += 1;
+  }
+
+  const text = params.currentItems
+    .map((i) => `${String(i.name || "")} ${String(i.title || "")} ${String(i.category_name || "")}`)
+    .join(" ")
+    .toLowerCase();
+
+  const coldHits = (text.match(/\b(wool|coat|jacket|parka|puffer|sweater|hoodie|boots?|thermal|cashmere)\b/g) || []).length;
+  const hotHits = (text.match(/\b(shorts?|tank|sleeveless|linen|sandals?|slides?|beach|resort|lightweight)\b/g) || []).length;
+
+  let season: WeatherSeason | undefined;
+  let bestSeason = 0;
+  for (const k of ["spring", "summer", "fall", "winter"] as WeatherSeason[]) {
+    if (seasonCounts[k] > bestSeason) {
+      bestSeason = seasonCounts[k];
+      season = k;
+    }
+  }
+
+  if (!season) {
+    if (coldHits >= hotHits + 1) season = "winter";
+    else if (hotHits >= coldHits + 1) season = "summer";
+  }
+  if (!season && params.inferredOccasion === "beach") season = "summer";
+
+  let temperatureC: number | undefined;
+  if (season === "winter") temperatureC = 7;
+  else if (season === "fall") temperatureC = 16;
+  else if (season === "spring") temperatureC = 18;
+  else if (season === "summer") temperatureC = 30;
+
+  if (temperatureC !== undefined) {
+    temperatureC += Math.min(7, hotHits * 1.5);
+    temperatureC -= Math.min(7, coldHits * 1.5);
+    temperatureC = Math.max(-10, Math.min(42, temperatureC));
+  }
+
+  if (temperatureC === undefined && !season) return undefined;
+  return { temperatureC, season };
+}
+
+function inferColorPreferenceSignals(params: {
+  wardrobeCanonicalColors: Set<string>;
+  wardrobeColorFamilies: Set<string>;
+  colorPalette?: Array<{ hex?: string; weight?: number }> | null;
+}): { colors: Set<string>; families: Set<string> } {
+  const colorScores = new Map<string, number>();
+  const familyScores = new Map<string, number>();
+
+  for (const color of params.wardrobeCanonicalColors) {
+    colorScores.set(color, (colorScores.get(color) || 0) + 1);
+    const fam = COLOR_FAMILIES_BY_NAME[color];
+    if (fam) familyScores.set(fam, (familyScores.get(fam) || 0) + 1);
+  }
+
+  for (const palette of params.colorPalette || []) {
+    const canonical = palette?.hex ? mapHexToFashionCanonical(palette.hex) : null;
+    if (!canonical) continue;
+    const w = Number.isFinite(Number(palette?.weight)) ? Math.max(0.15, Number(palette?.weight)) : 0.25;
+    colorScores.set(canonical, (colorScores.get(canonical) || 0) + w);
+    const fam = COLOR_FAMILIES_BY_NAME[canonical];
+    if (fam) familyScores.set(fam, (familyScores.get(fam) || 0) + w);
+  }
+
+  for (const fam of params.wardrobeColorFamilies) {
+    familyScores.set(fam, (familyScores.get(fam) || 0) + 0.4);
+  }
+
+  const colors = new Set(
+    Array.from(colorScores.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4)
+      .map(([k]) => k)
+  );
+  const families = new Set(
+    Array.from(familyScores.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([k]) => k)
+  );
+
+  return { colors, families };
+}
+
+function normalizeWeatherHint(input?: WeatherHint | null): WeatherHint | undefined {
+  if (!input) return undefined;
+  const out: WeatherHint = {};
+  const temp = Number(input.temperatureC);
+  if (Number.isFinite(temp)) {
+    out.temperatureC = Math.max(-25, Math.min(50, temp));
+  }
+  const season = String(input.season || "").toLowerCase().trim();
+  if (season === "spring" || season === "summer" || season === "fall" || season === "winter") {
+    out.season = season;
+  }
+  return out.temperatureC !== undefined || out.season ? out : undefined;
+}
+
+function extractColorHintSignals(colorHints?: string[] | null): { colors: Set<string>; families: Set<string> } {
+  const colors = new Set<string>();
+  const families = new Set<string>();
+  if (!Array.isArray(colorHints)) return { colors, families };
+
+  for (const raw of colorHints) {
+    const normalized = normalizeColorName(String(raw || ""));
+    if (!normalized) continue;
+    colors.add(normalized);
+    const fam = COLOR_FAMILIES_BY_NAME[normalized];
+    if (fam) families.add(fam);
+  }
+  return { colors, families };
+}
+
+function scoreColorPreferenceAlignment(
+  candidateColor: string | null,
+  preferredColors: Set<string>,
+  preferredFamilies: Set<string>,
+): number {
+  if (preferredColors.size === 0 && preferredFamilies.size === 0) return 0.64;
+  if (!candidateColor) return 0.42;
+  if (preferredColors.has(candidateColor)) return 0.96;
+  const family = COLOR_FAMILIES_BY_NAME[candidateColor] || "other";
+  if (preferredFamilies.has(family)) return 0.86;
+  if (family === "neutral") return 0.72;
+  return 0.36;
+}
+
+function scoreWeatherAlignment(slotRaw: string, source: any, weatherHint?: WeatherHint): number {
+  if (!weatherHint || (weatherHint.temperatureC === undefined && !weatherHint.season)) return 0.66;
+  const slot = normalizeWardrobeCategory(slotRaw) || slotRaw;
+  const blob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.attr_material || "")} ${String(source?.attr_style || "")} ${String(source?.product_types || "")}`.toLowerCase();
+
+  const hasHeavySignal = /\b(wool|fleece|puffer|thermal|down|cashmere|heavy|coat|parka|snow|fur-lined|insulated|boots?)\b/.test(blob);
+  const hasLightSignal = /\b(linen|cotton|breathable|airy|shorts?|tank|sleeveless|sandal|slides?|espadrille|beach|resort)\b/.test(blob);
+  const hasRainSignal = /\b(rain|waterproof|windbreaker|trench)\b/.test(blob);
+
+  let score = 0.7;
+  const t = weatherHint.temperatureC;
+  if (Number.isFinite(t)) {
+    if ((t as number) >= 30) {
+      if (slot === "outerwear") score -= 0.52;
+      if (slot === "shoes" && /\b(boots?)\b/.test(blob)) score -= 0.32;
+      if (hasHeavySignal) score -= 0.34;
+      if (hasLightSignal) score += 0.18;
+    } else if ((t as number) >= 24) {
+      if (slot === "outerwear") score -= 0.34;
+      if (hasHeavySignal) score -= 0.2;
+      if (hasLightSignal) score += 0.12;
+    } else if ((t as number) <= 8) {
+      if (slot === "outerwear") score += 0.2;
+      if (slot === "shoes" && /\b(sandal|slides?|espadrille)\b/.test(blob)) score -= 0.36;
+      if (hasHeavySignal) score += 0.2;
+      if (hasLightSignal) score -= 0.2;
+    } else if ((t as number) <= 14) {
+      if (slot === "outerwear") score += 0.12;
+      if (hasHeavySignal) score += 0.08;
+      if (hasLightSignal) score -= 0.08;
+    }
+  }
+
+  if (weatherHint.season === "summer") {
+    if (slot === "outerwear") score -= 0.34;
+    if (hasHeavySignal) score -= 0.22;
+    if (hasLightSignal) score += 0.12;
+  }
+  if (weatherHint.season === "winter") {
+    if (slot === "outerwear") score += 0.16;
+    if (hasHeavySignal) score += 0.14;
+    if (hasLightSignal) score -= 0.18;
+  }
+  if (weatherHint.season === "fall" || weatherHint.season === "spring") {
+    if (slot === "outerwear") score += hasRainSignal ? 0.12 : 0.06;
+  }
+
+  return Math.max(0.2, Math.min(1, score));
 }
 
 function extractCandidateColorFromSource(source: any): string | null {

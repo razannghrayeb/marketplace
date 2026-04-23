@@ -16,12 +16,12 @@ export function scoreDecisionConfidence(input: {
   const score = clamp01(margin * 0.55 + agreement * 0.25 + input.dataQuality * 0.2);
 
   const explanation: string[] = [
-    `Top-score margin is ${Math.round(margin * 100)} points in normalized space.`,
-    `Cross-metric winner agreement is ${Math.round(agreement * 100)}%.`,
+    `The leading product is ahead by ${Math.round(margin * 100)} points.`,
+    `Most scoring signals point to the same winner ${Math.round(agreement * 100)}% of the time.`,
   ];
 
   if (input.dataQuality < 0.55) {
-    explanation.push("Data quality penalties reduced recommendation confidence.");
+    explanation.push("Some product details are thin, so the recommendation is a little less certain.");
   }
 
   if (score >= 0.72) return { level: "clear_choice", score, explanation };

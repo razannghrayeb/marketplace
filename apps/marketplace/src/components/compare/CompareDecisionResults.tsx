@@ -61,6 +61,24 @@ const COMPLIMENT_COPY: Record<
   low_reaction_high_utility: 'Quiet utility',
 }
 
+const GOAL_COPY: Record<string, string> = {
+  best_value: 'Best value',
+  premium_quality: 'Premium quality',
+  style_match: 'Best style match',
+  low_risk_return: 'Lowest return risk',
+  occasion_fit: 'Best for the occasion',
+}
+
+function formatLabel(value: string): string {
+  const normalized = value.trim()
+  if (!normalized) return value
+  return normalized
+    .replace(/[_-]+/g, ' ')
+    .split(/\s+/)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
 function BulletList({ items, icon: Icon, tone }: { items: string[]; icon: typeof CheckCircle; tone: 'violet' | 'amber' | 'neutral' }) {
   if (!items.length) return null
   const iconCls =
@@ -203,13 +221,13 @@ export function CompareDecisionResults({
             {result.requestedGoal && (
               <span className="inline-flex items-center rounded-xl border border-violet-200/80 bg-white/90 px-3 py-1.5 text-xs font-medium text-neutral-700 shadow-sm">
                 Goal ·{' '}
-                <span className="ml-1 font-semibold text-violet-800">{result.requestedGoal.replace(/_/g, ' ')}</span>
+                <span className="ml-1 font-semibold text-violet-800">{GOAL_COPY[result.requestedGoal] ?? formatLabel(result.requestedGoal)}</span>
               </span>
             )}
             {result.requestedOccasion && (
               <span className="inline-flex items-center rounded-xl border border-fuchsia-200/80 bg-white/90 px-3 py-1.5 text-xs font-medium text-neutral-700 shadow-sm">
                 Occasion ·{' '}
-                <span className="ml-1 font-semibold text-fuchsia-800">{result.requestedOccasion}</span>
+                <span className="ml-1 font-semibold text-fuchsia-800">{formatLabel(result.requestedOccasion)}</span>
               </span>
             )}
           </div>

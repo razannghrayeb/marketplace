@@ -101,7 +101,7 @@ function buildRelativeDecisionNudge(
   }>
 ): string {
   if (peers.length === 0) {
-    return "Best fit if you want a balanced profile without major tradeoffs.";
+    return "Strong all-round pick if you want balance without big tradeoffs.";
   }
   const topPeer = peers.sort((a, b) => b.scores.overall - a.scores.overall)[0];
   const practicalDelta = current.scores.practical - topPeer.scores.practical;
@@ -120,15 +120,15 @@ function buildRelativeDecisionNudge(
   const weakest = advantages[advantages.length - 1];
 
   if (best.delta <= 0.02) {
-    return `Compared with ${topPeer.profile.title}, this is mostly a preference call with only small metric differences.`;
+    return `Compared with ${topPeer.profile.title}, this is mostly a personal-preference call with only small differences.`;
   }
 
   const tradeoff =
     weakest.delta < -0.03
-      ? `Tradeoff: ${metricDeltaLabel(weakest.delta, weakest.metric)}.`
-      : "Tradeoff profile is minimal versus the closest alternative.";
+      ? `Main tradeoff: ${metricDeltaLabel(weakest.delta, weakest.metric)}.`
+      : "Tradeoff is minor versus the closest alternative.";
 
-  return `Compared with ${topPeer.profile.title}, this shows ${metricDeltaLabel(best.delta, best.metric)}. ${tradeoff}`;
+  return `Compared with ${topPeer.profile.title}, this has ${metricDeltaLabel(best.delta, best.metric)}. ${tradeoff}`;
 }
 
 function scoreDataQuality(profiles: ProductDecisionProfile[]): { overallScore: number; notes: string[] } {

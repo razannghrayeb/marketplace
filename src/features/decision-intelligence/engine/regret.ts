@@ -6,22 +6,22 @@ function dominantRegretDriver(profile: ProductDecisionProfile): string {
     {
       key: "low_repeat_wear",
       score: 1 - profile.usageSignals.repeatWearPotential,
-      label: "repeat-wear depth may be limited",
+      label: "you may not reach for it as often after the first few wears",
     },
     {
       key: "trend_volatility",
       score: profile.derivedSignals.trendVolatility,
-      label: "trend curve may move quickly",
+      label: "the style may feel dated sooner than expected",
     },
     {
       key: "maintenance_burden",
       score: 1 - profile.usageSignals.maintenanceEase,
-      label: "care requirements can add friction",
+      label: "care needs may make it harder to wear regularly",
     },
     {
       key: "photo_confidence_gap",
       score: 1 - profile.trustSignals.photoToRealityConfidence,
-      label: "in-person expectation match is less certain",
+      label: "it may look different in person than it does online",
     },
   ].sort((a, b) => b.score - a.score);
 
@@ -55,32 +55,32 @@ export function buildRegretFlash(
     return {
       shortTermFeeling:
         statementLevel >= 0.6
-          ? "Immediate impact feels high-energy and attention-grabbing."
-          : "Feels like a meaningful upgrade at first wear.",
-      longTermReality: `Long-run usage may narrow because ${dominantDriver}.`,
+          ? "It feels exciting right away and has strong first impression energy."
+          : "It feels like a clear upgrade when you first wear it.",
+      longTermReality: `Over time, usage may drop because ${dominantDriver}.`,
     };
   }
   if (regretProbability >= 0.45) {
     return {
       shortTermFeeling:
         practicalStrength >= 0.62
-          ? "Feels strong early on, with visible payoff and workable day-to-day utility."
-          : "Feels like a solid change in the short term, especially in styled outfits.",
-      longTermReality: `Useful in selective contexts; watch for drag points because ${dominantDriver}.`,
+          ? "Feels strong early, with a good mix of payoff and day-to-day usability."
+          : "Feels like a solid change at first, especially for planned outfits.",
+      longTermReality: `Likely best in selected situations; watch for friction because ${dominantDriver}.`,
     };
   }
   return {
     shortTermFeeling:
       practicalStrength >= 0.72
-        ? "Feels dependable right away with clear day-to-day wear confidence."
+        ? "Feels dependable from day one and easy to keep in rotation."
         : practicalStrength >= 0.6
-          ? "Feels dependable right away without forcing a bold styling leap."
-          : "Feels easy to like now, with low emotional overcommitment.",
+          ? "Feels dependable quickly without forcing a bold style move."
+          : "Easy to like now without feeling like a risky commitment.",
     longTermReality:
       practicalStrength >= 0.72
-        ? "Sustains repeat wear with low regret pressure; likely to stay active in regular cycles."
+        ? "Likely to stay in regular rotation with low regret risk."
         : practicalStrength >= 0.6
-          ? `Sustains repeat wear with generally low regret pressure, though ${dominantDriver}.`
-          : `Should hold up over time, though ${dominantDriver}.`,
+          ? `Should remain wearable over time, though ${dominantDriver}.`
+          : `Can still hold up long term, though ${dominantDriver}.`,
   };
 }
