@@ -1414,7 +1414,7 @@ function hardCategoryTermsForDetection(
     const isTailoredIntent = hasFormalTailoringCue(detectionLabel);
     if (isVestTop) {
       const vestTopTerms = baseTerms.filter((t) =>
-        /\b(vest|vests|waistcoat|waistcoats|gilet|sleeveless top|tank|tank top|camisole|cami|top|tops)\b/.test(t),
+        /\b(vest|vests|waistcoat|waistcoats|gilet|sleeveless top|tank|tank top|camisole|cami)\b/.test(t),
       );
       return vestTopTerms.length > 0 ? vestTopTerms : baseTerms;
     }
@@ -1609,7 +1609,7 @@ function tightenTypeSeedsForDetection(
     const topIntent = parseTopDetectionIntent(detectionLabel);
     if (topIntent.isVestTop) {
       const vestTop = normalized.filter((t) =>
-        /\b(vest|vests|waistcoat|waistcoats|gilet|sleeveless top|tank|tank top|camisole|cami|top|tops)\b/.test(t),
+        /\b(vest|vests|waistcoat|waistcoats|gilet|sleeveless top|tank|tank top|camisole|cami)\b/.test(t),
       );
       return vestTop.length > 0 ? vestTop : normalized;
     }
@@ -2062,11 +2062,14 @@ function shouldRejectImplausibleBagDetection(detection: Detection, allDetections
 function shouldKeepDetectionForShopTheLook(detection: Detection, allDetections?: Detection[]): boolean {
   const mapped = mapDetectionToCategory(detection.label, detection.confidence).productCategory;
   const label = String(detection.label || "").toLowerCase();
-  const normalizedLabel = label.replace(/[_\s]+/g, " ").trim();
+  const normalizedLabel = label.replace(/[_\s,]+/g, " ").trim();
   const areaRatio = Number.isFinite(detection.area_ratio) ? detection.area_ratio : 0;
   const confidence = Number.isFinite(detection.confidence) ? detection.confidence : 0;
   // Never search this detector class.
-  if (/\bheadband head covering hair accessory(?:\s*\d+)?\b/.test(normalizedLabel)) {
+  if (
+    /\bheadband head covering hair accessory(?:\s*\d+)?\b/.test(normalizedLabel) ||
+    /\b(headband|head covering|hair accessory|hairband|headwear)\b/.test(normalizedLabel)
+  ) {
     return false;
   }
 
@@ -2139,8 +2142,11 @@ function accessoryRecoveryAreaRatioThreshold(): number {
 function shouldKeepAccessoryRecoveryDetection(detection: Detection): boolean {
   const mapped = mapDetectionToCategory(detection.label, detection.confidence).productCategory;
   if (mapped !== "bags" && mapped !== "accessories") return false;
-  const labelNorm = String(detection.label || "").toLowerCase().replace(/[_\s]+/g, " ").trim();
-  if (/\bheadband head covering hair accessory(?:\s*\d+)?\b/.test(labelNorm)) return false;
+  const labelNorm = String(detection.label || "").toLowerCase().replace(/[_\s,]+/g, " ").trim();
+  if (
+    /\bheadband head covering hair accessory(?:\s*\d+)?\b/.test(labelNorm) ||
+    /\b(headband|head covering|hair accessory|hairband|headwear)\b/.test(labelNorm)
+  ) return false;
 
   if (shouldRejectImplausibleBagDetection(detection)) return false;
 
@@ -2810,6 +2816,11 @@ function applySleeveIntentGuard(params: {
     return !isSleeveContradiction(desiredSleeve, observedSleeve);
   });
 
+  // In strict main-path mode, never invoke helper recoveries.
+  if (shopLookMainPathOnlyEnv()) {
+    return filtered;
+  }
+
   // If strict sleeve-compliance filtering collapses recall, fall back to
   // contradiction-only filtering to keep non-conflicting tops.
   if (!isDressCategory && filtered.length < Math.max(2, Math.ceil(products.length * (isTopCategory ? 0.45 : 0.2)))) {
@@ -3096,6 +3107,11 @@ function applyRelevanceThresholdFilter(
     const relevance = Number((p as any)?.finalRelevance01 ?? 0);
     return relevance >= minRelevance;
   });
+
+  // Strict mode: keep only true main-path results, no relevance fallback preservation.
+  if (shopLookMainPathOnlyEnv()) {
+    return rankBottomsByDesiredColor(filtered);
+  }
 
   if (filtered.length !== products.length) {
     console.log(
@@ -5294,6 +5310,10 @@ export class ImageAnalysisService {
             filters.softStyle = "semi-formal";
             delete (filters as any).minFormality;
           }
+          if (categoryMapping.productCategory === "bottoms") {
+            delete (filters as any).softStyle;
+            delete (filters as any).minFormality;
+          }
 
           const formalFootwearIntent =
             categoryMapping.productCategory === "footwear" &&
@@ -5411,11 +5431,14 @@ export class ImageAnalysisService {
             !noisyCat && (baseHardAuto || relaxedGarmentHardAuto || topsHardAuto);
           const accessoryLikeCategory = isAccessoryLikeCategory(categoryMapping.productCategory);
           const footwearLikeCategory = categoryMapping.productCategory === "footwear";
+          const suitCaptionForTop =
+            hasSuitCaptionCue && categoryMapping.productCategory === "tops";
           const accessoryOrFootwearConfident =
             (accessoryLikeCategory || footwearLikeCategory) &&
             (((detection.confidence ?? 0) >= 0.72) || ((detection.area_ratio ?? 0) >= 0.025));
           const shouldHardCategory =
             filterByDetectedCategory &&
+            !suitCaptionForTop &&
             (
               accessoryOrFootwearConfident ||
               shopLookHardCategoryStrictEnv() ||
@@ -5431,7 +5454,8 @@ export class ImageAnalysisService {
           const forceCoreMainPathHardCategory =
             coreApparelLikeCategory &&
             (detection.confidence ?? 0) >= 0.8 &&
-            (detection.area_ratio ?? 0) >= 0.05;
+            (detection.area_ratio ?? 0) >= 0.05 &&
+            !suitCaptionForTop;
           const forceHardCategoryFilterUsed = Boolean(shouldHardCategory || forceCoreMainPathHardCategory);
           if (filterByDetectedCategory) {
             if (shouldHardCategory || forceCoreMainPathHardCategory) {
@@ -5677,30 +5701,80 @@ export class ImageAnalysisService {
             if (detColor && detColorConfidence >= 0.45) return detColor;
             return inferredPrimaryColor;
           })();
+          const cropDominantForConflict = Array.isArray((filters as any).cropDominantColors)
+            ? ((filters as any).cropDominantColors as unknown[])
+                .map((c) => canonicalizeColorIntentToken(String(c ?? "")))
+                .filter((c) => c.length > 0)
+            : [];
+          const inferredColorNorm = canonicalizeColorIntentToken(inferredPrimaryColorForDetection);
+          const inferredColorIsChromatic =
+            inferredColorNorm.length > 0 &&
+            inferredColorNorm !== "multicolor" &&
+            !isNeutralFashionColor(inferredColorNorm);
+          const cropHasNeutral = cropDominantForConflict.some((c) => isNeutralFashionColor(c));
+          const cropHasChromatic = cropDominantForConflict.some(
+            (c) => c.length > 0 && c !== "multicolor" && !isNeutralFashionColor(c),
+          );
+          const inferredColorConflictForRetrieval =
+            inferredColorIsChromatic &&
+            Number(inferredColorsByItemConfidence[itemColorKey] ?? 0) >= 0.82 &&
+            cropHasNeutral &&
+            !cropHasChromatic;
+          const tinyFootwearBox =
+            categoryMapping.productCategory === "footwear" &&
+            Number(detection.area_ratio ?? 0) < 0.018;
+          const globalPrimaryNorm = canonicalizeColorIntentToken(inferredPrimaryColor);
+          const footwearColorConflictWithGlobal =
+            categoryMapping.productCategory === "footwear" &&
+            inferredColorNorm.length > 0 &&
+            globalPrimaryNorm.length > 0 &&
+            inferredColorNorm !== globalPrimaryNorm &&
+            isLightNeutralFashionColor(globalPrimaryNorm) &&
+            !isLightNeutralFashionColor(inferredColorNorm);
           const explicitColorFilter = String((filters as any).color ?? "").trim();
           const inferredPrimaryColorForSearch =
             categoryMapping.productCategory === "tops" && explicitColorFilter.length === 0
               ? (
                 Number(inferredColorsByItemConfidence[itemColorKey] ?? 0) >= 0.82
-                  ? canonicalizeColorIntentToken(inferredPrimaryColorForDetection)
+                  ? inferredColorNorm
                   : undefined
               )
-              : canonicalizeColorIntentToken(inferredPrimaryColorForDetection);
+              : categoryMapping.productCategory === "footwear" &&
+                  explicitColorFilter.length === 0 &&
+                  (tinyFootwearBox || footwearColorConflictWithGlobal)
+                ? undefined
+              : categoryMapping.productCategory === "bottoms" &&
+                  explicitColorFilter.length === 0 &&
+                  inferredColorConflictForRetrieval
+                ? undefined
+                : inferredColorNorm;
 
-          const detectionSimilarityThreshold = shopLookDetectionSimilarityThreshold(
+          let detectionSimilarityThreshold = shopLookDetectionSimilarityThreshold(
             similarityThreshold,
             categoryMapping.productCategory,
           );
+          if (categoryMapping.productCategory === "tops" && inferredColorConflictForRetrieval) {
+            // Beige/white-dominant crop can hide a chromatic shirt under layering.
+            // Widen initial KNN surface so chromatic matches can enter ranking.
+            detectionSimilarityThreshold = Math.max(0.2, detectionSimilarityThreshold - 0.06);
+          }
+          if (categoryMapping.productCategory === "footwear" && (detection.area_ratio ?? 0) < 0.012) {
+            // Tiny shoe crops are noisy; reduce threshold slightly to avoid empty KNN.
+            detectionSimilarityThreshold = Math.max(0.18, detectionSimilarityThreshold - 0.08);
+          }
           const detectionRetrievalLimit = (() => {
             const categoryNorm = String(categoryMapping.productCategory ?? "").toLowerCase().trim();
             const boost =
-              categoryNorm === "tops" ? 1.7
-                : categoryNorm === "dresses" ? 1.6
-                  : categoryNorm === "footwear" ? 1.5
+              categoryNorm === "tops"
+                ? (inferredColorConflictForRetrieval ? 2.4 : 1.7)
+                : categoryNorm === "dresses" ? 2.4
+                  : categoryNorm === "bottoms" ? 2.1
+                  : categoryNorm === "footwear"
+                    ? ((detection.area_ratio ?? 0) < 0.012 ? 2.6 : 1.9)
                     : 1;
             return Math.max(
               resolvedResultsPageSize,
-              Math.min(resolveShopLookRetrievalLimit(retrievalLimit * boost), retrievalLimit + 120),
+              Math.min(resolveShopLookRetrievalLimit(retrievalLimit * boost), retrievalLimit + 180),
             );
           })();
 
@@ -7641,6 +7715,10 @@ export class ImageAnalysisService {
             filters.softStyle = "semi-formal";
             delete (filters as any).minFormality;
           }
+          if (categoryMapping.productCategory === "bottoms") {
+            delete (filters as any).softStyle;
+            delete (filters as any).minFormality;
+          }
 
           const formalFootwearIntent =
             categoryMapping.productCategory === "footwear" &&
@@ -7762,6 +7840,14 @@ export class ImageAnalysisService {
           let predictedCategoryAisles: string[] | undefined;
           const accessoryLikeCategory = isAccessoryLikeCategory(categoryMapping.productCategory);
           const footwearLikeCategory = categoryMapping.productCategory === "footwear";
+          const suitCaptionForTop =
+            categoryMapping.productCategory === "tops" &&
+            (
+              /\b(suit|suiting|blazer|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|vest)\b/.test(
+                String(blipCaption ?? "").toLowerCase(),
+              ) ||
+              (/\btie\b/.test(String(blipCaption ?? "").toLowerCase()) && contextualFormalityScore >= 6)
+            );
           if (options.filterByDetectedCategory !== false) {
             const softCategories = shouldUseAlternatives(categoryMapping)
               ? getSearchCategories(categoryMapping)
@@ -7775,8 +7861,11 @@ export class ImageAnalysisService {
               (accessoryLikeCategory || footwearLikeCategory) &&
               (((detection.confidence ?? 0) >= 0.72) || ((detection.area_ratio ?? 0) >= 0.025));
             const shouldHardCategory =
-              accessoryOrFootwearConfident ||
-              !(imageSoftCategoryEnv() || shopLookSoftCategoryEnv());
+              !suitCaptionForTop &&
+              (
+                accessoryOrFootwearConfident ||
+                !(imageSoftCategoryEnv() || shopLookSoftCategoryEnv())
+              );
             if (!shouldHardCategory) {
               predictedCategoryAisles =
                 browseTypeSeeds.length > 0
@@ -7927,17 +8016,58 @@ export class ImageAnalysisService {
             if (detColor && detColorConfidence >= 0.45) return detColor;
             return inferredPrimaryColor;
           })();
+          const cropDominantForConflict = Array.isArray((filters as any).cropDominantColors)
+            ? ((filters as any).cropDominantColors as unknown[])
+                .map((c) => canonicalizeColorIntentToken(String(c ?? "")))
+                .filter((c) => c.length > 0)
+            : [];
+          const inferredColorNorm = canonicalizeColorIntentToken(inferredPrimaryColorForDetection);
+          const inferredColorIsChromatic =
+            inferredColorNorm.length > 0 &&
+            inferredColorNorm !== "multicolor" &&
+            !isNeutralFashionColor(inferredColorNorm);
+          const cropHasNeutral = cropDominantForConflict.some((c) => isNeutralFashionColor(c));
+          const cropHasChromatic = cropDominantForConflict.some(
+            (c) => c.length > 0 && c !== "multicolor" && !isNeutralFashionColor(c),
+          );
+          const inferredColorConflictForRetrieval =
+            inferredColorIsChromatic &&
+            Number(inferredColorsByItemConfidence[itemColorKey] ?? 0) >= 0.82 &&
+            cropHasNeutral &&
+            !cropHasChromatic;
+          const tinyFootwearBox =
+            categoryMapping.productCategory === "footwear" &&
+            Number(detection.area_ratio ?? 0) < 0.018;
+          const globalPrimaryNorm = canonicalizeColorIntentToken(inferredPrimaryColor);
+          const footwearColorConflictWithGlobal =
+            categoryMapping.productCategory === "footwear" &&
+            inferredColorNorm.length > 0 &&
+            globalPrimaryNorm.length > 0 &&
+            inferredColorNorm !== globalPrimaryNorm &&
+            isLightNeutralFashionColor(globalPrimaryNorm) &&
+            !isLightNeutralFashionColor(inferredColorNorm);
           const explicitColorFilter = String((filters as any).color ?? "").trim();
           const inferredPrimaryColorForSearch =
             categoryMapping.productCategory === "tops" && explicitColorFilter.length === 0
               ? undefined
+              : categoryMapping.productCategory === "footwear" &&
+                  explicitColorFilter.length === 0 &&
+                  (tinyFootwearBox || footwearColorConflictWithGlobal)
+                ? undefined
+              : categoryMapping.productCategory === "bottoms" &&
+                  explicitColorFilter.length === 0 &&
+                  inferredColorConflictForRetrieval
+                ? undefined
               : canonicalizeColorIntentToken(inferredPrimaryColorForDetection);
 
           const baseSimilarityThreshold = options.similarityThreshold ?? config.clip.imageSimilarityThreshold;
-          const detectionSimilarityThreshold = shopLookDetectionSimilarityThreshold(
+          let detectionSimilarityThreshold = shopLookDetectionSimilarityThreshold(
             baseSimilarityThreshold,
             categoryMapping.productCategory,
           );
+          if (categoryMapping.productCategory === "footwear" && (detection.area_ratio ?? 0) < 0.012) {
+            detectionSimilarityThreshold = Math.max(0.18, detectionSimilarityThreshold - 0.08);
+          }
 
           let similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalEmbedding,

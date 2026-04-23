@@ -392,6 +392,8 @@ export interface SearchResultWithRelated {
     variant_group_representatives?: number;
     recall_size?: number;
     final_accept_min?: number;
+    /** True when compact "<color> <product_type>" intent forces hard relevance gate. */
+    strict_color_type_intent?: boolean;
     /** Floor used after sparse recall when strict gate yields too few hits (≤ `image_min_results_target`). */
     final_accept_min_effective?: number;
     relevance_relaxed_for_min_count?: boolean;

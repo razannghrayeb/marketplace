@@ -4317,6 +4317,29 @@ export async function searchByImageWithSimilarity(
   const normalizedCropColorsForMerge = isFootwearDetectionIntent
     ? normalizedCropColors
     : normalizedCropColors.filter((c) => !["black", "gray", "charcoal"].includes(String(c).toLowerCase()));
+  const neutralColorSet = new Set([
+    "white",
+    "off-white",
+    "ivory",
+    "cream",
+    "ecru",
+    "beige",
+    "tan",
+    "camel",
+    "khaki",
+    "taupe",
+    "stone",
+    "nude",
+    "gray",
+    "grey",
+    "charcoal",
+    "silver",
+    "black",
+    "brown",
+  ]);
+  const inferredHasChromatic =
+    normalizedInferredColors.length > 0 &&
+    normalizedInferredColors.some((c) => !neutralColorSet.has(String(c).toLowerCase().trim()));
 
   // If inferred color disagrees with crop-local colors, prefer crop colors for
   // detection-anchored image search. This avoids top-color bleed (e.g. yellow)
@@ -4375,12 +4398,20 @@ export async function searchByImageWithSimilarity(
       hasStrongSlotAnchoredItemColor ||
       preferInferredColorForConflict
     );
-  const hasInferredColorSignal = hasTrustedInferredColorSignal;
+  const inferredOnlyMulticolorIntent =
+    !hasExplicitColorIntent &&
+    hasTrustedInferredColorSignal &&
+    normalizedInferredColors.length > 0 &&
+    normalizedInferredColors.every((c) => String(c).toLowerCase().trim() === "multicolor") &&
+    (detectionCategoryNorm === "tops" ||
+      detectionCategoryNorm === "bottoms" ||
+      detectionCategoryNorm === "dresses");
+  const hasInferredColorSignal = hasTrustedInferredColorSignal && !inferredOnlyMulticolorIntent;
 
   let allColorsForRelevance: string[];
   if (hasExplicitColorIntent) {
     allColorsForRelevance = [...explicitColorsForRelevance];
-  } else if (hasTrustedInferredColorSignal && normalizedInferredColors.length > 0) {
+  } else if (hasTrustedInferredColorSignal && !inferredOnlyMulticolorIntent && normalizedInferredColors.length > 0) {
     allColorsForRelevance = [...normalizedInferredColors];
   } else {
     allColorsForRelevance = [...normalizedCropColorsForMerge];
@@ -4463,7 +4494,18 @@ export async function searchByImageWithSimilarity(
         ? 0.26
         : 0.1;
 
-  const hasColorIntentForFinal = hasExplicitColorIntent || hasInferredColorSignal;
+  // Non-explicit chromatic inferred color is often too sparse/noisy in catalog metadata.
+  // Keep it as a ranking bias, but avoid hard-gating final relevance.
+  const suppressHardInferredColorGate =
+    !hasExplicitColorIntent &&
+    hasInferredColorSignal &&
+    inferredHasChromatic &&
+    (detectionCategoryNorm === "tops" ||
+      detectionCategoryNorm === "bottoms" ||
+      detectionCategoryNorm === "dresses" ||
+      detectionCategoryNorm === "outerwear");
+  const hasColorIntentForFinal =
+    hasExplicitColorIntent || (hasInferredColorSignal && !suppressHardInferredColorGate);
   const hasInferredColorIntentForRescue = !hasExplicitColorIntent && hasInferredColorSignal;
   const hasSoftColorIntentForRescue = !hasExplicitColorIntent && desiredColorsForRelevance.length > 0;
   const strictInferredOnePieceColorGate =
@@ -4474,7 +4516,8 @@ export async function searchByImageWithSimilarity(
   // Crop-dominant colors affect reranking but should not gate final relevance
   // unless we also have inferred semantic color evidence (e.g., BLIP "blue jeans").
   const softColorBiasOnly =
-    !hasExplicitColorIntent && hasCropColorSignal && !hasInferredColorSignal;
+    (!hasExplicitColorIntent && hasCropColorSignal && !hasInferredColorSignal) ||
+    suppressHardInferredColorGate;
 
   /**
    * When the user did not narrow the search (category / productTypes / text / explicit color),
@@ -6787,29 +6830,34 @@ export async function searchByImageWithSimilarity(
   // If the query image already exists in catalog (exact pHash match), make sure it is not
   // lost due to metadata/rerank gates. This is a strong identity signal.
   // pHash is often stored on product_images (primary row) while products.p_hash is unset — union both.
-  const normalizedQueryPHash = String(pHash ?? "").toLowerCase().trim().replace(/[^0-9a-f]/g, "");
+  const normalizedQueryPHash = String(pHash ?? "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^0-9a-f]/g, "")
+    .padStart(16, "0");
   if (normalizedQueryPHash && /^[0-9a-f]+$/i.test(normalizedQueryPHash)) {
     const existing = new Set(results.map((p) => String(p.id)));
     const hasIsHidden = await productsTableHasIsHiddenColumn();
     const hiddenClause = hasIsHidden ? "AND p.is_hidden = false" : "";
     const ph = normalizedQueryPHash;
+    const phLen = ph.length;
     const exactPhashRows = await pg.query(
       `SELECT id FROM (
          SELECT p.id
            FROM products p
           WHERE p.p_hash IS NOT NULL
-            AND LOWER(TRIM(p.p_hash)) = $1
+            AND LPAD(REGEXP_REPLACE(LOWER(TRIM(p.p_hash)), '[^0-9a-f]', '', 'g'), $2, '0') = $1
             ${hiddenClause}
          UNION
          SELECT p.id
            FROM product_images pi
            INNER JOIN products p ON p.id = pi.product_id
           WHERE pi.p_hash IS NOT NULL
-            AND LOWER(TRIM(pi.p_hash)) = $1
+            AND LPAD(REGEXP_REPLACE(LOWER(TRIM(pi.p_hash)), '[^0-9a-f]', '', 'g'), $2, '0') = $1
             ${hiddenClause}
        ) x
        LIMIT 10`,
-      [ph],
+      [ph, phLen],
     );
     const rescueIds = (exactPhashRows.rows ?? [])
       .map((r: any) => String(r.id))
@@ -7005,7 +7053,13 @@ async function findSimilarByPHash(
   limit: number = 10,
   maxDistance: number = 12,
 ): Promise<ProductResult[]> {
-  const normalizedInput = String(pHash ?? "").toLowerCase().trim().replace(/[^0-9a-f]/g, "");
+  const normalizePHashHex = (value: string | null | undefined, minLen: number = 16): string => {
+    const hex = String(value ?? "").toLowerCase().trim().replace(/[^0-9a-f]/g, "");
+    if (!hex) return "";
+    const targetLen = Math.max(minLen, hex.length);
+    return hex.padStart(targetLen, "0");
+  };
+  const normalizedInput = normalizePHashHex(pHash, 16);
   if (!normalizedInput) return [];
   const hasIsHidden = await productsTableHasIsHiddenColumn();
   const hiddenClause = hasIsHidden ? "AND p.is_hidden = false" : "";
@@ -7045,8 +7099,8 @@ async function findSimilarByPHash(
   // Calculate Hamming distance and filter similar
   const bestDistanceById = new Map<number, number>();
   for (const row of result.rows) {
-    const rowHash = String((row as any).p_hash ?? "").toLowerCase().trim().replace(/[^0-9a-f]/g, "");
-    if (!rowHash || rowHash.length !== normalizedInput.length) continue;
+    const rowHash = normalizePHashHex(String((row as any).p_hash ?? ""), normalizedInput.length);
+    if (!rowHash) continue;
     const distance = hammingDistance(normalizedInput, rowHash);
     if (distance <= maxDistance) { // configurable pHash tolerance (default: ~80% similar)
       const idNum = Number(row.id);
