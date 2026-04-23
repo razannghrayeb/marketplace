@@ -62,30 +62,30 @@ export function buildConsequences(
 
   if (scores.practical >= 0.8) {
     bullets.push(
-      `Very high daily utility driven by ${primaryUsageLever} plus ${secondaryUsageLever}, so this integrates quickly into outfit rotation.`
+      `Great everyday pick: ${primaryUsageLever} plus ${secondaryUsageLever} means you'll likely wear it often.`
     );
   } else if (scores.practical >= 0.72) {
-    bullets.push(`High daily utility driven by ${primaryUsageLever}, so this integrates quickly into outfit rotation.`);
+    bullets.push(`Strong daily option thanks to ${primaryUsageLever}, so it should slot into your weekly outfits easily.`);
   } else if (scores.practical >= 0.6) {
-    bullets.push(`Practical enough for steady weekly use, with ${primaryUsageLever} doing most of the work.`);
+    bullets.push(`Solid for regular wear, with ${primaryUsageLever} doing most of the heavy lifting.`);
   } else {
-    bullets.push(`More deliberate piece: weaker ${primaryUsageLever} means styling effort stays higher day to day.`);
+    bullets.push(`More of a planned piece: weaker ${primaryUsageLever} means you'll need to style it more intentionally.`);
   }
 
   if (scores.expressive >= 0.72) {
-    bullets.push(`Strong statement direction anchored by ${primaryExpressionLever}, likely to draw more social attention.`);
+    bullets.push(`Statement-heavy look led by ${primaryExpressionLever}; this one is more likely to get noticed.`);
   } else if (scores.expressive >= 0.58) {
-    bullets.push(`Balanced expression: ${primaryExpressionLever} adds personality without dominating the whole look.`);
+    bullets.push(`Balanced personality: ${primaryExpressionLever} adds character without taking over the whole outfit.`);
   } else {
-    bullets.push(`Lower statement pressure overall; ${primaryExpressionLever} reads subtle rather than spotlight-seeking.`);
+    bullets.push(`More understated overall; ${primaryExpressionLever} reads subtle rather than spotlight-seeking.`);
   }
 
   if (profile.usageSignals.occasionRange < 0.4) {
-    bullets.push(`Narrow occasion lane for ${profile.category.toLowerCase()} styling, better as a selective-context option.`);
+    bullets.push(`Best for specific moments: this ${profile.category.toLowerCase()} is less flexible across different occasions.`);
   } else if (profile.usageSignals.occasionRange < 0.6) {
-    bullets.push(`Moderate occasion spread: works best when the styling context is planned in advance.`);
+    bullets.push(`Moderately flexible: it works best when you already know the vibe or plan for the day.`);
   } else {
-    bullets.push(`Broad occasion coverage for ${profile.category.toLowerCase()} wear, from casual to polished plans.`);
+    bullets.push(`Very flexible: this ${profile.category.toLowerCase()} can move from casual looks to more polished outfits.`);
   }
 
   return bullets;

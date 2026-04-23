@@ -59,7 +59,7 @@ export function resolveComparisonMode(
   if (uniqueMajor.size > 1) {
     return {
       comparisonMode: "outfit_compare",
-      reason: "Mixed major categories detected, so outfit-based impact is more reliable than direct winner forcing.",
+      reason: "These items belong to different wardrobe areas, so an outfit-level comparison is the clearest way to compare them.",
     };
   }
 
@@ -68,12 +68,12 @@ export function resolveComparisonMode(
   if (subtypes.size > 1) {
     return {
       comparisonMode: "scenario_compare",
-      reason: "Products share major category but differ by subtype, so scenario-based comparison is more meaningful.",
+      reason: "The items share a broad category but differ in style or fit, so a use-case comparison is more helpful.",
     };
   }
 
   return {
     comparisonMode: "direct_head_to_head",
-    reason: "Products share category and subtype, enabling direct head-to-head evaluation.",
+    reason: "These items are similar enough for a direct side-by-side comparison.",
   };
 }

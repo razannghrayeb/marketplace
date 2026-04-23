@@ -20,25 +20,25 @@ export function scoreFrictionIndex(
 
   const explanation: string[] = [];
   if (values.inverseStylingEase > 0.55) {
-    explanation.push("Requires more styling effort to look intentional.");
+    explanation.push("Needs more styling effort to look put together.");
   }
   if (values.inverseVersatility > 0.55) {
-    explanation.push("Works in fewer outfit combinations.");
+    explanation.push("Pairs well with fewer pieces in your closet.");
   }
   if (values.maintenanceBurden > 0.55) {
-    explanation.push("Care routine is above average for repeat wear.");
+    explanation.push("Care needs are a bit higher than average.");
   }
   if (values.statementPenalty > 0.6) {
-    explanation.push("High statement profile can reduce everyday utility.");
+    explanation.push("The bold look can make it less of an everyday default.");
   }
 
   if (explanation.length === 0) {
     if (clampedIndex <= 0.24) {
-      explanation.push("Very low-friction profile with easy repeat-wear across weekly outfits.");
+      explanation.push("Very easy to wear repeatedly through the week.");
     } else if (clampedIndex <= 0.34) {
-      explanation.push("Low-friction item with strong repeat-wear practicality.");
+      explanation.push("Low-friction choice with strong repeat-wear potential.");
     } else {
-      explanation.push("Moderately low-friction profile; practical overall with a few styling constraints.");
+      explanation.push("Generally practical, with a few styling limits to keep in mind.");
     }
   }
 

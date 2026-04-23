@@ -25,11 +25,11 @@ export function analyzePhotoRealityGap(
 
   const explanation: string[] = [];
   if (label === "aligned") {
-    explanation.push("Visual presentation and practical expectations are largely consistent.");
+    explanation.push("What you see in photos is likely close to what you'll get in real life.");
   } else if (label === "photo_stronger") {
-    explanation.push("Image impression likely outruns day-to-day wear reality.");
+    explanation.push("Photos may look stronger than the item feels in everyday wear.");
   } else {
-    explanation.push("Product may look better in-person than in listing imagery.");
+    explanation.push("This one may look better in person than it does in the listing photos.");
   }
 
   return {

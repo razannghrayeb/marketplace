@@ -30,11 +30,11 @@ export function detectWhyNotBoth(input: {
   return {
     enabled: true,
     explanation: [
-      "Top options are close overall but excel in different use-cases.",
-      "A dual-choice can reduce regret by covering both utility and expression contexts.",
+      "The top options are close overall, but they solve different shopping needs.",
+      "Keeping both can make sense when you want one everyday piece and one more expressive piece.",
       input.mode === "outfit_compare"
-        ? "Mixed-category comparison increases complementarity value."
-        : "Complementary style roles justify a dual-ownership recommendation.",
+        ? "Because the items live in different wardrobe areas, they can work together instead of competing directly."
+        : "Their different strengths make a two-item choice feel more balanced than picking only one.",
     ],
     productRoles: [
       { productId: a.productId, role: roleA },

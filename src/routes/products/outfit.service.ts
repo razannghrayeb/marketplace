@@ -148,7 +148,8 @@ export async function getOutfitRecommendations(
   }
   
   const ageGroupHint = inferAgeGroupHintFromProduct(sourceProduct);
-  const sourceStyle = await buildStyleProfile(sourceProduct);
+  const rawSourceStyle = await buildStyleProfile(sourceProduct);
+  const sourceStyle = calibrateSourceStyleFromAnchor(sourceProduct, resolvedSourceCategory, rawSourceStyle);
 
   // Pass detected category to wardrobe engine for accurate gap detection
   const detectedCategoryMap = new Map<number, string>();
@@ -164,6 +165,18 @@ export async function getOutfitRecommendations(
     { 
       audienceGenderHint, 
       ageGroupHint,
+      occasionHint: sourceStyle.occasion,
+      styleHints: [sourceStyle.aesthetic, sourceStyle.occasion === "active" ? "sporty" : ""].filter(Boolean),
+      colorHints: [sourceProduct.color || sourceStyle.colorProfile.primary].filter(Boolean),
+      weatherHint: sourceStyle.season === "winter"
+        ? { season: "winter", temperatureC: 8 }
+        : sourceStyle.season === "summer"
+          ? { season: "summer", temperatureC: 30 }
+          : sourceStyle.season === "spring"
+            ? { season: "spring", temperatureC: 20 }
+            : sourceStyle.season === "fall"
+              ? { season: "fall", temperatureC: 16 }
+              : undefined,
       detectedCategories: detectedCategoryMap,
     }
   );
@@ -246,6 +259,12 @@ export async function getOutfitRecommendationsFromProduct(
   options: CompleteStyleOptions = {},
   userId?: number
 ): Promise<StyleRecommendationResponse> {
+  const catalogProductId = await resolveCatalogProductIdForCompleteStyle(product);
+  if (catalogProductId) {
+    const completeLookBacked = await getOutfitRecommendations(catalogProductId, options, userId);
+    if (completeLookBacked) return completeLookBacked;
+  }
+
   const result = await completeMyStyle(product, {
     maxPerCategory: options.maxPerCategory,
     maxTotal: options.maxTotal,
@@ -523,6 +542,51 @@ async function getCatalogProductById(productId: number): Promise<CompleteLookMap
   return (result.rows[0] as CompleteLookMappedSourceProduct | undefined) ?? null;
 }
 
+async function resolveCatalogProductIdForCompleteStyle(product: Product): Promise<number | null> {
+  const directId = Number(product.id);
+  if (Number.isFinite(directId) && directId >= 1) {
+    const existing = await getCatalogProductById(Math.floor(directId));
+    if (existing?.id) return existing.id;
+  }
+
+  const normalizedTitle = String(product.title || "").trim();
+  if (!normalizedTitle) return null;
+  const normalizedBrand = String(product.brand || "").trim();
+
+  try {
+    if (normalizedBrand) {
+      const exact = await pg.query<{ id: number }>(
+        `SELECT id
+         FROM products
+         WHERE lower(title) = lower($1)
+           AND lower(brand) = lower($2)
+         ORDER BY id DESC
+         LIMIT 1`,
+        [normalizedTitle, normalizedBrand]
+      );
+      if (exact.rows[0]?.id) return exact.rows[0].id;
+    }
+
+    const titleOnly = await pg.query<{ id: number }>(
+      `SELECT id
+       FROM products
+       WHERE lower(title) = lower($1)
+       ORDER BY id DESC
+       LIMIT 1`,
+      [normalizedTitle]
+    );
+    if (titleOnly.rows[0]?.id) return titleOnly.rows[0].id;
+  } catch (err) {
+    console.warn("[OutfitService] resolve catalog product for complete-style failed", {
+      title: normalizedTitle,
+      brand: normalizedBrand || undefined,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  return null;
+}
+
 function inferAgeGroupHintFromProduct(product: {
   title?: string | null;
   category?: string | null;
@@ -657,7 +721,7 @@ function violatesFormalPolicy(candidateFamily: string, candidateText: string): b
 }
 
 function violatesSportPolicy(candidateFamily: string, candidateText: string): boolean {
-  const formalCue = /\b(stiletto|pump|oxford|evening|cocktail|gown|tailored blazer|clutch)\b/;
+  const formalCue = /\b(stiletto|pump|oxford|evening|cocktail|gown|tailored blazer|clutch|strapless|sequin|sequined|metallic|corset|bodycon|party top|cami dress)\b/;
   const athleticCue = /\b(sneaker|trainer|running|track|jogger|legging|sports bra|active|gym|sport|hoodie|tee|tank|backpack|duffle)\b/;
 
   if (candidateFamily === "shoes" && !hasAnyCue(candidateText, /\b(sneaker|trainer|running|training|sport shoe)\b/)) {
@@ -671,6 +735,55 @@ function violatesSportPolicy(candidateFamily: string, candidateText: string): bo
   }
   if (hasAnyCue(candidateText, formalCue) && !hasAnyCue(candidateText, athleticCue)) return true;
   return false;
+}
+
+function calibrateSourceStyleFromAnchor(
+  sourceProduct: { title?: string | null; category?: string | null; description?: string | null; color?: string | null },
+  detectedCategory: ProductCategory,
+  sourceStyle: StyleProfile,
+): StyleProfile {
+  const text = `${String(sourceProduct.title || "")} ${String(sourceProduct.category || "")} ${String(sourceProduct.description || "")}`.toLowerCase();
+  const sportCue = /\b(track|tracksuit|track pant|track pants|jogger|joggers|jogging|sweatpant|sweatpants|athletic|activewear|sportswear|gym|training|running|workout|fleece jogg)\b/;
+  const formalBottomCue = /\b(tailored|trouser|trousers|slacks|dress pant|office pant|formal pant|pleated)\b/;
+  const partyCue = /\b(sequin|metallic|party|cocktail|strapless|corset|bodycon|evening)\b/;
+
+  let occasion = sourceStyle.occasion;
+  let aesthetic = sourceStyle.aesthetic;
+  let formality = sourceStyle.formality;
+
+  if (sportCue.test(text) || detectedCategory === "activewear" || detectedCategory === "sportswear") {
+    occasion = "active";
+    aesthetic = "sporty";
+    formality = Math.min(formality, 2);
+  }
+
+  if (detectedCategory === "pants") {
+    if (sportCue.test(text)) {
+      occasion = "active";
+      aesthetic = "sporty";
+      formality = Math.min(formality, 2);
+    } else if (formalBottomCue.test(text)) {
+      occasion = "semi-formal";
+      aesthetic = sourceStyle.aesthetic === "sporty" ? "classic" : sourceStyle.aesthetic;
+      formality = Math.max(formality, 5.5);
+    } else {
+      // Default pants without explicit formal cues should lean casual.
+      occasion = sourceStyle.occasion === "semi-formal" ? "casual" : sourceStyle.occasion;
+      formality = sourceStyle.occasion === "semi-formal" ? Math.min(formality, 4) : formality;
+    }
+  }
+
+  if (partyCue.test(text) && !sportCue.test(text)) {
+    occasion = "party";
+    formality = Math.max(formality, 5);
+  }
+
+  return {
+    ...sourceStyle,
+    occasion,
+    aesthetic,
+    formality,
+  };
 }
 
 function violatesCasualPolicy(candidateFamily: string, candidateText: string): boolean {
