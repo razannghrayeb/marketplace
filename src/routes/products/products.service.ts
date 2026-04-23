@@ -1891,6 +1891,11 @@ function imageVisualRescueMaxCount(): number {
   return 8;
 }
 
+function imageMainPathStrictEnv(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_MAIN_PATH_ONLY ?? "0").toLowerCase().trim();
+  return raw === "1" || raw === "true";
+}
+
 function imageVisualRescueAudienceMin(): number {
   const raw = Number(process.env.SEARCH_IMAGE_VISUAL_RESCUE_AUDIENCE_MIN);
   if (Number.isFinite(raw)) return Math.max(0, Math.min(1, raw));
@@ -2323,6 +2328,38 @@ function hasTailoredTopCatalogCue(src: Record<string, unknown>): boolean {
     .toLowerCase();
   if (!blob.trim()) return false;
   return /\b(suit|blazer|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|tailored jacket|structured jacket)\b/.test(blob);
+}
+
+function hasVestLikeTopCatalogCue(src: Record<string, unknown>): boolean {
+  const blob = [
+    src.title,
+    src.description,
+    src.category,
+    src.category_canonical,
+    Array.isArray(src.product_types) ? src.product_types.join(" ") : src.product_types,
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x))
+    .join(" ")
+    .toLowerCase();
+  if (!blob.trim()) return false;
+  return /\b(vest|vests|waistcoat|waistcoats|gilet|sleeveless top|tank top|tank|camisole|cami)\b/.test(blob);
+}
+
+function isLikelyNonVestTopForVestIntent(src: Record<string, unknown>): boolean {
+  const blob = [
+    src.title,
+    src.description,
+    src.category,
+    src.category_canonical,
+    Array.isArray(src.product_types) ? src.product_types.join(" ") : src.product_types,
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x))
+    .join(" ")
+    .toLowerCase();
+  if (!blob.trim()) return false;
+  return /\b(blouse|blouses|shirt|shirts|long sleeve|button down|button-down|overshirt)\b/.test(blob);
 }
 
 function normalizeDetectionCategoryToken(token: string | null | undefined): string {
@@ -3293,6 +3330,7 @@ export async function searchByImageWithSimilarity(
   }
 
   const evalT0 = Date.now();
+  const mainPathStrict = imageMainPathStrictEnv();
   const breakdownDebug =
     String(process.env.SEARCH_DEBUG ?? "").toLowerCase() === "1" ||
     String(process.env.SEARCH_TRACE_BREAKDOWN ?? "").toLowerCase() === "1";
@@ -4975,6 +5013,16 @@ export async function searchByImageWithSimilarity(
         if (hasTopColorIntent && Number.isFinite(topColorCompliance) && topColorCompliance >= 0.6) {
           blendedTopMain = Math.min(1, blendedTopMain + 0.035);
         }
+        const hasVestDetectionIntent =
+          desiredProductTypes.some((t) => /\b(vest|vests|waistcoat|waistcoats|gilet)\b/.test(String(t).toLowerCase()));
+        const srcForVest = (hit as any)?._source ?? {};
+        if (hasVestDetectionIntent) {
+          if (hasVestLikeTopCatalogCue(srcForVest)) {
+            blendedTopMain = Math.min(1, blendedTopMain + 0.08);
+          } else if (isLikelyNonVestTopForVestIntent(srcForVest)) {
+            blendedTopMain *= 0.86;
+          }
+        }
         const exactTopVisualEvidence = (comp.exactTypeScore ?? 0) >= 1 && visualComp >= 0.62;
         const boostedFloor = exactTopVisualEvidence ? 0.36 : 0.24;
         const boosted = Math.min(1, Math.max(boostedFloor, blendedTopMain));
@@ -5238,7 +5286,7 @@ export async function searchByImageWithSimilarity(
     thresholdRelaxed = visualGatedHits.length > 0;
   }
 
-  if (relaxThresholdWhenEmpty) {
+  if (!mainPathStrict && relaxThresholdWhenEmpty) {
     const minWantCandidates = Math.min(fetchLimit, Math.max(limit, 15));
     if (visualGatedHits.length < minWantCandidates && rankedHitsForGates.length > visualGatedHits.length) {
       const floor = imageRelaxSimilarityFloor();
@@ -5256,7 +5304,7 @@ export async function searchByImageWithSimilarity(
   const acceptMinImage = config.search.finalAcceptMinImage;
   /** When strict CLIP threshold + merchandise binding drop every hit, keep best raw-visual neighbors (always on). */
   let imageSearchPipelineDegraded = false;
-  if (visualGatedHits.length === 0 && rankedHitsForGates.length > 0) {
+  if (!mainPathStrict && visualGatedHits.length === 0 && rankedHitsForGates.length > 0) {
     const relFloor = imageRelaxSimilarityFloor();
     const relaxedHits = rankedHitsForGates.filter(
       (h: any) => visualSimFromHit(h) >= relFloor,
@@ -5324,7 +5372,7 @@ export async function searchByImageWithSimilarity(
     (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= effectiveFinalAcceptMin,
   );
 
-  if (rankedHits.length === 0 && visualGatedHits.length > 0) {
+  if (!mainPathStrict && rankedHits.length === 0 && visualGatedHits.length > 0) {
     imageSearchPipelineDegraded = true;
     let rescuePool = visualGatedHits;
     if (hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) {
@@ -5534,7 +5582,7 @@ export async function searchByImageWithSimilarity(
   // dropped solely due to weak/missing type/color fields.
   const rescueMinSim = imageVisualRescueMinSimilarity();
   const rescueMaxCount = imageVisualRescueMaxCount();
-  if (rescueMaxCount > 0) {
+  if (!mainPathStrict && rescueMaxCount > 0) {
     const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
     const rescueAudienceMin = imageVisualRescueAudienceMin();
     const rescueTypeMinIntent = hasReliableTypeIntentForRelevance
@@ -5609,7 +5657,7 @@ export async function searchByImageWithSimilarity(
   // by metadata noise, while still respecting audience and type/category safety.
   const mustKeepVisualMin = imageMustKeepVisualMinSimilarity();
   const mustKeepVisualMax = imageMustKeepVisualMaxCount();
-  if (!imageSearchVisualPrimaryRanking && mustKeepVisualMax > 0 && visualGatedHits.length > 0) {
+  if (!mainPathStrict && !imageSearchVisualPrimaryRanking && mustKeepVisualMax > 0 && visualGatedHits.length > 0) {
     const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
     const mustKeepAudienceMin = imageMustKeepVisualAudienceMin();
     const mustKeepTypeMin = hasReliableTypeIntentForRelevance
@@ -5670,6 +5718,7 @@ export async function searchByImageWithSimilarity(
   const imageMinResultsTarget = minResultsPolicy.target;
   const relevanceRelaxDelta = minResultsPolicy.delta;
   if (
+    !mainPathStrict &&
     imageMinResultsTarget > 0 &&
     rankedHits.length < imageMinResultsTarget &&
     visualGatedHits.length > rankedHits.length
@@ -5827,7 +5876,7 @@ export async function searchByImageWithSimilarity(
           rankedHits = inferredColorCompliantHits;
         }
       } else if (
-        (category === "bottoms" || category === "outerwear") &&
+        category === "outerwear" &&
         hasStrongDetectionScopedColor &&
         inferredColorCompliantHits.length === 0
       ) {
@@ -6843,6 +6892,7 @@ export async function searchByImageWithSimilarity(
       exact_cosine_rerank: exactCosineRerank,
       dual_knn_fusion: useDualKnn,
       image_rank_visual_first: imageSearchVisualPrimaryRanking,
+      main_path_strict: mainPathStrict,
       raw_open_search_hits: rawOpenSearchHitCount,
       hits_after_final_accept_min: countAfterFinalAcceptMin,
       hits_after_dedupe: countAfterDedupe,
@@ -6893,6 +6943,7 @@ export async function searchByImageWithSimilarity(
     related: related.length > 0 ? related : undefined,
     meta: {
       relevance_intent: relevanceIntentDebug,
+      main_path_strict: mainPathStrict,
       threshold: similarityThreshold,
       total_results: results.length,
       total_related: related.length,
