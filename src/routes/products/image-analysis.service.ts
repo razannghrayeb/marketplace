@@ -3026,6 +3026,39 @@ function applyRelevanceThresholdFilter(
           return bottomsColorSafeRescue;
         }
       }
+      // Last-resort color-agnostic apparel rescue:
+      // if tops/bottoms are fully collapsed by relevance+color gating, keep the best
+      // type-compatible visual neighbors instead of returning an empty detection.
+      if (categoryNorm === "tops" || categoryNorm === "bottoms") {
+        const apparelRescueFloor = Math.max(0.22, minRelevance - 0.18);
+        const rescueLimit = Math.max(1, Math.min(3, preserveCount > 0 ? preserveCount : 1));
+        const colorAgnosticRescue = sorted
+          .filter((item) => {
+            const relevance = Number((item as any)?.finalRelevance01 ?? 0);
+            if (relevance < apparelRescueFloor) return false;
+            const explain = ((item as any)?.explain ?? {}) as Record<string, unknown>;
+            if (Boolean(explain.hardBlocked)) return false;
+            const crossFamilyPenalty = Number(explain.crossFamilyPenalty ?? 0);
+            if (Number.isFinite(crossFamilyPenalty) && crossFamilyPenalty >= 0.72) return false;
+            const exactType = Number(explain.exactTypeScore ?? 0);
+            const typeCompliance = Number(explain.productTypeCompliance ?? 0);
+            const minTypeFloor = categoryNorm === "tops" ? 0.12 : 0.18;
+            if (!(exactType >= 1 || typeCompliance >= minTypeFloor)) return false;
+            if (hasSevereTopStyleContradiction(item)) return false;
+            return true;
+          })
+          .slice(0, rescueLimit)
+          .map((item) => ({
+            ...item,
+            relevanceApparelRescue: true,
+          }));
+        if (colorAgnosticRescue.length > 0) {
+          console.log(
+            `[relevance-threshold-apparel-rescue] preserved ${colorAgnosticRescue.length} product(s) for detection="${options?.detectionLabel ?? "unknown"}" category="${categoryNorm}" floor=${apparelRescueFloor.toFixed(3)} threshold=${minRelevance}`,
+          );
+          return colorAgnosticRescue;
+        }
+      }
       return filtered;
     }
     const bestRelevance = Number((recovered[0] as any)?.finalRelevance01 ?? 0);

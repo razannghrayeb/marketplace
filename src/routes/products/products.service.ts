@@ -5927,6 +5927,39 @@ export async function searchByImageWithSimilarity(
         }
       }
 
+      // Keep core apparel resilient when color is inferred (not explicit):
+      // for detection-anchored tops/bottoms, strong visual+type alignment should
+      // not be collapsed below final relevance gates by aggressive color caps.
+      if (
+        hasDetectionAnchoredTypeIntent &&
+        !hasExplicitColorIntent &&
+        compliance &&
+        (String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops" ||
+          String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms")
+      ) {
+        const typeComp = Math.max(0, Math.min(1, compliance.productTypeCompliance ?? 0));
+        const exactType = Number(compliance.exactTypeScore ?? 0);
+        const crossFamily = Math.max(0, Math.min(1, compliance.crossFamilyPenalty ?? 0));
+        const sim = Math.max(0, Math.min(1, similarityScore));
+        const hasStrongTypeEvidence = exactType >= 1 || typeComp >= 0.42;
+        const hasStrongVisualEvidenceForFloor = sim >= 0.68;
+        const notCrossFamilyContradiction = crossFamily < 0.55;
+        if (hasStrongTypeEvidence && hasStrongVisualEvidenceForFloor && notCrossFamilyContradiction) {
+          const typeBoost = exactType >= 1 ? 0.06 : Math.max(0, (typeComp - 0.42) * 0.1);
+          const floor = Math.min(0.58, Math.max(0.26, sim * 0.78 - crossFamily * 0.18 + typeBoost));
+          const source = String(finalRelevanceSource ?? "").toLowerCase();
+          const canLiftFrom =
+            source === "computed" ||
+            source === "catalog_color_correction" ||
+            source === "catalog_color_mix_dampen" ||
+            source === "context_personalization";
+          if (canLiftFrom) {
+            finalRelevance01 = Math.max(finalRelevance01 ?? 0, floor);
+            finalRelevanceSource = "core_apparel_type_visual_floor";
+          }
+        }
+      }
+
       const hasHardColorConflictAfterCorrection =
         finalRelevanceSource === "catalog_color_correction" &&
         hasColorIntentForFinal &&
