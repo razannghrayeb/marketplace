@@ -5044,9 +5044,32 @@ export async function searchByImageWithSimilarity(
     hasInferredColorSignal &&
     !hasExplicitColorIntent &&
     (detectionCategoryNorm === "tops" || detectionCategoryNorm === "bottoms");
+  const apparelDetectionCategory =
+    detectionCategoryNorm === "tops" ||
+    detectionCategoryNorm === "bottoms" ||
+    detectionCategoryNorm === "dresses" ||
+    detectionCategoryNorm === "outerwear";
+  const sparseVisualCandidatePool =
+    visualGatedHits.length > 0 &&
+    visualGatedHits.length <= Math.max(8, Math.min(fetchLimit, 24));
+  const strongestVisualCandidate = visualGatedHits.reduce((maxVal: number, h: any) => {
+    const v = visualSimFromHit(h);
+    return v > maxVal ? v : maxVal;
+  }, 0);
+  const hasStrongVisualEvidence =
+    strongestVisualCandidate >= Math.max(0.7, similarityThreshold - 0.1);
   let effectiveFinalAcceptMin = inferredColorSoftGateCategory
     ? Math.min(finalAcceptMin, 0.28)
     : finalAcceptMin;
+  // Color-agnostic apparel protection:
+  // In sparse candidate pools with strong visual evidence, avoid hard final-accept
+  // cutoffs that collapse tops/bottoms to zero before category-aware rescue.
+  if (apparelDetectionCategory && hasDetectionAnchoredTypeIntent && sparseVisualCandidatePool) {
+    effectiveFinalAcceptMin = Math.min(
+      effectiveFinalAcceptMin,
+      hasStrongVisualEvidence ? 0.16 : 0.2,
+    );
+  }
   let rankedHits = visualGatedHits.filter(
     (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= effectiveFinalAcceptMin,
   );
@@ -5465,14 +5488,18 @@ export async function searchByImageWithSimilarity(
             : category === "tops" || category === "dresses"
               ? category === "dresses"
                 ? 0.18
-                : 0.26
+                : 0.2
               : category === "bottoms" || category === "outerwear"
-                ? 0.24
+                ? category === "bottoms"
+                  ? 0.16
+                  : 0.22
                 : 0.22;
       const hasStrongDetectionScopedColor =
         preferredInferredColorConfidence >= 0.82 &&
         (category === "tops" || category === "bottoms" || category === "dresses" || category === "outerwear");
-      const effectiveMinInferredColorCompliance = hasStrongDetectionScopedColor
+      const shouldTightenForStrongInferredColor =
+        hasStrongDetectionScopedColor && category !== "tops" && category !== "bottoms";
+      const effectiveMinInferredColorCompliance = shouldTightenForStrongInferredColor
         ? Math.min(0.4, minInferredColorCompliance + 0.08)
         : minInferredColorCompliance;
       // Allow hits with high colorSimEff to pass even if colorCompliance is slightly below threshold
@@ -6067,9 +6094,17 @@ export async function searchByImageWithSimilarity(
   const countAfterHydration = results.length;
 
   const resultsBeforeFinalRelevanceFilter = results;
+  const sparseHydratedApparelPool =
+    apparelDetectionCategory &&
+    hasDetectionAnchoredTypeIntent &&
+    resultsBeforeFinalRelevanceFilter.length > 0 &&
+    resultsBeforeFinalRelevanceFilter.length <= 12;
+  const effectiveFinalResultMin = sparseHydratedApparelPool
+    ? Math.min(effectiveFinalAcceptMin, hasStrongVisualEvidence ? 0.14 : 0.18)
+    : effectiveFinalAcceptMin;
   results = results.filter(
     (p: any) =>
-      typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalAcceptMin,
+      typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalResultMin,
   ) as ProductResult[];
 
   const strongVisualOverrideMax = imageStrongVisualOverrideMaxCount();
@@ -6077,7 +6112,14 @@ export async function searchByImageWithSimilarity(
   let rescuedByStrongVisualOverride = 0;
   if (strongVisualOverrideMax > 0 && resultsBeforeFinalRelevanceFilter.length > results.length) {
     const existingIds = new Set(results.map((p) => String((p as any).id)));
-    const strongColorIntent = hasExplicitColorIntent || hasInferredColorSignal;
+    const inferredColorCanGateStrongOverride =
+      hasInferredColorSignal &&
+      !hasExplicitColorIntent &&
+      !(
+        hasDetectionAnchoredTypeIntent &&
+        (params.detectionProductCategory === "tops" || params.detectionProductCategory === "bottoms")
+      );
+    const strongColorIntent = hasExplicitColorIntent || inferredColorCanGateStrongOverride;
     const isDressDetectionForOverride =
       String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses";
     const strongMisses = resultsBeforeFinalRelevanceFilter

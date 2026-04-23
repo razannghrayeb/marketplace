@@ -2871,6 +2871,8 @@ function applyRelevanceThresholdFilter(
     desiredColor?: string | string[];
   },
 ): ProductResult[] {
+  const relevanceDebugEnabled =
+    process.env.NODE_ENV !== "production" || String(process.env.SEARCH_DEBUG ?? "") === "1";
   if (!minRelevance || minRelevance <= 0 || !Array.isArray(products) || products.length === 0) {
     return products;
   }
@@ -2943,19 +2945,39 @@ function applyRelevanceThresholdFilter(
     if (recovered.length === 0) {
       const categoryNorm = String(options?.category ?? "").toLowerCase().trim();
       if (categoryNorm === "bottoms") {
-        const desiredColors = (Array.isArray(options?.desiredColor)
+        const optionDesiredColors = (Array.isArray(options?.desiredColor)
           ? options?.desiredColor
           : [options?.desiredColor])
           .flatMap((c) => String(c ?? "").split(","))
           .map((c) => c.toLowerCase().trim())
           .filter((c) => c.length > 0);
-        const whiteIntentRegex = /^(white|off[\s-]?white|ivory|cream|ecru)$/;
-        const hasStrongWhiteIntent = desiredColors.some((c) => whiteIntentRegex.test(c));
+        const inferredDesiredFromProducts = products
+          .flatMap((item) => {
+            const explain = ((item as any)?.explain ?? {}) as Record<string, unknown>;
+            const fromEffective = Array.isArray(explain.desiredColorsEffective)
+              ? (explain.desiredColorsEffective as unknown[])
+              : [];
+            const fromDesired = Array.isArray(explain.desiredColors)
+              ? (explain.desiredColors as unknown[])
+              : [];
+            return [...fromEffective, ...fromDesired];
+          })
+          .map((c) => String(c ?? "").toLowerCase().trim())
+          .filter((c) => c.length > 0);
+        const desiredColors = [...new Set([...optionDesiredColors, ...inferredDesiredFromProducts])];
+        const hasColorIntent = desiredColors.length > 0;
+        if (relevanceDebugEnabled) {
+          console.log(
+            `[relevance-debug] detection="${options?.detectionLabel ?? "unknown"}" category="bottoms" desiredColors=[${desiredColors.join(", ")}] hasColorIntent=${hasColorIntent}`,
+          );
+        }
         const bottomsRescueFloor = Math.max(0.34, minRelevance - 0.14);
         const rescueLimit = Math.max(1, Math.min(2, preserveCount));
-        const whiteFamilyRegex = /\b(white|off[\s-]?white|ivory|cream|ecru)\b/i;
         const neutralColorRegex = /\b(white|off[\s-]?white|ivory|cream|beige|ecru|stone|taupe|nude)\b/i;
-        const warmNeutralRegex = /\b(beige|camel|tan|taupe|khaki|stone|nude)\b/i;
+        const desiredColorMatchers = desiredColors.map((token) => {
+          const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "[\\s-]+");
+          return new RegExp(`\\b${escaped}\\b`, "i");
+        });
         const bottomsColorSafeRescue = sorted
           .filter((item) => {
             const relevance = Number((item as any)?.finalRelevance01 ?? 0);
@@ -2974,14 +2996,15 @@ function applyRelevanceThresholdFilter(
               .filter((x) => x != null)
               .map((x) => String(x))
               .join(" ");
-            const looksNeutral = hasStrongWhiteIntent
-              ? whiteFamilyRegex.test(colorEvidence)
-              : neutralColorRegex.test(colorEvidence);
-            if (hasStrongWhiteIntent && warmNeutralRegex.test(colorEvidence) && !whiteFamilyRegex.test(colorEvidence)) {
-              return false;
+            const hasDesiredColorHit =
+              desiredColorMatchers.length > 0 &&
+              desiredColorMatchers.some((rx) => rx.test(colorEvidence));
+            const hasStrictColorCompliance = Number.isFinite(colorCompliance) && colorCompliance >= 0.45;
+            const hasModerateColorCompliance = Number.isFinite(colorCompliance) && colorCompliance >= 0.35;
+            if (hasColorIntent) {
+              return hasDesiredColorHit || hasStrictColorCompliance;
             }
-            const hasModerateColorCompliance = Number.isFinite(colorCompliance) && colorCompliance >= (hasStrongWhiteIntent ? 0.42 : 0.35);
-            return looksNeutral || hasModerateColorCompliance;
+            return neutralColorRegex.test(colorEvidence) || hasModerateColorCompliance;
           })
           .slice(0, rescueLimit)
           .map((item) => ({
@@ -2992,6 +3015,14 @@ function applyRelevanceThresholdFilter(
           console.log(
             `[relevance-threshold-bottoms-rescue] preserved ${bottomsColorSafeRescue.length} product(s) for detection="${options?.detectionLabel ?? "unknown"}" floor=${bottomsRescueFloor.toFixed(3)} threshold=${minRelevance}`,
           );
+          if (relevanceDebugEnabled) {
+            const selected = bottomsColorSafeRescue
+              .map((item) => String((item as any)?.id ?? "unknown"))
+              .join(", ");
+            console.log(
+              `[relevance-debug] detection="${options?.detectionLabel ?? "unknown"}" bottomsRescueSelected=[${selected}]`,
+            );
+          }
           return bottomsColorSafeRescue;
         }
       }
@@ -3224,6 +3255,18 @@ function isNeutralFashionColor(color: string): boolean {
 
 function isLightNeutralFashionColor(color: string): boolean {
   return LIGHT_NEUTRAL_COLORS.has(String(color || "").toLowerCase().trim());
+}
+
+function canonicalizeColorIntentToken(color: string | null | undefined): string {
+  const raw = String(color ?? "").toLowerCase().trim();
+  if (!raw) return "";
+  if (["charcoal", "anthracite", "graphite", "jet", "coal"].includes(raw)) return "black";
+  if (["off-white", "ivory", "cream", "ecru"].includes(raw)) return "white";
+  if (["camel", "tan", "khaki", "stone", "taupe", "nude", "sand"].includes(raw)) return "beige";
+  if (["navy", "midnight blue", "cobalt", "azure"].includes(raw)) return "blue";
+  if (["burgundy", "maroon", "wine"].includes(raw)) return "red";
+  if (["olive", "khaki green"].includes(raw)) return "green";
+  return raw;
 }
 
 function isBottomLikeLabel(label: string): boolean {
@@ -5220,6 +5263,11 @@ export class ImageAnalysisService {
             if (detColor && detColorConfidence >= 0.45) return detColor;
             return inferredPrimaryColor;
           })();
+          const explicitColorFilter = String((filters as any).color ?? "").trim();
+          const inferredPrimaryColorForSearch =
+            categoryMapping.productCategory === "tops" && explicitColorFilter.length === 0
+              ? undefined
+              : canonicalizeColorIntentToken(inferredPrimaryColorForDetection);
 
           const detectionSimilarityThreshold = shopLookDetectionSimilarityThreshold(
             similarityThreshold,
@@ -5249,7 +5297,7 @@ export class ImageAnalysisService {
             forceHardCategoryFilter: forceHardCategoryFilterUsed,
             relaxThresholdWhenEmpty: detectionRelaxThreshold,
             blipSignal: detectionBlipSignal,
-            inferredPrimaryColor: inferredPrimaryColorForDetection,
+            inferredPrimaryColor: inferredPrimaryColorForSearch,
             inferredColorKey: itemColorKey,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
@@ -5264,7 +5312,13 @@ export class ImageAnalysisService {
           // If BLIP-derived audience/style filters are too strict and remove all hits,
           // retry once without those attribute filters (but keep category/productTypes).
           if (
-            similarResult.results.length === 0 &&
+            (
+              similarResult.results.length === 0 ||
+              (
+                (categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "bottoms") &&
+                similarResult.results.length <= 1
+              )
+            ) &&
             (
               filters.gender ||
               filters.ageGroup ||
@@ -5301,7 +5355,7 @@ export class ImageAnalysisService {
               forceHardCategoryFilter: forceHardCategoryFilterUsed,
               relaxThresholdWhenEmpty: detectionRelaxThreshold,
               blipSignal: detectionBlipSignal,
-              inferredPrimaryColor: inferredPrimaryColorForDetection,
+              inferredPrimaryColor: inferredPrimaryColorForSearch,
               inferredColorKey: itemColorKey,
               inferredColorsByItem,
               inferredColorsByItemConfidence,
@@ -5340,7 +5394,7 @@ export class ImageAnalysisService {
               forceHardCategoryFilter: forceHardCategoryFilterUsed,
               relaxThresholdWhenEmpty: detectionRelaxThreshold,
               blipSignal: detectionBlipSignal,
-              inferredPrimaryColor: inferredPrimaryColorForDetection,
+              inferredPrimaryColor: inferredPrimaryColorForSearch,
               inferredColorKey: itemColorKey,
               inferredColorsByItem,
               inferredColorsByItemConfidence,
@@ -5381,7 +5435,7 @@ export class ImageAnalysisService {
               forceHardCategoryFilter: forceHardCategoryFilterUsed,
               relaxThresholdWhenEmpty: detectionRelaxThreshold,
               blipSignal: detectionBlipSignal,
-              inferredPrimaryColor: inferredPrimaryColorForDetection,
+              inferredPrimaryColor: inferredPrimaryColorForSearch,
               inferredColorKey: itemColorKey,
               inferredColorsByItem,
               inferredColorsByItemConfidence,
@@ -5447,7 +5501,7 @@ export class ImageAnalysisService {
               forceHardCategoryFilter: preserveHardCategoryInFallback,
               relaxThresholdWhenEmpty: detectionRelaxThreshold,
               blipSignal: detectionBlipSignal,
-              inferredPrimaryColor: inferredPrimaryColorForDetection,
+              inferredPrimaryColor: inferredPrimaryColorForSearch,
               inferredColorKey: itemColorKey,
               inferredColorsByItem,
               inferredColorsByItemConfidence,
@@ -5492,7 +5546,7 @@ export class ImageAnalysisService {
                 forceHardCategoryFilter: preserveHardCategoryInFallback,
                 relaxThresholdWhenEmpty: detectionRelaxThreshold,
                 blipSignal: detectionBlipSignal,
-                inferredPrimaryColor: inferredPrimaryColorForDetection,
+                inferredPrimaryColor: inferredPrimaryColorForSearch,
                 inferredColorKey: itemColorKey,
                 inferredColorsByItem,
                 inferredColorsByItemConfidence,
@@ -5551,7 +5605,7 @@ export class ImageAnalysisService {
                   forceHardCategoryFilter: forceHardCategoryFilterUsed,
                   relaxThresholdWhenEmpty: detectionRelaxThreshold,
                   blipSignal: detectionBlipSignal,
-                  inferredPrimaryColor: inferredPrimaryColorForDetection,
+                  inferredPrimaryColor: inferredPrimaryColorForSearch,
                   inferredColorKey: itemColorKey,
                   inferredColorsByItem,
                   inferredColorsByItemConfidence,
@@ -5708,7 +5762,7 @@ export class ImageAnalysisService {
                   forceHardCategoryFilter: true,
                   relaxThresholdWhenEmpty: true,
                   blipSignal: detectionBlipSignal,
-                  inferredPrimaryColor: inferredPrimaryColorForDetection,
+                  inferredPrimaryColor: inferredPrimaryColorForSearch,
                   inferredColorKey: itemColorKey,
                   inferredColorsByItem,
                   inferredColorsByItemConfidence,
@@ -5802,7 +5856,7 @@ export class ImageAnalysisService {
                   forceHardCategoryFilter: false,
                   relaxThresholdWhenEmpty: true,
                   blipSignal: detectionBlipSignal,
-                  inferredPrimaryColor: inferredPrimaryColorForDetection,
+                  inferredPrimaryColor: inferredPrimaryColorForSearch,
                   inferredColorKey: itemColorKey,
                   inferredColorsByItem,
                   inferredColorsByItemConfidence,
@@ -5882,7 +5936,7 @@ export class ImageAnalysisService {
                 forceHardCategoryFilter: false,
                 relaxThresholdWhenEmpty: true,
                 blipSignal: detectionBlipSignal,
-                inferredPrimaryColor: inferredPrimaryColorForDetection,
+                inferredPrimaryColor: inferredPrimaryColorForSearch,
                 inferredColorKey: itemColorKey,
                 inferredColorsByItem,
                 inferredColorsByItemConfidence,
@@ -5975,7 +6029,7 @@ export class ImageAnalysisService {
               forceHardCategoryFilter: categoryMapping.productCategory !== "tops",
               relaxThresholdWhenEmpty: true,
               blipSignal: detectionBlipSignal,
-              inferredPrimaryColor: inferredPrimaryColorForDetection,
+              inferredPrimaryColor: inferredPrimaryColorForSearch,
               inferredColorKey: itemColorKey,
               inferredColorsByItem,
               inferredColorsByItemConfidence,
@@ -6081,6 +6135,11 @@ export class ImageAnalysisService {
               if (filters.gender) stageFilters.gender = filters.gender;
               if (filters.ageGroup) stageFilters.ageGroup = filters.ageGroup;
 
+              // In final top fail-open recovery, relax inferred color gating to avoid zero-result collapse.
+              const stageInferredPrimaryColor =
+                categoryMapping.productCategory === "tops"
+                  ? undefined
+                  : inferredPrimaryColorForDetection;
               const stageResult = await runDetectionSearch(stage.reason, {
                 imageEmbedding: finalEmbedding,
                 imageEmbeddingGarment:
@@ -6099,7 +6158,7 @@ export class ImageAnalysisService {
                 forceHardCategoryFilter: false,
                 relaxThresholdWhenEmpty: true,
                 blipSignal: detectionBlipSignal,
-                inferredPrimaryColor: inferredPrimaryColorForDetection,
+                inferredPrimaryColor: stageInferredPrimaryColor,
                 inferredColorKey: itemColorKey,
                 inferredColorsByItem,
                 inferredColorsByItemConfidence,
@@ -6205,7 +6264,7 @@ export class ImageAnalysisService {
                   forceHardCategoryFilter: true,
                   relaxThresholdWhenEmpty: true,
                   blipSignal: detectionBlipSignal,
-                  inferredPrimaryColor: inferredPrimaryColorForDetection,
+                  inferredPrimaryColor: inferredPrimaryColorForSearch,
                   inferredColorKey: itemColorKey,
                   inferredColorsByItem,
                   inferredColorsByItemConfidence,
@@ -6275,6 +6334,81 @@ export class ImageAnalysisService {
                 console.log(
                   `[nonempty-fallback] detection="${label}" recovered=${safeFallback.length} category=${categoryMapping.productCategory}`,
                 );
+              }
+            }
+          }
+
+          if (similarResult.results.length === 0 && !includeEmptyDetectionGroups) {
+            // Final emergency top rescue: when all prior top recoveries fail, run one broad pass
+            // with color/style disabled to avoid dropping the tops group entirely.
+            if (
+              categoryMapping.productCategory === "tops" &&
+              detectionSearchCalls < maxSearchCallsPerDetection
+            ) {
+              const emergencyTopFilters: Partial<import("./types").SearchFilters> = {
+                category: ["tops", "top", "shirt", "blouse", "t-shirt", "sweater", "cardigan"],
+              };
+              if (filters.gender) emergencyTopFilters.gender = filters.gender;
+              if (strictAudienceLock && filters.ageGroup) emergencyTopFilters.ageGroup = filters.ageGroup;
+              const emergencyTopResult = await runDetectionSearch("recovery_tops_emergency", {
+                imageEmbedding: finalEmbedding,
+                imageEmbeddingGarment:
+                  Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+                    ? finalGarmentEmbedding
+                    : undefined,
+                imageBuffer: queryProcessBuf,
+                pHash: sourceImagePHash,
+                detectionYoloConfidence: detection.confidence,
+                detectionProductCategory: categoryMapping.productCategory,
+                filters: emergencyTopFilters,
+                limit: retrievalLimit,
+                similarityThreshold: Math.max(0.32, similarityThreshold - 0.2),
+                includeRelated: false,
+                knnField: shopTheLookKnnField(),
+                forceHardCategoryFilter: false,
+                relaxThresholdWhenEmpty: true,
+                blipSignal: undefined,
+                inferredPrimaryColor: undefined,
+                inferredColorKey: itemColorKey,
+                inferredColorsByItem,
+                inferredColorsByItemConfidence,
+                debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+                sessionId: options.sessionId,
+                userId: options.userId,
+                sessionFilters: options.sessionFilters ?? undefined,
+              });
+              const emergencyCategorySafe = applyDetectionCategoryGuard(
+                emergencyTopResult.results,
+                detection.label,
+                categoryMapping,
+                String((emergencyTopFilters as any).gender ?? ""),
+              );
+              const emergencySleeveSafe = applySleeveIntentGuard({
+                products: emergencyCategorySafe,
+                detectionLabel: detection.label,
+                categoryMapping,
+              });
+              const emergencyFormalitySafe = applyFormalityFilter(
+                emergencySleeveSafe,
+                Number((filters as any).minFormality ?? 0),
+              );
+              const emergencyAthleticSafe = applyAthleticMismatchGuard({
+                products: emergencyFormalitySafe,
+                detectionLabel: label,
+                productCategory: categoryMapping.productCategory,
+                softStyle: "",
+                minFormality: Number((filters as any).minFormality ?? 0),
+              });
+              if (emergencyAthleticSafe.length > 0) {
+                if (hotPathDebug) {
+                  console.log(
+                    `[recovery-stage] detection="${label}" stage=recovery_tops_emergency recovered=${emergencyAthleticSafe.length}`,
+                  );
+                }
+                similarResult = {
+                  ...similarResult,
+                  results: mergeImageSearchResultsById(similarResult.results, emergencyAthleticSafe, retrievalLimit),
+                };
               }
             }
           }
@@ -6399,12 +6533,29 @@ export class ImageAnalysisService {
       const preserveCountForDetection = isCoreOutfitCategory(detection.category)
         ? Math.min(3, Math.max(1, Math.floor(resolvedLimitPerItem * 0.12)))
         : 0;
+      const inferredDesiredColor = (() => {
+        const explicitColor = (detection.appliedFilters as any)?.color;
+        if (explicitColor != null && String(explicitColor).trim().length > 0) return explicitColor;
+        const rawIndex = Number((detection as any)?.detectionIndex);
+        const hasIndex = Number.isFinite(rawIndex) && rawIndex >= 0;
+        const detLabel = String((detection as any)?.detection?.label ?? "").trim();
+        if (!hasIndex || !detLabel) return undefined;
+        const colorKey = detectionColorKey(detLabel, Math.floor(rawIndex));
+        const inferred = inferredColorsByItem[colorKey];
+        const inferredConfidence = Number(inferredColorsByItemConfidence[colorKey] ?? 0);
+        return inferred && inferredConfidence >= 0.4 ? inferred : undefined;
+      })();
+      if (hotPathDebug) {
+        console.log(
+          `[relevance-debug] detection="${detection.detection?.label ?? "unknown"}" category="${detection.category}" desiredColor="${String(inferredDesiredColor ?? "")}" source=${(detection.appliedFilters as any)?.color ? "explicit" : "inferred_or_none"}`,
+        );
+      }
       const afterProducts = applyRelevanceThresholdFilter(beforeProducts, minRelevanceThreshold, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category),
         preserveAtLeastCount: preserveCountForDetection,
         detectionLabel: detection.detection?.label,
         category: detection.category,
-        desiredColor: (detection.appliedFilters as any)?.color,
+        desiredColor: inferredDesiredColor,
       });
       const droppedByFinalRelevance = Math.max(0, beforeProducts.length - afterProducts.length);
       const droppedByColorGate = beforeProducts.filter((prod) => {
@@ -7294,6 +7445,11 @@ export class ImageAnalysisService {
             if (detColor && detColorConfidence >= 0.45) return detColor;
             return inferredPrimaryColor;
           })();
+          const explicitColorFilter = String((filters as any).color ?? "").trim();
+          const inferredPrimaryColorForSearch =
+            categoryMapping.productCategory === "tops" && explicitColorFilter.length === 0
+              ? undefined
+              : canonicalizeColorIntentToken(inferredPrimaryColorForDetection);
 
           const baseSimilarityThreshold = options.similarityThreshold ?? config.clip.imageSimilarityThreshold;
           const detectionSimilarityThreshold = shopLookDetectionSimilarityThreshold(
@@ -7321,7 +7477,7 @@ export class ImageAnalysisService {
             forceHardCategoryFilter: forceHardCategoryFilterUsed,
             relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
             blipSignal: detectionBlipSignal,
-            inferredPrimaryColor: inferredPrimaryColorForDetection,
+            inferredPrimaryColor: inferredPrimaryColorForSearch,
             inferredColorKey: itemColorKey,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
@@ -7333,7 +7489,13 @@ export class ImageAnalysisService {
 
           // Retry without inferred attribute filters if they removed all hits.
           if (
-            similarResult.results.length === 0 &&
+            (
+              similarResult.results.length === 0 ||
+              (
+                (categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "bottoms") &&
+                similarResult.results.length <= 1
+              )
+            ) &&
             (
               filters.gender ||
               filters.ageGroup ||
@@ -7370,7 +7532,7 @@ export class ImageAnalysisService {
               forceHardCategoryFilter: forceHardCategoryFilterUsed,
               relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
               blipSignal: detectionBlipSignal,
-              inferredPrimaryColor: inferredPrimaryColorForDetection,
+              inferredPrimaryColor: inferredPrimaryColorForSearch,
               inferredColorKey: itemColorKey,
               inferredColorsByItem,
               inferredColorsByItemConfidence,
@@ -7436,7 +7598,7 @@ export class ImageAnalysisService {
               forceHardCategoryFilter: preserveHardCategoryInFallback,
               relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
               blipSignal: detectionBlipSignal,
-              inferredPrimaryColor: inferredPrimaryColorForDetection,
+              inferredPrimaryColor: inferredPrimaryColorForSearch,
               inferredColorKey: itemColorKey,
               inferredColorsByItem,
               inferredColorsByItemConfidence,
@@ -7480,7 +7642,7 @@ export class ImageAnalysisService {
                 forceHardCategoryFilter: preserveHardCategoryInFallback,
                 relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
                 blipSignal: detectionBlipSignal,
-                inferredPrimaryColor: inferredPrimaryColorForDetection,
+                inferredPrimaryColor: inferredPrimaryColorForSearch,
                 inferredColorKey: itemColorKey,
                 inferredColorsByItem,
                 inferredColorsByItemConfidence,
@@ -7520,7 +7682,7 @@ export class ImageAnalysisService {
               forceHardCategoryFilter: forceHardCategoryFilterUsed,
               relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
               blipSignal: detectionBlipSignal,
-              inferredPrimaryColor: inferredPrimaryColorForDetection,
+              inferredPrimaryColor: inferredPrimaryColorForSearch,
               inferredColorKey: itemColorKey,
               inferredColorsByItem,
               inferredColorsByItemConfidence,
@@ -7576,7 +7738,7 @@ export class ImageAnalysisService {
                   forceHardCategoryFilter: forceHardCategoryFilterUsed,
                   relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
                   blipSignal: detectionBlipSignal,
-                  inferredPrimaryColor: inferredPrimaryColorForDetection,
+                  inferredPrimaryColor: inferredPrimaryColorForSearch,
                   inferredColorKey: itemColorKey,
                   inferredColorsByItem,
                   inferredColorsByItemConfidence,
@@ -7644,7 +7806,7 @@ export class ImageAnalysisService {
               forceHardCategoryFilter: categoryMapping.productCategory !== "tops",
               relaxThresholdWhenEmpty: true,
               blipSignal: detectionBlipSignal,
-              inferredPrimaryColor: inferredPrimaryColorForDetection,
+              inferredPrimaryColor: inferredPrimaryColorForSearch,
               inferredColorKey: itemColorKey,
               inferredColorsByItem,
               inferredColorsByItemConfidence,
@@ -7842,12 +8004,27 @@ export class ImageAnalysisService {
       const preserveCountForDetection = isCoreOutfitCategory(detection.category)
         ? Math.min(3, Math.max(1, Math.floor(resolvedLimitPerItem * 0.12)))
         : 0;
+      const inferredDesiredColor = (() => {
+        const explicitColor = (detection.appliedFilters as any)?.color;
+        if (explicitColor != null && String(explicitColor).trim().length > 0) return explicitColor;
+        const rawIndex = Number((detection as any)?.detectionIndex);
+        const hasIndex = Number.isFinite(rawIndex) && rawIndex >= 0;
+        const detLabel = String((detection as any)?.detection?.label ?? "").trim();
+        if (!hasIndex || !detLabel) return undefined;
+        const colorKey = detectionColorKey(detLabel, Math.floor(rawIndex));
+        const inferred = inferredColorsByItem[colorKey];
+        const inferredConfidence = Number(inferredColorsByItemConfidence[colorKey] ?? 0);
+        return inferred && inferredConfidence >= 0.4 ? inferred : undefined;
+      })();
+      console.log(
+        `[relevance-debug-sel] detection="${detection.detection?.label ?? "unknown"}" category="${detection.category}" desiredColor="${String(inferredDesiredColor ?? "")}" source=${(detection.appliedFilters as any)?.color ? "explicit" : "inferred_or_none"}`,
+      );
       const afterProducts = applyRelevanceThresholdFilter(beforeProducts, minRelevanceThresholdSel, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category),
         preserveAtLeastCount: preserveCountForDetection,
         detectionLabel: detection.detection?.label,
         category: detection.category,
-        desiredColor: (detection.appliedFilters as any)?.color,
+        desiredColor: inferredDesiredColor,
       });
       const droppedByFinalRelevance = Math.max(0, beforeProducts.length - afterProducts.length);
       const droppedByColorGate = beforeProducts.filter((prod) => {
