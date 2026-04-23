@@ -1760,6 +1760,7 @@ function imageDualKnnDetectionEnabled(): boolean {
  * Set SEARCH_IMAGE_EF_SEARCH=0 to omit (some managed clusters reject per-query ef_search).
  */
 let imageKnnEfSearchSupported: boolean | null = null;
+let imageKnnNumCandidatesSupported: boolean | null = null;
 
 function imageKnnEfSearch(): number {
   if (imageKnnEfSearchSupported === false) return 0;
@@ -1812,11 +1813,10 @@ function mergeKnnHitsByProductId(primary: any[], extra: any[], cap: number): any
 }
 
 function knnQueryInner(vector: number[], k: number, ef: number): Record<string, unknown> {
-  const inner: Record<string, unknown> = {
-    vector,
-    k,
-    num_candidates: imageKnnNumCandidates(k),
-  };
+  const inner: Record<string, unknown> = { vector, k };
+  if (imageKnnNumCandidatesSupported !== false) {
+    inner.num_candidates = imageKnnNumCandidates(k);
+  }
   if (ef > 0) inner.ef_search = ef;
   return inner;
 }
@@ -1827,8 +1827,9 @@ function stripEfSearchFromKnnBody(body: Record<string, unknown>): Record<string,
   if (knn && typeof knn === "object") {
     for (const fieldName of Object.keys(knn)) {
       const fieldObj = knn[fieldName];
-      if (fieldObj && typeof fieldObj === "object" && "ef_search" in fieldObj) {
-        delete fieldObj.ef_search;
+      if (fieldObj && typeof fieldObj === "object") {
+        if ("ef_search" in fieldObj) delete fieldObj.ef_search;
+        if ("num_candidates" in fieldObj) delete fieldObj.num_candidates;
       }
     }
   }
@@ -3172,10 +3173,15 @@ async function opensearchImageKnnHits(
     const responseReason = String(err?.meta?.body?.error?.reason ?? "");
     const unknownEfSearch =
       errText.includes("unknown field [ef_search]") || responseReason.includes("unknown field [ef_search]");
+    const unknownNumCandidates =
+      errText.includes("unknown field [num_candidates]") || responseReason.includes("unknown field [num_candidates]");
 
-    if (unknownEfSearch) {
+    if (unknownEfSearch || unknownNumCandidates) {
       imageKnnEfSearchSupported = false;
       process.env.SEARCH_IMAGE_EF_SEARCH = "0";
+      if (unknownNumCandidates) {
+        imageKnnNumCandidatesSupported = false;
+      }
       const retryBody = stripEfSearchFromKnnBody(bodyToSend);
 
       try {
@@ -3565,19 +3571,58 @@ export async function searchByImageWithSimilarity(
   /** kNN size — wider when SEARCH_IMAGE_MERCHANDISE_SIMILARITY is on (see imageSearchKnnPoolLimit). */
   const retrievalKBase = imageCategoryAwareKnnPoolLimit(params.detectionProductCategory);
   const dynamicDetectionPoolCap = Math.max(
-    320,
-    Math.min(imageDetectionKnnPoolCap(), Math.max(limit * 8, 320)),
+    420,
+    Math.min(imageDetectionKnnPoolCap(), Math.max(limit * 10, 420)),
   );
   const retrievalK = detectionScoped
     ? (() => {
       const isTopDetection = isTopLikeDetectionCategory(params.detectionProductCategory);
-      if (!isTopDetection) return Math.min(retrievalKBase, dynamicDetectionPoolCap);
+      const isBottomDetection = isBottomLikeDetectionCategory(params.detectionProductCategory);
+      const isDressDetection = isDressLikeDetectionCategory(params.detectionProductCategory);
+      const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+      const isFootwearDetection = detectionCategoryNorm === "footwear" || detectionCategoryNorm === "shoes";
+      const isBagLikeDetection = detectionCategoryNorm === "bags" || detectionCategoryNorm === "accessories";
       const topCapEnv = Number(process.env.SEARCH_IMAGE_TOPS_DETECTION_KNN_POOL_CAP ?? "760");
       const topCap = Number.isFinite(topCapEnv)
         ? Math.max(260, Math.min(1200, Math.floor(topCapEnv)))
         : 760;
       const dynamicTopCap = Math.max(dynamicDetectionPoolCap, Math.max(420, Math.min(topCap, limit * 12)));
-      return Math.min(retrievalKBase, dynamicTopCap);
+      if (isTopDetection) {
+        return Math.min(retrievalKBase, dynamicTopCap);
+      }
+      if (isBottomDetection) {
+        const bottomsCapEnv = Number(process.env.SEARCH_IMAGE_BOTTOMS_DETECTION_KNN_POOL_CAP ?? "820");
+        const bottomsCap = Number.isFinite(bottomsCapEnv)
+          ? Math.max(320, Math.min(1300, Math.floor(bottomsCapEnv)))
+          : 820;
+        const dynamicBottomsCap = Math.max(dynamicDetectionPoolCap, Math.max(460, Math.min(bottomsCap, limit * 12)));
+        return Math.min(retrievalKBase, dynamicBottomsCap);
+      }
+      if (isDressDetection) {
+        const dressesCapEnv = Number(process.env.SEARCH_IMAGE_DRESSES_DETECTION_KNN_POOL_CAP ?? "900");
+        const dressesCap = Number.isFinite(dressesCapEnv)
+          ? Math.max(340, Math.min(1400, Math.floor(dressesCapEnv)))
+          : 900;
+        const dynamicDressCap = Math.max(dynamicDetectionPoolCap, Math.max(500, Math.min(dressesCap, limit * 13)));
+        return Math.min(retrievalKBase, dynamicDressCap);
+      }
+      if (isFootwearDetection) {
+        const footwearCapEnv = Number(process.env.SEARCH_IMAGE_FOOTWEAR_DETECTION_KNN_POOL_CAP ?? "760");
+        const footwearCap = Number.isFinite(footwearCapEnv)
+          ? Math.max(300, Math.min(1200, Math.floor(footwearCapEnv)))
+          : 760;
+        const dynamicFootwearCap = Math.max(dynamicDetectionPoolCap, Math.max(440, Math.min(footwearCap, limit * 11)));
+        return Math.min(retrievalKBase, dynamicFootwearCap);
+      }
+      if (isBagLikeDetection) {
+        const bagCapEnv = Number(process.env.SEARCH_IMAGE_BAGS_DETECTION_KNN_POOL_CAP ?? "760");
+        const bagCap = Number.isFinite(bagCapEnv)
+          ? Math.max(280, Math.min(1200, Math.floor(bagCapEnv)))
+          : 760;
+        const dynamicBagCap = Math.max(dynamicDetectionPoolCap, Math.max(420, Math.min(bagCap, limit * 10)));
+        return Math.min(retrievalKBase, dynamicBagCap);
+      }
+      return Math.min(retrievalKBase, dynamicDetectionPoolCap);
     })()
     : retrievalKBase;
 
