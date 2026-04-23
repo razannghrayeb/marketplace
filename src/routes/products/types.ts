@@ -384,6 +384,8 @@ export interface SearchResultWithRelated {
     /** Session/user personalization and variant handling diagnostics. */
     session_id?: string;
     user_id?: number;
+    /** True when image search runs in strict main-path mode (rescue/fallback branches disabled). */
+    main_path_strict?: boolean;
     personalization_applied?: boolean;
     variant_group_collapsing_applied?: boolean;
     variant_group_count?: number;

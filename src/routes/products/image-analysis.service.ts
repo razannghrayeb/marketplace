@@ -1212,6 +1212,11 @@ function shopLookMaxSearchCallsPerDetection(): number {
   return Math.max(2, Math.min(8, Math.floor(raw)));
 }
 
+function shopLookMainPathOnlyEnv(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_MAIN_PATH_ONLY ?? "0").toLowerCase().trim();
+  return raw === "1" || raw === "true";
+}
+
 /**
  * When the first kNN pass is already very slow, avoid stacking retries if recall is
  * already acceptable. This trims tail latency without affecting low-recall detections.
@@ -1348,12 +1353,14 @@ function strictDressFallbackTerms(detectionLabel: string): string[] | null {
 function parseTopDetectionIntent(detectionLabel: string): {
   isShortTop: boolean;
   isLongTop: boolean;
+  isVestTop: boolean;
   requestsOuterwear: boolean;
 } {
   const l = String(detectionLabel || "").toLowerCase();
   return {
     isShortTop: /\bshort sleeve top\b|\btee\b|\bt-?shirt\b|\btshirt\b|\btank\b|\bcamisole\b|\bcrop top\b/.test(l),
     isLongTop: /\blong sleeve top\b|\blong sleeve\b|\bfull sleeve\b/.test(l),
+    isVestTop: /\bvest\b|\bwaistcoat\b|\bgilet\b/.test(l),
     requestsOuterwear:
       /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|sport coat|dress jacket|shirt jacket|shacket|overshirt)\b/.test(
         l,
@@ -1403,7 +1410,14 @@ function hardCategoryTermsForDetection(
   if (categoryMapping.productCategory === "tops") {
     const topIntent = parseTopDetectionIntent(detectionLabel);
     const isShortTop = topIntent.isShortTop;
+    const isVestTop = topIntent.isVestTop;
     const isTailoredIntent = hasFormalTailoringCue(detectionLabel);
+    if (isVestTop) {
+      const vestTopTerms = baseTerms.filter((t) =>
+        /\b(vest|vests|waistcoat|waistcoats|gilet|sleeveless top|tank|tank top|camisole|cami|top|tops)\b/.test(t),
+      );
+      return vestTopTerms.length > 0 ? vestTopTerms : baseTerms;
+    }
     if (isShortTop) {
       const shortTopTerms = baseTerms.filter((t) =>
         /\b(t-?shirt|tshirt|tee|top|tops|tank|camisole|cami|crop top|polo|polos)\b/.test(t),
@@ -1593,6 +1607,12 @@ function tightenTypeSeedsForDetection(
 
   if (category === "tops") {
     const topIntent = parseTopDetectionIntent(detectionLabel);
+    if (topIntent.isVestTop) {
+      const vestTop = normalized.filter((t) =>
+        /\b(vest|vests|waistcoat|waistcoats|gilet|sleeveless top|tank|tank top|camisole|cami|top|tops)\b/.test(t),
+      );
+      return vestTop.length > 0 ? vestTop : normalized;
+    }
     const isTailoredIntent = hasFormalTailoringCue(detectionLabel);
     if (topIntent.isShortTop) {
       const shortTop = normalized.filter((t) =>
@@ -1839,21 +1859,26 @@ function recoverTailoredTopTypes(
   detectionLabel: string,
   rawLabel: string | undefined,
   contextualFormalityScore: number,
+  fullCaption?: string | null,
 ): string[] {
   const category = String(productCategory || "").toLowerCase();
   const normalized = [...new Set(seeds.map((s) => String(s).toLowerCase().trim()).filter(Boolean))];
   if (category !== "tops") return normalized;
 
   const cueText = `${String(detectionLabel || "")} ${String(rawLabel || "")}`;
+  const captionText = String(fullCaption ?? "").toLowerCase();
+  const hasCaptionSuitCue =
+    /\b(suit|suiting|blazer|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|vest)\b/.test(captionText);
   const structuredTopCue = /\b(long sleeve top|short sleeve top|shirt|dress shirt|button down|button-down)\b/i.test(
     String(detectionLabel || ""),
   );
+  const hasStrongTailoringSignal = hasFormalTailoringCue(cueText) || hasCaptionSuitCue;
   const shouldRecover =
-    contextualFormalityScore >= 8 ||
+    contextualFormalityScore >= 9 ||
     (contextualFormalityScore >= 7 && (
-      hasFormalTailoringCue(cueText) ||
-      hasShirtRecoveryCue(String(rawLabel || "")) ||
-      structuredTopCue
+      hasStrongTailoringSignal ||
+      (hasShirtRecoveryCue(String(rawLabel || "")) && hasCaptionSuitCue) ||
+      (structuredTopCue && hasStrongTailoringSignal)
     ));
 
   if (!shouldRecover) return normalized;
@@ -3627,6 +3652,43 @@ function selectDetectionColorFromPalette(params: {
   return primary;
 }
 
+function adjustStripedTopColorInference(params: {
+  selectedColor: string | null | undefined;
+  cropColors: string[];
+  productCategory: string;
+  detectionLabel: string;
+  fullCaption?: string | null;
+}): string | null {
+  const category = String(params.productCategory ?? "").toLowerCase().trim();
+  const label = String(params.detectionLabel ?? "").toLowerCase().trim();
+  const caption = String(params.fullCaption ?? "").toLowerCase();
+  const isTopLike =
+    category === "tops" ||
+    /\b(top|shirt|blouse|tee|t-?shirt|sweater|hoodie|sweatshirt|tank|camisole)\b/.test(label);
+  if (!isTopLike) return params.selectedColor ?? null;
+  const stripedCue =
+    /\b(striped?|stripes?|pinstripe|pin-striped|line pattern|lined shirt)\b/.test(caption) ||
+    /\b(striped?|pinstripe)\b/.test(label);
+  if (!stripedCue) return params.selectedColor ?? null;
+
+  const colors = (params.cropColors ?? [])
+    .map((c) => String(c ?? "").toLowerCase().trim())
+    .filter(Boolean);
+  const hasBlueFamily = colors.some((c) => ["blue", "navy", "sky-blue", "light-blue", "cobalt"].includes(c));
+  if (hasBlueFamily) {
+    const blueChoice = colors.find((c) => ["blue", "navy", "light-blue", "sky-blue", "cobalt"].includes(c));
+    if (blueChoice) return blueChoice;
+  }
+
+  const selected = String(params.selectedColor ?? "").toLowerCase().trim();
+  const darkNeutral = new Set(["black", "charcoal", "gray", "silver"]);
+  const hasLightNeutral = colors.some((c) => ["white", "off-white", "cream", "ivory"].includes(c));
+  // For striped tops, a dark-neutral-only inference is usually wrong (white+blue stripes collapse to gray/black).
+  // Returning null keeps main-path retrieval visual-first instead of over-gating by wrong inferred color.
+  if (darkNeutral.has(selected) && !hasBlueFamily && !hasLightNeutral) return null;
+  return params.selectedColor ?? null;
+}
+
 function lowQualityDetectionFallbackEnabled(): boolean {
   const raw = String(process.env.SEARCH_IMAGE_LOW_QUALITY_MULTICROP ?? "1").toLowerCase();
   return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
@@ -3990,6 +4052,10 @@ export interface DetectionSearchDebug {
   afterFormalityFilter: number;
   afterAthleticGuard: number;
   afterRecovery: number;
+  searchCallsUsed?: number;
+  searchCallLimit?: number;
+  searchReasonsExecuted?: string[];
+  searchReasonsSkipped?: string[];
   droppedByOtherGates: number;
   droppedByFinalRelevance: number;
   droppedByColorGate: number;
@@ -4055,6 +4121,7 @@ export interface GroupedSimilarProducts {
     coveredDetections: number;
     emptyDetections: number;
     coverageRatio: number;
+    mainPathOnly?: boolean;
   };
   /** Pagination settings applied to each detection group. */
   pagination?: {
@@ -4863,6 +4930,7 @@ export class ImageAnalysisService {
     const detectionSearchCallCounts: number[] = [];
     const detectionTaskDurations: number[] = [];
     const maxSearchCallsPerDetection = shopLookMaxSearchCallsPerDetection();
+    const mainPathOnly = shopLookMainPathOnlyEnv();
     const maxDetectionTaskMs = shopLookMaxDetectionTaskMs();
     const hotPathDebug = String(process.env.SEARCH_DEBUG ?? "") === "1";
     const detectionTaskWallStartedAt = Date.now();
@@ -4870,6 +4938,7 @@ export class ImageAnalysisService {
       console.info("[image-search][detection-runtime]", {
         detectionJobs: detectionJobs.length,
         detectionConcurrency,
+        mainPathOnly,
         blipApiUrlConfigured: Boolean(process.env.BLIP_API_URL),
         rankerApiUrlConfigured: Boolean(process.env.RANKER_API_URL),
       });
@@ -4881,7 +4950,9 @@ export class ImageAnalysisService {
         const detectionTaskStartedAt = Date.now();
         let detectionSearchTotalMs = 0;
         let detectionSearchCalls = 0;
-        let detectionSearchCallLimit = maxSearchCallsPerDetection;
+        let detectionSearchCallLimit = mainPathOnly ? 1 : maxSearchCallsPerDetection;
+        const searchReasonsExecuted: string[] = [];
+        const searchReasonsSkipped: string[] = [];
         let lastSearchResult: Awaited<ReturnType<typeof searchByImageWithSimilarity>> | null = null;
         try {
           const runDetectionSearch = async (
@@ -4903,6 +4974,7 @@ export class ImageAnalysisService {
               );
             }
             if (detectionSearchCalls >= detectionSearchCallLimit) {
+              searchReasonsSkipped.push(reason);
               if (hotPathDebug) {
                 console.warn(
                   `[detection-search-call-skipped] label="${detection.label}" reason="${reason}" max_calls=${detectionSearchCallLimit}`,
@@ -4938,6 +5010,7 @@ export class ImageAnalysisService {
             const elapsedMs = Date.now() - startedAt;
             detectionSearchTotalMs += elapsedMs;
             detectionSearchCalls += 1;
+            searchReasonsExecuted.push(reason);
             lastSearchResult = result;
             if (hotPathDebug) {
               console.info(
@@ -5059,6 +5132,7 @@ export class ImageAnalysisService {
             label,
             detection.raw_label,
             contextualFormalityScore,
+            blipCaption,
           );
           const blipCaptionNorm = String(blipCaption ?? "").toLowerCase();
           const hasSuitCaptionCue =
@@ -5166,10 +5240,19 @@ export class ImageAnalysisService {
           const inferredStyle = inferStyleForDetectionLabel(label);
           const useBlipSoftHints = blipStructuredConfidence >= imageBlipSoftHintConfidenceMin();
           const useStrongBlipSoftHints = blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
+          let styleAppliedFromInferredFallback = false;
           if (!isAccessoryOrBag && useStrongBlipSoftHints && blipStructured.style.attrStyle) {
             filters.softStyle = blipStructured.style.attrStyle;
           } else if (!isAccessoryOrBag && inferredStyle.attrStyle && shouldApplyInferredStyleFallback(categoryMapping.productCategory, label)) {
             filters.softStyle = inferredStyle.attrStyle;
+            styleAppliedFromInferredFallback = true;
+          }
+          if (
+            categoryMapping.productCategory === "bottoms" &&
+            styleAppliedFromInferredFallback &&
+            !useStrongBlipSoftHints
+          ) {
+            delete (filters as any).softStyle;
           }
 
           // Combine BLIP, label, and outfit-context formality. This preserves formalwear intent
@@ -5257,17 +5340,26 @@ export class ImageAnalysisService {
                   detectionLabel: label,
                   cropColorConfidence,
                 }) ?? cropColors[0];
-
-              setDetectionColorIfHigherConfidence(
-                inferredColorsByItem,
-                inferredColorsByItemConfidence,
-                inferredColorsByItemSource,
-                itemColorKey,
+              const adjustedColor = adjustStripedTopColorInference({
                 selectedColor,
-                cropColorConfidence,
-                1,
-                { productCategory: categoryMapping.productCategory, detectionLabel: label },
-              );
+                cropColors,
+                productCategory: categoryMapping.productCategory,
+                detectionLabel: label,
+                fullCaption: blipCaption,
+              });
+
+              if (adjustedColor) {
+                setDetectionColorIfHigherConfidence(
+                  inferredColorsByItem,
+                  inferredColorsByItemConfidence,
+                  inferredColorsByItemSource,
+                  itemColorKey,
+                  adjustedColor,
+                  cropColorConfidence,
+                  1,
+                  { productCategory: categoryMapping.productCategory, detectionLabel: label },
+                );
+              }
 
               // For slot-specific apparel, if crop picks a neutral but caption explicitly names
               // a chromatic slot color (e.g. yellow shirt), promote caption color.
@@ -6814,6 +6906,10 @@ export class ImageAnalysisService {
               afterFormalityFilter: formalitySafeResults.length,
               afterAthleticGuard: athleticSafeResults.length,
               afterRecovery: similarResult.results.length,
+              searchCallsUsed: detectionSearchCalls,
+              searchCallLimit: detectionSearchCallLimit,
+              searchReasonsExecuted,
+              searchReasonsSkipped,
               droppedByOtherGates,
               droppedByFinalRelevance: 0,
               droppedByColorGate: 0,
@@ -7023,6 +7119,7 @@ export class ImageAnalysisService {
           coveredDetections,
           emptyDetections,
           coverageRatio,
+          mainPathOnly,
         },
       },
       outfitCoherence,
@@ -7477,6 +7574,7 @@ export class ImageAnalysisService {
             categorySource,
             detection.raw_label,
             contextualFormalityScore,
+            blipCaption,
           );
           if (shouldForceTypeFilterForDetection(detection, categoryMapping, browseTypeSeeds)) {
             filters.productTypes = browseTypeSeeds.slice(0, 10);
@@ -7494,6 +7592,7 @@ export class ImageAnalysisService {
           const inferredStyle = inferStyleForDetectionLabel(categorySource);
           const useBlipSoftHints = blipStructuredConfidence >= imageBlipSoftHintConfidenceMin();
           const useStrongBlipSoftHints = blipStructuredConfidence >= imageBlipSoftHintConfidenceStrong();
+          let styleAppliedFromInferredFallback = false;
           if (useStrongBlipSoftHints && blipStructured.style.attrStyle) {
             filters.softStyle = blipStructured.style.attrStyle;
           } else if (
@@ -7501,6 +7600,14 @@ export class ImageAnalysisService {
             shouldApplyInferredStyleFallback(categoryMapping.productCategory, categorySource)
           ) {
             filters.softStyle = inferredStyle.attrStyle;
+            styleAppliedFromInferredFallback = true;
+          }
+          if (
+            categoryMapping.productCategory === "bottoms" &&
+            styleAppliedFromInferredFallback &&
+            !useStrongBlipSoftHints
+          ) {
+            delete (filters as any).softStyle;
           }
 
           // Use the stronger of BLIP caption formality and detection-label formality.
@@ -7585,17 +7692,26 @@ export class ImageAnalysisService {
                   detectionLabel: categorySource,
                   cropColorConfidence,
                 }) ?? cropColors[0];
-
-              setDetectionColorIfHigherConfidence(
-                inferredColorsByItem,
-                inferredColorsByItemConfidence,
-                inferredColorsByItemSource,
-                itemColorKey,
+              const adjustedColor = adjustStripedTopColorInference({
                 selectedColor,
-                cropColorConfidence,
-                1,
-                { productCategory: categoryMapping.productCategory, detectionLabel: categorySource },
-              );
+                cropColors,
+                productCategory: categoryMapping.productCategory,
+                detectionLabel: categorySource,
+                fullCaption: blipCaption,
+              });
+
+              if (adjustedColor) {
+                setDetectionColorIfHigherConfidence(
+                  inferredColorsByItem,
+                  inferredColorsByItemConfidence,
+                  inferredColorsByItemSource,
+                  itemColorKey,
+                  adjustedColor,
+                  cropColorConfidence,
+                  1,
+                  { productCategory: categoryMapping.productCategory, detectionLabel: categorySource },
+                );
+              }
 
               const existingColor = inferredColorsByItem[itemColorKey];
               const existingConf = Number(inferredColorsByItemConfidence[itemColorKey] ?? 0);
