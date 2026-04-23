@@ -193,6 +193,10 @@ export interface CompareDecisionResponse {
 
     hiddenFlaw: string;
     microStory: string;
+    decisionRationale: {
+      whyThisWon: string[];
+      tradeoffsToKnow: string[];
+    };
 
     scores: {
       value: number;

@@ -582,6 +582,19 @@ export function CompareDecisionResults({
                         <BulletList items={insight.photoRealityGap.explanation.slice(0, 2)} icon={CheckCircle} tone="neutral" />
                       )}
 
+                      {insight.decisionRationale?.whyThisWon?.length > 0 && (
+                        <>
+                          <p className="text-xs font-semibold text-violet-600 uppercase">Why this wins</p>
+                          <BulletList items={insight.decisionRationale.whyThisWon.slice(0, 3)} icon={CheckCircle} tone="violet" />
+                        </>
+                      )}
+                      {insight.decisionRationale?.tradeoffsToKnow?.length > 0 && (
+                        <>
+                          <p className="text-xs font-semibold text-amber-700 uppercase">Tradeoffs to know</p>
+                          <BulletList items={insight.decisionRationale.tradeoffsToKnow.slice(0, 2)} icon={AlertTriangle} tone="amber" />
+                        </>
+                      )}
+
                       {insight.hiddenFlaw && (
                         <>
                           <p className="text-xs font-semibold text-amber-700 uppercase">Hidden flaw</p>

@@ -1188,12 +1188,84 @@ function scoreOccasionGarmentCompatibility(
   return 0.74;
 }
 
+function scoreAestheticGarmentCompatibility(
+  sourceStyle: StyleProfile,
+  candidateFamily: string,
+  candidateTitle: string,
+  candidateCategory?: string | null
+): number {
+  const text = `${String(candidateTitle || "")} ${String(candidateCategory || "")}`.toLowerCase();
+  const sportyCue = /\b(track|tracksuit|jogger|legging|gym|running|training|athletic|sport|sports|basketball|football)\b/;
+  const tailoredCue = /\b(tailored|trouser|pleat|straight|wide leg|loafer|oxford|satchel|structured|coat|wool|knit)\b/;
+  const ruggedCue = /\b(combat|distressed|ripped|cargo)\b/;
+
+  if (sourceStyle.occasion === "active") return 0.86;
+
+  if (sourceStyle.aesthetic === "classic" || sourceStyle.aesthetic === "minimalist") {
+    if (sportyCue.test(text) && (candidateFamily === "bottoms" || candidateFamily === "shoes")) return 0.34;
+    if (ruggedCue.test(text)) return 0.44;
+    if (tailoredCue.test(text)) return 0.94;
+    return 0.76;
+  }
+
+  if (sourceStyle.aesthetic === "sporty") {
+    if (sportyCue.test(text)) return 0.95;
+    if (tailoredCue.test(text) && candidateFamily !== "bags") return 0.56;
+    return 0.74;
+  }
+
+  if (sourceStyle.aesthetic === "edgy") {
+    if (ruggedCue.test(text)) return 0.9;
+    if (tailoredCue.test(text)) return 0.68;
+    return 0.76;
+  }
+
+  return 0.78;
+}
+
+function scoreWeatherCompatibility(
+  sourceSeason: StyleProfile["season"],
+  candidateTitle: string,
+  candidateCategory?: string | null
+): number {
+  const text = `${String(candidateTitle || "")} ${String(candidateCategory || "")}`.toLowerCase();
+  const warmCue = /\b(wool|knit|knitted|cashmere|fleece|thermal|boot|boots|coat|jacket|cardigan|sweater)\b/;
+  const coolCue = /\b(linen|sleeveless|tank|short|shorts|mini|sandal|flip flop|slide|mesh)\b/;
+  const allSeasonCue = /\b(cotton|denim|tee|t-?shirt|shirt|blouse|trouser|jean|loafer|sneaker)\b/;
+
+  if (sourceSeason === "all-season") return allSeasonCue.test(text) ? 0.9 : 0.76;
+  if (sourceSeason === "winter") {
+    if (warmCue.test(text)) return 0.96;
+    if (coolCue.test(text)) return 0.34;
+    return 0.72;
+  }
+  if (sourceSeason === "summer") {
+    if (coolCue.test(text)) return 0.95;
+    if (warmCue.test(text)) return 0.44;
+    return 0.74;
+  }
+  if (sourceSeason === "fall") {
+    if (warmCue.test(text)) return 0.88;
+    if (coolCue.test(text)) return 0.6;
+    return 0.76;
+  }
+  if (sourceSeason === "spring") {
+    if (coolCue.test(text)) return 0.84;
+    if (warmCue.test(text)) return 0.66;
+    return 0.78;
+  }
+  return 0.74;
+}
+
 function buildFashionReasons(params: {
   categoryScore: number;
   colorScore: number;
   aestheticScore: number;
   formalityScore: number;
   seasonScore: number;
+  weatherScore: number;
+  aestheticGarmentScore: number;
+  occasionGarmentScore: number;
   priceScore: number;
   patternScore: number;
   materialScore: number;
@@ -1204,11 +1276,86 @@ function buildFashionReasons(params: {
   if (params.colorScore >= 0.84) reasons.push("harmonious color palette");
   if (params.formalityScore >= 0.86) reasons.push("matching formality");
   if (params.seasonScore >= 0.82) reasons.push("season-aligned");
+  if (params.weatherScore >= 0.84) reasons.push("weather-appropriate fabric/weight");
+  if (params.aestheticGarmentScore >= 0.84) reasons.push("silhouette fits the aesthetic");
+  if (params.occasionGarmentScore >= 0.86) reasons.push("occasion-appropriate item type");
   if (params.patternScore >= 0.8) reasons.push("pattern balance");
   if (params.materialScore >= 0.8) reasons.push("material-compatible");
   if (params.priceScore >= 0.82) reasons.push("price-tier aligned");
   if (reasons.length === 0) reasons.push("fashion-balanced match");
   return reasons.slice(0, 4);
+}
+
+function colorComfortHintForCategory(
+  sourceStyle: StyleProfile,
+  category: string
+): string {
+  const titleForBucket = (bucket: string): string => {
+    switch (bucket) {
+      case "blue": return "blue";
+      case "green": return "green";
+      case "red": return "red";
+      case "pink": return "pink";
+      case "purple": return "purple";
+      case "yellow": return "yellow";
+      case "orange": return "orange";
+      case "brown": return "brown";
+      case "black": return "black";
+      case "white": return "white";
+      case "gray": return "gray";
+      default: return bucket;
+    }
+  };
+
+  const sourceBuckets = new Set<string>();
+  for (const b of extractColorBucketsFromText(sourceStyle.colorProfile.primary)) sourceBuckets.add(b);
+  for (const harmony of sourceStyle.colorProfile.harmonies || []) {
+    for (const c of harmony.colors || []) {
+      for (const b of extractColorBucketsFromText(c)) sourceBuckets.add(b);
+    }
+  }
+
+  const neutralOrder = ["black", "white", "gray", "brown"];
+  const neutrals = neutralOrder.filter((n) => sourceBuckets.has(n));
+  const chromatic = Array.from(sourceBuckets).filter((b) => !neutralOrder.includes(b));
+  const primaryBucket =
+    extractColorBucketsFromText(sourceStyle.colorProfile.primary).values().next().value ||
+    chromatic[0];
+
+  const formattedPrimary = primaryBucket ? titleForBucket(primaryBucket) : "this palette";
+
+  const pickPalette = (target: string): string[] => {
+    const safeNeutrals = neutrals.length > 0 ? neutrals : ["black", "white", "gray", "brown"];
+    const compatibleChromatic =
+      primaryBucket && COLOR_BUCKET_COMPATIBILITY[primaryBucket]
+        ? COLOR_BUCKET_COMPATIBILITY[primaryBucket]
+        : [];
+    const harmonyChromatic = chromatic.filter((c) => c !== primaryBucket);
+    const accentPool = Array.from(new Set([...harmonyChromatic, ...compatibleChromatic])).slice(0, 2);
+
+    if (target === "Bottoms") {
+      return [...safeNeutrals.slice(0, 3), ...accentPool.slice(0, 1)];
+    }
+    if (target === "Shoes" || target === "Bags") {
+      return [...safeNeutrals.slice(0, 4), ...accentPool.slice(0, 1)];
+    }
+    if (target === "Tops") {
+      return [...safeNeutrals.slice(0, 2), formattedPrimary, ...accentPool.slice(0, 1)];
+    }
+    return [...safeNeutrals.slice(0, 3), ...accentPool.slice(0, 1)];
+  };
+
+  const colors = pickPalette(category)
+    .map((c) => titleForBucket(c))
+    .filter(Boolean)
+    .slice(0, 4);
+
+  const joined = colors.join(", ");
+  if (category === "Bottoms") return `Comfortable bottoms colors with ${formattedPrimary}: ${joined}.`;
+  if (category === "Shoes") return `Comfortable shoe colors with ${formattedPrimary}: ${joined}.`;
+  if (category === "Bags") return `Comfortable bag colors with ${formattedPrimary}: ${joined}.`;
+  if (category === "Tops") return `Comfortable top colors with ${formattedPrimary}: ${joined}.`;
+  return `Comfortable colors with ${formattedPrimary}: ${joined}.`;
 }
 
 async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Promise<CompleteLookMappedSuggestion[]> {
@@ -1278,6 +1425,17 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     const aestheticScore = scoreAestheticCompatibility(params.sourceStyle.aesthetic, candidateStyle.aesthetic);
     const formalityScore = scoreFormalityCompatibility(params.sourceStyle.formality, candidateStyle.formality);
     const seasonScore = scoreSeasonCompatibility(params.sourceStyle.season, candidateStyle.season);
+    const weatherScore = scoreWeatherCompatibility(
+      params.sourceStyle.season,
+      candidateProduct.title,
+      candidateProduct.category
+    );
+    const aestheticGarmentScore = scoreAestheticGarmentCompatibility(
+      params.sourceStyle,
+      candidateFamily,
+      candidateProduct.title,
+      candidateProduct.category
+    );
     const priceScore = scoreRangeMatch(params.sourceProduct.price_cents, candidateProduct.price_cents);
     const footwearOccasionScore =
       candidateFamily === "shoes"
@@ -1309,6 +1467,8 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       colorScore * 0.14 +
       formalityScore * 0.14 +
       seasonScore * 0.07 +
+      weatherScore * 0.09 +
+      aestheticGarmentScore * 0.08 +
       footwearOccasionScore * 0.16 +
       bagOccasionScore * 0.1 +
       garmentOccasionScore * 0.1 +
@@ -1325,6 +1485,15 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     }
     if (candidateFamily === "bags" && bagOccasionScore < 0.45) {
       finalScore = Math.round(finalScore * 0.76 * 1000) / 1000;
+    }
+    if (
+      (candidateFamily === "tops" || candidateFamily === "bottoms" || candidateFamily === "shoes") &&
+      aestheticGarmentScore < 0.5
+    ) {
+      finalScore = Math.round(finalScore * 0.62 * 1000) / 1000;
+    }
+    if (weatherScore < 0.46) {
+      finalScore = Math.round(finalScore * 0.65 * 1000) / 1000;
     }
 
     // Strongly penalize chromatic clashes for core garments (tops, bottoms, dresses, outerwear).
@@ -1368,6 +1537,9 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       aestheticScore,
       formalityScore,
       seasonScore,
+      weatherScore,
+      aestheticGarmentScore,
+      occasionGarmentScore: garmentOccasionScore,
       priceScore,
       patternScore: patternOverlap,
       materialScore: materialOverlap,
@@ -1392,6 +1564,12 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
           ? "accessory style is less suitable for this occasion"
           : "accessory style matches the occasion"
       );
+    }
+    if (aestheticGarmentScore < 0.5) {
+      matchReasons.push("less aligned with this aesthetic");
+    }
+    if (weatherScore < 0.46) {
+      matchReasons.push("weather mismatch risk");
     }
     if (sourceHasChromaticColor && isCoreGarmentFamily(candidateFamily) && colorScore < 0.28) {
       matchReasons.push("color contrast is risky for this core piece");
@@ -1631,9 +1809,11 @@ function mapCompleteLookToStyleResponse(params: {
 
   const recommendations = Array.from(groups.entries()).map(([category, products]) => {
     const priority = completeStylePriorityFromCategory(category, completeLookResult.missingCategories || []);
+    const colorHint = colorComfortHintForCategory(sourceStyle, category);
+    const styleReason = reasons.get(category) || `Recommended ${category.toLowerCase()} for this look`;
     return {
       category,
-      reason: reasons.get(category) || `Recommended ${category.toLowerCase()} for this look`,
+      reason: `${styleReason}. ${colorHint}`,
       priority,
       priorityLabel: getPriorityLabel(priority),
       products,

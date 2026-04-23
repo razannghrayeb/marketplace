@@ -38,6 +38,36 @@ interface EngineOptions {
   version?: string;
 }
 
+function resolveOverallWeights(request: CompareDecisionRequest): {
+  value: number;
+  quality: number;
+  style: number;
+  risk: number;
+  occasion: number;
+  practical: number;
+  expressive: number;
+} {
+  const hasOccasion = Boolean(request.occasion);
+  const base = hasOccasion
+    ? { value: 0.18, quality: 0.19, style: 0.17, risk: 0.14, occasion: 0.15, practical: 0.09, expressive: 0.08 }
+    : { value: 0.2, quality: 0.2, style: 0.18, risk: 0.16, occasion: 0.1, practical: 0.08, expressive: 0.08 };
+
+  switch (request.compareGoal) {
+    case "best_value":
+      return { ...base, value: base.value + 0.08, quality: base.quality - 0.03, style: base.style - 0.02, risk: base.risk - 0.02, practical: base.practical - 0.01 };
+    case "premium_quality":
+      return { ...base, quality: base.quality + 0.08, value: base.value - 0.03, style: base.style + 0.01, risk: base.risk - 0.03, practical: base.practical - 0.01, expressive: base.expressive - 0.02 };
+    case "style_match":
+      return { ...base, style: base.style + 0.08, expressive: base.expressive + 0.04, value: base.value - 0.04, quality: base.quality - 0.03, risk: base.risk - 0.03, practical: base.practical - 0.02 };
+    case "low_risk_return":
+      return { ...base, risk: base.risk + 0.08, quality: base.quality + 0.03, value: base.value - 0.03, style: base.style - 0.03, expressive: base.expressive - 0.03, practical: base.practical - 0.02 };
+    case "occasion_fit":
+      return { ...base, occasion: base.occasion + 0.08, style: base.style + 0.03, expressive: base.expressive + 0.02, value: base.value - 0.03, quality: base.quality - 0.03, risk: base.risk - 0.03, practical: base.practical - 0.04 };
+    default:
+      return base;
+  }
+}
+
 function pickWinner(
   scored: Array<{ productId: number; score: number }>
 ): number | undefined {
@@ -84,10 +114,10 @@ function toTensionAxes(
 
 function metricDeltaLabel(delta: number, metric: string): string {
   const points = Math.abs(Math.round(delta * 100));
-  if (points >= 12) return `a strong ${points}-point edge in ${metric}`;
-  if (points >= 6) return `a ${points}-point edge in ${metric}`;
-  if (points >= 3) return `a slight ${points}-point edge in ${metric}`;
-  return `near-parity in ${metric}`;
+  if (points >= 12) return `a clear ${points}-point lead in ${metric}`;
+  if (points >= 6) return `a ${points}-point lead in ${metric}`;
+  if (points >= 3) return `a slight ${points}-point lead in ${metric}`;
+  return `almost tied in ${metric}`;
 }
 
 function buildRelativeDecisionNudge(
@@ -101,7 +131,7 @@ function buildRelativeDecisionNudge(
   }>
 ): string {
   if (peers.length === 0) {
-    return "Strong all-round pick if you want balance without big tradeoffs.";
+    return "Strong all-around pick if you want balance without major tradeoffs.";
   }
   const topPeer = peers.sort((a, b) => b.scores.overall - a.scores.overall)[0];
   const practicalDelta = current.scores.practical - topPeer.scores.practical;
@@ -120,15 +150,107 @@ function buildRelativeDecisionNudge(
   const weakest = advantages[advantages.length - 1];
 
   if (best.delta <= 0.02) {
-    return `Compared with ${topPeer.profile.title}, this is mostly a personal-preference call with only small differences.`;
+    return `Compared with ${topPeer.profile.title}, the difference is small, so this is mostly a personal style call.`;
   }
 
   const tradeoff =
     weakest.delta < -0.03
-      ? `Main tradeoff: ${metricDeltaLabel(weakest.delta, weakest.metric)}.`
-      : "Tradeoff is minor versus the closest alternative.";
+      ? `Main tradeoff: it trails with ${metricDeltaLabel(weakest.delta, weakest.metric)}.`
+      : "Tradeoff is small versus the closest alternative.";
 
   return `Compared with ${topPeer.profile.title}, this has ${metricDeltaLabel(best.delta, best.metric)}. ${tradeoff}`;
+}
+
+function metricDisplayLabel(metric: keyof ProductDecisionProfile["derivedSignals"] | "value" | "quality" | "style" | "risk" | "occasion" | "practical" | "expressive"): string {
+  switch (metric) {
+    case "value":
+      return "better value for the price";
+    case "quality":
+      return "stronger quality confidence";
+    case "style":
+      return "closer style fit";
+    case "risk":
+      return "lower return-risk profile";
+    case "occasion":
+      return "better occasion fit";
+    case "practical":
+      return "easier day-to-day wear";
+    case "expressive":
+      return "stronger statement energy";
+    default:
+      return metric;
+  }
+}
+
+function buildDecisionRationale(
+  current: {
+    profile: ProductDecisionProfile;
+    scores: {
+      value: number;
+      quality: number;
+      style: number;
+      risk: number;
+      occasion: number;
+      practical: number;
+      expressive: number;
+      overall: number;
+    };
+  },
+  peers: Array<{
+    profile: ProductDecisionProfile;
+    scores: {
+      value: number;
+      quality: number;
+      style: number;
+      risk: number;
+      occasion: number;
+      practical: number;
+      expressive: number;
+      overall: number;
+    };
+  }>
+): { whyThisWon: string[]; tradeoffsToKnow: string[] } {
+  if (peers.length === 0) {
+    return {
+      whyThisWon: ["Solid all-around profile with balanced scoring signals."],
+      tradeoffsToKnow: ["No direct comparison tradeoffs available."],
+    };
+  }
+
+  const nearestPeer = [...peers].sort(
+    (a, b) =>
+      Math.abs(current.scores.overall - a.scores.overall) - Math.abs(current.scores.overall - b.scores.overall)
+  )[0];
+
+  const dimensions: Array<{
+    metric: "value" | "quality" | "style" | "risk" | "occasion" | "practical" | "expressive";
+    delta: number;
+  }> = [
+    { metric: "value", delta: current.scores.value - nearestPeer.scores.value },
+    { metric: "quality", delta: current.scores.quality - nearestPeer.scores.quality },
+    { metric: "style", delta: current.scores.style - nearestPeer.scores.style },
+    { metric: "risk", delta: current.scores.risk - nearestPeer.scores.risk },
+    { metric: "occasion", delta: current.scores.occasion - nearestPeer.scores.occasion },
+    { metric: "practical", delta: current.scores.practical - nearestPeer.scores.practical },
+    { metric: "expressive", delta: current.scores.expressive - nearestPeer.scores.expressive },
+  ];
+
+  const strengths = [...dimensions].sort((a, b) => b.delta - a.delta).slice(0, 3);
+  const tradeoffs = [...dimensions].sort((a, b) => a.delta - b.delta).slice(0, 2);
+
+  const whyThisWon = strengths.map((s) =>
+    s.delta > 0.02
+      ? `Leads ${nearestPeer.profile.title} with ${metricDeltaLabel(s.delta, metricDisplayLabel(s.metric))}.`
+      : `Stays competitive on ${metricDisplayLabel(s.metric)} with only a small gap versus ${nearestPeer.profile.title}.`
+  );
+
+  const tradeoffsToKnow = tradeoffs.map((t) =>
+    t.delta < -0.02
+      ? `Trails ${nearestPeer.profile.title} with ${metricDeltaLabel(t.delta, metricDisplayLabel(t.metric))}.`
+      : `${metricDisplayLabel(t.metric)} is close to ${nearestPeer.profile.title}, so preference and styling context matter.`
+  );
+
+  return { whyThisWon, tradeoffsToKnow };
 }
 
 function scoreDataQuality(profiles: ProductDecisionProfile[]): { overallScore: number; notes: string[] } {
@@ -190,6 +312,7 @@ export function runCompareDecisionEngine(
 
   const minPrice = Math.min(...profiles.map((p) => p.effectivePrice));
   const maxPrice = Math.max(...profiles.map((p) => p.effectivePrice));
+  const overallWeights = resolveOverallWeights(request);
 
   const productResults = profiles.map((profile) => {
     const value = scoreValue(profile, minPrice, maxPrice);
@@ -208,13 +331,13 @@ export function runCompareDecisionEngine(
     const practical = scorePractical(profile);
     const expressive = scoreExpressive(profile);
     const overall = clamp01(
-      value * 0.2 +
-        quality * 0.2 +
-        style * 0.18 +
-        risk * 0.16 +
-        occasion * 0.1 +
-        practical * 0.08 +
-        expressive * 0.08
+      value * overallWeights.value +
+        quality * overallWeights.quality +
+        style * overallWeights.style +
+        risk * overallWeights.risk +
+        occasion * overallWeights.occasion +
+        practical * overallWeights.practical +
+        expressive * overallWeights.expressive
     );
 
     const friction = scoreFrictionIndex(profile);
@@ -293,6 +416,7 @@ export function runCompareDecisionEngine(
     sortedOverallScores: sortedByOverall.map((s) => s.overall),
     dataQuality: dataQuality.overallScore,
     winnersByContext,
+    allOverallScores: productResults.map((r) => r.scores.overall),
   });
 
   const whyNotBoth = detectWhyNotBoth({
@@ -328,10 +452,10 @@ export function runCompareDecisionEngine(
         firstAttractionProductId: request.userSignals?.firstAttractionProductId,
         attractionScores,
         explanation: [
-          "Attraction combines visual boldness, silhouette clarity, color energy, and emotional pull.",
+          "Attraction blends first-glance impact: boldness, silhouette clarity, color energy, and overall emotional pull.",
           request.userSignals?.firstAttractionProductId
-            ? "First-attraction signal was included as a bounded deterministic boost."
-            : "No first-attraction input provided, so attraction is purely product-derived.",
+            ? "Your first-attraction pick was included as a small tie-breaker boost."
+            : "No first-attraction input was provided, so this score is based only on product signals.",
         ],
       },
       visualDifferences: buildVisualDifferences(profiles),
@@ -386,6 +510,36 @@ export function runCompareDecisionEngine(
       photoRealityGap: r.photoRealityGap,
       hiddenFlaw: r.hiddenFlaw,
       microStory: r.microStory,
+      decisionRationale: buildDecisionRationale(
+        {
+          profile: r.profile,
+          scores: {
+            value: r.scores.value,
+            quality: r.scores.quality,
+            style: r.scores.style,
+            risk: r.scores.risk,
+            occasion: r.scores.occasion,
+            practical: r.scores.practical,
+            expressive: r.scores.expressive,
+            overall: r.scores.overall,
+          },
+        },
+        productResults
+          .filter((candidate) => candidate.profile.id !== r.profile.id)
+          .map((candidate) => ({
+            profile: candidate.profile,
+            scores: {
+              value: candidate.scores.value,
+              quality: candidate.scores.quality,
+              style: candidate.scores.style,
+              risk: candidate.scores.risk,
+              occasion: candidate.scores.occasion,
+              practical: candidate.scores.practical,
+              expressive: candidate.scores.expressive,
+              overall: candidate.scores.overall,
+            },
+          }))
+      ),
       scores: r.scores,
     })),
     tensionAxes: toTensionAxes(
@@ -422,8 +576,13 @@ export function runCompareDecisionEngine(
             quality_texture: 0.2,
             style_goal_fit: 0.3,
             risk_return_inverse: 0.3,
-            overall_value: 0.2,
-            overall_quality: 0.2,
+            overall_value: overallWeights.value,
+            overall_quality: overallWeights.quality,
+            overall_style: overallWeights.style,
+            overall_risk: overallWeights.risk,
+            overall_occasion: overallWeights.occasion,
+            overall_practical: overallWeights.practical,
+            overall_expressive: overallWeights.expressive,
           },
           scoreBreakdownByProduct: productResults.map((r) => ({
             productId: r.profile.id,
@@ -447,10 +606,10 @@ export function runCompareDecisionEngine(
   response.decisionConfidence.explanation = [
     ...response.decisionConfidence.explanation,
     response.decisionConfidence.level === "toss_up"
-      ? "Recommendation: prioritize your top metric (value, quality, or expression) to break this close tie."
+      ? "Recommendation: pick your top priority (value, quality, or style expression) to break this close tie."
       : response.decisionConfidence.level === "leaning_choice"
-        ? "Recommendation: lead option is stronger, but verify fit details and return comfort before final purchase."
-        : "Recommendation: confidence is high enough to choose the lead product unless your personal style preference differs.",
+        ? "Recommendation: the leading option is stronger, but double-check fit details and return comfort before checkout."
+        : "Recommendation: confidence is high enough to choose the leading option unless your personal style preference points elsewhere.",
   ];
 
   options.publisher?.publish({

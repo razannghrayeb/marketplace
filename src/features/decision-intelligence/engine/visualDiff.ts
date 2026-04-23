@@ -14,7 +14,7 @@ export function buildVisualDifferences(profiles: ProductDecisionProfile[]): stri
   const lowBold = sortedByBold[sortedByBold.length - 1];
   if (topBold.imageSignals.visualBoldness - lowBold.imageSignals.visualBoldness > 0.18) {
     notes.push(
-      `${topBold.title} reads more visually assertive than ${lowBold.title}, creating stronger style expression but lower neutrality.`
+      `${topBold.title} reads bolder at first glance, while ${lowBold.title} feels calmer and easier to style day to day.`
     );
   }
 
@@ -22,12 +22,12 @@ export function buildVisualDifferences(profiles: ProductDecisionProfile[]): stri
   const lowStructure = sortedByStructure[sortedByStructure.length - 1];
   if (topStructure.imageSignals.structureLevel - lowStructure.imageSignals.structureLevel > 0.16) {
     notes.push(
-      `${topStructure.title} has a more structured silhouette, while ${lowStructure.title} leans softer and less formal.`
+      `${topStructure.title} has a cleaner, more structured shape, while ${lowStructure.title} drapes softer with a more relaxed vibe.`
     );
   }
 
   if (notes.length === 0) {
-    notes.push("Visual language is close across selected items, so practical and identity factors drive most differentiation.");
+    notes.push("These pieces look quite close visually, so your best choice comes down to comfort, styling habits, and personal vibe.");
   }
 
   return notes;
