@@ -5,6 +5,23 @@ import type { ScrapedProduct } from "../types";
 const BASE = "https://lb.mikesport.com";
 const VENDOR_NAME = "Mike Sport";
 
+function canonicalizeParentProductUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    const last = segments[segments.length - 1] ?? "";
+    if (/-lebanon-\d+$/i.test(last)) {
+      segments[segments.length - 1] = last.replace(/-\d+$/i, "");
+      parsed.pathname = `/${segments.join("/")}`;
+    }
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return url.split("#")[0].split("?")[0];
+  }
+}
+
 function ensureHttps(url: string | null | undefined): string | null {
   if (!url) return null;
   if (url.startsWith("//")) return `https:${url}`;
@@ -360,7 +377,9 @@ export function mapMikesportProductToScrapedRows(product: any): ScrapedProduct[]
   const vendor_url = BASE;
 
   const handle = String(product?.handle ?? "").trim();
-  const baseProductUrl = handle ? `${BASE}/products/${handle}` : BASE;
+  const baseProductUrl = canonicalizeParentProductUrl(
+    handle ? `${BASE}/products/${handle}` : BASE
+  );
 
   const title = decodeHtmlEntities(String(product?.title ?? "").trim()) || "Untitled";
 
@@ -457,7 +476,7 @@ export function mapMikesportProductToScrapedRows(product: any): ScrapedProduct[]
       .map((v) => v?.id)
       .filter((v) => v != null)
       .map((v) => String(v));
-    const variantIdValue = variantIds.length ? variantIds.join(",") : null;
+    const variantIdValue = variantIds.length ? variantIds[0] : null;
     const primaryVariantId = variantIds.length ? variantIds[0] : null;
 
     let groupImage: string | null = null;

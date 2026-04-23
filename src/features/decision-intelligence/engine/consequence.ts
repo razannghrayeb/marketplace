@@ -51,6 +51,15 @@ function secondKey<T extends Record<string, number>>(obj: T): keyof T {
   return (sorted[1]?.[0] ?? sorted[0][0]) as keyof T;
 }
 
+function categoryNoun(category: string): string {
+  const normalized = category.trim().toLowerCase();
+  if (!normalized) return "piece";
+  if (normalized.endsWith("dresses")) return "dress";
+  if (normalized.endsWith("ies")) return `${normalized.slice(0, -3)}y`;
+  if (normalized.endsWith("s")) return normalized.slice(0, -1);
+  return normalized;
+}
+
 export function buildConsequences(
   profile: ProductDecisionProfile,
   scores: { practical: number; expressive: number; overall: number }
@@ -81,11 +90,11 @@ export function buildConsequences(
   }
 
   if (profile.usageSignals.occasionRange < 0.4) {
-    bullets.push(`Best for specific moments. This ${profile.category.toLowerCase()} is less flexible across different occasions.`);
+    bullets.push(`Best for specific moments. This ${categoryNoun(profile.category)} is less flexible across different occasions.`);
   } else if (profile.usageSignals.occasionRange < 0.6) {
     bullets.push(`Moderately flexible: it works best when you already know the vibe or have a plan.`);
   } else {
-    bullets.push(`Very flexible: you can dress this ${profile.category.toLowerCase()} down for casual plans or up for polished moments.`);
+    bullets.push(`Very flexible: you can dress this ${categoryNoun(profile.category)} down for casual plans or up for polished moments.`);
   }
 
   return bullets;

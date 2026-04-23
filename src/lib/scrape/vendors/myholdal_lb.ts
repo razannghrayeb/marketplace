@@ -17,6 +17,25 @@ function normalizeUrl(url: string): string {
   return new URL(url, VENDOR_URL).toString();
 }
 
+function canonicalizeParentProductUrl(url: string): string {
+  try {
+    const parsed = new URL(url, VENDOR_URL);
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    const last = segments[segments.length - 1] ?? "";
+    // MYHOLDAL often duplicates the same product as "...-lebanon-1/-2".
+    // Collapse these to a stable parent key so colors/siblings are treated as one variant family.
+    if (/-lebanon-\d+$/i.test(last)) {
+      segments[segments.length - 1] = last.replace(/-\d+$/i, "");
+      parsed.pathname = `/${segments.join("/")}`;
+    }
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return url.split("#")[0].split("?")[0];
+  }
+}
+
 function moneyToCents(s: string): number {
   const n = Number(String(s).replace(/[^0-9.]/g, ""));
   return Number.isFinite(n) ? Math.round(n * 100) : 0;
@@ -365,7 +384,9 @@ export function parseProductPage(
   productJsonOverride?: any | null
 ): ScrapedProduct | ScrapedProduct[] | null {
   const $ = load(productHtml);
-  const parentProductUrl = productUrl.split("#")[0].split("?")[0];
+  const parentProductUrl = canonicalizeParentProductUrl(
+    productUrl.split("#")[0].split("?")[0]
+  );
 
   const np = productJsonOverride ?? extractWindowNP($);
 
@@ -526,7 +547,7 @@ export function parseProductPage(
       .map((v) => v?.id)
       .filter((v) => v != null)
       .map((v) => String(v));
-    const variantIdValue = variantIds.length ? variantIds.join(",") : null;
+    const variantIdValue = variantIds.length ? variantIds[0] : null;
     const primaryVariantId = variantIds.length ? variantIds[0] : null;
 
     let groupImage: string | null = null;
