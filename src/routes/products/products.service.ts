@@ -6587,6 +6587,55 @@ export async function searchByImageWithSimilarity(
       typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalResultMin,
   ) as ProductResult[];
 
+  // Main-path deterministic keep rule:
+  // if strict mode would return empty for detection-anchored tops/bottoms, keep the
+  // strongest in-family visual candidates instead of collapsing to zero.
+  if (
+    mainPathStrict &&
+    hasDetectionAnchoredTypeIntent &&
+    results.length === 0 &&
+    resultsBeforeFinalRelevanceFilter.length > 0 &&
+    (String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops" ||
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms")
+  ) {
+    const detectionCategoryNormStrict = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+    const keepFloor = detectionCategoryNormStrict === "bottoms" ? 0.66 : 0.58;
+    const rescueKeep = resultsBeforeFinalRelevanceFilter
+      .filter((p: any) => {
+        const explainAny = p.explain as any;
+        const sim = Number(p.similarity_score ?? 0);
+        const crossFamily = Number(explainAny?.crossFamilyPenalty ?? 0);
+        const exactType = Number(explainAny?.exactTypeScore ?? 0);
+        const typeComp = Number(explainAny?.productTypeCompliance ?? 0);
+        const categoryComp = Number(explainAny?.categoryScore ?? explainAny?.categoryRelevance01 ?? 0);
+        if (crossFamily >= 0.55) return false;
+        if (categoryComp < 0.8) return false;
+        if (sim < 0.72) return false;
+        return exactType >= 1 || typeComp >= 0.48;
+      })
+      .sort((a: any, b: any) => {
+        const sa = Number(a.similarity_score ?? 0);
+        const sb = Number(b.similarity_score ?? 0);
+        return sb - sa;
+      })
+      .slice(0, Math.max(2, Math.min(limit, 6)))
+      .map((p: any) => {
+        const next = { ...p } as any;
+        const sim = Number(next.similarity_score ?? 0);
+        const lifted = Math.max(keepFloor, Math.min(0.86, sim * 0.9));
+        next.finalRelevance01 = Math.max(Number(next.finalRelevance01 ?? 0), lifted);
+        next.explain = {
+          ...(next.explain ?? {}),
+          finalRelevance01: next.finalRelevance01,
+          finalRelevanceSource: "main_path_strict_type_visual_keep",
+        };
+        return next;
+      });
+    if (rescueKeep.length > 0) {
+      results = rescueKeep as ProductResult[];
+    }
+  }
+
   const strongVisualOverrideMax = imageStrongVisualOverrideMaxCount();
   const droppedByFinalRelevanceBeforeOverride = Math.max(0, resultsBeforeFinalRelevanceFilter.length - results.length);
   let rescuedByStrongVisualOverride = 0;
