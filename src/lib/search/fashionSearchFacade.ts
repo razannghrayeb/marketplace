@@ -101,6 +101,7 @@ export interface UnifiedImageSearchParams {
   sessionFilters?: Partial<LegacySearchFilters>;
   collapseVariantGroups?: boolean;
 }
+type EnhancedTextSearchOutput = SearchResultWithRelated & { total: number; tookMs: number };
 
 type EnhancedTextSearchOutput = SearchResultWithRelated & { total: number; tookMs: number };
 

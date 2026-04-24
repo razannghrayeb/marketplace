@@ -64,6 +64,15 @@ import {
   filterProductTypeSeedsByMappedCategory,
 } from "../../lib/search/productTypeTaxonomy";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
+import {
+  computeOutfitCoherence,
+  type OutfitCoherenceResult,
+  type DetectionWithColor,
+} from "../../lib/detection/outfitCoherence";
+
+// `sharp` is CommonJS callable. TS interop can produce a non-callable object.
+const sharp: any =
+  typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
 
 type BlipSignal = {
   productType?: string | null;
@@ -992,9 +1001,27 @@ function requiresSlotSpecificColor(productCategory: string): boolean {
   return productCategory === "tops" || productCategory === "bottoms" || productCategory === "dresses";
 }
 
+function isNeutralFashionColorEarly(color: string): boolean {
+  const c = String(color || "").toLowerCase().trim();
+  return (
+    c === "black" ||
+    c === "gray" ||
+    c === "charcoal" ||
+    c === "white" ||
+    c === "off-white" ||
+    c === "cream" ||
+    c === "ivory" ||
+    c === "beige" ||
+    c === "tan" ||
+    c === "brown" ||
+    c === "navy" ||
+    c === "silver"
+  );
+}
+
 function isChromaticFashionColor(color: string): boolean {
   const c = String(color || "").toLowerCase().trim();
-  return c.length > 0 && !isNeutralFashionColor(c);
+  return c.length > 0 && !isNeutralFashionColorEarly(c);
 }
 
 function canPromoteCaptionSlotColor(params: {
@@ -1023,7 +1050,7 @@ function canPromoteCaptionSlotColor(params: {
   const existingConfidence = clamp01(Number(params.existingConfidence ?? 0));
 
   if (!existingColor) return true;
-  if (!isNeutralFashionColor(existingColor)) return false;
+  if (!isNeutralFashionColorEarly(existingColor)) return false;
 
   const reliableCropNeutral = existingSource === 1 && existingConfidence >= 0.58;
   if (reliableCropNeutral) return true;
@@ -2332,6 +2359,41 @@ function normalizeLooseText(v: unknown): string {
     .replace(/[^a-z0-9\s]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+function detectionIoU(
+  a: { x1: number; y1: number; x2: number; y2: number },
+  b: { x1: number; y1: number; x2: number; y2: number },
+): number {
+  const x1 = Math.max(a.x1, b.x1);
+  const y1 = Math.max(a.y1, b.y1);
+  const x2 = Math.min(a.x2, b.x2);
+  const y2 = Math.min(a.y2, b.y2);
+  const iw = Math.max(0, x2 - x1);
+  const ih = Math.max(0, y2 - y1);
+  const inter = iw * ih;
+  if (inter <= 0) return 0;
+  const areaA = Math.max(0, a.x2 - a.x1) * Math.max(0, a.y2 - a.y1);
+  const areaB = Math.max(0, b.x2 - b.x1) * Math.max(0, b.y2 - b.y1);
+  const denom = areaA + areaB - inter;
+  if (denom <= 0) return 0;
+  return inter / denom;
+}
+function dedupeOverlappingDetections<T extends { label: string; confidence: number; box: { x1: number; y1: number; x2: number; y2: number } }>(
+  detections: T[],
+  iouThreshold = 0.72,
+): T[] {
+  if (!Array.isArray(detections) || detections.length <= 1) return detections;
+  const sorted = [...detections].sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0));
+  const kept: T[] = [];
+  for (const det of sorted) {
+    const normLabel = normalizeLooseText(det.label);
+    const duplicate = kept.some((k) => {
+      if (normalizeLooseText(k.label) !== normLabel) return false;
+      return detectionIoU(det.box, k.box) >= iouThreshold;
+    });
+    if (!duplicate) kept.push(det);
+  }
+  return kept;
 }
 
 function detectionIoU(
@@ -3846,17 +3908,6 @@ async function mapPoolSettled<T, R>(
   await Promise.all(Array.from({ length: n }, () => worker()));
   return results;
 }
-import {
-  computeOutfitCoherence,
-  type OutfitCoherenceResult,
-  type DetectionWithColor,
-} from "../../lib/detection/outfitCoherence";
-
-// `sharp` is CommonJS callable. TS interop can cause `import sharp from "sharp"`
-// to produce a non-callable object at runtime, so we guard it.
-const sharp: any =
-  typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
-
 /**
  * Single full-frame pseudo-detection when YOLO is down or returns nothing.
  * Keeps `detection` non-null for clients while `similarProducts.byDetection` uses the same geometry.

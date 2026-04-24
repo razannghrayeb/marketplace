@@ -1813,8 +1813,8 @@ export async function textSearch(
     const countAfterFinalAcceptMin = thresholdPassedIds.length;
 
     const strictColorTypeIntent = hasStrictColorTypeIntent(rawQuery, ast, hasProductTypeConstraint);
-    // User preference: always run text search in strict mode.
-    const relevanceGateSoft = false;
+    const relevanceGateSoft = config.search.relevanceGateMode === "soft" && !strictColorTypeIntent;
+  
     const softFloorMin = config.search.softFinalRelevanceFloorMin;
 
     // #region agent log
@@ -1879,7 +1879,7 @@ export async function textSearch(
     let countAfterColorPost = finalProductIds.length;
 
     if (desiredColors.length > 0) {
-      const strictColorPost = String(process.env.SEARCH_COLOR_POSTFILTER_STRICT ?? "0").toLowerCase() !== "0";
+      const strictColorPost = String(process.env.SEARCH_COLOR_POSTFILTER_STRICT ?? "0").toLowerCase() === "1";
       const maxImgConfHits = Math.max(0, ...hits.map((h: any) => Number(h?._source?.color_confidence_image) || 0));
       const compliantIds = finalProductIds.filter((id) => (complianceById.get(id)?.colorCompliance ?? 0) > 0);
       if (strictColorPost && compliantIds.length > 0) {
