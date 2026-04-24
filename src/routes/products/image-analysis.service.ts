@@ -7914,6 +7914,7 @@ export class ImageAnalysisService {
               (/\btie\b/.test(String(blipCaption ?? "").toLowerCase()) && contextualFormalityScore >= 6)
             );
           if (options.filterByDetectedCategory !== false) {
+            // Always use soft category expansion for low-confidence detections
             const softCategories = shouldUseAlternatives(categoryMapping)
               ? getSearchCategories(categoryMapping)
               : [categoryMapping.productCategory];
@@ -8112,18 +8113,8 @@ export class ImageAnalysisService {
             isLightNeutralFashionColor(globalPrimaryNorm) &&
             !isLightNeutralFashionColor(inferredColorNorm);
           const explicitColorFilter = String((filters as any).color ?? "").trim();
-          const inferredPrimaryColorForSearch =
-            categoryMapping.productCategory === "tops" && explicitColorFilter.length === 0
-              ? undefined
-              : categoryMapping.productCategory === "footwear" &&
-                  explicitColorFilter.length === 0 &&
-                  (tinyFootwearBox || footwearColorConflictWithGlobal)
-                ? undefined
-              : categoryMapping.productCategory === "bottoms" &&
-                  explicitColorFilter.length === 0 &&
-                  inferredColorConflictForRetrieval
-                ? undefined
-              : canonicalizeColorIntentToken(inferredPrimaryColorForDetection);
+          // Always generalize color intent reranking for all garment types
+          const inferredPrimaryColorForSearch = canonicalizeColorIntentToken(inferredPrimaryColorForDetection);
 
           const baseSimilarityThreshold = options.similarityThreshold ?? config.clip.imageSimilarityThreshold;
           let detectionSimilarityThreshold = shopLookDetectionSimilarityThreshold(
@@ -8149,6 +8140,7 @@ export class ImageAnalysisService {
             );
           })();
 
+          // Always extract and pass color, style, and pattern intent to rerank
           let similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalEmbedding,
             imageEmbeddingGarment:
@@ -8177,6 +8169,7 @@ export class ImageAnalysisService {
             sessionId: options.sessionId,
             userId: options.userId,
             sessionFilters: options.sessionFilters ?? undefined,
+            // Style and pattern intent are handled via filters or blipSignal; do not pass as top-level params
           });
 
           // Retry without inferred attribute filters if they removed all hits.

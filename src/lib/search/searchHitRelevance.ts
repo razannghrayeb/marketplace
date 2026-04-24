@@ -82,9 +82,11 @@ export function computeFinalRelevance01(params: {
   colorScore: number;
   audScore: number;
   styleScore: number;
+  patternScore?: number;
   sleeveScore: number;
   hasColorIntent: boolean;
   hasStyleIntent: boolean;
+  hasPatternIntent?: boolean;
   hasSleeveIntent: boolean;
   hasAudienceIntent: boolean;
   /** From scoreCrossFamilyTypePenalty; strong garment↔footwear mismatches are typically ≥ 0.8 */
@@ -134,9 +136,10 @@ export function computeFinalRelevance01(params: {
   const colorPart = params.hasColorIntent ? params.colorScore : 1;
   const audPart = params.hasAudienceIntent ? params.audScore : 1;
   const stylePart = params.hasStyleIntent ? params.styleScore : 1;
+  const patternPart = params.hasPatternIntent && typeof params.patternScore === 'number' ? params.patternScore : 1;
   const sleevePart = params.hasSleeveIntent ? params.sleeveScore : 1;
-  // Attribute blend: keep color dominant, but allow style to influence as well.
-  const attrScore = colorPart * 0.45 + stylePart * 0.2 + sleevePart * 0.2 + audPart * 0.15;
+  // Attribute blend: keep color dominant, but allow style and pattern to influence as well.
+  const attrScore = colorPart * 0.4 + stylePart * 0.15 + patternPart * 0.15 + sleevePart * 0.15 + audPart * 0.15;
   const attrFactor = 0.5 + attrScore * 0.5;
 
   const crossFamilySoftFactor = Math.max(0, 1 - crossPen * 0.6);
@@ -284,6 +287,8 @@ export interface SearchHitRelevanceIntent {
   desiredColorsTier: string[];
   /** Canonical attr_style token (e.g. "casual", "formal", "smart-casual"). */
   desiredStyle?: string;
+  /** Canonical attr_pattern token (e.g. "striped", "floral", "solid"). */
+  desiredPattern?: string;
   /** short | long | sleeveless */
   desiredSleeve?: string;
   rerankColorMode: "any" | "all";
@@ -539,6 +544,7 @@ export function computeHitRelevance(
     desiredColors,
     desiredColorsTier,
     desiredStyle,
+    desiredPattern, // new
     desiredSleeve,
     rerankColorMode,
     mergedCategory,
@@ -744,6 +750,23 @@ export function computeHitRelevance(
     }
   }
 
+  // Pattern compliance (new, similar to style)
+  let patternCompliance = 0;
+  const normalizedDesiredPattern = desiredPattern ? String(desiredPattern).toLowerCase().trim() : "";
+  const hitPatternRaw = hit?._source?.attr_pattern;
+  const hitPattern = typeof hitPatternRaw === "string" ? hitPatternRaw.toLowerCase().trim() : "";
+  if (normalizedDesiredPattern) {
+    if (hitPattern) {
+      if (hitPattern === normalizedDesiredPattern) patternCompliance = 1;
+      else if (hitPattern.includes(normalizedDesiredPattern) || normalizedDesiredPattern.includes(hitPattern)) patternCompliance = 0.7;
+      else patternCompliance = 0;
+    } else if (title.includes(normalizedDesiredPattern)) {
+      patternCompliance = 0.6;
+    } else {
+      patternCompliance = 0;
+    }
+  }
+
   let sleeveCompliance = 0;
   const wantedSleeve = normalizeSleeveToken(desiredSleeve);
   const sleeveIntentApplicable = docSupportsSleeveIntent(src);
@@ -911,6 +934,7 @@ export function computeHitRelevance(
   const attrComponentRaw =
     colorCompliance * 90 * docTrust +
     styleCompliance * 65 * docTrust +
+    patternCompliance * 40 * docTrust + // new
     sleeveCompliance * 52 * docTrust +
     audienceCompliance * wAud * docTrust;
   const attrComponent = attrComponentRaw * attrTypeGate;
@@ -933,6 +957,9 @@ export function computeHitRelevance(
   const styleScoreForFinal = normalizedDesiredStyle
     ? confidenceBlend(styleCompliance, styleMetadataConfidence, 0.32)
     : styleCompliance;
+  const patternScoreForFinal = normalizedDesiredPattern
+    ? confidenceBlend(patternCompliance, styleMetadataConfidence, 0.32)
+    : patternCompliance;
   const sleeveScoreForFinal = hasSleeveIntentForDoc
     ? confidenceBlend(sleeveCompliance, styleMetadataConfidence, 0.28)
     : sleeveCompliance;
@@ -959,9 +986,11 @@ export function computeHitRelevance(
     colorScore: colorScoreForFinal,
     audScore: audienceCompliance,
     styleScore: styleScoreForFinal,
+    patternScore: patternScoreForFinal, // new
     sleeveScore: sleeveScoreForFinal,
     hasColorIntent: hasColorIntentForFinalRelevance,
     hasStyleIntent: Boolean(normalizedDesiredStyle),
+    hasPatternIntent: Boolean(normalizedDesiredPattern), // new
     hasSleeveIntent: hasSleeveIntentForDoc,
     hasAudienceIntent,
     crossFamilyPenalty: crossFamilyPenaltyForFinal,
