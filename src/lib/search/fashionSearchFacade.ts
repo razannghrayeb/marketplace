@@ -103,8 +103,6 @@ export interface UnifiedImageSearchParams {
 }
 type EnhancedTextSearchOutput = SearchResultWithRelated & { total: number; tookMs: number };
 
-type EnhancedTextSearchOutput = SearchResultWithRelated & { total: number; tookMs: number };
-
 function normalizeParentUrlKey(raw: string | null | undefined): string {
   const cleaned = String(raw ?? "").trim();
   if (!cleaned) return "";
