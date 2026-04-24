@@ -709,7 +709,7 @@ function applyTopBlackColorPriority<T extends { explain?: any; finalRelevance01?
   products.sort((a, b) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
   return products;
 }
-}
+
 // Generalized: Strengthen color intent for tops (or any garment) for any inferred color.
 function applyColorIntentPriority<T extends { explain?: any; finalRelevance01?: number; rerankScore?: number }>(
   products: T[],
