@@ -656,3 +656,103 @@ export function runCompareDecisionEngine(
 
   return serializeCompareDecisionResponse(response);
 }
+
+// Strengthen color intent for tops when inferred color is black.
+// This keeps charcoal/gray as fallback while ensuring exact black rises to the top.
+function applyTopBlackColorPriority<T extends { explain?: any; finalRelevance01?: number; rerankScore?: number }>(
+  products: T[],
+  detectionLabel: string,
+  inferredItemColor?: string | null,
+): T[] {
+  const isTop = /top|shirt|blouse|sweater|knitwear/i.test(detectionLabel || "");
+  const wantsBlack = (inferredItemColor || "").toLowerCase() === "black";
+  if (!isTop || !wantsBlack) return products;
+
+  for (const p of products) {
+    const ex = p.explain || {};
+    const matchedColor = String(ex.matchedColor || "").toLowerCase();
+    const colorTier = String(ex.colorTier || "").toLowerCase();
+    const colorCompliance = Number(ex.colorCompliance ?? 0);
+
+    const exactBlack = matchedColor === "black" && colorTier === "exact";
+    const isCharcoal = matchedColor === "charcoal";
+    const isGray = matchedColor === "gray" || matchedColor === "grey";
+
+    let delta = 0;
+    if (exactBlack) {
+      // Strong boost for true black
+      delta += 0.07 + Math.max(0, (colorCompliance - 0.9)) * 0.12;
+    } else if (isCharcoal) {
+      // Moderate boost for charcoal
+      delta += 0.035 + Math.max(0, (colorCompliance - 0.85)) * 0.07;
+    } else if (isGray) {
+      // Mild penalty for gray
+      delta -= 0.025;
+      if (colorTier === "bucket" || colorTier === "family") delta -= 0.015;
+    } else {
+      // Strong penalty for all other colors
+      delta -= 0.09;
+      if (colorTier === "bucket" || colorTier === "family") delta -= 0.03;
+    }
+
+    if (typeof p.finalRelevance01 === "number") {
+      p.finalRelevance01 = Math.max(0, Math.min(1, p.finalRelevance01 + delta));
+    }
+    if (typeof p.rerankScore === "number") {
+      p.rerankScore += delta * 100;
+    }
+
+    if (!p.explain) p.explain = {};
+    p.explain.topBlackPriorityDelta = delta;
+  }
+
+  products.sort((a, b) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
+  return products;
+}
+}
+// Generalized: Strengthen color intent for tops (or any garment) for any inferred color.
+function applyColorIntentPriority<T extends { explain?: any; finalRelevance01?: number; rerankScore?: number }>(
+  products: T[],
+  detectionLabel: string,
+  inferredItemColor?: string | null,
+): T[] {
+  if (!inferredItemColor) return products;
+  // Optionally restrict to tops: const isTop = /top|shirt|blouse|sweater|knitwear/i.test(detectionLabel || "");
+  // if (!isTop) return products;
+
+  const intentColor = (inferredItemColor || "").toLowerCase();
+
+  for (const p of products) {
+    const ex = p.explain || {};
+    const matchedColor = String(ex.matchedColor || "").toLowerCase();
+    const colorTier = String(ex.colorTier || "").toLowerCase();
+    const colorCompliance = Number(ex.colorCompliance ?? 0);
+
+    let delta = 0;
+    if (matchedColor === intentColor && colorTier === "exact") {
+      // Strong boost for exact color match
+      delta += 0.07 + Math.max(0, (colorCompliance - 0.9)) * 0.12;
+    } else if (colorTier === "family" || colorTier === "bucket") {
+      // Mild boost for similar color family/bucket
+      delta += 0.025 + Math.max(0, (colorCompliance - 0.8)) * 0.05;
+    } else {
+      // Strong penalty for unrelated colors
+      delta -= 0.09;
+      if (colorTier !== "none") delta -= 0.03;
+    }
+
+    if (typeof p.finalRelevance01 === "number") {
+      p.finalRelevance01 = Math.max(0, Math.min(1, p.finalRelevance01 + delta));
+    }
+    if (typeof p.rerankScore === "number") {
+      p.rerankScore += delta * 100;
+    }
+
+    if (!p.explain) p.explain = {};
+    p.explain.colorIntentPriorityDelta = delta;
+  }
+  products.sort((a, b) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
+  return products;
+}
+// In the per-detection ranking flow, after base scoring and before final slicing/return:
+// products = applyTopBlackColorPriority(products, detection.label, inferredColorForThisDetection);

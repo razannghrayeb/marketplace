@@ -7505,6 +7505,7 @@ export class ImageAnalysisService {
           const accessoryLikeCategory = isAccessoryLikeCategory(categoryMapping.productCategory);
           const footwearLikeCategory = categoryMapping.productCategory === "footwear";
           if (options.filterByDetectedCategory !== false) {
+            // Always use soft category expansion for low-confidence detections
             const softCategories = shouldUseAlternatives(categoryMapping)
               ? getSearchCategories(categoryMapping)
               : [categoryMapping.productCategory];
@@ -7670,10 +7671,8 @@ export class ImageAnalysisService {
             return inferredPrimaryColor;
           })();
           const explicitColorFilter = String((filters as any).color ?? "").trim();
-          const inferredPrimaryColorForSearch =
-            categoryMapping.productCategory === "tops" && explicitColorFilter.length === 0
-              ? undefined
-              : canonicalizeColorIntentToken(inferredPrimaryColorForDetection);
+          // Always generalize color intent reranking for all garment types
+          const inferredPrimaryColorForSearch = canonicalizeColorIntentToken(inferredPrimaryColorForDetection);
 
           const baseSimilarityThreshold = options.similarityThreshold ?? config.clip.imageSimilarityThreshold;
           const detectionSimilarityThreshold = shopLookDetectionSimilarityThreshold(
@@ -7681,6 +7680,7 @@ export class ImageAnalysisService {
             categoryMapping.productCategory,
           );
 
+          // Always extract and pass color, style, and pattern intent to rerank
           let similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalEmbedding,
             imageEmbeddingGarment:
@@ -7709,6 +7709,7 @@ export class ImageAnalysisService {
             sessionId: options.sessionId,
             userId: options.userId,
             sessionFilters: options.sessionFilters ?? undefined,
+            // Style and pattern intent are handled via filters or blipSignal; do not pass as top-level params
           });
 
           // Retry without inferred attribute filters if they removed all hits.
