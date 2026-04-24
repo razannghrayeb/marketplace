@@ -3090,7 +3090,26 @@ function imageKnnTimeoutMs(detectionScoped = false): number {
   }
   const raw = Number(process.env.SEARCH_IMAGE_KNN_TIMEOUT_MS);
   if (Number.isFinite(raw) && raw >= 500) return Math.min(120_000, Math.floor(raw));
-  return detectionScoped ? 8_000 : 12_000;
+  return detectionScoped ? 15_000 : 12_000;
+}
+
+function imageDetectionAudienceFilterEnabled(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_DETECTION_AUDIENCE_FILTER ?? "1").toLowerCase().trim();
+  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
+}
+
+function imageDetectionInferredColorGateMinConfidence(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_INFERRED_COLOR_HARD_GATE_MIN_CONFIDENCE ?? "0.9");
+  if (!Number.isFinite(raw)) return 0.9;
+  return Math.max(0.65, Math.min(0.99, raw));
+}
+
+function imageDetectionFinalAcceptFloor(category: string): number {
+  const c = String(category ?? "").toLowerCase().trim();
+  if (c === "tops") return 0.14;
+  if (c === "bottoms") return 0.16;
+  if (c === "dresses") return 0.16;
+  return 0.2;
 }
 
 /**
@@ -3106,7 +3125,7 @@ function imageExactCosineRerankEnabled(): boolean {
 async function opensearchImageKnnHits(
   body: Record<string, unknown>,
   timeoutMs: number,
-): Promise<any[]> {
+): Promise<{ hits: any[]; timedOut: boolean }> {
   const startedAt = Date.now();
   // This cluster rejects per-query `ef_search`; sanitize every request to keep
   // the primary pipeline stable and avoid fail-then-retry behavior.
@@ -3167,7 +3186,7 @@ async function opensearchImageKnnHits(
       });
     }
 
-    return hits;
+    return { hits, timedOut: false };
   } catch (err: any) {
     const errText = String(err?.message ?? "");
     const responseReason = String(err?.meta?.body?.error?.reason ?? "");
@@ -3207,7 +3226,7 @@ async function opensearchImageKnnHits(
             took: r.body?.took ?? null,
           });
         }
-        return hits;
+        return { hits, timedOut: false };
       } catch {
         // Fall through to the standard error logging below.
       }
@@ -3226,7 +3245,35 @@ async function opensearchImageKnnHits(
         timeoutMs,
         elapsedMs: Date.now() - startedAt,
       });
-      return [];
+      const retryTimeoutMs = Math.min(120_000, Math.floor(timeoutMs * 1.5));
+      try {
+        const retry = await osClient.search(
+          {
+            index: config.opensearch.index,
+            body: bodyToSend as any,
+            timeout: `${Math.max(1, Math.ceil(retryTimeoutMs / 1000))}s`,
+          },
+          {
+            requestTimeout: retryTimeoutMs,
+            maxRetries: 0,
+          },
+        );
+        const retryHits = (retry.body?.hits?.hits ?? []) as any[];
+        console.warn("[image-knn] timeout-retry succeeded", {
+          index: config.opensearch.index,
+          field: knnField ?? null,
+          vectorLength: queryVector?.length ?? null,
+          timeoutMs,
+          retryTimeoutMs,
+          hits: retryHits.length,
+          elapsedMs: Date.now() - startedAt,
+          took: retry.body?.took ?? null,
+        });
+        return { hits: retryHits, timedOut: false };
+      } catch {
+        // Both attempts timed out — surface the signal so callers can skip recovery branches.
+        return { hits: [], timedOut: true };
+      }
     }
 
     console.error("[image-knn] opensearch error", {
@@ -3240,7 +3287,7 @@ async function opensearchImageKnnHits(
       responseBody: err?.meta?.body ?? null,
     });
 
-    return [];
+    return { hits: [], timedOut: false };
   }
 }
 
@@ -3438,7 +3485,7 @@ export async function searchByImageWithSimilarity(
   const filtersAny = filters as { gender?: string; color?: string; softColor?: string; style?: string; softStyle?: string };
   const queryGenderNormForPost = normalizeQueryGender(filtersAny.gender);
   const visualPrimaryBroad = isBroadImageSearchVisualPrimaryRanking(filters, imageSearchTextQuery);
-  if (filtersAny.gender && !detectionScoped) {
+  if (filtersAny.gender && (!detectionScoped || imageDetectionAudienceFilterEnabled())) {
     const rawGender = String(filtersAny.gender).toLowerCase().trim();
     const g = normalizeQueryGender(rawGender) ?? rawGender;
     const normalizedAgeGroup = normalizeAudienceAgeGroupValue((filters as { ageGroup?: string }).ageGroup);
@@ -3514,7 +3561,7 @@ export async function searchByImageWithSimilarity(
   }
   {
     const normalizedAgeGroup = normalizeAudienceAgeGroupValue((filters as { ageGroup?: string }).ageGroup);
-    if (normalizedAgeGroup === "kids" && !detectionScoped) {
+    if (normalizedAgeGroup === "kids" && (!detectionScoped || imageDetectionAudienceFilterEnabled())) {
       filter.push({
         bool: {
           should: [
@@ -3563,7 +3610,7 @@ export async function searchByImageWithSimilarity(
       },
     },
   ];
-  if (cat && !detectionScoped) {
+  if (cat && (!detectionScoped || forceHardCategoryFilter)) {
     const hardCategoryOnly = buildHardCategoryFilterClause(cat);
     if (hardCategoryOnly) relaxedKnnFilter.push(hardCategoryOnly);
   }
@@ -3722,6 +3769,7 @@ export async function searchByImageWithSimilarity(
 
   let knnFieldResolved: string;
   let hits: any[];
+  let knnTimedOut = false;
   /** Query vector for the active single kNN field (dual fusion uses global + garment separately). */
   let queryVector: number[] = imageEmbedding;
 
@@ -3759,7 +3807,8 @@ export async function searchByImageWithSimilarity(
       opensearchImageKnnHits(bodyGlobal, knnTimeoutMs),
       opensearchImageKnnHits(bodyGarment, knnTimeoutMs),
     ]);
-    hits = mergeDualKnnHitsForImageSearch(hg, hgr, imageEmbedding, garmentQueryVector!);
+    if (hg.timedOut || hgr.timedOut) knnTimedOut = true;
+    hits = mergeDualKnnHitsForImageSearch(hg.hits, hgr.hits, imageEmbedding, garmentQueryVector!);
   } else {
     knnFieldResolved = resolveImageSearchKnnField(knnFieldParam);
     queryVector = imageEmbedding;
@@ -3821,8 +3870,9 @@ export async function searchByImageWithSimilarity(
         opensearchImageKnnHits(knnBody, knnTimeoutMs),
         opensearchImageKnnHits(knnBodyEmbeddingFallback, knnTimeoutMs),
       ]);
-      const garmentCount = Array.isArray(garmentHits) ? garmentHits.length : 0;
-      const embeddingCount = Array.isArray(embeddingHits) ? embeddingHits.length : 0;
+      if (garmentHits.timedOut || embeddingHits.timedOut) knnTimedOut = true;
+      const garmentCount = garmentHits.hits.length;
+      const embeddingCount = embeddingHits.hits.length;
       const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
       const isTopBottomDetection =
         detectionCategoryNorm === "tops" || detectionCategoryNorm === "bottoms";
@@ -3850,7 +3900,7 @@ export async function searchByImageWithSimilarity(
           );
 
         if (shouldMergeEmbeddingFallback) {
-          hits = mergeKnnHitsByProductId(garmentHits, embeddingHits, retrievalK);
+          hits = mergeKnnHitsByProductId(garmentHits.hits, embeddingHits.hits, retrievalK);
           if (breakdownDebug) {
             console.warn("[image-knn] low garment recall; merged embedding fallback", {
               garmentCount,
@@ -3862,7 +3912,7 @@ export async function searchByImageWithSimilarity(
             });
           }
         } else {
-          hits = garmentHits;
+          hits = garmentHits.hits;
         }
       } else {
         if (breakdownDebug) {
@@ -3872,10 +3922,12 @@ export async function searchByImageWithSimilarity(
         }
         knnFieldResolved = "embedding";
         queryVector = imageEmbedding;
-        hits = embeddingHits;
+        hits = embeddingHits.hits;
       }
     } else {
-      hits = await opensearchImageKnnHits(knnBody, knnTimeoutMs);
+      const knnResult = await opensearchImageKnnHits(knnBody, knnTimeoutMs);
+      if (knnResult.timedOut) knnTimedOut = true;
+      hits = knnResult.hits;
     }
 
     if (imageExactCosineRerankEnabled() && Array.isArray(hits)) {
@@ -3920,7 +3972,9 @@ export async function searchByImageWithSimilarity(
         },
       },
     };
-    hits = await opensearchImageKnnHits(knnBodyFallback, knnTimeoutMs);
+    const knnFallbackResult = await opensearchImageKnnHits(knnBodyFallback, knnTimeoutMs);
+    if (knnFallbackResult.timedOut) knnTimedOut = true;
+    hits = knnFallbackResult.hits;
     if (imageExactCosineRerankEnabled() && Array.isArray(hits)) {
       for (const hit of hits) {
         const docVec = asFloatVector(hit?._source?.[knnFieldResolved], queryVector.length);
@@ -3982,7 +4036,7 @@ export async function searchByImageWithSimilarity(
         opensearchImageKnnHits(bodyGlobalRelaxed, relaxedTimeoutMs),
         opensearchImageKnnHits(bodyGarmentRelaxed, relaxedTimeoutMs),
       ]);
-      relaxedHits = mergeDualKnnHitsForImageSearch(hgRelaxed, hgrRelaxed, imageEmbedding, garmentQueryVector!);
+      relaxedHits = mergeDualKnnHitsForImageSearch(hgRelaxed.hits, hgrRelaxed.hits, imageEmbedding, garmentQueryVector!);
     } else {
       const relaxedBody = {
         size: retrievalK,
@@ -4001,7 +4055,8 @@ export async function searchByImageWithSimilarity(
           },
         },
       };
-      relaxedHits = await opensearchImageKnnHits(relaxedBody, relaxedTimeoutMs);
+      const relaxedResult = await opensearchImageKnnHits(relaxedBody, relaxedTimeoutMs);
+      relaxedHits = relaxedResult.hits;
     }
 
     if (Array.isArray(relaxedHits) && relaxedHits.length > 0) {
@@ -4531,6 +4586,9 @@ export async function searchByImageWithSimilarity(
     (desiredProductTypes.length > 0 && !desiredProductTypes.some((t) => athleticIntentRe.test(String(t))));
   const shouldSuppressAthleticCandidates =
     hasDetectionAnchoredTypeIntent &&
+    // Only suppress athletic candidates when detection confidence is reliable.
+    // Low-confidence detections produce noisy style signals that over-constrain recall.
+    (params.detectionYoloConfidence ?? 0) >= 0.60 &&
     (params.detectionProductCategory === "tops" ||
       params.detectionProductCategory === "bottoms" ||
       params.detectionProductCategory === "outerwear") &&
@@ -4572,28 +4630,29 @@ export async function searchByImageWithSimilarity(
 
   // Non-explicit chromatic inferred color is often too sparse/noisy in catalog metadata.
   // Keep it as a ranking bias, but avoid hard-gating final relevance.
-  const suppressHardInferredColorGate =
-    !hasExplicitColorIntent &&
-    hasInferredColorSignal &&
-    inferredHasChromatic &&
-    (detectionCategoryNorm === "tops" ||
-      detectionCategoryNorm === "bottoms" ||
-      detectionCategoryNorm === "dresses" ||
-      detectionCategoryNorm === "outerwear");
-  const hasColorIntentForFinal =
-    hasExplicitColorIntent || (hasInferredColorSignal && !suppressHardInferredColorGate);
-  const hasInferredColorIntentForRescue = !hasExplicitColorIntent && hasInferredColorSignal;
-  const hasSoftColorIntentForRescue = !hasExplicitColorIntent && desiredColorsForRelevance.length > 0;
-  const strictInferredOnePieceColorGate =
+  const inferredColorGateSlotSafe =
+    detectionCategoryNorm === "tops" ||
+    detectionCategoryNorm === "bottoms" ||
+    detectionCategoryNorm === "dresses";
+  const inferredColorCanHardGateFinal =
     !hasExplicitColorIntent &&
     hasInferredColorSignal &&
     hasDetectionAnchoredTypeIntent &&
+    inferredColorGateSlotSafe &&
+    preferredInferredColorConfidence >= imageDetectionInferredColorGateMinConfidence();
+  const suppressHardInferredColorGate =
+    !hasExplicitColorIntent &&
+    hasInferredColorSignal &&
+    (!inferredColorCanHardGateFinal || inferredHasChromatic);
+  const hasColorIntentForFinal = hasExplicitColorIntent || inferredColorCanHardGateFinal;
+  const hasInferredColorIntentForRescue = !hasExplicitColorIntent && hasInferredColorSignal;
+  const hasSoftColorIntentForRescue = !hasExplicitColorIntent && desiredColorsForRelevance.length > 0;
+  const strictInferredOnePieceColorGate =
+    inferredColorCanHardGateFinal &&
     desiredProductTypes.some((t) => /\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(String(t).toLowerCase()));
   // Crop-dominant colors affect reranking but should not gate final relevance
   // unless we also have inferred semantic color evidence (e.g., BLIP "blue jeans").
-  const softColorBiasOnly =
-    (!hasExplicitColorIntent && hasCropColorSignal && !hasInferredColorSignal) ||
-    suppressHardInferredColorGate;
+  const softColorBiasOnly = !hasExplicitColorIntent && !inferredColorCanHardGateFinal;
 
   /**
    * When the user did not narrow the search (category / productTypes / text / explicit color),
@@ -5475,9 +5534,13 @@ export async function searchByImageWithSimilarity(
   }, 0);
   const hasStrongVisualEvidence =
     strongestVisualCandidate >= Math.max(0.7, similarityThreshold - 0.1);
-  let effectiveFinalAcceptMin = inferredColorSoftGateCategory
-    ? Math.min(finalAcceptMin, 0.28)
+  const detectionFinalAcceptFloor = hasDetectionAnchoredTypeIntent
+    ? imageDetectionFinalAcceptFloor(detectionCategoryNorm)
     : finalAcceptMin;
+  let effectiveFinalAcceptMin = Math.min(finalAcceptMin, detectionFinalAcceptFloor);
+  if (inferredColorSoftGateCategory) {
+    effectiveFinalAcceptMin = Math.min(effectiveFinalAcceptMin, 0.28);
+  }
   // Color-agnostic apparel protection:
   // In sparse candidate pools with strong visual evidence, avoid hard final-accept
   // cutoffs that collapse tops/bottoms to zero before category-aware rescue.
@@ -6973,6 +7036,35 @@ export async function searchByImageWithSimilarity(
   }
   const finalReturnedCount = results.length;
   const droppedByLimit = Math.max(0, countAfterDedupe - finalReturnedCount);
+  const topObs = results.slice(0, 10);
+  const colorComplianceAt10 =
+    topObs.length > 0
+      ? topObs.reduce(
+        (sum, p: any) => sum + Math.max(0, Math.min(1, Number((p.explain as any)?.colorCompliance ?? 0))),
+        0,
+      ) / topObs.length
+      : 0;
+  const detectionCategoryForObs = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  const crossCategoryLeakAt10 =
+    detectionCategoryForObs.length > 0 && topObs.length > 0
+      ? topObs.filter(
+        (p: any) =>
+          !passesStrictDetectionCategoryFamily(
+            p as unknown as Record<string, unknown>,
+            detectionCategoryForObs,
+          ),
+      ).length / topObs.length
+      : 0;
+  const detectionObservability = {
+    category: detectionCategoryForObs || undefined,
+    knn_hits: rawOpenSearchHitCount,
+    after_visual_gate: visualGatedHits.length,
+    after_final_gate: countAfterFinalAcceptMin,
+    zero_result_rate: finalReturnedCount > 0 ? 0 : 1,
+    color_compliance_at_10: Math.round(colorComplianceAt10 * 1000) / 1000,
+    cross_category_leak_at_10: Math.round(crossCategoryLeakAt10 * 1000) / 1000,
+    knn_timed_out: knnTimedOut,
+  };
 
   let related: ProductResult[] = [];
   if (includeRelated && pHash) {
@@ -7146,7 +7238,7 @@ export async function searchByImageWithSimilarity(
   return {
     results,
     related: related.length > 0 ? related : undefined,
-    meta: {
+    meta: ({
       relevance_intent: relevanceIntentDebug,
       main_path_strict: mainPathStrict,
       threshold: similarityThreshold,
@@ -7164,6 +7256,7 @@ export async function searchByImageWithSimilarity(
       below_final_relevance_gate: belowFinalRelevanceGate,
       relevance_gate_soft: false,
       image_knn_field: knnFieldResolved,
+      knn_timed_out: knnTimedOut ? 1 : 0,
       debug_raw_cosine_bypass_used: false,
       deep_fusion_enabled: imageDeepFusionEnabled(),
       deep_fusion_weight: imageDeepFusionWeight(),
@@ -7176,6 +7269,7 @@ export async function searchByImageWithSimilarity(
       variant_group_collapsing_applied: variantCollapsingApplied,
       variant_group_count: variantGroupCount,
       variant_group_representatives: variantRepresentativeCount,
+      detection_observability: detectionObservability,
       pipeline_counts: {
         exact_cosine_rerank: exactCosineRerank,
         dual_knn_fusion: useDualKnn,
@@ -7197,7 +7291,7 @@ export async function searchByImageWithSimilarity(
         dropped_by_limit: droppedByLimit,
         final_returned_count: finalReturnedCount,
       },
-    },
+    } as any),
   };
 }
 
@@ -7996,9 +8090,3 @@ export async function getCandidateScoresForProducts(
     },
   };
 }
-
-
-
-
-
-

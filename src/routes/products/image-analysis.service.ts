@@ -1232,11 +1232,30 @@ function shopLookPerDetectionConcurrency(detections?: Array<{ label: string; con
 
 /** Max search calls per detection (initial + retries/fallbacks). Default 3 to preserve recall on hard detections. */
 function shopLookMaxSearchCallsPerDetection(): number {
+  if (shopLookDeterministicTwoPassEnv()) return 2;
   const raw = Number(process.env.SEARCH_IMAGE_SHOP_MAX_SEARCH_CALLS ?? "3");
   if (!Number.isFinite(raw)) return 3;
   // A value of 1 collapses recall for hard categories (tops/bottoms/footwear) because
   // no retry/recovery path can run. Keep at least 2 calls to preserve pipeline robustness.
   return Math.max(2, Math.min(8, Math.floor(raw)));
+}
+
+function shopLookDeterministicTwoPassEnv(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_DETECTION_DETERMINISTIC_TWO_PASS ?? "1").toLowerCase().trim();
+  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
+}
+
+function shopLookDeterministicPassBMinResults(productCategory: string, perItemLimit: number): number {
+  const category = String(productCategory ?? "").toLowerCase().trim();
+  const base =
+    category === "tops"
+      ? Math.max(3, Math.floor(perItemLimit * 0.35))
+      : category === "bottoms"
+        ? Math.max(3, Math.floor(perItemLimit * 0.32))
+        : category === "dresses"
+          ? Math.max(2, Math.floor(perItemLimit * 0.28))
+          : Math.max(2, Math.floor(perItemLimit * 0.22));
+  return Math.max(1, Math.min(10, base));
 }
 
 function shopLookMainPathOnlyEnv(): boolean {
@@ -2265,19 +2284,26 @@ function dedupeDetectionsByCategoryHighestConfidence(detections: Detection[]): D
   }
 
   const shouldAllowMultiPerCategory = (category: string): boolean =>
-    category === "tops" || category === "bottoms";
+    category === "tops" || category === "bottoms" || category === "dresses";
 
   const maxKeepForCategory = (category: string): number => {
-    if (category === "tops") return 2;
+    if (category === "tops") {
+      const raw = Number(process.env.SEARCH_IMAGE_TOPS_MAX_DETECTIONS_KEEP ?? "4");
+      if (Number.isFinite(raw)) return Math.max(2, Math.min(5, Math.floor(raw)));
+      return 3;
+    }
     if (category === "bottoms") return 2;
-  if (category === "dresses") return 2;
+    if (category === "dresses") return 2;
     return 1;
   };
 
-  const isDistinctDetection = (kept: Detection[], candidate: Detection): boolean => {
+  const isDistinctDetection = (kept: Detection[], candidate: Detection, category: string): boolean => {
+    // Tops often have multiple layered/overlapping garments (jacket over shirt, cardigan over tee).
+    // Use a tighter IoU threshold for tops so overlapping-but-distinct garments are kept.
+    const iouThreshold = category === "tops" ? 0.35 : 0.42;
     for (const existing of kept) {
       const iou = boundingBoxIou(existing.box, candidate.box);
-      if (iou >= 0.42) return false;
+      if (iou >= iouThreshold) return false;
     }
     return true;
   };
@@ -2302,7 +2328,7 @@ function dedupeDetectionsByCategoryHighestConfidence(detections: Detection[]): D
           kept.push(candidate);
           break;
         }
-        if (isDistinctDetection(kept, candidate)) {
+        if (isDistinctDetection(kept, candidate, category)) {
           kept.push(candidate);
         }
       }
@@ -2645,7 +2671,7 @@ function applyDetectionCategoryGuard(
       return !isAccessoryLikeCategory(categoryMapping.productCategory);
     }
 
-    const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, term));
+    const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, String(term)));
     if (!allowByTerm) {
       // Apparel detections are sometimes under-described in catalog metadata
       // (for example, a true dress can be indexed with a generic fashion title).
@@ -5017,7 +5043,8 @@ export class ImageAnalysisService {
         const detectionTaskStartedAt = Date.now();
         let detectionSearchTotalMs = 0;
         let detectionSearchCalls = 0;
-        let detectionSearchCallLimit = mainPathOnly ? 1 : maxSearchCallsPerDetection;
+        const deterministicTwoPass = shopLookDeterministicTwoPassEnv();
+        let detectionSearchCallLimit = deterministicTwoPass ? 2 : (mainPathOnly ? 1 : maxSearchCallsPerDetection);
         const searchReasonsExecuted: string[] = [];
         const searchReasonsSkipped: string[] = [];
         let lastSearchResult: Awaited<ReturnType<typeof searchByImageWithSimilarity>> | null = null;
@@ -5890,6 +5917,20 @@ export class ImageAnalysisService {
           });
           const searchFirstMs = Date.now() - searchFirstStartedAt;
           detectionSearchFirstDurations.push(searchFirstMs);
+
+          // If the KNN call itself timed out (both primary and retry failed), the root cause
+          // is infrastructure pressure — not a filter/precision issue. All downstream recovery
+          // branches would face the same timeout, so skip them and surface the degraded state.
+          const firstPassKnnTimedOut = Boolean((similarResult as any)?.meta?.knn_timed_out);
+          if (firstPassKnnTimedOut) {
+            if (hotPathDebug || true) {
+              console.warn(
+                `[detection-knn-timeout] label="${label}" category="${categoryMapping.productCategory}" skipping recovery chain — root cause is KNN timeout`,
+              );
+            }
+            // Leave similarResult as-is (empty) and fall through to the empty/skip logic below.
+          }
+
           const slowFirstSearch =
             searchFirstMs >= shopLookSlowFirstSearchMsThreshold();
           const slowSearchSkipRecoveryMinResults =
@@ -5898,13 +5939,78 @@ export class ImageAnalysisService {
             similarResult.results.length >= slowSearchSkipRecoveryMinResults;
           if (slowFirstSearch && sufficientFirstPassResults) {
             // Freeze additional retries/recoveries for this detection only.
-            detectionSearchCallLimit = detectionSearchCalls;
+            // In deterministic two-pass mode, do NOT pin the limit — Pass B must still be
+            // available when results are below the Pass B minimum threshold.
+            if (!deterministicTwoPass) {
+              detectionSearchCallLimit = detectionSearchCalls;
+            }
             if (hotPathDebug) {
               console.info(
-                `[detection-search-adaptive-limit] label="${label}" search_first_ms=${searchFirstMs} first_count=${similarResult.results.length} limit=${detectionSearchCallLimit}`,
+                `[detection-search-adaptive-limit] label="${label}" search_first_ms=${searchFirstMs} first_count=${similarResult.results.length} two_pass=${deterministicTwoPass} limit=${deterministicTwoPass ? detectionSearchCallLimit : detectionSearchCalls}`,
               );
             }
           }
+
+          // These are assigned inside the else branch below; declare them here so they
+          // remain in scope after the if/else for the return object and debug fields.
+          let knnCandidateCount = similarResult.results.length;
+          let precisionSafeResults = similarResult.results;
+          let categorySafeResults = similarResult.results;
+          let sleeveSafeResults = similarResult.results;
+          let formalitySafeResults = similarResult.results;
+          let athleticSafeResults = similarResult.results;
+
+          if (!firstPassKnnTimedOut && deterministicTwoPass) {
+            const passBMinResults = shopLookDeterministicPassBMinResults(
+              categoryMapping.productCategory,
+              resolvedLimitPerItem,
+            );
+            if (similarResult.results.length < passBMinResults && detectionSearchCalls < detectionSearchCallLimit) {
+              const categoryNorm = String(categoryMapping.productCategory ?? "").toLowerCase().trim();
+              const passBCategoryRelax =
+                categoryNorm === "tops" || categoryNorm === "bottoms" || categoryNorm === "dresses";
+              const passBFilters = passBCategoryRelax
+                ? (() => {
+                  const clone = { ...(filters as any) };
+                  delete clone.category;
+                  return clone;
+                })()
+                : filters;
+              const passBKnnField = passBCategoryRelax
+                ? knnFieldUsed
+                : (knnFieldUsed === "embedding_garment" ? "embedding" : "embedding_garment");
+
+              similarResult = await runDetectionSearch("deterministic_pass_b", {
+                imageEmbedding: finalEmbedding,
+                imageEmbeddingGarment:
+                  Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+                    ? finalGarmentEmbedding
+                    : undefined,
+                imageBuffer: clipBuffer,
+                pHash: sourceImagePHash,
+                detectionYoloConfidence: detection.confidence,
+                detectionProductCategory: categoryMapping.productCategory,
+                filters: passBFilters,
+                softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
+                limit: detectionRetrievalLimit,
+                similarityThreshold: Math.max(0.2, detectionSimilarityThreshold - 0.03),
+                includeRelated: false,
+                predictedCategoryAisles: passBCategoryRelax ? undefined : predictedCategoryAisles,
+                knnField: passBKnnField,
+                forceHardCategoryFilter: passBCategoryRelax ? false : forceHardCategoryFilterUsed,
+                relaxThresholdWhenEmpty: true,
+                blipSignal: detectionBlipSignal,
+                inferredPrimaryColor: inferredPrimaryColorForSearch,
+                inferredColorKey: itemColorKey,
+                inferredColorsByItem,
+                inferredColorsByItemConfidence,
+                debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+                sessionId: options.sessionId,
+                userId: options.userId,
+                sessionFilters: options.sessionFilters ?? undefined,
+              });
+            }
+          } else {
 
           // If BLIP-derived audience/style filters are too strict and remove all hits,
           // retry once without those attribute filters (but keep category/productTypes).
@@ -6230,9 +6336,9 @@ export class ImageAnalysisService {
             console.log(`[skip-trace] detection="${label}" after_knn_search=${similarResult.results.length}`);
           }
 
-          const knnCandidateCount = similarResult.results.length;
+          knnCandidateCount = similarResult.results.length;
 
-          const precisionSafeResults = applyShopLookVisualPrecisionGuard(
+          precisionSafeResults = applyShopLookVisualPrecisionGuard(
             similarResult.results,
             categoryMapping.productCategory === "footwear" && (detection.area_ratio ?? 0) <= 0.02
               ? shopLookTinyFootwearRecoveryThreshold(detectionSimilarityThreshold)
@@ -6244,14 +6350,14 @@ export class ImageAnalysisService {
             console.log(`[skip-trace] detection="${label}" after_precision_guard=${precisionSafeResults.length} (filtered_by=${similarResult.results.length - precisionSafeResults.length})`);
           }
 
-          const categorySafeResults = applyDetectionCategoryGuard(
+          categorySafeResults = applyDetectionCategoryGuard(
             precisionSafeResults,
             detection.label,
             categoryMapping,
             String((filters as any).gender ?? ""),
           );
 
-          const sleeveSafeResults = applySleeveIntentGuard({
+          sleeveSafeResults = applySleeveIntentGuard({
             products: categorySafeResults,
             detectionLabel: detection.label,
             categoryMapping,
@@ -6266,9 +6372,9 @@ export class ImageAnalysisService {
           if (minFormality && hotPathDebug) {
             console.log(`[formality-apply-main] detection="${detection.label}" minFormality=${minFormality} incoming=${sleeveSafeResults.length}`);
           }
-          const formalitySafeResults = applyFormalityFilter(sleeveSafeResults, minFormality);
+          formalitySafeResults = applyFormalityFilter(sleeveSafeResults, minFormality);
 
-          const athleticSafeResults = applyAthleticMismatchGuard({
+          athleticSafeResults = applyAthleticMismatchGuard({
             products: formalitySafeResults,
             detectionLabel: label,
             productCategory: categoryMapping.productCategory,
@@ -7008,6 +7114,7 @@ export class ImageAnalysisService {
                 };
               }
             }
+          }
           }
 
           if (similarResult.results.length === 0 && !includeEmptyDetectionGroups) {
@@ -8955,9 +9062,3 @@ export function getImageAnalysisService(): ImageAnalysisService {
 }
 
 export default ImageAnalysisService;
-
-
-
-
-
-
