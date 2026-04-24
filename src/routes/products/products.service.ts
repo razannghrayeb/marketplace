@@ -1247,14 +1247,27 @@ function passesStrictDetectionCategoryFamily(
   const d = String(detectionProductCategory || "").toLowerCase().trim();
   if (!isStrictDetectionCategory(d)) return true;
 
-  const blob = productCategoryFamilyBlob(product);
+  const strongBlob = [
+    product.category,
+    product.category_canonical,
+    product.title,
+    ...(Array.isArray(product.product_types) ? product.product_types : []),
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x).toLowerCase())
+    .join(" ");
+  const descBlob = String(product.description ?? "").toLowerCase();
+  const blob = `${strongBlob} ${descBlob}`.trim();
   if (!blob.trim()) return false;
 
   const hasFootwear = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|flat|flats|oxford|oxfords|pump|pumps|mule|mules|clog|clogs)\b/.test(blob);
   const hasTop = /\b(top|tops|shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|tank|cami|camisole|sweater|cardigan|cardigans|hoodie|pullover|jumper|polo|henley|tunic|knitwear|bodysuit|bodysuits|overshirt|overshirts|jersey|jerseys|crop\s*top|button\s*down|button-down|blazer|blazers|sport coat|dress jacket|suit jacket|waistcoat|vest|vests)\b/.test(blob);
+  const hasTopStrong = /\b(top|tops|shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|tank|cami|camisole|sweater|cardigan|cardigans|hoodie|pullover|jumper|polo|henley|tunic|knitwear|bodysuit|bodysuits|overshirt|overshirts|jersey|jerseys|crop\s*top|button\s*down|button-down|blazer|blazers|sport coat|dress jacket|suit jacket|waistcoat|vest|vests)\b/.test(strongBlob);
   const hasOuterwear = /\b(outerwear|outwear|jacket|jackets|coat|coats|blazer|blazers|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers)\b/.test(blob);
   const hasBottom = /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|skirt|skirts|legging|leggings|jogger|joggers|sweatpants?|slack|slacks|culotte|culottes|palazzo|chino|chinos|cargo|track\s*pants?)\b/.test(blob);
+  const hasBottomStrong = /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|skirt|skirts|legging|leggings|jogger|joggers|sweatpants?|slack|slacks|culotte|culottes|palazzo|chino|chinos|cargo|track\s*pants?)\b/.test(strongBlob);
   const hasDressOnePiece = /\b(dress|dresses|gown|gowns|frock|frocks|sundress|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|abaya|abayas|kaftan|kaftans|caftan|caftans)\b/.test(blob);
+  const hasDressStrong = /\b(dress|dresses|gown|gowns|frock|frocks|sundress|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|abaya|abayas|kaftan|kaftans|caftan|caftans)\b/.test(strongBlob);
   const hasAccessory = /\b(bag|bags|wallet|wallets|belt|belts|hat|hats|cap|caps|jewelry|jewellery|ring|rings|earring|earrings|necklace|necklaces|bracelet|bracelets|watch|watches|sunglasses|glasses|scarf|scarves)\b/.test(blob);
 
   if (d === "footwear") {
@@ -1262,13 +1275,13 @@ function passesStrictDetectionCategoryFamily(
   }
 
   if (d === "dresses") {
-    if (!hasDressOnePiece && !isOnePieceCatalogCandidate(product)) return false;
+    if (!hasDressStrong && !hasDressOnePiece && !isOnePieceCatalogCandidate(product)) return false;
     if (hasFootwear || hasAccessory) return false;
     return true;
   }
 
   if (d === "tops") {
-    if (!hasTop) return false;
+    if (!hasTopStrong && !hasTop) return false;
     if (hasFootwear || hasAccessory) return false;
     return true;
   }
@@ -1280,7 +1293,8 @@ function passesStrictDetectionCategoryFamily(
   }
 
   if (d === "bottoms") {
-    if (!hasBottom) return false;
+    const bottomLikeWithoutStrongCue = hasBottom && !hasBottomStrong && (hasTopStrong || hasDressStrong || hasOuterwear);
+    if ((!hasBottomStrong && !hasBottom) || bottomLikeWithoutStrongCue) return false;
     if (hasFootwear || hasAccessory) return false;
     return true;
   }
@@ -2774,6 +2788,31 @@ function collectInferredColorTokens(
     // (e.g. trousers color leaking into top query). If preferred slot has no usable
     // color signal, fall back to no inferred-color gating.
     if (isApparelLike) return [];
+  }
+
+  if (isApparelLike && inferredByItem && typeof inferredByItem === "object") {
+    const itemEntries = Object.entries(inferredByItem);
+    if (itemEntries.length > 0) {
+      const categoryKeyRe = /\b(top|shirt|blouse|tee|t-?shirt|sweater|hoodie|cardigan|jacket|coat|outerwear|trouser|pant|jean|skirt|dress|gown|short|legging|cargo|chino)\b/i;
+      const categoryMatched = itemEntries
+        .map(([key, value]) => {
+          const conf = Number(inferredByItemConfidence?.[key] ?? 0);
+          const raw = String(value ?? "").toLowerCase().trim();
+          const norm = normalizeColorToken(raw) ?? raw;
+          return { key, norm, conf };
+        })
+        .filter((x) => categoryKeyRe.test(x.key) && Boolean(x.norm) && Number.isFinite(x.conf) && x.conf >= colorConfidenceThreshold())
+        .sort((a, b) => b.conf - a.conf);
+
+      if (categoryMatched.length > 0) {
+        return [categoryMatched[0].norm];
+      }
+
+      // Avoid cross-item color contamination when the preferred slot is missing/weak.
+      if (itemEntries.length > 1 || preferredKey) {
+        return [];
+      }
+    }
   }
 
   const scored = collectConfidentColorTokenMap({
@@ -4729,13 +4768,23 @@ export async function searchByImageWithSimilarity(
   const inferredColorGateSlotSafe =
     detectionCategoryNorm === "tops" ||
     detectionCategoryNorm === "bottoms" ||
-    detectionCategoryNorm === "dresses";
+    detectionCategoryNorm === "dresses" ||
+    detectionCategoryNorm === "footwear" ||
+    detectionCategoryNorm === "bags";
+  const inferredColorGateMinConfidence =
+    detectionCategoryNorm === "footwear" || detectionCategoryNorm === "bags"
+      ? Math.max(imageDetectionInferredColorGateMinConfidence(), 0.74)
+      : imageDetectionInferredColorGateMinConfidence();
   const inferredColorCanHardGateFinal =
     !hasExplicitColorIntent &&
     hasInferredColorSignal &&
     hasDetectionAnchoredTypeIntent &&
     inferredColorGateSlotSafe &&
-    preferredInferredColorConfidence >= imageDetectionInferredColorGateMinConfidence();
+    preferredInferredColorConfidence >= inferredColorGateMinConfidence &&
+    (
+      (detectionCategoryNorm !== "footwear" && detectionCategoryNorm !== "bags") ||
+      hasStrongSlotAnchoredItemColor
+    );
   const suppressHardInferredColorGate =
     !hasExplicitColorIntent &&
     hasInferredColorSignal &&
@@ -5259,6 +5308,8 @@ export async function searchByImageWithSimilarity(
       const categoryComp = Math.max(0, Math.min(1, (comp as any).categoryScore ?? 0));
       const taxonomyComp = Math.max(0, Math.min(1, (comp as any).taxonomyMatch ?? 0));
       const audienceComp = Math.max(0, Math.min(1, comp.audienceCompliance ?? 0));
+      const materialComp = Math.max(0, Math.min(1, materialSimById.get(idStr) ?? 0));
+      const colorCompTop = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
       const structuralTopComp = Math.max(typeComp, topPartComp, categoryComp, taxonomyComp);
       const strongTopEvidence =
         ((comp.exactTypeScore ?? 0) >= 1 || structuralTopComp >= 0.34) &&
@@ -5266,11 +5317,22 @@ export async function searchByImageWithSimilarity(
         (comp.crossFamilyPenalty ?? 0) < 0.52;
       if (strongTopEvidence) {
         let blendedTopMain =
-          0.58 * visualComp +
-          0.22 * structuralTopComp +
+          0.5 * visualComp +
+          0.2 * structuralTopComp +
           0.1 * Math.max(sleeveComp, topPartComp) +
-          0.06 * Math.max(0, Math.min(1, comp.styleCompliance ?? 0)) +
+          0.08 * Math.max(0, Math.min(1, comp.styleCompliance ?? 0)) +
+          0.08 * materialComp +
           0.04 * audienceComp;
+
+        if (hasColorPreferenceForRanking) {
+          blendedTopMain =
+            0.46 * visualComp +
+            0.18 * structuralTopComp +
+            0.16 * colorCompTop +
+            0.1 * Math.max(sleeveComp, topPartComp) +
+            0.06 * Math.max(0, Math.min(1, comp.styleCompliance ?? 0)) +
+            0.04 * materialComp;
+        }
         const weakTopStructure =
           (comp.exactTypeScore ?? 0) < 1 &&
           structuralTopComp < 0.46 &&
@@ -5361,29 +5423,36 @@ export async function searchByImageWithSimilarity(
           return 0.84;
         })()
         : 0;
+      const ultraNearDuplicate = rawVisual >= 0.985;
       const typeOk =
         typeMatch ||
         (comp.productTypeCompliance ?? 0) >= explicitIntentTypeFloor ||
-        (hasExplicitCategoryFilter && (comp.categoryRelevance01 ?? 0) >= explicitIntentCategoryFloor);
+        (hasExplicitCategoryFilter && (comp.categoryRelevance01 ?? 0) >= explicitIntentCategoryFloor) ||
+        (ultraNearDuplicate && (comp.categoryRelevance01 ?? 0) >= 0.9);
       const hasTypeIntentHere = (relevanceIntent.desiredProductTypes?.length ?? 0) > 0;
       const nearIdenticalColorCompliance = Number(comp.colorCompliance ?? 0);
+      const nearIdenticalHasColorIntent =
+        hasColorIntentForFinal ||
+        (hasColorPreferenceForRanking && hasDetectionAnchoredTypeIntent);
       // Gate: explicit color requires strong compliance; inferred color applies a softer gate
       // so wrong-color near-duplicates can't trivially override correct-color lower-cosine matches.
-      const nearIdenticalPassesColorGate = !hasColorIntentForFinal
+      const nearIdenticalPassesColorGate = !nearIdenticalHasColorIntent
         ? true
         : hasExplicitColorIntent
           ? nearIdenticalColorCompliance >= 0.4
           : hasInferredColorSignal
-            ? nearIdenticalColorCompliance >= 0.15
+            ? nearIdenticalColorCompliance >= (isFootwearDetectionIntent || detectionCategoryNorm === "bags" ? 0.22 : 0.18)
             : true;
       if (!crossBlocked && (!hasTypeIntentHere || typeOk) && nearIdenticalPassesColorGate) {
         // Damp the near-identical floor by color compliance when color intent is active.
         // Without damping, a wrong-color product with slightly higher CLIP cosine outranks
         // a correctly-colored product (the "Mint Sweater beats Dark Grey" bug).
-        const colorDampedRaw = hasColorIntentForFinal
+        const colorDampedRaw = nearIdenticalHasColorIntent
           ? rawVisual * (hasExplicitColorIntent
-              ? 0.60 + 0.40 * nearIdenticalColorCompliance
-              : 0.70 + 0.30 * nearIdenticalColorCompliance)
+              ? 0.55 + 0.45 * nearIdenticalColorCompliance
+              : (isFootwearDetectionIntent || detectionCategoryNorm === "bags")
+                ? 0.58 + 0.42 * nearIdenticalColorCompliance
+                : 0.66 + 0.34 * nearIdenticalColorCompliance)
           : rawVisual;
         comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, colorDampedRaw));
         finalScoreSourceById.set(idStr, "near_identical_floor");
@@ -5819,7 +5888,7 @@ export async function searchByImageWithSimilarity(
           const minAudienceCompliance = filtersAny.gender ? 0.75 : 0.55;
           if ((comp.audienceCompliance ?? 1) < minAudienceCompliance) return false;
           if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
-          const fallbackTypeFloor = params.detectionProductCategory === "tops" ? 0.14 : 0.22;
+          const fallbackTypeFloor = params.detectionProductCategory === "tops" ? 0.14 : 0.2;
           if ((comp.exactTypeScore ?? 0) < 1 && (comp.productTypeCompliance ?? 0) < fallbackTypeFloor) return false;
           if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < fallbackSleeveMin) return false;
           if (hasExplicitColorIntent && (comp.colorCompliance ?? 0) < 0.18) return false;
@@ -6163,7 +6232,7 @@ export async function searchByImageWithSimilarity(
   if (hasExplicitColorIntent && desiredColorsForRelevance.length > 0) {
     const strictColorPost = String(process.env.SEARCH_COLOR_POSTFILTER_STRICT ?? "1").toLowerCase() !== "0";
     const explicitColorCategory = String(params.detectionProductCategory ?? "").toLowerCase();
-    const minExplicitColorCompliance = explicitColorCategory === "bags" ? 0.2 : 0;
+    const minExplicitColorCompliance = explicitColorCategory === "bags" ? 0.35 : 0;
     const maxImgConfHits = Math.max(
       0,
       ...rankedHits.map((h: any) => Number(h?._source?.color_confidence_image) || 0),
@@ -6200,7 +6269,7 @@ export async function searchByImageWithSimilarity(
         category === "footwear"
           ? 0.3
           : category === "bags"
-            ? 0.3
+            ? 0.36
             : category === "tops" || category === "dresses"
               ? category === "dresses"
                 ? 0.14
@@ -6392,7 +6461,19 @@ export async function searchByImageWithSimilarity(
         const typeComp = Number(comp?.productTypeCompliance ?? 0);
         return categoryScore >= 0.35 || exactType >= 1 || typeComp >= 0.9;
       });
-      rankedHits = bagCategoryAlignedHits.length > 0 ? bagCategoryAlignedHits : bagSafeHits;
+      const baseBagHits = bagCategoryAlignedHits.length > 0 ? bagCategoryAlignedHits : bagSafeHits;
+      rankedHits = hasColorPreferenceForRanking
+        ? [...baseBagHits].sort((a: any, b: any) => {
+            const ida = String(a?._source?.product_id);
+            const idb = String(b?._source?.product_id);
+            const ca = Number(complianceById.get(ida)?.colorCompliance ?? 0);
+            const cb = Number(complianceById.get(idb)?.colorCompliance ?? 0);
+            if (Math.abs(cb - ca) > 1e-6) return cb - ca;
+            const fa = Number(complianceById.get(ida)?.finalRelevance01 ?? 0);
+            const fb = Number(complianceById.get(idb)?.finalRelevance01 ?? 0);
+            return fb - fa;
+          })
+        : baseBagHits;
     }
   }
 
@@ -7157,7 +7238,11 @@ export async function searchByImageWithSimilarity(
         if (exactType >= 1 || typeComp >= 0.14 || onePieceCandidate) return true;
         return sim >= dressVisualOverrideMin && crossFamily < 0.42;
       }
-      if (exactType >= 1 || typeComp >= 0.3) return true;
+      const detectionTypeMin =
+        String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms"
+          ? 0.24
+          : 0.3;
+      if (exactType >= 1 || typeComp >= detectionTypeMin) return true;
       return sim >= 0.96 && crossFamily < 0.35;
     });
     if (filtered.length > 0) {
@@ -7216,19 +7301,23 @@ export async function searchByImageWithSimilarity(
         const isTopFinalGate = detectionCategoryForFinalGate === "tops";
         const isBottomFinalGate = detectionCategoryForFinalGate === "bottoms";
         const typeFloor = isDressFinalGate
-          ? 0.72
+          ? 0.38
           : isTopFinalGate
             ? 0.33
             : isBottomFinalGate
               ? 0.4
               : 0.82;
         const simFloor = isDressFinalGate
-          ? 0.95
+          ? 0.9
           : isTopFinalGate
             ? 0.91
             : isBottomFinalGate
               ? 0.9
               : 0.985;
+        if (isDressFinalGate) {
+          const onePieceCandidate = isOnePieceCatalogCandidate(p as unknown as Record<string, unknown>);
+          return crossFamily < 0.26 && (onePieceCandidate || exactType >= 1 || typeComp >= typeFloor || sim >= 0.94);
+        }
         return crossFamily < 0.22 && (exactType >= 1 || typeComp >= typeFloor || sim >= simFloor);
       });
       if (familySafeFallback.length > 0) {
@@ -7244,7 +7333,7 @@ export async function searchByImageWithSimilarity(
   // Footwear subtype gate: when the query specifies a clear footwear kind (sneakers, boots,
   // sandals, heels, loafers, flats), hard-block cross-subtype results that slipped through
   // the family gate (e.g. black boots appearing in a sneaker search).
-  if (detectionCategoryForFinalGate === "footwear" && desiredProductTypes.length > 0) {
+  if ((detectionCategoryForFinalGate === "footwear" || detectionCategoryForFinalGate === "shoes") && desiredProductTypes.length > 0) {
     const footwearSubtypeFiltered = results.filter((p: any) =>
       passesFootwearSubtypeGate(p as unknown as Record<string, unknown>, desiredProductTypes),
     );
