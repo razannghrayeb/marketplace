@@ -1926,10 +1926,17 @@ function imageVisualRescueTypeMinWhenIntent(): number {
   return Math.max(0, Math.min(1, raw));
 }
 
-function imageVisualRescueColorMinWhenIntent(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_VISUAL_RESCUE_COLOR_MIN_WHEN_INTENT ?? "0.28");
-  if (!Number.isFinite(raw)) return 0.28;
-  return Math.max(0, Math.min(1, raw));
+function imageVisualRescueColorMinWhenIntent(category?: string): number {
+  const c = String(category ?? "").toLowerCase().trim();
+  const envRaw = Number(process.env.SEARCH_IMAGE_VISUAL_RESCUE_COLOR_MIN_WHEN_INTENT);
+  if (Number.isFinite(envRaw)) return Math.max(0, Math.min(1, envRaw));
+  if (c === "tops") return 0.18;
+  if (c === "bottoms") return 0.16;
+  if (c === "footwear" || c === "shoes") return 0.24;
+  if (c === "dresses") return 0.2;
+  if (c === "outerwear") return 0.2;
+  if (c === "bags") return 0.2;
+  return 0.18;
 }
 
 function imageVisualRescueStyleMinWhenIntent(): number {
@@ -5241,7 +5248,34 @@ export async function searchByImageWithSimilarity(
     // not blocked by cross-family mismatch or severe type non-compliance.
     if (rawVisual >= nearIdenticalRawMin) {
       const crossBlocked = crossFamilyPenaltyVal >= 0.5;
-      const typeOk = typeMatch || (comp.productTypeCompliance ?? 0) >= 0.5;
+      const explicitIntentTypeFloor = hasExplicitTypeFilter || hasExplicitCategoryFilter
+        ? (() => {
+          const dc = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+          if (dc === "tops") return 0.72;
+          if (dc === "bottoms") return 0.62;
+          if (dc === "footwear" || dc === "shoes") return 0.74;
+          if (dc === "dresses") return 0.78;
+          if (dc === "outerwear") return 0.7;
+          if (dc === "bags") return 0.76;
+          return 0.7;
+        })()
+        : 0.5;
+      const explicitIntentCategoryFloor = hasExplicitCategoryFilter
+        ? (() => {
+          const dc = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+          if (dc === "tops") return 0.86;
+          if (dc === "bottoms") return 0.8;
+          if (dc === "footwear" || dc === "shoes") return 0.88;
+          if (dc === "dresses") return 0.9;
+          if (dc === "outerwear") return 0.84;
+          if (dc === "bags") return 0.88;
+          return 0.84;
+        })()
+        : 0;
+      const typeOk =
+        typeMatch ||
+        (comp.productTypeCompliance ?? 0) >= explicitIntentTypeFloor ||
+        (hasExplicitCategoryFilter && (comp.categoryRelevance01 ?? 0) >= explicitIntentCategoryFloor);
       const hasTypeIntentHere = (relevanceIntent.desiredProductTypes?.length ?? 0) > 0;
       const nearIdenticalColorCompliance = Number(comp.colorCompliance ?? 0);
       const nearIdenticalPassesColorGate = !hasColorIntentForFinal
@@ -5808,10 +5842,23 @@ export async function searchByImageWithSimilarity(
   if (!mainPathStrict && rescueMaxCount > 0) {
     const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
     const rescueAudienceMin = imageVisualRescueAudienceMin();
+    const detectionCategoryKey = String(params.detectionProductCategory ?? "").toLowerCase().trim();
     const rescueTypeMinIntent = hasReliableTypeIntentForRelevance
-      ? 0.45
+      ? detectionCategoryKey === "tops"
+        ? 0.5
+        : detectionCategoryKey === "bottoms"
+          ? 0.48
+          : detectionCategoryKey === "footwear" || detectionCategoryKey === "shoes"
+            ? 0.56
+            : detectionCategoryKey === "dresses"
+              ? 0.54
+              : detectionCategoryKey === "outerwear"
+                ? 0.5
+                : detectionCategoryKey === "bags"
+                  ? 0.52
+                  : 0.45
       : imageVisualRescueTypeMinWhenIntent();
-    const rescueColorMinIntent = imageVisualRescueColorMinWhenIntent();
+    const rescueColorMinIntent = imageVisualRescueColorMinWhenIntent(params.detectionProductCategory);
     const rescueStyleMinIntent = imageVisualRescueStyleMinWhenIntent();
     const topsStyleMinIntent =
       params.detectionProductCategory === "tops"
@@ -5843,17 +5890,42 @@ export async function searchByImageWithSimilarity(
         if ((hasExplicitTypeFilter || hasReliableTypeIntentForRelevance) && typeComp < rescueTypeMinIntent) return false;
         if (hasDetectionAnchoredTypeIntent) {
           const detectionTypeRescueFloor =
-            params.detectionProductCategory === "tops" ? 0.12 : 0.3;
+            detectionCategoryKey === "tops"
+              ? 0.18
+              : detectionCategoryKey === "bottoms"
+                ? 0.24
+                : detectionCategoryKey === "footwear" || detectionCategoryKey === "shoes"
+                  ? 0.34
+                  : detectionCategoryKey === "dresses"
+                    ? 0.3
+                    : detectionCategoryKey === "outerwear"
+                      ? 0.28
+                      : detectionCategoryKey === "bags"
+                        ? 0.3
+                        : 0.3;
           if (typeComp < detectionTypeRescueFloor) return false;
         }
         if (hasColorIntentForFinal) {
-          const effectiveRescueColorMin = isFootwearDetectionIntent
-            ? Math.max(rescueColorMinIntent, 0.42)
-            : rescueColorMinIntent;
+          const effectiveRescueColorMin =
+            detectionCategoryKey === "tops"
+              ? Math.max(rescueColorMinIntent, 0.14)
+              : detectionCategoryKey === "bottoms"
+                ? Math.max(rescueColorMinIntent, 0.12)
+                : detectionCategoryKey === "footwear" || detectionCategoryKey === "shoes"
+                  ? Math.max(rescueColorMinIntent, 0.3)
+                  : detectionCategoryKey === "dresses"
+                    ? Math.max(rescueColorMinIntent, 0.16)
+                    : detectionCategoryKey === "outerwear"
+                      ? Math.max(rescueColorMinIntent, 0.16)
+                      : detectionCategoryKey === "bags"
+                        ? Math.max(rescueColorMinIntent, 0.18)
+                        : rescueColorMinIntent;
           if (colorComp < effectiveRescueColorMin) return false;
         }
         const inferredVisualRescueColorFloor =
-          inferredColorSoftGateCategory ? (isFootwearDetectionIntent ? 0.02 : 0.04) : 0.12;
+          inferredColorSoftGateCategory
+            ? imageVisualRescueColorMinWhenIntent(params.detectionProductCategory)
+            : 0.12;
         if (hasInferredColorIntentForRescue && colorComp < inferredVisualRescueColorFloor) return false;
         if (hasExplicitStyleIntent && styleComp < rescueStyleMinIntent) return false;
         // Soft inferred style for tops is often noisy; only hard-gate on explicit style intent.
@@ -7056,11 +7128,7 @@ export async function searchByImageWithSimilarity(
   const variantGroupCount = variantCollapsed.groupCount;
   const variantRepresentativeCount = variantCollapsed.representativeCount;
   const preserveColorCohesionForDetection =
-    hasDetectionAnchoredTypeIntent &&
-    hasColorIntentForFinal &&
-    (detectionCategoryForFinalGate === "tops" ||
-      detectionCategoryForFinalGate === "bottoms" ||
-      detectionCategoryForFinalGate === "dresses");
+    hasDetectionAnchoredTypeIntent;
   const diversityRerankApplied =
     imageDiversityRerankEnabled() &&
     variantCollapsed.results.length > 2 &&
