@@ -3094,7 +3094,7 @@ function imageKnnTimeoutMs(detectionScoped = false): number {
 }
 
 function imageDetectionAudienceFilterEnabled(): boolean {
-  const raw = String(process.env.SEARCH_IMAGE_DETECTION_AUDIENCE_FILTER ?? "1").toLowerCase().trim();
+  const raw = String(process.env.SEARCH_IMAGE_DETECTION_AUDIENCE_FILTER ?? "0").toLowerCase().trim();
   return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
 }
 
@@ -4645,6 +4645,11 @@ export async function searchByImageWithSimilarity(
     hasInferredColorSignal &&
     (!inferredColorCanHardGateFinal || inferredHasChromatic);
   const hasColorIntentForFinal = hasExplicitColorIntent || inferredColorCanHardGateFinal;
+  const hasColorPreferenceForRanking =
+    hasExplicitColorIntent ||
+    hasInferredColorSignal ||
+    hasCropColorSignal ||
+    desiredColorsForRelevance.length > 0;
   const hasInferredColorIntentForRescue = !hasExplicitColorIntent && hasInferredColorSignal;
   const hasSoftColorIntentForRescue = !hasExplicitColorIntent && desiredColorsForRelevance.length > 0;
   const strictInferredOnePieceColorGate =
@@ -5238,12 +5243,27 @@ export async function searchByImageWithSimilarity(
       const crossBlocked = crossFamilyPenaltyVal >= 0.5;
       const typeOk = typeMatch || (comp.productTypeCompliance ?? 0) >= 0.5;
       const hasTypeIntentHere = (relevanceIntent.desiredProductTypes?.length ?? 0) > 0;
-      if (!crossBlocked && (!hasTypeIntentHere || typeOk)) {
+      const nearIdenticalColorCompliance = Number(comp.colorCompliance ?? 0);
+      const nearIdenticalPassesColorGate = !hasColorIntentForFinal
+        ? true
+        : hasExplicitColorIntent
+          ? nearIdenticalColorCompliance >= 0.4
+          : true;
+      if (!crossBlocked && (!hasTypeIntentHere || typeOk) && nearIdenticalPassesColorGate) {
         comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, rawVisual));
         finalScoreSourceById.set(idStr, "near_identical_floor");
       }
     }
   }
+
+  const colorTierRankForSort = (tier: unknown): number => {
+    const t = String(tier ?? "none").toLowerCase().trim();
+    if (t === "exact") return 4;
+    if (t === "family") return 3;
+    if (t === "bucket") return 2;
+    if (t === "none") return 0;
+    return 1;
+  };
 
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
@@ -5257,9 +5277,29 @@ export async function searchByImageWithSimilarity(
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
     const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
     const detectionCategoryForSort = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+    if (hasColorPreferenceForRanking) {
+      const ca = Math.max(0, Math.min(1, complianceById.get(ida)?.colorCompliance ?? 0));
+      const cb = Math.max(0, Math.min(1, complianceById.get(idb)?.colorCompliance ?? 0));
+      const ta = colorTierRankForSort(complianceById.get(ida)?.colorTier) / 4;
+      const tb = colorTierRankForSort(complianceById.get(idb)?.colorTier) / 4;
+      const isTopColorIntentSort = detectionCategoryForSort === "tops" && hasDetectionAnchoredTypeIntent;
+      const colorBonusScale = hasExplicitColorIntent
+        ? 0.12
+        : hasInferredColorSignal
+          ? (isTopColorIntentSort ? 0.1 : 0.08)
+          : 0.05;
+      const faAdj = fa + colorBonusScale * (0.55 * ta + 0.45 * ca);
+      const fbAdj = fb + colorBonusScale * (0.55 * tb + 0.45 * cb);
+      if (Math.abs(fbAdj - faAdj) > 1e-6) return fbAdj - faAdj;
+    }
     const topsColorOrderingWindow =
-      detectionCategoryForSort === "tops" && hasDetectionAnchoredTypeIntent ? 0.08 : 0.04;
-    if (hasColorIntentForFinal && Math.abs(fb - fa) <= topsColorOrderingWindow) {
+      detectionCategoryForSort === "tops" && hasDetectionAnchoredTypeIntent
+        ? (hasColorPreferenceForRanking ? 0.16 : 0.08)
+        : (hasColorPreferenceForRanking ? 0.08 : 0.04);
+    if (hasColorPreferenceForRanking && Math.abs(fb - fa) <= topsColorOrderingWindow) {
+      const ta = colorTierRankForSort(complianceById.get(ida)?.colorTier);
+      const tb = colorTierRankForSort(complianceById.get(idb)?.colorTier);
+      if (tb !== ta) return tb - ta;
       const ca = complianceById.get(ida)?.colorCompliance ?? 0;
       const cb = complianceById.get(idb)?.colorCompliance ?? 0;
       const minColorDelta = detectionCategoryForSort === "tops" ? 0.02 : 0.03;
@@ -5539,7 +5579,8 @@ export async function searchByImageWithSimilarity(
     : finalAcceptMin;
   let effectiveFinalAcceptMin = Math.min(finalAcceptMin, detectionFinalAcceptFloor);
   if (inferredColorSoftGateCategory) {
-    effectiveFinalAcceptMin = Math.min(effectiveFinalAcceptMin, 0.28);
+    const inferredFinalAcceptSoftFloor = isFootwearDetectionIntent ? 0.2 : 0.18;
+    effectiveFinalAcceptMin = Math.min(effectiveFinalAcceptMin, inferredFinalAcceptSoftFloor);
   }
   // Color-agnostic apparel protection:
   // In sparse candidate pools with strong visual evidence, avoid hard final-accept
@@ -5601,7 +5642,7 @@ export async function searchByImageWithSimilarity(
           return false;
         }
         const inferredRescueColorFloor =
-          inferredColorSoftGateCategory ? 0.02 : 0.18;
+          inferredColorSoftGateCategory ? (isFootwearDetectionIntent ? 0.02 : 0.04) : 0.1;
         if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < inferredRescueColorFloor) {
           return false;
         }
@@ -5627,7 +5668,7 @@ export async function searchByImageWithSimilarity(
           if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < fallbackSleeveMin) return false;
           if (hasExplicitColorIntent && (comp.colorCompliance ?? 0) < 0.18) return false;
           const inferredFallbackColorFloor =
-            inferredColorSoftGateCategory ? 0.01 : 0.08;
+            inferredColorSoftGateCategory ? (isFootwearDetectionIntent ? 0.01 : 0.02) : 0.06;
           if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < inferredFallbackColorFloor) return false;
           if (shouldSuppressAthleticCandidates && isAthleticCatalogCandidate(h._source ?? {})) return false;
           // Soft color intent does not gate fallback — only explicit color does.
@@ -5812,7 +5853,7 @@ export async function searchByImageWithSimilarity(
           if (colorComp < effectiveRescueColorMin) return false;
         }
         const inferredVisualRescueColorFloor =
-          inferredColorSoftGateCategory ? 0.02 : 0.16;
+          inferredColorSoftGateCategory ? (isFootwearDetectionIntent ? 0.02 : 0.04) : 0.12;
         if (hasInferredColorIntentForRescue && colorComp < inferredVisualRescueColorFloor) return false;
         if (hasExplicitStyleIntent && styleComp < rescueStyleMinIntent) return false;
         // Soft inferred style for tops is often noisy; only hard-gate on explicit style intent.
@@ -7238,7 +7279,7 @@ export async function searchByImageWithSimilarity(
   return {
     results,
     related: related.length > 0 ? related : undefined,
-    meta: ({
+    meta: {
       relevance_intent: relevanceIntentDebug,
       main_path_strict: mainPathStrict,
       threshold: similarityThreshold,
@@ -7291,7 +7332,7 @@ export async function searchByImageWithSimilarity(
         dropped_by_limit: droppedByLimit,
         final_returned_count: finalReturnedCount,
       },
-    } as any),
+    },
   };
 }
 

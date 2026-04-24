@@ -359,6 +359,15 @@ export interface SearchResultWithRelated {
     /** True when every candidate in the recall window scored below the path final-accept gate (text vs image env). */
     below_relevance_threshold?: boolean;
     knn_timed_out?: number;
+    detection_observability?: {
+      category?: string;
+      knn_hits: number;
+      after_visual_gate: number;
+      after_final_gate: number;
+      zero_result_rate: number;
+      color_compliance_at_10: number;
+      cross_category_leak_at_10: number;
+    };
     detection_observilaty?: {
       hadDetections?: boolean;
       yoloConfidence?: number;
