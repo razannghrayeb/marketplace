@@ -1410,22 +1410,17 @@ async function classifyFootwearSubtypeFromCropEmbedding(
     const subtypeData = await ensureFootwearSubtypeEmbeddings();
     let bestSubtype: string | null = null;
     let bestScore = -1;
-    let secondBestScore = -1;
     for (const { subtype, embeddings } of subtypeData) {
       if (embeddings.length === 0) continue;
       // Average cosine similarity across all prompts for this subtype.
       const avgScore =
         embeddings.reduce((sum, te) => sum + cosineSimilarity(cropEmbedding, te), 0) / embeddings.length;
       if (avgScore > bestScore) {
-        secondBestScore = bestScore;
         bestScore = avgScore;
         bestSubtype = subtype;
-      } else if (avgScore > secondBestScore) {
-        secondBestScore = avgScore;
       }
     }
-    const margin = bestScore - secondBestScore;
-    return bestScore >= minConfidence && margin >= 0.03 ? bestSubtype : null;
+    return bestScore >= minConfidence ? bestSubtype : null;
   } catch {
     return null;
   }
@@ -5523,9 +5518,8 @@ export class ImageAnalysisService {
             /\b(short sleeve|long sleeve|half sleeve|3\/?4 sleeve|sleeveless)\b/.test(normalizedLabelForSleeve);
           const sleeveSensitiveCategory =
             categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses";
-          const sleeveSignalStrong = hasExplicitSleeveCue
-            ? (detection.confidence ?? 0) >= 0.72 || (detection.area_ratio ?? 0) >= 0.05
-            : (detection.confidence ?? 0) >= 0.94 || (detection.area_ratio ?? 0) >= 0.12;
+          const sleeveSignalStrong =
+            (detection.confidence ?? 0) >= 0.94 || (detection.area_ratio ?? 0) >= 0.12;
           if (
             detectionSleeve &&
             (!sleeveSensitiveCategory || (hasExplicitSleeveCue && sleeveSignalStrong))
@@ -5982,18 +5976,16 @@ export class ImageAnalysisService {
             isLightNeutralFashionColor(globalPrimaryNorm) &&
             !isLightNeutralFashionColor(inferredColorNorm);
           const explicitColorFilter = String((filters as any).color ?? "").trim();
-          const itemColorConfidence = Number(inferredColorsByItemConfidence[itemColorKey] ?? 0);
           const inferredPrimaryColorForSearch =
             categoryMapping.productCategory === "tops" && explicitColorFilter.length === 0
               ? (
-                itemColorConfidence >= 0.82
+                Number(inferredColorsByItemConfidence[itemColorKey] ?? 0) >= 0.82
                   ? inferredColorNorm
                   : undefined
               )
               : categoryMapping.productCategory === "footwear" &&
                   explicitColorFilter.length === 0 &&
-                  (tinyFootwearBox || footwearColorConflictWithGlobal) &&
-                  itemColorConfidence < 0.8
+                  (tinyFootwearBox || footwearColorConflictWithGlobal)
                 ? undefined
               : categoryMapping.productCategory === "bottoms" &&
                   explicitColorFilter.length === 0 &&
@@ -7920,9 +7912,8 @@ export class ImageAnalysisService {
             /\b(short sleeve|long sleeve|half sleeve|3\/?4 sleeve|sleeveless)\b/.test(normalizedSourceForSleeve);
           const sleeveSensitiveCategory =
             categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses";
-          const sleeveSignalStrong = hasExplicitSleeveCue
-            ? (detection.confidence ?? 0) >= 0.72 || (detection.area_ratio ?? 0) >= 0.05
-            : (detection.confidence ?? 0) >= 0.94 || (detection.area_ratio ?? 0) >= 0.12;
+          const sleeveSignalStrong =
+            (detection.confidence ?? 0) >= 0.94 || (detection.area_ratio ?? 0) >= 0.12;
           if (
             detectionSleeve &&
             (!sleeveSensitiveCategory || (hasExplicitSleeveCue && sleeveSignalStrong))
@@ -8246,20 +8237,8 @@ export class ImageAnalysisService {
             isLightNeutralFashionColor(globalPrimaryNorm) &&
             !isLightNeutralFashionColor(inferredColorNorm);
           const explicitColorFilter = String((filters as any).color ?? "").trim();
-          const itemColorConfidence = Number(inferredColorsByItemConfidence[itemColorKey] ?? 0);
-          const inferredPrimaryColorForSearch =
-            categoryMapping.productCategory === "tops" && explicitColorFilter.length === 0
-              ? (itemColorConfidence >= 0.82 ? inferredColorNorm : undefined)
-              : categoryMapping.productCategory === "footwear" &&
-                  explicitColorFilter.length === 0 &&
-                  (tinyFootwearBox || footwearColorConflictWithGlobal) &&
-                  itemColorConfidence < 0.8
-                ? undefined
-                : categoryMapping.productCategory === "bottoms" &&
-                    explicitColorFilter.length === 0 &&
-                    inferredColorConflictForRetrieval
-                  ? undefined
-                  : inferredColorNorm;
+          // Always generalize color intent reranking for all garment types
+          const inferredPrimaryColorForSearch = canonicalizeColorIntentToken(inferredPrimaryColorForDetection);
 
           const baseSimilarityThreshold = options.similarityThreshold ?? config.clip.imageSimilarityThreshold;
           let detectionSimilarityThreshold = shopLookDetectionSimilarityThreshold(
