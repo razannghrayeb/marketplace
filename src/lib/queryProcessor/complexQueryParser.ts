@@ -361,7 +361,7 @@ export function mergeComplexConstraints(
   // Apply price constraints
   const priceConstraints = complexResult.constraints.filter(c => c.type === "price");
   if (priceConstraints.length > 0) {
-        const minCandidates = priceConstraints
+    const minCandidates = priceConstraints
       .filter(c => c.operator === "gte")
       .map(c => c.value as number);
     const maxCandidates = priceConstraints
@@ -372,7 +372,6 @@ export function mergeComplexConstraints(
     // - upper bound is the lowest lte
     const minPrice = minCandidates.length > 0 ? Math.max(...minCandidates) : Number.POSITIVE_INFINITY;
     const maxPrice = maxCandidates.length > 0 ? Math.min(...maxCandidates) : Number.NEGATIVE_INFINITY;
-
 
     if (isFinite(minPrice) || isFinite(maxPrice)) {
       merged.priceRange = {

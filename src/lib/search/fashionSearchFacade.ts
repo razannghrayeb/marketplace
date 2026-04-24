@@ -103,6 +103,8 @@ export interface UnifiedImageSearchParams {
 }
 type EnhancedTextSearchOutput = SearchResultWithRelated & { total: number; tookMs: number };
 
+type EnhancedTextSearchOutput = SearchResultWithRelated & { total: number; tookMs: number };
+
 function normalizeParentUrlKey(raw: string | null | undefined): string {
   const cleaned = String(raw ?? "").trim();
   if (!cleaned) return "";
@@ -338,7 +340,7 @@ export async function searchText(params: UnifiedTextSearchParams): Promise<Searc
     delete normalizedFilters.currency;
   }
 
-   const enhancedOutput = await enhancedTextSearch(query, normalizedFilters, {
+  const enhancedOutput = await enhancedTextSearch(query, normalizedFilters, {
     limit,
     offset: (page - 1) * limit,
     includeRelated,
@@ -346,12 +348,12 @@ export async function searchText(params: UnifiedTextSearchParams): Promise<Searc
     negationConstraints,
   } as any);
 
-   return finalizeTextSearchResponse(enhancedOutput as EnhancedTextSearchOutput);
+  return finalizeTextSearchResponse(enhancedOutput as EnhancedTextSearchOutput);
 }
+
 export function finalizeTextSearchResponse(output: EnhancedTextSearchOutput): EnhancedTextSearchOutput {
   return {
     ...output,
-  
     meta: {
       ...(output.meta ?? {}),
       total_results: output.total,

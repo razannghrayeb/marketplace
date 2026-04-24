@@ -1760,6 +1760,7 @@ function imageDualKnnDetectionEnabled(): boolean {
  * Set SEARCH_IMAGE_EF_SEARCH=0 to omit (some managed clusters reject per-query ef_search).
  */
 let imageKnnEfSearchSupported: boolean | null = null;
+let imageKnnNumCandidatesSupported: boolean | null = null;
 
 function imageKnnEfSearch(): number {
   if (imageKnnEfSearchSupported === false) return 0;
@@ -1771,6 +1772,19 @@ function imageKnnEfSearch(): number {
   if (Number.isFinite(raw) && raw === 0) return 0;
   if (Number.isFinite(raw) && raw > 0) return Math.max(64, Math.min(512, Math.floor(raw)));
   return 128;
+}
+
+function imageKnnNumCandidates(k: number): number {
+  const rawEnv = process.env.SEARCH_IMAGE_NUM_CANDIDATES;
+  if (rawEnv !== undefined && String(rawEnv).trim() !== "") {
+    const raw = Number(rawEnv);
+    if (Number.isFinite(raw) && raw > 0) {
+      return Math.max(k, Math.min(5000, Math.floor(raw)));
+    }
+  }
+  // Keep ANN neighborhood substantially wider than k so relevant items survive
+  // approximate search before downstream constraints/rerank.
+  return Math.max(k, Math.min(5000, Math.max(k * 4, 800)));
 }
 
 function mergeKnnHitsByProductId(primary: any[], extra: any[], cap: number): any[] {
@@ -1800,6 +1814,9 @@ function mergeKnnHitsByProductId(primary: any[], extra: any[], cap: number): any
 
 function knnQueryInner(vector: number[], k: number, ef: number): Record<string, unknown> {
   const inner: Record<string, unknown> = { vector, k };
+  if (imageKnnNumCandidatesSupported !== false) {
+    inner.num_candidates = imageKnnNumCandidates(k);
+  }
   if (ef > 0) inner.ef_search = ef;
   return inner;
 }
@@ -1810,8 +1827,9 @@ function stripEfSearchFromKnnBody(body: Record<string, unknown>): Record<string,
   if (knn && typeof knn === "object") {
     for (const fieldName of Object.keys(knn)) {
       const fieldObj = knn[fieldName];
-      if (fieldObj && typeof fieldObj === "object" && "ef_search" in fieldObj) {
-        delete fieldObj.ef_search;
+      if (fieldObj && typeof fieldObj === "object") {
+        if ("ef_search" in fieldObj) delete fieldObj.ef_search;
+        if ("num_candidates" in fieldObj) delete fieldObj.num_candidates;
       }
     }
   }
@@ -1889,6 +1907,11 @@ function imageVisualRescueMaxCount(): number {
   const raw = Number(process.env.SEARCH_IMAGE_VISUAL_RESCUE_MAX_COUNT);
   if (Number.isFinite(raw)) return Math.max(0, Math.min(40, Math.floor(raw)));
   return 8;
+}
+
+function imageMainPathStrictEnv(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_MAIN_PATH_ONLY ?? "0").toLowerCase().trim();
+  return raw === "1" || raw === "true";
 }
 
 function imageVisualRescueAudienceMin(): number {
@@ -2300,6 +2323,76 @@ function hasTailoredTypeIntent(desiredProductTypes: string[]): boolean {
   );
 }
 
+function hasStrictSuitTopIntent(desiredProductTypes: string[]): boolean {
+  const desired = desiredProductTypes
+    .map((t) => String(t ?? "").toLowerCase().trim())
+    .filter(Boolean)
+    .join(" ");
+  if (!desired) return false;
+  return /\b(suit|suits|blazer|blazers|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|vest|vests)\b/.test(desired);
+}
+
+function hasTailoredTopCatalogCue(src: Record<string, unknown>): boolean {
+  const blob = [
+    src.title,
+    src.description,
+    src.category,
+    src.category_canonical,
+    Array.isArray(src.product_types) ? src.product_types.join(" ") : src.product_types,
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x))
+    .join(" ")
+    .toLowerCase();
+  if (!blob.trim()) return false;
+  return /\b(suit|blazer|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|tailored jacket|structured jacket)\b/.test(blob);
+}
+
+function hasVestLikeTopCatalogCue(src: Record<string, unknown>): boolean {
+  const blob = [
+    src.title,
+    src.description,
+    src.category,
+    src.category_canonical,
+    Array.isArray(src.product_types) ? src.product_types.join(" ") : src.product_types,
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x))
+    .join(" ")
+    .toLowerCase();
+  if (!blob.trim()) return false;
+  return /\b(vest|vests|waistcoat|waistcoats|gilet|sleeveless top|tank top|tank|camisole|cami)\b/.test(blob);
+}
+
+function isLikelyNonVestTopForVestIntent(src: Record<string, unknown>): boolean {
+  const blob = [
+    src.title,
+    src.description,
+    src.category,
+    src.category_canonical,
+    Array.isArray(src.product_types) ? src.product_types.join(" ") : src.product_types,
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x))
+    .join(" ")
+    .toLowerCase();
+  if (!blob.trim()) return false;
+  return /\b(blouse|blouses|shirt|shirts|long sleeve|button down|button-down|overshirt)\b/.test(blob);
+}
+
+function normalizeDetectionCategoryToken(token: string | null | undefined): string {
+  const normalized = String(token ?? "").toLowerCase().trim();
+  if (!normalized) return normalized;
+  if (
+    /\b(oxford|oxfords|loafer|loafers|sneaker|sneakers|heel|heels|boot|boots|sandals?|slippers?|mule|mules|pumps?|flats?|footwear)\b/.test(
+      normalized,
+    )
+  ) return "footwear";
+  if (/\b(trouser|trousers|pants?|slacks?|jeans?|shorts?|bottoms?)\b/.test(normalized)) return "bottoms";
+  if (/\b(blazer|blazers|shirt|shirts|tee|t-?shirt|tops?|sweater|hoodie)\b/.test(normalized)) return "tops";
+  return normalized;
+}
+
 function isTooCasualTopForTailoredIntent(src: Record<string, unknown>): boolean {
   const blob = [
     src.title,
@@ -2605,13 +2698,27 @@ function collectInferredColorTokens(
   }
 
   const preferredKey = String(preferredItemKey ?? "").trim();
+  const isApparelLike =
+    /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|sweater|hoodie|cardigan|jacket|coat|outerwear|trouser|trousers|pant|pants|jean|jeans|skirt|skirts|dress|dresses|gown|gowns|short|shorts|legging|leggings|cargo|chino|chinos)\b/.test(
+      `${merged} ${typeText}`,
+    );
+  const preferredValueRaw = preferredKey
+    ? String(inferredByItem?.[preferredKey] ?? "").toLowerCase().trim()
+    : "";
+  const preferredColorNorm = preferredValueRaw
+    ? (normalizeColorToken(preferredValueRaw) ?? preferredValueRaw)
+    : "";
+  const preferredConf = Number(inferredByItemConfidence?.[preferredKey] ?? 0);
+  const preferredHasConfidentColor =
+    Boolean(preferredColorNorm) && Number.isFinite(preferredConf) && preferredConf >= colorConfidenceThreshold();
   if (preferredKey) {
-    const preferredValue = String(inferredByItem?.[preferredKey] ?? "").toLowerCase().trim();
-    const preferredColor = normalizeColorToken(preferredValue) ?? preferredValue;
-    const preferredConf = Number(inferredByItemConfidence?.[preferredKey] ?? 0);
-    if (preferredColor && preferredConf >= colorConfidenceThreshold()) {
-      return [preferredColor];
+    if (preferredHasConfidentColor) {
+      return [preferredColorNorm];
     }
+    // Critical: for detection-anchored apparel, do not borrow color from other items
+    // (e.g. trousers color leaking into top query). If preferred slot has no usable
+    // color signal, fall back to no inferred-color gating.
+    if (isApparelLike) return [];
   }
 
   const scored = collectConfidentColorTokenMap({
@@ -3066,10 +3173,15 @@ async function opensearchImageKnnHits(
     const responseReason = String(err?.meta?.body?.error?.reason ?? "");
     const unknownEfSearch =
       errText.includes("unknown field [ef_search]") || responseReason.includes("unknown field [ef_search]");
+    const unknownNumCandidates =
+      errText.includes("unknown field [num_candidates]") || responseReason.includes("unknown field [num_candidates]");
 
-    if (unknownEfSearch) {
+    if (unknownEfSearch || unknownNumCandidates) {
       imageKnnEfSearchSupported = false;
       process.env.SEARCH_IMAGE_EF_SEARCH = "0";
+      if (unknownNumCandidates) {
+        imageKnnNumCandidatesSupported = false;
+      }
       const retryBody = stripEfSearchFromKnnBody(bodyToSend);
 
       try {
@@ -3255,6 +3367,7 @@ export async function searchByImageWithSimilarity(
   }
 
   const evalT0 = Date.now();
+  const mainPathStrict = imageMainPathStrictEnv();
   const breakdownDebug =
     String(process.env.SEARCH_DEBUG ?? "").toLowerCase() === "1" ||
     String(process.env.SEARCH_TRACE_BREAKDOWN ?? "").toLowerCase() === "1";
@@ -3458,19 +3571,58 @@ export async function searchByImageWithSimilarity(
   /** kNN size — wider when SEARCH_IMAGE_MERCHANDISE_SIMILARITY is on (see imageSearchKnnPoolLimit). */
   const retrievalKBase = imageCategoryAwareKnnPoolLimit(params.detectionProductCategory);
   const dynamicDetectionPoolCap = Math.max(
-    320,
-    Math.min(imageDetectionKnnPoolCap(), Math.max(limit * 8, 320)),
+    420,
+    Math.min(imageDetectionKnnPoolCap(), Math.max(limit * 10, 420)),
   );
   const retrievalK = detectionScoped
     ? (() => {
       const isTopDetection = isTopLikeDetectionCategory(params.detectionProductCategory);
-      if (!isTopDetection) return Math.min(retrievalKBase, dynamicDetectionPoolCap);
+      const isBottomDetection = isBottomLikeDetectionCategory(params.detectionProductCategory);
+      const isDressDetection = isDressLikeDetectionCategory(params.detectionProductCategory);
+      const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+      const isFootwearDetection = detectionCategoryNorm === "footwear" || detectionCategoryNorm === "shoes";
+      const isBagLikeDetection = detectionCategoryNorm === "bags" || detectionCategoryNorm === "accessories";
       const topCapEnv = Number(process.env.SEARCH_IMAGE_TOPS_DETECTION_KNN_POOL_CAP ?? "760");
       const topCap = Number.isFinite(topCapEnv)
         ? Math.max(260, Math.min(1200, Math.floor(topCapEnv)))
         : 760;
       const dynamicTopCap = Math.max(dynamicDetectionPoolCap, Math.max(420, Math.min(topCap, limit * 12)));
-      return Math.min(retrievalKBase, dynamicTopCap);
+      if (isTopDetection) {
+        return Math.min(retrievalKBase, dynamicTopCap);
+      }
+      if (isBottomDetection) {
+        const bottomsCapEnv = Number(process.env.SEARCH_IMAGE_BOTTOMS_DETECTION_KNN_POOL_CAP ?? "820");
+        const bottomsCap = Number.isFinite(bottomsCapEnv)
+          ? Math.max(320, Math.min(1300, Math.floor(bottomsCapEnv)))
+          : 820;
+        const dynamicBottomsCap = Math.max(dynamicDetectionPoolCap, Math.max(460, Math.min(bottomsCap, limit * 12)));
+        return Math.min(retrievalKBase, dynamicBottomsCap);
+      }
+      if (isDressDetection) {
+        const dressesCapEnv = Number(process.env.SEARCH_IMAGE_DRESSES_DETECTION_KNN_POOL_CAP ?? "900");
+        const dressesCap = Number.isFinite(dressesCapEnv)
+          ? Math.max(340, Math.min(1400, Math.floor(dressesCapEnv)))
+          : 900;
+        const dynamicDressCap = Math.max(dynamicDetectionPoolCap, Math.max(500, Math.min(dressesCap, limit * 13)));
+        return Math.min(retrievalKBase, dynamicDressCap);
+      }
+      if (isFootwearDetection) {
+        const footwearCapEnv = Number(process.env.SEARCH_IMAGE_FOOTWEAR_DETECTION_KNN_POOL_CAP ?? "760");
+        const footwearCap = Number.isFinite(footwearCapEnv)
+          ? Math.max(300, Math.min(1200, Math.floor(footwearCapEnv)))
+          : 760;
+        const dynamicFootwearCap = Math.max(dynamicDetectionPoolCap, Math.max(440, Math.min(footwearCap, limit * 11)));
+        return Math.min(retrievalKBase, dynamicFootwearCap);
+      }
+      if (isBagLikeDetection) {
+        const bagCapEnv = Number(process.env.SEARCH_IMAGE_BAGS_DETECTION_KNN_POOL_CAP ?? "760");
+        const bagCap = Number.isFinite(bagCapEnv)
+          ? Math.max(280, Math.min(1200, Math.floor(bagCapEnv)))
+          : 760;
+        const dynamicBagCap = Math.max(dynamicDetectionPoolCap, Math.max(420, Math.min(bagCap, limit * 10)));
+        return Math.min(retrievalKBase, dynamicBagCap);
+      }
+      return Math.min(retrievalKBase, dynamicDetectionPoolCap);
     })()
     : retrievalKBase;
 
@@ -4179,8 +4331,9 @@ export async function searchByImageWithSimilarity(
       desiredProductTypes = prunedByLength;
     }
   }
+  const detectionCategoryNorm = normalizeDetectionCategoryToken(params.detectionProductCategory);
   hasDetectionAnchoredTypeIntent =
-    Boolean(String(params.detectionProductCategory ?? "").trim()) ||
+    Boolean(String(detectionCategoryNorm ?? "").trim()) ||
     (
       desiredProductTypes.length > 0 &&
       (
@@ -4190,7 +4343,7 @@ export async function searchByImageWithSimilarity(
     );
 
   const isFootwearDetectionIntent =
-    String(params.detectionProductCategory ?? "").toLowerCase().trim() === "footwear" ||
+    detectionCategoryNorm === "footwear" ||
     desiredProductTypes.some((t) => /\b(shoe|shoes|sandal|sandals|sneaker|sneakers|heel|heels|boot|boots|loafer|loafers|trainer|trainers|flat|flats|footwear|oxford|oxfords|pump|pumps)\b/.test(String(t).toLowerCase()));
 
   const explicitColorsForRelevance =
@@ -4240,6 +4393,29 @@ export async function searchByImageWithSimilarity(
   const normalizedCropColorsForMerge = isFootwearDetectionIntent
     ? normalizedCropColors
     : normalizedCropColors.filter((c) => !["black", "gray", "charcoal"].includes(String(c).toLowerCase()));
+  const neutralColorSet = new Set([
+    "white",
+    "off-white",
+    "ivory",
+    "cream",
+    "ecru",
+    "beige",
+    "tan",
+    "camel",
+    "khaki",
+    "taupe",
+    "stone",
+    "nude",
+    "gray",
+    "grey",
+    "charcoal",
+    "silver",
+    "black",
+    "brown",
+  ]);
+  const inferredHasChromatic =
+    normalizedInferredColors.length > 0 &&
+    normalizedInferredColors.some((c) => !neutralColorSet.has(String(c).toLowerCase().trim()));
 
   // If inferred color disagrees with crop-local colors, prefer crop colors for
   // detection-anchored image search. This avoids top-color bleed (e.g. yellow)
@@ -4264,7 +4440,6 @@ export async function searchByImageWithSimilarity(
   const preferredInferredColorConfidence = Number(
     preferredInferredColorKey ? inferredByItemConfidenceForRelevance?.[preferredInferredColorKey] : 0,
   );
-  const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
   const hasStrongTopItemColor =
     (detectionCategoryNorm === "tops" ||
       desiredProductTypes.some((t) =>
@@ -4299,12 +4474,20 @@ export async function searchByImageWithSimilarity(
       hasStrongSlotAnchoredItemColor ||
       preferInferredColorForConflict
     );
-  const hasInferredColorSignal = hasTrustedInferredColorSignal;
+  const inferredOnlyMulticolorIntent =
+    !hasExplicitColorIntent &&
+    hasTrustedInferredColorSignal &&
+    normalizedInferredColors.length > 0 &&
+    normalizedInferredColors.every((c) => String(c).toLowerCase().trim() === "multicolor") &&
+    (detectionCategoryNorm === "tops" ||
+      detectionCategoryNorm === "bottoms" ||
+      detectionCategoryNorm === "dresses");
+  const hasInferredColorSignal = hasTrustedInferredColorSignal && !inferredOnlyMulticolorIntent;
 
   let allColorsForRelevance: string[];
   if (hasExplicitColorIntent) {
     allColorsForRelevance = [...explicitColorsForRelevance];
-  } else if (hasTrustedInferredColorSignal && normalizedInferredColors.length > 0) {
+  } else if (hasTrustedInferredColorSignal && !inferredOnlyMulticolorIntent && normalizedInferredColors.length > 0) {
     allColorsForRelevance = [...normalizedInferredColors];
   } else {
     allColorsForRelevance = [...normalizedCropColorsForMerge];
@@ -4387,7 +4570,18 @@ export async function searchByImageWithSimilarity(
         ? 0.26
         : 0.1;
 
-  const hasColorIntentForFinal = hasExplicitColorIntent || hasInferredColorSignal;
+  // Non-explicit chromatic inferred color is often too sparse/noisy in catalog metadata.
+  // Keep it as a ranking bias, but avoid hard-gating final relevance.
+  const suppressHardInferredColorGate =
+    !hasExplicitColorIntent &&
+    hasInferredColorSignal &&
+    inferredHasChromatic &&
+    (detectionCategoryNorm === "tops" ||
+      detectionCategoryNorm === "bottoms" ||
+      detectionCategoryNorm === "dresses" ||
+      detectionCategoryNorm === "outerwear");
+  const hasColorIntentForFinal =
+    hasExplicitColorIntent || (hasInferredColorSignal && !suppressHardInferredColorGate);
   const hasInferredColorIntentForRescue = !hasExplicitColorIntent && hasInferredColorSignal;
   const hasSoftColorIntentForRescue = !hasExplicitColorIntent && desiredColorsForRelevance.length > 0;
   const strictInferredOnePieceColorGate =
@@ -4398,7 +4592,8 @@ export async function searchByImageWithSimilarity(
   // Crop-dominant colors affect reranking but should not gate final relevance
   // unless we also have inferred semantic color evidence (e.g., BLIP "blue jeans").
   const softColorBiasOnly =
-    !hasExplicitColorIntent && hasCropColorSignal && !hasInferredColorSignal;
+    (!hasExplicitColorIntent && hasCropColorSignal && !hasInferredColorSignal) ||
+    suppressHardInferredColorGate;
 
   /**
    * When the user did not narrow the search (category / productTypes / text / explicit color),
@@ -4937,6 +5132,16 @@ export async function searchByImageWithSimilarity(
         if (hasTopColorIntent && Number.isFinite(topColorCompliance) && topColorCompliance >= 0.6) {
           blendedTopMain = Math.min(1, blendedTopMain + 0.035);
         }
+        const hasVestDetectionIntent =
+          desiredProductTypes.some((t) => /\b(vest|vests|waistcoat|waistcoats|gilet)\b/.test(String(t).toLowerCase()));
+        const srcForVest = (hit as any)?._source ?? {};
+        if (hasVestDetectionIntent) {
+          if (hasVestLikeTopCatalogCue(srcForVest)) {
+            blendedTopMain = Math.min(1, blendedTopMain + 0.08);
+          } else if (isLikelyNonVestTopForVestIntent(srcForVest)) {
+            blendedTopMain *= 0.86;
+          }
+        }
         const exactTopVisualEvidence = (comp.exactTypeScore ?? 0) >= 1 && visualComp >= 0.62;
         const boostedFloor = exactTopVisualEvidence ? 0.36 : 0.24;
         const boosted = Math.min(1, Math.max(boostedFloor, blendedTopMain));
@@ -4992,12 +5197,13 @@ export async function searchByImageWithSimilarity(
     // Primary: finalRelevance01 descending (incorporates visual + metadata signals).
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
     const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
+    const detectionCategoryForSort = String(params.detectionProductCategory ?? "").toLowerCase().trim();
     const topsColorOrderingWindow =
-      detectionCategoryForFinalGate === "tops" && hasDetectionAnchoredTypeIntent ? 0.08 : 0.04;
+      detectionCategoryForSort === "tops" && hasDetectionAnchoredTypeIntent ? 0.08 : 0.04;
     if (hasColorIntentForFinal && Math.abs(fb - fa) <= topsColorOrderingWindow) {
       const ca = complianceById.get(ida)?.colorCompliance ?? 0;
       const cb = complianceById.get(idb)?.colorCompliance ?? 0;
-      const minColorDelta = detectionCategoryForFinalGate === "tops" ? 0.02 : 0.03;
+      const minColorDelta = detectionCategoryForSort === "tops" ? 0.02 : 0.03;
       if (Math.abs(cb - ca) >= minColorDelta) return cb - ca;
     }
     if (Math.abs(fb - fa) > 1e-6) return fb - fa;
@@ -5199,7 +5405,7 @@ export async function searchByImageWithSimilarity(
     thresholdRelaxed = visualGatedHits.length > 0;
   }
 
-  if (relaxThresholdWhenEmpty) {
+  if (!mainPathStrict && relaxThresholdWhenEmpty) {
     const minWantCandidates = Math.min(fetchLimit, Math.max(limit, 15));
     if (visualGatedHits.length < minWantCandidates && rankedHitsForGates.length > visualGatedHits.length) {
       const floor = imageRelaxSimilarityFloor();
@@ -5217,7 +5423,7 @@ export async function searchByImageWithSimilarity(
   const acceptMinImage = config.search.finalAcceptMinImage;
   /** When strict CLIP threshold + merchandise binding drop every hit, keep best raw-visual neighbors (always on). */
   let imageSearchPipelineDegraded = false;
-  if (visualGatedHits.length === 0 && rankedHitsForGates.length > 0) {
+  if (!mainPathStrict && visualGatedHits.length === 0 && rankedHitsForGates.length > 0) {
     const relFloor = imageRelaxSimilarityFloor();
     const relaxedHits = rankedHitsForGates.filter(
       (h: any) => visualSimFromHit(h) >= relFloor,
@@ -5254,7 +5460,7 @@ export async function searchByImageWithSimilarity(
     hasDetectionAnchoredTypeIntent &&
     hasInferredColorSignal &&
     !hasExplicitColorIntent &&
-    (detectionCategoryNorm === "tops" || detectionCategoryNorm === "bottoms");
+    (detectionCategoryNorm === "tops" || detectionCategoryNorm === "bottoms" || detectionCategoryNorm === "footwear" || detectionCategoryNorm === "dresses");
   const apparelDetectionCategory =
     detectionCategoryNorm === "tops" ||
     detectionCategoryNorm === "bottoms" ||
@@ -5285,7 +5491,7 @@ export async function searchByImageWithSimilarity(
     (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= effectiveFinalAcceptMin,
   );
 
-  if (rankedHits.length === 0 && visualGatedHits.length > 0) {
+  if (!mainPathStrict && rankedHits.length === 0 && visualGatedHits.length > 0) {
     imageSearchPipelineDegraded = true;
     let rescuePool = visualGatedHits;
     if (hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent) {
@@ -5495,7 +5701,7 @@ export async function searchByImageWithSimilarity(
   // dropped solely due to weak/missing type/color fields.
   const rescueMinSim = imageVisualRescueMinSimilarity();
   const rescueMaxCount = imageVisualRescueMaxCount();
-  if (rescueMaxCount > 0) {
+  if (!mainPathStrict && rescueMaxCount > 0) {
     const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
     const rescueAudienceMin = imageVisualRescueAudienceMin();
     const rescueTypeMinIntent = hasReliableTypeIntentForRelevance
@@ -5570,7 +5776,7 @@ export async function searchByImageWithSimilarity(
   // by metadata noise, while still respecting audience and type/category safety.
   const mustKeepVisualMin = imageMustKeepVisualMinSimilarity();
   const mustKeepVisualMax = imageMustKeepVisualMaxCount();
-  if (!imageSearchVisualPrimaryRanking && mustKeepVisualMax > 0 && visualGatedHits.length > 0) {
+  if (!mainPathStrict && !imageSearchVisualPrimaryRanking && mustKeepVisualMax > 0 && visualGatedHits.length > 0) {
     const existingIds = new Set(rankedHits.map((h: any) => String(h._source.product_id)));
     const mustKeepAudienceMin = imageMustKeepVisualAudienceMin();
     const mustKeepTypeMin = hasReliableTypeIntentForRelevance
@@ -5631,6 +5837,7 @@ export async function searchByImageWithSimilarity(
   const imageMinResultsTarget = minResultsPolicy.target;
   const relevanceRelaxDelta = minResultsPolicy.delta;
   if (
+    !mainPathStrict &&
     imageMinResultsTarget > 0 &&
     rankedHits.length < imageMinResultsTarget &&
     visualGatedHits.length > rankedHits.length
@@ -5788,7 +5995,7 @@ export async function searchByImageWithSimilarity(
           rankedHits = inferredColorCompliantHits;
         }
       } else if (
-        (category === "bottoms" || category === "outerwear") &&
+        category === "outerwear" &&
         hasStrongDetectionScopedColor &&
         inferredColorCompliantHits.length === 0
       ) {
@@ -5894,19 +6101,31 @@ export async function searchByImageWithSimilarity(
   // Detection-anchored bottoms with trouser intent should reject shorts candidates.
   const shouldRejectShortsForTrouserIntent =
     hasDetectionAnchoredTypeIntent &&
-    String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms" &&
+    detectionCategoryNorm === "bottoms" &&
     hasStrictTrouserIntent(desiredProductTypes);
   if (shouldRejectShortsForTrouserIntent && rankedHits.length > 0) {
     rankedHits = rankedHits.filter((h: any) => !isShortsCatalogCandidate((h as any)?._source ?? {}));
   }
 
-  const detectionCategoryNormForTailored = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  const detectionCategoryNormForTailored = detectionCategoryNorm;
   const isTailoredStyleIntent =
     /\b(semi-formal|formal|business|tailored|smart)\b/i.test(desiredStyleForRelevance ?? "");
   const isTailoredIntentForDetection =
     hasDetectionAnchoredTypeIntent &&
-    (detectionCategoryNormForTailored === "tops" || detectionCategoryNormForTailored === "bottoms") &&
-    (isTailoredStyleIntent || hasTailoredTypeIntent(desiredProductTypes));
+    (
+      // Keep tailored gating for tops when type/style cues indicate suit/blazer intent.
+      (
+        detectionCategoryNormForTailored === "tops" &&
+        (isTailoredStyleIntent || hasTailoredTypeIntent(desiredProductTypes))
+      ) ||
+      // For bottoms, only enforce tailored hard-gating when style is explicitly formal.
+      // Inferred trouser/cargo/chino labels are too noisy and were suppressing valid cargo results.
+      (
+        detectionCategoryNormForTailored === "bottoms" &&
+        hasExplicitStyleIntent &&
+        isTailoredStyleIntent
+      )
+    );
   if (isTailoredIntentForDetection && rankedHits.length > 0) {
     const tailoredSafeHits = rankedHits.filter((h: any) => {
       const src = (h as any)?._source ?? {};
@@ -5916,6 +6135,17 @@ export async function searchByImageWithSimilarity(
     });
     if (tailoredSafeHits.length > 0) {
       rankedHits = tailoredSafeHits;
+    }
+  }
+  if (
+    hasDetectionAnchoredTypeIntent &&
+    detectionCategoryNormForTailored === "tops" &&
+    hasStrictSuitTopIntent(desiredProductTypes) &&
+    rankedHits.length > 0
+  ) {
+    const suitFirstHits = rankedHits.filter((h: any) => hasTailoredTopCatalogCue((h as any)?._source ?? {}));
+    if (suitFirstHits.length > 0) {
+      rankedHits = suitFirstHits;
     }
   }
 
@@ -6196,16 +6426,36 @@ export async function searchByImageWithSimilarity(
         (String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops" ||
           String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms")
       ) {
+        const detectionCategoryForFloor = String(params.detectionProductCategory ?? "").toLowerCase().trim();
         const typeComp = Math.max(0, Math.min(1, compliance.productTypeCompliance ?? 0));
         const exactType = Number(compliance.exactTypeScore ?? 0);
         const crossFamily = Math.max(0, Math.min(1, compliance.crossFamilyPenalty ?? 0));
         const sim = Math.max(0, Math.min(1, similarityScore));
+        const categoryComp = Math.max(
+          0,
+          Math.min(
+            1,
+            Number((compliance as any).categoryRelevance01 ?? (compliance as any).categoryScore ?? 0),
+          ),
+        );
         const hasStrongTypeEvidence = exactType >= 1 || typeComp >= 0.42;
         const hasStrongVisualEvidenceForFloor = sim >= 0.68;
         const notCrossFamilyContradiction = crossFamily < 0.55;
         if (hasStrongTypeEvidence && hasStrongVisualEvidenceForFloor && notCrossFamilyContradiction) {
           const typeBoost = exactType >= 1 ? 0.06 : Math.max(0, (typeComp - 0.42) * 0.1);
-          const floor = Math.min(0.58, Math.max(0.26, sim * 0.78 - crossFamily * 0.18 + typeBoost));
+          let floor = Math.min(0.58, Math.max(0.26, sim * 0.78 - crossFamily * 0.18 + typeBoost));
+          // Main-path acceptance floor for bottoms/skirts:
+          // when visual+type+category evidence is very strong, avoid dropping below
+          // the final threshold due secondary caps.
+          if (
+            detectionCategoryForFloor === "bottoms" &&
+            exactType >= 1 &&
+            categoryComp >= 0.95 &&
+            crossFamily < 0.35 &&
+            (sim >= nearIdenticalRawMin || sim >= 0.76)
+          ) {
+            floor = Math.max(floor, Math.min(0.72, Math.max(0.66, sim * 0.9)));
+          }
           const source = String(finalRelevanceSource ?? "").toLowerCase();
           const canLiftFrom =
             source === "computed" ||
@@ -6398,6 +6648,55 @@ export async function searchByImageWithSimilarity(
     (p: any) =>
       typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalResultMin,
   ) as ProductResult[];
+
+  // Main-path deterministic keep rule:
+  // if strict mode would return empty for detection-anchored tops/bottoms, keep the
+  // strongest in-family visual candidates instead of collapsing to zero.
+  if (
+    mainPathStrict &&
+    hasDetectionAnchoredTypeIntent &&
+    results.length === 0 &&
+    resultsBeforeFinalRelevanceFilter.length > 0 &&
+    (String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops" ||
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms")
+  ) {
+    const detectionCategoryNormStrict = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+    const keepFloor = detectionCategoryNormStrict === "bottoms" ? 0.66 : 0.58;
+    const rescueKeep = resultsBeforeFinalRelevanceFilter
+      .filter((p: any) => {
+        const explainAny = p.explain as any;
+        const sim = Number(p.similarity_score ?? 0);
+        const crossFamily = Number(explainAny?.crossFamilyPenalty ?? 0);
+        const exactType = Number(explainAny?.exactTypeScore ?? 0);
+        const typeComp = Number(explainAny?.productTypeCompliance ?? 0);
+        const categoryComp = Number(explainAny?.categoryScore ?? explainAny?.categoryRelevance01 ?? 0);
+        if (crossFamily >= 0.55) return false;
+        if (categoryComp < 0.8) return false;
+        if (sim < 0.72) return false;
+        return exactType >= 1 || typeComp >= 0.48;
+      })
+      .sort((a: any, b: any) => {
+        const sa = Number(a.similarity_score ?? 0);
+        const sb = Number(b.similarity_score ?? 0);
+        return sb - sa;
+      })
+      .slice(0, Math.max(2, Math.min(limit, 6)))
+      .map((p: any) => {
+        const next = { ...p } as any;
+        const sim = Number(next.similarity_score ?? 0);
+        const lifted = Math.max(keepFloor, Math.min(0.86, sim * 0.9));
+        next.finalRelevance01 = Math.max(Number(next.finalRelevance01 ?? 0), lifted);
+        next.explain = {
+          ...(next.explain ?? {}),
+          finalRelevance01: next.finalRelevance01,
+          finalRelevanceSource: "main_path_strict_type_visual_keep",
+        };
+        return next;
+      });
+    if (rescueKeep.length > 0) {
+      results = rescueKeep as ProductResult[];
+    }
+  }
 
   const strongVisualOverrideMax = imageStrongVisualOverrideMaxCount();
   const droppedByFinalRelevanceBeforeOverride = Math.max(0, resultsBeforeFinalRelevanceFilter.length - results.length);
@@ -6688,29 +6987,34 @@ export async function searchByImageWithSimilarity(
   // If the query image already exists in catalog (exact pHash match), make sure it is not
   // lost due to metadata/rerank gates. This is a strong identity signal.
   // pHash is often stored on product_images (primary row) while products.p_hash is unset — union both.
-  const normalizedQueryPHash = String(pHash ?? "").toLowerCase().trim().replace(/[^0-9a-f]/g, "");
+  const normalizedQueryPHash = String(pHash ?? "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^0-9a-f]/g, "")
+    .padStart(16, "0");
   if (normalizedQueryPHash && /^[0-9a-f]+$/i.test(normalizedQueryPHash)) {
     const existing = new Set(results.map((p) => String(p.id)));
     const hasIsHidden = await productsTableHasIsHiddenColumn();
     const hiddenClause = hasIsHidden ? "AND p.is_hidden = false" : "";
     const ph = normalizedQueryPHash;
+    const phLen = ph.length;
     const exactPhashRows = await pg.query(
       `SELECT id FROM (
          SELECT p.id
            FROM products p
           WHERE p.p_hash IS NOT NULL
-            AND LOWER(TRIM(p.p_hash)) = $1
+            AND LPAD(REGEXP_REPLACE(LOWER(TRIM(p.p_hash)), '[^0-9a-f]', '', 'g'), $2, '0') = $1
             ${hiddenClause}
          UNION
          SELECT p.id
            FROM product_images pi
            INNER JOIN products p ON p.id = pi.product_id
           WHERE pi.p_hash IS NOT NULL
-            AND LOWER(TRIM(pi.p_hash)) = $1
+            AND LPAD(REGEXP_REPLACE(LOWER(TRIM(pi.p_hash)), '[^0-9a-f]', '', 'g'), $2, '0') = $1
             ${hiddenClause}
        ) x
        LIMIT 10`,
-      [ph],
+      [ph, phLen],
     );
     const rescueIds = (exactPhashRows.rows ?? [])
       .map((r: any) => String(r.id))
@@ -6793,6 +7097,7 @@ export async function searchByImageWithSimilarity(
       exact_cosine_rerank: exactCosineRerank,
       dual_knn_fusion: useDualKnn,
       image_rank_visual_first: imageSearchVisualPrimaryRanking,
+      main_path_strict: mainPathStrict,
       raw_open_search_hits: rawOpenSearchHitCount,
       hits_after_final_accept_min: countAfterFinalAcceptMin,
       hits_after_dedupe: countAfterDedupe,
@@ -6843,6 +7148,7 @@ export async function searchByImageWithSimilarity(
     related: related.length > 0 ? related : undefined,
     meta: {
       relevance_intent: relevanceIntentDebug,
+      main_path_strict: mainPathStrict,
       threshold: similarityThreshold,
       total_results: results.length,
       total_related: related.length,
@@ -6904,7 +7210,13 @@ async function findSimilarByPHash(
   limit: number = 10,
   maxDistance: number = 12,
 ): Promise<ProductResult[]> {
-  const normalizedInput = String(pHash ?? "").toLowerCase().trim().replace(/[^0-9a-f]/g, "");
+  const normalizePHashHex = (value: string | null | undefined, minLen: number = 16): string => {
+    const hex = String(value ?? "").toLowerCase().trim().replace(/[^0-9a-f]/g, "");
+    if (!hex) return "";
+    const targetLen = Math.max(minLen, hex.length);
+    return hex.padStart(targetLen, "0");
+  };
+  const normalizedInput = normalizePHashHex(pHash, 16);
   if (!normalizedInput) return [];
   const hasIsHidden = await productsTableHasIsHiddenColumn();
   const hiddenClause = hasIsHidden ? "AND p.is_hidden = false" : "";
@@ -6944,8 +7256,8 @@ async function findSimilarByPHash(
   // Calculate Hamming distance and filter similar
   const bestDistanceById = new Map<number, number>();
   for (const row of result.rows) {
-    const rowHash = String((row as any).p_hash ?? "").toLowerCase().trim().replace(/[^0-9a-f]/g, "");
-    if (!rowHash || rowHash.length !== normalizedInput.length) continue;
+    const rowHash = normalizePHashHex(String((row as any).p_hash ?? ""), normalizedInput.length);
+    if (!rowHash) continue;
     const distance = hammingDistance(normalizedInput, rowHash);
     if (distance <= maxDistance) { // configurable pHash tolerance (default: ~80% similar)
       const idNum = Number(row.id);

@@ -639,14 +639,21 @@ function genderHardFilterMinConfidence(): number {
   const n = Number(process.env.SEARCH_GENDER_HARD_MIN_CONFIDENCE ?? '0.55');
   return Number.isFinite(n) ? Math.min(0.95, Math.max(0.35, n)) : 0.55;
 }
+
+/**
+ * Controls whether inferred audience (gender/age from AST) can become hard filters.
+ * Default is OFF to protect recall; explicit caller filters still stay hard.
+ */
 function inferredAudienceHardFilterEnabled(): boolean {
   const v = String(process.env.SEARCH_INFERRED_AUDIENCE_HARD ?? "").toLowerCase();
   return v === "1" || v === "true" || v === "yes" || v === "on";
 }
+
 function strictColorTypeModeEnabled(): boolean {
   const v = String(process.env.SEARCH_STRICT_COLOR_TYPE_MODE ?? "1").toLowerCase();
   return !(v === "0" || v === "false" || v === "off" || v === "no");
 }
+
 function hasStrictColorTypeIntent(rawQuery: string, ast: QueryAST, hasProductTypeConstraint: boolean): boolean {
   if (!strictColorTypeModeEnabled()) return false;
   const normalizedTokens = (ast.tokens?.normalized ?? []).map((t) => String(t).toLowerCase()).filter(Boolean);
@@ -659,6 +666,7 @@ function hasStrictColorTypeIntent(rawQuery: string, ast: QueryAST, hasProductTyp
   if (hasNegation) return false;
   return true;
 }
+
 /** When true, hard/soft gender clauses also allow indexed `unisex` (SEARCH_GENDER_UNISEX_OR). */
 function binaryGenderAllowsUnisexFilter(g: string): boolean {
   if (!config.search.genderUnisexOr) return false;
@@ -1082,10 +1090,10 @@ export async function textSearch(
 
     if (hardColorFilterActive) {
       const colorsForFilter = rerankDesiredColors;
-      // Precision rule:
-      // - When the query asks for ONE color token, filter by the product's *primary*
-      //   color (`attr_color`) first. This avoids matches where `attr_colors`
-      //   contains the requested color only as a secondary accent.
+      // Precision + recall rule:
+      // - For one color token, require a match in primary OR multi-color fields.
+      //   This keeps high precision while avoiding false negatives from imperfect
+      //   primary-color extraction.
       // - For multi-color queries we keep recall-focused matching on `attr_colors`.
       if (colorsForFilter.length === 1) {
         const expanded = expandColorTermsForFilter(colorsForFilter[0]);
@@ -1657,9 +1665,6 @@ export async function textSearch(
       (c) => !isGenderFilterClause(c) && !isAgeGroupFilterClause(c),
     );
 
-    // If single-color strict filter by `attr_color` yields 0 hits,
-    // retry by allowing `attr_colors` (multi-color palette) matches.
-
     if (currentTotal === 0 && hasStrictColor && filterWithoutColors.length > 0) {
       console.warn("[textSearch] Zero hits with strict colors; retrying without colors.");
       const relaxedBody: any = {
@@ -2102,6 +2107,7 @@ export async function textSearch(
       deduped_results: countAfterDedupe,
       paged_results: finalReturnedCount,
     };
+
     if (!xgbFullRecall && useXgbRanker && results.length > 3) {
       results = await runXgbTieBreakOnSlice(results);
     }
@@ -2225,6 +2231,7 @@ export async function textSearch(
         final_accept_min: finalAcceptMin,
         strict_color_type_intent: strictColorTypeIntent,
         total_above_threshold: totalAboveThreshold,
+        gate_counts: gateCounts,
         open_search_total_estimate: typeof osTotal === "number" ? osTotal : undefined,
         ...(relatedFetchError ? { related_fetch_error: relatedFetchError } : {}),
         ...(includeRetrievalMeta
@@ -2236,6 +2243,7 @@ export async function textSearch(
                 open_search_total_raw:
                   response.body.hits.total?.value ?? response.body.hits.total ?? null,
                 accepted_after_relevance_min: thresholdPassedIds.length,
+                gate_counts: gateCounts,
                 below_relevance_threshold: belowRelevanceThreshold,
                 recall_size: recallSize,
                 final_accept_min: finalAcceptMin,
