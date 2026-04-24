@@ -5251,13 +5251,13 @@ export async function searchByImageWithSimilarity(
       const explicitIntentTypeFloor = hasExplicitTypeFilter || hasExplicitCategoryFilter
         ? (() => {
           const dc = String(params.detectionProductCategory ?? "").toLowerCase().trim();
-          if (dc === "tops") return 0.72;
-          if (dc === "bottoms") return 0.62;
-          if (dc === "footwear" || dc === "shoes") return 0.74;
-          if (dc === "dresses") return 0.78;
-          if (dc === "outerwear") return 0.7;
-          if (dc === "bags") return 0.76;
-          return 0.7;
+          if (dc === "tops") return 0.54;
+          if (dc === "bottoms") return 0.58;
+          if (dc === "footwear" || dc === "shoes") return 0.68;
+          if (dc === "dresses") return 0.74;
+          if (dc === "outerwear") return 0.62;
+          if (dc === "bags") return 0.7;
+          return 0.6;
         })()
         : 0.5;
       const explicitIntentCategoryFloor = hasExplicitCategoryFilter
@@ -5891,18 +5891,18 @@ export async function searchByImageWithSimilarity(
         if (hasDetectionAnchoredTypeIntent) {
           const detectionTypeRescueFloor =
             detectionCategoryKey === "tops"
-              ? 0.18
+              ? 0.32
               : detectionCategoryKey === "bottoms"
-                ? 0.24
+                ? 0.28
                 : detectionCategoryKey === "footwear" || detectionCategoryKey === "shoes"
-                  ? 0.34
+                  ? 0.38
                   : detectionCategoryKey === "dresses"
-                    ? 0.3
+                    ? 0.34
                     : detectionCategoryKey === "outerwear"
-                      ? 0.28
+                      ? 0.32
                       : detectionCategoryKey === "bags"
-                        ? 0.3
-                        : 0.3;
+                        ? 0.34
+                        : 0.32;
           if (typeComp < detectionTypeRescueFloor) return false;
         }
         if (hasColorIntentForFinal) {
@@ -7084,14 +7084,18 @@ export async function searchByImageWithSimilarity(
         const isBottomFinalGate = detectionCategoryForFinalGate === "bottoms";
         const typeFloor = isDressFinalGate
           ? 0.72
-          : isTopFinalGate || isBottomFinalGate
-            ? 0.42
-            : 0.82;
+          : isTopFinalGate
+            ? 0.25
+            : isBottomFinalGate
+              ? 0.35
+              : 0.82;
         const simFloor = isDressFinalGate
           ? 0.95
-          : isTopFinalGate || isBottomFinalGate
-            ? 0.94
-            : 0.985;
+          : isTopFinalGate
+            ? 0.88
+            : isBottomFinalGate
+              ? 0.88
+              : 0.985;
         return crossFamily < 0.22 && (exactType >= 1 || typeComp >= typeFloor || sim >= simFloor);
       });
       if (familySafeFallback.length > 0) {
@@ -7128,7 +7132,11 @@ export async function searchByImageWithSimilarity(
   const variantGroupCount = variantCollapsed.groupCount;
   const variantRepresentativeCount = variantCollapsed.representativeCount;
   const preserveColorCohesionForDetection =
-    hasDetectionAnchoredTypeIntent;
+    hasDetectionAnchoredTypeIntent &&
+    hasColorIntentForFinal &&
+    (detectionCategoryForFinalGate === "tops" ||
+      detectionCategoryForFinalGate === "bottoms" ||
+      detectionCategoryForFinalGate === "dresses");
   const diversityRerankApplied =
     imageDiversityRerankEnabled() &&
     variantCollapsed.results.length > 2 &&
