@@ -3,8 +3,74 @@
 import type { ScrapedProduct } from "./types";
 import { supabaseAdmin } from "../supabaseAdmin";
 import { savePrimaryProductImageFromUrl } from "../productImages";
+import { inferCategoryCanonical } from "../search/categoryFilter";
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+/**
+ * Infer product_types array from category_canonical + title.
+ * Mirrors the backfill logic in migration 017. Called at ingest time so every
+ * new product arrives with populated product_types rather than an empty array.
+ */
+function inferProductTypes(categoryCanonical: string | null, title: string): string[] {
+  const cat = (categoryCanonical ?? "").toLowerCase().trim();
+  const t = (title ?? "").toLowerCase();
+
+  if (cat === "tops") {
+    if (/\b(t-?shirt|tee|tshirt)\b/.test(t)) return ["t-shirt", "tee", "top"];
+    if (/\b(shirt|shirts)\b/.test(t)) return ["shirt", "top"];
+    if (/\b(blouse|blouses)\b/.test(t)) return ["blouse", "top"];
+    if (/\b(sweater|pullover|knitwear|knit)\b/.test(t)) return ["sweater", "top", "knitwear"];
+    if (/\b(hoodie|hoody|sweatshirt)\b/.test(t)) return ["hoodie", "sweatshirt", "top"];
+    if (/\b(polo)\b/.test(t)) return ["polo", "top"];
+    if (/\b(cardigan)\b/.test(t)) return ["cardigan", "top"];
+    if (/\b(tank|camisole|cami)\b/.test(t)) return ["tank top", "top"];
+    if (/\b(bodysuit)\b/.test(t)) return ["bodysuit", "top"];
+    if (/\b(overshirt)\b/.test(t)) return ["overshirt", "top"];
+    return ["top"];
+  }
+
+  if (cat === "bottoms") {
+    if (/\b(jeans?|denim)\b/.test(t)) return ["jeans", "denim", "pants"];
+    if (/\b(trouser|trousers|chino|chinos|slack|slacks)\b/.test(t)) return ["trousers", "pants"];
+    if (/\b(skirt|skirts)\b/.test(t)) return ["skirt"];
+    if (/\b(shorts?|bermuda)\b/.test(t)) return ["shorts"];
+    if (/\b(leggings?|tights?)\b/.test(t)) return ["leggings"];
+    if (/\b(jogger|sweatpants?)\b/.test(t)) return ["joggers", "sweatpants"];
+    return ["pants"];
+  }
+
+  if (cat === "dresses") {
+    if (/\b(jumpsuit|romper|playsuit)\b/.test(t)) return ["jumpsuit"];
+    if (/\b(abaya|kaftan|kaftans|jalabiya)\b/.test(t)) return ["abaya"];
+    if (/\bmaxi\s*dress\b/.test(t)) return ["dress", "maxi dress"];
+    if (/\bmidi\s*dress\b/.test(t)) return ["dress", "midi dress"];
+    if (/\bmini\s*dress\b/.test(t)) return ["dress", "mini dress"];
+    return ["dress"];
+  }
+
+  if (cat === "footwear") {
+    if (/\b(sneaker|sneakers|trainer|trainers|runner|runners)\b/.test(t)) return ["sneakers", "trainers"];
+    if (/\b(boot|boots|ankle\s*boot|combat\s*boot)\b/.test(t)) return ["boots"];
+    if (/\b(sandal|sandals|slide|slides|flip\s*flop)\b/.test(t)) return ["sandals"];
+    if (/\b(heel|heels|pump|pumps|stiletto)\b/.test(t)) return ["heels", "pumps"];
+    if (/\b(loafer|loafers|moccasin)\b/.test(t)) return ["loafers"];
+    if (/\b(flat|flats|ballet)\b/.test(t)) return ["flats"];
+    if (/\b(oxford|oxfords|derby|brogue)\b/.test(t)) return ["oxfords"];
+    return ["shoes"];
+  }
+
+  if (cat === "outerwear") {
+    if (/\b(blazer|blazers|sport coat)\b/.test(t)) return ["blazer"];
+    if (/\b(jacket|jackets)\b/.test(t)) return ["jacket"];
+    if (/\b(coat|coats)\b/.test(t)) return ["coat"];
+    if (/\b(parka)\b/.test(t)) return ["parka"];
+    if (/\b(vest|gilet)\b/.test(t)) return ["vest"];
+    return ["outerwear"];
+  }
+
+  return [];
+}
 
 function isRetryableSupabaseError(err: any): boolean {
   if (!err || typeof err !== "object") return false;
@@ -78,6 +144,9 @@ export async function upsertProduct(p: ScrapedProduct): Promise<number> {
   const imageUrls = p.image_urls ?? null;
   const primaryImageUrl = p.image_url ?? imageUrls?.[0] ?? null;
 
+  const categoryCanonical = inferCategoryCanonical(p.category ?? null, p.title);
+  const productTypes = inferProductTypes(categoryCanonical, p.title);
+
   // 1) Upsert into products
   // IMPORTANT: this assumes you have a UNIQUE constraint on (vendor_id, product_url)
   const { data: productRows, error: upsertErr } = await withRetry(async () => {
@@ -108,6 +177,9 @@ export async function upsertProduct(p: ScrapedProduct): Promise<number> {
 
             image_url: primaryImageUrl,
             image_urls: imageUrls,
+
+            category_canonical: categoryCanonical,
+            product_types: productTypes,
           },
         ],
         { onConflict: "vendor_id,product_url" }
