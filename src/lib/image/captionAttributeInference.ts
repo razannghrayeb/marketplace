@@ -66,25 +66,47 @@ export function inferColorFromCaption(caption: string): {
   const colorTokens =
     "black|navy|blue|denim|grey|gray|white|ivory|cream|off[- ]white|beige|tan|camel|brown|green|olive|red|burgundy|pink|yellow|gold";
 
-  let topColor: string | null = null;
-  const topMatch = s.match(
-    new RegExp(`\\b(${colorTokens})\\b[^.]{0,40}\\b(top|shirt|blouse|tee|t-shirt|t shirt|tunic)\\b`),
-  );
-  if (topMatch?.[1]) topColor = mapColorWord(topMatch[1]);
+  // Helper: find the color token with the SHORTEST gap before a target garment keyword.
+  // Using .match() finds the leftmost color, which is wrong when a different garment type
+  // sits between that color and the target (e.g. "blue sweater and grey pants" → "blue" wins
+  // the leftmost match for "pants", but "grey" is the correct closest color).
+  function nearestColorBefore(text: string, garmentRe: string): string | null {
+    const colorPat = new RegExp(
+      `\\b(${colorTokens})\\b`,
+      "g",
+    );
+    const garmentPat = new RegExp(`^([^.]{0,35})\\b(?:${garmentRe})\\b`);
+    let cm: RegExpExecArray | null;
+    let bestGap = Infinity;
+    let best: string | null = null;
+    while ((cm = colorPat.exec(text)) !== null) {
+      const afterColor = text.slice(cm.index + cm[0].length);
+      const gm = afterColor.match(garmentPat);
+      if (gm) {
+        const gap = gm[1].length;
+        if (gap < bestGap) {
+          bestGap = gap;
+          best = mapColorWord(cm[1]);
+        }
+      }
+    }
+    return best;
+  }
 
-  let jeansColor: string | null = null;
-  const jeansMatch = s.match(
-    /\b(black|navy|blue|denim|grey|gray|beige|tan|camel|brown|white|off[- ]white|cream|olive|green|red|pink|yellow|gold)\b[^.]{0,30}\b(jeans|pants|trousers|chinos|cargo)\b/,
-  );
-  if (jeansMatch?.[1]) jeansColor = mapColorWord(jeansMatch[1]);
+  // Top garments: include sweater/cardigan/pullover/hoodie so BLIP captions like
+  // "blue sweater" correctly set topColor="blue" (previously only shirt/blouse/tee matched).
+  const topGarments = "top|shirt|blouse|tee|t-shirt|t shirt|tunic|sweater|cardigan|pullover|jumper|hoodie|sweatshirt|knitwear";
+  const topColor = nearestColorBefore(s, topGarments);
 
-  let garmentColor: string | null = null;
-  const garmentMatch = s.match(
-    new RegExp(
-      `\\b(${colorTokens})\\b[^.]{0,40}\\b(dress|dresses|skirt|skirts|jacket|coat|blazer|sweater|gown)\\b`,
-    ),
-  );
-  if (garmentMatch?.[1]) garmentColor = mapColorWord(garmentMatch[1]);
+  // Bottom garments: find nearest (not leftmost) color before the garment type.
+  // Leftmost-match bug: "blue sweater and grey pants" → regex returns "blue" (not "grey").
+  const bottomGarments = "jeans|pants|trousers|chinos|cargo|shorts|leggings";
+  const jeansColor = nearestColorBefore(s, bottomGarments);
+
+  // Garment color for dresses, outerwear, skirts: use nearest-color approach.
+  // "sweater" is now in topGarments so this slot covers dresses/skirts/outerwear specifically.
+  const garmentGarments = "dress|dresses|skirt|skirts|jacket|coat|blazer|gown|romper|jumpsuit";
+  const garmentColor = nearestColorBefore(s, garmentGarments);
 
   return { topColor, jeansColor, garmentColor };
 }
