@@ -358,6 +358,12 @@ export interface SearchResultWithRelated {
     did_you_mean?: string; // Suggestion if not auto-applied
     /** True when every candidate in the recall window scored below the path final-accept gate (text vs image env). */
     below_relevance_threshold?: boolean;
+    knn_timed_out?: number;
+    detection_observilaty?: {
+      hadDetections?: boolean;
+      yoloConfidence?: number;
+      category?: string;
+    };
     /** Image search: kNN recall passed CLIP gate but every hit failed final relevance gate (hard mode). */
     below_final_relevance_gate?: boolean;
     relevance_gate_soft?: boolean;
