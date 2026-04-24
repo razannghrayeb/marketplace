@@ -1251,7 +1251,7 @@ function passesStrictDetectionCategoryFamily(
   if (!blob.trim()) return false;
 
   const hasFootwear = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|flat|flats|oxford|oxfords|pump|pumps|mule|mules|clog|clogs)\b/.test(blob);
-  const hasTop = /\b(top|tops|shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|tank|cami|camisole|sweater|cardigan|hoodie|pullover|jumper|polo|henley|tunic|knitwear|bodysuit|crop\s*top|button\s*down|button-down|blazer|blazers|sport coat|dress jacket|suit jacket|waistcoat|vest|vests)\b/.test(blob);
+  const hasTop = /\b(top|tops|shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|tank|cami|camisole|sweater|cardigan|cardigans|hoodie|pullover|jumper|polo|henley|tunic|knitwear|bodysuit|bodysuits|overshirt|overshirts|jersey|jerseys|crop\s*top|button\s*down|button-down|blazer|blazers|sport coat|dress jacket|suit jacket|waistcoat|vest|vests)\b/.test(blob);
   const hasOuterwear = /\b(outerwear|outwear|jacket|jackets|coat|coats|blazer|blazers|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers)\b/.test(blob);
   const hasBottom = /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|skirt|skirts|legging|leggings|jogger|joggers|sweatpants?|slack|slacks|culotte|culottes|palazzo|chino|chinos|cargo|track\s*pants?)\b/.test(blob);
   const hasDressOnePiece = /\b(dress|dresses|gown|gowns|frock|frocks|sundress|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|abaya|abayas|kaftan|kaftans|caftan|caftans)\b/.test(blob);
@@ -5193,12 +5193,12 @@ export async function searchByImageWithSimilarity(
         // Keep tops main-path tuning from overpowering active color intent.
         // When the query has color intent and product color compliance is none,
         // dampen the boost so wrong-color tops do not dominate ranking.
-        const hasTopColorIntent = Boolean(comp.hasColorIntent ?? hasColorIntentForFinal);
+        const hasTopColorIntent = hasColorPreferenceForRanking || Boolean(comp.hasColorIntent ?? hasColorIntentForFinal);
         const topColorCompliance = Number(comp.colorCompliance ?? NaN);
-        if (hasTopColorIntent && Number.isFinite(topColorCompliance) && topColorCompliance <= 0) {
+        if (hasTopColorIntent && Number.isFinite(topColorCompliance) && topColorCompliance <= 0.12) {
           // Keep stricter damping for explicit color filters, but avoid collapsing
           // tops to zero when color comes only from inferred intent.
-          blendedTopMain *= hasExplicitColorIntent ? 0.45 : 0.85;
+          blendedTopMain *= hasExplicitColorIntent ? 0.45 : 0.72;
         }
         if (hasTopColorIntent && Number.isFinite(topColorCompliance) && topColorCompliance >= 0.6) {
           blendedTopMain = Math.min(1, blendedTopMain + 0.035);
@@ -5450,17 +5450,18 @@ export async function searchByImageWithSimilarity(
       if ((hasExplicitTypeFilter || (hasExplicitCategoryFilter && hasDerivedTypeIntentForSafetyGate)) && exactType < 1 && typeComp < 0.28) {
         return false;
       }
-      // Category-specific type floor: relax for bottoms with high YOLO confidence to handle jeans/denims
-      // with low productTypeCompliance to 'trousers' detection label (0.928 confidence).
+      // Category-specific type floor with confidence-aware relaxation.
+      // Keep tops stricter here so wrong families do not dominate main-path candidates.
       let detAnchoredTypeFloor = hasColorIntentForFinal ? 0.26 : 0.22;
       if (hasDetectionAnchoredTypeIntent && params.detectionProductCategory === 'tops') {
         const yoloConfidence = params.detectionYoloConfidence ?? 0;
+        const wantsColorCohesion = hasColorPreferenceForRanking;
         if (yoloConfidence >= 0.9) {
-          detAnchoredTypeFloor = 0.08;
+          detAnchoredTypeFloor = wantsColorCohesion ? 0.26 : 0.22;
         } else if (yoloConfidence >= 0.8) {
-          detAnchoredTypeFloor = 0.12;
+          detAnchoredTypeFloor = wantsColorCohesion ? 0.3 : 0.24;
         } else {
-          detAnchoredTypeFloor = 0.16;
+          detAnchoredTypeFloor = wantsColorCohesion ? 0.34 : 0.28;
         }
       }
       if (hasDetectionAnchoredTypeIntent && params.detectionProductCategory === 'bottoms') {
@@ -7085,16 +7086,16 @@ export async function searchByImageWithSimilarity(
         const typeFloor = isDressFinalGate
           ? 0.72
           : isTopFinalGate
-            ? 0.35
+            ? 0.33
             : isBottomFinalGate
-              ? 0.42
+              ? 0.4
               : 0.82;
         const simFloor = isDressFinalGate
           ? 0.95
           : isTopFinalGate
-            ? 0.88
+            ? 0.91
             : isBottomFinalGate
-              ? 0.88
+              ? 0.9
               : 0.985;
         return crossFamily < 0.22 && (exactType >= 1 || typeComp >= typeFloor || sim >= simFloor);
       });
