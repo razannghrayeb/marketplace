@@ -1241,7 +1241,7 @@ function shopLookMaxSearchCallsPerDetection(): number {
 }
 
 function shopLookDeterministicTwoPassEnv(): boolean {
-  const raw = String(process.env.SEARCH_IMAGE_DETECTION_DETERMINISTIC_TWO_PASS ?? "1").toLowerCase().trim();
+  const raw = String(process.env.SEARCH_IMAGE_DETECTION_DETERMINISTIC_TWO_PASS ?? "0").toLowerCase().trim();
   return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
 }
 
@@ -2288,9 +2288,9 @@ function dedupeDetectionsByCategoryHighestConfidence(detections: Detection[]): D
 
   const maxKeepForCategory = (category: string): number => {
     if (category === "tops") {
-      const raw = Number(process.env.SEARCH_IMAGE_TOPS_MAX_DETECTIONS_KEEP ?? "4");
+      const raw = Number(process.env.SEARCH_IMAGE_TOPS_MAX_DETECTIONS_KEEP ?? "2");
       if (Number.isFinite(raw)) return Math.max(2, Math.min(5, Math.floor(raw)));
-      return 3;
+      return 2;
     }
     if (category === "bottoms") return 2;
     if (category === "dresses") return 2;
@@ -2671,7 +2671,7 @@ function applyDetectionCategoryGuard(
       return !isAccessoryLikeCategory(categoryMapping.productCategory);
     }
 
-    const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, String(term)));
+    const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, term));
     if (!allowByTerm) {
       // Apparel detections are sometimes under-described in catalog metadata
       // (for example, a true dress can be indexed with a generic fashion title).
@@ -5951,8 +5951,6 @@ export class ImageAnalysisService {
             }
           }
 
-          // These are assigned inside the else branch below; declare them here so they
-          // remain in scope after the if/else for the return object and debug fields.
           let knnCandidateCount = similarResult.results.length;
           let precisionSafeResults = similarResult.results;
           let categorySafeResults = similarResult.results;
