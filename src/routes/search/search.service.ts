@@ -640,6 +640,33 @@ function genderHardFilterMinConfidence(): number {
   return Number.isFinite(n) ? Math.min(0.95, Math.max(0.35, n)) : 0.55;
 }
 
+/**
+ * Controls whether inferred audience (gender/age from AST) can become hard filters.
+ * Default is OFF to protect recall; explicit caller filters still stay hard.
+ */
+function inferredAudienceHardFilterEnabled(): boolean {
+  const v = String(process.env.SEARCH_INFERRED_AUDIENCE_HARD ?? "").toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+function strictColorTypeModeEnabled(): boolean {
+  const v = String(process.env.SEARCH_STRICT_COLOR_TYPE_MODE ?? "1").toLowerCase();
+  return !(v === "0" || v === "false" || v === "off" || v === "no");
+}
+
+function hasStrictColorTypeIntent(rawQuery: string, ast: QueryAST, hasProductTypeConstraint: boolean): boolean {
+  if (!strictColorTypeModeEnabled()) return false;
+  const normalizedTokens = (ast.tokens?.normalized ?? []).map((t) => String(t).toLowerCase()).filter(Boolean);
+  const colors = (ast.entities?.colors ?? []).map((c) => String(c).toLowerCase()).filter(Boolean);
+  if (colors.length === 0 || !hasProductTypeConstraint) return false;
+  // Keep this mode for compact filter queries like "red dress", "black maxi dress".
+  const compact = normalizedTokens.length > 0 && normalizedTokens.length <= 4;
+  if (!compact) return false;
+  const hasNegation = /\b(not|except|without|minus)\b/i.test(rawQuery);
+  if (hasNegation) return false;
+  return true;
+}
+
 /** When true, hard/soft gender clauses also allow indexed `unisex` (SEARCH_GENDER_UNISEX_OR). */
 function binaryGenderAllowsUnisexFilter(g: string): boolean {
   if (!config.search.genderUnisexOr) return false;
@@ -1063,14 +1090,23 @@ export async function textSearch(
 
     if (hardColorFilterActive) {
       const colorsForFilter = rerankDesiredColors;
-      // Precision rule:
-      // - When the query asks for ONE color token, filter by the product's *primary*
-      //   color (`attr_color`) first. This avoids matches where `attr_colors`
-      //   contains the requested color only as a secondary accent.
+      // Precision + recall rule:
+      // - For one color token, require a match in primary OR multi-color fields.
+      //   This keeps high precision while avoiding false negatives from imperfect
+      //   primary-color extraction.
       // - For multi-color queries we keep recall-focused matching on `attr_colors`.
       if (colorsForFilter.length === 1) {
         const expanded = expandColorTermsForFilter(colorsForFilter[0]);
-        filterClauses.push({ terms: { attr_color: expanded } });
+        filterClauses.push({
+          bool: {
+            _name: "strict_single_color_filter",
+            should: [
+              { terms: { attr_color: expanded } },
+              { terms: { attr_colors: expanded } },
+            ],
+            minimum_should_match: 1,
+          },
+        });
       } else if (colorMode === "all") {
         filterClauses.push({
           bool: {
@@ -1205,7 +1241,11 @@ export async function textSearch(
     const mergedAgeGroup = (merged as { ageGroup?: string }).ageGroup ?? ast.entities.ageGroup;
     const useHardAudienceFilter =
       (Boolean(merged.gender) || Boolean(mergedAgeGroup)) &&
-      (genderFromCaller || ageFromCaller || ast.confidence >= genderHardFilterMinConfidence());
+      (
+        genderFromCaller ||
+        ageFromCaller ||
+        (inferredAudienceHardFilterEnabled() && ast.confidence >= genderHardFilterMinConfidence())
+      );
     const gNorm = merged.gender ? merged.gender.toLowerCase() : "";
 
     if (merged.gender && useHardAudienceFilter && normalizeQueryGender(merged.gender)) {
@@ -1565,9 +1605,13 @@ export async function textSearch(
 
     const isColorFilterClause = (c: any): boolean => {
       if (!c) return false;
+      if (c?.bool?._name === "strict_single_color_filter") return true;
       if (c?.term?.attr_color) return true;
       if (c?.terms?.attr_colors) return true;
       if (c?.term?.attr_colors) return true;
+      if (c?.bool?.should && Array.isArray(c.bool.should)) {
+        return c.bool.should.some((s: any) => Boolean(s?.terms?.attr_color) || Boolean(s?.terms?.attr_colors));
+      }
       if (c?.bool?.must && Array.isArray(c.bool.must)) {
         // Our AND-mode filter uses: { bool: { must: [ { term:{attr_colors:...}}, ... ] } }
         return c.bool.must.every((m: any) => Boolean(m?.term?.attr_colors));
@@ -1621,37 +1665,6 @@ export async function textSearch(
       (c) => !isGenderFilterClause(c) && !isAgeGroupFilterClause(c),
     );
 
-    // If single-color strict filter by `attr_color` yields 0 hits,
-    // retry by allowing `attr_colors` (multi-color palette) matches.
-    const usedPrimaryColorOnlyFilter =
-      rerankDesiredColors.length === 1 && filterClauses.some((c) => Boolean(c?.term?.attr_color));
-    if (currentTotal === 0 && usedPrimaryColorOnlyFilter) {
-      console.warn("[textSearch] 0 hits with primary color; retrying using attr_colors.");
-      const colorOnlyWithoutPrimary = filterWithoutColors;
-      const relaxedBody: any = {
-        ...searchBody,
-        query: {
-          ...searchBody.query,
-          bool: {
-            ...searchBody.query.bool,
-            // Keep everything except remove strict primary-color constraint.
-            filter: [
-              ...colorOnlyWithoutPrimary,
-              {
-                terms: {
-                  attr_colors: [...new Set(rerankDesiredColors.flatMap((c) => expandColorTermsForFilter(c)))],
-                },
-              },
-            ],
-            // Preserve must/should exactly as in the first attempt.
-          },
-        },
-      };
-      searchRetryTrace.push("zero_hit_primary_color_to_attr_colors");
-      response = await opensearch.search({ index: config.opensearch.index, body: relaxedBody });
-      currentTotal =
-        response.body.hits.total?.value ?? response.body.hits.total ?? currentTotal;
-    }
     if (currentTotal === 0 && hasStrictColor && filterWithoutColors.length > 0) {
       console.warn("[textSearch] Zero hits with strict colors; retrying without colors.");
       const relaxedBody: any = {
@@ -1799,7 +1812,9 @@ export async function textSearch(
       .filter((id) => (complianceById.get(id)?.finalRelevance01 ?? 0) >= finalAcceptMin);
     const countAfterFinalAcceptMin = thresholdPassedIds.length;
 
-    const relevanceGateSoft = config.search.relevanceGateMode === "soft";
+    const strictColorTypeIntent = hasStrictColorTypeIntent(rawQuery, ast, hasProductTypeConstraint);
+    // User preference: always run text search in strict mode.
+    const relevanceGateSoft = false;
     const softFloorMin = config.search.softFinalRelevanceFloorMin;
 
     // #region agent log
@@ -1827,6 +1842,7 @@ export async function textSearch(
             finalAcceptMin,
             relevanceGateMode: config.search.relevanceGateMode,
             relevanceGateSoft,
+            strictColorTypeIntent,
             hitsCount: hits.length,
             sortedByRelevanceCount: sortedByRelevance.length,
             thresholdPassedIdsCount: thresholdPassedIds.length,
@@ -1859,13 +1875,16 @@ export async function textSearch(
         ? softFloorPassedIds
         : sortedIds
       : thresholdPassedIds;
+    const countAfterSoftGate = finalProductIds.length;
+    let countAfterColorPost = finalProductIds.length;
 
     if (desiredColors.length > 0) {
-      const strictColorPost = String(process.env.SEARCH_COLOR_POSTFILTER_STRICT ?? "1").toLowerCase() !== "0";
+      const strictColorPost = String(process.env.SEARCH_COLOR_POSTFILTER_STRICT ?? "0").toLowerCase() !== "0";
       const maxImgConfHits = Math.max(0, ...hits.map((h: any) => Number(h?._source?.color_confidence_image) || 0));
       const compliantIds = finalProductIds.filter((id) => (complianceById.get(id)?.colorCompliance ?? 0) > 0);
       if (strictColorPost && compliantIds.length > 0) {
         finalProductIds = compliantIds;
+        countAfterColorPost = finalProductIds.length;
       } else if (strictColorPost && compliantIds.length === 0 && maxImgConfHits < 0.42) {
         // Weak image color signal — keep full candidate list to avoid false negatives
       }
@@ -2078,6 +2097,16 @@ export async function textSearch(
 
     results = results.slice(offset, offset + limit);
     const finalReturnedCount = results.length;
+    const gateCounts = {
+      open_search_hits: rawOpenSearchHitCount,
+      ranked_hits: sortedByRelevance.length,
+      accepted_after_final_accept_min: thresholdPassedIds.length,
+      accepted_after_soft_gate: countAfterSoftGate,
+      accepted_after_color_post: countAfterColorPost,
+      hydrated_results: preDedupeCount,
+      deduped_results: countAfterDedupe,
+      paged_results: finalReturnedCount,
+    };
 
     if (!xgbFullRecall && useXgbRanker && results.length > 3) {
       results = await runXgbTieBreakOnSlice(results);
@@ -2137,6 +2166,7 @@ export async function textSearch(
           embedding_fashion_01: embeddingFashion01,
           soft_ast_color: useSoftAstColor,
           hard_color_filter: hardColorFilterActive,
+          strict_color_type_intent: strictColorTypeIntent,
           expansion_term_count: expansionTerms.length,
           recall_size: recallSize,
           final_accept_min: finalAcceptMin,
@@ -2199,7 +2229,9 @@ export async function textSearch(
         below_relevance_threshold: belowRelevanceThreshold,
         recall_size: recallSize,
         final_accept_min: finalAcceptMin,
+        strict_color_type_intent: strictColorTypeIntent,
         total_above_threshold: totalAboveThreshold,
+        gate_counts: gateCounts,
         open_search_total_estimate: typeof osTotal === "number" ? osTotal : undefined,
         ...(relatedFetchError ? { related_fetch_error: relatedFetchError } : {}),
         ...(includeRetrievalMeta
@@ -2211,6 +2243,7 @@ export async function textSearch(
                 open_search_total_raw:
                   response.body.hits.total?.value ?? response.body.hits.total ?? null,
                 accepted_after_relevance_min: thresholdPassedIds.length,
+                gate_counts: gateCounts,
                 below_relevance_threshold: belowRelevanceThreshold,
                 recall_size: recallSize,
                 final_accept_min: finalAcceptMin,

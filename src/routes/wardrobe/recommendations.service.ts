@@ -306,6 +306,11 @@ function sourceMatchesSlot(slot: string, source: any): boolean {
   // Require the text intent to agree with the canonical slot when the index is noisy.
   // This prevents mislabeled items (e.g. shirts indexed as shoes) from leaking through.
   if (canonical && canonical !== slot) {
+    if (slot === "accessories") {
+      const strongAccessoryIntent = /\b(watch|watches|scarf|scarves|hat|hats|cap|caps|sunglass|sunglasses|jewel|jewelry|jewellery|necklace|earring|bracelet|ring|belt)\b/.test(blob);
+      const bagLikeIntent = /\b(bag|bags|handbag|handbags|tote|totes|clutch|clutches|wallet|crossbody|backpack|satchel|messenger)\b/.test(blob);
+      if (strongAccessoryIntent && !bagLikeIntent) return true;
+    }
     // Special case: hooded/hoodie items can be used as tops even if categorizied as outerwear
     if (slot === "tops" && /\b(hoodie|hooded)\b/.test(blob)) return true;
     

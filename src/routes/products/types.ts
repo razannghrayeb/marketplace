@@ -384,16 +384,30 @@ export interface SearchResultWithRelated {
     /** Session/user personalization and variant handling diagnostics. */
     session_id?: string;
     user_id?: number;
+    /** True when image search runs in strict main-path mode (rescue/fallback branches disabled). */
+    main_path_strict?: boolean;
     personalization_applied?: boolean;
     variant_group_collapsing_applied?: boolean;
     variant_group_count?: number;
     variant_group_representatives?: number;
     recall_size?: number;
     final_accept_min?: number;
+    /** True when compact "<color> <product_type>" intent forces hard relevance gate. */
+    strict_color_type_intent?: boolean;
     /** Floor used after sparse recall when strict gate yields too few hits (≤ `image_min_results_target`). */
     final_accept_min_effective?: number;
     relevance_relaxed_for_min_count?: boolean;
     image_min_results_target?: number;
+    gate_counts?: {
+      open_search_hits: number;
+      ranked_hits: number;
+      accepted_after_final_accept_min: number;
+      accepted_after_soft_gate: number;
+      accepted_after_color_post: number;
+      hydrated_results: number;
+      deduped_results: number;
+      paged_results: number;
+    };
     /** Count after relevance gate + dedupe (before pagination slice). */
     total_above_threshold?: number;
     open_search_total_estimate?: number;

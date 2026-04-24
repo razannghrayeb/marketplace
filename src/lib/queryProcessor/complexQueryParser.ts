@@ -361,16 +361,17 @@ export function mergeComplexConstraints(
   // Apply price constraints
   const priceConstraints = complexResult.constraints.filter(c => c.type === "price");
   if (priceConstraints.length > 0) {
-    const minPrice = Math.min(
-      ...priceConstraints
-        .filter(c => c.operator === "gte")
-        .map(c => c.value as number)
-    );
-    const maxPrice = Math.max(
-      ...priceConstraints
-        .filter(c => c.operator === "lte")
-        .map(c => c.value as number)
-    );
+    const minCandidates = priceConstraints
+      .filter(c => c.operator === "gte")
+      .map(c => c.value as number);
+    const maxCandidates = priceConstraints
+      .filter(c => c.operator === "lte")
+      .map(c => c.value as number);
+    // Merge to the narrowest valid intersection:
+    // - lower bound is the highest gte
+    // - upper bound is the lowest lte
+    const minPrice = minCandidates.length > 0 ? Math.max(...minCandidates) : Number.POSITIVE_INFINITY;
+    const maxPrice = maxCandidates.length > 0 ? Math.min(...maxCandidates) : Number.NEGATIVE_INFINITY;
 
     if (isFinite(minPrice) || isFinite(maxPrice)) {
       merged.priceRange = {
