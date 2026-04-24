@@ -64,6 +64,15 @@ import {
   filterProductTypeSeedsByMappedCategory,
 } from "../../lib/search/productTypeTaxonomy";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
+import {
+  computeOutfitCoherence,
+  type OutfitCoherenceResult,
+  type DetectionWithColor,
+} from "../../lib/detection/outfitCoherence";
+
+// `sharp` is CommonJS callable. TS interop can produce a non-callable object.
+const sharp: any =
+  typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
 
 type BlipSignal = {
   productType?: string | null;
@@ -970,9 +979,27 @@ function requiresSlotSpecificColor(productCategory: string): boolean {
   return productCategory === "tops" || productCategory === "bottoms" || productCategory === "dresses";
 }
 
+function isNeutralFashionColorEarly(color: string): boolean {
+  const c = String(color || "").toLowerCase().trim();
+  return (
+    c === "black" ||
+    c === "gray" ||
+    c === "charcoal" ||
+    c === "white" ||
+    c === "off-white" ||
+    c === "cream" ||
+    c === "ivory" ||
+    c === "beige" ||
+    c === "tan" ||
+    c === "brown" ||
+    c === "navy" ||
+    c === "silver"
+  );
+}
+
 function isChromaticFashionColor(color: string): boolean {
   const c = String(color || "").toLowerCase().trim();
-  return c.length > 0 && !isNeutralFashionColor(c);
+  return c.length > 0 && !isNeutralFashionColorEarly(c);
 }
 
 function canPromoteCaptionSlotColor(params: {
@@ -1001,7 +1028,7 @@ function canPromoteCaptionSlotColor(params: {
   const existingConfidence = clamp01(Number(params.existingConfidence ?? 0));
 
   if (!existingColor) return true;
-  if (!isNeutralFashionColor(existingColor)) return false;
+  if (!isNeutralFashionColorEarly(existingColor)) return false;
 
   const reliableCropNeutral = existingSource === 1 && existingConfidence >= 0.58;
   if (reliableCropNeutral) return true;
@@ -2276,6 +2303,13 @@ function dedupeOverlappingDetections<T extends { label: string; confidence: numb
   for (const det of sorted) {
     const normLabel = normalizeLooseText(det.label);
     const duplicate = kept.some((k) => {
+      if (normalizeLooseText(k.label) !== normLabel) return false;
+      return detectionIoU(det.box, k.box) >= iouThreshold;
+    });
+    if (!duplicate) kept.push(det);
+  }
+  return kept;
+}
 
 function textHasWholePhrase(haystack: string, phrase: string): boolean {
   if (!haystack || !phrase) return false;
@@ -3672,17 +3706,6 @@ async function mapPoolSettled<T, R>(
   await Promise.all(Array.from({ length: n }, () => worker()));
   return results;
 }
-import {
-  computeOutfitCoherence,
-  type OutfitCoherenceResult,
-  type DetectionWithColor,
-} from "../../lib/detection/outfitCoherence";
-
-// `sharp` is CommonJS callable. TS interop can cause `import sharp from "sharp"`
-// to produce a non-callable object at runtime, so we guard it.
-const sharp: any =
-  typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
-
 /**
  * Single full-frame pseudo-detection when YOLO is down or returns nothing.
  * Keeps `detection` non-null for clients while `similarProducts.byDetection` uses the same geometry.
