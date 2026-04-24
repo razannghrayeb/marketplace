@@ -1344,6 +1344,88 @@ export function inferFootwearSubtypeFromCaption(
   return label;
 }
 
+/**
+ * CLIP zero-shot footwear subtype classification from crop embedding.
+ * Used when YOLO returns a generic "shoe" label and BLIP caption lacks subtype cues.
+ * Text embeddings are computed once and cached for the process lifetime.
+ */
+const FOOTWEAR_SUBTYPE_PROMPTS: Array<{ subtype: string; prompts: string[] }> = [
+  {
+    subtype: "sneakers",
+    prompts: ["a photo of sneakers", "a pair of athletic sneakers", "running shoes or trainers"],
+  },
+  {
+    subtype: "boots",
+    prompts: ["a photo of boots", "ankle boots or knee-high boots", "leather or suede boots"],
+  },
+  {
+    subtype: "heels",
+    prompts: ["a photo of high heels", "stiletto heels or pumps", "platform heels or wedge shoes"],
+  },
+  {
+    subtype: "sandals",
+    prompts: ["a photo of sandals", "open-toe sandals or slides", "flip flops or strappy sandals"],
+  },
+  {
+    subtype: "loafers",
+    prompts: ["a photo of loafers", "slip-on loafers or moccasins", "penny loafers"],
+  },
+  {
+    subtype: "flats",
+    prompts: ["a photo of ballet flats", "flat shoes or ballerina flats", "oxford shoes or derbies"],
+  },
+];
+
+type FootwearSubtypeCache = {
+  subtype: string;
+  embeddings: number[][];
+} | null;
+
+let footwearSubtypeEmbeddingCache: FootwearSubtypeCache[] | null = null;
+
+async function ensureFootwearSubtypeEmbeddings(): Promise<Array<{ subtype: string; embeddings: number[][] }>> {
+  if (footwearSubtypeEmbeddingCache) return footwearSubtypeEmbeddingCache as Array<{ subtype: string; embeddings: number[][] }>;
+  const results = await Promise.all(
+    FOOTWEAR_SUBTYPE_PROMPTS.map(async ({ subtype, prompts }) => {
+      const embeddings = await Promise.all(
+        prompts.map((p) => getTextEmbedding(p).catch(() => null)),
+      );
+      return { subtype, embeddings: embeddings.filter((e): e is number[] => e !== null) };
+    }),
+  );
+  footwearSubtypeEmbeddingCache = results;
+  return results;
+}
+
+/**
+ * Classify footwear subtype from crop embedding via CLIP zero-shot.
+ * Returns the best-matching subtype name or null if confidence is too low or
+ * the text encoder is unavailable.
+ */
+async function classifyFootwearSubtypeFromCropEmbedding(
+  cropEmbedding: number[],
+  minConfidence = 0.24,
+): Promise<string | null> {
+  try {
+    const subtypeData = await ensureFootwearSubtypeEmbeddings();
+    let bestSubtype: string | null = null;
+    let bestScore = -1;
+    for (const { subtype, embeddings } of subtypeData) {
+      if (embeddings.length === 0) continue;
+      // Average cosine similarity across all prompts for this subtype.
+      const avgScore =
+        embeddings.reduce((sum, te) => sum + cosineSimilarity(cropEmbedding, te), 0) / embeddings.length;
+      if (avgScore > bestScore) {
+        bestScore = avgScore;
+        bestSubtype = subtype;
+      }
+    }
+    return bestScore >= minConfidence ? bestSubtype : null;
+  } catch {
+    return null;
+  }
+}
+
 function strictFootwearSubtypeFallbackTerms(
   detectionLabel: string,
 ): string[] | null {
@@ -2437,7 +2519,15 @@ function inferSleeveIntentFromDetectionLabel(
 ): "short" | "long" | "sleeveless" | null {
   const label = normalizeLooseText(detectionLabel);
   if (!label) return null;
-  if (/\b(sleeveless|tank|camisole|cami|vest top|strapless|halter|sling|sling dress|vest dress)\b/.test(label)) {
+  if (/\b(sleeveless|tank|camisole|cami|vest top|strapless|halter|sling|sling dress|vest dress|gilet|waistcoat)\b/.test(label)) {
+    return "sleeveless";
+  }
+  // Standalone "vest" label in fashion = waistcoat/puffer vest (definitionally sleeveless).
+  // Only match when not paired with long-sleeve garment words (e.g. "vest cardigan" shouldn't override).
+  if (
+    /\bvest\b/.test(label) &&
+    !/\b(sweater|cardigan|hoodie|pullover|jacket|coat|sweatshirt|overshirt)\b/.test(label)
+  ) {
     return "sleeveless";
   }
   if (/\bhalf sleeve\b|\b3\/?4 sleeve\b/.test(label)) return "short";
@@ -5436,6 +5526,17 @@ export class ImageAnalysisService {
           ) {
             filters.sleeve = detectionSleeve;
           }
+          // Vest-type garments are definitionally sleeveless — bypass the strict explicit-cue
+          // requirement so that a YOLO "vest"/"gilet"/"waistcoat" label correctly gates the
+          // retrieval to sleeveless products even though the label word isn't "sleeveless".
+          if (!filters.sleeve && sleeveSensitiveCategory) {
+            const isVestLike =
+              /\b(vest|gilet|waistcoat)\b/.test(normalizedLabelForSleeve) &&
+              !/\b(sweater|cardigan|hoodie|pullover|jacket|coat|sweatshirt|overshirt)\b/.test(normalizedLabelForSleeve);
+            if (isVestLike) {
+              filters.sleeve = "sleeveless";
+            }
+          }
           const detectionLength = inferLengthIntentFromDetection(detection, imageHeight);
           if (detectionLength) (filters as any).length = detectionLength;
 
@@ -5587,7 +5688,9 @@ export class ImageAnalysisService {
           }
 
           const knnFieldUsed =
-            categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "bottoms"
+            categoryMapping.productCategory === "tops" ||
+            categoryMapping.productCategory === "bottoms" ||
+            categoryMapping.productCategory === "dresses"
               ? "embedding"
               : shopTheLookKnnField();
           const textureMaterial = await textureMaterialPromise;
@@ -5639,7 +5742,23 @@ export class ImageAnalysisService {
               captionConfidence: detConfidence,
               minCaptionConfidence: 0.62,
             });
-            if (!(categoryNeedsStableSlotColor && hasReliableCropColor && !allowCaptionOverrideNeutralCrop)) {
+            // BLIP cross-validation: crop k-means can misclassify neutral garments as chromatic
+            // under warm/cool lighting (e.g. gray trousers → blue cluster). When the detection
+            // caption names a neutral color with high confidence, trust the linguistic signal.
+            const allowHighConfNeutralCaptionOverrideChromaticCrop =
+              detCaptionColorNorm.length > 0 &&
+              isNeutralFashionColorEarly(detCaptionColorNorm) &&
+              detConfidence >= 0.75 &&
+              existingColorNorm.length > 0 &&
+              isChromaticFashionColor(existingColorNorm);
+            if (
+              !(
+                categoryNeedsStableSlotColor &&
+                hasReliableCropColor &&
+                !allowCaptionOverrideNeutralCrop &&
+                !allowHighConfNeutralCaptionOverrideChromaticCrop
+              )
+            ) {
               setDetectionColorIfHigherConfidence(
                 inferredColorsByItem,
                 inferredColorsByItemConfidence,
@@ -5778,6 +5897,30 @@ export class ImageAnalysisService {
                   }
                 }
               }
+            }
+          }
+
+          // CLIP zero-shot fallback: when YOLO + BLIP still return a generic "shoe" label,
+          // classify the shoe crop embedding against subtype text anchors. This handles cases
+          // where the caption describes context (outfit, model) rather than the shoe itself.
+          if (
+            categoryMapping.productCategory === "footwear" &&
+            (label === "shoe" || label === "shoes") &&
+            finalEmbedding.length > 0
+          ) {
+            const clipSubtype = await classifyFootwearSubtypeFromCropEmbedding(finalEmbedding).catch(() => null);
+            if (clipSubtype && clipSubtype !== label) {
+              if (hotPathDebug) {
+                console.log(`[detection-trace] footwear subtype CLIP-classified: "${label}" → "${clipSubtype}"`);
+              }
+              label = clipSubtype;
+              softProductTypeHints = tightenTypeSeedsForDetection(
+                label,
+                categoryMapping,
+                [...new Set([label, ...softProductTypeHints])],
+                { confidence: detection.confidence, areaRatio: detection.area_ratio },
+              );
+              if (formalFootwearIntent) softProductTypeHints = pruneAthleticFootwearTerms(softProductTypeHints);
             }
           }
 
@@ -7947,6 +8090,8 @@ export class ImageAnalysisService {
             const existingSource = Number(inferredColorsByItemSource[itemColorKey] ?? 0);
             const hasReliableCropColor = existingColor.length > 0 && existingSource === 1 && existingConf >= 0.6;
             const categoryNeedsStableSlotColor = requiresSlotSpecificColor(categoryMapping.productCategory);
+            const detCaptionColorNorm2 = String(detCaptionColor ?? "").toLowerCase().trim();
+            const existingColorNorm2 = String(existingColor ?? "").toLowerCase().trim();
             const allowCaptionOverrideNeutralCrop = canPromoteCaptionSlotColor({
               productCategory: categoryMapping.productCategory,
               detectionLabel: categorySource,
@@ -7957,7 +8102,20 @@ export class ImageAnalysisService {
               captionConfidence: detConfidence,
               minCaptionConfidence: 0.62,
             });
-            if (!(categoryNeedsStableSlotColor && hasReliableCropColor && !allowCaptionOverrideNeutralCrop)) {
+            const allowHighConfNeutralCaptionOverrideChromaticCrop2 =
+              detCaptionColorNorm2.length > 0 &&
+              isNeutralFashionColorEarly(detCaptionColorNorm2) &&
+              detConfidence >= 0.75 &&
+              existingColorNorm2.length > 0 &&
+              isChromaticFashionColor(existingColorNorm2);
+            if (
+              !(
+                categoryNeedsStableSlotColor &&
+                hasReliableCropColor &&
+                !allowCaptionOverrideNeutralCrop &&
+                !allowHighConfNeutralCaptionOverrideChromaticCrop2
+              )
+            ) {
               setDetectionColorIfHigherConfidence(
                 inferredColorsByItem,
                 inferredColorsByItemConfidence,

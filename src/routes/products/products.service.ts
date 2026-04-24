@@ -1288,6 +1288,54 @@ function passesStrictDetectionCategoryFamily(
   return true;
 }
 
+/**
+ * Hard-block cross-subtype footwear when the query names a specific footwear kind.
+ * sneakers → block boots/heels/sandals; boots → block sandals/sneakers; etc.
+ * Only activates when desiredProductTypes contains at least one recognisable footwear subtype.
+ */
+function passesFootwearSubtypeGate(
+  product: Record<string, unknown>,
+  desiredProductTypes: string[],
+): boolean {
+  const desired = desiredProductTypes.map((t) => String(t).toLowerCase().trim()).join(" ");
+  const wantsSneakers = /\b(sneaker|sneakers|trainer|trainers|runner|runners|athletic shoe)\b/.test(desired);
+  const wantsBoots = /\b(boot|boots|ankle\s*boot|combat\s*boot|chelsea\s*boot|knee.?high)\b/.test(desired);
+  const wantsSandals = /\b(sandal|sandals|slide|slides|flip\s*flop)\b/.test(desired);
+  const wantsHeels = /\b(heel|heels|pump|pumps|stiletto|kitten\s*heel|wedge|platform\s*heel)\b/.test(desired);
+  const wantsLoafers = /\b(loafer|loafers|moccasin|slip.?on)\b/.test(desired);
+  const wantsFlats = /\b(flat|flats|ballet\s*flat|oxford|oxfords|derby)\b/.test(desired);
+
+  const hasSubtypeIntent = wantsSneakers || wantsBoots || wantsSandals || wantsHeels || wantsLoafers || wantsFlats;
+  if (!hasSubtypeIntent) return true;
+
+  const blob = [
+    ...(Array.isArray(product.product_types) ? product.product_types : []),
+    product.title,
+    product.category,
+    product.category_canonical,
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x).toLowerCase())
+    .join(" ");
+
+  if (!blob.trim()) return true;
+
+  const isSneak = /\b(sneaker|sneakers|trainer|trainers|runner|runners|athletic shoe|tennis shoe)\b/.test(blob);
+  const isBoot = /\b(boot|boots|ankle\s*boot|combat\s*boot|chelsea\s*boot|knee.?high|thigh.?high\s*boot)\b/.test(blob);
+  const isSandal = /\b(sandal|sandals|slide|slides|flip\s*flop|mule|mules)\b/.test(blob);
+  const isHeel = /\b(heel|heels|pump|pumps|stiletto|kitten\s*heel|platform\s*heel|wedge\s*heel|block\s*heel)\b/.test(blob);
+  const isLoafer = /\b(loafer|loafers|moccasin|slip.?on)\b/.test(blob);
+  const isFlat = /\b(flat|flats|ballet\s*flat|oxford|oxfords|derby|brogues?)\b/.test(blob);
+
+  if (wantsSneakers) return !isBoot && !isHeel && !isSandal && !isFlat;
+  if (wantsBoots) return !isSandal && !isSneak && !isHeel;
+  if (wantsSandals) return !isBoot && !isSneak && !isHeel;
+  if (wantsHeels) return !isSneak && !isBoot && !isSandal && !isFlat;
+  if (wantsLoafers) return !isSneak && !isBoot && !isSandal && !isHeel;
+  if (wantsFlats) return !isHeel && !isBoot && !isSneak;
+  return true;
+}
+
 function isOnePieceCatalogCandidate(product: Record<string, unknown>): boolean {
   const blob = [
     product.category,
@@ -2893,27 +2941,68 @@ function expandColorIntentWithNearest(tokens: string[]): string[] {
     "light-pink": ["pink", "rose", "blush"],
     blush: ["pink", "light-pink", "rose"],
     rose: ["pink", "light-pink", "blush"],
-    pink: ["light-pink", "blush", "rose"],
-    beige: ["off-white", "white", "cream", "ivory", "tan"],
-    camel: ["beige", "tan", "white", "off-white"],
+    pink: ["light-pink", "blush", "rose", "fuchsia", "magenta"],
+    fuchsia: ["pink", "magenta", "hot-pink"],
+    magenta: ["fuchsia", "pink"],
+    "hot-pink": ["fuchsia", "pink"],
+    beige: ["off-white", "white", "cream", "ivory", "tan", "sand"],
+    camel: ["beige", "tan", "white", "off-white", "sand"],
     taupe: ["beige", "stone", "off-white", "white"],
-    stone: ["beige", "off-white", "white"],
-    khaki: ["beige", "tan", "off-white"],
+    stone: ["beige", "off-white", "white", "sand"],
+    sand: ["beige", "camel", "tan"],
+    khaki: ["beige", "tan", "off-white", "olive"],
     nude: ["beige", "off-white", "white"],
     "off-white": ["white", "cream", "ivory", "beige"],
     cream: ["off-white", "white", "ivory", "beige"],
     ivory: ["off-white", "white", "cream", "beige"],
-    "light-blue": ["blue", "sky-blue", "powder-blue"],
-    "sky-blue": ["light-blue", "blue"],
-    navy: ["blue", "indigo"],
-    charcoal: ["black", "gray"],
-    gray: ["charcoal", "black"],
-    burgundy: ["maroon", "red"],
-    maroon: ["burgundy", "red"],
-    lavender: ["purple", "lilac"],
-    lilac: ["lavender", "purple"],
-    mint: ["green", "sage"],
-    teal: ["blue", "green"],
+    "light-blue": ["blue", "sky-blue", "powder-blue", "ice-blue"],
+    "sky-blue": ["light-blue", "blue", "powder-blue"],
+    "powder-blue": ["light-blue", "sky-blue"],
+    "ice-blue": ["light-blue", "sky-blue"],
+    navy: ["blue", "indigo", "midnight-blue"],
+    "midnight-blue": ["navy", "blue", "indigo"],
+    indigo: ["navy", "blue", "violet"],
+    cobalt: ["blue", "royal-blue"],
+    "royal-blue": ["cobalt", "blue"],
+    charcoal: ["black", "gray", "dark-gray"],
+    "dark-gray": ["charcoal", "gray", "black"],
+    gray: ["charcoal", "black", "silver", "dark-gray"],
+    silver: ["gray", "white"],
+    burgundy: ["maroon", "red", "wine", "bordeaux"],
+    maroon: ["burgundy", "red", "wine"],
+    wine: ["burgundy", "maroon", "red"],
+    bordeaux: ["burgundy", "wine", "red"],
+    crimson: ["red", "burgundy"],
+    red: ["burgundy", "maroon", "crimson", "scarlet", "tomato"],
+    scarlet: ["red", "crimson"],
+    tomato: ["red", "orange"],
+    orange: ["rust", "terracotta", "amber", "tomato"],
+    rust: ["orange", "terracotta", "brown"],
+    terracotta: ["rust", "orange", "brown"],
+    amber: ["orange", "yellow", "gold"],
+    gold: ["amber", "yellow", "mustard"],
+    mustard: ["yellow", "gold", "olive"],
+    yellow: ["mustard", "gold", "amber", "lemon"],
+    lemon: ["yellow", "lime"],
+    lime: ["green", "lemon"],
+    mint: ["green", "sage", "teal"],
+    sage: ["green", "olive", "mint"],
+    olive: ["green", "khaki", "sage", "mustard"],
+    green: ["olive", "sage", "mint", "emerald", "forest-green"],
+    emerald: ["green", "teal"],
+    "forest-green": ["green", "olive"],
+    teal: ["blue", "green", "cyan", "mint"],
+    cyan: ["teal", "blue", "sky-blue"],
+    turquoise: ["teal", "cyan", "blue"],
+    lavender: ["purple", "lilac", "violet"],
+    lilac: ["lavender", "purple", "mauve"],
+    mauve: ["lilac", "purple", "pink"],
+    violet: ["purple", "indigo", "lavender"],
+    purple: ["violet", "lavender", "lilac", "plum"],
+    plum: ["purple", "burgundy", "wine"],
+    brown: ["tan", "rust", "camel", "chocolate"],
+    chocolate: ["brown", "tan"],
+    tan: ["beige", "brown", "camel"],
   };
 
   const out: string[] = [];
@@ -5278,13 +5367,25 @@ export async function searchByImageWithSimilarity(
         (hasExplicitCategoryFilter && (comp.categoryRelevance01 ?? 0) >= explicitIntentCategoryFloor);
       const hasTypeIntentHere = (relevanceIntent.desiredProductTypes?.length ?? 0) > 0;
       const nearIdenticalColorCompliance = Number(comp.colorCompliance ?? 0);
+      // Gate: explicit color requires strong compliance; inferred color applies a softer gate
+      // so wrong-color near-duplicates can't trivially override correct-color lower-cosine matches.
       const nearIdenticalPassesColorGate = !hasColorIntentForFinal
         ? true
         : hasExplicitColorIntent
           ? nearIdenticalColorCompliance >= 0.4
-          : true;
+          : hasInferredColorSignal
+            ? nearIdenticalColorCompliance >= 0.15
+            : true;
       if (!crossBlocked && (!hasTypeIntentHere || typeOk) && nearIdenticalPassesColorGate) {
-        comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, rawVisual));
+        // Damp the near-identical floor by color compliance when color intent is active.
+        // Without damping, a wrong-color product with slightly higher CLIP cosine outranks
+        // a correctly-colored product (the "Mint Sweater beats Dark Grey" bug).
+        const colorDampedRaw = hasColorIntentForFinal
+          ? rawVisual * (hasExplicitColorIntent
+              ? 0.60 + 0.40 * nearIdenticalColorCompliance
+              : 0.70 + 0.30 * nearIdenticalColorCompliance)
+          : rawVisual;
+        comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, colorDampedRaw));
         finalScoreSourceById.set(idStr, "near_identical_floor");
       }
     }
@@ -5485,6 +5586,26 @@ export async function searchByImageWithSimilarity(
         }
       }
       if (hasDetectionAnchoredTypeIntent && exactType < 1 && typeComp < detAnchoredTypeFloor && !visualStrong) {
+        // Don't penalize products whose product_types array is empty but whose indexed
+        // category already confirms the detection intent.  Missing metadata ≠ wrong category.
+        const srcPT = h?._source?.product_types;
+        const hasEmptyProductTypes = !Array.isArray(srcPT) || (srcPT as unknown[]).length === 0;
+        if (hasEmptyProductTypes) {
+          const srcCat = String(h?._source?.category_canonical ?? h?._source?.category ?? "").toLowerCase();
+          const dc = params.detectionProductCategory ?? "";
+          const categoryConfirmsDetection =
+            dc === "tops"
+              ? /\b(tops?|shirt|blouse|sweater|hoodie|cardigan|pullover|knitwear|jersey|polo|tee|t-?shirt)\b/.test(srcCat)
+              : dc === "bottoms"
+                ? /\b(bottoms?|pants?|trousers?|jeans?|denim|shorts?|skirt|leggings?|joggers?)\b/.test(srcCat)
+                : dc === "dresses"
+                  ? /\b(dress|dresses|gown|jumpsuit|romper|abaya|kaftan)\b/.test(srcCat)
+                  : false;
+          if (categoryConfirmsDetection) {
+            // Category is sufficient evidence when product_types is unpopulated.
+            return true;
+          }
+        }
         return false;
       }
       const lengthComp = Number((comp as any).lengthCompliance ?? 0);
@@ -6564,17 +6685,28 @@ export async function searchByImageWithSimilarity(
           ? isOnePieceCatalogCandidate(p as unknown as Record<string, unknown>)
           : false;
 
-        // `sleeveCompliance` around 0.15 commonly means sleeve metadata is missing/uncertain,
-        // not an explicit contradiction. Only cap when we have a strong mismatch signal.
-        if (isTopDetection && (compliance.hasSleeveIntent ?? false) && sleeveComp < 0.12) {
-          finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.34 : 0.28);
-          finalRelevanceSource = "sleeve_conflict_cap";
+        // sleeveComp < 0.05: explicit YOLO/metadata contradiction (e.g. long-sleeve label, short-sleeve
+        // product) → hard cap. sleeveComp 0.05–0.20: no sleeve metadata on the product (value ≈ 0.15)
+        // → softer cap so valid products without sleeve metadata are not buried.
+        if (isTopDetection && (compliance.hasSleeveIntent ?? false)) {
+          if (sleeveComp < 0.05) {
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.34 : 0.28);
+            finalRelevanceSource = "sleeve_conflict_cap";
+          } else if (sleeveComp < 0.20) {
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.50 : 0.42);
+            finalRelevanceSource = "sleeve_no_metadata_cap";
+          }
         }
 
         if (isDressDetection) {
-          if ((compliance.hasSleeveIntent ?? false) && sleeveComp < 0.12) {
-            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.34 : 0.28);
-            finalRelevanceSource = "dress_sleeve_conflict_cap";
+          if ((compliance.hasSleeveIntent ?? false)) {
+            if (sleeveComp < 0.05) {
+              finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.34 : 0.28);
+              finalRelevanceSource = "dress_sleeve_conflict_cap";
+            } else if (sleeveComp < 0.20) {
+              finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.50 : 0.42);
+              finalRelevanceSource = "dress_sleeve_no_metadata_cap";
+            }
           }
           if (((compliance as any).hasLengthIntent ?? false) && lengthComp < 0.24) {
             finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.38 : 0.3);
@@ -7106,6 +7238,18 @@ export async function searchByImageWithSimilarity(
         // remain, do not return unrelated category leakage.
         results = [];
       }
+    }
+  }
+
+  // Footwear subtype gate: when the query specifies a clear footwear kind (sneakers, boots,
+  // sandals, heels, loafers, flats), hard-block cross-subtype results that slipped through
+  // the family gate (e.g. black boots appearing in a sneaker search).
+  if (detectionCategoryForFinalGate === "footwear" && desiredProductTypes.length > 0) {
+    const footwearSubtypeFiltered = results.filter((p: any) =>
+      passesFootwearSubtypeGate(p as unknown as Record<string, unknown>, desiredProductTypes),
+    );
+    if (footwearSubtypeFiltered.length > 0) {
+      results = footwearSubtypeFiltered as ProductResult[];
     }
   }
 
