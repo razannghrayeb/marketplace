@@ -5256,6 +5256,15 @@ export async function searchByImageWithSimilarity(
     }
   }
 
+  const colorTierRankForSort = (tier: unknown): number => {
+    const t = String(tier ?? "none").toLowerCase().trim();
+    if (t === "exact") return 4;
+    if (t === "family") return 3;
+    if (t === "bucket") return 2;
+    if (t === "none") return 0;
+    return 1;
+  };
+
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
     const idb = String(b._source.product_id);
@@ -5268,21 +5277,28 @@ export async function searchByImageWithSimilarity(
     const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
     const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
     const detectionCategoryForSort = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+    if (hasColorPreferenceForRanking) {
+      const ca = Math.max(0, Math.min(1, complianceById.get(ida)?.colorCompliance ?? 0));
+      const cb = Math.max(0, Math.min(1, complianceById.get(idb)?.colorCompliance ?? 0));
+      const ta = colorTierRankForSort(complianceById.get(ida)?.colorTier) / 4;
+      const tb = colorTierRankForSort(complianceById.get(idb)?.colorTier) / 4;
+      const isTopColorIntentSort = detectionCategoryForSort === "tops" && hasDetectionAnchoredTypeIntent;
+      const colorBonusScale = hasExplicitColorIntent
+        ? 0.12
+        : hasInferredColorSignal
+          ? (isTopColorIntentSort ? 0.1 : 0.08)
+          : 0.05;
+      const faAdj = fa + colorBonusScale * (0.55 * ta + 0.45 * ca);
+      const fbAdj = fb + colorBonusScale * (0.55 * tb + 0.45 * cb);
+      if (Math.abs(fbAdj - faAdj) > 1e-6) return fbAdj - faAdj;
+    }
     const topsColorOrderingWindow =
       detectionCategoryForSort === "tops" && hasDetectionAnchoredTypeIntent
         ? (hasColorPreferenceForRanking ? 0.16 : 0.08)
         : (hasColorPreferenceForRanking ? 0.08 : 0.04);
     if (hasColorPreferenceForRanking && Math.abs(fb - fa) <= topsColorOrderingWindow) {
-      const colorTierRank = (tier: unknown): number => {
-        const t = String(tier ?? "none").toLowerCase().trim();
-        if (t === "exact") return 4;
-        if (t === "family") return 3;
-        if (t === "bucket") return 2;
-        if (t === "none") return 0;
-        return 1;
-      };
-      const ta = colorTierRank(complianceById.get(ida)?.colorTier);
-      const tb = colorTierRank(complianceById.get(idb)?.colorTier);
+      const ta = colorTierRankForSort(complianceById.get(ida)?.colorTier);
+      const tb = colorTierRankForSort(complianceById.get(idb)?.colorTier);
       if (tb !== ta) return tb - ta;
       const ca = complianceById.get(ida)?.colorCompliance ?? 0;
       const cb = complianceById.get(idb)?.colorCompliance ?? 0;
