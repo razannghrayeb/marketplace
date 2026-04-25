@@ -1261,8 +1261,8 @@ function passesStrictDetectionCategoryFamily(
   if (!blob.trim()) return false;
 
   const hasFootwear = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|flat|flats|oxford|oxfords|pump|pumps|mule|mules|clog|clogs)\b/.test(blob);
-  const hasTop = /\b(top|tops|shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|tank|cami|camisole|sweater|cardigan|cardigans|hoodie|pullover|jumper|polo|henley|tunic|knitwear|bodysuit|bodysuits|overshirt|overshirts|jersey|jerseys|crop\s*top|button\s*down|button-down|blazer|blazers|sport coat|dress jacket|suit jacket|waistcoat|vest|vests)\b/.test(blob);
-  const hasOuterwear = /\b(outerwear|outwear|jacket|jackets|coat|coats|blazer|blazers|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers)\b/.test(blob);
+  const hasTop = /\b(top|tops|shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|tank|cami|camisole|sweater|sweaters|cardigan|cardigans|hoodie|hoodies|sweatshirt|sweatshirts|pullover|jumper|polo|henley|tunic|knitwear|bodysuit|bodysuits|overshirt|overshirts|jersey|jerseys|loungewear|crop\s*top|button\s*down|button-down)\b/.test(blob);
+  const hasOuterwear = /\b(outerwear|outwear|jacket|jackets|coat|coats|blazer|blazers|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers|vest|vests|gilet)\b/.test(blob);
   const hasBottom = /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|skirt|skirts|legging|leggings|jogger|joggers|sweatpants?|slack|slacks|culotte|culottes|palazzo|chino|chinos|cargo|track\s*pants?)\b/.test(blob);
   const hasDressOnePiece = /\b(dress|dresses|gown|gowns|frock|frocks|sundress|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|abaya|abayas|kaftan|kaftans|caftan|caftans)\b/.test(blob);
   const hasAccessory = /\b(bag|bags|wallet|wallets|belt|belts|hat|hats|cap|caps|jewelry|jewellery|ring|rings|earring|earrings|necklace|necklaces|bracelet|bracelets|watch|watches|sunglasses|glasses|scarf|scarves)\b/.test(blob);
@@ -3383,17 +3383,16 @@ async function opensearchImageKnnHits(
     );
 
     const hits = (r.body?.hits?.hits ?? []) as any[];
+    const tookMs = r.body?.took ?? null;
+    const elapsedMs = Date.now() - startedAt;
 
-    if (process.env.NODE_ENV !== "production") {
-      console.log("[image-knn] search ok", {
-        index: config.opensearch.index,
-        field: knnField ?? null,
-        vectorLength: queryVector?.length ?? null,
-        hits: hits.length,
-        elapsedMs: Date.now() - startedAt,
-        took: r.body?.took ?? null,
-      });
-    }
+    // Always log took so latency split (server vs network) is visible in production logs.
+    console.log("[image-knn]", {
+      field: knnField ?? null,
+      hits: hits.length,
+      tookMs,   // OpenSearch server-side ms
+      elapsedMs, // total round-trip ms; (elapsedMs - tookMs) ≈ network + serialization
+    });
 
     return { hits, timedOut: false };
   } catch (err: any) {
@@ -4020,12 +4019,9 @@ export async function searchByImageWithSimilarity(
     "audience_gender",
     "embedding_score_version",
     "embedding_garment_score_version",
-    "embedding_color",
-    "embedding_texture",
-    "embedding_material",
-    "embedding_style",
-    "embedding_pattern",
-    ...partEmbeddingFields,
+    // Attribute + part embeddings are intentionally omitted here.
+    // They are fetched via a separate targeted mget for only the top hits
+    // (see enrichment block after signalsPromise), reducing kNN response payload by ~80%.
   ];
 
   let garmentQueryVector: number[] | null = null;
@@ -4420,13 +4416,53 @@ export async function searchByImageWithSimilarity(
   const exactCosineRerank = imageExactCosineRerankEnabled();
 
   // ────────────────────────────────────────────────────────────────────────────
-  // PART SIMILARITY COMPUTATION (Phase 1)
+  // ATTRIBUTE / PART EMBEDDING ENRICHMENT (two-pass mget)
   // ────────────────────────────────────────────────────────────────────────────
-  // For each retrieved hit, compute similarities against query part embeddings
+  // The initial kNN response intentionally excludes attribute and part embeddings
+  // to keep response payload small (~2 MB vs ~84 MB).  Now that we know which
+  // signals are active and have the full hit list, fetch only the needed vectors
+  // for the top N hits via a single mget call.
   const partSimByDocId = new Map<string, Record<string, number>>();
   const hasQueryPartEmbeddings = Object.keys(partQueryEmbeddings).some(
     (key) => partQueryEmbeddings[key] && Array.isArray(partQueryEmbeddings[key]) && partQueryEmbeddings[key]!.length > 0
   );
+
+  if (Array.isArray(hits) && hits.length > 0) {
+    const attrFieldsToFetch: string[] = [];
+    if (runColor) attrFieldsToFetch.push("embedding_color");
+    if (runTexture) attrFieldsToFetch.push("embedding_texture");
+    if (runMaterial) attrFieldsToFetch.push("embedding_material");
+    if (runStyle) attrFieldsToFetch.push("embedding_style");
+    if (runPattern) attrFieldsToFetch.push("embedding_pattern");
+    if (hasQueryPartEmbeddings) attrFieldsToFetch.push(...partEmbeddingFields);
+
+    if (attrFieldsToFetch.length > 0) {
+      const topIds = hits
+        .slice(0, 200)
+        .map((h) => String(h?._source?.product_id ?? ""))
+        .filter(Boolean);
+      const uniqueIds = [...new Set(topIds)];
+      if (uniqueIds.length > 0) {
+        try {
+          const mgetResp = await (osClient as any).mget(
+            { index: config.opensearch.index, body: { ids: uniqueIds }, _source: attrFieldsToFetch },
+            { requestTimeout: 8_000, maxRetries: 0 },
+          );
+          const byId = new Map<string, any>();
+          for (const doc of (mgetResp.body?.docs ?? [])) {
+            if (doc?.found && doc?._source) byId.set(String(doc._id ?? ""), doc._source);
+          }
+          for (const hit of hits) {
+            const pid = String(hit?._source?.product_id ?? "");
+            const embData = byId.get(pid);
+            if (embData && hit._source) Object.assign(hit._source, embData);
+          }
+        } catch (err: any) {
+          console.warn("[image-knn] attr mget failed (proceeding without attr embeddings):", err?.message ?? err);
+        }
+      }
+    }
+  }
 
   if (hasQueryPartEmbeddings && Array.isArray(hits) && hits.length > 0) {
     try {
