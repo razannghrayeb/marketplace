@@ -1337,6 +1337,20 @@ function passesFootwearSubtypeGate(
 }
 
 function isOnePieceCatalogCandidate(product: Record<string, unknown>): boolean {
+  // Fast-path: category field uses terms that are unambiguously one-piece garments
+  // but don't contain "dress"/"gown" literally (e.g. "evening wear", "bridal").
+  const catStr =
+    String(product.category ?? "").toLowerCase().trim() +
+    " " +
+    String(product.category_canonical ?? "").toLowerCase().trim();
+  if (
+    /\b(evening\s*wear|eveningwear|bridal|bridalwear|prom|ball\s*gown|cocktail\s*wear|formalwear|formal\s*wear)\b/.test(
+      catStr,
+    )
+  ) {
+    return true;
+  }
+
   const blob = [
     product.category,
     product.category_canonical,
@@ -1492,6 +1506,8 @@ function computeExplicitFinalRelevance(params: {
   const isTopLikeIntent = isTopLikeCategory(mergedCategory) || String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops";
   const isBottomLikeIntent = /\b(bottom|bottoms|pants?|trousers?|jeans?|skirt|skirts|leggings?)\b/.test(mergedCategory) || String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms";
   const isBagLikeIntent = isBagLikeCategory(mergedCategory) || String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bags";
+  const isDressLikeIntent = /\b(dress|dresses|gown|gowns)\b/.test(mergedCategory) || String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses";
+  const isFootwearLikeIntent = /\b(shoe|shoes|footwear|sneaker|sneakers|boot|boots|sandal|sandals|heel|heels|loafer|loafers)\b/.test(mergedCategory) || String(params.detectionProductCategory ?? "").toLowerCase().trim() === "shoes" || String(params.detectionProductCategory ?? "").toLowerCase().trim() === "footwear";
 
   const simVisual = Math.max(0, Math.min(1, params.simVisual));
 
@@ -1509,11 +1525,32 @@ function computeExplicitFinalRelevance(params: {
         : intra >= 0.25
           ? 0.88
           : 1
-      : isBottomLikeIntent
-        ? simVisual >= 0.75
-          ? 0.68
-          : 0.6
-        : 0.55
+      : isTopLikeIntent
+        // Tops without typeMatch (sparse product_types) get a graduated gate
+        // similar to bottoms rather than a flat 0.55 penalty. Still lower than
+        // a real type match so precision is maintained.
+        ? simVisual >= 0.68
+          ? 0.72
+          : 0.62
+        : isBottomLikeIntent
+          ? simVisual >= 0.75
+            ? 0.68
+            : 0.6
+          : isDressLikeIntent
+            // Dresses with sparse product_types get a graduated gate instead
+            // of the flat 0.55 — sparse metadata ≠ wrong category.
+            ? simVisual >= 0.70
+              ? 0.72
+              : 0.62
+            : isBagLikeIntent
+              ? simVisual >= 0.68
+                ? 0.70
+                : 0.60
+              : isFootwearLikeIntent
+                ? simVisual >= 0.70
+                  ? 0.72
+                  : 0.62
+                : 0.55
     : 1;
 
   // ── Multi-channel visual similarity ──────────────────────────────
@@ -5161,10 +5198,29 @@ export async function searchByImageWithSimilarity(
     const lexicalAssistTypeMatch =
       (subtypeKeywordSignal.exactHit || subtypeKeywordSignal.overlap >= 0.6) &&
       (comp.productTypeCompliance ?? 0) >= 0.55;
+    const isTopDetectionForTypeMatch =
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops";
+    const isDressDetectionForTypeMatch =
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses";
+    const isBagDetectionForTypeMatch =
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bags" ||
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "accessories";
+    const isFootwearDetectionForTypeMatch =
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "shoes" ||
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "footwear";
     const typeMatch =
       (comp.exactTypeScore ?? 0) >= 1 ||
       (comp.productTypeCompliance ?? 0) >= 0.82 ||
-      lexicalAssistTypeMatch;
+      lexicalAssistTypeMatch ||
+      // Category-level fallback for detection-scoped tops: products with strong
+      // category evidence but empty product_types should not be gated out as
+      // non-matches — their category field already places them in the tops family.
+      (isTopDetectionForTypeMatch && (comp.categoryRelevance01 ?? 0) >= 0.90) ||
+      // Same fallback for dresses: category="dresses" with empty product_types is
+      // still a valid dress — categoryRelevance01 is the authoritative signal.
+      (isDressDetectionForTypeMatch && (comp.categoryRelevance01 ?? 0) >= 0.90) ||
+      // Same fallback for bags and footwear.
+      ((isBagDetectionForTypeMatch || isFootwearDetectionForTypeMatch) && (comp.categoryRelevance01 ?? 0) >= 0.90);
     const lengthCompliance = lengthComplianceById.get(idStr) ?? 0;
     const hasLengthIntentForHit = hasLengthIntentById.get(idStr) ?? false;
     const crossFamilyPenaltyVal = comp.crossFamilyPenalty ?? 0;
@@ -5265,13 +5321,13 @@ export async function searchByImageWithSimilarity(
       const partSim = partSimByDocId.get(idStr);
       const topPartComp = partSim ? computeTopPartSimilarity01(partSim) : 0;
       const visualComp = Math.max(0, Math.min(1, effectiveVisualForScoring));
-      const categoryComp = Math.max(0, Math.min(1, (comp as any).categoryScore ?? 0));
-      const taxonomyComp = Math.max(0, Math.min(1, (comp as any).taxonomyMatch ?? 0));
+      const categoryComp = Math.max(0, Math.min(1, comp.categoryRelevance01 ?? 0));
+      const taxonomyComp = Math.max(0, Math.min(1, comp.siblingClusterScore ?? 0));
       const audienceComp = Math.max(0, Math.min(1, comp.audienceCompliance ?? 0));
       const structuralTopComp = Math.max(typeComp, topPartComp, categoryComp, taxonomyComp);
       const strongTopEvidence =
         ((comp.exactTypeScore ?? 0) >= 1 || structuralTopComp >= 0.34) &&
-        visualComp >= 0.66 &&
+        visualComp >= 0.58 &&
         (comp.crossFamilyPenalty ?? 0) < 0.52;
       if (strongTopEvidence) {
         let blendedTopMain =
@@ -5340,8 +5396,8 @@ export async function searchByImageWithSimilarity(
       const dressTypeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
       const dressLengthComp = Math.max(0, Math.min(1, (comp as any).lengthCompliance ?? 0));
       const dressColorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
-      const dressCategoryComp = Math.max(0, Math.min(1, (comp as any).categoryScore ?? 0));
-      const dressTaxonomyComp = Math.max(0, Math.min(1, (comp as any).taxonomyMatch ?? 0));
+      const dressCategoryComp = Math.max(0, Math.min(1, comp.categoryRelevance01 ?? 0));
+      const dressTaxonomyComp = Math.max(0, Math.min(1, comp.siblingClusterScore ?? 0));
       const dressAudienceComp = Math.max(0, Math.min(1, comp.audienceCompliance ?? 0));
       const dressStructuralComp = Math.max(dressTypeComp, dressCategoryComp, dressTaxonomyComp);
       const dressVisualComp = Math.max(0, Math.min(1, effectiveVisualForScoring));
@@ -5404,8 +5460,8 @@ export async function searchByImageWithSimilarity(
       const bottomTypeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
       const bottomLengthComp = Math.max(0, Math.min(1, (comp as any).lengthCompliance ?? 0));
       const bottomColorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
-      const bottomCategoryComp = Math.max(0, Math.min(1, (comp as any).categoryScore ?? 0));
-      const bottomTaxonomyComp = Math.max(0, Math.min(1, (comp as any).taxonomyMatch ?? 0));
+      const bottomCategoryComp = Math.max(0, Math.min(1, comp.categoryRelevance01 ?? 0));
+      const bottomTaxonomyComp = Math.max(0, Math.min(1, comp.siblingClusterScore ?? 0));
       const bottomAudienceComp = Math.max(0, Math.min(1, comp.audienceCompliance ?? 0));
       const bottomStructuralComp = Math.max(bottomTypeComp, bottomCategoryComp, bottomTaxonomyComp);
       const bottomVisualComp = Math.max(0, Math.min(1, effectiveVisualForScoring));
@@ -5465,8 +5521,8 @@ export async function searchByImageWithSimilarity(
       const bagTypeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
       const bagColorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
       const bagPatternComp = Math.max(0, Math.min(1, (comp as any).patternSimRaw ?? 0));
-      const bagCategoryComp = Math.max(0, Math.min(1, (comp as any).categoryScore ?? 0));
-      const bagTaxonomyComp = Math.max(0, Math.min(1, (comp as any).taxonomyMatch ?? 0));
+      const bagCategoryComp = Math.max(0, Math.min(1, comp.categoryRelevance01 ?? 0));
+      const bagTaxonomyComp = Math.max(0, Math.min(1, comp.siblingClusterScore ?? 0));
       const bagAudienceComp = Math.max(0, Math.min(1, comp.audienceCompliance ?? 0));
       const bagStructuralComp = Math.max(bagTypeComp, bagCategoryComp, bagTaxonomyComp);
       const bagVisualComp = Math.max(0, Math.min(1, effectiveVisualForScoring));
@@ -5519,8 +5575,8 @@ export async function searchByImageWithSimilarity(
     ) {
       const shoeTypeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
       const shoeColorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
-      const shoeCategoryComp = Math.max(0, Math.min(1, (comp as any).categoryScore ?? 0));
-      const shoeTaxonomyComp = Math.max(0, Math.min(1, (comp as any).taxonomyMatch ?? 0));
+      const shoeCategoryComp = Math.max(0, Math.min(1, comp.categoryRelevance01 ?? 0));
+      const shoeTaxonomyComp = Math.max(0, Math.min(1, comp.siblingClusterScore ?? 0));
       const shoeAudienceComp = Math.max(0, Math.min(1, comp.audienceCompliance ?? 0));
       const shoeStructuralComp = Math.max(shoeTypeComp, shoeCategoryComp, shoeTaxonomyComp);
       const shoeVisualComp = Math.max(0, Math.min(1, effectiveVisualForScoring));
@@ -6282,7 +6338,23 @@ export async function searchByImageWithSimilarity(
                       : detectionCategoryKey === "bags"
                         ? 0.34
                         : 0.32;
-          if (typeComp < detectionTypeRescueFloor) return false;
+          if (typeComp < detectionTypeRescueFloor) {
+            // Exception: products with empty product_types have typeComp = 0 but
+            // their category field already confirms the correct family.
+            // Sparse metadata ≠ type mismatch — allow through visual rescue.
+            const isDressRescueCategoryException =
+              detectionCategoryKey === "dresses" &&
+              isOnePieceCatalogCandidate((h as any)._source as Record<string, unknown>);
+            const hId = String((h as any)._source?.product_id);
+            const hCategoryRelevance = complianceById.get(hId)?.categoryRelevance01 ?? 0;
+            const isBagRescueCategoryException =
+              (detectionCategoryKey === "bags" || detectionCategoryKey === "accessories") &&
+              hCategoryRelevance >= 0.90;
+            const isFootwearRescueCategoryException =
+              (detectionCategoryKey === "footwear" || detectionCategoryKey === "shoes") &&
+              hCategoryRelevance >= 0.90;
+            if (!isDressRescueCategoryException && !isBagRescueCategoryException && !isFootwearRescueCategoryException) return false;
+          }
         }
         if (hasColorIntentForFinal) {
           const effectiveRescueColorMin =
