@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { createServer } from "./server";
 import { testConnection } from "./lib/core/db";
+import { applyIndexSpeedSettings } from "./lib/core";
 import { setupSchedules } from "./lib/scheduler";
 import { runWorkerLoop } from "./lib/worker";
 
@@ -48,6 +49,12 @@ async function main() {
     );
     process.exit(1);
   }
+
+  // Apply live-tunable kNN speed settings to the existing index (no reindex needed).
+  // This fixes ef_search=1024 on indexes created before this change.
+  applyIndexSpeedSettings().catch((err) =>
+    console.warn("[opensearch] applyIndexSpeedSettings failed (non-fatal):", err?.message ?? err),
+  );
 
   // Start the job scheduler (registers recurring jobs in Redis)
   await setupSchedules();

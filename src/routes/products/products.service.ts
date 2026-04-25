@@ -958,6 +958,11 @@ function imageCategoryAwareKnnPoolLimit(detectionProductCategory?: string): numb
     return widenedDefault;
   }
 
+  if (category === "outerwear") {
+    const widenedDefault = Math.min(1400, Math.max(base, Math.floor(base * 1.25)));
+    return widenedDefault;
+  }
+
   if (!isDressLikeDetectionCategory(detectionProductCategory)) return base;
 
   // One-piece garments need a wider recall pool because strict type/length/color gates
@@ -1327,7 +1332,7 @@ function passesFootwearSubtypeGate(
   const isLoafer = /\b(loafer|loafers|moccasin|slip.?on)\b/.test(blob);
   const isFlat = /\b(flat|flats|ballet\s*flat|oxford|oxfords|derby|brogues?)\b/.test(blob);
 
-  if (wantsSneakers) return !isBoot && !isHeel && !isSandal && !isFlat;
+  if (wantsSneakers) return !isBoot && !isHeel && !isSandal && !isFlat && !isLoafer;
   if (wantsBoots) return !isSandal && !isSneak && !isHeel;
   if (wantsSandals) return !isBoot && !isSneak && !isHeel;
   if (wantsHeels) return !isSneak && !isBoot && !isSandal && !isFlat;
@@ -1650,12 +1655,12 @@ function computeExplicitFinalRelevance(params: {
 
   const colorGate =
     colorIntentStrength > 0
-      ? Math.max(0.35, 1 - 0.65 * colorIntentStrength * (1 - params.colorMatch))
+      ? Math.max(0.50, 1 - 0.65 * colorIntentStrength * (1 - params.colorMatch))
       : 1;
   const colorTierFactor =
     colorIntentStrength > 0
       ? colorTier === "exact"
-        ? 1.12 + 0.08 * colorIntentStrength
+        ? 1.06 + 0.04 * colorIntentStrength
         : colorTier === "family"
           ? 1.06 + 0.05 * colorIntentStrength
           : colorTier === "bucket"
@@ -1872,6 +1877,23 @@ function imageKnnNumCandidates(k: number): number {
   return Math.max(k, Math.min(5000, Math.max(k * 4, 800)));
 }
 
+/**
+ * Reduced num_candidates for detection-scoped per-crop kNN queries.
+ * Detection searches have multiple fallback paths, so slightly lower ANN recall per
+ * individual call is acceptable. This halves HNSW traversal depth vs the full-image path.
+ * Override with SEARCH_IMAGE_NUM_CANDIDATES_DETECTION (env var).
+ */
+function imageKnnNumCandidatesDetection(k: number): number {
+  const rawEnv = process.env.SEARCH_IMAGE_NUM_CANDIDATES_DETECTION;
+  if (rawEnv !== undefined && String(rawEnv).trim() !== "") {
+    const raw = Number(rawEnv);
+    if (Number.isFinite(raw) && raw > 0) {
+      return Math.max(k, Math.min(5000, Math.floor(raw)));
+    }
+  }
+  return Math.max(k, Math.min(3000, Math.max(k * 2, 500)));
+}
+
 function mergeKnnHitsByProductId(primary: any[], extra: any[], cap: number): any[] {
   const byId = new Map<string, any>();
   const mergeOne = (hit: any) => {
@@ -1897,10 +1919,12 @@ function mergeKnnHitsByProductId(primary: any[], extra: any[], cap: number): any
     .slice(0, Math.max(1, cap));
 }
 
-function knnQueryInner(vector: number[], k: number, ef: number): Record<string, unknown> {
+function knnQueryInner(vector: number[], k: number, ef: number, numCandidatesOverride?: number): Record<string, unknown> {
   const inner: Record<string, unknown> = { vector, k };
   if (imageKnnNumCandidatesSupported !== false) {
-    inner.num_candidates = imageKnnNumCandidates(k);
+    inner.num_candidates = numCandidatesOverride !== undefined
+      ? numCandidatesOverride
+      : imageKnnNumCandidates(k);
   }
   if (ef > 0) inner.ef_search = ef;
   return inner;
@@ -2476,12 +2500,13 @@ function normalizeDetectionCategoryToken(token: string | null | undefined): stri
   const normalized = String(token ?? "").toLowerCase().trim();
   if (!normalized) return normalized;
   if (
-    /\b(oxford|oxfords|loafer|loafers|sneaker|sneakers|heel|heels|boot|boots|sandals?|slippers?|mule|mules|pumps?|flats?|footwear)\b/.test(
+    /\b(oxford|oxfords|loafer|loafers|sneaker|sneakers|heel|heels|boot|boots|sandals?|slippers?|mule|mules|pumps?|flats?|footwear|shoe|shoes)\b/.test(
       normalized,
     )
   ) return "footwear";
   if (/\b(trouser|trousers|pants?|slacks?|jeans?|shorts?|bottoms?)\b/.test(normalized)) return "bottoms";
   if (/\b(blazer|blazers|shirt|shirts|tee|t-?shirt|tops?|sweater|hoodie)\b/.test(normalized)) return "tops";
+  if (/\b(jacket|jackets|coat|coats|parka|parkas|bomber|trench|windbreaker|anorak|outerwear)\b/.test(normalized)) return "outerwear";
   return normalized;
 }
 
@@ -3433,6 +3458,46 @@ async function opensearchImageKnnHits(
   }
 }
 
+/**
+ * Batch multiple kNN queries into a single _msearch HTTP call.
+ * Semantically identical to N sequential opensearchImageKnnHits calls but uses one
+ * TCP round-trip. OpenSearch processes each sub-request in parallel server-side.
+ * Falls back to individual calls if msearch is unavailable or partially fails.
+ */
+async function batchOpensearchKnnHits(
+  queries: Array<{ body: Record<string, unknown>; timeoutMs: number }>,
+): Promise<Array<{ hits: any[]; timedOut: boolean }>> {
+  if (queries.length === 0) return [];
+  if (queries.length === 1) return [await opensearchImageKnnHits(queries[0].body, queries[0].timeoutMs)];
+
+  const maxTimeoutMs = Math.max(...queries.map((q) => q.timeoutMs));
+  const msearchBody: any[] = [];
+  for (const q of queries) {
+    msearchBody.push({ index: config.opensearch.index });
+    msearchBody.push(stripEfSearchFromKnnBody(q.body));
+  }
+
+  try {
+    const r = await (osClient as any).msearch(
+      { body: msearchBody },
+      { requestTimeout: maxTimeoutMs, maxRetries: 0 },
+    );
+    const responses: any[] = r.body?.responses ?? [];
+    return queries.map((_, i) => {
+      const resp = responses[i];
+      if (!resp || resp.error) {
+        return { hits: [], timedOut: false };
+      }
+      const timedOut = Boolean(resp.timed_out);
+      const hits = (resp.hits?.hits ?? []) as any[];
+      return { hits, timedOut };
+    });
+  } catch {
+    // msearch failed — fall back to parallel individual calls (no semantic change)
+    return Promise.all(queries.map((q) => opensearchImageKnnHits(q.body, q.timeoutMs)));
+  }
+}
+
 function normalizeImageCategoryIntent(raw: unknown): string {
   const s = String(raw ?? "")
     .toLowerCase()
@@ -3841,6 +3906,44 @@ export async function searchByImageWithSimilarity(
   let runStyle = false;
   let runPattern = false;
 
+  // Part-embedding fields are large float vectors. Only fetch those relevant to the detection
+  // category to reduce _source serialization overhead per kNN hit.
+  const detectionCategoryForSource = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  const partEmbeddingFields: string[] = (() => {
+    if (!detectionCategoryForSource) {
+      // No category hint: fetch all (non-detection full-image search path)
+      return [
+        "embedding_part_sleeve", "embedding_part_neckline",
+        "embedding_part_hem", "embedding_part_waistline",
+        "embedding_part_heel", "embedding_part_toe",
+        "embedding_part_bag_handle", "embedding_part_bag_body",
+        "embedding_part_pattern_patch",
+      ];
+    }
+    const parts: string[] = ["embedding_part_pattern_patch"]; // always include for pattern rerank
+    if (detectionCategoryForSource === "tops" || detectionCategoryForSource === "outerwear") {
+      parts.push("embedding_part_sleeve", "embedding_part_neckline");
+    } else if (detectionCategoryForSource === "dresses") {
+      parts.push("embedding_part_sleeve", "embedding_part_neckline", "embedding_part_hem", "embedding_part_waistline");
+    } else if (detectionCategoryForSource === "bottoms") {
+      parts.push("embedding_part_hem", "embedding_part_waistline");
+    } else if (detectionCategoryForSource === "footwear" || detectionCategoryForSource === "shoes") {
+      parts.push("embedding_part_heel", "embedding_part_toe");
+    } else if (detectionCategoryForSource === "bags" || detectionCategoryForSource === "accessories") {
+      parts.push("embedding_part_bag_handle", "embedding_part_bag_body");
+    } else {
+      // Unknown category: fetch all to avoid missing data
+      return [
+        "embedding_part_sleeve", "embedding_part_neckline",
+        "embedding_part_hem", "embedding_part_waistline",
+        "embedding_part_heel", "embedding_part_toe",
+        "embedding_part_bag_handle", "embedding_part_bag_body",
+        "embedding_part_pattern_patch",
+      ];
+    }
+    return parts;
+  })();
+
   const baseImageKnnSourceFields = [
     "product_id",
     "title",
@@ -3875,15 +3978,7 @@ export async function searchByImageWithSimilarity(
     "embedding_material",
     "embedding_style",
     "embedding_pattern",
-    "embedding_part_sleeve",
-    "embedding_part_neckline",
-    "embedding_part_hem",
-    "embedding_part_waistline",
-    "embedding_part_heel",
-    "embedding_part_toe",
-    "embedding_part_bag_handle",
-    "embedding_part_bag_body",
-    "embedding_part_pattern_patch",
+    ...partEmbeddingFields,
   ];
 
   let garmentQueryVector: number[] | null = null;
@@ -3909,6 +4004,17 @@ export async function searchByImageWithSimilarity(
   const ef = imageKnnEfSearch();
   const knnTimeoutMs = imageKnnTimeoutMs(detectionScoped);
 
+  // For detection-scoped per-crop queries, use a tighter num_candidates to reduce HNSW traversal
+  // depth without hurting recall (downstream fallback paths cover any recall gap).
+  const detectionNumCandidates = detectionScoped ? imageKnnNumCandidatesDetection(retrievalK) : undefined;
+
+  // When true: for tops/bottoms, run garment kNN first and only fire global embedding
+  // fallback if garment recall is below floor — halves OpenSearch load on the happy path.
+  // Default off; enable with SEARCH_IMAGE_LAZY_GARMENT_FALLBACK=1 once baseline is verified.
+  const lazyGarmentFallback =
+    detectionScoped &&
+    String(process.env.SEARCH_IMAGE_LAZY_GARMENT_FALLBACK ?? "").toLowerCase() === "1";
+
   let knnFieldResolved: string;
   let hits: any[];
   let knnTimedOut = false;
@@ -3924,7 +4030,7 @@ export async function searchByImageWithSimilarity(
         bool: {
           must: {
             knn: {
-              embedding: knnQueryInner(imageEmbedding, retrievalK, ef),
+              embedding: knnQueryInner(imageEmbedding, retrievalK, ef, detectionNumCandidates),
             },
           },
           filter,
@@ -3938,16 +4044,16 @@ export async function searchByImageWithSimilarity(
         bool: {
           must: {
             knn: {
-              embedding_garment: knnQueryInner(garmentQueryVector!, retrievalK, ef),
+              embedding_garment: knnQueryInner(garmentQueryVector!, retrievalK, ef, detectionNumCandidates),
             },
           },
           filter,
         },
       },
     };
-    const [hg, hgr] = await Promise.all([
-      opensearchImageKnnHits(bodyGlobal, knnTimeoutMs),
-      opensearchImageKnnHits(bodyGarment, knnTimeoutMs),
+    const [hg, hgr] = await batchOpensearchKnnHits([
+      { body: bodyGlobal, timeoutMs: knnTimeoutMs },
+      { body: bodyGarment, timeoutMs: knnTimeoutMs },
     ]);
     if (hg.timedOut || hgr.timedOut) knnTimedOut = true;
     hits = mergeDualKnnHitsForImageSearch(hg.hits, hgr.hits, imageEmbedding, garmentQueryVector!);
@@ -3978,7 +4084,7 @@ export async function searchByImageWithSimilarity(
         bool: {
           must: {
             knn: {
-              [knnFieldResolved]: knnQueryInner(queryVector, retrievalK, ef),
+              [knnFieldResolved]: knnQueryInner(queryVector, retrievalK, ef, detectionNumCandidates),
             },
           },
           filter,
@@ -3987,34 +4093,6 @@ export async function searchByImageWithSimilarity(
     };
 
     if (knnFieldResolved === "embedding_garment") {
-      // Run garment + global fallback in parallel.
-      // Root recall fix: for detection-scoped queries, garment vectors can be sparse for some
-      // categories (notably tops/bottoms). If we only switch on zero hits, main-path recall
-      // collapses. Merge in global embedding candidates when garment recall is too low.
-      const knnBodyEmbeddingFallback = {
-        size: retrievalK,
-        _source: [
-          ...baseImageKnnSourceFields,
-          ...(imageExactCosineRerankEnabled() ? ["embedding"] : []),
-        ],
-        query: {
-          bool: {
-            must: {
-              knn: {
-                embedding: knnQueryInner(imageEmbedding, retrievalK, ef),
-              },
-            },
-            filter,
-          },
-        },
-      };
-      const [garmentHits, embeddingHits] = await Promise.all([
-        opensearchImageKnnHits(knnBody, knnTimeoutMs),
-        opensearchImageKnnHits(knnBodyEmbeddingFallback, knnTimeoutMs),
-      ]);
-      if (garmentHits.timedOut || embeddingHits.timedOut) knnTimedOut = true;
-      const garmentCount = garmentHits.hits.length;
-      const embeddingCount = embeddingHits.hits.length;
       const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
       const isTopBottomDetection =
         detectionCategoryNorm === "tops" || detectionCategoryNorm === "bottoms";
@@ -4028,43 +4106,106 @@ export async function searchByImageWithSimilarity(
         detectionCategoryNorm === "bottoms" ||
         detectionCategoryNorm === "dresses" ||
         detectionCategoryNorm === "outerwear";
-      if (garmentCount > 0) {
-        const shouldMergeEmbeddingFallback =
-          detectionScoped &&
-          embeddingCount > 0 &&
-          (
-            garmentCount < lowRecallFloor ||
-            (
-              detectionApparelCategory &&
-              !isTopBottomDetection &&
-              embeddingCount >= Math.max(12, Math.floor(garmentCount * 0.35))
-            )
-          );
 
-        if (shouldMergeEmbeddingFallback) {
-          hits = mergeKnnHitsByProductId(garmentHits.hits, embeddingHits.hits, retrievalK);
-          if (breakdownDebug) {
-            console.warn("[image-knn] low garment recall; merged embedding fallback", {
-              garmentCount,
-              embeddingCount,
-              lowRecallFloor,
-              detectionCategoryNorm,
-              isTopBottomDetection,
-              mergedCount: hits.length,
-            });
+      const knnBodyEmbeddingFallback = {
+        size: retrievalK,
+        _source: [
+          ...baseImageKnnSourceFields,
+          ...(imageExactCosineRerankEnabled() ? ["embedding"] : []),
+        ],
+        query: {
+          bool: {
+            must: {
+              knn: {
+                embedding: knnQueryInner(imageEmbedding, retrievalK, ef, detectionNumCandidates),
+              },
+            },
+            filter,
+          },
+        },
+      };
+
+      // Lazy sequential mode (SEARCH_IMAGE_LAZY_GARMENT_FALLBACK=1): run garment first;
+      // fire global embedding fallback only when garment recall is below floor.
+      // This halves OpenSearch load on the happy path (garment adequate) at the cost of
+      // sequential latency on the fallback path. Dresses/outerwear keep parallel behavior
+      // because they benefit most from the merged set.
+      if (lazyGarmentFallback && isTopBottomDetection) {
+        const garmentResult = await opensearchImageKnnHits(knnBody, knnTimeoutMs);
+        if (garmentResult.timedOut) knnTimedOut = true;
+        const garmentCount = garmentResult.hits.length;
+        const needsEmbeddingFallback = garmentCount === 0 || garmentCount < lowRecallFloor;
+        if (needsEmbeddingFallback) {
+          const embeddingResult = await opensearchImageKnnHits(knnBodyEmbeddingFallback, knnTimeoutMs);
+          if (embeddingResult.timedOut) knnTimedOut = true;
+          if (garmentCount > 0) {
+            hits = mergeKnnHitsByProductId(garmentResult.hits, embeddingResult.hits, retrievalK);
+            if (breakdownDebug) {
+              console.warn("[image-knn] lazy: low garment recall; fetched embedding fallback sequentially", {
+                garmentCount, embeddingCount: embeddingResult.hits.length, lowRecallFloor, detectionCategoryNorm,
+              });
+            }
+          } else {
+            if (breakdownDebug) {
+              console.warn("[image-knn] lazy: garment returned no hits; using sequential embedding fallback");
+            }
+            knnFieldResolved = "embedding";
+            queryVector = imageEmbedding;
+            hits = embeddingResult.hits;
           }
         } else {
-          hits = garmentHits.hits;
+          hits = garmentResult.hits;
         }
       } else {
-        if (breakdownDebug) {
-          console.warn(
-            "[image-knn] embedding_garment returned no hits; using parallel embedding fallback",
-          );
+        // Default: run garment + global fallback in parallel.
+        // Root recall fix: for detection-scoped queries, garment vectors can be sparse for some
+        // categories (notably tops/bottoms). If we only switch on zero hits, main-path recall
+        // collapses. Merge in global embedding candidates when garment recall is too low.
+        const [garmentHits, embeddingHits] = await batchOpensearchKnnHits([
+          { body: knnBody, timeoutMs: knnTimeoutMs },
+          { body: knnBodyEmbeddingFallback, timeoutMs: knnTimeoutMs },
+        ]);
+        if (garmentHits.timedOut || embeddingHits.timedOut) knnTimedOut = true;
+        const garmentCount = garmentHits.hits.length;
+        const embeddingCount = embeddingHits.hits.length;
+        if (garmentCount > 0) {
+          const shouldMergeEmbeddingFallback =
+            detectionScoped &&
+            embeddingCount > 0 &&
+            (
+              garmentCount < lowRecallFloor ||
+              (
+                detectionApparelCategory &&
+                !isTopBottomDetection &&
+                embeddingCount >= Math.max(12, Math.floor(garmentCount * 0.35))
+              )
+            );
+
+          if (shouldMergeEmbeddingFallback) {
+            hits = mergeKnnHitsByProductId(garmentHits.hits, embeddingHits.hits, retrievalK);
+            if (breakdownDebug) {
+              console.warn("[image-knn] low garment recall; merged embedding fallback", {
+                garmentCount,
+                embeddingCount,
+                lowRecallFloor,
+                detectionCategoryNorm,
+                isTopBottomDetection,
+                mergedCount: hits.length,
+              });
+            }
+          } else {
+            hits = garmentHits.hits;
+          }
+        } else {
+          if (breakdownDebug) {
+            console.warn(
+              "[image-knn] embedding_garment returned no hits; using parallel embedding fallback",
+            );
+          }
+          knnFieldResolved = "embedding";
+          queryVector = imageEmbedding;
+          hits = embeddingHits.hits;
         }
-        knnFieldResolved = "embedding";
-        queryVector = imageEmbedding;
-        hits = embeddingHits.hits;
       }
     } else {
       const knnResult = await opensearchImageKnnHits(knnBody, knnTimeoutMs);
@@ -4107,7 +4248,7 @@ export async function searchByImageWithSimilarity(
         bool: {
           must: {
             knn: {
-              [knnFieldResolved]: knnQueryInner(queryVector, retrievalK, imageKnnEfSearch()),
+              [knnFieldResolved]: knnQueryInner(queryVector, retrievalK, imageKnnEfSearch(), detectionNumCandidates),
             },
           },
           filter,
@@ -4153,7 +4294,7 @@ export async function searchByImageWithSimilarity(
           bool: {
             must: {
               knn: {
-                embedding: knnQueryInner(imageEmbedding, retrievalK, ef),
+                embedding: knnQueryInner(imageEmbedding, retrievalK, ef, detectionNumCandidates),
               },
             },
             filter: relaxedKnnFilter,
@@ -4167,16 +4308,16 @@ export async function searchByImageWithSimilarity(
           bool: {
             must: {
               knn: {
-                embedding_garment: knnQueryInner(garmentQueryVector!, retrievalK, ef),
+                embedding_garment: knnQueryInner(garmentQueryVector!, retrievalK, ef, detectionNumCandidates),
               },
             },
             filter: relaxedKnnFilter,
           },
         },
       };
-      const [hgRelaxed, hgrRelaxed] = await Promise.all([
-        opensearchImageKnnHits(bodyGlobalRelaxed, relaxedTimeoutMs),
-        opensearchImageKnnHits(bodyGarmentRelaxed, relaxedTimeoutMs),
+      const [hgRelaxed, hgrRelaxed] = await batchOpensearchKnnHits([
+        { body: bodyGlobalRelaxed, timeoutMs: relaxedTimeoutMs },
+        { body: bodyGarmentRelaxed, timeoutMs: relaxedTimeoutMs },
       ]);
       relaxedHits = mergeDualKnnHitsForImageSearch(hgRelaxed.hits, hgrRelaxed.hits, imageEmbedding, garmentQueryVector!);
     } else {
@@ -4190,7 +4331,7 @@ export async function searchByImageWithSimilarity(
           bool: {
             must: {
               knn: {
-                [knnFieldResolved]: knnQueryInner(queryVector, retrievalK, ef),
+                [knnFieldResolved]: knnQueryInner(queryVector, retrievalK, ef, detectionNumCandidates),
               },
             },
             filter: relaxedKnnFilter,
@@ -4587,9 +4728,17 @@ export async function searchByImageWithSimilarity(
       inferredColorTokens.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
     ),
   ];
-  const normalizedCropColorsForMerge = isFootwearDetectionIntent
-    ? normalizedCropColors
-    : normalizedCropColors.filter((c) => !["black", "gray", "charcoal"].includes(String(c).toLowerCase()));
+  // For footwear, keep all crop colors only when there is strong confidence that the
+  // shoe itself is dark-colored.  Otherwise, background neutrals (black mats, gray floors)
+  // cause spurious "black shoe" intent even for brightly colored footwear.
+  const normalizedCropColorsForMerge =
+    isFootwearDetectionIntent &&
+    hasHighConfidenceDarkFootwearConsensus({
+      inferredByItem: inferredByItemForRelevance,
+      inferredByItemConfidence: inferredByItemConfidenceForRelevance,
+    })
+      ? normalizedCropColors
+      : normalizedCropColors.filter((c) => !["black", "gray", "charcoal"].includes(String(c).toLowerCase()));
   const neutralColorSet = new Set([
     "white",
     "off-white",
@@ -4958,7 +5107,7 @@ export async function searchByImageWithSimilarity(
           .compliance <= 0;
 
       if (hasHardCatalogColorConflict) {
-        comp.colorCompliance = 0;
+        comp.colorCompliance = (comp.colorCompliance ?? 0) * 0.35;
       }
 
       if (!hasAnyColorTokenIntent) {
@@ -7571,6 +7720,13 @@ export async function searchByImageWithSimilarity(
       // than what the catalog label says, which would silently drop the same product.
       const pSim = typeof (p as any).similarity_score === "number" ? (p as any).similarity_score : 0;
       if (pSim >= nearIdenticalRawMin) return true;
+      // For dresses: high visual+category relevance is an alternative pass so that
+      // catalog items with sparse keyword labels (e.g. "evening wear") aren't dropped
+      // by the keyword-only gate despite a strong semantic match.
+      if (detectionCategoryForFinalGate === "dresses") {
+        const catRel01 = Number((p.explain ?? {}).categoryRelevance01 ?? 0);
+        if (catRel01 >= 0.80) return true;
+      }
       return passesStrictDetectionCategoryFamily(
         p as unknown as Record<string, unknown>,
         detectionCategoryForFinalGate,
@@ -7598,7 +7754,7 @@ export async function searchByImageWithSimilarity(
               ? 0.4
               : 0.82;
         const simFloor = isDressFinalGate
-          ? 0.95
+          ? 0.88
           : isTopFinalGate
             ? 0.91
             : isBottomFinalGate
@@ -7659,14 +7815,18 @@ export async function searchByImageWithSimilarity(
       detectionCategoryForFinalGate === "dresses");
   const diversityRerankApplied =
     imageDiversityRerankEnabled() &&
-    variantCollapsed.results.length > 2 &&
-    !preserveColorCohesionForDetection;
+    variantCollapsed.results.length > 2;
   const diversityLambda = imageDiversityLambda();
+  // When color cohesion was previously requested, allow diversity but raise lambda
+  // so same-color items still cluster near the top instead of being fully dispersed.
+  const effectiveDiversityLambda = preserveColorCohesionForDetection
+    ? Math.min(0.92, diversityLambda + 0.10)
+    : diversityLambda;
   const diversityPoolCap = imageDiversityPoolCap();
   if (diversityRerankApplied) {
     const head = variantCollapsed.results.slice(0, Math.max(limit, diversityPoolCap));
     const tail = variantCollapsed.results.slice(Math.max(limit, diversityPoolCap));
-    const rerankedHead = applyImageDiversityRerank(head as ProductResult[], diversityLambda);
+    const rerankedHead = applyImageDiversityRerank(head as ProductResult[], effectiveDiversityLambda);
     results = [...rerankedHead, ...tail].slice(0, limit) as ProductResult[];
   } else {
     results = variantCollapsed.results.slice(0, limit) as ProductResult[];
