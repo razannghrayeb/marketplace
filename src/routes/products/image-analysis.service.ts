@@ -1037,26 +1037,17 @@ function canPromoteCaptionSlotColor(params: {
   if (!requiresSlotSpecificColor(params.productCategory)) return false;
 
   const captionColor = String(params.captionColor || "").toLowerCase().trim();
-  if (!captionColor || !isChromaticFashionColor(captionColor)) return false;
+  if (!captionColor) return false;
+  if (captionColor === "multicolor") return false;
 
   const minCaptionConfidence = Number.isFinite(params.minCaptionConfidence)
     ? Math.max(0, Math.min(1, Number(params.minCaptionConfidence)))
     : 0.62;
   const captionConfidence = clamp01(Number(params.captionConfidence ?? 0));
   if (captionConfidence < minCaptionConfidence) return false;
-
-  const existingColor = String(params.existingColor || "").toLowerCase().trim();
-  const existingSource = Number(params.existingSource ?? 0);
-  const existingConfidence = clamp01(Number(params.existingConfidence ?? 0));
-
-  if (!existingColor) return true;
-  if (!isNeutralFashionColorEarly(existingColor)) return false;
-
-  const reliableCropNeutral = existingSource === 1 && existingConfidence >= 0.58;
-  if (reliableCropNeutral) return true;
-
-  // Also allow replacing weak neutral slot colors from lower-priority signals.
-  return existingConfidence <= captionConfidence + 0.12;
+  // User preference: trust BLIP caption when provided for slot-specific colors.
+  // Keep only a confidence gate and avoid over-constraining by prior crop color.
+  return true;
 }
 
 function ensureStyleAndMask(detection: Detection, imageWidth: number, imageHeight: number): Detection {
@@ -1516,6 +1507,7 @@ function parseBottomDetectionIntent(detectionLabel: string): {
   isTrousersLike: boolean;
   isJeansLike: boolean;
   isSkirtLike: boolean;
+  isShortsLike: boolean;
 } {
   const l = String(detectionLabel || "").toLowerCase();
   return {
@@ -1525,6 +1517,7 @@ function parseBottomDetectionIntent(detectionLabel: string): {
       ),
     isJeansLike: /\b(jean|jeans|denim|denims)\b/.test(l),
     isSkirtLike: /\b(skirt|skirts|mini skirt|midi skirt|maxi skirt)\b/.test(l),
+    isShortsLike: /\b(short|shorts|bermuda|bermudas|cargo short|cargo shorts)\b/.test(l),
   };
 }
 
@@ -1598,6 +1591,7 @@ function hardCategoryTermsForDetection(
     const bottomIntent = parseBottomDetectionIntent(detectionLabel);
     const isTrousersLike = bottomIntent.isTrousersLike;
     const isJeansLike = bottomIntent.isJeansLike;
+    const isShortsLike = bottomIntent.isShortsLike;
 
     if (isTrousersLike) {
       const trouserLike = baseTerms.filter((t) =>
@@ -1616,6 +1610,10 @@ function hardCategoryTermsForDetection(
     const isSkirtLike = bottomIntent.isSkirtLike;
     if (isSkirtLike) {
       return baseTerms.filter((t) => /\b(skirt|skirts)\b/.test(t));
+    }
+    if (isShortsLike) {
+      const shortsLike = baseTerms.filter((t) => /\b(short|shorts|bermuda|bermudas|cargo short|cargo shorts)\b/.test(t));
+      if (shortsLike.length > 0) return shortsLike;
     }
     return baseTerms;
   }
@@ -1798,6 +1796,12 @@ function tightenTypeSeedsForDetection(
     if (bottomIntent.isSkirtLike) {
       const skirtLike = normalized.filter((t) => /\b(skirt|skirts)\b/.test(t));
       return skirtLike.length > 0 ? skirtLike : normalized;
+    }
+    if (bottomIntent.isShortsLike) {
+      const shortsLike = normalized.filter((t) =>
+        /\b(short|shorts|bermuda|bermudas|cargo short|cargo shorts)\b/.test(t),
+      );
+      if (shortsLike.length > 0) return shortsLike;
     }
   }
 
@@ -3886,6 +3890,8 @@ function selectDetectionColorFromPalette(params: {
     category === "dresses" ||
     /\b(dress|gown|jumpsuit|romper|playsuit|sundress|vest dress)\b/.test(label);
   const primaryIsLightNeutral = isLightNeutralFashionColor(primary);
+  const warmNeutralSet = new Set(["beige", "tan", "camel", "taupe", "stone", "sand", "khaki", "nude"]);
+  const lightNeutralSet = new Set(["white", "off-white", "cream", "ivory"]);
 
   // One-piece garments frequently include background/sky bleed in upper regions.
   // Keep a confident light-neutral primary color for dresses/jumpsuits.
@@ -3894,10 +3900,13 @@ function selectDetectionColorFromPalette(params: {
   }
 
   // For tops, studio/product-collage backgrounds frequently dominate the crop with white/off-white.
-  // If we still captured a non-neutral secondary color, prefer it as item color even at high confidence.
+  // If we still captured a non-neutral secondary color, prefer it only when confidence
+  // is not already strong; otherwise keep the stable primary and let caption signals refine.
   if (isTopLike && primaryIsLightNeutral && alternatives.length > 0) {
     const chromaticAlt = alternatives.find((c) => !isNeutralFashionColor(c));
-    if (chromaticAlt) return chromaticAlt;
+    if (chromaticAlt && mediumConfidence) return chromaticAlt;
+    const warmNeutralAlt = alternatives.find((c) => warmNeutralSet.has(c));
+    if (warmNeutralAlt && lowConfidence) return warmNeutralAlt;
   }
   // Bottom crops often include dark shadows/background and default to black.
   // Prefer a neutral/chromatic alternative when available to reduce false-black bias.
@@ -3908,6 +3917,17 @@ function selectDetectionColorFromPalette(params: {
     if (preferredNeutralAlt) return preferredNeutralAlt;
     const chromaticAlt = alternatives.find((c) => !isNeutralFashionColor(c));
     if (chromaticAlt) return chromaticAlt;
+  }
+  // Bottoms in bright/light scenes are often misread as gray due shadows/denim bleed.
+  // If we have a plausible light-neutral alternative, prefer it over gray/charcoal.
+  if (
+    isBottomLike &&
+    (primary === "gray" || primary === "charcoal") &&
+    alternatives.length > 0 &&
+    confidence < 0.9
+  ) {
+    const lightAlt = alternatives.find((c) => lightNeutralSet.has(c) || warmNeutralSet.has(c));
+    if (lightAlt) return lightAlt;
   }
 
   if (mediumConfidence && primary === "black" && alternatives.length > 0) {
@@ -3953,6 +3973,16 @@ function selectDetectionColorFromPalette(params: {
     }
   }
 
+  // Footwear can pick up blue floor/sky reflections around white shoes.
+  // Prefer light-neutral shoe body colors when available.
+  if (category === "footwear" && alternatives.length > 0 && confidence < 0.9) {
+    const blueLikePrimary = ["blue", "light-blue", "sky-blue", "powder-blue", "cyan", "teal"].includes(primary);
+    if (blueLikePrimary) {
+      const lightNeutralAlt = alternatives.find((c) => lightNeutralSet.has(c));
+      if (lightNeutralAlt) return lightNeutralAlt;
+    }
+  }
+
   return primary;
 }
 
@@ -3973,11 +4003,18 @@ function adjustStripedTopColorInference(params: {
   const stripedCue =
     /\b(striped?|stripes?|pinstripe|pin-striped|line pattern|lined shirt)\b/.test(caption) ||
     /\b(striped?|pinstripe)\b/.test(label);
-  if (!stripedCue) return params.selectedColor ?? null;
-
+  const warmNeutralCaptionCue =
+    /\b(tan|beige|camel|khaki|sand|stone|taupe)\b/.test(caption) &&
+    /\b(top|shirt|polo|tee|t-?shirt|blouse)\b/.test(caption);
+  const warmNeutralSet = new Set(["beige", "tan", "camel", "taupe", "stone", "sand", "khaki", "nude"]);
   const colors = (params.cropColors ?? [])
     .map((c) => String(c ?? "").toLowerCase().trim())
     .filter(Boolean);
+  if (warmNeutralCaptionCue) {
+    const warmChoice = colors.find((c) => warmNeutralSet.has(c));
+    if (warmChoice) return warmChoice;
+  }
+  if (!stripedCue) return params.selectedColor ?? null;
   const hasBlueFamily = colors.some((c) => ["blue", "navy", "sky-blue", "light-blue", "cobalt"].includes(c));
   if (hasBlueFamily) {
     const blueChoice = colors.find((c) => ["blue", "navy", "light-blue", "sky-blue", "cobalt"].includes(c));
@@ -4162,6 +4199,8 @@ export interface ImageAnalysisResult {
   inferredColorsByItem?: Record<string, string | null> | null;
   /** Confidence of chosen per-item color after BLIP vs crop fusion (0..1). */
   inferredColorsByItemConfidence?: Record<string, number> | null;
+  /** Source of selected per-item color (full_caption | crop | caption | unknown). */
+  inferredColorsByItemSource?: Record<string, string> | null;
 
   /** Fashion detection results */
   detection: {
@@ -4234,12 +4273,58 @@ function detectionColorKey(label: string, index?: number): string {
   return Number.isFinite(index as number) ? `${base}_${index}` : base;
 }
 
+function detectionColorSourceName(sourcePriority: number | null | undefined): string {
+  const p = Number(sourcePriority ?? -1);
+  if (p === 0) return "full_caption";
+  if (p === 1) return "crop";
+  if (p >= 2) return "caption";
+  return "unknown";
+}
+
 function estimateCropColorConfidence(detection: Detection): number {
   const detConf = clamp01(Number(detection.confidence ?? 0));
   const area = Math.max(0, Number(detection.area_ratio ?? 0));
   const areaSignal = clamp01(Math.min(1, area / 0.2));
   // Crop color is strong when detection is confident and reasonably sized.
   return clamp01(0.35 + 0.45 * detConf + 0.2 * areaSignal);
+}
+
+function isBlueLikeColor(color: string): boolean {
+  const c = String(color || "").toLowerCase().trim();
+  return (
+    c === "blue" ||
+    c === "light-blue" ||
+    c === "sky-blue" ||
+    c === "powder-blue" ||
+    c === "cyan" ||
+    c === "teal" ||
+    c === "navy"
+  );
+}
+
+function isWarmNeutralColor(color: string): boolean {
+  const c = String(color || "").toLowerCase().trim();
+  return (
+    c === "beige" ||
+    c === "tan" ||
+    c === "camel" ||
+    c === "taupe" ||
+    c === "stone" ||
+    c === "sand" ||
+    c === "khaki" ||
+    c === "nude" ||
+    c === "brown"
+  );
+}
+
+function colorFamilyBucket(color: string): string {
+  const c = canonicalizeColorIntentToken(color);
+  if (!c) return "";
+  if (c === "multicolor") return "multicolor";
+  if (isNeutralFashionColor(c)) return "neutral";
+  if (c === "red" || c === "pink" || c === "orange" || c === "yellow" || c === "gold") return "warm";
+  if (c === "blue" || c === "green" || c === "teal" || c === "purple") return "cool";
+  return c;
 }
 
 function setDetectionColorIfHigherConfidence(
@@ -4273,6 +4358,60 @@ function setDetectionColorIfHigherConfidence(
   const prevConf = clamp01(Number(confByItem[key] ?? 0));
   const nextPriority = Math.max(0, Math.floor(sourcePriority));
   const prevPriority = Math.max(0, Math.floor(Number(sourceByItem[key] ?? 0)));
+  const prevColor = String(colorByItem[key] ?? "").toLowerCase().trim();
+  const incomingDifferent = prevColor.length > 0 && prevColor !== c;
+  const confidenceGap = nextConf - prevConf;
+  const incomingFromCaption = nextPriority >= 2;
+
+  if (incomingDifferent) {
+    // Conflict guard: avoid unstable color flips when we already have a strong slot-local signal.
+    const hasStrongExisting = prevConf >= 0.78;
+    const prevBucket = colorFamilyBucket(prevColor);
+    const nextBucket = colorFamilyBucket(c);
+    const crossFamilyConflict =
+      prevBucket.length > 0 &&
+      nextBucket.length > 0 &&
+      prevBucket !== nextBucket;
+    const apparelLike =
+      apparelLikeCategory ||
+      /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|sweater|hoodie|cardigan|jacket|coat|blazer|trouser|trousers|pant|pants|jean|jeans|skirt|skirts|dress|dresses)\b/.test(
+        key,
+      );
+    const footwearLike = category === "footwear" || /\b(shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|flat|flats)\b/.test(key);
+
+    // Global rule (all colors): do not switch a strong existing color to a different
+    // family unless the incoming signal is clearly stronger.
+    if (!incomingFromCaption && hasStrongExisting && crossFamilyConflict && confidenceGap < 0.2) {
+      return;
+    }
+
+    // Do not let caption/global signals replace strong warm/chromatic apparel colors with light-neutral.
+    if (
+      !incomingFromCaption &&
+      apparelLike &&
+      hasStrongExisting &&
+      nextPriority > prevPriority &&
+      isLightNeutralFashionColor(c) &&
+      (isWarmNeutralColor(prevColor) || isChromaticFashionColor(prevColor)) &&
+      confidenceGap < 0.18
+    ) {
+      return;
+    }
+
+    // Do not let blue reflections replace strong light-neutral footwear color.
+    if (
+      !incomingFromCaption &&
+      footwearLike &&
+      hasStrongExisting &&
+      nextPriority > prevPriority &&
+      isBlueLikeColor(c) &&
+      isLightNeutralFashionColor(prevColor) &&
+      confidenceGap < 0.2
+    ) {
+      return;
+    }
+  }
+
   if (!(key in colorByItem) || nextPriority > prevPriority || (nextPriority === prevPriority && nextConf >= prevConf)) {
     colorByItem[key] = c;
     confByItem[key] = nextConf;
@@ -7446,6 +7585,22 @@ export class ImageAnalysisService {
       };
     });
 
+    const relevanceFilteredResultsWithColorSource = relevanceFilteredResults.map((row) => {
+      const rawIndex = Number((row as any)?.detectionIndex);
+      const hasIndex = Number.isFinite(rawIndex) && rawIndex >= 0;
+      const detLabel = String((row as any)?.detection?.label ?? "").trim();
+      if (!hasIndex || !detLabel) return row;
+      const colorKey = detectionColorKey(detLabel, Math.floor(rawIndex));
+      const colorSource = detectionColorSourceName(inferredColorsByItemSource[colorKey]);
+      return {
+        ...row,
+        detection: {
+          ...(row as any).detection,
+          colorSource,
+        },
+      };
+    });
+
     // Recalculate counts and total after filtering
     let newTotalProducts = 0;
     for (const result of relevanceFilteredResults) {
@@ -7480,6 +7635,7 @@ export class ImageAnalysisService {
         ...detection,
         dominantColor: inferredColorsByItem[colorKey] ?? detection.dominantColor,
         colorConfidence: inferredColorsByItemConfidence[colorKey] ?? detection.colorConfidence,
+        colorSource: detectionColorSourceName(inferredColorsByItemSource[colorKey]),
       } as DetectionWithColor;
     });
 
@@ -7516,8 +7672,11 @@ export class ImageAnalysisService {
       inferredPrimaryColor: resolvedPrimaryColor,
       inferredColorsByItem,
       inferredColorsByItemConfidence,
+      inferredColorsByItemSource: Object.fromEntries(
+        Object.entries(inferredColorsByItemSource).map(([k, v]) => [k, detectionColorSourceName(v)]),
+      ),
       similarProducts: {
-        byDetection: relevanceFilteredResults,
+        byDetection: relevanceFilteredResultsWithColorSource,
         totalProducts: newTotalProducts,
         threshold: similarityThreshold,
         detectedCategories,
@@ -9038,6 +9197,22 @@ export class ImageAnalysisService {
       };
     });
 
+    const relevanceFilteredResultsSelWithColorSource = relevanceFilteredResultsSel.map((row) => {
+      const rawIndex = Number((row as any)?.detectionIndex);
+      const hasIndex = Number.isFinite(rawIndex) && rawIndex >= 0;
+      const detLabel = String((row as any)?.detection?.label ?? "").trim();
+      if (!hasIndex || !detLabel) return row;
+      const colorKey = detectionColorKey(detLabel, Math.floor(rawIndex));
+      const colorSource = detectionColorSourceName(inferredColorsByItemSource[colorKey]);
+      return {
+        ...row,
+        detection: {
+          ...(row as any).detection,
+          colorSource,
+        },
+      };
+    });
+
     // Recalculate counts and total after filtering
     let newTotalProductsSel = 0;
     for (const result of relevanceFilteredResultsSel) {
@@ -9060,7 +9235,8 @@ export class ImageAnalysisService {
         ...detection,
         dominantColor: inferredColorsByItem[colorKey] ?? detection.dominantColor,
         colorConfidence: inferredColorsByItemConfidence[colorKey] ?? detection.colorConfidence,
-      });
+        colorSource: detectionColorSourceName(inferredColorsByItemSource[colorKey]),
+      } as DetectionWithColor);
     }
 
     const coherenceDetections = dedupeOverlappingDetections(itemsForCoherence);
@@ -9096,12 +9272,15 @@ export class ImageAnalysisService {
       inferredPrimaryColor: resolvedPrimaryColor,
       inferredColorsByItem,
       inferredColorsByItemConfidence,
+      inferredColorsByItemSource: Object.fromEntries(
+        Object.entries(inferredColorsByItemSource).map(([k, v]) => [k, detectionColorSourceName(v)]),
+      ),
       similarProducts: {
-        byDetection: relevanceFilteredResultsSel,
+        byDetection: relevanceFilteredResultsSelWithColorSource,
         totalProducts: newTotalProductsSel,
         totalAvailableProducts: pagedSel.totalAvailableProducts,
         threshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
-        detectedCategories: [...new Set(relevanceFilteredResultsSel.map((r) => r.category))],
+        detectedCategories: [...new Set(relevanceFilteredResultsSelWithColorSource.map((r) => r.category))],
         pagination: {
           mode: "per_detection",
           page: resolvedResultsPage,

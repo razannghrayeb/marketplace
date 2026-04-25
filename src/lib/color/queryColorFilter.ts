@@ -16,7 +16,8 @@ export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
     "green", "olive", "khaki", "sage", "mint", "forest green", "forest-green",
     "hunter green", "army green", "emerald", "lime", "moss",
   ],
-  beige: ["beige", "camel", "tan", "taupe", "stone", "sand", "light khaki"],
+  beige: ["beige", "tan", "taupe", "stone", "sand", "light khaki"],
+  camel: ["camel", "camel brown", "light brown", "warm beige"],
   brown: ["brown", "mocha", "chocolate", "coffee", "caramel", "cognac", "rust brown"],
   purple: ["purple", "violet", "plum", "lavender", "lilac", "mauve", "grape", "orchid"],
   pink: [

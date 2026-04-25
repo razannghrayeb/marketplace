@@ -426,10 +426,12 @@ export async function getDashboardStats(): Promise<{
   productsWithoutCanonical: number;
   priceRecordsToday: number;
 }> {
-  const [hasIsHidden, hasIsFlagged, hasCanonicalId] = await Promise.all([
+  const [hasIsHidden, hasIsFlagged, hasCanonicalId, hasCanonicalProducts, hasPriceHistory] = await Promise.all([
     productsTableHasColumn("is_hidden"),
     productsTableHasColumn("is_flagged"),
     productsTableHasColumn("canonical_id"),
+    tableExists("canonical_products"),
+    tableExists("price_history"),
   ]);
 
   const hiddenExpr = hasIsHidden
@@ -441,15 +443,21 @@ export async function getDashboardStats(): Promise<{
   const withoutCanonicalExpr = hasCanonicalId
     ? "(SELECT COUNT(*) FROM products WHERE canonical_id IS NULL) as products_without_canonical"
     : "0::bigint as products_without_canonical";
+  const canonicalsExpr = hasCanonicalProducts
+    ? "(SELECT COUNT(*) FROM canonical_products) as total_canonicals"
+    : "0::bigint as total_canonicals";
+  const priceRecordsTodayExpr = hasPriceHistory
+    ? "(SELECT COUNT(*) FROM price_history WHERE recorded_at > CURRENT_DATE) as price_records_today"
+    : "0::bigint as price_records_today";
 
   const result = await pg.query(`
     SELECT
       (SELECT COUNT(*) FROM products) as total_products,
       ${hiddenExpr},
       ${flaggedExpr},
-      (SELECT COUNT(*) FROM canonical_products) as total_canonicals,
+      ${canonicalsExpr},
       ${withoutCanonicalExpr},
-      (SELECT COUNT(*) FROM price_history WHERE recorded_at > CURRENT_DATE) as price_records_today
+      ${priceRecordsTodayExpr}
   `);
 
   const row = result.rows[0];
