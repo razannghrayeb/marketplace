@@ -35,7 +35,12 @@ import {
   type QueryAST,
 } from "../../lib/queryProcessor";
 import { expandColorTermsForFilter, normalizeColorToken } from "../../lib/color/queryColorFilter";
-import { tieredColorListCompliance, tieredColorMatchScore } from "../../lib/color/colorCanonical";
+import {
+  COLOR_FAMILY_GROUPS,
+  coarseColorBucket,
+  tieredColorListCompliance,
+  tieredColorMatchScore,
+} from "../../lib/color/colorCanonical";
 import {
   computeHitRelevance,
   normalizeQueryGender,
@@ -3003,83 +3008,120 @@ function expandColorIntentWithNearest(tokens: string[]): string[] {
     .filter(Boolean);
   if (normalized.length === 0) return [];
 
-  const nearest: Record<string, string[]> = {
-    "light-pink": ["pink", "rose", "blush"],
-    blush: ["pink", "light-pink", "rose"],
-    rose: ["pink", "light-pink", "blush"],
-    pink: ["light-pink", "blush", "rose", "fuchsia", "magenta"],
-    fuchsia: ["pink", "magenta", "hot-pink"],
-    magenta: ["fuchsia", "pink"],
-    "hot-pink": ["fuchsia", "pink"],
-    beige: ["off-white", "white", "cream", "ivory", "tan", "sand"],
-    camel: ["beige", "tan", "white", "off-white", "sand"],
-    taupe: ["beige", "stone", "off-white", "white"],
-    stone: ["beige", "off-white", "white", "sand"],
-    sand: ["beige", "camel", "tan"],
-    khaki: ["beige", "tan", "off-white", "olive"],
-    nude: ["beige", "off-white", "white"],
-    "off-white": ["white", "cream", "ivory", "beige"],
-    cream: ["off-white", "white", "ivory", "beige"],
-    ivory: ["off-white", "white", "cream", "beige"],
-    "light-blue": ["blue", "sky-blue", "powder-blue", "ice-blue"],
-    "sky-blue": ["light-blue", "blue", "powder-blue"],
-    "powder-blue": ["light-blue", "sky-blue"],
-    "ice-blue": ["light-blue", "sky-blue"],
-    navy: ["blue", "indigo", "midnight-blue"],
-    "midnight-blue": ["navy", "blue", "indigo"],
-    indigo: ["navy", "blue", "violet"],
-    cobalt: ["blue", "royal-blue"],
-    "royal-blue": ["cobalt", "blue"],
-    charcoal: ["black", "gray", "dark-gray"],
-    "dark-gray": ["charcoal", "gray", "black"],
-    gray: ["charcoal", "black", "silver", "dark-gray"],
-    silver: ["gray", "white"],
-    burgundy: ["maroon", "red", "wine", "bordeaux"],
-    maroon: ["burgundy", "red", "wine"],
-    wine: ["burgundy", "maroon", "red"],
-    bordeaux: ["burgundy", "wine", "red"],
-    crimson: ["red", "burgundy"],
-    red: ["burgundy", "maroon", "crimson", "scarlet", "tomato"],
-    scarlet: ["red", "crimson"],
-    tomato: ["red", "orange"],
-    orange: ["rust", "terracotta", "amber", "tomato"],
-    rust: ["orange", "terracotta", "brown"],
-    terracotta: ["rust", "orange", "brown"],
-    amber: ["orange", "yellow", "gold"],
-    gold: ["amber", "yellow", "mustard"],
-    mustard: ["yellow", "gold", "olive"],
-    yellow: ["mustard", "gold", "amber", "lemon"],
-    lemon: ["yellow", "lime"],
-    lime: ["green", "lemon"],
-    mint: ["green", "sage", "teal"],
-    sage: ["green", "olive", "mint"],
-    olive: ["green", "khaki", "sage", "mustard"],
-    green: ["olive", "sage", "mint", "emerald", "forest-green"],
-    emerald: ["green", "teal"],
-    "forest-green": ["green", "olive"],
-    teal: ["blue", "green", "cyan", "mint"],
-    cyan: ["teal", "blue", "sky-blue"],
-    turquoise: ["teal", "cyan", "blue"],
-    lavender: ["purple", "lilac", "violet"],
-    lilac: ["lavender", "purple", "mauve"],
-    mauve: ["lilac", "purple", "pink"],
-    violet: ["purple", "indigo", "lavender"],
-    purple: ["violet", "lavender", "lilac", "plum"],
-    plum: ["purple", "burgundy", "wine"],
-    brown: ["tan", "rust", "camel", "chocolate"],
-    chocolate: ["brown", "tan"],
-    tan: ["beige", "brown", "camel"],
+  const normalizeNeighbor = (value: string): string => {
+    const base = String(value ?? "")
+      .toLowerCase()
+      .replace(/[_\s]+/g, "-")
+      .trim();
+    return normalizeColorToken(base) ?? base;
   };
+
+  const veryLight = new Set(["white", "off-white", "cream", "ivory"]);
+  const darkTones = new Set(["black", "charcoal", "navy", "burgundy", "maroon", "brown"]);
+  const toneGroup = (token: string): "light" | "dark" | "mid" => {
+    if (veryLight.has(token) || /^light-/.test(token) || /^pale-/.test(token) || /^baby-/.test(token)) {
+      return "light";
+    }
+    if (darkTones.has(token) || /^dark-/.test(token) || /^deep-/.test(token) || /^midnight-/.test(token)) {
+      return "dark";
+    }
+    return "mid";
+  };
+  const toneCompatible = (source: string, candidate: string): boolean => {
+    const s = toneGroup(source);
+    const c = toneGroup(candidate);
+    if (s === "light" && c === "dark") return false;
+    if (s === "dark" && c === "light") return false;
+    return true;
+  };
+
+  // Extra shade links for labels that are often outside canonical family groups.
+  const shadeNeighbors: Record<string, string[]> = {
+    "light-blue": ["sky-blue", "powder-blue", "blue"],
+    "sky-blue": ["light-blue", "blue"],
+    "powder-blue": ["light-blue", "sky-blue"],
+    "hot-pink": ["pink", "fuchsia"],
+    "dark-gray": ["gray", "charcoal"],
+    "midnight-blue": ["navy", "blue"],
+    "forest-green": ["green", "olive"],
+  };
+
+  const normalizedFamilyGroups = COLOR_FAMILY_GROUPS.map((group) =>
+    [...new Set(group.map(normalizeNeighbor).filter(Boolean))],
+  );
 
   const out: string[] = [];
   for (const token of normalized) {
     if (!out.includes(token)) out.push(token);
-    for (const alt of nearest[token] ?? []) {
-      const normAlt = normalizeColorToken(alt) ?? alt;
-      if (normAlt && !out.includes(normAlt)) out.push(normAlt);
+    const sourceBucket = coarseColorBucket(token);
+    const candidates = new Set<string>();
+
+    for (const group of normalizedFamilyGroups) {
+      if (!group.includes(token)) continue;
+      for (const member of group) candidates.add(member);
+    }
+    for (const alt of shadeNeighbors[token] ?? []) {
+      candidates.add(normalizeNeighbor(alt));
+    }
+
+    let added = 0;
+    for (const candidate of candidates) {
+      if (!candidate || candidate === token || out.includes(candidate)) continue;
+      const candidateBucket = coarseColorBucket(candidate);
+      // Never mix distinct coarse color buckets during nearest expansion.
+      if (sourceBucket && candidateBucket && sourceBucket !== candidateBucket) continue;
+      if (!toneCompatible(token, candidate)) continue;
+      out.push(candidate);
+      added += 1;
+      if (added >= 6) break;
     }
   }
   return out;
+}
+
+function downgradeColorTierOneStep(tier: string | null | undefined): "exact" | "family" | "bucket" | "none" {
+  const t = String(tier ?? "none").toLowerCase().trim();
+  if (t === "exact") return "family";
+  if (t === "family") return "bucket";
+  if (t === "bucket") return "none";
+  return "none";
+}
+
+function applyExpandedColorTierPenalty(params: {
+  comp: HitCompliance;
+  primaryDesiredColors: Set<string>;
+  expandedDesiredOnly: Set<string>;
+  rerankColorMode: "any" | "all";
+  hasExplicitColorIntent: boolean;
+}): HitCompliance {
+  const comp = params.comp;
+  const matchedColor = String(comp.matchedColor ?? "").toLowerCase().trim();
+  if (!matchedColor) return comp;
+  if (params.primaryDesiredColors.size === 0 || params.expandedDesiredOnly.size === 0) return comp;
+
+  const primaryDesired = [...params.primaryDesiredColors];
+  const expandedOnly = [...params.expandedDesiredOnly];
+  const matchInPrimary = tieredColorListCompliance(primaryDesired, [matchedColor], params.rerankColorMode);
+  if ((matchInPrimary.compliance ?? 0) > 0) return comp;
+
+  const matchInExpanded = tieredColorListCompliance(expandedOnly, [matchedColor], params.rerankColorMode);
+  if ((matchInExpanded.compliance ?? 0) <= 0) return comp;
+
+  const tier = String(comp.colorTier ?? "none").toLowerCase();
+  const explicit = params.hasExplicitColorIntent;
+  const tierPenalty =
+    tier === "exact"
+      ? (explicit ? 0.86 : 0.9)
+      : tier === "family"
+        ? (explicit ? 0.74 : 0.8)
+        : tier === "bucket"
+          ? (explicit ? 0.58 : 0.66)
+          : 0.6;
+
+  const next = { ...comp };
+  next.colorCompliance = Math.max(0, Math.min(1, Number(comp.colorCompliance ?? 0) * tierPenalty));
+  next.colorTier = downgradeColorTierOneStep(comp.colorTier as any);
+  return next;
 }
 
 function computeColorContradictionPenalty(params: {
@@ -4844,12 +4886,53 @@ export async function searchByImageWithSimilarity(
       allColorsForRelevance.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
     ),
   ];
-  const desiredColorsForRelevance = expandColorIntentWithNearest(desiredColorsBaseForRelevance);
+  const bagLikeDetectionIntent =
+    detectionCategoryNorm === "bags" ||
+    desiredProductTypes.some((t) =>
+      /\b(bag|bags|handbag|handbags|purse|wallet|clutch|satchel|crossbody|tote|backpack)\b/.test(
+        String(t ?? "").toLowerCase(),
+      ),
+    );
+  const warmNeutralColors = new Set([
+    "beige",
+    "camel",
+    "tan",
+    "brown",
+    "taupe",
+    "stone",
+    "sand",
+    "khaki",
+    "nude",
+  ]);
+  const lightNeutralColors = new Set(["white", "off-white", "cream", "ivory", "ecru"]);
+  const hasWarmNeutralSignalForBags =
+    desiredColorsBaseForRelevance.some((c) => warmNeutralColors.has(String(c ?? "").toLowerCase().trim())) ||
+    normalizedInferredColors.some((c) => warmNeutralColors.has(String(c ?? "").toLowerCase().trim())) ||
+    normalizedCropColorsForMerge.some((c) => warmNeutralColors.has(String(c ?? "").toLowerCase().trim()));
+  const removeLightNeutralDrift = (tokens: string[]): string[] => {
+    if (!(bagLikeDetectionIntent && !hasExplicitColorIntent && hasWarmNeutralSignalForBags)) return tokens;
+    const pruned = tokens.filter((c) => !lightNeutralColors.has(String(c ?? "").toLowerCase().trim()));
+    // Keep intent non-empty in edge cases.
+    return pruned.length > 0 ? pruned : tokens;
+  };
+
+  let desiredColorsForRelevance = removeLightNeutralDrift(
+    expandColorIntentWithNearest(desiredColorsBaseForRelevance),
+  );
+  const primaryDesiredColorSet = new Set(
+    desiredColorsBaseForRelevance
+      .map((c) => normalizeColorToken(String(c ?? "").toLowerCase().trim()) ?? String(c ?? "").toLowerCase().trim())
+      .filter(Boolean),
+  );
+  const expandedDesiredOnlySet = new Set(
+    desiredColorsForRelevance.filter((c) => !primaryDesiredColorSet.has(String(c ?? "").toLowerCase().trim())),
+  );
   const rerankColorModeForRelevance = filtersRecord.colorMode === "all" ? "all" : "any";
-  const desiredColorsTierForRelevance =
+  let desiredColorsTierForRelevance =
     allColorsForRelevance.length > 0
       ? expandColorIntentWithNearest(allColorsForRelevance)
       : desiredColorsForRelevance;
+  desiredColorsTierForRelevance = removeLightNeutralDrift(desiredColorsTierForRelevance);
 
   const queryAgeGroupRawForRelevance =
     typeof filtersRecord.ageGroup === "string" ? filtersRecord.ageGroup : undefined;
@@ -5050,6 +5133,13 @@ export async function searchByImageWithSimilarity(
     const sim = visualSimFromHit(hit);
     const rel = computeHitRelevance(hit, sim, relevanceIntent);
     const { primaryColor, ...comp } = rel;
+    const compWithExpandedPenalty = applyExpandedColorTierPenalty({
+      comp,
+      primaryDesiredColors: primaryDesiredColorSet,
+      expandedDesiredOnly: expandedDesiredOnlySet,
+      rerankColorMode: rerankColorModeForRelevance,
+      hasExplicitColorIntent,
+    });
     const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
     const isCoreDetectionCategory =
       detectionCategoryNorm === "tops" ||
@@ -5061,10 +5151,10 @@ export async function searchByImageWithSimilarity(
     if (
       hasDetectionAnchoredTypeIntent &&
       isCoreDetectionCategory &&
-      Number(comp.categoryRelevance01 ?? 0) >= 0.95 &&
-      ((comp.exactTypeScore ?? 0) >= 1 || Number(comp.productTypeCompliance ?? 0) >= 0.88)
+      Number(compWithExpandedPenalty.categoryRelevance01 ?? 0) >= 0.95 &&
+      ((compWithExpandedPenalty.exactTypeScore ?? 0) >= 1 || Number(compWithExpandedPenalty.productTypeCompliance ?? 0) >= 0.88)
     ) {
-      comp.crossFamilyPenalty = Math.min(Number(comp.crossFamilyPenalty ?? 0), 0.18);
+      compWithExpandedPenalty.crossFamilyPenalty = Math.min(Number(compWithExpandedPenalty.crossFamilyPenalty ?? 0), 0.18);
     }
     const docLength = inferDocLengthToken(hit);
     const hasLengthIntentForHit = Boolean(desiredLengthForRelevance) && docSupportsLengthIntent(hit);
@@ -5075,11 +5165,11 @@ export async function searchByImageWithSimilarity(
         docLength.explicit,
       )
       : 0;
-    (comp as any).lengthCompliance = lengthCompliance;
-    (comp as any).hasLengthIntent = hasLengthIntentForHit;
+    (compWithExpandedPenalty as any).lengthCompliance = lengthCompliance;
+    (compWithExpandedPenalty as any).hasLengthIntent = hasLengthIntentForHit;
     lengthComplianceById.set(idStr, lengthCompliance);
     hasLengthIntentById.set(idStr, hasLengthIntentForHit);
-    complianceById.set(idStr, comp);
+    complianceById.set(idStr, compWithExpandedPenalty);
     colorByHitId.set(idStr, primaryColor);
   }
 
@@ -7034,7 +7124,7 @@ export async function searchByImageWithSimilarity(
           finalRelevanceSource = "tailored_intent_casual_hard_gate";
         }
       } else if (
-        hasColorIntentForFinal &&
+        (hasColorIntentForFinal || hasColorPreferenceForRanking) &&
         authoritativeColorNorm &&
         compliance &&
         !(
@@ -7043,6 +7133,7 @@ export async function searchByImageWithSimilarity(
           String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops"
         )
       ) {
+        const colorCorrectionHardMode = hasColorIntentForFinal;
         const authoritativeColor = tieredColorListCompliance(
           desiredColorsTierForRelevance,
           authoritativeColorTokens.length > 0 ? authoritativeColorTokens : [authoritativeColorNorm],
@@ -7054,57 +7145,68 @@ export async function searchByImageWithSimilarity(
           rerankColorModeForRelevance,
         );
         if (authoritativeColor.compliance <= 0 || bucketOnlyCatalogConflict) {
-          const blipColorConflict = blipColorConflictFactorById.get(idStr) ?? 1;
-          const conflictStrength = Math.max(0, Math.min(1, 1 - blipColorConflict));
-          const strictDetectionColor = hasDetectionAnchoredTypeIntent;
-          const isTopDetectionColorFallback =
-            !hasExplicitColorIntent &&
-            strictDetectionColor &&
-            String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops";
-          const baseConflictCap = hasExplicitColorIntent
-            ? similarityScore * (strictDetectionColor ? 0.34 : 0.46)
-            : isTopDetectionColorFallback
-              ? similarityScore * 0.82
-              : hasInferredColorSignal
-                ? similarityScore * (strictDetectionColor ? 0.42 : 0.58)
-                : similarityScore * (strictDetectionColor ? 0.54 : 0.72);
-          const conflictAdjustedCap = baseConflictCap * (1 - 0.25 * conflictStrength);
-          const maxConflictCap = hasExplicitColorIntent
-            ? strictDetectionColor
-              ? 0.24
-              : 0.45
-            : hasInferredColorSignal
+          if (colorCorrectionHardMode) {
+            const blipColorConflict = blipColorConflictFactorById.get(idStr) ?? 1;
+            const conflictStrength = Math.max(0, Math.min(1, 1 - blipColorConflict));
+            const strictDetectionColor = hasDetectionAnchoredTypeIntent;
+            const isTopDetectionColorFallback =
+              !hasExplicitColorIntent &&
+              strictDetectionColor &&
+              String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops";
+            const baseConflictCap = hasExplicitColorIntent
+              ? similarityScore * (strictDetectionColor ? 0.34 : 0.46)
+              : isTopDetectionColorFallback
+                ? similarityScore * 0.82
+                : hasInferredColorSignal
+                  ? similarityScore * (strictDetectionColor ? 0.42 : 0.58)
+                  : similarityScore * (strictDetectionColor ? 0.54 : 0.72);
+            const conflictAdjustedCap = baseConflictCap * (1 - 0.25 * conflictStrength);
+            const maxConflictCap = hasExplicitColorIntent
               ? strictDetectionColor
-                ? 0.30
-                : 0.55
-              : strictDetectionColor
-                ? 0.36
-                : 0.65;
-          const topFallbackMaxConflictCap = isTopDetectionColorFallback ? 0.78 : maxConflictCap;
-          const strictOnePieceCap = strictInferredOnePieceColorGate ? 0.22 : topFallbackMaxConflictCap;
-          const nearDuplicateRelax = similarityScore >= nearIdenticalRawMin
-            ? strictInferredOnePieceColorGate
-              ? 0.02
-              : 0.05
-            : 0;
-          // Keep contradictory colors visible for sparse catalogs, but with realistic caps
-          const conservativeCap = Math.min(
-            strictOnePieceCap + nearDuplicateRelax,
-            Math.max(strictInferredOnePieceColorGate ? 0.08 : 0.15, conflictAdjustedCap),
-          );
-          const inferredCoreCategoryFloor = 0;
-          const conservativeCapAdjusted = Math.max(conservativeCap, inferredCoreCategoryFloor);
-          finalRelevance01 = Math.min(finalRelevance01 ?? 0, conservativeCapAdjusted);
-          finalRelevanceSource = "catalog_color_correction";
-          explainColorCompliance = 0;
-          explainMatchedColor = authoritativeColorNorm;
-          explainColorTier = "none";
+                ? 0.24
+                : 0.45
+              : hasInferredColorSignal
+                ? strictDetectionColor
+                  ? 0.30
+                  : 0.55
+                : strictDetectionColor
+                  ? 0.36
+                  : 0.65;
+            const topFallbackMaxConflictCap = isTopDetectionColorFallback ? 0.78 : maxConflictCap;
+            const strictOnePieceCap = strictInferredOnePieceColorGate ? 0.22 : topFallbackMaxConflictCap;
+            const nearDuplicateRelax = similarityScore >= nearIdenticalRawMin
+              ? strictInferredOnePieceColorGate
+                ? 0.02
+                : 0.05
+              : 0;
+            // Keep contradictory colors visible for sparse catalogs, but with realistic caps
+            const conservativeCap = Math.min(
+              strictOnePieceCap + nearDuplicateRelax,
+              Math.max(strictInferredOnePieceColorGate ? 0.08 : 0.15, conflictAdjustedCap),
+            );
+            const inferredCoreCategoryFloor = 0;
+            const conservativeCapAdjusted = Math.max(conservativeCap, inferredCoreCategoryFloor);
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, conservativeCapAdjusted);
+            finalRelevanceSource = "catalog_color_correction";
+            explainColorCompliance = 0;
+            explainMatchedColor = authoritativeColorNorm;
+            explainColorTier = "none";
+          } else {
+            // Soft-color mode: keep recall, but do not report contradictory "exact" color matches.
+            const base = Math.max(0, finalRelevance01 ?? 0);
+            finalRelevance01 = Math.min(base, Math.max(0.18, base * 0.94));
+            finalRelevanceSource = "catalog_color_soft_consistency";
+            explainColorCompliance = Math.min(explainColorCompliance ?? 1, 0.42);
+            explainMatchedColor = authoritativeColorNorm;
+            explainColorTier = downgradeColorTierOneStep(explainColorTier ?? authoritativeColor.tier);
+          }
         } else if ((compliance.colorCompliance ?? 0) + 0.05 < authoritativeColor.compliance) {
           const strongTypeForColorLift =
             (compliance.exactTypeScore ?? 0) >= 1 || (compliance.productTypeCompliance ?? 0) >= 0.9;
           const styleCompatibleForColorLift =
             !hasDetectionAnchoredTypeIntent || !hasSoftStyleHint || (compliance.styleCompliance ?? 0) >= 0.25;
           const canApplyColorLift =
+            colorCorrectionHardMode &&
             (hasExplicitColorIntent || authoritativeColor.tier === "exact") &&
             strongTypeForColorLift &&
             styleCompatibleForColorLift;

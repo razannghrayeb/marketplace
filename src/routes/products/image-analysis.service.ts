@@ -1404,23 +1404,29 @@ async function ensureFootwearSubtypeEmbeddings(): Promise<Array<{ subtype: strin
  */
 async function classifyFootwearSubtypeFromCropEmbedding(
   cropEmbedding: number[],
-  minConfidence = 0.24,
+  minConfidence = 0.3,
 ): Promise<string | null> {
   try {
     const subtypeData = await ensureFootwearSubtypeEmbeddings();
     let bestSubtype: string | null = null;
     let bestScore = -1;
+    let secondBestScore = -1;
     for (const { subtype, embeddings } of subtypeData) {
       if (embeddings.length === 0) continue;
       // Average cosine similarity across all prompts for this subtype.
       const avgScore =
         embeddings.reduce((sum, te) => sum + cosineSimilarity(cropEmbedding, te), 0) / embeddings.length;
       if (avgScore > bestScore) {
+        secondBestScore = bestScore;
         bestScore = avgScore;
         bestSubtype = subtype;
+      } else if (avgScore > secondBestScore) {
+        secondBestScore = avgScore;
       }
     }
-    return bestScore >= minConfidence ? bestSubtype : null;
+    const margin = bestScore - secondBestScore;
+    const minMargin = 0.02;
+    return bestScore >= minConfidence && margin >= minMargin ? bestSubtype : null;
   } catch {
     return null;
   }
@@ -1664,23 +1670,22 @@ function hardCategoryTermsForDetection(
     }
 
     if (isGenericShoeLike) {
-      // Generic "shoe" label is ambiguous; keep broad footwear recall and let
-      // downstream ranking/guards choose the best subtype.
-      const footwearBroad = baseTerms.filter((t) =>
-        /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|boot|boots|heel|heels|pump|pumps|sandal|sandals|loafer|loafers|flat|flats|mule|mules|oxford|oxfords|clog|clogs|footwear)\b/.test(
+      // Keep generic shoe fallback narrower to avoid subtype drift (e.g. shoe -> sandal/heel/boot).
+      const footwearNeutral = baseTerms.filter((t) =>
+        /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|loafer|loafers|flat|flats|oxford|oxfords|footwear)\b/.test(
           t,
         ),
       );
-      return footwearBroad.length > 0 ? footwearBroad : baseTerms;
+      return footwearNeutral.length > 0 ? footwearNeutral : baseTerms;
     }
 
-    // Generic "shoe" detections should keep broad footwear recall until subtype is explicit.
-    const footwearBroad = baseTerms.filter((t) =>
-      /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|boot|boots|heel|heels|pump|pumps|sandal|sandals|loafer|loafers|flat|flats|mule|mules|oxford|oxfords|clog|clogs|footwear)\b/.test(
+    // Default fallback remains subtype-safe unless we have explicit subtype cues.
+    const footwearNeutral = baseTerms.filter((t) =>
+      /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|loafer|loafers|flat|flats|oxford|oxfords|footwear)\b/.test(
         t,
       ),
     );
-    return footwearBroad.length > 0 ? footwearBroad : baseTerms;
+    return footwearNeutral.length > 0 ? footwearNeutral : baseTerms;
   }
 
   // Prefer hat/cap-family over generic `accessories`.
@@ -2616,11 +2621,21 @@ function applyFullImageFallbackGuard(
     const categoryCanonicalText = normalizeLooseText((row as any).category_canonical);
     const titleText = normalizeLooseText((row as any).title);
     const descriptionText = normalizeLooseText((row as any).description);
+    const productUrlText = normalizeLooseText((row as any).product_url);
+    const parentProductUrlText = normalizeLooseText((row as any).parent_product_url);
     const productTypeRaw = (row as any).product_types;
     const productTypeText = Array.isArray(productTypeRaw)
       ? normalizeLooseText(productTypeRaw.join(" "))
       : normalizeLooseText(productTypeRaw);
-    const haystack = [categoryText, categoryCanonicalText, productTypeText, titleText, descriptionText]
+    const haystack = [
+      categoryText,
+      categoryCanonicalText,
+      productTypeText,
+      titleText,
+      descriptionText,
+      productUrlText,
+      parentProductUrlText,
+    ]
       .filter(Boolean)
       .join(" ");
 
@@ -2744,6 +2759,8 @@ function applyDetectionCategoryGuard(
     const titleText = normalizeLooseText((p as any).title);
     const descriptionText = normalizeLooseText((p as any).description);
     const attrSleeveText = normalizeLooseText((p as any).attr_sleeve);
+    const productUrlText = normalizeLooseText((p as any).product_url);
+    const parentProductUrlText = normalizeLooseText((p as any).parent_product_url);
     const productTypeRaw = (p as any).product_types;
     const productTypeText = Array.isArray(productTypeRaw)
       ? normalizeLooseText(productTypeRaw.join(" "))
@@ -2755,6 +2772,8 @@ function applyDetectionCategoryGuard(
       titleText,
       descriptionText,
       attrSleeveText,
+      productUrlText,
+      parentProductUrlText,
     ]
       .filter(Boolean)
       .join(" ");
@@ -2908,6 +2927,8 @@ function applyDetectionCategoryGuard(
       (p as any)?.title,
       (p as any)?.description,
       (p as any)?.attr_sleeve,
+      (p as any)?.product_url,
+      (p as any)?.parent_product_url,
       Array.isArray((p as any)?.product_types)
         ? (p as any).product_types.join(" ")
         : (p as any)?.product_types,
@@ -2921,6 +2942,12 @@ function applyDetectionCategoryGuard(
       return false;
     }
     if (/\b(coat|coats|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber)\b/.test(haystack)) {
+      return false;
+    }
+    if (queryGenderNorm === "men" && hasExplicitWomenCue(haystack)) {
+      return false;
+    }
+    if (queryGenderNorm === "women" && hasExplicitMenCue(haystack)) {
       return false;
     }
     const observedSleeve = inferSleeveFromProductText(haystack);
@@ -3805,6 +3832,22 @@ function canonicalizeColorIntentToken(color: string | null | undefined): string 
   if (["burgundy", "maroon", "wine"].includes(raw)) return "red";
   if (["olive", "khaki green"].includes(raw)) return "green";
   return raw;
+}
+
+function shouldApplyStrictDetectionSoftColor(params: {
+  productCategory: string;
+  color: string;
+  confidence: number;
+}): boolean {
+  const category = String(params.productCategory || "").toLowerCase().trim();
+  const color = canonicalizeColorIntentToken(params.color);
+  const confidence = Number.isFinite(params.confidence) ? params.confidence : 0;
+  if (!color || color === "multicolor") return false;
+  if (isNeutralFashionColor(color)) return false;
+  if (category === "tops") return confidence >= 0.84;
+  if (category === "bottoms" || category === "dresses" || category === "outerwear") return confidence >= 0.82;
+  if (category === "footwear" || category === "bags") return confidence >= 0.8;
+  return confidence >= 0.86;
 }
 
 function isBottomLikeLabel(label: string): boolean {
@@ -6063,10 +6106,27 @@ export class ImageAnalysisService {
             isLightNeutralFashionColor(globalPrimaryNorm) &&
             !isLightNeutralFashionColor(inferredColorNorm);
           const explicitColorFilter = String((filters as any).color ?? "").trim();
+          const inferredColorConfidenceForDetection = Number(
+            inferredColorsByItemConfidence[itemColorKey] ?? 0,
+          );
+          if (
+            explicitColorFilter.length === 0 &&
+            inferredColorNorm.length > 0 &&
+            shouldApplyStrictDetectionSoftColor({
+              productCategory: categoryMapping.productCategory,
+              color: inferredColorNorm,
+              confidence: inferredColorConfidenceForDetection,
+            })
+          ) {
+            // Promote high-confidence item color into strict softColor intent so
+            // final relevance gating prefers the requested hue more aggressively.
+            (filters as any).softColor = inferredColorNorm;
+            (filters as any).softColorStrict = true;
+          }
           const inferredPrimaryColorForSearch =
             categoryMapping.productCategory === "tops" && explicitColorFilter.length === 0
               ? (
-                Number(inferredColorsByItemConfidence[itemColorKey] ?? 0) >= 0.82
+                inferredColorConfidenceForDetection >= 0.82
                   ? inferredColorNorm
                   : undefined
               )
