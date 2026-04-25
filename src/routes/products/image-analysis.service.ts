@@ -1498,7 +1498,7 @@ function parseTopDetectionIntent(detectionLabel: string): {
 }
 
 function isTopCatalogCue(text: string): boolean {
-  return /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|cardigan|hoodie|pullover|jumper)\b/.test(
+  return /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|cardigan|cardigans|hoodie|hoodies|sweatshirt|sweatshirts|pullover|jumper|loungewear)\b/.test(
     text,
   );
 }
@@ -1568,7 +1568,7 @@ function hardCategoryTermsForDetection(
     const isLongTop = topIntent.isLongTop;
     if (isLongTop) {
       const longTopTerms = baseTerms.filter((t) =>
-        /\b(shirt|shirts|blouse|blouses|overshirt|sweater|cardigan|knitwear|top|tops)\b/.test(
+        /\b(shirt|shirts|blouse|blouses|overshirt|sweater|cardigan|knitwear|hoodie|hoodies|sweatshirt|sweatshirts|pullover|loungewear|top|tops)\b/.test(
           t,
         ),
       );
@@ -1690,6 +1690,23 @@ function hardCategoryTermsForDetection(
     return footwearNeutral.length > 0 ? footwearNeutral : baseTerms;
   }
 
+  if (categoryMapping.productCategory === "outerwear") {
+    const isVestLike = /\bvest\b|\bgilet\b|\bwaistcoat\b/.test(l);
+    if (isVestLike) {
+      // Vest can be formal (waistcoat/suit vest) or fashion (sleeveless-top style).
+      // Return union of outerwear vest terms + sleeveless top terms so both types surface.
+      const formalVest = baseTerms.filter((t) =>
+        /\b(vest|vests|waistcoat|waistcoats|gilet)\b/.test(t),
+      );
+      const fashionVest = getCategorySearchTerms("tops")
+        .map((t) => String(t).toLowerCase().trim())
+        .filter((t) => /\b(vest|vests|tank|tank top|camisole|cami|sleeveless)\b/.test(t));
+      const merged = [...new Set([...formalVest, ...fashionVest])];
+      return merged.length > 0 ? merged : baseTerms;
+    }
+    return baseTerms;
+  }
+
   // Prefer hat/cap-family over generic `accessories`.
   if (categoryMapping.productCategory === "accessories") {
     if (/\b(headband|head covering|hair accessory|hairband|headwear)\b/.test(l)) {
@@ -1765,7 +1782,7 @@ function tightenTypeSeedsForDetection(
     }
     if (topIntent.isLongTop) {
       const longTop = normalized.filter((t) =>
-        /\b(shirt|shirts|blouse|blouses|top|tops|sweater|cardigan|knitwear)\b/.test(t),
+        /\b(shirt|shirts|blouse|blouses|top|tops|sweater|cardigan|knitwear|hoodie|hoodies|sweatshirt|sweatshirts|pullover|loungewear)\b/.test(t),
       );
       const longTopWithoutSleeveless = longTop.filter(
         (t) => !/\b(tank|camisole|cami|crop top|sleeveless|strapless|halter|tee|t-?shirt|tshirt|polo)\b/.test(t),
@@ -5963,7 +5980,8 @@ export class ImageAnalysisService {
           const knnFieldUsed =
             categoryMapping.productCategory === "tops" ||
             categoryMapping.productCategory === "bottoms" ||
-            categoryMapping.productCategory === "dresses"
+            categoryMapping.productCategory === "dresses" ||
+            categoryMapping.productCategory === "outerwear"
               ? "embedding"
               : shopTheLookKnnField();
           const textureMaterial = await textureMaterialPromise;

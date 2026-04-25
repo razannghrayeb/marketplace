@@ -663,24 +663,24 @@ export function mapDetectionToCategory(
     mapping.alternativeCategories = [...mapping.alternativeCategories];
     mapping.confidence = mapping.confidence * detectionConfidence;
     
-    // Try to infer dress length from bounding box if this is a dress
-    if (
-      (mapping.productCategory === "dresses" || mapping.productCategory === "midi-dresses" || mapping.productCategory === "maxi-dresses" || mapping.productCategory === "mini-dresses") &&
-      detectionBox?.box_normalized
-    ) {
+    // Infer dress length from bounding box — store as attribute only; keep productCategory="dresses"
+    // so isDressLikeDetectionCategory, isStrictDetectionCategory, and kNN pool sizing still fire.
+    if (mapping.productCategory === "dresses" && detectionBox?.box_normalized) {
       const inferredLength = inferDressLengthFromBox({
         y1: detectionBox.box_normalized.y1 ?? 0,
         y2: detectionBox.box_normalized.y2 ?? 1,
       });
       if (inferredLength) {
         mapping.attributes.dressLength = inferredLength;
-        // Promote the length-specific DB category as primary when inferred with confidence
-        if (mapping.productCategory === "dresses") {
-          const lengthCategory = inferredLength === "maxi" ? "maxi-dresses" : inferredLength === "midi" ? "midi-dresses" : "mini-dresses";
-          const others = ["dresses", "midi-dresses", "maxi-dresses", "mini-dresses"].filter((c) => c !== lengthCategory);
-          mapping.productCategory = lengthCategory;
-          mapping.alternativeCategories = [...new Set([...others, ...mapping.alternativeCategories.filter((c) => !["dresses","midi-dresses","maxi-dresses","mini-dresses"].includes(c))])];
-        }
+        // Surface length-specific DB categories as alternatives for soft scoring without
+        // changing the primary category (which drives pool sizing and strict gate logic).
+        const lengthCategory = inferredLength === "maxi" ? "maxi-dresses" : inferredLength === "midi" ? "midi-dresses" : "mini-dresses";
+        const otherLengths = ["midi-dresses", "maxi-dresses", "mini-dresses"].filter(c => c !== lengthCategory);
+        mapping.alternativeCategories = [
+          lengthCategory,
+          ...otherLengths,
+          ...mapping.alternativeCategories.filter(c => !["midi-dresses","maxi-dresses","mini-dresses"].includes(c)),
+        ];
       }
     }
 
@@ -693,10 +693,8 @@ export function mapDetectionToCategory(
       const result = { ...mapping };
       result.attributes = { ...mapping.attributes };
       result.alternativeCategories = [...mapping.alternativeCategories];
-      // Slight confidence penalty for fuzzy match
       result.confidence = result.confidence * detectionConfidence * 0.9;
 
-      // Try to infer dress length from bounding box
       if (result.productCategory === "dresses" && detectionBox?.box_normalized) {
         const inferredLength = inferDressLengthFromBox({
           y1: detectionBox.box_normalized.y1 ?? 0,
@@ -705,9 +703,12 @@ export function mapDetectionToCategory(
         if (inferredLength) {
           result.attributes.dressLength = inferredLength;
           const lengthCategory = inferredLength === "maxi" ? "maxi-dresses" : inferredLength === "midi" ? "midi-dresses" : "mini-dresses";
-          const others = ["dresses", "midi-dresses", "maxi-dresses", "mini-dresses"].filter((c) => c !== lengthCategory);
-          result.productCategory = lengthCategory;
-          result.alternativeCategories = [...new Set([...others, ...result.alternativeCategories.filter((c) => !["dresses","midi-dresses","maxi-dresses","mini-dresses"].includes(c))])];
+          const otherLengths = ["midi-dresses", "maxi-dresses", "mini-dresses"].filter(c => c !== lengthCategory);
+          result.alternativeCategories = [
+            lengthCategory,
+            ...otherLengths,
+            ...result.alternativeCategories.filter(c => !["midi-dresses","maxi-dresses","mini-dresses"].includes(c)),
+          ];
         }
       }
 
