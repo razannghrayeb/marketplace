@@ -3336,9 +3336,9 @@ async function opensearchImageKnnHits(
   timeoutMs: number,
 ): Promise<{ hits: any[]; timedOut: boolean }> {
   const startedAt = Date.now();
-  // This cluster rejects per-query `ef_search`; sanitize every request to keep
-  // the primary pipeline stable and avoid fail-then-retry behavior.
-  const bodyToSend = stripEfSearchFromKnnBody(body);
+  // Send query as-is; error handler below strips ef_search/num_candidates on rejection
+  // and marks them unsupported for the rest of the server lifetime.
+  const bodyToSend = body;
 
   const boolQ = (bodyToSend as any)?.query?.bool;
   const knnObj = boolQ?.must?.knn;
@@ -3516,7 +3516,7 @@ async function batchOpensearchKnnHits(
   const msearchBody: any[] = [];
   for (const q of queries) {
     msearchBody.push({ index: config.opensearch.index });
-    msearchBody.push(stripEfSearchFromKnnBody(q.body));
+    msearchBody.push(q.body);
   }
 
   try {
@@ -3525,11 +3525,16 @@ async function batchOpensearchKnnHits(
       { requestTimeout: maxTimeoutMs, maxRetries: 0 },
     );
     const responses: any[] = r.body?.responses ?? [];
+
+    // If any sub-response errored (e.g. unsupported ef_search/num_candidates),
+    // fall back to individual calls which have proper per-field error handling.
+    const hasSubErrors = responses.slice(0, queries.length).some((resp: any) => !resp || resp.error);
+    if (hasSubErrors) {
+      return Promise.all(queries.map((q) => opensearchImageKnnHits(q.body, q.timeoutMs)));
+    }
+
     return queries.map((_, i) => {
       const resp = responses[i];
-      if (!resp || resp.error) {
-        return { hits: [], timedOut: false };
-      }
       const timedOut = Boolean(resp.timed_out);
       const hits = (resp.hits?.hits ?? []) as any[];
       return { hits, timedOut };

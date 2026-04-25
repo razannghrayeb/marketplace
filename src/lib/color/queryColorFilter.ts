@@ -6,16 +6,27 @@ export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
   black: ["black", "charcoal", "dark gray", "dark grey", "jet", "onyx"],
   white: ["white", "off white", "off-white", "ivory", "cream", "ecru"],
   gray: ["gray", "grey", "heather grey", "heather gray", "silver"],
-  blue: ["blue", "navy", "cobalt", "denim", "sky blue", "mid blue", "midnight blue"],
-  red: ["red", "burgundy", "maroon", "wine", "cherry"],
-  green: ["green", "olive", "khaki", "sage", "mint", "forest green", "hunter green"],
+  blue: [
+    "blue", "navy", "cobalt", "denim", "sky blue", "mid blue", "midnight blue",
+    "royal blue", "royal-blue", "light blue", "light-blue", "powder blue", "baby blue",
+    "teal", "turquoise", "indigo", "electric blue", "sapphire",
+  ],
+  red: ["red", "burgundy", "maroon", "wine", "cherry", "crimson", "scarlet"],
+  green: [
+    "green", "olive", "khaki", "sage", "mint", "forest green", "forest-green",
+    "hunter green", "army green", "emerald", "lime", "moss",
+  ],
   beige: ["beige", "camel", "tan", "taupe", "stone", "sand", "light khaki"],
-  brown: ["brown", "mocha", "chocolate", "coffee"],
-  purple: ["purple", "violet", "plum", "lavender", "lilac", "mauve"],
-  pink: ["pink", "blush", "fuchsia", "fuschia", "fushia", "fuhsia", "magenta", "rose", "hot pink"],
-  yellow: ["yellow", "mustard", "golden", "gold"],
-  orange: ["orange", "rust", "peach", "coral", "burnt orange"],
-  multicolor: ["multicolor", "multi color", "multi-color", "colour block", "color block"],
+  brown: ["brown", "mocha", "chocolate", "coffee", "caramel", "cognac", "rust brown"],
+  purple: ["purple", "violet", "plum", "lavender", "lilac", "mauve", "grape", "orchid"],
+  pink: [
+    "pink", "blush", "fuchsia", "fuschia", "fushia", "fuhsia", "magenta",
+    "rose", "hot pink", "dusty pink", "dusty rose", "salmon",
+  ],
+  yellow: ["yellow", "mustard", "golden", "gold", "lemon", "canary", "butter"],
+  orange: ["orange", "rust", "peach", "coral", "burnt orange", "terracotta", "amber"],
+  teal: ["teal", "turquoise", "aqua", "cyan", "peacock"],
+  multicolor: ["multicolor", "multi color", "multi-color", "colour block", "color block", "printed", "pattern"],
 };
 
 const COLOR_COMMON_MISSPELLINGS: Record<string, string> = {

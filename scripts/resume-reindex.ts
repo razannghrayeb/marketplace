@@ -33,7 +33,7 @@ import "dotenv/config";
 import axios from "axios";
 import { Pool } from "pg";
 import sharp from "sharp";
-import { osClient, ensureIndex } from "../src/lib/core/opensearch";
+import { osClient, ensureIndex, applyIndexSpeedSettings } from "../src/lib/core/opensearch";
 import { config } from "../src/config"; 
 import {
   processImageForEmbedding,
@@ -978,6 +978,13 @@ async function main() {
     } catch (err: any) {
       console.error("❌ Failed to recreate index:", err.message);
       process.exit(1);
+    }
+  } else {
+    // For resume/incremental runs, ensure ef_search=128 on the live index.
+    try {
+      await applyIndexSpeedSettings();
+    } catch (err: any) {
+      console.warn("⚠️  applyIndexSpeedSettings failed (non-fatal):", err?.message ?? err);
     }
   }
 

@@ -1147,14 +1147,16 @@ function correctDetectionByPosition(detection: Detection): Detection {
     return corrected;
   }
 
-  // Shirts are sometimes emitted as outwear by the detector on layered collages.
-  // Recover a top label when the box is clearly upper-body and not coat-length.
+  // Shirts are sometimes emitted as outwear by the detector on collages.
+  // Only recover to a top label when detection confidence is very low — high-confidence
+  // outwear detections are genuine jackets/coats and must stay as outerwear.
   if (
     /\b(outwear|outerwear|jacket)\b/.test(label) &&
     centerY >= 0.2 &&
     centerY <= 0.58 &&
     boxHeight >= 0.16 &&
-    boxHeight <= 0.7
+    boxHeight <= 0.42 &&
+    (Number.isFinite(detection.confidence) ? detection.confidence : 1) < 0.38
   ) {
     const corrected = { ...detection };
     corrected.label = /\blong\b/.test(label) ? "long sleeve top" : "short sleeve top";
@@ -1325,7 +1327,9 @@ export function inferFootwearSubtypeFromCaption(
   if (label !== "shoe" && label !== "shoes") return label;
   const confidence = Number(opts?.confidence ?? 0);
   const areaRatio = Number(opts?.areaRatio ?? 0);
-  const refineEligible = confidence >= 0.9 || areaRatio >= 0.02;
+  // Model B (yolos-fashionpedia) rarely exceeds 0.9 confidence — lower threshold
+  // so subtype inference fires for most detections with a visible shoe region.
+  const refineEligible = confidence >= 0.55 || areaRatio >= 0.015;
   if (!refineEligible) return label;
 
   const cap = String(caption ?? "").toLowerCase();

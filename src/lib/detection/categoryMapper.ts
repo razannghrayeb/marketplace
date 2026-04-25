@@ -104,20 +104,20 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
   },
   "long sleeve outwear": {
     productCategory: "outerwear",
-    confidence: 0.9,
-    alternativeCategories: ["jackets", "coats", "blazers"],
+    confidence: 0.92,
+    alternativeCategories: ["jackets", "coats", "blazers", "vests"],
     attributes: { sleeveLength: "long" },
   },
   "short sleeve outwear": {
     productCategory: "outerwear",
-    confidence: 0.85,
-    alternativeCategories: ["blazers", "vests"],
+    confidence: 0.88,
+    alternativeCategories: ["blazers", "vests", "jackets"],
     attributes: { sleeveLength: "short" },
   },
   vest: {
-    productCategory: "tops",
-    confidence: 0.8,
-    alternativeCategories: ["outerwear", "activewear"],
+    productCategory: "outerwear",
+    confidence: 0.82,
+    alternativeCategories: ["vests", "tops", "activewear"],
     attributes: { sleeveLength: "sleeveless" },
   },
   sling: {
@@ -147,25 +147,25 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
   "short sleeve dress": {
     productCategory: "dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["midi-dresses", "mini-dresses", "maxi-dresses"],
     attributes: { sleeveLength: "short" },
   },
   "long sleeve dress": {
     productCategory: "dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["midi-dresses", "maxi-dresses", "mini-dresses"],
     attributes: { sleeveLength: "long" },
   },
   "vest dress": {
     productCategory: "dresses",
     confidence: 0.9,
-    alternativeCategories: ["jumpsuits"],
+    alternativeCategories: ["midi-dresses", "mini-dresses", "jumpsuits"],
     attributes: { sleeveLength: "sleeveless" },
   },
   "sling dress": {
     productCategory: "dresses",
     confidence: 0.9,
-    alternativeCategories: [],
+    alternativeCategories: ["midi-dresses", "mini-dresses", "maxi-dresses"],
     attributes: { sleeveLength: "sleeveless" },
   },
 
@@ -280,37 +280,37 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
   dress: {
     productCategory: "dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["midi-dresses", "mini-dresses", "maxi-dresses"],
     attributes: {},
   },
   gown: {
     productCategory: "dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["maxi-dresses"],
     attributes: { formalityHint: 9 },
   },
   maxi_dress: {
-    productCategory: "dresses",
+    productCategory: "maxi-dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["dresses", "midi-dresses"],
     attributes: { dressLength: "maxi" },
   },
   long_dress: {
-    productCategory: "dresses",
+    productCategory: "maxi-dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["dresses", "midi-dresses"],
     attributes: { dressLength: "long" },
   },
   mini_dress: {
-    productCategory: "dresses",
+    productCategory: "mini-dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["dresses", "midi-dresses"],
     attributes: { dressLength: "mini" },
   },
   midi_dress: {
-    productCategory: "dresses",
+    productCategory: "midi-dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["dresses", "mini-dresses", "maxi-dresses"],
     attributes: { dressLength: "midi" },
   },
   jumpsuit: {
@@ -664,16 +664,26 @@ export function mapDetectionToCategory(
     mapping.confidence = mapping.confidence * detectionConfidence;
     
     // Try to infer dress length from bounding box if this is a dress
-    if (mapping.productCategory === "dresses" && detectionBox?.box_normalized) {
+    if (
+      (mapping.productCategory === "dresses" || mapping.productCategory === "midi-dresses" || mapping.productCategory === "maxi-dresses" || mapping.productCategory === "mini-dresses") &&
+      detectionBox?.box_normalized
+    ) {
       const inferredLength = inferDressLengthFromBox({
         y1: detectionBox.box_normalized.y1 ?? 0,
         y2: detectionBox.box_normalized.y2 ?? 1,
       });
       if (inferredLength) {
         mapping.attributes.dressLength = inferredLength;
+        // Promote the length-specific DB category as primary when inferred with confidence
+        if (mapping.productCategory === "dresses") {
+          const lengthCategory = inferredLength === "maxi" ? "maxi-dresses" : inferredLength === "midi" ? "midi-dresses" : "mini-dresses";
+          const others = ["dresses", "midi-dresses", "maxi-dresses", "mini-dresses"].filter((c) => c !== lengthCategory);
+          mapping.productCategory = lengthCategory;
+          mapping.alternativeCategories = [...new Set([...others, ...mapping.alternativeCategories.filter((c) => !["dresses","midi-dresses","maxi-dresses","mini-dresses"].includes(c))])];
+        }
       }
     }
-    
+
     return mapping;
   }
 
@@ -685,7 +695,7 @@ export function mapDetectionToCategory(
       result.alternativeCategories = [...mapping.alternativeCategories];
       // Slight confidence penalty for fuzzy match
       result.confidence = result.confidence * detectionConfidence * 0.9;
-      
+
       // Try to infer dress length from bounding box
       if (result.productCategory === "dresses" && detectionBox?.box_normalized) {
         const inferredLength = inferDressLengthFromBox({
@@ -694,9 +704,13 @@ export function mapDetectionToCategory(
         });
         if (inferredLength) {
           result.attributes.dressLength = inferredLength;
+          const lengthCategory = inferredLength === "maxi" ? "maxi-dresses" : inferredLength === "midi" ? "midi-dresses" : "mini-dresses";
+          const others = ["dresses", "midi-dresses", "maxi-dresses", "mini-dresses"].filter((c) => c !== lengthCategory);
+          result.productCategory = lengthCategory;
+          result.alternativeCategories = [...new Set([...others, ...result.alternativeCategories.filter((c) => !["dresses","midi-dresses","maxi-dresses","mini-dresses"].includes(c))])];
         }
       }
-      
+
       return result;
     }
   }

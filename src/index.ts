@@ -51,10 +51,12 @@ async function main() {
   }
 
   // Apply live-tunable kNN speed settings to the existing index (no reindex needed).
-  // This fixes ef_search=1024 on indexes created before this change.
-  applyIndexSpeedSettings().catch((err) =>
-    console.warn("[opensearch] applyIndexSpeedSettings failed (non-fatal):", err?.message ?? err),
-  );
+  // Awaited so we know the setting is live before the server accepts requests.
+  try {
+    await applyIndexSpeedSettings();
+  } catch (err: any) {
+    console.error("[opensearch] applyIndexSpeedSettings FAILED — searches may be slow:", err?.message ?? err);
+  }
 
   // Start the job scheduler (registers recurring jobs in Redis)
   await setupSchedules();
