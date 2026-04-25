@@ -3715,6 +3715,15 @@ function derivePrimaryColorFromItems(
   confidenceByItem: Record<string, number>,
   minConfidence = 0.55,
 ): string | null {
+  const derived = derivePrimaryColorFromItemsWithConfidence(colorsByItem, confidenceByItem, minConfidence);
+  return derived.color;
+}
+
+function derivePrimaryColorFromItemsWithConfidence(
+  colorsByItem: Record<string, string | null>,
+  confidenceByItem: Record<string, number>,
+  minConfidence = 0.55,
+): { color: string | null; confidence: number } {
   const tally = new Map<string, number>();
   for (const [key, value] of Object.entries(colorsByItem || {})) {
     const color = String(value || "").toLowerCase().trim();
@@ -3723,12 +3732,30 @@ function derivePrimaryColorFromItems(
     if (!Number.isFinite(conf) || conf < minConfidence) continue;
     tally.set(color, (tally.get(color) ?? 0) + conf);
   }
-  if (tally.size === 0) return null;
+  if (tally.size === 0) return { color: null, confidence: 0 };
   let bestColor: string | null = null;
   let bestScore = -1;
   for (const [color, score] of tally.entries()) {
     if (score > bestScore) {
       bestScore = score;
+      bestColor = color;
+    }
+  }
+  return { color: bestColor, confidence: bestScore > 0 ? Math.min(1, bestScore) : 0 };
+}
+
+function pickColorByHighestConfidence(
+  candidates: Array<{ color: string | null | undefined; confidence: number | null | undefined }>,
+): string | null {
+  let bestColor: string | null = null;
+  let bestConfidence = -1;
+  for (const candidate of candidates) {
+    const color = String(candidate.color ?? "").toLowerCase().trim();
+    if (!color) continue;
+    const confidence = Number(candidate.confidence ?? 0);
+    const safeConfidence = Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0;
+    if (safeConfidence > bestConfidence) {
+      bestConfidence = safeConfidence;
       bestColor = color;
     }
   }
@@ -5093,17 +5120,24 @@ export class ImageAnalysisService {
     const inferredColorsByItemSource: Record<string, number> = {};
     // Prefer BLIP caption color when explicit (e.g. "white dress") — full-image dominant can pick up sky/background.
     const captionPrimaryColor = resolveCaptionPrimaryColor(blipCaption ?? "", captionColors, blipStructured);
+    const captionPrimaryColorConfidence = captionPrimaryColor
+      ? Math.max(0.45, Math.min(1, Number(blipStructuredConfidence ?? 0.6)))
+      : 0;
     const allowDominantFallback = shouldUseDominantColorFallback(captionColors, blipStructured);
     const allowFullImageDominantFallback =
       allowDominantFallback &&
       analysisResult.detection.items.length <= 1;
-    const inferredPrimaryColor =
-      captionPrimaryColor ??
-      (allowFullImageDominantFallback && imageInferDominantColorEnv() && analysisResult.services?.blip
+    const dominantPrimaryColor =
+      allowFullImageDominantFallback && imageInferDominantColorEnv() && analysisResult.services?.blip
         ? await extractDominantColorNames(buffer, { maxColors: 2, minShare: 0.12 })
           .then((c) => c[0] ?? null)
           .catch(() => null)
-        : null);
+        : null;
+    const dominantPrimaryColorConfidence = dominantPrimaryColor ? 0.52 : 0;
+    const inferredPrimaryColor = pickColorByHighestConfidence([
+      { color: captionPrimaryColor, confidence: captionPrimaryColorConfidence },
+      { color: dominantPrimaryColor, confidence: dominantPrimaryColorConfidence },
+    ]);
 
     const detectionJobs: Array<{ detection: Detection; detectionIndex?: number }> =
       groupByDetection
@@ -7395,9 +7429,15 @@ export class ImageAnalysisService {
     similarityTimings.postProcessingMs = Date.now() - postProcessingStartedAt;
     similarityTimings.totalMs = Date.now() - similarityStartedAt;
 
-    const resolvedPrimaryColor =
-      inferredPrimaryColor ??
-      derivePrimaryColorFromItems(inferredColorsByItem, inferredColorsByItemConfidence);
+    const itemPrimary = derivePrimaryColorFromItemsWithConfidence(
+      inferredColorsByItem,
+      inferredColorsByItemConfidence,
+    );
+    const resolvedPrimaryColor = pickColorByHighestConfidence([
+      { color: captionPrimaryColor, confidence: captionPrimaryColorConfidence },
+      { color: dominantPrimaryColor, confidence: dominantPrimaryColorConfidence },
+      { color: itemPrimary.color, confidence: itemPrimary.confidence },
+    ]);
 
     return {
       ...analysisResult,
@@ -7753,17 +7793,24 @@ export class ImageAnalysisService {
     const inferredColorsByItemConfidence: Record<string, number> = {};
     const inferredColorsByItemSource: Record<string, number> = {};
     const captionPrimaryColor = resolveCaptionPrimaryColor(blipCaption ?? "", captionColors, blipStructured);
+    const captionPrimaryColorConfidence = captionPrimaryColor
+      ? Math.max(0.45, Math.min(1, Number(blipStructuredConfidence ?? 0.6)))
+      : 0;
     const allowDominantFallback = shouldUseDominantColorFallback(captionColors, blipStructured);
     const allowFullImageDominantFallback =
       allowDominantFallback &&
       allItemsToProcess.length <= 1;
-    const inferredPrimaryColor =
-      captionPrimaryColor ??
-      (allowFullImageDominantFallback && imageInferDominantColorEnv() && fullResult.services?.blip
+    const dominantPrimaryColor =
+      allowFullImageDominantFallback && imageInferDominantColorEnv() && fullResult.services?.blip
         ? await extractDominantColorNames(buffer, { maxColors: 2, minShare: 0.12 })
           .then((c) => c[0] ?? null)
           .catch(() => null)
-        : null);
+        : null;
+    const dominantPrimaryColorConfidence = dominantPrimaryColor ? 0.52 : 0;
+    const inferredPrimaryColor = pickColorByHighestConfidence([
+      { color: captionPrimaryColor, confidence: captionPrimaryColorConfidence },
+      { color: dominantPrimaryColor, confidence: dominantPrimaryColorConfidence },
+    ]);
     // Avoid TS "never" narrowing when caption inference is type-proved unreachable.
     const captionWantsJeans = blipStructured.productTypeHints.includes("jeans");
     const contextualFormalityScore = inferContextualFormalityFromDetections(allItemsToProcess);
@@ -8962,9 +9009,15 @@ export class ImageAnalysisService {
 
     const coveredSel = relevanceFilteredResultsSel.filter((r) => r.count > 0).length;
     const totalSel = allItemsToProcess.length;
-    const resolvedPrimaryColor =
-      inferredPrimaryColor ??
-      derivePrimaryColorFromItems(inferredColorsByItem, inferredColorsByItemConfidence);
+    const itemPrimary = derivePrimaryColorFromItemsWithConfidence(
+      inferredColorsByItem,
+      inferredColorsByItemConfidence,
+    );
+    const resolvedPrimaryColor = pickColorByHighestConfidence([
+      { color: captionPrimaryColor, confidence: captionPrimaryColorConfidence },
+      { color: dominantPrimaryColor, confidence: dominantPrimaryColorConfidence },
+      { color: itemPrimary.color, confidence: itemPrimary.confidence },
+    ]);
 
     return {
       ...fullResult,
