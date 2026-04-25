@@ -439,6 +439,40 @@ function normalizeSleeveToken(raw: string | undefined): "short" | "long" | "slee
   return null;
 }
 
+function inferSleeveFromCatalogSignals(
+  src: Record<string, unknown>,
+  title: string,
+  description: string,
+): "short" | "long" | "sleeveless" | null {
+  const bag = [
+    src.category,
+    src.category_canonical,
+    ...(Array.isArray(src.product_types) ? src.product_types : []),
+    title,
+    description,
+  ]
+    .map((x) => String(x ?? "").toLowerCase())
+    .join(" ");
+
+  if (!bag.trim()) return null;
+
+  // Explicit no-sleeve families.
+  if (/\b(tank|cami|camisole|halter|strapless|tube top|vest top|spaghetti strap|sleeveless)\b/.test(bag)) {
+    return "sleeveless";
+  }
+
+  // Type-level defaults when explicit sleeve fields are missing.
+  if (/\b(hoodie|hooded|sweater|cardigan|pullover|jacket|coat|parka|trench|blazer|windbreaker|overcoat)\b/.test(bag)) {
+    return "long";
+  }
+
+  if (/\b(t-?shirt|tee\b|tees\b|polo\b|polo shirt|jersey tee|short sleeve)\b/.test(bag)) {
+    return "short";
+  }
+
+  return null;
+}
+
 function docSupportsSleeveIntent(src: Record<string, unknown>): boolean {
   const bag = [
     src.category,
@@ -782,10 +816,17 @@ export function computeHitRelevance(
     const docSleeve = normalizeSleeveToken(docSleeveRaw);
     const titleSleeve = normalizeSleeveToken(title);
     const observed = docSleeve ?? titleSleeve ?? normalizeSleeveToken(description);
-    if (!observed) {
+    const inferredObserved =
+      observed ?? inferSleeveFromCatalogSignals(src, title, description);
+
+    if (!inferredObserved) {
       sleeveCompliance = 0.15;
-    } else if (observed === wantedSleeve) {
-      sleeveCompliance = 1;
+    } else if (inferredObserved === wantedSleeve) {
+      // Inferred sleeve from type/category cues is weaker than explicit sleeve metadata.
+      sleeveCompliance = observed ? 1 : 0.62;
+    } else if (!observed) {
+      // Avoid hard contradiction penalty when mismatch comes from heuristic inference only.
+      sleeveCompliance = 0.12;
     } else if (docSleeve) {
       sleeveCompliance = 0;
     } else {

@@ -7022,8 +7022,20 @@ export async function searchByImageWithSimilarity(
             finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.34 : 0.28);
             finalRelevanceSource = "sleeve_conflict_cap";
           } else if (sleeveComp < 0.20) {
-            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.50 : 0.42);
-            finalRelevanceSource = "sleeve_no_metadata_cap";
+            const strongNoSleeveMetadataEvidence =
+              (compliance.exactTypeScore ?? 0) >= 1 &&
+              typeComp >= 0.72 &&
+              (compliance.categoryRelevance01 ?? 0) >= 0.86 &&
+              (compliance.colorCompliance ?? 0) >= 0.55 &&
+              similarityScore >= 0.62;
+
+            if (strongNoSleeveMetadataEvidence) {
+              finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.66 : 0.58);
+              finalRelevanceSource = "sleeve_no_metadata_relaxed_cap";
+            } else {
+              finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.50 : 0.42);
+              finalRelevanceSource = "sleeve_no_metadata_cap";
+            }
           }
         }
 
@@ -7033,8 +7045,20 @@ export async function searchByImageWithSimilarity(
               finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.34 : 0.28);
               finalRelevanceSource = "dress_sleeve_conflict_cap";
             } else if (sleeveComp < 0.20) {
-              finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.50 : 0.42);
-              finalRelevanceSource = "dress_sleeve_no_metadata_cap";
+              const strongDressNoSleeveMetadataEvidence =
+                onePieceCandidate &&
+                ((compliance.exactTypeScore ?? 0) >= 1 || typeComp >= 0.74) &&
+                (compliance.categoryRelevance01 ?? 0) >= 0.86 &&
+                (compliance.colorCompliance ?? 0) >= 0.5 &&
+                similarityScore >= 0.62;
+
+              if (strongDressNoSleeveMetadataEvidence) {
+                finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.66 : 0.58);
+                finalRelevanceSource = "dress_sleeve_no_metadata_relaxed_cap";
+              } else {
+                finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.50 : 0.42);
+                finalRelevanceSource = "dress_sleeve_no_metadata_cap";
+              }
             }
           }
           if (((compliance as any).hasLengthIntent ?? false) && lengthComp < 0.24) {

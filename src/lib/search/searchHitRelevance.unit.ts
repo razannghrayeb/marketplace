@@ -64,6 +64,34 @@ describe("computeHitRelevance - sleeve intent", () => {
     expect(rel.sleeveCompliance).toBe(1);
     expect(rel.finalRelevance01).toBeGreaterThan(0.75);
   });
+
+  test("infers short sleeve from t-shirt signals when sleeve metadata is missing", () => {
+    const hit = {
+      _source: {
+        title: "Men Core Tee",
+        category: "T-Shirts",
+        category_canonical: "tops",
+        product_types: ["tee"],
+        attr_sleeve: null,
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.84, {
+      desiredProductTypes: ["tshirt", "tee"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      desiredStyle: "casual",
+      desiredSleeve: "short",
+      rerankColorMode: "any",
+      mergedCategory: "tops",
+      astCategories: ["tops"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+    });
+
+    expect(rel.sleeveCompliance).toBeGreaterThan(0.5);
+  });
 });
 
 describe("scoreCrossFamilyTypePenalty - category fallback", () => {
