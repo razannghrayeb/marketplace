@@ -4886,6 +4886,22 @@ export async function searchByImageWithSimilarity(
     allColorsForRelevance = [...normalizedCropColorsForMerge];
   }
 
+  // Bottoms warm-neutral intent is often represented as one inferred token (e.g. beige),
+  // while crop extraction contains sibling tones (tan/camel). Keep the family together
+  // to improve recall for semantically equivalent neutral bottoms.
+  if (!hasExplicitColorIntent && detectionCategoryNorm === "bottoms") {
+    const warmNeutralSet = new Set(["beige", "camel", "tan", "taupe", "stone", "sand", "khaki", "nude", "brown"]);
+    const hasWarmNeutralIntent =
+      allColorsForRelevance.some((c) => warmNeutralSet.has(String(c ?? "").toLowerCase().trim())) ||
+      normalizedInferredColors.some((c) => warmNeutralSet.has(String(c ?? "").toLowerCase().trim()));
+    if (hasWarmNeutralIntent) {
+      const warmFromCrop = normalizedCropColorsForMerge.filter((c) =>
+        warmNeutralSet.has(String(c ?? "").toLowerCase().trim()),
+      );
+      allColorsForRelevance = [...new Set([...allColorsForRelevance, ...warmFromCrop, "beige", "camel", "tan"])];
+    }
+  }
+
   const desiredColorsBaseForRelevance = [
     ...new Set(
       allColorsForRelevance.map((c) => normalizeColorToken(c) ?? c).filter(Boolean),
