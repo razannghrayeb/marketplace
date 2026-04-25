@@ -4570,6 +4570,19 @@ export class ImageAnalysisService {
       })()
       : Promise.resolve(null);
 
+    // Speculatively start accessory recovery in parallel with the initial detection.
+    // Accessory recovery needs a low-confidence pass with preprocessing — it is independent
+    // of the initial detection's confidence/preprocessing settings, so it can overlap fully.
+    // The result is consumed only when shouldRunAccessoryRecovery evaluates true; otherwise
+    // the promise resolves and is discarded. Saves ~accessoryRecoveryMs from the critical path.
+    const accessorySpeculativePromise: Promise<Awaited<ReturnType<typeof this.yoloClient.detectFromBuffer>> | null> =
+      runDetection && services.yolo
+        ? this.yoloClient.detectFromBuffer(buffer, filename, {
+            confidence: accessoryRecoveryConfidenceThreshold(),
+            preprocessing: { enhanceContrast: true, enhanceSharpness: true, bilateralFilter: true },
+          }).catch(() => null)
+        : Promise.resolve(null);
+
     const detectionPromise = runDetection && services.yolo
       ? (async () => {
         const startedAt = Date.now();
@@ -4668,15 +4681,8 @@ export class ImageAnalysisService {
       if (shouldRunAccessoryRecovery && services.yolo) {
         const accessoryRecoveryStartedAt = Date.now();
         try {
-          const accessoryRetryConfidence = accessoryRecoveryConfidenceThreshold();
-          const accessoryRetry = await this.yoloClient.detectFromBuffer(buffer, filename, {
-            confidence: accessoryRetryConfidence,
-            preprocessing: {
-              enhanceContrast: preprocessing?.enhanceContrast ?? true,
-              enhanceSharpness: preprocessing?.enhanceSharpness ?? true,
-              bilateralFilter: preprocessing?.bilateralFilter ?? true,
-            },
-          });
+          // Collect from the speculative promise started in parallel with initial detection.
+          const accessoryRetry = await accessorySpeculativePromise;
 
           const accessoryDetections = (accessoryRetry?.detections ?? []).filter((detection) =>
             shouldKeepAccessoryRecoveryDetection(detection),

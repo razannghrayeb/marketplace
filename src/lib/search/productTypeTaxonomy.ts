@@ -756,6 +756,33 @@ function headMicroGroup(token: string): keyof typeof HEAD_MICRO | null {
   return null;
 }
 
+/**
+ * Cross-cluster soft siblings: token pairs from different clusters within the same family
+ * that are visually/functionally related but not synonyms (e.g. vest-as-top ↔ tank/cami).
+ * Score kept at 0.58 — above zero but below the within-cluster default of 0.64.
+ */
+const SOFT_SIBLING_RAW: [string, string, number][] = [
+  ["vest", "tank", 0.58],
+  ["vest", "cami", 0.58],
+  ["vest", "camisole", 0.58],
+  ["vest", "camis", 0.58],
+  ["vests", "tank", 0.58],
+  ["vests", "cami", 0.58],
+  ["vests", "camisole", 0.58],
+  ["vests", "camis", 0.58],
+];
+
+const SOFT_SIBLING_MAP = (() => {
+  const m = new Map<string, Map<string, number>>();
+  for (const [a, b, score] of SOFT_SIBLING_RAW) {
+    if (!m.has(a)) m.set(a, new Map());
+    if (!m.has(b)) m.set(b, new Map());
+    m.get(a)!.set(b, score);
+    m.get(b)!.set(a, score);
+  }
+  return m;
+})();
+
 let clusterIndex: Map<string, Set<string>> | null = null;
 let typeToFamilyIndex: Map<string, string> | null = null;
 
@@ -1289,6 +1316,22 @@ export function scoreProductTypeTaxonomyMatch(
         best = Math.max(best, wCluster);
         bestQ = qt;
         bestD = dt;
+      }
+    }
+  }
+
+  // Soft cross-cluster siblings (e.g. vest-as-top ↔ tank/cami)
+  if (best < wCluster) {
+    for (const qt of q) {
+      const softRow = SOFT_SIBLING_MAP.get(qt);
+      if (!softRow) continue;
+      for (const dt of d) {
+        const softScore = softRow.get(dt);
+        if (softScore !== undefined && softScore > best) {
+          best = softScore;
+          bestQ = qt;
+          bestD = dt;
+        }
       }
     }
   }

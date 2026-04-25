@@ -739,9 +739,9 @@ export function computeHitRelevance(
   if (desiredColorsTier.length > 0 && catalogColorNorm) {
     const tCatalog = tieredColorListCompliance(desiredColorsTier, [catalogColorNorm], rerankColorMode);
     if (tCatalog.compliance <= 0) {
-      // Hard safety: when catalog color contradicts desired color, never allow
-      // inferred palette/text signals to look like a strong color match.
-      colorCompliance = 0;
+      // Catalog color contradicts desired color: penalize rather than zero so that
+      // products with noisy merchant color strings aren't fully eliminated.
+      colorCompliance = colorCompliance * 0.35;
       if (colorTier === "exact") colorTier = "none";
       // Keep `matchedColor` tied to query-vs-hit match evidence only; do not replace it
       // with catalog color, otherwise explain output can look like query color was rewritten.
