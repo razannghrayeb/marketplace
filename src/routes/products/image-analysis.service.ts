@@ -2160,6 +2160,12 @@ function shouldRejectImplausibleBagDetection(detection: Detection, allDetections
     return true;
   }
 
+  // Additional guard: elongated low-confidence bag boxes are commonly duplicate
+  // overlays around a real bag detection (e.g., strap + torso region).
+  if (confidence < 0.45 && areaRatio >= 0.05 && widthNorm <= 0.2 && slenderness >= 2.2) {
+    return true;
+  }
+
   if (!Array.isArray(allDetections) || allDetections.length <= 1) return false;
 
   const thisArea = detectionBoxArea(detection.box);
@@ -3598,7 +3604,43 @@ function normalizeParentDedupKey(urlLike: unknown): string {
   }
 }
 
-function buildProductDedupKey(product: ProductResult): string {
+function normalizeVariantTitleSegment(raw: unknown): string {
+  return String(raw ?? "")
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/\b\d{1,2}(?:\.\d+)?\s*(?:"|in(?:ches)?|in)\s*inseam\b/g, " ")
+    .replace(/\b(?:inseam|petite|tall|long)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildVariantFamilyDedupKey(product: ProductResult): string {
+  const vendor = String((product as any)?.vendor_id ?? "").trim() || "__vendor";
+  const title = String((product as any)?.title ?? "");
+  const titleSegments = title
+    .split("|")
+    .map((segment) => normalizeVariantTitleSegment(segment))
+    .filter((segment) => Boolean(segment) && !/^\d/.test(segment));
+
+  if (titleSegments.length >= 2) {
+    return `vf:${vendor}|${titleSegments[0]}|${titleSegments[1]}`;
+  }
+  if (titleSegments.length === 1) {
+    return `vf:${vendor}|${titleSegments[0]}`;
+  }
+
+  const parent = normalizeParentDedupKey((product as any)?.parent_product_url || (product as any)?.product_url);
+  if (parent) return `vp:${vendor}|${parent}`;
+
+  return `id:${String((product as any)?.id ?? "")}`;
+}
+
+function buildProductDedupKey(product: ProductResult, collapseVariantGroups: boolean): string {
+  if (collapseVariantGroups) {
+    return buildVariantFamilyDedupKey(product);
+  }
+
   const explicitGroupKey = String((product as any)?.variant_group_key ?? "").trim().toLowerCase();
   if (explicitGroupKey) return `group:${explicitGroupKey}`;
 
@@ -3619,6 +3661,7 @@ function buildProductDedupKey(product: ProductResult): string {
 function applyGroupedPostRanking(
   groupedResults: DetectionSimilarProducts[],
   includeCrossGroupDedupe: boolean,
+  collapseVariantGroups: boolean,
 ): { rows: DetectionSimilarProducts[]; totalProducts: number } {
   if (groupedResults.length === 0) return { rows: groupedResults, totalProducts: 0 };
   const weighted = groupedResults.map((row) => {
@@ -3637,7 +3680,7 @@ function applyGroupedPostRanking(
     ? ranked.map((row, rowIdx) => {
       const seen = new Set<string>();
       const deduped = row.products.filter((p) => {
-        const key = buildProductDedupKey(p as ProductResult);
+        const key = buildProductDedupKey(p as ProductResult, collapseVariantGroups);
         if (!key || seen.has(key)) return false;
         // Keep first seen in ranked group order; dominant group wins ties.
         seen.add(key);
@@ -3652,7 +3695,7 @@ function applyGroupedPostRanking(
     const globalSeen = new Set<string>();
     const globalRows = rows.map((row) => {
       const products = row.products.filter((p) => {
-        const key = buildProductDedupKey(p as ProductResult);
+        const key = buildProductDedupKey(p as ProductResult, collapseVariantGroups);
         if (!key || globalSeen.has(key)) return false;
         globalSeen.add(key);
         return true;
@@ -4755,6 +4798,7 @@ export class ImageAnalysisService {
       filterByDetectedCategory = true,
       groupByDetection = false,
       includeEmptyDetectionGroups = false,
+      collapseVariantGroups = true,
       ...analyzeOptions
     } = options;
     const resolvedLimitPerItem = resolveShopLookLimit(similarLimitPerItem);
@@ -5520,9 +5564,12 @@ export class ImageAnalysisService {
             categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses";
           const sleeveSignalStrong =
             (detection.confidence ?? 0) >= 0.94 || (detection.area_ratio ?? 0) >= 0.12;
+          // For sleeve-sensitive categories: trust an explicit label cue ("short sleeve top") at any
+          // detection confidence, since the label word itself is definitive. Fall back to strong-signal
+          // check only when sleeve is inferred (e.g. "tshirt" → short) without an explicit cue.
           if (
             detectionSleeve &&
-            (!sleeveSensitiveCategory || (hasExplicitSleeveCue && sleeveSignalStrong))
+            (!sleeveSensitiveCategory || hasExplicitSleeveCue || sleeveSignalStrong)
           ) {
             filters.sleeve = detectionSleeve;
           }
@@ -7213,7 +7260,11 @@ export class ImageAnalysisService {
       }
     }
 
-    const postRanked = applyGroupedPostRanking(groupedResults, imageCrossGroupDedupeEnabled());
+    const postRanked = applyGroupedPostRanking(
+      groupedResults,
+      imageCrossGroupDedupeEnabled(),
+      collapseVariantGroups !== false,
+    );
     const finalGroupedResults = postRanked.rows;
 
     // Apply minimum relevance threshold filter to each detection's products
@@ -7914,9 +7965,11 @@ export class ImageAnalysisService {
             categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses";
           const sleeveSignalStrong =
             (detection.confidence ?? 0) >= 0.94 || (detection.area_ratio ?? 0) >= 0.12;
+          // Trust an explicit label cue ("short sleeve top") at any detection confidence; only
+          // require strong signal when sleeve is inferred from a non-explicit label (e.g. "tshirt").
           if (
             detectionSleeve &&
-            (!sleeveSensitiveCategory || (hasExplicitSleeveCue && sleeveSignalStrong))
+            (!sleeveSensitiveCategory || hasExplicitSleeveCue || sleeveSignalStrong)
           ) {
             filters.sleeve = detectionSleeve;
           }
@@ -8795,7 +8848,11 @@ export class ImageAnalysisService {
       }
     }
 
-    const postRankedSel = applyGroupedPostRanking(groupedResults, imageCrossGroupDedupeEnabled());
+    const postRankedSel = applyGroupedPostRanking(
+      groupedResults,
+      imageCrossGroupDedupeEnabled(),
+      options.collapseVariantGroups !== false,
+    );
     const pagedSel = paginateDetectionGroups(
       postRankedSel.rows,
       resolvedResultsPage,
