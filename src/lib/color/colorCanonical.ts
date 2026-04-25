@@ -38,15 +38,17 @@ export type FashionCanonicalColor = (typeof FASHION_CANONICAL_COLORS)[number];
 /** Groups of canonicals that should score as strong family matches (not collapsed to one token). */
 export const COLOR_FAMILY_GROUPS: string[][] = [
   ["off-white", "cream", "ivory", "white", "ecru", "eggshell"],
-  ["navy", "blue", "light-blue", "cobalt", "denim", "midnight-blue", "royal-blue", "baby-blue", "sky-blue"],
+  ["navy", "blue", "light-blue", "cobalt", "denim", "midnight-blue", "royal-blue", "baby-blue", "sky-blue", "powder-blue", "indigo", "sapphire"],
   ["charcoal", "gray", "grey", "heather-gray", "silver"],
-  ["burgundy", "red", "wine", "maroon", "cherry"],
+  ["burgundy", "red", "wine", "maroon", "cherry", "crimson", "scarlet"],
   ["camel", "beige", "tan", "taupe", "khaki"],
-  ["olive", "green", "sage", "mint", "forest-green", "army-green"],
-  ["pink", "fuchsia", "fuschia", "fushia", "fuhsia", "magenta", "rose", "hot-pink", "blush"],
-  ["purple", "violet", "plum", "lavender", "lilac", "mauve"],
-  ["gold", "yellow", "mustard"],
-  ["brown", "chocolate", "mocha"],
+  ["olive", "green", "sage", "mint", "forest-green", "army-green", "hunter-green", "emerald", "moss"],
+  ["pink", "fuchsia", "fuschia", "fushia", "fuhsia", "magenta", "rose", "hot-pink", "blush", "dusty-pink", "dusty-rose", "salmon"],
+  ["purple", "violet", "plum", "lavender", "lilac", "mauve", "grape", "orchid"],
+  ["gold", "yellow", "mustard", "lemon", "canary"],
+  ["brown", "chocolate", "mocha", "caramel", "cognac"],
+  ["orange", "coral", "rust", "terracotta", "peach", "burnt-orange", "amber"],
+  ["teal", "turquoise", "aqua", "cyan", "peacock"],
 ];
 
 function normalizeToken(s: string): string {

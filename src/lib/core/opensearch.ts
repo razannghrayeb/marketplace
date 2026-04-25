@@ -408,13 +408,30 @@ export async function ensureIndex() {
  */
 export async function applyIndexSpeedSettings(): Promise<void> {
   const index = config.opensearch.index;
+
+  try {
+    const before = await osClient.indices.getSettings({ index });
+    const cur = before.body?.[index]?.settings?.index?.knn?.algo_param?.ef_search;
+    console.log(`[opensearch] ef_search on ${index} before apply: ${cur ?? "unknown"}`);
+  } catch {
+    // non-fatal read — proceed with write
+  }
+
   await osClient.indices.putSettings({
     index,
-    body: {
-      "index.knn.algo_param.ef_search": 128,
-    },
+    body: { "index.knn.algo_param.ef_search": 128 },
   });
-  console.log(`[opensearch] Applied speed settings to ${index}: ef_search=128`);
+
+  try {
+    const after = await osClient.indices.getSettings({ index });
+    const applied = after.body?.[index]?.settings?.index?.knn?.algo_param?.ef_search;
+    console.log(`[opensearch] ef_search on ${index} after apply: ${applied ?? "unknown — verify manually"}`);
+    if (String(applied) !== "128") {
+      console.warn(`[opensearch] WARNING: ef_search may not have applied — got ${applied}, expected 128`);
+    }
+  } catch {
+    console.warn(`[opensearch] Could not verify ef_search was applied to ${index}`);
+  }
 }
 
 /**
