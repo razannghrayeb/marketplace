@@ -6157,6 +6157,37 @@ export async function searchByImageWithSimilarity(
         }
         return false;
       }
+      // Shirt-focused tops intent should not leak into outerwear/jackets unless explicitly requested.
+      if (hasDetectionAnchoredTypeIntent && params.detectionProductCategory === "tops") {
+        const desiredTypeBlob = desiredProductTypes.map((t) => String(t).toLowerCase()).join(" ");
+        const wantsShirtLike = /\b(shirt|shirts|t-?shirt|tshirt|tee|tees|blouse|blouses|button\s*down|button-down|long sleeve top|short sleeve top)\b/.test(
+          desiredTypeBlob,
+        );
+        const wantsOuterwearLike = /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|windbreaker|windbreakers|bomber|bombers|trench)\b/.test(
+          desiredTypeBlob,
+        );
+        if (wantsShirtLike && !wantsOuterwearLike) {
+          const srcBlob = [
+            h?._source?.category_canonical,
+            h?._source?.category,
+            h?._source?.title,
+            h?._source?.description,
+            Array.isArray(h?._source?.product_types)
+              ? (h._source.product_types as unknown[]).join(" ")
+              : h?._source?.product_types,
+          ]
+            .filter((x) => x != null)
+            .map((x) => String(x).toLowerCase())
+            .join(" ");
+          const hasOuterwearCue = /\b(jacket|jackets|coat|coats|outerwear|outwear|parka|parkas|windbreaker|windbreakers|bomber|bombers|trench)\b/.test(
+            srcBlob,
+          );
+          const hasShirtCue = /\b(shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|button\s*down|button-down|top|tops)\b/.test(
+            srcBlob,
+          );
+          if (hasOuterwearCue && !hasShirtCue) return false;
+        }
+      }
       const lengthComp = Number((comp as any).lengthCompliance ?? 0);
       const hasLengthIntentForHit = Boolean((comp as any).hasLengthIntent);
       const dressLengthMin = (() => {
@@ -7192,13 +7223,20 @@ export async function searchByImageWithSimilarity(
             explainMatchedColor = authoritativeColorNorm;
             explainColorTier = "none";
           } else {
-            // Soft-color mode: keep recall, but do not report contradictory "exact" color matches.
+            // Soft-color mode: keep recall, but do not represent contradictions as valid color families.
+            const softCategory = String(params.detectionProductCategory ?? "").toLowerCase().trim();
             const base = Math.max(0, finalRelevance01 ?? 0);
-            finalRelevance01 = Math.min(base, Math.max(0.18, base * 0.94));
+            const softConflictMultiplier =
+              softCategory === "footwear"
+                ? 0.82
+                : softCategory === "bags"
+                  ? 0.84
+                  : 0.9;
+            finalRelevance01 = Math.min(base, Math.max(0.16, base * softConflictMultiplier));
             finalRelevanceSource = "catalog_color_soft_consistency";
-            explainColorCompliance = Math.min(explainColorCompliance ?? 1, 0.42);
+            explainColorCompliance = 0;
             explainMatchedColor = authoritativeColorNorm;
-            explainColorTier = downgradeColorTierOneStep(explainColorTier ?? authoritativeColor.tier);
+            explainColorTier = "none";
           }
         } else if ((compliance.colorCompliance ?? 0) + 0.05 < authoritativeColor.compliance) {
           const strongTypeForColorLift =
