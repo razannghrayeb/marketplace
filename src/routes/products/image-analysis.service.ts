@@ -885,6 +885,7 @@ function captionColorForProductCategory(
   if (productCategory === "tops") return captionColors.topColor ?? null;
   if (productCategory === "bottoms") return captionColors.jeansColor ?? null;
   if (productCategory === "dresses") return captionColors.garmentColor ?? null;
+  if (productCategory === "outerwear") return captionColors.garmentColor ?? null;
   return null;
 }
 
@@ -6637,7 +6638,7 @@ export class ImageAnalysisService {
               similarityThreshold: detectionSimilarityThreshold,
               includeRelated: false,
               predictedCategoryAisles: preserveHardCategoryInFallback ? undefined : predictedCategoryAisles,
-              knnField: shopTheLookKnnField(),
+              knnField: knnFieldUsed,
               forceHardCategoryFilter: preserveHardCategoryInFallback,
               relaxThresholdWhenEmpty: detectionRelaxThreshold,
               blipSignal: detectionBlipSignal,
@@ -6682,7 +6683,7 @@ export class ImageAnalysisService {
                 limit: detectionRetrievalLimit,
                 similarityThreshold: detectionSimilarityThreshold,
                 includeRelated: false,
-                knnField: shopTheLookKnnField(),
+                knnField: knnFieldUsed,
                 forceHardCategoryFilter: preserveHardCategoryInFallback,
                 relaxThresholdWhenEmpty: detectionRelaxThreshold,
                 blipSignal: detectionBlipSignal,
@@ -8611,6 +8612,14 @@ export class ImageAnalysisService {
             );
           })();
 
+          const browseKnnField =
+            categoryMapping.productCategory === "tops" ||
+            categoryMapping.productCategory === "bottoms" ||
+            categoryMapping.productCategory === "dresses" ||
+            categoryMapping.productCategory === "outerwear"
+              ? "embedding"
+              : shopTheLookKnnField();
+
           // Always extract and pass color, style, and pattern intent to rerank
           let similarResult = await searchByImageWithSimilarity({
             imageEmbedding: finalFullFrameEmbedding,
@@ -8628,7 +8637,7 @@ export class ImageAnalysisService {
             similarityThreshold: detectionSimilarityThreshold,
             includeRelated: false,
             predictedCategoryAisles,
-            knnField: shopTheLookKnnField(),
+            knnField: browseKnnField,
             forceHardCategoryFilter: forceHardCategoryFilterUsed,
             relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
             blipSignal: detectionBlipSignal,
@@ -8684,7 +8693,7 @@ export class ImageAnalysisService {
               similarityThreshold: detectionSimilarityThreshold,
               includeRelated: false,
               predictedCategoryAisles,
-              knnField: shopTheLookKnnField(),
+              knnField: browseKnnField,
               forceHardCategoryFilter: forceHardCategoryFilterUsed,
               relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
               blipSignal: detectionBlipSignal,
@@ -8750,7 +8759,7 @@ export class ImageAnalysisService {
               similarityThreshold: detectionSimilarityThreshold,
               includeRelated: false,
               predictedCategoryAisles: preserveHardCategoryInFallback ? undefined : predictedCategoryAisles,
-              knnField: shopTheLookKnnField(),
+              knnField: browseKnnField,
               forceHardCategoryFilter: preserveHardCategoryInFallback,
               relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
               blipSignal: detectionBlipSignal,
@@ -8794,7 +8803,7 @@ export class ImageAnalysisService {
                 limit: retrievalLimit,
                 similarityThreshold: detectionSimilarityThreshold,
                 includeRelated: false,
-                knnField: shopTheLookKnnField(),
+                knnField: browseKnnField,
                 forceHardCategoryFilter: preserveHardCategoryInFallback,
                 relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
                 blipSignal: detectionBlipSignal,
@@ -8834,7 +8843,7 @@ export class ImageAnalysisService {
               similarityThreshold: detectionSimilarityThreshold,
               includeRelated: false,
               predictedCategoryAisles,
-              knnField: shopTheLookKnnField(),
+              knnField: browseKnnField,
               forceHardCategoryFilter: forceHardCategoryFilterUsed,
               relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
               blipSignal: detectionBlipSignal,
@@ -8890,7 +8899,7 @@ export class ImageAnalysisService {
                   similarityThreshold: detectionSimilarityThreshold,
                   includeRelated: false,
                   predictedCategoryAisles,
-                  knnField: shopTheLookKnnField(),
+                  knnField: browseKnnField,
                   forceHardCategoryFilter: forceHardCategoryFilterUsed,
                   relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
                   blipSignal: detectionBlipSignal,
@@ -8958,7 +8967,7 @@ export class ImageAnalysisService {
               limit: retrievalLimit,
               similarityThreshold: ablationThreshold,
               includeRelated: false,
-              knnField: shopTheLookKnnField(),
+              knnField: browseKnnField,
               forceHardCategoryFilter: categoryMapping.productCategory !== "tops",
               relaxThresholdWhenEmpty: true,
               blipSignal: detectionBlipSignal,
