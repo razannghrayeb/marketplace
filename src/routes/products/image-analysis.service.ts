@@ -330,9 +330,12 @@ function shopLookTopRecoverySimilarityThreshold(baseThreshold: number): number {
 }
 
 function shopLookDressRecoverySimilarityThreshold(baseThreshold: number): number {
-  const raw = Number(process.env.SEARCH_IMAGE_SHOP_DRESS_RECOVERY_MIN_SIM ?? "0.54");
-  const floor = Number.isFinite(raw) ? raw : 0.54;
-  return Math.max(0.35, Math.min(baseThreshold, Math.min(0.9, floor)));
+  // Floor must be BELOW the main-path dress cap (0.5) so the ablation recovery can
+  // actually rescue low-result sets that the main pass failed to fill.
+  // Default 0.46 gives ~4 points of headroom below the main 0.50 threshold.
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_DRESS_RECOVERY_MIN_SIM ?? "0.46");
+  const floor = Number.isFinite(raw) ? raw : 0.46;
+  return Math.max(0.30, Math.min(baseThreshold, Math.min(0.9, floor)));
 }
 
 function shopLookDetectionSimilarityThreshold(baseThreshold: number, productCategory: string): number {
@@ -637,7 +640,8 @@ function shouldUseDominantColorFallback(
   // If caption already has slot-level color cues for a multi-item scene, avoid
   // replacing them with a single global dominant color.
   if (mentionsMultipleItems) return false;
-  return false;
+  // Single-item scene with a slot color: allow dominant color as supplementary validation.
+  return true;
 }
 
 function resolveCaptionPrimaryColor(
@@ -1428,6 +1432,125 @@ async function classifyFootwearSubtypeFromCropEmbedding(
   }
 }
 
+/**
+ * Infer dress silhouette/style from BLIP caption.
+ * Returns a specific product-type string to feed into softProductTypeHints, or null.
+ */
+export function inferDressSilhouetteFromCaption(
+  detectionLabel: string,
+  caption: string | null | undefined,
+): string | null {
+  const label = String(detectionLabel || "").toLowerCase();
+  if (!/\b(dress|gown|one[-\s]?piece|onepiece|sundress|kaftan|caftan|abaya)\b/.test(label)) return null;
+  const cap = String(caption ?? "").toLowerCase();
+  if (!cap) return null;
+
+  if (/\b(bodycon|body\s*con|bandage|fitted|figure[\s-]?hugging|tight[\s-]?fitting)\b/.test(cap)) return "bodycon dress";
+  if (/\b(wrap|wrap[\s-]?around|tie[\s-]?waist)\b/.test(cap) && /dress/.test(cap)) return "wrap dress";
+  if (/\b(shirt[\s-]?dress|button[\s-]?down\s+dress|denim\s+dress)\b/.test(cap)) return "shirt dress";
+  if (/\b(shift|straight\s+dress|column\s+dress|sheath)\b/.test(cap)) return "shift dress";
+  if (/\b(a[\s-]?line|fit[\s-]?and[\s-]?flare|skater|circle\s+skirt)\b/.test(cap) && /dress/.test(cap)) return "a-line dress";
+  if (/\b(slip\s+dress|satin\s+dress|bias[\s-]?cut)\b/.test(cap)) return "slip dress";
+  if (/\b(kaftan|caftan)\b/.test(cap)) return "kaftan";
+  if (/\b(abaya)\b/.test(cap)) return "abaya";
+  if (/\b(sundress|sun[\s-]?dress)\b/.test(cap)) return "sundress";
+  if (/\b(babydoll|baby[\s-]?doll|smock\s+dress|trapeze|empire[\s-]?waist)\b/.test(cap)) return "babydoll dress";
+  if (/\b(pinafore|pinafore\s+dress)\b/.test(cap)) return "pinafore dress";
+  if (/\b(maxi)\b/.test(cap) && /dress/.test(cap)) return "maxi dress";
+  if (/\b(midi)\b/.test(cap) && /dress/.test(cap)) return "midi dress";
+  if (/\b(mini)\b/.test(cap) && /dress/.test(cap)) return "mini dress";
+
+  return null;
+}
+
+const DRESS_SILHOUETTE_PROMPTS: Array<{ subtype: string; prompts: string[] }> = [
+  {
+    subtype: "bodycon dress",
+    prompts: ["a bodycon dress", "a tight fitted bodycon dress", "a figure-hugging dress"],
+  },
+  {
+    subtype: "wrap dress",
+    prompts: ["a wrap dress", "a tie-waist wrap dress", "a draped wrap midi dress"],
+  },
+  {
+    subtype: "shirt dress",
+    prompts: ["a shirt dress", "a button-down shirt dress", "a denim shirt dress"],
+  },
+  {
+    subtype: "shift dress",
+    prompts: ["a shift dress", "a straight column dress", "a loose shift dress"],
+  },
+  {
+    subtype: "a-line dress",
+    prompts: ["an a-line dress", "a fit and flare dress", "a skater dress"],
+  },
+  {
+    subtype: "slip dress",
+    prompts: ["a slip dress", "a satin slip dress", "a bias cut slip dress"],
+  },
+  {
+    subtype: "maxi dress",
+    prompts: ["a maxi dress", "a long floor-length dress", "a flowing maxi dress"],
+  },
+  {
+    subtype: "midi dress",
+    prompts: ["a midi dress", "a knee-length midi dress", "a calf-length dress"],
+  },
+  {
+    subtype: "mini dress",
+    prompts: ["a mini dress", "a short mini dress", "a thigh-length dress"],
+  },
+];
+
+type DressSilhouetteCache = Array<{ subtype: string; embeddings: number[][] }> | null;
+let dressSilhouetteEmbeddingCache: DressSilhouetteCache = null;
+
+async function ensureDressSilhouetteEmbeddings(): Promise<Array<{ subtype: string; embeddings: number[][] }>> {
+  if (dressSilhouetteEmbeddingCache) return dressSilhouetteEmbeddingCache;
+  const results = await Promise.all(
+    DRESS_SILHOUETTE_PROMPTS.map(async ({ subtype, prompts }) => {
+      const embeddings = await Promise.all(
+        prompts.map((p) => getTextEmbedding(p).catch(() => null)),
+      );
+      return { subtype, embeddings: embeddings.filter((e): e is number[] => e !== null) };
+    }),
+  );
+  dressSilhouetteEmbeddingCache = results;
+  return results;
+}
+
+/**
+ * CLIP zero-shot dress silhouette classification from garment crop embedding.
+ * Used when YOLO returns a generic dress label and BLIP caption has no silhouette cue.
+ */
+async function classifyDressSilhouetteFromCropEmbedding(
+  cropEmbedding: number[],
+  minConfidence = 0.28,
+): Promise<string | null> {
+  try {
+    const silhouetteData = await ensureDressSilhouetteEmbeddings();
+    let bestSubtype: string | null = null;
+    let bestScore = -1;
+    let secondBestScore = -1;
+    for (const { subtype, embeddings } of silhouetteData) {
+      if (embeddings.length === 0) continue;
+      const avgScore =
+        embeddings.reduce((sum, te) => sum + cosineSimilarity(cropEmbedding, te), 0) / embeddings.length;
+      if (avgScore > bestScore) {
+        secondBestScore = bestScore;
+        bestScore = avgScore;
+        bestSubtype = subtype;
+      } else if (avgScore > secondBestScore) {
+        secondBestScore = avgScore;
+      }
+    }
+    const margin = bestScore - secondBestScore;
+    return bestScore >= minConfidence && margin >= 0.018 ? bestSubtype : null;
+  } catch {
+    return null;
+  }
+}
+
 function strictFootwearSubtypeFallbackTerms(
   detectionLabel: string,
 ): string[] | null {
@@ -1450,7 +1573,7 @@ function strictDressFallbackTerms(detectionLabel: string): string[] | null {
   const label = String(detectionLabel || "").toLowerCase();
   if (!label) return null;
 
-  if (!/\b(dress|gown|one[-\s]?piece|onepiece|sundress|sun dress|slip dress|bodycon|cocktail dress|evening dress|party dress|maxi dress|midi dress|mini dress|frock)\b/.test(label)) {
+  if (!/\b(dress|gown|one[-\s]?piece|onepiece|sundress|sun dress|slip dress|bodycon|cocktail dress|evening dress|party dress|maxi dress|midi dress|mini dress|frock|kaftan|caftan|abaya|wrap dress|shirt dress|shift dress|a-line dress|smock|babydoll dress|pinafore|chemise|fit and flare)\b/.test(label)) {
     return null;
   }
 
@@ -1472,6 +1595,18 @@ function strictDressFallbackTerms(detectionLabel: string): string[] | null {
     "midi dress",
     "mini dress",
     "frock",
+    "kaftan",
+    "caftan",
+    "abaya",
+    "wrap dress",
+    "shirt dress",
+    "shift dress",
+    "a-line dress",
+    "smock dress",
+    "babydoll dress",
+    "pinafore dress",
+    "chemise",
+    "fit and flare dress",
   ];
 }
 
@@ -1642,7 +1777,7 @@ function hardCategoryTermsForDetection(
 
   if (categoryMapping.productCategory === "dresses") {
     const dressTerms = baseTerms.filter((t) =>
-      /\b(dress|dresses|gown|gowns|one piece|one-piece|sundress|sun dress|slip dress|bodycon|cocktail dress|evening dress|party dress|maxi dress|midi dress|mini dress|frock)\b/.test(
+      /\b(dress|dresses|gown|gowns|one piece|one-piece|sundress|sun dress|slip dress|bodycon|cocktail dress|evening dress|party dress|maxi dress|midi dress|mini dress|frock|kaftan|caftan|abaya|wrap dress|shirt dress|shift dress|a-line dress|smock|babydoll dress|pinafore|chemise|fit and flare)\b/.test(
         t,
       ),
     );
@@ -1908,7 +2043,7 @@ function tightenTypeSeedsForDetection(
     const dressLike = normalized.filter((t) => {
       if (/\b(jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits)\b/.test(t)) return false;
       if (/\b(gown|gowns)\b/.test(t) && !isGownLike) return false;
-      return /\b(dress|dresses|gown|gowns|one piece|one-piece|sundress|sun dress|slip dress|bodycon|cocktail dress|evening dress|party dress|maxi dress|midi dress|mini dress|frock)\b/.test(t);
+      return /\b(dress|dresses|gown|gowns|one piece|one-piece|sundress|sun dress|slip dress|bodycon|cocktail dress|evening dress|party dress|maxi dress|midi dress|mini dress|frock|kaftan|caftan|abaya|wrap dress|shirt dress|shift dress|a-line dress|smock|babydoll dress|pinafore|chemise|fit and flare)\b/.test(t);
     });
     if (dressLike.length > 0) return dressLike;
   }
@@ -2046,7 +2181,15 @@ function recoverTailoredTopTypes(
 
 function shouldPreserveHardCategoryOnFallback(mapping: CategoryMapping): boolean {
   const category = String(mapping.productCategory || "").toLowerCase();
-  return category === "dresses" || category === "footwear" || category === "bags" || category === "accessories";
+  return (
+    category === "tops" ||
+    category === "bottoms" ||
+    category === "dresses" ||
+    category === "outerwear" ||
+    category === "footwear" ||
+    category === "bags" ||
+    category === "accessories"
+  );
 }
 
 function fallbackCategoryTermsForDetection(
@@ -5279,8 +5422,15 @@ export class ImageAnalysisService {
       const hasBottom = /\b(skirt|pants|trousers|jeans|shorts|bottom)\b/.test(detectionLabels);
       const captionMainItem = normalizeLooseText(blipStructured.mainItem);
       if (captionMainItem.includes("dress") && hasTop && hasBottom) {
-        // Keep raw caption text to avoid null; suppress only structured hints/signals.
-        blipStructured = buildStructuredBlipOutput("");
+        // BLIP is hallucinating a dress for a top+bottom outfit.
+        // Suppress only product-type hints and the main item label — the hallucination.
+        // Preserve colors, gender, age group, and style signals which remain valid
+        // observations about the image even when the item type is wrong.
+        blipStructured = {
+          ...blipStructured,
+          mainItem: null,
+          productTypeHints: [],
+        };
         blipStructuredConfidence = 0;
         fullBlipSignal = undefined;
       }
@@ -5747,8 +5897,8 @@ export class ImageAnalysisService {
           const applicableFormalityScore = isFootwearCategory
             ? footwearFormalityScore
             : effectiveFormalityScore;
-          if (blipCaption && blipFormalityScore > 0) {
-            console.log(`[formality-intent] caption="${blipCaption.substring(0, 60)}..." score=${blipFormalityScore}`);
+          if (hotPathDebug && blipCaption && blipFormalityScore > 0) {
+            console.info(`[formality-intent] caption="${blipCaption.substring(0, 60)}..." score=${blipFormalityScore}`);
           }
           const formalityHardGateEligible = ["outerwear", "dresses"].includes(
             String(categoryMapping.productCategory || "").toLowerCase(),
@@ -5759,10 +5909,10 @@ export class ImageAnalysisService {
             filters.softStyle = formalityHardGateEligible ? "formal" : "semi-formal";
             if (formalityHardGateEligible) {
               (filters as any).minFormality = 8;
-              console.log(`[formality-intent][APPLIED] enforcing formal-wear-only for detection="${label}"`);
+              if (hotPathDebug) console.info(`[formality-intent][APPLIED] enforcing formal-wear-only for detection="${label}"`);
             } else {
               delete (filters as any).minFormality;
-              console.log(`[formality-intent][SOFT] applying semi-formal bias for detection="${label}"`);
+              if (hotPathDebug) console.info(`[formality-intent][SOFT] applying semi-formal bias for detection="${label}"`);
             }
           } else if (!isAccessoryOrBag && !isFootwearCategory && applicableFormalityScore >= 7) {
             // Keep this softer than strict formal: improves suit/blazer recall without over-pruning.
@@ -5978,10 +6128,15 @@ export class ImageAnalysisService {
             }
           }
 
+          // tops/bottoms/outerwear: catalog `embedding` holds full-frame CLIP vectors;
+          // query with full-frame vector for proper distribution alignment.
+          // dresses: use `embedding_garment` — the garment crop is more precise for a
+          // dress that spans 40-80% of the image, and the catalog field is indexed from
+          // the same garment-crop pipeline. The two-pass fallback at passBKnnField
+          // automatically queries `embedding` when garment-field results are low.
           const knnFieldUsed =
             categoryMapping.productCategory === "tops" ||
             categoryMapping.productCategory === "bottoms" ||
-            categoryMapping.productCategory === "dresses" ||
             categoryMapping.productCategory === "outerwear"
               ? "embedding"
               : shopTheLookKnnField();
@@ -6213,6 +6368,35 @@ export class ImageAnalysisService {
                 { confidence: detection.confidence, areaRatio: detection.area_ratio },
               );
               if (formalFootwearIntent) softProductTypeHints = pruneAthleticFootwearTerms(softProductTypeHints);
+            }
+          }
+
+          // Dress silhouette inference: refine generic dress label with a specific
+          // silhouette/style type to improve product-type hint precision.
+          // 1. Caption-based (fast, no extra CLIP call).
+          // 2. CLIP zero-shot fallback when caption gives no silhouette cue and label is generic.
+          if (categoryMapping.productCategory === "dresses") {
+            const captionSilhouette = inferDressSilhouetteFromCaption(
+              label,
+              detCaption || blipCaption,
+            );
+            if (captionSilhouette) {
+              if (hotPathDebug) {
+                console.log(`[detection-trace] dress silhouette from caption: "${label}" → "${captionSilhouette}"`);
+              }
+              softProductTypeHints = [...new Set([captionSilhouette, ...softProductTypeHints])];
+            } else if (
+              (label === "dress" || label === "gown") &&
+              finalEmbedding.length > 0
+            ) {
+              // Only run CLIP zero-shot for generic labels where caption gave no signal.
+              const clipSilhouette = await classifyDressSilhouetteFromCropEmbedding(finalEmbedding).catch(() => null);
+              if (clipSilhouette) {
+                if (hotPathDebug) {
+                  console.log(`[detection-trace] dress silhouette CLIP-classified: "${label}" → "${clipSilhouette}"`);
+                }
+                softProductTypeHints = [...new Set([clipSilhouette, ...softProductTypeHints])];
+              }
             }
           }
 
