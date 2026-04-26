@@ -625,7 +625,7 @@ async function processProduct(
   enrichMap: Map<number, any>
 ): Promise<ProductResult> {
   const { id, vendor_id, title, description, brand, category,
-          color, price_cents, availability, last_seen, image_url,
+          price_cents, availability, last_seen, image_url,
           is_hidden, canonical_id } = product;
 
   try {
@@ -662,7 +662,6 @@ async function processProduct(
       vendorId: vendor_id,
       title,
       description: description ?? null,
-      catalogColor: color ?? null,
       brand,
       category,
       priceCents: price_cents,

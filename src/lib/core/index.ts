@@ -17,7 +17,7 @@ export {
   queryWithPgCapacityRetry,
   toPgVectorParam,
 } from "./db";
-export { osClient, ensureIndex, recreateIndex, getIndexStats, applyIndexSpeedSettings } from "./opensearch";
+export { osClient, ensureIndex, recreateIndex, getIndexStats, applyIndexSpeedSettings, warmupKnnIndex } from "./opensearch";
 export {
   CircuitBreaker,
   CircuitOpenError,

@@ -27,11 +27,15 @@
  */
 
 import "dotenv/config";
-import { Pool } from "pg";
 import { osClient } from "../src/lib/core/opensearch";
+import { config } from "../src/config";
+import { pg } from "../src/lib/core/db";
 import { mapHexToFashionCanonical } from "../src/lib/color/garmentColorPipeline";
 import { promises as fs } from "fs";
 import { performance } from "perf_hooks";
+
+type Queryable = Pick<typeof pg, "query">;
+type ProductColorRow = { id: number; color: string };
 
 // ============================================================================
 // Constants & Types
@@ -46,7 +50,6 @@ interface RepairStats {
   endTime?: number;
 }
 
-const BATCH_SIZE = 50;
 const BULK_BUFFER_SIZE = 1000;
 
 // Fashion canonical color tokens (from garmentColorPipeline.ts)
@@ -128,21 +131,37 @@ function normalizeColorToCanonical(colorStr: string | null): string | null {
 }
 
 /**
- * Fetch product IDs from PostgreSQL (those with color values).
- * We'll check if they have embeddings in OpenSearch later.
+ * Fetch product IDs + colors directly from PostgreSQL.
+ * Keeps bind parameter count small even for very large datasets.
  */
-async function fetchProductIdsWithColors(pool: Pool, limit?: number): Promise<number[]> {
+async function fetchProductColorRows(
+  pool: Queryable,
+  opts: { category?: string; limit?: number },
+): Promise<ProductColorRow[]> {
+  const params: Array<string | number> = [];
+  const where: string[] = ["color IS NOT NULL", "TRIM(color) <> ''"];
+
+  if (opts.category) {
+    params.push(opts.category);
+    where.push(`LOWER(COALESCE(category, '')) = LOWER($${params.length})`);
+  }
+
+  let limitClause = "";
+  if (typeof opts.limit === "number" && Number.isFinite(opts.limit) && opts.limit > 0) {
+    params.push(opts.limit);
+    limitClause = `LIMIT $${params.length}`;
+  }
+
   const query = `
-    SELECT id
+    SELECT id, color
     FROM products
-    WHERE color IS NOT NULL
-    AND TRIM(color) != ''
+    WHERE ${where.join(" AND ")}
     ORDER BY id ASC
-    ${limit ? `LIMIT ${limit}` : ""}
+    ${limitClause}
   `;
 
-  const result = await pool.query(query);
-  return result.rows.map((row) => row.id);
+  const result = await pool.query(query, params);
+  return result.rows as ProductColorRow[];
 }
 
 /**
@@ -175,9 +194,21 @@ function buildColorUpdate(
 async function repairColors(): Promise<void> {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");
-  const limitStr = args.find((a) => a.startsWith("--limit="))?.split("=")[1];
+  const limitArgEq = args.find((a) => a.startsWith("--limit="));
+  const limitArgPos = args.indexOf("--limit");
+  const limitStr = limitArgEq
+    ? limitArgEq.split("=")[1]
+    : limitArgPos >= 0
+      ? args[limitArgPos + 1]
+      : undefined;
   const limit = limitStr ? parseInt(limitStr, 10) : undefined;
-  const category = args.find((a) => a.startsWith("--category="))?.split("=")[1];
+  const categoryArgEq = args.find((a) => a.startsWith("--category="));
+  const categoryArgPos = args.indexOf("--category");
+  const category = categoryArgEq
+    ? categoryArgEq.split("=")[1]
+    : categoryArgPos >= 0
+      ? args[categoryArgPos + 1]
+      : undefined;
 
   const stats: RepairStats = {
     processed: 0,
@@ -187,7 +218,7 @@ async function repairColors(): Promise<void> {
     startTime: performance.now(),
   };
 
-  const pool = new Pool();
+  const pool = pg;
 
   try {
     console.log(`[repair-colors] Starting color repair...`);
@@ -195,12 +226,12 @@ async function repairColors(): Promise<void> {
     if (limit) console.log(`[repair-colors] Limit: ${limit}`);
     if (category) console.log(`[repair-colors] Category filter: ${category}`);
 
-    // Step 1: Fetch product IDs from PostgreSQL with color values
-    console.log(`[repair-colors] Fetching product IDs with color values from database...`);
-    let productIds = await fetchProductIdsWithColors(pool, limit);
-    console.log(`[repair-colors] Found ${productIds.length} products with color values`);
+    // Step 1: Fetch product IDs + colors from PostgreSQL
+    console.log(`[repair-colors] Fetching product colors from database...`);
+    const productColorRows = await fetchProductColorRows(pool, { category, limit });
+    console.log(`[repair-colors] Found ${productColorRows.length} products with color values`);
 
-    if (productIds.length === 0) {
+    if (productColorRows.length === 0) {
       console.log(`[repair-colors] No products to process`);
       stats.endTime = performance.now();
       const duration = ((stats.endTime - stats.startTime) / 1000).toFixed(2);
@@ -208,35 +239,10 @@ async function repairColors(): Promise<void> {
       return;
     }
 
-    // Step 2: Filter by category if specified
-    if (category) {
-      const categoryPlaceholders = productIds.map((_, i) => `$${i + 2}`).join(", ");
-      const categoryQuery = `
-        SELECT id FROM products
-        WHERE id IN (${categoryPlaceholders})
-        AND LOWER(COALESCE(category, '')) = LOWER($1)
-      `;
-
-      const categoryResult = await pool.query(categoryQuery, [category, ...productIds]);
-      productIds = categoryResult.rows.map((r) => r.id);
-      console.log(`[repair-colors] Filtered to ${productIds.length} products in category "${category}"`);
-    }
-
-    // Step 3: Fetch color values for these products
-    console.log(`[repair-colors] Fetching color values from database...`);
+    // Step 2: Build color map
     const colorMap = new Map<number, string | null>();
 
-    const placeholders = productIds.map((_, i) => `$${i + 1}`).join(", ");
-    const colorQuery = `
-      SELECT id, color
-      FROM products
-      WHERE id IN (${placeholders})
-      AND color IS NOT NULL
-      AND TRIM(color) != ''
-    `;
-
-    const colorResult = await pool.query(colorQuery, productIds);
-    for (const row of colorResult.rows) {
+    for (const row of productColorRows) {
       colorMap.set(row.id, row.color);
     }
 
@@ -262,7 +268,7 @@ async function repairColors(): Promise<void> {
         let existingDoc: any;
         try {
           const docResp = await osClient.get({
-            index: "products",
+            index: config.opensearch.index,
             id: String(productId),
           });
           existingDoc = docResp.body?._source ?? docResp.body;
@@ -295,7 +301,7 @@ async function repairColors(): Promise<void> {
         bulkOps.push(
           {
             index: {
-              _index: "products",
+              _index: config.opensearch.index,
               _id: String(productId),
             },
           },
@@ -332,7 +338,7 @@ async function repairColors(): Promise<void> {
     // Refresh index
     if (!dryRun && stats.updated > 0) {
       console.log(`[repair-colors] Refreshing OpenSearch index...`);
-      await osClient.indices.refresh({ index: "products" });
+      await osClient.indices.refresh({ index: config.opensearch.index });
     }
 
     stats.endTime = performance.now();
@@ -354,8 +360,6 @@ async function repairColors(): Promise<void> {
   } catch (err) {
     console.error(`[repair-colors] Fatal error:`, err);
     process.exit(1);
-  } finally {
-    await pool.end();
   }
 }
 

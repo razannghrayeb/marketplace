@@ -1,5 +1,6 @@
 import { extractAttributesSync } from "./attributeExtractor";
 import type { GarmentColorAnalysis } from "../color/garmentColorPipeline";
+import { normalizeCatalogColorToCanonical } from "../color/garmentColorPipeline";
 import { inferCategoryCanonical } from "./categoryFilter";
 import {
   expandProductTypesForIndexing,
@@ -234,9 +235,12 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
         : [],
   );
   const catalogColorHint = toLowerTrim(input.catalogColor ?? null);
-  const normalizedCatalogColors = catalogColorHint ? normalizeArray([catalogColorHint]) : [];
+  // Map raw vendor color string to a canonical token before using it in index fields.
+  // e.g. "Navy Blue" → "navy", "#1A2B3C" → "navy", "blush" → "pink".
+  const catalogCanonical = normalizeCatalogColorToCanonical(catalogColorHint);
+  const normalizedCatalogColors = catalogCanonical ? [catalogCanonical] : [];
   if (normalizedTitleColors.length === 0 && normalizedCatalogColors.length > 0) {
-    normalizedTitleColors = normalizeArray([catalogColorHint]);
+    normalizedTitleColors = normalizeArray([catalogCanonical]);
   }
   const colorConfidenceText =
     normalizedTitleColors.length > 0 ? Math.max(0.35, attrConfidence.color ?? 0.52) : 0;
