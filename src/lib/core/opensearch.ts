@@ -63,7 +63,7 @@ export async function ensureIndex() {
         settings: {
           index: {
             knn: true,
-            "knn.algo_param.ef_search": 128,
+            "knn.algo_param.ef_search": 64,
           },
           analysis: {
             analyzer: {
@@ -419,15 +419,15 @@ export async function applyIndexSpeedSettings(): Promise<void> {
 
   await osClient.indices.putSettings({
     index,
-    body: { "index.knn.algo_param.ef_search": 128 },
+    body: { "index.knn.algo_param.ef_search": 64 },
   });
 
   try {
     const after = await osClient.indices.getSettings({ index });
     const applied = after.body?.[index]?.settings?.index?.knn?.algo_param?.ef_search;
     console.log(`[opensearch] ef_search on ${index} after apply: ${applied ?? "unknown — verify manually"}`);
-    if (String(applied) !== "128") {
-      console.warn(`[opensearch] WARNING: ef_search may not have applied — got ${applied}, expected 128`);
+    if (String(applied) !== "64") {
+      console.warn(`[opensearch] WARNING: ef_search may not have applied — got ${applied}, expected 64`);
     }
   } catch {
     console.warn(`[opensearch] Could not verify ef_search was applied to ${index}`);
