@@ -6006,12 +6006,12 @@ export class ImageAnalysisService {
           if (detCaption.trim().length > 0) {
             obs.detectionCaptionHits += 1;
             const detCaptionColors = inferColorFromCaption(detCaption);
-            const detCaptionColor =
-              captionColorForProductCategory(categoryMapping.productCategory, detCaptionColors) ??
-              detCaptionColors.garmentColor ??
-              detCaptionColors.topColor ??
-              detCaptionColors.jeansColor ??
-              null;
+            // Strict slot binding: do not fallback across slots.
+            // Each BLIP color must map only to its corresponding item type.
+            const detCaptionColor = captionColorForProductCategory(
+              categoryMapping.productCategory,
+              detCaptionColors,
+            );
             const detStruct = buildStructuredBlipOutput(detCaption);
             const consistency = await clipCaptionConsistency01(finalEmbedding, detCaption);
             const detConfidence = combineConfidenceFromConsistency(detStruct.confidence, consistency);
@@ -8422,12 +8422,12 @@ export class ImageAnalysisService {
           if (detCaption.trim().length > 0) {
             obs.detectionCaptionHits += 1;
             const detCaptionColors = inferColorFromCaption(detCaption);
-            const detCaptionColor =
-              captionColorForProductCategory(categoryMapping.productCategory, detCaptionColors) ??
-              detCaptionColors.garmentColor ??
-              detCaptionColors.topColor ??
-              detCaptionColors.jeansColor ??
-              null;
+            // Strict slot binding: do not fallback across slots.
+            // Each BLIP color must map only to its corresponding item type.
+            const detCaptionColor = captionColorForProductCategory(
+              categoryMapping.productCategory,
+              detCaptionColors,
+            );
             const detStruct = buildStructuredBlipOutput(detCaption);
             const consistency = await clipCaptionConsistency01(finalEmbedding, detCaption);
             const detConfidence = combineConfidenceFromConsistency(detStruct.confidence, consistency);

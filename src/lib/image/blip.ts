@@ -159,6 +159,18 @@ export class BlipService {
   private visionSession:  ort.InferenceSession | null = null;
   private decoderSession: ort.InferenceSession | null = null;
   private mode: 'onnx-local' | 'remote-api' | 'disabled' = 'disabled';
+  private runtimeLogged = false;
+
+  private logRuntimeDetails(extra?: Record<string, unknown>) {
+    if (this.runtimeLogged) return;
+    this.runtimeLogged = true;
+    const details: Record<string, unknown> = {
+      mode: this.mode,
+      device_hint: this.mode === 'onnx-local' ? 'cpu' : 'unknown-remote',
+      ...extra,
+    };
+    console.log('[BLIP] runtime', details);
+  }
 
   async init() {
     if (BLIP_API_URL) {
@@ -168,6 +180,7 @@ export class BlipService {
       }
       this.mode = 'remote-api';
       console.log(`[BLIP] remote API mode ready: ${BLIP_API_URL}`);
+      this.logRuntimeDetails({ endpoint: BLIP_API_URL });
       return;
     }
 
@@ -180,6 +193,7 @@ export class BlipService {
 
     this.mode = 'onnx-local';
     console.log('[BLIP] vision + decoder ready');
+    this.logRuntimeDetails({ execution_providers: ['cpu'] });
   }
 
   async caption(imageBuffer: Buffer): Promise<string> {

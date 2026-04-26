@@ -46,6 +46,11 @@ export function inferColorFromCaption(caption: string): {
 } {
   const s = String(caption || "").toLowerCase();
 
+  // Guard against cross-garment color bleeding:
+  // "black leather jacket and jeans" should not set jeansColor=black.
+  const INTERVENING_GARMENT_CUE_RE =
+    /\b(jacket|coat|blazer|sweater|hoodie|cardigan|shirt|blouse|top|tee|t-?shirt|dress|gown|skirt|shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|bag|wallet|purse|hat|scarf|belt|sunglasses|vest|outerwear)\b/;
+
   const mapColorWord = (w: string): string | null => {
     const x = w.toLowerCase().trim();
     if (!x) return null;
@@ -56,7 +61,8 @@ export function inferColorFromCaption(caption: string): {
     if (x === "charcoal") return "charcoal";
     if (x === "grey" || x === "gray" || x === "silver") return "gray";
     if (x === "white" || x === "ivory" || x === "cream" || x === "off-white" || x === "off white") return "off-white";
-    if (x === "beige" || x === "tan" || x === "camel" || x === "taupe" || x === "khaki") return x === "beige" ? "beige" : "tan";
+    if (x === "beige" || x === "taupe" || x === "khaki") return "beige";
+    if (x === "tan" || x === "camel") return "camel";
     if (x === "brown" || x === "chocolate" || x === "mocha" || x === "caramel" || x === "cognac") return "brown";
     if (x === "green" || x === "olive" || x === "sage" || x === "mint" || x === "emerald" || x === "forest" || x === "moss") return "green";
     if (x === "red" || x === "burgundy" || x === "maroon" || x === "wine" || x === "crimson") return "red";
@@ -88,7 +94,11 @@ export function inferColorFromCaption(caption: string): {
       const afterColor = text.slice(cm.index + cm[0].length);
       const gm = afterColor.match(garmentPat);
       if (gm) {
-        const gap = gm[1].length;
+        const between = String(gm[1] || "");
+        // Reject matches where another garment type appears between color and target garment.
+        // Example: "black jacket and jeans" => black belongs to jacket, not jeans.
+        if (INTERVENING_GARMENT_CUE_RE.test(between)) continue;
+        const gap = between.length;
         if (gap < bestGap) {
           bestGap = gap;
           best = mapColorWord(cm[1]);

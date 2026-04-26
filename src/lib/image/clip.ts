@@ -40,10 +40,28 @@ export function getClipExecutionProviders(): string[] {
   return ["cpu"];
 }
 
+let resolvedClipProviders: string[] = ["cpu"];
+
+function providersSuggestGpu(providers: string[]): boolean {
+  return providers.some((p) => {
+    const v = String(p).toLowerCase();
+    return v === "cuda" || v === "dml" || v === "coreml" || v === "tensorrt";
+  });
+}
+
+function logClipRuntimeProviders(scope: "image" | "text", providers: string[]): void {
+  const gpu = providersSuggestGpu(providers);
+  console.log(
+    `[CLIP] ${scope} runtime providers=${providers.join(",")} (device_hint=${gpu ? "gpu" : "cpu"})`
+  );
+}
+
 async function createClipInferenceSession(modelPath: string): Promise<ort.InferenceSession> {
   const providers = getClipExecutionProviders();
   try {
-    return await ort.InferenceSession.create(modelPath, { executionProviders: providers });
+    const session = await ort.InferenceSession.create(modelPath, { executionProviders: providers });
+    resolvedClipProviders = [...providers];
+    return session;
   } catch (err) {
     const first = providers[0]?.toLowerCase();
     if (first && first !== "cpu") {
@@ -53,7 +71,9 @@ async function createClipInferenceSession(modelPath: string): Promise<ort.Infere
         "failed; falling back to CPU:",
         (err as Error).message
       );
-      return await ort.InferenceSession.create(modelPath, { executionProviders: ["cpu"] });
+      const session = await ort.InferenceSession.create(modelPath, { executionProviders: ["cpu"] });
+      resolvedClipProviders = ["cpu"];
+      return session;
     }
     throw err;
   }
@@ -509,6 +529,7 @@ async function _doInit(modelType?: ClipModelType): Promise<void> {
   console.log(`[CLIP]   ${activeConfig.description}`);
   imageSession = await createClipInferenceSession(imageModelPath);
   console.log(`[CLIP] ✅ Image model loaded`);
+  logClipRuntimeProviders("image", resolvedClipProviders);
 
   // ── Load text model ───────────────────────────────────────────────────────
   // FIX: use isUsableModelFile (size-aware) instead of just fs.existsSync
@@ -516,6 +537,7 @@ async function _doInit(modelType?: ClipModelType): Promise<void> {
     console.log(`[CLIP] Loading text model: ${activeConfig.name}...`);
     textSession = await createClipInferenceSession(textModelPath);
     console.log(`[CLIP] ✅ Text model loaded`);
+    logClipRuntimeProviders("text", resolvedClipProviders);
 
     // Pre-load BPE tokenizer so the first text embedding is fast
     console.log(`[CLIP] Loading BPE tokenizer...`);

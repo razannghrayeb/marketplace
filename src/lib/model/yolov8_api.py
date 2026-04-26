@@ -28,6 +28,7 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 import numpy as np
+import torch
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -56,15 +57,30 @@ def get_detector(conf: float | None = None) -> DualDetector:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Warm models in a thread so GET /health returns immediately (Docker healthchecks)."""
+    """Load models and run warmup inference so the first real request is fast."""
+
+    rt = _runtime_device_info()
+    log.info(
+        "YOLO runtime device=%s cuda_available=%s cuda_device=%s cuda_device_count=%s",
+        rt["runtime_device"],
+        rt["cuda_available"],
+        rt["cuda_device_name"] or "n/a",
+        rt["cuda_device_count"],
+    )
 
     async def _preload():
         global _detector_error
         try:
-            await asyncio.to_thread(get_detector)
+            detector = await asyncio.to_thread(get_detector)
+            # Warmup: run a dummy inference to compile CUDA kernels.
+            # Without this the first real request pays the JIT compilation cost (~1-3s).
+            dummy = np.zeros((224, 224, 3), dtype=np.uint8)
+            dummy_pil = Image.fromarray(dummy)
+            await asyncio.to_thread(detector.predict, dummy_pil)
+            log.info("YOLO warmup complete")
         except Exception as e:
             _detector_error = repr(e)
-            log.exception("YOLO dual-model preload failed")
+            log.exception("YOLO dual-model preload/warmup failed")
 
     asyncio.create_task(_preload())
     yield
@@ -133,6 +149,10 @@ class HealthResponse(BaseModel):
     ok: bool
     model_path: str
     model_loaded: bool
+    runtime_device: str
+    cuda_available: bool
+    cuda_device_name: Optional[str] = None
+    cuda_device_count: int
     num_classes: int
     class_names: List[str]
     config: dict
@@ -142,6 +162,25 @@ class LabelsResponse(BaseModel):
     fashion_categories: List[str]
     category_styles: dict
     total: int
+
+
+def _runtime_device_info() -> dict:
+    cuda_available = bool(torch.cuda.is_available())
+    runtime_device = "cuda" if cuda_available else "cpu"
+    cuda_device_name = None
+    cuda_device_count = 0
+    if cuda_available:
+        cuda_device_count = int(torch.cuda.device_count())
+        try:
+            cuda_device_name = str(torch.cuda.get_device_name(0))
+        except Exception:
+            cuda_device_name = None
+    return {
+        "runtime_device": runtime_device,
+        "cuda_available": cuda_available,
+        "cuda_device_name": cuda_device_name,
+        "cuda_device_count": cuda_device_count,
+    }
 
 
 def _run_dual_detector(image: Image.Image, conf: float) -> DetectionResponse:
@@ -197,11 +236,16 @@ def _run_dual_detector(image: Image.Image, conf: float) -> DetectionResponse:
 def health() -> HealthResponse:
     """Liveness: always fast. `model_loaded` becomes true after background preload (or first detect)."""
     model_path = "dual-model-yolo (deepfashion2_yolov8s-seg + yolos-fashionpedia)"
+    rt = _runtime_device_info()
     if _detector is None:
         return HealthResponse(
             ok=_detector_error is None,
             model_path=model_path,
             model_loaded=False,
+            runtime_device=rt["runtime_device"],
+            cuda_available=rt["cuda_available"],
+            cuda_device_name=rt["cuda_device_name"],
+            cuda_device_count=rt["cuda_device_count"],
             num_classes=0,
             class_names=[],
             config={
@@ -219,6 +263,10 @@ def health() -> HealthResponse:
         ok=True,
         model_path=model_path,
         model_loaded=True,
+        runtime_device=rt["runtime_device"],
+        cuda_available=rt["cuda_available"],
+        cuda_device_name=rt["cuda_device_name"],
+        cuda_device_count=rt["cuda_device_count"],
         num_classes=len(class_names),
         class_names=class_names,
         config={
