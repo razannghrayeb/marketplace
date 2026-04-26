@@ -87,7 +87,7 @@ The script maps input colors to canonical fashion tokens:
 ✅ **Fast** — no image re-processing, no CLIP/BLIP re-computation  
 ✅ **Efficient** — bulk indexing (50 docs/buffer)  
 ✅ **Safe** — dry-run mode to preview changes  
-✅ **Targeted** — only updates color metadata  
+✅ **Targeted** — only updates color metadata
 
 ## Integration with Recent Fixes
 
@@ -100,14 +100,16 @@ This script complements the color priority fix in [src/lib/search/searchDocument
 ## Example: Fixing Product 24542
 
 Before repair:
+
 ```
 OpenSearch: attr_color = "gray"
 PostgreSQL: color = "light green"
 ```
 
 After repair:
+
 ```
-OpenSearch: 
+OpenSearch:
   - attr_color = "green"
   - color_primary_canonical = "green"
   - attr_color_source = "catalog"

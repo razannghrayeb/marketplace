@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { createServer } from "./server";
 import { testConnection } from "./lib/core/db";
-import { applyIndexSpeedSettings } from "./lib/core";
+import { applyIndexSpeedSettings, warmupKnnIndex } from "./lib/core";
 import { setupSchedules } from "./lib/scheduler";
 import { runWorkerLoop } from "./lib/worker";
 
@@ -56,6 +56,13 @@ async function main() {
     await applyIndexSpeedSettings();
   } catch (err: any) {
     console.error("[opensearch] applyIndexSpeedSettings FAILED — searches may be slow:", err?.message ?? err);
+  }
+
+  // Preload FAISS graph segments into native memory so the first real queries are fast.
+  try {
+    await warmupKnnIndex();
+  } catch (err: any) {
+    console.warn("[opensearch] warmupKnnIndex FAILED (non-fatal):", err?.message ?? err);
   }
 
   // Start the job scheduler (registers recurring jobs in Redis)

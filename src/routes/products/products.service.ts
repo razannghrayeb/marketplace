@@ -3323,7 +3323,7 @@ function imageExactCosineRerankEnabled(): boolean {
  * Override with IMAGE_KNN_CONCURRENCY env var (default 2).
  */
 const imageKnnSemaphore = (() => {
-  const max = Math.max(1, Math.min(8, Number(process.env.IMAGE_KNN_CONCURRENCY ?? "2")));
+  const max = Math.max(1, Math.min(8, Number(process.env.IMAGE_KNN_CONCURRENCY ?? "10")));
   let available = max;
   const waiters: Array<() => void> = [];
   return {

@@ -510,6 +510,34 @@ export async function applyIndexSpeedSettings(): Promise<void> {
 }
 
 /**
+ * Preload FAISS graph segments into native memory for all shards of the index.
+ * Without this, the first kNN queries after a restart pay the disk-read cost
+ * for each FAISS segment file — making early searches 5-20x slower.
+ *
+ * Uses the OpenSearch kNN warmup API: GET /_plugins/_knn/warmup/<index>
+ * Safe to call on a live index — read-only operation.
+ */
+export async function warmupKnnIndex(): Promise<void> {
+  const index = config.opensearch.index;
+  try {
+    const resp = await (osClient.transport as any).request({
+      method: "GET",
+      path: `/_plugins/_knn/warmup/${encodeURIComponent(index)}`,
+    });
+    const shards = resp?.body?._shards;
+    console.log(
+      `[opensearch] kNN warmup complete for ${index}:`,
+      shards
+        ? `total=${shards.total} successful=${shards.successful} failed=${shards.failed}`
+        : "ok",
+    );
+  } catch (err: any) {
+    // Non-fatal: warmup API may not be available on all managed clusters.
+    console.warn(`[opensearch] kNN warmup failed (non-fatal, queries may be slow initially):`, err?.message ?? err);
+  }
+}
+
+/**
  * Delete and recreate the index (use with caution)
  */
 export async function recreateIndex(): Promise<void> {
