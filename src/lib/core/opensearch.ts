@@ -434,38 +434,71 @@ export async function ensureIndex() {
  */
 export async function applyIndexSpeedSettings(): Promise<void> {
   const index = config.opensearch.index;
+  const expected = "64";
+
+  const readCurrentEfSearch = async (): Promise<string | undefined> => {
+    const settingsResp = await osClient.indices.getSettings({
+      index,
+      include_defaults: true as any,
+    });
+    return readEfSearchFromSettingsPayload(settingsResp.body?.[index]);
+  };
 
   try {
-    const before = await osClient.indices.getSettings({ index });
-    const cur = readEfSearchFromSettingsPayload(before.body?.[index]);
+    const cur = await readCurrentEfSearch();
     console.log(`[opensearch] ef_search on ${index} before apply: ${cur ?? "unknown"}`);
   } catch {
     // non-fatal read — proceed with write
   }
 
-  await osClient.indices.putSettings({
-    index,
-    body: {
-      index: {
-        "knn.algo_param.ef_search": 64,
-      },
+  const applyAttempts: Array<{ label: string; body: Record<string, unknown> }> = [
+    // Preferred index-settings shape.
+    {
+      label: "nested-index",
+      body: { index: { "knn.algo_param.ef_search": 64 } },
     },
-  });
+    // Some managed clusters only honor flattened keys.
+    {
+      label: "flat-index-key",
+      body: { "index.knn.algo_param.ef_search": 64 },
+    },
+    // Some variants expose `knn.algo_param` object.
+    {
+      label: "flat-object-key",
+      body: { "index.knn.algo_param": { ef_search: 64 } },
+    },
+  ];
+
+  let applied: string | undefined;
+  for (const attempt of applyAttempts) {
+    try {
+      await osClient.indices.putSettings({
+        index,
+        body: attempt.body as any,
+      });
+      applied = await readCurrentEfSearch();
+      if (String(applied) === expected) {
+        if (process.env.NODE_ENV !== "production") {
+          console.log(`[opensearch] ef_search apply mode: ${attempt.label}`);
+        }
+        break;
+      }
+    } catch {
+      // Try the next write shape.
+    }
+  }
 
   try {
-    const after = await osClient.indices.getSettings({
-      index,
-      include_defaults: true as any,
-    });
+    const after = await osClient.indices.getSettings({ index, include_defaults: true as any });
     const indexPayload = after.body?.[index];
-    const applied = readEfSearchFromSettingsPayload(indexPayload);
+    applied = applied ?? readEfSearchFromSettingsPayload(indexPayload);
     console.log(`[opensearch] ef_search on ${index} after apply: ${applied ?? "unknown — verify manually"}`);
-    if (String(applied) !== "64") {
+    if (String(applied) !== expected) {
       const settingsIndexKeys = Object.keys(indexPayload?.settings?.index ?? {});
       const settingsKeys = Object.keys(indexPayload?.settings ?? {});
       const defaultsIndexKeys = Object.keys(indexPayload?.defaults?.index ?? {});
       const defaultsKeys = Object.keys(indexPayload?.defaults ?? {});
-      console.warn(`[opensearch] WARNING: ef_search may not have applied — got ${applied}, expected 64`);
+      console.warn(`[opensearch] WARNING: ef_search may not have applied — got ${applied}, expected ${expected}`);
       console.warn(
         `[opensearch] debug setting keys`,
         JSON.stringify({ settingsIndexKeys, settingsKeys, defaultsIndexKeys, defaultsKeys })
