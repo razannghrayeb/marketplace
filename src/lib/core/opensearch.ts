@@ -48,7 +48,20 @@ function readEfSearchFromIndexSettings(indexSettings: any): string | undefined {
   return (
     indexSettings?.knn?.algo_param?.ef_search ??
     indexSettings?.["knn.algo_param.ef_search"] ??
-    indexSettings?.["index.knn.algo_param.ef_search"]
+    indexSettings?.["index.knn.algo_param.ef_search"] ??
+    indexSettings?.index?.knn?.algo_param?.ef_search ??
+    indexSettings?.index?.["knn.algo_param.ef_search"] ??
+    indexSettings?.index?.["index.knn.algo_param.ef_search"]
+  );
+}
+
+function readEfSearchFromSettingsPayload(indexPayload: any): string | undefined {
+  if (!indexPayload) return undefined;
+  return (
+    readEfSearchFromIndexSettings(indexPayload?.settings?.index) ??
+    readEfSearchFromIndexSettings(indexPayload?.settings) ??
+    readEfSearchFromIndexSettings(indexPayload?.defaults?.index) ??
+    readEfSearchFromIndexSettings(indexPayload?.defaults)
   );
 }
 
@@ -420,9 +433,7 @@ export async function applyIndexSpeedSettings(): Promise<void> {
 
   try {
     const before = await osClient.indices.getSettings({ index });
-    const idxSettings = before.body?.[index]?.settings?.index ?? {};
-    // OpenSearch may return settings as flat dot-notation keys or nested objects.
-    const cur = readEfSearchFromIndexSettings(idxSettings);
+    const cur = readEfSearchFromSettingsPayload(before.body?.[index]);
     console.log(`[opensearch] ef_search on ${index} before apply: ${cur ?? "unknown"}`);
   } catch {
     // non-fatal read — proceed with write
@@ -442,11 +453,19 @@ export async function applyIndexSpeedSettings(): Promise<void> {
       index,
       include_defaults: true as any,
     });
-    const afterIdxSettings = after.body?.[index]?.settings?.index ?? {};
-    const applied = readEfSearchFromIndexSettings(afterIdxSettings);
+    const indexPayload = after.body?.[index];
+    const applied = readEfSearchFromSettingsPayload(indexPayload);
     console.log(`[opensearch] ef_search on ${index} after apply: ${applied ?? "unknown — verify manually"}`);
     if (String(applied) !== "64") {
+      const settingsIndexKeys = Object.keys(indexPayload?.settings?.index ?? {});
+      const settingsKeys = Object.keys(indexPayload?.settings ?? {});
+      const defaultsIndexKeys = Object.keys(indexPayload?.defaults?.index ?? {});
+      const defaultsKeys = Object.keys(indexPayload?.defaults ?? {});
       console.warn(`[opensearch] WARNING: ef_search may not have applied — got ${applied}, expected 64`);
+      console.warn(
+        `[opensearch] debug setting keys`,
+        JSON.stringify({ settingsIndexKeys, settingsKeys, defaultsIndexKeys, defaultsKeys })
+      );
     }
   } catch {
     console.warn(`[opensearch] Could not verify ef_search was applied to ${index}`);
