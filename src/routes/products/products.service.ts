@@ -1901,8 +1901,9 @@ function imageKnnNumCandidatesDetection(k: number): number {
     }
   }
   // For FAISS HNSW, num_candidates maps directly to efSearch (not ef_search in query body).
-  // Keep it close to k so FAISS traverses only ~64 nodes instead of the default ~512+.
-  return Math.max(k, 64);
+  // Must be >= 200 so that after category filter selectivity (~15-30%), enough results survive
+  // the post-filter to exceed sparseKnnMinHits and avoid fallback retry searches.
+  return Math.max(k, 200);
 }
 
 function mergeKnnHitsByProductId(primary: any[], extra: any[], cap: number): any[] {
