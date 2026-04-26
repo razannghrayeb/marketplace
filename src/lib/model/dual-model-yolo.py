@@ -45,7 +45,7 @@ for pkg, imp in [("ultralytics","ultralytics"),
     except ImportError: _pip(pkg)
 
 # ── imports ───────────────────────────────────────────────────────────────────
-import os, io, warnings, tempfile, urllib.request
+import os, io, warnings, tempfile, urllib.request, logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -58,6 +58,16 @@ from PIL import Image, ImageDraw, ImageFont
 from ultralytics import YOLO
 from huggingface_hub import hf_hub_download
 from transformers import pipeline as hf_pipeline
+
+
+class _SuppressSequentialPipelineGpuWarning(logging.Filter):
+    """Hide the known Transformers pipeline sequential-on-GPU advisory."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return "using the pipelines sequentially on GPU" not in msg
+
+
+logging.getLogger("transformers.pipelines.base").addFilter(_SuppressSequentialPipelineGpuWarning())
 
 _CUDA_AVAILABLE = torch.cuda.is_available()
 _DEVICE_ID = 0 if _CUDA_AVAILABLE else -1
