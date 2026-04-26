@@ -135,11 +135,12 @@ RUN set -eux; \
   python3 -m venv /app/yolo/venv && \
   /app/yolo/venv/bin/pip install --no-cache-dir --upgrade pip && \
   if [ "$YOLO_TORCH_VARIANT" = "gpu" ]; then \
-  /app/yolo/venv/bin/pip install --no-cache-dir torch torchvision; \
+  /app/yolo/venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu124 torch torchvision; \
   else \
   /app/yolo/venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchvision; \
   fi && \
   /app/yolo/venv/bin/pip install --no-cache-dir -r /app/yolo/requirements-extras.txt && \
+  /app/yolo/venv/bin/python3 -c "import torch; print('YOLO torch build:', torch.__version__, 'cuda=', torch.version.cuda, 'cuda_available=', torch.cuda.is_available())" && \
   \
   # Pre-download YOLO detector weights during the image build so deploys don't
   # pay the cold-start download cost on every revision.
