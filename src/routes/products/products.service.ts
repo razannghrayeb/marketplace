@@ -5128,9 +5128,9 @@ export async function searchByImageWithSimilarity(
   const colorIntentStrengthForFinal = hasExplicitColorIntent
     ? 1
     : hasInferredColorSignal
-      ? 0.82
+      ? 0.92
       : hasCropColorSignal
-        ? 0.42
+        ? 0.55
         : 0;
 
   const nearIdenticalRawMin = imageSearchNearIdenticalRawCosineMin();
@@ -5539,9 +5539,9 @@ export async function searchByImageWithSimilarity(
       colorWeightScale: hasExplicitColorIntent
         ? 1
         : hasInferredColorSignal
-          ? 0.85
+          ? 1.0
           : hasCropColorSignal
-            ? 0.55
+            ? 0.70
             : 0.35,
       colorIntentStrength: colorIntentStrengthForFinal,
       mergedCategoryForRelevance,

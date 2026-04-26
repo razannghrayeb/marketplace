@@ -51,20 +51,25 @@ export function inferColorFromCaption(caption: string): {
     if (!x) return null;
     if (x === "navy" || x === "dark-blue" || x === "dark blue" || x === "midnight-blue" || x === "midnight blue")
       return "navy";
-    if (x === "blue" || x === "denim") return "blue";
+    if (x === "blue" || x === "denim" || x === "cobalt" || x === "indigo" || x === "sapphire") return "blue";
     if (x === "black") return "black";
-    if (x === "grey" || x === "gray") return "gray";
+    if (x === "charcoal") return "charcoal";
+    if (x === "grey" || x === "gray" || x === "silver") return "gray";
     if (x === "white" || x === "ivory" || x === "cream" || x === "off-white" || x === "off white") return "off-white";
-    if (x === "beige" || x === "tan" || x === "camel" || x === "brown") return x === "beige" ? "beige" : "tan";
-    if (x === "green" || x === "olive") return "green";
-    if (x === "red" || x === "burgundy") return "red";
-    if (x === "pink") return "pink";
-    if (x === "yellow" || x === "gold") return "yellow";
+    if (x === "beige" || x === "tan" || x === "camel" || x === "taupe" || x === "khaki") return x === "beige" ? "beige" : "tan";
+    if (x === "brown" || x === "chocolate" || x === "mocha" || x === "caramel" || x === "cognac") return "brown";
+    if (x === "green" || x === "olive" || x === "sage" || x === "mint" || x === "emerald" || x === "forest" || x === "moss") return "green";
+    if (x === "red" || x === "burgundy" || x === "maroon" || x === "wine" || x === "crimson") return "red";
+    if (x === "pink" || x === "blush" || x === "fuchsia" || x === "magenta" || x === "rose" || x === "salmon" || x === "dusty pink") return "pink";
+    if (x === "purple" || x === "violet" || x === "lavender" || x === "lilac" || x === "plum" || x === "mauve") return "purple";
+    if (x === "yellow" || x === "gold" || x === "mustard" || x === "lemon" || x === "canary") return "yellow";
+    if (x === "orange" || x === "coral" || x === "rust" || x === "terracotta" || x === "peach" || x === "amber") return "orange";
+    if (x === "teal" || x === "turquoise" || x === "aqua" || x === "cyan" || x === "peacock") return "teal";
     return null;
   };
 
   const colorTokens =
-    "black|navy|blue|denim|grey|gray|white|ivory|cream|off[- ]white|beige|tan|camel|brown|green|olive|red|burgundy|pink|yellow|gold";
+    "black|charcoal|navy|blue|denim|cobalt|indigo|grey|gray|white|ivory|cream|off[- ]white|beige|tan|camel|taupe|khaki|brown|chocolate|mocha|green|olive|sage|mint|emerald|red|burgundy|maroon|wine|crimson|pink|blush|fuchsia|magenta|rose|salmon|purple|violet|lavender|lilac|plum|mauve|yellow|gold|mustard|lemon|orange|coral|rust|terracotta|peach|amber|teal|turquoise|aqua|silver";
 
   // Helper: find the color token with the SHORTEST gap before a target garment keyword.
   // Using .match() finds the leftmost color, which is wrong when a different garment type
@@ -105,7 +110,7 @@ export function inferColorFromCaption(caption: string): {
 
   // Garment color for dresses, outerwear, skirts: use nearest-color approach.
   // "sweater" is now in topGarments so this slot covers dresses/skirts/outerwear specifically.
-  const garmentGarments = "dress|dresses|skirt|skirts|jacket|coat|blazer|gown|romper|jumpsuit";
+  const garmentGarments = "dress|dresses|skirt|skirts|jacket|coat|blazer|gown|romper|jumpsuit|vest|gilet|waistcoat";
   const garmentColor = nearestColorBefore(s, garmentGarments);
 
   return { topColor, jeansColor, garmentColor };
