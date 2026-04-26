@@ -1003,8 +1003,8 @@ function imageDetectionRerankCandidateCap(): number {
 function imageDetectionKnnPoolCap(): number {
   // For FAISS HNSW, FAISS traversal depth is controlled by num_candidates, NOT by k.
   // k only determines how many results come back — keep it wide enough for quality reranking.
-  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "200");
-  if (!Number.isFinite(raw)) return 200;
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "130");
+  if (!Number.isFinite(raw)) return 130;
   return Math.max(60, Math.min(600, Math.floor(raw)));
 }
 
@@ -3286,6 +3286,12 @@ function imageKnnTimeoutMs(detectionScoped = false): number {
   return detectionScoped ? 15_000 : 12_000;
 }
 
+function imageKnnMaxConcurrentShardRequests(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_MAX_CONCURRENT_SHARD_REQUESTS ?? "8");
+  if (!Number.isFinite(raw) || raw <= 0) return 8;
+  return Math.max(1, Math.min(32, Math.floor(raw)));
+}
+
 function imageDetectionAudienceFilterEnabled(): boolean {
   const raw = String(process.env.SEARCH_IMAGE_DETECTION_AUDIENCE_FILTER ?? "0").toLowerCase().trim();
   return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
@@ -3355,6 +3361,14 @@ async function opensearchImageKnnHits(
   const boolQ = (bodyToSend as any)?.query?.bool;
   const knnObj = boolQ?.must?.knn;
   const knnField = knnObj ? Object.keys(knnObj)[0] : undefined;
+  const maxConcurrentShardRequests = imageKnnMaxConcurrentShardRequests();
+  const requestBody = {
+    ...(bodyToSend as any),
+    // kNN retrieval does not need exact hit counts; avoid extra shard work.
+    track_total_hits: false,
+    // Use _source allowlist only; do not fetch stored fields payload.
+    stored_fields: [],
+  };
   const queryVectorRaw = knnField ? knnObj?.[knnField]?.vector : undefined;
   const queryVector =
     Array.isArray(queryVectorRaw)
@@ -3384,7 +3398,9 @@ async function opensearchImageKnnHits(
     const r = await osClient.search(
       {
         index: config.opensearch.index,
-        body: bodyToSend as any,
+        body: requestBody as any,
+        max_concurrent_shard_requests: maxConcurrentShardRequests,
+        pre_filter_shard_size: 1,
         timeout: `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`,
       },
       {
@@ -3421,13 +3437,19 @@ async function opensearchImageKnnHits(
       if (unknownNumCandidates) {
         imageKnnNumCandidatesSupported = false;
       }
-      const retryBody = stripEfSearchFromKnnBody(bodyToSend);
+      const retryBody = {
+        ...stripEfSearchFromKnnBody(bodyToSend),
+        track_total_hits: false,
+        stored_fields: [],
+      };
 
       try {
         const r = await osClient.search(
           {
             index: config.opensearch.index,
             body: retryBody as any,
+            max_concurrent_shard_requests: maxConcurrentShardRequests,
+            pre_filter_shard_size: 1,
             timeout: `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`,
           },
           {
@@ -3470,7 +3492,9 @@ async function opensearchImageKnnHits(
         const retry = await osClient.search(
           {
             index: config.opensearch.index,
-            body: bodyToSend as any,
+            body: requestBody as any,
+            max_concurrent_shard_requests: maxConcurrentShardRequests,
+            pre_filter_shard_size: 1,
             timeout: `${Math.max(1, Math.ceil(retryTimeoutMs / 1000))}s`,
           },
           {
