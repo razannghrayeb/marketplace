@@ -250,11 +250,18 @@ Notes:
 
 Text and image search embeddings use **ONNX Runtime** in `src/lib/image/clip.ts`. By default the server uses **CPU** only. On a **GPU** machine or **[Cloud Run with GPU](https://cloud.google.com/run/docs/configuring/services/gpu)** (where available in your region), you can enable CUDA:
 
-1. Deploy a revision with **GPU** attached (NVIDIA L4, etc.) and a **CUDA-capable** ONNX Runtime stack. The stock `onnxruntime-node` wheel on Linux is often **CPU-only**; for production GPU you may need a custom base image or build that ships **`onnxruntime-gpu`**-compatible native libraries — validate in a staging revision first.
+1. Deploy a revision with **GPU** attached (NVIDIA L4, etc.) and a **CUDA-capable** ONNX Runtime stack. The stock `onnxruntime-node` package can still run CPU-only depending on runtime libraries; for production GPU you may need a custom base image or build that ships CUDA-compatible ONNX runtime native libraries — validate in a staging revision first.
 2. Set runtime env:
    - **`CLIP_USE_GPU=true`** — tries `cuda` then `cpu`, or  
    - **`CLIP_EXECUTION_PROVIDERS=cuda,cpu`** — explicit order (also supports **`dml,cpu`** on Windows with DirectML).
+   - **`BLIP_USE_GPU=true`** or **`BLIP_EXECUTION_PROVIDERS=cuda,cpu`** — enable CUDA for local ONNX BLIP sessions.
 3. If GPU session creation fails, the code **falls back to CPU** automatically and logs a warning.
+
+For embedded YOLO in the root image, GPU-capable torch wheels are now the default build behavior. You can still force CPU explicitly:
+
+```bash
+docker build --build-arg YOLO_TORCH_VARIANT=cpu -t "$IMAGE" .
+```
 
 **Concurrency:** Try-on, search, and other API routes are independent HTTP requests; the storefront **React Query** client runs multiple queries in parallel. Try-on state is kept in a **global provider** so polling continues while users navigate (see marketplace `TryOnProvider`).
 

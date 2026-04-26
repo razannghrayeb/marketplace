@@ -24,7 +24,7 @@ const MODEL_DIR = path.join(process.cwd(), "models");
  * - `CLIP_EXECUTION_PROVIDERS=cuda,cpu` — try CUDA first (Linux GPU / Cloud Run GPU), then CPU.
  * - `CLIP_EXECUTION_PROVIDERS=dml,cpu` — DirectML on Windows with GPU.
  * - `CLIP_USE_GPU=true` — shorthand for `cuda,cpu`.
- * - Default: `cpu` (safe for Cloud Run without GPU).
+ * - Default: `cuda,cpu` (GPU-first with CPU fallback).
  *
  * Requires a GPU-capable onnxruntime build where deployed; otherwise creation falls back to CPU.
  */
@@ -34,10 +34,10 @@ export function getClipExecutionProviders(): string[] {
     return raw.split(",").map((s) => s.trim()).filter(Boolean);
   }
   const gpu = process.env.CLIP_USE_GPU?.trim().toLowerCase();
-  if (gpu === "true" || gpu === "1" || gpu === "yes") {
-    return ["cuda", "cpu"];
+  if (gpu === "false" || gpu === "0" || gpu === "no") {
+    return ["cpu"];
   }
-  return ["cpu"];
+  return ["cuda", "cpu"];
 }
 
 let resolvedClipProviders: string[] = ["cpu"];

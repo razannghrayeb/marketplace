@@ -65,6 +65,10 @@ FROM node:20-bookworm-slim AS production
 
 # 1 = install PyTorch + YOLO venv in this image (~1.5GB+). 0 = slim API image; set YOLO_API_URL to external detector.
 ARG EMBEDDED_YOLO=1
+# Torch wheel source for embedded YOLO:
+# - gpu (default): installs default PyPI wheels (CUDA-enabled on Linux).
+# - cpu: smaller image, no CUDA.
+ARG YOLO_TORCH_VARIANT=gpu
 
 WORKDIR /app
 
@@ -114,14 +118,16 @@ COPY src/lib/model/yolov8_api.py \
   /app/yolo/
 COPY src/lib/model/requirements-yolo-extras.txt /app/yolo/requirements-extras.txt
 
-# CPU torch wheels from PyTorch index (smaller + faster than default CUDA-capable PyPI wheels)
+# GPU torch wheels by default; set YOLO_TORCH_VARIANT=cpu to force CPU build.
 RUN set -eux; \
   if [ "$EMBEDDED_YOLO" = "1" ]; then \
   python3 -m venv /app/yolo/venv && \
   /app/yolo/venv/bin/pip install --no-cache-dir --upgrade pip && \
-  /app/yolo/venv/bin/pip install --no-cache-dir \
-  --index-url https://download.pytorch.org/whl/cpu \
-  torch torchvision && \
+  if [ "$YOLO_TORCH_VARIANT" = "gpu" ]; then \
+  /app/yolo/venv/bin/pip install --no-cache-dir torch torchvision; \
+  else \
+  /app/yolo/venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchvision; \
+  fi && \
   /app/yolo/venv/bin/pip install --no-cache-dir -r /app/yolo/requirements-extras.txt && \
   \
   # Pre-download YOLO detector weights during the image build so deploys don't
