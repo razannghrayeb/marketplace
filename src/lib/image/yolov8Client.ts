@@ -68,6 +68,10 @@ export interface HealthResponse {
   ok: boolean;
   model_path: string;
   model_loaded: boolean;
+  runtime_device?: string;
+  cuda_available?: boolean;
+  cuda_device_name?: string;
+  cuda_device_count?: number;
   num_classes: number;
   class_names: string[];
   config: {
@@ -181,6 +185,7 @@ export class YOLOv8Client {
   /** Batch / reload long operations */
   private timeout: number;
   private detectTimeoutMs: number;
+  private runtimeLogged = false;
   private readonly circuit = new YoloCircuitBreaker();
 
   constructor(baseUrl?: string, timeout?: number) {
@@ -215,6 +220,15 @@ export class YOLOv8Client {
         }
         console.warn(
           `[YOLOv8] service unhealthy at ${this.baseUrl}: ok=${health?.ok} model_loaded=${health?.model_loaded}`
+        );
+      }
+      if (!this.runtimeLogged) {
+        this.runtimeLogged = true;
+        const runtimeDevice = health.runtime_device || "unknown";
+        const cuda = typeof health.cuda_available === "boolean" ? String(health.cuda_available) : "unknown";
+        const cudaName = health.cuda_device_name || "n/a";
+        console.info(
+          `[YOLOv8] runtime device=${runtimeDevice} cuda_available=${cuda} cuda_device=${cudaName}`
         );
       }
       return {

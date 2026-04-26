@@ -34,7 +34,11 @@ import {
   getQueryEmbedding,
   type QueryAST,
 } from "../../lib/queryProcessor";
-import { expandColorTermsForFilter, normalizeColorToken } from "../../lib/color/queryColorFilter";
+import {
+  expandColorTermsForFilter,
+  normalizeColorToken,
+  normalizeColorTokensFromRaw,
+} from "../../lib/color/queryColorFilter";
 import {
   COLOR_FAMILY_GROUPS,
   coarseColorBucket,
@@ -1924,9 +1928,10 @@ function mergeKnnHitsByProductId(primary: any[], extra: any[], cap: number): any
     .slice(0, Math.max(1, cap));
 }
 
-function knnQueryInner(vector: number[], k: number, ef: number, numCandidatesOverride?: number): Record<string, unknown> {
+// numCandidatesOverride=null → omit num_candidates entirely (let ef_search control traversal)
+function knnQueryInner(vector: number[], k: number, ef: number, numCandidatesOverride?: number | null): Record<string, unknown> {
   const inner: Record<string, unknown> = { vector, k };
-  if (imageKnnNumCandidatesSupported !== false) {
+  if (numCandidatesOverride !== null && imageKnnNumCandidatesSupported !== false) {
     inner.num_candidates = numCandidatesOverride !== undefined
       ? numCandidatesOverride
       : imageKnnNumCandidates(k);
@@ -2303,28 +2308,7 @@ function docColorPaletteForHit(hit: { _source?: Record<string, unknown> }): stri
 }
 
 function extractCanonicalColorTokensFromRawColor(raw: string | null | undefined): string[] {
-  if (!raw) return [];
-  const value = String(raw).toLowerCase().trim();
-  if (!value) return [];
-
-  const tokens: string[] = [];
-  const add = (v: string) => {
-    const x = normalizeColorToken(v) ?? v.trim().toLowerCase();
-    if (x && !tokens.includes(x)) tokens.push(x);
-  };
-
-  // Preserve whole phrase first (e.g. "mid wash denim" -> blue).
-  add(value);
-
-  // Then split merchant composite formats like "white/black", "red & black", "blue, white".
-  const parts = value
-    .replace(/\band\b/g, ",")
-    .split(/[\/,&+|,]/g)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  for (const p of parts) add(p);
-
-  return tokens;
+  return normalizeColorTokensFromRaw(raw);
 }
 
 function hasChildAudienceSignals(src: Record<string, unknown>): boolean {
@@ -4001,10 +3985,10 @@ export async function searchByImageWithSimilarity(
   const ef = imageKnnEfSearch();
   const knnTimeoutMs = imageKnnTimeoutMs(detectionScoped);
 
-  // Do NOT send num_candidates for detection searches: OpenSearch FAISS HNSW treats
-  // num_candidates as efSearch, overriding the per-query ef_search=64 setting.
-  // Omitting it lets ef_search=64 control traversal depth (max(k=60, ef=64) = 64 steps).
-  const detectionNumCandidates = undefined;
+  // Pass null to knnQueryInner to suppress num_candidates entirely for detection searches.
+  // FAISS HNSW treats num_candidates as efSearch; sending it overrides ef_search=64.
+  // With null: only ef_search=64 is sent → traversal = max(k=60, 64) = 64 steps.
+  const detectionNumCandidates = detectionScoped ? null : undefined;
 
   // When true: for tops/bottoms, run garment kNN first and only fire global embedding
   // fallback if garment recall is below floor — halves OpenSearch load on the happy path.
@@ -5960,6 +5944,19 @@ export async function searchByImageWithSimilarity(
     if (t === "none") return 0;
     return 1;
   };
+  const desiredColorSetForSort = new Set(
+    (desiredColorsForRelevance ?? []).map((c) => String(c ?? "").toLowerCase().trim()).filter(Boolean),
+  );
+  const exactCatalogColorIntentMatchForSort = (hit: any): number => {
+    if (desiredColorSetForSort.size === 0) return 0;
+    const rawColor = typeof hit?._source?.color === "string" ? hit._source.color : "";
+    const tokens = extractCanonicalColorTokensFromRawColor(rawColor);
+    for (const t of tokens) {
+      const color = String(t ?? "").toLowerCase().trim();
+      if (color && desiredColorSetForSort.has(color)) return 1;
+    }
+    return 0;
+  };
 
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
@@ -6002,6 +5999,12 @@ export async function searchByImageWithSimilarity(
       if (Math.abs(cb - ca) >= minColorDelta) return cb - ca;
     }
     if (Math.abs(fb - fa) > 1e-6) return fb - fa;
+    if ((hasExplicitColorIntent || hasInferredColorSignal) && Math.abs(fb - fa) <= 1e-6) {
+      // Tie-break boost: exact catalog color match to desired color wins when relevance ties.
+      const ea = exactCatalogColorIntentMatchForSort(a);
+      const eb = exactCatalogColorIntentMatchForSort(b);
+      if (eb !== ea) return eb - ea;
+    }
     if (hasExplicitColorIntent || hasInferredColorSignal) {
       const ca = complianceById.get(ida)?.colorCompliance ?? 0;
       const cb = complianceById.get(idb)?.colorCompliance ?? 0;
@@ -6197,6 +6200,9 @@ export async function searchByImageWithSimilarity(
           const hasShirtCue = /\b(shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|button\s*down|button-down|top|tops)\b/.test(
             srcBlob,
           );
+          const hasLayeredOuterwearCue = /\b(shirt\s*[- ]\s*jacket|shacket|overshirt|overshirts)\b/.test(srcBlob);
+          // "shirt jacket" style items should not outrank true shirts when intent is shirt-only.
+          if (hasLayeredOuterwearCue) return false;
           if (hasOuterwearCue && !hasShirtCue) return false;
         }
       }
@@ -6872,9 +6878,6 @@ export async function searchByImageWithSimilarity(
         category === "shoes" ||
         ((category === "bags") &&
           hasStrongDetectionScopedColor &&
-          desiredColorsForRelevance.length === 1) ||
-        (category === "outerwear" &&
-          hasStrongDetectionScopedColor &&
           desiredColorsForRelevance.length === 1);
       if (whiteIntentForBottoms) {
         const whiteLikeBottomHits = inferredColorCompliantHits.filter((h: any) => {
@@ -6903,18 +6906,15 @@ export async function searchByImageWithSimilarity(
         } else {
           rankedHits = inferredColorCompliantHits;
         }
-      } else if (
-        category === "outerwear" &&
-        hasStrongDetectionScopedColor &&
-        inferredColorCompliantHits.length === 0
-      ) {
-        // Strong bottoms/outerwear color signal should still prune obvious mismatches
-        // instead of keeping a fully unconstrained color tail.
+      } else if (category === "outerwear" && hasStrongDetectionScopedColor) {
+        // Outerwear color extraction is noisy (material/lighting/shadows), so keep recall-first.
+        // Only trim obvious color tails when we still preserve a usable candidate pool.
         const softColorSafeHits = rankedHits.filter(
           (h: any) =>
-            (complianceById.get(String(h._source.product_id))?.colorCompliance ?? 0) >= 0.12,
+            (complianceById.get(String(h._source.product_id))?.colorCompliance ?? 0) >= 0.08,
         );
-        if (softColorSafeHits.length > 0) {
+        const minOuterwearKeep = rankedHits.length >= 10 ? 4 : rankedHits.length >= 6 ? 3 : 2;
+        if (softColorSafeHits.length >= minOuterwearKeep) {
           rankedHits = softColorSafeHits;
         }
       } else if (inferredColorCompliantHits.length >= minKeep) {

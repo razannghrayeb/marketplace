@@ -411,7 +411,10 @@ export async function applyIndexSpeedSettings(): Promise<void> {
 
   try {
     const before = await osClient.indices.getSettings({ index });
-    const cur = before.body?.[index]?.settings?.index?.knn?.algo_param?.ef_search;
+    const idxSettings = before.body?.[index]?.settings?.index ?? {};
+    // OpenSearch may return settings as flat dot-notation keys or nested objects
+    const cur = idxSettings?.knn?.algo_param?.ef_search
+      ?? idxSettings?.["knn.algo_param.ef_search"];
     console.log(`[opensearch] ef_search on ${index} before apply: ${cur ?? "unknown"}`);
   } catch {
     // non-fatal read — proceed with write
@@ -424,7 +427,9 @@ export async function applyIndexSpeedSettings(): Promise<void> {
 
   try {
     const after = await osClient.indices.getSettings({ index });
-    const applied = after.body?.[index]?.settings?.index?.knn?.algo_param?.ef_search;
+    const afterIdxSettings = after.body?.[index]?.settings?.index ?? {};
+    const applied = afterIdxSettings?.knn?.algo_param?.ef_search
+      ?? afterIdxSettings?.["knn.algo_param.ef_search"];
     console.log(`[opensearch] ef_search on ${index} after apply: ${applied ?? "unknown — verify manually"}`);
     if (String(applied) !== "64") {
       console.warn(`[opensearch] WARNING: ef_search may not have applied — got ${applied}, expected 64`);
