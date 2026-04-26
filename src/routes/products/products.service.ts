@@ -997,11 +997,11 @@ function imageDetectionRerankCandidateCap(): number {
  * calls while keeping a broader default pool for non-detection image searches.
  */
 function imageDetectionKnnPoolCap(): number {
-  // Raise default detection kNN pool to improve first-stage recall.
-  // Keep bounded to avoid unbounded latency growth.
-  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "560");
-  if (!Number.isFinite(raw)) return 560;
-  return Math.max(200, Math.min(900, Math.floor(raw)));
+  // FAISS HNSW: effective_ef = max(k, ef_search). Keeping k below ef_search (64)
+  // is the only way to actually reduce traversal depth and cut latency.
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "60");
+  if (!Number.isFinite(raw)) return 60;
+  return Math.max(40, Math.min(300, Math.floor(raw)));
 }
 
 function imageCategoryAwareMinResultsPolicy(params: {
@@ -1861,12 +1861,12 @@ function imageKnnEfSearch(): number {
   if (imageKnnEfSearchSupported === false) return 0;
   const rawEnv = process.env.SEARCH_IMAGE_EF_SEARCH;
   if (rawEnv === undefined || String(rawEnv).trim() === "") {
-    return 128;
+    return 64;
   }
   const raw = Number(rawEnv);
   if (Number.isFinite(raw) && raw === 0) return 0;
-  if (Number.isFinite(raw) && raw > 0) return Math.max(64, Math.min(512, Math.floor(raw)));
-  return 128;
+  if (Number.isFinite(raw) && raw > 0) return Math.max(32, Math.min(512, Math.floor(raw)));
+  return 64;
 }
 
 function imageKnnNumCandidates(k: number): number {
@@ -3870,60 +3870,14 @@ export async function searchByImageWithSimilarity(
 
   /** kNN size — wider when SEARCH_IMAGE_MERCHANDISE_SIMILARITY is on (see imageSearchKnnPoolLimit). */
   const retrievalKBase = imageCategoryAwareKnnPoolLimit(params.detectionProductCategory);
-  const dynamicDetectionPoolCap = Math.max(
-    420,
-    Math.min(imageDetectionKnnPoolCap(), Math.max(limit * 10, 420)),
+  // Detection pool cap: must be < ef_search so FAISS doesn't auto-bump traversal depth.
+  // ef_search=64, so k must stay below 64 for the setting to take effect.
+  const dynamicDetectionPoolCap = Math.min(
+    imageDetectionKnnPoolCap(),
+    Math.max(limit * 3, 40),
   );
   const retrievalK = detectionScoped
-    ? (() => {
-      const isTopDetection = isTopLikeDetectionCategory(params.detectionProductCategory);
-      const isBottomDetection = isBottomLikeDetectionCategory(params.detectionProductCategory);
-      const isDressDetection = isDressLikeDetectionCategory(params.detectionProductCategory);
-      const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
-      const isFootwearDetection = detectionCategoryNorm === "footwear" || detectionCategoryNorm === "shoes";
-      const isBagLikeDetection = detectionCategoryNorm === "bags" || detectionCategoryNorm === "accessories";
-      const topCapEnv = Number(process.env.SEARCH_IMAGE_TOPS_DETECTION_KNN_POOL_CAP ?? "760");
-      const topCap = Number.isFinite(topCapEnv)
-        ? Math.max(260, Math.min(1200, Math.floor(topCapEnv)))
-        : 760;
-      const dynamicTopCap = Math.max(dynamicDetectionPoolCap, Math.max(420, Math.min(topCap, limit * 12)));
-      if (isTopDetection) {
-        return Math.min(retrievalKBase, dynamicTopCap);
-      }
-      if (isBottomDetection) {
-        const bottomsCapEnv = Number(process.env.SEARCH_IMAGE_BOTTOMS_DETECTION_KNN_POOL_CAP ?? "820");
-        const bottomsCap = Number.isFinite(bottomsCapEnv)
-          ? Math.max(320, Math.min(1300, Math.floor(bottomsCapEnv)))
-          : 820;
-        const dynamicBottomsCap = Math.max(dynamicDetectionPoolCap, Math.max(460, Math.min(bottomsCap, limit * 12)));
-        return Math.min(retrievalKBase, dynamicBottomsCap);
-      }
-      if (isDressDetection) {
-        const dressesCapEnv = Number(process.env.SEARCH_IMAGE_DRESSES_DETECTION_KNN_POOL_CAP ?? "900");
-        const dressesCap = Number.isFinite(dressesCapEnv)
-          ? Math.max(340, Math.min(1400, Math.floor(dressesCapEnv)))
-          : 900;
-        const dynamicDressCap = Math.max(dynamicDetectionPoolCap, Math.max(500, Math.min(dressesCap, limit * 13)));
-        return Math.min(retrievalKBase, dynamicDressCap);
-      }
-      if (isFootwearDetection) {
-        const footwearCapEnv = Number(process.env.SEARCH_IMAGE_FOOTWEAR_DETECTION_KNN_POOL_CAP ?? "760");
-        const footwearCap = Number.isFinite(footwearCapEnv)
-          ? Math.max(300, Math.min(1200, Math.floor(footwearCapEnv)))
-          : 760;
-        const dynamicFootwearCap = Math.max(dynamicDetectionPoolCap, Math.max(440, Math.min(footwearCap, limit * 11)));
-        return Math.min(retrievalKBase, dynamicFootwearCap);
-      }
-      if (isBagLikeDetection) {
-        const bagCapEnv = Number(process.env.SEARCH_IMAGE_BAGS_DETECTION_KNN_POOL_CAP ?? "760");
-        const bagCap = Number.isFinite(bagCapEnv)
-          ? Math.max(280, Math.min(1200, Math.floor(bagCapEnv)))
-          : 760;
-        const dynamicBagCap = Math.max(dynamicDetectionPoolCap, Math.max(420, Math.min(bagCap, limit * 10)));
-        return Math.min(retrievalKBase, dynamicBagCap);
-      }
-      return Math.min(retrievalKBase, dynamicDetectionPoolCap);
-    })()
+    ? Math.min(retrievalKBase, dynamicDetectionPoolCap)
     : retrievalKBase;
 
   let colorQueryEmbedding: number[] | null = null;
