@@ -47,9 +47,13 @@ function readEfSearchFromIndexSettings(indexSettings: any): string | undefined {
   if (!indexSettings) return undefined;
   return (
     indexSettings?.knn?.algo_param?.ef_search ??
+    indexSettings?.["knn.algo_param"]?.ef_search ??
+    indexSettings?.["index.knn.algo_param"]?.ef_search ??
     indexSettings?.["knn.algo_param.ef_search"] ??
     indexSettings?.["index.knn.algo_param.ef_search"] ??
     indexSettings?.index?.knn?.algo_param?.ef_search ??
+    indexSettings?.index?.["knn.algo_param"]?.ef_search ??
+    indexSettings?.index?.["index.knn.algo_param"]?.ef_search ??
     indexSettings?.index?.["knn.algo_param.ef_search"] ??
     indexSettings?.index?.["index.knn.algo_param.ef_search"]
   );
