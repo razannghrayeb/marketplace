@@ -1900,7 +1900,9 @@ function imageKnnNumCandidatesDetection(k: number): number {
       return Math.max(k, Math.min(5000, Math.floor(raw)));
     }
   }
-  return Math.max(k, Math.min(3000, Math.max(k * 2, 500)));
+  // For FAISS HNSW, num_candidates maps directly to efSearch (not ef_search in query body).
+  // Keep it close to k so FAISS traverses only ~64 nodes instead of the default ~512+.
+  return Math.max(k, 64);
 }
 
 function mergeKnnHitsByProductId(primary: any[], extra: any[], cap: number): any[] {
@@ -4021,10 +4023,9 @@ export async function searchByImageWithSimilarity(
   const ef = imageKnnEfSearch();
   const knnTimeoutMs = imageKnnTimeoutMs(detectionScoped);
 
-  // Pass null to knnQueryInner to suppress num_candidates entirely for detection searches.
-  // FAISS HNSW treats num_candidates as efSearch; sending it overrides ef_search=64.
-  // With null: only ef_search=64 is sent → traversal = max(k=60, 64) = 64 steps.
-  const detectionNumCandidates = detectionScoped ? null : undefined;
+  // For FAISS HNSW, num_candidates is the actual efSearch parameter (not ef_search in query body).
+  // Setting it to max(k, 64) limits FAISS traversal to 64 steps instead of the default 512+.
+  const detectionNumCandidates = detectionScoped ? imageKnnNumCandidatesDetection(retrievalK) : undefined;
 
   // When true: for tops/bottoms, run garment kNN first and only fire global embedding
   // fallback if garment recall is below floor — halves OpenSearch load on the happy path.
