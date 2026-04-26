@@ -3315,10 +3315,35 @@ function imageExactCosineRerankEnabled(): boolean {
   return v !== "0" && v !== "false";
 }
 
+/**
+ * Limits concurrent OpenSearch kNN HTTP calls to avoid CPU contention on the cluster.
+ * CLIP/BLIP/query-signal computation all happen BEFORE acquiring this semaphore,
+ * so parallel detection tasks still run their fast GPU work simultaneously.
+ * Only the actual network round-trip to OpenSearch is serialized.
+ * Override with IMAGE_KNN_CONCURRENCY env var (default 2).
+ */
+const imageKnnSemaphore = (() => {
+  const max = Math.max(1, Math.min(8, Number(process.env.IMAGE_KNN_CONCURRENCY ?? "2")));
+  let available = max;
+  const waiters: Array<() => void> = [];
+  return {
+    async acquire(): Promise<void> {
+      if (available > 0) { available--; return; }
+      return new Promise<void>((resolve) => waiters.push(resolve));
+    },
+    release(): void {
+      if (waiters.length > 0) { waiters.shift()!(); }
+      else { available++; }
+    },
+  };
+})();
+
 async function opensearchImageKnnHits(
   body: Record<string, unknown>,
   timeoutMs: number,
 ): Promise<{ hits: any[]; timedOut: boolean }> {
+  // Acquire before the HTTP call — CLIP/BLIP/signal work is done by this point.
+  await imageKnnSemaphore.acquire();
   const startedAt = Date.now();
   // Send query as-is; error handler below strips ef_search/num_candidates on rejection
   // and marks them unsupported for the rest of the server lifetime.
@@ -3480,6 +3505,8 @@ async function opensearchImageKnnHits(
     });
 
     return { hits: [], timedOut: false };
+  } finally {
+    imageKnnSemaphore.release();
   }
 }
 
@@ -3502,6 +3529,9 @@ async function batchOpensearchKnnHits(
     msearchBody.push(q.body);
   }
 
+  // Acquire once for the entire msearch batch — both kNN sub-queries share one slot.
+  await imageKnnSemaphore.acquire();
+  let semaphoreReleased = false;
   try {
     const r = await (osClient as any).msearch(
       { body: msearchBody },
@@ -3510,9 +3540,11 @@ async function batchOpensearchKnnHits(
     const responses: any[] = r.body?.responses ?? [];
 
     // If any sub-response errored (e.g. unsupported ef_search/num_candidates),
-    // fall back to individual calls which have proper per-field error handling.
+    // release before falling back so individual calls can re-acquire normally.
     const hasSubErrors = responses.slice(0, queries.length).some((resp: any) => !resp || resp.error);
     if (hasSubErrors) {
+      imageKnnSemaphore.release();
+      semaphoreReleased = true;
       return Promise.all(queries.map((q) => opensearchImageKnnHits(q.body, q.timeoutMs)));
     }
 
@@ -3523,8 +3555,12 @@ async function batchOpensearchKnnHits(
       return { hits, timedOut };
     });
   } catch {
-    // msearch failed — fall back to parallel individual calls (no semantic change)
+    // msearch failed — release before fallback so individual calls can re-acquire.
+    imageKnnSemaphore.release();
+    semaphoreReleased = true;
     return Promise.all(queries.map((q) => opensearchImageKnnHits(q.body, q.timeoutMs)));
+  } finally {
+    if (!semaphoreReleased) imageKnnSemaphore.release();
   }
 }
 
