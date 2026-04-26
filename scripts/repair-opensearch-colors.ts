@@ -24,6 +24,7 @@
  *   npx tsx scripts/repair-opensearch-colors.ts --limit 100        # Limit to 100
  *   npx tsx scripts/repair-opensearch-colors.ts --dry-run          # No writes
  *   npx tsx scripts/repair-opensearch-colors.ts --category dresses # One category
+ *   npx tsx scripts/repair-opensearch-colors.ts --start-id 8900     # Start from product ID
  */
 
 import "dotenv/config";
@@ -136,10 +137,15 @@ function normalizeColorToCanonical(colorStr: string | null): string | null {
  */
 async function fetchProductColorRows(
   pool: Queryable,
-  opts: { category?: string; limit?: number },
+  opts: { category?: string; limit?: number; startId?: number },
 ): Promise<ProductColorRow[]> {
   const params: Array<string | number> = [];
   const where: string[] = ["color IS NOT NULL", "TRIM(color) <> ''"];
+
+  if (typeof opts.startId === "number" && Number.isFinite(opts.startId)) {
+    params.push(opts.startId);
+    where.push(`id >= $${params.length}`);
+  }
 
   if (opts.category) {
     params.push(opts.category);
@@ -202,6 +208,14 @@ async function repairColors(): Promise<void> {
       ? args[limitArgPos + 1]
       : undefined;
   const limit = limitStr ? parseInt(limitStr, 10) : undefined;
+  const startIdArgEq = args.find((a) => a.startsWith("--start-id="));
+  const startIdArgPos = args.indexOf("--start-id");
+  const startIdStr = startIdArgEq
+    ? startIdArgEq.split("=")[1]
+    : startIdArgPos >= 0
+      ? args[startIdArgPos + 1]
+      : undefined;
+  const startId = startIdStr ? parseInt(startIdStr, 10) : undefined;
   const categoryArgEq = args.find((a) => a.startsWith("--category="));
   const categoryArgPos = args.indexOf("--category");
   const category = categoryArgEq
@@ -224,11 +238,14 @@ async function repairColors(): Promise<void> {
     console.log(`[repair-colors] Starting color repair...`);
     console.log(`[repair-colors] Dry run: ${dryRun}`);
     if (limit) console.log(`[repair-colors] Limit: ${limit}`);
+    if (typeof startId === "number" && Number.isFinite(startId)) {
+      console.log(`[repair-colors] Start ID: ${startId}`);
+    }
     if (category) console.log(`[repair-colors] Category filter: ${category}`);
 
     // Step 1: Fetch product IDs + colors from PostgreSQL
     console.log(`[repair-colors] Fetching product colors from database...`);
-    const productColorRows = await fetchProductColorRows(pool, { category, limit });
+    const productColorRows = await fetchProductColorRows(pool, { category, limit, startId });
     console.log(`[repair-colors] Found ${productColorRows.length} products with color values`);
 
     if (productColorRows.length === 0) {
