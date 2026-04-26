@@ -1001,11 +1001,11 @@ function imageDetectionRerankCandidateCap(): number {
  * calls while keeping a broader default pool for non-detection image searches.
  */
 function imageDetectionKnnPoolCap(): number {
-  // FAISS HNSW: effective_ef = max(k, ef_search). Keeping k below ef_search (64)
-  // is the only way to actually reduce traversal depth and cut latency.
-  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "60");
-  if (!Number.isFinite(raw)) return 60;
-  return Math.max(40, Math.min(300, Math.floor(raw)));
+  // For FAISS HNSW, FAISS traversal depth is controlled by num_candidates, NOT by k.
+  // k only determines how many results come back — keep it wide enough for quality reranking.
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "200");
+  if (!Number.isFinite(raw)) return 200;
+  return Math.max(60, Math.min(600, Math.floor(raw)));
 }
 
 function imageCategoryAwareMinResultsPolicy(params: {
@@ -3893,11 +3893,11 @@ export async function searchByImageWithSimilarity(
 
   /** kNN size — wider when SEARCH_IMAGE_MERCHANDISE_SIMILARITY is on (see imageSearchKnnPoolLimit). */
   const retrievalKBase = imageCategoryAwareKnnPoolLimit(params.detectionProductCategory);
-  // Detection pool cap: must be < ef_search so FAISS doesn't auto-bump traversal depth.
-  // ef_search=64, so k must stay below 64 for the setting to take effect.
+  // Detection pool cap: bounds how many results come back from OpenSearch for reranking.
+  // FAISS traversal depth is set by num_candidates, not by k — raising k is cheap.
   const dynamicDetectionPoolCap = Math.min(
     imageDetectionKnnPoolCap(),
-    Math.max(limit * 3, 40),
+    Math.max(limit * 10, 200),
   );
   const retrievalK = detectionScoped
     ? Math.min(retrievalKBase, dynamicDetectionPoolCap)

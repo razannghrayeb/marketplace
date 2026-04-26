@@ -34,12 +34,12 @@ const upload = multer({
     files: 10, // Max 10 files for batch
   },
   fileFilter: (_req, file, cb) => {
-    const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+    const allowedTypes = ["image/jpeg", "image/png", "image/webp"];
     if (allowedTypes.includes(file.mimetype)) {
       cb(null, true);
     } else {
       cb(
-        new Error("Invalid file type. Only JPEG, PNG, WebP, and GIF are allowed.")
+        new Error("Invalid file type. Only JPEG, PNG, and WebP are allowed.")
       );
     }
   },
@@ -285,8 +285,11 @@ router.post(
         req.query.products_page !== undefined || req.query.products_limit !== undefined;
       const productsLimit = clamp(productsLimitRaw ?? baseLimitPerItem ?? 22, 1, 80);
       const productsOffset = (productsPage - 1) * productsLimit;
+      // Fetch enough items so page N can be sliced from the service results.
+      // Do NOT cap at the UI output limit (80) — that silently drops page 2+ items.
+      // The service enforces its own retrieval cap (~220 by default).
       const fetchLimitPerItem = productsPaginationEnabled
-        ? clamp(productsLimit * productsPage, 1, 80)
+        ? Math.min(productsOffset + productsLimit, 500)
         : baseLimitPerItem ?? undefined;
 
       const detectionsPage = parsePositiveInt(req.query.detections_page) ?? 1;

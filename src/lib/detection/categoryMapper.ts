@@ -58,22 +58,26 @@ export interface NormalizedBox {
 export function inferDressLengthFromBox(box: NormalizedBox | undefined): "maxi" | "midi" | "mini" | undefined {
   if (!box || typeof box.y2 !== 'number') return undefined;
 
-  const boxHeight = Math.max(0, (box.y2 ?? 0) - (box.y1 ?? 0));
-  // Skip length inference when the dress box is small (likely not full-body)
-  // or when the detection covers the entire image (no reliable framing).
+  const y1 = box.y1 ?? 0;
+  const y2 = box.y2;
+  const boxHeight = Math.max(0, y2 - y1);
+
+  // Skip length inference when the dress box is tiny (not a full-body view)
+  // or covers the entire image (no frame of reference).
   if (boxHeight < 0.25 || boxHeight > 0.95) return undefined;
 
-  // Use box-relative proportions instead of assuming fixed waist position:
-  // the bottom 60% of the dress box is hem area.
-  const hemRatio = box.y2;
+  // Portrait / close-crop detection: box starts very near the image top AND
+  // spans most of the image height. In this framing the absolute hem position
+  // (y2) is unreliable — the image may be cropped to the dress itself rather
+  // than showing the full body. Skip inference to avoid mis-classifying a
+  // mini or midi as maxi because y2 is large due to cropping.
+  if (y1 < 0.06 && boxHeight > 0.65) return undefined;
 
-  if (hemRatio > 0.88) {
-    return "maxi";
-  } else if (hemRatio > 0.72) {
-    return "midi";
-  } else if (hemRatio > 0.0) {
-    return "mini";
-  }
+  // Full-body framing: use the absolute hem position as the length signal.
+  const hemRatio = y2;
+  if (hemRatio > 0.88) return "maxi";
+  if (hemRatio > 0.72) return "midi";
+  if (hemRatio > 0.0) return "mini";
 
   return undefined;
 }
