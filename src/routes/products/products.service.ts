@@ -4001,9 +4001,10 @@ export async function searchByImageWithSimilarity(
   const ef = imageKnnEfSearch();
   const knnTimeoutMs = imageKnnTimeoutMs(detectionScoped);
 
-  // For detection-scoped per-crop queries, use a tighter num_candidates to reduce HNSW traversal
-  // depth without hurting recall (downstream fallback paths cover any recall gap).
-  const detectionNumCandidates = detectionScoped ? imageKnnNumCandidatesDetection(retrievalK) : undefined;
+  // Do NOT send num_candidates for detection searches: OpenSearch FAISS HNSW treats
+  // num_candidates as efSearch, overriding the per-query ef_search=64 setting.
+  // Omitting it lets ef_search=64 control traversal depth (max(k=60, ef=64) = 64 steps).
+  const detectionNumCandidates = undefined;
 
   // When true: for tops/bottoms, run garment kNN first and only fire global embedding
   // fallback if garment recall is below floor — halves OpenSearch load on the happy path.
