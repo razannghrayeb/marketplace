@@ -132,6 +132,7 @@ interface ProductRow {
   vendor_id: number;
   title: string;
   description: string | null;
+  color: string | null;
   brand: string | null;
   category: string | null;
   price_cents: number | null;
@@ -624,7 +625,7 @@ async function processProduct(
   enrichMap: Map<number, any>
 ): Promise<ProductResult> {
   const { id, vendor_id, title, description, brand, category,
-          price_cents, availability, last_seen, image_url,
+          color, price_cents, availability, last_seen, image_url,
           is_hidden, canonical_id } = product;
 
   try {
@@ -661,6 +662,7 @@ async function processProduct(
       vendorId: vendor_id,
       title,
       description: description ?? null,
+      catalogColor: color ?? null,
       brand,
       category,
       priceCents: price_cents,
@@ -1082,7 +1084,7 @@ async function main() {
   while (!shuttingDown) {
     // Fetch next page
     const batchRes = await queryWithRetry(
-      `SELECT id, vendor_id, title, description, brand, category,
+            `SELECT id, vendor_id, title, description, color, brand, category,
               price_cents, availability, last_seen, image_url, ${optionalCols}
        FROM products
        WHERE image_url IS NOT NULL

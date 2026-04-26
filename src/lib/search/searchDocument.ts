@@ -234,7 +234,8 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
         : [],
   );
   const catalogColorHint = toLowerTrim(input.catalogColor ?? null);
-  if (normalizedTitleColors.length === 0 && catalogColorHint) {
+  const normalizedCatalogColors = catalogColorHint ? normalizeArray([catalogColorHint]) : [];
+  if (normalizedTitleColors.length === 0 && normalizedCatalogColors.length > 0) {
     normalizedTitleColors = normalizeArray([catalogColorHint]);
   }
   const colorConfidenceText =
@@ -245,18 +246,25 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
       ? Math.min(0.92, 0.58 + 0.12 * normalizedDetectedColors.length)
       : 0;
 
-  // Merge title + image for backward-compatible `attr_colors` / BM25 / legacy filters.
+  // Merge catalog + title + image for backward-compatible `attr_colors` / BM25 / legacy filters.
   const normalizedColors: string[] = [];
-  for (const c of [...normalizedTitleColors, ...normalizedDetectedColors]) {
+  for (const c of [...normalizedCatalogColors, ...normalizedTitleColors, ...normalizedDetectedColors]) {
     if (!normalizedColors.includes(c)) normalizedColors.push(c);
   }
 
   const attrColorPrimary =
-    normalizedDetectedColors.length > 0
-      ? normalizedDetectedColors[0]
-      : normalizedTitleColors[0] ?? null;
-  const attrColorSource: "image" | "text" | "none" =
-    normalizedDetectedColors.length > 0 ? "image" : normalizedTitleColors.length > 0 ? "text" : "none";
+    normalizedCatalogColors[0] ??
+    normalizedDetectedColors[0] ??
+    normalizedTitleColors[0] ??
+    null;
+  const attrColorSource: "catalog" | "image" | "text" | "none" =
+    normalizedCatalogColors.length > 0
+      ? "catalog"
+      : normalizedDetectedColors.length > 0
+        ? "image"
+        : normalizedTitleColors.length > 0
+          ? "text"
+          : "none";
 
   const enrich = input.enrichment;
   const normConfidence =
@@ -361,7 +369,7 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
     attr_colors_text: normalizedTitleColors,
     attr_colors_image: normalizedDetectedColors,
     attr_color_source: attrColorSource,
-    color_primary_canonical: analysis ? analysis.primaryCanonical : toLowerTrim(attrColorPrimary),
+    color_primary_canonical: normalizedCatalogColors[0] ?? (analysis ? analysis.primaryCanonical : toLowerTrim(attrColorPrimary)),
     color_secondary_canonical: analysis?.secondaryCanonical ?? null,
     color_accent_canonical: analysis?.accentCanonical ?? null,
     color_palette_canonical: analysis ? analysis.paletteCanonical : normalizedDetectedColors,

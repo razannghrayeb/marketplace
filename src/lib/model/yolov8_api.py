@@ -206,7 +206,8 @@ def _run_dual_detector(image: Image.Image, conf: float) -> DetectionResponse:
         )
 
         area = (x2 - x1) * (y2 - y1)
-        area_ratio = float(area / float(width * height)) if width and height else 0.0
+        area_ratio = float(area / float(width * height)
+                           ) if width and height else 0.0
 
         det = Detection(
             label=lbl,
@@ -257,7 +258,8 @@ def health() -> HealthResponse:
         )
 
     det = _detector
-    class_names = sorted({p for p in [c for c in det._LABEL_MAP_A.values()]})  # type: ignore[attr-defined]
+    # type: ignore[attr-defined]
+    class_names = sorted({p for p in [c for c in det._LABEL_MAP_A.values()]})
 
     return HealthResponse(
         ok=True,
@@ -281,7 +283,8 @@ def health() -> HealthResponse:
 @app.get("/labels", response_model=LabelsResponse)
 def labels() -> LabelsResponse:
     det = get_detector()
-    categories = sorted(set(det._LABEL_MAP_A.values()) | det._KEEP_B)  # type: ignore[attr-defined]
+    categories = sorted(set(det._LABEL_MAP_A.values()) |
+                        det._KEEP_B)  # type: ignore[attr-defined]
     return LabelsResponse(
         fashion_categories=categories,
         category_styles={},
@@ -293,15 +296,19 @@ def labels() -> LabelsResponse:
 async def detect(
     file: UploadFile = File(...),
     confidence: float = Query(0.6),
-    enhance_contrast: bool = Query(False, description="Apply contrast enhancement"),
-    enhance_sharpness: bool = Query(False, description="Apply sharpness enhancement"),
-    bilateral_filter: bool = Query(False, description="Apply bilateral filtering for noise reduction"),
+    enhance_contrast: bool = Query(
+        False, description="Apply contrast enhancement"),
+    enhance_sharpness: bool = Query(
+        False, description="Apply sharpness enhancement"),
+    bilateral_filter: bool = Query(
+        False, description="Apply bilateral filtering for noise reduction"),
 ) -> DetectionResponse:
     try:
         content = await file.read()
         image = Image.open(io.BytesIO(content)).convert("RGB")
     except Exception as exc:  # pragma: no cover - defensive
-        raise HTTPException(status_code=400, detail=f"Invalid image: {exc}") from exc
+        raise HTTPException(
+            status_code=400, detail=f"Invalid image: {exc}") from exc
 
     # Apply preprocessing if any option is enabled
     if enhance_contrast or enhance_sharpness or bilateral_filter:
@@ -319,9 +326,12 @@ async def detect(
 async def detect_batch(
     files: List[UploadFile] = File(...),
     confidence: float = Query(0.6),
-    enhance_contrast: bool = Query(False, description="Apply contrast enhancement"),
-    enhance_sharpness: bool = Query(False, description="Apply sharpness enhancement"),
-    bilateral_filter: bool = Query(False, description="Apply bilateral filtering for noise reduction"),
+    enhance_contrast: bool = Query(
+        False, description="Apply contrast enhancement"),
+    enhance_sharpness: bool = Query(
+        False, description="Apply sharpness enhancement"),
+    bilateral_filter: bool = Query(
+        False, description="Apply bilateral filtering for noise reduction"),
 ):
     # Create preprocessing config if needed
     preprocess_config = None
@@ -356,7 +366,8 @@ def reload(confidence: float = Query(0.6)):
     with _detector_lock:
         _detector = DualDetector(conf=confidence)
         _detector_error = None
-    return {"ok": True, "message": "Model reloaded", "num_classes": len(_detector._LABEL_MAP_A)}  # type: ignore[attr-defined]
+    # type: ignore[attr-defined]
+    return {"ok": True, "message": "Model reloaded", "num_classes": len(_detector._LABEL_MAP_A)}
 
 
 if __name__ == "__main__":  # pragma: no cover
