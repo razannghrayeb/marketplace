@@ -59,6 +59,16 @@ def structured_to_caption(payload: Dict[str, Any]) -> str:
 async def lifespan(app: FastAPI):
     global processor, model
     print(f"[BLIP-SVC] loading InstructBLIP from {MODEL_PATH} on {DEVICE}")
+    print(
+        "[BLIP-SVC] runtime",
+        {
+            "torch_version": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_version": torch.version.cuda,
+            "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+            "device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        },
+    )
 
     processor = InstructBlipProcessor.from_pretrained(
         MODEL_PATH,
@@ -96,7 +106,15 @@ class CaptionRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ready", "model_path": MODEL_PATH, "device": DEVICE}
+    return {
+        "status": "ready",
+        "model_path": MODEL_PATH,
+        "device": DEVICE,
+        "torch_version": torch.__version__,
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_version": torch.version.cuda,
+        "device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+    }
 
 
 @app.post("/caption")

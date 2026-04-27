@@ -223,9 +223,9 @@ gcloud run deploy blip-service \
   --image us-central1-docker.pkg.dev/<PROJECT_ID>/marketplace/blip-service:latest \
   --region us-central1 \
   --gpu 1 \
-  --gpu-type nvidia-l4 \
-  --cpu 4 \
-  --memory 16Gi \
+  --gpu-type nvidia-rtx-pro-6000 \
+  --cpu 20 \
+  --memory 80Gi \
   --concurrency 4 \
   --min-instances 1 \
   --max-instances 5 \
@@ -239,6 +239,14 @@ Finally point API at BLIP:
 gcloud run services update marketplace \
   --region us-central1 \
   --set-env-vars BLIP_API_URL=https://blip-service-<hash>-uc.a.run.app,BLIP_API_TIMEOUT_MS=8000
+```
+
+If you deploy API via `cloudbuild.cloudrun.yaml`, set substitutions:
+
+```bash
+gcloud builds submit \
+  --config cloudbuild.cloudrun.yaml \
+  --substitutions _BLIP_API_URL=https://blip-service-<hash>-uc.a.run.app,_BLIP_API_TIMEOUT_MS=8000
 ```
 
 Notes:
