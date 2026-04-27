@@ -71,7 +71,13 @@ logging.getLogger("transformers.pipelines.base").addFilter(_SuppressSequentialPi
 
 _CUDA_AVAILABLE = torch.cuda.is_available()
 _DEVICE_ID = 0 if _CUDA_AVAILABLE else -1
-_TORCH_DEVICE = "cuda" if _CUDA_AVAILABLE else "cpu"
+_TORCH_DEVICE = os.getenv("YOLO_DEVICE", "cuda" if _CUDA_AVAILABLE else "cpu").strip().lower()
+if _TORCH_DEVICE == "cuda" and not _CUDA_AVAILABLE:
+    print("[YOLO] YOLO_DEVICE=cuda requested but CUDA is unavailable; falling back to CPU.")
+    _TORCH_DEVICE = "cpu"
+if _TORCH_DEVICE not in {"cuda", "cpu"}:
+    print(f"[YOLO] Unsupported YOLO_DEVICE='{_TORCH_DEVICE}', falling back to auto.")
+    _TORCH_DEVICE = "cuda" if _CUDA_AVAILABLE else "cpu"
 _YOLO_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yolo")
 
 warnings.filterwarnings("ignore")
@@ -147,16 +153,14 @@ class DualDetector:
         print("Loading Model A: deepfashion2_yolov8s-seg …")
         path = hf_hub_download(repo_id="Bingsu/adetailer",
                                filename="deepfashion2_yolov8s-seg.pt")
-        self._model_a = YOLO(path)
-        if _CUDA_AVAILABLE:
-            self._model_a.to("cuda")
+        self._model_a = YOLO(path).to(_TORCH_DEVICE)
         print(f"  ✓ {len(self._model_a.names)} clothing classes")
 
         print("Loading Model B: yolos-fashionpedia …")
         self._model_b = hf_pipeline(
             "object-detection",
             model="valentinafeve/yolos-fashionpedia",
-            device=_DEVICE_ID,
+            device=0 if _TORCH_DEVICE == "cuda" else -1,
         )
         print(f"  ✓ Fashionpedia  |  keeping: {self._KEEP_B}")
         print(f"  ✓ Both models conf ≥ {self.conf}\n")
@@ -251,7 +255,7 @@ class DualDetector:
         def _run_a():
             return self._model_a.predict(
                 source=img_source, conf=effective_conf, verbose=False,
-                device=0 if _CUDA_AVAILABLE else "cpu",
+                device=0 if _TORCH_DEVICE == "cuda" else "cpu",
             )[0]
 
         def _run_b():

@@ -18,6 +18,38 @@ SESSION_OPTIONS.intra_op_num_threads = ONNX_NUM_THREADS
 SESSION_OPTIONS.inter_op_num_threads = ONNX_NUM_THREADS
 SESSION_OPTIONS.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
+
+def get_execution_providers() -> List[str]:
+    """
+    Resolve ONNX Runtime execution providers in priority order.
+    Default is GPU-first with CPU fallback for RTX deployments.
+    """
+    raw = os.environ.get("ONNX_EXECUTION_PROVIDERS", "").strip()
+    if raw:
+        providers = [p.strip() for p in raw.split(",") if p.strip()]
+    else:
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+    available = set(ort.get_available_providers())
+    selected = [p for p in providers if p in available]
+
+    if not selected:
+        selected = ["CPUExecutionProvider"] if "CPUExecutionProvider" in available else list(available)
+
+    return selected
+
+
+_execution_providers: Optional[List[str]] = None
+
+
+def current_execution_providers() -> List[str]:
+    global _execution_providers
+    if _execution_providers is None:
+        _execution_providers = get_execution_providers()
+        print(f"[ONNX] available_providers={ort.get_available_providers()}")
+        print(f"[ONNX] selected_providers={_execution_providers}")
+    return _execution_providers
+
 # Model sessions (lazy loaded)
 _fashion_clip_image_session: Optional[ort.InferenceSession] = None
 _fashion_clip_text_session: Optional[ort.InferenceSession] = None
@@ -31,7 +63,7 @@ def get_fashion_clip_image_session() -> ort.InferenceSession:
     if _fashion_clip_image_session is None:
         model_path = os.path.join(MODEL_DIR, "fashion-clip-image.onnx")
         _fashion_clip_image_session = ort.InferenceSession(
-            model_path, SESSION_OPTIONS, providers=["CPUExecutionProvider"]
+            model_path, SESSION_OPTIONS, providers=current_execution_providers()
         )
     return _fashion_clip_image_session
 
@@ -42,7 +74,7 @@ def get_fashion_clip_text_session() -> ort.InferenceSession:
     if _fashion_clip_text_session is None:
         model_path = os.path.join(MODEL_DIR, "fashion-clip-text.onnx")
         _fashion_clip_text_session = ort.InferenceSession(
-            model_path, SESSION_OPTIONS, providers=["CPUExecutionProvider"]
+            model_path, SESSION_OPTIONS, providers=current_execution_providers()
         )
     return _fashion_clip_text_session
 
@@ -54,7 +86,7 @@ def get_attribute_model_session() -> ort.InferenceSession:
         model_path = os.path.join(MODEL_DIR, "attribute_model.onnx")
         if os.path.exists(model_path):
             _attribute_model_session = ort.InferenceSession(
-                model_path, SESSION_OPTIONS, providers=["CPUExecutionProvider"]
+                model_path, SESSION_OPTIONS, providers=current_execution_providers()
             )
     return _attribute_model_session
 
