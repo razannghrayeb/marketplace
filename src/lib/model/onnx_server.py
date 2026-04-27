@@ -18,6 +18,7 @@ from onnx_inference import (
     extract_attributes,
     batch_compute_embeddings,
     cosine_similarity,
+    current_execution_providers,
 )
 
 app = FastAPI(
@@ -69,6 +70,7 @@ class HealthResponse(BaseModel):
     status: str
     requests_served: int
     avg_inference_time_ms: float
+    execution_providers: List[str]
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -79,6 +81,7 @@ async def health():
         status="healthy",
         requests_served=request_count,
         avg_inference_time_ms=avg_time,
+        execution_providers=current_execution_providers(),
     )
 
 

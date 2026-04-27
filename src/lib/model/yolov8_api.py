@@ -153,6 +153,8 @@ class HealthResponse(BaseModel):
     cuda_available: bool
     cuda_device_name: Optional[str] = None
     cuda_device_count: int
+    configured_device: Optional[str] = None
+    requested_device: Optional[str] = None
     num_classes: int
     class_names: List[str]
     config: dict
@@ -175,11 +177,20 @@ def _runtime_device_info() -> dict:
             cuda_device_name = str(torch.cuda.get_device_name(0))
         except Exception:
             cuda_device_name = None
+    requested_device = str((__import__("os").environ.get("YOLO_DEVICE") or "")).strip().lower() or None
+    effective_device = None
+    try:
+        from dual_model_yolo import _TORCH_DEVICE as dual_torch_device  # type: ignore
+        effective_device = str(dual_torch_device)
+    except Exception:
+        effective_device = "cuda" if cuda_available else "cpu"
     return {
         "runtime_device": runtime_device,
         "cuda_available": cuda_available,
         "cuda_device_name": cuda_device_name,
         "cuda_device_count": cuda_device_count,
+        "configured_device": effective_device,
+        "requested_device": requested_device,
     }
 
 
@@ -247,6 +258,8 @@ def health() -> HealthResponse:
             cuda_available=rt["cuda_available"],
             cuda_device_name=rt["cuda_device_name"],
             cuda_device_count=rt["cuda_device_count"],
+            configured_device=rt.get("configured_device"),
+            requested_device=rt.get("requested_device"),
             num_classes=0,
             class_names=[],
             config={
@@ -269,6 +282,8 @@ def health() -> HealthResponse:
         cuda_available=rt["cuda_available"],
         cuda_device_name=rt["cuda_device_name"],
         cuda_device_count=rt["cuda_device_count"],
+        configured_device=rt.get("configured_device"),
+        requested_device=rt.get("requested_device"),
         num_classes=len(class_names),
         class_names=class_names,
         config={

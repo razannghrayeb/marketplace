@@ -137,6 +137,42 @@ curl http://0.0.0.0:8000/health
 
 ## Production Deployment
 
+### NVIDIA RTX Pro 6000 (GPU Host)
+
+For a dedicated NVIDIA GPU host (including RTX Pro 6000), use GPU-first runtime providers and reserve GPU devices for the containers.
+
+Required host prerequisites:
+
+- NVIDIA driver installed and visible via `nvidia-smi`
+- Docker Engine + Compose plugin
+- NVIDIA Container Toolkit configured (`nvidia-ctk runtime configure --runtime=docker`)
+
+Recommended env:
+
+```bash
+export CLIP_EXECUTION_PROVIDERS=cuda,cpu
+export CLIP_USE_GPU=true
+export ONNX_EXECUTION_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider
+export NVIDIA_VISIBLE_DEVICES=all
+export NVIDIA_DRIVER_CAPABILITIES=compute,utility
+```
+
+Startup:
+
+```bash
+docker compose build --no-cache api onnx-inference yolov8
+docker compose up -d
+```
+
+Verification:
+
+```bash
+docker compose logs onnx-inference | rg "selected_providers|available_providers"
+docker compose logs api | rg "\\[CLIP\\].*runtime providers"
+```
+
+You should see `CUDAExecutionProvider` for the ONNX sidecar and `cuda` in CLIP runtime providers.
+
 ### Option 1: Docker Swarm Deployment
 
 #### 1. Prepare Environment
