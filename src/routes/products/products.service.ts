@@ -905,8 +905,11 @@ function applyImageDiversityRerank(results: ProductResult[], lambda: number): Pr
  */
 function imageSearchKnnPoolLimit(): number {
   const envK = Number(process.env.SEARCH_IMAGE_RETRIEVAL_K);
+  // Default 200 (was 500). With HNSW traversal depth = max(k, ef_search), k=500 caused
+  // 500 random FAISS node lookups per query — each a disk page-fault when OS RAM is >90% used.
+  // k=200 reduces traversal by 2.5× with no recall loss at this index size (m=24, ef=200).
   const baseFromEnv =
-    Number.isFinite(envK) && envK >= 120 ? Math.floor(envK) : 500;
+    Number.isFinite(envK) && envK >= 120 ? Math.floor(envK) : 200;
 
   if (!imageMerchandiseSimilarityBindingEnabled()) {
     return Math.min(500, Math.max(120, baseFromEnv));
@@ -914,7 +917,9 @@ function imageSearchKnnPoolLimit(): number {
 
   const merchCapEnv = Number(process.env.SEARCH_IMAGE_MERCH_CANDIDATE_CAP);
   const hardCap = 1200;
-  const defaultMerch = Math.min(hardCap, Math.max(700, baseFromEnv));
+  // Default 300 (was 700). 300 candidates after ~30% category-filter survival = 90 items
+  // for reranking — sufficient for top-20 display. Old 700 meant 700-node HNSW traversal.
+  const defaultMerch = Math.min(hardCap, Math.max(300, baseFromEnv));
   const cap =
     Number.isFinite(merchCapEnv) && merchCapEnv >= 120
       ? Math.min(hardCap, Math.floor(merchCapEnv))
@@ -1005,6 +1010,7 @@ function imageDetectionKnnPoolCap(): number {
   // k only determines how many results come back — keep it wide enough for quality reranking.
   const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "130");
   if (!Number.isFinite(raw)) return 130;
+  return Math.max(60, Math.min(600, Math.floor(raw)));
   return Math.max(60, Math.min(600, Math.floor(raw)));
 }
 
@@ -1881,9 +1887,10 @@ function imageKnnNumCandidates(k: number): number {
       return Math.max(k, Math.min(5000, Math.floor(raw)));
     }
   }
-  // Keep ANN neighborhood substantially wider than k so relevant items survive
-  // approximate search before downstream constraints/rerank.
-  return Math.max(k, Math.min(5000, Math.max(k * 4, 800)));
+  // k*2 with cap 600 (was k*4 with cap 5000). Old formula produced num_candidates=2800 at
+  // k=700 — that's 2800 HNSW traversal nodes on a memory-starved node = seconds of disk I/O.
+  // k*2 still provides a 2× oversampling buffer so post-filter candidates survive reranking.
+  return Math.max(k, Math.min(600, Math.max(k * 2, 300)));
 }
 
 /**
@@ -1900,10 +1907,10 @@ function imageKnnNumCandidatesDetection(k: number): number {
       return Math.max(k, Math.min(5000, Math.floor(raw)));
     }
   }
-  // For FAISS HNSW, num_candidates maps directly to efSearch (not ef_search in query body).
-  // Must be >= 200 so that after category filter selectivity (~15-30%), enough results survive
-  // the post-filter to exceed sparseKnnMinHits and avoid fallback retry searches.
-  return Math.max(k, 200);
+  // Floor 150 (was 200). After category filter selectivity (~15-30%), 150 candidates still
+  // leaves 22-45 survivors — enough to exceed sparseKnnMinHits and fill a top-20 page.
+  // 150 nodes of HNSW traversal is 33% less disk I/O than 200 on memory-pressured nodes.
+  return Math.max(k, 150);
 }
 
 function mergeKnnHitsByProductId(primary: any[], extra: any[], cap: number): any[] {
@@ -3553,11 +3560,20 @@ async function batchOpensearchKnnHits(
   const msearchBody: any[] = [];
   for (const q of queries) {
     msearchBody.push({ index: config.opensearch.index });
-    msearchBody.push(q.body);
+    // Apply the same body augmentations as opensearchImageKnnHits so msearch sub-queries
+    // don't compute expensive full hit counts or load stored fields.
+    // Also add the query-level timeout so OpenSearch cancels server-side at the deadline.
+    msearchBody.push({
+      ...q.body,
+      track_total_hits: false,
+      stored_fields: [],
+      timeout: `${Math.max(1, Math.ceil(q.timeoutMs / 1000))}s`,
+    });
   }
 
   // Acquire once for the entire msearch batch — both kNN sub-queries share one slot.
   await imageKnnSemaphore.acquire();
+  const batchStartedAt = Date.now();
   let semaphoreReleased = false;
   try {
     const r = await (osClient as any).msearch(
@@ -3575,10 +3591,22 @@ async function batchOpensearchKnnHits(
       return Promise.all(queries.map((q) => opensearchImageKnnHits(q.body, q.timeoutMs)));
     }
 
-    return queries.map((_, i) => {
+    const batchElapsedMs = Date.now() - batchStartedAt;
+    return queries.map((q, i) => {
       const resp = responses[i];
       const timedOut = Boolean(resp.timed_out);
       const hits = (resp.hits?.hits ?? []) as any[];
+      const boolQ = (q.body as any)?.query?.bool;
+      const knnObj = boolQ?.must?.knn;
+      const field = knnObj ? Object.keys(knnObj)[0] : null;
+      console.log("[image-knn]", {
+        field,
+        hits: hits.length,
+        tookMs: resp.took ?? null,
+        elapsedMs: batchElapsedMs,
+        timedOut,
+        batch: true,
+      });
       return { hits, timedOut };
     });
   } catch {

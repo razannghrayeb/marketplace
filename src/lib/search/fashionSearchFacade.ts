@@ -443,7 +443,10 @@ export async function searchImage(
   const derivedAisleHints =
     predictedCategoryAisles && predictedCategoryAisles.length > 0
       ? predictedCategoryAisles
-      : inferAislesEnv() && imageBuffer
+      // Skip YOLO when the upstream detection pipeline already classified the item:
+      // detectionProductCategory is set by image-analysis.service for every crop search,
+      // so re-running YOLO here would duplicate the /detect call for no gain.
+      : inferAislesEnv() && imageBuffer && !detectionProductCategory
         ? await inferPredictedCategoryAislesFromImage(imageBuffer)
         : undefined;
 

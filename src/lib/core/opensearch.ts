@@ -89,7 +89,10 @@ export async function ensureIndex() {
         settings: {
           index: {
             knn: true,
-            "knn.algo_param.ef_search": 250,
+            // 100 (was 250). With k=200 as the new default pool limit, ef_search=100 is
+            // sufficient — HNSW traversal = max(ef_search, k) = 200. Halving traversal cuts
+            // disk I/O in half on memory-pressured managed nodes.
+            "knn.algo_param.ef_search": 100,
           },
           analysis: {
             analyzer: {
@@ -434,7 +437,7 @@ export async function ensureIndex() {
  */
 export async function applyIndexSpeedSettings(): Promise<void> {
   const index = config.opensearch.index;
-  const expected = "250";
+  const expected = "100";
 
   const readCurrentEfSearch = async (): Promise<string | undefined> => {
     const settingsResp = await osClient.indices.getSettings({
@@ -455,17 +458,17 @@ export async function applyIndexSpeedSettings(): Promise<void> {
     // Preferred index-settings shape.
     {
       label: "nested-index",
-      body: { index: { "knn.algo_param.ef_search": 250 } },
+      body: { index: { "knn.algo_param.ef_search": 100 } },
     },
     // Some managed clusters only honor flattened keys.
     {
       label: "flat-index-key",
-      body: { "index.knn.algo_param.ef_search": 250 },
+      body: { "index.knn.algo_param.ef_search": 100 },
     },
     // Some variants expose `knn.algo_param` object.
     {
       label: "flat-object-key",
-      body: { "index.knn.algo_param": { ef_search: 250 } },
+      body: { "index.knn.algo_param": { ef_search: 100 } },
     },
   ];
 
