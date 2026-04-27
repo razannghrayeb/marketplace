@@ -111,6 +111,9 @@ export async function findRelatedProducts(
 
   const searchBody = {
     size: limit,
+    _source: {
+      excludes: ["embedding_*"],
+    },
     query: {
       bool: queryBool,
     },

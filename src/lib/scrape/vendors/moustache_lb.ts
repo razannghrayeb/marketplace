@@ -1,5 +1,6 @@
 import { load } from "cheerio";
 import type { ScrapedProduct } from "../types";
+import { normalizeColorTokensFromRaw } from "../../color/queryColorFilter";
 
 const VENDOR_NAME = "Moustache";
 const VENDOR_URL = "https://moustachestores.com";
@@ -126,6 +127,32 @@ function normalizeOptionName(name: string | null | undefined): string {
 function normalizeVariantValue(value: any): string | null {
   const v = String(value ?? "").trim();
   return v.length ? v : null;
+}
+
+function isCodeLikeColorValue(value: string | null | undefined): boolean {
+  const v = String(value ?? "").trim();
+  if (!v) return false;
+  if (/^\d{3,}$/.test(v)) return true;
+  if (/^[a-z]{0,2}\d{3,}[a-z0-9-]*$/i.test(v)) return true;
+  return false;
+}
+
+function resolveColorValue(
+  rawColor: string | null | undefined,
+  title: string | null | undefined,
+  description: string | null | undefined
+): string | null {
+  const normalizedRaw = normalizeVariantValue(rawColor);
+  if (normalizedRaw && !isCodeLikeColorValue(normalizedRaw)) {
+    const fromRaw = normalizeColorTokensFromRaw(normalizedRaw)[0] ?? null;
+    return fromRaw ?? normalizedRaw;
+  }
+
+  const inferred = normalizeColorTokensFromRaw(
+    [normalizedRaw, title, description].filter(Boolean).join(" ")
+  )[0] ?? null;
+
+  return inferred ?? normalizedRaw ?? null;
 }
 
 function looksLikeSizeValue(value: string | null | undefined): boolean {
@@ -483,12 +510,14 @@ export function parseProductPage(
       ? `${parentProductUrl}#color=${encodeURIComponent(groupColor)}`
       : parentProductUrl;
 
+    const resolvedColor = resolveColorValue(groupColor, title, description);
+
     rows.push({
       ...base,
       product_url: groupProductUrl,
       variant_id: variantIdValue,
       size: sizeValue,
-      color: groupColor,
+      color: resolvedColor,
       price_cents: price,
       sales_price_cents: sale,
       availability: groupAvailable,

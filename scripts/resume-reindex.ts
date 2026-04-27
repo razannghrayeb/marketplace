@@ -78,7 +78,7 @@ const DEFAULT_BG_REMOVAL_THRESHOLD = 35;
 const DEFAULT_CONCURRENCY = 3;
 
 // Bulk index buffer size — flush when this many docs are queued
-const BULK_FLUSH_SIZE = 20;
+const BULK_FLUSH_SIZE = 100;
 
 const DB_RETRY = { attempts: 8, baseDelayMs: 2_000 } as const;
 const MAX_CONNECTION_WAIT_MS = 10 * 60 * 1000; // 10 minutes

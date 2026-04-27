@@ -89,7 +89,7 @@ export async function ensureIndex() {
         settings: {
           index: {
             knn: true,
-            "knn.algo_param.ef_search": 64,
+            "knn.algo_param.ef_search": 250,
           },
           analysis: {
             analyzer: {
@@ -434,7 +434,7 @@ export async function ensureIndex() {
  */
 export async function applyIndexSpeedSettings(): Promise<void> {
   const index = config.opensearch.index;
-  const expected = "64";
+  const expected = "250";
 
   const readCurrentEfSearch = async (): Promise<string | undefined> => {
     const settingsResp = await osClient.indices.getSettings({
@@ -455,17 +455,17 @@ export async function applyIndexSpeedSettings(): Promise<void> {
     // Preferred index-settings shape.
     {
       label: "nested-index",
-      body: { index: { "knn.algo_param.ef_search": 64 } },
+      body: { index: { "knn.algo_param.ef_search": 250 } },
     },
     // Some managed clusters only honor flattened keys.
     {
       label: "flat-index-key",
-      body: { "index.knn.algo_param.ef_search": 64 },
+      body: { "index.knn.algo_param.ef_search": 250 },
     },
     // Some variants expose `knn.algo_param` object.
     {
       label: "flat-object-key",
-      body: { "index.knn.algo_param": { ef_search: 64 } },
+      body: { "index.knn.algo_param": { ef_search: 250 } },
     },
   ];
 
