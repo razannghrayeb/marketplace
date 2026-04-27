@@ -50,8 +50,8 @@ export async function getCandidateScoresForProducts(
   const {
     baseProductId,
     limit = 30,
-    clipLimit = 200,
-    textLimit = 200,
+    clipLimit = 120,
+    textLimit = 120,
     usePHashDedup = true,
     pHashThreshold = 5,
   } = params;

@@ -367,8 +367,8 @@ export async function getPriceDrops(req: Request, res: Response) {
  * 
  * Query params:
  *   - limit: number of candidates to return (default 30, max 100)
- *   - clipLimit: candidates from CLIP k-NN (default 200)
- *   - textLimit: candidates from text search (default 200)
+ *   - clipLimit: candidates from CLIP k-NN (default 120)
+ *   - textLimit: candidates from text search (default 120)
  *   - usePHashDedup: filter near-duplicates (default false)
  *   - pHashThreshold: max Hamming distance for dedup (default 5)
  */
@@ -382,8 +382,8 @@ export async function getSimilarProducts(req: Request, res: Response) {
     const { getCandidateScoresForProducts } = await import("./products.service");
 
     const limit = Math.min(Math.max(1, parseInt(req.query.limit as string) || 30), 100);
-    const clipLimit = Math.min(Math.max(1, parseInt(req.query.clipLimit as string) || 200), 500);
-    const textLimit = Math.min(Math.max(1, parseInt(req.query.textLimit as string) || 200), 500);
+    const clipLimit = Math.min(Math.max(1, parseInt(req.query.clipLimit as string) || 120), 500);
+    const textLimit = Math.min(Math.max(1, parseInt(req.query.textLimit as string) || 120), 500);
     const usePHashDedup = req.query.usePHashDedup === "true" || req.query.usePHashDedup === "1";
     const pHashThreshold = Math.min(Math.max(0, parseInt(req.query.pHashThreshold as string) || 5), 64);
 

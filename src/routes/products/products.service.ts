@@ -234,8 +234,8 @@ export interface CandidateResult {
 export interface CandidateGeneratorParams {
   baseProductId: string;
   limit?: number;            // final number of candidates returned (default 30)
-  clipLimit?: number;        // how many to pull from CLIP kNN (default 200)
-  textLimit?: number;        // how many to pull from text search (default 200)
+  clipLimit?: number;        // how many to pull from CLIP kNN (default 120)
+  textLimit?: number;        // how many to pull from text search (default 120)
   usePHashDedup?: boolean;   // use pHash to filter near-duplicates (default false)
   pHashThreshold?: number;   // max Hamming distance to consider duplicate (default 5)
 }
@@ -906,20 +906,20 @@ function applyImageDiversityRerank(results: ProductResult[], lambda: number): Pr
 function imageSearchKnnPoolLimit(): number {
   const envK = Number(process.env.SEARCH_IMAGE_RETRIEVAL_K);
   const baseFromEnv =
-    Number.isFinite(envK) && envK >= 200 ? Math.floor(envK) : 500;
+    Number.isFinite(envK) && envK >= 120 ? Math.floor(envK) : 500;
 
   if (!imageMerchandiseSimilarityBindingEnabled()) {
-    return Math.min(500, Math.max(200, baseFromEnv));
+    return Math.min(500, Math.max(120, baseFromEnv));
   }
 
   const merchCapEnv = Number(process.env.SEARCH_IMAGE_MERCH_CANDIDATE_CAP);
   const hardCap = 1200;
   const defaultMerch = Math.min(hardCap, Math.max(700, baseFromEnv));
   const cap =
-    Number.isFinite(merchCapEnv) && merchCapEnv >= 200
+    Number.isFinite(merchCapEnv) && merchCapEnv >= 120
       ? Math.min(hardCap, Math.floor(merchCapEnv))
       : defaultMerch;
-  return Math.max(200, cap);
+  return Math.max(120, cap);
 }
 
 function isDressLikeDetectionCategory(category?: string): boolean {
@@ -8550,6 +8550,9 @@ export async function searchByTextWithRelated(
   const searchBody = {
     size: limit,
     from: (page - 1) * limit,
+    _source: {
+      excludes: ["embedding_*"],
+    },
     query: {
       bool: {
         should,
@@ -8789,8 +8792,8 @@ export async function getCandidateScoresForProducts(
   const {
     baseProductId,
     limit = 30,
-    clipLimit = 200,
-    textLimit = 200,
+    clipLimit = 120,
+    textLimit = 120,
     usePHashDedup = true,
     pHashThreshold = 5,
   } = params;

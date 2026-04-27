@@ -94,6 +94,9 @@ export async function searchProductsFilteredBrowse(params: {
     const searchBody = {
       size: batchSize,
       from,
+      _source: {
+        excludes: ["embedding_*"],
+      },
       query: {
         bool: {
           must: [{ match_all: {} }],

@@ -474,8 +474,8 @@ export interface CandidateResult {
 export interface CandidateGeneratorParams {
   baseProductId: string;
   limit?: number; // final number of candidates returned (default 30)
-  clipLimit?: number; // how many to pull from CLIP kNN (default 200)
-  textLimit?: number; // how many to pull from text search (default 200)
+  clipLimit?: number; // how many to pull from CLIP kNN (default 120)
+  textLimit?: number; // how many to pull from text search (default 120)
   usePHashDedup?: boolean; // use pHash to filter near-duplicates (default false)
   pHashThreshold?: number; // max Hamming distance to consider duplicate (default 5)
 }
