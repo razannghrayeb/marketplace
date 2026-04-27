@@ -748,6 +748,11 @@ export function computeHitRelevance(
     }
   }
 
+  // Explain hygiene: don't expose a matched color when effective color signal is none.
+  if (colorTier === "none" || colorCompliance <= 0.01) {
+    matchedColor = null;
+  }
+
   const docCategoryForPenalty =
     typeof hit?._source?.category === "string" ? hit._source.category : undefined;
   const docCanonicalForPenalty =

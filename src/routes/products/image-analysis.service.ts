@@ -4144,6 +4144,20 @@ function selectDetectionColorFromPalette(params: {
     }
   }
 
+  // Footwear shadows frequently push brown leather toward charcoal/black.
+  // If palette contains a warm-neutral sibling, prefer it unless confidence is very high.
+  if (
+    category === "footwear" &&
+    alternatives.length > 0 &&
+    confidence < 0.9 &&
+    (primary === "black" || primary === "charcoal" || primary === "gray")
+  ) {
+    const warmNeutralAlt = alternatives.find((c) =>
+      ["brown", "camel", "tan", "beige", "khaki", "taupe", "stone", "sand"].includes(c),
+    );
+    if (warmNeutralAlt) return warmNeutralAlt;
+  }
+
   return primary;
 }
 
