@@ -4069,7 +4069,7 @@ export async function searchByImageWithSimilarity(
     knnFieldResolved = "embedding+embedding_garment";
     const bodyGlobal = {
       size: retrievalK,
-      _source: [...baseImageKnnSourceFields, "embedding", "embedding_garment"],
+      _source: baseImageKnnSourceFields,
       query: {
         bool: {
           must: {
@@ -4083,7 +4083,7 @@ export async function searchByImageWithSimilarity(
     };
     const bodyGarment = {
       size: retrievalK,
-      _source: [...baseImageKnnSourceFields, "embedding", "embedding_garment"],
+      _source: baseImageKnnSourceFields,
       query: {
         bool: {
           must: {
@@ -4120,10 +4120,7 @@ export async function searchByImageWithSimilarity(
 
     const knnBody = {
       size: retrievalK,
-      _source: [
-        ...baseImageKnnSourceFields,
-        ...(imageExactCosineRerankEnabled() ? [knnFieldResolved] : []),
-      ],
+      _source: baseImageKnnSourceFields,
       query: {
         bool: {
           must: {
@@ -4153,10 +4150,7 @@ export async function searchByImageWithSimilarity(
 
       const knnBodyEmbeddingFallback = {
         size: retrievalK,
-        _source: [
-          ...baseImageKnnSourceFields,
-          ...(imageExactCosineRerankEnabled() ? ["embedding"] : []),
-        ],
+        _source: baseImageKnnSourceFields,
         query: {
           bool: {
             must: {
@@ -4284,10 +4278,7 @@ export async function searchByImageWithSimilarity(
     }
     const knnBodyFallback = {
       size: retrievalK,
-      _source: [
-        ...baseImageKnnSourceFields,
-        ...(imageExactCosineRerankEnabled() ? [knnFieldResolved] : []),
-      ],
+      _source: baseImageKnnSourceFields,
       query: {
         bool: {
           must: {
@@ -4333,7 +4324,7 @@ export async function searchByImageWithSimilarity(
     if (useDualKnn && dualKnnEligible) {
       const bodyGlobalRelaxed = {
         size: retrievalK,
-        _source: [...baseImageKnnSourceFields, "embedding", "embedding_garment"],
+        _source: baseImageKnnSourceFields,
         query: {
           bool: {
             must: {
@@ -4347,7 +4338,7 @@ export async function searchByImageWithSimilarity(
       };
       const bodyGarmentRelaxed = {
         size: retrievalK,
-        _source: [...baseImageKnnSourceFields, "embedding", "embedding_garment"],
+        _source: baseImageKnnSourceFields,
         query: {
           bool: {
             must: {
@@ -4367,10 +4358,7 @@ export async function searchByImageWithSimilarity(
     } else {
       const relaxedBody = {
         size: retrievalK,
-        _source: [
-          ...baseImageKnnSourceFields,
-          ...(imageExactCosineRerankEnabled() ? [knnFieldResolved] : []),
-        ],
+        _source: baseImageKnnSourceFields,
         query: {
           bool: {
             must: {
@@ -8550,9 +8538,7 @@ export async function searchByTextWithRelated(
   const searchBody = {
     size: limit,
     from: (page - 1) * limit,
-    _source: {
-      excludes: ["embedding_*"],
-    },
+    _source: ["product_id"],
     query: {
       bool: {
         should,
@@ -8874,7 +8860,7 @@ export async function getCandidateScoresForProducts(
         String(process.env.SEARCH_IMAGE_KNN_FIELD ?? "embedding").trim() || "embedding";
       const clipBody = {
         size: fetchLimit,
-        _source: ["product_id"],
+        _source: ["title", "price_usd", "image_cdn", "product_id"],
         query: {
           bool: {
             must: {
