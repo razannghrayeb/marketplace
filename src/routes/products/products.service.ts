@@ -3714,6 +3714,11 @@ export async function searchByImageWithSimilarity(
   }
 
   const evalT0 = Date.now();
+  let stageSetupDoneAt = evalT0;
+  let stageKnnDoneAt = evalT0;
+  let stageRerankDoneAt = evalT0;
+  let stageHydrationDoneAt = evalT0;
+  let stageFinalizedAt = evalT0;
   const mainPathStrict = imageMainPathStrictEnv();
   const breakdownDebug =
     String(process.env.SEARCH_DEBUG ?? "").toLowerCase() === "1" ||
@@ -4064,6 +4069,7 @@ export async function searchByImageWithSimilarity(
   let knnTimedOut = false;
   /** Query vector for the active single kNN field (dual fusion uses global + garment separately). */
   let queryVector: number[] = imageEmbedding;
+  stageSetupDoneAt = Date.now();
 
   if (useDualKnn) {
     knnFieldResolved = "embedding+embedding_garment";
@@ -4388,6 +4394,8 @@ export async function searchByImageWithSimilarity(
       }
     }
   }
+
+  stageKnnDoneAt = Date.now();
 
   const signals = await signalsPromise;
   colorQueryEmbedding = signals.colorQueryEmbedding;
@@ -7108,6 +7116,8 @@ export async function searchByImageWithSimilarity(
     }
   }
 
+  stageRerankDoneAt = Date.now();
+
   const maxHydrate = Math.min(
     rankedHits.length,
     Math.max(limit * 10, 150),
@@ -8065,6 +8075,8 @@ export async function searchByImageWithSimilarity(
     knn_timed_out: knnTimedOut,
   };
 
+  stageHydrationDoneAt = Date.now();
+
   let related: ProductResult[] = [];
   if (includeRelated && pHash) {
     const excludeIds = results.map((p) => String(p.id));
@@ -8154,6 +8166,16 @@ export async function searchByImageWithSimilarity(
     }
   }
 
+  stageFinalizedAt = Date.now();
+  const timing = {
+    total_ms: stageFinalizedAt - evalT0,
+    setup_ms: stageSetupDoneAt - evalT0,
+    knn_ms: stageKnnDoneAt - stageSetupDoneAt,
+    rerank_ms: stageRerankDoneAt - stageKnnDoneAt,
+    hydrate_ms: stageHydrationDoneAt - stageRerankDoneAt,
+    finalize_ms: stageFinalizedAt - stageHydrationDoneAt,
+  };
+
   if (searchEvalEnabled()) {
     emitImageSearchEval({
       kind: "image_search",
@@ -8231,6 +8253,7 @@ export async function searchByImageWithSimilarity(
         dropped_by_dedupe: droppedByDedupe,
         dropped_by_limit: droppedByLimit,
       },
+      timing,
     });
   }
 
@@ -8269,6 +8292,7 @@ export async function searchByImageWithSimilarity(
       variant_group_count: variantGroupCount,
       variant_group_representatives: variantRepresentativeCount,
       detection_observability: detectionObservability,
+      timing,
       pipeline_counts: {
         exact_cosine_rerank: exactCosineRerank,
         dual_knn_fusion: useDualKnn,
