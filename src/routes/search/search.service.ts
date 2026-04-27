@@ -2038,7 +2038,9 @@ export async function textSearch(
           title: baseProduct.title || "",
           brand: baseProduct.brand,
           category: baseProduct.category,
-          color: desiredColors[0] ?? baseProduct.color,
+          // Keep product color authoritative for ranker context.
+          // Desired query color must not overwrite null/missing catalog color.
+          color: baseProduct.color ?? null,
           vendorId: baseProduct.vendor_id,
           priceCents: basePriceCents,
         };

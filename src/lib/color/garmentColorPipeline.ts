@@ -98,6 +98,13 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
   // Achromatic neutrals — widen gate to chroma < 11 so very desaturated
   // darks (near-black leather, dark charcoal wool) don't bleed into navy/brown.
   if (chroma < 11) {
+    // Dark brown leather/suede can be low-chroma under shadow and was collapsing
+    // into charcoal. Preserve warm-neutral hues before generic gray buckets.
+    if (lab[0] >= 16 && lab[0] <= 62 && lab[1] >= 1.5 && lab[2] >= 4.5) {
+      if (lab[0] < 35) return "brown";
+      if (lab[0] < 48) return "camel";
+      return "tan";
+    }
     // Keep very light cool tones from collapsing into white/off-white.
     if (lab[0] > 78 && lab[2] <= -3 && blueLead >= 6) return "light-blue";
     // Pale yellows are often low-chroma in studio lighting; avoid mapping to beige/off-white.
