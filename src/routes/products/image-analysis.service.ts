@@ -6219,7 +6219,53 @@ export class ImageAnalysisService {
             (filters as any).material = textureMaterial.material;
           }
 
-          // Per-detection BLIP captioning + CLIP consistency gate.
+          // Snapshot filters before BLIP and fire the kNN search immediately.
+          // The search runs concurrently with BLIP below (OpenSearch I/O and GPU captioning
+          // in parallel). BLIP-derived material/type/gender signals feed the retry path if
+          // the initial results are sparse; detectionBlipSignal still reaches all retry calls.
+          const preBlipFilters = { ...filters };
+          const preBlipSoftTypeHints = [...softProductTypeHints];
+          const _parallelSearchStartedAt = Date.now();
+          const _parallelSearchPromise = runDetectionSearch("initial", {
+            imageEmbedding: finalFullFrameEmbedding,
+            imageEmbeddingGarment:
+              Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
+                ? finalGarmentEmbedding
+                : undefined,
+            // Pass clipBuffer so products.service computes attribute signals (color/texture/etc.)
+            // for reranking. YOLO re-entry is guarded in fashionSearchFacade: when
+            // detectionProductCategory is set the facade skips inferPredictedCategoryAislesFromImage.
+            imageBuffer: clipBuffer,
+            pHash: sourceImagePHash,
+            detectionYoloConfidence: detection.confidence,
+            detectionProductCategory: categoryMapping.productCategory,
+            filters: preBlipFilters,
+            softProductTypeHints: preBlipSoftTypeHints.length > 0 ? preBlipSoftTypeHints : undefined,
+            limit: Math.max(
+              resolvedResultsPageSize,
+              Math.min(resolveShopLookRetrievalLimit(retrievalLimit * 1.7), retrievalLimit + 180),
+            ),
+            similarityThreshold: shopLookDetectionSimilarityThreshold(
+              similarityThreshold,
+              categoryMapping.productCategory,
+            ),
+            includeRelated: false,
+            predictedCategoryAisles,
+            knnField: knnFieldUsed,
+            forceHardCategoryFilter: forceHardCategoryFilterUsed,
+            relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
+            blipSignal: undefined,
+            inferredPrimaryColor: undefined,
+            inferredColorKey: itemColorKey,
+            inferredColorsByItem,
+            inferredColorsByItemConfidence,
+            debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
+            sessionId: options.sessionId,
+            userId: options.userId,
+            sessionFilters: options.sessionFilters ?? undefined,
+          });
+
+          // Per-detection BLIP captioning + CLIP consistency gate — runs concurrently with search above.
           const detCaption = await detCaptionPromise;
           const detCaptionMs = Date.now() - detCaptionStartedAt;
           detectionBlipDurations.push(detCaptionMs);
@@ -6591,36 +6637,10 @@ export class ImageAnalysisService {
 
           const detectionRelaxThreshold = shopLookDetectionRelaxEnv();
 
-          const searchFirstStartedAt = Date.now();
-          let similarResult = await runDetectionSearch("initial", {
-            imageEmbedding: finalFullFrameEmbedding,
-            imageEmbeddingGarment:
-              Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
-                ? finalGarmentEmbedding
-                : undefined,
-            imageBuffer: clipBuffer,
-            pHash: sourceImagePHash,
-            detectionYoloConfidence: detection.confidence,
-            detectionProductCategory: categoryMapping.productCategory,
-            filters,
-            softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
-            limit: detectionRetrievalLimit,
-            similarityThreshold: detectionSimilarityThreshold,
-            includeRelated: false,
-            predictedCategoryAisles,
-            knnField: knnFieldUsed,
-            forceHardCategoryFilter: forceHardCategoryFilterUsed,
-            relaxThresholdWhenEmpty: detectionRelaxThreshold,
-            blipSignal: detectionBlipSignal,
-            inferredPrimaryColor: inferredPrimaryColorForSearch,
-            inferredColorKey: itemColorKey,
-            inferredColorsByItem,
-            inferredColorsByItemConfidence,
-            debugRawCosineFirst: shopLookDebugRawCosineFirstEnv(),
-            sessionId: options.sessionId,
-            userId: options.userId,
-            sessionFilters: options.sessionFilters ?? undefined,
-          });
+          // Await the already-running parallel search (fired before BLIP above).
+          // BLIP signals are available for the retry/fallback calls that follow.
+          const searchFirstStartedAt = _parallelSearchStartedAt;
+          let similarResult = await _parallelSearchPromise;
           const searchFirstMs = Date.now() - searchFirstStartedAt;
           detectionSearchFirstDurations.push(searchFirstMs);
 
