@@ -748,6 +748,23 @@ export function computeHitRelevance(
     }
   }
 
+  // Additional guard: many vendors encode variant color in URL params/fragments.
+  // If URL color contradicts desired color, don't allow optimistic "exact" tiers.
+  const urlColorHintsForGuard = extractColorHintsFromProductUrl(hit?._source?.product_url);
+  if (desiredColorsTier.length > 0 && urlColorHintsForGuard.length > 0) {
+    const tUrl = tieredColorListCompliance(desiredColorsTier, urlColorHintsForGuard, rerankColorMode);
+    if (tUrl.compliance <= 0) {
+      colorCompliance = colorCompliance * 0.45;
+      if (colorTier === "exact") colorTier = "none";
+    }
+  }
+
+  // Explain consistency: avoid reporting "exact" when weighted compliance is weak.
+  // This prevents contradictions like exact-tier with very low effective color match.
+  if (colorTier === "exact" && colorCompliance < 0.6) {
+    colorTier = colorCompliance >= 0.35 ? "family" : "none";
+  }
+
   // Explain hygiene: don't expose a matched color when effective color signal is none.
   if (colorTier === "none" || colorCompliance <= 0.01) {
     matchedColor = null;

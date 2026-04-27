@@ -17,6 +17,7 @@ import {
   processImageForEmbedding,
   processImageForGarmentEmbeddingWithOptionalBox,
   computeShopTheLookGarmentEmbeddingFromDetection,
+  computeShopTheLookGarmentEmbeddingsFromDetections,
   scalePixelBoxToImageDims,
   blip,
   computePHash,
@@ -2362,9 +2363,36 @@ function shouldRejectImplausibleBagDetection(detection: Detection, allDetections
     if (containedRatio >= 0.74 && otherConfidence >= confidence + 0.05) {
       return true;
     }
+
+    // Also drop tiny inner duplicates (e.g., second box around the lower part of the same bag).
+    // This catches the inverse case not covered above where the current box is mostly inside
+    // a larger, comparable/higher-confidence bag detection.
+    if (
+      thisArea <= otherArea * 0.45 &&
+      containedRatio >= 0.86 &&
+      otherConfidence >= confidence - 0.02
+    ) {
+      return true;
+    }
   }
 
   return false;
+}
+
+function shouldRejectEdgeArtifactDetection(detection: Detection): boolean {
+  const mapped = mapDetectionToCategory(detection.label, detection.confidence).productCategory;
+  if (mapped !== "tops" && mapped !== "outerwear") return false;
+
+  const confidence = Number.isFinite(detection.confidence) ? detection.confidence : 0;
+  const areaRatio = Number.isFinite(detection.area_ratio) ? detection.area_ratio : 0;
+  const bn = detection.box_normalized;
+  if (!bn) return false;
+
+  const widthNorm = Math.max(0, bn.x2 - bn.x1);
+  const touchesEdge = bn.x1 <= 0.03 || bn.x2 >= 0.97;
+
+  // Spurious edge artifacts: tiny, low-confidence side slivers should not become top detections.
+  return touchesEdge && widthNorm <= 0.1 && areaRatio <= 0.015 && confidence < 0.45;
 }
 
 function shouldKeepDetectionForShopTheLook(detection: Detection, allDetections?: Detection[]): boolean {
@@ -2378,6 +2406,10 @@ function shouldKeepDetectionForShopTheLook(detection: Detection, allDetections?:
     /\bheadband head covering hair accessory(?:\s*\d+)?\b/.test(normalizedLabel) ||
     /\b(headband|head covering|hair accessory|hairband|headwear)\b/.test(normalizedLabel)
   ) {
+    return false;
+  }
+
+  if (shouldRejectEdgeArtifactDetection(detection)) {
     return false;
   }
 
@@ -3074,6 +3106,10 @@ function applyDetectionCategoryGuard(
       if (/\b(belt|belts|scarf|scarves|hat|hats|cap|caps|jewelry|bracelet|necklace|earrings)\b/.test(haystack)) {
         return false;
       }
+      // Keep bag retrieval audience-safe as well. Many bag catalogs encode audience
+      // only in product URLs (e.g. ".../womens-..."), so rely on the full haystack.
+      if (queryGenderNorm === "men" && hasExplicitWomenCue(haystack)) return false;
+      if (queryGenderNorm === "women" && hasExplicitMenCue(haystack)) return false;
     }
 
     return true;
@@ -5553,7 +5589,19 @@ export class ImageAnalysisService {
     // systematic framing mismatch. Using the full-image vector for that field restores alignment.
     const fullFrameEmbedding = await processImageForEmbedding(fullProcessBuf).catch(() => null);
 
-    // Per-detection work is concurrency-limited to avoid OpenSearch kNN pile-ups; CLIP still serializes in-process.
+    const detectionEmbeddingBatchStartedAt = Date.now();
+    const detectionEmbeddingBatch = await computeShopTheLookGarmentEmbeddingsFromDetections(
+      buffer,
+      detectionJobs.map(({ detection }) => detection.box),
+      fullProcessBuf,
+    ).catch(() => []);
+    const detectionEmbeddingBatchMs = Date.now() - detectionEmbeddingBatchStartedAt;
+    const detectionEmbeddingBatchReady = detectionEmbeddingBatch.reduce(
+      (count, item) => (item?.embedding && item?.clipBufferForAttributes ? count + 1 : count),
+      0,
+    );
+
+    // Per-detection work is concurrency-limited to avoid OpenSearch kNN pile-ups.
     const detectionConcurrency = shopLookPerDetectionConcurrency(
       detectionJobs.map(({ detection }) => detection),
     );
@@ -5572,6 +5620,8 @@ export class ImageAnalysisService {
       console.info("[image-search][detection-runtime]", {
         detectionJobs: detectionJobs.length,
         detectionConcurrency,
+        embeddingBatchMs: detectionEmbeddingBatchMs,
+        embeddingBatchReady: detectionEmbeddingBatchReady,
         mainPathOnly,
         blipApiUrlConfigured: Boolean(process.env.BLIP_API_URL),
         rankerApiUrlConfigured: Boolean(process.env.RANKER_API_URL),
@@ -5580,7 +5630,7 @@ export class ImageAnalysisService {
     const settled = await mapPoolSettled(
       detectionJobs,
       detectionConcurrency,
-      async ({ detection, detectionIndex }) => {
+      async ({ detection, detectionIndex }, detectionJobIndex) => {
         const detectionTaskStartedAt = Date.now();
         let detectionSearchTotalMs = 0;
         let detectionSearchCalls = 0;
@@ -5669,10 +5719,21 @@ export class ImageAnalysisService {
           let queryProcessBuf: Buffer;
           const cropEmbedStartedAt = Date.now();
           try {
-            const aligned = await computeShopTheLookGarmentEmbeddingFromDetection(buffer, detection.box, fullProcessBuf);
-            finalEmbedding = aligned.embedding;
-            clipBuffer = aligned.clipBufferForAttributes;
-            queryProcessBuf = aligned.processBuf;
+            const batched = detectionEmbeddingBatch[detectionJobIndex];
+            if (batched?.embedding && batched.clipBufferForAttributes) {
+              finalEmbedding = batched.embedding;
+              clipBuffer = batched.clipBufferForAttributes;
+              queryProcessBuf = batched.processBuf;
+            } else {
+              const aligned = await computeShopTheLookGarmentEmbeddingFromDetection(
+                buffer,
+                detection.box,
+                fullProcessBuf,
+              );
+              finalEmbedding = aligned.embedding;
+              clipBuffer = aligned.clipBufferForAttributes;
+              queryProcessBuf = aligned.processBuf;
+            }
           } catch {
             return null;
           }
@@ -7584,11 +7645,20 @@ export class ImageAnalysisService {
           if (similarResult.results.length === 0) {
             // Fail-safe: avoid zero-result detections when we already have category-safe
             // candidates, but keep quality by using a strict score floor.
-            const fallbackPool = mergeImageSearchResultsById(
-              mergeImageSearchResultsById(formalitySafeResults, sleeveSafeResults, retrievalLimit),
-              categorySafeResults,
+            const desiredSleeve = inferSleeveIntentFromDetectionLabel(detection.label);
+            const sleeveGateStrict =
+              Boolean(desiredSleeve) &&
+              (categoryMapping.productCategory === "tops" ||
+                categoryMapping.productCategory === "dresses" ||
+                categoryMapping.productCategory === "outerwear");
+            const baseFallbackPool = mergeImageSearchResultsById(
+              formalitySafeResults,
+              sleeveSafeResults,
               retrievalLimit,
             );
+            const fallbackPool = sleeveGateStrict
+              ? baseFallbackPool
+              : mergeImageSearchResultsById(baseFallbackPool, categorySafeResults, retrievalLimit);
             const safeFallback = buildSafeNonEmptyFallback({
               candidates: fallbackPool,
               productCategory: categoryMapping.productCategory,
@@ -7674,6 +7744,18 @@ export class ImageAnalysisService {
         }
       },
     );
+    const detectionEmbeddingFallbackCount = Math.max(
+      0,
+      detectionJobs.length - detectionEmbeddingBatchReady,
+    );
+    if (process.env.NODE_ENV !== "production" || String(process.env.SEARCH_DEBUG ?? "") === "1") {
+      console.info("[image-search][embedding-batch-usage]", {
+        detectionJobs: detectionJobs.length,
+        embeddingBatchReady: detectionEmbeddingBatchReady,
+        embeddingFallbackCount: detectionEmbeddingFallbackCount,
+        embeddingBatchMs: detectionEmbeddingBatchMs,
+      });
+    }
     similarityTimings.detectionTaskWallMs = Date.now() - detectionTaskWallStartedAt;
     if (detectionTaskDurations.length > 0) {
       const detectionTaskTotalMs = detectionTaskDurations.reduce((sum, value) => sum + value, 0);
@@ -8267,22 +8349,44 @@ export class ImageAnalysisService {
       i,
       isUserDefined: i >= itemsToProcess.length,
     }));
+    const selectiveEmbeddingBatchStartedAt = Date.now();
+    const selectiveEmbeddingBatch = await computeShopTheLookGarmentEmbeddingsFromDetections(
+      buffer,
+      selectiveDetectionJobs.map(({ detection }) => detection.box),
+      fullProcessBuf,
+    ).catch(() => []);
+    const selectiveEmbeddingBatchMs = Date.now() - selectiveEmbeddingBatchStartedAt;
+    const selectiveEmbeddingBatchReady = selectiveEmbeddingBatch.reduce(
+      (count, item) => (item?.embedding && item?.clipBufferForAttributes ? count + 1 : count),
+      0,
+    );
     const selectiveDetectionConcurrency = shopLookPerDetectionConcurrency(
       selectiveDetectionJobs.map(({ detection }) => detection),
     );
     const selectiveSettled = await mapPoolSettled(
       selectiveDetectionJobs,
       selectiveDetectionConcurrency,
-      async ({ detection, i, isUserDefined }) => {
+      async ({ detection, i, isUserDefined }, selectiveJobIndex) => {
         try {
           let clipBuffer: Buffer;
           let finalEmbedding: number[];
           let queryProcessBuf: Buffer;
           try {
-            const aligned = await computeShopTheLookGarmentEmbeddingFromDetection(buffer, detection.box, fullProcessBuf);
-            finalEmbedding = aligned.embedding;
-            clipBuffer = aligned.clipBufferForAttributes;
-            queryProcessBuf = aligned.processBuf;
+            const batched = selectiveEmbeddingBatch[selectiveJobIndex];
+            if (batched?.embedding && batched.clipBufferForAttributes) {
+              finalEmbedding = batched.embedding;
+              clipBuffer = batched.clipBufferForAttributes;
+              queryProcessBuf = batched.processBuf;
+            } else {
+              const aligned = await computeShopTheLookGarmentEmbeddingFromDetection(
+                buffer,
+                detection.box,
+                fullProcessBuf,
+              );
+              finalEmbedding = aligned.embedding;
+              clipBuffer = aligned.clipBufferForAttributes;
+              queryProcessBuf = aligned.processBuf;
+            }
           } catch {
             return null;
           }
@@ -9339,6 +9443,18 @@ export class ImageAnalysisService {
         }
       },
     );
+    const selectiveEmbeddingFallbackCount = Math.max(
+      0,
+      selectiveDetectionJobs.length - selectiveEmbeddingBatchReady,
+    );
+    if (process.env.NODE_ENV !== "production" || String(process.env.SEARCH_DEBUG ?? "") === "1") {
+      console.info("[image-search][selective-embedding-batch-usage]", {
+        detectionJobs: selectiveDetectionJobs.length,
+        embeddingBatchReady: selectiveEmbeddingBatchReady,
+        embeddingFallbackCount: selectiveEmbeddingFallbackCount,
+        embeddingBatchMs: selectiveEmbeddingBatchMs,
+      });
+    }
 
     for (const outcome of selectiveSettled) {
       if (outcome.status === "fulfilled" && outcome.value) {

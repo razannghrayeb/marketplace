@@ -4,7 +4,7 @@
  * High-level image processing: CLIP embeddings, validation, pHash.
  */
 
-import { getImageEmbedding, preprocessImage, isClipAvailable, initClip } from "./clip";
+import { getImageEmbedding, getImageEmbeddingBatch, preprocessImage, isClipAvailable, initClip } from "./clip";
 import { loadImage, normalizeImage, pHash } from "./utils";
 import { prepareBufferForImageSearchQuery } from "./embeddingPrep";
 import sharpLib from "sharp";
@@ -334,6 +334,85 @@ export async function computeShopTheLookGarmentEmbeddingFromDetection(
   const clipBufferForAttributes = await resolveGarmentEmbedBufferFromPrepared(processBuf, box);
   const embedding = await processImageForEmbedding(clipBufferForAttributes);
   return { embedding, clipBufferForAttributes, processBuf };
+}
+
+export type ShopTheLookDetectionEmbedding = {
+  embedding: number[] | null;
+  clipBufferForAttributes: Buffer | null;
+  processBuf: Buffer;
+};
+
+/**
+ * Batch variant of shop-the-look garment embeddings.
+ * Computes per-detection padded crops first, then runs a single CLIP forward pass
+ * for all valid crops to maximize GPU throughput.
+ */
+export async function computeShopTheLookGarmentEmbeddingsFromDetections(
+  rawBuffer: Buffer,
+  detectionBoxes: Array<PixelBox | null | undefined>,
+  preparedProcessBuf?: Buffer,
+): Promise<ShopTheLookDetectionEmbedding[]> {
+  const processBuf = preparedProcessBuf ?? (await prepareBufferForImageSearchQuery(rawBuffer)).buffer;
+  if (!Array.isArray(detectionBoxes) || detectionBoxes.length === 0) return [];
+
+  const [rawMeta, procMeta] = await Promise.all([
+    sharp(rawBuffer).metadata(),
+    sharp(processBuf).metadata(),
+  ]);
+  const rw = rawMeta.width ?? 0;
+  const rh = rawMeta.height ?? 0;
+  const pw = procMeta.width ?? 0;
+  const ph = procMeta.height ?? 0;
+
+  const clipBuffers = await Promise.all(
+    detectionBoxes.map(async (detectionBox) => {
+      try {
+        let box = detectionBox ?? null;
+        if (box && rw > 0 && rh > 0 && pw > 0 && ph > 0 && (rw !== pw || rh !== ph)) {
+          box = scalePixelBoxToImageDims(box, rw, rh, pw, ph);
+        }
+        const crop = await resolveGarmentEmbedBufferFromPrepared(processBuf, box);
+        return crop;
+      } catch {
+        return null;
+      }
+    }),
+  );
+
+  const validIndexToPreprocessed = new Map<number, Float32Array>();
+  for (let i = 0; i < clipBuffers.length; i++) {
+    const clipBuffer = clipBuffers[i];
+    if (!clipBuffer) continue;
+    try {
+      const { data, info } = await sharp(clipBuffer)
+        .resize(224, 224, { fit: "cover" })
+        .removeAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      validIndexToPreprocessed.set(
+        i,
+        preprocessImage(new Uint8Array(data), info.width, info.height, info.channels),
+      );
+    } catch {
+      // Keep null for this detection.
+    }
+  }
+
+  const validEntries = [...validIndexToPreprocessed.entries()];
+  const batchEmbeddings = await getImageEmbeddingBatch(validEntries.map(([, pre]) => pre));
+  const embeddingByIndex = new Map<number, number[]>();
+  for (let i = 0; i < validEntries.length; i++) {
+    const emb = batchEmbeddings[i];
+    if (Array.isArray(emb) && emb.length > 0) {
+      embeddingByIndex.set(validEntries[i][0], emb);
+    }
+  }
+
+  return detectionBoxes.map((_, i) => ({
+    embedding: embeddingByIndex.get(i) ?? null,
+    clipBufferForAttributes: clipBuffers[i] ?? null,
+    processBuf,
+  }));
 }
 
 /**
