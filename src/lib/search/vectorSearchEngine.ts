@@ -52,7 +52,7 @@ export async function searchSingleVector(params: SingleVectorSearchParams): Prom
           filter: filterQuery,
         },
       },
-      _source: ["product_id"],
+      _source: ["title", "price_usd", "image_cdn", "product_id"],
     },
   });
 
