@@ -52,6 +52,7 @@ import { searchByImageWithSimilarity } from "./search.service";
 import { ProductResult } from "./types";
 import sharpLib from "sharp";
 import crypto from "crypto";
+import { performance } from "node:perf_hooks";
 import {
   mapDetectionToCategory,
   getSearchCategories,
@@ -4449,6 +4450,7 @@ export interface ImageAnalysisStageTimings {
   accessoryRecoveryMs?: number;
   deferredFullFrameEmbeddingMs?: number;
   postProcessMs?: number;
+  detectionPersistQueueMs?: number;
 }
 
 export interface ImageSimilarityStageTimings {
@@ -4900,7 +4902,7 @@ export class ImageAnalysisService {
     filename: string,
     options: AnalyzeOptions = {}
   ): Promise<ImageAnalysisResult> {
-    const analysisStartedAt = Date.now();
+    const analysisStartedAt = performance.now();
     const analysisTimings: ImageAnalysisStageTimings = { totalMs: 0 };
     const {
       store = true,
@@ -4914,27 +4916,27 @@ export class ImageAnalysisService {
     } = options;
 
     // Validate image first
-    const validateStartedAt = Date.now();
+    const validateStartedAt = performance.now();
     const validation = await validateImage(buffer);
-    analysisTimings.validateMs = Date.now() - validateStartedAt;
+    analysisTimings.validateMs = performance.now() - validateStartedAt;
     if (!validation.valid) {
       throw new Error(validation.error || "Invalid image");
     }
 
     // Check service availability
-    const serviceStatusStartedAt = Date.now();
+    const serviceStatusStartedAt = performance.now();
     const services = await this.getServiceStatus();
-    analysisTimings.serviceStatusMs = Date.now() - serviceStatusStartedAt;
+    analysisTimings.serviceStatusMs = performance.now() - serviceStatusStartedAt;
 
     // Get image metadata first
-    const metadataStartedAt = Date.now();
+    const metadataStartedAt = performance.now();
     const metadata = await sharp(buffer).metadata();
-    analysisTimings.metadataMs = Date.now() - metadataStartedAt;
+    analysisTimings.metadataMs = performance.now() - metadataStartedAt;
     const imageWidth = metadata.width || 0;
     const imageHeight = metadata.height || 0;
-    const pHashStartedAt = Date.now();
+    const pHashStartedAt = performance.now();
     const pHash = await computePHash(buffer);
-    analysisTimings.pHashMs = Date.now() - pHashStartedAt;
+    analysisTimings.pHashMs = performance.now() - pHashStartedAt;
 
     const deferClip =
       deferFullImageEmbedding &&
@@ -4946,25 +4948,25 @@ export class ImageAnalysisService {
     // Run operations in parallel where possible
     const storagePromise = store
       ? (async () => {
-        const startedAt = Date.now();
+        const startedAt = performance.now();
         try {
           return await this.storeImage(buffer, filename, productId, isPrimary, pHash);
         } finally {
-          analysisTimings.storageMs = Date.now() - startedAt;
+          analysisTimings.storageMs = performance.now() - startedAt;
         }
       })()
       : Promise.resolve(null);
 
     const embeddingPromise = generateEmbedding && services.clip && !deferClip
       ? (async () => {
-        const startedAt = Date.now();
+        const startedAt = performance.now();
         try {
           return await processImageForEmbedding(buffer);
         } catch (err) {
           console.error("CLIP embedding failed:", err);
           return null;
         } finally {
-          analysisTimings.clipEmbeddingMs = Date.now() - startedAt;
+          analysisTimings.clipEmbeddingMs = performance.now() - startedAt;
         }
       })()
       : Promise.resolve(null);
@@ -4984,7 +4986,7 @@ export class ImageAnalysisService {
 
     const detectionPromise = runDetection && services.yolo
       ? (async () => {
-        const startedAt = Date.now();
+        const startedAt = performance.now();
         try {
           return await this.yoloClient.detectFromBuffer(buffer, filename, { confidence, preprocessing });
         } catch (err) {
@@ -5003,7 +5005,7 @@ export class ImageAnalysisService {
           }
           return null;
         } finally {
-          analysisTimings.yoloInitialMs = Date.now() - startedAt;
+          analysisTimings.yoloInitialMs = performance.now() - startedAt;
         }
       })()
       : Promise.resolve(null);
@@ -5029,7 +5031,7 @@ export class ImageAnalysisService {
     ) {
       const retryConfidence = Math.max(0.05, confidence * 0.6);
       let didRetryFindDetections = false;
-      const retryStartedAt = Date.now();
+      const retryStartedAt = performance.now();
       try {
         const retry = await this.yoloClient.detectFromBuffer(buffer, filename, {
           confidence: retryConfidence,
@@ -5048,7 +5050,7 @@ export class ImageAnalysisService {
       } catch (err) {
         console.warn("[YOLOv8] retry-on-empty failed:", err);
       } finally {
-        analysisTimings.yoloRetryMs = Date.now() - retryStartedAt;
+        analysisTimings.yoloRetryMs = performance.now() - retryStartedAt;
       }
 
       if (!didRetryFindDetections) {
@@ -5078,7 +5080,7 @@ export class ImageAnalysisService {
         initialBagDetections.every((detection) => Number(detection.confidence ?? 0) < 0.78);
 
       if (shouldRunAccessoryRecovery && services.yolo) {
-        const accessoryRecoveryStartedAt = Date.now();
+        const accessoryRecoveryStartedAt = performance.now();
         try {
           // Collect from the speculative promise started in parallel with initial detection.
           const accessoryRetry = await accessorySpeculativePromise;
@@ -5107,19 +5109,19 @@ export class ImageAnalysisService {
         } catch (err) {
           console.warn("[YOLOv8] accessory recovery retry failed:", err);
         } finally {
-          analysisTimings.accessoryRecoveryMs = Date.now() - accessoryRecoveryStartedAt;
+          analysisTimings.accessoryRecoveryMs = performance.now() - accessoryRecoveryStartedAt;
         }
       }
 
       // Ensure clients always receive `style` + `mask` (YOLO service returns them as null currently).
-      const postProcessStartedAt = Date.now();
+      const postProcessStartedAt = performance.now();
       detectionResult = {
         ...detectionResult,
         detections: detectionResult.detections
           .map((d) => correctDetectionByPosition(d))
           .map((d) => ensureStyleAndMask(d, imageWidth, imageHeight)),
       };
-      analysisTimings.postProcessMs = Date.now() - postProcessStartedAt;
+      analysisTimings.postProcessMs = performance.now() - postProcessStartedAt;
     }
 
     let embeddingFinal = embeddingResult;
@@ -5129,12 +5131,12 @@ export class ImageAnalysisService {
         Array.isArray(detectionResult.detections) &&
         detectionResult.detections.length > 0;
       if (!hasDetections) {
-        const deferredClipStartedAt = Date.now();
+        const deferredClipStartedAt = performance.now();
         embeddingFinal = await processImageForEmbedding(buffer).catch((err) => {
           console.error("CLIP embedding failed (deferred full-frame):", err);
           return null;
         });
-        analysisTimings.deferredFullFrameEmbeddingMs = Date.now() - deferredClipStartedAt;
+        analysisTimings.deferredFullFrameEmbeddingMs = performance.now() - deferredClipStartedAt;
       }
     }
 
@@ -5147,41 +5149,36 @@ export class ImageAnalysisService {
       pHash,
     };
 
-    // Persist detection results to DB when we have a stored product image
-    try {
-      const productImageId = storageResult && (storageResult as any).id ? (storageResult as any).id : 0;
-      if (productImageId && detectionResult && Array.isArray(detectionResult.detections) && detectionResult.detections.length > 0) {
-        for (const det of detectionResult.detections) {
-          try {
-            await pg.query(
-              `INSERT INTO product_image_detections
-               (product_image_id, product_id, label, raw_label, confidence, box, box_x1, box_y1, box_x2, box_y2, area_ratio, style)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-              [
-                productImageId,
-                productId || null,
-                det.label || null,
-                (det as any).raw_label || null,
-                typeof det.confidence === "number" ? det.confidence : null,
-                det.box ? JSON.stringify(det.box) : null,
-                det.box ? Math.round(det.box.x1) : null,
-                det.box ? Math.round(det.box.y1) : null,
-                det.box ? Math.round(det.box.x2) : null,
-                det.box ? Math.round(det.box.y2) : null,
-                typeof det.area_ratio === "number" ? det.area_ratio : null,
-                det.style ? JSON.stringify(det.style) : null,
-              ]
-            );
-          } catch (rowErr) {
-            console.error("Failed to persist detection row:", rowErr);
-          }
-        }
-      }
-    } catch (err) {
-      console.error("Error persisting detections:", err);
+    // Persist detection rows in the background so upload/search response is not blocked by DB I/O.
+    const detectionPersistQueueStartedAt = performance.now();
+    const productImageId = storageResult && (storageResult as any).id ? (storageResult as any).id : 0;
+    if (
+      productImageId &&
+      detectionResult &&
+      Array.isArray(detectionResult.detections) &&
+      detectionResult.detections.length > 0
+    ) {
+      setImmediate(() => {
+        void this.persistDetectionRows(productImageId, productId, detectionResult!.detections);
+      });
     }
-
-    analysisTimings.totalMs = Date.now() - analysisStartedAt;
+    analysisTimings.detectionPersistQueueMs = performance.now() - detectionPersistQueueStartedAt;
+    analysisTimings.totalMs = performance.now() - analysisStartedAt;
+    console.info("[image-analysis][latency-ms]", {
+      totalMs: Number(analysisTimings.totalMs.toFixed(2)),
+      validateMs: Number((analysisTimings.validateMs ?? 0).toFixed(2)),
+      serviceStatusMs: Number((analysisTimings.serviceStatusMs ?? 0).toFixed(2)),
+      metadataMs: Number((analysisTimings.metadataMs ?? 0).toFixed(2)),
+      pHashMs: Number((analysisTimings.pHashMs ?? 0).toFixed(2)),
+      storageMs: Number((analysisTimings.storageMs ?? 0).toFixed(2)),
+      clipEmbeddingMs: Number((analysisTimings.clipEmbeddingMs ?? 0).toFixed(2)),
+      yoloInitialMs: Number((analysisTimings.yoloInitialMs ?? 0).toFixed(2)),
+      yoloRetryMs: Number((analysisTimings.yoloRetryMs ?? 0).toFixed(2)),
+      accessoryRecoveryMs: Number((analysisTimings.accessoryRecoveryMs ?? 0).toFixed(2)),
+      postProcessMs: Number((analysisTimings.postProcessMs ?? 0).toFixed(2)),
+      deferredFullFrameEmbeddingMs: Number((analysisTimings.deferredFullFrameEmbeddingMs ?? 0).toFixed(2)),
+      detectionPersistQueueMs: Number((analysisTimings.detectionPersistQueueMs ?? 0).toFixed(2)),
+    });
 
     return {
       image: {
@@ -9749,6 +9746,42 @@ export class ImageAnalysisService {
         return "image/gif";
       default:
         return "image/jpeg";
+    }
+  }
+
+  private async persistDetectionRows(
+    productImageId: number,
+    productId: number | undefined,
+    detections: Detection[],
+  ): Promise<void> {
+    try {
+      await Promise.all(
+        detections.map((det) =>
+          pg.query(
+            `INSERT INTO product_image_detections
+             (product_image_id, product_id, label, raw_label, confidence, box, box_x1, box_y1, box_x2, box_y2, area_ratio, style)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+            [
+              productImageId,
+              productId || null,
+              det.label || null,
+              (det as any).raw_label || null,
+              typeof det.confidence === "number" ? det.confidence : null,
+              det.box ? JSON.stringify(det.box) : null,
+              det.box ? Math.round(det.box.x1) : null,
+              det.box ? Math.round(det.box.y1) : null,
+              det.box ? Math.round(det.box.x2) : null,
+              det.box ? Math.round(det.box.y2) : null,
+              typeof det.area_ratio === "number" ? det.area_ratio : null,
+              det.style ? JSON.stringify(det.style) : null,
+            ],
+          ).catch((rowErr) => {
+            console.error("Failed to persist detection row:", rowErr);
+          }),
+        ),
+      );
+    } catch (err) {
+      console.error("Error persisting detections:", err);
     }
   }
 }
