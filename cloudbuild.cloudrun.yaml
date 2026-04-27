@@ -68,7 +68,7 @@ steps:
         set -euo pipefail
 
         IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$BUILD_ID"
-        ENV_VARS="NODE_ENV=production"
+        ENV_VARS="NODE_ENV=production,BLIP_API_URL=${_BLIP_API_URL},BLIP_API_TIMEOUT_MS=${_BLIP_API_TIMEOUT_MS}"
         if [ -n "${_COMMON_ENV_VARS}" ]; then
           ENV_VARS="$$ENV_VARS,${_COMMON_ENV_VARS}"
         fi
@@ -126,6 +126,8 @@ substitutions:
   # Set GPU only when needed (example: _GPU_COUNT=1,_GPU_TYPE=nvidia-l4)
   _GPU_COUNT: "0"
   _GPU_TYPE: "none"
+  _BLIP_API_URL: ""
+  _BLIP_API_TIMEOUT_MS: "8000"
 
   _COMMON_ENV_VARS: "OS_INDEX=products,CORS_ORIGIN=*"
 
