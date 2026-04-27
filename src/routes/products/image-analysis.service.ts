@@ -1200,9 +1200,9 @@ function categoryConcurrencyOverride(category: string): number | null {
 /** Max concurrent OpenSearch kNN calls per shop-the-look request (default 8). */
 function shopLookPerDetectionConcurrency(detections?: Array<{ label: string; confidence?: number }>): number {
   const raw = Number(process.env.SEARCH_IMAGE_SHOP_DETECTION_CONCURRENCY);
-  // Slightly higher default improves latency when 3-6 detections are present
-  // without changing retrieval/ranking behavior.
-  let n = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 8;
+  const detectedCount = Array.isArray(detections) ? detections.length : 0;
+  // Default to full fan-out across detections for lower wall-clock latency.
+  let n = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : Math.max(1, detectedCount || 8);
 
   if (Array.isArray(detections) && detections.length > 0) {
     // Use dominant detection category to allow path/category-specific tuning.
@@ -1226,7 +1226,9 @@ function shopLookPerDetectionConcurrency(detections?: Array<{ label: string; con
   // Avoid accidental fully-serial per-detection execution unless explicitly allowed.
   const allowSerial = String(process.env.SEARCH_IMAGE_SHOP_ALLOW_SERIAL_DETECTION ?? "").toLowerCase() === "1";
   const minConcurrency = allowSerial ? 1 : 3;
-  return Math.min(16, Math.max(minConcurrency, n));
+  const capRaw = Number(process.env.SEARCH_IMAGE_SHOP_DETECTION_CONCURRENCY_CAP ?? "24");
+  const cap = Number.isFinite(capRaw) ? Math.max(4, Math.min(64, Math.floor(capRaw))) : 24;
+  return Math.min(cap, Math.max(minConcurrency, n));
 }
 
 /** Max search calls per detection (initial + retries/fallbacks). Default 3 to preserve recall on hard detections. */

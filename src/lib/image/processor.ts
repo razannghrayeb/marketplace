@@ -342,6 +342,25 @@ export type ShopTheLookDetectionEmbedding = {
   processBuf: Buffer;
 };
 
+async function mapPool<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  }
+  const n = Math.min(Math.max(1, limit), Math.max(1, items.length));
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return out;
+}
+
 /**
  * Batch variant of shop-the-look garment embeddings.
  * Computes per-detection padded crops first, then runs a single CLIP forward pass
@@ -379,23 +398,32 @@ export async function computeShopTheLookGarmentEmbeddingsFromDetections(
     }),
   );
 
+  const preprocessConcurrencyRaw = Number(process.env.SEARCH_IMAGE_PREPROCESS_CONCURRENCY ?? "12");
+  const preprocessConcurrency = Number.isFinite(preprocessConcurrencyRaw)
+    ? Math.max(2, Math.min(32, Math.floor(preprocessConcurrencyRaw)))
+    : 12;
+  const preprocessedByIndex = await mapPool(
+    clipBuffers.map((clipBuffer, i) => ({ clipBuffer, i })),
+    preprocessConcurrency,
+    async ({ clipBuffer, i }) => {
+      if (!clipBuffer) return { i, pre: null as Float32Array | null };
+      try {
+        const { data, info } = await sharp(clipBuffer)
+          .resize(224, 224, { fit: "cover" })
+          .removeAlpha()
+          .raw()
+          .toBuffer({ resolveWithObject: true });
+        // `data` is already a Uint8Array-compatible Buffer; avoid extra copy.
+        return { i, pre: preprocessImage(data, info.width, info.height, info.channels) };
+      } catch {
+        return { i, pre: null as Float32Array | null };
+      }
+    },
+  );
+
   const validIndexToPreprocessed = new Map<number, Float32Array>();
-  for (let i = 0; i < clipBuffers.length; i++) {
-    const clipBuffer = clipBuffers[i];
-    if (!clipBuffer) continue;
-    try {
-      const { data, info } = await sharp(clipBuffer)
-        .resize(224, 224, { fit: "cover" })
-        .removeAlpha()
-        .raw()
-        .toBuffer({ resolveWithObject: true });
-      validIndexToPreprocessed.set(
-        i,
-        preprocessImage(new Uint8Array(data), info.width, info.height, info.channels),
-      );
-    } catch {
-      // Keep null for this detection.
-    }
+  for (const row of preprocessedByIndex) {
+    if (row.pre) validIndexToPreprocessed.set(row.i, row.pre);
   }
 
   const validEntries = [...validIndexToPreprocessed.entries()];
