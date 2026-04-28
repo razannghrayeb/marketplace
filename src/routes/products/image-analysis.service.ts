@@ -6223,8 +6223,24 @@ export class ImageAnalysisService {
           // The search runs concurrently with BLIP below (OpenSearch I/O and GPU captioning
           // in parallel). BLIP-derived material/type/gender signals feed the retry path if
           // the initial results are sparse; detectionBlipSignal still reaches all retry calls.
+
+          // For generic shoe detections: start CLIP zero-shot subtype classification
+          // concurrently with the kNN search (uses cached text embeddings after first warmup,
+          // ~0ms overhead per request). The result is awaited at/before the retry decision
+          // so retries use the correct subtype even when BLIP is unavailable.
+          const _earlyFootwearSubtypePromise: Promise<string | null> =
+            categoryMapping.productCategory === "footwear" &&
+            (label === "shoe" || label === "shoes") &&
+            finalEmbedding.length > 0
+              ? classifyFootwearSubtypeFromCropEmbedding(finalEmbedding).catch(() => null)
+              : Promise.resolve(null);
+
           const preBlipFilters = { ...filters };
           const preBlipSoftTypeHints = [...softProductTypeHints];
+          // k-means crop color for this detection is already resolved (awaited above at
+          // cropColorsPromise). Pass it to the initial search so the reranker has a color
+          // bias from the start rather than ordering results purely by cosine similarity.
+          const _initialInferredColor = String(inferredColorsByItem[itemColorKey] ?? "").trim() || undefined;
           const _parallelSearchStartedAt = Date.now();
           const _parallelSearchPromise = runDetectionSearch("initial", {
             imageEmbedding: finalFullFrameEmbedding,
@@ -6255,7 +6271,9 @@ export class ImageAnalysisService {
             forceHardCategoryFilter: forceHardCategoryFilterUsed,
             relaxThresholdWhenEmpty: shopLookDetectionRelaxEnv(),
             blipSignal: undefined,
-            inferredPrimaryColor: undefined,
+            // Pass k-means crop color (already resolved) so the initial reranker has a
+            // color bias rather than falling back to cosine-only ordering.
+            inferredPrimaryColor: _initialInferredColor,
             inferredColorKey: itemColorKey,
             inferredColorsByItem,
             inferredColorsByItemConfidence,
@@ -6475,7 +6493,9 @@ export class ImageAnalysisService {
             (label === "shoe" || label === "shoes") &&
             finalEmbedding.length > 0
           ) {
-            const clipSubtype = await classifyFootwearSubtypeFromCropEmbedding(finalEmbedding).catch(() => null);
+            // Await the promise started concurrently with the initial kNN search.
+            // After first warmup this is pure cosine computation (~0ms).
+            const clipSubtype = await _earlyFootwearSubtypePromise;
             if (clipSubtype && clipSubtype !== label) {
               if (hotPathDebug) {
                 console.log(`[detection-trace] footwear subtype CLIP-classified: "${label}" → "${clipSubtype}"`);
@@ -6564,13 +6584,19 @@ export class ImageAnalysisService {
             categoryMapping.productCategory === "footwear" &&
             Number(detection.area_ratio ?? 0) < 0.018;
           const globalPrimaryNorm = canonicalizeColorIntentToken(inferredPrimaryColor);
+          // Suppress shoe color when the global primary is light-neutral AND the shoe's
+          // crop color differs — this guards against background-bleed on small detections
+          // (e.g., white studio floor leaking into a tiny shoe bbox). When the shoe box
+          // is large enough (≥ 6% of image), the crop color is reliably the shoe itself,
+          // so we keep it even when the global primary is white/beige/cream.
           const footwearColorConflictWithGlobal =
             categoryMapping.productCategory === "footwear" &&
             inferredColorNorm.length > 0 &&
             globalPrimaryNorm.length > 0 &&
             inferredColorNorm !== globalPrimaryNorm &&
             isLightNeutralFashionColor(globalPrimaryNorm) &&
-            !isLightNeutralFashionColor(inferredColorNorm);
+            !isLightNeutralFashionColor(inferredColorNorm) &&
+            (detection.area_ratio ?? 0) < 0.06;
           const explicitColorFilter = String((filters as any).color ?? "").trim();
           const inferredColorConfidenceForDetection = Number(
             inferredColorsByItemConfidence[itemColorKey] ?? 0,
@@ -7129,13 +7155,24 @@ export class ImageAnalysisService {
 
           // Footwear can go sparse with crop-only embeddings; run recovery when the group
           // is empty or too small, not only for tiny boxes.
+          // When BLIP/CLIP refined the label to a specific subtype (e.g. "shoe" → "boots"),
+          // raise the count threshold so sparse-but-specific results still trigger a
+          // recovery that uses the refined softProductTypeHints.
+          const footwearSubtypeWasRefined =
+            categoryMapping.productCategory === "footwear" &&
+            label !== rawLabel &&
+            label !== "shoe" &&
+            label !== "shoes";
+          const footwearLowCountThreshold = footwearSubtypeWasRefined
+            ? Math.max(3, Math.floor(resolvedLimitPerItem * 0.35))
+            : Math.max(2, Math.floor(resolvedLimitPerItem * 0.2));
           if (
             detectionSearchCalls < maxSearchCallsPerDetection &&
-            similarResult.results.length < Math.max(2, Math.floor(resolvedLimitPerItem * 0.2)) &&
+            similarResult.results.length < footwearLowCountThreshold &&
             categoryMapping.productCategory === "footwear"
           ) {
             if (hotPathDebug) {
-              console.log(`[recovery-attempt] detection="${label}" type=footwear_recovery reason="low_count(${similarResult.results.length})"`);
+              console.log(`[recovery-attempt] detection="${label}" type=footwear_recovery reason="low_count(${similarResult.results.length})" subtype_refined=${footwearSubtypeWasRefined}`);
             }
             const footwearTerms = hardCategoryTermsForDetection(label, categoryMapping, {
               confidence: detection.confidence,
@@ -7174,6 +7211,9 @@ export class ImageAnalysisService {
                   detectionYoloConfidence: detection.confidence,
                   detectionProductCategory: categoryMapping.productCategory,
                   filters: footwearFilters,
+                  // Pass refined subtype hints (e.g. "boots") so the recovery search
+                  // targets the correct subtype, not generic "footwear".
+                  softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
                   limit: detectionRetrievalLimit,
                   similarityThreshold: shopLookFootwearRecoveryThreshold(similarityThreshold, detection.area_ratio ?? 0),
                   includeRelated: false,
@@ -8904,7 +8944,8 @@ export class ImageAnalysisService {
             globalPrimaryNorm.length > 0 &&
             inferredColorNorm !== globalPrimaryNorm &&
             isLightNeutralFashionColor(globalPrimaryNorm) &&
-            !isLightNeutralFashionColor(inferredColorNorm);
+            !isLightNeutralFashionColor(inferredColorNorm) &&
+            (detection.area_ratio ?? 0) < 0.06;
           const explicitColorFilter = String((filters as any).color ?? "").trim();
           // Always generalize color intent reranking for all garment types
           const inferredPrimaryColorForSearch = canonicalizeColorIntentToken(inferredPrimaryColorForDetection);
