@@ -39,7 +39,7 @@ function resolvePoolMax(): number {
   }
 
   if (process.env.NODE_ENV === "production") {
-    return 2;
+    return 10;
   }
 
   return 10;

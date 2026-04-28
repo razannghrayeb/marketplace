@@ -7180,9 +7180,11 @@ export async function searchByImageWithSimilarity(
 
   stageRerankDoneAt = Date.now();
 
+  // Detection searches use a tighter cap: post-rerank gates drop ~20-30% of candidates,
+  // so limit*5 still safely covers the final display set while halving PG data transfer.
   const maxHydrate = Math.min(
     rankedHits.length,
-    Math.max(limit * 10, 150),
+    detectionScoped ? Math.max(limit * 5, 80) : Math.max(limit * 10, 150),
   );
   const hitsForHydrate = rankedHits.slice(0, maxHydrate);
   const productIds = hitsForHydrate.map((hit: any) => hit._source.product_id);
@@ -8160,7 +8162,10 @@ export async function searchByImageWithSimilarity(
     .trim()
     .replace(/[^0-9a-f]/g, "")
     .padStart(16, "0");
-  if (normalizedQueryPHash && /^[0-9a-f]+$/i.test(normalizedQueryPHash)) {
+  // Skip pHash rescue for detection-scoped searches: the query image is a YOLO crop,
+  // not a full catalog product photo, so its pHash will never match catalog items.
+  // The full-table-scan queries below take 11-12s and are wasted on crop images.
+  if (!detectionScoped && normalizedQueryPHash && /^[0-9a-f]+$/i.test(normalizedQueryPHash)) {
     const existing = new Set(results.map((p) => String(p.id)));
     const hasIsHidden = await productsTableHasIsHiddenColumn();
     const hiddenClause = hasIsHidden ? "AND p.is_hidden = false" : "";
