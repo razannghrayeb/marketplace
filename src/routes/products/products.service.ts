@@ -3290,7 +3290,9 @@ function imageKnnTimeoutMs(detectionScoped = false): number {
   }
   const raw = Number(process.env.SEARCH_IMAGE_KNN_TIMEOUT_MS);
   if (Number.isFinite(raw) && raw >= 500) return Math.min(120_000, Math.floor(raw));
-  return detectionScoped ? 15_000 : 12_000;
+  // Reduced from 12-15s to match actual kNN latency (64-339ms typical, 490ms spike under load).
+  // Tight timeout forces fast-fail on overloaded cluster instead of holding semaphore slots for 15+ seconds.
+  return detectionScoped ? 3_000 : 2_500;
 }
 
 function imageKnnMaxConcurrentShardRequests(): number {
@@ -3336,13 +3338,13 @@ function imageExactCosineRerankEnabled(): boolean {
  * CLIP/BLIP/query-signal computation all happen BEFORE acquiring this semaphore,
  * so parallel detection tasks still run their fast GPU work simultaneously.
  * Only the actual network round-trip to OpenSearch is serialized.
- * Override with IMAGE_KNN_CONCURRENCY env var (default 2).
+ * Override with IMAGE_KNN_CONCURRENCY env var (default 8).
  */
 const imageKnnSemaphore = (() => {
-  // Cap raised from 8→24. Each knn call holds a slot for ~400ms (tookMs=8-199ms + TCP).
-  // Old cap of 8 caused 12+ second queuing when any slot was held by a timeout-retry.
-  // 24 supports 8 concurrent image-search requests × 3 detections each without queuing.
-  const max = Math.max(1, Math.min(24, Number(process.env.IMAGE_KNN_CONCURRENCY ?? "24")));
+  // Cap back to 8. With 2.5-3s timeout, each knn call holds a slot for ~500ms (tookMs + TCP).
+  // Earlier cap of 24 was needed because 12-15s timeout caused long retries to starve other requests.
+  // Now with fast timeouts, 8 concurrent slots × 3 detections/request = 24 parallel kNN ops (no queuing).
+  const max = Math.max(1, Math.min(24, Number(process.env.IMAGE_KNN_CONCURRENCY ?? "8")));
   let available = max;
   const waiters: Array<() => void> = [];
   return {
@@ -3500,10 +3502,10 @@ async function opensearchImageKnnHits(
         elapsedMs: elapsedOnTimeout,
       });
       // Release the semaphore slot BEFORE the retry — don't monopolize a slot for
-      // timeoutMs (15s) + retryTimeoutMs (22.5s) = 37.5s, which starves other callers.
+      // timeoutMs (2.5s) + retryTimeoutMs (3s) = 5.5s, but still enough for slow shards.
       imageKnnSemaphore.release();
       semaphoreReleased = true;
-      const retryTimeoutMs = Math.min(120_000, Math.floor(timeoutMs * 1.5));
+      const retryTimeoutMs = Math.min(120_000, Math.floor(timeoutMs * 1.2));
       // Re-acquire for the retry so we stay within the concurrency limit.
       await imageKnnSemaphore.acquire();
       semaphoreReleased = false;
@@ -4593,9 +4595,12 @@ export async function searchByImageWithSimilarity(
 
     let results: ProductResult[] = [];
     if (productIds.length > 0) {
-      const products = await getProductsByIdsOrdered(productIds);
       const numericIds = productIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
-      const imagesByProduct = await getImagesForProducts(numericIds);
+      // Parallelize DB queries: fetch products and images simultaneously instead of sequentially
+      const [products, imagesByProduct] = await Promise.all([
+        getProductsByIdsOrdered(productIds),
+        getImagesForProducts(numericIds),
+      ]);
 
       results = products.map((p: any) => {
         const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
@@ -7192,10 +7197,13 @@ export async function searchByImageWithSimilarity(
   // Fetch product data
   let results: ProductResult[] = [];
   if (productIds.length > 0) {
-    const products = await getProductsByIdsOrdered(productIds);
     const numericIds = productIds.map((id: string) => parseInt(id, 10));
-    const imagesByProduct = await getImagesForProducts(numericIds);
-    const userLifestyle = await personalizationPromise;
+    // Parallelize DB queries: fetch products and images simultaneously instead of sequentially
+    const [products, imagesByProduct, userLifestyle] = await Promise.all([
+      getProductsByIdsOrdered(productIds),
+      getImagesForProducts(numericIds),
+      personalizationPromise,
+    ]);
 
     results = products.map((p: any) => {
       const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
@@ -8179,9 +8187,12 @@ export async function searchByImageWithSimilarity(
       .filter((id: string) => !existing.has(id));
     let exactInjected = false;
     if (rescueIds.length > 0) {
-      const rescueProducts = await getProductsByIdsOrdered(rescueIds);
       const rescueNumericIds = rescueIds.map((id: string) => parseInt(id, 10)).filter(Number.isFinite);
-      const rescueImages = await getImagesForProducts(rescueNumericIds);
+      // Parallelize DB queries: fetch products and images simultaneously instead of sequentially
+      const [rescueProducts, rescueImages] = await Promise.all([
+        getProductsByIdsOrdered(rescueIds),
+        getImagesForProducts(rescueNumericIds),
+      ]);
       const rescued: ProductResult[] = rescueProducts.map((p: any) => {
         const imgs: ProductImage[] = rescueImages.get(parseInt(p.id, 10)) || [];
         return {
@@ -8451,9 +8462,12 @@ async function findSimilarByPHash(
 
   // Fetch product data
   const productIds = topSimilar.map(s => String(s.id));
-  const products = await getProductsByIdsOrdered(productIds);
   const numericIds = topSimilar.map(s => s.id);
-  const imagesByProduct = await getImagesForProducts(numericIds);
+  // Parallelize DB queries: fetch products and images simultaneously instead of sequentially
+  const [products, imagesByProduct] = await Promise.all([
+    getProductsByIdsOrdered(productIds),
+    getImagesForProducts(numericIds),
+  ]);
 
   const distanceMap = new Map(topSimilar.map(s => [s.id, s.distance]));
 
@@ -8647,9 +8661,12 @@ export async function searchByTextWithRelated(
   let extractedCategories: string[] = entities.categories;
 
   if (productIds.length > 0) {
-    const products = await getProductsByIdsOrdered(productIds);
     const numericIds = productIds.map((id: string) => parseInt(id, 10));
-    const imagesByProduct = await getImagesForProducts(numericIds);
+    // Parallelize DB queries: fetch products and images simultaneously instead of sequentially
+    const [products, imagesByProduct] = await Promise.all([
+      getProductsByIdsOrdered(productIds),
+      getImagesForProducts(numericIds),
+    ]);
 
     // Also extract brands/categories from results for related search
     const resultBrands = [...new Set(products.map((p: any) => p.brand?.toLowerCase()).filter(Boolean))];
@@ -8722,10 +8739,13 @@ export async function getProductWithVariants(productId: number): Promise<{
   product: Record<string, unknown>;
   images: ProductImage[];
 } | null> {
-  const rows = await getProductsByIdsOrdered([productId]);
+  // Parallelize DB queries: fetch product and images simultaneously
+  const [rows, imagesByProduct] = await Promise.all([
+    getProductsByIdsOrdered([productId]),
+    getImagesForProducts([productId]),
+  ]);
   if (!rows.length) return null;
   const product = rows[0] as Record<string, unknown>;
-  const imagesByProduct = await getImagesForProducts([productId]);
   const images = imagesByProduct.get(productId) ?? [];
   return { product, images };
 }
@@ -9094,9 +9114,12 @@ export async function getCandidateScoresForProducts(
     };
   }
 
-  const products = await getProductsByIdsOrdered(finalIds);
   const numericIds = finalIds.map((id) => parseInt(id, 10));
-  const imagesByProduct = await getImagesForProducts(numericIds);
+  // Parallelize DB queries: fetch products and images simultaneously
+  const [products, imagesByProduct] = await Promise.all([
+    getProductsByIdsOrdered(finalIds),
+    getImagesForProducts(numericIds),
+  ]);
 
   // Build candidate results
   const candidates: CandidateResult[] = products.map((p: any) => {

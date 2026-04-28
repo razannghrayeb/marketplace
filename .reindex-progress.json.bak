@@ -3,7 +3,7 @@
   "totalProcessed": 76298,
   "totalSuccess": 75378,
   "totalFailed": 920,
-  "totalSkipped": 0,
+  "totalSkipped": 1,
   "totalBgRemoved": 9103,
   "totalAttrEmbFailures": 0,
   "failedIds": [
@@ -930,5 +930,5 @@
   ],
   "modelType": "fashion-clip",
   "startedAt": "2026-04-14T17:40:58.364Z",
-  "lastUpdatedAt": "2026-04-28T04:24:13.768Z"
+  "lastUpdatedAt": "2026-04-28T04:42:31.061Z"
 }

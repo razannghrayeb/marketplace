@@ -3,7 +3,9 @@
     "allow": [
       "Bash(npm run *)",
       "Bash(grep -E \"\\\\.\\(ts|js\\)$\")",
-      "Bash(grep -E \"\\\\.ts$\")"
+      "Bash(grep -E \"\\\\.ts$\")",
+      "Bash(awk -F: '$2 > 4560 && $2 < 8140')",
+      "Bash(awk -F: 'NR>1{if \\($1+0 > 4560 && $1+0 < 8140\\) print}')"
     ]
   }
 }
