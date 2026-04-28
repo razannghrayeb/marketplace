@@ -3758,6 +3758,7 @@ export async function searchByImageWithSimilarity(
   const evalT0 = Date.now();
   let stageSetupDoneAt = evalT0;
   let stageKnnDoneAt = evalT0;
+  let stageSignalsDoneAt = evalT0;
   let stageRerankDoneAt = evalT0;
   let stageHydrationDoneAt = evalT0;
   let stageFinalizedAt = evalT0;
@@ -4455,6 +4456,7 @@ export async function searchByImageWithSimilarity(
   stageKnnDoneAt = Date.now();
 
   const signals = await signalsPromise;
+  stageSignalsDoneAt = Date.now();
   colorQueryEmbedding = signals.colorQueryEmbedding;
   textureQueryEmbedding = signals.textureQueryEmbedding;
   materialQueryEmbedding = signals.materialQueryEmbedding;
@@ -8237,10 +8239,12 @@ export async function searchByImageWithSimilarity(
     total_ms: stageFinalizedAt - evalT0,
     setup_ms: stageSetupDoneAt - evalT0,
     knn_ms: stageKnnDoneAt - stageSetupDoneAt,
-    rerank_ms: stageRerankDoneAt - stageKnnDoneAt,
+    signals_ms: stageSignalsDoneAt - stageKnnDoneAt,
+    score_ms: stageRerankDoneAt - stageSignalsDoneAt,
     hydrate_ms: stageHydrationDoneAt - stageRerankDoneAt,
     finalize_ms: stageFinalizedAt - stageHydrationDoneAt,
   };
+  console.log("[image-search-timing]", timing);
 
   if (searchEvalEnabled()) {
     emitImageSearchEval({
