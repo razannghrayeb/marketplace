@@ -3339,7 +3339,10 @@ function imageExactCosineRerankEnabled(): boolean {
  * Override with IMAGE_KNN_CONCURRENCY env var (default 2).
  */
 const imageKnnSemaphore = (() => {
-  const max = Math.max(1, Math.min(8, Number(process.env.IMAGE_KNN_CONCURRENCY ?? "10")));
+  // Cap raised from 8→24. Each knn call holds a slot for ~400ms (tookMs=8-199ms + TCP).
+  // Old cap of 8 caused 12+ second queuing when any slot was held by a timeout-retry.
+  // 24 supports 8 concurrent image-search requests × 3 detections each without queuing.
+  const max = Math.max(1, Math.min(24, Number(process.env.IMAGE_KNN_CONCURRENCY ?? "24")));
   let available = max;
   const waiters: Array<() => void> = [];
   return {
@@ -3360,6 +3363,7 @@ async function opensearchImageKnnHits(
 ): Promise<{ hits: any[]; timedOut: boolean }> {
   // Acquire before the HTTP call — CLIP/BLIP/signal work is done by this point.
   await imageKnnSemaphore.acquire();
+  let semaphoreReleased = false;
   const startedAt = Date.now();
   // Send query as-is; error handler below strips ef_search/num_candidates on rejection
   // and marks them unsupported for the rest of the server lifetime.
@@ -3487,14 +3491,22 @@ async function opensearchImageKnnHits(
       err?.meta?.statusCode === 408;
 
     if (timedOut) {
+      const elapsedOnTimeout = Date.now() - startedAt;
       console.error("[image-knn] request timeout", {
         index: config.opensearch.index,
         field: knnField ?? null,
         vectorLength: queryVector?.length ?? null,
         timeoutMs,
-        elapsedMs: Date.now() - startedAt,
+        elapsedMs: elapsedOnTimeout,
       });
+      // Release the semaphore slot BEFORE the retry — don't monopolize a slot for
+      // timeoutMs (15s) + retryTimeoutMs (22.5s) = 37.5s, which starves other callers.
+      imageKnnSemaphore.release();
+      semaphoreReleased = true;
       const retryTimeoutMs = Math.min(120_000, Math.floor(timeoutMs * 1.5));
+      // Re-acquire for the retry so we stay within the concurrency limit.
+      await imageKnnSemaphore.acquire();
+      semaphoreReleased = false;
       try {
         const retry = await osClient.search(
           {
@@ -3540,7 +3552,7 @@ async function opensearchImageKnnHits(
 
     return { hits: [], timedOut: false };
   } finally {
-    imageKnnSemaphore.release();
+    if (!semaphoreReleased) imageKnnSemaphore.release();
   }
 }
 
@@ -3968,17 +3980,32 @@ export async function searchByImageWithSimilarity(
   let partQueryEmbeddings: Record<string, number[] | null> = {};
   // Kick off expensive query-signal extraction in parallel with first kNN retrieval.
   // We only block on this promise right before rerank/compliance stages need it.
+  // Timeout guard: under GPU contention the 11 CLIP attribute embeddings can block for
+  // 10+ seconds even after kNN returns in <500ms. Race against a deadline so we always
+  // return results promptly; reranking degrades gracefully to score-only when signals miss.
+  const _SIGNAL_TIMEOUT_MS = Number(process.env.IMAGE_SIGNAL_TIMEOUT_MS ?? "3000");
+  const _nullSignals: ImageQuerySignals = {
+    colorQueryEmbedding: null,
+    textureQueryEmbedding: null,
+    materialQueryEmbedding: null,
+    styleQueryEmbedding: null,
+    patternQueryEmbedding: null,
+    partQueryEmbeddings: {},
+  };
   const signalsPromise =
     imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0
-      ? getCachedImageQuerySignals(imageBuffer)
-      : Promise.resolve<ImageQuerySignals>({
-        colorQueryEmbedding: null,
-        textureQueryEmbedding: null,
-        materialQueryEmbedding: null,
-        styleQueryEmbedding: null,
-        patternQueryEmbedding: null,
-        partQueryEmbeddings: {},
-      });
+      ? Promise.race([
+          getCachedImageQuerySignals(imageBuffer),
+          new Promise<ImageQuerySignals>((resolve) =>
+            setTimeout(() => {
+              console.warn("[image-signals] attribute embedding timeout — skipping rerank signals", {
+                timeoutMs: _SIGNAL_TIMEOUT_MS,
+              });
+              resolve(_nullSignals);
+            }, _SIGNAL_TIMEOUT_MS)
+          ),
+        ])
+      : Promise.resolve<ImageQuerySignals>(_nullSignals);
 
   let runColor = false;
   let runTexture = false;
