@@ -33,6 +33,12 @@ import {
 } from "../../lib/outfit/outfitNarrative";
 import type { ProductCategory, StyleProfile, StyleRecommendation } from "../../lib/outfit/completestyle";
 import { mapHexToFashionCanonical } from "../../lib/color/garmentColorPipeline";
+import {
+  getStyleAwareSlotTerms,
+  resolveWeatherContext,
+  type FashionAesthetic,
+  type OutfitOccasion,
+} from "../../lib/outfit/styleAwareSlotQuery";
 
 // ============================================================================
 // Types
@@ -619,6 +625,97 @@ function minimumSlotScore(slot: string): number {
   if (normalized === "bottoms") return 0.54;
   if (normalized === "tops" || normalized === "outerwear" || normalized === "dresses") return 0.57;
   return 0.56;
+}
+
+/**
+ * Outfit-level coherence gate.
+ *
+ * After each slot is scored independently, outliers that are too far from the
+ * outfit's formality centre are penalised. This prevents a single formal item
+ * (blazer, formality 7) from coexisting with a beach item (flip-flops, formality 1)
+ * in the same completion set.
+ *
+ * Logic:
+ *   1. Take the top suggestion per slot to compute the outfit's formality centre.
+ *   2. Any suggestion whose formality deviates more than `MAX_FORMALITY_GAP` from
+ *      that centre receives a proportional score penalty.
+ *   3. Hard-incompatible aesthetic pairs (e.g. active + formal) are penalised more.
+ */
+function enforceOutfitCoherence(suggestions: CompleteLookSuggestion[]): CompleteLookSuggestion[] {
+  if (suggestions.length <= 2) return suggestions;
+
+  const MAX_FORMALITY_GAP = 3.5;
+
+  // Collect formality from top item per slot
+  const topBySlot = new Map<string, number>();
+  for (const s of suggestions) {
+    const slot = normalizeWardrobeCategory(s.stylistSignals?.slot || s.category) || "accessories";
+    if (!topBySlot.has(slot)) {
+      const f = s.stylistSignals?.formalityScore;
+      if (f != null && Number.isFinite(f)) topBySlot.set(slot, f);
+    }
+  }
+
+  if (topBySlot.size < 2) return suggestions;
+
+  const formalityValues = Array.from(topBySlot.values());
+  formalityValues.sort((a, b) => a - b);
+  // Use median as the outfit's formality centre
+  const mid = Math.floor(formalityValues.length / 2);
+  const centre =
+    formalityValues.length % 2 === 0
+      ? (formalityValues[mid - 1] + formalityValues[mid]) / 2
+      : formalityValues[mid];
+
+  // Collect dominant aesthetic tokens from all suggestions
+  const aestheticCounts: Record<string, number> = {};
+  for (const s of suggestions) {
+    const ae = String(s.stylistSignals?.aesthetic || "").toLowerCase().trim();
+    if (ae) aestheticCounts[ae] = (aestheticCounts[ae] || 0) + 1;
+  }
+  const dominantAesthetic = Object.entries(aestheticCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+
+  // Hard-incompatible aesthetic pairs
+  const HARD_CLASHES: Array<[string, string]> = [
+    ["active", "formal"],
+    ["active", "romantic"],
+    ["sporty", "formal"],
+    ["streetwear", "formal"],
+    ["beach", "formal"],
+  ];
+  function isHardAestheticClash(a: string, b: string): boolean {
+    return HARD_CLASHES.some(
+      ([x, y]) => (a.includes(x) && b.includes(y)) || (a.includes(y) && b.includes(x))
+    );
+  }
+
+  return suggestions
+    .map((s) => {
+      const f = s.stylistSignals?.formalityScore ?? centre;
+      const diff = Math.abs(f - centre);
+      let penalty = 1;
+
+      // Formality outlier penalty
+      if (diff > MAX_FORMALITY_GAP) {
+        const excess = diff - MAX_FORMALITY_GAP;
+        penalty *= Math.max(0.3, 1 - excess * 0.14);
+      }
+
+      // Aesthetic clash penalty
+      if (dominantAesthetic) {
+        const candidateAe = String(s.stylistSignals?.aesthetic || "").toLowerCase().trim();
+        if (candidateAe && isHardAestheticClash(dominantAesthetic, candidateAe)) {
+          penalty *= 0.45;
+        }
+      }
+
+      if (penalty >= 0.99) return s;
+      return {
+        ...s,
+        score: Math.round((s.score || 0) * penalty * 1000) / 1000,
+      };
+    })
+    .sort((a, b) => (b.score || 0) - (a.score || 0));
 }
 
 // ============================================================================
@@ -1328,16 +1425,30 @@ async function runCompleteLookCore(
             continue;
           }
 
+          // Aesthetic avoid penalty: downgrade items that clash with the detected aesthetic.
+          // This catches items that pass the slot filter but are stylistically wrong
+          // (e.g. ballet flats in a streetwear outfit, clutch for a sporty look).
+          let aestheticAvoidMultiplier = 1;
+          if (slotQuerySpec.avoidTerms.length > 0) {
+            const titleBlob = String(source?.title || "").toLowerCase();
+            const isAvoided = slotQuerySpec.avoidTerms.some((term) =>
+              titleBlob.includes(term.toLowerCase())
+            );
+            if (isAvoided) {
+              aestheticAvoidMultiplier = 0.55; // significant but not total elimination
+            }
+          }
+
           // Fashion-aware blend: emphasize style/color over raw retrieval.
           const finalScore =
-            embeddingNorm * 0.2 +
+            (embeddingNorm * 0.2 +
             categoryCompat * 0.18 +
             colorHarmony * 0.19 +
             styleAlignment * 0.18 +
             patternAlignment * 0.08 +
             materialAlignment * 0.04 +
             formalityAlignment * 0.08 +
-            weatherAlignment * 0.05;
+            weatherAlignment * 0.05) * aestheticAvoidMultiplier;
 
           const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment * accessoryStyleAlignment);
           const slotAwareFinalScore = Math.round((finalScore * (0.7 + slotStyleScore * 0.3) * footwearDressAlignment) * 1000) / 1000;
@@ -1407,9 +1518,39 @@ async function runCompleteLookCore(
         return scored;
       };
 
+      // Compute aesthetic-aware slot terms once per category (reused inside runSearch)
+      const weatherCtx = resolveWeatherContext(hintedWeather?.temperatureC, hintedWeather?.season);
+      const slotQuerySpec = getStyleAwareSlotTerms({
+        aesthetic: (inferPreferredAesthetic(preferredStyleTerms) as FashionAesthetic),
+        occasion: inferredOccasion as OutfitOccasion,
+        sourceCategory: currentCategoryList[0] || "unknown",
+        targetSlot: category,
+        weather: weatherCtx,
+      });
+
       const runSearch = async (filters: any[], useVector: boolean) => {
         const styleHint = preferredStyleTerms.slice(0, 4).join(" ").trim();
         const lexicalHint = `${canonical} ${styleHint}`.trim();
+
+        // Build style-aware should clauses for lexical search
+        const styleAwareShould: any[] = [
+          // Broad fallback: generic category + style hint
+          {
+            multi_match: {
+              query: lexicalHint,
+              fields: ["title^3", "category^2", "brand", "attr_style", "attr_pattern", "attr_material"],
+            },
+          },
+        ];
+        // Primary aesthetic terms get a strong boost so they surface above generic matches
+        for (const term of slotQuerySpec.primaryTerms.slice(0, 6)) {
+          styleAwareShould.push({ match_phrase: { title: { query: term, boost: 4 } } });
+        }
+        // Secondary terms get a lighter boost
+        for (const term of slotQuerySpec.boostTerms.slice(0, 4)) {
+          styleAwareShould.push({ match_phrase: { title: { query: term, boost: 1.8 } } });
+        }
+
         const queryBody: any = centroid && useVector
           ? {
               size: perCategoryPool,
@@ -1433,14 +1574,7 @@ async function runCompleteLookCore(
               query: {
                 bool: {
                   filter: filters,
-                  should: [
-                    {
-                      multi_match: {
-                        query: lexicalHint,
-                        fields: ["title^3", "category^2", "brand", "attr_style", "attr_pattern", "attr_material"],
-                      },
-                    },
-                  ],
+                  should: styleAwareShould,
                   minimum_should_match: 0,
                 },
               },
