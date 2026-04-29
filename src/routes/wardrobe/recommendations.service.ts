@@ -1589,15 +1589,69 @@ async function runCompleteLookCore(
         return response.body.hits.hits || [];
       };
 
-      let hits = await runSearch(buildFilters(true), true);
-      let scored = scoreHits(hits);
+      /**
+       * Aesthetic-targeted search: requires at least one specific style term to match.
+       * This is the key fix for shoes/bags always returning the same generic items —
+       * the KNN vector path retrieves visually similar items but ignores whether a shoe
+       * is "strappy sandals" vs "combat boots". This search guarantees aesthetically
+       * appropriate items reach the scoring pool regardless of embedding similarity.
+       */
+      const runAestheticSearch = async (filters: any[]): Promise<any[]> => {
+        if (slotQuerySpec.primaryTerms.length === 0) return [];
+        try {
+          const phraseShould = [
+            ...slotQuerySpec.primaryTerms.slice(0, 8).map((term) => ({
+              match_phrase: { title: { query: term, boost: 3 } },
+            })),
+            ...slotQuerySpec.boostTerms.slice(0, 4).map((term) => ({
+              match_phrase: { title: { query: term, boost: 1.5 } },
+            })),
+          ];
+          const res = await osClient.search({
+            index: config.opensearch.index,
+            body: {
+              size: perCategoryPool,
+              query: {
+                bool: {
+                  filter: filters,
+                  should: phraseShould,
+                  minimum_should_match: 1, // MUST match at least one specific aesthetic term
+                },
+              },
+              sort: [{ _score: { order: "desc" } }, { last_seen_at: { order: "desc", missing: "_last" } }],
+              _source: sourceFields,
+            },
+          });
+          return res.body.hits.hits || [];
+        } catch {
+          return [];
+        }
+      };
+
+      // Always run both the vector search and the aesthetic-targeted search in parallel.
+      // The vector search finds visually similar items; the aesthetic search guarantees
+      // style-appropriate items (e.g. "strappy sandals" for bohemian, "combat boots"
+      // for edgy) are in the pool even when they aren't near the embedding centroid.
+      let [hits, aestheticHits] = await Promise.all([
+        runSearch(buildFilters(true), true),
+        runAestheticSearch(buildFilters(true)),
+      ]);
+      let scored = dedupeCompleteLookSuggestions(
+        scoreHits(hits).concat(scoreHits(aestheticHits)).sort((a, b) => b.score - a.score)
+      );
+
       if (scored.length < minPerCategory) {
         const lexicalHits = await runSearch(buildFilters(true), false);
         scored = dedupeCompleteLookSuggestions(scored.concat(scoreHits(lexicalHits)).sort((a, b) => b.score - a.score));
       }
       if (scored.length === 0 && userPriceTier) {
-        hits = await runSearch(buildFilters(false), true);
-        scored = scoreHits(hits);
+        const [relaxedHits, relaxedAestheticHits] = await Promise.all([
+          runSearch(buildFilters(false), true),
+          runAestheticSearch(buildFilters(false)),
+        ]);
+        scored = dedupeCompleteLookSuggestions(
+          scoreHits(relaxedHits).concat(scoreHits(relaxedAestheticHits)).sort((a, b) => b.score - a.score)
+        );
         if (scored.length < minPerCategory) {
           const relaxedLexicalHits = await runSearch(buildFilters(false), false);
           scored = dedupeCompleteLookSuggestions(scored.concat(scoreHits(relaxedLexicalHits)).sort((a, b) => b.score - a.score));
@@ -1687,6 +1741,11 @@ async function runCompleteLookCore(
     inferredAgeGroup,
     limit,
   }).catch(() => mergedSuggestions);
+  mergedSuggestions = enforceVariantDiversity(mergedSuggestions, 2);
+
+  // Outfit-level coherence: penalise cross-slot formality/aesthetic outliers
+  // (e.g. formal blazer + beach sandals coexisting in the same set).
+  mergedSuggestions = enforceOutfitCoherence(mergedSuggestions);
   mergedSuggestions = enforceVariantDiversity(mergedSuggestions, 2);
 
   mergedSuggestions = mergedSuggestions.slice(0, limit);
