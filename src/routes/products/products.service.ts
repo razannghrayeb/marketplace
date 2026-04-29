@@ -905,11 +905,12 @@ function applyImageDiversityRerank(results: ProductResult[], lambda: number): Pr
  */
 function imageSearchKnnPoolLimit(): number {
   const envK = Number(process.env.SEARCH_IMAGE_RETRIEVAL_K);
-  // Default 200 (was 500). With HNSW traversal depth = max(k, ef_search), k=500 caused
-  // 500 random FAISS node lookups per query — each a disk page-fault when OS RAM is >90% used.
-  // k=200 reduces traversal by 2.5× with no recall loss at this index size (m=24, ef=200).
+  // Default 350 (cut from 500 for memory, restored from 200 which hurt recall too much).
+  // k=200 at 30% category-filter survival leaves only 60 candidates — too few for diverse
+  // categories like footwear where subtypes (sneakers/boots/heels) each occupy disjoint
+  // CLIP neighborhoods. k=350 gives ~105 candidates after filter, enough variety for reranking.
   const baseFromEnv =
-    Number.isFinite(envK) && envK >= 120 ? Math.floor(envK) : 200;
+    Number.isFinite(envK) && envK >= 120 ? Math.floor(envK) : 350;
 
   if (!imageMerchandiseSimilarityBindingEnabled()) {
     return Math.min(500, Math.max(120, baseFromEnv));
@@ -917,9 +918,9 @@ function imageSearchKnnPoolLimit(): number {
 
   const merchCapEnv = Number(process.env.SEARCH_IMAGE_MERCH_CANDIDATE_CAP);
   const hardCap = 1200;
-  // Default 300 (was 700). 300 candidates after ~30% category-filter survival = 90 items
-  // for reranking — sufficient for top-20 display. Old 700 meant 700-node HNSW traversal.
-  const defaultMerch = Math.min(hardCap, Math.max(300, baseFromEnv));
+  // Default 450 (was 700, cut to 300). 300 at 30% survival = 90 items — too sparse for
+  // footwear and accessories where visual diversity is high. 450 → ~135 candidates.
+  const defaultMerch = Math.min(hardCap, Math.max(450, baseFromEnv));
   const cap =
     Number.isFinite(merchCapEnv) && merchCapEnv >= 120
       ? Math.min(hardCap, Math.floor(merchCapEnv))
@@ -1010,7 +1011,6 @@ function imageDetectionKnnPoolCap(): number {
   // k only determines how many results come back — keep it wide enough for quality reranking.
   const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "130");
   if (!Number.isFinite(raw)) return 130;
-  return Math.max(60, Math.min(600, Math.floor(raw)));
   return Math.max(60, Math.min(600, Math.floor(raw)));
 }
 
@@ -1887,10 +1887,11 @@ function imageKnnNumCandidates(k: number): number {
       return Math.max(k, Math.min(5000, Math.floor(raw)));
     }
   }
-  // k*2 with cap 600 (was k*4 with cap 5000). Old formula produced num_candidates=2800 at
-  // k=700 — that's 2800 HNSW traversal nodes on a memory-starved node = seconds of disk I/O.
-  // k*2 still provides a 2× oversampling buffer so post-filter candidates survive reranking.
-  return Math.max(k, Math.min(600, Math.max(k * 2, 300)));
+  // k*3 with cap 900 (was k*4/5000, cut to k*2/600 which hurt recall too much).
+  // At k=350: num_candidates = max(350, 1050, 500) = 1050 — 3× oversampling ensures
+  // diverse footwear subtypes (sneakers/boots/heels) survive the post-filter stage.
+  // Still far below the old 2800-node extreme that caused disk I/O stalls.
+  return Math.max(k, Math.min(900, Math.max(k * 3, 500)));
 }
 
 /**
@@ -1907,10 +1908,11 @@ function imageKnnNumCandidatesDetection(k: number): number {
       return Math.max(k, Math.min(5000, Math.floor(raw)));
     }
   }
-  // Floor 150 (was 200). After category filter selectivity (~15-30%), 150 candidates still
-  // leaves 22-45 survivors — enough to exceed sparseKnnMinHits and fill a top-20 page.
-  // 150 nodes of HNSW traversal is 33% less disk I/O than 200 on memory-pressured nodes.
-  return Math.max(k, 150);
+  // Floor 200 (restored from 150). At 15-30% category-filter survival, 150 nodes left only
+  // 22-45 candidates — often fewer than resolvedLimitPerItem, triggering expensive recovery
+  // retries that add more latency than the extra 50 traversal nodes would have cost.
+  // 200 nodes → 30-60 survivors, enough to fill a page without cascading into retries.
+  return Math.max(k, 200);
 }
 
 function mergeKnnHitsByProductId(primary: any[], extra: any[], cap: number): any[] {
@@ -3290,9 +3292,11 @@ function imageKnnTimeoutMs(detectionScoped = false): number {
   }
   const raw = Number(process.env.SEARCH_IMAGE_KNN_TIMEOUT_MS);
   if (Number.isFinite(raw) && raw >= 500) return Math.min(120_000, Math.floor(raw));
-  // Reduced from 12-15s to match actual kNN latency (64-339ms typical, 490ms spike under load).
-  // Tight timeout forces fast-fail on overloaded cluster instead of holding semaphore slots for 15+ seconds.
-  return detectionScoped ? 3_000 : 2_500;
+  // 3s detection / 2.5s full-image was too tight — under moderate load kNN takes 500-800ms,
+  // causing frequent first-pass timeouts that triggered expensive retry chains (costing more
+  // latency than just waiting the extra 2-3s). Using 7s / 5s: fast-fails on truly stuck
+  // queries (>7s) while tolerating normal load spikes without cascading into retries.
+  return detectionScoped ? 7_000 : 5_000;
 }
 
 function imageKnnMaxConcurrentShardRequests(): number {
@@ -3984,9 +3988,10 @@ export async function searchByImageWithSimilarity(
   // Kick off expensive query-signal extraction in parallel with first kNN retrieval.
   // We only block on this promise right before rerank/compliance stages need it.
   // Timeout guard: under GPU contention the 11 CLIP attribute embeddings can block for
-  // 10+ seconds even after kNN returns in <500ms. Race against a deadline so we always
-  // return results promptly; reranking degrades gracefully to score-only when signals miss.
-  const _SIGNAL_TIMEOUT_MS = Number(process.env.IMAGE_SIGNAL_TIMEOUT_MS ?? "3000");
+  // several seconds. Race against a deadline to avoid stalling, but 3000ms was too tight —
+  // signals frequently timed out, leaving color/texture/style reranking disabled entirely.
+  // 6000ms matches typical GPU batch latency under moderate load (p95 ~4-5s).
+  const _SIGNAL_TIMEOUT_MS = Number(process.env.IMAGE_SIGNAL_TIMEOUT_MS ?? "6000");
   const _nullSignals: ImageQuerySignals = {
     colorQueryEmbedding: null,
     textureQueryEmbedding: null,
