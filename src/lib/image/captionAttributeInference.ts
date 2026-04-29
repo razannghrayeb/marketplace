@@ -43,6 +43,8 @@ export function inferColorFromCaption(caption: string): {
   topColor?: string | null;
   jeansColor?: string | null;
   garmentColor?: string | null;
+  shoeColor?: string | null;
+  bagColor?: string | null;
 } {
   const s = String(caption || "").toLowerCase();
 
@@ -56,6 +58,12 @@ export function inferColorFromCaption(caption: string): {
     if (!x) return null;
     if (x === "navy" || x === "dark-blue" || x === "dark blue" || x === "midnight-blue" || x === "midnight blue")
       return "navy";
+    if (
+      x === "light-blue" || x === "light blue" || x === "baby blue" || x === "baby-blue" ||
+      x === "sky blue" || x === "sky-blue" || x === "powder blue" || x === "powder-blue" ||
+      x === "pastel blue" || x === "pastel-blue" || x === "ice blue" || x === "ice-blue"
+    )
+      return "light-blue";
     if (x === "blue" || x === "denim" || x === "cobalt" || x === "indigo" || x === "sapphire") return "blue";
     if (x === "black") return "black";
     if (x === "charcoal") return "charcoal";
@@ -75,7 +83,7 @@ export function inferColorFromCaption(caption: string): {
   };
 
   const colorTokens =
-    "black|charcoal|navy|blue|denim|cobalt|indigo|grey|gray|white|ivory|cream|off[- ]white|beige|tan|camel|taupe|khaki|brown|chocolate|mocha|green|olive|sage|mint|emerald|red|burgundy|maroon|wine|crimson|pink|blush|fuchsia|magenta|rose|salmon|purple|violet|lavender|lilac|plum|mauve|yellow|gold|mustard|lemon|orange|coral|rust|terracotta|peach|amber|teal|turquoise|aqua|silver";
+    "black|charcoal|navy|light[- ]blue|baby[- ]blue|sky[- ]blue|powder[- ]blue|pastel[- ]blue|ice[- ]blue|blue|denim|cobalt|indigo|grey|gray|white|ivory|cream|off[- ]white|beige|tan|camel|taupe|khaki|brown|chocolate|mocha|green|olive|sage|mint|emerald|red|burgundy|maroon|wine|crimson|pink|blush|fuchsia|magenta|rose|salmon|purple|violet|lavender|lilac|plum|mauve|yellow|gold|mustard|lemon|orange|coral|rust|terracotta|peach|amber|teal|turquoise|aqua|silver";
 
   // Helper: find the color token with the SHORTEST gap before a target garment keyword.
   // Using .match() finds the leftmost color, which is wrong when a different garment type
@@ -123,7 +131,16 @@ export function inferColorFromCaption(caption: string): {
   const garmentGarments = "dress|dresses|skirt|skirts|jacket|coat|blazer|gown|romper|jumpsuit|vest|gilet|waistcoat";
   const garmentColor = nearestColorBefore(s, garmentGarments);
 
-  return { topColor, jeansColor, garmentColor };
+  // Footwear color slot — allows per-detection BLIP captions like "white loafer" to propagate.
+  const footwearGarments =
+    "shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals|trainer|trainers|flat|flats|slipper|slippers|mule|mules|pump|pumps|oxford|oxfords";
+  const shoeColor = nearestColorBefore(s, footwearGarments);
+
+  // Bag/accessory color slot.
+  const bagGarments = "bag|bags|handbag|handbags|purse|purses|tote|totes|clutch|clutches|wallet|wallets|satchel|satchels";
+  const bagColor = nearestColorBefore(s, bagGarments);
+
+  return { topColor, jeansColor, garmentColor, shoeColor, bagColor };
 }
 
 /** Single best color token for catalog backfill when category slot is unknown. */
