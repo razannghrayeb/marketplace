@@ -129,6 +129,8 @@ export function buildStructuredBlipOutput(rawCaption: string): StructuredBlipOut
     slotColors.topColor,
     slotColors.jeansColor,
     slotColors.garmentColor,
+    slotColors.shoeColor,
+    slotColors.bagColor,
   ]
     .filter((x): x is string => Boolean(x))
     .map(normalizeColorToken);

@@ -886,12 +886,20 @@ function shouldApplyInferredStyleFallback(productCategory: string, detectionLabe
 /** BLIP slot color for this catalog category (top vs jeans vs dress), if the caption named one explicitly. */
 function captionColorForProductCategory(
   productCategory: string,
-  captionColors: { topColor?: string | null; jeansColor?: string | null; garmentColor?: string | null },
+  captionColors: {
+    topColor?: string | null;
+    jeansColor?: string | null;
+    garmentColor?: string | null;
+    shoeColor?: string | null;
+    bagColor?: string | null;
+  },
 ): string | null {
   if (productCategory === "tops") return captionColors.topColor ?? null;
   if (productCategory === "bottoms") return captionColors.jeansColor ?? null;
   if (productCategory === "dresses") return captionColors.garmentColor ?? null;
   if (productCategory === "outerwear") return captionColors.garmentColor ?? null;
+  if (productCategory === "footwear") return captionColors.shoeColor ?? null;
+  if (productCategory === "bags" || productCategory === "accessories") return captionColors.bagColor ?? null;
   return null;
 }
 
@@ -4103,6 +4111,12 @@ function selectDetectionColorFromPalette(params: {
   // If we still captured a non-neutral secondary color, prefer it only when confidence
   // is not already strong; otherwise keep the stable primary and let caption signals refine.
   if (isTopLike && primaryIsLightNeutral && alternatives.length > 0) {
+    // Silver means white/light top in shadow — prefer the actual white/off-white sibling if present
+    // before hunting for a chromatic alt (which may be a background bleed).
+    if (primary === "silver") {
+      const lightAlt = alternatives.find((c) => lightNeutralSet.has(c));
+      if (lightAlt) return lightAlt;
+    }
     const chromaticAlt = alternatives.find((c) => !isNeutralFashionColor(c));
     if (chromaticAlt && mediumConfidence) return chromaticAlt;
     const warmNeutralAlt = alternatives.find((c) => warmNeutralSet.has(c));
@@ -4127,6 +4141,12 @@ function selectDetectionColorFromPalette(params: {
     confidence < 0.9
   ) {
     const lightAlt = alternatives.find((c) => lightNeutralSet.has(c) || warmNeutralSet.has(c));
+    if (lightAlt) return lightAlt;
+  }
+  // Light-colored bottoms (white skirts, cream trousers) photographed in shadow K-means to "silver".
+  // Prefer the true white/off-white sibling before silver gets converted to gray downstream.
+  if (isBottomLike && primary === "silver" && alternatives.length > 0 && confidence < 0.9) {
+    const lightAlt = alternatives.find((c) => lightNeutralSet.has(c));
     if (lightAlt) return lightAlt;
   }
 
@@ -4179,6 +4199,12 @@ function selectDetectionColorFromPalette(params: {
     const blueLikePrimary = ["blue", "light-blue", "sky-blue", "powder-blue", "cyan", "teal"].includes(primary);
     if (blueLikePrimary) {
       const lightNeutralAlt = alternatives.find((c) => lightNeutralSet.has(c));
+      if (lightNeutralAlt) return lightNeutralAlt;
+    }
+    // White shoes in shadow map to "silver" (LAB L=60-78) by K-means.
+    // Prefer white/off-white alternatives when available rather than reporting silver.
+    if (primary === "silver") {
+      const lightNeutralAlt = alternatives.find((c) => lightNeutralSet.has(c) && c !== "silver");
       if (lightNeutralAlt) return lightNeutralAlt;
     }
   }
@@ -4623,6 +4649,17 @@ function setDetectionColorIfHigherConfidence(
       isLightNeutralFashionColor(prevColor) &&
       confidenceGap < 0.2
     ) {
+      return;
+    }
+
+    // Do not let a caption's generic parent color ("blue") override a crop-detected subspecies
+    // ("light-blue") — the crop is the more reliable signal for hue precision.
+    const subspeciesDowngrade =
+      incomingFromCaption &&
+      prevColor === "light-blue" &&
+      c === "blue" &&
+      prevConf >= 0.45;
+    if (subspeciesDowngrade) {
       return;
     }
   }

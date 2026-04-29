@@ -132,11 +132,13 @@ const STYLE_TERMS_LEXICON = [
   "sporty",
   "athleisure",
   "boho",
+  "bohemian",
   "elegant",
   "chic",
   "edgy",
   "business",
   "romantic",
+  "modern",
 ] as const;
 
 function isTrackedOutfitSlot(value: string): boolean {
@@ -1425,35 +1427,44 @@ async function runCompleteLookCore(
             continue;
           }
 
-          // Aesthetic avoid penalty: downgrade items that clash with the detected aesthetic.
-          // This catches items that pass the slot filter but are stylistically wrong
-          // (e.g. ballet flats in a streetwear outfit, clutch for a sporty look).
-          let aestheticAvoidMultiplier = 1;
-          if (slotQuerySpec.avoidTerms.length > 0) {
-            const titleBlob = String(source?.title || "").toLowerCase();
-            const isAvoided = slotQuerySpec.avoidTerms.some((term) =>
-              titleBlob.includes(term.toLowerCase())
-            );
-            if (isAvoided) {
-              aestheticAvoidMultiplier = 0.55; // significant but not total elimination
-            }
-          }
+          // Aesthetic keyword alignment: check for positive (primary/boost) and
+          // negative (avoid) aesthetic keywords in the product title and compute
+          // a soft alignment score in [~0.24, 1]. This replaces the blunt global
+          // avoid multiplier with a targeted, explainable dimension.
+          const titleBlob = String(source?.title || "").toLowerCase();
+          const primaryHits = slotQuerySpec.primaryTerms.filter((t) => titleBlob.includes(String(t || "").toLowerCase())).length;
+          const boostHits = slotQuerySpec.boostTerms.filter((t) => titleBlob.includes(String(t || "").toLowerCase())).length;
+          const avoidHits = slotQuerySpec.avoidTerms.filter((t) => titleBlob.includes(String(t || "").toLowerCase())).length;
+          const posDen = Math.max(1, slotQuerySpec.primaryTerms.length + 0.5 * slotQuerySpec.boostTerms.length);
+          const positive = Math.min(1, (primaryHits + 0.5 * boostHits) / posDen);
+          const avoidPenalty = slotQuerySpec.avoidTerms.length > 0 ? Math.min(1, avoidHits / Math.max(1, slotQuerySpec.avoidTerms.length)) : 0;
+          // Base alignment biased toward permissive (so we don't wipe out candidates),
+          // then scale down when avoid-terms are present.
+          let aestheticKeywordAlignment = 0.6 + 0.4 * positive; // range ~0.6-1.0
+          aestheticKeywordAlignment = aestheticKeywordAlignment * (1 - 0.6 * avoidPenalty); // avoid can reduce alignment, but not to zero
 
-          // Fashion-aware blend: emphasize style/color over raw retrieval.
-          const finalScore =
-            (embeddingNorm * 0.2 +
-            categoryCompat * 0.18 +
-            colorHarmony * 0.19 +
-            styleAlignment * 0.18 +
-            patternAlignment * 0.08 +
+          // Fashion-aware blend: emphasize style/color over raw retrieval. We
+          // slightly rebalance weights to favor style + color while keeping a
+          // normalized sum so scores remain comparable.
+          const finalScoreRaw =
+            embeddingNorm * 0.17 +
+            categoryCompat * 0.16 +
+            colorHarmony * 0.21 +
+            styleAlignment * 0.22 +
+            patternAlignment * 0.07 +
             materialAlignment * 0.04 +
             formalityAlignment * 0.08 +
-            weatherAlignment * 0.05) * aestheticAvoidMultiplier;
+            weatherAlignment * 0.05;
+          const finalScore = finalScoreRaw * aestheticKeywordAlignment;
 
           const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment * accessoryStyleAlignment);
           const slotAwareFinalScore = Math.round((finalScore * (0.7 + slotStyleScore * 0.3) * footwearDressAlignment) * 1000) / 1000;
 
-          const floor = relaxedFloor ? Math.max(0.5, minimumSlotScore(category) - 0.04) : minimumSlotScore(category);
+          // Lower the absolute slot floors slightly to avoid over-pruning (bags
+          // were observed to have a high default floor). Clamp to a safe lower
+          // bound so we don't return extremely low-quality items.
+          const baseFloor = Math.max(0.35, minimumSlotScore(category) - 0.12);
+          const floor = relaxedFloor ? Math.max(0.4, baseFloor - 0.04) : baseFloor;
           if (slotAwareFinalScore < floor) {
             continue;
           }
@@ -1520,13 +1531,23 @@ async function runCompleteLookCore(
 
       // Compute aesthetic-aware slot terms once per category (reused inside runSearch)
       const weatherCtx = resolveWeatherContext(hintedWeather?.temperatureC, hintedWeather?.season);
+      const detectedAesthetic = inferPreferredAesthetic(preferredStyleTerms) as FashionAesthetic;
       const slotQuerySpec = getStyleAwareSlotTerms({
-        aesthetic: (inferPreferredAesthetic(preferredStyleTerms) as FashionAesthetic),
+        aesthetic: detectedAesthetic,
         occasion: inferredOccasion as OutfitOccasion,
         sourceCategory: currentCategoryList[0] || "unknown",
         targetSlot: category,
         weather: weatherCtx,
       });
+      if (slotQuerySpec.primaryTerms.length > 0) {
+        console.info("[outfit-stylist]", {
+          slot: category,
+          aesthetic: detectedAesthetic,
+          occasion: inferredOccasion,
+          styleTerms: preferredStyleTerms.slice(0, 6),
+          primaryTerms: slotQuerySpec.primaryTerms.slice(0, 4),
+        });
+      }
 
       const runSearch = async (filters: any[], useVector: boolean) => {
         const styleHint = preferredStyleTerms.slice(0, 4).join(" ").trim();
@@ -1599,12 +1620,16 @@ async function runCompleteLookCore(
       const runAestheticSearch = async (filters: any[]): Promise<any[]> => {
         if (slotQuerySpec.primaryTerms.length === 0) return [];
         try {
-          const phraseShould = [
+          // Use `match` with `operator: "and"` instead of `match_phrase` so that
+          // product titles with extra words still match.
+          // e.g. "Women's Strappy Flat Sandals" matches "strappy sandals" because
+          // both tokens appear in the title even though they aren't adjacent.
+          const shouldClauses = [
             ...slotQuerySpec.primaryTerms.slice(0, 8).map((term) => ({
-              match_phrase: { title: { query: term, boost: 3 } },
+              match: { title: { query: term, operator: "and", boost: 3 } },
             })),
             ...slotQuerySpec.boostTerms.slice(0, 4).map((term) => ({
-              match_phrase: { title: { query: term, boost: 1.5 } },
+              match: { title: { query: term, operator: "and", boost: 1.5 } },
             })),
           ];
           const res = await osClient.search({
@@ -1614,8 +1639,8 @@ async function runCompleteLookCore(
               query: {
                 bool: {
                   filter: filters,
-                  should: phraseShould,
-                  minimum_should_match: 1, // MUST match at least one specific aesthetic term
+                  should: shouldClauses,
+                  minimum_should_match: 1, // MUST match at least one aesthetic term
                 },
               },
               sort: [{ _score: { order: "desc" } }, { last_seen_at: { order: "desc", missing: "_last" } }],
@@ -1880,12 +1905,16 @@ function inferPreferredAesthetic(preferredStyleTerms: string[]): StyleProfileAes
   const tokenSet = new Set(preferredStyleTerms.map((t) => String(t).toLowerCase().trim()).filter(Boolean));
   if (!tokenSet.size) return null;
   const has = (x: string) => tokenSet.has(x);
-  if (has("streetwear") || has("edgy")) return "streetwear";
+  // Order matters: check more specific/distinctive aesthetics first
+  if (has("edgy")) return "edgy";
+  if (has("streetwear")) return "streetwear";
   if (has("sporty") || has("athleisure")) return "sporty";
-  if (has("minimalist") || has("business")) return "minimalist";
-  if (has("classic") || has("formal") || has("elegant")) return "classic";
-  if (has("boho")) return "bohemian";
+  if (has("bohemian") || has("boho")) return "bohemian";
   if (has("romantic") || has("chic")) return "romantic";
+  if (has("minimalist")) return "minimalist";
+  if (has("classic") || has("elegant")) return "classic";
+  if (has("modern")) return "modern";
+  if (has("business")) return "classic"; // business → classic for slot queries
   if (has("vintage")) return "classic";
   return null;
 }
