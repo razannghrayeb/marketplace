@@ -307,6 +307,10 @@ function sourceMatchesSlot(slot: string, source: any): boolean {
   if (slot === "bottoms" && /\b(top|tops|shirt|shirts|blouse|blouses|t-?shirt|tee|polo|hoodie|sweater|sweatshirt|cardigan|tank|camisole|knitwear|short sleeves?|long sleeves?)\b/.test(blob)) {
     return false;
   }
+  // Swimwear and underwear are not outfit bottoms.
+  if (slot === "bottoms" && /\b(bikini|swimsuit|swimwear|swim wear|swimming|swim brief|swim short|underwear|briefs?|thong|panty|panties|boxer|lingerie)\b/.test(blob)) {
+    return false;
+  }
   if (slot === "tops" && /\b(shoe|shoes|sneaker|boot|heel|loafer|sandal|bag|bags|handbag|tote|clutch|purse|wallet)\b/.test(blob)) {
     return false;
   }
@@ -621,12 +625,11 @@ function enforceVariantDiversity(
 
 function minimumSlotScore(slot: string): number {
   const normalized = normalizeWardrobeCategory(slot) || String(slot || "").toLowerCase().trim();
-  if (normalized === "bags" || normalized === "accessories") return 0.62;
-  if (normalized === "shoes") return 0.58;
-  // Slightly lower floor for bottoms to avoid under-recommendation while preserving precision.
-  if (normalized === "bottoms") return 0.54;
-  if (normalized === "tops" || normalized === "outerwear" || normalized === "dresses") return 0.57;
-  return 0.56;
+  if (normalized === "bags" || normalized === "accessories") return 0.44;
+  if (normalized === "shoes") return 0.42;
+  if (normalized === "bottoms") return 0.42;
+  if (normalized === "tops" || normalized === "outerwear" || normalized === "dresses") return 0.45;
+  return 0.42;
 }
 
 /**
@@ -1427,44 +1430,48 @@ async function runCompleteLookCore(
             continue;
           }
 
-          // Aesthetic keyword alignment: check for positive (primary/boost) and
-          // negative (avoid) aesthetic keywords in the product title and compute
-          // a soft alignment score in [~0.24, 1]. This replaces the blunt global
-          // avoid multiplier with a targeted, explainable dimension.
+          // Aesthetic keyword alignment: how well the product title matches
+          // aesthetic-specific terms for this slot (e.g. "chunky sneakers" for
+          // streetwear shoes). Treated as a proper scoring dimension (not a
+          // multiplier) so items without explicit style words in their title
+          // aren't systematically penalised.
           const titleBlob = String(source?.title || "").toLowerCase();
+          const hasPrimaryTerms = slotQuerySpec.primaryTerms.length > 0;
           const primaryHits = slotQuerySpec.primaryTerms.filter((t) => titleBlob.includes(String(t || "").toLowerCase())).length;
           const boostHits = slotQuerySpec.boostTerms.filter((t) => titleBlob.includes(String(t || "").toLowerCase())).length;
           const avoidHits = slotQuerySpec.avoidTerms.filter((t) => titleBlob.includes(String(t || "").toLowerCase())).length;
-          const posDen = Math.max(1, slotQuerySpec.primaryTerms.length + 0.5 * slotQuerySpec.boostTerms.length);
-          const positive = Math.min(1, (primaryHits + 0.5 * boostHits) / posDen);
-          const avoidPenalty = slotQuerySpec.avoidTerms.length > 0 ? Math.min(1, avoidHits / Math.max(1, slotQuerySpec.avoidTerms.length)) : 0;
-          // Base alignment biased toward permissive (so we don't wipe out candidates),
-          // then scale down when avoid-terms are present.
-          let aestheticKeywordAlignment = 0.6 + 0.4 * positive; // range ~0.6-1.0
-          aestheticKeywordAlignment = aestheticKeywordAlignment * (1 - 0.6 * avoidPenalty); // avoid can reduce alignment, but not to zero
+          let aestheticKeywordAlignment: number;
+          if (!hasPrimaryTerms) {
+            // No aesthetic context — neutral score, no penalty.
+            aestheticKeywordAlignment = 0.72;
+          } else {
+            const posDen = Math.max(1, slotQuerySpec.primaryTerms.length + 0.5 * slotQuerySpec.boostTerms.length);
+            const positive = Math.min(1, (primaryHits + 0.5 * boostHits) / posDen);
+            const avoidPenalty = slotQuerySpec.avoidTerms.length > 0 ? Math.min(1, avoidHits / Math.max(1, slotQuerySpec.avoidTerms.length)) : 0;
+            // Range: 0.62 (no match, no avoid) → 1.0 (full match).
+            // Avoid terms can reduce but not eliminate a good score.
+            aestheticKeywordAlignment = Math.max(0.28, (0.62 + 0.38 * positive) * (1 - 0.5 * avoidPenalty));
+          }
 
-          // Fashion-aware blend: emphasize style/color over raw retrieval. We
-          // slightly rebalance weights to favor style + color while keeping a
-          // normalized sum so scores remain comparable.
-          const finalScoreRaw =
-            embeddingNorm * 0.17 +
-            categoryCompat * 0.16 +
-            colorHarmony * 0.21 +
-            styleAlignment * 0.22 +
-            patternAlignment * 0.07 +
+          // Weighted scoring: aestheticKeywordAlignment is a first-class dimension
+          // (12% weight) rather than a global multiplier. This prevents the common
+          // case where products lack explicit style words in their titles (a sneaker
+          // won't say "streetwear") from tanking otherwise good candidates.
+          const finalScore =
+            embeddingNorm * 0.15 +
+            categoryCompat * 0.14 +
+            colorHarmony * 0.19 +
+            styleAlignment * 0.18 +
+            aestheticKeywordAlignment * 0.12 +
+            patternAlignment * 0.06 +
             materialAlignment * 0.04 +
-            formalityAlignment * 0.08 +
+            formalityAlignment * 0.07 +
             weatherAlignment * 0.05;
-          const finalScore = finalScoreRaw * aestheticKeywordAlignment;
 
           const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment * accessoryStyleAlignment);
           const slotAwareFinalScore = Math.round((finalScore * (0.7 + slotStyleScore * 0.3) * footwearDressAlignment) * 1000) / 1000;
 
-          // Lower the absolute slot floors slightly to avoid over-pruning (bags
-          // were observed to have a high default floor). Clamp to a safe lower
-          // bound so we don't return extremely low-quality items.
-          const baseFloor = Math.max(0.35, minimumSlotScore(category) - 0.12);
-          const floor = relaxedFloor ? Math.max(0.4, baseFloor - 0.04) : baseFloor;
+          const floor = relaxedFloor ? Math.max(0.32, minimumSlotScore(category) - 0.06) : minimumSlotScore(category);
           if (slotAwareFinalScore < floor) {
             continue;
           }
@@ -2742,9 +2749,19 @@ function inferStyleTermsFromCurrentItems(
 function computeStyleAlignment(source: any, preferredStyleTerms: string[]): number {
   if (preferredStyleTerms.length === 0) return 0.62;
   const blob = `${String(source?.attr_style || "")} ${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.product_types || "")}`.toLowerCase();
-  if (!blob.trim()) return 0.58;
+  if (!blob.trim()) return 0.62;
 
-  let best = 0.45;
+  // Hard mismatch detection: formal items for casual request and vice-versa.
+  const styleSet = new Set(preferredStyleTerms.map((t) => String(t || "").toLowerCase().trim()));
+  const isCasualStyle = styleSet.has("casual") || styleSet.has("streetwear") || styleSet.has("sporty") || styleSet.has("athleisure") || styleSet.has("boho") || styleSet.has("bohemian");
+  const isFormalStyle = styleSet.has("formal") || styleSet.has("business") || styleSet.has("elegant");
+  if (isCasualStyle && /\b(formal gown|evening gown|cocktail dress|black tie|tuxedo|tailored suit)\b/.test(blob)) return 0.34;
+  if (isFormalStyle && /\b(athletic|skate|surf|streetwear graphic|sportswear)\b/.test(blob)) return 0.38;
+
+  // Default to neutral — product titles rarely carry explicit style labels
+  // (a sneaker won't say "streetwear", a tote won't say "classic").
+  // Reward exact matches, but don't penalize for absence.
+  let best = 0.62;
   for (const token of preferredStyleTerms) {
     if (!token) continue;
     if (blob === token) best = Math.max(best, 0.92);

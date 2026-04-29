@@ -905,12 +905,8 @@ function applyImageDiversityRerank(results: ProductResult[], lambda: number): Pr
  */
 function imageSearchKnnPoolLimit(): number {
   const envK = Number(process.env.SEARCH_IMAGE_RETRIEVAL_K);
-  // Default 350 (cut from 500 for memory, restored from 200 which hurt recall too much).
-  // k=200 at 30% category-filter survival leaves only 60 candidates — too few for diverse
-  // categories like footwear where subtypes (sneakers/boots/heels) each occupy disjoint
-  // CLIP neighborhoods. k=350 gives ~105 candidates after filter, enough variety for reranking.
   const baseFromEnv =
-    Number.isFinite(envK) && envK >= 120 ? Math.floor(envK) : 350;
+    Number.isFinite(envK) && envK >= 120 ? Math.floor(envK) : 500;
 
   if (!imageMerchandiseSimilarityBindingEnabled()) {
     return Math.min(500, Math.max(120, baseFromEnv));
@@ -918,9 +914,7 @@ function imageSearchKnnPoolLimit(): number {
 
   const merchCapEnv = Number(process.env.SEARCH_IMAGE_MERCH_CANDIDATE_CAP);
   const hardCap = 1200;
-  // Default 450 (was 700, cut to 300). 300 at 30% survival = 90 items — too sparse for
-  // footwear and accessories where visual diversity is high. 450 → ~135 candidates.
-  const defaultMerch = Math.min(hardCap, Math.max(450, baseFromEnv));
+  const defaultMerch = Math.min(hardCap, Math.max(700, baseFromEnv));
   const cap =
     Number.isFinite(merchCapEnv) && merchCapEnv >= 120
       ? Math.min(hardCap, Math.floor(merchCapEnv))
@@ -1007,7 +1001,7 @@ function imageDetectionRerankCandidateCap(): number {
  * calls while keeping a broader default pool for non-detection image searches.
  */
 function imageDetectionKnnPoolCap(): number {
-  // For FAISS HNSW, FAISS traversal depth is controlled by num_candidates, NOT by k.
+  // For FAISS HNSW, FAISS traversal depth is controlled by w, NOT by k.
   // k only determines how many results come back — keep it wide enough for quality reranking.
   const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "130");
   if (!Number.isFinite(raw)) return 130;
@@ -1887,11 +1881,9 @@ function imageKnnNumCandidates(k: number): number {
       return Math.max(k, Math.min(5000, Math.floor(raw)));
     }
   }
-  // k*3 with cap 900 (was k*4/5000, cut to k*2/600 which hurt recall too much).
-  // At k=350: num_candidates = max(350, 1050, 500) = 1050 — 3× oversampling ensures
-  // diverse footwear subtypes (sneakers/boots/heels) survive the post-filter stage.
-  // Still far below the old 2800-node extreme that caused disk I/O stalls.
-  return Math.max(k, Math.min(900, Math.max(k * 3, 500)));
+  // Keep ANN neighborhood substantially wider than k so relevant items survive
+  // approximate search before downstream constraints/rerank.
+  return Math.max(k, Math.min(5000, Math.max(k * 4, 800)));
 }
 
 /**
@@ -1908,10 +1900,9 @@ function imageKnnNumCandidatesDetection(k: number): number {
       return Math.max(k, Math.min(5000, Math.floor(raw)));
     }
   }
-  // Floor 200 (restored from 150). At 15-30% category-filter survival, 150 nodes left only
-  // 22-45 candidates — often fewer than resolvedLimitPerItem, triggering expensive recovery
-  // retries that add more latency than the extra 50 traversal nodes would have cost.
-  // 200 nodes → 30-60 survivors, enough to fill a page without cascading into retries.
+  // For FAISS HNSW, num_candidates maps directly to efSearch (not ef_search in query body).
+  // Must be >= 200 so that after category filter selectivity (~15-30%), enough results survive
+  // the post-filter to exceed sparseKnnMinHits and avoid fallback retry searches.
   return Math.max(k, 200);
 }
 
@@ -3292,11 +3283,7 @@ function imageKnnTimeoutMs(detectionScoped = false): number {
   }
   const raw = Number(process.env.SEARCH_IMAGE_KNN_TIMEOUT_MS);
   if (Number.isFinite(raw) && raw >= 500) return Math.min(120_000, Math.floor(raw));
-  // 3s detection / 2.5s full-image was too tight — under moderate load kNN takes 500-800ms,
-  // causing frequent first-pass timeouts that triggered expensive retry chains (costing more
-  // latency than just waiting the extra 2-3s). Using 7s / 5s: fast-fails on truly stuck
-  // queries (>7s) while tolerating normal load spikes without cascading into retries.
-  return detectionScoped ? 7_000 : 5_000;
+  return detectionScoped ? 15_000 : 12_000;
 }
 
 function imageKnnMaxConcurrentShardRequests(): number {
@@ -3342,13 +3329,10 @@ function imageExactCosineRerankEnabled(): boolean {
  * CLIP/BLIP/query-signal computation all happen BEFORE acquiring this semaphore,
  * so parallel detection tasks still run their fast GPU work simultaneously.
  * Only the actual network round-trip to OpenSearch is serialized.
- * Override with IMAGE_KNN_CONCURRENCY env var (default 8).
+ * Override with IMAGE_KNN_CONCURRENCY env var (default 2).
  */
 const imageKnnSemaphore = (() => {
-  // Cap back to 8. With 2.5-3s timeout, each knn call holds a slot for ~500ms (tookMs + TCP).
-  // Earlier cap of 24 was needed because 12-15s timeout caused long retries to starve other requests.
-  // Now with fast timeouts, 8 concurrent slots × 3 detections/request = 24 parallel kNN ops (no queuing).
-  const max = Math.max(1, Math.min(24, Number(process.env.IMAGE_KNN_CONCURRENCY ?? "8")));
+  const max = Math.max(1, Math.min(8, Number(process.env.IMAGE_KNN_CONCURRENCY ?? "10")));
   let available = max;
   const waiters: Array<() => void> = [];
   return {
@@ -3369,7 +3353,6 @@ async function opensearchImageKnnHits(
 ): Promise<{ hits: any[]; timedOut: boolean }> {
   // Acquire before the HTTP call — CLIP/BLIP/signal work is done by this point.
   await imageKnnSemaphore.acquire();
-  let semaphoreReleased = false;
   const startedAt = Date.now();
   // Send query as-is; error handler below strips ef_search/num_candidates on rejection
   // and marks them unsupported for the rest of the server lifetime.
@@ -3497,22 +3480,14 @@ async function opensearchImageKnnHits(
       err?.meta?.statusCode === 408;
 
     if (timedOut) {
-      const elapsedOnTimeout = Date.now() - startedAt;
       console.error("[image-knn] request timeout", {
         index: config.opensearch.index,
         field: knnField ?? null,
         vectorLength: queryVector?.length ?? null,
         timeoutMs,
-        elapsedMs: elapsedOnTimeout,
+        elapsedMs: Date.now() - startedAt,
       });
-      // Release the semaphore slot BEFORE the retry — don't monopolize a slot for
-      // timeoutMs (2.5s) + retryTimeoutMs (3s) = 5.5s, but still enough for slow shards.
-      imageKnnSemaphore.release();
-      semaphoreReleased = true;
-      const retryTimeoutMs = Math.min(120_000, Math.floor(timeoutMs * 1.2));
-      // Re-acquire for the retry so we stay within the concurrency limit.
-      await imageKnnSemaphore.acquire();
-      semaphoreReleased = false;
+      const retryTimeoutMs = Math.min(120_000, Math.floor(timeoutMs * 1.5));
       try {
         const retry = await osClient.search(
           {
@@ -3558,7 +3533,7 @@ async function opensearchImageKnnHits(
 
     return { hits: [], timedOut: false };
   } finally {
-    if (!semaphoreReleased) imageKnnSemaphore.release();
+    imageKnnSemaphore.release();
   }
 }
 
@@ -3578,20 +3553,11 @@ async function batchOpensearchKnnHits(
   const msearchBody: any[] = [];
   for (const q of queries) {
     msearchBody.push({ index: config.opensearch.index });
-    // Apply the same body augmentations as opensearchImageKnnHits so msearch sub-queries
-    // don't compute expensive full hit counts or load stored fields.
-    // Also add the query-level timeout so OpenSearch cancels server-side at the deadline.
-    msearchBody.push({
-      ...q.body,
-      track_total_hits: false,
-      stored_fields: [],
-      timeout: `${Math.max(1, Math.ceil(q.timeoutMs / 1000))}s`,
-    });
+    msearchBody.push(q.body);
   }
 
   // Acquire once for the entire msearch batch — both kNN sub-queries share one slot.
   await imageKnnSemaphore.acquire();
-  const batchStartedAt = Date.now();
   let semaphoreReleased = false;
   try {
     const r = await (osClient as any).msearch(
@@ -3609,22 +3575,10 @@ async function batchOpensearchKnnHits(
       return Promise.all(queries.map((q) => opensearchImageKnnHits(q.body, q.timeoutMs)));
     }
 
-    const batchElapsedMs = Date.now() - batchStartedAt;
-    return queries.map((q, i) => {
+    return queries.map((_, i) => {
       const resp = responses[i];
       const timedOut = Boolean(resp.timed_out);
       const hits = (resp.hits?.hits ?? []) as any[];
-      const boolQ = (q.body as any)?.query?.bool;
-      const knnObj = boolQ?.must?.knn;
-      const field = knnObj ? Object.keys(knnObj)[0] : null;
-      console.log("[image-knn]", {
-        field,
-        hits: hits.length,
-        tookMs: resp.took ?? null,
-        elapsedMs: batchElapsedMs,
-        timedOut,
-        batch: true,
-      });
       return { hits, timedOut };
     });
   } catch {
@@ -3762,7 +3716,6 @@ export async function searchByImageWithSimilarity(
   const evalT0 = Date.now();
   let stageSetupDoneAt = evalT0;
   let stageKnnDoneAt = evalT0;
-  let stageSignalsDoneAt = evalT0;
   let stageRerankDoneAt = evalT0;
   let stageHydrationDoneAt = evalT0;
   let stageFinalizedAt = evalT0;
@@ -3987,33 +3940,17 @@ export async function searchByImageWithSimilarity(
   let partQueryEmbeddings: Record<string, number[] | null> = {};
   // Kick off expensive query-signal extraction in parallel with first kNN retrieval.
   // We only block on this promise right before rerank/compliance stages need it.
-  // Timeout guard: under GPU contention the 11 CLIP attribute embeddings can block for
-  // several seconds. Race against a deadline to avoid stalling, but 3000ms was too tight —
-  // signals frequently timed out, leaving color/texture/style reranking disabled entirely.
-  // 6000ms matches typical GPU batch latency under moderate load (p95 ~4-5s).
-  const _SIGNAL_TIMEOUT_MS = Number(process.env.IMAGE_SIGNAL_TIMEOUT_MS ?? "6000");
-  const _nullSignals: ImageQuerySignals = {
-    colorQueryEmbedding: null,
-    textureQueryEmbedding: null,
-    materialQueryEmbedding: null,
-    styleQueryEmbedding: null,
-    patternQueryEmbedding: null,
-    partQueryEmbeddings: {},
-  };
   const signalsPromise =
     imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0
-      ? Promise.race([
-          getCachedImageQuerySignals(imageBuffer),
-          new Promise<ImageQuerySignals>((resolve) =>
-            setTimeout(() => {
-              console.warn("[image-signals] attribute embedding timeout — skipping rerank signals", {
-                timeoutMs: _SIGNAL_TIMEOUT_MS,
-              });
-              resolve(_nullSignals);
-            }, _SIGNAL_TIMEOUT_MS)
-          ),
-        ])
-      : Promise.resolve<ImageQuerySignals>(_nullSignals);
+      ? getCachedImageQuerySignals(imageBuffer)
+      : Promise.resolve<ImageQuerySignals>({
+        colorQueryEmbedding: null,
+        textureQueryEmbedding: null,
+        materialQueryEmbedding: null,
+        styleQueryEmbedding: null,
+        patternQueryEmbedding: null,
+        partQueryEmbeddings: {},
+      });
 
   let runColor = false;
   let runTexture = false;
@@ -4461,7 +4398,6 @@ export async function searchByImageWithSimilarity(
   stageKnnDoneAt = Date.now();
 
   const signals = await signalsPromise;
-  stageSignalsDoneAt = Date.now();
   colorQueryEmbedding = signals.colorQueryEmbedding;
   textureQueryEmbedding = signals.textureQueryEmbedding;
   materialQueryEmbedding = signals.materialQueryEmbedding;
@@ -4602,12 +4538,9 @@ export async function searchByImageWithSimilarity(
 
     let results: ProductResult[] = [];
     if (productIds.length > 0) {
+      const products = await getProductsByIdsOrdered(productIds);
       const numericIds = productIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
-      // Parallelize DB queries: fetch products and images simultaneously instead of sequentially
-      const [products, imagesByProduct] = await Promise.all([
-        getProductsByIdsOrdered(productIds),
-        getImagesForProducts(numericIds),
-      ]);
+      const imagesByProduct = await getImagesForProducts(numericIds);
 
       results = products.map((p: any) => {
         const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
@@ -6766,7 +6699,10 @@ export async function searchByImageWithSimilarity(
             const isFootwearRescueCategoryException =
               (detectionCategoryKey === "footwear" || detectionCategoryKey === "shoes") &&
               hCategoryRelevance >= 0.90;
-            if (!isDressRescueCategoryException && !isBagRescueCategoryException && !isFootwearRescueCategoryException) return false;
+            const isBottomRescueCategoryException =
+              detectionCategoryKey === "bottoms" &&
+              hCategoryRelevance >= 0.85;
+            if (!isDressRescueCategoryException && !isBagRescueCategoryException && !isFootwearRescueCategoryException && !isBottomRescueCategoryException) return false;
           }
         }
         if (hasColorIntentForFinal) {
@@ -6822,7 +6758,7 @@ export async function searchByImageWithSimilarity(
     const mustKeepTypeMin = hasReliableTypeIntentForRelevance
       ? 0.45
       : hasExplicitTypeFilter || hasExplicitCategoryFilter || hasDetectionAnchoredTypeIntent
-        ? (params.detectionProductCategory === "tops" ? 0.2 : 0.45)
+        ? (params.detectionProductCategory === "tops" ? 0.2 : params.detectionProductCategory === "bottoms" ? 0.22 : 0.45)
         : 0.28;
     const mustKeep: any[] = visualGatedHits
       .filter((h: any) => !existingIds.has(String(h._source.product_id)))
@@ -7185,11 +7121,9 @@ export async function searchByImageWithSimilarity(
 
   stageRerankDoneAt = Date.now();
 
-  // Detection searches use a tighter cap: post-rerank gates drop ~20-30% of candidates,
-  // so limit*5 still safely covers the final display set while halving PG data transfer.
   const maxHydrate = Math.min(
     rankedHits.length,
-    detectionScoped ? Math.max(limit * 5, 80) : Math.max(limit * 10, 150),
+    Math.max(limit * 10, 150),
   );
   const hitsForHydrate = rankedHits.slice(0, maxHydrate);
   const productIds = hitsForHydrate.map((hit: any) => hit._source.product_id);
@@ -7206,13 +7140,10 @@ export async function searchByImageWithSimilarity(
   // Fetch product data
   let results: ProductResult[] = [];
   if (productIds.length > 0) {
+    const products = await getProductsByIdsOrdered(productIds);
     const numericIds = productIds.map((id: string) => parseInt(id, 10));
-    // Parallelize DB queries: fetch products and images simultaneously instead of sequentially
-    const [products, imagesByProduct, userLifestyle] = await Promise.all([
-      getProductsByIdsOrdered(productIds),
-      getImagesForProducts(numericIds),
-      personalizationPromise,
-    ]);
+    const imagesByProduct = await getImagesForProducts(numericIds);
+    const userLifestyle = await personalizationPromise;
 
     results = products.map((p: any) => {
       const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
@@ -8167,10 +8098,7 @@ export async function searchByImageWithSimilarity(
     .trim()
     .replace(/[^0-9a-f]/g, "")
     .padStart(16, "0");
-  // Skip pHash rescue for detection-scoped searches: the query image is a YOLO crop,
-  // not a full catalog product photo, so its pHash will never match catalog items.
-  // The full-table-scan queries below take 11-12s and are wasted on crop images.
-  if (!detectionScoped && normalizedQueryPHash && /^[0-9a-f]+$/i.test(normalizedQueryPHash)) {
+  if (normalizedQueryPHash && /^[0-9a-f]+$/i.test(normalizedQueryPHash)) {
     const existing = new Set(results.map((p) => String(p.id)));
     const hasIsHidden = await productsTableHasIsHiddenColumn();
     const hiddenClause = hasIsHidden ? "AND p.is_hidden = false" : "";
@@ -8199,12 +8127,9 @@ export async function searchByImageWithSimilarity(
       .filter((id: string) => !existing.has(id));
     let exactInjected = false;
     if (rescueIds.length > 0) {
+      const rescueProducts = await getProductsByIdsOrdered(rescueIds);
       const rescueNumericIds = rescueIds.map((id: string) => parseInt(id, 10)).filter(Number.isFinite);
-      // Parallelize DB queries: fetch products and images simultaneously instead of sequentially
-      const [rescueProducts, rescueImages] = await Promise.all([
-        getProductsByIdsOrdered(rescueIds),
-        getImagesForProducts(rescueNumericIds),
-      ]);
+      const rescueImages = await getImagesForProducts(rescueNumericIds);
       const rescued: ProductResult[] = rescueProducts.map((p: any) => {
         const imgs: ProductImage[] = rescueImages.get(parseInt(p.id, 10)) || [];
         return {
@@ -8249,12 +8174,10 @@ export async function searchByImageWithSimilarity(
     total_ms: stageFinalizedAt - evalT0,
     setup_ms: stageSetupDoneAt - evalT0,
     knn_ms: stageKnnDoneAt - stageSetupDoneAt,
-    signals_ms: stageSignalsDoneAt - stageKnnDoneAt,
-    score_ms: stageRerankDoneAt - stageSignalsDoneAt,
+    rerank_ms: stageRerankDoneAt - stageKnnDoneAt,
     hydrate_ms: stageHydrationDoneAt - stageRerankDoneAt,
     finalize_ms: stageFinalizedAt - stageHydrationDoneAt,
   };
-  console.log("[image-search-timing]", timing);
 
   if (searchEvalEnabled()) {
     emitImageSearchEval({
@@ -8476,12 +8399,9 @@ async function findSimilarByPHash(
 
   // Fetch product data
   const productIds = topSimilar.map(s => String(s.id));
+  const products = await getProductsByIdsOrdered(productIds);
   const numericIds = topSimilar.map(s => s.id);
-  // Parallelize DB queries: fetch products and images simultaneously instead of sequentially
-  const [products, imagesByProduct] = await Promise.all([
-    getProductsByIdsOrdered(productIds),
-    getImagesForProducts(numericIds),
-  ]);
+  const imagesByProduct = await getImagesForProducts(numericIds);
 
   const distanceMap = new Map(topSimilar.map(s => [s.id, s.distance]));
 
@@ -8675,12 +8595,9 @@ export async function searchByTextWithRelated(
   let extractedCategories: string[] = entities.categories;
 
   if (productIds.length > 0) {
+    const products = await getProductsByIdsOrdered(productIds);
     const numericIds = productIds.map((id: string) => parseInt(id, 10));
-    // Parallelize DB queries: fetch products and images simultaneously instead of sequentially
-    const [products, imagesByProduct] = await Promise.all([
-      getProductsByIdsOrdered(productIds),
-      getImagesForProducts(numericIds),
-    ]);
+    const imagesByProduct = await getImagesForProducts(numericIds);
 
     // Also extract brands/categories from results for related search
     const resultBrands = [...new Set(products.map((p: any) => p.brand?.toLowerCase()).filter(Boolean))];
@@ -8753,13 +8670,10 @@ export async function getProductWithVariants(productId: number): Promise<{
   product: Record<string, unknown>;
   images: ProductImage[];
 } | null> {
-  // Parallelize DB queries: fetch product and images simultaneously
-  const [rows, imagesByProduct] = await Promise.all([
-    getProductsByIdsOrdered([productId]),
-    getImagesForProducts([productId]),
-  ]);
+  const rows = await getProductsByIdsOrdered([productId]);
   if (!rows.length) return null;
   const product = rows[0] as Record<string, unknown>;
+  const imagesByProduct = await getImagesForProducts([productId]);
   const images = imagesByProduct.get(productId) ?? [];
   return { product, images };
 }
@@ -9128,12 +9042,9 @@ export async function getCandidateScoresForProducts(
     };
   }
 
+  const products = await getProductsByIdsOrdered(finalIds);
   const numericIds = finalIds.map((id) => parseInt(id, 10));
-  // Parallelize DB queries: fetch products and images simultaneously
-  const [products, imagesByProduct] = await Promise.all([
-    getProductsByIdsOrdered(finalIds),
-    getImagesForProducts(numericIds),
-  ]);
+  const imagesByProduct = await getImagesForProducts(numericIds);
 
   // Build candidate results
   const candidates: CandidateResult[] = products.map((p: any) => {
