@@ -5716,10 +5716,16 @@ export async function searchByImageWithSimilarity(
         }
         // Graduated color damping for tops: wrong-color products should not outrank
         // correctly-colored ones purely due to slightly higher visual similarity.
+        // Hard color mismatch (colorTier "none" + color intent) gets aggressive capping.
         const hasTopColorIntent = hasColorPreferenceForRanking || Boolean(comp.hasColorIntent ?? hasColorIntentForFinal);
         const topColorCompliance = Number(comp.colorCompliance ?? NaN);
+        const topHardColorMismatch = comp.colorTier === "none" && hasTopColorIntent;
         if (hasTopColorIntent && Number.isFinite(topColorCompliance)) {
-          if (topColorCompliance <= 0.12) {
+          if (topHardColorMismatch) {
+            // Total color mismatch under hard gate: apply aggressive damping so wrong-color
+            // tops don't outrank correctly-colored ones via visual similarity alone.
+            blendedTopMain *= hasExplicitColorIntent ? 0.25 : 0.30;
+          } else if (topColorCompliance <= 0.12) {
             // Strong mismatch: heavy damping
             blendedTopMain *= hasExplicitColorIntent ? 0.40 : 0.65;
           } else if (topColorCompliance < 0.38) {
@@ -5745,7 +5751,8 @@ export async function searchByImageWithSimilarity(
           }
         }
         const exactTopVisualEvidence = (comp.exactTypeScore ?? 0) >= 1 && visualComp >= 0.62;
-        const boostedFloor = exactTopVisualEvidence ? 0.36 : 0.24;
+        // Hard color mismatch: keep score near the computeHitRelevance cap, not boosted.
+        const boostedFloor = topHardColorMismatch ? 0.08 : exactTopVisualEvidence ? 0.36 : 0.24;
         const boosted = Math.min(1, Math.max(boostedFloor, blendedTopMain));
         if (boosted > (comp.finalRelevance01 ?? 0)) {
           comp.finalRelevance01 = boosted;

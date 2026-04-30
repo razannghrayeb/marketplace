@@ -13,7 +13,8 @@
       "Bash(curl -sk \"https://avnadmin:AVNS_G97kQ2PFQD6JlaLg-D-@os-991a95b-rolash1030-7288.a.aivencloud.com:21921/products_v1/_mapping\")",
       "Bash(node -e ' *)",
       "Bash(curl -sk \"https://avnadmin:AVNS_G97kQ2PFQD6JlaLg-D-@os-991a95b-rolash1030-7288.a.aivencloud.com:21921/products_v1/_mapping\" -o C:/tmp/mapping.json)",
-      "Bash(psql -h 0.0.0.0 -p 5432 -U postgres -d fashion -c ' *)"
+      "Bash(psql -h 0.0.0.0 -p 5432 -U postgres -d fashion -c ' *)",
+      "Bash(npx tsc *)"
     ]
   }
 }

@@ -220,7 +220,7 @@ export async function getOutfitRecommendations(
   ): CompleteLookMappedSuggestion[] => {
     const out = [...base];
     const hasSlot = (slot: string) =>
-      out.some((s) => categoryFamily(s.category) === slot);
+      out.some((s) => categoryFamily(`${s.category || ""} ${s.title || ""}`) === slot);
     const usedIds = new Set(out.map((s) => s.product_id));
     const needShoes = prioritizedMissingCategories.includes("shoes") && !hasSlot("shoes");
     const needBags = prioritizedMissingCategories.includes("bags") && !hasSlot("bags");
@@ -230,7 +230,7 @@ export async function getOutfitRecommendations(
     for (const candidate of rankedBackup) {
       if (out.length >= maxTotal) break;
       if (usedIds.has(candidate.product_id)) continue;
-      const family = categoryFamily(candidate.category);
+      const family = categoryFamily(`${candidate.category || ""} ${candidate.title || ""}`);
       if ((needShoes && family === "shoes") || (needBags && family === "bags")) {
         out.push(candidate);
         usedIds.add(candidate.product_id);
@@ -843,7 +843,7 @@ function footwearSubtypeLabel(value: string): string {
 
 function isFeminineShoeCue(value: string): boolean {
   const text = normalizeStyleToken(value);
-  return /\b(heel|heels|pump|pumps|stiletto|stilettos|sandal|sandals|dress sandal|mule|mules|ballet flat|ballerina|mary jane|slingback|kitten heel|espadrille)\b/.test(text);
+  return /\b(heel|heels|pump|pumps|stiletto|stilettos|sandal|sandals|dress sandal|mule|mules|ballet flat|ballerina|mary jane|slingback|kitten heel|espadrille|loafer|loafers|boot|boots|ankle boot)\b/.test(text);
 }
 
 function preferredShoeSubtypesByOccasion(
@@ -1658,10 +1658,12 @@ function scoreBagOccasionCompatibility(
 
   if (sourceOccasion === "party") {
     if (isFormalBag) return 0.96;
-    if (isCasualBag) return 0.34;
+    if (/\b(crossbody|shoulder bag|hobo)\b/.test(text)) return 0.72;
+    if (/\b(tote)\b/.test(text)) return 0.62;
+    if (/\b(backpack|messenger)\b/.test(text)) return 0.42;
     if (isSportBag) return 0.2;
     if (isBeachBag) return 0.24;
-    return 0.52;
+    return 0.64;
   }
 
   if (sourceOccasion === "formal" || sourceOccasion === "semi-formal") {
@@ -1710,7 +1712,7 @@ function minimumOccasionCompatibilityForFamily(
     return 0.4;
   }
   if (candidateFamily === "bags") {
-    if (sourceOccasion === "party") return 0.62;
+    if (sourceOccasion === "party") return 0.52;
     if (sourceOccasion === "formal" || sourceOccasion === "semi-formal") return 0.6;
     if (sourceOccasion === "active") return 0.58;
     if (sourceOccasion === "beach") return 0.58;
@@ -2680,7 +2682,7 @@ function mapCompleteLookToStyleResponse(params: {
   };
 
   for (const s of stagedSuggestions) {
-    const categoryLabel = completeStyleCategoryLabel(s.category);
+    const categoryLabel = completeStyleCategoryLabel(`${s.category || ""} ${s.title || ""}`);
     if (!categoryLabel) continue;
     if (!shouldKeepMappedSuggestion(categoryLabel, s)) continue;
     if (!groups.has(categoryLabel)) groups.set(categoryLabel, []);
