@@ -1,153 +1,279 @@
-/**
- * Deduplicate OpenSearch index by removing size-variant documents.
- *
- * For each group of products sharing the same parent_product_url (or image_url),
- * keep the single best representative (prefer in-stock, then newest last_seen)
- * and delete all others from OpenSearch.
- *
- * Postgres and embeddings are untouched — this only removes redundant OS docs.
- * After this runs: ~39k unique docs instead of 107k, so k=200 covers 5x more products.
- *
- * Run:   npx ts-node -r dotenv/config scripts/dedup-opensearch-variants.ts
- * Dry:   DRY_RUN=1 npx ts-node -r dotenv/config scripts/dedup-opensearch-variants.ts
- *
- * ~5-10 min for 107k products.
- */
 import "dotenv/config";
-import { pg, osClient } from "../src/lib/core";
+import { osClient } from "../src/lib/core";
 import { config } from "../src/config";
 
 const INDEX = config.opensearch.index;
-const BATCH_SIZE = 500;
-const CONCURRENCY = 5;
-const DRY_RUN = process.env.DRY_RUN === "1";
+const SCROLL_TTL = "3m";
+const FETCH_SIZE = 500;
+const BULK_BATCH = 100;
+const FAST_INGEST = process.env.FAST_INGEST !== "0";
 
-interface CanonicalRow {
-  canonical_id: string;
-  group_key: string;
+function groupKey(src: any): string | null {
+  // Group by parent_product_url + primary color to keep one variant per color.
+  // This preserves size variants of DIFFERENT colors but removes duplicate sizes of the same color.
+  const p = src?.parent_product_url ?? null;
+  const c = src?.color_primary_canonical ?? src?.attr_color ?? null;
+  
+  if (!p || String(p).trim().length === 0) return null;
+  
+  const parentTrim = String(p).trim();
+  const colorTrim = c ? String(c).trim() : "no_color";
+  return `${parentTrim}::${colorTrim}`;
 }
 
-/**
- * For each group sharing the same parent_product_url (or image_url),
- * pick the canonical representative:
- *   1. availability = true preferred
- *   2. newest last_seen as tiebreaker
- */
-async function fetchCanonicalIds(): Promise<Map<string, string>> {
-  const res = await pg.query<CanonicalRow>(`
-    SELECT DISTINCT ON (COALESCE(parent_product_url, image_url, id::text))
-      id::text AS canonical_id,
-      COALESCE(parent_product_url, image_url, id::text) AS group_key
-    FROM products
-    ORDER BY
-      COALESCE(parent_product_url, image_url, id::text),
-      availability DESC,
-      last_seen DESC NULLS LAST,
-      id ASC
-  `);
-  const map = new Map<string, string>();
-  for (const row of res.rows) {
-    map.set(row.group_key, row.canonical_id);
-  }
-  return map;
+function isInStock(av: any): boolean {
+  if (av === true) return true;
+  if (!av) return false;
+  const s = String(av).toLowerCase();
+  return s.includes("in") || s.includes("available") || s.includes("instock") || s === "1";
 }
 
-/** Fetch all (id, parent_product_url, image_url) from Postgres. */
-async function fetchAllProducts(): Promise<Array<{ id: string; parent_product_url: string | null; image_url: string | null }>> {
-  const res = await pg.query<{ id: string; parent_product_url: string | null; image_url: string | null }>(
-    `SELECT id::text, parent_product_url, image_url FROM products ORDER BY id`,
-  );
-  return res.rows;
+function parseDate(v: any): number {
+  if (!v) return 0;
+  const t = Date.parse(String(v));
+  if (Number.isFinite(t)) return t;
+  return 0;
 }
 
-async function bulkDelete(ids: string[]): Promise<{ deleted: number; notFound: number; errors: number }> {
-  if (ids.length === 0) return { deleted: 0, notFound: 0, errors: 0 };
-  const body: any[] = ids.flatMap((id) => [{ delete: { _index: INDEX, _id: id } }]);
-  const resp = await osClient.bulk({ body, timeout: "30s" });
-  let deleted = 0;
-  let notFound = 0;
-  let errors = 0;
-  for (const item of (resp.body?.items ?? [])) {
-    const r = item.delete;
-    if (r?.result === "deleted") deleted++;
-    else if (r?.status === 404) notFound++;
-    else errors++;
-  }
-  return { deleted, notFound, errors };
-}
+async function fetchAllDocs() {
+  const map = new Map<string, Array<any>>();
+  const keepUnkeyed: Array<any> = [];
 
-async function sleep(ms: number) {
-  return new Promise((res) => setTimeout(res, ms));
-}
+  let resp = await osClient.search({
+    index: INDEX,
+    scroll: SCROLL_TTL,
+    size: FETCH_SIZE,
+    _source: ["parent_product_url", "image_url", "availability", "last_seen_at", "color_primary_canonical", "attr_color"],
+    body: { query: { match_all: {} } },
+  });
 
-async function main() {
-  if (DRY_RUN) console.log("=== DRY RUN — no deletes will be sent ===\n");
+  let total = resp.body.hits.total?.value ?? resp.body.hits.total ?? 0;
+  console.log(`Found ~${total} documents in index ${INDEX}.`);
 
-  console.log("Fetching canonical IDs from Postgres...");
-  const canonicalMap = await fetchCanonicalIds();
-  console.log(`Canonical unique products: ${canonicalMap.size}`);
-
-  console.log("Fetching all products from Postgres...");
-  const allProducts = await fetchAllProducts();
-  console.log(`Total products: ${allProducts.size ?? allProducts.length}`);
-
-  // Build set of IDs to delete: any product whose group_key maps to a DIFFERENT canonical ID
-  const toDelete: string[] = [];
-  for (const product of allProducts) {
-    const groupKey = product.parent_product_url ?? product.image_url ?? product.id;
-    const canonicalId = canonicalMap.get(groupKey);
-    if (canonicalId && canonicalId !== product.id) {
-      toDelete.push(product.id);
+  while (resp.body.hits.hits.length > 0) {
+    for (const h of resp.body.hits.hits) {
+      const key = groupKey(h._source);
+      if (!key) {
+        keepUnkeyed.push({ id: h._id, source: h._source });
+        continue;
+      }
+      const arr = map.get(key) ?? [];
+      arr.push({ id: h._id, source: h._source });
+      map.set(key, arr);
     }
+
+    const scrollId = resp.body._scroll_id;
+    let scrollRetries = 0;
+    while (true) {
+      try {
+        resp = await osClient.scroll({ scroll_id: scrollId, scroll: SCROLL_TTL });
+        break;
+      } catch (err: any) {
+        scrollRetries++;
+        if (scrollRetries >= 5) { console.warn("Scroll failed after retries, stopping fetch early."); break; }
+        const delay = Math.pow(2, scrollRetries) * 1000;
+        console.warn(`Scroll retry ${scrollRetries}/5 after ${delay}ms (${err.code || err.message})`);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+    if (scrollRetries >= 5) break;
   }
 
-  console.log(`Variant docs to delete from OpenSearch: ${toDelete.length}`);
-  console.log(`Docs to keep: ${allProducts.length - toDelete.length}`);
+  return { groups: map, unkeyed: keepUnkeyed };
+}
 
-  if (DRY_RUN) {
-    console.log("\nDry run complete — no changes made.");
-    await pg.end();
+function pickCanonical(docs: Array<any>): string {
+  if (docs.length === 1) return docs[0].id;
+  const inStock = docs.filter((d) => isInStock(d.source?.availability));
+  const candidate = (inStock.length ? inStock : docs).sort((a, b) => parseDate(b.source?.last_seen_at) - parseDate(a.source?.last_seen_at))[0];
+  return candidate.id;
+}
+
+async function getIndexSettingsAndMappings(indexName: string) {
+  const resp = await osClient.indices.get({ index: indexName });
+  const meta = resp.body[indexName];
+  const settings = meta.settings ?? {};
+  const mappings = meta.mappings ?? {};
+  const idxSettings = { ...(settings.index ?? {}) };
+  delete (idxSettings as any).creation_date;
+  delete (idxSettings as any).uuid;
+  delete (idxSettings as any).provided_name;
+  delete (idxSettings as any).version;
+  return { settings: { index: idxSettings }, mappings };
+}
+
+async function createIndex(newIndex: string, dryRun: boolean) {
+  const exists = await osClient.indices.exists({ index: newIndex });
+  if (exists.body) {
+    console.log(`Index ${newIndex} already exists.`);
+    return;
+  }
+  if (dryRun) {
+    console.log(`Dry-run: would create index ${newIndex} with copied settings/mappings.`);
     return;
   }
 
-  // Batch-delete
-  const batches: string[][] = [];
-  for (let i = 0; i < toDelete.length; i += BATCH_SIZE) {
-    batches.push(toDelete.slice(i, i + BATCH_SIZE));
-  }
-
-  let totalDeleted = 0;
-  let totalNotFound = 0;
-  let totalErrors = 0;
-  const startMs = Date.now();
-
-  for (let batchIdx = 0; batchIdx < batches.length; batchIdx += CONCURRENCY) {
-    const chunk = batches.slice(batchIdx, batchIdx + CONCURRENCY);
-    const results = await Promise.all(chunk.map((b) => bulkDelete(b)));
-    for (const r of results) {
-      totalDeleted += r.deleted;
-      totalNotFound += r.notFound;
-      totalErrors += r.errors;
-    }
-
-    const done = Math.min((batchIdx + CONCURRENCY) * BATCH_SIZE, toDelete.length);
-    const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
-    const rate = done > 0 ? (done / ((Date.now() - startMs) / 1000)).toFixed(0) : "0";
-    console.log(`  ${done}/${toDelete.length} (${((done / toDelete.length) * 100).toFixed(1)}%) — ${elapsed}s elapsed, ~${rate} docs/s`);
-
-    if (batchIdx + CONCURRENCY < batches.length) await sleep(100);
-  }
-
-  const totalSec = ((Date.now() - startMs) / 1000).toFixed(1);
-  console.log(`\nDone in ${totalSec}s`);
-  console.log(`  deleted: ${totalDeleted}`);
-  console.log(`  not found in OpenSearch (already gone): ${totalNotFound}`);
-  console.log(`  errors: ${totalErrors}`);
-
-  await pg.end();
+  const { settings, mappings } = await getIndexSettingsAndMappings(INDEX);
+  await osClient.indices.create({ index: newIndex, body: { settings, mappings } });
+  console.log(`Created index ${newIndex}`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+async function setFastIngestSettings(indexName: string, dryRun: boolean) {
+  if (!FAST_INGEST) return;
+  if (dryRun) {
+    console.log(`Dry-run: would set ${indexName} refresh_interval=-1 and number_of_replicas=0 for faster ingest.`);
+    return;
+  }
+  await osClient.indices.putSettings({
+    index: indexName,
+    body: {
+      index: {
+        refresh_interval: "-1",
+        number_of_replicas: 0,
+      },
+    },
+  });
+  console.log(`Applied fast-ingest settings to ${indexName}`);
+}
+
+async function restoreIngestSettings(indexName: string, dryRun: boolean) {
+  if (!FAST_INGEST) return;
+  if (dryRun) {
+    console.log(`Dry-run: would restore ${indexName} refresh_interval=1s and number_of_replicas=1 after ingest.`);
+    return;
+  }
+  await osClient.indices.putSettings({
+    index: indexName,
+    body: {
+      index: {
+        refresh_interval: "1s",
+        number_of_replicas: 1,
+      },
+    },
+  });
+  console.log(`Restored ingest settings on ${indexName}`);
+}
+
+async function reindexCanonicals(newIndex: string, canonicalIds: string[], dryRun: boolean) {
+  console.log(`Reindexing ${canonicalIds.length} canonical docs into ${newIndex} (dryRun=${dryRun})`);
+  if (dryRun) return;
+
+  // Check how many docs are already in the target index to support resume
+  let alreadyIndexed = 0;
+  try {
+    const countResp = await osClient.count({ index: newIndex });
+    alreadyIndexed = countResp.body?.count ?? 0;
+    if (alreadyIndexed > 0) {
+      console.log(`Target index ${newIndex} already has ${alreadyIndexed} docs. Resuming from offset ${alreadyIndexed}.`);
+    }
+  } catch {
+    alreadyIndexed = 0;
+  }
+
+  for (let i = 0; i < canonicalIds.length; i += BULK_BATCH) {
+    if (i < alreadyIndexed) continue; // Skip already-indexed batches
+
+    const batch = canonicalIds.slice(i, i + BULK_BATCH);
+    let mgetResp: any;
+    let retries = 0;
+    const maxRetries = 5;
+
+    while (retries < maxRetries) {
+      try {
+        mgetResp = await osClient.mget({ index: INDEX, body: { ids: batch } });
+        break;
+      } catch (err: any) {
+        retries++;
+        if (retries >= maxRetries) throw err;
+        const delay = Math.pow(2, retries) * 1000;
+        console.warn(`mget retry ${retries}/${maxRetries} after ${delay}ms (error: ${err.code || err.message})`);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+
+    const body: any[] = [];
+    for (const doc of mgetResp.body.docs) {
+      if (!doc.found) continue;
+      body.push({ index: { _index: newIndex, _id: doc._id } });
+      body.push(doc._source);
+    }
+    if (body.length === 0) continue;
+
+    let resp: any;
+    retries = 0;
+    while (retries < maxRetries) {
+      try {
+        resp = await osClient.bulk({ body, timeout: "60s" });
+        break;
+      } catch (err: any) {
+        retries++;
+        if (retries >= maxRetries) throw err;
+        const delay = Math.pow(2, retries) * 1000;
+        console.warn(`bulk retry ${retries}/${maxRetries} after ${delay}ms (error: ${err.code || err.message})`);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+
+    if (resp.body?.errors) {
+      console.error(`Errors reindexing batch starting ${i}`);
+      for (const it of resp.body.items) {
+        const op = it.index || it.create;
+        if (op && op.status >= 400) console.error(JSON.stringify(op));
+      }
+      throw new Error("Reindex bulk errors");
+    }
+    console.log(`Indexed batch ${i}-${i + batch.length}`);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+async function run(dryRun = true, newIndexName?: string) {
+  console.log(`Starting dedup/reindex: dryRun=${dryRun}`);
+  const { groups, unkeyed } = await fetchAllDocs();
+  console.log(`Grouped into ${groups.size} unique parent/image keys. Unkeyed docs: ${unkeyed.length}`);
+
+  const canonicalIds: string[] = [];
+  let totalDocs = 0;
+  let keepCount = 0;
+
+  for (const [k, arr] of groups) {
+    totalDocs += arr.length;
+    const canonical = pickCanonical(arr);
+    canonicalIds.push(canonical);
+    keepCount += 1;
+  }
+
+  for (const d of unkeyed) {
+    canonicalIds.push(d.id);
+    totalDocs += 1;
+    keepCount += 1;
+  }
+
+  console.log(`Total docs scanned: ${totalDocs}`);
+  console.log(`Canonical documents to keep: ${keepCount}`);
+  console.log(`Estimated duplicates removed: ${totalDocs - keepCount}`);
+
+  const targetIndex = newIndexName || `${INDEX}_dedup_v1`;
+  await createIndex(targetIndex, dryRun);
+  await setFastIngestSettings(targetIndex, dryRun);
+  await reindexCanonicals(targetIndex, canonicalIds, dryRun);
+  await restoreIngestSettings(targetIndex, dryRun);
+
+  console.log(`Done. To switch aliases, POST to /_aliases with actions to point your read alias to ${targetIndex}.`);
+}
+
+async function main() {
+  const execute = process.argv.includes("--execute");
+  const targetArgIdx = process.argv.findIndex((s) => s === "--target");
+  const target = targetArgIdx >= 0 ? process.argv[targetArgIdx + 1] : undefined;
+  try {
+    await run(!execute, target);
+    console.log("Finished.");
+    process.exit(0);
+  } catch (err) {
+    console.error(err);
+    process.exit(1);
+  }
+}
+
+main();
