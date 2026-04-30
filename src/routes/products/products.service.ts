@@ -1869,7 +1869,7 @@ function imageKnnEfSearch(): number {
   }
   const raw = Number(rawEnv);
   if (Number.isFinite(raw) && raw === 0) return 0;
-  if (Number.isFinite(raw) && raw > 0) return Math.max(32, Math.min(512, Math.floor(raw)));
+  if (Number.isFinite(raw) && raw > 0) return Math.max(1, Math.floor(raw));
   return 64;
 }
 

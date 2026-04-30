@@ -12,7 +12,7 @@ import { osClient } from "../src/lib/core";
 import { config } from "../src/config";
 
 const SOURCE_INDEX = config.opensearch.index;
-const TARGET_INDEX = `${config.opensearch.index}_dedup_v1`;
+const TARGET_INDEX = "products_dedup_v1";
 const SCROLL_TTL = "3m";
 const FETCH_SIZE = 500;
 const BULK_BATCH = 100;
