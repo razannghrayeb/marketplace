@@ -6167,24 +6167,55 @@ export async function searchByImageWithSimilarity(
     }
     return 0;
   };
+  const colorIntentPriorityForSort = (comp: any): number => {
+    if (!hasColorPreferenceForRanking) return 0;
+    const tier = String(comp?.colorTier ?? "none").toLowerCase().trim();
+    if (tier === "exact") return 3;
+    if (tier === "family") return 2;
+    if (tier === "bucket") return 1;
+    return 0;
+  };
+  const intentMatchCountForSort = (comp: any): number => {
+    if (!comp) return 0;
+    let count = 0;
+    if ((relevanceIntent.desiredProductTypes?.length ?? 0) > 0 && Number(comp.productTypeCompliance ?? 0) >= 0.5) count += 1;
+    if (hasColorPreferenceForRanking && Number(comp.colorCompliance ?? 0) >= 0.35 && colorIntentPriorityForSort(comp) > 0) count += 1;
+    if (Boolean(desiredStyleForRelevance) && Number(comp.styleCompliance ?? 0) >= 0.6) count += 1;
+    if (hasAudienceIntentForRelevance && Number(comp.audienceCompliance ?? 0) >= 0.85) count += 1;
+    if (Boolean(desiredSleeveNorm) && Number(comp.sleeveCompliance ?? 0) >= 0.6) count += 1;
+    return count;
+  };
 
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
     const idb = String(b._source.product_id);
+    const compA = complianceById.get(ida);
+    const compB = complianceById.get(idb);
     if (shouldUseVisualPrimarySort) {
       const va = rankedVisualForSort(a);
       const vb = rankedVisualForSort(b);
       if (Math.abs(vb - va) > 0.01) return vb - va;
     }
+    // Priority 1: when color intent exists, keep exact/family color matches first.
+    // exact > family > others
+    if (hasColorPreferenceForRanking) {
+      const cpA = colorIntentPriorityForSort(compA);
+      const cpB = colorIntentPriorityForSort(compB);
+      if (cpB !== cpA) return cpB - cpA;
+    }
+    // Priority 2: rank by number of matched intents (type/color/style/pattern/audience/sleeve).
+    const icA = intentMatchCountForSort(compA);
+    const icB = intentMatchCountForSort(compB);
+    if (icB !== icA) return icB - icA;
     // Primary: finalRelevance01 descending (incorporates visual + metadata signals).
-    const fa = complianceById.get(ida)?.finalRelevance01 ?? 0;
-    const fb = complianceById.get(idb)?.finalRelevance01 ?? 0;
+    const fa = compA?.finalRelevance01 ?? 0;
+    const fb = compB?.finalRelevance01 ?? 0;
     const detectionCategoryForSort = String(params.detectionProductCategory ?? "").toLowerCase().trim();
     if (hasColorPreferenceForRanking) {
       const ca = Math.max(0, Math.min(1, complianceById.get(ida)?.colorCompliance ?? 0));
       const cb = Math.max(0, Math.min(1, complianceById.get(idb)?.colorCompliance ?? 0));
-      const ta = colorTierRankForSort(complianceById.get(ida)?.colorTier) / 4;
-      const tb = colorTierRankForSort(complianceById.get(idb)?.colorTier) / 4;
+      const ta = colorTierRankForSort(compA?.colorTier) / 4;
+      const tb = colorTierRankForSort(compB?.colorTier) / 4;
       const isTopColorIntentSort = detectionCategoryForSort === "tops" && hasDetectionAnchoredTypeIntent;
       const colorBonusScale = hasExplicitColorIntent
         ? 0.12
@@ -6200,11 +6231,11 @@ export async function searchByImageWithSimilarity(
         ? (hasColorPreferenceForRanking ? 0.16 : 0.08)
         : (hasColorPreferenceForRanking ? 0.08 : 0.04);
     if (hasColorPreferenceForRanking && Math.abs(fb - fa) <= topsColorOrderingWindow) {
-      const ta = colorTierRankForSort(complianceById.get(ida)?.colorTier);
-      const tb = colorTierRankForSort(complianceById.get(idb)?.colorTier);
+      const ta = colorTierRankForSort(compA?.colorTier);
+      const tb = colorTierRankForSort(compB?.colorTier);
       if (tb !== ta) return tb - ta;
-      const ca = complianceById.get(ida)?.colorCompliance ?? 0;
-      const cb = complianceById.get(idb)?.colorCompliance ?? 0;
+      const ca = compA?.colorCompliance ?? 0;
+      const cb = compB?.colorCompliance ?? 0;
       const minColorDelta = detectionCategoryForSort === "tops" ? 0.02 : 0.03;
       if (Math.abs(cb - ca) >= minColorDelta) return cb - ca;
     }
@@ -6216,8 +6247,8 @@ export async function searchByImageWithSimilarity(
       if (eb !== ea) return eb - ea;
     }
     if (hasExplicitColorIntent || hasInferredColorSignal) {
-      const ca = complianceById.get(ida)?.colorCompliance ?? 0;
-      const cb = complianceById.get(idb)?.colorCompliance ?? 0;
+      const ca = compA?.colorCompliance ?? 0;
+      const cb = compB?.colorCompliance ?? 0;
       if (Math.abs(cb - ca) > 1e-6) return cb - ca;
     }
     const va = visualSimEffectiveById.get(ida) ?? rankedVisualForSort(a);
@@ -6226,8 +6257,8 @@ export async function searchByImageWithSimilarity(
     const ia = imageCompositeById.get(ida) ?? 0;
     const ib = imageCompositeById.get(idb) ?? 0;
     if (Math.abs(ib - ia) > 1e-8) return ib - ia;
-    const ra = complianceById.get(ida)?.rerankScore ?? 0;
-    const rb = complianceById.get(idb)?.rerankScore ?? 0;
+    const ra = compA?.rerankScore ?? 0;
+    const rb = compB?.rerankScore ?? 0;
     return rb - ra;
   });
 
@@ -6241,6 +6272,9 @@ export async function searchByImageWithSimilarity(
     const footwearDetectionForGenderGate =
       String(params.detectionProductCategory ?? "").toLowerCase().trim() === "footwear" ||
       String(params.detectionProductCategory ?? "").toLowerCase().trim() === "shoes";
+    const bagDetectionForGenderGate =
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bags" ||
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bag";
 
     const title = (t: any) => (typeof t === "string" ? t.toLowerCase() : "");
     const docGender = (hit: any) => {
@@ -6268,13 +6302,19 @@ export async function searchByImageWithSimilarity(
     const matches = (hit: any) => {
       const dg = docGender(hit);
       const t = title(hit?._source?.title);
+      const c = title(hit?._source?.category);
+      const cc = title(hit?._source?.category_canonical);
+      const audienceBlob = `${t} ${c} ${cc}`;
       if (dg === wantG) return true;
       if (dg === "unisex") return true;
       if (dg) return false;
-      const hasWant = wantKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(t));
-      const hasUnisexCue = /\b(unisex|all\s*gender|all-gender)\b/.test(t);
-      if (oppKw.length > 0 && oppKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(t))) return false;
+      const hasWant = wantKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(audienceBlob));
+      const hasUnisexCue = /\b(unisex|all\s*gender|all-gender)\b/.test(audienceBlob);
+      if (oppKw.length > 0 && oppKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(audienceBlob))) return false;
       if (hasWant) return true;
+      // Soft mode for bags: keep unknown-gender results to preserve recall,
+      // but ranking below will demote ambiguous items without men/unisex cues.
+      if (bagDetectionForGenderGate) return true;
       // For footwear, unknown-gender docs should not pass on visual similarity only.
       // This prevents men/women leakage when catalog gender metadata is sparse.
       if (footwearDetectionForGenderGate) return hasUnisexCue;
@@ -6283,7 +6323,37 @@ export async function searchByImageWithSimilarity(
     };
 
     const filtered = sortedByRelevance.filter((h: any) => matches(h));
-    return filtered.length > 0 ? filtered : sortedByRelevance;
+    if (filtered.length === 0) return sortedByRelevance;
+
+    // Soft gender demotion for bag results with unknown gender and no men/unisex cues.
+    if (bagDetectionForGenderGate) {
+      const indexById = new Map<string, number>();
+      sortedByRelevance.forEach((h: any, idx: number) => {
+        indexById.set(String(h?._source?.product_id ?? idx), idx);
+      });
+      const bagUnknownGenderPenalty = (hit: any): number => {
+        const dg = docGender(hit);
+        if (dg === wantG || dg === "unisex") return 0;
+        const t = title(hit?._source?.title);
+        const c = title(hit?._source?.category);
+        const cc = title(hit?._source?.category_canonical);
+        const audienceBlob = `${t} ${c} ${cc}`;
+        const hasWant = wantKw.some((kw) => new RegExp(`\\b${kw}\\b`).test(audienceBlob));
+        const hasUnisexCue = /\b(unisex|all\s*gender|all-gender)\b/.test(audienceBlob);
+        if (hasWant || hasUnisexCue) return 0;
+        return dg ? 1 : 2;
+      };
+      return [...filtered].sort((a: any, b: any) => {
+        const pa = bagUnknownGenderPenalty(a);
+        const pb = bagUnknownGenderPenalty(b);
+        if (pa !== pb) return pa - pb;
+        const ia = indexById.get(String(a?._source?.product_id)) ?? Number.MAX_SAFE_INTEGER;
+        const ib = indexById.get(String(b?._source?.product_id)) ?? Number.MAX_SAFE_INTEGER;
+        return ia - ib;
+      });
+    }
+
+    return filtered;
   })();
 
   const strictCategorySafetyActive =
