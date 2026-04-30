@@ -162,6 +162,139 @@ export const CATEGORY_KEYWORDS: Record<ProductCategory, string[]> = {
 };
 
 // ============================================================================
+// Aesthetic Compatibility Matrix
+// ============================================================================
+
+const AESTHETIC_COMPATIBILITY: Record<string, Record<string, number>> = {
+  classic:    { classic: 1.0, modern: 0.8, minimalist: 0.8, romantic: 0.7, bohemian: 0.3, streetwear: 0.2, edgy: 0.3, sporty: 0.1 },
+  modern:     { modern: 1.0, classic: 0.8, minimalist: 0.8, edgy: 0.6, streetwear: 0.6, romantic: 0.5, bohemian: 0.4, sporty: 0.5 },
+  minimalist: { minimalist: 1.0, modern: 0.8, classic: 0.7, romantic: 0.4, bohemian: 0.3, streetwear: 0.4, edgy: 0.4, sporty: 0.4 },
+  bohemian:   { bohemian: 1.0, romantic: 0.7, classic: 0.3, modern: 0.4, minimalist: 0.3, streetwear: 0.2, edgy: 0.3, sporty: 0.2 },
+  streetwear: { streetwear: 1.0, sporty: 0.8, edgy: 0.7, modern: 0.6, minimalist: 0.4, bohemian: 0.2, classic: 0.2, romantic: 0.1 },
+  romantic:   { romantic: 1.0, bohemian: 0.7, classic: 0.7, modern: 0.5, minimalist: 0.4, streetwear: 0.1, edgy: 0.2, sporty: 0.1 },
+  edgy:       { edgy: 1.0, streetwear: 0.7, modern: 0.6, classic: 0.3, minimalist: 0.3, sporty: 0.4, bohemian: 0.3, romantic: 0.2 },
+  sporty:     { sporty: 1.0, streetwear: 0.8, modern: 0.5, edgy: 0.4, minimalist: 0.4, classic: 0.2, bohemian: 0.2, romantic: 0.1 },
+};
+
+// ============================================================================
+// Season Compatibility Matrix
+// ============================================================================
+
+const SEASON_COMPATIBILITY: Record<string, Record<string, number>> = {
+  spring:       { spring: 1.0, summer: 0.7, fall: 0.4, winter: 0.2, "all-season": 1.0 },
+  summer:       { summer: 1.0, spring: 0.7, fall: 0.3, winter: 0.1, "all-season": 1.0 },
+  fall:         { fall: 1.0, winter: 0.7, spring: 0.4, summer: 0.2, "all-season": 1.0 },
+  winter:       { winter: 1.0, fall: 0.7, spring: 0.2, summer: 0.1, "all-season": 1.0 },
+  "all-season": { "all-season": 1.0, spring: 1.0, summer: 1.0, fall: 1.0, winter: 1.0 },
+};
+
+// ============================================================================
+// Category Type Groupings
+// ============================================================================
+
+const ACCESSORY_CATEGORIES: Set<ProductCategory> = new Set([
+  "jewelry", "necklace", "bracelet", "earrings", "ring", "watch",
+  "belt", "scarf", "hat", "sunglasses", "wallet",
+]);
+const FOOTWEAR_CATEGORIES: Set<ProductCategory> = new Set([
+  "heels", "flats", "boots", "sandals", "sneakers", "loafers",
+]);
+const BAG_CATEGORIES: Set<ProductCategory> = new Set([
+  "bag", "clutch", "tote", "backpack", "crossbody",
+]);
+const OUTERWEAR_CATEGORIES: Set<ProductCategory> = new Set([
+  "jacket", "blazer", "coat", "parka", "bomber", "cardigan",
+]);
+
+interface ScoringWeights {
+  bm25: number;
+  color: number;
+  formality: number;
+  occasion: number;
+  aesthetic: number;
+  season: number;
+}
+
+function getCategoryWeights(targetCategories: ProductCategory[]): ScoringWeights {
+  const hasAccessory = targetCategories.some(c => ACCESSORY_CATEGORIES.has(c));
+  const hasFootwear  = targetCategories.some(c => FOOTWEAR_CATEGORIES.has(c));
+  const hasBag       = targetCategories.some(c => BAG_CATEGORIES.has(c));
+  const hasOuterwear = targetCategories.some(c => OUTERWEAR_CATEGORIES.has(c));
+
+  if (hasAccessory) return { bm25: 0.20, color: 0.15, formality: 0.35, occasion: 0.20, aesthetic: 0.05, season: 0.05 };
+  if (hasFootwear)  return { bm25: 0.25, color: 0.20, formality: 0.30, occasion: 0.15, aesthetic: 0.05, season: 0.05 };
+  if (hasOuterwear) return { bm25: 0.30, color: 0.20, formality: 0.20, occasion: 0.10, aesthetic: 0.05, season: 0.15 };
+  if (hasBag)       return { bm25: 0.30, color: 0.20, formality: 0.25, occasion: 0.15, aesthetic: 0.05, season: 0.05 };
+  return              { bm25: 0.30, color: 0.20, formality: 0.20, occasion: 0.20, aesthetic: 0.05, season: 0.05 };
+}
+
+function computeAestheticScore(sourceAesthetic: string, candidateAesthetic: string): number {
+  return AESTHETIC_COMPATIBILITY[sourceAesthetic]?.[candidateAesthetic] ?? 0.5;
+}
+
+function computeSeasonScore(sourceSeason: string, candidateSeason: string): number {
+  return SEASON_COMPATIBILITY[sourceSeason]?.[candidateSeason] ?? 0.5;
+}
+
+/**
+ * Hue-wheel color harmony score (0–1).
+ * Uses the COLOR_WHEEL hue values for precise complementary/analogous detection.
+ */
+function computeColorHarmonyScore(sourceColor: string | undefined, candidateColor: string | undefined): number {
+  if (!sourceColor || !candidateColor) return 0.5;
+
+  const src = sourceColor.toLowerCase();
+  const cnd = candidateColor.toLowerCase();
+  const srcInfo = COLOR_WHEEL[src];
+  const cndInfo = COLOR_WHEEL[cnd];
+
+  if (!srcInfo || !cndInfo) return 0.5;
+
+  // Metallics look great with everything
+  if (srcInfo.type === "metallic" || cndInfo.type === "metallic") return 0.85;
+
+  // Neutrals go with everything; same neutral = monochromatic bonus
+  if (srcInfo.type === "neutral" || cndInfo.type === "neutral") {
+    return src === cnd ? 0.95 : 0.85;
+  }
+
+  // Same color — monochromatic (good but not the goal for outfit completion)
+  if (src === cnd) return 0.75;
+
+  const hueDiff = Math.abs(srcInfo.hue - cndInfo.hue);
+  const dist = Math.min(hueDiff, 360 - hueDiff);  // Shortest path on wheel
+
+  if (dist >= 150 && dist <= 210) return 0.92;  // Complementary (~180°)
+  if (dist >= 100 && dist <= 140) return 0.80;  // Triadic (~120°)
+  if (dist >= 130 && dist < 150)  return 0.75;  // Split-complementary
+  if (dist <= 45)                 return 0.70;  // Analogous (<45°)
+  if (dist >= 70 && dist <= 110)  return 0.30;  // Clash (~90°)
+  return 0.50;
+}
+
+/**
+ * Category-aware price range — accessories have their own price points
+ * and should not be constrained by the anchor item's price.
+ */
+function getPriceRangeForCategory(
+  anchorPriceCents: number,
+  targetCategories: ProductCategory[],
+): { min?: number; max?: number } | undefined {
+  if (anchorPriceCents <= 0) return undefined;
+
+  // Accessories (jewelry, belts, etc.) are priced independently of clothing
+  if (targetCategories.some(c => ACCESSORY_CATEGORIES.has(c))) return undefined;
+
+  if (targetCategories.some(c => FOOTWEAR_CATEGORIES.has(c))) {
+    return { min: Math.round(anchorPriceCents * 0.3), max: Math.round(anchorPriceCents * 5.0) };
+  }
+  if (targetCategories.some(c => BAG_CATEGORIES.has(c))) {
+    return { min: Math.round(anchorPriceCents * 0.3), max: Math.round(anchorPriceCents * 4.0) };
+  }
+  return { min: Math.round(anchorPriceCents * 0.5), max: Math.round(anchorPriceCents * 3.0) };
+}
+
+// ============================================================================
 // Color Theory & Harmony Rules
 // ============================================================================
 
@@ -834,38 +967,29 @@ export async function completeMyStyle(
     useVisualSimilarity = true,
     disablePriceFilter = false,
   } = options;
-  
-  // Default price range: 0.5x to 2.5x of source product price
-  // Only apply if product has a price and no explicit range provided
-  const effectivePriceRange = priceRange ?? (
-    !disablePriceFilter && product.price_cents > 0
-      ? {
-          min: Math.round(product.price_cents * 0.5),
-          max: Math.round(product.price_cents * 2.5),
-        }
-      : undefined
-  );
-  
+
   // Detect category and style
   const detectedCategory = detectCategory(product.title, product.description);
   const detectedStyle = buildStyleProfile(product);
-  
+
   // Get pairing rules
   const pairings = CATEGORY_PAIRINGS[detectedCategory] || CATEGORY_PAIRINGS.unknown;
-  
+
   // Build recommendations for each pairing category
   const recommendations: StyleRecommendation[] = [];
   let totalProducts = 0;
-  
+
   for (const pairing of pairings) {
     if (totalProducts >= maxTotal) break;
-    
+
     const categoryProducts = await findProductsForCategory(
       pairing.categories,
       detectedStyle,
       {
         maxResults: maxPerCategory,
-        priceRange: effectivePriceRange,
+        priceRange,
+        anchorPriceCents: product.price_cents,
+        disablePriceFilter,
         excludeBrands,
         preferSameBrand: preferSameBrand ? product.brand : undefined,
         useVisualSimilarity,
@@ -907,7 +1031,9 @@ async function findProductsForCategory(
   style: StyleProfile,
   options: {
     maxResults: number;
-    priceRange?: { min?: number; max?: number };
+    priceRange?: { min?: number; max?: number };   // explicit override
+    anchorPriceCents?: number;                      // used for auto price-range
+    disablePriceFilter?: boolean;
     excludeBrands?: string[];
     preferSameBrand?: string;
     useVisualSimilarity: boolean;
@@ -964,11 +1090,16 @@ async function findProductsForCategory(
       }
     };
     
-    // Add price filter
-    if (options.priceRange) {
+    // Smart per-category price range: explicit override → auto-range → none
+    const effectivePriceRange = options.priceRange ?? (
+      !options.disablePriceFilter && options.anchorPriceCents
+        ? getPriceRangeForCategory(options.anchorPriceCents, categories)
+        : undefined
+    );
+    if (effectivePriceRange) {
       const priceFilter: any = { range: { price_cents: {} } };
-      if (options.priceRange.min) priceFilter.range.price_cents.gte = options.priceRange.min;
-      if (options.priceRange.max) priceFilter.range.price_cents.lte = options.priceRange.max;
+      if (effectivePriceRange.min) priceFilter.range.price_cents.gte = effectivePriceRange.min;
+      if (effectivePriceRange.max) priceFilter.range.price_cents.lte = effectivePriceRange.max;
       query.bool.filter.push(priceFilter);
     }
     
@@ -986,25 +1117,26 @@ async function findProductsForCategory(
       });
     }
     
-    // Add color harmony boost
+    // Color harmony boost — prioritise the dedicated `color` field over title text
     if (style.colorProfile.primary && style.colorProfile.primary !== "neutral") {
-      const harmoniousColors = style.colorProfile.harmonies
-        .flatMap(h => h.colors)
-        .slice(0, 10);
-      
+      const harmoniousColors = [...new Set(
+        style.colorProfile.harmonies.flatMap(h => h.colors)
+      )].slice(0, 12);
+
       for (const color of harmoniousColors) {
-        query.bool.should.push({
-          match: { title: { query: color, boost: 0.5 } }
-        });
+        // `color` field is the most reliable signal
+        query.bool.should.push({ match: { color: { query: color, boost: 1.5 } } });
+        // Title mention is weaker but still useful
+        query.bool.should.push({ match: { title: { query: color, boost: 0.3 } } });
       }
     }
     
-    // Execute search
+    // Execute search — fetch a larger pool so re-ranking has more to work with
     const response = await osClient.search({
       index: config.opensearch.index,
       body: {
         query,
-        size: options.maxResults * 2,  // Get more to filter
+        size: options.maxResults * 4,
         _source: ["id", "title", "brand", "category", "color", "price_cents", "currency", "image_url", "image_cdn", "description"],
       }
     });
@@ -1066,46 +1198,73 @@ async function findProductsForCategory(
       seen.add(dedupeKey);
 
       const matchReasons: string[] = [];
-      let matchScore = hit._score || 0;
-      
-      // Check style compatibility
+
+      // Normalize BM25 score to 0–1 range (asymptotic: score/(score+10))
+      const bm25Score = hit._score || 0;
+      const normalizedBm25 = bm25Score / (bm25Score + 10);
+
+      // Style profile for the candidate
       const productStyle = buildStyleProfile(product);
-      
-      // Formality match (±2 is acceptable)
+
+      // Category-specific weight profile
+      const weights = getCategoryWeights(categories);
+
+      // --- Color harmony score ---
+      const sourceColor = style.colorProfile.primary !== "neutral" ? style.colorProfile.primary : undefined;
+      const productColor = product.color?.toLowerCase() || detectColor(product.title, product.description);
+      const colorScore = computeColorHarmonyScore(sourceColor, productColor);
+      if (colorScore >= 0.75) matchReasons.push("Color harmony match");
+
+      // --- Formality score ---
       const formalityDiff = Math.abs(productStyle.formality - style.formality);
-      if (formalityDiff <= 2) {
-        matchScore += 10;
-        matchReasons.push("Matches formality level");
-      } else if (formalityDiff <= 4) {
-        matchScore += 5;
-      }
-      
-      // Color harmony check
-      if (product.color || detectColor(product.title)) {
-        const productColor = product.color || detectColor(product.title);
-        if (productColor) {
-          const isHarmonious = style.colorProfile.harmonies.some(h => 
-            h.colors.includes(productColor.toLowerCase())
-          );
-          if (isHarmonious) {
-            matchScore += 15;
-            matchReasons.push("Color harmony match");
-          }
-        }
-      }
-      
-      // Occasion match
+      const formalityScore =
+        formalityDiff === 0 ? 1.0 :
+        formalityDiff <= 1 ? 0.9 :
+        formalityDiff <= 2 ? 0.75 :
+        formalityDiff <= 3 ? 0.5 :
+        Math.max(0.1, 1 - formalityDiff * 0.1);
+      if (formalityDiff <= 2) matchReasons.push("Matches formality level");
+
+      // --- Occasion score ---
+      const OCCASION_COMPAT: Record<string, string[]> = {
+        casual:      ["semi-formal", "active"],
+        "semi-formal": ["casual", "formal"],
+        formal:      ["semi-formal", "party"],
+        party:       ["formal", "semi-formal"],
+        active:      ["casual"],
+        beach:       ["casual"],
+      };
+      let occasionScore = 0.3;
       if (productStyle.occasion === style.occasion) {
-        matchScore += 10;
+        occasionScore = 1.0;
         matchReasons.push(`Perfect for ${style.occasion} occasions`);
+      } else if (OCCASION_COMPAT[style.occasion]?.includes(productStyle.occasion)) {
+        occasionScore = 0.7;
       }
-      
-      // Same brand bonus
-      if (options.preferSameBrand && product.brand?.toLowerCase() === options.preferSameBrand.toLowerCase()) {
-        matchScore += 5;
-        matchReasons.push("Same brand for cohesive look");
-      }
-      
+
+      // --- Aesthetic coherence score ---
+      const aestheticScore = computeAestheticScore(style.aesthetic, productStyle.aesthetic);
+
+      // --- Season compatibility score ---
+      const seasonScore = computeSeasonScore(style.season, productStyle.season);
+      if (seasonScore < 0.3) matchReasons.push("Season mismatch");
+
+      // --- Brand bonus (small flat addition, not part of weights) ---
+      const brandBonus = (options.preferSameBrand &&
+        product.brand?.toLowerCase() === options.preferSameBrand.toLowerCase())
+        ? 0.05 : 0;
+      if (brandBonus > 0) matchReasons.push("Same brand for cohesive look");
+
+      // --- Final normalized weighted score ---
+      const matchScore =
+        weights.bm25      * normalizedBm25 +
+        weights.color     * colorScore +
+        weights.formality * formalityScore +
+        weights.occasion  * occasionScore +
+        weights.aesthetic * aestheticScore +
+        weights.season    * seasonScore +
+        brandBonus;
+
       scoredProducts.push({
         ...product,
         matchScore,

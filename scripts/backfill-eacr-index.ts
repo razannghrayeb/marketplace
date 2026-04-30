@@ -20,8 +20,8 @@ const INDEX = process.argv.includes("--index")
   ? process.argv[process.argv.indexOf("--index") + 1]
   : "products_dedup_v1"; // Default to deduplicated index
 const BATCH_SIZE = 100;
-const SCROLL_TTL = "2m";
 const CHECKPOINT_FILE = "./data/backfill-checkpoint.json";
+const MAX_RETRIES = 5;
 
 interface ProductDoc {
   id: string;
@@ -93,32 +93,70 @@ function clearCheckpoint() {
 async function fetchProductsFromOpenSearch(): Promise<ProductDoc[]> {
   const products: ProductDoc[] = [];
   let batch = 0;
-  const MAX_RETRIES = 5;
-  
+
   // Support starting from a specific offset (for resume)
   const fromOffset = process.argv.includes("--from-offset")
     ? parseInt(process.argv[process.argv.indexOf("--from-offset") + 1])
     : 0;
 
-  let resp = await osClient.search({
-    index: INDEX,
-    scroll: SCROLL_TTL,
-    size: BATCH_SIZE,
-    _source: ["title", "category", "attr_color", "availability", "embedding"],
-    body: { query: { match_all: {} } },
-  });
+  const searchWithRetry = async (body: Record<string, any>) => {
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        return await osClient.search({
+          index: INDEX,
+          size: BATCH_SIZE,
+          _source: ["title", "category", "attr_color", "availability", "embedding"],
+          body,
+        });
+      } catch (err: any) {
+        console.error(`  Search attempt ${attempt + 1}/${MAX_RETRIES} failed:`, err.message);
+        if (attempt < MAX_RETRIES - 1) {
+          const backoffMs = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s, 8s, 16s
+          console.log(`  Retrying in ${backoffMs}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          continue;
+        }
+        throw err;
+      }
+    }
 
-  const total = resp.body.hits.total?.value ?? resp.body.hits.total ?? 0;
-  console.log(`Found ${total} documents in ${INDEX}. Fetching embeddings...`);
+    throw new Error("Search failed after retries");
+  };
+
+  let total = 0;
+  let docIndex = 0; // Track overall document position in sorted order
+  let searchAfter: any[] | undefined;
+  let loggedTotal = false;
+
   
   if (fromOffset > 0) {
     console.log(`📍 Starting from offset ${fromOffset}. Skipping first ${fromOffset} documents...`);
   }
 
-  let docIndex = 0; // Track overall document position
+  while (true) {
+    const body: Record<string, any> = {
+      query: { match_all: {} },
+      // Stable sort key required for reliable search_after pagination.
+      sort: [{ _id: "asc" }],
+    };
+    if (searchAfter) {
+      body.search_after = searchAfter;
+    }
 
-  while (resp.body.hits.hits.length > 0) {
-    for (const hit of resp.body.hits.hits) {
+    const resp = await searchWithRetry(body);
+    const hits = resp.body.hits.hits as Array<any>;
+
+    if (!loggedTotal) {
+      total = resp.body.hits.total?.value ?? resp.body.hits.total ?? 0;
+      console.log(`Found ${total} documents in ${INDEX}. Fetching embeddings...`);
+      loggedTotal = true;
+    }
+
+    if (!hits.length) {
+      break;
+    }
+
+    for (const hit of hits) {
       docIndex++;
       
       // Skip documents until we reach fromOffset
@@ -140,32 +178,10 @@ async function fetchProductsFromOpenSearch(): Promise<ProductDoc[]> {
     }
 
     batch++;
-    const progress = Math.min(fromOffset + batch * BATCH_SIZE, total);
+    const progress = Math.min(docIndex, total);
     console.log(`  Fetched ${progress}/${total} products...`);
 
-    const scrollId = resp.body._scroll_id;
-    
-    // Retry logic for scroll with exponential backoff
-    let scrollSucceeded = false;
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      try {
-        resp = await osClient.scroll({ scroll_id: scrollId, scroll: SCROLL_TTL });
-        scrollSucceeded = true;
-        break;
-      } catch (err: any) {
-        console.error(`  Scroll attempt ${attempt + 1}/${MAX_RETRIES} failed:`, err.message);
-        if (attempt < MAX_RETRIES - 1) {
-          const backoffMs = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s, 8s, 16s
-          console.log(`  Retrying in ${backoffMs}ms...`);
-          await new Promise((resolve) => setTimeout(resolve, backoffMs));
-        }
-      }
-    }
-
-    if (!scrollSucceeded) {
-      console.warn(`  Scroll failed after ${MAX_RETRIES} retries. Stopping fetch.`);
-      break;
-    }
+    searchAfter = hits[hits.length - 1]?.sort;
   }
 
   console.log(`Total products with embeddings: ${products.length}`);

@@ -1992,6 +1992,27 @@ export async function textSearch(
       return (scoreMap.get(String(b.id)) ?? 0) - (scoreMap.get(String(a.id)) ?? 0);
     });
 
+    // Suit-specific post-filter: when the query clearly targets suits (not blazers/jackets),
+    // front-rank only products whose title/category explicitly mentions "suit" or "tuxedo".
+    // This prevents blazers and jackets from dominating suit results in text search.
+    const hasSuitTextIntent = desiredProductTypes.some((t) => /\b(suits?|tuxedo)\b/.test(t));
+    if (hasSuitTextIntent && results.length > 0) {
+      const suitResults = results.filter((p: any) => {
+        const titleBlob = String(p.title ?? "").toLowerCase();
+        const catBlob = String(p.category ?? "").toLowerCase();
+        return /\b(suits?|tuxedo)\b/.test(`${titleBlob} ${catBlob}`) && !/\bblazer\b/.test(titleBlob);
+      });
+      if (suitResults.length >= 3) results = suitResults;
+    }
+    // For men's suit queries, also filter out women's products (audienceCompliance hard gate).
+    if (hasSuitTextIntent && queryGenderForAudience === "men" && results.length > 0) {
+      const menResults = results.filter((p: any) => {
+        const compliance = complianceById.get(String(p.id));
+        return !compliance || (compliance.audienceCompliance ?? 1) >= 0.35;
+      });
+      if (menResults.length >= 2) results = menResults;
+    }
+
     if (results.length === 0) {
       const openSearchHitsTotal =
         response.body.hits.total?.value ?? response.body.hits.total ?? 0;
