@@ -124,7 +124,13 @@ export function inferColorFromCaption(caption: string): {
   // Bottom garments: find nearest (not leftmost) color before the garment type.
   // Leftmost-match bug: "blue sweater and grey pants" → regex returns "blue" (not "grey").
   const bottomGarments = "jeans|pants|trousers|chinos|cargo|shorts|leggings";
-  const jeansColor = nearestColorBefore(s, bottomGarments);
+  let jeansColor = nearestColorBefore(s, bottomGarments);
+  // Default bare "jeans" mention to "blue": without an explicit color word, jeans strongly
+  // implies blue/denim. Only apply when no color was extracted (e.g. "black leather jacket
+  // and jeans" — "black" is blocked by the intervening jacket cue, leaving jeansColor null).
+  if (!jeansColor && /\bjeans\b/.test(s)) {
+    jeansColor = "blue";
+  }
 
   // Garment color for dresses, outerwear, skirts: use nearest-color approach.
   // "sweater" is now in topGarments so this slot covers dresses/skirts/outerwear specifically.

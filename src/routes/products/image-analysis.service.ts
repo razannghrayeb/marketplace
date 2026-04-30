@@ -1013,7 +1013,12 @@ async function extractDetectionCropColorsForRanking(params: {
 }
 
 function requiresSlotSpecificColor(productCategory: string): boolean {
-  return productCategory === "tops" || productCategory === "bottoms" || productCategory === "dresses";
+  return (
+    productCategory === "tops" ||
+    productCategory === "bottoms" ||
+    productCategory === "dresses" ||
+    productCategory === "outerwear"
+  );
 }
 
 function isNeutralFashionColorEarly(color: string): boolean {
@@ -4652,6 +4657,31 @@ function setDetectionColorIfHigherConfidence(
       return;
     }
 
+    // Do not accept blue-like colors from crop as the FIRST color for a footwear slot.
+    // Shoes photographed against blue backgrounds or cropped with denim overflow frequently
+    // receive spurious "light-blue" from k-means. Caption confirmation is required to trust
+    // a chromatic blue on footwear when the slot has no prior signal.
+    if (
+      !incomingFromCaption &&
+      footwearLike &&
+      isBlueLikeColor(c) &&
+      !prevColor
+    ) {
+      return;
+    }
+
+    // Do not let dark-neutral variants (charcoal, dark-gray) from crop/detection-caption
+    // override canonical "black" from the full-image caption for any slot.
+    // Camera exposure and warm lighting frequently render black garments as charcoal — both
+    // map to the same color family and "black" is the more canonical representation.
+    if (
+      prevColor === "black" &&
+      (c === "charcoal" || c === "dark-gray" || c === "dark-grey") &&
+      prevConf >= 0.50
+    ) {
+      return;
+    }
+
     // Do not let a caption's generic parent color ("blue") override a crop-detected subspecies
     // ("light-blue") — the crop is the more reliable signal for hue precision.
     const subspeciesDowngrade =
@@ -5284,6 +5314,11 @@ export class ImageAnalysisService {
     const imageWidth = metadata.width || 0;
     const imageHeight = metadata.height || 0;
 
+    // Start rembg in parallel with YOLO — both are independent of each other.
+    // YOLO takes ~400ms so rembg gets that window for free; the effective extra
+    // wait is max(0, rembgQueryTimeoutMs - yoloMs) instead of the full timeout.
+    const fullProcessBufPromise = prepareBufferForImageSearchQuery(buffer);
+
     // First, run the standard analysis
     const analysisResult = await this.analyzeImage(buffer, filename, {
       ...analyzeOptions,
@@ -5293,7 +5328,8 @@ export class ImageAnalysisService {
     const sourceImagePHash = await computePHash(buffer).catch(() => undefined);
     const similarityStartedAt = Date.now();
     const similarityTimings: ImageSimilarityStageTimings = { totalMs: 0 };
-    const { buffer: fullProcessBuf } = await prepareBufferForImageSearchQuery(buffer);
+    // By now rembg is likely already done (ran in parallel with YOLO)
+    const { buffer: fullProcessBuf } = await fullProcessBufPromise;
 
     // Similarity search disabled — return early
     if (!findSimilar) {
