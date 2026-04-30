@@ -94,6 +94,15 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
   const blueLead = b - Math.max(r, g);
   const redLead = r - Math.max(g, b);
   const greenLead = g - Math.max(r, b);
+  const minChannel = Math.min(r, g, b);
+
+  // White footwear and studio-lit light garments often pick up a cool cast in
+  // shadows. If all RGB channels are still very high and chroma is low, keep
+  // the cluster in the white family instead of promoting a tiny blue bias.
+  if (lab[0] > 88 && minChannel >= 224 && chroma < 16) {
+    if (lab[0] > 93 || minChannel >= 238) return "white";
+    return "off-white";
+  }
 
   // Achromatic neutrals — widen gate to chroma < 11 so very desaturated
   // darks (near-black leather, dark charcoal wool) don't bleed into navy/brown.
@@ -111,7 +120,7 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
     if (lab[0] > 72 && lab[2] >= 12 && lab[1] >= -2) return "yellow";
     if (lab[0] < 14) return "black";
     if (lab[0] < 36) return "charcoal";
-    if (lab[0] < 60) return "gray";
+    if (lab[0] < 68) return "gray";
     if (lab[0] < 78) return "silver";
     if (lab[0] > 92) return "white";
     return "off-white";

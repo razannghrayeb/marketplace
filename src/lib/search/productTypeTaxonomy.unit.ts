@@ -4,6 +4,7 @@ declare const test: any;
 declare const expect: any;
 
 import {
+  expandProductTypesForQuery,
   extractFashionTypeNounTokens,
   extractLexicalProductTypeSeeds,
   filterProductTypeSeedsByMappedCategory,
@@ -78,6 +79,16 @@ describe("extractLexicalProductTypeSeeds", () => {
     expect(j).toContain("jeans");
     const t = extractLexicalProductTypeSeeds("women tops");
     expect(t.some((x) => x === "tops" || x === "top")).toBe(true);
+  });
+
+  test("expands broad tops into common top subtypes for recall", () => {
+    const expanded = expandProductTypesForQuery(["tops"]);
+    expect(expanded).toContain("blouse");
+    expect(expanded).toContain("blouses");
+    expect(expanded).toContain("shirt");
+    expect(expanded).toContain("tee");
+    expect(expanded).toContain("tank top");
+    expect(expanded).toContain("cardigan");
   });
 
   test("vest dress: outerwear vest token dropped when aisle is dresses", () => {
