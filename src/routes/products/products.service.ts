@@ -5778,9 +5778,15 @@ export async function searchByImageWithSimilarity(
           blendedBottomMain *= 0.88;
         }
         // Graduated color damping for bottoms: color is the primary differentiator.
+        // colorTier "none" + hard color gate = confirmed mismatch with no family rescue.
+        const bottomHardColorMismatch = comp.colorTier === "none" && hasColorIntentForFinal;
         const hasBottomColorIntent = hasColorPreferenceForRanking || Boolean((comp as any).hasColorIntent ?? hasColorIntentForFinal);
         if (hasBottomColorIntent && Number.isFinite(bottomColorComp)) {
-          if (bottomColorComp <= 0.12) {
+          if (bottomHardColorMismatch) {
+            // Total color mismatch under hard gate: apply aggressive damping so wrong-color
+            // bottoms don't outrank correctly-colored ones via visual similarity alone.
+            blendedBottomMain *= hasExplicitColorIntent ? 0.25 : 0.30;
+          } else if (bottomColorComp <= 0.12) {
             blendedBottomMain *= hasExplicitColorIntent ? 0.40 : 0.65;
           } else if (bottomColorComp < 0.40) {
             const t = bottomColorComp / 0.40;
@@ -5793,7 +5799,8 @@ export async function searchByImageWithSimilarity(
           }
         }
         const exactBottomVisualEvidence = (comp.exactTypeScore ?? 0) >= 1 && bottomVisualComp >= 0.62;
-        const bottomBoostedFloor = exactBottomVisualEvidence ? 0.34 : 0.24;
+        // Hard color mismatch: keep score near the computeHitRelevance cap, not boosted.
+        const bottomBoostedFloor = bottomHardColorMismatch ? 0.06 : exactBottomVisualEvidence ? 0.34 : 0.24;
         const bottomBoosted = Math.min(1, Math.max(bottomBoostedFloor, blendedBottomMain));
         if (bottomBoosted > (comp.finalRelevance01 ?? 0)) {
           comp.finalRelevance01 = bottomBoosted;
@@ -5909,6 +5916,67 @@ export async function searchByImageWithSimilarity(
         }
       }
     }
+    // Main-path outerwear tuning:
+    // Jackets, coats, blazers have no dedicated tuning block (unlike tops/bottoms/dresses/bags/shoes).
+    // Without rescue, valid outerwear products collapse below the 0.2 acceptance floor because
+    // the intentGate and colorGate simultaneously fire for any outerwear with sparse metadata.
+    // The core_apparel_type_visual_floor also excludes outerwear, compounding the gap.
+    if (
+      hasDetectionAnchoredTypeIntent &&
+      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "outerwear"
+    ) {
+      const outerTypeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
+      const outerColorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
+      const outerCategoryComp = Math.max(0, Math.min(1, comp.categoryRelevance01 ?? 0));
+      const outerTaxonomyComp = Math.max(0, Math.min(1, comp.siblingClusterScore ?? 0));
+      const outerAudienceComp = Math.max(0, Math.min(1, comp.audienceCompliance ?? 0));
+      const outerStyleComp = Math.max(0, Math.min(1, comp.styleCompliance ?? 0));
+      const outerStructuralComp = Math.max(outerTypeComp, outerCategoryComp, outerTaxonomyComp);
+      const outerVisualComp = Math.max(0, Math.min(1, effectiveVisualForScoring));
+      const strongOuterEvidence =
+        ((comp.exactTypeScore ?? 0) >= 1 || outerStructuralComp >= 0.28) &&
+        outerVisualComp >= 0.56 &&
+        (comp.crossFamilyPenalty ?? 0) < 0.52;
+      if (strongOuterEvidence) {
+        const weakOuterStructure =
+          (comp.exactTypeScore ?? 0) < 1 &&
+          outerStructuralComp < 0.44 &&
+          outerCategoryComp < 0.28 &&
+          outerTaxonomyComp < 0.38;
+        let blendedOuterMain =
+          0.58 * outerVisualComp +
+          0.20 * outerStructuralComp +
+          0.12 * outerColorComp +
+          0.06 * outerStyleComp +
+          0.04 * outerAudienceComp;
+        if (weakOuterStructure) {
+          blendedOuterMain *= 0.88;
+        }
+        // Graduated color damping for outerwear: color is important (black jacket vs beige coat),
+        // but silhouette + structure usually sufficient to distinguish jackets from other garments.
+        const hasOuterColorIntent = hasColorPreferenceForRanking || Boolean((comp as any).hasColorIntent ?? hasColorIntentForFinal);
+        if (hasOuterColorIntent && Number.isFinite(outerColorComp)) {
+          if (outerColorComp <= 0.12) {
+            blendedOuterMain *= hasExplicitColorIntent ? 0.40 : 0.65;
+          } else if (outerColorComp < 0.40) {
+            const t = outerColorComp / 0.40;
+            blendedOuterMain *= hasExplicitColorIntent
+              ? 0.40 + 0.28 * t   // explicit: 0.40 → 0.68
+              : 0.65 + 0.22 * t;  // inferred: 0.65 → 0.87
+          }
+          if (outerColorComp >= 0.60) {
+            blendedOuterMain = Math.min(1, blendedOuterMain + 0.04);
+          }
+        }
+        const exactOuterVisualEvidence = (comp.exactTypeScore ?? 0) >= 1 && outerVisualComp >= 0.60;
+        const outerBoostedFloor = exactOuterVisualEvidence ? 0.34 : 0.22;
+        const outerBoosted = Math.min(1, Math.max(outerBoostedFloor, blendedOuterMain));
+        if (outerBoosted > (comp.finalRelevance01 ?? 0)) {
+          comp.finalRelevance01 = outerBoosted;
+          finalScoreSourceById.set(idStr, "outerwear_main_path_tuning");
+        }
+      }
+    }
     (comp as any).colorContradictionPenalty = Math.round(colorContradictionPenalty * 1000) / 1000;
     keywordSubtypeBoostById.set(idStr, Math.round(subtypeKeywordSignal.boost * 1000) / 1000);
     keywordSubtypeOverlapById.set(idStr, subtypeKeywordSignal.overlap);
@@ -5975,7 +6043,9 @@ export async function searchByImageWithSimilarity(
         : hasExplicitColorIntent
           ? nearIdenticalColorCompliance >= 0.35
           : hasInferredColorSignal
-            ? nearIdenticalColorCompliance >= 0.20
+            // colorTier "none" means zero color-family match even accounting for metadata noise;
+            // don't let near-identical visual similarity override the color precision cap.
+            ? nearIdenticalColorCompliance >= 0.20 && comp.colorTier !== "none"
             : nearIdenticalColorCompliance >= 0.06; // crop-only: minimal gate
       if (!crossBlocked && (!hasTypeIntentHere || typeOk) && nearIdenticalPassesColorGate) {
         // Graduated damping by color signal strength: stronger signals → stricter color gating.
@@ -7462,12 +7532,16 @@ export async function searchByImageWithSimilarity(
       // Keep core apparel resilient when color is inferred (not explicit):
       // for detection-anchored tops/bottoms, strong visual+type alignment should
       // not be collapsed below final relevance gates by aggressive color caps.
+      // Exception: when inferred color IS hard-gating the final relevance (hasColorIntentForFinal),
+      // this floor must not override the color precision cap for wrong-color products.
       if (
         hasDetectionAnchoredTypeIntent &&
         !hasExplicitColorIntent &&
+        !hasColorIntentForFinal &&
         compliance &&
         (String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops" ||
-          String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms")
+          String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms" ||
+          String(params.detectionProductCategory ?? "").toLowerCase().trim() === "outerwear")
       ) {
         const detectionCategoryForFloor = String(params.detectionProductCategory ?? "").toLowerCase().trim();
         const typeComp = Math.max(0, Math.min(1, compliance.productTypeCompliance ?? 0));
