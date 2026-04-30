@@ -5,7 +5,15 @@
       "Bash(grep -E \"\\\\.\\(ts|js\\)$\")",
       "Bash(grep -E \"\\\\.ts$\")",
       "Bash(awk -F: '$2 > 4560 && $2 < 8140')",
-      "Bash(awk -F: 'NR>1{if \\($1+0 > 4560 && $1+0 < 8140\\) print}')"
+      "Bash(awk -F: 'NR>1{if \\($1+0 > 4560 && $1+0 < 8140\\) print}')",
+      "Bash(xargs cat *)",
+      "Bash(psql postgresql://postgres.afycknzavzcpgosfaxsq:MariamKafel2005.@aws-1-eu-west-1.pooler.supabase.com:6543/postgres -c ' *)",
+      "Bash(psql \"postgresql://postgres.afycknzavzcpgosfaxsq:MariamKafel2005.@aws-1-eu-west-1.pooler.supabase.com:6543/postgres\" -c \"\\\\d product_images\")",
+      "Bash(npx ts-node *)",
+      "Bash(curl -sk \"https://avnadmin:AVNS_G97kQ2PFQD6JlaLg-D-@os-991a95b-rolash1030-7288.a.aivencloud.com:21921/products_v1/_mapping\")",
+      "Bash(node -e ' *)",
+      "Bash(curl -sk \"https://avnadmin:AVNS_G97kQ2PFQD6JlaLg-D-@os-991a95b-rolash1030-7288.a.aivencloud.com:21921/products_v1/_mapping\" -o C:/tmp/mapping.json)",
+      "Bash(psql -h 0.0.0.0 -p 5432 -U postgres -d fashion -c ' *)"
     ]
   }
 }

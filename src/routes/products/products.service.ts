@@ -4075,6 +4075,8 @@ export async function searchByImageWithSimilarity(
     "audience_gender",
     "embedding_score_version",
     "embedding_garment_score_version",
+    "image_url",
+    "parent_product_url",
     // Attribute + part embeddings are intentionally omitted here.
     // They are fetched via a separate targeted mget for only the top hits
     // (see enrichment block after signalsPromise), reducing kNN response payload by ~80%.
@@ -4570,6 +4572,26 @@ export async function searchByImageWithSimilarity(
   };
 
   const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
+
+  // Collapse size/style variants at the earliest possible point — before any quality gate.
+  // Vendors index every size variant as a separate product sharing the same image_url,
+  // which saturates the KNN recall window. Sorting by _score first guarantees we keep
+  // the highest-similarity representative for each unique image, so downstream quality
+  // gates (color, type, category) always evaluate the best candidate per product.
+  if (Array.isArray(hits) && hits.length > 1) {
+    hits = [...hits].sort((a: any, b: any) => (Number(b._score) || 0) - (Number(a._score) || 0));
+    const seenImageKeys = new Set<string>();
+    hits = hits.filter((h: any) => {
+      const key: string | null =
+        (h._source?.parent_product_url as string | null | undefined) ??
+        (h._source?.image_url as string | null | undefined) ??
+        null;
+      if (!key) return true;
+      if (seenImageKeys.has(key)) return false;
+      seenImageKeys.add(key);
+      return true;
+    });
+  }
 
   const rawCosineDebugAllowed =
     debugRawCosineFirst &&
@@ -8237,30 +8259,31 @@ export async function searchByImageWithSimilarity(
     .trim()
     .replace(/[^0-9a-f]/g, "")
     .padStart(16, "0");
-  if (normalizedQueryPHash && /^[0-9a-f]+$/i.test(normalizedQueryPHash)) {
+  // Skip pHash rescue for detection-scoped searches: the query is a YOLO crop,
+  // not a full catalog product photo, so its pHash will never match catalog items.
+  if (!detectionScoped && normalizedQueryPHash && /^[0-9a-f]+$/i.test(normalizedQueryPHash)) {
     const exactPhashT0 = Date.now();
     const existing = new Set(results.map((p) => String(p.id)));
     const hasIsHidden = await productsTableHasIsHiddenColumn();
     const hiddenClause = hasIsHidden ? "AND p.is_hidden = false" : "";
     const ph = normalizedQueryPHash;
-    const phLen = ph.length;
+    // pHash from computePHash is always 16-char lowercase hex — use a plain equality
+    // check so the DB can use a btree index on p_hash instead of a full table scan.
     const exactPhashRows = await pg.query(
       `SELECT id FROM (
          SELECT p.id
            FROM products p
-          WHERE p.p_hash IS NOT NULL
-            AND LPAD(REGEXP_REPLACE(LOWER(TRIM(p.p_hash)), '[^0-9a-f]', '', 'g'), $2, '0') = $1
+          WHERE p.p_hash = $1
             ${hiddenClause}
          UNION
          SELECT p.id
            FROM product_images pi
            INNER JOIN products p ON p.id = pi.product_id
-          WHERE pi.p_hash IS NOT NULL
-            AND LPAD(REGEXP_REPLACE(LOWER(TRIM(pi.p_hash)), '[^0-9a-f]', '', 'g'), $2, '0') = $1
+          WHERE pi.p_hash = $1
             ${hiddenClause}
        ) x
        LIMIT 10`,
-      [ph, phLen],
+      [ph],
     );
     const rescueIds = (exactPhashRows.rows ?? [])
       .map((r: any) => String(r.id))
@@ -8478,69 +8501,52 @@ async function findSimilarByPHash(
   limit: number = 10,
   maxDistance: number = 12,
 ): Promise<ProductResult[]> {
-  const normalizePHashHex = (value: string | null | undefined, minLen: number = 16): string => {
-    const hex = String(value ?? "").toLowerCase().trim().replace(/[^0-9a-f]/g, "");
-    if (!hex) return "";
-    const targetLen = Math.max(minLen, hex.length);
-    return hex.padStart(targetLen, "0");
-  };
-  const normalizedInput = normalizePHashHex(pHash, 16);
-  if (!normalizedInput) return [];
+  const normalizedInput = String(pHash ?? "").toLowerCase().trim().replace(/[^0-9a-f]/g, "").padStart(16, "0");
+  if (!normalizedInput || normalizedInput === "0".repeat(16)) return [];
   const hasIsHidden = await productsTableHasIsHiddenColumn();
   const hiddenClause = hasIsHidden ? "AND p.is_hidden = false" : "";
   const excludeNumeric = excludeIds
     .map((id) => parseInt(id, 10))
     .filter(Number.isFinite);
 
-  const result =
-    excludeNumeric.length > 0
-      ? await pg.query(
-        `SELECT id, p_hash FROM (
-           SELECT p.id, p.p_hash
-             FROM products p
-            WHERE p.p_hash IS NOT NULL ${hiddenClause}
-           UNION ALL
-           SELECT p.id, pi.p_hash
-             FROM product_images pi
-             INNER JOIN products p ON p.id = pi.product_id
-            WHERE pi.p_hash IS NOT NULL ${hiddenClause}
-         ) hashes
-         WHERE id != ALL($1::int[])`,
-        [excludeNumeric]
-      )
-      : await pg.query(
-        `SELECT id, p_hash FROM (
-           SELECT p.id, p.p_hash
-             FROM products p
-            WHERE p.p_hash IS NOT NULL ${hiddenClause}
-           UNION ALL
-           SELECT p.id, pi.p_hash
-             FROM product_images pi
-             INNER JOIN products p ON p.id = pi.product_id
-            WHERE pi.p_hash IS NOT NULL ${hiddenClause}
-         ) hashes`
-      );
+  // Compute Hamming distance in SQL via bit XOR on the hex strings converted to bit(64).
+  // This avoids fetching every row into Node.js and filters at the DB level.
+  // The bit-count trick: count '1' chars in the XOR text representation.
+  const excludeClause = excludeNumeric.length > 0 ? "AND id != ALL($3::int[])" : "";
+  const params: unknown[] = excludeNumeric.length > 0
+    ? [normalizedInput, maxDistance, excludeNumeric]
+    : [normalizedInput, maxDistance];
 
-  // Calculate Hamming distance and filter similar
-  const bestDistanceById = new Map<number, number>();
-  for (const row of result.rows) {
-    const rowHash = normalizePHashHex(String((row as any).p_hash ?? ""), normalizedInput.length);
-    if (!rowHash) continue;
-    const distance = hammingDistance(normalizedInput, rowHash);
-    if (distance <= maxDistance) { // configurable pHash tolerance (default: ~80% similar)
-      const idNum = Number(row.id);
-      const best = bestDistanceById.get(idNum);
-      if (best == null || distance < best) {
-        bestDistanceById.set(idNum, distance);
-      }
-    }
-  }
-  const similar: Array<{ id: number; distance: number }> = [...bestDistanceById.entries()].map(
-    ([id, distance]) => ({ id, distance }),
+  const result = await pg.query(
+    `SELECT id, distance FROM (
+       SELECT id,
+         length(replace(
+           (('x' || $1)::bit(64) # ('x' || lpad(lower(trim(p_hash)), 16, '0'))::bit(64))::text,
+           '0', ''
+         )) AS distance
+       FROM (
+         SELECT p.id, p.p_hash
+           FROM products p
+          WHERE p.p_hash IS NOT NULL ${hiddenClause}
+         UNION ALL
+         SELECT p.id, pi.p_hash
+           FROM product_images pi
+           INNER JOIN products p ON p.id = pi.product_id
+          WHERE pi.p_hash IS NOT NULL ${hiddenClause}
+       ) hashes
+       WHERE p_hash ~ '^[0-9a-fA-F]+$'
+         ${excludeClause}
+     ) ranked
+     WHERE distance <= $2
+     ORDER BY distance
+     LIMIT ${limit}`,
+    params,
   );
 
-  // Sort by similarity (lower distance = more similar)
-  similar.sort((a, b) => a.distance - b.distance);
+  const similar: Array<{ id: number; distance: number }> = result.rows.map((row: any) => ({
+    id: Number(row.id),
+    distance: Number(row.distance),
+  }));
   const topSimilar = similar.slice(0, limit);
 
   if (topSimilar.length === 0) return [];

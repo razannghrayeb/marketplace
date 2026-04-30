@@ -209,6 +209,8 @@ export interface BuildSearchDocumentInput {
   catalogColor?: string | null;
   /** From `products.gender` when title did not yield gender (e.g. BLIP backfill). */
   catalogGender?: string | null;
+  /** Base product URL without size/variant query params — used for pre-hydration dedup. */
+  parentProductUrl?: string | null;
   enrichment?: BuildSearchDocumentEnrichmentInput | null;
   attributeEmbeddings?: {
     color?: number[];
@@ -367,6 +369,7 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
     color_confidence_image: colorConfidenceImage,
     image_cdn: input.imageCdn ?? null,
     p_hash: input.pHash ?? null,
+    parent_product_url: input.parentProductUrl ?? null,
     last_seen_at: input.lastSeenAt ?? null,
     attr_color: primaryAttrColor,
     attr_colors: normalizedColors,
