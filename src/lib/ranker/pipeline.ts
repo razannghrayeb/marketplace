@@ -32,12 +32,12 @@ import { pg } from "../core";
  * Must sum to 1.0.
  */
 const HEURISTIC_WEIGHTS = {
-  clip_sim:   Number(process.env.HW_CLIP_SIM   ?? 0.30),
-  text_sim:   Number(process.env.HW_TEXT_SIM   ?? 0.20),
-  styleScore: Number(process.env.HW_STYLE      ?? 0.20),
-  colorScore: Number(process.env.HW_COLOR      ?? 0.15),
-  phash_sim:  Number(process.env.HW_PHASH      ?? 0.10),
-  same_brand: Number(process.env.HW_SAME_BRAND ?? 0.05),
+  clip_sim:   Number(process.env.HW_CLIP_SIM   ?? 0.25),  // visual similarity
+  text_sim:   Number(process.env.HW_TEXT_SIM   ?? 0.15),  // keyword relevance
+  styleScore: Number(process.env.HW_STYLE      ?? 0.28),  // formality + occasion coherence
+  colorScore: Number(process.env.HW_COLOR      ?? 0.22),  // color harmony
+  phash_sim:  Number(process.env.HW_PHASH      ?? 0.05),  // near-duplicate visual match
+  same_brand: Number(process.env.HW_SAME_BRAND ?? 0.05),  // brand cohesion
 } as const;
 
 /** Max times to retry the model before falling back to heuristic. */

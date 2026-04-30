@@ -671,6 +671,12 @@ export function topsMicroGroup(token: string): keyof typeof TOPS_MICRO | null {
   return null;
 }
 
+const OUTER_MICRO_SUIT = new Set([
+  "suit",
+  "suits",
+  "tuxedo",
+  "tuxedos",
+]);
 const OUTER_MICRO_BLAZER = new Set([
   "blazer",
   "blazers",
@@ -697,16 +703,21 @@ const OUTER_MICRO_JACKET = new Set([
   "bomber jacket",
 ]);
 
-function outerMicroGroup(token: string): "blazer" | "jacket" | null {
+function outerMicroGroup(token: string): "suit" | "blazer" | "jacket" | null {
   const t = token.toLowerCase().trim();
+  if (OUTER_MICRO_SUIT.has(t)) return "suit";
   if (OUTER_MICRO_BLAZER.has(t)) return "blazer";
   if (OUTER_MICRO_JACKET.has(t)) return "jacket";
   return null;
 }
 
+// Penalty between suit (full two-piece) and blazer/jacket (standalone piece).
+// suit↔blazer: significant — a full suit is not a blazer.
+// suit↔jacket: higher — suits are not casual jackets.
 const OUTER_PAIR_PENALTY: Record<string, Record<string, number>> = {
-  blazer: { blazer: 0, jacket: 0.48 },
-  jacket: { blazer: 0.48, jacket: 0 },
+  suit:   { suit: 0,    blazer: 0.50, jacket: 0.65 },
+  blazer: { suit: 0.50, blazer: 0,    jacket: 0.48 },
+  jacket: { suit: 0.65, blazer: 0.48, jacket: 0    },
 };
 
 const DRESS_MICRO = {

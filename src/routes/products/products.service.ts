@@ -2458,6 +2458,28 @@ function hasTailoredTopCatalogCue(src: Record<string, unknown>): boolean {
   return /\b(suit|blazer|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|tailored jacket|structured jacket)\b/.test(blob);
 }
 
+// Stricter than hasTailoredTopCatalogCue: only accepts full suits (not blazers/jackets).
+// Used to front-rank results for strict suit queries so blazers don't appear first.
+function hasActualSuitCatalogCue(src: Record<string, unknown>): boolean {
+  const blob = [
+    src.title,
+    src.description,
+    src.category,
+    src.category_canonical,
+    Array.isArray(src.product_types) ? src.product_types.join(" ") : src.product_types,
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x))
+    .join(" ")
+    .toLowerCase();
+  if (!blob.trim()) return false;
+  if (!/\b(suits?|tuxedo|tuxedos)\b/.test(blob)) return false;
+  // "suit jacket" alone is just the jacket component — exclude it unless "suit" still
+  // appears elsewhere (e.g. "Men's Suit — includes suit jacket and trousers").
+  const blobWithoutSuitJacket = blob.replace(/\bsuit jacket\b/g, "");
+  return /\bsuits?\b/.test(blobWithoutSuitJacket) || /\btuxedo\b/.test(blob);
+}
+
 function hasVestLikeTopCatalogCue(src: Record<string, unknown>): boolean {
   const blob = [
     src.title,
@@ -5714,6 +5736,14 @@ export async function searchByImageWithSimilarity(
         if (weakTopStructure) {
           blendedTopMain *= 0.88;
         }
+        // Damp blendedTopMain by intraFamilyPenalty so wrong-subtype tops don't get
+        // inflated scores from categoryComp/taxonomyComp always being 1 for any top.
+        // Without this, a hoodie query can return a button-down shirt with 0.94 score
+        // purely because clipCosine is high and the product IS a top (category match).
+        const intraFamPen = Math.max(0, comp.intraFamilyPenalty ?? 0);
+        if (intraFamPen > 0.15) {
+          blendedTopMain *= Math.max(0.45, 1 - intraFamPen * 0.80);
+        }
         // Graduated color damping for tops: wrong-color products should not outrank
         // correctly-colored ones purely due to slightly higher visual similarity.
         // Hard color mismatch (colorTier "none" + color intent) gets aggressive capping.
@@ -6133,15 +6163,26 @@ export async function searchByImageWithSimilarity(
         // Graduated damping by color signal strength: stronger signals → stricter color gating.
         // Even without the hard-gate, compliance proportionally reduces the near-identical floor
         // so correct-color products rank above wrong-color near-duplicates.
-        const colorDampedRaw = hasColorPreferenceForRanking
+        let colorDampedRaw = hasColorPreferenceForRanking
           ? rawVisual * (hasExplicitColorIntent
               ? 0.55 + 0.45 * nearIdenticalColorCompliance
               : hasInferredColorSignal
                 ? 0.63 + 0.37 * nearIdenticalColorCompliance
                 : 0.80 + 0.20 * nearIdenticalColorCompliance) // crop-only: soft
           : rawVisual;
-        comp.finalRelevance01 = Math.max(comp.finalRelevance01, Math.min(1, colorDampedRaw));
-        finalScoreSourceById.set(idStr, "near_identical_floor");
+        // Apply intraFamilyPenalty damping so wrong-subtype hits don't get a free
+        // visual-similarity rescue. Products with intraFamilyPenalty=0.44 (e.g. shirt
+        // vs hoodie) scale down by ~31%, keeping the floor below what the tops boost
+        // and main formula already computed for them.
+        const intraPenNI = Math.max(0, comp.intraFamilyPenalty ?? 0);
+        if (intraPenNI > 0.15) {
+          colorDampedRaw *= Math.max(0.50, 1 - intraPenNI * 0.70);
+        }
+        const colorDampedCapped = Math.min(1, colorDampedRaw);
+        if (colorDampedCapped > (comp.finalRelevance01 ?? 0)) {
+          comp.finalRelevance01 = colorDampedCapped;
+          finalScoreSourceById.set(idStr, "near_identical_floor");
+        }
       }
     }
   }
@@ -6207,6 +6248,16 @@ export async function searchByImageWithSimilarity(
     const icA = intentMatchCountForSort(compA);
     const icB = intentMatchCountForSort(compB);
     if (icB !== icA) return icB - icA;
+    // Color compliance tiebreaker: when intent counts are equal and color embeddings
+    // are available, prefer products with better color match. This ensures family+color
+    // products rank above family-only products even when no explicit color intent exists
+    // (hasColorPreferenceForRanking=false), using the color embedding cosine similarity
+    // stored in colorCompliance at the !hasAnyColorTokenIntent branch.
+    if (runColor && !hasColorPreferenceForRanking) {
+      const ca = compA?.colorCompliance ?? 0;
+      const cb = compB?.colorCompliance ?? 0;
+      if (Math.abs(cb - ca) >= 0.06) return cb - ca;
+    }
     // Primary: finalRelevance01 descending (incorporates visual + metadata signals).
     const fa = compA?.finalRelevance01 ?? 0;
     const fb = compB?.finalRelevance01 ?? 0;
@@ -7335,7 +7386,7 @@ export async function searchByImageWithSimilarity(
     hasStrictSuitTopIntent(desiredProductTypes) &&
     rankedHits.length > 0
   ) {
-    const suitFirstHits = rankedHits.filter((h: any) => hasTailoredTopCatalogCue((h as any)?._source ?? {}));
+    const suitFirstHits = rankedHits.filter((h: any) => hasActualSuitCatalogCue((h as any)?._source ?? {}));
     if (suitFirstHits.length > 0) {
       rankedHits = suitFirstHits;
     }
