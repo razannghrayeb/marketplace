@@ -5460,6 +5460,15 @@ export async function searchByImageWithSimilarity(
   const keywordSubtypeExactHitById = new Map<string, boolean>();
   const finalScoreSourceById = new Map<string, string>();
 
+  // Pre-compute detection category for efficiency (used many times per result in the loop below).
+  const normalizedDetectionCategory = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  const isTopDetection = normalizedDetectionCategory === "tops";
+  const isDressDetection = normalizedDetectionCategory === "dresses";
+  const isBottomsDetection = normalizedDetectionCategory === "bottoms";
+  const isBagDetection = normalizedDetectionCategory === "bags" || normalizedDetectionCategory === "accessories";
+  const isFootwearDetection = normalizedDetectionCategory === "shoes" || normalizedDetectionCategory === "footwear";
+  const isOuterwearDetection = normalizedDetectionCategory === "outerwear";
+
   // Final relevance pass: compute the authoritative finalRelevance01 incorporating
   // all visual + metadata signals, adaptive floors, composite, and BLIP reranking.
   for (const hit of baseCandidates) {
@@ -5491,16 +5500,10 @@ export async function searchByImageWithSimilarity(
     const lexicalAssistTypeMatch =
       (subtypeKeywordSignal.exactHit || subtypeKeywordSignal.overlap >= 0.6) &&
       (comp.productTypeCompliance ?? 0) >= 0.55;
-    const isTopDetectionForTypeMatch =
-      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops";
-    const isDressDetectionForTypeMatch =
-      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses";
-    const isBagDetectionForTypeMatch =
-      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bags" ||
-      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "accessories";
-    const isFootwearDetectionForTypeMatch =
-      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "shoes" ||
-      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "footwear";
+    const isTopDetectionForTypeMatch = isTopDetection;
+    const isDressDetectionForTypeMatch = isDressDetection;
+    const isBagDetectionForTypeMatch = isBagDetection;
+    const isFootwearDetectionForTypeMatch = isFootwearDetection;
     const typeMatch =
       (comp.exactTypeScore ?? 0) >= 1 ||
       (comp.productTypeCompliance ?? 0) >= 0.82 ||
@@ -5607,7 +5610,7 @@ export async function searchByImageWithSimilarity(
     // is strong, so similar tops are not under-ranked due noisy metadata/color cues.
     if (
       hasDetectionAnchoredTypeIntent &&
-      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops"
+      isTopDetection
     ) {
       const typeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
       const sleeveComp = Math.max(0, Math.min(1, comp.sleeveCompliance ?? 0));
@@ -5684,7 +5687,7 @@ export async function searchByImageWithSimilarity(
     // This block uses Math.max so it can only raise the score, never lower it.
     if (
       hasDetectionAnchoredTypeIntent &&
-      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses"
+      isDressDetection
     ) {
       const dressTypeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
       const dressLengthComp = Math.max(0, Math.min(1, (comp as any).lengthCompliance ?? 0));
@@ -5748,7 +5751,7 @@ export async function searchByImageWithSimilarity(
     // condition that misses many legitimate bottoms with sparse type metadata.
     if (
       hasDetectionAnchoredTypeIntent &&
-      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms"
+      isBottomsDetection
     ) {
       const bottomTypeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
       const bottomLengthComp = Math.max(0, Math.min(1, (comp as any).lengthCompliance ?? 0));
@@ -5815,8 +5818,7 @@ export async function searchByImageWithSimilarity(
     // This tuning rescues same-color bags so they rank above shape-only near-duplicates.
     if (
       hasDetectionAnchoredTypeIntent &&
-      (String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bags" ||
-        String(params.detectionProductCategory ?? "").toLowerCase().trim() === "accessories")
+      isBagDetection
     ) {
       const bagTypeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
       const bagColorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
@@ -5870,8 +5872,7 @@ export async function searchByImageWithSimilarity(
     // Uses stronger color damping than any other category (0.35 floor for inferred mismatch).
     if (
       hasDetectionAnchoredTypeIntent &&
-      (String(params.detectionProductCategory ?? "").toLowerCase().trim() === "footwear" ||
-        String(params.detectionProductCategory ?? "").toLowerCase().trim() === "shoes")
+      isFootwearDetection
     ) {
       const shoeTypeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
       const shoeColorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
@@ -5923,7 +5924,7 @@ export async function searchByImageWithSimilarity(
     // The core_apparel_type_visual_floor also excludes outerwear, compounding the gap.
     if (
       hasDetectionAnchoredTypeIntent &&
-      String(params.detectionProductCategory ?? "").toLowerCase().trim() === "outerwear"
+      isOuterwearDetection
     ) {
       const outerTypeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
       const outerColorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
@@ -7539,11 +7540,11 @@ export async function searchByImageWithSimilarity(
         !hasExplicitColorIntent &&
         !hasColorIntentForFinal &&
         compliance &&
-        (String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops" ||
-          String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms" ||
-          String(params.detectionProductCategory ?? "").toLowerCase().trim() === "outerwear")
+        (isTopDetection ||
+          isBottomsDetection ||
+          isOuterwearDetection)
       ) {
-        const detectionCategoryForFloor = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+        const detectionCategoryForFloor = normalizedDetectionCategory;
         const typeComp = Math.max(0, Math.min(1, compliance.productTypeCompliance ?? 0));
         const exactType = Number(compliance.exactTypeScore ?? 0);
         const crossFamily = Math.max(0, Math.min(1, compliance.crossFamilyPenalty ?? 0));
