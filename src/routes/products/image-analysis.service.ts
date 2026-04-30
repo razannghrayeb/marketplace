@@ -340,6 +340,12 @@ function shopLookDressRecoverySimilarityThreshold(baseThreshold: number): number
   return Math.max(0.30, Math.min(baseThreshold, Math.min(0.9, floor)));
 }
 
+function shopLookOuterwearRecoverySimilarityThreshold(baseThreshold: number): number {
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_OUTERWEAR_RECOVERY_MIN_SIM ?? "0.50");
+  const floor = Number.isFinite(raw) ? raw : 0.50;
+  return Math.max(0.35, Math.min(baseThreshold, Math.min(0.9, floor)));
+}
+
 function shopLookDetectionSimilarityThreshold(baseThreshold: number, productCategory: string): number {
   const category = String(productCategory || "").toLowerCase().trim();
   if (category === "tops") {
@@ -3336,7 +3342,7 @@ function applyShopLookVisualPrecisionGuard(
       : categoryNorm === "bottoms"
         ? Math.max(0.41, baseMin - 0.06)
         : categoryNorm === "outerwear"
-          ? Math.max(0.5, baseMin - 0.03)
+          ? Math.max(0.43, baseMin - 0.08)
           : Math.max(0.47, baseMin - 0.04);
   const adaptive = products.filter((p) => scoreOf(p) >= adaptiveFloor);
   return adaptive.length > 0 ? adaptive : fallback;
@@ -9038,6 +9044,7 @@ export class ImageAnalysisService {
                 ? (inferredColorConflictForRetrieval ? 2.4 : 1.7)
                 : categoryNorm === "dresses" ? 2.4
                   : categoryNorm === "bottoms" ? 2.1
+                    : categoryNorm === "outerwear" ? 2.2
                     : categoryNorm === "footwear"
                       ? ((detection.area_ratio ?? 0) < 0.012 ? 2.6 : 1.9)
                       : 1;
@@ -9362,12 +9369,16 @@ export class ImageAnalysisService {
             }
           }
 
-          const topOrDressCategory =
-            categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses";
-          const topOrDressMinKeep = categoryMapping.productCategory === "tops"
+          const apparelRecoveryCategory =
+            categoryMapping.productCategory === "tops" ||
+            categoryMapping.productCategory === "dresses" ||
+            categoryMapping.productCategory === "outerwear";
+          const apparelRecoveryMinKeep = categoryMapping.productCategory === "tops"
             ? shopLookTopRecoveryMinKeep(resolvedLimitPerItem)
-            : Math.max(3, Math.min(8, Math.floor(resolvedLimitPerItem * 0.35)));
-          if (topOrDressCategory && similarResult.results.length < topOrDressMinKeep) {
+            : categoryMapping.productCategory === "outerwear"
+              ? Math.max(3, Math.min(8, Math.floor(resolvedLimitPerItem * 0.35)))
+              : Math.max(3, Math.min(8, Math.floor(resolvedLimitPerItem * 0.35)));
+          if (apparelRecoveryCategory && similarResult.results.length < apparelRecoveryMinKeep) {
             const ablationTerms = hardCategoryTermsForDetection(categorySource, categoryMapping, {
               confidence: detection.confidence,
               areaRatio: detection.area_ratio,
@@ -9385,7 +9396,9 @@ export class ImageAnalysisService {
 
             const ablationThreshold = categoryMapping.productCategory === "tops"
               ? shopLookTopRecoverySimilarityThreshold(options.similarityThreshold ?? config.clip.imageSimilarityThreshold)
-              : shopLookDressRecoverySimilarityThreshold(options.similarityThreshold ?? config.clip.imageSimilarityThreshold);
+              : categoryMapping.productCategory === "outerwear"
+                ? shopLookOuterwearRecoverySimilarityThreshold(options.similarityThreshold ?? config.clip.imageSimilarityThreshold)
+                : shopLookDressRecoverySimilarityThreshold(options.similarityThreshold ?? config.clip.imageSimilarityThreshold);
 
             const ablation = await searchByImageWithSimilarity({
               imageEmbedding: finalEmbedding,

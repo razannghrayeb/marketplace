@@ -3752,6 +3752,9 @@ export async function searchByImageWithSimilarity(
   let stageRerankDoneAt = evalT0;
   let stageHydrationDoneAt = evalT0;
   let stageFinalizedAt = evalT0;
+  let finalizeRelatedMs = 0;
+  let finalizeExactPhashMs = 0;
+  let finalizeNearExactMs = 0;
   const mainPathStrict = imageMainPathStrictEnv();
   const breakdownDebug =
     String(process.env.SEARCH_DEBUG ?? "").toLowerCase() === "1" ||
@@ -7496,6 +7499,7 @@ export async function searchByImageWithSimilarity(
         const typeComp = Math.max(0, Math.min(1, compliance.productTypeCompliance ?? 0));
         const isTopDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops";
         const isDressDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses";
+        const isOuterwearDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "outerwear";
         const onePieceCandidate = isDressDetection
           ? isOnePieceCatalogCandidate(p as unknown as Record<string, unknown>)
           : false;
@@ -7559,8 +7563,15 @@ export async function searchByImageWithSimilarity(
             finalRelevanceSource = "type_conflict_cap";
           }
         } else if (typeComp < 0.28) {
-          finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.36 : 0.3);
-          finalRelevanceSource = "type_conflict_cap";
+          const categoryComp = Math.max(0, Math.min(1, compliance.categoryRelevance01 ?? 0));
+          const exactType = Number(compliance.exactTypeScore ?? 0);
+          if (isOuterwearDetection && (categoryComp >= 0.55 || exactType >= 1)) {
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.62 : 0.52);
+            finalRelevanceSource = "outerwear_sparse_type_relaxed_cap";
+          } else {
+            finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.36 : 0.3);
+            finalRelevanceSource = "type_conflict_cap";
+          }
         }
 
         // Hard guard for bottoms query: a shirt/sweater/blouse must not appear for a skirt
@@ -8208,12 +8219,14 @@ export async function searchByImageWithSimilarity(
 
   let related: ProductResult[] = [];
   if (includeRelated && pHash) {
+    const relatedT0 = Date.now();
     const excludeIds = results.map((p) => String(p.id));
     related = await findSimilarByPHash(pHash, excludeIds, limit);
     const filteredRel = filterRelatedAgainstMain(results as any, related as any, {
       imageSearch: true,
     });
     related = (filteredRel ?? []) as ProductResult[];
+    finalizeRelatedMs = Date.now() - relatedT0;
   }
 
   // If the query image already exists in catalog (exact pHash match), make sure it is not
@@ -8225,6 +8238,7 @@ export async function searchByImageWithSimilarity(
     .replace(/[^0-9a-f]/g, "")
     .padStart(16, "0");
   if (normalizedQueryPHash && /^[0-9a-f]+$/i.test(normalizedQueryPHash)) {
+    const exactPhashT0 = Date.now();
     const existing = new Set(results.map((p) => String(p.id)));
     const hasIsHidden = await productsTableHasIsHiddenColumn();
     const hiddenClause = hasIsHidden ? "AND p.is_hidden = false" : "";
@@ -8277,8 +8291,10 @@ export async function searchByImageWithSimilarity(
       results = [...rescued, ...results].slice(0, limit);
       exactInjected = true;
     }
+    finalizeExactPhashMs = Date.now() - exactPhashT0;
     // Near-exact rescue for re-encoded files: same image can drift by 1-2 pHash bits.
     if (!exactInjected) {
+      const nearExactT0 = Date.now();
       const nearExact = await findSimilarByPHash(ph, [...existing], 10, 2);
       if (nearExact.length > 0) {
         const rescuedNearExact = nearExact.map((p: any) => {
@@ -8294,6 +8310,7 @@ export async function searchByImageWithSimilarity(
         }) as ProductResult[];
         results = [...rescuedNearExact, ...results].slice(0, limit);
       }
+      finalizeNearExactMs = Date.now() - nearExactT0;
     }
   }
 
@@ -8305,6 +8322,9 @@ export async function searchByImageWithSimilarity(
     rerank_ms: stageRerankDoneAt - stageKnnDoneAt,
     hydrate_ms: stageHydrationDoneAt - stageRerankDoneAt,
     finalize_ms: stageFinalizedAt - stageHydrationDoneAt,
+    finalize_related_ms: finalizeRelatedMs,
+    finalize_exact_phash_ms: finalizeExactPhashMs,
+    finalize_near_exact_ms: finalizeNearExactMs,
   };
 
   if (searchEvalEnabled()) {

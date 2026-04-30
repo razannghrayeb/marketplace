@@ -137,6 +137,42 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   ],
 ] as const;
 
+const BROAD_TOP_QUERY_EXPANSION = [
+  "top",
+  "tops",
+  "shirt",
+  "shirts",
+  "blouse",
+  "blouses",
+  "button down",
+  "button-down",
+  "tshirt",
+  "tee",
+  "tees",
+  "t-shirt",
+  "tank",
+  "tank top",
+  "camisole",
+  "cami",
+  "camis",
+  "polo",
+  "polos",
+  "polo shirt",
+  "sweater",
+  "sweaters",
+  "cardigan",
+  "cardigans",
+  "jumper",
+  "jumpers",
+  "knitwear",
+  "hoodie",
+  "hoodies",
+  "sweatshirt",
+  "sweatshirts",
+  "pullover",
+  "pullovers",
+] as const;
+
 /** Map specific surface forms to indexed hypernyms (index-time recall). */
 export const TYPE_TO_HYPERNYM: Record<string, string> = {
   jeans: "pants",
@@ -1261,6 +1297,9 @@ export function expandProductTypesForQuery(seeds: string[]): string[] {
     const key = s.toLowerCase().trim();
     if (!key) continue;
     out.add(key);
+    if (key === "top" || key === "tops") {
+      for (const t of BROAD_TOP_QUERY_EXPANSION) out.add(t);
+    }
     const cluster = idx.get(key);
     if (cluster) {
       for (const t of cluster) out.add(t);

@@ -53,6 +53,18 @@ describe("garmentColorPipeline", () => {
     assert.equal(out.primaryCanonical, "light-blue");
   });
 
+  it("keeps cool-lit white as white instead of light-blue", async () => {
+    const img = await solidPng(242, 246, 255);
+    const out = await extractGarmentFashionColors(img, { minShare: 0.08 });
+    assert.equal(out.primaryCanonical, "white");
+  });
+
+  it("keeps cool shadowed white in the white family", async () => {
+    const img = await solidPng(226, 234, 246);
+    const out = await extractGarmentFashionColors(img, { minShare: 0.08 });
+    assert.equal(out.primaryCanonical, "off-white");
+  });
+
   it("returns swapped promoted neutral as primary when black is only marginally stronger", async () => {
     const img = await splitVerticalPng(
       { r: 18, g: 18, b: 20 },
