@@ -26,8 +26,10 @@ Complete navigation guide for Fashion Aggregator API documentation (organized by
 |------|---------|----------|
 | **INDEX.md** | This file — navigation hub | Everyone |
 | **FEATURES.md** | **Product features → endpoints & integration checklist** | PM, frontend, full-stack |
+| **FEATURE_MODULES_COMPONENTS.md** | Feature-by-feature module/component mapping | Backend engineers, tech leads |
 | **IMPLEMENTATION_STATUS.md** | What's implemented, bugs, gaps | Tech leads |
 | **architecture.md** | Module structure & patterns | Backend engineers |
+| **SYSTEM_ARCHITECTURE_UML_USE_CASES.md** | High-level architecture + UML diagrams + use cases | Leads, architects, backend engineers |
 | **api-reference.md** | Complete API specification | API consumers |
 | **compare-intelligent-shopping.md** | Intelligent compare goals, modes, and response contract | Product, backend, frontend |
 
