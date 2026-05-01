@@ -1662,6 +1662,24 @@ function isTopCatalogCue(text: string): boolean {
   );
 }
 
+function hasExplicitPoloCue(...texts: Array<string | null | undefined>): boolean {
+  const blob = texts
+    .map((text) => String(text ?? "").toLowerCase())
+    .join(" ");
+  return /\b(polo(?:s)?|polo shirt|pique|piqu[eé])\b/.test(blob);
+}
+
+function suppressPoloForPlainShortTop(seeds: string[], ...cueTexts: Array<string | null | undefined>): string[] {
+  const blob = cueTexts
+    .map((text) => String(text ?? "").toLowerCase())
+    .join(" ");
+  if (!/\b(short sleeve top|t ?shirt|tshirt|tee|plain|basic|minimal|clean)\b/.test(blob)) {
+    return seeds;
+  }
+  if (hasExplicitPoloCue(blob)) return seeds;
+  return seeds.filter((seed) => !/\bpolo(?:s)?\b/.test(String(seed).toLowerCase()));
+}
+
 function parseBottomDetectionIntent(detectionLabel: string): {
   isTrousersLike: boolean;
   isJeansLike: boolean;
@@ -1927,7 +1945,8 @@ function tightenTypeSeedsForDetection(
     const isTailoredIntent = hasFormalTailoringCue(detectionLabel);
     if (topIntent.isShortTop) {
       const shortTop = normalized.filter((t) =>
-        /\b(tshirt|t-?shirt|tee|tees|top|tops|tank|camisole|cami|crop top|polo|polos)\b/.test(t),
+        /\b(tshirt|t-?shirt|tee|tees|top|tops|tank|camisole|cami|crop top)\b/.test(t) ||
+        (/\bpolo(?:s)?\b/.test(t) && hasExplicitPoloCue(detectionLabel)),
       );
       return shortTop.length > 0 ? shortTop : normalized;
     }
@@ -3510,7 +3529,37 @@ function applyRelevanceThresholdFilter(
   const rankBottomsByDesiredColor = (rows: ProductResult[]): ProductResult[] => {
     const categoryNorm = String(options?.category ?? "").toLowerCase().trim();
     if (categoryNorm !== "bottoms" || rows.length <= 1) return rows;
-    const whiteFamilyRegex = /\b(white|off[\s-]?white|ivory|cream|ecru|bone)\b/i;
+    const whiteFamilyRegex = /\b(white|off[\s-]?white|ivory|cream|ecru|bone|calico)\b/i;
+    const nonWhiteColorRegex =
+      /\b(blue|indigo|navy|black|coal|charcoal|grey|gray|green|olive|brown|tan|khaki|red|pink|purple|orange|yellow)\b/i;
+    const bottomTypeRegex = /\b(pants?|trousers?|jeans?|denim|chinos?|slacks|cargos?|bottoms?)\b/i;
+    const suitOuterwearRegex = /\b(suits?|tuxedo|blazers?|jackets?|sport\s+coats?)\b/i;
+    const colorEvidenceScore = (item: ProductResult): number => {
+      const explain = ((item as any)?.explain ?? {}) as Record<string, unknown>;
+      const catalogColor = String((item as any)?.color ?? "");
+      const title = String((item as any)?.title ?? "");
+      const category = String((item as any)?.category ?? "");
+      const categoryCanonical = String((item as any)?.category_canonical ?? "");
+      const productTypes = Array.isArray((item as any)?.product_types)
+        ? (item as any).product_types.join(" ")
+        : String((item as any)?.product_types ?? "");
+      const description = String((item as any)?.description ?? "");
+      const url = String((item as any)?.product_url ?? "");
+      const matchedColor = String(explain.matchedColor ?? "");
+      const catalogAndTitle = [catalogColor, title, url].join(" ");
+      const listingTypeText = [title, category, categoryCanonical, productTypes].join(" ");
+      const allText = [catalogAndTitle, listingTypeText, description].join(" ");
+      let score = 0;
+      if (whiteFamilyRegex.test(catalogColor)) score += 4;
+      if (whiteFamilyRegex.test(title)) score += 3;
+      if (whiteFamilyRegex.test(url)) score += 2;
+      if (whiteFamilyRegex.test(description)) score += 1;
+      if (whiteFamilyRegex.test(matchedColor)) score += 0.75;
+      if (nonWhiteColorRegex.test(catalogColor) && !whiteFamilyRegex.test(catalogColor)) score -= 4;
+      if (nonWhiteColorRegex.test(title) && !whiteFamilyRegex.test(title)) score -= 2;
+      if (suitOuterwearRegex.test(allText) && !bottomTypeRegex.test(listingTypeText)) score -= 5;
+      return score;
+    };
     return [...rows].sort((a, b) => {
       const ar = Number((a as any)?.finalRelevance01 ?? 0);
       const br = Number((b as any)?.finalRelevance01 ?? 0);
@@ -3528,6 +3577,11 @@ function applyRelevanceThresholdFilter(
       const bColorComp = Number(bExplain.colorCompliance ?? 0);
       const aWhiteHit = whiteFamilyRegex.test(aBlob) ? 1 : 0;
       const bWhiteHit = whiteFamilyRegex.test(bBlob) ? 1 : 0;
+      const aColorEvidence = colorEvidenceScore(a);
+      const bColorEvidence = colorEvidenceScore(b);
+      if (prefersWhiteFamily && Math.abs(aColorEvidence - bColorEvidence) > 1e-6) {
+        return bColorEvidence - aColorEvidence;
+      }
       if (prefersWhiteFamily && aWhiteHit !== bWhiteHit) return bWhiteHit - aWhiteHit;
       if (Math.abs(aColorComp - bColorComp) > 1e-6) return bColorComp - aColorComp;
       return br - ar;
@@ -5912,6 +5966,12 @@ export class ImageAnalysisService {
             blipCaption,
           );
           const blipCaptionNorm = String(blipCaption ?? "").toLowerCase();
+          softProductTypeHints = suppressPoloForPlainShortTop(
+            softProductTypeHints,
+            label,
+            detection.raw_label,
+            blipCaptionNorm,
+          );
           const hasSuitCaptionCue =
             /\b(suit|suiting|blazer|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|vest)\b/.test(blipCaptionNorm) ||
             (/\btie\b/.test(blipCaptionNorm) && contextualFormalityScore >= 6);

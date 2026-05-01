@@ -401,7 +401,7 @@ const FAMILY_PAIR_PENALTY: Record<string, Record<string, number>> = {
     modest_full: 1,
     dress: 0.72,
     tops: 0.2,
-    outerwear: 0.12,
+    outerwear: 0.62,
     footwear: 0.92,
     head_covering: 0.88,
     bags: 0.9,
@@ -439,6 +439,8 @@ const FAMILY_PAIR_PENALTY: Record<string, Record<string, number>> = {
   outerwear: {
     modest_full: 0.22,
     dress: 0.15,
+    bottoms: 0.62,
+    shorts_skirt: 0.58,
     head_covering: 0.28,
     footwear: 0.92,
     bags: 0.9,

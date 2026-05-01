@@ -141,6 +141,20 @@ export class EACRv3Engine {
       }
     }
 
+    // Fallback: if the super-cluster filter is too strict, choose the nearest centroid globally.
+    if (clustersInSuper.length === 0) {
+      let bestCluster = 0;
+      let bestDist = Infinity;
+      for (let i = 0; i < this.centroids.length; i++) {
+        const dist = this.cosineDistance(vector, this.centroids[i]);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestCluster = i;
+        }
+      }
+      return bestCluster;
+    }
+
     // Step 3: Find nearest cluster within the super-cluster
     let bestCluster = clustersInSuper[0];
     let bestDist = Infinity;
@@ -160,7 +174,10 @@ export class EACRv3Engine {
    */
   addVector(id: string, vector: number[], timestamp: number = Date.now()) {
     const clusterId = this.assignToNearestCluster(vector);
-    const cluster = this.clusters.get(clusterId)!;
+    const cluster = this.clusters.get(clusterId);
+    if (!cluster) {
+      throw new Error(`EACR cluster ${clusterId} is missing`);
+    }
 
     // Add vector to cluster
     const vec: Vector = { id, data: vector, lastSeen: timestamp };
