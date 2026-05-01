@@ -50,6 +50,12 @@ describe("scoreRerankProductTypeBreakdown", () => {
     expect(r.exactTypeScore).toBe(0);
     expect(r.intraFamilyPenalty).toBeGreaterThan(0);
   });
+
+  test("pants intent does not treat suits as bottom-like", () => {
+    const r = scoreRerankProductTypeBreakdown(["pants", "trousers"], ["suit", "outerwear"]);
+    expect(r.exactTypeScore).toBe(0);
+    expect(r.combinedTypeCompliance).toBeLessThan(0.35);
+  });
 });
 
 describe("extractLexicalProductTypeSeeds", () => {

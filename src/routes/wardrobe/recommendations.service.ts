@@ -150,7 +150,7 @@ function normalizeWardrobeCategory(value?: string | null): string | null {
   const raw = value.toLowerCase().trim();
   if (!raw) return null;
   if (raw.includes("dress") || raw.includes("gown")) return "dresses";
-  if (raw.includes("top") || raw.includes("shirt") || raw.includes("blouse") || raw.includes("hoodie") || raw.includes("sweater"))
+  if (raw.includes("top") || raw.includes("shirt") || raw.includes("polo") || raw.includes("blouse") || raw.includes("hoodie") || raw.includes("sweater"))
     return "tops";
   if (
     raw.includes("bottom") ||

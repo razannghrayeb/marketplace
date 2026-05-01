@@ -18,7 +18,7 @@ import * as path from "path";
 
 const INDEX = process.argv.includes("--index")
   ? process.argv[process.argv.indexOf("--index") + 1]
-  : "products_dedup_v1"; // Default to deduplicated index
+  : "products_v1"; // Default to source product index
 const BATCH_SIZE = 100;
 const CHECKPOINT_FILE = "./data/backfill-checkpoint.json";
 const MAX_RETRIES = 5;

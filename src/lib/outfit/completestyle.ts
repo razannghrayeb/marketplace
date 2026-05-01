@@ -1048,6 +1048,14 @@ function mapStyleToCategory(style: string, text: string): ProductCategory {
 function detectCategoryFallback(text: string): { category: ProductCategory; confidence: number } {
   const lowerText = text.toLowerCase();
   
+  // Direct "polo" keyword match → prioritize shirt
+  if (/\b(polo|polo shirt|polo shirt)\b/.test(lowerText)) {
+    return {
+      category: 'shirt',
+      confidence: 0.95,
+    };
+  }
+  
   // Weighted keyword matching with confidence scores
   const categoryScores: Record<ProductCategory, number> = {
     dress: 0, gown: 0, maxi_dress: 0, mini_dress: 0, midi_dress: 0,

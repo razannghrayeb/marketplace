@@ -81,6 +81,7 @@ const EMBEDDING_DIM = parseInt(process.env.EXPECTED_EMBEDDING_DIM || "512", 10);
  */
 export async function ensureIndex() {
   const index = config.opensearch.index;
+  const efSearchValue = parseInt(process.env.OS_EF_SEARCH || "100", 10);
   const exists = await osClient.indices.exists({ index });
   if (!exists.body) {
     await osClient.indices.create({
@@ -89,10 +90,11 @@ export async function ensureIndex() {
         settings: {
           index: {
             knn: true,
-            // 100 (was 250). With k=200 as the new default pool limit, ef_search=100 is
+            // ef_search from OS_EF_SEARCH env var (default 100).
+            // With k=200 as the new default pool limit, ef_search=100 is
             // sufficient — HNSW traversal = max(ef_search, k) = 200. Halving traversal cuts
             // disk I/O in half on memory-pressured managed nodes.
-            "knn.algo_param.ef_search": 100,
+            "knn.algo_param.ef_search": efSearchValue,
           },
           analysis: {
             analyzer: {
@@ -434,10 +436,12 @@ export async function ensureIndex() {
  * Apply ef_search and other live-tunable kNN settings to the existing index.
  * Safe to run against a live index — no reindex required.
  * Run this once after deploying to fix the ef_search=1024 bottleneck on existing indexes.
+ * 
+ * Configurable via OS_EF_SEARCH env var (defaults to 100).
  */
 export async function applyIndexSpeedSettings(): Promise<void> {
   const index = config.opensearch.index;
-  const expected = "100";
+  const expected = String(process.env.OS_EF_SEARCH || "100");
 
   const readCurrentEfSearch = async (): Promise<string | undefined> => {
     const settingsResp = await osClient.indices.getSettings({
@@ -454,21 +458,22 @@ export async function applyIndexSpeedSettings(): Promise<void> {
     // non-fatal read — proceed with write
   }
 
+  const efSearchValue = parseInt(expected, 10);
   const applyAttempts: Array<{ label: string; body: Record<string, unknown> }> = [
     // Preferred index-settings shape.
     {
       label: "nested-index",
-      body: { index: { "knn.algo_param.ef_search": 100 } },
+      body: { index: { "knn.algo_param.ef_search": efSearchValue } },
     },
     // Some managed clusters only honor flattened keys.
     {
       label: "flat-index-key",
-      body: { "index.knn.algo_param.ef_search": 100 },
+      body: { "index.knn.algo_param.ef_search": efSearchValue },
     },
     // Some variants expose `knn.algo_param` object.
     {
       label: "flat-object-key",
-      body: { "index.knn.algo_param": { ef_search: 100 } },
+      body: { "index.knn.algo_param": { ef_search: efSearchValue } },
     },
   ];
 

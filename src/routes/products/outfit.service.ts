@@ -2370,7 +2370,7 @@ function completeStyleCategoryLabel(raw?: string): string {
   if (c.includes("footwear") || c.includes("shoe") || c.includes("sneaker") || c.includes("boot") || c.includes("sandal") || c.includes("loafer") || c.includes("heel") || c.includes("flat") || c.includes("mule") || c.includes("trainer")) return "Shoes";
   if (c.includes("dress")) return "Dresses";
   if (c.includes("outerwear") || c.includes("jacket") || c.includes("coat") || c.includes("blazer")) return "Outerwear";
-  if (c.includes("top") || c.includes("shirt") || c.includes("blouse") || c.includes("hoodie") || c.includes("sweater")) return "Tops";
+  if (c.includes("top") || c.includes("shirt") || c.includes("blouse") || c.includes("polo") || c.includes("hoodie") || c.includes("sweater")) return "Tops";
   if (c.includes("bottom") || c.includes("pants") || c.includes("trouser") || c.includes("jeans") || c.includes("skirt") || c.includes("short")) return "Bottoms";
   if (c.includes("bag") || c.includes("backpack") || c.includes("crossbody") || c.includes("clutch") || c.includes("tote")) return "Bags";
   if (c.includes("wallet") || c.includes("accessor") || c.includes("watch") || c.includes("scarf") || c.includes("hat") || c.includes("belt") || c.includes("jewel") || c.includes("jewelry") || c.includes("sunglass")) return "Accessories";
@@ -2399,6 +2399,34 @@ function completeStylePriorityFromCategory(categoryLabel: string, missingCategor
   if (resolvedIdx === 0) return 1;
   if (resolvedIdx >= 1) return 2;
   return 3;
+}
+
+/**
+ * Validate if a product's category family matches the target slot
+ * Prevents bags from appearing in bottoms, accessories in shoes, etc.
+ */
+function isProductValidForSlot(product: { category?: string | null }, targetSlot: string): boolean {
+  const family = categoryFamily(product.category);
+  const normalizedSlot = targetSlot.toLowerCase().trim();
+
+  // Exact family match is always valid
+  if (family === normalizedSlot) return true;
+
+  // Handle slot-to-family mappings
+  const slotToFamilies: Record<string, string[]> = {
+    bottoms: ["bottoms"],
+    shoes: ["shoes"],
+    bags: ["bags"],
+    accessories: ["accessories"],
+    dresses: ["dress"],
+    tops: ["tops"],
+    outerwear: ["outerwear"],
+  };
+
+  const validFamilies = slotToFamilies[normalizedSlot];
+  if (!validFamilies) return true; // Unknown slot, allow by default
+  
+  return validFamilies.includes(family);
 }
 
 function balanceSuggestionsForCoverage(
@@ -2434,7 +2462,7 @@ function balanceSuggestionsForCoverage(
   // Pass 1: ensure each missing slot gets at least one recommendation when available.
   for (const slot of slotPriority) {
     const pool = bySlot.get(slot) || [];
-    const pick = pool.find((p) => !used.has(p.product_id));
+    const pick = pool.find((p) => !used.has(p.product_id) && isProductValidForSlot(p, slot));
     if (pick && out.length < maxTotal) {
       out.push(pick);
       used.add(pick.product_id);
@@ -2450,7 +2478,7 @@ function balanceSuggestionsForCoverage(
       const slotCount = out.filter((x) => normalizedSlot(x.category) === slot).length;
       if (slotCount >= maxPerCategory) continue;
       const pool = bySlot.get(slot) || [];
-      const pick = pool.find((p) => !used.has(p.product_id));
+      const pick = pool.find((p) => !used.has(p.product_id) && isProductValidForSlot(p, slot));
       if (!pick) continue;
       out.push(pick);
       used.add(pick.product_id);
@@ -2465,6 +2493,8 @@ function balanceSuggestionsForCoverage(
     const slot = normalizedSlot(s.category);
     const slotCount = out.filter((x) => normalizedSlot(x.category) === slot).length;
     if (slot && slotCount >= maxPerCategory) continue;
+    // Only add if product is valid for its assigned slot
+    if (!isProductValidForSlot(s, slot)) continue;
     out.push(s);
     used.add(s.product_id);
   }
