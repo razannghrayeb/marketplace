@@ -745,12 +745,12 @@ export function getSearchCategories(mapping: CategoryMapping): string[] {
  * Returns true when confidence is below threshold.
  *
  * @param mapping - The category mapping result
- * @param threshold - Confidence threshold (default 0.8)
+ * @param threshold - Confidence threshold (default 0.85, raised from 0.8 to prevent low-confidence alternative leakage)
  * @returns True if alternatives should be included in search
  */
 export function shouldUseAlternatives(
   mapping: CategoryMapping,
-  threshold: number = 0.8
+  threshold: number = 0.85
 ): boolean {
   return mapping.confidence < threshold && mapping.alternativeCategories.length > 0;
 }

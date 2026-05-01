@@ -4796,10 +4796,16 @@ export async function searchByImageWithSimilarity(
   const hasExplicitCategoryFilter = !isDetectionScopedQuery && filterCategory != null;
   const hasTextTypeIntent = Boolean(textQueryForRelevance);
   let hasDetectionAnchoredTypeIntent = false;
+  // CRITICAL FIX: When hard category filter is active (filterCategory is set), do NOT include predictedCategoryAisles
+  // predictedCategoryAisles may contain alternatives that would override the hard filter in relevance scoring
+  // After fix in image-analysis.service.ts, predictedCategoryAisles should only contain primary category when hard filter applied,
+  // but this provides additional safety to prevent alternative category leakage in relevance
   const astCategoriesForRelevance = normalizeImageCategoryIntentArray([
     ...new Set(
       [
-        ...(predictedCategoryAisles ?? []).map((x) => String(x).toLowerCase().trim()).filter(Boolean),
+        ...(filterCategory == null && (predictedCategoryAisles ?? []).length > 0
+          ? (predictedCategoryAisles ?? []).map((x) => String(x).toLowerCase().trim()).filter(Boolean)
+          : []),
         ...(Array.isArray(filterCategory)
           ? filterCategory
           : filterCategory
