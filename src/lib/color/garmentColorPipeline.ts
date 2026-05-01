@@ -131,6 +131,14 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
   if (lab[0] < 42 && blueLead >= 8 && chroma >= 10) {
     return lab[0] < 30 ? "navy" : "blue";
   }
+  // Taupe/brown leather and warm greige fabrics often have R as the leading
+  // channel, but also keep green above blue. Treat that as warm-neutral before
+  // the dark-red shortcut below; true burgundy usually has blue >= green.
+  if (redLead >= 8 && g >= b + 5 && lab[2] >= 6 && chroma >= 10) {
+    if (lab[0] < 34) return "brown";
+    if (lab[0] < 48) return "camel";
+    return "tan";
+  }
   if (lab[0] < 30 && redLead >= 10 && chroma >= 12) {
     return "burgundy";
   }

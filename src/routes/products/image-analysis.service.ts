@@ -4112,6 +4112,7 @@ const NEUTRAL_COLORS = new Set([
   "ivory",
   "beige",
   "tan",
+  "camel",
   "brown",
   "navy",
   "silver",
@@ -4197,6 +4198,20 @@ function selectDetectionColorFromPalette(params: {
   const primaryIsLightNeutral = isLightNeutralFashionColor(primary);
   const warmNeutralSet = new Set(["beige", "tan", "camel", "taupe", "stone", "sand", "khaki", "nude"]);
   const lightNeutralSet = new Set(["white", "off-white", "cream", "ivory"]);
+  const warmNeutralEvidence = alternatives.find((c) => warmNeutralSet.has(c) || c === "brown" || c === "camel");
+  const noisyNeutralEvidence = alternatives.some((c) => ["black", "charcoal", "gray", "silver", "multicolor"].includes(c));
+
+  // Warm taupe/brown leather can be over-mapped to burgundy when shadows raise
+  // the red channel. If the same crop also contains warm-neutral evidence, keep
+  // retrieval in the neutral/brown family instead of hard-gating to red.
+  if (
+    (isBottomLike || isTopLike || isOnePieceLike || category === "footwear") &&
+    primary === "burgundy" &&
+    warmNeutralEvidence &&
+    noisyNeutralEvidence
+  ) {
+    return warmNeutralEvidence;
+  }
 
   // One-piece garments frequently include background/sky bleed in upper regions.
   // Keep a confident light-neutral primary color for dresses/jumpsuits.
@@ -8922,6 +8937,7 @@ export class ImageAnalysisService {
               !suitCaptionForTop &&
               (
                 accessoryOrFootwearConfident ||
+                footwearLikeCategory ||
                 !(imageSoftCategoryEnv() || shopLookSoftCategoryEnv())
               );
             if (!shouldHardCategory) {
