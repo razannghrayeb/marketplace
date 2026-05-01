@@ -96,6 +96,17 @@ const CATEGORY_ALIASES: Record<string, string[]> = {
     "coats",
     "blazer",
     "blazers",
+    "sport coat",
+    "sport coats",
+    "sportcoat",
+    "suit jacket",
+    "suit jackets",
+    "dress jacket",
+    "dress jackets",
+    "suit",
+    "suits",
+    "tuxedo",
+    "tuxedos",
     "cardigan",
     "cardigans",
     "parka",
@@ -131,22 +142,52 @@ const CATEGORY_ALIASES: Record<string, string[]> = {
     "shoe",
     "sneakers",
     "sneaker",
+    "trainers",
+    "trainer",
+    "running shoes",
+    "running shoe",
+    "athletic shoes",
+    "athletic shoe",
+    "tennis shoes",
+    "tennis shoe",
     "boots",
     "boot",
+    "ankle boots",
+    "ankle boot",
+    "chelsea boots",
+    "chelsea boot",
     "sandals",
     "sandal",
     "heels",
     "heel",
+    "pumps",
+    "pump",
+    "stilettos",
+    "stiletto",
     "loafers",
     "loafer",
+    "moccasins",
+    "moccasin",
     "flats",
     "flat",
     "mules",
+    "mule",
     "slides",
+    "slide",
     "slippers",
-    "pumps",
+    "slipper",
     "oxfords",
-    "trainers",
+    "oxford",
+    "derbies",
+    "derby",
+    "brogues",
+    "brogue",
+    "clogs",
+    "clog",
+    "espadrilles",
+    "espadrille",
+    "dress shoes",
+    "dress shoe",
   ],
   accessories: [
     "accessories",
@@ -404,13 +445,13 @@ export function inferCategoryCanonical(rawCategory: string | null | undefined, t
   if (norm) {
     // Resolve high-signal garment classes first to avoid ambiguous alias collisions
     // like "short jacket" being mapped to bottoms due the token "short".
-    if (/\b(jacket|jackets|coat|coats|blazer|blazers|cardigan|cardigans|parka|windbreaker|vest|gilet|trench|overshirt)\b/.test(norm)) {
+    if (/\b(jacket|jackets|coat|coats|blazer|blazers|suit|suits|tuxedo|tuxedos|cardigan|cardigans|parka|parkas|windbreaker|windbreakers|vest|vests|gilet|gilets|waistcoat|waistcoats|trench|trenches|overcoat|overcoats|bomber|bombers|anorak|anoraks|poncho|ponchos|cape|capes|shacket|shackets|shirt\s+jackets?|overshirt|overshirts)\b/.test(norm)) {
       return "outerwear";
     }
     if (/\b(dress|dresses|gown|frock|maxi dress|mini dress|midi dress|sundress|jumpsuit|romper|abaya|kaftan|jalabiya|thobe)\b/.test(norm)) {
       return "dresses";
     }
-    if (/\b(shoes?|sneakers?|boots?|sandals?|heels?|loafers?|flats?|mules?|slides?|slippers?|pumps?|oxfords?|trainers?)\b/.test(norm)) {
+    if (/\b(shoes?|sneakers?|boots?|sandals?|heels?|loafers?|flats?|mules?|slides?|slippers?|pumps?|oxfords?|trainers?|derbies|derby|brogues?|clogs?|espadrilles?|stilettos?|moccasins?)\b/.test(norm)) {
       return "footwear";
     }
     if (/\b(shorts|bermuda|bermudas|cargo shorts|denim shorts|jeans|trousers|pants|chinos|leggings|skirt|skirts|culottes|sweatpants)\b/.test(norm)) {

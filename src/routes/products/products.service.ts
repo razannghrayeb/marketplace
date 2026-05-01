@@ -1266,7 +1266,7 @@ function passesStrictDetectionCategoryFamily(
 
   const hasFootwear = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|flat|flats|oxford|oxfords|pump|pumps|mule|mules|clog|clogs)\b/.test(blob);
   const hasTop = /\b(top|tops|shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|tank|cami|camisole|sweater|sweaters|cardigan|cardigans|hoodie|hoodies|sweatshirt|sweatshirts|pullover|jumper|polo|henley|tunic|knitwear|bodysuit|bodysuits|overshirt|overshirts|jersey|jerseys|loungewear|crop\s*top|button\s*down|button-down)\b/.test(blob);
-  const hasOuterwear = /\b(outerwear|outwear|jacket|jackets|coat|coats|blazer|blazers|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers|vest|vests|gilet)\b/.test(blob);
+  const hasOuterwear = /\b(outerwear|outwear|jacket|jackets|shirt\s+jackets?|shacket|shackets|overshirt|overshirts|coat|coats|overcoat|overcoats|blazer|blazers|sport\s+coat|sportcoat|suit\s+jackets?|dress\s+jackets?|parka|parkas|trench|trenches|windbreaker|windbreakers|bomber|bombers|vest|vests|gilet|gilets|waistcoat|waistcoats|poncho|ponchos|anorak|anoraks|cape|capes)\b/.test(blob);
   const hasBottom = /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|skirt|skirts|legging|leggings|jogger|joggers|sweatpants?|slack|slacks|culotte|culottes|palazzo|chino|chinos|cargo|track\s*pants?)\b/.test(blob);
   const hasDressOnePiece = /\b(dress|dresses|gown|gowns|frock|frocks|sundress|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|abaya|abayas|kaftan|kaftans|caftan|caftans)\b/.test(blob);
   const hasAccessory = /\b(bag|bags|wallet|wallets|belt|belts|hat|hats|cap|caps|jewelry|jewellery|ring|rings|earring|earrings|necklace|necklaces|bracelet|bracelets|watch|watches|sunglasses|glasses|scarf|scarves)\b/.test(blob);
@@ -1319,8 +1319,17 @@ function passesFootwearSubtypeGate(
   const wantsLoafers = /\b(loafer|loafers|moccasin|slip.?on)\b/.test(desired);
   const wantsFlats = /\b(flat|flats|ballet\s*flat|oxford|oxfords|derby)\b/.test(desired);
 
-  const hasSubtypeIntent = wantsSneakers || wantsBoots || wantsSandals || wantsHeels || wantsLoafers || wantsFlats;
-  if (!hasSubtypeIntent) return true;
+  const requestedSubtypeCount = [
+    wantsSneakers,
+    wantsBoots,
+    wantsSandals,
+    wantsHeels,
+    wantsLoafers,
+    wantsFlats,
+  ].filter(Boolean).length;
+  // Generic shoe intents often expand to several footwear siblings for recall.
+  // Only hard-block cross-subtypes when the intent points to one clear subtype.
+  if (requestedSubtypeCount !== 1) return true;
 
   const blob = [
     ...(Array.isArray(product.product_types) ? product.product_types : []),
@@ -2439,7 +2448,7 @@ function hasStrictSuitTopIntent(desiredProductTypes: string[]): boolean {
     .filter(Boolean)
     .join(" ");
   if (!desired) return false;
-  return /\b(suit|suits|blazer|blazers|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|vest|vests)\b/.test(desired);
+  return /\b(suit|suits|tuxedo|tuxedos)\b/.test(desired);
 }
 
 function hasTailoredTopCatalogCue(src: Record<string, unknown>): boolean {
@@ -2521,8 +2530,8 @@ function normalizeDetectionCategoryToken(token: string | null | undefined): stri
     )
   ) return "footwear";
   if (/\b(trouser|trousers|pants?|slacks?|jeans?|shorts?|bottoms?)\b/.test(normalized)) return "bottoms";
-  if (/\b(blazer|blazers|shirt|shirts|tee|t-?shirt|tops?|sweater|hoodie)\b/.test(normalized)) return "tops";
-  if (/\b(jacket|jackets|coat|coats|parka|parkas|bomber|trench|windbreaker|anorak|outerwear)\b/.test(normalized)) return "outerwear";
+  if (/\b(blazer|blazers|sport\s+coat|sportcoat|suit\s+jackets?|dress\s+jackets?|jacket|jackets|coat|coats|parka|parkas|bomber|trench|windbreaker|anorak|outerwear|outwear|shacket|overshirt|overcoat|waistcoat|gilet|vests?)\b/.test(normalized)) return "outerwear";
+  if (/\b(shirt|shirts|tee|t-?shirt|tops?|sweater|hoodie)\b/.test(normalized)) return "tops";
   return normalized;
 }
 
@@ -7382,7 +7391,7 @@ export async function searchByImageWithSimilarity(
   }
   if (
     hasDetectionAnchoredTypeIntent &&
-    detectionCategoryNormForTailored === "tops" &&
+    (detectionCategoryNormForTailored === "tops" || detectionCategoryNormForTailored === "outerwear") &&
     hasStrictSuitTopIntent(desiredProductTypes) &&
     rankedHits.length > 0
   ) {

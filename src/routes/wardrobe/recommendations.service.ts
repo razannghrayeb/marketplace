@@ -174,8 +174,9 @@ function normalizeWardrobeCategory(value?: string | null): string | null {
     return "shoes";
   if (raw.includes("outerwear") || raw.includes("coat") || raw.includes("jacket") || raw.includes("blazer") || raw.includes("cardigan"))
     return "outerwear";
-  if (raw.includes("bag") || raw.includes("tote") || raw.includes("clutch") || raw.includes("wallet")) return "bags";
-  if (raw.includes("accessor") || raw.includes("watch") || raw.includes("scarf") || raw.includes("hat") || raw.includes("sunglass") || raw.includes("jewelry"))
+  if (raw.includes("bag") || raw.includes("tote") || raw.includes("clutch") || raw.includes("backpack") || raw.includes("crossbody") || raw.includes("satchel") || raw.includes("messenger") || raw.includes("purse"))
+    return "bags";
+  if (raw.includes("accessor") || raw.includes("wallet") || raw.includes("card holder") || raw.includes("watch") || raw.includes("scarf") || raw.includes("hat") || raw.includes("sunglass") || raw.includes("jewelry"))
     return "accessories";
   return raw;
 }
@@ -250,8 +251,8 @@ export function inferMissingCategoriesForOutfit(params: {
 function categoryLabelToSlot(label?: string | null): string {
   const text = String(label || "").toLowerCase().trim();
   if (!text) return "accessories";
-  if (text.includes("bag") || text.includes("backpack") || text.includes("crossbody") || text.includes("clutch") || text.includes("tote") || text.includes("wallet")) return "bags";
-  if (text.includes("accessor") || text.includes("watch") || text.includes("scarf") || text.includes("hat") || text.includes("belt") || text.includes("jewel") || text.includes("sunglass")) return "accessories";
+  if (text.includes("bag") || text.includes("backpack") || text.includes("crossbody") || text.includes("clutch") || text.includes("tote") || text.includes("satchel") || text.includes("messenger") || text.includes("purse")) return "bags";
+  if (text.includes("wallet") || text.includes("card holder") || text.includes("accessor") || text.includes("watch") || text.includes("scarf") || text.includes("hat") || text.includes("belt") || text.includes("jewel") || text.includes("sunglass")) return "accessories";
   if (text.includes("shoe") || text.includes("sneaker") || text.includes("boot") || text.includes("heel") || text.includes("sandal") || text.includes("loafer") || text.includes("flat") || text.includes("mule") || text.includes("trainer")) return "shoes";
   if (text.includes("dress")) return "dresses";
   if (text.includes("outer") || text.includes("jacket") || text.includes("coat") || text.includes("blazer")) return "outerwear";
@@ -278,7 +279,7 @@ function slotMismatchRegex(slot: string): RegExp | null {
   if (slot !== "dresses" && slot !== "outerwear") {
     if (sleepwear.test(slot)) return sleepwear;
   }
-  if (slot === "bags") return /\b(headband|hair accessory|hairband|headwear|hat|cap|beanie|duffle|luggage|suitcase|travel accessory|key ring|keychain)\b/;
+  if (slot === "bags") return /\b(wallet|card holder|card case|coin purse|phone case|bag charm|strap|headband|hair accessory|hairband|headwear|hat|cap|beanie|duffle|luggage|suitcase|travel accessory|key ring|keychain)\b/;
   if (slot === "accessories") {
     return /\b(handbag|bag|tote|clutch|wallet|crossbody|backpack|satchel|messenger)\b/;
   }
@@ -371,7 +372,7 @@ function buildSlotIntentFilter(slot: string): any | null {
         : slot === "bottoms"
           ? topTerms.concat(shoeTerms).concat(["bag", "handbag", "backpack", "wallet"])
           : slot === "bags"
-            ? ["shirt", "top", "pant", "shoe", "sneaker", "jacket", "wallet", "backpack", "duffle", "luggage", "suitcase", "travel accessory", "key ring", "keychain"]
+            ? ["shirt", "top", "pant", "shoe", "sneaker", "jacket", "wallet", "card holder", "card case", "coin purse", "phone case", "bag charm", "strap", "duffle", "luggage", "suitcase", "travel accessory", "key ring", "keychain"]
             : [];
 
   if (slot === "bags") {
@@ -390,6 +391,13 @@ function buildSlotIntentFilter(slot: string): any | null {
                 { match_phrase: { title: "luggage" } },
                 { match_phrase: { title: "suitcase" } },
                 { match_phrase: { title: "travel accessory" } },
+                { match_phrase: { title: "wallet" } },
+                { match_phrase: { title: "card holder" } },
+                { match_phrase: { title: "card case" } },
+                { match_phrase: { title: "coin purse" } },
+                { match_phrase: { title: "phone case" } },
+                { match_phrase: { title: "bag charm" } },
+                { match_phrase: { title: "strap" } },
                 { match_phrase: { title: "key ring" } },
                 { match_phrase: { title: "keychain" } },
               ],
