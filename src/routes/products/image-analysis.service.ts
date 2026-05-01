@@ -1580,16 +1580,45 @@ function strictFootwearSubtypeFallbackTerms(
   const label = String(detectionLabel || "").toLowerCase();
   if (!label) return null;
 
+  if (/\b(sneaker|sneakers|trainer|trainers|running\s*shoe|athletic\s*shoe|sport\s*shoe|tennis\s*shoe)\b/.test(label)) {
+    return ["sneakers", "sneaker", "trainers", "trainer", "running shoes", "athletic shoes", "tennis shoes"];
+  }
   if (/\b(boot|boots|ankle\s*boot|combat\s*boot|chelsea)\b/.test(label)) {
-    return ["boots", "boot"];
+    return ["boots", "boot", "ankle boots", "chelsea boots"];
   }
   if (/\b(heel|heels|pump|pumps|stiletto|stilettos|wedge|wedges|slingback|kitten\s*heel)\b/.test(label)) {
-    return ["heels", "heel", "pumps", "pump", "stiletto", "wedge", "slingback"];
+    return ["heels", "heel", "pumps", "pump", "stiletto", "wedge", "slingback", "kitten heel"];
   }
   if (/\b(sandal|sandals|slide|slides|mule|mules|flip\s*flop|flip-flop)\b/.test(label)) {
     return ["sandals", "sandal", "slides", "slide", "mules", "mule", "flip flop"];
   }
+  if (/\b(loafer|loafers|moccasin|slip.?on)\b/.test(label)) {
+    return ["loafers", "loafer", "moccasins", "moccasin", "slip-on", "slip ons"];
+  }
+  if (/\b(flat|flats|ballet|ballerina|oxford|oxfords|derby|brogue|brogues)\b/.test(label)) {
+    return ["flats", "flat", "ballet flats", "oxfords", "oxford", "derby", "brogues"];
+  }
+  if (/\b(slipper|slippers|espadrille|espadrilles|clog|clogs)\b/.test(label)) {
+    return ["slippers", "slipper", "espadrilles", "espadrille", "clogs", "clog"];
+  }
   return null;
+}
+
+function isGenericFootwearDetectionLabel(label: string): boolean {
+  const l = String(label || "").toLowerCase();
+  return /\bshoe\b|\bshoes\b|\bfootwear\b/.test(l) &&
+    !/\b(sneaker|sneakers|trainer|trainers|running\s*shoe|athletic\s*shoe|sport\s*shoe|tennis\s*shoe|boot|boots|heel|heels|pump|pumps|sandal|sandals|loafer|loafers|flat|flats|mule|mules|slide|slides|oxford|oxfords|derby|brogue|clog|clogs|slipper|slippers)\b/.test(l);
+}
+
+function isFootwearSearchTerm(term: string): boolean {
+  return /\b(footwear|shoe|shoes|sneaker|sneakers|trainer|trainers|running\s*shoes?|athletic\s*shoes?|sport\s*shoes?|tennis\s*shoes?|boot|boots|ankle\s*boots?|chelsea\s*boots?|heel|heels|pump|pumps|stiletto|stilettos|wedge|wedges|sandal|sandals|slide|slides|mule|mules|flip\s*flop|flip-flop|loafer|loafers|moccasin|moccasins|flat|flats|ballet\s*flats?|oxford|oxfords|derby|brogue|brogues|clog|clogs|slipper|slippers|espadrille|espadrilles)\b/.test(
+    String(term || "").toLowerCase(),
+  );
+}
+
+function broadFootwearTerms(terms: string[]): string[] {
+  const filtered = terms.filter((t) => isFootwearSearchTerm(t));
+  return filtered.length > 0 ? filtered : terms;
 }
 
 function strictDressFallbackTerms(detectionLabel: string): string[] | null {
@@ -1827,59 +1856,66 @@ function hardCategoryTermsForDetection(
   }
 
   if (categoryMapping.productCategory === "footwear") {
-    const isGenericShoeLike = /\bshoe\b|\bshoes\b/.test(l) &&
-      !/\b(sneaker|sneakers|trainer|trainers|boot|boots|heel|heels|pump|pumps|sandal|sandals|loafer|loafers|flat|flats|mule|mules|oxford|oxfords|clog|clogs)\b/.test(
-        l,
-      );
+    const isGenericShoeLike = isGenericFootwearDetectionLabel(l);
     const isBootLike = /\b(boot|boots|ankle boot|combat boot|chelsea)\b/.test(l);
     const isHeelLike = /\b(heel|heels|pump|pumps|stiletto|stilettos|wedge|wedges|slingback)\b/.test(l);
     const isSandalLike = /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(l);
+    const strictFallback = strictFootwearSubtypeFallbackTerms(l);
 
     if (isBootLike) {
       const bootsOnly = baseTerms.filter((t) => /\b(boot|boots)\b/.test(t));
-      return bootsOnly.length > 0 ? bootsOnly : (strictFootwearSubtypeFallbackTerms(l) ?? baseTerms);
+      return bootsOnly.length > 0 ? bootsOnly : (strictFallback ?? baseTerms);
     }
     if (isHeelLike) {
       const heelsOnly = baseTerms.filter((t) => /\b(heel|heels|pump|pumps|stiletto|wedge)\b/.test(t));
-      return heelsOnly.length > 0 ? heelsOnly : (strictFootwearSubtypeFallbackTerms(l) ?? baseTerms);
+      return heelsOnly.length > 0 ? heelsOnly : (strictFallback ?? baseTerms);
     }
     if (isSandalLike) {
       const sandalsOnly = baseTerms.filter((t) => /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(t));
-      return sandalsOnly.length > 0 ? sandalsOnly : (strictFootwearSubtypeFallbackTerms(l) ?? baseTerms);
+      return sandalsOnly.length > 0 ? sandalsOnly : (strictFallback ?? baseTerms);
+    }
+    if (strictFallback) {
+      const strict = baseTerms.filter((t) => strictFallback.some((fallback) => normalizeLooseText(t) === normalizeLooseText(fallback)));
+      return strict.length > 0 ? strict : strictFallback;
     }
 
     if (isGenericShoeLike) {
-      // Keep generic shoe fallback narrower to avoid subtype drift (e.g. shoe -> sandal/heel/boot).
-      const footwearNeutral = baseTerms.filter((t) =>
-        /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|loafer|loafers|flat|flats|oxford|oxfords|footwear)\b/.test(
-          t,
-        ),
-      );
-      return footwearNeutral.length > 0 ? footwearNeutral : baseTerms;
+      // Generic shoe detections are common; keep recall broad and let subtype rerank
+      // handle precision once visual/category evidence is available.
+      return broadFootwearTerms(baseTerms);
     }
 
-    // Default fallback remains subtype-safe unless we have explicit subtype cues.
-    const footwearNeutral = baseTerms.filter((t) =>
-      /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|loafer|loafers|flat|flats|oxford|oxfords|footwear)\b/.test(
-        t,
-      ),
-    );
-    return footwearNeutral.length > 0 ? footwearNeutral : baseTerms;
+    return broadFootwearTerms(baseTerms);
   }
 
   if (categoryMapping.productCategory === "outerwear") {
     const isVestLike = /\bvest\b|\bgilet\b|\bwaistcoat\b/.test(l);
+    const isBlazerLike = /\b(blazer|blazers|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket)\b/.test(l);
+    const isCoatLike = /\b(coat|coats|overcoat|overcoats|parka|parkas|trench|trenches|windbreaker|windbreakers)\b/.test(l);
+    const isJacketLike = /\b(jacket|jackets|shirt\s*jacket|shacket|overshirt|bomber|bombers)\b/.test(l);
     if (isVestLike) {
       // Vest can be formal (waistcoat/suit vest) or fashion (sleeveless-top style).
       // Return union of outerwear vest terms + sleeveless top terms so both types surface.
       const formalVest = baseTerms.filter((t) =>
-        /\b(vest|vests|waistcoat|waistcoats|gilet)\b/.test(t),
+        /\b(vest|vests|waistcoat|waistcoats|gilet|gilets)\b/.test(t),
       );
       const fashionVest = getCategorySearchTerms("tops")
         .map((t) => String(t).toLowerCase().trim())
         .filter((t) => /\b(vest|vests|tank|tank top|camisole|cami|sleeveless)\b/.test(t));
       const merged = [...new Set([...formalVest, ...fashionVest])];
       return merged.length > 0 ? merged : baseTerms;
+    }
+    if (isBlazerLike) {
+      const blazerTerms = baseTerms.filter((t) => /\b(blazer|blazers|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket)\b/.test(t));
+      return blazerTerms.length > 0 ? blazerTerms : baseTerms;
+    }
+    if (isCoatLike) {
+      const coatTerms = baseTerms.filter((t) => /\b(coat|coats|overcoat|overcoats|parka|parkas|trench|trenches|windbreaker|windbreakers)\b/.test(t));
+      return coatTerms.length > 0 ? coatTerms : baseTerms;
+    }
+    if (isJacketLike) {
+      const jacketTerms = baseTerms.filter((t) => /\b(jacket|jackets|shirt\s*jacket|shacket|shackets|overshirt|overshirts|bomber|bombers)\b/.test(t));
+      return jacketTerms.length > 0 ? jacketTerms : baseTerms;
     }
     return baseTerms;
   }
@@ -2022,55 +2058,51 @@ function tightenTypeSeedsForDetection(
   }
 
   if (category === "footwear") {
-    const isGenericShoeLike = /\bshoe\b|\bshoes\b/.test(label) &&
-      !/\b(sneaker|sneakers|trainer|trainers|boot|boots|heel|heels|pump|pumps|sandal|sandals|loafer|loafers|flat|flats|mule|mules|oxford|oxfords|clog|clogs)\b/.test(
-        label,
-      );
+    const isGenericShoeLike = isGenericFootwearDetectionLabel(label);
     const isBootLike = /\b(boot|boots|ankle boot|chelsea|combat boot)\b/.test(label);
     const isHeelLike = /\b(heel|heels|pump|pumps|stiletto|stilettos|wedge|wedges|slingback)\b/.test(label);
     const isSandalLike = /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(label);
+    const strictFallback = strictFootwearSubtypeFallbackTerms(label);
 
     if (isBootLike) {
       const bootsOnly = normalized.filter((t) => /\b(boot|boots)\b/.test(t));
-      return bootsOnly.length > 0 ? bootsOnly : (strictFootwearSubtypeFallbackTerms(label) ?? normalized);
+      return bootsOnly.length > 0 ? bootsOnly : (strictFallback ?? normalized);
     }
     if (isHeelLike) {
       const heelsOnly = normalized.filter((t) => /\b(heel|heels|pump|pumps|stiletto|wedge)\b/.test(t));
-      return heelsOnly.length > 0 ? heelsOnly : (strictFootwearSubtypeFallbackTerms(label) ?? normalized);
+      return heelsOnly.length > 0 ? heelsOnly : (strictFallback ?? normalized);
     }
     if (isSandalLike) {
       const sandalsOnly = normalized.filter((t) => /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(t));
-      return sandalsOnly.length > 0 ? sandalsOnly : (strictFootwearSubtypeFallbackTerms(label) ?? normalized);
+      return sandalsOnly.length > 0 ? sandalsOnly : (strictFallback ?? normalized);
+    }
+    if (strictFallback) {
+      const strict = normalized.filter((t) => strictFallback.some((fallback) => normalizeLooseText(t) === normalizeLooseText(fallback)));
+      return strict.length > 0 ? strict : strictFallback;
     }
 
     if (isGenericShoeLike) {
       // Keep generic shoe intent broad; subtype narrowing happens in rerank.
-      const footwearBroad = normalized.filter((t) =>
-        /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|boot|boots|heel|heels|pump|pumps|sandal|sandals|loafer|loafers|flat|flats|mule|mules|oxford|oxfords|clog|clogs|footwear)\b/.test(
-          t,
-        ),
-      );
-      return footwearBroad.length > 0 ? footwearBroad : normalized;
+      return broadFootwearTerms(normalized);
     }
 
-    const footwearBroad = normalized.filter((t) =>
-      /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|boot|boots|heel|heels|pump|pumps|sandal|sandals|loafer|loafers|flat|flats|mule|mules|oxford|oxfords|clog|clogs|footwear)\b/.test(
-        t,
-      ),
-    );
-    return footwearBroad.length > 0 ? footwearBroad : normalized;
+    return broadFootwearTerms(normalized);
   }
 
   if (category === "outerwear") {
-    const formalOuterwearLabel = /\b(suit|blazer|sport\s*coat|dress\s*jacket)\b/.test(label);
+    const formalOuterwearLabel = /\b(suit|blazer|sport\s*coat|sportcoat|dress\s*jacket|suit\s*jacket)\b/.test(label);
+    const isVestLike = /\b(vest|vests|gilet|gilets|waistcoat|waistcoats)\b/.test(label);
+    const isCoatLike = /\b(coat|coats|overcoat|overcoats|parka|parkas|trench|trenches|windbreaker|windbreakers)\b/.test(label);
+    const isPlainJacketLike = /\b(jacket|jackets|shirt\s*jacket|shacket|shackets|overshirt|overshirts|bomber|bombers)\b/.test(label) && !formalOuterwearLabel;
     const outerwearLike = normalized.filter((t) => {
       if (/\bdress\b/.test(t) && !/\bdress\s*jacket\b/.test(t)) return false;
       if (/\b(suit|suits|sport\s*coat|sportcoat|dress\s*jacket)\b/.test(t) && !formalOuterwearLabel) {
         return false;
       }
-      return /\b(jacket|jackets|coat|coats|parka|parkas|trench|windbreaker|windbreakers|vest|vests|gilet|poncho|anorak|bomber|blazer|blazers|outerwear|outwear)\b/.test(
-        t,
-      );
+      if (isVestLike) return /\b(vest|vests|gilet|gilets|waistcoat|waistcoats|sleeveless)\b/.test(t);
+      if (isCoatLike) return /\b(coat|coats|overcoat|overcoats|parka|parkas|trench|trenches|windbreaker|windbreakers)\b/.test(t);
+      if (isPlainJacketLike) return /\b(jacket|jackets|shirt\s*jacket|shacket|shackets|overshirt|overshirts|bomber|bombers)\b/.test(t);
+      return /\b(jacket|jackets|coat|coats|overcoat|overcoats|parka|parkas|trench|trenches|windbreaker|windbreakers|vest|vests|gilet|gilets|waistcoat|waistcoats|poncho|anorak|bomber|bombers|blazer|blazers|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket|outerwear|outwear)\b/.test(t);
     });
     return outerwearLike.length > 0 ? outerwearLike : normalized;
   }
@@ -5977,6 +6009,9 @@ export class ImageAnalysisService {
             (/\btie\b/.test(blipCaptionNorm) && contextualFormalityScore >= 6);
           if (hasSuitCaptionCue && categoryMapping.productCategory === "tops") {
             const suitTopPriority = [
+              "suit",
+              "suits",
+              "tuxedo",
               "suit jacket",
               "blazer",
               "sport coat",

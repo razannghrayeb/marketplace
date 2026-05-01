@@ -2642,11 +2642,50 @@ function mapCompleteLookToStyleResponse(params: {
 
     // Never allow bag-accessory placeholders unless concrete bag subtype exists.
     if (categoryLabel === "Bags") {
-      const bagAccessoryOnly = /\bbag accessories?\b/.test(text);
-      const realBagSubtype = /\b(tote|crossbody|clutch|satchel|backpack|shoulder bag|handbag|hobo|messenger|bucket bag|top handle|mini bag)\b/.test(text);
-      // Hard ban noisy bag-accessories bucket for bag recommendations.
-      if (bagAccessoryOnly && !realBagSubtype) return false;
+      const bagAssessment = assessBagCandidate(`${s.title || ""} ${s.category || ""}`);
+      if (
+        !bagAssessment.isBagCandidate ||
+        bagAssessment.isAccessoryNoise ||
+        bagAssessment.isTravelUtility ||
+        bagAssessment.pipelineScore < 0.58
+      ) {
+        return false;
+      }
       if (looksLikeBagAccessoryNoise(text)) return false;
+    }
+
+    if (categoryLabel === "Shoes") {
+      const shoeAssessment = assessShoeCandidate({
+        sourceStyle,
+        sourceFamily: categoryFamily(detectedCategory),
+        candidateTitle: s.title,
+        candidateCategory: s.category,
+      });
+      if (shoeAssessment.isNoise || shoeAssessment.pipelineScore < 0.5) return false;
+    }
+
+    if (categoryLabel === "Tops") {
+      const topAssessment = assessTopCandidate({
+        sourceStyle,
+        candidateTitle: s.title,
+        candidateCategory: s.category,
+      });
+      if (topAssessment.isNoise || topAssessment.pipelineScore < 0.48) return false;
+    }
+
+    if (categoryLabel === "Bottoms") {
+      if (
+        (sourceStyle.occasion === "formal" || sourceStyle.occasion === "semi-formal" || sourceStyle.occasion === "party") &&
+        /\b(short|shorts|jogger|joggers|sweatpants|track pant|track pants|cargo|swim short|biker short|cycling short)\b/.test(text)
+      ) {
+        return false;
+      }
+      if (
+        sourceStyle.occasion === "active" &&
+        /\b(dress pant|dress pants|slacks|tailored trouser|tailored trousers|pleated trouser|pleated trousers|formal trouser)\b/.test(text)
+      ) {
+        return false;
+      }
     }
 
     // For classic/minimalist moderate+ formality, remove sporty bottoms.
@@ -2789,6 +2828,13 @@ function mapCompleteLookToStyleResponse(params: {
       if (categoryLabel === "Shoes") {
         const familyLooksShoes = categoryFamily(s.category) === "shoes";
         if (!isShoeLike(text) && !familyLooksShoes) continue;
+        const shoeAssessment = assessShoeCandidate({
+          sourceStyle,
+          sourceFamily: categoryFamily(detectedCategory),
+          candidateTitle: s.title,
+          candidateCategory: s.category,
+        });
+        if (shoeAssessment.isNoise || shoeAssessment.pipelineScore < 0.5) continue;
         if (sourceIsDressyOccasion && sourceIsDressAnchor) {
           if (isSneakerLike(text)) continue;
           // Prefer dressy shoes, but don't force-empty category if metadata is noisy.
@@ -2797,6 +2843,15 @@ function mapCompleteLookToStyleResponse(params: {
       } else {
         const familyLooksBags = categoryFamily(s.category) === "bags";
         if (looksLikeBagAccessoryNoise(text)) continue;
+        const bagAssessment = assessBagCandidate(`${s.title || ""} ${s.category || ""}`);
+        if (
+          !bagAssessment.isBagCandidate ||
+          bagAssessment.isAccessoryNoise ||
+          bagAssessment.isTravelUtility ||
+          bagAssessment.pipelineScore < 0.58
+        ) {
+          continue;
+        }
         // Accept true bag subtype OR bag family classification for fallback fill.
         if (!isRealBagLike(text) && !familyLooksBags) continue;
       }

@@ -18,11 +18,11 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   ["shorts", "short", "bermuda", "board shorts"],
   ["skirt", "skirts", "mini skirt", "midi skirt"],
   // Footwear (7) — was one mega-cluster; now siblings are distinguishable in rerank
-  ["sneaker", "sneakers", "trainer", "trainers"],
-  ["boot", "boots", "ankle boot", "chelsea boot"],
-  ["sandal", "sandals", "flip flop", "flip flops"],
-  ["heel", "heels", "pump", "pumps", "stiletto", "stilettos"],
-  ["flat", "flats", "ballerina", "ballet flat", "loafer", "loafers", "oxford", "oxfords", "brogue", "brogues"],
+  ["sneaker", "sneakers", "trainer", "trainers", "running shoe", "running shoes", "athletic shoe", "athletic shoes", "sport shoe", "sport shoes", "tennis shoe", "tennis shoes"],
+  ["boot", "boots", "ankle boot", "ankle boots", "chelsea boot", "chelsea boots", "combat boot", "combat boots"],
+  ["sandal", "sandals", "flip flop", "flip flops", "flip-flop", "flip-flops", "gladiator sandal", "gladiator sandals"],
+  ["heel", "heels", "pump", "pumps", "stiletto", "stilettos", "wedge", "wedges", "slingback", "slingbacks", "kitten heel", "kitten heels"],
+  ["flat", "flats", "ballerina", "ballerinas", "ballet flat", "ballet flats", "loafer", "loafers", "moccasin", "moccasins", "oxford", "oxfords", "derby", "derbies", "brogue", "brogues", "dress shoe", "dress shoes"],
   ["mule", "mules", "slide", "slides", "clog", "clogs"],
   ["slipper", "slippers", "slip-on", "slip on", "slip ons", "slip-ons", "espadrille", "espadrilles"],
   ["shoe", "shoes"],
@@ -33,11 +33,22 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   ["tshirt", "tee", "tees", "t-shirt", "tank", "camisole", "camis"],
   ["top", "tops", "cami"],
   ["polo", "polos", "polo shirt"],
-  // Outerwear (3)
-  ["blazer", "blazers", "suit", "suits", "sport coat", "sportcoat", "suit jacket", "dress jacket"],
+  // Outerwear (5)
+  ["suit", "suits", "tuxedo", "tuxedos"],
+  ["blazer", "blazers", "sport coat", "sportcoat", "suit jacket", "dress jacket"],
   [
     "jacket",
     "jackets",
+    "shirt jacket",
+    "shirt jackets",
+    "shacket",
+    "shackets",
+    "overshirt",
+    "overshirts",
+    "bomber",
+    "bomber jacket",
+  ],
+  [
     "coat",
     "coats",
     "parka",
@@ -45,13 +56,18 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
     "trench",
     "windbreaker",
     "windbreakers",
+    "overcoat",
+    "overcoats",
+  ],
+  [
     "vest",
     "vests",
     "gilet",
+    "gilets",
+    "waistcoat",
+    "waistcoats",
     "poncho",
     "anorak",
-    "bomber",
-    "bomber jacket",
   ],
   // Dress (2)
   ["dress", "dresses", "gown", "gowns", "frock", "midi dress", "maxi dress", "mini dress"],
@@ -194,8 +210,22 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   sneakers: "shoes",
   trainer: "shoes",
   trainers: "shoes",
+  "running shoe": "shoes",
+  "running shoes": "shoes",
+  "athletic shoe": "shoes",
+  "athletic shoes": "shoes",
+  "sport shoe": "shoes",
+  "sport shoes": "shoes",
+  "tennis shoe": "shoes",
+  "tennis shoes": "shoes",
   boot: "shoes",
   boots: "shoes",
+  "ankle boot": "shoes",
+  "ankle boots": "shoes",
+  "chelsea boot": "shoes",
+  "chelsea boots": "shoes",
+  "combat boot": "shoes",
+  "combat boots": "shoes",
   sandal: "shoes",
   sandals: "shoes",
   loafer: "shoes",
@@ -204,12 +234,22 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   heels: "shoes",
   flat: "shoes",
   flats: "shoes",
+  "ballet flat": "shoes",
+  "ballet flats": "shoes",
   mule: "shoes",
   mules: "shoes",
   oxford: "shoes",
   oxfords: "shoes",
   pump: "shoes",
   pumps: "shoes",
+  derby: "shoes",
+  derbies: "shoes",
+  brogue: "shoes",
+  brogues: "shoes",
+  moccasin: "shoes",
+  moccasins: "shoes",
+  "dress shoe": "shoes",
+  "dress shoes": "shoes",
   slide: "shoes",
   slides: "shoes",
   slipper: "shoes",
@@ -255,12 +295,41 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
 
   blazer: "outerwear",
   blazers: "outerwear",
+  "sport coat": "outerwear",
+  sportcoat: "outerwear",
+  "suit jacket": "outerwear",
+  "dress jacket": "outerwear",
   suit: "outerwear",
   suits: "outerwear",
+  tuxedo: "outerwear",
+  tuxedos: "outerwear",
   jacket: "outerwear",
   jackets: "outerwear",
+  "shirt jacket": "outerwear",
+  "shirt jackets": "outerwear",
+  shacket: "outerwear",
+  shackets: "outerwear",
+  overshirt: "outerwear",
+  overshirts: "outerwear",
+  bomber: "outerwear",
+  "bomber jacket": "outerwear",
   coat: "outerwear",
   coats: "outerwear",
+  parka: "outerwear",
+  parkas: "outerwear",
+  trench: "outerwear",
+  windbreaker: "outerwear",
+  windbreakers: "outerwear",
+  overcoat: "outerwear",
+  overcoats: "outerwear",
+  vest: "outerwear",
+  vests: "outerwear",
+  gilet: "outerwear",
+  gilets: "outerwear",
+  waistcoat: "outerwear",
+  waistcoats: "outerwear",
+  poncho: "outerwear",
+  anorak: "outerwear",
 
   tote: "bag",
   totes: "bag",
@@ -348,6 +417,9 @@ const CLUSTER_FAMILY: readonly string[] = [
   "tops",
   "tops",
   "tops",
+  "outerwear",
+  "outerwear",
+  "outerwear",
   "outerwear",
   "outerwear",
   "dress",
@@ -613,22 +685,43 @@ const FOOTWEAR_MICRO = {
 export function footwearMicroGroup(token: string): keyof typeof FOOTWEAR_MICRO | null {
   const t = token.toLowerCase().trim();
   if (!t) return null;
-  const athletic = new Set(["sneaker", "sneakers", "trainer", "trainers"]);
+  const athletic = new Set([
+    "sneaker",
+    "sneakers",
+    "trainer",
+    "trainers",
+    "running shoe",
+    "running shoes",
+    "athletic shoe",
+    "athletic shoes",
+    "sport shoe",
+    "sport shoes",
+    "tennis shoe",
+    "tennis shoes",
+  ]);
   const genericShoe = new Set(["shoe", "shoes"]);
-  const boot = new Set(["boot", "boots", "ankle boot", "chelsea boot"]);
-  const sandal = new Set(["sandal", "sandals", "flip flop", "flip flops"]);
-  const heel = new Set(["heel", "heels", "pump", "pumps", "stiletto", "stilettos"]);
+  const boot = new Set(["boot", "boots", "ankle boot", "ankle boots", "chelsea boot", "chelsea boots", "combat boot", "combat boots"]);
+  const sandal = new Set(["sandal", "sandals", "flip flop", "flip flops", "flip-flop", "flip-flops", "gladiator sandal", "gladiator sandals"]);
+  const heel = new Set(["heel", "heels", "pump", "pumps", "stiletto", "stilettos", "wedge", "wedges", "slingback", "slingbacks", "kitten heel", "kitten heels"]);
   const flatDress = new Set([
     "flat",
     "flats",
     "ballerina",
+    "ballerinas",
     "ballet flat",
+    "ballet flats",
     "loafer",
     "loafers",
+    "moccasin",
+    "moccasins",
     "oxford",
     "oxfords",
+    "derby",
+    "derbies",
     "brogue",
     "brogues",
+    "dress shoe",
+    "dress shoes",
   ]);
   const mule = new Set(["mule", "mules", "slide", "slides", "clog", "clogs"]);
   const slipper = new Set([
@@ -679,16 +772,20 @@ const OUTER_MICRO_SUIT = new Set([
   "tuxedo",
   "tuxedos",
 ]);
-const OUTER_MICRO_BLAZER = new Set([
-  "blazer",
-  "blazers",
-  "sport coat",
-  "sportcoat",
-  "suit jacket",
-]);
+const OUTER_MICRO_BLAZER = new Set(["blazer", "blazers", "sport coat", "sportcoat", "suit jacket", "dress jacket"]);
 const OUTER_MICRO_JACKET = new Set([
   "jacket",
   "jackets",
+  "shirt jacket",
+  "shirt jackets",
+  "shacket",
+  "shackets",
+  "overshirt",
+  "overshirts",
+  "bomber",
+  "bomber jacket",
+]);
+const OUTER_MICRO_COAT = new Set([
   "coat",
   "coats",
   "parka",
@@ -696,30 +793,38 @@ const OUTER_MICRO_JACKET = new Set([
   "trench",
   "windbreaker",
   "windbreakers",
+  "overcoat",
+  "overcoats",
+]);
+const OUTER_MICRO_VEST = new Set([
   "vest",
   "vests",
   "gilet",
+  "gilets",
+  "waistcoat",
+  "waistcoats",
   "poncho",
   "anorak",
-  "bomber",
-  "bomber jacket",
 ]);
 
-function outerMicroGroup(token: string): "suit" | "blazer" | "jacket" | null {
+function outerMicroGroup(token: string): "suit" | "blazer" | "jacket" | "coat" | "vest" | null {
   const t = token.toLowerCase().trim();
   if (OUTER_MICRO_SUIT.has(t)) return "suit";
   if (OUTER_MICRO_BLAZER.has(t)) return "blazer";
   if (OUTER_MICRO_JACKET.has(t)) return "jacket";
+  if (OUTER_MICRO_COAT.has(t)) return "coat";
+  if (OUTER_MICRO_VEST.has(t)) return "vest";
   return null;
 }
 
-// Penalty between suit (full two-piece) and blazer/jacket (standalone piece).
-// suit↔blazer: significant — a full suit is not a blazer.
-// suit↔jacket: higher — suits are not casual jackets.
+// Penalty between outerwear micro-types. Keep generic jacket reasonably close to
+// coats, but do not let blazer/suit/vest drift into plain jacket searches.
 const OUTER_PAIR_PENALTY: Record<string, Record<string, number>> = {
-  suit:   { suit: 0,    blazer: 0.50, jacket: 0.65 },
-  blazer: { suit: 0.50, blazer: 0,    jacket: 0.48 },
-  jacket: { suit: 0.65, blazer: 0.48, jacket: 0    },
+  suit: { suit: 0, blazer: 0.50, jacket: 0.65, coat: 0.72, vest: 0.58 },
+  blazer: { suit: 0.50, blazer: 0, jacket: 0.44, coat: 0.58, vest: 0.50 },
+  jacket: { suit: 0.65, blazer: 0.44, jacket: 0, coat: 0.32, vest: 0.50 },
+  coat: { suit: 0.72, blazer: 0.58, jacket: 0.32, coat: 0, vest: 0.62 },
+  vest: { suit: 0.58, blazer: 0.50, jacket: 0.50, coat: 0.62, vest: 0 },
 };
 
 const DRESS_MICRO = {

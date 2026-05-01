@@ -31,6 +31,21 @@ describe("scoreRerankProductTypeBreakdown", () => {
     expect(r.intraFamilyPenalty).toBeGreaterThan(0);
   });
 
+  test("plain jacket intent is distinct from blazer and vest", () => {
+    const blazer = scoreRerankProductTypeBreakdown(["jacket"], ["blazer", "outerwear"]);
+    const vest = scoreRerankProductTypeBreakdown(["jacket"], ["vest", "outerwear"]);
+
+    expect(blazer.exactTypeScore).toBe(0);
+    expect(blazer.combinedTypeCompliance).toBeLessThan(0.35);
+    expect(vest.combinedTypeCompliance).toBeLessThan(0.35);
+  });
+
+  test("outerwear phrase variants stay in their micro-clusters", () => {
+    expect(scoreRerankProductTypeBreakdown(["jacket"], ["shacket", "outerwear"]).combinedTypeCompliance).toBeGreaterThan(0.6);
+    expect(scoreRerankProductTypeBreakdown(["coat"], ["parka", "outerwear"]).combinedTypeCompliance).toBeGreaterThan(0.6);
+    expect(scoreRerankProductTypeBreakdown(["vest"], ["waistcoat", "outerwear"]).combinedTypeCompliance).toBeGreaterThan(0.6);
+  });
+
   test("sneakers vs heels are not equivalent within footwear", () => {
     const r = scoreRerankProductTypeBreakdown(["sneakers"], ["heels", "shoes"]);
     expect(r.exactTypeScore).toBe(0);
@@ -45,6 +60,16 @@ describe("scoreRerankProductTypeBreakdown", () => {
     expect(Math.abs(sneakerMatch.combinedTypeCompliance - heelMatch.combinedTypeCompliance)).toBeLessThanOrEqual(0.15);
   });
 
+  test("generic shoe intent keeps broad footwear recall", () => {
+    expect(scoreRerankProductTypeBreakdown(["shoes"], ["boots", "shoes"]).combinedTypeCompliance).toBeGreaterThan(0.9);
+    expect(scoreRerankProductTypeBreakdown(["shoes"], ["sandals", "shoes"]).combinedTypeCompliance).toBeGreaterThan(0.9);
+  });
+
+  test("common footwear catalog phrases map to subtype clusters", () => {
+    expect(scoreRerankProductTypeBreakdown(["sneakers"], ["running shoes"]).combinedTypeCompliance).toBeGreaterThan(0.6);
+    expect(scoreRerankProductTypeBreakdown(["dress shoes"], ["oxfords"]).combinedTypeCompliance).toBeGreaterThan(0.6);
+  });
+
   test("hoodie vs dress shirt are distinct tops", () => {
     const r = scoreRerankProductTypeBreakdown(["hoodie"], ["shirt", "shirts"]);
     expect(r.exactTypeScore).toBe(0);
@@ -53,6 +78,12 @@ describe("scoreRerankProductTypeBreakdown", () => {
 
   test("pants intent does not treat suits as bottom-like", () => {
     const r = scoreRerankProductTypeBreakdown(["pants", "trousers"], ["suit", "outerwear"]);
+    expect(r.exactTypeScore).toBe(0);
+    expect(r.combinedTypeCompliance).toBeLessThan(0.35);
+  });
+
+  test("full suit intent does not treat standalone blazers as exact suits", () => {
+    const r = scoreRerankProductTypeBreakdown(["suit"], ["blazer", "outerwear"]);
     expect(r.exactTypeScore).toBe(0);
     expect(r.combinedTypeCompliance).toBeLessThan(0.35);
   });
