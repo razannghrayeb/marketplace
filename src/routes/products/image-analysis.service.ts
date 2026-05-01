@@ -1621,6 +1621,12 @@ function broadFootwearTerms(terms: string[]): string[] {
   return filtered.length > 0 ? filtered : terms;
 }
 
+function genericFootwearTerms(terms: string[]): string[] {
+  const filtered = terms.filter((t) => /\b(shoe|shoes|dress\s*shoe|dress\s*shoes|flat|flats|loafer|loafers|oxford|oxfords|derby|derbies|brogue|brogues)\b/.test(t));
+  if (filtered.length > 0) return filtered;
+  return terms.filter((t) => /\b(shoe|shoes)\b/.test(t));
+}
+
 function strictDressFallbackTerms(detectionLabel: string): string[] | null {
   const label = String(detectionLabel || "").toLowerCase();
   if (!label) return null;
@@ -2094,8 +2100,9 @@ function tightenTypeSeedsForDetection(
     }
 
     if (isGenericShoeLike) {
-      // Keep generic shoe intent broad; subtype narrowing happens in rerank.
-      return broadFootwearTerms(normalized);
+      // Generic shoe intent should stay closer to true shoes, not the whole footwear family.
+      // This avoids boots/heels/sandals dominating generic shoe searches.
+      return genericFootwearTerms(normalized);
     }
 
     return broadFootwearTerms(normalized);

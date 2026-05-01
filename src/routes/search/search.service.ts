@@ -1993,29 +1993,27 @@ export async function textSearch(
     });
 
     // Suit-specific post-filter: when the query clearly targets suits (not blazers/jackets),
-    // front-rank only products whose title/category explicitly mentions "suit" or "tuxedo".
-    // This prevents blazers, jackets, and sport coats from dominating suit results in text search.
-    // Also filters formal bottoms (dress pants, trousers) and excludes casual bottoms (cargo, work pants).
+    // keep full suit items and formal bottoms while excluding jacket-family and casual bottoms.
     const hasSuitTextIntent = desiredProductTypes.some((t) => /\b(suits?|tuxedo)\b/.test(t));
     if (hasSuitTextIntent && results.length > 0) {
       const suitResults = results.filter((p: any) => {
         const titleBlob = String(p.title ?? "").toLowerCase();
         const catBlob = String(p.category ?? "").toLowerCase();
         const allText = `${titleBlob} ${catBlob}`;
-        
-        // Must mention suit/tuxedo and not be a jacket-family item
-        const isSuitOrTuxedo = /\b(suits?|tuxedo)\b/.test(allText);
         const isJacketLike = /\b(blazer|jacket|jackets|sport\s*coat|sportcoat)\b/.test(titleBlob);
-        
-        if (!isSuitOrTuxedo || isJacketLike) return false;
-        
-        // If it's bottoms, only allow formal types (dress pants, trousers, slacks) - exclude casual (cargo, work)
+        if (isJacketLike) return false;
+
+        // If it's bottoms, allow formal types (dress pants, trousers, slacks) even if the listing
+        // does not literally contain the word "suit". Exclude casual bottoms (cargo, work, utility).
         const isBottoms = /\b(bottoms|pants|trousers|slacks)\b/.test(catBlob);
         if (isBottoms) {
           const isFormalBottoms = /\b(dress\s*pants?|trousers?|slacks?|suit\s*pants?|formal|business)\b/.test(titleBlob);
           const isCasualBottoms = /\b(cargo|work\s*pants?|utility|chinos|khaki|jogger|sweatpants|casual)\b/.test(titleBlob);
           return isFormalBottoms && !isCasualBottoms;
         }
+
+        // Non-bottom suit items still need an explicit suit/tuxedo cue.
+        if (!/\b(suits?|tuxedo)\b/.test(allText)) return false;
         
         return true;
       });
@@ -2106,6 +2104,10 @@ export async function textSearch(
 
         const sorted = [...rankSlice];
         sorted.sort((a: any, b: any) => {
+          const aFinal = Number(a.finalRelevance01 ?? 0);
+          const bFinal = Number(b.finalRelevance01 ?? 0);
+          if (Math.abs(bFinal - aFinal) > 1e-6) return bFinal - aFinal;
+
           const aPen = a.explain?.crossFamilyPenalty ?? 0;
           const bPen = b.explain?.crossFamilyPenalty ?? 0;
           if (aPen !== bPen) return aPen - bPen;
