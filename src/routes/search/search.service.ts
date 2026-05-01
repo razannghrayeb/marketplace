@@ -1994,13 +1994,14 @@ export async function textSearch(
 
     // Suit-specific post-filter: when the query clearly targets suits (not blazers/jackets),
     // front-rank only products whose title/category explicitly mentions "suit" or "tuxedo".
-    // This prevents blazers and jackets from dominating suit results in text search.
+    // This prevents blazers, jackets, and sport coats from dominating suit results in text search.
     const hasSuitTextIntent = desiredProductTypes.some((t) => /\b(suits?|tuxedo)\b/.test(t));
     if (hasSuitTextIntent && results.length > 0) {
       const suitResults = results.filter((p: any) => {
         const titleBlob = String(p.title ?? "").toLowerCase();
         const catBlob = String(p.category ?? "").toLowerCase();
-        return /\b(suits?|tuxedo)\b/.test(`${titleBlob} ${catBlob}`) && !/\bblazer\b/.test(titleBlob);
+        const allText = `${titleBlob} ${catBlob}`;
+        return /\b(suits?|tuxedo)\b/.test(allText) && !/\b(blazer|jacket|jackets|sport\s*coat|sportcoat)\b/.test(titleBlob);
       });
       if (suitResults.length >= 3) results = suitResults;
     }
