@@ -3842,6 +3842,14 @@ export async function searchByImageWithSimilarity(
       if (clause) filter.push(clause);
     }
   }
+  // CRITICAL FIX: Force hard category filter for footwear when detection identifies it
+  // This ensures opensearch query includes term filter for footwear category
+  // preventing soft-category mode from allowing non-footwear items to leak through
+  const detectionProductCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  if (detectionProductCategoryNorm === "footwear" || detectionProductCategoryNorm === "shoes") {
+    const footwearClause = buildHardCategoryFilterClause("footwear");
+    if (footwearClause) filter.push(footwearClause);
+  }
   if (filters.brand) filter.push({ term: { brand: String(filters.brand).toLowerCase() } });
   if (filters.vendorId) filter.push({ term: { vendor_id: String(filters.vendorId) } });
   if (Array.isArray((filters as { productTypes?: string[] }).productTypes)) {
@@ -3985,6 +3993,12 @@ export async function searchByImageWithSimilarity(
   if (cat && (!detectionScoped || forceHardCategoryFilter)) {
     const hardCategoryOnly = buildHardCategoryFilterClause(cat);
     if (hardCategoryOnly) relaxedKnnFilter.push(hardCategoryOnly);
+  }
+  // CRITICAL FIX: Force hard category filter for footwear in relaxed KNN fallback path
+  // Ensures footwear detection results stay within footwear category even in sparse retrieval
+  if (detectionProductCategoryNorm === "footwear" || detectionProductCategoryNorm === "shoes") {
+    const footwearClause = buildHardCategoryFilterClause("footwear");
+    if (footwearClause) relaxedKnnFilter.push(footwearClause);
   }
 
   /** kNN size — wider when SEARCH_IMAGE_MERCHANDISE_SIMILARITY is on (see imageSearchKnnPoolLimit). */
