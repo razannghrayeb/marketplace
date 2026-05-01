@@ -5986,13 +5986,13 @@ export async function searchByImageWithSimilarity(
             blendedBottomMain = Math.min(1, blendedBottomMain + 0.045);
           }
         }
+        // Hard color mismatch: keep score near the computeHitRelevance cap, not boosted.
+        const exactBottomVisualEvidence = (comp.exactTypeScore ?? 0) >= 1 && bottomVisualComp >= 0.62;
+        const bottomBoostedFloor = bottomHardColorMismatch ? 0.06 : exactBottomVisualEvidence ? 0.34 : 0.24;
         let bottomBoosted = Math.min(1, Math.max(bottomBoostedFloor, blendedBottomMain));
         // CRITICAL: Prevent tuning from inflating weak visual candidates above strong ones.
         const bottomVisualCeiling = Math.min(1, bottomVisualComp * 1.12 + 0.02);
-        bottomBoosted = Math.min(bottomBoosted, bottomVisualCeilingComp >= 0.62;
-        // Hard color mismatch: keep score near the computeHitRelevance cap, not boosted.
-        const bottomBoostedFloor = bottomHardColorMismatch ? 0.06 : exactBottomVisualEvidence ? 0.34 : 0.24;
-        const bottomBoosted = Math.min(1, Math.max(bottomBoostedFloor, blendedBottomMain));
+        bottomBoosted = Math.min(bottomBoosted, bottomVisualCeiling);
         if (bottomBoosted > (comp.finalRelevance01 ?? 0)) {
           comp.finalRelevance01 = bottomBoosted;
           finalScoreSourceById.set(idStr, "bottoms_main_path_tuning");
@@ -6042,13 +6042,13 @@ export async function searchByImageWithSimilarity(
           if (bagColorComp >= 0.60) {
             blendedBagMain = Math.min(1, blendedBagMain + 0.05);
           }
+        }
+        const exactBagVisualEvidence = (comp.exactTypeScore ?? 0) >= 1 && bagVisualComp >= 0.60;
+        const bagBoostedFloor = exactBagVisualEvidence ? 0.30 : 0.20;
         let bagBoosted = Math.min(1, Math.max(bagBoostedFloor, blendedBagMain));
         // CRITICAL: Prevent tuning from inflating weak visual candidates above strong ones.
         const bagVisualCeiling = Math.min(1, bagVisualComp * 1.12 + 0.02);
-        bagBoosted = Math.min(bagBoosted, bagVisualCeiling
-        const exactBagVisualEvidence = (comp.exactTypeScore ?? 0) >= 1 && bagVisualComp >= 0.60;
-        const bagBoostedFloor = exactBagVisualEvidence ? 0.30 : 0.20;
-        const bagBoosted = Math.min(1, Math.max(bagBoostedFloor, blendedBagMain));
+        bagBoosted = Math.min(bagBoosted, bagVisualCeiling);
         if (bagBoosted > (comp.finalRelevance01 ?? 0)) {
           comp.finalRelevance01 = bagBoosted;
           finalScoreSourceById.set(idStr, "bags_main_path_tuning");
@@ -6095,16 +6095,16 @@ export async function searchByImageWithSimilarity(
               ? 0.30 + 0.38 * t   // 0.30 → 0.68
               : 0.52 + 0.36 * t;  // 0.52 → 0.88
           }
-        let shoeBoosted = Math.min(1, Math.max(shoeBoostedFloor, blendedShoeMain));
-        // CRITICAL: Prevent tuning from inflating weak visual candidates above strong ones.
-        const shoeVisualCeiling = Math.min(1, shoeVisualComp * 1.12 + 0.02);
-        shoeBoosted = Math.min(shoeBoosted, shoeVisualCeiling
+          if (shoeColorComp >= 0.60) {
             blendedShoeMain = Math.min(1, blendedShoeMain + 0.06);
           }
         }
         const exactShoeVisualEvidence = (comp.exactTypeScore ?? 0) >= 1 && shoeVisualComp >= 0.60;
         const shoeBoostedFloor = exactShoeVisualEvidence ? 0.30 : 0.20;
-        const shoeBoosted = Math.min(1, Math.max(shoeBoostedFloor, blendedShoeMain));
+        let shoeBoosted = Math.min(1, Math.max(shoeBoostedFloor, blendedShoeMain));
+        // CRITICAL: Prevent tuning from inflating weak visual candidates above strong ones.
+        const shoeVisualCeiling = Math.min(1, shoeVisualComp * 1.12 + 0.02);
+        shoeBoosted = Math.min(shoeBoosted, shoeVisualCeiling);
         if (shoeBoosted > (comp.finalRelevance01 ?? 0)) {
           comp.finalRelevance01 = shoeBoosted;
           finalScoreSourceById.set(idStr, "footwear_main_path_tuning");
@@ -6159,16 +6159,16 @@ export async function searchByImageWithSimilarity(
               ? 0.40 + 0.28 * t   // explicit: 0.40 → 0.68
               : 0.65 + 0.22 * t;  // inferred: 0.65 → 0.87
           }
-        let outerBoosted = Math.min(1, Math.max(outerBoostedFloor, blendedOuterMain));
-        // CRITICAL: Prevent tuning from inflating weak visual candidates above strong ones.
-        const outerVisualCeiling = Math.min(1, outerVisualComp * 1.12 + 0.02);
-        outerBoosted = Math.min(outerBoosted, outerVisualCeiling
+          if (outerColorComp >= 0.50) {
             blendedOuterMain = Math.min(1, blendedOuterMain + 0.04);
           }
         }
         const exactOuterVisualEvidence = (comp.exactTypeScore ?? 0) >= 1 && outerVisualComp >= 0.60;
         const outerBoostedFloor = exactOuterVisualEvidence ? 0.34 : 0.22;
-        const outerBoosted = Math.min(1, Math.max(outerBoostedFloor, blendedOuterMain));
+        let outerBoosted = Math.min(1, Math.max(outerBoostedFloor, blendedOuterMain));
+        // CRITICAL: Prevent tuning from inflating weak visual candidates above strong ones.
+        const outerVisualCeiling = Math.min(1, outerVisualComp * 1.12 + 0.02);
+        outerBoosted = Math.min(outerBoosted, outerVisualCeiling);
         if (outerBoosted > (comp.finalRelevance01 ?? 0)) {
           comp.finalRelevance01 = outerBoosted;
           finalScoreSourceById.set(idStr, "outerwear_main_path_tuning");
