@@ -1861,18 +1861,30 @@ function hardCategoryTermsForDetection(
     const isHeelLike = /\b(heel|heels|pump|pumps|stiletto|stilettos|wedge|wedges|slingback)\b/.test(l);
     const isSandalLike = /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(l);
     const strictFallback = strictFootwearSubtypeFallbackTerms(l);
+    
+    // CRITICAL FIX: For footwear subtypes, always include broader terms for recall
+    // Using only narrow subtype terms (heels, pumps, stiletto) causes 95% of products to be filtered out
+    // because most products are tagged with broader "footwear" or "shoes" category terms
+    const broadTerms = broadFootwearTerms(baseTerms);
 
     if (isBootLike) {
       const bootsOnly = baseTerms.filter((t) => /\b(boot|boots)\b/.test(t));
-      return bootsOnly.length > 0 ? bootsOnly : (strictFallback ?? baseTerms);
+      // Merge narrow boots terms with broader footwear terms for better recall
+      const merged = [...new Set([...bootsOnly, ...broadTerms])];
+      return merged.length > 0 ? merged : (strictFallback ?? baseTerms);
     }
     if (isHeelLike) {
       const heelsOnly = baseTerms.filter((t) => /\b(heel|heels|pump|pumps|stiletto|wedge)\b/.test(t));
-      return heelsOnly.length > 0 ? heelsOnly : (strictFallback ?? baseTerms);
+      // CRITICAL: Merge narrow heels terms with broader footwear terms
+      // Without this, searches for "heels" only match products tagged "heel/pump/stiletto", missing 147+ products tagged "footwear/shoes"
+      const merged = [...new Set([...heelsOnly, ...broadTerms])];
+      return merged.length > 0 ? merged : (strictFallback ?? baseTerms);
     }
     if (isSandalLike) {
       const sandalsOnly = baseTerms.filter((t) => /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip-flop)\b/.test(t));
-      return sandalsOnly.length > 0 ? sandalsOnly : (strictFallback ?? baseTerms);
+      // Merge narrow sandal terms with broader footwear terms for better recall
+      const merged = [...new Set([...sandalsOnly, ...broadTerms])];
+      return merged.length > 0 ? merged : (strictFallback ?? baseTerms);
     }
     if (strictFallback) {
       const strict = baseTerms.filter((t) => strictFallback.some((fallback) => normalizeLooseText(t) === normalizeLooseText(fallback)));
@@ -6337,11 +6349,17 @@ export class ImageAnalysisService {
           const accessoryOrFootwearConfident =
             (accessoryLikeCategory || footwearLikeCategory) &&
             (((detection.confidence ?? 0) >= 0.72) || ((detection.area_ratio ?? 0) >= 0.025));
+          // CRITICAL FIX: Footwear should always use hard filtering when detected, even at lower confidence
+          // This prevents footwear alternative categories (sneakers, boots, heels, etc) from leaking through
+          const footwearAlwaysHardFilter =
+            footwearLikeCategory &&
+            ((detection.confidence ?? 0) >= 0.55 || (detection.area_ratio ?? 0) >= 0.015);
           const shouldHardCategory =
             filterByDetectedCategory &&
             !suitCaptionForTop &&
             (
               accessoryOrFootwearConfident ||
+              footwearAlwaysHardFilter ||
               shopLookHardCategoryStrictEnv() ||
               detectionMeetsAutoHardHeuristics ||
               shouldForceHardCategoryForDetection(detection, categoryMapping)
@@ -6369,6 +6387,9 @@ export class ImageAnalysisService {
               });
               const categoryTerms = formalFootwearIntent ? pruneAthleticFootwearTerms(terms) : terms;
               filters.category = categoryTerms.length === 1 ? categoryTerms[0] : categoryTerms;
+              // CRITICAL FIX: When hard filter is applied, predictedCategoryAisles must NOT include alternatives
+              // Alternatives would cause soft boosting to override the hard filter in reranking
+              predictedCategoryAisles = [categoryMapping.productCategory];
             } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
               if (shopLookSingleCategoryHintEnv()) {
                 predictedCategoryAisles = [categoryMapping.productCategory];
