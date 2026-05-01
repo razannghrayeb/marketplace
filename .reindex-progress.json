@@ -1,8 +1,8 @@
 {
-  "lastProcessedId": "415764",
-  "totalProcessed": 102920,
-  "totalSuccess": 101975,
-  "totalFailed": 945,
+  "lastProcessedId": "417693",
+  "totalProcessed": 104850,
+  "totalSuccess": 103902,
+  "totalFailed": 948,
   "totalSkipped": 2,
   "totalBgRemoved": 9103,
   "totalAttrEmbFailures": 0,
@@ -951,9 +951,12 @@
     "414090",
     "414343",
     "414358",
-    "414362"
+    "414362",
+    "416503",
+    "416544",
+    "416554"
   ],
   "modelType": "fashion-clip",
   "startedAt": "2026-04-14T17:40:58.364Z",
-  "lastUpdatedAt": "2026-05-01T15:27:14.810Z"
+  "lastUpdatedAt": "2026-05-01T16:23:12.953Z"
 }

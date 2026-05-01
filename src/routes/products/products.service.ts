@@ -4846,6 +4846,22 @@ export async function searchByImageWithSimilarity(
   if (softHintsMerged.length > 0) {
     desiredProductTypes = [...new Set([...desiredProductTypes, ...softHintsMerged])];
   }
+  const hasSuitLikeDesiredIntent = desiredProductTypes.some((t) => /\b(suit|suits|tuxedo|tuxedos)\b/.test(String(t).toLowerCase()));
+  if (hasSuitLikeDesiredIntent) {
+    const formalBottomTerms = [
+      "pants",
+      "pant",
+      "trousers",
+      "trouser",
+      "slacks",
+      "slack",
+      "dress pants",
+      "formal pants",
+      "suit pants",
+      "tailored pants",
+    ];
+    desiredProductTypes = [...new Set([...desiredProductTypes, ...formalBottomTerms])];
+  }
   if (textQueryForRelevance) {
     const fromText = extractFashionTypeNounTokens(textQueryForRelevance).map((t) => t.toLowerCase());
     if (fromText.length > 0) {
@@ -5369,11 +5385,28 @@ export async function searchByImageWithSimilarity(
       const srcForColor = (hit._source ?? {}) as Record<string, unknown>;
       const sourceColor = extractCanonicalColorTokensFromSource(srcForColor);
       const catalogColorNorm = sourceColor.tokens[0] ?? "";
+      const lightNeutralTokens = new Set(["white", "off-white", "cream", "ivory", "ecru"]);
+      const desiredHasLightNeutralIntent = desiredColorsTierForRelevance.some((c) =>
+        lightNeutralTokens.has(String(c ?? "").toLowerCase().trim()),
+      );
+      const sourceHasLightNeutralColor = sourceColor.tokens.some((c) =>
+        lightNeutralTokens.has(String(c ?? "").toLowerCase().trim()),
+      );
+      const sourceHasNonLightNeutralColor = sourceColor.tokens.some(
+        (c) => !lightNeutralTokens.has(String(c ?? "").toLowerCase().trim()),
+      );
+      const lightNeutralTopColorConflict =
+        hasDetectionAnchoredTypeIntent &&
+        String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops" &&
+        hasInferredColorSignal &&
+        desiredHasLightNeutralIntent &&
+        sourceHasNonLightNeutralColor &&
+        !sourceHasLightNeutralColor;
       const hasHardCatalogColorConflict =
         hasAnyColorTokenIntent &&
         sourceColor.tokens.length > 0 &&
-        tieredColorListCompliance(desiredColorsTierForRelevance, sourceColor.tokens, rerankColorModeForRelevance)
-          .compliance <= 0;
+        (tieredColorListCompliance(desiredColorsTierForRelevance, sourceColor.tokens, rerankColorModeForRelevance)
+          .compliance <= 0 || lightNeutralTopColorConflict);
 
       if (hasHardCatalogColorConflict) {
         comp.colorCompliance = (comp.colorCompliance ?? 0) * 0.35;
@@ -5580,6 +5613,7 @@ export async function searchByImageWithSimilarity(
   // Track fusedVisual / metadataCompliance per hit for the clean explain output.
   const fusedVisualById = new Map<string, number>();
   const metadataComplianceById = new Map<string, number>();
+  const baseFinalById = new Map<string, number>();
   const keywordSubtypeBoostById = new Map<string, number>();
   const keywordSubtypeOverlapById = new Map<string, number>();
   const keywordSubtypeExactHitById = new Map<string, boolean>();
@@ -5730,6 +5764,8 @@ export async function searchByImageWithSimilarity(
     } else {
       comp.finalRelevance01 = baseFinal;
     }
+    // Record the base final (pre-rescue) for conservative boost capping later.
+    baseFinalById.set(idStr, baseFinal);
     // Main-path tops tuning:
     // strengthen primary score (before final-accept gate) when visual + type evidence
     // is strong, so similar tops are not under-ranked due noisy metadata/color cues.
@@ -5902,8 +5938,8 @@ export async function searchByImageWithSimilarity(
       const bottomStructuralComp = Math.max(bottomTypeComp, bottomCategoryComp, bottomTaxonomyComp);
       const bottomVisualComp = Math.max(0, Math.min(1, effectiveVisualForScoring));
       const strongBottomEvidence =
-        ((comp.exactTypeScore ?? 0) >= 1 || bottomStructuralComp >= 0.28) &&
-        bottomVisualComp >= 0.60 &&
+        ((comp.exactTypeScore ?? 0) >= 1 || bottomStructuralComp >= 0.20) &&
+        bottomVisualComp >= 0.55 &&
         (comp.crossFamilyPenalty ?? 0) < 0.52;
       if (strongBottomEvidence) {
         const weakBottomStructure =
@@ -5928,7 +5964,7 @@ export async function searchByImageWithSimilarity(
           if (bottomHardColorMismatch) {
             // Total color mismatch under hard gate: apply aggressive damping so wrong-color
             // bottoms don't outrank correctly-colored ones via visual similarity alone.
-            blendedBottomMain *= hasExplicitColorIntent ? 0.25 : 0.30;
+            blendedBottomMain *= hasExplicitColorIntent ? 0.25 : 0.42;
           } else if (bottomColorComp <= 0.12) {
             blendedBottomMain *= hasExplicitColorIntent ? 0.40 : 0.65;
           } else if (bottomColorComp < 0.40) {
@@ -6709,6 +6745,20 @@ export async function searchByImageWithSimilarity(
     (h: any) => (complianceById.get(String(h._source.product_id))?.finalRelevance01 ?? 0) >= effectiveFinalAcceptMin,
   );
 
+  // Conservative cap: prevent rescue logic from boosting hits far above their
+  // computed base relevance unless there is strong exact/type or fused visual evidence.
+  // This prevents distant or metadata-noisy products from outranking genuinely
+  // relevant items via large rescue multipliers.
+  for (const [id, comp] of complianceById.entries()) {
+    const base = baseFinalById.get(id) ?? 0;
+    const fused = fusedVisualById.get(id) ?? 0;
+    const allowStrongBoost = (comp.exactTypeScore ?? 0) >= 1 || fused >= 0.72;
+    if (!allowStrongBoost) {
+      const cap = Math.min(1, base + 0.12);
+      if ((comp.finalRelevance01 ?? 0) > cap) comp.finalRelevance01 = cap;
+    }
+  }
+
   if (!mainPathStrict && rankedHits.length === 0 && visualGatedHits.length > 0) {
     imageSearchPipelineDegraded = true;
     let rescuePool = visualGatedHits;
@@ -7485,8 +7535,34 @@ export async function searchByImageWithSimilarity(
         category: p.category,
         category_canonical: p.category,
         description: p.description,
+        gender: (p as any)?.gender,
+        attr_gender: (p as any)?.attr_gender,
+        audience_gender: (p as any)?.audience_gender,
         product_types: (p as any)?.product_types,
       } as Record<string, unknown>;
+
+      const isBottomsDetectionForGenderGate =
+        String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms";
+      const hasBinaryQueryGenderIntent = queryGenderNorm === "men" || queryGenderNorm === "women";
+      if (
+        hasDetectionAnchoredTypeIntent &&
+        isBottomsDetectionForGenderGate &&
+        hasBinaryQueryGenderIntent &&
+        compliance
+      ) {
+        const audienceCompliance = Math.max(0, Math.min(1, Number(compliance.audienceCompliance ?? 1)));
+        const hasOppositeGenderCue = hasOppositeGenderSignalForQuery(hydratedBlobSrc, queryGenderNorm);
+        if (hasOppositeGenderCue) {
+          finalRelevance01 = Math.min(finalRelevance01 ?? 0, 0.14);
+          finalRelevanceSource = "bottoms_gender_hard_cap";
+        } else if (audienceCompliance < 0.70) {
+          // Keep weakly-audienced bottoms available for sparse catalogs, but prevent
+          // them from outranking clear same-gender matches.
+          const base = Math.max(0, finalRelevance01 ?? 0);
+          finalRelevance01 = Math.min(base, Math.max(0.16, base * 0.58));
+          finalRelevanceSource = "bottoms_gender_soft_penalty";
+        }
+      }
 
       // Hard gate: reject sport/athletic brand products when fashion (non-sport) intent is detected.
       // Sport brands (Adidas, Nike, Puma, etc.) are only relevant for explicit sportswear searches.
@@ -7982,7 +8058,9 @@ export async function searchByImageWithSimilarity(
         const isFootwearDetection =
           String(params.detectionProductCategory ?? "").toLowerCase().trim() === "footwear" ||
           String(params.detectionProductCategory ?? "").toLowerCase().trim() === "shoes";
-        const minAudienceCompliance = isFootwearDetection ? 0.75 : 0.45;
+        const isBottomsDetection =
+          String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms";
+        const minAudienceCompliance = isFootwearDetection ? 0.75 : isBottomsDetection ? 0.7 : 0.45;
         if (audienceCompliance < minAudienceCompliance) return false;
       }
       if (shouldRejectShortsForTrouserIntent && isShortsCatalogCandidate(src)) {

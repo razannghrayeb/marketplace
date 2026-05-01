@@ -498,6 +498,8 @@ interface EmbeddingResult {
   partEmbeddings: Record<string, number[] | null> | null;
   pHash: string;
   garmentColorAnalysis: any;
+  colorLabAvg?: number[] | null;
+  colorHueHist?: number[] | null;
   bgWasRemoved: boolean;
   attrEmbFailed: boolean;
   partEmbFailed: boolean;
@@ -569,6 +571,65 @@ async function generateEmbeddings(
     computePHash(rawBuf),
     extractGarmentFashionColors(garmentBuf, { box: null }).catch(() => null),
   ]);
+  
+  // Compute average Lab and hue histogram for the garment buffer (precompute descriptors)
+  async function computeAvgLabAndHueHist(buf: Buffer) {
+    try {
+      const { data, info } = await sharp(buf).resize(32, 32, { fit: "inside" }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+      const ch = info.channels;
+      let rSum = 0, gSum = 0, bSum = 0, count = 0;
+      const hues: number[] = [];
+      for (let i = 0; i < data.length; i += ch) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        rSum += r; gSum += g; bSum += b; count++;
+        // compute hue
+        const max = Math.max(r, g, b), min = Math.min(r, g, b);
+        let h = 0;
+        if (max === min) h = 0;
+        else if (max === r) h = ((g - b) / (max - min)) * 60;
+        else if (max === g) h = (2 + (b - r) / (max - min)) * 60;
+        else h = (4 + (r - g) / (max - min)) * 60;
+        if (h < 0) h += 360;
+        hues.push(h);
+      }
+      const rAvg = rSum / Math.max(1, count);
+      const gAvg = gSum / Math.max(1, count);
+      const bAvg = bSum / Math.max(1, count);
+
+      // rgb -> Lab
+      const rgbToXyz = (r:number,g:number,b:number) => {
+        const conv = (v:number) => { v /= 255; return v <= 0.04045 ? v/12.92 : Math.pow((v+0.055)/1.055, 2.4); };
+        const R = conv(r), G = conv(g), B = conv(b);
+        return [R*0.4124564 + G*0.3575761 + B*0.1804375,
+                R*0.2126729 + G*0.7151522 + B*0.0721750,
+                R*0.0193339 + G*0.1191920 + B*0.9503041];
+      };
+      const xyzToLab = (x:number,y:number,z:number) => {
+        const xr = x / 0.95047, yr = y / 1.0, zr = z / 1.08883;
+        const f = (t:number) => t>0.008856 ? Math.cbrt(t) : (7.787*t + 16/116);
+        const fx=f(xr), fy=f(yr), fz=f(zr);
+        return [116*fy - 16, 500*(fx-fy), 200*(fy-fz)];
+      };
+      const [x,y,z] = rgbToXyz(rAvg, gAvg, bAvg);
+      const labAvg = xyzToLab(x,y,z);
+
+      // Hue histogram (12 bins)
+      const bins = 12;
+      const hist = new Array(bins).fill(0);
+      for (const h of hues) {
+        const idx = Math.floor((h / 360) * bins) % bins;
+        hist[idx]++;
+      }
+      const histNorm = hist.map((c) => c / Math.max(1, hues.length));
+      return { labAvg, hist: histNorm };
+    } catch {
+      return { labAvg: null, hist: null };
+    }
+  }
+
+  const { labAvg, hist } = await computeAvgLabAndHueHist(garmentBuf).catch(() => ({ labAvg: null, hist: null }));
 
   // ── Part-level embeddings (Phase 1) ───────────────────────────────────────
   // Generate embeddings for canonical parts (sleeves, necklines, heels, etc.)
@@ -599,6 +660,8 @@ async function generateEmbeddings(
     partEmbeddings: partEmbs,
     pHash,
     garmentColorAnalysis,
+    colorLabAvg: labAvg ?? null,
+    colorHueHist: hist ?? null,
     bgWasRemoved,
     attrEmbFailed,
     partEmbFailed,
@@ -685,6 +748,18 @@ async function processProduct(
         : null,
       images: [{ url: image_url, p_hash: emb.pHash, is_primary: true }],
     });
+
+    // Precomputed color descriptors for fast color-aware rerank
+    if (emb.colorLabAvg && Array.isArray(emb.colorLabAvg) && emb.colorLabAvg.length === 3) {
+      body.color_lab_avg = emb.colorLabAvg; // [L, a, b]
+    } else {
+      body.color_lab_avg = null;
+    }
+    if (emb.colorHueHist && Array.isArray(emb.colorHueHist)) {
+      body.color_hue_hist = emb.colorHueHist; // normalized histogram array (sum ~1)
+    } else {
+      body.color_hue_hist = null;
+    }
 
     // Attach per-attribute embeddings when available
     if (emb.attrEmbeddings) {
@@ -1042,7 +1117,7 @@ async function main() {
     );
   }
 
-  const startFromId = cfg.startFromId ?? progress.lastProcessedId;
+  const startFromId = cfg.startFromId ?? (progress.lastProcessedId > 0 ? progress.lastProcessedId + 1 : 0);
 
   // ── 7. Count products ──────────────────────────────────────────────────────
   const categoryFilter = cfg.category
