@@ -14,6 +14,7 @@
     "recreate-index": "npx tsx scripts/recreate-opensearch-index.ts",
     "reindex-embeddings": "npx tsx scripts/reindex-embeddings.ts",
     "resume-reindex": "npx tsx scripts/resume-reindex.ts",
+    "os:prune-orphans": "npx tsx scripts/prune-orphan-product-docs.ts",
     "dedupe-products": "npx tsx scripts/dedupe-products.ts",
     "migrate:product-variants": "npx tsx scripts/migrate-to-product-variants.ts",
     "verify:product-variants": "npx tsx scripts/verify-product-variants.ts",
