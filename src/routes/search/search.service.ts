@@ -46,6 +46,7 @@ import { searchByImageWithSimilarity } from '../products/products.service';
 import type { ProductResult, SearchResultWithRelated } from '../products/types';
 import { findRelatedProducts } from '../../lib/search/relatedProducts';
 import { dedupeSearchResults, filterRelatedAgainstMain } from '../../lib/search/resultDedup';
+import { sortProductsByRelevanceAndCategory, sortProductsByFinalRelevance } from '../../lib/search/sortResults';
 import {
   getCategorySearchTerms,
   loadCategoryVocabulary,
@@ -1982,48 +1983,9 @@ export async function textSearch(
       } as ProductResult;
     });
 
-    // Sort results by category first, then by finalRelevance01 descending within each category
-    // Tie-breakers prioritize same color, then same style
-    results.sort((a: any, b: any) => {
-      // Primary sort: by category (null categories go to the end)
-      const catA = String(a.category ?? "").toLowerCase().trim();
-      const catB = String(b.category ?? "").toLowerCase().trim();
-      
-      if (catA !== catB) {
-        // Categories without a name go to the end
-        if (!catA) return 1;
-        if (!catB) return -1;
-        return catA.localeCompare(catB);
-      }
-      
-      // Secondary sort: within same category, by finalRelevance01 descending
-      const fa = typeof a.finalRelevance01 === "number" ? a.finalRelevance01 : 0;
-      const fb = typeof b.finalRelevance01 === "number" ? b.finalRelevance01 : 0;
-      if (Math.abs(fb - fa) > 1e-8) return fb - fa;
-      
-      // Tertiary tie-breaker: prioritize same color
-      const colorA = String(a.color ?? "").toLowerCase().trim();
-      const colorB = String(b.color ?? "").toLowerCase().trim();
-      if (colorA && colorB && colorA !== colorB) {
-        // Both have colors and they differ - maintain existing order (stable sort)
-        return 0;
-      }
-      if (colorA && !colorB) return -1; // a has color, b doesn't - a comes first
-      if (!colorA && colorB) return 1;  // b has color, a doesn't - b comes first
-      
-      // Quaternary tie-breaker: prioritize same style (via explain.styleCompliance)
-      const styleA = a.explain?.styleCompliance ?? 0;
-      const styleB = b.explain?.styleCompliance ?? 0;
-      if (Math.abs(styleB - styleA) > 1e-8) return styleB - styleA;
-      
-      // Quinary sort: by rerankScore descending
-      const ar = a.rerankScore ?? 0;
-      const br = b.rerankScore ?? 0;
-      if (br !== ar) return br - ar;
-      
-      // Final tie-breaker: by original OpenSearch score descending
-      return (scoreMap.get(String(b.id)) ?? 0) - (scoreMap.get(String(a.id)) ?? 0);
-    });
+    // Image search should stay relevance-first so strong matches do not get buried
+    // behind lexicographic category order before the final top-k slice.
+    results = sortProductsByFinalRelevance(results);
 
     // Suit-specific post-filter: when the query clearly targets suits (not blazers/jackets),
     // keep full suit items and formal bottoms while excluding jacket-family and casual bottoms.
@@ -2827,7 +2789,7 @@ export async function multiImageSearch(
         const tb = b.textSearchRerankScore ?? 0;
         if (Math.abs(tb - ta) > 1e-8) return tb - ta;
         return (b.rerankScore ?? 0) - (a.rerankScore ?? 0);
-      });
+      });;
 
     const preThresholdFinalResults = [...finalResults];
     finalResults = finalResults.filter(
@@ -2844,7 +2806,7 @@ export async function multiImageSearch(
       finalResults = preThresholdFinalResults.slice(0, Math.min(safeLimit, 5));
       finalFloorFallbackUsed = true;
     }
-    finalResults.sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
+    finalResults = sortProductsByFinalRelevance(finalResults);
     finalResults = dedupeMultiImageResults(finalResults);
     finalResults = finalResults.slice(0, safeLimit);
 

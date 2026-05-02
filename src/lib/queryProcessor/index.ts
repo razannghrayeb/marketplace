@@ -693,8 +693,8 @@ function extractFilters(query: string): ExtractedFilters {
     blouses: "tshirt",
     camisole: "tshirt",
     tunic: "tshirt",
-    "vest top": "vest",
-    "sleeveless vest top": "vest",
+    "vest top": "tank",
+    "sleeveless vest top": "tank",
 
     abaya: "abaya",
     abayas: "abaya",
@@ -720,7 +720,7 @@ function extractFilters(query: string): ExtractedFilters {
     "dress jacket": "blazer",
     "tailored jacket": "jacket",
     "structured jacket": "jacket",
-    "vest top": "vest",
+    "vest top": "tank",
     "maxi abaya": "abaya",
     "open abaya": "abaya",
   };

@@ -33,9 +33,11 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   ["tshirt", "tee", "tees", "t-shirt", "tank", "camisole", "camis"],
   ["top", "tops", "cami"],
   ["polo", "polos", "polo shirt"],
-  // Outerwear (5)
-  ["suit", "suits", "tuxedo", "tuxedos"],
-  ["blazer", "blazers", "sport coat", "sportcoat", "suit jacket", "dress jacket"],
+  // Tailored / formal (2)
+  ["suit", "suits", "tuxedo", "tuxedos", "suit jacket", "dress jacket"],
+  ["vest", "vests", "gilet", "gilets", "waistcoat", "waistcoats"],
+  // Outerwear (3)
+  ["blazer", "blazers", "sport coat", "sportcoat"],
   [
     "jacket",
     "jackets",
@@ -59,16 +61,7 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
     "overcoat",
     "overcoats",
   ],
-  [
-    "vest",
-    "vests",
-    "gilet",
-    "gilets",
-    "waistcoat",
-    "waistcoats",
-    "poncho",
-    "anorak",
-  ],
+  ["poncho", "anorak"],
   // Dress (2)
   ["dress", "dresses", "gown", "gowns", "frock", "midi dress", "maxi dress", "mini dress"],
   ["jumpsuit", "jumpsuits", "romper", "rompers", "playsuit", "playsuits"],
@@ -297,12 +290,12 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   blazers: "outerwear",
   "sport coat": "outerwear",
   sportcoat: "outerwear",
-  "suit jacket": "outerwear",
-  "dress jacket": "outerwear",
-  suit: "outerwear",
-  suits: "outerwear",
-  tuxedo: "outerwear",
-  tuxedos: "outerwear",
+  "suit jacket": "tailored",
+  "dress jacket": "tailored",
+  suit: "tailored",
+  suits: "tailored",
+  tuxedo: "tailored",
+  tuxedos: "tailored",
   jacket: "outerwear",
   jackets: "outerwear",
   "shirt jacket": "outerwear",
@@ -322,12 +315,12 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   windbreakers: "outerwear",
   overcoat: "outerwear",
   overcoats: "outerwear",
-  vest: "outerwear",
-  vests: "outerwear",
-  gilet: "outerwear",
-  gilets: "outerwear",
-  waistcoat: "outerwear",
-  waistcoats: "outerwear",
+  vest: "tailored",
+  vests: "tailored",
+  gilet: "tailored",
+  gilets: "tailored",
+  waistcoat: "tailored",
+  waistcoats: "tailored",
   poncho: "outerwear",
   anorak: "outerwear",
 
@@ -417,8 +410,8 @@ const CLUSTER_FAMILY: readonly string[] = [
   "tops",
   "tops",
   "tops",
-  "outerwear",
-  "outerwear",
+  "tailored",
+  "tailored",
   "outerwear",
   "outerwear",
   "outerwear",
@@ -515,6 +508,18 @@ const FAMILY_PAIR_PENALTY: Record<string, Record<string, number>> = {
     shorts_skirt: 0.58,
     head_covering: 0.28,
     footwear: 0.92,
+    bags: 0.9,
+    jewellery: 0.85,
+  },
+  tailored: {
+    modest_full: 0.28,
+    dress: 0.16,
+    bottoms: 0.68,
+    shorts_skirt: 0.62,
+    tops: 0.56,
+    outerwear: 0.34,
+    head_covering: 0.3,
+    footwear: 0.88,
     bags: 0.9,
     jewellery: 0.85,
   },
@@ -991,6 +996,7 @@ const GARMENT_LIKE_FAMILIES = new Set<string>([
   "tops",
   "shorts_skirt",
   "outerwear",
+  "tailored",
   "modest_full",
   "activewear",
   "swimwear",
@@ -1061,13 +1067,17 @@ export function extractLexicalProductTypeSeeds(rawQuery: string): string[] {
   const qNorm = normalizeForLexicalMatch(rawQuery);
   if (!qNorm) return [];
   const hits: string[] = [];
+  const isVestTopQuery = /\b(?:sleeveless\s+)?vest\s+top\b/.test(qNorm);
+  if (isVestTopQuery) hits.push("tank");
   for (const phrase of getProductTypePhrasesLongestFirst()) {
     if (!phrase || phrase.length < 2) continue;
+    if (isVestTopQuery && phrase === "vest") continue;
     if (phraseMatchesWholeWords(qNorm, phrase)) hits.push(phrase);
   }
   const fam = getTypeToFamily();
   for (const w of qNorm.split(/\s+/)) {
     if (w.length < 2) continue;
+    if (isVestTopQuery && w === "vest") continue;
     if (fam.has(w)) hits.push(w);
   }
   return [...new Set(hits)];
@@ -1084,6 +1094,7 @@ export function intentFamiliesForProductCategory(productCategory: string): Set<s
     tops: ["tops"],
     bottoms: ["bottoms", "shorts_skirt"],
     outerwear: ["outerwear"],
+    tailored: ["tailored"],
     footwear: ["footwear"],
     bags: ["bags"],
     // Keep "accessories" separate from bags to avoid headwear/hair labels
@@ -1361,6 +1372,9 @@ export function inferMacroFamiliesFromListingCategoryFields(
   }
   if (/\b(coat|coats|jacket|jackets|blazer|blazers|parka|parkas|puffer|vests?)\b/.test(combined)) {
     out.add("outerwear");
+  }
+  if (/\b(suit|suits|tuxedo|tuxedos|waistcoat|waistcoats|vest|vests|gilet|gilets)\b/.test(combined)) {
+    out.add("tailored");
   }
   if (/\b(bag|bags|handbag|handbags|tote|totes|backpack|backpacks)\b/.test(combined)) {
     out.add("bags");

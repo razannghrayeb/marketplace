@@ -1789,9 +1789,14 @@ function hardCategoryTermsForDetection(
   detectionLabel: string,
   categoryMapping: CategoryMapping,
   opts?: { confidence?: number; areaRatio?: number },
+  caption?: string | null,
 ): string[] {
   const l = String(detectionLabel || "").toLowerCase();
   const hasLongSleeveCue = /\blong sleeve\b|\bfull sleeve\b/.test(l);
+  const captionText = String(caption ?? "").toLowerCase();
+  const hasCaptionSuitCue = /\b(suit|suiting|blazer|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|vest)\b/.test(
+    captionText,
+  );
   const baseTerms = getCategorySearchTerms(categoryMapping.productCategory).map((t) =>
     String(t).toLowerCase().trim(),
   );
@@ -1953,6 +1958,10 @@ function hardCategoryTermsForDetection(
   }
 
   if (categoryMapping.productCategory === "outerwear") {
+    if (hasCaptionSuitCue) {
+      const tailoredTerms = getCategorySearchTerms("tailored").map((t) => String(t).toLowerCase().trim());
+      return tailoredTerms.length > 0 ? tailoredTerms : baseTerms;
+    }
     const isVestLike = /\bvest\b|\bgilet\b|\bwaistcoat\b/.test(l);
     const isBlazerLike = /\b(blazer|blazers|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket)\b/.test(l);
     const isCoatLike = /\b(coat|coats|overcoat|overcoats|parka|parkas|trench|trenches|windbreaker|windbreakers)\b/.test(l);
@@ -6551,7 +6560,7 @@ export class ImageAnalysisService {
               const terms = hardCategoryTermsForDetection(label, categoryMapping, {
                 confidence: detection.confidence,
                 areaRatio: detection.area_ratio,
-              });
+              }, blipCaption ?? "");
               const categoryTerms = formalFootwearIntent ? pruneAthleticFootwearTerms(terms) : terms;
               filters.category = categoryTerms.length === 1 ? categoryTerms[0] : categoryTerms;
               // CRITICAL FIX: When hard filter is applied, predictedCategoryAisles must NOT include alternatives
@@ -6844,7 +6853,7 @@ export class ImageAnalysisService {
                   const terms = hardCategoryTermsForDetection(label, categoryMapping, {
                     confidence: detection.confidence,
                     areaRatio: detection.area_ratio,
-                  });
+                  }, blipCaption ?? "");
                   const categoryTerms = formalFootwearIntent ? pruneAthleticFootwearTerms(terms) : terms;
                   filters.category = categoryTerms.length === 1 ? categoryTerms[0] : categoryTerms;
                 } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
@@ -9142,7 +9151,7 @@ export class ImageAnalysisService {
               const terms = hardCategoryTermsForDetection(categorySource, categoryMapping, {
                 confidence: detection.confidence,
                 areaRatio: detection.area_ratio,
-              });
+              }, blipCaption ?? "");
               const categoryTerms = formalFootwearIntent ? pruneAthleticFootwearTerms(terms) : terms;
               filters.category = categoryTerms.length === 1 ? categoryTerms[0] : categoryTerms;
             }
@@ -9681,7 +9690,7 @@ export class ImageAnalysisService {
             const ablationTerms = hardCategoryTermsForDetection(categorySource, categoryMapping, {
               confidence: detection.confidence,
               areaRatio: detection.area_ratio,
-            });
+            }, detCaption ?? blipCaption ?? "");
             const ablationFilters: Partial<import("./types").SearchFilters> = {};
             if (ablationTerms.length > 0) {
               ablationFilters.category = ablationTerms.length === 1 ? ablationTerms[0] : ablationTerms;

@@ -134,6 +134,12 @@ describe("extractLexicalProductTypeSeeds", () => {
     expect(seeds).toContain("dress");
     expect(filterProductTypeSeedsByMappedCategory(seeds, "dresses")).toEqual(["dress"]);
   });
+
+  test("vest top stays in tops instead of formal vest seeds", () => {
+    const seeds = extractLexicalProductTypeSeeds("sleeveless vest top");
+    expect(seeds).toContain("tank");
+    expect(seeds).not.toContain("vest");
+  });
 });
 
 describe("extractFashionTypeNounTokens", () => {
@@ -160,5 +166,10 @@ describe("inferMacroFamiliesFromListingCategoryFields", () => {
     const fams = inferMacroFamiliesFromListingCategoryFields("bags", "Top Handle Bag");
     expect(fams.has("tops")).toBe(false);
     expect(fams.has("bags")).toBe(true);
+  });
+
+  test("maps tailored listing categories to tailored family", () => {
+    const fams = inferMacroFamiliesFromListingCategoryFields("tailored", "waistcoat");
+    expect(fams.has("tailored")).toBe(true);
   });
 });
