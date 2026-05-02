@@ -1756,7 +1756,9 @@ export async function textSearch(
       relaxedUsed = true;
     }
 
-    const hits = response.body.hits.hits;
+    const hits: any[] = Array.isArray(response.body?.hits?.hits)
+      ? response.body.hits.hits
+      : [];
     const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
     const rawHitProductIds = [
       ...new Set(
