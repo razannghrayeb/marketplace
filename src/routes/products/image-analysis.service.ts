@@ -6522,6 +6522,11 @@ export class ImageAnalysisService {
           const footwearLikeCategory = categoryMapping.productCategory === "footwear";
           const suitCaptionForTop =
             hasSuitCaptionCue && categoryMapping.productCategory === "tops";
+          const suitCaptionForTailored =
+            hasSuitCaptionCue && categoryMapping.productCategory === "outerwear";
+          const detectionProductCategoryForSearch = suitCaptionForTailored
+            ? "tailored"
+            : categoryMapping.productCategory;
           const accessoryOrFootwearConfident =
             (accessoryLikeCategory || footwearLikeCategory) &&
             (((detection.confidence ?? 0) >= 0.72) || ((detection.area_ratio ?? 0) >= 0.025));
@@ -6640,7 +6645,7 @@ export class ImageAnalysisService {
             imageBuffer: clipBuffer,
             pHash: sourceImagePHash,
             detectionYoloConfidence: detection.confidence,
-            detectionProductCategory: categoryMapping.productCategory,
+            detectionProductCategory: detectionProductCategoryForSearch,
             filters: preBlipFilters,
             softProductTypeHints: preBlipSoftTypeHints.length > 0 ? preBlipSoftTypeHints : undefined,
             limit: Math.max(
@@ -6649,7 +6654,7 @@ export class ImageAnalysisService {
             ),
             similarityThreshold: shopLookDetectionSimilarityThreshold(
               similarityThreshold,
-              categoryMapping.productCategory,
+              detectionProductCategoryForSearch,
             ),
             includeRelated: false,
             predictedCategoryAisles,

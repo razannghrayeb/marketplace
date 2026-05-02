@@ -18,31 +18,20 @@ export type SortableProduct = {
 };
 
 /**
- * Sort products by category, then by finalRelevance01 (descending) within each category.
- * Tie-breakers prioritize: color presence → style compliance → rerankScore → similarity score
+ * Sort products by finalRelevance01 (descending), then tie-break by color, style,
+ * rerank score, and similarity.
  */
 export function sortProductsByRelevanceAndCategory<T extends SortableProduct>(
   products: T[],
   scoreMap?: Map<string, number>,
 ): T[] {
   return [...products].sort((a: any, b: any) => {
-    // Primary sort: by category (null categories go to the end)
-    const catA = String(a.category ?? "").toLowerCase().trim();
-    const catB = String(b.category ?? "").toLowerCase().trim();
-
-    if (catA !== catB) {
-      // Categories without a name go to the end
-      if (!catA) return 1;
-      if (!catB) return -1;
-      return catA.localeCompare(catB);
-    }
-
-    // Secondary sort: within same category, by finalRelevance01 descending
+    // Primary sort: final relevance descending.
     const fa = typeof a.finalRelevance01 === "number" ? a.finalRelevance01 : 0;
     const fb = typeof b.finalRelevance01 === "number" ? b.finalRelevance01 : 0;
     if (Math.abs(fb - fa) > 1e-8) return fb - fa;
 
-    // Tertiary tie-breaker: prioritize same color
+    // Tie-breaker: prioritize same color / color presence.
     const colorA = String(a.color ?? "").toLowerCase().trim();
     const colorB = String(b.color ?? "").toLowerCase().trim();
     if (colorA && colorB && colorA !== colorB) {
@@ -52,7 +41,7 @@ export function sortProductsByRelevanceAndCategory<T extends SortableProduct>(
     if (colorA && !colorB) return -1; // a has color, b doesn't - a comes first
     if (!colorA && colorB) return 1; // b has color, a doesn't - b comes first
 
-    // Quaternary tie-breaker: prioritize same style (via explain.styleCompliance)
+    // Next tie-breaker: style compliance.
     const styleA = a.explain?.styleCompliance ?? 0;
     const styleB = b.explain?.styleCompliance ?? 0;
     if (Math.abs(styleB - styleA) > 1e-8) return styleB - styleA;

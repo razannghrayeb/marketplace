@@ -2149,6 +2149,8 @@ export async function textSearch(
       results = await runXgbTieBreakOnSlice(results);
     }
 
+    results = sortProductsByRelevanceAndCategory(results, scoreMap);
+
     let related: ProductResult[] = [];
     if (includeRelated) {
       related = (filterRelatedAgainstMain(results as any, relatedProducts as any) ?? []) as ProductResult[];

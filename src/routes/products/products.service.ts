@@ -8562,9 +8562,11 @@ export async function searchByImageWithSimilarity(
     const head = variantCollapsed.results.slice(0, Math.max(limit, diversityPoolCap));
     const tail = variantCollapsed.results.slice(Math.max(limit, diversityPoolCap));
     const rerankedHead = applyImageDiversityRerank(head as ProductResult[], effectiveDiversityLambda);
-    results = [...rerankedHead, ...tail].slice(0, limit) as ProductResult[];
+    const combined = sortProductsByRelevanceAndCategory([...rerankedHead, ...tail]);
+    results = combined.slice(0, limit) as ProductResult[];
   } else {
-    results = variantCollapsed.results.slice(0, limit) as ProductResult[];
+    const combined = sortProductsByRelevanceAndCategory(variantCollapsed.results);
+    results = combined.slice(0, limit) as ProductResult[];
   }
   const finalReturnedCount = results.length;
   const droppedByLimit = Math.max(0, countAfterDedupe - finalReturnedCount);
