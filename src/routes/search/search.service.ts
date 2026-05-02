@@ -2702,9 +2702,13 @@ export async function multiImageSearch(
       { vectorScore: number; compositeScore: number }
     >();
 
+    // Convert hydrated results to Map for O(1) lookup instead of O(n) Array.find
+    const hydratedMap = new Map(
+      hydratedResults.map((p: any) => [String(p.id), p])
+    );
     const results = hits
       .map((hit: any) => {
-        const hydrated = hydratedResults.find((p: any) => String(p.id) === String(hit._source.product_id));
+        const hydrated = hydratedMap.get(String(hit._source.product_id));
         if (!hydrated) return null;
         const vectorScore = hit._score;
         const compositeScore = calculateCompositeScore(

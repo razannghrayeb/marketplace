@@ -28,7 +28,15 @@ def get_execution_providers() -> List[str]:
     if raw:
         providers = [p.strip() for p in raw.split(",") if p.strip()]
     else:
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        providers = ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
+
+    alias_map = {
+        "trt": "TensorrtExecutionProvider",
+        "tensorrt": "TensorrtExecutionProvider",
+        "cuda": "CUDAExecutionProvider",
+        "cpu": "CPUExecutionProvider",
+    }
+    providers = [alias_map.get(p.lower(), p) for p in providers]
 
     available = set(ort.get_available_providers())
     selected = [p for p in providers if p in available]
@@ -40,6 +48,7 @@ def get_execution_providers() -> List[str]:
 
 
 _execution_providers: Optional[List[str]] = None
+_execution_provider_configs: Optional[List[Any]] = None
 
 
 def current_execution_providers() -> List[str]:
@@ -49,6 +58,39 @@ def current_execution_providers() -> List[str]:
         print(f"[ONNX] available_providers={ort.get_available_providers()}")
         print(f"[ONNX] selected_providers={_execution_providers}")
     return _execution_providers
+
+
+def current_execution_provider_configs() -> List[Any]:
+    """
+    Build provider config list with TensorRT tuning knobs when available.
+    """
+    global _execution_provider_configs
+    if _execution_provider_configs is not None:
+        return _execution_provider_configs
+
+    selected = current_execution_providers()
+    configs: List[Any] = []
+    trt_cache_path = os.environ.get("TRT_ENGINE_CACHE_PATH", "/tmp/trt_engine_cache")
+    trt_enable_fp16 = os.environ.get("TRT_FP16_ENABLE", "1")
+
+    for provider in selected:
+        if provider == "TensorrtExecutionProvider":
+            os.makedirs(trt_cache_path, exist_ok=True)
+            configs.append(
+                (
+                    "TensorrtExecutionProvider",
+                    {
+                        "trt_engine_cache_enable": "1",
+                        "trt_engine_cache_path": trt_cache_path,
+                        "trt_fp16_enable": trt_enable_fp16,
+                    },
+                )
+            )
+        else:
+            configs.append(provider)
+
+    _execution_provider_configs = configs
+    return _execution_provider_configs
 
 # Model sessions (lazy loaded)
 _fashion_clip_image_session: Optional[ort.InferenceSession] = None
@@ -63,7 +105,7 @@ def get_fashion_clip_image_session() -> ort.InferenceSession:
     if _fashion_clip_image_session is None:
         model_path = os.path.join(MODEL_DIR, "fashion-clip-image.onnx")
         _fashion_clip_image_session = ort.InferenceSession(
-            model_path, SESSION_OPTIONS, providers=current_execution_providers()
+            model_path, SESSION_OPTIONS, providers=current_execution_provider_configs()
         )
     return _fashion_clip_image_session
 
@@ -74,7 +116,7 @@ def get_fashion_clip_text_session() -> ort.InferenceSession:
     if _fashion_clip_text_session is None:
         model_path = os.path.join(MODEL_DIR, "fashion-clip-text.onnx")
         _fashion_clip_text_session = ort.InferenceSession(
-            model_path, SESSION_OPTIONS, providers=current_execution_providers()
+            model_path, SESSION_OPTIONS, providers=current_execution_provider_configs()
         )
     return _fashion_clip_text_session
 
@@ -86,7 +128,7 @@ def get_attribute_model_session() -> ort.InferenceSession:
         model_path = os.path.join(MODEL_DIR, "attribute_model.onnx")
         if os.path.exists(model_path):
             _attribute_model_session = ort.InferenceSession(
-                model_path, SESSION_OPTIONS, providers=current_execution_providers()
+                model_path, SESSION_OPTIONS, providers=current_execution_provider_configs()
             )
     return _attribute_model_session
 
@@ -261,3 +303,32 @@ def batch_compute_embeddings(images: List[Image.Image]) -> np.ndarray:
     embeddings = embeddings / norms
     
     return embeddings
+
+
+def rerank_image_pairs(
+    query_image: Image.Image,
+    candidate_images: List[Image.Image],
+    candidate_ids: List[str],
+) -> List[Dict[str, Any]]:
+    """
+    Score a query image against a batch of candidate images.
+
+    This uses the batched ONNX/TensorRT image tower so the service can rerank
+    the top-k pool in a single GPU-backed pass. If a dedicated reranker model is
+    added later, this function is the swap point.
+    """
+    if not candidate_images or not candidate_ids:
+        return []
+
+    images = [query_image] + candidate_images
+    embeddings = batch_compute_embeddings(images)
+    query_embedding = embeddings[0]
+    candidate_embeddings = embeddings[1:]
+
+    scores = np.clip(np.dot(candidate_embeddings, query_embedding), 0.0, 1.0)
+    ranked = [
+        {"id": candidate_id, "score": float(score)}
+        for candidate_id, score in zip(candidate_ids, scores.tolist())
+    ]
+    ranked.sort(key=lambda item: item["score"], reverse=True)
+    return ranked
