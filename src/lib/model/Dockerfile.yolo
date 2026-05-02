@@ -32,6 +32,7 @@ COPY yolov8_api.py \
     dual-model-yolo.py \
     image_preprocessor.py \
     ./
+COPY proto ./proto
 
 # Create models directory and set permissions
 RUN mkdir -p /app/models && chown -R yolo:yolo /app/models
@@ -44,9 +45,11 @@ USER yolo
 ENV YOLO_MODEL_PATH=kesimeg/yolov8n-clothing-detection
 ENV HF_HOME=/app/.cache/huggingface
 ENV PYTHONUNBUFFERED=1
+ENV YOLO_GRPC_PORT=50052
 
 # Expose port
 EXPOSE 8001
+EXPOSE 50052
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \

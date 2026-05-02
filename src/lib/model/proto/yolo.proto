@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package marketplace.yolo.v1;
+
+service YoloDetector {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Detect(DetectRequest) returns (DetectionResponse);
+}
+
+message HealthRequest {}
+
+message Box {
+  double x1 = 1;
+  double y1 = 2;
+  double x2 = 3;
+  double y2 = 4;
+}
+
+message Detection {
+  string label = 1;
+  string raw_label = 2;
+  double confidence = 3;
+  Box box = 4;
+  Box box_normalized = 5;
+  double area_ratio = 6;
+}
+
+message ImageSize {
+  uint32 width = 1;
+  uint32 height = 2;
+}
+
+message SummaryEntry {
+  string label = 1;
+  uint32 count = 2;
+}
+
+message DetectionResponse {
+  bool success = 1;
+  repeated Detection detections = 2;
+  uint32 count = 3;
+  ImageSize image_size = 4;
+  string model = 5;
+  repeated SummaryEntry summary = 6;
+}
+
+message DetectRequest {
+  bytes image_bytes = 1;
+  string filename = 2;
+  double confidence = 3;
+  bool enhance_contrast = 4;
+  bool enhance_sharpness = 5;
+  bool bilateral_filter = 6;
+}
+
+message HealthResponse {
+  bool ok = 1;
+  string model_path = 2;
+  bool model_loaded = 3;
+  string runtime_device = 4;
+  bool cuda_available = 5;
+  string cuda_device_name = 6;
+  uint32 cuda_device_count = 7;
+  string configured_device = 8;
+  string requested_device = 9;
+  uint32 num_classes = 10;
+  repeated string class_names = 11;
+}

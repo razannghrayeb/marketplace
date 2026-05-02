@@ -21,6 +21,8 @@ services:
       - RANKER_API_URL=http://ranker:8000
       # Bundled YOLO (docker-entrypoint starts uvicorn on 127.0.0.1:8001). Do not point at yolov8 unless you use EMBEDDED_YOLO=0.
       - YOLOV8_SERVICE_URL=http://127.0.0.1:8001
+      - YOLO_TRANSPORT=${YOLO_TRANSPORT:-auto}
+      - YOLO_GRPC_ADDRESS=${YOLO_GRPC_ADDRESS:-127.0.0.1:50052}
       - ONNX_API_URL=http://onnx-inference:8000
       - ONNX_GRPC_ADDRESS=onnx-inference:50051
       - SEARCH_IMAGE_RERANK_TRANSPORT=${SEARCH_IMAGE_RERANK_TRANSPORT:-grpc}
@@ -172,7 +174,9 @@ services:
       dockerfile: Dockerfile.yolo
     ports:
       - "8001:8001"
+      - "50052:50052"
     environment:
+      - YOLO_GRPC_PORT=50052
       - YOLO_MODEL_PATH=kesimeg/yolov8n-clothing-detection
       - YOLO_FASHION_MODEL_PATH=kesimeg/yolov8n-clothing-detection
       - YOLO_CONFIDENCE_THRESHOLD=0.25

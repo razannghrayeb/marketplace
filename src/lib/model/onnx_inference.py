@@ -6,11 +6,12 @@ import os
 import numpy as np
 from PIL import Image
 import onnxruntime as ort
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Callable
 from transformers import CLIPTokenizer
 
 MODEL_DIR = os.environ.get("MODEL_DIR", "/models")
 ONNX_NUM_THREADS = int(os.environ.get("ONNX_NUM_THREADS", "4"))
+RERANK_IMAGE_MODEL_FILE = os.environ.get("RERANK_IMAGE_MODEL_FILE", "clip-image-vit-l-14.onnx")
 
 # Session options for better performance
 SESSION_OPTIONS = ort.SessionOptions()
@@ -70,8 +71,11 @@ def current_execution_provider_configs() -> List[Any]:
 
     selected = current_execution_providers()
     configs: List[Any] = []
-    trt_cache_path = os.environ.get("TRT_ENGINE_CACHE_PATH", "/tmp/trt_engine_cache")
+    trt_cache_path = os.environ.get("TRT_ENGINE_CACHE_PATH", os.path.join(MODEL_DIR, ".cache", "tensorrt"))
+    trt_device_id = os.environ.get("TRT_DEVICE_ID", "0")
     trt_enable_fp16 = os.environ.get("TRT_FP16_ENABLE", "1")
+    trt_enable_fp8 = os.environ.get("TRT_FP8_ENABLE", "1")
+    trt_builder_optimization_level = os.environ.get("TRT_BUILDER_OPTIMIZATION_LEVEL", "5")
 
     for provider in selected:
         if provider == "TensorrtExecutionProvider":
@@ -80,9 +84,12 @@ def current_execution_provider_configs() -> List[Any]:
                 (
                     "TensorrtExecutionProvider",
                     {
+                        "device_id": trt_device_id,
                         "trt_engine_cache_enable": "1",
                         "trt_engine_cache_path": trt_cache_path,
                         "trt_fp16_enable": trt_enable_fp16,
+                        "trt_fp8_enable": trt_enable_fp8,
+                        "trt_builder_optimization_level": trt_builder_optimization_level,
                     },
                 )
             )
@@ -95,8 +102,20 @@ def current_execution_provider_configs() -> List[Any]:
 # Model sessions (lazy loaded)
 _fashion_clip_image_session: Optional[ort.InferenceSession] = None
 _fashion_clip_text_session: Optional[ort.InferenceSession] = None
+_rerank_image_session: Optional[ort.InferenceSession] = None
 _attribute_model_session: Optional[ort.InferenceSession] = None
 _clip_tokenizer: Optional[CLIPTokenizer] = None
+
+
+def _resolve_model_path(primary_file: str, fallback_files: List[str]) -> str:
+    candidates = [primary_file] + [f for f in fallback_files if f != primary_file]
+    for filename in candidates:
+        model_path = os.path.join(MODEL_DIR, filename)
+        if os.path.exists(model_path):
+            if filename != primary_file:
+                print(f"[ONNX] requested model {primary_file} missing; falling back to {filename}")
+            return model_path
+    return os.path.join(MODEL_DIR, primary_file)
 
 
 def get_fashion_clip_image_session() -> ort.InferenceSession:
@@ -108,6 +127,21 @@ def get_fashion_clip_image_session() -> ort.InferenceSession:
             model_path, SESSION_OPTIONS, providers=current_execution_provider_configs()
         )
     return _fashion_clip_image_session
+
+
+def get_rerank_image_session() -> ort.InferenceSession:
+    """Get or create the higher-precision image encoder used only for reranking."""
+    global _rerank_image_session
+    if _rerank_image_session is None:
+        model_path = _resolve_model_path(
+            RERANK_IMAGE_MODEL_FILE,
+            ["clip-image-vit-l-14.onnx", "fashion-clip-image.onnx", "clip-image-vit-32.onnx"],
+        )
+        print(f"[ONNX] rerank_image_model={model_path}")
+        _rerank_image_session = ort.InferenceSession(
+            model_path, SESSION_OPTIONS, providers=current_execution_provider_configs()
+        )
+    return _rerank_image_session
 
 
 def get_fashion_clip_text_session() -> ort.InferenceSession:
@@ -142,13 +176,48 @@ def get_clip_tokenizer() -> CLIPTokenizer:
     return _clip_tokenizer
 
 
-def preprocess_image(image: Image.Image, size: int = 224) -> np.ndarray:
+def _resample_lanczos():
+    """Pillow compatibility shim for high-quality down/up sampling."""
+    resampling = getattr(Image, "Resampling", None)
+    if resampling is not None and hasattr(resampling, "LANCZOS"):
+        return resampling.LANCZOS
+    return getattr(Image, "LANCZOS", Image.BICUBIC)
+
+
+def _image_model_input_size(
+    session_getter: Callable[[], ort.InferenceSession] = get_fashion_clip_image_session,
+    default: int = 224,
+) -> int:
+    """
+    Infer the square image input size from the loaded ONNX image tower.
+    Falls back to 224 for dynamic/unknown shapes.
+    """
+    try:
+        session = session_getter()
+        shape = session.get_inputs()[0].shape
+        dims = [d for d in shape if isinstance(d, int) and d >= 128]
+        if dims:
+            return int(dims[-1])
+    except Exception:
+        pass
+    return default
+
+
+def preprocess_image(
+    image: Image.Image,
+    size: int = None,
+    normalization: str = "clip",
+    session_getter: Callable[[], ort.InferenceSession] = get_fashion_clip_image_session,
+) -> np.ndarray:
     """
     Preprocess image for CLIP/ResNet models
     - Resize to size x size
-    - Normalize with ImageNet mean/std
+    - Normalize with CLIP mean/std by default
     - Convert to NCHW format
     """
+    if size is None:
+        size = _image_model_input_size(session_getter=session_getter)
+
     # Resize with aspect ratio preservation and center crop
     image = image.convert("RGB")
     
@@ -161,7 +230,7 @@ def preprocess_image(image: Image.Image, size: int = 224) -> np.ndarray:
         new_h = size
         new_w = int(w * size / h)
     
-    image = image.resize((new_w, new_h), Image.BILINEAR)
+    image = image.resize((new_w, new_h), _resample_lanczos())
     
     # Center crop to size x size
     left = (new_w - size) // 2
@@ -171,9 +240,13 @@ def preprocess_image(image: Image.Image, size: int = 224) -> np.ndarray:
     # Convert to numpy and normalize
     img_array = np.array(image).astype(np.float32) / 255.0
     
-    # ImageNet normalization
-    mean = np.array([0.485, 0.456, 0.406])
-    std = np.array([0.229, 0.224, 0.225])
+    # Match the CLIP embedding path used by the TypeScript image tower.
+    if normalization == "imagenet":
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+    else:
+        mean = np.array([0.48145466, 0.4578275, 0.40821073])
+        std = np.array([0.26862954, 0.26130258, 0.27577711])
     img_array = (img_array - mean) / std
     
     # NHWC to NCHW
@@ -190,8 +263,8 @@ def compute_image_embedding(image: Image.Image) -> np.ndarray:
     """
     session = get_fashion_clip_image_session()
     
-    # Preprocess
-    input_tensor = preprocess_image(image, size=224)
+    # Preprocess at the ONNX image tower's native input size.
+    input_tensor = preprocess_image(image)
     
     # Run inference
     input_name = session.get_inputs()[0].name
@@ -248,7 +321,7 @@ def extract_attributes(image: Image.Image) -> Dict[str, Any]:
         return {"error": "Attribute model not available"}
     
     # Preprocess
-    input_tensor = preprocess_image(image, size=224)
+    input_tensor = preprocess_image(image, size=224, normalization="imagenet")
     
     # Run inference
     input_name = session.get_inputs()[0].name
@@ -288,10 +361,11 @@ def batch_compute_embeddings(images: List[Image.Image]) -> np.ndarray:
     Compute embeddings for a batch of images
     More efficient than computing one at a time
     """
-    session = get_fashion_clip_image_session()
+    session = get_rerank_image_session()
     
     # Preprocess all images
-    batch = np.concatenate([preprocess_image(img) for img in images], axis=0)
+    rerank_size = _image_model_input_size(session_getter=get_rerank_image_session)
+    batch = np.concatenate([preprocess_image(img, size=rerank_size) for img in images], axis=0)
     
     # Run inference
     input_name = session.get_inputs()[0].name
@@ -313,9 +387,10 @@ def rerank_image_pairs(
     """
     Score a query image against a batch of candidate images.
 
-    This uses the batched ONNX/TensorRT image tower so the service can rerank
-    the top-k pool in a single GPU-backed pass. If a dedicated reranker model is
-    added later, this function is the swap point.
+    This is a bi-encoder reranker: it runs the image tower for the query and
+    candidates, then scores normalized embeddings with dot product. It is not a
+    cross-attention/pixel-pair model; if a dedicated pairwise reranker is added
+    later, this function is the swap point.
     """
     if not candidate_images or not candidate_ids:
         return []

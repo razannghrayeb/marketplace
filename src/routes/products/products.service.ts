@@ -2,6 +2,7 @@ import { osClient } from "../../lib/core/index";
 import {
   pg,
   getProductsByIdsOrdered,
+  getSearchProductsByIdsOrdered,
   productsTableHasIsHiddenColumn,
 } from "../../lib/core/index";
 import { config } from "../../config";
@@ -348,8 +349,8 @@ function imageDiversityRerankEnabled(): boolean {
 
 /** Phase 9: lambda in MMR (higher = more relevance, lower = more diversity). */
 function imageDiversityLambda(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_DIVERSITY_LAMBDA ?? "0.45");
-  if (!Number.isFinite(raw)) return 0.45;
+  const raw = Number(process.env.SEARCH_IMAGE_DIVERSITY_LAMBDA ?? "0.90");
+  if (!Number.isFinite(raw)) return 0.90;
   return Math.max(0.5, Math.min(0.98, raw));
 }
 
@@ -4492,6 +4493,17 @@ export async function searchByImageWithSimilarity(
   }
 
   stageKnnDoneAt = Date.now();
+  const rawKnnProductIds = [
+    ...new Set(
+      (Array.isArray(hits) ? hits : [])
+        .map((hit: any) => String(hit?._source?.product_id ?? ""))
+        .filter(Boolean),
+    ),
+  ];
+  const productHydrationPromise = getSearchProductsByIdsOrdered(rawKnnProductIds).then(
+    (products) => ({ products }),
+    (error) => ({ error }),
+  );
 
   const signals = await signalsPromise;
   colorQueryEmbedding = signals.colorQueryEmbedding;
@@ -5628,6 +5640,10 @@ export async function searchByImageWithSimilarity(
   const isBagDetection = normalizedDetectionCategory === "bags" || normalizedDetectionCategory === "accessories";
   const isFootwearDetection = normalizedDetectionCategory === "shoes" || normalizedDetectionCategory === "footwear";
   const isOuterwearDetection = normalizedDetectionCategory === "outerwear";
+  const visualColorOverrideMin = Math.max(
+    0.5,
+    Math.min(1, Number(process.env.SEARCH_IMAGE_COLOR_VISUAL_OVERRIDE_MIN ?? "0.85") || 0.85),
+  );
 
   // Final relevance pass: compute the authoritative finalRelevance01 incorporating
   // all visual + metadata signals, adaptive floors, composite, and BLIP reranking.
@@ -5769,6 +5785,22 @@ export async function searchByImageWithSimilarity(
     }
     // Record the base final (pre-rescue) for conservative boost capping later.
     baseFinalById.set(idStr, baseFinal);
+    const hasPreGateVisualColorOverride =
+      !hasExplicitColorIntent &&
+      (hasColorIntentForFinal || hasColorPreferenceForRanking) &&
+      hasDetectionAnchoredTypeIntent &&
+      rawVisual >= visualColorOverrideMin &&
+      ((comp.exactTypeScore ?? 0) >= 1 ||
+        (comp.productTypeCompliance ?? 0) >= 0.74 ||
+        (comp.categoryRelevance01 ?? 0) >= 0.9) &&
+      (comp.crossFamilyPenalty ?? 0) < 0.45;
+    if (hasPreGateVisualColorOverride) {
+      comp.finalRelevance01 = Math.max(
+        comp.finalRelevance01 ?? 0,
+        Math.min(0.86, Math.max(0.62, rawVisual * 0.88)),
+      );
+      finalScoreSourceById.set(idStr, "pre_gate_visual_color_override");
+    }
     // Main-path tops tuning:
     // strengthen primary score (before final-accept gate) when visual + type evidence
     // is strong, so similar tops are not under-ranked due noisy metadata/color cues.
@@ -7608,21 +7640,34 @@ export async function searchByImageWithSimilarity(
     scoreMap.set(id, Math.round(sim * 100) / 100);
   });
 
-  // Fetch product data
+  // Fetch product card data. Product rows started hydrating right after kNN,
+  // overlapping PostgreSQL I/O with reranking and post-filter work.
   let results: ProductResult[] = [];
     if (productIds.length > 0) {
     const numericIds = productIds.map((id: string) => parseInt(id, 10));
-    const [products, imagesByProduct, userLifestyle] = await Promise.all([
-      getProductsByIdsOrdered(productIds),
+    const [productHydration, imagesByProduct, userLifestyle] = await Promise.all([
+      productHydrationPromise,
       getImagesForProducts(numericIds),
       personalizationPromise,
     ]);
+    if ((productHydration as any).error) throw (productHydration as any).error;
+    const productById = new Map(((productHydration as any).products as any[]).map((p: any) => [String(p.id), p]));
+    const products = productIds.map((id: string) => productById.get(String(id))).filter(Boolean);
 
     results = products.map((p: any) => {
       const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
       const idStr = String(p.id);
       const similarityScore = scoreMap.get(idStr) ?? 0;
       const compliance = complianceById.get(idStr);
+      const hasVisualColorOverride =
+        !hasExplicitColorIntent &&
+        hasDetectionAnchoredTypeIntent &&
+        Boolean(compliance) &&
+        similarityScore >= visualColorOverrideMin &&
+        ((compliance?.exactTypeScore ?? 0) >= 1 ||
+          (compliance?.productTypeCompliance ?? 0) >= 0.74 ||
+          (compliance?.categoryRelevance01 ?? 0) >= 0.9) &&
+        (compliance?.crossFamilyPenalty ?? 0) < 0.45;
       const styleSim = styleSimById.get(idStr) ?? 0;
       const colorSim = colorSimById.get(idStr) ?? 0;
       const styleSimRaw = styleSimRawById.get(idStr) ?? styleSim;
@@ -7785,14 +7830,25 @@ export async function searchByImageWithSimilarity(
                 : 0.05
               : 0;
             // Keep contradictory colors visible for sparse catalogs, but with realistic caps
-            const conservativeCap = Math.min(
-              strictOnePieceCap + nearDuplicateRelax,
-              Math.max(strictInferredOnePieceColorGate ? 0.08 : 0.15, conflictAdjustedCap),
+            const visualOverrideLift = hasVisualColorOverride
+              ? Math.min(0.86, Math.max(0.62, similarityScore * 0.88))
+              : 0;
+            const conservativeCap = Math.max(
+              visualOverrideLift,
+              Math.min(
+                strictOnePieceCap + nearDuplicateRelax,
+                Math.max(strictInferredOnePieceColorGate ? 0.08 : 0.15, conflictAdjustedCap),
+              ),
             );
             const inferredCoreCategoryFloor = 0;
             const conservativeCapAdjusted = Math.max(conservativeCap, inferredCoreCategoryFloor);
-            finalRelevance01 = Math.min(finalRelevance01 ?? 0, conservativeCapAdjusted);
-            finalRelevanceSource = "catalog_color_correction";
+            const colorCappedRelevance = Math.min(finalRelevance01 ?? 0, conservativeCapAdjusted);
+            finalRelevance01 = hasVisualColorOverride
+              ? Math.max(colorCappedRelevance, visualOverrideLift)
+              : colorCappedRelevance;
+            finalRelevanceSource = hasVisualColorOverride
+              ? "catalog_color_visual_override"
+              : "catalog_color_correction";
             explainColorCompliance = 0;
             explainMatchedColor = authoritativeColorNorm;
             explainColorTier = "none";
@@ -8016,6 +8072,7 @@ export async function searchByImageWithSimilarity(
           const canLiftFrom =
             source === "computed" ||
             source === "catalog_color_correction" ||
+            source === "catalog_color_visual_override" ||
             source === "catalog_color_mix_dampen" ||
             source === "context_personalization";
           if (canLiftFrom) {
