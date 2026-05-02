@@ -667,8 +667,22 @@ function extractFilters(query: string): ExtractedFilters {
     shorts: "shorts",
     short: "shorts",
 
+    suit: "suit",
+    suits: "suit",
     blazer: "blazer",
     blazers: "blazer",
+    jacket: "jacket",
+    jackets: "jacket",
+    coat: "coat",
+    coats: "coat",
+    vest: "vest",
+    vests: "vest",
+    waistcoat: "waistcoat",
+    waistcoats: "waistcoat",
+    gilet: "gilet",
+    gilets: "gilet",
+    tuxedo: "tuxedo",
+    tuxedos: "tuxedo",
     sweater: "sweater",
     sweaters: "sweater",
     top: "top",
@@ -679,6 +693,8 @@ function extractFilters(query: string): ExtractedFilters {
     blouses: "tshirt",
     camisole: "tshirt",
     tunic: "tshirt",
+    "vest top": "vest",
+    "sleeveless vest top": "vest",
 
     abaya: "abaya",
     abayas: "abaya",
@@ -700,6 +716,11 @@ function extractFilters(query: string): ExtractedFilters {
     "track pants": "joggers",
     "sweat pants": "joggers",
     "sweatpants": "joggers",
+    "suit jacket": "suit",
+    "dress jacket": "blazer",
+    "tailored jacket": "jacket",
+    "structured jacket": "jacket",
+    "vest top": "vest",
     "maxi abaya": "abaya",
     "open abaya": "abaya",
   };
@@ -738,9 +759,17 @@ function extractFilters(query: string): ExtractedFilters {
   }
 
   // Category — check single words, then two-word combos
+  const normalizedQuery = query.toLowerCase();
+  if (/\bvest\s+top\b|\bsleeveless\s+vest\s+top\b/.test(normalizedQuery)) {
+    f.category = "tops";
+  } else if (/\b(suit|suits|tuxedo|tuxedos|suit\s+jacket|dress\s+jacket|tailored\s+jacket|structured\s+jacket|waistcoat|waistcoats|vest|vests|gilet|gilets)\b/.test(normalizedQuery)) {
+    f.category = "tailored";
+  }
+  if (!f.category) {
   for (const word of words) {
     const cat = findCategory(word);
     if (cat) { f.category = cat.term; break; }
+  }
   }
   if (!f.category && words.length >= 2) {
     for (let i = 0; i < words.length - 1; i++) {
@@ -761,12 +790,15 @@ function extractFilters(query: string): ExtractedFilters {
       shirt: "tops", shirts: "tops", tee: "tops", tshirt: "tops", blouse: "tops",
       top: "tops", tops: "tops", polo: "tops", sweater: "tops", hoodie: "tops",
       sweatshirt: "tops", tank: "tops", tunic: "tops", pullover: "tops",
+      suit: "tailored", suits: "tailored", blazer: "tailored", blazers: "tailored",
+      jacket: "outerwear", jackets: "outerwear", coat: "outerwear", coats: "outerwear",
+      vest: "tailored", vests: "tailored", waistcoat: "tailored", waistcoats: "tailored",
+      gilet: "tailored", gilets: "tailored", tuxedo: "tailored", tuxedos: "tailored",
       dress: "dresses", dresses: "dresses", gown: "dresses", frock: "dresses",
       jumpsuit: "dresses", romper: "dresses",
       abaya: "dresses", abayas: "dresses", kaftan: "dresses", kaftans: "dresses",
       caftan: "dresses", jalabiya: "dresses", thobe: "dresses", thobes: "dresses",
       dishdasha: "dresses", bisht: "dresses",
-      jacket: "outerwear", jackets: "outerwear", coat: "outerwear", coats: "outerwear",
       cardigan: "outerwear",
       parka: "outerwear", windbreaker: "outerwear",
       shoe: "footwear", shoes: "footwear", sneaker: "footwear", sneakers: "footwear",
