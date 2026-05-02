@@ -3,7 +3,7 @@ declare const describe: any;
 declare const test: any;
 declare const expect: any;
 
-import { computeHitRelevance } from "./searchHitRelevance";
+import { computeHitRelevance, scoreAudienceCompliance } from "./searchHitRelevance";
 import { scoreCrossFamilyTypePenalty } from "./productTypeTaxonomy";
 
 describe("computeHitRelevance - sleeve intent", () => {
@@ -188,6 +188,34 @@ describe("computeHitRelevance - type intent reliability", () => {
 });
 
 describe("computeHitRelevance - color typo normalization", () => {
+  test("tops color intent caps mismatched color relevance", () => {
+    const hit = {
+      _source: {
+        title: "Women Red Cotton Shirt",
+        category: "shirts",
+        category_canonical: "tops",
+        product_types: ["shirt"],
+        color: "red",
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.92, {
+      desiredProductTypes: ["shirt"],
+      desiredColors: ["blue"],
+      desiredColorsTier: ["blue"],
+      rerankColorMode: "any",
+      mergedCategory: "tops",
+      astCategories: ["tops"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.colorCompliance).toBeLessThan(0.2);
+    expect(rel.finalRelevance01).toBeLessThan(0.2);
+  });
+
   test("pink intent matches catalog color typo fuhsia", () => {
     const hit = {
       _source: {
@@ -242,5 +270,35 @@ describe("computeHitRelevance - color typo normalization", () => {
 
     expect(rel.colorCompliance).toBeGreaterThan(0.7);
     expect(rel.colorTier === "exact" || rel.colorTier === "family").toBe(true);
+  });
+});
+
+describe("scoreAudienceCompliance - cue-based gender inference", () => {
+  test("women query is penalized by masculine style cues even without gender words", () => {
+    const hit = {
+      _source: {
+        title: "Tailored Oxford Shirt",
+        category: "shirts",
+        category_canonical: "tops",
+        product_types: ["shirt", "oxford"],
+      },
+    } as any;
+
+    const compliance = scoreAudienceCompliance(undefined, "women", hit);
+    expect(compliance).toBeLessThan(0.4);
+  });
+
+  test("men query is penalized by feminine style cues even without gender words", () => {
+    const hit = {
+      _source: {
+        title: "Floral Blouse",
+        category: "shirts",
+        category_canonical: "tops",
+        product_types: ["blouse"],
+      },
+    } as any;
+
+    const compliance = scoreAudienceCompliance(undefined, "men", hit);
+    expect(compliance).toBeLessThan(0.4);
   });
 });

@@ -399,6 +399,78 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
     alternativeCategories: ["flats"],
     attributes: {},
   },
+  oxfords: {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["oxfords"],
+    attributes: { formalityHint: 7 },
+  },
+  pumps: {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["pumps"],
+    attributes: { formalityHint: 8 },
+  },
+  trainers: {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["sneakers"],
+    attributes: { formalityHint: 3 },
+  },
+  "dress shoes": {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["oxfords"],
+    attributes: { formalityHint: 8 },
+  },
+  "dress shoe": {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["oxfords"],
+    attributes: { formalityHint: 8 },
+  },
+  "running shoes": {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["sneakers"],
+    attributes: { formalityHint: 3 },
+  },
+  "running shoe": {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["sneakers"],
+    attributes: { formalityHint: 3 },
+  },
+  "athletic shoes": {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["sneakers"],
+    attributes: { formalityHint: 3 },
+  },
+  "athletic shoe": {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["sneakers"],
+    attributes: { formalityHint: 3 },
+  },
+  stilettos: {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["heels"],
+    attributes: { formalityHint: 9 },
+  },
+  mules: {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["mules"],
+    attributes: { formalityHint: 5 },
+  },
+  "ankle boots": {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["boots"],
+    attributes: {},
+  },
 
   // Bags
   bag: {
@@ -559,6 +631,62 @@ const FUZZY_PATTERNS: FuzzyPattern[] = [
       confidence: 0.9,
       alternativeCategories: ["ties"],
       attributes: { formalityHint: 8 },
+    },
+  },
+
+  // Specific footwear subtypes — BEFORE generic shoe patterns so we catch these first.
+  {
+    pattern: /\b(oxfords?|brogues?|derbies?|loafers?|moccasins?|dress\s*shoes?|formal\s*shoes?|penny\s*loafers?)\b/i,
+    mapping: {
+      productCategory: "footwear",
+      confidence: 0.92,
+      alternativeCategories: ["oxfords", "dress shoes"],
+      attributes: { formalityHint: 8 },
+    },
+  },
+  {
+    pattern: /\b(pumps?|stilettos?|heels?|wedges?|kitten\s*heels?|platform|slingbacks?)\b/i,
+    mapping: {
+      productCategory: "footwear",
+      confidence: 0.92,
+      alternativeCategories: ["heels"],
+      attributes: { formalityHint: 8 },
+    },
+  },
+  {
+    pattern: /\b(sneakers?|trainers?|running\s*shoes?|athletic\s*shoes?|sport\s*shoes?|tennis\s*shoes?)\b/i,
+    mapping: {
+      productCategory: "footwear",
+      confidence: 0.92,
+      alternativeCategories: ["sneakers"],
+      attributes: { formalityHint: 3 },
+    },
+  },
+  {
+    pattern: /\b(boots?|ankle\s*boots?|chelsea\s*boots?|combat\s*boots?|hiking\s*boots?|rain\s*boots?|cowboy\s*boots?)\b/i,
+    mapping: {
+      productCategory: "footwear",
+      confidence: 0.92,
+      alternativeCategories: ["boots"],
+      attributes: {},
+    },
+  },
+  {
+    pattern: /\b(sandals?|slides?|flip\s*flops?|mules?|clogs?)\b/i,
+    mapping: {
+      productCategory: "footwear",
+      confidence: 0.92,
+      alternativeCategories: ["sandals"],
+      attributes: { formalityHint: 2 },
+    },
+  },
+  {
+    pattern: /\b(flats?|ballet\s*flats?|ballerinas?)\b/i,
+    mapping: {
+      productCategory: "footwear",
+      confidence: 0.92,
+      alternativeCategories: ["flats"],
+      attributes: {},
     },
   },
 
