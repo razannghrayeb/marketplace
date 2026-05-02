@@ -2020,7 +2020,13 @@ export async function textSearch(
     const hasSuitTextIntent = desiredProductTypes.some((t) => /\b(suits?|tuxedo)\b/.test(t));
     if (hasSuitTextIntent && results.length > 0) {
       const suitResults = results.filter((p: any) => hasActualSuitCatalogCue((p as any) ?? {}));
-      results = suitResults;
+      if (suitResults.length > 0) {
+        const suitResultIds = new Set(suitResults.map((p: any) => String((p as any)?.id ?? "")).filter(Boolean));
+        results = [
+          ...suitResults,
+          ...results.filter((p: any) => !suitResultIds.has(String((p as any)?.id ?? ""))),
+        ];
+      }
     }
     // For men's suit queries, also filter out women's products (audienceCompliance hard gate).
     if (hasSuitTextIntent && queryGenderForAudience === "men" && results.length > 0) {

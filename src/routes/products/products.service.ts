@@ -7585,7 +7585,15 @@ export async function searchByImageWithSimilarity(
   ) {
     const suitFirstHits = rankedHits.filter((h: any) => hasActualSuitCatalogCue((h as any)?._source ?? {}));
     if (suitFirstHits.length > 0) {
-      rankedHits = suitFirstHits;
+      const suitFirstIds = new Set(
+        suitFirstHits
+          .map((h: any) => String((h as any)?._source?.product_id ?? ""))
+          .filter(Boolean),
+      );
+      rankedHits = [
+        ...suitFirstHits,
+        ...rankedHits.filter((h: any) => !suitFirstIds.has(String((h as any)?._source?.product_id ?? ""))),
+      ];
     }
   }
 

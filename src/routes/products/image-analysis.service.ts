@@ -66,6 +66,7 @@ import {
   filterProductTypeSeedsByMappedCategory,
 } from "../../lib/search/productTypeTaxonomy";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
+import { sortProductsByRelevanceAndCategory } from "../../lib/search/sortResults";
 import {
   computeOutfitCoherence,
   type OutfitCoherenceResult,
@@ -4028,7 +4029,8 @@ function finalRelevanceScore(product: unknown): number {
 }
 
 function sortProductsByFinalRelevanceDesc(products: ProductResult[]): ProductResult[] {
-  return [...products].sort((a, b) => finalRelevanceScore(b) - finalRelevanceScore(a));
+  // Use centralized sorting utility to ensure consistent ordering across all APIs
+  return sortProductsByRelevanceAndCategory(products);
 }
 
 function sortDetectionProductsByFinalRelevance(row: DetectionSimilarProducts): DetectionSimilarProducts {
@@ -8362,28 +8364,29 @@ export class ImageAnalysisService {
       };
     });
 
-    const relevanceFilteredResultsWithColorSource = relevanceFilteredResults.map((row) => {
-      const rawIndex = Number((row as any)?.detectionIndex);
-      const hasIndex = Number.isFinite(rawIndex) && rawIndex >= 0;
-      const detLabel = String((row as any)?.detection?.label ?? "").trim();
-      if (!hasIndex || !detLabel) return row;
-      const colorKey = detectionColorKey(detLabel, Math.floor(rawIndex));
-      const colorSource = detectionColorSourceName(inferredColorsByItemSource[colorKey]);
-      return {
-        ...row,
-        detection: {
-          ...(row as any).detection,
-          colorSource,
-        },
-      };
-    });
-
     // Recalculate counts and total after filtering
     let newTotalProducts = 0;
     for (const result of relevanceFilteredResults) {
       result.count = result.products.length;
       newTotalProducts += result.count;
     }
+
+    const relevanceFilteredResultsWithColorSource = relevanceFilteredResults.map((row) => {
+      const sortedRow = sortDetectionProductsByFinalRelevance(row);
+      const rawIndex = Number((sortedRow as any)?.detectionIndex);
+      const hasIndex = Number.isFinite(rawIndex) && rawIndex >= 0;
+      const detLabel = String((sortedRow as any)?.detection?.label ?? "").trim();
+      if (!hasIndex || !detLabel) return sortedRow;
+      const colorKey = detectionColorKey(detLabel, Math.floor(rawIndex));
+      const colorSource = detectionColorSourceName(inferredColorsByItemSource[colorKey]);
+      return {
+        ...sortedRow,
+        detection: {
+          ...(sortedRow as any).detection,
+          colorSource,
+        },
+      };
+    });
 
     if (hotPathDebug) {
       console.log(
@@ -10035,28 +10038,29 @@ export class ImageAnalysisService {
       };
     });
 
-    const relevanceFilteredResultsSelWithColorSource = relevanceFilteredResultsSel.map((row) => {
-      const rawIndex = Number((row as any)?.detectionIndex);
-      const hasIndex = Number.isFinite(rawIndex) && rawIndex >= 0;
-      const detLabel = String((row as any)?.detection?.label ?? "").trim();
-      if (!hasIndex || !detLabel) return row;
-      const colorKey = detectionColorKey(detLabel, Math.floor(rawIndex));
-      const colorSource = detectionColorSourceName(inferredColorsByItemSource[colorKey]);
-      return {
-        ...row,
-        detection: {
-          ...(row as any).detection,
-          colorSource,
-        },
-      };
-    });
-
     // Recalculate counts and total after filtering
     let newTotalProductsSel = 0;
     for (const result of relevanceFilteredResultsSel) {
       result.count = result.products.length;
       newTotalProductsSel += result.count;
     }
+
+    const relevanceFilteredResultsSelWithColorSource = relevanceFilteredResultsSel.map((row) => {
+      const sortedRow = sortDetectionProductsByFinalRelevance(row);
+      const rawIndex = Number((sortedRow as any)?.detectionIndex);
+      const hasIndex = Number.isFinite(rawIndex) && rawIndex >= 0;
+      const detLabel = String((sortedRow as any)?.detection?.label ?? "").trim();
+      if (!hasIndex || !detLabel) return sortedRow;
+      const colorKey = detectionColorKey(detLabel, Math.floor(rawIndex));
+      const colorSource = detectionColorSourceName(inferredColorsByItemSource[colorKey]);
+      return {
+        ...sortedRow,
+        detection: {
+          ...(sortedRow as any).detection,
+          colorSource,
+        },
+      };
+    });
 
     console.log(
       `[relevance-gate-sel] total products before=${totalProducts} → after=${newTotalProductsSel} (threshold=${minRelevanceThresholdSel})`,
