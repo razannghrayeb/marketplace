@@ -13,6 +13,7 @@ import {
   dedupeImageSearchResults,
   filterRelatedAgainstMain,
 } from "../../lib/search/resultDedup";
+import { sortProductsByRelevanceAndCategory, sortProductsByFinalRelevance } from "../../lib/search/sortResults";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
 import {
   emitImageSearchEval,
@@ -8332,17 +8333,18 @@ export async function searchByImageWithSimilarity(
       })
       : resultsBeforeFinalRelevanceFilter;
     const fallbackPool = topFocusedFallback.length > 0 ? topFocusedFallback : resultsBeforeFinalRelevanceFilter;
-    results = fallbackPool
-      .map((p: any) => {
-        const currentRel = typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : 0;
-        const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
-        return {
-          ...p,
-          finalRelevance01: Math.max(currentRel, sim * 0.85, effectiveFinalAcceptMin),
-        };
-      })
-      .sort((a: any, b: any) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0))
-      .slice(0, limit) as ProductResult[];
+    results = sortProductsByRelevanceAndCategory(
+      fallbackPool
+        .map((p: any) => {
+          const currentRel = typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : 0;
+          const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+          return {
+            ...p,
+            finalRelevance01: Math.max(currentRel, sim * 0.85, effectiveFinalAcceptMin),
+          };
+        })
+        .slice(0, limit)
+    ) as ProductResult[];
   }
 
   if (hasDetectionAnchoredTypeIntent) {
