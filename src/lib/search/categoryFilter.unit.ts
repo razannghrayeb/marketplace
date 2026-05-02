@@ -34,10 +34,19 @@ describe("categoryFilter", () => {
     expect(t.includes("wallet")).toBe(true);
   });
 
+  test("getCategorySearchTerms expands tailored aliases", () => {
+    const t = getCategorySearchTerms("tailored");
+    expect(t.includes("suit")).toBe(true);
+    expect(t.includes("waistcoat")).toBe(true);
+  });
+
   test("inferCategoryCanonical maps vendor label to aisle", () => {
     expect(inferCategoryCanonical("Bags", "")).toBe("accessories");
     expect(inferCategoryCanonical(null, "Men crew neck tee shirt")).toBe("tops");
     expect(inferCategoryCanonical(null, "Top Handle Bag")).toBe("accessories");
     expect(inferCategoryCanonical("CONCEALERS", "")).toBe("beauty");
+    expect(inferCategoryCanonical(null, "Men's suit jacket")).toBe("tailored");
+    expect(inferCategoryCanonical(null, "Sleeveless vest top")).toBe("tops");
+    expect(inferCategoryCanonical(null, "Wool waistcoat vest")).toBe("tailored");
   });
 });

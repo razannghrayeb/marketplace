@@ -99,12 +99,6 @@ const CATEGORY_ALIASES: Record<string, string[]> = {
     "sport coat",
     "sport coats",
     "sportcoat",
-    "suit jacket",
-    "suit jackets",
-    "dress jacket",
-    "dress jackets",
-    "suit",
-    "suits",
     "tuxedo",
     "tuxedos",
     "cardigan",
@@ -135,6 +129,27 @@ const CATEGORY_ALIASES: Record<string, string[]> = {
     "shackets",
     "shirt jacket",
     "shirt jackets",
+  ],
+  tailored: [
+    "tailored",
+    "suit",
+    "suits",
+    "tuxedo",
+    "tuxedos",
+    "suit jacket",
+    "suit jackets",
+    "dress jacket",
+    "dress jackets",
+    "waistcoat",
+    "waistcoats",
+    "vest",
+    "vests",
+    "gilet",
+    "gilets",
+    "structured jacket",
+    "structured jackets",
+    "tailored jacket",
+    "tailored jackets",
   ],
   footwear: [
     "footwear",
@@ -445,7 +460,13 @@ export function inferCategoryCanonical(rawCategory: string | null | undefined, t
   if (norm) {
     // Resolve high-signal garment classes first to avoid ambiguous alias collisions
     // like "short jacket" being mapped to bottoms due the token "short".
-    if (/\b(jacket|jackets|coat|coats|blazer|blazers|suit|suits|tuxedo|tuxedos|cardigan|cardigans|parka|parkas|windbreaker|windbreakers|vest|vests|gilet|gilets|waistcoat|waistcoats|trench|trenches|overcoat|overcoats|bomber|bombers|anorak|anoraks|poncho|ponchos|cape|capes|shacket|shackets|shirt\s+jackets?|overshirt|overshirts)\b/.test(norm)) {
+    if (/\b(vest\s*top|sleeveless\s*top|tank\s*top|camisole|cami)\b/.test(norm)) {
+      return "tops";
+    }
+    if (/\b(suit|suits|tuxedo|tuxedos|suit\s+jacket|suit\s+jackets|dress\s+jacket|dress\s+jackets|waistcoat|waistcoats|vest|vests|gilet|gilets|tailored\s+jacket|tailored\s+jackets|structured\s+jacket|structured\s+jackets)\b/.test(norm)) {
+      return "tailored";
+    }
+    if (/\b(jacket|jackets|coat|coats|blazer|blazers|cardigan|cardigans|parka|parkas|windbreaker|windbreakers|trench|trenches|overcoat|overcoats|bomber|bombers|anorak|anoraks|poncho|ponchos|cape|capes|shacket|shackets|shirt\s+jackets?|overshirt|overshirts)\b/.test(norm)) {
       return "outerwear";
     }
     if (/\b(dress|dresses|gown|frock|maxi dress|mini dress|midi dress|sundress|jumpsuit|romper|abaya|kaftan|jalabiya|thobe)\b/.test(norm)) {

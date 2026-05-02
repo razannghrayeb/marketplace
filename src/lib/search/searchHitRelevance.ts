@@ -747,9 +747,9 @@ export function computeHitRelevance(
       // reduce compliance drastically so indexed gray/charcoal products win.
       const catalogContradictionPenalty = 
         colorTier === "exact" ? 0 
-        : (colorTier === "light-shade" || colorTier === "dark-shade") ? 0.08
-        : colorTier === "family" ? 0.12 
-        : 0.25;
+        : (colorTier === "light-shade" || colorTier === "dark-shade") ? 0.02
+        : colorTier === "family" ? 0.08 
+        : 0.15;
       colorCompliance = colorCompliance * catalogContradictionPenalty;
       if (colorTier === "exact") colorTier = "none";
       // Demote family/shade tiers to bucket so it gets gated by bucketLimit logic

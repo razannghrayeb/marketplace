@@ -2548,6 +2548,7 @@ function normalizeDetectionCategoryToken(token: string | null | undefined): stri
     )
   ) return "footwear";
   if (/\b(trouser|trousers|pants?|slacks?|jeans?|shorts?|bottoms?)\b/.test(normalized)) return "bottoms";
+  if (/\b(suit|suits|tuxedo|tuxedos|blazer|blazers|sport\s+coat|sportcoat|suit\s+jackets?|dress\s+jackets?|waistcoat|waistcoats|gilet|gilets|vests?|tailored\s+jacket|tailored\s+jackets|structured\s+jacket|structured\s+jackets)\b/.test(normalized)) return "tailored";
   if (/\b(blazer|blazers|sport\s+coat|sportcoat|suit\s+jackets?|dress\s+jackets?|jacket|jackets|coat|coats|parka|parkas|bomber|trench|windbreaker|anorak|outerwear|outwear|shacket|overshirt|overcoat|waistcoat|gilet|vests?)\b/.test(normalized)) return "outerwear";
   if (/\b(shirt|shirts|tee|t-?shirt|tops?|sweater|hoodie)\b/.test(normalized)) return "tops";
   return normalized;
@@ -5611,6 +5612,7 @@ export async function searchByImageWithSimilarity(
   const isTopDetection = normalizedDetectionCategory === "tops";
   const isDressDetection = normalizedDetectionCategory === "dresses";
   const isBottomsDetection = normalizedDetectionCategory === "bottoms";
+  const isTailoredDetection = normalizedDetectionCategory === "tailored";
   const isBagDetection = normalizedDetectionCategory === "bags" || normalizedDetectionCategory === "accessories";
   const isFootwearDetection = normalizedDetectionCategory === "shoes" || normalizedDetectionCategory === "footwear";
   const isOuterwearDetection = normalizedDetectionCategory === "outerwear";
@@ -5661,6 +5663,8 @@ export async function searchByImageWithSimilarity(
       // Same fallback for dresses: category="dresses" with empty product_types is
       // still a valid dress — categoryRelevance01 is the authoritative signal.
       (isDressDetectionForTypeMatch && (comp.categoryRelevance01 ?? 0) >= 0.90) ||
+      // Tailored items often carry sparse subtype metadata; category evidence is enough to keep them alive.
+      (isTailoredDetection && (comp.categoryRelevance01 ?? 0) >= 0.90) ||
       // Same fallback for bags and footwear.
       ((isBagDetectionForTypeMatch || isFootwearDetectionForTypeMatch) && (comp.categoryRelevance01 ?? 0) >= 0.90);
     const lengthCompliance = lengthComplianceById.get(idStr) ?? 0;
@@ -6170,6 +6174,66 @@ export async function searchByImageWithSimilarity(
       finalScoreSourceById.set(idStr, "computed");
     }
 
+    // Main-path tailored tuning:
+    // Tailored items (suits, waistcoats, structured jackets) behave like a formal subset
+    // of outerwear, but they need their own rescue path so they are not diluted by generic
+    // jacket logic or suppressed by sparse metadata.
+    if (
+      hasDetectionAnchoredTypeIntent &&
+      isTailoredDetection
+    ) {
+      const tailoredTypeComp = Math.max(0, Math.min(1, comp.productTypeCompliance ?? 0));
+      const tailoredColorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
+      const tailoredCategoryComp = Math.max(0, Math.min(1, comp.categoryRelevance01 ?? 0));
+      const tailoredTaxonomyComp = Math.max(0, Math.min(1, comp.siblingClusterScore ?? 0));
+      const tailoredAudienceComp = Math.max(0, Math.min(1, comp.audienceCompliance ?? 0));
+      const tailoredStyleComp = Math.max(0, Math.min(1, comp.styleCompliance ?? 0));
+      const tailoredStructuralComp = Math.max(tailoredTypeComp, tailoredCategoryComp, tailoredTaxonomyComp);
+      const tailoredVisualComp = Math.max(0, Math.min(1, effectiveVisualForScoring));
+      const strongTailoredEvidence =
+        ((comp.exactTypeScore ?? 0) >= 1 || tailoredStructuralComp >= 0.30) &&
+        tailoredVisualComp >= 0.56 &&
+        (comp.crossFamilyPenalty ?? 0) < 0.52;
+      if (strongTailoredEvidence) {
+        const weakTailoredStructure =
+          (comp.exactTypeScore ?? 0) < 1 &&
+          tailoredStructuralComp < 0.42 &&
+          tailoredCategoryComp < 0.30 &&
+          tailoredTaxonomyComp < 0.38;
+        let blendedTailoredMain =
+          0.56 * tailoredVisualComp +
+          0.28 * tailoredStructuralComp +
+          0.08 * tailoredColorComp +
+          0.04 * tailoredStyleComp +
+          0.04 * tailoredAudienceComp;
+        if (weakTailoredStructure) {
+          blendedTailoredMain *= 0.88;
+        }
+        const hasTailoredColorIntent = hasColorPreferenceForRanking || Boolean((comp as any).hasColorIntent ?? hasColorIntentForFinal);
+        if (hasTailoredColorIntent && Number.isFinite(tailoredColorComp)) {
+          if (tailoredColorComp <= 0.12) {
+            blendedTailoredMain *= hasExplicitColorIntent ? 0.38 : 0.62;
+          } else if (tailoredColorComp < 0.38) {
+            const t = tailoredColorComp / 0.38;
+            blendedTailoredMain *= hasExplicitColorIntent
+              ? 0.38 + 0.30 * t
+              : 0.62 + 0.22 * t;
+          }
+          if (tailoredColorComp >= 0.55) {
+            blendedTailoredMain = Math.min(1, blendedTailoredMain + 0.04);
+          }
+        }
+        const exactTailoredVisualEvidence = (comp.exactTypeScore ?? 0) >= 1 && tailoredVisualComp >= 0.60;
+        const tailoredBoostedFloor = exactTailoredVisualEvidence ? 0.34 : 0.24;
+        let tailoredBoosted = Math.min(1, Math.max(tailoredBoostedFloor, blendedTailoredMain));
+        const tailoredVisualCeiling = Math.min(1, tailoredVisualComp * 1.12 + 0.02);
+        tailoredBoosted = Math.min(tailoredBoosted, tailoredVisualCeiling);
+        if (tailoredBoosted > (comp.finalRelevance01 ?? 0)) {
+          comp.finalRelevance01 = tailoredBoosted;
+          finalScoreSourceById.set(idStr, "tailored_main_path_tuning");
+        }
+      }
+    }
     const broadImageIntent =
       !hasExplicitColorIntent &&
       !hasExplicitStyleIntent &&
@@ -7470,6 +7534,11 @@ export async function searchByImageWithSimilarity(
         detectionCategoryNormForTailored === "tops" &&
         (isTailoredStyleIntent || hasTailoredTypeIntent(desiredProductTypes))
       ) ||
+      // Tailored detections should keep formal/suit/waistcoat items in play.
+      (
+        detectionCategoryNormForTailored === "tailored" &&
+        (isTailoredStyleIntent || hasTailoredTypeIntent(desiredProductTypes))
+      ) ||
       // For bottoms, only enforce tailored hard-gating when style is explicitly formal.
       // Inferred trouser/cargo/chino labels are too noisy and were suppressing valid cargo results.
       (
@@ -7491,7 +7560,7 @@ export async function searchByImageWithSimilarity(
   }
   if (
     hasDetectionAnchoredTypeIntent &&
-    (detectionCategoryNormForTailored === "tops" || detectionCategoryNormForTailored === "outerwear") &&
+    (detectionCategoryNormForTailored === "tops" || detectionCategoryNormForTailored === "outerwear" || detectionCategoryNormForTailored === "tailored") &&
     hasStrictSuitTopIntent(desiredProductTypes) &&
     rankedHits.length > 0
   ) {
@@ -7784,6 +7853,7 @@ export async function searchByImageWithSimilarity(
         const typeComp = Math.max(0, Math.min(1, compliance.productTypeCompliance ?? 0));
         const isTopDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops";
         const isDressDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses";
+        const isTailoredDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tailored";
         const isOuterwearDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "outerwear";
         const onePieceCandidate = isDressDetection
           ? isOnePieceCatalogCandidate(p as unknown as Record<string, unknown>)
@@ -7850,9 +7920,9 @@ export async function searchByImageWithSimilarity(
         } else if (typeComp < 0.28) {
           const categoryComp = Math.max(0, Math.min(1, compliance.categoryRelevance01 ?? 0));
           const exactType = Number(compliance.exactTypeScore ?? 0);
-          if (isOuterwearDetection && (categoryComp >= 0.55 || exactType >= 1)) {
+          if ((isOuterwearDetection || isTailoredDetection) && (categoryComp >= 0.55 || exactType >= 1)) {
             finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.62 : 0.52);
-            finalRelevanceSource = "outerwear_sparse_type_relaxed_cap";
+            finalRelevanceSource = isTailoredDetection ? "tailored_sparse_type_relaxed_cap" : "outerwear_sparse_type_relaxed_cap";
           } else {
             finalRelevance01 = Math.min(finalRelevance01 ?? 0, similarityScore >= nearIdenticalRawMin ? 0.36 : 0.3);
             finalRelevanceSource = "type_conflict_cap";
@@ -7889,7 +7959,8 @@ export async function searchByImageWithSimilarity(
         compliance &&
         (isTopDetection ||
           isBottomsDetection ||
-          isOuterwearDetection)
+          isOuterwearDetection ||
+          isTailoredDetection)
       ) {
         const detectionCategoryForFloor = normalizedDetectionCategory;
         const typeComp = Math.max(0, Math.min(1, compliance.productTypeCompliance ?? 0));
