@@ -353,7 +353,7 @@ export interface HitCompliance {
   intraFamilyPenalty: number;
   colorCompliance: number;
   matchedColor: string | null;
-  colorTier: "exact" | "family" | "bucket" | "none";
+  colorTier: "exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none";
   crossFamilyPenalty: number;
   audienceCompliance: number;
   styleCompliance: number;
@@ -711,7 +711,7 @@ export function computeHitRelevance(
 
   let colorCompliance = 0;
   let matchedColor: string | null = null;
-  let colorTier: "exact" | "family" | "bucket" | "none" = "none";
+  let colorTier: "exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none" = "none";
   if (desiredColorsTier.length > 0) {
     const tImg = tieredColorListCompliance(desiredColorsTier, imgTierRaw, rerankColorMode);
     const tText = tieredColorListCompliance(desiredColorsTier, textTierRaw, rerankColorMode);
@@ -733,17 +733,27 @@ export function computeHitRelevance(
     }
   }
 
-  // Guardrail: if catalog color explicitly contradicts desired color, do not allow
-  // image-palette/text color extraction to claim an "exact" match.
+  // Guardrail: if catalog color explicitly contradicts desired color, demote tier to force proper gating.
+  // This ensures products with contradictory indexed colors don't bypass family/bucket compliance checks.
   const catalogColorRaw = typeof hit?._source?.color === "string" ? String(hit._source.color).toLowerCase() : "";
   const catalogColorNorm = catalogColorRaw ? normalizeColorToken(catalogColorRaw) ?? catalogColorRaw : "";
+  let catalogColorContradicts = false;
   if (desiredColorsTier.length > 0 && catalogColorNorm) {
     const tCatalog = tieredColorListCompliance(desiredColorsTier, [catalogColorNorm], rerankColorMode);
     if (tCatalog.compliance <= 0) {
-      // Catalog color contradicts desired color: penalize rather than zero so that
-      // products with noisy merchant color strings aren't fully eliminated.
-      colorCompliance = colorCompliance * 0.35;
+      catalogColorContradicts = true;
+      // Catalog color contradicts desired color: heavily penalize to force exact-match products to rank higher.
+      // For family/bucket tiers especially (e.g., white product matched via silver→gray), 
+      // reduce compliance drastically so indexed gray/charcoal products win.
+      const catalogContradictionPenalty = 
+        colorTier === "exact" ? 0 
+        : (colorTier === "light-shade" || colorTier === "dark-shade") ? 0.08
+        : colorTier === "family" ? 0.12 
+        : 0.25;
+      colorCompliance = colorCompliance * catalogContradictionPenalty;
       if (colorTier === "exact") colorTier = "none";
+      // Demote family/shade tiers to bucket so it gets gated by bucketLimit logic
+      if (colorTier === "family" || colorTier === "light-shade" || colorTier === "dark-shade") colorTier = "bucket";
       // Keep `matchedColor` tied to query-vs-hit match evidence only; do not replace it
       // with catalog color, otherwise explain output can look like query color was rewritten.
     }
@@ -1095,6 +1105,8 @@ export function computeHitRelevance(
     const noneTierLimit = suitRelax ? (isBottomLikeIntent ? 0.16 : isTopLikeIntent ? 0.18 : 0.12) : (isBottomLikeIntent ? 0.06 : isTopLikeIntent ? 0.08 : 0.08);
     const lowComplianceLimit = suitRelax ? (isBottomLikeIntent ? 0.2 : isTopLikeIntent ? 0.22 : 0.18) : (isBottomLikeIntent ? 0.1 : isTopLikeIntent ? 0.12 : 0.12);
     const bucketLimit = suitRelax ? (isBottomLikeIntent ? 0.5 : 0.56) : (isBottomLikeIntent ? 0.32 : 0.36);
+    // Shade tiers (light-shade, dark-shade) get slightly higher cap than bucket but lower than family
+    const shadeLimit = bucketLimit + 0.08;
 
     if (colorTier === "none") {
       finalRelevance01 = Math.min(finalRelevance01, noneTierLimit);
@@ -1102,6 +1114,8 @@ export function computeHitRelevance(
       finalRelevance01 = Math.min(finalRelevance01, lowComplianceLimit);
     } else if ((isBottomLikeIntent || isTopLikeIntent) && colorTier === "bucket") {
       finalRelevance01 = Math.min(finalRelevance01, bucketLimit);
+    } else if ((isBottomLikeIntent || isTopLikeIntent) && (colorTier === "light-shade" || colorTier === "dark-shade")) {
+      finalRelevance01 = Math.min(finalRelevance01, shadeLimit);
     }
   }
 
