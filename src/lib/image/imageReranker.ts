@@ -38,6 +38,7 @@ const ONNX_RERANK_TIMEOUT_MS = Math.max(500, Number(process.env.ONNX_RERANK_TIME
 const IMAGE_RERANK_TOPK = Math.max(10, Number(process.env.SEARCH_IMAGE_RERANK_TOPK || 200) || 200);
 const IMAGE_RERANK_ENABLED = String(process.env.SEARCH_IMAGE_ONNX_RERANK ?? "1").toLowerCase() !== "0";
 const IMAGE_RERANK_TRANSPORT = String(process.env.SEARCH_IMAGE_RERANK_TRANSPORT ?? "grpc").toLowerCase();
+const IMAGE_RERANK_INPUT_SIZE = Math.max(224, Number(process.env.SEARCH_IMAGE_RERANK_INPUT_SIZE || 224) || 224);
 
 const PROTO_PATH = path.resolve(process.cwd(), "src", "lib", "model", "proto", "rerank.proto");
 
@@ -149,12 +150,12 @@ async function fetchImageBuffer(url: string): Promise<Buffer> {
 async function downscaleForRerank(buffer: Buffer): Promise<string> {
   const jpeg = await sharp(buffer)
     .rotate()
-    .resize(224, 224, {
+    .resize(IMAGE_RERANK_INPUT_SIZE, IMAGE_RERANK_INPUT_SIZE, {
       fit: "cover",
       position: "centre",
-      withoutEnlargement: true,
+      kernel: sharp.kernel.lanczos3,
     })
-    .jpeg({ quality: 90, mozjpeg: true })
+    .jpeg({ quality: 95, mozjpeg: true, chromaSubsampling: "4:4:4" })
     .toBuffer();
   return jpeg.toString("base64");
 }

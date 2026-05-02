@@ -51,10 +51,7 @@ RUN corepack enable && corepack prepare pnpm@9 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
 # Install only root workspace dependencies required for API build.
-# Use --no-frozen-lockfile here as a temporary workaround for CI when the
-# lockfile is out of sync with package.json. Update and commit pnpm-lock.yaml
-# for a permanent fix.
-RUN pnpm install --no-frozen-lockfile --filter .
+RUN pnpm install --frozen-lockfile --filter .
 
 # Copy source
 COPY tsconfig.json tsconfig.base.json ./
@@ -109,8 +106,7 @@ RUN groupadd -g 1001 nodejs && \
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
 # Install only root production dependencies for runtime.
-# Use --no-frozen-lockfile temporarily to allow Cloud Build to proceed.
-RUN pnpm install --no-frozen-lockfile --prod --filter .
+RUN pnpm install --frozen-lockfile --prod --filter .
 
 # Copy built files
 COPY --from=builder /app/dist ./dist
@@ -131,6 +127,7 @@ COPY src/lib/model/yolov8_api.py \
   src/lib/model/dual-model-yolo.py \
   src/lib/model/image_preprocessor.py \
   /app/yolo/
+COPY src/lib/model/proto /app/yolo/proto
 COPY src/lib/model/requirements-yolo-extras.txt /app/yolo/requirements-extras.txt
 
 # GPU torch wheels by default; set YOLO_TORCH_VARIANT=cpu to force CPU build.

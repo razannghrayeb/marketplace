@@ -6,7 +6,7 @@
  * intent classification, entity extraction, expansions).
  */
 
-import { pg, getProductsByIdsOrdered } from '../../lib/core/db';
+import { pg, getSearchProductsByIdsOrdered } from '../../lib/core/db';
 import { osClient } from '../../lib/core/opensearch';
 import { config } from '../../config';
 import {
@@ -1758,6 +1758,22 @@ export async function textSearch(
 
     const hits = response.body.hits.hits;
     const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
+    const rawHitProductIds = [
+      ...new Set(
+        hits
+          .map((hit: any) => String(hit?._source?.product_id ?? ""))
+          .filter(Boolean),
+      ),
+    ];
+    const rawHitNumericIds = rawHitProductIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
+    const productHydrationPromise = getSearchProductsByIdsOrdered(rawHitProductIds).then(
+      (products) => ({ products }),
+      (error) => ({ error }),
+    );
+    const imageHydrationPromise = getImagesForProducts(rawHitNumericIds).then(
+      (imagesByProduct) => ({ imagesByProduct }),
+      (error) => ({ error }),
+    );
 
     // Normalize scores into ~[0,1] for `similarity_score` (max-of-recall vs tanh of raw OS score)
     const maxScore = hits.length > 0 ? hits[0]._score ?? 1 : 1;
@@ -1944,13 +1960,19 @@ export async function textSearch(
           })
         : Promise.resolve([] as ProductResult[]);
 
-    // Fetch hydrated product + images; overlap related OpenSearch when requested.
-    const products = await getProductsByIdsOrdered(finalProductIds);
-    const numericIds = finalProductIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
-    const [imagesByProduct, relatedProducts] = await Promise.all([
-      getImagesForProducts(numericIds),
+    // Hydration is intentionally started from the raw OpenSearch candidates above,
+    // so PostgreSQL can fetch card metadata while deterministic reranking runs.
+    const [productHydration, imageHydration, relatedProducts] = await Promise.all([
+      productHydrationPromise,
+      imageHydrationPromise,
       relatedPromise,
     ]);
+    if ((productHydration as any).error) throw (productHydration as any).error;
+    if ((imageHydration as any).error) throw (imageHydration as any).error;
+    const candidateProducts = (productHydration as any).products as any[];
+    const imagesByProduct = (imageHydration as any).imagesByProduct as Map<number, any[]>;
+    const productById = new Map(candidateProducts.map((p: any) => [String(p.id), p]));
+    const products = finalProductIds.map((id) => productById.get(String(id))).filter(Boolean);
 
     let results: ProductResult[] = products.map((p: any) => {
       const productIdStr = String(p.id);
@@ -4512,7 +4534,7 @@ async function hydrateProductDetails(
            p.price_cents,
            ROUND(p.price_cents / 100.0, 2) AS price,
            COALESCE(p.image_cdn, p.image_url) AS image_url,
-           p.category, p.description, p.vendor_id, p.size, p.color
+           p.category, NULL::text AS description, p.vendor_id, p.size, p.color
     FROM products p
     WHERE p.id = ANY($1::bigint[])
   `;
