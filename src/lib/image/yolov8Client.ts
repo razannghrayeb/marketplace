@@ -75,6 +75,8 @@ export interface HealthResponse {
   cuda_available?: boolean;
   cuda_device_name?: string;
   cuda_device_count?: number;
+  configured_device?: string;
+  requested_device?: string;
   num_classes: number;
   class_names: string[];
   config: {
