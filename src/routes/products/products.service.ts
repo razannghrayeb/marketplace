@@ -2501,11 +2501,28 @@ function hasActualSuitCatalogCue(src: Record<string, unknown>): boolean {
     .join(" ")
     .toLowerCase();
   if (!blob.trim()) return false;
-  if (!/\b(suits?|tuxedo|tuxedos)\b/.test(blob)) return false;
-  // "suit jacket" alone is just the jacket component — exclude it unless "suit" still
-  // appears elsewhere (e.g. "Men's Suit — includes suit jacket and trousers").
-  const blobWithoutSuitJacket = blob.replace(/\bsuit jacket\b/g, "");
-  return /\bsuits?\b/.test(blobWithoutSuitJacket) || /\btuxedo\b/.test(blob);
+  // Normalize and remove punctuation for robust matching
+  const norm = blob.replace(/[^a-z0-9\s\-_/]/g, " ").replace(/\s+/g, " ").trim();
+  if (!norm) return false;
+  // If any explicit suit/tux token exists (covers suit-2p, suit_txd, suit-2pnos, etc.) allow
+  if (/\b(suit|suits|tuxedo|tuxedos)\b/i.test(norm)) {
+    // Exclude cases where only "suit jacket" appears without other suit cues
+    const withoutSuitJacket = norm.replace(/\bsuit jacket\b/gi, "").trim();
+    if (/\b(suit|suits)\b/i.test(withoutSuitJacket) || /\btuxedo\b/i.test(withoutSuitJacket)) return true;
+  }
+
+  // Some vendors tag suit sets as blazer + pant or 'set' without the word 'suit'.
+  // Detect patterns like "blazer" + "trousers|pants|set|2p" to infer a suit product.
+  const hasBlazer = /\b(blazer|blazers|suit jacket|dress jacket|sport coat|sportcoat)\b/i.test(norm);
+  const hasSuitBottomHint = /\b(pant|pants|trouser|trousers|slacks|dress pants|2p|set|full set)\b/i.test(norm);
+  if (hasBlazer && hasSuitBottomHint) return true;
+
+  // Fallback: category canonical or category string explicitly mentions tailored-like aisle
+  const catCanon = String(src.category_canonical ?? "").toLowerCase();
+  const catRaw = String(src.category ?? "").toLowerCase();
+  if (catCanon === "tailored" || /\b(suit|suits|tailored|tailoring|waistcoat|waistcoats)\b/.test(catRaw)) return true;
+
+  return false;
 }
 
 function hasVestLikeTopCatalogCue(src: Record<string, unknown>): boolean {
@@ -8794,7 +8811,24 @@ export async function searchByImageWithSimilarity(
 
   // Ensure final ordering after any rescue/injection steps (pHash, near-exact, related)
   try {
+    const dbgEnabled = String(process.env.SEARCH_IMAGE_SORT_DEBUG ?? "").toLowerCase() === "1" || String(process.env.SEARCH_IMAGE_SORT_DEBUG ?? "").toLowerCase() === "true";
+    if (dbgEnabled) {
+      try {
+        console.warn('[search-image][sort-debug] BEFORE final sort:', results.slice(0, 50).map((p: any) => ({ id: p.id, finalRelevance01: p.finalRelevance01, similarity_score: p.similarity_score, rerankScore: p.rerankScore })));
+      } catch (ee) {
+        console.warn('[search-image][sort-debug] BEFORE final sort: <serialize-failed>');
+      }
+    }
+
     results = sortProductsByRelevanceAndCategory(results).slice(0, limit);
+
+    if (dbgEnabled) {
+      try {
+        console.warn('[search-image][sort-debug] AFTER final sort:', results.slice(0, 50).map((p: any) => ({ id: p.id, finalRelevance01: p.finalRelevance01, similarity_score: p.similarity_score, rerankScore: p.rerankScore })));
+      } catch (ee) {
+        console.warn('[search-image][sort-debug] AFTER final sort: <serialize-failed>');
+      }
+    }
   } catch (e) {
     // Defensive: sorting should not throw; log and continue with current order
     console.warn('[search-image] final sort failed:', (e as Error).message);

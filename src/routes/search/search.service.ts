@@ -128,9 +128,19 @@ function hasActualSuitCatalogCue(src: Record<string, unknown>): boolean {
     .join(" ")
     .toLowerCase();
   if (!blob.trim()) return false;
-  if (!/\b(suit|suits|tuxedo|tuxedos)\b/.test(blob)) return false;
-  const blobWithoutSuitJacket = blob.replace(/\bsuit jacket\b/g, "");
-  return /\bsuits?\b/.test(blobWithoutSuitJacket) || /\btuxedo\b/.test(blob);
+  const norm = blob.replace(/[^a-z0-9\s\-_/]/g, " ").replace(/\s+/g, " ").trim();
+  if (!norm) return false;
+  if (/\b(suit|suits|tuxedo|tuxedos)\b/i.test(norm)) {
+    const withoutSuitJacket = norm.replace(/\bsuit jacket\b/gi, "").trim();
+    if (/\b(suit|suits)\b/i.test(withoutSuitJacket) || /\btuxedo\b/i.test(withoutSuitJacket)) return true;
+  }
+  const hasBlazer = /\b(blazer|blazers|suit jacket|dress jacket|sport coat|sportcoat)\b/i.test(norm);
+  const hasSuitBottomHint = /\b(pant|pants|trouser|trousers|slacks|dress pants|2p|set|full set)\b/i.test(norm);
+  if (hasBlazer && hasSuitBottomHint) return true;
+  const catCanon = String(src.category_canonical ?? "").toLowerCase();
+  const catRaw = String(src.category ?? "").toLowerCase();
+  if (catCanon === "tailored" || /\b(suit|suits|tailored|tailoring|waistcoat|waistcoats)\b/.test(catRaw)) return true;
+  return false;
 }
 
 // ─── Shared types ────────────────────────────────────────────────────────────

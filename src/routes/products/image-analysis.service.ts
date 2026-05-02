@@ -4022,6 +4022,20 @@ function isCoreOutfitCategory(category: string | undefined): boolean {
   );
 }
 
+function finalRelevanceScore(product: unknown): number {
+  const score = Number((product as any)?.finalRelevance01 ?? 0);
+  return Number.isFinite(score) ? score : 0;
+}
+
+function sortProductsByFinalRelevanceDesc(products: ProductResult[]): ProductResult[] {
+  return [...products].sort((a, b) => finalRelevanceScore(b) - finalRelevanceScore(a));
+}
+
+function sortDetectionProductsByFinalRelevance(row: DetectionSimilarProducts): DetectionSimilarProducts {
+  const products = Array.isArray(row.products) ? sortProductsByFinalRelevanceDesc(row.products) : [];
+  return { ...row, products, count: products.length };
+}
+
 function paginateDetectionGroups(
   rows: DetectionSimilarProducts[],
   page: number,
@@ -4038,7 +4052,7 @@ function paginateDetectionGroups(
   let totalProducts = 0;
   let totalAvailableProducts = 0;
   const paginated = rows.map((row) => {
-    const allProducts = Array.isArray(row.products) ? row.products : [];
+    const allProducts = Array.isArray(row.products) ? sortProductsByFinalRelevanceDesc(row.products) : [];
     const totalItems = allProducts.length;
     const totalPages = totalItems > 0 ? Math.ceil(totalItems / safePageSize) : 0;
     const products = allProducts.slice(offset, offset + safePageSize);
@@ -4210,7 +4224,8 @@ function applyGroupedPostRanking(
   const rows = includeCrossGroupDedupe
     ? ranked.map((row, rowIdx) => {
       const seen = new Set<string>();
-      const deduped = row.products.filter((p) => {
+      const sortedProducts = Array.isArray(row.products) ? sortProductsByFinalRelevanceDesc(row.products) : [];
+      const deduped = sortedProducts.filter((p) => {
         const key = buildProductDedupKey(p as ProductResult, collapseVariantGroups);
         if (!key || seen.has(key)) return false;
         // Keep first seen in ranked group order; dominant group wins ties.
@@ -4220,12 +4235,12 @@ function applyGroupedPostRanking(
       if (rowIdx === 0) return { ...row, products: deduped, count: deduped.length };
       return { ...row, products: deduped, count: deduped.length };
     })
-    : ranked;
+    : ranked.map(sortDetectionProductsByFinalRelevance);
 
   if (includeCrossGroupDedupe) {
     const globalSeen = new Set<string>();
     const globalRows = rows.map((row) => {
-      const products = row.products.filter((p) => {
+      const products = sortProductsByFinalRelevanceDesc(row.products).filter((p) => {
         const key = buildProductDedupKey(p as ProductResult, collapseVariantGroups);
         if (!key || globalSeen.has(key)) return false;
         globalSeen.add(key);
