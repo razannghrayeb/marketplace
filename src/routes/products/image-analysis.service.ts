@@ -106,19 +106,22 @@ function inferApparelAudienceFallback(params: {
   if (/\b(women|womens|woman|female|lady|ladies|girl|girls)\b/.test(blob)) womenScore += 2;
   if (/\b(men|mens|man|male|gent|gents|boy|boys)\b/.test(blob)) menScore += 2;
 
-  if (/\b(dress|dresses|gown|skirt|blouse|heels?|pumps?|clutch|handbag|tote|vest\s*dress|sling\s*dress|abaya|kaftan|camisole|cami|leggings?)\b/.test(blob)) {
+  const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|handbag|clutch|tote|purse|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt|mom\s*jeans|girlfriend\s*jeans|boyfriend\s*jeans|high[-\s]?waist\s*jeans|high[-\s]?rise\s*jeans|flare\s*jeans|bootcut\s*jeans|wide[-\s]?leg\s*jeans)\b/;
+  const menStyleCue = /\b(suit|suits|tie|oxford|oxfords|dress\s*shirt|button\s*down|button-down|cargo\s*pants?|chino|chinos|boxer|briefs|loafer|loafers|briefcase|messenger\s*bag|duffel|duffle|satchel|backpack|menswear)\b/;
+
+  if (womenStyleCue.test(blob)) {
     womenScore += 1.6;
   }
-  if (/\b(suit|tie|oxford|oxfords|dress\s*shirt|cargo\s*pants|chino|chinos|boxer|briefs|menswear)\b/.test(blob)) {
+  if (menStyleCue.test(blob)) {
     menScore += 1.5;
   }
 
   // Detection-only cues are useful when BLIP captioning is missing or weak.
   for (const d of params.detections) {
     const lb = `${d.label ?? ""} ${d.raw_label ?? ""}`.toLowerCase();
-    if (/\b(short|long|vest|sling)\s*sleeve\s*dress|\bdress\b|\bskirt\b/.test(lb)) womenScore += 1.3;
-    if (/\b(heel|heels|pump|pumps|stiletto|kitten heel|mary jane)\b/.test(lb)) womenScore += 1.2;
-    if (/\b(tie|oxford|oxfords|loafer|loafers|suit)\b/.test(lb)) menScore += 1.1;
+    if (/\b(short|long|vest|sling)\s*sleeve\s*dress|\bdress\b|\bskirt\b|\bmom\s*jeans\b|\bhigh[-\s]?waist\s*jeans\b|\bhigh[-\s]?rise\s*jeans\b|\bwide[-\s]?leg\s*jeans\b/.test(lb)) womenScore += 1.3;
+    if (/\b(heel|heels|pump|pumps|stiletto|kitten heel|mary jane|handbag|clutch|tote|purse)\b/.test(lb)) womenScore += 1.2;
+    if (/\b(tie|oxford|oxfords|loafer|loafers|suit|briefcase|messenger\s*bag|duffel|duffle)\b/.test(lb)) menScore += 1.1;
   }
 
   // Formal menswear fallback when captions are weak/missing:
@@ -128,7 +131,7 @@ function inferApparelAudienceFallback(params: {
   const hasUpperFormalCue = /\b(long\s*sleeve\s*top|shirt|dress\s*shirt|blazer|sport\s*coat|suit|jacket)\b/.test(
     detectionBlob,
   );
-  const hasStrongWomenCue = /\b(dress|skirt|heels?|pumps?|blouse|camisole|cami)\b/.test(detectionBlob);
+  const hasStrongWomenCue = /\b(dress|skirt|heels?|pumps?|blouse|camisole|cami|handbag|clutch|tote|purse|mom\s*jeans|high[-\s]?waist\s*jeans|high[-\s]?rise\s*jeans)\b/.test(detectionBlob);
   if (hasTrouserCue && hasUpperFormalCue && !hasStrongWomenCue) {
     menScore += 2.1;
     // Strong deterministic lock for classic men's tailoring scenes
@@ -1336,6 +1339,9 @@ function shopLookMaxDetectionTaskMs(): number {
 /**
  * Infer specific footwear subtype from BLIP caption when YOLO returns generic "shoe".
  * Returns a more specific label to feed into `hardCategoryTermsForDetection`.
+ *
+ * Note: This is synchronous and relies on caption keywords. For caption-less cases,
+ * use the async classifyFootwearSubtypeFromCropEmbedding fallback (CLIP zero-shot).
  */
 export function inferFootwearSubtypeFromCaption(
   detectionLabel: string,
@@ -1346,24 +1352,27 @@ export function inferFootwearSubtypeFromCaption(
   if (label !== "shoe" && label !== "shoes") return label;
   const confidence = Number(opts?.confidence ?? 0);
   const areaRatio = Number(opts?.areaRatio ?? 0);
+  // Allow caption-driven refinement even when detection confidence/area are not set.
+  const cap = String(caption ?? "").toLowerCase();
   // Model B (yolos-fashionpedia) rarely exceeds 0.9 confidence — lower threshold
   // so subtype inference fires for most detections with a visible shoe region.
-  const refineEligible = confidence >= 0.55 || areaRatio >= 0.015;
+  const refineEligible = confidence >= 0.55 || areaRatio >= 0.015 || (cap && cap.trim().length > 0);
   if (!refineEligible) return label;
-
-  const cap = String(caption ?? "").toLowerCase();
   if (!cap) return label;
 
-  if (/\b(sneaker|sneakers|trainer|trainers|running\s*shoe|athletic\s*shoe|sport\s*shoe)\b/.test(cap)) return "sneakers";
-  if (/\b(boot|boots|ankle\s*boot|combat\s*boot|chelsea|hiking\s*boot|rain\s*boot)\b/.test(cap)) return "boots";
+  // Ordered: most specific patterns first to avoid overlap (e.g., "formal dress shoes" → oxfords, not just "dress shoe").
+  if (/\b(sneaker|sneakers|trainer|trainers|running\s*shoe|athletic\s*shoe|sport\s*shoe|cross\s*trainer)\b/.test(cap)) return "sneakers";
+  if (/\b(boot|boots|ankle\s*boot|combat\s*boot|chelsea|hiking\s*boot|rain\s*boot|cowboy\s*boot)\b/.test(cap)) return "boots";
   if (/\b(heel|heels|pump|pumps|stiletto|stilettos|wedge|wedges|platform|slingback|kitten\s*heel)\b/.test(cap)) return "heels";
-  if (/\b(sandal|sandals|slide|slides|mule|mules|flip\s*flop|espadrille|gladiator)\b/.test(cap)) return "sandals";
-  if (/\b(loafer|loafers|moccasin|moccasins|penny\s*loafer|driving\s*shoe)\b/.test(cap)) return "loafers";
-  if (/\b(flat|flats|ballet|ballerina)\b/.test(cap)) return "flats";
-  if (/\b(oxford|oxfords|brogue|brogues|derby|dress\s*shoe)\b/.test(cap)) return "oxfords";
+  if (/\b(sandal|sandals|slide|slides|mule|mules|flip\s*flop|espadrille|gladiator|thong)\b/.test(cap)) return "sandals";
+  if (/\b(loafer|loafers|moccasin|moccasins|penny\s*loafer|driving\s*shoe|slip[\s-]?on)\b/.test(cap)) return "loafers";
+  if (/\b(flat|flats|ballet|ballerina|ballet\s*flat|baller)\b/.test(cap)) return "flats";
+  if (/\b(oxford|oxfords|brogue|brogues|derby|dress\s*shoe|formal\s*shoe)\b/.test(cap)) return "oxfords";
   if (/\b(clog|clogs)\b/.test(cap)) return "clogs";
-  if (/\b(formal|formal\s*wear|business|suit|tuxedo|dress\s*shoe|dress\s*shoes|formal\s*shoe|formal\s*shoes)\b/.test(cap)) return "oxfords";
+  // Catch-all formal cues when specific type not mentioned
+  if (/\b(formal|business|suit|tuxedo)\b/.test(cap) && /\b(shoe|shoes|footwear)\b/.test(cap)) return "oxfords";
 
+  // Caption didn't specify a subtype — could try CLIP but this is sync-only.
   return label;
 }
 
@@ -1453,6 +1462,43 @@ async function classifyFootwearSubtypeFromCropEmbedding(
   } catch {
     return null;
   }
+}
+
+/**
+ * Async fallback: refine footwear subtype using CLIP zero-shot classification.
+ * Called when caption is missing or doesn't specify a subtype.
+ * Requires crop embedding (e.g., from ROI box around shoe).
+ *
+ * @param detectionLabel - YOLO label (e.g., "shoe")
+ * @param cropEmbedding - CLIP embedding from shoe crop region
+ * @param caption - Optional BLIP caption (tried first, sync)
+ * @returns Refined subtype (e.g., "sneakers", "heels") or original label
+ */
+export async function refineFootwearSubtypeWithCLIP(
+  detectionLabel: string,
+  cropEmbedding: number[],
+  caption?: string | null,
+): Promise<string> {
+  const label = String(detectionLabel || "").toLowerCase();
+  if (label !== "shoe" && label !== "shoes") return label;
+
+  // Try caption first (instant)
+  if (caption) {
+    const captionInferred = inferFootwearSubtypeFromCaption(label, caption);
+    if (captionInferred !== label) return captionInferred; // Caption specified a subtype
+  }
+
+  // Caption didn't help — try CLIP zero-shot (requires embedding)
+  if (!cropEmbedding || cropEmbedding.length === 0) return label;
+  
+  try {
+    const clipSubtype = await classifyFootwearSubtypeFromCropEmbedding(cropEmbedding, 0.3);
+    if (clipSubtype) return clipSubtype;
+  } catch {
+    // CLIP unavailable or error — fall through to original label
+  }
+
+  return label;
 }
 
 /**
@@ -3577,14 +3623,16 @@ function applyRelevanceThresholdFilter(
     .map((c) => c.toLowerCase().trim())
     .filter((c) => c.length > 0);
   const prefersWhiteFamily = desiredColorTokens.some((c) => /^(white|off[\s-]?white|ivory|cream|ecru)$/i.test(c));
-  const rankBottomsByDesiredColor = (rows: ProductResult[]): ProductResult[] => {
+  const rankApparelByDesiredColor = (rows: ProductResult[]): ProductResult[] => {
     const categoryNorm = String(options?.category ?? "").toLowerCase().trim();
-    if (categoryNorm !== "bottoms" || rows.length <= 1) return rows;
+    if ((categoryNorm !== "bottoms" && categoryNorm !== "tops") || rows.length <= 1) return rows;
     const whiteFamilyRegex = /\b(white|off[\s-]?white|ivory|cream|ecru|bone|calico)\b/i;
     const nonWhiteColorRegex =
       /\b(blue|indigo|navy|black|coal|charcoal|grey|gray|green|olive|brown|tan|khaki|red|pink|purple|orange|yellow)\b/i;
     const bottomTypeRegex = /\b(pants?|trousers?|jeans?|denim|chinos?|slacks|cargos?|bottoms?)\b/i;
+    const topTypeRegex = /\b(tops?|shirts?|blouses?|tees?|t-?shirts?|tshirts?|tanks?|camisoles?|cami|polo(?:s)?|sweaters?|hoodies?|sweatshirts?|cardigans?|overshirts?|loungewear)\b/i;
     const suitOuterwearRegex = /\b(suits?|tuxedo|blazers?|jackets?|sport\s+coats?)\b/i;
+    const topColorCueRegex = /\b(tops?|shirts?|blouses?|tees?|t-?shirts?|tshirts?|tanks?|camisoles?|polo(?:s)?|sweaters?|hoodies?|sweatshirts?|cardigans?|overshirts?)\b/i;
     const colorEvidenceScore = (item: ProductResult): number => {
       const explain = ((item as any)?.explain ?? {}) as Record<string, unknown>;
       const catalogColor = String((item as any)?.color ?? "");
@@ -3601,14 +3649,18 @@ function applyRelevanceThresholdFilter(
       const listingTypeText = [title, category, categoryCanonical, productTypes].join(" ");
       const allText = [catalogAndTitle, listingTypeText, description].join(" ");
       let score = 0;
+      if (categoryNorm === "tops" && topTypeRegex.test(listingTypeText)) score += 3;
+      if (categoryNorm === "bottoms" && bottomTypeRegex.test(listingTypeText)) score += 3;
       if (whiteFamilyRegex.test(catalogColor)) score += 4;
       if (whiteFamilyRegex.test(title)) score += 3;
       if (whiteFamilyRegex.test(url)) score += 2;
       if (whiteFamilyRegex.test(description)) score += 1;
       if (whiteFamilyRegex.test(matchedColor)) score += 0.75;
+      if (categoryNorm === "tops" && topColorCueRegex.test(listingTypeText)) score += 1.25;
       if (nonWhiteColorRegex.test(catalogColor) && !whiteFamilyRegex.test(catalogColor)) score -= 4;
       if (nonWhiteColorRegex.test(title) && !whiteFamilyRegex.test(title)) score -= 2;
       if (suitOuterwearRegex.test(allText) && !bottomTypeRegex.test(listingTypeText)) score -= 5;
+      if (categoryNorm === "tops" && suitOuterwearRegex.test(allText) && !topTypeRegex.test(listingTypeText)) score -= 3;
       return score;
     };
     return [...rows].sort((a, b) => {
@@ -3630,7 +3682,7 @@ function applyRelevanceThresholdFilter(
       const bWhiteHit = whiteFamilyRegex.test(bBlob) ? 1 : 0;
       const aColorEvidence = colorEvidenceScore(a);
       const bColorEvidence = colorEvidenceScore(b);
-      if (prefersWhiteFamily && Math.abs(aColorEvidence - bColorEvidence) > 1e-6) {
+      if (Math.abs(aColorEvidence - bColorEvidence) > 1e-6) {
         return bColorEvidence - aColorEvidence;
       }
       if (prefersWhiteFamily && aWhiteHit !== bWhiteHit) return bWhiteHit - aWhiteHit;
@@ -3641,12 +3693,20 @@ function applyRelevanceThresholdFilter(
 
   const filtered = products.filter((p) => {
     const relevance = Number((p as any)?.finalRelevance01 ?? 0);
+    const explain = ((p as any)?.explain ?? {}) as Record<string, unknown>;
+    const categoryNorm = String(options?.category ?? "").toLowerCase().trim();
+    const audienceCompliance = Number(explain.audienceCompliance ?? NaN);
+    const hasAudienceIntent = Boolean(explain.hasAudienceIntent);
+    const audienceFloor = categoryNorm === "bags" ? 0.46 : categoryNorm === "tops" || categoryNorm === "bottoms" ? 0.52 : 0;
+    if (hasAudienceIntent && audienceFloor > 0 && Number.isFinite(audienceCompliance) && audienceCompliance < audienceFloor) {
+      return false;
+    }
     return relevance >= minRelevance;
   });
 
   // Strict mode: keep only true main-path results, no relevance fallback preservation.
   if (shopLookMainPathOnlyEnv()) {
-    return rankBottomsByDesiredColor(filtered);
+    return rankApparelByDesiredColor(filtered);
   }
 
   if (filtered.length !== products.length) {
@@ -3673,6 +3733,16 @@ function applyRelevanceThresholdFilter(
       if (colorTier === "none") return true;
       if (Number.isFinite(colorCompliance) && colorCompliance < 0.2) return true;
       return false;
+    };
+    const hasSevereAudienceContradiction = (row: ProductResult): boolean => {
+      const categoryNorm = String(options?.category ?? "").toLowerCase().trim();
+      if (categoryNorm !== "tops" && categoryNorm !== "bottoms" && categoryNorm !== "bags") return false;
+      const explain = ((row as any)?.explain ?? {}) as Record<string, unknown>;
+      if (!Boolean(explain.hasAudienceIntent)) return false;
+      const audienceCompliance = Number(explain.audienceCompliance ?? NaN);
+      if (!Number.isFinite(audienceCompliance)) return false;
+      const floor = categoryNorm === "bags" ? 0.46 : 0.52;
+      return audienceCompliance < floor;
     };
     const hasSevereTopStyleContradiction = (row: ProductResult): boolean => {
       const categoryNorm = String(options?.category ?? "").toLowerCase().trim();
@@ -3702,6 +3772,7 @@ function applyRelevanceThresholdFilter(
     const fallbackPool = sorted.filter((item) => {
       const relevance = Number((item as any)?.finalRelevance01 ?? 0);
       if (hasSevereColorContradiction(item)) return false;
+      if (hasSevereAudienceContradiction(item)) return false;
       if (hasSevereTopStyleContradiction(item)) return false;
       return relevance >= qualityFloor;
     });
@@ -3768,6 +3839,7 @@ function applyRelevanceThresholdFilter(
               desiredColorMatchers.some((rx) => rx.test(colorEvidence));
             const hasStrictColorCompliance = Number.isFinite(colorCompliance) && colorCompliance >= 0.45;
             const hasModerateColorCompliance = Number.isFinite(colorCompliance) && colorCompliance >= 0.35;
+            if (hasSevereAudienceContradiction(item)) return false;
             if (hasColorIntent) {
               return hasDesiredColorHit || hasStrictColorCompliance;
             }
@@ -3793,6 +3865,93 @@ function applyRelevanceThresholdFilter(
           return bottomsColorSafeRescue;
         }
       }
+      if (categoryNorm === "tops") {
+        const optionDesiredColors = (Array.isArray(options?.desiredColor)
+          ? options?.desiredColor
+          : [options?.desiredColor])
+          .flatMap((c) => String(c ?? "").split(","))
+          .map((c) => c.toLowerCase().trim())
+          .filter((c) => c.length > 0);
+        const inferredDesiredFromProducts = products
+          .flatMap((item) => {
+            const explain = ((item as any)?.explain ?? {}) as Record<string, unknown>;
+            const fromEffective = Array.isArray(explain.desiredColorsEffective)
+              ? (explain.desiredColorsEffective as unknown[])
+              : [];
+            const fromDesired = Array.isArray(explain.desiredColors)
+              ? (explain.desiredColors as unknown[])
+              : [];
+            return [...fromEffective, ...fromDesired];
+          })
+          .map((c) => String(c ?? "").toLowerCase().trim())
+          .filter((c) => c.length > 0);
+        const desiredColors = [...new Set([...optionDesiredColors, ...inferredDesiredFromProducts])];
+        const hasColorIntent = desiredColors.length > 0;
+        if (relevanceDebugEnabled) {
+          console.log(
+            `[relevance-debug] detection="${options?.detectionLabel ?? "unknown"}" category="tops" desiredColors=[${desiredColors.join(", ")}] hasColorIntent=${hasColorIntent}`,
+          );
+        }
+        const topsRescueFloor = Math.max(0.33, minRelevance - 0.13);
+        const rescueLimit = Math.max(1, Math.min(2, preserveCount));
+        const neutralColorRegex = /\b(white|off[\s-]?white|ivory|cream|beige|ecru|stone|taupe|nude|gray|grey|black|navy|blue|brown|pink|red|green|yellow|purple|orange)\b/i;
+        const desiredColorMatchers = desiredColors.map((token) => {
+          const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "[\\s-]+");
+          return new RegExp(`\\b${escaped}\\b`, "i");
+        });
+        const topsColorSafeRescue = sorted
+          .filter((item) => {
+            const relevance = Number((item as any)?.finalRelevance01 ?? 0);
+            if (relevance < topsRescueFloor) return false;
+            const explain = ((item as any)?.explain ?? {}) as Record<string, unknown>;
+            if (Boolean(explain.hardBlocked)) return false;
+            const contradictionPenalty = Number(explain.colorContradictionPenalty ?? 1);
+            if (Number.isFinite(contradictionPenalty) && contradictionPenalty < 0.75) return false;
+            const colorCompliance = Number(explain.colorCompliance ?? NaN);
+            const colorEvidence = [
+              explain.matchedColor,
+              (item as any)?.color,
+              (item as any)?.title,
+              (item as any)?.description,
+              (item as any)?.category,
+              (item as any)?.category_canonical,
+              Array.isArray((item as any)?.product_types) ? (item as any).product_types.join(" ") : (item as any)?.product_types,
+            ]
+              .filter((x) => x != null)
+              .map((x) => String(x))
+              .join(" ");
+            const hasDesiredColorHit =
+              desiredColorMatchers.length > 0 &&
+              desiredColorMatchers.some((rx) => rx.test(colorEvidence));
+            const hasStrongColorCompliance = Number.isFinite(colorCompliance) && colorCompliance >= 0.42;
+            const hasModerateColorCompliance = Number.isFinite(colorCompliance) && colorCompliance >= 0.32;
+            const topTypeHit = /\b(tops?|shirts?|blouses?|tees?|t-?shirts?|tshirts?|tanks?|camisoles?|polo(?:s)?|sweaters?|hoodies?|sweatshirts?|cardigans?|overshirts?|loungewear)\b/i.test(colorEvidence);
+            if (hasSevereAudienceContradiction(item)) return false;
+            if (hasColorIntent) {
+              return (topTypeHit && hasDesiredColorHit) || hasStrongColorCompliance;
+            }
+            return topTypeHit && (neutralColorRegex.test(colorEvidence) || hasModerateColorCompliance);
+          })
+          .slice(0, rescueLimit)
+          .map((item) => ({
+            ...item,
+            relevanceTopsColorRescue: true,
+          }));
+        if (topsColorSafeRescue.length > 0) {
+          console.log(
+            `[relevance-threshold-tops-rescue] preserved ${topsColorSafeRescue.length} product(s) for detection="${options?.detectionLabel ?? "unknown"}" floor=${topsRescueFloor.toFixed(3)} threshold=${minRelevance}`,
+          );
+          if (relevanceDebugEnabled) {
+            const selected = topsColorSafeRescue
+              .map((item) => String((item as any)?.id ?? "unknown"))
+              .join(", ");
+            console.log(
+              `[relevance-debug] detection="${options?.detectionLabel ?? "unknown"}" topsRescueSelected=[${selected}]`,
+            );
+          }
+          return topsColorSafeRescue;
+        }
+      }
       // Last-resort color-agnostic apparel rescue:
       // if tops/bottoms are fully collapsed by relevance+color gating, keep the best
       // type-compatible visual neighbors instead of returning an empty detection.
@@ -3810,6 +3969,7 @@ function applyRelevanceThresholdFilter(
             const exactType = Number(explain.exactTypeScore ?? 0);
             const typeCompliance = Number(explain.productTypeCompliance ?? 0);
             const minTypeFloor = categoryNorm === "tops" ? 0.12 : 0.18;
+            if (hasSevereAudienceContradiction(item)) return false;
             if (!(exactType >= 1 || typeCompliance >= minTypeFloor)) return false;
             if (hasSevereTopStyleContradiction(item)) return false;
             return true;
@@ -3832,10 +3992,10 @@ function applyRelevanceThresholdFilter(
     console.log(
       `[relevance-threshold-fallback] preserved ${recovered.length} product(s) for detection="${options?.detectionLabel ?? "unknown"}" category="${options?.category ?? "unknown"}" bestFinalRelevance01=${bestRelevance.toFixed(3)} threshold=${minRelevance}`,
     );
-    return rankBottomsByDesiredColor(recovered);
+    return rankApparelByDesiredColor(recovered);
   }
 
-  return rankBottomsByDesiredColor(filtered);
+  return rankApparelByDesiredColor(filtered);
 }
 
 function isCoreOutfitCategory(category: string | undefined): boolean {

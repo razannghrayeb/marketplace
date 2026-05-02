@@ -142,7 +142,9 @@ export function computeFinalRelevance01(params: {
   const attrScore = colorPart * 0.4 + stylePart * 0.15 + patternPart * 0.15 + sleevePart * 0.15 + audPart * 0.15;
   const attrFactor = 0.5 + attrScore * 0.5;
 
-  const crossFamilySoftFactor = Math.max(0, 1 - crossPen * 0.6);
+  const crossFamilySoftFactor = params.hasReliableTypeIntent === false
+    ? Math.max(0.72, 1 - crossPen * 0.25)
+    : Math.max(0, 1 - crossPen * 0.6);
   const intraFamilySoftFactor = params.hasTypeIntent
     ? params.tightSemanticCap
       ? Math.max(0.25, 1 - intraPen * 0.95)
@@ -217,6 +219,8 @@ export function scoreAudienceCompliance(
     ? hit._source.product_types.map((t) => String(t).toLowerCase()).join(" ")
     : "";
   const audienceBlob = `${title} ${category} ${canonical} ${productTypes}`;
+  const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|handbag|clutch|tote|purse|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt)\b/;
+  const menStyleCue = /\b(suit|suits|tie|oxford|oxfords|dress\s*shirt|button\s*down|button-down|briefs|boxer|boxers|cargo\s*pants?|chino|chinos|loafer|loafers|briefcase|messenger|sport\s*coat|blazer)\b/;
 
   let score = 1;
   let factors = 0;
@@ -247,13 +251,17 @@ export function scoreAudienceCompliance(
     factors += 1;
     if (!docG) {
       const hasKidsCue = /\b(kids?|child|children|boys?|girls?|toddler|baby|youth)\b/.test(audienceBlob);
+      const hasWomenStyleCue = womenStyleCue.test(audienceBlob);
+      const hasMenStyleCue = menStyleCue.test(audienceBlob);
       if (wantG === "men") {
         if (hasKidsCue) score *= 0;
+        else if (hasWomenStyleCue && !hasMenStyleCue) score *= 0.12;
         else if (/\b(men|mens|male)\b/.test(audienceBlob)) score *= 0.9;
         else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(audienceBlob)) score *= 0.28;
         else score *= 0.78;
       } else if (wantG === "women") {
         if (hasKidsCue) score *= 0;
+        else if (hasMenStyleCue && !hasWomenStyleCue) score *= 0.12;
         else if (/\b(women|womens|female|ladies|woman)\b/.test(audienceBlob)) score *= 0.9;
         else if (/\b(men|mens|male|man|boy|boys)\b/.test(audienceBlob)) score *= 0.28;
         else score *= 0.78;
@@ -364,6 +372,7 @@ export interface HitCompliance {
   hasTypeIntent?: boolean;
   hasColorIntent?: boolean;
   hasSleeveIntent?: boolean;
+  hasAudienceIntent?: boolean;
   hasLengthIntent?: boolean;
   typeGateFactor?: number;
   hardBlocked?: boolean;
@@ -482,23 +491,14 @@ function docSupportsSleeveIntent(src: Record<string, unknown>): boolean {
   ]
     .map((x) => String(x ?? "").toLowerCase())
     .join(" ");
-  if (!bag.trim()) return true;
-  // Bottoms have no sleeves — do not score sleeve compliance (avoids misleading 0 on pants).
-  // Use "shorts" not "short" so "short sleeve" / "short dress" on tops & dresses still get sleeve/length logic.
-  if (
-    /\b(pant|pants|trouser|trousers|jean|jeans|shorts|skirt|skirts|legging|leggings|jogger|joggers|chino|chinos|cargo|cargos|bottom|bottoms)\b/.test(
-      bag,
-    )
-  ) {
+
+  if (!bag.trim()) return false;
+
+  if (/\b(pant|pants|trouser|trousers|jean|jeans|shorts|skirt|skirts|legging|leggings|jogger|joggers|chino|chinos|cargo|cargos|bottom|bottoms|shoe|shoes|sneaker|sneakers|boot|boots|sandal|sandals|heel|heels|loafer|loafers|bag|bags|wallet|wallets|belt|belts|hat|hats|cap|caps|scarf|scarves|jewelry|jewellery|ring|rings|earring|earrings|necklace|necklaces|bracelet|bracelets)\b/.test(bag)) {
     return false;
   }
-  if (/\b(shoe|shoes|sneaker|sneakers|boot|boots|sandal|sandals|heel|heels|loafer|loafers)\b/.test(bag)) {
-    return false;
-  }
-  if (/\b(bag|bags|wallet|wallets|belt|belts|hat|hats|cap|caps|scarf|scarves|jewelry|jewellery|ring|rings|earring|earrings|necklace|necklaces|bracelet|bracelets)\b/.test(bag)) {
-    return false;
-  }
-  return true;
+
+  return /\b(dress|dressy|top|shirt|shirts|blouse|blouses|tee|t-?shirt|tank|camisole|cami|sweater|sweaters|cardigan|cardigans|hoodie|hoodies|jacket|jackets|coat|coats|blazer|blazers|outerwear|suit|suits|romper|jumpsuit|vest)\b/.test(bag);
 }
 
 function rawColorList(...parts: unknown[]): string[] {
@@ -625,6 +625,7 @@ export function computeHitRelevance(
     attrColorsRaw,
     attrText,
     attrImg,
+    hit?._source?.color,
     hit?._source?.color_primary_canonical,
     hit?._source?.color_secondary_canonical,
     hit?._source?.color_accent_canonical,
@@ -1076,19 +1077,31 @@ export function computeHitRelevance(
   ]
     .map((x) => String(x).toLowerCase())
     .join(" ");
+  const isTopLikeIntent =
+    /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|overshirt|overshirts|polo|polos|loungewear)\b/.test(
+      intentBlob,
+    );
   const isBottomLikeIntent =
     /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts?|skirt|skirts|leggings?)\b/.test(intentBlob);
   const isFootwearLikeIntent =
     /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(intentBlob);
-  if (hasColorIntentForFinalRelevance && (isBottomLikeIntent || isFootwearLikeIntent)) {
+
+  // Detect explicit suit queries and relax color gating so coordinated
+  // trousers/dress-pants and shoes surface alongside jackets.
+  const suitIntent = /\b(suit|suits|two[-\s]?piece|three[-\s]?piece|matching\s*suit)\b/.test(intentBlob);
+
+  if (hasColorIntentForFinalRelevance && (isTopLikeIntent || isBottomLikeIntent || isFootwearLikeIntent)) {
+    const suitRelax = suitIntent;
+    const noneTierLimit = suitRelax ? (isBottomLikeIntent ? 0.16 : isTopLikeIntent ? 0.18 : 0.12) : (isBottomLikeIntent ? 0.06 : isTopLikeIntent ? 0.08 : 0.08);
+    const lowComplianceLimit = suitRelax ? (isBottomLikeIntent ? 0.2 : isTopLikeIntent ? 0.22 : 0.18) : (isBottomLikeIntent ? 0.1 : isTopLikeIntent ? 0.12 : 0.12);
+    const bucketLimit = suitRelax ? (isBottomLikeIntent ? 0.5 : 0.56) : (isBottomLikeIntent ? 0.32 : 0.36);
+
     if (colorTier === "none") {
-      finalRelevance01 = Math.min(finalRelevance01, isBottomLikeIntent ? 0.06 : 0.08);
+      finalRelevance01 = Math.min(finalRelevance01, noneTierLimit);
     } else if (colorCompliance < 0.2) {
-      finalRelevance01 = Math.min(finalRelevance01, isBottomLikeIntent ? 0.1 : 0.12);
-    } else if (isBottomLikeIntent && colorTier === "bucket") {
-      // Bottom color is high-value for perceived similarity; bucket-level match is
-      // acceptable but should not be treated as near-exact.
-      finalRelevance01 = Math.min(finalRelevance01, 0.32);
+      finalRelevance01 = Math.min(finalRelevance01, lowComplianceLimit);
+    } else if ((isBottomLikeIntent || isTopLikeIntent) && colorTier === "bucket") {
+      finalRelevance01 = Math.min(finalRelevance01, bucketLimit);
     }
   }
 
@@ -1115,6 +1128,35 @@ export function computeHitRelevance(
     if (promptAnchoredTypeIntent && hasTypeIntent && productTypeCompliance < 0.3) {
       finalRelevance01 = Math.min(finalRelevance01, 0.04);
     }
+  }
+
+  // Hard filter: when the user is searching for "short" (sleeve/shorts intent)
+  // but did NOT ask for swimwear, exclude swimwear listings completely.
+  let swimBlocked = false;
+  try {
+    const swimRegex = /\b(swim|swimwear|swimsuit|bikini|one[-\s]?piece|tankini|trunks|boardshorts?|board[-\s]?shorts?|swimshorts?|swim[-\s]?short)\b/;
+    const docBlobForSwim = [src.category, src.category_canonical, src.title, ...(Array.isArray(productTypes) ? productTypes : [])]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    const docIsSwim = swimRegex.test(docBlobForSwim);
+
+    const userAskedSwim = Boolean(
+      (mergedCategory && swimRegex.test(String(mergedCategory).toLowerCase())) ||
+        (Array.isArray(astCategories) && astCategories.some((c) => swimRegex.test(String(c).toLowerCase()))) ||
+        (Array.isArray(desiredProductTypes) && desiredProductTypes.some((t) => swimRegex.test(String(t).toLowerCase()))) ||
+        (String(lexicalMatchQuery ?? "").toLowerCase().includes("swim"))
+    );
+
+    const userSearchingShort = Boolean(wantedSleeve === "short" || /\bshorts?\b/.test(String(lexicalMatchQuery ?? "").toLowerCase()) || (Array.isArray(desiredProductTypes) && desiredProductTypes.some((t) => /shorts?/.test(String(t).toLowerCase()))));
+
+    if (userSearchingShort && docIsSwim && !userAskedSwim) {
+      finalRelevance01 = 0;
+      swimBlocked = true;
+    }
+  } catch (e) {
+    // Non-fatal: if anything goes wrong, don't crash relevance computation.
+    swimBlocked = false;
   }
 
   return {
@@ -1144,8 +1186,12 @@ export function computeHitRelevance(
     hasTypeIntent,
     hasColorIntent: hasColorIntentForFinalRelevance,
     hasSleeveIntent: hasSleeveIntentForDoc,
+    hasAudienceIntent,
     typeGateFactor,
-    hardBlocked: hardBlocked || negationBlocked,
+    hardBlocked: hardBlocked || negationBlocked || swimBlocked,
+    // swimBlocked: true when a swimwear hit was zeroed due to short/shorts intent
+    // without explicit swim intent from the user.
+    // Included in `hardBlocked` above via `swimBlocked` variable.
     lexicalScoreDistinct,
   };
 }

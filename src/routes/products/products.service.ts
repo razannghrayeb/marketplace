@@ -2379,11 +2379,15 @@ function hasOppositeGenderSignalForQuery(
 
   const menRe = /\b(men|mens|male|man|gents?|gentlemen)\b/;
   const womenRe = /\b(women|womens|female|lady|ladies|woman)\b/;
+  const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|handbag|clutch|tote|purse|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt)\b/;
+  const menStyleCue = /\b(suit|suits|tie|oxford|oxfords|dress\s*shirt|button\s*down|button-down|briefs|boxer|boxers|cargo\s*pants?|chino|chinos|loafer|loafers|briefcase|messenger|sport\s*coat|blazer)\b/;
   const hasMenCue = menRe.test(blob);
   const hasWomenCue = womenRe.test(blob);
+  const hasWomenStyleCue = womenStyleCue.test(blob);
+  const hasMenStyleCue = menStyleCue.test(blob);
 
-  if (queryGender === "men") return hasWomenCue && !hasMenCue;
-  if (queryGender === "women") return hasMenCue && !hasWomenCue;
+  if (queryGender === "men") return (hasWomenCue || hasWomenStyleCue) && !(hasMenCue || hasMenStyleCue);
+  if (queryGender === "women") return (hasMenCue || hasMenStyleCue) && !(hasWomenCue || hasWomenStyleCue);
   return false;
 }
 
@@ -8415,12 +8419,15 @@ export async function searchByImageWithSimilarity(
   }
 
   // Always sort by finalRelevance01 descending as the primary signal.
-  // For visual-primary (broad) searches, use similarity_score as a tie-breaker
-  // only when finalRelevance01 values are very close.
+  // Break ties with product-type compliance before falling back to raw visual
+  // similarity so weaker-but-sharper visuals do not jump ahead of better matches.
   results.sort((a: any, b: any) => {
     const fa = a.finalRelevance01 ?? 0;
     const fb = b.finalRelevance01 ?? 0;
     if (Math.abs(fb - fa) > 1e-6) return fb - fa;
+    const ta = Number(a?.explain?.productTypeCompliance ?? 0);
+    const tb = Number(b?.explain?.productTypeCompliance ?? 0);
+    if (Math.abs(tb - ta) > 1e-6) return tb - ta;
     if (imageSearchVisualPrimaryRanking) {
       const vs = (b.similarity_score ?? 0) - (a.similarity_score ?? 0);
       if (Math.abs(vs) > 1e-6) return vs;
