@@ -4676,7 +4676,8 @@ export async function searchByImageWithSimilarity(
       });
     }
 
-    results = (dedupeImageSearchResults(results as any) as ProductResult[]).slice(0, limit);
+    const dedupedDebug = (dedupeImageSearchResults(results as any) as ProductResult[]);
+    results = sortProductsByRelevanceAndCategory(dedupedDebug).slice(0, limit);
 
     let related: ProductResult[] = [];
     if (includeRelated && pHash) {
@@ -8333,18 +8334,15 @@ export async function searchByImageWithSimilarity(
       })
       : resultsBeforeFinalRelevanceFilter;
     const fallbackPool = topFocusedFallback.length > 0 ? topFocusedFallback : resultsBeforeFinalRelevanceFilter;
-    results = sortProductsByRelevanceAndCategory(
-      fallbackPool
-        .map((p: any) => {
-          const currentRel = typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : 0;
-          const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
-          return {
-            ...p,
-            finalRelevance01: Math.max(currentRel, sim * 0.85, effectiveFinalAcceptMin),
-          };
-        })
-        .slice(0, limit)
-    ) as ProductResult[];
+    const fallbackMapped = fallbackPool.map((p: any) => {
+      const currentRel = typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : 0;
+      const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+      return {
+        ...p,
+        finalRelevance01: Math.max(currentRel, sim * 0.85, effectiveFinalAcceptMin),
+      };
+    });
+    results = sortProductsByRelevanceAndCategory(fallbackMapped).slice(0, limit) as ProductResult[];
   }
 
   if (hasDetectionAnchoredTypeIntent) {
@@ -8674,7 +8672,7 @@ export async function searchByImageWithSimilarity(
           })),
         };
       }) as ProductResult[];
-      results = [...rescued, ...results].slice(0, limit);
+      results = [...rescued, ...results];
       exactInjected = true;
     }
     finalizeExactPhashMs = Date.now() - exactPhashT0;
@@ -8694,7 +8692,7 @@ export async function searchByImageWithSimilarity(
             finalRelevance01: boosted,
           };
         }) as ProductResult[];
-        results = [...rescuedNearExact, ...results].slice(0, limit);
+        results = [...rescuedNearExact, ...results];
       }
       finalizeNearExactMs = Date.now() - nearExactT0;
     }
@@ -8792,6 +8790,14 @@ export async function searchByImageWithSimilarity(
       },
       timing,
     });
+  }
+
+  // Ensure final ordering after any rescue/injection steps (pHash, near-exact, related)
+  try {
+    results = sortProductsByRelevanceAndCategory(results).slice(0, limit);
+  } catch (e) {
+    // Defensive: sorting should not throw; log and continue with current order
+    console.warn('[search-image] final sort failed:', (e as Error).message);
   }
 
   return {

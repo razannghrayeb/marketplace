@@ -1960,7 +1960,10 @@ function hardCategoryTermsForDetection(
   if (categoryMapping.productCategory === "outerwear") {
     if (hasCaptionSuitCue) {
       const tailoredTerms = getCategorySearchTerms("tailored").map((t) => String(t).toLowerCase().trim());
-      return tailoredTerms.length > 0 ? tailoredTerms : baseTerms;
+      // Suit listings are often indexed as outerwear, so keep both formalwear and
+      // outerwear vocabulary in the recall set rather than narrowing to tailored only.
+      const merged = [...new Set([...tailoredTerms, ...baseTerms])];
+      return merged.length > 0 ? merged : baseTerms;
     }
     const isVestLike = /\bvest\b|\bgilet\b|\bwaistcoat\b/.test(l);
     const isBlazerLike = /\b(blazer|blazers|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket)\b/.test(l);
@@ -8268,6 +8271,14 @@ export class ImageAnalysisService {
     const relevanceFilteredResults = finalGroupedResults.map((detection) => {
       const beforeProducts = Array.isArray(detection.products) ? detection.products : [];
       const categoryNorm = String(detection.category ?? "").toLowerCase().trim();
+      const appliedCategoryText = Array.isArray((detection.appliedFilters as any)?.category)
+        ? (detection.appliedFilters as any).category.join(" ")
+        : String((detection.appliedFilters as any)?.category ?? "");
+      const suitCaptionTailoredFallback =
+        categoryNorm === "outerwear" &&
+        /\b(tailored|suit|suits|tuxedo|tuxedos|waistcoat|waistcoats|vest|vests|gilet|gilets|structured\s+jacket|tailored\s+jacket)\b/.test(
+          appliedCategoryText.toLowerCase(),
+        );
       const detectionMinRelevanceThreshold =
         categoryNorm === "tops"
           ? Math.min(minRelevanceThreshold, 0.3)
@@ -8277,8 +8288,10 @@ export class ImageAnalysisService {
               ? Math.min(minRelevanceThreshold, 0.28)
               : categoryNorm === "footwear"
                 ? Math.min(minRelevanceThreshold, 0.28)
+                : suitCaptionTailoredFallback
+                  ? Math.min(minRelevanceThreshold, 0.28)
                 : minRelevanceThreshold;
-      const preserveCountForDetection = isCoreOutfitCategory(detection.category)
+      const preserveCountForDetection = (isCoreOutfitCategory(detection.category) || suitCaptionTailoredFallback)
         ? Math.min(3, Math.max(1, Math.floor(resolvedLimitPerItem * 0.12)))
         : 0;
       const inferredDesiredColor = (() => {
@@ -8299,7 +8312,7 @@ export class ImageAnalysisService {
         );
       }
       const afterProducts = applyRelevanceThresholdFilter(beforeProducts, detectionMinRelevanceThreshold, {
-        preserveAtLeastOne: isCoreOutfitCategory(detection.category),
+        preserveAtLeastOne: isCoreOutfitCategory(detection.category) || suitCaptionTailoredFallback,
         preserveAtLeastCount: preserveCountForDetection,
         detectionLabel: detection.detection?.label,
         category: detection.category,
@@ -9943,7 +9956,17 @@ export class ImageAnalysisService {
 
     const relevanceFilteredResultsSel = finalGroupedResults.map((detection) => {
       const beforeProducts = Array.isArray(detection.products) ? detection.products : [];
+      const categoryNorm = String(detection.category ?? "").toLowerCase().trim();
+      const appliedCategoryText = Array.isArray((detection.appliedFilters as any)?.category)
+        ? (detection.appliedFilters as any).category.join(" ")
+        : String((detection.appliedFilters as any)?.category ?? "");
+      const suitCaptionTailoredFallback =
+        categoryNorm === "outerwear" &&
+        /\b(tailored|suit|suits|tuxedo|tuxedos|waistcoat|waistcoats|vest|vests|gilet|gilets|structured\s+jacket|tailored\s+jacket)\b/.test(
+          appliedCategoryText.toLowerCase(),
+        );
       const preserveCountForDetection = isCoreOutfitCategory(detection.category)
+        || suitCaptionTailoredFallback
         ? Math.min(3, Math.max(1, Math.floor(resolvedLimitPerItem * 0.12)))
         : 0;
       const inferredDesiredColor = (() => {
@@ -9962,7 +9985,7 @@ export class ImageAnalysisService {
         `[relevance-debug-sel] detection="${detection.detection?.label ?? "unknown"}" category="${detection.category}" desiredColor="${String(inferredDesiredColor ?? "")}" source=${(detection.appliedFilters as any)?.color ? "explicit" : "inferred_or_none"}`,
       );
       const afterProducts = applyRelevanceThresholdFilter(beforeProducts, minRelevanceThresholdSel, {
-        preserveAtLeastOne: isCoreOutfitCategory(detection.category),
+        preserveAtLeastOne: isCoreOutfitCategory(detection.category) || suitCaptionTailoredFallback,
         preserveAtLeastCount: preserveCountForDetection,
         detectionLabel: detection.detection?.label,
         category: detection.category,

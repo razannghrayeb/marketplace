@@ -115,6 +115,24 @@ function buildHybridScoreRecallStats(hits: any[]): HybridScoreRecallStats | unde
   };
 }
 
+function hasActualSuitCatalogCue(src: Record<string, unknown>): boolean {
+  const blob = [
+    src.title,
+    src.description,
+    src.category,
+    src.category_canonical,
+    Array.isArray(src.product_types) ? src.product_types.join(" ") : src.product_types,
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x))
+    .join(" ")
+    .toLowerCase();
+  if (!blob.trim()) return false;
+  if (!/\b(suit|suits|tuxedo|tuxedos)\b/.test(blob)) return false;
+  const blobWithoutSuitJacket = blob.replace(/\bsuit jacket\b/g, "");
+  return /\bsuits?\b/.test(blobWithoutSuitJacket) || /\btuxedo\b/.test(blob);
+}
+
 // ─── Shared types ────────────────────────────────────────────────────────────
 
 export interface SearchFilters {
@@ -1987,32 +2005,12 @@ export async function textSearch(
     // behind lexicographic category order before the final top-k slice.
     results = sortProductsByFinalRelevance(results);
 
-    // Suit-specific post-filter: when the query clearly targets suits (not blazers/jackets),
-    // keep full suit items and formal bottoms while excluding jacket-family and casual bottoms.
+    // Suit-specific post-filter: when the query clearly targets suits, keep only products
+    // that have an actual suit/tuxedo catalog cue after hydration.
     const hasSuitTextIntent = desiredProductTypes.some((t) => /\b(suits?|tuxedo)\b/.test(t));
     if (hasSuitTextIntent && results.length > 0) {
-      const suitResults = results.filter((p: any) => {
-        const titleBlob = String(p.title ?? "").toLowerCase();
-        const catBlob = String(p.category ?? "").toLowerCase();
-        const allText = `${titleBlob} ${catBlob}`;
-        const isJacketLike = /\b(blazer|jacket|jackets|sport\s*coat|sportcoat)\b/.test(titleBlob);
-        if (isJacketLike) return false;
-
-        // If it's bottoms, allow formal types (dress pants, trousers, slacks) even if the listing
-        // does not literally contain the word "suit". Exclude casual bottoms (cargo, work, utility).
-        const isBottoms = /\b(bottoms|pants|trousers|slacks)\b/.test(catBlob);
-        if (isBottoms) {
-          const isFormalBottoms = /\b(dress\s*pants?|trousers?|slacks?|suit\s*pants?|formal|business)\b/.test(titleBlob);
-          const isCasualBottoms = /\b(cargo|work\s*pants?|utility|chinos|khaki|jogger|sweatpants|casual)\b/.test(titleBlob);
-          return isFormalBottoms && !isCasualBottoms;
-        }
-
-        // Non-bottom suit items still need an explicit suit/tuxedo cue.
-        if (!/\b(suits?|tuxedo)\b/.test(allText)) return false;
-        
-        return true;
-      });
-      if (suitResults.length >= 3) results = suitResults;
+      const suitResults = results.filter((p: any) => hasActualSuitCatalogCue((p as any) ?? {}));
+      results = suitResults;
     }
     // For men's suit queries, also filter out women's products (audienceCompliance hard gate).
     if (hasSuitTextIntent && queryGenderForAudience === "men" && results.length > 0) {
