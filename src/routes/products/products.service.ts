@@ -60,6 +60,7 @@ import {
 import { attrGenderFilterClause } from "./opensearchFilters";
 import type { SearchResultWithRelated } from "./types";
 import { findRelatedProducts } from "../../lib/search/relatedProducts";
+import { computeColorContradictionPenalty as computeColorContradictionPenaltyCore } from "./colorRelevance";
 import { createHash } from "crypto";
 
 // ============================================================================
@@ -783,8 +784,19 @@ function collapseVariantGroups(results: ProductResult[]): {
     representatives.push(representative);
   }
 
+  // Sort final results by finalRelevance01 descending (highest to lowest)
+  const allResults = [...passthrough, ...representatives].sort((a, b) => {
+    const fa = Number(a.finalRelevance01 ?? 0);
+    const fb = Number(b.finalRelevance01 ?? 0);
+    if (Math.abs(fb - fa) > 1e-6) return fb - fa;
+    const sa = Number(a.similarity_score ?? 0);
+    const sb = Number(b.similarity_score ?? 0);
+    if (Math.abs(sb - sa) > 1e-6) return sb - sa;
+    return Number(b.rerankScore ?? 0) - Number(a.rerankScore ?? 0);
+  });
+
   return {
-    results: [...passthrough, ...representatives],
+    results: allResults,
     groupCount,
     representativeCount: passthrough.length + representatives.length,
   };
@@ -1481,7 +1493,7 @@ function computeExplicitFinalRelevance(params: {
   typeMatch: boolean;
   catSoft: number;
   colorMatch: number;
-  colorTier?: "exact" | "family" | "bucket" | "none";
+  colorTier?: "exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none";
   styleMatch: number;
   sleeveMatch: number;
   lengthMatch: number;
@@ -1679,11 +1691,13 @@ function computeExplicitFinalRelevance(params: {
     colorIntentStrength > 0
       ? colorTier === "exact"
         ? 1.06 + 0.04 * colorIntentStrength
-        : colorTier === "family"
-          ? 1.06 + 0.05 * colorIntentStrength
-          : colorTier === "bucket"
-            ? 0.88 - 0.06 * colorIntentStrength
-            : 0.74 - 0.12 * colorIntentStrength
+        : (colorTier === "light-shade" || colorTier === "dark-shade")
+          ? 1.04 + 0.045 * colorIntentStrength
+          : colorTier === "family"
+            ? 1.06 + 0.05 * colorIntentStrength
+            : colorTier === "bucket"
+              ? 0.88 - 0.06 * colorIntentStrength
+              : 0.74 - 0.12 * colorIntentStrength
       : 1;
 
   // ── Intent coverage gate ─────────────────────────────────────────
@@ -3158,54 +3172,23 @@ function computeColorContradictionPenalty(params: {
   nearIdenticalRawMin: number;
   hit: { _source?: Record<string, unknown> };
 }): number {
-  if (!Array.isArray(params.desiredColorsTier) || params.desiredColorsTier.length === 0) return 1;
-
   const docColors = docColorPaletteForHit(params.hit);
-  if (docColors.length === 0) return 1;
-
-  const tier = tieredColorListCompliance(
-    params.desiredColorsTier,
-    docColors,
-    params.rerankColorMode,
-  );
   const bucketOnlyConflict = hasBucketOnlyColorConflict(
     params.desiredColorsTier,
     docColors,
     params.rerankColorMode,
   );
-  if ((tier?.compliance ?? 0) > 0 && !bucketOnlyConflict) return 1;
-
-  if (bucketOnlyConflict) {
-    if (params.rawVisual >= params.nearIdenticalRawMin) {
-      if (params.hasExplicitColorIntent) return 0.82;
-      if (params.hasInferredColorSignal) return 0.88;
-      if (params.hasCropColorSignal) return 0.92;
-      return 0.94;
-    }
-    if (params.hasExplicitColorIntent) return 0.72;
-    if (params.hasInferredColorSignal) return 0.8;
-    if (params.hasCropColorSignal) return 0.86;
-    return 0.9;
-  }
-
-  // Hard color contradiction (different color family entirely, e.g. searching gray/black,
-  // product is red/green). Apply meaningful visual score penalty so non-neutral wrong-color
-  // products don't surface above correctly-colored items.
-  if (params.rawVisual >= params.nearIdenticalRawMin) {
-    // Near-identical products are differentiated almost entirely by color/attributes.
-    // A strong penalty here ensures a wrong-color near-duplicate ranks below a right-color one.
-    if (params.hasExplicitColorIntent) return 0.62;
-    if (params.hasInferredColorSignal) return 0.72;
-    if (params.hasCropColorSignal) return 0.86;
-    return 1;
-  }
-
-  // Non-near-identical: still penalize but allow some visibility for visually similar items
-  // that differ only in color (e.g. same style, different color family entirely).
-  if (params.hasExplicitColorIntent) return 0.52;
-  if (params.hasInferredColorSignal) return 0.66;
-  if (params.hasCropColorSignal) return 0.82;
-  return 1;
+  return computeColorContradictionPenaltyCore({
+    desiredColorsTier: params.desiredColorsTier,
+    rerankColorMode: params.rerankColorMode,
+    hasExplicitColorIntent: params.hasExplicitColorIntent,
+    hasInferredColorSignal: params.hasInferredColorSignal,
+    hasCropColorSignal: params.hasCropColorSignal,
+    rawVisual: params.rawVisual,
+    nearIdenticalRawMin: params.nearIdenticalRawMin,
+    docColors,
+    bucketOnlyConflict,
+  });
 }
 
 function computeBatchCompositeInfluence(
@@ -6852,8 +6835,23 @@ export async function searchByImageWithSimilarity(
           const minAudienceCompliance = filtersAny.gender ? 0.75 : 0.55;
           if ((comp.audienceCompliance ?? 1) < minAudienceCompliance) return false;
           if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
-          const fallbackTypeFloor = params.detectionProductCategory === "tops" ? 0.14 : 0.22;
-          if ((comp.exactTypeScore ?? 0) < 1 && (comp.productTypeCompliance ?? 0) < fallbackTypeFloor) return false;
+          // CRITICAL FIX: Allow sparse-metadata products to be rescued by visual similarity.
+          // Only enforce strict type floor if product has explicit product_types metadata.
+          // If product_types is empty/sparse (productTypeCompliance=0), allow rescue if visual is strong.
+          const typeComp = comp.productTypeCompliance ?? 0;
+          const exactType = comp.exactTypeScore ?? 0;
+          const visualSim = visualSimFromHit(h);
+          const hasSparseProductTypeMetadata = exactType < 1 && typeComp < 0.08;
+          if (hasSparseProductTypeMetadata) {
+            // Sparse metadata (no explicit product_types): allow if visual similarity is strong enough
+            // This prevents valid candidates from being rejected solely due to missing metadata
+            const sparseMetadataVisualFloor = params.detectionProductCategory === "tops" ? 0.68 : 0.70;
+            if (visualSim < sparseMetadataVisualFloor) return false;
+          } else {
+            // Product has explicit type metadata: apply strict floor
+            const fallbackTypeFloor = params.detectionProductCategory === "tops" ? 0.14 : 0.22;
+            if (exactType < 1 && typeComp < fallbackTypeFloor) return false;
+          }
           if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < fallbackSleeveMin) return false;
           if (hasExplicitColorIntent && (comp.colorCompliance ?? 0) < 0.18) return false;
           const inferredFallbackColorFloor =
@@ -6924,11 +6922,17 @@ export async function searchByImageWithSimilarity(
       if (comp) {
         if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) continue;
         if (shouldSuppressAthleticCandidates && isAthleticCatalogCandidate(h._source ?? {})) continue;
+        const v = visualSimFromHit(h);
         if (hasDetectionAnchoredTypeIntent) {
           const typeComp = comp.productTypeCompliance ?? 0;
           const exactType = comp.exactTypeScore ?? 0;
           const rescueTypeFloor = params.detectionProductCategory === "tops" ? 0.08 : 0.16;
-          if (exactType < 1 && typeComp < rescueTypeFloor) continue;
+          // FIX: Allow sparse-metadata products (typeComp ~0) if visual is strong enough.
+          // This prevents rejecting visually similar items that just lack product_types metadata.
+          const hasSparseMetadata = exactType < 1 && typeComp < 0.08;
+          const sparseVisualFloor = params.detectionProductCategory === "tops" ? 0.68 : 0.70;
+          if (!hasSparseMetadata && exactType < 1 && typeComp < rescueTypeFloor) continue;
+          if (hasSparseMetadata && v < sparseVisualFloor) continue;
           if ((comp.crossFamilyPenalty ?? 0) >= 0.62) continue;
         }
         // Shoes: color is highly visible and a primary differentiator between styles.
@@ -6936,18 +6940,19 @@ export async function searchByImageWithSimilarity(
         // Raise the inferred-signal floor from 0.08 to 0.28 so wrong-color shoes are filtered.
         const footwearColorFloor = hasExplicitColorIntent ? 0.42 : hasInferredColorSignal ? 0.28 : 0.10;
         if (hasColorPreferenceForRanking && isFootwearDetectionIntent && (comp.colorCompliance ?? 0) < footwearColorFloor) continue;
-        const v = visualSimFromHit(h);
         const existing = comp.finalRelevance01 ?? 0;
         const colorComp = Math.max(0, Math.min(1, comp.colorCompliance ?? 0));
         const colorTier = String(comp.colorTier ?? "none").toLowerCase();
         const colorTierFactor =
           colorTier === "exact"
             ? 1.12
-            : colorTier === "family"
-              ? 1.05
-              : colorTier === "bucket"
-                ? 0.94
-                : 0.8;
+            : (colorTier === "light-shade" || colorTier === "dark-shade")
+              ? 1.08
+              : colorTier === "family"
+                ? 1.05
+                : colorTier === "bucket"
+                  ? 0.94
+                  : 0.8;
         const colorLift = hasColorIntentForFinal
           ? (0.58 + 0.42 * colorComp) * colorTierFactor
           : hasInferredColorIntentForRescue
@@ -8204,6 +8209,7 @@ export async function searchByImageWithSimilarity(
             ? (hasExplicitColorIntent ? 0.46 : 0.42)
             : (hasExplicitColorIntent ? 0.42 : 0.28);
           if (colorTier === "exact" && colorCompliance < 0.24) return false;
+          if ((colorTier === "light-shade" || colorTier === "dark-shade") && colorCompliance < 0.38) return false;
           if (colorTier === "family" && colorCompliance < 0.46) return false;
           if (colorTier === "bucket" && colorCompliance < 0.58) return false;
           if (colorTier === "none" && colorCompliance < 0.34) return false;
@@ -8419,19 +8425,38 @@ export async function searchByImageWithSimilarity(
   }
 
   // Always sort by finalRelevance01 descending as the primary signal.
-  // Break ties with product-type compliance before falling back to raw visual
-  // similarity so weaker-but-sharper visuals do not jump ahead of better matches.
+  // Tie-breaker: for detection-anchored `bottoms` or `tops`, prefer strong
+  // visual similarity early so visually-correct items (e.g. pants) are not
+  // demoted by metadata-only signals. Otherwise prefer product-type
+  // compliance then (optionally) raw visual similarity.
   results.sort((a: any, b: any) => {
     const fa = a.finalRelevance01 ?? 0;
     const fb = b.finalRelevance01 ?? 0;
     if (Math.abs(fb - fa) > 1e-6) return fb - fa;
+
+    const simA = Number(a.similarity_score ?? 0);
+    const simB = Number(b.similarity_score ?? 0);
+
+    // Detection-aware early visual preference for bottoms/tops.
+    if (detectionCategoryForFinalGate === "bottoms" || detectionCategoryForFinalGate === "tops") {
+      // Slightly different thresholds per category to be conservative for tops.
+      const simThreshold = detectionCategoryForFinalGate === "bottoms" ? 0.82 : 0.85;
+      if (simA >= simThreshold || simB >= simThreshold) {
+        const vs = simB - simA;
+        if (Math.abs(vs) > 1e-6) return vs;
+      }
+    }
+
     const ta = Number(a?.explain?.productTypeCompliance ?? 0);
     const tb = Number(b?.explain?.productTypeCompliance ?? 0);
     if (Math.abs(tb - ta) > 1e-6) return tb - ta;
+
+    // Fall back to visual similarity when broad visual-first ranking is enabled.
     if (imageSearchVisualPrimaryRanking) {
-      const vs = (b.similarity_score ?? 0) - (a.similarity_score ?? 0);
+      const vs = simB - simA;
       if (Math.abs(vs) > 1e-6) return vs;
     }
+
     return 0;
   });
 

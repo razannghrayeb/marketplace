@@ -35,20 +35,70 @@ export const FASHION_CANONICAL_COLORS = [
 
 export type FashionCanonicalColor = (typeof FASHION_CANONICAL_COLORS)[number];
 
-/** Groups of canonicals that should score as strong family matches (not collapsed to one token). */
+/**
+ * Ultra-granular shade groups: organized by specific shade names.
+ * Tier structure: exact > light-shade > dark-shade > family > bucket > none
+ *
+ * Light-shade tiers (pale, soft, light variants):
+ * - "light-blue", "sky-blue", "powder-blue", "baby-blue" (for blue family)
+ *
+ * Dark-shade tiers (deep, dark, rich variants):
+ * - "navy", "midnight-blue", "indigo", "sapphire" (for blue family)
+ *
+ * Families remain broader for fallback matching.
+ */
 export const COLOR_FAMILY_GROUPS: string[][] = [
-  ["off-white", "cream", "ivory", "white", "ecru", "eggshell"],
-  ["navy", "blue", "light-blue", "cobalt", "denim", "midnight-blue", "royal-blue", "baby-blue", "sky-blue", "powder-blue", "indigo", "sapphire"],
-  ["charcoal", "gray", "grey", "heather-gray", "silver"],
-  ["burgundy", "red", "wine", "maroon", "cherry", "crimson", "scarlet"],
-  ["camel", "beige", "tan", "taupe", "khaki"],
-  ["olive", "green", "sage", "mint", "forest-green", "army-green", "hunter-green", "emerald", "moss"],
-  ["pink", "fuchsia", "fuschia", "fushia", "fuhsia", "magenta", "rose", "hot-pink", "blush", "dusty-pink", "dusty-rose", "salmon"],
-  ["purple", "violet", "plum", "lavender", "lilac", "mauve", "grape", "orchid"],
-  ["gold", "yellow", "mustard", "lemon", "canary"],
-  ["brown", "chocolate", "mocha", "caramel", "cognac"],
-  ["orange", "coral", "rust", "terracotta", "peach", "burnt-orange", "amber"],
-  ["teal", "turquoise", "aqua", "cyan", "peacock"],
+  // White family: very light neutrals
+  ["white", "off-white", "cream", "ivory", "ecru", "eggshell"],
+  
+  // Blue family - split into granular shade groups
+  ["light-blue", "sky-blue", "powder-blue", "baby-blue", "pale-blue"],  // light shades
+  ["blue", "cobalt", "royal-blue", "denim", "periwinkle"],               // mid shades
+  ["navy", "midnight-blue", "indigo", "sapphire", "dark-blue"],          // dark shades
+  
+  // Gray/Charcoal family
+  ["silver", "gray", "grey", "heather-gray", "ash"],                     // light gray
+  ["charcoal", "dark-gray", "dark-grey", "slate", "gunmetal"],           // dark gray
+  
+  // Red family - split into tones
+  ["cherry", "scarlet", "crimson", "bright-red", "tomato"],              // bright reds
+  ["burgundy", "maroon", "wine", "claret", "oxblood", "garnet"],         // deep reds
+  
+  // Pink family - split into tones
+  ["blush", "dusty-rose", "dusty-pink", "rose", "mauve"],                // soft pinks
+  ["hot-pink", "fuchsia", "magenta", "fuschia", "bright-pink"],          // bright pinks
+  ["salmon", "coral", "peachy-pink", "apricot", "terracotta"],           // warm pinks
+  
+  // Purple family
+  ["lavender", "lilac", "periwinkle", "pale-purple", "mauve"],           // light purples
+  ["purple", "violet", "plum", "orchid", "grape", "aubergine"],          // deep purples
+  
+  // Green family - split into undertones
+  ["mint", "light-green", "sage", "seafoam", "pale-green"],              // light/soft greens
+  ["green", "forest-green", "hunter-green", "kelly-green", "pine"],      // mid greens
+  ["olive", "moss", "army-green", "khaki", "sage-green", "darkgreen"],   // earthy/dark greens
+  ["emerald", "teal-green", "aqua-green"],                               // jewel-tone greens
+  
+  // Brown/Camel family - split into undertones
+  ["beige", "tan", "light-brown", "camel", "cream-brown", "sand"],       // light browns
+  ["brown", "chocolate", "mocha", "coffee", "walnut"],                   // mid browns
+  ["caramel", "cognac", "toffee", "chestnut", "rust", "mahogany"],       // warm/rich browns
+  ["charcoal-brown", "dark-brown", "espresso", "burnt-umber"],           // dark browns
+  
+  // Yellow/Gold family
+  ["pale-yellow", "cream-yellow", "butter", "light-yellow"],             // light yellows
+  ["yellow", "golden", "mustard", "lemon", "canary"],                    // mid/warm yellows
+  ["gold", "deep-gold", "bronze", "antique-gold"],                       // rich/deep golds
+  
+  // Orange family
+  ["peach", "apricot", "light-orange", "coral", "salmon"],               // soft oranges
+  ["orange", "bright-orange", "tangerine", "pumpkin"],                   // mid oranges
+  ["rust", "burnt-orange", "terracotta", "copper", "amber"],             // deep/warm oranges
+  
+  // Teal/Cyan family
+  ["aqua", "cyan", "seafoam", "pale-turquoise", "light-teal"],           // light teals
+  ["teal", "turquoise", "peacock", "sea-green"],                         // mid teals
+  ["dark-teal", "deep-teal"],                                            // dark teals
 ];
 
 function normalizeToken(s: string): string {
@@ -68,6 +118,60 @@ const VERY_LIGHT_NEUTRAL_SET = new Set([
   "ecru",
   "eggshell",
 ]);
+
+/**
+ * Light-shade groups (tier: light-shade).
+ * These are pale, soft, light variants of their families.
+ */
+const LIGHT_SHADE_GROUPS: Set<string>[] = [
+  new Set(["light-blue", "sky-blue", "powder-blue", "baby-blue", "pale-blue"].map(normalizeToken)),
+  new Set(["silver", "gray", "grey", "heather-gray", "ash"].map(normalizeToken)),
+  new Set(["blush", "dusty-rose", "dusty-pink", "rose", "mauve"].map(normalizeToken)),
+  new Set(["lavender", "lilac", "periwinkle", "pale-purple", "mauve"].map(normalizeToken)),
+  new Set(["mint", "light-green", "sage", "seafoam", "pale-green"].map(normalizeToken)),
+  new Set(["beige", "tan", "light-brown", "camel", "cream-brown", "sand"].map(normalizeToken)),
+  new Set(["pale-yellow", "cream-yellow", "butter", "light-yellow"].map(normalizeToken)),
+  new Set(["peach", "apricot", "light-orange", "coral", "salmon"].map(normalizeToken)),
+  new Set(["aqua", "cyan", "seafoam", "pale-turquoise", "light-teal"].map(normalizeToken)),
+];
+
+/**
+ * Dark-shade groups (tier: dark-shade).
+ * These are deep, dark, rich variants of their families.
+ */
+const DARK_SHADE_GROUPS: Set<string>[] = [
+  new Set(["navy", "midnight-blue", "indigo", "sapphire", "dark-blue"].map(normalizeToken)),
+  new Set(["charcoal", "dark-gray", "dark-grey", "slate", "gunmetal"].map(normalizeToken)),
+  new Set(["burgundy", "maroon", "wine", "claret", "oxblood", "garnet"].map(normalizeToken)),
+  new Set(["hot-pink", "fuchsia", "magenta", "fuschia", "bright-pink"].map(normalizeToken)),
+  new Set(["purple", "violet", "plum", "orchid", "grape", "aubergine"].map(normalizeToken)),
+  new Set(["olive", "moss", "army-green", "khaki", "sage-green", "darkgreen"].map(normalizeToken)),
+  new Set(["emerald", "teal-green", "aqua-green"].map(normalizeToken)),
+  new Set(["caramel", "cognac", "toffee", "chestnut", "rust", "mahogany"].map(normalizeToken)),
+  new Set(["charcoal-brown", "dark-brown", "espresso", "burnt-umber"].map(normalizeToken)),
+  new Set(["gold", "deep-gold", "bronze", "antique-gold"].map(normalizeToken)),
+  new Set(["rust", "burnt-orange", "terracotta", "copper", "amber"].map(normalizeToken)),
+  new Set(["dark-teal", "deep-teal"].map(normalizeToken)),
+];
+
+/**
+ * Shade tier classification: determines if a color falls into light-shade or dark-shade group.
+ * Returns: "light-shade" | "dark-shade" | "mid" | null
+ */
+function getShadeGroup(token: string): "light-shade" | "dark-shade" | "mid" | null {
+  const normalized = normalizeToken(token);
+  if (!normalized) return null;
+  
+  for (const lightGroup of LIGHT_SHADE_GROUPS) {
+    if (lightGroup.has(normalized)) return "light-shade";
+  }
+  
+  for (const darkGroup of DARK_SHADE_GROUPS) {
+    if (darkGroup.has(normalized)) return "dark-shade";
+  }
+  
+  return "mid";
+}
 
 function stripTonePrefix(token: string): string {
   return String(token || "")
@@ -225,13 +329,21 @@ export function coarseColorBucket(raw: string | null | undefined): string | null
 }
 
 /**
- * Tiered match for rerank: prefer exact > same family > same coarse bucket > none.
+ * Tiered match for rerank: prefer exact > light-shade > dark-shade > family > bucket > none.
  * Scores in [0, 1].
+ * 
+ * Tier definitions:
+ * - exact: identical color names
+ * - light-shade: same light shade variant group (light-blue, sky-blue, etc.)
+ * - dark-shade: same dark shade variant group (navy, midnight-blue, etc.)
+ * - family: same color family but different shade
+ * - bucket: same coarse color bucket
+ * - none: no match
  */
 export function tieredColorMatchScore(
   desiredRaw: string,
   productColors: string[],
-): { score: number; matchedColor: string | null; tier: "exact" | "family" | "bucket" | "none" } {
+): { score: number; matchedColor: string | null; tier: "exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none" } {
   const desired = normalizeToken(desiredRaw);
   if (!desired || productColors.length === 0) {
     return { score: 0, matchedColor: null, tier: "none" };
@@ -239,12 +351,52 @@ export function tieredColorMatchScore(
 
   const prodNorm = productColors.map((c) => ({ raw: c, n: normalizeToken(String(c)) })).filter((x) => x.n);
 
+  // Tier 1: Exact match
   for (const { raw, n } of prodNorm) {
     if (n === desired || n === desiredRaw.toLowerCase().replace(/\s+/g, "-")) {
       return { score: 1, matchedColor: raw, tier: "exact" };
     }
   }
 
+  // Tier 2 & 3: Shade-specific matches (light-shade or dark-shade)
+  const desiredShade = getShadeGroup(desired);
+  let bestShade: { score: number; matchedColor: string | null; tier: "light-shade" | "dark-shade" | null } = {
+    score: 0,
+    matchedColor: null,
+    tier: null,
+  };
+  
+  if (desiredShade === "light-shade" || desiredShade === "dark-shade") {
+    const targetGroup = desiredShade === "light-shade" ? LIGHT_SHADE_GROUPS : DARK_SHADE_GROUPS;
+    
+    for (const shadeGroup of targetGroup) {
+      if (shadeGroup.has(desired)) {
+        // Found the desired color's shade group; check for matches in same group
+        for (const { raw, n } of prodNorm) {
+          if (shadeGroup.has(n)) {
+            let score = 0.92; // High score for same shade group
+            const productShade = getShadeGroup(n);
+            
+            // Same exact shade nuance deserves higher score
+            if (desired === n) score = 0.98;
+            // Same base color (e.g., both blues, both reds) gets bonus
+            else if (stripTonePrefix(desired) === stripTonePrefix(n)) score += 0.04;
+            
+            if (score > bestShade.score) {
+              bestShade = { score, matchedColor: raw, tier: desiredShade };
+            }
+          }
+        }
+        break;
+      }
+    }
+  }
+  
+  if (bestShade.matchedColor && bestShade.tier) {
+    return { score: bestShade.score, matchedColor: bestShade.matchedColor, tier: bestShade.tier };
+  }
+
+  // Tier 4: Family match
   let bestFamily: { score: number; matchedColor: string | null } = {
     score: 0,
     matchedColor: null,
@@ -264,6 +416,7 @@ export function tieredColorMatchScore(
     return { score: bestFamily.score, matchedColor: bestFamily.matchedColor, tier: "family" };
   }
 
+  // Tier 5: Bucket match
   const db = coarseColorBucket(desired);
   const desiredTone = colorTone(desired);
 
@@ -290,11 +443,12 @@ export function tieredColorMatchScore(
     }
   }
 
-  // For light chromatic intents, allow very-light neutrals as weaker fallback.
-  if (desiredTone === "light" && db && db !== "white") {
+  // For light chromatic intents, only allow very-light neutrals as last-resort fallback
+  // when there are NO bucket matches at all (strict priority for exact/shade/family/bucket matches first).
+  if (desiredTone === "light" && db && db !== "white" && bestBucket.score === 0) {
     for (const { raw, n } of prodNorm) {
       if (VERY_LIGHT_NEUTRAL_SET.has(n)) {
-        const neutralFallbackScore = 0.56;
+        const neutralFallbackScore = 0.28;
         if (neutralFallbackScore > bestBucket.score) {
           bestBucket = { score: neutralFallbackScore, matchedColor: raw };
         }
@@ -306,6 +460,7 @@ export function tieredColorMatchScore(
     return { score: bestBucket.score, matchedColor: bestBucket.matchedColor, tier: "bucket" };
   }
 
+  // Tier 6: No match
   return { score: 0, matchedColor: null, tier: "none" };
 }
 
@@ -313,7 +468,7 @@ export function tieredColorListCompliance(
   desired: string[],
   productColors: string[],
   mode: "any" | "all",
-): { compliance: number; bestMatch: string | null; tier: "exact" | "family" | "bucket" | "none" } {
+): { compliance: number; bestMatch: string | null; tier: "exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none" } {
   if (desired.length === 0) return { compliance: 1, bestMatch: null, tier: "none" };
   if (productColors.length === 0) return { compliance: 0, bestMatch: null, tier: "none" };
 

@@ -688,11 +688,11 @@ function applyTopBlackColorPriority<T extends { explain?: any; finalRelevance01?
     } else if (isGray) {
       // Mild penalty for gray
       delta -= 0.025;
-      if (colorTier === "bucket" || colorTier === "family") delta -= 0.015;
+      if (colorTier === "bucket" || colorTier === "family" || colorTier === "light-shade" || colorTier === "dark-shade") delta -= 0.015;
     } else {
       // Strong penalty for all other colors
       delta -= 0.09;
-      if (colorTier === "bucket" || colorTier === "family") delta -= 0.03;
+      if (colorTier === "bucket" || colorTier === "family" || colorTier === "light-shade" || colorTier === "dark-shade") delta -= 0.03;
     }
 
     if (typeof p.finalRelevance01 === "number") {
@@ -732,6 +732,9 @@ function applyColorIntentPriority<T extends { explain?: any; finalRelevance01?: 
     if (matchedColor === intentColor && colorTier === "exact") {
       // Strong boost for exact color match
       delta += 0.07 + Math.max(0, (colorCompliance - 0.9)) * 0.12;
+    } else if (colorTier === "light-shade" || colorTier === "dark-shade") {
+      // Good boost for shade-specific matches (better than family/bucket)
+      delta += 0.045 + Math.max(0, (colorCompliance - 0.85)) * 0.08;
     } else if (colorTier === "family" || colorTier === "bucket") {
       // Mild boost for similar color family/bucket
       delta += 0.025 + Math.max(0, (colorCompliance - 0.8)) * 0.05;
