@@ -1,6 +1,6 @@
 import { extractAttributesSync } from "./attributeExtractor";
 import type { GarmentColorAnalysis } from "../color/garmentColorPipeline";
-import { normalizeCatalogColorToCanonical } from "../color/garmentColorPipeline";
+import { normalizeColorTokensFromRaw } from "../color/queryColorFilter";
 import { inferCategoryCanonical } from "./categoryFilter";
 import {
   expandProductTypesForIndexing,
@@ -51,6 +51,29 @@ function normalizeArray(values: Array<unknown> | undefined): string[] {
     if (!out.includes(normalized)) out.push(normalized);
   }
   return out;
+}
+
+function computeProductQualityScore(input: {
+  imageCdn?: string | null;
+  priceCents?: number | null;
+  colors: string[];
+  productTypes: string[];
+  audienceGender: string | null;
+}): number {
+  const hasValidImage = Boolean(String(input.imageCdn ?? "").trim());
+  const price = Number(input.priceCents ?? 0);
+  const hasValidPrice = Number.isFinite(price) && price > 0 && price < 10_000_000_000;
+  const hasValidColor = input.colors.length > 0;
+  const hasNormalizedType = input.productTypes.length > 0;
+  const hasAudience = Boolean(input.audienceGender);
+
+  let score = 0.55;
+  if (hasValidImage) score += 0.18;
+  if (hasValidPrice) score += 0.08;
+  if (hasValidColor) score += 0.08;
+  if (hasNormalizedType) score += 0.08;
+  if (hasAudience) score += 0.03;
+  return Math.max(0.45, Math.min(1, Math.round(score * 1000) / 1000));
 }
 
 /**
@@ -207,6 +230,7 @@ export interface BuildSearchDocumentInput {
   garmentColorAnalysis?: GarmentColorAnalysis | null;
   /** From `products.color` when title/image did not yield color (e.g. BLIP backfill). */
   catalogColor?: string | null;
+  productUrl?: string | null;
   /** From `products.gender` when title did not yield gender (e.g. BLIP backfill). */
   catalogGender?: string | null;
   /** Base product URL without size/variant query params — used for pre-hydration dedup. */
@@ -236,13 +260,11 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
         ? [attributes.color]
         : [],
   );
-  const catalogColorHint = toLowerTrim(input.catalogColor ?? null);
-  // Map raw vendor color string to a canonical token before using it in index fields.
-  // e.g. "Navy Blue" → "navy", "#1A2B3C" → "navy", "blush" → "pink".
-  const catalogCanonical = normalizeCatalogColorToCanonical(catalogColorHint);
-  const normalizedCatalogColors = catalogCanonical ? [catalogCanonical] : [];
+  // Map raw vendor color strings to canonical search tokens before indexing.
+  // e.g. "White/Navy/Wolf Grey" -> ["white", "blue", "gray"].
+  const normalizedCatalogColors = normalizeColorTokensFromRaw(input.catalogColor ?? null);
   if (normalizedTitleColors.length === 0 && normalizedCatalogColors.length > 0) {
-    normalizedTitleColors = normalizeArray([catalogCanonical]);
+    normalizedTitleColors = normalizeArray(normalizedCatalogColors);
   }
   const colorConfidenceText =
     normalizedTitleColors.length > 0 ? Math.max(0.35, attrConfidence.color ?? 0.52) : 0;
@@ -344,6 +366,13 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
   const attrGenderRaw =
     toLowerTrim(attributes.gender) || toLowerTrim(input.catalogGender ?? null);
   const audience = inferAudienceFromTitle(input.title || "", attrGenderRaw);
+  const productQualityScore = computeProductQualityScore({
+    imageCdn: input.imageCdn,
+    priceCents: input.priceCents,
+    colors: normalizedColors,
+    productTypes: productTypesIndexed,
+    audienceGender: audience.audience_gender,
+  });
 
   const doc: Record<string, any> = {
     product_id: String(input.productId),
@@ -352,6 +381,7 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
     description: input.description ?? null,
     brand: toLowerTrim(input.brand),
     category: categoryLower,
+    color: input.catalogColor ?? null,
     category_canonical: categoryCanonical,
     price_usd: Math.round(Number(input.priceCents ?? 0) / LBP_TO_USD),
     availability: input.availability ? "in_stock" : "out_of_stock",
@@ -365,10 +395,12 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
     category_confidence: categoryConfidence,
     brand_confidence: brandConfidence,
     type_confidence: typeConfidence,
+    product_quality_score: productQualityScore,
     color_confidence_text: colorConfidenceText,
     color_confidence_image: colorConfidenceImage,
     image_cdn: input.imageCdn ?? null,
     p_hash: input.pHash ?? null,
+    product_url: input.productUrl ?? null,
     parent_product_url: input.parentProductUrl ?? null,
     last_seen_at: input.lastSeenAt ?? null,
     attr_color: primaryAttrColor,

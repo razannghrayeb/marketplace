@@ -314,6 +314,8 @@ const CATALOG_COLOR_NAME_MAP: Record<string, string> = {
   "ecru": "cream",
   "natural": "cream",
   "off white": "off-white",
+  "offwhite": "off-white",
+  "bone": "off-white",
   "eggshell": "off-white",
   "milk": "white",
   "snow": "white",
@@ -324,6 +326,12 @@ const CATALOG_COLOR_NAME_MAP: Record<string, string> = {
   "metallic silver": "silver",
   "metallic gold": "gold",
   "gunmetal": "charcoal",
+  "antra": "charcoal",
+  "anthracite": "charcoal",
+  "heathered black": "black",
+  "heathered_black": "black",
+  "toasted coconut": "beige",
+  "beech": "beige",
 };
 
 /**

@@ -284,7 +284,7 @@ export async function searchBrowse(params: {
     limit,
   })) as ProductResult[];
   const relevanceFiltered = filterByFinalRelevance(results, config.search.finalAcceptMinText) ?? [];
-  return applyNonSportGuardToNormalSearch(relevanceFiltered, undefined, filters) ?? [];
+  return relevanceFiltered;
 }
 
 /**
@@ -544,4 +544,3 @@ export async function searchImage(
     tookMs: Date.now() - start,
   };
 }
-

@@ -101,7 +101,7 @@ export async function searchProductsFilteredBrowse(params: {
           filter: filter.length > 0 ? filter : undefined,
         },
       },
-      sort: [{ _score: "desc" }, { price_usd: "asc" }],
+      sort: [{ _score: "desc" }, { price_usd: "asc" }, { product_id: "asc" }],
     };
 
     const osResponse = await osClient.search({

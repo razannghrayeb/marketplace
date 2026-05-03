@@ -5,43 +5,157 @@ import { COLOR_FAMILY_GROUPS, coarseColorBucket } from "./colorCanonical";
  */
 
 export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
-  black: ["black", "charcoal", "dark gray", "dark grey", "jet", "onyx"],
-  white: ["white", "off white", "off-white", "ivory", "cream", "ecru"],
-  gray: ["gray", "grey", "heather grey", "heather gray", "silver"],
+  black: [
+    "black", "jet", "onyx", "heathered black",
+    "heathered_black", "core black", "tnf black", "all black", "total black", "blackout",
+    "black out", "raven", "ebony", "obsidian", "noir", "nero", "caviar", "ink black",
+    "night black", "phantom black", "carbon black", "washed black", "faded black",
+    "matte black", "mat black", "black heather", "black denim", "black rinse",
+  ],
+  white: [
+    "white", "off white", "off-white", "offwhite", "ivory", "cream", "bone", "ecru",
+    "natural", "sail", "summit white", "cloud white", "wonder white", "cream white",
+    "chalk white", "vintage white", "gardenia white", "optic white", "optical white",
+    "bright white", "snow white", "tnf white", "egret", "alabaster", "milk white",
+    "coconut milk", "vanilla", "flour", "parchment", "paper white", "marshmallow",
+    "winter white", "warm white", "broken white", "star white", "sea salt", "seasalt",
+    "pearl white", "undyed white", "whitecap", "white cap",
+  ],
+  gray: [
+    "gray", "grey", "heather grey", "heather gray", "silver", "charcoal",
+    "dark gray", "dark grey", "wolf grey", "wolf gray",
+    "smoke grey", "smoke gray", "light smoke grey", "dark smoke grey", "iron grey",
+    "castlerock", "castle grey", "vast grey", "dove grey", "college grey", "halo gray",
+    "halo grey", "titan gray", "titan grey", "thunder", "thunderstorm", "raincloud",
+    "downpour", "storm", "stormy", "tempest", "cinder", "carbon", "forged iron",
+    "magnet", "asphalt", "concrete", "cement", "pebble", "gravel", "pewter",
+    "gunmetal", "graphite", "tungsten", "alloy", "aluminium", "aluminum", "platinum",
+    "metallic silver", "silver metallic", "lunar silver", "chrome", "steel", "lead",
+    "fog", "mist", "cloud grey", "cloud gray", "glacier grey", "glacier gray",
+    "galactic grey", "moonstone", "quiet shade", "turbulence", "ironstone", "coal",
+  ],
   blue: [
     "blue", "navy", "cobalt", "denim", "sky blue", "mid blue", "midnight blue",
     "royal blue", "royal-blue", "light blue", "light-blue", "powder blue", "baby blue",
-    "teal", "turquoise", "indigo", "electric blue", "sapphire",
+    "teal", "turquoise", "indigo", "electric blue", "sapphire", "marine", "azure",
+    "lapis", "petrol", "atlantic", "ocean", "cerulean", "cornflower", "periwinkle",
+    "celeste", "niagara", "reef", "pool", "lagoon", "clear sky", "blue smoke",
+    "smoky blue", "smokey blue", "blue cendre", "blue atlantis", "hero blue",
+    "game royal", "bright royal", "hyper royal", "university blue", "estate blue",
+    "diffused blue", "dutch blue", "mazarine", "dress blue", "peacoat", "new navy",
+    "team navy", "nb navy", "shadow navy", "armoury navy", "armory navy",
+    "collegiate navy", "ink", "inkwell", "legend ink", "blue void", "deep sea",
+    "deep navy", "deep blue", "thunder blue", "steel blue", "blue slate",
+    "slate blue", "blue stone", "bluestone", "dark blue", "navy blue", "chambray",
   ],
-  red: ["red", "burgundy", "maroon", "wine", "cherry", "crimson", "scarlet"],
+  red: [
+    "red", "burgundy", "maroon", "wine", "cherry", "crimson", "scarlet", "ruby",
+    "racer red", "university red", "pure ruby", "better scarlet", "victory crimson",
+    "shadow red", "fire", "flame", "lava", "goji", "tomato", "berry red", "poppy",
+    "rosewood", "henna", "paprika", "silt red", "pomegranate", "syrah", "merlot",
+    "bordeaux", "bordo", "oxblood", "garnet", "currant", "zinfandel", "sangria",
+    "tawny port",
+  ],
   green: [
     "green", "olive", "khaki", "sage", "mint", "forest green", "forest-green",
-    "hunter green", "army green", "emerald", "lime", "moss",
+    "hunter green", "army green", "emerald", "lime", "moss", "kaki", "military",
+    "pine", "fir", "evergreen", "laurel", "thyme", "oregano", "eucalyptus",
+    "bay leaf", "artichoke", "fennel", "celery", "pistachio", "matcha", "avocado",
+    "cactus", "fern", "algae", "algal", "seagrass", "jade", "malachite",
+    "lily pad", "lilypad", "waterlily", "bicoastal", "serpentine", "conifer",
+    "cypress", "juniper", "balsam", "loden", "duffel", "duffle", "kalamata",
+    "tapenade", "taiga", "field green", "terrain", "garden green", "leaf green",
+    "bamboo", "apple green", "neon green", "cyber green", "hyper green",
+    "green strike", "chlorophyll", "oil green", "dark olive", "olive drab",
+    "olive strata", "cargo khaki", "trench coat khaki",
   ],
-  beige: ["beige", "taupe", "stone", "sand", "light khaki"],
-  camel: ["camel", "tan", "camel brown", "light brown", "warm beige"],
-  brown: ["brown", "mocha", "chocolate", "coffee", "caramel", "cognac", "rust brown"],
-  purple: ["purple", "violet", "plum", "lavender", "lilac", "mauve", "grape", "orchid"],
+  beige: [
+    "beige", "taupe", "stone", "sand", "light khaki", "toasted coconut", "beech",
+    "greige", "mushroom", "porcini", "shiitake", "shitake", "cardboard", "natural",
+    "canvas", "linen", "oatmeal", "oat", "wheat", "straw", "raffia", "rattan",
+    "sandstone", "warm sand", "sanddrift", "dune", "desert", "parsnip", "cornstalk",
+    "putty", "biscotti", "biscuit", "eggnog", "almond", "sesame", "flax",
+  ],
+  camel: [
+    "camel", "tan", "camel brown", "light brown", "warm beige", "light camel",
+    "dark camel", "british tan", "light british tan", "tawny", "toasted tan",
+  ],
+  brown: [
+    "brown", "mocha", "chocolate", "coffee", "caramel", "cognac", "rust brown",
+    "espresso", "moka", "mocca", "cocoa", "cappuccino", "latte", "toffee",
+    "butterscotch", "honey", "golden brown", "chestnut", "walnut", "hazel",
+    "hazelnut", "mahogany", "tobacco", "cinnamon", "ginger", "maple", "oak",
+    "wood", "cedar", "bark", "acorn", "fawn", "truffle", "umber", "earth brown",
+    "saddle brown", "carob", "pecan", "praline", "sepia", "cork",
+  ],
+  purple: [
+    "purple", "violet", "plum", "lavender", "lilac", "mauve", "grape", "orchid",
+    "iris", "amethyst", "wisteria", "eggplant", "aubergine", "ube", "raisin",
+    "mulberry", "hyacinth", "grapeberry",
+  ],
   pink: [
     "pink", "blush", "fuchsia", "fuschia", "fushia", "fuhsia", "magenta",
-    "rose", "hot pink", "dusty pink", "dusty rose", "salmon",
+    "rose", "hot pink", "dusty pink", "dusty rose", "salmon", "coral pink",
+    "guava", "hibiscus", "strawberry", "raspberry", "bubblegum", "taffy",
+    "peony", "carnation", "flamingo", "aster", "baby pink", "pale pink",
+    "light pink", "clear pink", "bliss pink", "glow pink", "elemental pink",
+    "vivid pink", "neon pink", "rose gold", "nude", "skin", "bridal rose",
   ],
-  yellow: ["yellow", "mustard", "golden", "gold", "lemon", "canary", "butter"],
-  orange: ["orange", "rust", "peach", "coral", "burnt orange", "terracotta", "amber"],
-  teal: ["teal", "turquoise", "aqua", "cyan", "peacock"],
-  multicolor: ["multicolor", "multi color", "multi-color", "colour block", "color block", "printed", "pattern"],
+  yellow: [
+    "yellow", "mustard", "golden", "gold", "lemon", "canary", "butter", "banana",
+    "corn", "sunflower", "dandelion", "turmeric", "ochre", "citrine", "champagne",
+    "honey gold", "lucid lemon", "solar yellow", "volt", "barely volt", "limelight",
+  ],
+  orange: [
+    "orange", "rust", "peach", "coral", "burnt orange", "terracotta", "terra cotta",
+    "amber", "tangerine", "papaya", "mango", "pumpkin", "kumquat", "marmalade",
+    "mandarin", "clementine", "apricot", "copper", "ember", "sunrise", "sunset",
+    "afterglow", "carrot", "tomato orange",
+  ],
+  teal: [
+    "teal", "turquoise", "aqua", "cyan", "peacock", "acqua", "aquaverde",
+    "aquamarine", "seafoam", "sea foam", "water green", "watergreen", "sea green",
+    "tidal teal", "legacy teal", "preloved teal", "real teal", "deep turquoise",
+  ],
+  multicolor: [
+    "multicolor", "multi color", "multi-color", "multicolour", "colour block",
+    "color block", "printed", "pattern", "multi", "mix", "mixed", "assorted",
+    "rainbow", "print", "camo", "camouflage", "leopard", "zebra", "tie dye",
+    "tie-dye", "plaid", "gingham", "stripe", "herringbone", "floral", "hearts",
+    "confetti", "ombre", "gradient", "marble", "aop", "allover", "check", "dots",
+  ],
 };
 
 const COLOR_COMMON_MISSPELLINGS: Record<string, string> = {
   fuschia: "fuchsia",
   fushia: "fuchsia",
   fuhsia: "fuchsia",
+  fichia: "fuchsia",
+  fucsia: "fuchsia",
+  fluxia: "fuchsia",
   magentaa: "magenta",
   biege: "beige",
+  begie: "beige",
   bordeuax: "bordeaux",
+  bordeax: "bordeaux",
   burgendy: "burgundy",
   antracite: "anthracite",
   antrasite: "anthracite",
+  antrasit: "anthracite",
+  anthracide: "anthracite",
+  antractic: "anthracite",
+  antra: "anthracite",
+  whie: "white",
+  whote: "white",
+  whhite: "white",
+  blk: "black",
+  blak: "black",
+  balck: "black",
+  siliver: "silver",
+  sliver: "silver",
+  metalic: "metallic",
+  caml: "camel",
+  tumeric: "turmeric",
   drk: "dark",
   dk: "dark",
   lt: "light",
@@ -60,6 +174,46 @@ const COLOR_NOISE_WORDS = new Set([
   "plaid", "gingham", "stripe", "striped", "jacquard", "print", "printed", "allover",
   "twist", "grid", "block", "combo", "fun", "product", "code",
 ]);
+
+for (const word of [
+  "mirror", "lens", "lenses", "frame", "strap", "with", "style", "item", "wordmark",
+  "composition", "abstract", "heritage", "vintage", "classic", "team", "logo",
+  "logos", "label", "model", "collaboration", "supplier", "colour", "color",
+]) {
+  COLOR_NOISE_WORDS.add(word);
+}
+
+const EXTRA_NON_COLOR_VALUE_RE =
+  /^(?:adult|youth|men|women|boys?|girls?|slim|straight|athletic|bikini|force|birthday|congratulation|usa|no pocket|one(?:\s+size(?:\s+for\s+(?:kids?|men|women|youth|adult))?)?|colors?\s+can\s+be\s+customi[sz]ed|supplier\s+colou?r|[ml]\/?[xl]|xs\/s|s\/m|m\/l|l\/xl|xl\/2xl|2xs\/xs|xl\/rg|l\/rg|m\/rg|xxxs|ns|w\d+\s*[-/]\s*l\d+|\d+w\s*[-/]\s*\d+l|\d+(?:\.\d+)?\s*(?:cm|w\s*cm|oz|ml|eu|eeu|l)|\d+\s+\d\/\d\s*eu|\d{2,3}\s*[a-z]{1,2}|[0-9]{2,3}[a-z]?)$/i;
+
+function normalizeRawColorString(raw: string | null | undefined): string {
+  return String(raw ?? "")
+    .toLowerCase()
+    .replace(/&amp;?/g, " ")
+    .replace(/[Â‎]/g, " ")
+    .replace(/[“”]/g, '"')
+    .replace(/[’]/g, "'")
+    .replace(/\bmetalic\b/g, "metallic")
+    .replace(/\bsiliver\b|\bsliver\b/g, "silver")
+    .replace(/\bwhie\b|\bwhote\b|\bwhhite\b/g, "white")
+    .replace(/\bblak\b|\bbalck\b/g, "black")
+    .replace(/\bbegie\b|\bbiege\b/g, "beige")
+    .replace(/\bfushia\b|\bfuschia\b|\bfichia\b|\bfucsia\b|\bfluxia\b/g, "fuchsia")
+    .replace(/\banthracide\b|\bantracite\b|\bantrasit(?:e)?\b|\bantractic\b/g, "anthracite")
+    .replace(/\bbordeax\b|\bbordeuax\b|\bburgendy\b/g, "bordeaux")
+    .replace(/\bd[.\s-]*(blue|grey|gray|green|brown|beige|purple|navy)\b/g, "dark $1")
+    .replace(/\bl[.\s-]*(blue|grey|gray|green|brown|beige|purple|navy)\b/g, "light $1")
+    .replace(/\blt[.\s-]*(blue|grey|gray|green|brown|beige|purple|navy|pink|mint|lilac)\b/g, "light $1")
+    .replace(/\bdrk[.\s-]*(blue|grey|gray|green|brown|beige|purple|navy)\b/g, "dark $1")
+    .replace(/[_-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isNonColorValue(raw: string | null | undefined): boolean {
+  const value = normalizeRawColorString(raw);
+  return !value || NON_COLOR_VALUE_RE.test(value) || EXTRA_NON_COLOR_VALUE_RE.test(value);
+}
 
 const COLOR_ALIAS_TO_CANONICAL = (() => {
   const map = new Map<string, string>();
@@ -169,7 +323,7 @@ export type RawColorGroup =
   | "unknown";
 
 function inferBucketFromKeywordHints(raw: string): string | null {
-  const s = String(raw ?? "").toLowerCase();
+  const s = normalizeRawColorString(raw);
   if (!s) return null;
   let best: string | null = null;
   let bestScore = 0;
@@ -209,8 +363,7 @@ function normalizeColorFamilyRepresentative(members: string[]): string | null {
 }
 
 function inferColorFromFamilyCluster(raw: string): string | null {
-  const key = String(raw ?? "")
-    .toLowerCase()
+  const key = normalizeRawColorString(raw)
     .replace(/["“”'`]/g, " ")
     .replace(/[()]/g, " ")
     .replace(/[_-]/g, " ")
@@ -248,14 +401,13 @@ function inferColorFromFamilyCluster(raw: string): string | null {
  */
 export function inferColorGroupFromRaw(raw: string | null | undefined): RawColorGroup {
   if (!raw) return "unknown";
-  const source = String(raw ?? "")
-    .toLowerCase()
+  const source = normalizeRawColorString(raw)
     .replace(/["“”'`]/g, " ")
     .replace(/[()]/g, " ")
     .replace(/[_-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (!source || NON_COLOR_VALUE_RE.test(source)) return "unknown";
+  if (!source || isNonColorValue(source)) return "unknown";
 
   const candidates: string[] = [];
   const addCandidate = (token: string) => {
@@ -275,12 +427,13 @@ export function inferColorGroupFromRaw(raw: string | null | undefined): RawColor
     .map((s) => s.trim())
     .filter(Boolean);
   for (const p of parts) {
-    if (NON_COLOR_VALUE_RE.test(p)) continue;
+    if (isNonColorValue(p)) continue;
     if (/^\d+([.\s]\d+)?$/.test(p)) continue;
     addCandidate(p);
     const words = p.split(/\s+/g).filter(Boolean);
     for (let i = 0; i < words.length; i++) {
       const w = words[i];
+      if (/^(?:[a-z]{1,4}\d+|\d+[a-z]{1,4})$/i.test(w)) continue;
       if (COLOR_NOISE_WORDS.has(w)) continue;
       addCandidate(w);
       if (i < words.length - 1) addCandidate(`${w} ${words[i + 1]}`);
@@ -315,14 +468,13 @@ export function inferColorGroupFromRaw(raw: string | null | undefined): RawColor
 
 export function normalizeColorToken(raw: string | null | undefined): string | null {
   if (!raw) return null;
-  const keyBase = raw
-    .toLowerCase()
+  const keyBase = normalizeRawColorString(raw)
     .replace(/["“”'`]/g, " ")
     .replace(/[()]/g, " ")
     .replace(/[_-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (!keyBase || NON_COLOR_VALUE_RE.test(keyBase)) return null;
+  if (!keyBase || isNonColorValue(keyBase)) return null;
   const key = COLOR_COMMON_MISSPELLINGS[keyBase] ?? keyBase;
   const direct = COLOR_ALIAS_TO_CANONICAL.get(key);
   if (direct) return direct;
@@ -359,8 +511,8 @@ export function normalizeColorToken(raw: string | null | undefined): string | nu
  */
 export function normalizeColorTokensFromRaw(raw: string | null | undefined): string[] {
   if (!raw) return [];
-  const source = String(raw).toLowerCase().trim();
-  if (!source || NON_COLOR_VALUE_RE.test(source)) return [];
+  const source = normalizeRawColorString(raw);
+  if (!source || isNonColorValue(source)) return [];
 
   const out: string[] = [];
   const add = (token: string) => {
@@ -379,7 +531,7 @@ export function normalizeColorTokensFromRaw(raw: string | null | undefined): str
     .map((s) => s.trim())
     .filter(Boolean);
   for (const p of parts) {
-    if (NON_COLOR_VALUE_RE.test(p)) continue;
+    if (isNonColorValue(p)) continue;
     if (/^\d+([.\s]\d+)?$/.test(p)) continue;
     add(p);
 
@@ -387,6 +539,7 @@ export function normalizeColorTokensFromRaw(raw: string | null | undefined): str
     const words = p.split(/\s+/g).filter(Boolean);
     for (let i = 0; i < words.length; i++) {
       const w = words[i];
+      if (/^(?:[a-z]{1,4}\d+|\d+[a-z]{1,4})$/i.test(w)) continue;
       if (COLOR_NOISE_WORDS.has(w)) continue;
       add(w);
       if (i < words.length - 1) add(`${w} ${words[i + 1]}`);

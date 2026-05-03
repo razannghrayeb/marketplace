@@ -333,7 +333,7 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
   const hasGender = await productsTableHasGenderColumn();
   const productResult = await pg.query(
     `SELECT id, vendor_id, title, description, brand, category, price_cents, availability, last_seen, image_cdn, color,
-            parent_product_url, image_url,
+            product_url, parent_product_url, image_url,
             ${hasGender ? "gender" : "NULL::text AS gender"},
             ${hasIsHidden ? "is_hidden" : "false AS is_hidden"},
             ${hasCanonicalId ? "canonical_id" : "NULL::integer AS canonical_id"}
@@ -414,6 +414,7 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
     availability: Boolean(product.availability),
     isHidden: Boolean(product.is_hidden),
     canonicalId: hasCanonicalId ? product.canonical_id : null,
+    productUrl: product.product_url ?? null,
     parentProductUrl: product.parent_product_url ?? null,
     imageCdn: product.image_cdn,
     pHash: primaryImage?.p_hash ?? null,

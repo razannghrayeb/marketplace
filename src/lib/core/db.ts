@@ -276,30 +276,19 @@ export async function getSearchProductsByIdsOrdered(ids: (number | string)[]): P
     .filter((id) => Number.isFinite(id));
   if (numericIds.length === 0) return [];
 
-  const hasGender = await productsTableHasGenderColumn();
+  // Hydration step: fetch only essential Shop page fields
   const result = await pg.query(
     `SELECT
        p.id,
-       p.vendor_id,
-       v.name AS vendor_name,
        p.title,
        p.brand,
        p.category,
-       NULL::text AS description,
-       p.size,
-       p.color,
        COALESCE(p.currency, 'USD') AS currency,
        p.price_cents,
        p.sales_price_cents,
-       p.availability,
-       p.last_seen,
        p.image_url,
-       p.image_cdn,
-       p.product_url,
-       p.parent_product_url,
-       ${hasGender ? "p.gender" : "NULL::text AS gender"}
+       p.image_cdn
      FROM products p
-     LEFT JOIN vendors v ON v.id = p.vendor_id
      WHERE p.id = ANY($1::int[])`,
     [numericIds],
   );
