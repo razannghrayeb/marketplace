@@ -16,8 +16,14 @@ function canonType(t: string): string {
   return String(t)
     .toLowerCase()
     .replace(/[\s_-]+/g, "")
-    .replace(/shirts/g, "shirt")
-    .replace(/pants/g, "pant")
+    .replace(/tshirts?/g, "tshirt")
+    .replace(/tees?/g, "tshirt")
+    .replace(/shirts?/g, "shirt")
+    .replace(/pants?/g, "pant")
+    .replace(/trousers?/g, "trouser")
+    .replace(/dresses?/g, "dress")
+    .replace(/sneakers?/g, "sneaker")
+    .replace(/shoes?/g, "shoe")
     .trim();
 }
 
@@ -25,12 +31,10 @@ function containsEquivalent(term: string, list: string[]): boolean {
   const x = canonType(term);
   return list.some((item) => {
     const y = canonType(item);
+    if ((x.endsWith("pant") || x.endsWith("trouser")) && y === "dress") return false;
+    if ((y.endsWith("pant") || y.endsWith("trouser")) && x === "dress") return false;
     return x === y || x.includes(y) || y.includes(x);
   });
-}
-
-function pickDesired(desired: string[], re: RegExp): string[] {
-  return uniq(desired.filter((term) => re.test(String(term).toLowerCase().trim())));
 }
 
 function includesAny(blob: string, re: RegExp): boolean {
@@ -40,15 +44,16 @@ function includesAny(blob: string, re: RegExp): boolean {
 function strictBottomsContract(): ProductRecallContract {
   return {
     exactTypes: [
-      "wide leg trouser",
-      "wide leg pants",
+      "trousers",
       "tailored trouser",
-      "dress pants",
-      "pleated trousers",
+      "wide leg trouser",
+      "dress pant",
+      "straight pant",
+      "pleated trouser",
     ],
-    relatedTypes: ["straight pants", "loose pants", "chinos"],
-    weakTypes: ["jeans", "cargo pants", "utility pants"],
-    badTypes: ["jogger", "sweatpants", "shorts", "skirt"],
+    relatedTypes: ["chino", "loose pant"],
+    weakTypes: ["jeans", "cargo pants", "utility pants", "joggers"],
+    badTypes: ["shorts", "skirt", "dress", "shirt", "shoe"],
     blockedFamilies: ["tops", "dresses", "footwear", "bags", "accessories", "outerwear"],
   };
 }
@@ -81,11 +86,19 @@ function strictSweaterContract(): ProductRecallContract {
 
 function strictDressesContract(): ProductRecallContract {
   return {
-    exactTypes: ["dress", "maxi dress", "midi dress", "mini dress", "wrap dress"],
-    relatedTypes: ["sundress", "shirt dress"],
-    weakTypes: ["jumpsuit", "romper"],
-    badTypes: ["shirt", "blouse", "pants", "trousers", "shoe", "bag"],
-    blockedFamilies: ["tops", "bottoms", "footwear", "bags", "accessories"],
+    exactTypes: [
+      "dress",
+      "sleeveless dress",
+      "tank dress",
+      "midi dress",
+      "mini dress",
+      "maxi dress",
+      "casual dress",
+    ],
+    relatedTypes: ["halter dress", "sundress", "slip dress"],
+    weakTypes: ["gown", "kaftan", "abaya"],
+    badTypes: ["tank top", "cami", "shirt", "skirt", "pants"],
+    blockedFamilies: ["tops", "bottoms", "footwear", "bags", "accessories", "outerwear"],
   };
 }
 
@@ -109,11 +122,45 @@ export function buildProductRecallContract(params: {
 
   // Footwear contract
   if (category === "footwear" || includesAny(blob, /\b(shoe|shoes|sneaker|trainer|boot|loafer|flat|sandal|heel|pump|oxford)\b/)) {
-    const footwearExact = pickDesired(desired, /\b(shoe|shoes|sneaker|sneakers|trainer|trainers|boot|boots|loafer|loafers|flat|flats|sandal|sandals|heel|heels|pump|pumps|oxford|oxfords)\b/);
+    const footwearContract = (() => {
+      if (includesAny(blob, /\b(sneaker|sneakers|trainer|trainers|running\s*shoe|low\s*top)\b/)) {
+        return {
+          exactTypes: ["sneaker", "low top sneaker", "trainer", "running shoe"],
+          relatedTypes: ["shoe", "casual shoe"],
+          weakTypes: ["boot", "loafer", "flat", "sandal", "heel"],
+        };
+      }
+      if (includesAny(blob, /\b(boot|boots|chelsea|ankle\s*boot)\b/)) {
+        return {
+          exactTypes: ["boot", "ankle boot", "chelsea boot"],
+          relatedTypes: ["shoe"],
+          weakTypes: ["sneaker", "loafer", "flat", "sandal", "heel"],
+        };
+      }
+      if (includesAny(blob, /\b(loafer|loafers|flat|flats|oxford|oxfords)\b/)) {
+        return {
+          exactTypes: ["loafer", "flat", "oxford"],
+          relatedTypes: ["shoe", "casual shoe"],
+          weakTypes: ["sneaker", "boot", "sandal", "heel"],
+        };
+      }
+      if (includesAny(blob, /\b(sandal|sandals|heel|heels|pump|pumps)\b/)) {
+        return {
+          exactTypes: ["sandal", "heel", "pump"],
+          relatedTypes: ["shoe"],
+          weakTypes: ["sneaker", "boot", "loafer", "flat"],
+        };
+      }
+      return {
+        exactTypes: ["shoe"],
+        relatedTypes: ["sneaker", "trainer", "boot", "loafer", "flat", "sandal", "heel"],
+        weakTypes: ["casual shoe"],
+      };
+    })();
     const contract = {
-      exactTypes: uniq(["sneaker", "low top sneaker", "trainer", "shoe", ...footwearExact]),
-      relatedTypes: uniq(["casual shoe"]),
-      weakTypes: uniq(["loafer", "flat"]),
+      exactTypes: uniq(footwearContract.exactTypes),
+      relatedTypes: uniq(footwearContract.relatedTypes),
+      weakTypes: uniq(footwearContract.weakTypes),
       badTypes: uniq(["dress", "shirt", "blouse", "t-shirt", "hoodie", "pants", "trousers", "bag"]),
       blockedFamilies: ["dresses", "tops", "bottoms", "bags", "accessories", "outerwear"],
     };
@@ -194,8 +241,8 @@ export function allocateRecallBudgets(total: number): {
   visual: number;
 } {
   const safeTotal = Math.max(1, Math.floor(total));
-  const exact = Math.max(1, Math.round(safeTotal * 0.5));
-  const related = Math.max(0, Math.round(safeTotal * 0.25));
-  const visual = Math.max(1, safeTotal - exact - related);
+  const visual = Math.max(1, Math.round(safeTotal * 0.6));
+  const exact = Math.max(1, Math.round(safeTotal * 0.25));
+  const related = Math.max(0, safeTotal - visual - exact);
   return { exact, related, visual };
 }

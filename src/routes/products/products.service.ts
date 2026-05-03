@@ -14,7 +14,6 @@ import {
   dedupeImageSearchResults,
   filterRelatedAgainstMain,
 } from "../../lib/search/resultDedup";
-import { sortProductsByRelevanceAndCategory, sortProductsByFinalRelevance } from "../../lib/search/sortResults";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
 import {
   emitImageSearchEval,
@@ -375,9 +374,9 @@ function imageMerchandiseSimilarityBindingEnabled(): boolean {
   return v !== "0" && v !== "false";
 }
 
-/** Phase 8: deep visual+text fusion in final image ranking. Default ON. */
+/** Deep visual+text fusion in final image ranking. Default OFF for production stabilization. */
 function imageDeepFusionEnabled(): boolean {
-  const v = String(process.env.SEARCH_IMAGE_DEEP_FUSION ?? "1").toLowerCase();
+  const v = String(process.env.SEARCH_IMAGE_DEEP_FUSION ?? "0").toLowerCase();
   return v !== "0" && v !== "false";
 }
 
@@ -388,10 +387,41 @@ function imageDeepFusionWeight(): number {
   return Math.max(0, Math.min(0.4, raw));
 }
 
-/** Phase 9: apply MMR-style diversity reranking after relevance sort + dedupe. Default ON. */
+/** MMR-style diversity reranking after relevance sort + dedupe. Default OFF for production stabilization. */
 function imageDiversityRerankEnabled(): boolean {
-  const v = String(process.env.SEARCH_IMAGE_DIVERSITY_RERANK ?? "1").toLowerCase();
+  const v = String(process.env.SEARCH_IMAGE_DIVERSITY_RERANK ?? "0").toLowerCase();
   return v !== "0" && v !== "false";
+}
+
+/** Tier scoring is debug-only unless explicitly enabled. */
+function imageTierScoringEnabled(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_TIER_SCORING_ENABLED ?? "0").toLowerCase();
+  return v === "1" || v === "true" || v === "on" || v === "yes";
+}
+
+/** Optional late image reranker. Kept off by default to preserve a single calibrated score path. */
+function imageCandidateRerankerEnabled(): boolean {
+  const v = String(process.env.SEARCH_IMAGE_CANDIDATE_RERANKER_ENABLED ?? "0").toLowerCase();
+  return v === "1" || v === "true" || v === "on" || v === "yes";
+}
+
+function tierScoreMultiplier(tier: string): number {
+  switch (tier) {
+    case "exact":
+      return 1.06;
+    case "strong":
+      return 1.03;
+    case "related":
+      return 0.98;
+    case "weak":
+      return 0.90;
+    case "fallback":
+      return 0.82;
+    case "blocked":
+      return 0;
+    default:
+      return 1;
+  }
 }
 
 /** Phase 9: lambda in MMR (higher = more relevance, lower = more diversity). */
@@ -809,6 +839,122 @@ function compareDeterministicRankKey(a: ProductResult, b: ProductResult): number
   if (ka < kb) return -1;
   if (ka > kb) return 1;
   return 0;
+}
+
+function clampScore01(value: unknown, fallback = 0): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return Math.max(0, Math.min(1, fallback));
+  return Math.max(0, Math.min(1, n));
+}
+
+function synchronizeFinalScore<T extends ProductResult>(
+  product: T,
+  scoreRaw?: unknown,
+  source?: string,
+): T {
+  const finalScore = clampScore01(
+    scoreRaw ?? (product as any).finalRelevance01 ?? product.similarity_score ?? 0,
+  );
+  const next: any = {
+    ...product,
+    finalRelevance01: finalScore,
+    mlRerankScore: finalScore,
+  };
+
+  if (next.explain && typeof next.explain === "object") {
+    const rankingDebug =
+      next.explain.rankingDebug && typeof next.explain.rankingDebug === "object"
+        ? { ...next.explain.rankingDebug, finalScore }
+        : next.explain.rankingDebug;
+    next.explain = {
+      ...next.explain,
+      finalRelevance01: finalScore,
+      ...(source ? { finalRelevanceSource: source } : {}),
+      ...(rankingDebug ? { rankingDebug } : {}),
+    };
+  }
+
+  if (next.rankingDebug && typeof next.rankingDebug === "object") {
+    next.rankingDebug = {
+      ...next.rankingDebug,
+      finalScore,
+    };
+  }
+
+  return next as T;
+}
+
+function sortByAuthoritativeFinalScore<T extends ProductResult>(products: T[]): T[] {
+  return [...products].sort((a, b) => {
+    const fa = clampScore01((a as any).finalRelevance01);
+    const fb = clampScore01((b as any).finalRelevance01);
+    if (Math.abs(fb - fa) > 1e-8) return fb - fa;
+    return compareDeterministicRankKey(a, b);
+  });
+}
+
+function samePoolSafeFillResults(params: {
+  finalResults: ProductResult[];
+  rankedCandidates: ProductResult[];
+  detectionProductCategory?: string | null;
+  desiredProductTypes?: string[];
+  minResults: number;
+  limit: number;
+  hasKidsAudienceIntent?: boolean;
+}): ProductResult[] {
+  const minResults = Math.max(0, Math.floor(params.minResults));
+  const limit = Math.max(1, Math.floor(params.limit));
+  if (minResults <= 0 || params.finalResults.length >= Math.min(minResults, limit)) {
+    return params.finalResults;
+  }
+
+  const detectionCategory = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  const desiredProductTypes = params.desiredProductTypes ?? [];
+  const existingIds = new Set(params.finalResults.map((p) => String((p as any).id)));
+  const fillCount = Math.min(minResults, limit) - params.finalResults.length;
+
+  const fillers = sortByAuthoritativeFinalScore(params.rankedCandidates)
+    .filter((p: any) => !existingIds.has(String(p.id)))
+    .filter((p: any) => {
+      const ex = (p.explain ?? {}) as any;
+      if ((ex.hardBlocked ?? false) === true) return false;
+      if (!params.hasKidsAudienceIntent && hasChildAudienceSignals(p as Record<string, unknown>)) return false;
+      if (Number(ex.audienceCompliance ?? 1) < 0.45) return false;
+      if (Number(ex.crossFamilyPenalty ?? 0) >= 0.55) return false;
+      if (
+        detectionCategory &&
+        isStrictDetectionCategory(detectionCategory) &&
+        !passesStrictDetectionCategoryFamily(p as unknown as Record<string, unknown>, detectionCategory)
+      ) {
+        return false;
+      }
+      if (
+        detectionCategory === "footwear" &&
+        desiredProductTypes.length > 0 &&
+        !passesFootwearSubtypeGate(p as unknown as Record<string, unknown>, desiredProductTypes)
+      ) {
+        return false;
+      }
+      return true;
+    })
+    .slice(0, fillCount)
+    .map((p: any) => {
+      const currentRel = clampScore01(p.finalRelevance01 ?? p.similarity_score ?? 0.45, 0.45);
+      const sim = clampScore01(p.similarity_score ?? 0);
+      const safeScore = Math.min(Math.max(currentRel, sim * 0.72, 0.32), 0.55);
+      return synchronizeFinalScore(
+        {
+          ...p,
+          fallbackReason: "same_pool_safe_fill",
+        },
+        safeScore,
+        "same_pool_safe_fill",
+      );
+    });
+
+  return fillers.length > 0
+    ? [...params.finalResults, ...fillers]
+    : params.finalResults;
 }
 
 function collapseVariantGroups(results: ProductResult[]): {
@@ -5193,9 +5339,9 @@ export async function searchByImageWithSimilarity(
 
   // Phase 4: contract-based hybrid recall for detection-scoped image search.
   // Channels:
-  // - visual kNN channel (25%)
-  // - exact metadata recall (50%)
-  // - related metadata recall (25%)
+  // - visual kNN channel (~60%)
+  // - exact metadata recall (~25%)
+  // - related metadata recall (~15%)
   // The contract prevents broad drift by explicitly excluding bad/blocked types.
   if (
     detectionScoped &&
@@ -5571,7 +5717,7 @@ export async function searchByImageWithSimilarity(
     }
 
     const dedupedDebug = (dedupeImageSearchResults(results as any) as ProductResult[]);
-    results = sortProductsByRelevanceAndCategory(dedupedDebug).slice(0, limit);
+    results = sortByAuthoritativeFinalScore(dedupedDebug).slice(0, limit);
 
     let related: ProductResult[] = [];
     if (includeRelated && pHash) {
@@ -9115,7 +9261,8 @@ export async function searchByImageWithSimilarity(
       });
       const tierAssignment = assignMatchTier(contractTier, normalized, fashionIntent);
 
-      // Apply tier-based scoring: bound finalRelevance01 by tier cap
+      // Tier assignment is debug-first. In production stabilization it must not cap
+      // or boost the authoritative calibrated score unless explicitly enabled.
       const tierBasedScore = computeTierBasedScore({
         tier: tierAssignment.tier,
         visualSimilarity: similarityScore ?? 0,
@@ -9123,14 +9270,11 @@ export async function searchByImageWithSimilarity(
         colorMatch: compliance?.colorCompliance ?? 0,
         audienceMatch: compliance?.audienceCompliance ?? 0,
       });
-      
-      // Cap finalRelevance01 by tier cap (prevents lower tiers from scoring higher than tier allows)
       const tierCap = getTierCap(tierAssignment.tier);
-      const tierBoundedFinal = Math.min(finalRelevance01 ?? 0, tierCap);
-      
-      // Use tier-based score if it's higher (ensures tier integrity)
-      // Otherwise, use the current finalRelevance01 (bounded by tier cap)
-      const finalScoreWithTierBound = Math.max(tierBoundedFinal, tierBasedScore);
+      const oldCalibratedFinal = clampScore01(finalRelevance01 ?? 0);
+      const finalScoreWithTierBound = imageTierScoringEnabled()
+        ? clampScore01(oldCalibratedFinal * tierScoreMultiplier(tierAssignment.tier))
+        : oldCalibratedFinal;
 
       return {
         ...p,
@@ -9154,9 +9298,13 @@ export async function searchByImageWithSimilarity(
         })(),
         rerankScore: compliance?.rerankScore,
         finalRelevance01: finalScoreWithTierBound,
-        matchTier: tierAssignment.tier,
-        tierReason: tierAssignment.reason,
-        tierCap: tierAssignment.tierCap,
+        ...(includeDebug
+          ? {
+            matchTier: tierAssignment.tier,
+            tierReason: tierAssignment.reason,
+            tierCap: tierAssignment.tierCap,
+          }
+          : {}),
         normalizedFamily: normalized.normalizedFamily,
         normalizedType: normalized.normalizedType,
         normalizedSubtype: normalized.normalizedSubtype,
@@ -9249,6 +9397,12 @@ export async function searchByImageWithSimilarity(
             // ── Final score ──────────────────────────────────────
             finalRelevance01: finalScoreWithTierBound,
             finalRelevanceSource,
+            oldCalibratedFinalRelevance01: oldCalibratedFinal,
+            tierScoringAuthority: imageTierScoringEnabled() ? "soft_multiplier" : "debug_only",
+            matchTier: tierAssignment.tier,
+            tierReason: tierAssignment.reason,
+            tierScore: tierBasedScore,
+            tierCap,
             rankingDebug: includeDebug && additiveScore
               ? {
                 id: idStr,
@@ -9504,7 +9658,7 @@ export async function searchByImageWithSimilarity(
         finalRelevance01: Math.max(currentRel, sim * 0.85, effectiveFinalAcceptMin),
       };
     });
-    results = sortProductsByRelevanceAndCategory(fallbackMapped).slice(0, limit) as ProductResult[];
+    results = sortByAuthoritativeFinalScore(fallbackMapped).slice(0, limit) as ProductResult[];
   }
 
   if (hasDetectionAnchoredTypeIntent) {
@@ -9658,52 +9812,21 @@ export async function searchByImageWithSimilarity(
     }
   }
 
-  // Always sort by finalRelevance01 descending as the primary signal.
-  // Tie-breaker: for detection-anchored `bottoms` or `tops`, prefer strong
-  // visual similarity early so visually-correct items (e.g. pants) are not
-  // demoted by metadata-only signals. Otherwise prefer product-type
-  // compliance then (optionally) raw visual similarity.
-  results.sort((a: any, b: any) => {
-    const fa = a.finalRelevance01 ?? 0;
-    const fb = b.finalRelevance01 ?? 0;
-    if (Math.abs(fb - fa) > 1e-6) return fb - fa;
+  const beforeSamePoolSafeFillCount = results.length;
+  if (hasDetectionAnchoredTypeIntent && imageMinResultsTarget > 0 && resultsBeforeFinalRelevanceFilter.length > results.length) {
+    results = samePoolSafeFillResults({
+      finalResults: results,
+      rankedCandidates: resultsBeforeFinalRelevanceFilter,
+      detectionProductCategory: detectionCategoryForFinalGate,
+      desiredProductTypes,
+      minResults: imageMinResultsTarget,
+      limit,
+      hasKidsAudienceIntent,
+    });
+  }
+  const samePoolSafeFillCount = Math.max(0, results.length - beforeSamePoolSafeFillCount);
 
-    const simA = Number(a.similarity_score ?? 0);
-    const simB = Number(b.similarity_score ?? 0);
-
-    // Detection-aware early visual preference for bottoms/tops.
-    if (detectionCategoryForFinalGate === "bottoms" || detectionCategoryForFinalGate === "tops") {
-      // Slightly different thresholds per category to be conservative for tops.
-      const simThreshold = detectionCategoryForFinalGate === "bottoms" ? 0.82 : 0.85;
-      if (simA >= simThreshold || simB >= simThreshold) {
-        const vs = simB - simA;
-        if (Math.abs(vs) > 1e-6) return vs;
-      }
-    }
-
-    const ta = Number(a?.explain?.productTypeCompliance ?? 0);
-    const tb = Number(b?.explain?.productTypeCompliance ?? 0);
-    if (Math.abs(tb - ta) > 1e-6) return tb - ta;
-
-    const ma = Number(a?.explain?.metadataCompliance ?? 0);
-    const mb = Number(b?.explain?.metadataCompliance ?? 0);
-    if (Math.abs(mb - ma) > 1e-6) return mb - ma;
-
-    const ra = Number(a?.rerankScore ?? 0);
-    const rb = Number(b?.rerankScore ?? 0);
-    if (Math.abs(rb - ra) > 1e-6) return rb - ra;
-
-    // Fall back to visual similarity when broad visual-first ranking is enabled.
-    if (imageSearchVisualPrimaryRanking) {
-      const vs = simB - simA;
-      if (Math.abs(vs) > 1e-6) return vs;
-    }
-
-    const vsFallback = simB - simA;
-    if (Math.abs(vsFallback) > 1e-6) return vsFallback;
-
-    return compareDeterministicRankKey(a as ProductResult, b as ProductResult);
-  });
+  results = sortByAuthoritativeFinalScore(results);
 
   const dedupedResults = dedupeImageSearchResults(results as any) as ProductResult[];
   const countAfterDedupe = dedupedResults.length;
@@ -9732,7 +9855,7 @@ export async function searchByImageWithSimilarity(
   const diversityPoolCap = imageDiversityPoolCap();
   if (diversityRerankApplied) {
     const diversityStartedAt = Date.now();
-    const relevanceSorted = sortProductsByRelevanceAndCategory(variantCollapsed.results);
+    const relevanceSorted = sortByAuthoritativeFinalScore(variantCollapsed.results);
     const lockedTop = relevanceSorted.slice(0, Math.min(15, relevanceSorted.length));
     const diversityPool = relevanceSorted.slice(lockedTop.length, Math.max(lockedTop.length, diversityPoolCap));
     const tail = relevanceSorted.slice(Math.max(lockedTop.length, diversityPoolCap));
@@ -9740,7 +9863,7 @@ export async function searchByImageWithSimilarity(
     results = [...lockedTop, ...diversifiedRest, ...tail].slice(0, limit) as ProductResult[];
     rerankStepTimers.diversity_ms += Date.now() - diversityStartedAt;
   } else {
-    const combined = sortProductsByRelevanceAndCategory(variantCollapsed.results);
+    const combined = sortByAuthoritativeFinalScore(variantCollapsed.results);
     results = combined.slice(0, limit) as ProductResult[];
   }
   const finalReturnedCount = results.length;
@@ -9933,6 +10056,7 @@ export async function searchByImageWithSimilarity(
       SEARCH_FINAL_ACCEPT_MIN_IMAGE: finalAcceptMin,
       effective_final_accept_min: effectiveFinalAcceptMin,
       relevance_relaxed_for_min_count: relevanceRelaxedForMinCount,
+      same_pool_safe_fill_count: samePoolSafeFillCount,
       CLIP_SIMILARITY_THRESHOLD: config.clip.imageSimilarityThreshold,
       category_filter_mode: hasHardCategoryFilter ? "hard" : "soft",
       product_type_filter_mode: "none",
@@ -9973,7 +10097,7 @@ export async function searchByImageWithSimilarity(
 
   // Ensure final ordering after any rescue/injection steps (pHash, near-exact, related)
   try {
-    if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0 && results.length > 1) {
+    if (imageCandidateRerankerEnabled() && imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0 && results.length > 1) {
       const topRerankWindow = Math.min(results.length, 200);
       const baseCandidates = results.slice(0, topRerankWindow).map((product, index) => ({
         id: String(product.id),
@@ -9996,14 +10120,15 @@ export async function searchByImageWithSimilarity(
         if (rerankScore === undefined) return product;
         const baseFinal = Number(product.finalRelevance01 ?? product.similarity_score ?? 0);
         const blended = Math.max(0, Math.min(1, baseFinal * 0.3 + rerankScore * 0.7));
-        return {
+        return synchronizeFinalScore({
           ...product,
-          mlRerankScore: rerankScore,
+          imageCandidateRerankScore: rerankScore,
           rerankScore: Math.max(Number(product.rerankScore ?? 0), rerankScore),
-          finalRelevance01: blended,
-        };
+        } as any, blended, "candidate_image_rerank");
       });
     }
+
+    results = results.map((product) => synchronizeFinalScore(product));
 
     const dbgEnabled = String(process.env.SEARCH_IMAGE_SORT_DEBUG ?? "").toLowerCase() === "1" || String(process.env.SEARCH_IMAGE_SORT_DEBUG ?? "").toLowerCase() === "true";
     if (dbgEnabled) {
@@ -10014,7 +10139,7 @@ export async function searchByImageWithSimilarity(
       }
     }
 
-    results = sortProductsByRelevanceAndCategory(results).slice(0, limit);
+    results = sortByAuthoritativeFinalScore(results).slice(0, limit);
 
     if (dbgEnabled) {
       try {
@@ -10091,6 +10216,7 @@ export async function searchByImageWithSimilarity(
         hits_after_final_accept_min: countAfterFinalAcceptMin,
         dropped_by_final_relevance_before_override: droppedByFinalRelevanceBeforeOverride,
         rescued_by_strong_visual_override: rescuedByStrongVisualOverride,
+        same_pool_safe_fill: samePoolSafeFillCount,
         hits_after_color_postfilter: countAfterColorPostfilter,
         hits_after_hydration: countAfterHydration,
         dropped_by_dedupe: droppedByDedupe,

@@ -82,21 +82,14 @@ export function sortProductsByRelevanceAndCategory<T extends SortableProduct>(
 }
 
 /**
- * Sort products by finalRelevance01 only (simple descending)
+ * Sort products by finalRelevance01 only (simple descending).
+ * Deterministic key is used only when authoritative scores are tied.
  */
 export function sortProductsByFinalRelevance<T extends SortableProduct>(products: T[]): T[] {
   return [...products].sort((a: any, b: any) => {
     const fa = a.finalRelevance01 ?? 0;
     const fb = b.finalRelevance01 ?? 0;
     if (Math.abs(fb - fa) > 1e-6) return fb - fa;
-
-    // Fallback tie-breaker
-    const ar = a.rerankScore ?? 0;
-    const br = b.rerankScore ?? 0;
-    if (br !== ar) return br - ar;
-
-    const simDelta = (b.similarity_score ?? 0) - (a.similarity_score ?? 0);
-    if (Math.abs(simDelta) > 1e-8) return simDelta;
 
     return compareDeterministicProductKey(a, b);
   });
