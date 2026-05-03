@@ -13,6 +13,9 @@ import {
   isYoloCircuitOpenError,
 } from "./yoloCircuitBreaker";
 import { mapDetectionToCategory } from "../detection/categoryMapper";
+import * as path from "path";
+import * as grpc from "@grpc/grpc-js";
+import * as protoLoader from "@grpc/proto-loader";
 
 // ============================================================================
 // Types
@@ -72,6 +75,8 @@ export interface HealthResponse {
   cuda_available?: boolean;
   cuda_device_name?: string;
   cuda_device_count?: number;
+  configured_device?: string;
+  requested_device?: string;
   num_classes: number;
   class_names: string[];
   config: {
@@ -138,6 +143,22 @@ export interface OutfitComposition {
  */
 let yoloUrlConflictWarned = false;
 let yoloDeprecatedEnvWarned = false;
+const YOLO_PROTO_PATH = path.resolve(process.cwd(), "src", "lib", "model", "proto", "yolo.proto");
+
+type GrpcYoloClient = {
+  Health: (
+    request: Record<string, never>,
+    metadata: grpc.Metadata,
+    options: grpc.CallOptions,
+    callback: (err: grpc.ServiceError | null, response: any) => void,
+  ) => void;
+  Detect: (
+    request: Record<string, unknown>,
+    metadata: grpc.Metadata,
+    options: grpc.CallOptions,
+    callback: (err: grpc.ServiceError | null, response: any) => void,
+  ) => void;
+};
 
 export function resolveYoloServiceBaseUrl(override?: string): string {
   const o = override?.trim();
@@ -180,8 +201,72 @@ function yoloReadinessTimeoutMs(): number {
   return Math.min(180_000, Math.max(5_000, n));
 }
 
+function yoloTransport(): "http" | "grpc" | "auto" {
+  const raw = String(process.env.YOLO_TRANSPORT ?? "auto").toLowerCase().trim();
+  return raw === "grpc" || raw === "http" || raw === "auto" ? raw : "auto";
+}
+
+function resolveYoloGrpcAddress(): string {
+  return process.env.YOLO_GRPC_ADDRESS?.trim() || "127.0.0.1:50052";
+}
+
+let grpcClient: GrpcYoloClient | null = null;
+
+function getGrpcClient(): GrpcYoloClient {
+  if (grpcClient) return grpcClient;
+  const packageDefinition = protoLoader.loadSync(YOLO_PROTO_PATH, {
+    keepCase: false,
+    longs: String,
+    enums: String,
+    defaults: true,
+    oneofs: true,
+  });
+  const proto = grpc.loadPackageDefinition(packageDefinition) as any;
+  const Ctor = proto.marketplace.yolo.v1.YoloDetector;
+  grpcClient = new Ctor(resolveYoloGrpcAddress(), grpc.credentials.createInsecure()) as GrpcYoloClient;
+  return grpcClient;
+}
+
+function boxFromGrpc(box: any): BoundingBox {
+  return {
+    x1: Number(box?.x1 ?? 0),
+    y1: Number(box?.y1 ?? 0),
+    x2: Number(box?.x2 ?? 0),
+    y2: Number(box?.y2 ?? 0),
+  };
+}
+
+function detectionResponseFromGrpc(response: any): DetectionResponse {
+  const summary: Record<string, number> = {};
+  const rows = Array.isArray(response?.summary) ? response.summary : [];
+  for (const row of rows) {
+    const label = String(row?.label ?? "");
+    if (label) summary[label] = Number(row?.count ?? 0);
+  }
+  return {
+    success: Boolean(response?.success),
+    detections: (Array.isArray(response?.detections) ? response.detections : []).map((d: any) => ({
+      label: String(d?.label ?? ""),
+      raw_label: String(d?.rawLabel ?? d?.raw_label ?? d?.label ?? ""),
+      confidence: Number(d?.confidence ?? 0),
+      box: boxFromGrpc(d?.box),
+      box_normalized: boxFromGrpc(d?.boxNormalized ?? d?.box_normalized),
+      area_ratio: Number(d?.areaRatio ?? d?.area_ratio ?? 0),
+    })),
+    count: Number(response?.count ?? 0),
+    image_size: {
+      width: Number(response?.imageSize?.width ?? response?.image_size?.width ?? 0),
+      height: Number(response?.imageSize?.height ?? response?.image_size?.height ?? 0),
+    },
+    model: String(response?.model ?? "dual-detector-v1"),
+    summary,
+  };
+}
+
 export class YOLOv8Client {
   private baseUrl: string;
+  private grpcAddress: string;
+  private transport: "http" | "grpc" | "auto";
   /** Batch / reload long operations */
   private timeout: number;
   private detectTimeoutMs: number;
@@ -190,10 +275,13 @@ export class YOLOv8Client {
 
   constructor(baseUrl?: string, timeout?: number) {
     this.baseUrl = resolveYoloServiceBaseUrl(baseUrl);
+    this.grpcAddress = resolveYoloGrpcAddress();
+    this.transport = yoloTransport();
     this.timeout = timeout || 30000;
     this.detectTimeoutMs = yoloDetectTimeoutMs();
     console.info(
-      `[YOLOv8] HTTP client: base URL=${this.baseUrl} (YOLOV8_SERVICE_URL canonical; YOLO_API_URL deprecated alias); detect timeout=${this.detectTimeoutMs}ms`,
+      `[YOLOv8] client: transport=${this.transport} grpc=${this.grpcAddress} http=${this.baseUrl} ` +
+        `(YOLOV8_SERVICE_URL canonical; YOLO_API_URL deprecated alias); detect timeout=${this.detectTimeoutMs}ms`,
     );
   }
 
@@ -276,6 +364,14 @@ export class YOLOv8Client {
    * Health check endpoint
    */
   async health(): Promise<HealthResponse> {
+    if (this.transport === "grpc" || this.transport === "auto") {
+      try {
+        return await this.grpcHealth();
+      } catch (e) {
+        if (this.transport === "grpc") throw e;
+      }
+    }
+
     const response = await fetch(`${this.baseUrl}/health`, {
       method: "GET",
       signal: AbortSignal.timeout(yoloReadinessTimeoutMs()),
@@ -289,6 +385,46 @@ export class YOLOv8Client {
     }
 
     return response.json();
+  }
+
+  private grpcHealth(): Promise<HealthResponse> {
+    return new Promise((resolve, reject) => {
+      try {
+        getGrpcClient().Health(
+          {},
+          new grpc.Metadata(),
+          { deadline: Date.now() + yoloReadinessTimeoutMs() },
+          (err, response) => {
+            if (err) return reject(err);
+            resolve({
+              ok: Boolean(response?.ok),
+              model_path: String(response?.modelPath ?? response?.model_path ?? ""),
+              model_loaded: Boolean(response?.modelLoaded ?? response?.model_loaded),
+              runtime_device: String(response?.runtimeDevice ?? response?.runtime_device ?? "unknown"),
+              cuda_available: Boolean(response?.cudaAvailable ?? response?.cuda_available),
+              cuda_device_name: String(response?.cudaDeviceName ?? response?.cuda_device_name ?? ""),
+              cuda_device_count: Number(response?.cudaDeviceCount ?? response?.cuda_device_count ?? 0),
+              configured_device: String(response?.configuredDevice ?? response?.configured_device ?? "") || undefined,
+              requested_device: String(response?.requestedDevice ?? response?.requested_device ?? "") || undefined,
+              num_classes: Number(response?.numClasses ?? response?.num_classes ?? 0),
+              class_names: Array.isArray(response?.classNames)
+                ? response.classNames.map(String)
+                : Array.isArray(response?.class_names)
+                  ? response.class_names.map(String)
+                  : [],
+              config: {
+                confidence_threshold: 0.6,
+                iou_threshold: 0,
+                max_detections: 300,
+                min_box_area_ratio: 0,
+              },
+            });
+          },
+        );
+      } catch (error) {
+        reject(error);
+      }
+    });
   }
 
   /**
@@ -320,6 +456,19 @@ export class YOLOv8Client {
     } catch (e) {
       if (isYoloCircuitOpenError(e)) throw e;
       throw e;
+    }
+
+    if (this.transport === "grpc" || this.transport === "auto") {
+      try {
+        const data = await this.grpcDetectFromBuffer(imageBuffer, filename, options);
+        this.circuit.onSuccess();
+        return data;
+      } catch (e) {
+        if (this.transport === "grpc") {
+          this.circuit.onFailure();
+          throw e;
+        }
+      }
     }
 
     const formData = new FormData();
@@ -376,6 +525,35 @@ export class YOLOv8Client {
       if (!failureCounted) this.circuit.onFailure();
       throw e;
     }
+  }
+
+  private grpcDetectFromBuffer(
+    imageBuffer: Buffer,
+    filename: string,
+    options: DetectOptions,
+  ): Promise<DetectionResponse> {
+    return new Promise((resolve, reject) => {
+      try {
+        getGrpcClient().Detect(
+          {
+            imageBytes: imageBuffer,
+            filename,
+            confidence: Number(options.confidence ?? 0.6),
+            enhanceContrast: Boolean(options.preprocessing?.enhanceContrast),
+            enhanceSharpness: Boolean(options.preprocessing?.enhanceSharpness),
+            bilateralFilter: Boolean(options.preprocessing?.bilateralFilter),
+          },
+          new grpc.Metadata(),
+          { deadline: Date.now() + this.detectTimeoutMs },
+          (err, response) => {
+            if (err) return reject(err);
+            resolve(detectionResponseFromGrpc(response));
+          },
+        );
+      } catch (error) {
+        reject(error);
+      }
+    });
   }
 
   /**

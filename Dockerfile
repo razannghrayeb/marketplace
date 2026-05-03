@@ -127,6 +127,7 @@ COPY src/lib/model/yolov8_api.py \
   src/lib/model/dual-model-yolo.py \
   src/lib/model/image_preprocessor.py \
   /app/yolo/
+COPY src/lib/model/proto /app/yolo/proto
 COPY src/lib/model/requirements-yolo-extras.txt /app/yolo/requirements-extras.txt
 
 # GPU torch wheels by default; set YOLO_TORCH_VARIANT=cpu to force CPU build.

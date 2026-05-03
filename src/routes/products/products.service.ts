@@ -2,6 +2,7 @@ import { osClient } from "../../lib/core/index";
 import {
   pg,
   getProductsByIdsOrdered,
+  getSearchProductsByIdsOrdered,
   productsTableHasIsHiddenColumn,
 } from "../../lib/core/index";
 import { config } from "../../config";
@@ -63,6 +64,7 @@ import type { SearchResultWithRelated } from "./types";
 import { findRelatedProducts } from "../../lib/search/relatedProducts";
 import { computeColorContradictionPenalty as computeColorContradictionPenaltyCore } from "./colorRelevance";
 import { createHash } from "crypto";
+import { rerankImageCandidates } from "../../lib/image/imageReranker";
 
 // ============================================================================
 // Types
@@ -347,8 +349,8 @@ function imageDiversityRerankEnabled(): boolean {
 
 /** Phase 9: lambda in MMR (higher = more relevance, lower = more diversity). */
 function imageDiversityLambda(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_DIVERSITY_LAMBDA ?? "0.82");
-  if (!Number.isFinite(raw)) return 0.82;
+  const raw = Number(process.env.SEARCH_IMAGE_DIVERSITY_LAMBDA ?? "0.90");
+  if (!Number.isFinite(raw)) return 0.90;
   return Math.max(0.5, Math.min(0.98, raw));
 }
 
@@ -3848,14 +3850,6 @@ export async function searchByImageWithSimilarity(
       if (clause) filter.push(clause);
     }
   }
-  // CRITICAL FIX: Force hard category filter for footwear when detection identifies it
-  // This ensures opensearch query includes term filter for footwear category
-  // preventing soft-category mode from allowing non-footwear items to leak through
-  const detectionProductCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
-  if (detectionProductCategoryNorm === "footwear" || detectionProductCategoryNorm === "shoes") {
-    const footwearClause = buildHardCategoryFilterClause("footwear");
-    if (footwearClause) filter.push(footwearClause);
-  }
   if (filters.brand) filter.push({ term: { brand: String(filters.brand).toLowerCase() } });
   if (filters.vendorId) filter.push({ term: { vendor_id: String(filters.vendorId) } });
   if (Array.isArray((filters as { productTypes?: string[] }).productTypes)) {
@@ -4002,7 +3996,8 @@ export async function searchByImageWithSimilarity(
   }
   // CRITICAL FIX: Force hard category filter for footwear in relaxed KNN fallback path
   // Ensures footwear detection results stay within footwear category even in sparse retrieval
-  if (detectionProductCategoryNorm === "footwear" || detectionProductCategoryNorm === "shoes") {
+  const relaxedDetectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  if (relaxedDetectionCategoryNorm === "footwear" || relaxedDetectionCategoryNorm === "shoes") {
     const footwearClause = buildHardCategoryFilterClause("footwear");
     if (footwearClause) relaxedKnnFilter.push(footwearClause);
   }
@@ -4011,10 +4006,9 @@ export async function searchByImageWithSimilarity(
   const retrievalKBase = imageCategoryAwareKnnPoolLimit(params.detectionProductCategory);
   // Detection pool cap: bounds how many results come back from OpenSearch for reranking.
   // FAISS traversal depth is set by num_candidates, not by k — raising k is cheap.
-  const dynamicDetectionPoolCap = Math.min(
-    imageDetectionKnnPoolCap(),
-    Math.max(limit * 10, 200),
-  );
+  // Detection pool cap: use configured limits, NOT endpoint limit (limit = API return count)
+  // This ensures candidate pool reflects search quality needs, not API pagination
+  const dynamicDetectionPoolCap = imageDetectionKnnPoolCap();
   const retrievalK = detectionScoped
     ? Math.min(retrievalKBase, dynamicDetectionPoolCap)
     : retrievalKBase;
@@ -4499,6 +4493,17 @@ export async function searchByImageWithSimilarity(
   }
 
   stageKnnDoneAt = Date.now();
+  const rawKnnProductIds = [
+    ...new Set(
+      (Array.isArray(hits) ? hits : [])
+        .map((hit: any) => String(hit?._source?.product_id ?? ""))
+        .filter(Boolean),
+    ),
+  ];
+  const productHydrationPromise = getSearchProductsByIdsOrdered(rawKnnProductIds).then(
+    (products) => ({ products }),
+    (error) => ({ error }),
+  );
 
   const signals = await signalsPromise;
   colorQueryEmbedding = signals.colorQueryEmbedding;
@@ -5635,6 +5640,10 @@ export async function searchByImageWithSimilarity(
   const isBagDetection = normalizedDetectionCategory === "bags" || normalizedDetectionCategory === "accessories";
   const isFootwearDetection = normalizedDetectionCategory === "shoes" || normalizedDetectionCategory === "footwear";
   const isOuterwearDetection = normalizedDetectionCategory === "outerwear";
+  const visualColorOverrideMin = Math.max(
+    0.5,
+    Math.min(1, Number(process.env.SEARCH_IMAGE_COLOR_VISUAL_OVERRIDE_MIN ?? "0.85") || 0.85),
+  );
 
   // Final relevance pass: compute the authoritative finalRelevance01 incorporating
   // all visual + metadata signals, adaptive floors, composite, and BLIP reranking.
@@ -5776,6 +5785,22 @@ export async function searchByImageWithSimilarity(
     }
     // Record the base final (pre-rescue) for conservative boost capping later.
     baseFinalById.set(idStr, baseFinal);
+    const hasPreGateVisualColorOverride =
+      !hasExplicitColorIntent &&
+      (hasColorIntentForFinal || hasColorPreferenceForRanking) &&
+      hasDetectionAnchoredTypeIntent &&
+      rawVisual >= visualColorOverrideMin &&
+      ((comp.exactTypeScore ?? 0) >= 1 ||
+        (comp.productTypeCompliance ?? 0) >= 0.74 ||
+        (comp.categoryRelevance01 ?? 0) >= 0.9) &&
+      (comp.crossFamilyPenalty ?? 0) < 0.45;
+    if (hasPreGateVisualColorOverride) {
+      comp.finalRelevance01 = Math.max(
+        comp.finalRelevance01 ?? 0,
+        Math.min(0.86, Math.max(0.62, rawVisual * 0.88)),
+      );
+      finalScoreSourceById.set(idStr, "pre_gate_visual_color_override");
+    }
     // Main-path tops tuning:
     // strengthen primary score (before final-accept gate) when visual + type evidence
     // is strong, so similar tops are not under-ranked due noisy metadata/color cues.
@@ -7585,7 +7610,15 @@ export async function searchByImageWithSimilarity(
   ) {
     const suitFirstHits = rankedHits.filter((h: any) => hasActualSuitCatalogCue((h as any)?._source ?? {}));
     if (suitFirstHits.length > 0) {
-      rankedHits = suitFirstHits;
+      const suitFirstIds = new Set(
+        suitFirstHits
+          .map((h: any) => String((h as any)?._source?.product_id ?? ""))
+          .filter(Boolean),
+      );
+      rankedHits = [
+        ...suitFirstHits,
+        ...rankedHits.filter((h: any) => !suitFirstIds.has(String((h as any)?._source?.product_id ?? ""))),
+      ];
     }
   }
 
@@ -7607,21 +7640,34 @@ export async function searchByImageWithSimilarity(
     scoreMap.set(id, Math.round(sim * 100) / 100);
   });
 
-  // Fetch product data
+  // Fetch product card data. Product rows started hydrating right after kNN,
+  // overlapping PostgreSQL I/O with reranking and post-filter work.
   let results: ProductResult[] = [];
     if (productIds.length > 0) {
     const numericIds = productIds.map((id: string) => parseInt(id, 10));
-    const [products, imagesByProduct, userLifestyle] = await Promise.all([
-      getProductsByIdsOrdered(productIds),
+    const [productHydration, imagesByProduct, userLifestyle] = await Promise.all([
+      productHydrationPromise,
       getImagesForProducts(numericIds),
       personalizationPromise,
     ]);
+    if ((productHydration as any).error) throw (productHydration as any).error;
+    const productById = new Map(((productHydration as any).products as any[]).map((p: any) => [String(p.id), p]));
+    const products = productIds.map((id: string) => productById.get(String(id))).filter(Boolean);
 
     results = products.map((p: any) => {
       const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
       const idStr = String(p.id);
       const similarityScore = scoreMap.get(idStr) ?? 0;
       const compliance = complianceById.get(idStr);
+      const hasVisualColorOverride =
+        !hasExplicitColorIntent &&
+        hasDetectionAnchoredTypeIntent &&
+        Boolean(compliance) &&
+        similarityScore >= visualColorOverrideMin &&
+        ((compliance?.exactTypeScore ?? 0) >= 1 ||
+          (compliance?.productTypeCompliance ?? 0) >= 0.74 ||
+          (compliance?.categoryRelevance01 ?? 0) >= 0.9) &&
+        (compliance?.crossFamilyPenalty ?? 0) < 0.45;
       const styleSim = styleSimById.get(idStr) ?? 0;
       const colorSim = colorSimById.get(idStr) ?? 0;
       const styleSimRaw = styleSimRawById.get(idStr) ?? styleSim;
@@ -7784,14 +7830,25 @@ export async function searchByImageWithSimilarity(
                 : 0.05
               : 0;
             // Keep contradictory colors visible for sparse catalogs, but with realistic caps
-            const conservativeCap = Math.min(
-              strictOnePieceCap + nearDuplicateRelax,
-              Math.max(strictInferredOnePieceColorGate ? 0.08 : 0.15, conflictAdjustedCap),
+            const visualOverrideLift = hasVisualColorOverride
+              ? Math.min(0.86, Math.max(0.62, similarityScore * 0.88))
+              : 0;
+            const conservativeCap = Math.max(
+              visualOverrideLift,
+              Math.min(
+                strictOnePieceCap + nearDuplicateRelax,
+                Math.max(strictInferredOnePieceColorGate ? 0.08 : 0.15, conflictAdjustedCap),
+              ),
             );
             const inferredCoreCategoryFloor = 0;
             const conservativeCapAdjusted = Math.max(conservativeCap, inferredCoreCategoryFloor);
-            finalRelevance01 = Math.min(finalRelevance01 ?? 0, conservativeCapAdjusted);
-            finalRelevanceSource = "catalog_color_correction";
+            const colorCappedRelevance = Math.min(finalRelevance01 ?? 0, conservativeCapAdjusted);
+            finalRelevance01 = hasVisualColorOverride
+              ? Math.max(colorCappedRelevance, visualOverrideLift)
+              : colorCappedRelevance;
+            finalRelevanceSource = hasVisualColorOverride
+              ? "catalog_color_visual_override"
+              : "catalog_color_correction";
             explainColorCompliance = 0;
             explainMatchedColor = authoritativeColorNorm;
             explainColorTier = "none";
@@ -8015,6 +8072,7 @@ export async function searchByImageWithSimilarity(
           const canLiftFrom =
             source === "computed" ||
             source === "catalog_color_correction" ||
+            source === "catalog_color_visual_override" ||
             source === "catalog_color_mix_dampen" ||
             source === "context_personalization";
           if (canLiftFrom) {
@@ -8754,8 +8812,10 @@ export async function searchByImageWithSimilarity(
   }
 
   if (breakdownDebug) {
+    // Hard category filter is used ONLY when soft mode is off AND we have catalog terms
+    // Otherwise we fall back to soft/no filtering
     const hasHardCategoryFilter =
-      !softCategory || !desiredCatalogTerms || desiredCatalogTerms.size === 0;
+      !softCategory && desiredCatalogTerms && desiredCatalogTerms.size > 0;
     console.warn("[search-breakdown][image]", {
       query: imageSearchTextQuery ?? null,
       image_knn_field: knnFieldResolved,
@@ -8811,6 +8871,38 @@ export async function searchByImageWithSimilarity(
 
   // Ensure final ordering after any rescue/injection steps (pHash, near-exact, related)
   try {
+    if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0 && results.length > 1) {
+      const topRerankWindow = Math.min(results.length, 200);
+      const baseCandidates = results.slice(0, topRerankWindow).map((product, index) => ({
+        id: String(product.id),
+        imageUrl:
+          product.images?.find((img) => img.is_primary)?.url ??
+          product.image_url ??
+          product.image_cdn ??
+          product.images?.[0]?.url ??
+          null,
+        baseScore: Number(product.finalRelevance01 ?? product.similarity_score ?? 0) - index * 1e-6,
+      }));
+      const reranked = await rerankImageCandidates({
+        queryImageBuffer: imageBuffer,
+        candidates: baseCandidates,
+        topK: topRerankWindow,
+      });
+      const rerankScoreById = new Map(reranked.map((item) => [String(item.id), Number(item.score) || 0]));
+      results = results.map((product) => {
+        const rerankScore = rerankScoreById.get(String(product.id));
+        if (rerankScore === undefined) return product;
+        const baseFinal = Number(product.finalRelevance01 ?? product.similarity_score ?? 0);
+        const blended = Math.max(0, Math.min(1, baseFinal * 0.3 + rerankScore * 0.7));
+        return {
+          ...product,
+          mlRerankScore: rerankScore,
+          rerankScore: Math.max(Number(product.rerankScore ?? 0), rerankScore),
+          finalRelevance01: blended,
+        };
+      });
+    }
+
     const dbgEnabled = String(process.env.SEARCH_IMAGE_SORT_DEBUG ?? "").toLowerCase() === "1" || String(process.env.SEARCH_IMAGE_SORT_DEBUG ?? "").toLowerCase() === "true";
     if (dbgEnabled) {
       try {

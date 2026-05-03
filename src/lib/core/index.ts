@@ -10,6 +10,7 @@ export {
   testConnection,
   closePool,
   getProductsByIdsOrdered,
+  getSearchProductsByIdsOrdered,
   productsTableHasIsHiddenColumn,
   productsTableHasCanonicalIdColumn,
   productsTableHasGenderColumn,

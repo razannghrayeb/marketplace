@@ -21,7 +21,11 @@ services:
       - RANKER_API_URL=http://ranker:8000
       # Bundled YOLO (docker-entrypoint starts uvicorn on 127.0.0.1:8001). Do not point at yolov8 unless you use EMBEDDED_YOLO=0.
       - YOLOV8_SERVICE_URL=http://127.0.0.1:8001
+      - YOLO_TRANSPORT=${YOLO_TRANSPORT:-auto}
+      - YOLO_GRPC_ADDRESS=${YOLO_GRPC_ADDRESS:-127.0.0.1:50052}
       - ONNX_API_URL=http://onnx-inference:8000
+      - ONNX_GRPC_ADDRESS=onnx-inference:50051
+      - SEARCH_IMAGE_RERANK_TRANSPORT=${SEARCH_IMAGE_RERANK_TRANSPORT:-grpc}
       - CLIP_EXECUTION_PROVIDERS=${CLIP_EXECUTION_PROVIDERS:-cuda,cpu}
       - CLIP_USE_GPU=${CLIP_USE_GPU:-true}
       # Optional external BLIP service (HF InstructBLIP). Keep empty to use local ONNX BLIP in Node.
@@ -113,10 +117,14 @@ services:
       dockerfile: Dockerfile.onnx
     ports:
       - "8002:8000"
+      - "50051:50051"
     environment:
       - MODEL_DIR=/models
       - ONNX_NUM_THREADS=4
-      - ONNX_EXECUTION_PROVIDERS=${ONNX_EXECUTION_PROVIDERS:-CUDAExecutionProvider,CPUExecutionProvider}
+      - ONNX_EXECUTION_PROVIDERS=${ONNX_EXECUTION_PROVIDERS:-TensorrtExecutionProvider,CUDAExecutionProvider,CPUExecutionProvider}
+      - ONNX_GRPC_PORT=${ONNX_GRPC_PORT:-50051}
+      - TRT_ENGINE_CACHE_PATH=${TRT_ENGINE_CACHE_PATH:-/tmp/trt_engine_cache}
+      - TRT_FP16_ENABLE=${TRT_FP16_ENABLE:-1}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     volumes:
@@ -166,7 +174,9 @@ services:
       dockerfile: Dockerfile.yolo
     ports:
       - "8001:8001"
+      - "50052:50052"
     environment:
+      - YOLO_GRPC_PORT=50052
       - YOLO_MODEL_PATH=kesimeg/yolov8n-clothing-detection
       - YOLO_FASHION_MODEL_PATH=kesimeg/yolov8n-clothing-detection
       - YOLO_CONFIDENCE_THRESHOLD=0.25
