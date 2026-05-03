@@ -289,6 +289,13 @@ export interface ProductResult {
       sameColorFamily?: boolean;
       familyMismatch?: boolean;
       nearIdenticalVisual?: boolean;
+      visualBase?: number;
+      attributeAgreement?: number;
+      familyGate?: number;
+      contradictionPenalty?: number;
+      qualityModifier?: number;
+      maxFinal?: number;
+      matchLabel?: string;
       finalScore?: number;
       boosts?: string[];
       penalties?: string[];
