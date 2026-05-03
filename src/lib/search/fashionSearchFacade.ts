@@ -103,10 +103,14 @@ export interface UnifiedImageSearchParams {
   inferredColorKey?: string | null;
   /** Debug path: bypass rerank/final gates in products.service and return top-k raw exact-cosine hits. */
   debugRawCosineFirst?: boolean;
+  /** Include heavy per-product debug payloads in response. */
+  debug?: boolean;
   sessionId?: string;
   userId?: number;
   sessionFilters?: Partial<LegacySearchFilters>;
   collapseVariantGroups?: boolean;
+  /** Optional request-scoped memo for rerank visual signals across recovery calls. */
+  rerankSignalCache?: Map<string, unknown>;
 }
 type EnhancedTextSearchOutput = SearchResultWithRelated & { total: number; tookMs: number };
 
@@ -320,8 +324,7 @@ function applyPostHydrationGuards(
         const prodAud = String(product.normalizedAudience ?? "").toLowerCase().trim();
         const wantAud = String(intentAudience ?? "").toLowerCase().trim();
         if (prodAud && wantAud && prodAud !== "unisex" && prodAud !== wantAud) {
-          maxFinal = Math.min(maxFinal, 0.48);
-          nextProduct.guardReason = (nextProduct.guardReason ? `${nextProduct.guardReason};` : "") + "opposite_gender_penalty";
+          return null;
         }
       }
 
@@ -516,10 +519,12 @@ export async function searchImage(
     inferredColorsByItemConfidence,
     inferredColorKey,
     debugRawCosineFirst,
+    debug,
     sessionId,
     userId,
     sessionFilters,
     collapseVariantGroups,
+    rerankSignalCache,
   } = params;
 
   if ((!imageEmbedding || imageEmbedding.length === 0) && !imageBuffer) {
@@ -634,10 +639,12 @@ export async function searchImage(
     inferredColorsByItemConfidence,
     inferredColorKey,
     debugRawCosineFirst,
+    debug,
     sessionId,
     userId,
     sessionFilters: inheritedSessionFilters as any,
     collapseVariantGroups,
+    rerankSignalCache: rerankSignalCache as any,
   } as any);
 
   const metaAny = res.meta as Record<string, unknown> | undefined;

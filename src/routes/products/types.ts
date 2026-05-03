@@ -128,6 +128,8 @@ export interface ImageSearchParams extends SearchParams {
   inferredColorKey?: string | null;
   /** Debug path: bypass rerank/final gates and return top-k by raw exact cosine (with existing category constraints). */
   debugRawCosineFirst?: boolean;
+  /** Include heavy per-product debug payloads in response. */
+  debug?: boolean;
   /** Optional session context used to inherit conversational filters. */
   sessionId?: string;
   /** Optional authenticated user used for wardrobe-driven personalization. */
@@ -136,6 +138,8 @@ export interface ImageSearchParams extends SearchParams {
   sessionFilters?: Partial<SearchFilters>;
   /** When true, merge same variant family into one representative result. */
   collapseVariantGroups?: boolean;
+  /** Optional request-scoped memo for rerank visual signals across recovery calls. */
+  rerankSignalCache?: Map<string, unknown>;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -200,6 +204,13 @@ export interface ProductResult {
   /** True when the product was preserved by a fallback gate despite scoring below the requested relevance threshold. */
   relevanceFallbackPreserved?: boolean;
   mlRerankScore?: number;
+  // Match-tier assignment (Phase 4)
+  /** Assigned tier based on normalized metadata and contract tier. */
+  matchTier?: "exact" | "strong" | "related" | "weak" | "fallback" | "blocked";
+  /** Reason for tier assignment (e.g., "exact family & type match", "related family"). */
+  tierReason?: string;
+  /** Score cap applied for this tier (e.g., 0.94 for exact, 0.78 for strong). */
+  tierCap?: number;
   explain?: {
     // ── Raw signals ──────────────────────────────────────────
     /** Raw CLIP cosine similarity [0,1]. */

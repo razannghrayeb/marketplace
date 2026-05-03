@@ -70,6 +70,13 @@ import type { SearchResultWithRelated } from "./types";
 import { findRelatedProducts } from "../../lib/search/relatedProducts";
 import { computeColorContradictionPenalty as computeColorContradictionPenaltyCore } from "./colorRelevance";
 import { normalizeHydratedProduct } from "../../lib/search/productNormalization";
+import {
+  assignMatchTier,
+  inferContractTierFromProduct,
+  buildFashionIntentFromSearch,
+  computeTierBasedScore,
+  getTierCap,
+} from "../../lib/search/matchTierAssignment";
 import { createHash } from "crypto";
 import { rerankImageCandidates } from "../../lib/image/imageReranker";
 
@@ -177,6 +184,8 @@ export interface ImageSearchParams extends SearchParams {
   inferredColorKey?: string | null;
   /** Debug path: bypass rerank/final gates and return top-k raw exact-cosine hits. */
   debugRawCosineFirst?: boolean;
+  /** Include heavy response debug payloads (`explain`, `debugContract`, ranking details). */
+  debug?: boolean;
   /** Optional session context used to inherit conversational filters. */
   sessionId?: string;
   /** Optional authenticated user used for wardrobe-driven personalization. */
@@ -185,6 +194,26 @@ export interface ImageSearchParams extends SearchParams {
   sessionFilters?: Record<string, unknown> | null;
   /** When true, merge same variant family into one representative result. */
   collapseVariantGroups?: boolean;
+  /** Optional request-scoped cache for expensive visual rerank signals across recovery calls. */
+  rerankSignalCache?: Map<string, VisualSignalCacheEntry>;
+}
+
+interface VisualSignalCacheEntry {
+  visualSimRaw: number;
+  visualSimEffective: number;
+  categorySoft: number;
+  blipAlign: number;
+  blipColorConflict: number;
+  colorFusionRaw: number;
+  styleSim: number;
+  patternSim: number;
+  textureSim: number;
+  materialSim: number;
+  colorSimEff: number;
+  styleSimEff: number;
+  composite: number;
+  deepText: number;
+  deepFusionScore: number;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -4428,10 +4457,12 @@ export async function searchByImageWithSimilarity(
     inferredPrimaryColor: inferredPrimaryFromParams,
     inferredColorsByItem: inferredByItemFromParams,
     debugRawCosineFirst = false,
+    debug = false,
     sessionId,
     userId,
     sessionFilters: sessionFiltersFromParams,
     collapseVariantGroups: collapseVariantGroupsRequested = false,
+    rerankSignalCache,
   } = params;
 
   if (!imageEmbedding || imageEmbedding.length === 0) {
@@ -4451,6 +4482,34 @@ export async function searchByImageWithSimilarity(
   const breakdownDebug =
     String(process.env.SEARCH_DEBUG ?? "").toLowerCase() === "1" ||
     String(process.env.SEARCH_TRACE_BREAKDOWN ?? "").toLowerCase() === "1";
+  const includeDebug =
+    debug === true || String(process.env.SEARCH_DEBUG ?? "").toLowerCase() === "1";
+  const rerankStepTimers = {
+    exact_cosine_ms: 0,
+    normalization_ms: 0,
+    tier_assignment_ms: 0,
+    scoring_ms: 0,
+    diversity_ms: 0,
+    debug_build_ms: 0,
+  };
+  let exactCosineOpCount = 0;
+  const exactCosineRerank = imageExactCosineRerankEnabled();
+  const applyExactCosineRerank = (
+    hitsToRerank: any[] | undefined,
+    activeQueryVector: number[],
+    activeKnnField: string,
+  ) => {
+    if (!exactCosineRerank || !Array.isArray(hitsToRerank) || hitsToRerank.length === 0) return;
+    const t0 = Date.now();
+    for (const hit of hitsToRerank) {
+      const docVec = asFloatVector(hit?._source?.[activeKnnField], activeQueryVector.length);
+      if (!docVec) continue;
+      (hit as any)._exactCosineRaw = cosineSimilarityRaw(activeQueryVector, docVec);
+      (hit as any)._exactCosine01 = normalizeTo01ByVersion((hit as any)._exactCosineRaw, "v2");
+      exactCosineOpCount += 1;
+    }
+    rerankStepTimers.exact_cosine_ms += Date.now() - t0;
+  };
 
   const filters = mergeSessionFilters(
     baseFilters,
@@ -5010,15 +5069,7 @@ export async function searchByImageWithSimilarity(
       hits = knnResult.hits;
     }
 
-    if (imageExactCosineRerankEnabled() && Array.isArray(hits)) {
-      for (const hit of hits) {
-        const docVec = asFloatVector(hit?._source?.[knnFieldResolved], queryVector.length);
-        if (docVec) {
-          (hit as any)._exactCosineRaw = cosineSimilarityRaw(queryVector, docVec);
-          (hit as any)._exactCosine01 = normalizeTo01ByVersion((hit as any)._exactCosineRaw, "v2");
-        }
-      }
-    }
+    applyExactCosineRerank(hits, queryVector, knnFieldResolved);
   }
 
   if (useDualKnn && (!Array.isArray(hits) || hits.length === 0)) {
@@ -5052,15 +5103,7 @@ export async function searchByImageWithSimilarity(
     const knnFallbackResult = await opensearchImageKnnHits(knnBodyFallback, knnTimeoutMs);
     if (knnFallbackResult.timedOut) knnTimedOut = true;
     hits = knnFallbackResult.hits;
-    if (imageExactCosineRerankEnabled() && Array.isArray(hits)) {
-      for (const hit of hits) {
-        const docVec = asFloatVector(hit?._source?.[knnFieldResolved], queryVector.length);
-        if (docVec) {
-          (hit as any)._exactCosineRaw = cosineSimilarityRaw(queryVector, docVec);
-          (hit as any)._exactCosine01 = normalizeTo01ByVersion((hit as any)._exactCosineRaw, "v2");
-        }
-      }
-    }
+    applyExactCosineRerank(hits, queryVector, knnFieldResolved);
   }
 
   // KNN sparse-recall fallback: when strict detection filters over-prune ANN candidates,
@@ -5348,8 +5391,6 @@ export async function searchByImageWithSimilarity(
   runMaterial = Boolean(materialQueryEmbedding && materialQueryEmbedding.length > 0);
   runStyle = Boolean(styleQueryEmbedding && styleQueryEmbedding.length > 0);
   runPattern = Boolean(patternQueryEmbedding && patternQueryEmbedding.length > 0);
-
-  const exactCosineRerank = imageExactCosineRerankEnabled();
 
   // ────────────────────────────────────────────────────────────────────────────
   // ATTRIBUTE / PART EMBEDDING ENRICHMENT (two-pass mget)
@@ -6173,6 +6214,7 @@ export async function searchByImageWithSimilarity(
   const colorByHitId = new Map<string, string | null>();
   const lengthComplianceById = new Map<string, number>();
   const hasLengthIntentById = new Map<string, boolean>();
+  const normalizationStartedAt = Date.now();
   for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
     const sim = visualSimFromHit(hit);
@@ -6222,6 +6264,7 @@ export async function searchByImageWithSimilarity(
     complianceById.set(idStr, compWithExpandedPenalty);
     colorByHitId.set(idStr, primaryColor);
   }
+  rerankStepTimers.normalization_ms += Date.now() - normalizationStartedAt;
 
   // Precompute color embedding cosine + align `colorCompliance` with it when tier metadata
   // is absent (no tokens) or contradicts strong embedding_color match — before composite
@@ -6340,10 +6383,38 @@ export async function searchByImageWithSimilarity(
       : raw;
   };
 
+  const visualSignalCache = rerankSignalCache ?? new Map<string, VisualSignalCacheEntry>();
+  const visualSignalIntentKey = [
+    String(params.detectionProductCategory ?? ""),
+    desiredProductTypes.join(","),
+    desiredColorsForRelevance.join(","),
+    String(desiredStyleForRelevance ?? ""),
+    String(knnFieldResolved ?? "embedding"),
+  ].join("|");
+
   // After compliance + merchandise sim: compute per-hit embedding similarities,
   // BLIP alignment (as soft reranking factor), and composite score.
   for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
+    const cacheKey = `${visualSignalIntentKey}:${idStr}`;
+    const cachedSignals = visualSignalCache.get(cacheKey);
+    if (cachedSignals) {
+      blipAlignById.set(idStr, cachedSignals.blipAlign);
+      visualSimEffectiveById.set(idStr, cachedSignals.visualSimEffective);
+      blipColorConflictFactorById.set(idStr, cachedSignals.blipColorConflict);
+      colorSimFusionRawById.set(idStr, cachedSignals.colorFusionRaw);
+      styleSimRawById.set(idStr, cachedSignals.styleSim);
+      styleSimById.set(idStr, cachedSignals.styleSimEff);
+      colorSimById.set(idStr, cachedSignals.colorSimEff);
+      textureSimById.set(idStr, cachedSignals.textureSim);
+      materialSimById.set(idStr, cachedSignals.materialSim);
+      patternSimById.set(idStr, cachedSignals.patternSim);
+      taxonomyMatchById.set(idStr, cachedSignals.categorySoft);
+      imageCompositeById.set(idStr, cachedSignals.composite);
+      deepFusionTextById.set(idStr, cachedSignals.deepText);
+      deepFusionScoreById.set(idStr, cachedSignals.deepFusionScore);
+      continue;
+    }
     const visualSimRaw =
       useMerchSimForThresholdAndPrimarySort
         ? (merchandiseSimById.get(idStr) ?? visualSimFromHit(hit))
@@ -6438,7 +6509,26 @@ export async function searchByImageWithSimilarity(
       0,
       Math.min(1, 0.55 * deepText + 0.45 * attrBlend),
     );
-    deepFusionScoreById.set(idStr, Math.round(deepFusionScore * 1000) / 1000);
+    const deepFusionScoreRounded = Math.round(deepFusionScore * 1000) / 1000;
+    deepFusionScoreById.set(idStr, deepFusionScoreRounded);
+
+    visualSignalCache.set(cacheKey, {
+      visualSimRaw,
+      visualSimEffective: visualSimRaw,
+      categorySoft,
+      blipAlign: Math.round(blipAlign.matchScore * 1000) / 1000,
+      blipColorConflict: Math.round(blipColorConflict * 1000) / 1000,
+      colorFusionRaw: Math.round(colorFusionRaw * 1000) / 1000,
+      styleSim: Math.round(styleSim * 1000) / 1000,
+      patternSim: Math.round(patternSim * 1000) / 1000,
+      textureSim: Math.round(textureSim * 1000) / 1000,
+      materialSim: Math.round(materialSim * 1000) / 1000,
+      colorSimEff: Math.round(colorSimEff * 1000) / 1000,
+      styleSimEff: Math.round(styleSimEff * 1000) / 1000,
+      composite,
+      deepText: Math.round(deepText * 1000) / 1000,
+      deepFusionScore: deepFusionScoreRounded,
+    });
   }
   const compositeValues = Array.from(imageCompositeById.values());
   const compositeMin = compositeValues.length > 0 ? Math.min(...compositeValues) : 0;
@@ -6490,6 +6580,7 @@ export async function searchByImageWithSimilarity(
 
   // Final relevance pass: compute the authoritative finalRelevance01 incorporating
   // all visual + metadata signals, adaptive floors, composite, and BLIP reranking.
+  const scoringStartedAt = Date.now();
   for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
     const comp = complianceById.get(idStr);
@@ -7210,6 +7301,7 @@ export async function searchByImageWithSimilarity(
       }
     }
   }
+  rerankStepTimers.scoring_ms += Date.now() - scoringStartedAt;
 
   const colorTierRankForSort = (tier: unknown): number => {
     const t = String(tier ?? "none").toLowerCase().trim();
@@ -7251,6 +7343,7 @@ export async function searchByImageWithSimilarity(
     return count;
   };
 
+  const tierAssignmentStartedAt = Date.now();
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
     const idb = String(b._source.product_id);
@@ -7599,6 +7692,7 @@ export async function searchByImageWithSimilarity(
   const rankedHitsForGates = rankedHitsCategorySafe.length > 0
     ? rankedHitsCategorySafe
     : rankedHitsCandidates;
+  rerankStepTimers.tier_assignment_ms += Date.now() - tierAssignmentStartedAt;
   const droppedByCategorySafety = strictCategorySafetyActive
     ? Math.max(0, rankedHitsCandidates.length - rankedHitsCategorySafe.length)
     : 0;
@@ -8472,6 +8566,11 @@ export async function searchByImageWithSimilarity(
   }
 
   stageRerankDoneAt = Date.now();
+  console.log("[rerank-step] exact_cosine_ms", rerankStepTimers.exact_cosine_ms, "count", exactCosineOpCount);
+  console.log("[rerank-step] normalization_ms", rerankStepTimers.normalization_ms);
+  console.log("[rerank-step] tier_assignment_ms", rerankStepTimers.tier_assignment_ms);
+  console.log("[rerank-step] scoring_ms", rerankStepTimers.scoring_ms);
+  console.log("[rerank-step] diversity_ms", rerankStepTimers.diversity_ms);
 
   const maxHydrate = Math.min(
     rankedHits.length,
@@ -8510,6 +8609,7 @@ export async function searchByImageWithSimilarity(
     const products = productIds.map((id: string) => productById.get(String(id))).filter(Boolean);
 
     const assembleStartedAt = Date.now();
+    const debugBuildStartedAt = Date.now();
     results = products.map((p: any) => {
       const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
       const idStr = String(p.id);
@@ -9000,6 +9100,38 @@ export async function searchByImageWithSimilarity(
               : "calibrated_image_score";
       }
 
+      // Assign match tier based on normalized metadata and intent alignment
+      const contractTier = inferContractTierFromProduct(
+        normalized.normalizedFamily,
+        normalized.normalizedType,
+        params.detectionProductCategory
+      );
+      const fashionIntent = buildFashionIntentFromSearch({
+        family: resultJobFamily,
+        type: desiredProductTypes[0] ?? undefined,
+        color: explicitColorsForRelevance[0] ?? undefined,
+        audience: queryGenderNorm as any,
+        style: desiredStyleForRelevance,
+      });
+      const tierAssignment = assignMatchTier(contractTier, normalized, fashionIntent);
+
+      // Apply tier-based scoring: bound finalRelevance01 by tier cap
+      const tierBasedScore = computeTierBasedScore({
+        tier: tierAssignment.tier,
+        visualSimilarity: similarityScore ?? 0,
+        typeMatch: compliance?.exactTypeScore ?? 0,
+        colorMatch: compliance?.colorCompliance ?? 0,
+        audienceMatch: compliance?.audienceCompliance ?? 0,
+      });
+      
+      // Cap finalRelevance01 by tier cap (prevents lower tiers from scoring higher than tier allows)
+      const tierCap = getTierCap(tierAssignment.tier);
+      const tierBoundedFinal = Math.min(finalRelevance01 ?? 0, tierCap);
+      
+      // Use tier-based score if it's higher (ensures tier integrity)
+      // Otherwise, use the current finalRelevance01 (bounded by tier cap)
+      const finalScoreWithTierBound = Math.max(tierBoundedFinal, tierBasedScore);
+
       return {
         ...p,
         // Never overwrite canonical catalog color with query-time matched color.
@@ -9021,7 +9153,10 @@ export async function searchByImageWithSimilarity(
           return typeAligned ? ("exact" as const) : ("similar" as const);
         })(),
         rerankScore: compliance?.rerankScore,
-        finalRelevance01,
+        finalRelevance01: finalScoreWithTierBound,
+        matchTier: tierAssignment.tier,
+        tierReason: tierAssignment.reason,
+        tierCap: tierAssignment.tierCap,
         normalizedFamily: normalized.normalizedFamily,
         normalizedType: normalized.normalizedType,
         normalizedSubtype: normalized.normalizedSubtype,
@@ -9109,12 +9244,12 @@ export async function searchByImageWithSimilarity(
             desiredSleeve: desiredSleeveForRelevance,
             desiredLength: (compliance as any).hasLengthIntent ? (desiredLengthForRelevance ?? undefined) : undefined,
             colorMode: rerankColorModeForRelevance,
-            relevanceIntentDebug,
+            relevanceIntentDebug: includeDebug ? relevanceIntentDebug : undefined,
 
             // ── Final score ──────────────────────────────────────
-            finalRelevance01,
+            finalRelevance01: finalScoreWithTierBound,
             finalRelevanceSource,
-            rankingDebug: additiveScore
+            rankingDebug: includeDebug && additiveScore
               ? {
                 id: idStr,
                 detectedLabel: params.detectionLabel ?? params.detectionProductCategory,
@@ -9133,14 +9268,15 @@ export async function searchByImageWithSimilarity(
                 qualityModifier: additiveScore.qualityModifier,
                 maxFinal: additiveScore.maxFinal,
                 matchLabel: additiveScore.matchLabel,
-                finalScore: finalRelevance01,
+                finalScore: finalScoreWithTierBound,
                 boosts: additiveScore.boosts,
                 penalties: additiveScore.penalties,
               }
               : undefined,
           }
           : undefined,
-        debugContract: {
+        debugContract: includeDebug
+          ? {
           imageMode: (params as any)?.imageMode ?? null,
           intentFamily: resultJobFamily ?? null,
           intentType: Array.isArray(desiredProductTypes) && desiredProductTypes.length > 0 ? desiredProductTypes[0] : null,
@@ -9163,10 +9299,13 @@ export async function searchByImageWithSimilarity(
           },
           capReason: String(finalRelevanceSource ?? '')?.includes('cap') ? finalRelevanceSource : null,
           tieBreakReason: undefined,
-        },
+        }
+          : undefined,
         images: imagesOut,
       };
     }) as ProductResult[];
+    rerankStepTimers.debug_build_ms += Date.now() - debugBuildStartedAt;
+    console.log("[rerank-step] debug_build_ms", rerankStepTimers.debug_build_ms);
     console.log("[hydrate-step] assemble_ms", Date.now() - assembleStartedAt);
   }
   // Final hard contradiction guard on hydrated product metadata.
@@ -9174,13 +9313,13 @@ export async function searchByImageWithSimilarity(
   if ((queryGenderNormForPost || shouldRejectShortsForTrouserIntent) && results.length > 0) {
     results = results.filter((p: any) => {
       const src = p as Record<string, unknown>;
-      if (queryGenderNormForPost && hasOppositeGenderSignalForQuery(src, queryGenderNormForPost)) {
+      const audienceCompliance = Number((p as any)?.explain?.audienceCompliance ?? 1);
+      if (queryGenderNormForPost && (audienceCompliance === 0 || hasOppositeGenderSignalForQuery(src, queryGenderNormForPost))) {
         return false;
       }
       // Detection-scoped image search needs a hard numeric audience guard because many
       // catalog rows don't carry clean gender keywords for the heuristic checker.
       if (queryGenderNormForPost && hasDetectionAnchoredTypeIntent) {
-        const audienceCompliance = Number((p as any)?.explain?.audienceCompliance ?? 1);
         const isFootwearDetection =
           String(params.detectionProductCategory ?? "").toLowerCase().trim() === "footwear" ||
           String(params.detectionProductCategory ?? "").toLowerCase().trim() === "shoes";
@@ -9592,12 +9731,14 @@ export async function searchByImageWithSimilarity(
     : diversityLambda;
   const diversityPoolCap = imageDiversityPoolCap();
   if (diversityRerankApplied) {
+    const diversityStartedAt = Date.now();
     const relevanceSorted = sortProductsByRelevanceAndCategory(variantCollapsed.results);
     const lockedTop = relevanceSorted.slice(0, Math.min(15, relevanceSorted.length));
     const diversityPool = relevanceSorted.slice(lockedTop.length, Math.max(lockedTop.length, diversityPoolCap));
     const tail = relevanceSorted.slice(Math.max(lockedTop.length, diversityPoolCap));
     const diversifiedRest = applyImageDiversityRerank(diversityPool as ProductResult[], effectiveDiversityLambda);
     results = [...lockedTop, ...diversifiedRest, ...tail].slice(0, limit) as ProductResult[];
+    rerankStepTimers.diversity_ms += Date.now() - diversityStartedAt;
   } else {
     const combined = sortProductsByRelevanceAndCategory(variantCollapsed.results);
     results = combined.slice(0, limit) as ProductResult[];
@@ -9885,6 +10026,19 @@ export async function searchByImageWithSimilarity(
   } catch (e) {
     // Defensive: sorting should not throw; log and continue with current order
     console.warn('[search-image] final sort failed:', (e as Error).message);
+  }
+
+  if (!includeDebug && Array.isArray(results) && results.length > 0) {
+    results = results.map((product) => {
+      const next = { ...product } as ProductResult & {
+        explain?: Record<string, unknown>;
+        debugContract?: Record<string, unknown>;
+      };
+      delete (next as any).debugContract;
+      delete (next as any).rankingDebug;
+      delete (next as any).explain;
+      return next;
+    });
   }
 
   return {

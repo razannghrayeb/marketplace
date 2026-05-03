@@ -13,13 +13,18 @@ function uniq(values: string[]): string[] {
 }
 
 function canonType(t: string): string {
-  return String(t).toLowerCase().replace(/[\s_-]+/g, "").trim();
+  return String(t)
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "")
+    .replace(/shirts/g, "shirt")
+    .replace(/pants/g, "pant")
+    .trim();
 }
 
-function isBadEquivalent(term: string, badTypes: string[]): boolean {
+function containsEquivalent(term: string, list: string[]): boolean {
   const x = canonType(term);
-  return badTypes.some((bad) => {
-    const y = canonType(bad);
+  return list.some((item) => {
+    const y = canonType(item);
     return x === y || x.includes(y) || y.includes(x);
   });
 }
@@ -30,6 +35,68 @@ function pickDesired(desired: string[], re: RegExp): string[] {
 
 function includesAny(blob: string, re: RegExp): boolean {
   return re.test(blob);
+}
+
+function strictBottomsContract(): ProductRecallContract {
+  return {
+    exactTypes: [
+      "wide leg trouser",
+      "wide leg pants",
+      "tailored trouser",
+      "dress pants",
+      "pleated trousers",
+    ],
+    relatedTypes: ["straight pants", "loose pants", "chinos"],
+    weakTypes: ["jeans", "cargo pants", "utility pants"],
+    badTypes: ["jogger", "sweatpants", "shorts", "skirt"],
+    blockedFamilies: ["tops", "dresses", "footwear", "bags", "accessories", "outerwear"],
+  };
+}
+
+function strictButtonUpShirtContract(): ProductRecallContract {
+  return {
+    exactTypes: [
+      "button up shirt",
+      "button down shirt",
+      "collared shirt",
+      "shirt",
+      "blouse",
+    ],
+    relatedTypes: ["overshirt", "long sleeve top"],
+    weakTypes: ["cardigan", "sweater", "sweatshirt", "hoodie"],
+    badTypes: ["pants", "trousers", "dress", "shoe", "bag"],
+    blockedFamilies: ["bottoms", "dresses", "footwear", "bags", "accessories"],
+  };
+}
+
+function strictSweaterContract(): ProductRecallContract {
+  return {
+    exactTypes: ["sweater", "pullover", "knit pullover", "turtleneck sweater", "knitwear"],
+    relatedTypes: ["cardigan", "long sleeve top"],
+    weakTypes: ["hoodie", "sweatshirt"],
+    badTypes: ["pants", "trousers", "dress", "shoe", "bag"],
+    blockedFamilies: ["bottoms", "dresses", "footwear", "bags", "accessories"],
+  };
+}
+
+function strictDressesContract(): ProductRecallContract {
+  return {
+    exactTypes: ["dress", "maxi dress", "midi dress", "mini dress", "wrap dress"],
+    relatedTypes: ["sundress", "shirt dress"],
+    weakTypes: ["jumpsuit", "romper"],
+    badTypes: ["shirt", "blouse", "pants", "trousers", "shoe", "bag"],
+    blockedFamilies: ["tops", "bottoms", "footwear", "bags", "accessories"],
+  };
+}
+
+function strictTopFallbackContract(): ProductRecallContract {
+  return {
+    exactTypes: ["top", "shirt", "blouse", "tee", "tshirt", "sleeveless_top"],
+    relatedTypes: ["long sleeve top", "overshirt"],
+    weakTypes: ["sweater", "cardigan", "hoodie", "sweatshirt"],
+    badTypes: ["pants", "trousers", "dress", "shoe", "bag"],
+    blockedFamilies: ["bottoms", "dresses", "footwear", "bags", "accessories"],
+  };
 }
 
 export function buildProductRecallContract(params: {
@@ -55,71 +122,31 @@ export function buildProductRecallContract(params: {
 
   // Sweater / knit top contract
   if (includesAny(blob, /\b(sweater|knit|pullover|jumper|knitwear)\b/)) {
-    const sweaterExact = pickDesired(desired, /\b(sweater|sweaters|pullover|pullovers|jumper|jumpers|knitwear|knitted|knit)\b/);
-    const contract = {
-      exactTypes: uniq(["sweater", "pullover", "jumper", "knitwear", "knitted", ...sweaterExact]),
-      relatedTypes: uniq(["turtleneck", "cardigan"]),
-      weakTypes: uniq(["sweatshirt", "hoodie"]),
-      badTypes: uniq(["shirt", "blouse", "button down", "polo", "t-shirt", "short sleeve top"]),
-      blockedFamilies: ["dresses", "bottoms", "footwear", "bags", "accessories"],
-    };
-    return sanitizeContract(contract);
+    return sanitizeContract(strictSweaterContract());
   }
 
   // Button-up shirt contract
   if (includesAny(blob, /\b(button\s*up|button-up|button\s*down|button-down|collared shirt|shirt|blouse)\b/)) {
-    const shirtExact = pickDesired(desired, /\b(shirt|shirts|button[-\s]*up|button[-\s]*down|collared shirt|blouse|blouses|top|tops)\b/);
-    const contract = {
-      exactTypes: uniq(["shirt", "button-up", "button down", "blouse", "collared shirt", ...shirtExact]),
-      relatedTypes: uniq(["overshirt"]),
-      weakTypes: uniq(["generic long sleeve top"]),
-      badTypes: uniq(["sweater", "hoodie", "sweatshirt", "t-shirt", "tank"]),
-      blockedFamilies: ["dresses", "bottoms", "footwear", "bags", "accessories"],
-    };
-    return sanitizeContract(contract);
+    return sanitizeContract(strictButtonUpShirtContract());
   }
 
   // Trousers contract
   if (category === "bottoms" || includesAny(blob, /\b(trouser|trousers|pant|pants|wide\s*leg|tailored|dress pant|chino|slack)\b/)) {
-    const trouserExact = pickDesired(desired, /\b(trouser|trousers|pant|pants|wide\s*leg|wide[-\s]*leg|tailored|dress pant|dress pants|chino|chinos|slack|slacks|jean|jeans|bottom|bottoms)\b/);
-    const contract = {
-      exactTypes: uniq(["wide leg trouser", "wide leg pant", "tailored trouser", "dress pant", "trousers", ...trouserExact]),
-      relatedTypes: uniq(["straight pant", "chino", "loose pant"]),
-      weakTypes: uniq(["jeans", "cargo", "utility pant"]),
-      badTypes: uniq(["jogger", "sweatpant", "shorts", "skirt"]),
-      blockedFamilies: ["tops", "dresses", "footwear", "bags", "accessories", "outerwear"],
-    };
-    return sanitizeContract(contract);
+    return sanitizeContract(strictBottomsContract());
   }
 
   // Dresses contract
   if (category === "dresses" || includesAny(blob, /\b(dress|gown|frock)\b/)) {
-    const dressExact = pickDesired(desired, /\b(dress|dresses|gown|gowns|frock|frocks)\b/);
-    const contract = {
-      exactTypes: uniq(["dress", "short sleeve dress", "long sleeve dress", ...dressExact]),
-      relatedTypes: uniq(["midi dress", "maxi dress", "semi formal dress"]),
-      weakTypes: uniq(["beach dress", "casual dress"]),
-      badTypes: uniq(["shirt", "blouse", "t-shirt", "hoodie", "pants", "trousers"]),
-      blockedFamilies: ["tops", "bottoms", "footwear", "bags", "accessories"],
-    };
-    return sanitizeContract(contract);
+    return sanitizeContract(strictDressesContract());
   }
 
   // Generic top fallback
   if (category === "tops" || includesAny(blob, /\b(top|tee|t-shirt|polo|blouse)\b/)) {
-    const topExact = pickDesired(desired, /\b(top|tops|tee|tees|t-shirt|tshirts?|polo|polo shirts?|blouse|blouses|shirt|shirts)\b/);
-    const contract = {
-      exactTypes: uniq(["top", "tops", ...topExact]),
-      relatedTypes: uniq([]),
-      weakTypes: uniq([]),
-      badTypes: uniq(["pants", "trousers", "dress", "shoe", "bag"]),
-      blockedFamilies: ["bottoms", "dresses", "footwear", "bags", "accessories"],
-    };
-    return sanitizeContract(contract);
+    return sanitizeContract(strictTopFallbackContract());
   }
 
   return sanitizeContract({
-    exactTypes: uniq(desired),
+    exactTypes: [],
     relatedTypes: [],
     weakTypes: [],
     badTypes: [],
@@ -130,9 +157,14 @@ export function buildProductRecallContract(params: {
 function sanitizeContract(contract: ProductRecallContract): ProductRecallContract {
   const bad = uniq(contract.badTypes);
 
-  const exactTypes = uniq(contract.exactTypes).filter((t) => !isBadEquivalent(t, bad));
-  const relatedTypes = uniq(contract.relatedTypes).filter((t) => !isBadEquivalent(t, bad) && !exactTypes.some((x) => canonType(x) === canonType(t)));
-  const weakTypes = uniq(contract.weakTypes).filter((t) => !isBadEquivalent(t, bad) && !exactTypes.some((x) => canonType(x) === canonType(t)) && !relatedTypes.some((x) => canonType(x) === canonType(t)));
+  const exactTypes = uniq(contract.exactTypes).filter((t) => !containsEquivalent(t, bad));
+  const relatedTypes = uniq(contract.relatedTypes)
+    .filter((t) => !containsEquivalent(t, bad))
+    .filter((t) => !containsEquivalent(t, exactTypes));
+  const weakTypes = uniq(contract.weakTypes)
+    .filter((t) => !containsEquivalent(t, bad))
+    .filter((t) => !containsEquivalent(t, exactTypes))
+    .filter((t) => !containsEquivalent(t, relatedTypes));
 
   return {
     exactTypes,
