@@ -60,10 +60,16 @@ import {
   extractLexicalProductTypeSeeds,
   scoreRerankProductTypeBreakdown,
 } from "../../lib/search/productTypeTaxonomy";
+import {
+  allocateRecallBudgets,
+  buildProductRecallContract,
+  familyBlockTerms,
+} from "../../lib/search/productRecallContract";
 import { attrGenderFilterClause } from "./opensearchFilters";
 import type { SearchResultWithRelated } from "./types";
 import { findRelatedProducts } from "../../lib/search/relatedProducts";
 import { computeColorContradictionPenalty as computeColorContradictionPenaltyCore } from "./colorRelevance";
+import { normalizeHydratedProduct } from "../../lib/search/productNormalization";
 import { createHash } from "crypto";
 import { rerankImageCandidates } from "../../lib/image/imageReranker";
 
@@ -219,6 +225,15 @@ export interface ProductResult {
   openSearchScore?: number; // raw or normalized
   pHashDist?: number;
   candidateScore?: number;
+  normalizedFamily?: string | null;
+  normalizedType?: string | null;
+  normalizedSubtype?: string | null;
+  normalizedColor?: string | null;
+  normalizedAudience?: "men" | "women" | "unisex" | "unknown";
+  normalizedMaterial?: string | null;
+  normalizedStyle?: string | null;
+  normalizedOccasion?: string | null;
+  normalizedSilhouette?: string | null;
 }
 
 // ============================================================================
@@ -751,6 +766,22 @@ function getVariantGroupKey(product: ProductResult): string | null {
   return `${vendor}|single:${String(product.id)}`;
 }
 
+function deterministicRankKey(product: ProductResult): string {
+  const id = String(product.id ?? "").trim();
+  const vendor = String((product as any).vendor_id ?? "").toLowerCase().trim();
+  const url = String(product.product_url ?? "").toLowerCase().trim();
+  const title = String(product.title ?? "").toLowerCase().trim();
+  return [id, vendor, url, title].join("|");
+}
+
+function compareDeterministicRankKey(a: ProductResult, b: ProductResult): number {
+  const ka = deterministicRankKey(a);
+  const kb = deterministicRankKey(b);
+  if (ka < kb) return -1;
+  if (ka > kb) return 1;
+  return 0;
+}
+
 function collapseVariantGroups(results: ProductResult[]): {
   results: ProductResult[];
   groupCount: number;
@@ -786,7 +817,9 @@ function collapseVariantGroups(results: ProductResult[]): {
       const sa = Number(a.similarity_score ?? 0);
       const sb = Number(b.similarity_score ?? 0);
       if (Math.abs(sb - sa) > 1e-6) return sb - sa;
-      return Number(b.rerankScore ?? 0) - Number(a.rerankScore ?? 0);
+      const rr = Number(b.rerankScore ?? 0) - Number(a.rerankScore ?? 0);
+      if (Math.abs(rr) > 1e-6) return rr;
+      return compareDeterministicRankKey(a, b);
     });
     const representative = { ...sortedGroup[0] } as ProductResult;
     representative.variant_group_key = key;
@@ -803,7 +836,9 @@ function collapseVariantGroups(results: ProductResult[]): {
     const sa = Number(a.similarity_score ?? 0);
     const sb = Number(b.similarity_score ?? 0);
     if (Math.abs(sb - sa) > 1e-6) return sb - sa;
-    return Number(b.rerankScore ?? 0) - Number(a.rerankScore ?? 0);
+    const rr = Number(b.rerankScore ?? 0) - Number(a.rerankScore ?? 0);
+    if (Math.abs(rr) > 1e-6) return rr;
+    return compareDeterministicRankKey(a, b);
   });
 
   return {
@@ -1847,6 +1882,98 @@ function isBagCatalogCandidate(source: Record<string, unknown> | null | undefine
   return !hasNonBagCue;
 }
 
+function scoreTopCandidate(params: {
+  typeMatch01: number;
+  color01: number;
+  sleeve01: number;
+  neckline01: number;
+  material01: number;
+  style01: number;
+  audience01: number;
+}): number {
+  const score =
+    0.25 * params.typeMatch01 +
+    0.18 * params.color01 +
+    0.12 * params.sleeve01 +
+    0.10 * params.neckline01 +
+    0.08 * params.material01 +
+    0.07 * params.style01 +
+    0.10 * params.audience01;
+  return Math.max(0, Math.min(1, score));
+}
+
+function scoreBottomCandidate(params: {
+  typeMatch01: number;
+  color01: number;
+  silhouette01: number;
+  length01: number;
+  styleFormality01: number;
+  material01: number;
+  audience01: number;
+}): number {
+  const score =
+    0.24 * params.typeMatch01 +
+    0.16 * params.color01 +
+    0.18 * params.silhouette01 +
+    0.08 * params.length01 +
+    0.12 * params.styleFormality01 +
+    0.08 * params.material01 +
+    0.08 * params.audience01;
+  return Math.max(0, Math.min(1, score));
+}
+
+function scoreDressCandidate(params: {
+  typeMatch01: number;
+  color01: number;
+  dressLength01: number;
+  sleeve01: number;
+  silhouette01: number;
+  occasionFormality01: number;
+  audience01: number;
+}): number {
+  const score =
+    0.20 * params.typeMatch01 +
+    0.14 * params.color01 +
+    0.14 * params.dressLength01 +
+    0.10 * params.sleeve01 +
+    0.12 * params.silhouette01 +
+    0.12 * params.occasionFormality01 +
+    0.08 * params.audience01;
+  return Math.max(0, Math.min(1, score));
+}
+
+function scoreFootwearCandidate(params: {
+  typeMatch01: number;
+  color01: number;
+  shape01: number;
+  soleHeelProfile01: number;
+  style01: number;
+  audience01: number;
+}): number {
+  const score =
+    0.30 * params.typeMatch01 +
+    0.18 * params.color01 +
+    0.16 * params.shape01 +
+    0.12 * params.soleHeelProfile01 +
+    0.10 * params.style01 +
+    0.08 * params.audience01;
+  return Math.max(0, Math.min(1, score));
+}
+
+function scoreAccessoryCandidate(params: {
+  typeMatch01: number;
+  color01: number;
+  style01: number;
+  audience01: number;
+}): number {
+  const score =
+    0.36 * params.typeMatch01 +
+    0.22 * params.color01 +
+    0.18 * params.style01 +
+    0.10 * params.audience01;
+  return Math.max(0, Math.min(1, score));
+}
+
 function computeExplicitFinalRelevance(params: {
   simVisual: number;
   typeMatch: boolean;
@@ -1999,41 +2126,71 @@ function computeExplicitFinalRelevance(params: {
 
   // ── Metadata compliance ──────────────────────────────────────────
   const patternMatch = Math.max(0, Math.min(1, params.patternSimRaw ?? 0));
+  const typeMatch01 = params.typeMatch ? Math.max(params.catSoft, 0.92) : Math.max(0.08, params.catSoft * 0.35);
+  const color01 = Math.max(0, Math.min(1, params.colorMatch * colorWeightScale));
+  const style01 = Math.max(0, Math.min(1, params.styleMatch));
+  const sleeve01 = Math.max(0, Math.min(1, params.sleeveMatch));
+  const length01 = Math.max(0, Math.min(1, params.lengthMatch));
+  const audience01 = Math.max(0, Math.min(1, params.audienceMatch));
+  const material01 = Math.max(0, Math.min(1, styleSimRaw));
+  const neckline01 = Math.max(0, Math.min(1, patternMatch));
+
   const complianceFromAttrs = Math.max(
     0,
     Math.min(
       1,
       isTopLikeIntent
-        ? 0.12 * params.catSoft +
-        0.34 * params.colorMatch * colorWeightScale +
-        0.27 * params.styleMatch +
-        0.17 * params.sleeveMatch +
-        0.06 * params.lengthMatch +
-        0.05 * params.audienceMatch +
-        0.03 * patternMatch
+        ? scoreTopCandidate({
+          typeMatch01,
+          color01,
+          sleeve01,
+          neckline01,
+          material01,
+          style01,
+          audience01,
+        })
         : isBottomLikeIntent
-          ? 0.14 * params.catSoft +
-          0.42 * params.colorMatch * colorWeightScale +
-          0.24 * params.styleMatch +
-          0.05 * params.sleeveMatch +
-          0.1 * params.lengthMatch +
-          0.05 * params.audienceMatch +
-          0.01 * patternMatch
-        : isBagLikeIntent
-          ? 0.14 * params.catSoft +
-          0.5 * params.colorMatch * colorWeightScale +
-          0.14 * params.styleMatch +
-          0.03 * params.sleeveMatch +
-          0.02 * params.lengthMatch +
-          0.05 * params.audienceMatch +
-          0.12 * patternMatch
-          : 0.12 * params.catSoft +
-          0.4 * params.colorMatch * colorWeightScale +
-          0.22 * params.styleMatch +
-          0.14 * params.sleeveMatch +
-          0.08 * params.lengthMatch +
-          0.05 * params.audienceMatch +
-          0.01 * patternMatch,
+          ? scoreBottomCandidate({
+            typeMatch01,
+            color01,
+            silhouette01: Math.max(length01, style01 * 0.7),
+            length01,
+            styleFormality01: style01,
+            material01,
+            audience01,
+          })
+          : isDressLikeIntent
+            ? scoreDressCandidate({
+              typeMatch01,
+              color01,
+              dressLength01: length01,
+              sleeve01,
+              silhouette01: Math.max(length01, style01 * 0.65),
+              occasionFormality01: style01,
+              audience01,
+            })
+            : isFootwearLikeIntent
+              ? scoreFootwearCandidate({
+                typeMatch01,
+                color01,
+                shape01: Math.max(style01, patternMatch),
+                soleHeelProfile01: Math.max(length01, patternMatch * 0.8),
+                style01,
+                audience01,
+              })
+              : isBagLikeIntent
+                ? scoreAccessoryCandidate({
+                  typeMatch01,
+                  color01,
+                  style01,
+                  audience01,
+                })
+                : scoreAccessoryCandidate({
+                  typeMatch01,
+                  color01,
+                  style01,
+                  audience01,
+                }),
     ),
   );
 
@@ -3070,6 +3227,146 @@ function inferCatalogLengthToken(src: Record<string, unknown>): "mini" | "midi" 
   if (/\bmaxi\b/.test(blob)) return "maxi";
   if (/\blong\b/.test(blob)) return "long";
   return null;
+}
+
+type RefinedDetectionIntent = {
+  desiredProductTypes: string[];
+  preferredDesiredProductTypes: string[];
+  inferredSleeve?: "short" | "long" | "sleeveless";
+  inferredStyle?: string;
+};
+
+/**
+ * Phase 2: detection + caption intent refinement.
+ *
+ * Converts generic labels into stronger fashion intent terms before recall/rerank.
+ * Rules implemented:
+ * - long sleeve top + sweater cues -> sweater / knit pullover
+ * - long sleeve top + collar/button cues -> button-up shirt
+ * - short sleeve top + polo cues -> polo shirt
+ * - trousers + wide-leg cues -> wide-leg tailored trousers
+ * - shorts + denim cues -> denim shorts
+ * - vest + sleeveless cues -> sleeveless top (not outerwear)
+ * - dress + beach/resort cues -> beach dress
+ */
+function refineDetectionIntentPhase2(params: {
+  detectionLabel?: string;
+  detectionProductCategory?: string;
+  desiredProductTypes: string[];
+  preferredDesiredProductTypes: string[];
+  softProductTypeHints?: string[];
+  blipSignal?: ImageSearchParams["blipSignal"];
+}): RefinedDetectionIntent {
+  const detectionLabel = String(params.detectionLabel ?? "").toLowerCase().trim();
+  const detectionCategory = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  const softHints = (params.softProductTypeHints ?? []).map((x) => String(x).toLowerCase().trim());
+  const blipTokens = [
+    params.blipSignal?.productType,
+    params.blipSignal?.style,
+    params.blipSignal?.material,
+    params.blipSignal?.occasion,
+  ]
+    .map((x) => String(x ?? "").toLowerCase().trim())
+    .filter(Boolean);
+
+  const blob = [
+    detectionLabel,
+    detectionCategory,
+    ...params.desiredProductTypes,
+    ...params.preferredDesiredProductTypes,
+    ...softHints,
+    ...blipTokens,
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  const removeTokens = (arr: string[], blocked: RegExp): string[] =>
+    arr.filter((t) => !blocked.test(String(t).toLowerCase()));
+
+  const appendUnique = (arr: string[], items: string[]) => {
+    for (const item of items) {
+      const token = String(item).toLowerCase().trim();
+      if (!token) continue;
+      if (!arr.includes(token)) arr.push(token);
+    }
+  };
+
+  const prependUnique = (arr: string[], items: string[]) => {
+    const out: string[] = [];
+    appendUnique(out, items);
+    appendUnique(out, arr);
+    return out;
+  };
+
+  let desired = [...new Set(params.desiredProductTypes.map((t) => String(t).toLowerCase().trim()).filter(Boolean))];
+  let preferred = [...new Set(params.preferredDesiredProductTypes.map((t) => String(t).toLowerCase().trim()).filter(Boolean))];
+
+  let inferredSleeve: "short" | "long" | "sleeveless" | undefined;
+  let inferredStyle: string | undefined;
+
+  const longSleeveTopLike = /\b(long sleeve top|long\s*sleeve)\b/.test(blob);
+  const shortSleeveTopLike = /\b(short sleeve top|short\s*sleeve)\b/.test(blob);
+  const hasSweaterCue = /\b(sweater|knit|knitted|pullover|jumper)\b/.test(blob);
+  const hasShirtCue = /\b(button|button-up|button up|button-down|button down|collar|shirt\s*collar|shirt|blouse)\b/.test(blob);
+  const hasPoloCue = /\b(polo|polo shirt|collared polo|placket)\b/.test(blob);
+  const bottomsLike = detectionCategory === "bottoms" || /\b(trouser|trousers|pants?|chino|chinos|slack|slacks)\b/.test(blob);
+  const hasWideLegCue = /\b(wide\s*leg|wide-leg|palazzo|flowy|tailored|dress pant|pleated)\b/.test(blob);
+  const shortsLike = /\b(short|shorts)\b/.test(blob);
+  const denimCue = /\b(denim|jean|jeans)\b/.test(blob);
+  const vestLike = /\b(vest)\b/.test(detectionLabel || blob);
+  const vestOuterwearCue = /\b(outerwear|jacket|coat|puffer|blazer|waistcoat|gilet)\b/.test(blob);
+  const dressLike = detectionCategory === "dresses" || /\b(dress|gown)\b/.test(blob);
+  const beachCue = /\b(beach|resort|vacation|holiday|summer|seaside|pool)\b/.test(blob);
+
+  if (longSleeveTopLike && hasSweaterCue) {
+    preferred = prependUnique(preferred, ["sweater", "knit_pullover", "pullover", "knitwear"]);
+    desired = prependUnique(desired, ["sweater", "knit_pullover", "pullover", "knitwear"]);
+    desired = removeTokens(desired, /\b(shirt|blouse|button down|button-up|button up|t-?shirt|tee|short sleeve top)\b/);
+    inferredSleeve = "long";
+  }
+
+  if (longSleeveTopLike && hasShirtCue && !hasSweaterCue) {
+    preferred = prependUnique(preferred, ["shirt", "button_up_shirt", "button-down shirt", "collared shirt", "blouse"]);
+    desired = prependUnique(desired, ["shirt", "button_up_shirt", "button-down shirt", "collared shirt", "blouse"]);
+    desired = removeTokens(desired, /\b(sweater|hoodie|sweatshirt|jumper|knitwear|pullover)\b/);
+    inferredSleeve = "long";
+  }
+
+  if (shortSleeveTopLike && hasPoloCue) {
+    preferred = prependUnique(preferred, ["polo", "polo shirt", "collared polo"]);
+    desired = prependUnique(desired, ["polo", "polo shirt", "collared polo"]);
+    inferredSleeve = "short";
+  }
+
+  if (bottomsLike && hasWideLegCue) {
+    preferred = prependUnique(preferred, ["wide_leg_trousers", "wide leg trouser", "tailored trousers", "dress pant"]);
+    desired = prependUnique(desired, ["wide_leg_trousers", "wide leg trouser", "tailored trousers", "dress pant", "trousers"]);
+  }
+
+  if (shortsLike && denimCue) {
+    preferred = prependUnique(preferred, ["denim_shorts", "denim shorts"]);
+    desired = prependUnique(desired, ["denim_shorts", "denim shorts", "shorts"]);
+  }
+
+  if (vestLike && !vestOuterwearCue) {
+    preferred = prependUnique(preferred, ["sleeveless_top", "sleeveless top", "tank top"]);
+    desired = prependUnique(desired, ["sleeveless_top", "sleeveless top", "tank top", "cami"]);
+    desired = removeTokens(desired, /\b(outerwear|jacket|coat|blazer|waistcoat|gilet)\b/);
+    inferredSleeve = "sleeveless";
+  }
+
+  if (dressLike && beachCue) {
+    preferred = prependUnique(preferred, ["beach_dress", "beach dress", "resort dress"]);
+    desired = prependUnique(desired, ["beach_dress", "beach dress", "resort dress", "casual dress"]);
+    inferredStyle = "beach";
+  }
+
+  return {
+    desiredProductTypes: [...new Set(desired)],
+    preferredDesiredProductTypes: [...new Set(preferred)],
+    inferredSleeve,
+    inferredStyle,
+  };
 }
 
 /**
@@ -4851,9 +5148,12 @@ export async function searchByImageWithSimilarity(
     }
   }
 
-  // Hybrid recall for detection-scoped image search: visual kNN is good at shape,
-  // but it can miss obvious catalog matches for color/type intent. Add a small
-  // metadata channel and let the normal reranker decide final order.
+  // Phase 4: contract-based hybrid recall for detection-scoped image search.
+  // Channels:
+  // - visual kNN channel (25%)
+  // - exact metadata recall (50%)
+  // - related metadata recall (25%)
+  // The contract prevents broad drift by explicitly excluding bad/blocked types.
   if (
     detectionScoped &&
     String(process.env.SEARCH_IMAGE_HYBRID_METADATA_RECALL ?? "1").toLowerCase() !== "0"
@@ -4862,75 +5162,139 @@ export async function searchByImageWithSimilarity(
       ...(((filters as { productTypes?: string[] }).productTypes ?? []).map((t) => String(t).toLowerCase().trim())),
       ...((softProductTypeHintsParam ?? []).map((t) => String(t).toLowerCase().trim())),
     ].filter(Boolean);
-    const typeRecallTerms = [...new Set(expandProductTypesForQuery(typeRecallSeeds))];
+    const contract = buildProductRecallContract({
+      desiredProductTypes: [...new Set(expandProductTypesForQuery(typeRecallSeeds))],
+      detectionCategory: params.detectionProductCategory,
+    });
+    const typeRecallTerms = contract.exactTypes;
+    const relatedRecallTerms = contract.relatedTypes;
+    const badTypeTerms = contract.badTypes;
+    const blockedFamilyTerms = familyBlockTerms(contract.blockedFamilies);
     const colorRecallTerms = [
       ...((filtersAny.color ? expandColorTermsForFilter(String(filtersAny.color)) : [])),
       ...((filtersAny.softColor ? expandColorTermsForFilter(String(filtersAny.softColor)) : [])),
     ].filter(Boolean);
 
-    const should: any[] = [];
-    if (typeRecallTerms.length > 0) {
-      should.push({ terms: { product_types: [...new Set(typeRecallTerms)], boost: 4 } });
-    }
-    if (colorRecallTerms.length > 0) {
-      should.push({ terms: { attr_colors: [...new Set(colorRecallTerms)], boost: 2.2 } });
-      should.push({ terms: { color_palette_canonical: [...new Set(colorRecallTerms)], boost: 1.2 } });
-    }
-    if (cat) {
-      const categoryTerms = Array.isArray(cat) ? cat.map((c) => String(c)) : [String(cat)];
-      const expandedCategoryTerms = [...new Set(categoryTerms.flatMap((c) => getCategorySearchTerms(c)))];
-      if (expandedCategoryTerms.length > 0) {
-        should.push({ terms: { category_canonical: expandedCategoryTerms, boost: 2.5 } });
-        should.push({ terms: { category: expandedCategoryTerms, boost: 1.5 } });
-      }
-    }
-
-    const hasUsefulMetadataRecall = should.length > 0 && typeRecallTerms.length > 0;
+    const hasUsefulMetadataRecall = typeRecallTerms.length > 0 || relatedRecallTerms.length > 0;
     if (hasUsefulMetadataRecall) {
       try {
-        const metadataRecallBody = {
-          size: Math.min(220, Math.max(limit * 8, 80)),
-          _source: baseImageKnnSourceFields,
-          query: {
-            bool: {
-              filter: [
-                { bool: { must_not: [{ term: { is_hidden: true } }] } },
-                { terms: { product_types: typeRecallTerms } },
-                {
-                  bool: {
-                    must_not: [
-                      { terms: { category: ["candles & holders", "pots & plants", "home decor"] } },
-                    ],
-                  },
-                },
-              ],
-              should,
-              minimum_should_match: 1,
-            },
-          },
+        const recallPool = Math.min(220, Math.max(limit * 8, 80));
+        const budgets = allocateRecallBudgets(recallPool);
+
+        const sharedMustNot: any[] = [
+          { terms: { category: ["candles & holders", "pots & plants", "home decor"] } },
+        ];
+        if (badTypeTerms.length > 0) {
+          sharedMustNot.push({ terms: { product_types: badTypeTerms } });
+        }
+        if (blockedFamilyTerms.length > 0) {
+          sharedMustNot.push({ terms: { category: blockedFamilyTerms } });
+          sharedMustNot.push({ terms: { category_canonical: blockedFamilyTerms } });
+        }
+
+        const buildShouldClauses = (typeTerms: string[]) => {
+          const should: any[] = [];
+          if (typeTerms.length > 0) {
+            should.push({ terms: { product_types: [...new Set(typeTerms)], boost: 4 } });
+          }
+          if (colorRecallTerms.length > 0) {
+            should.push({ terms: { attr_colors: [...new Set(colorRecallTerms)], boost: 2.2 } });
+            should.push({ terms: { color_palette_canonical: [...new Set(colorRecallTerms)], boost: 1.2 } });
+          }
+          if (cat) {
+            const categoryTerms = Array.isArray(cat) ? cat.map((c) => String(c)) : [String(cat)];
+            const expandedCategoryTerms = [...new Set(categoryTerms.flatMap((c) => getCategorySearchTerms(c)))];
+            if (expandedCategoryTerms.length > 0) {
+              should.push({ terms: { category_canonical: expandedCategoryTerms, boost: 2.5 } });
+              should.push({ terms: { category: expandedCategoryTerms, boost: 1.5 } });
+            }
+          }
+          return should;
         };
-        const resp = await osClient.search({ index: config.opensearch.index, body: metadataRecallBody });
-        const metadataHits = (resp.body?.hits?.hits ?? []).map((hit: any) => ({
-          ...hit,
-          _score: Math.min(0.72, Number(hit?._score ?? 0) > 0 ? 0.72 : 0.62),
-          _metadataRecall: true,
-        }));
-        if (metadataHits.length > 0) {
+
+        const channelSearch = async (typeTerms: string[], size: number, scoreCap: number, channel: "exact" | "related") => {
+          if (typeTerms.length === 0 || size <= 0) return [] as any[];
+          const should = buildShouldClauses(typeTerms);
+          const body = {
+            size,
+            _source: baseImageKnnSourceFields,
+            query: {
+              bool: {
+                filter: [
+                  { bool: { must_not: [{ term: { is_hidden: true } }] } },
+                  { terms: { product_types: typeTerms } },
+                ],
+                must_not: sharedMustNot,
+                should,
+                minimum_should_match: should.length > 0 ? 1 : 0,
+              },
+            },
+          };
+          const resp = await osClient.search({ index: config.opensearch.index, body });
+          return (resp.body?.hits?.hits ?? []).map((hit: any) => ({
+            ...hit,
+            _score: Math.min(scoreCap, Number(hit?._score ?? 0) > 0 ? scoreCap : Math.max(0.58, scoreCap - 0.08)),
+            _metadataRecall: true,
+            _recallChannel: channel,
+          }));
+        };
+
+        const [exactHits, relatedHits] = await Promise.all([
+          channelSearch(typeRecallTerms, budgets.exact, 0.86, "exact"),
+          channelSearch(relatedRecallTerms, budgets.related, 0.74, "related"),
+        ]);
+
+        const visualRanked = [...(Array.isArray(hits) ? hits : [])]
+          .sort((a: any, b: any) => {
+            const sa = Number(a?._exactCosine01 ?? a?._score ?? 0);
+            const sb = Number(b?._exactCosine01 ?? b?._score ?? 0);
+            return sb - sa;
+          })
+          .slice(0, budgets.visual);
+
+        const takeChannel = (arr: any[], budget: number, out: any[], seen: Set<string>) => {
+          let used = 0;
+          for (const hit of arr) {
+            if (used >= budget) break;
+            const id = String(hit?._source?.product_id ?? "");
+            if (!id || seen.has(id)) continue;
+            seen.add(id);
+            out.push(hit);
+            used += 1;
+          }
+        };
+
+        const mergedBudgeted: any[] = [];
+        const seen = new Set<string>();
+        takeChannel(exactHits, budgets.exact, mergedBudgeted, seen);
+        takeChannel(relatedHits, budgets.related, mergedBudgeted, seen);
+        takeChannel(visualRanked, budgets.visual, mergedBudgeted, seen);
+
+        // Fill any empty budget remainder with strongest visual candidates.
+        if (mergedBudgeted.length < recallPool) {
+          takeChannel(Array.isArray(hits) ? hits : [], recallPool - mergedBudgeted.length, mergedBudgeted, seen);
+        }
+
+        if (mergedBudgeted.length > 0) {
           const beforeCount = Array.isArray(hits) ? hits.length : 0;
-          hits = mergeKnnHitsByProductId(Array.isArray(hits) ? hits : [], metadataHits, retrievalK);
+          hits = mergeKnnHitsByProductId(mergedBudgeted, Array.isArray(hits) ? hits : [], retrievalK);
           if (breakdownDebug) {
-            console.log("[image-knn][metadata-recall]", {
+            console.log("[image-knn][contract-recall]", {
               before: beforeCount,
-              metadata: metadataHits.length,
               afterMerge: hits.length,
-              typeRecallTerms,
-              colorRecallTerms,
+              budgets,
+              exactTerms: typeRecallTerms,
+              relatedTerms: relatedRecallTerms,
+              badTypeTerms,
+              blockedFamilyTerms,
+              exactHits: exactHits.length,
+              relatedHits: relatedHits.length,
             });
           }
         }
       } catch (err: any) {
         if (breakdownDebug) {
-          console.warn("[image-knn][metadata-recall] failed", err?.message ?? err);
+          console.warn("[image-knn][contract-recall] failed", err?.message ?? err);
         }
       }
     }
@@ -4945,7 +5309,11 @@ export async function searchByImageWithSimilarity(
     ),
   ];
   const endpointLimit = limit;
-  console.log("[hydrate] ids_count", rawKnnProductIds.length, "endpoint_limit", endpointLimit);
+  console.log("[hydrate-debug]", {
+    inputIdsCount: rawKnnProductIds.length,
+    uniqueIdsCount: new Set(rawKnnProductIds).size,
+    endpoint_limit: endpointLimit,
+  });
   const productHydrationStartedAt = Date.now();
   const productHydrationPromise = getSearchProductsByIdsOrdered(rawKnnProductIds).then(
     (products) => {
@@ -4953,7 +5321,7 @@ export async function searchByImageWithSimilarity(
         "[hydrate-step] products_ms",
         Date.now() - productHydrationStartedAt,
         "count",
-        rawKnnProductIds.length,
+        Array.isArray(products) ? products.length : rawKnnProductIds.length,
       );
       return { products };
     },
@@ -5317,10 +5685,20 @@ export async function searchByImageWithSimilarity(
   const softHintsMerged = (softProductTypeHintsParam ?? [])
     .map((t) => String(t).toLowerCase().trim())
     .filter(Boolean);
-  const preferredDesiredProductTypes = [...new Set(softHintsMerged)];
+  let preferredDesiredProductTypes = [...new Set(softHintsMerged)];
   if (softHintsMerged.length > 0) {
     desiredProductTypes = [...new Set([...desiredProductTypes, ...softHintsMerged])];
   }
+  const refinedIntent = refineDetectionIntentPhase2({
+    detectionLabel: params.detectionLabel,
+    detectionProductCategory: params.detectionProductCategory,
+    desiredProductTypes,
+    preferredDesiredProductTypes,
+    softProductTypeHints: softHintsMerged,
+    blipSignal,
+  });
+  desiredProductTypes = refinedIntent.desiredProductTypes;
+  preferredDesiredProductTypes = refinedIntent.preferredDesiredProductTypes;
   const hasSuitLikeDesiredIntent = desiredProductTypes.some((t) => /\b(suit|suits|tuxedo|tuxedos)\b/.test(String(t).toLowerCase()));
   if (hasSuitLikeDesiredIntent) {
     const formalBottomTerms = [
@@ -5647,9 +6025,11 @@ export async function searchByImageWithSimilarity(
     ? explicitStyleForRelevance
     : hasSoftStyleHint
       ? softStyleForRelevance
-      : undefined;
+      : refinedIntent.inferredStyle;
   const desiredSleeveForRelevance =
-    typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
+    typeof filtersRecord.sleeve === "string"
+      ? String(filtersRecord.sleeve).toLowerCase().trim()
+      : refinedIntent.inferredSleeve;
   const desiredSleeveNorm = desiredSleeveForRelevance;
   const isTopDetectionIntent =
     params.detectionProductCategory === "tops" ||
@@ -8180,6 +8560,13 @@ export async function searchByImageWithSimilarity(
         audience_gender: (p as any)?.audience_gender,
         product_types: (p as any)?.product_types,
       } as Record<string, unknown>;
+      const normalized = normalizeHydratedProduct({
+        ...hydratedBlobSrc,
+        brand: p.brand,
+        product_url: (p as any)?.product_url,
+        parent_product_url: (p as any)?.parent_product_url,
+        color: p.color,
+      });
 
       const isBottomsDetectionForGenderGate =
         String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms";
@@ -8635,6 +9022,15 @@ export async function searchByImageWithSimilarity(
         })(),
         rerankScore: compliance?.rerankScore,
         finalRelevance01,
+        normalizedFamily: normalized.normalizedFamily,
+        normalizedType: normalized.normalizedType,
+        normalizedSubtype: normalized.normalizedSubtype,
+        normalizedColor: normalized.normalizedColor,
+        normalizedAudience: normalized.normalizedAudience,
+        normalizedMaterial: normalized.normalizedMaterial,
+        normalizedStyle: normalized.normalizedStyle,
+        normalizedOccasion: normalized.normalizedOccasion,
+        normalizedSilhouette: normalized.normalizedSilhouette,
         explain: compliance
           ? {
             // ── Raw signals ──────────────────────────────────────
@@ -8744,6 +9140,30 @@ export async function searchByImageWithSimilarity(
               : undefined,
           }
           : undefined,
+        debugContract: {
+          imageMode: (params as any)?.imageMode ?? null,
+          intentFamily: resultJobFamily ?? null,
+          intentType: Array.isArray(desiredProductTypes) && desiredProductTypes.length > 0 ? desiredProductTypes[0] : null,
+          intentSubtype: Array.isArray(desiredProductTypes) && desiredProductTypes.length > 1 ? desiredProductTypes[1] : null,
+          productFamily: resultProductFamily ?? null,
+          productType: normalized.normalizedType ?? null,
+          productSubtype: normalized.normalizedSubtype ?? null,
+          productAudience: normalized.normalizedAudience ?? null,
+          guardPassed: typeof finalRelevance01 === 'number' ? finalRelevance01 > 0 : null,
+          guardReason: finalRelevanceSource ?? null,
+          scoreBreakdown: {
+            visual: similarityScore ?? 0,
+            type: compliance?.productTypeCompliance ?? null,
+            color: explainColorCompliance ?? (compliance?.colorCompliance ?? null),
+            sleeve: compliance?.sleeveCompliance ?? null,
+            length: (compliance as any)?.lengthCompliance ?? null,
+            style: compliance?.styleCompliance ?? null,
+            audience: compliance?.audienceCompliance ?? null,
+            final: finalRelevance01 ?? null,
+          },
+          capReason: String(finalRelevanceSource ?? '')?.includes('cap') ? finalRelevanceSource : null,
+          tieBreakReason: undefined,
+        },
         images: imagesOut,
       };
     }) as ProductResult[];
@@ -9126,13 +9546,24 @@ export async function searchByImageWithSimilarity(
     const tb = Number(b?.explain?.productTypeCompliance ?? 0);
     if (Math.abs(tb - ta) > 1e-6) return tb - ta;
 
+    const ma = Number(a?.explain?.metadataCompliance ?? 0);
+    const mb = Number(b?.explain?.metadataCompliance ?? 0);
+    if (Math.abs(mb - ma) > 1e-6) return mb - ma;
+
+    const ra = Number(a?.rerankScore ?? 0);
+    const rb = Number(b?.rerankScore ?? 0);
+    if (Math.abs(rb - ra) > 1e-6) return rb - ra;
+
     // Fall back to visual similarity when broad visual-first ranking is enabled.
     if (imageSearchVisualPrimaryRanking) {
       const vs = simB - simA;
       if (Math.abs(vs) > 1e-6) return vs;
     }
 
-    return 0;
+    const vsFallback = simB - simA;
+    if (Math.abs(vsFallback) > 1e-6) return vsFallback;
+
+    return compareDeterministicRankKey(a as ProductResult, b as ProductResult);
   });
 
   const dedupedResults = dedupeImageSearchResults(results as any) as ProductResult[];

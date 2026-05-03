@@ -40,6 +40,8 @@ import {
   getYOLOv8Client,
   extractOutfitComposition,
   dedupeDetectionsBySameLabelIou,
+  dropWeakDuplicateDetections,
+  mergeNearbyShoeBoxes,
   boundingBoxIou,
   Detection,
   OutfitComposition,
@@ -88,6 +90,58 @@ type BlipSignal = {
   occasion?: string | null;
   confidence?: number;
 };
+
+type ImageMode = "worn_outfit" | "flatlay_collage" | "single_product";
+
+function inferImageMode(params: {
+  caption?: string | null;
+  detections: Detection[];
+}): ImageMode {
+  const caption = String(params.caption ?? "").toLowerCase().trim();
+  const detections = Array.isArray(params.detections) ? params.detections : [];
+  const n = detections.length;
+
+  const personCue = /\b(person|man|woman|model|wearing|wears|street|walking|standing)\b/.test(caption);
+  const flatlayCue = /\b(flatlay|flat lay|collage|arranged|on a table|set of clothing|collection of)\b/.test(caption);
+
+  if (flatlayCue) return "flatlay_collage";
+
+  if (n <= 0) {
+    return personCue ? "worn_outfit" : "single_product";
+  }
+
+  const maxArea = Math.max(...detections.map((d) => Number(d.area_ratio) || 0), 0);
+  const avgArea = detections.reduce((sum, d) => sum + (Number(d.area_ratio) || 0), 0) / Math.max(1, n);
+
+  let overlapPairs = 0;
+  let strongOverlapPairs = 0;
+  for (let i = 0; i < detections.length; i++) {
+    for (let j = i + 1; j < detections.length; j++) {
+      const iou = boundingBoxIou(detections[i].box, detections[j].box);
+      overlapPairs += 1;
+      if (iou >= 0.2) strongOverlapPairs += 1;
+    }
+  }
+  const overlapRate = overlapPairs > 0 ? strongOverlapPairs / overlapPairs : 0;
+
+  if (n === 1 && maxArea >= 0.34 && !personCue) {
+    return "single_product";
+  }
+
+  if (!personCue && n >= 3 && overlapRate <= 0.18 && avgArea <= 0.14) {
+    return "flatlay_collage";
+  }
+
+  if (personCue) {
+    return "worn_outfit";
+  }
+
+  if (n >= 2 && overlapRate > 0.22) {
+    return "worn_outfit";
+  }
+
+  return n > 1 ? "flatlay_collage" : "single_product";
+}
 
 function inferApparelAudienceFallback(params: {
   caption?: string | null;
@@ -5097,6 +5151,8 @@ export interface GroupedSimilarProducts {
   threshold: number;
   /** All detected categories */
   detectedCategories: string[];
+  /** Inferred scene mode to control detection search behavior. */
+  imageMode?: ImageMode;
   /**
    * Shop-the-look coverage: how many detections yielded at least one product vs total detection jobs.
    * Coherence should be read together with `coverageRatio` (see `outfitCoherence`).
@@ -5428,10 +5484,16 @@ export class ImageAnalysisService {
           );
 
           if (accessoryDetections.length > 0) {
-            const mergedDetectionsRaw = dedupeDetectionsBySameLabelIou(
+            let mergedDetectionsRaw = dedupeDetectionsBySameLabelIou(
               [...detectionResult.detections, ...accessoryDetections],
               yoloShopDedupeIouThreshold(),
             ).map((row) => row.detection);
+
+            // PHASE 1: Drop weak duplicate detections (confidence < 0.45 overlapping stronger same-family)
+            mergedDetectionsRaw = dropWeakDuplicateDetections(mergedDetectionsRaw, 0.45, 0.65);
+
+            // PHASE 1: Merge nearby shoe boxes and apply expansion
+            mergedDetectionsRaw = mergeNearbyShoeBoxes(mergedDetectionsRaw, 100);
 
             const mergedDetections = mergedDetectionsRaw
               .filter((d) => shouldKeepDetectionForShopTheLook(d, mergedDetectionsRaw))
@@ -5612,6 +5674,10 @@ export class ImageAnalysisService {
           totalAvailableProducts: 0,
           threshold: similarityThreshold,
           detectedCategories: [],
+          imageMode: inferImageMode({
+            caption: null,
+            detections: analysisResult.detection?.items ?? [],
+          }),
           pagination: {
             mode: "per_detection",
             page: resolvedResultsPage,
@@ -5641,6 +5707,10 @@ export class ImageAnalysisService {
             totalAvailableProducts: 0,
             threshold: similarityThreshold,
             detectedCategories: fallbackDetectedCategories,
+            imageMode: inferImageMode({
+              caption: null,
+              detections: fallbackDetection.items,
+            }),
             pagination: {
               mode: "per_detection",
               page: resolvedResultsPage,
@@ -5765,6 +5835,10 @@ export class ImageAnalysisService {
           totalAvailableProducts: pagedFallback.totalAvailableProducts,
           threshold: similarityThreshold,
           detectedCategories: fallbackDetectedCategories,
+          imageMode: inferImageMode({
+            caption: fallbackCaption,
+            detections: fallbackDetection.items,
+          }),
           pagination: {
             mode: "per_detection",
             page: resolvedResultsPage,
@@ -5900,7 +5974,7 @@ export class ImageAnalysisService {
         }))
         : (() => {
           // First, deduplicate by IoU for same-label detections
-          const iouDedupedDetections = dedupeDetectionsBySameLabelIou(
+          let iouDedupedDetections = dedupeDetectionsBySameLabelIou(
             analysisResult.detection.items,
             yoloShopDedupeIouThreshold(),
           ).map(({ detection, originalIndex }) => ({
@@ -5908,9 +5982,19 @@ export class ImageAnalysisService {
             detectionIndex: originalIndex,
           }));
 
+          // PHASE 1: Drop weak duplicate detections (confidence < 0.45 overlapping stronger same-family)
+          let cleanedDetections = dropWeakDuplicateDetections(
+            iouDedupedDetections.map(d => d.detection),
+            0.45,
+            0.65
+          );
+
+          // PHASE 1: Merge nearby shoe boxes and apply expansion
+          cleanedDetections = mergeNearbyShoeBoxes(cleanedDetections, 100);
+
           // Then, deduplicate by category to keep only highest confidence per category
           const categoryDedupedDetections = dedupeDetectionsByCategoryHighestConfidence(
-            iouDedupedDetections.map(d => d.detection)
+            cleanedDetections
           );
 
           // Return deduplicated results with best matches
@@ -8461,6 +8545,10 @@ export class ImageAnalysisService {
         totalProducts: newTotalProducts,
         threshold: similarityThreshold,
         detectedCategories,
+        imageMode: inferImageMode({
+          caption: blipCaption,
+          detections: analysisResult.detection?.items ?? [],
+        }),
         shopTheLookStats: {
           totalDetections: totalDetectionJobs,
           coveredDetections,
@@ -10124,6 +10212,10 @@ export class ImageAnalysisService {
         totalAvailableProducts: pagedSel.totalAvailableProducts,
         threshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
         detectedCategories: [...new Set(relevanceFilteredResultsSelWithColorSource.map((r) => r.category))],
+        imageMode: inferImageMode({
+          caption: blipCaption,
+          detections: allItemsToProcess,
+        }),
         pagination: {
           mode: "per_detection",
           page: resolvedResultsPage,

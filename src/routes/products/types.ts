@@ -184,6 +184,15 @@ export interface ProductResult {
   /** Cosine similarity in [0, 1] (from OpenSearch score via 2·score−1). */
   similarity_score?: number;
   match_type?: "exact" | "similar" | "related"; // How the product matched
+  normalizedFamily?: string | null;
+  normalizedType?: string | null;
+  normalizedSubtype?: string | null;
+  normalizedColor?: string | null;
+  normalizedAudience?: "men" | "women" | "unisex" | "unknown";
+  normalizedMaterial?: string | null;
+  normalizedStyle?: string | null;
+  normalizedOccasion?: string | null;
+  normalizedSilhouette?: string | null;
   // Deterministic reranking fields (Phase 3)
   rerankScore?: number;
   /** Calibrated 0..1 relevance (text search acceptance gating). */
