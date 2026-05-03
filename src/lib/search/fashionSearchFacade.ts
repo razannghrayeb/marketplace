@@ -277,8 +277,8 @@ function applyNonSportGuardToNormalSearch(
 function applyPostHydrationGuards(
   results: ProductResult[] | undefined,
   intentProductCategory: string | undefined,
-): ProductResult[] | undefined {
-  if (!results || results.length === 0) return results;
+): ProductResult[] {
+  if (!results || results.length === 0) return results ?? [];
   if (!intentProductCategory) return results;
 
   const guardEnabled = String(process.env.SEARCH_IMAGE_FAMILY_GUARD ?? "1").toLowerCase() !== "0";
@@ -294,7 +294,7 @@ function applyPostHydrationGuards(
     }
 
     // Apply soft audience cap
-    const audienceCap = getAudienceCap(undefined, productAudience);
+    const audienceCap = getAudienceCap(null, productAudience);
     if (audienceCap < 1.0 && product.finalRelevance01) {
       return {
         ...product,
@@ -574,7 +574,7 @@ export async function searchImage(
   // "strict" was silently discarding all hits whose relevance layer hadn't run
   // or whose score was depressed by threshold/preprocessing mismatches.
   let filteredResults = filterByFinalRelevance(res.results, effectiveMin, "lenient") ?? [];
-  let filteredRelated = filterByFinalRelevance(res.related, effectiveMin, "lenient");
+  let filteredRelated = filterByFinalRelevance(res.related, effectiveMin, "lenient") ?? [];
 
   // PHASE 1: Apply post-hydration family and audience guards
   // This prevents shoes→dresses and other cross-family leakage
