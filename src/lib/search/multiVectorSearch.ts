@@ -150,10 +150,10 @@ export function normalizeMultiVectorScoresToUnitRange(
 
 export class MultiVectorSearchEngine {
   private readonly indexName: string;
-  private readonly defaultBaseK: number = 100;
-  private readonly defaultCandidateMultiplier: number = 2.0;
-  private readonly defaultMinCandidates: number = 20;
-  private readonly defaultMaxCandidates: number = 1000;
+  private readonly defaultBaseK: number = 300;
+  private readonly defaultCandidateMultiplier: number = 3.5;
+  private readonly defaultMinCandidates: number = 60;
+  private readonly defaultMaxCandidates: number = 2000;
 
   constructor(indexName?: string) {
     this.indexName = indexName || config.opensearch.index;
@@ -391,7 +391,7 @@ export class MultiVectorSearchEngine {
     const weightMap = new Map(embeddings.map(e => [e.attribute, e.weight]));
 
     return candidates.map(candidate => {
-      const product = productMap.get(candidate.productId);
+      const product = productMap.get(candidate.productId) as any;
 
       const result: MultiVectorSearchResult = {
         productId: candidate.productId,
