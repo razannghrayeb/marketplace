@@ -68,7 +68,7 @@ import {
   filterProductTypeSeedsByMappedCategory,
 } from "../../lib/search/productTypeTaxonomy";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
-import { sortProductsByRelevanceAndCategory } from "../../lib/search/sortResults";
+import { sortProductsByFinalRelevance } from "../../lib/search/sortResults";
 import {
   computeOutfitCoherence,
   type OutfitCoherenceResult,
@@ -1336,14 +1336,32 @@ function shopLookPerDetectionConcurrency(detections?: Array<{ label: string; con
   return Math.min(cap, Math.max(minConcurrency, n));
 }
 
-/** Max search calls per detection (initial + retries/fallbacks). Default 3 to preserve recall on hard detections. */
+/** Primary search calls per detection. Extra zero-result recovery calls are configured separately. */
 function shopLookMaxSearchCallsPerDetection(): number {
-  if (shopLookDeterministicTwoPassEnv()) return 2;
-  const raw = Number(process.env.SEARCH_IMAGE_SHOP_MAX_SEARCH_CALLS ?? "3");
-  if (!Number.isFinite(raw)) return 3;
-  // A value of 1 collapses recall for hard categories (tops/bottoms/footwear) because
-  // no retry/recovery path can run. Keep at least 2 calls to preserve pipeline robustness.
-  return Math.max(2, Math.min(8, Math.floor(raw)));
+  const fallbackDefault = shopLookDeterministicTwoPassEnv() ? "2" : "1";
+  const raw = Number(
+    process.env.SEARCH_IMAGE_DETECTION_SEARCH_CALL_LIMIT ??
+    process.env.SEARCH_IMAGE_SHOP_MAX_SEARCH_CALLS ??
+    fallbackDefault,
+  );
+  if (!Number.isFinite(raw)) return Number(fallbackDefault);
+  return Math.max(1, Math.min(8, Math.floor(raw)));
+}
+
+function shopLookZeroResultExtraCalls(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_ZERO_RESULT_EXTRA_CALLS ?? "1");
+  if (!Number.isFinite(raw)) return 1;
+  return Math.max(0, Math.min(3, Math.floor(raw)));
+}
+
+function shopLookRecoveryOnlyOnZeroEnv(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_RECOVERY_ONLY_ON_ZERO ?? "1").toLowerCase().trim();
+  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
+}
+
+function shopLookSplitTypeSearchEnabled(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_SPLIT_TYPE_SEARCH_ENABLED ?? "0").toLowerCase().trim();
+  return raw === "1" || raw === "true" || raw === "on" || raw === "yes";
 }
 
 function shopLookDeterministicTwoPassEnv(): boolean {
@@ -4066,8 +4084,7 @@ function finalRelevanceScore(product: unknown): number {
 }
 
 function sortProductsByFinalRelevanceDesc(products: ProductResult[]): ProductResult[] {
-  // Use centralized sorting utility to ensure consistent ordering across all APIs
-  return sortProductsByRelevanceAndCategory(products);
+  return sortProductsByFinalRelevance(products);
 }
 
 function sortDetectionProductsByFinalRelevance(row: DetectionSimilarProducts): DetectionSimilarProducts {
@@ -6065,7 +6082,11 @@ export class ImageAnalysisService {
     const detectionSearchTotalDurations: number[] = [];
     const detectionSearchCallCounts: number[] = [];
     const detectionTaskDurations: number[] = [];
-    const maxSearchCallsPerDetection = shopLookMaxSearchCallsPerDetection();
+    const primarySearchCallsPerDetection = shopLookMaxSearchCallsPerDetection();
+    const zeroResultExtraCalls = shopLookZeroResultExtraCalls();
+    const maxSearchCallsPerDetection = primarySearchCallsPerDetection + zeroResultExtraCalls;
+    const recoveryOnlyOnZero = shopLookRecoveryOnlyOnZeroEnv();
+    const splitTypeSearchEnabled = shopLookSplitTypeSearchEnabled();
     const mainPathOnly = shopLookMainPathOnlyEnv();
     const maxDetectionTaskMs = shopLookMaxDetectionTaskMs();
     const hotPathDebug = String(process.env.SEARCH_DEBUG ?? "") === "1";
@@ -6077,6 +6098,10 @@ export class ImageAnalysisService {
         embeddingBatchMs: detectionEmbeddingBatchMs,
         embeddingBatchReady: detectionEmbeddingBatchReady,
         mainPathOnly,
+        primarySearchCallsPerDetection,
+        zeroResultExtraCalls,
+        recoveryOnlyOnZero,
+        splitTypeSearchEnabled,
         blipApiUrlConfigured: Boolean(process.env.BLIP_API_URL),
         rankerApiUrlConfigured: Boolean(process.env.RANKER_API_URL),
       });
@@ -6782,7 +6807,7 @@ export class ImageAnalysisService {
             );
           }
 
-          const _parallelSearchPromise = initialTypeSearchHintsForSearch.length > 1
+          const _parallelSearchPromise = splitTypeSearchEnabled && initialTypeSearchHintsForSearch.length > 1
             ? Promise.all(
               initialTypeSearchHintsForSearch.map((typeHint, index) =>
                 runDetectionSearch(`initial_type_${index + 1}`, {
@@ -7248,7 +7273,10 @@ export class ImageAnalysisService {
               categoryMapping.productCategory,
               resolvedLimitPerItem,
             );
-            if (similarResult.results.length < passBMinResults && detectionSearchCalls < detectionSearchCallLimit) {
+            if (
+              (recoveryOnlyOnZero ? similarResult.results.length === 0 : similarResult.results.length < passBMinResults) &&
+              detectionSearchCalls < detectionSearchCallLimit
+            ) {
               // Pass B uses the alternate KNN field to retrieve complementary neighbors;
               // category constraints are intentionally kept — dropping them floods the pool
               // with off-category items that downstream precision guards then eject, leaving
@@ -7293,6 +7321,7 @@ export class ImageAnalysisService {
             (
               similarResult.results.length === 0 ||
               (
+                !shopLookRecoveryOnlyOnZeroEnv() &&
                 (categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "bottoms") &&
                 similarResult.results.length <= 1
               )
@@ -7701,7 +7730,9 @@ export class ImageAnalysisService {
             : Math.max(2, Math.floor(resolvedLimitPerItem * 0.2));
           if (
             detectionSearchCalls < maxSearchCallsPerDetection &&
-            similarResult.results.length < footwearLowCountThreshold &&
+            (recoveryOnlyOnZero
+              ? similarResult.results.length === 0
+              : similarResult.results.length < footwearLowCountThreshold) &&
             categoryMapping.productCategory === "footwear"
           ) {
             if (hotPathDebug) {
@@ -7792,7 +7823,9 @@ export class ImageAnalysisService {
           const topsRecoveryMinKeep = shopLookTopRecoveryMinKeep(resolvedLimitPerItem);
           if (
             detectionSearchCalls < maxSearchCallsPerDetection &&
-            guardedCountForRecovery < topsRecoveryMinKeep &&
+            (recoveryOnlyOnZero
+              ? guardedCountForRecovery === 0
+              : guardedCountForRecovery < topsRecoveryMinKeep) &&
             categoryMapping.productCategory === "tops" &&
             (((detection.confidence ?? 0) >= 0.45 && (detection.area_ratio ?? 0) >= 0.02) ||
               (vestLikeRecovery &&
@@ -7912,7 +7945,9 @@ export class ImageAnalysisService {
           if (
             detectionSearchCalls < maxSearchCallsPerDetection &&
             topOrDressCategory &&
-            guardedCountForRecovery < topOrDressMinKeep
+            (recoveryOnlyOnZero
+              ? guardedCountForRecovery === 0
+              : guardedCountForRecovery < topOrDressMinKeep)
           ) {
             const ablationTerms = hardCategoryTermsForDetection(label, categoryMapping, {
               confidence: detection.confidence,
@@ -9571,6 +9606,7 @@ export class ImageAnalysisService {
             (
               similarResult.results.length === 0 ||
               (
+                !shopLookRecoveryOnlyOnZeroEnv() &&
                 (categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "bottoms") &&
                 similarResult.results.length <= 1
               )
@@ -9779,7 +9815,9 @@ export class ImageAnalysisService {
           const lowQualityFallbackWanted =
             shopLookLowQualityMultiCropFallbackEnabled() &&
             shouldUseLowQualityMultiCropFallback(detection) &&
-            similarResult.results.length < Math.max(3, Math.floor(retrievalLimit * 0.35));
+            (shopLookRecoveryOnlyOnZeroEnv()
+              ? similarResult.results.length === 0
+              : similarResult.results.length < Math.max(3, Math.floor(retrievalLimit * 0.35)));
           if (lowQualityFallbackWanted) {
             const expandedRaw = expandDetectionBox(detection.box, imageWidth, imageHeight, 0.22);
             let expandedBox = expandedRaw;
@@ -9855,7 +9893,12 @@ export class ImageAnalysisService {
             : categoryMapping.productCategory === "outerwear"
               ? Math.max(3, Math.min(8, Math.floor(resolvedLimitPerItem * 0.35)))
               : Math.max(3, Math.min(8, Math.floor(resolvedLimitPerItem * 0.35)));
-          if (apparelRecoveryCategory && similarResult.results.length < apparelRecoveryMinKeep) {
+          if (
+            apparelRecoveryCategory &&
+            (shopLookRecoveryOnlyOnZeroEnv()
+              ? similarResult.results.length === 0
+              : similarResult.results.length < apparelRecoveryMinKeep)
+          ) {
             const ablationTerms = hardCategoryTermsForDetection(categorySource, categoryMapping, {
               confidence: detection.confidence,
               areaRatio: detection.area_ratio,

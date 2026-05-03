@@ -488,6 +488,7 @@ export interface SearchResultWithRelated {
       hits_after_final_accept_min: number;
       dropped_by_final_relevance_before_override: number;
       rescued_by_strong_visual_override: number;
+      same_pool_safe_fill?: number;
       hits_after_color_postfilter: number;
       hits_after_hydration: number;
       dropped_by_dedupe: number;

@@ -354,18 +354,21 @@ function applyPostHydrationGuards(
         nextProduct.guardReason = (nextProduct.guardReason ? `${nextProduct.guardReason};` : "") + "audience_cap_applied";
       }
 
-      // Contract-tier caps: map common product indicators to the user's requested tier caps.
-      // Do NOT boost related items globally — we only cap their maximum final score here.
+      // Tier caps stay opt-in while the production path stabilizes.
       let contractCap = 1;
-      const mt = String(product.match_type ?? "").toLowerCase().trim();
-      if (mt === "exact") contractCap = Math.min(contractCap, 0.94);
-      else if (mt === "related") contractCap = Math.min(contractCap, 0.78);
-      else if (mt === "similar") {
-        // treat visual/similar as weak tier
-        contractCap = Math.min(contractCap, 0.64);
+      const contractTierCapsEnabled =
+        String(process.env.SEARCH_IMAGE_TIER_SCORING_ENABLED ?? "0").toLowerCase().trim() === "1";
+      if (contractTierCapsEnabled) {
+        const mt = String(product.match_type ?? "").toLowerCase().trim();
+        if (mt === "exact") contractCap = Math.min(contractCap, 0.94);
+        else if (mt === "related") contractCap = Math.min(contractCap, 0.78);
+        else if (mt === "similar") {
+          contractCap = Math.min(contractCap, 0.64);
+        }
+        if (typeof product.similarity_score === "number" && product.similarity_score < 0.4) {
+          contractCap = Math.min(contractCap, 0.56);
+        }
       }
-      // fallback when visual evidence is very weak
-      if (typeof product.similarity_score === "number" && product.similarity_score < 0.4) contractCap = Math.min(contractCap, 0.56);
 
       // Final enforce: do not increase score, only cap it according to rules above
       const enforced = Math.min(maxFinal, contractCap, typeof nextProduct.finalRelevance01 === "number" ? nextProduct.finalRelevance01 : 1);
