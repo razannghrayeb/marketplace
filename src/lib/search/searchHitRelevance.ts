@@ -100,10 +100,77 @@ export function scoreCategoryRelevance01(
 }
 
 /**
+ * Compute tiered cap instead of flat cap
+ * Caps are determined by product type match quality, color match, and other attributes
+ * Returns the maximum allowed final relevance score
+ */
+function computeTieredCap(params: {
+  typeScore: number;
+  colorScore: number;
+  styleScore: number;
+  sleeveScore: number;
+  semScore: number;
+  intraFamilyPenalty?: number;
+  hasReliableTypeIntent?: boolean;
+  hasColorIntent: boolean;
+  hasStyleIntent: boolean;
+  hasSleeveIntent: boolean;
+  tightSemanticCap?: boolean;
+}): number {
+  const intraPen = Math.max(0, params.intraFamilyPenalty ?? 0);
+
+  // If image search mode (tightSemanticCap), use broader semantic cap
+  if (params.tightSemanticCap) {
+    // Allow stronger bonus for semantic similarity
+    return Math.min(1, params.semScore + 0.25);
+  }
+
+  // Text search or hybrid mode: use tiered caps based on type/color/attribute match
+
+  // Tier 1: Exact type match + all attributes correct (0.92-0.95)
+  if (params.typeScore >= 0.9 && params.colorScore >= 0.85) {
+    return 0.94;
+  }
+
+  // Tier 2: Good type match + color match (0.84-0.90)
+  if (params.typeScore >= 0.75 && params.colorScore >= 0.7) {
+    return 0.88;
+  }
+
+  // Tier 3: Acceptable type + color + style/sleeve (0.72-0.82)
+  if (params.typeScore >= 0.6 && params.colorScore >= 0.5) {
+    if (params.hasStyleIntent || params.hasSleeveIntent) {
+      if (params.styleScore >= 0.6 || params.sleeveScore >= 0.6) {
+        return 0.80;
+      }
+    }
+    return 0.75;
+  }
+
+  // Tier 4: Weak type match (0.55-0.70)
+  if (params.typeScore >= 0.35) {
+    return 0.62;
+  }
+
+  // Tier 5: Type mismatch penalty
+  if (intraPen > 0.7) {
+    return 0.55; // Related but wrong subtype
+  }
+
+  // Fallback: semantic-only match
+  return Math.min(1, params.semScore + 0.15);
+}
+
+/**
  * Calibrated 0..1 relevance for acceptance gating (text: SEARCH_FINAL_ACCEPT_MIN_TEXT;
  * image: SEARCH_FINAL_ACCEPT_MIN_IMAGE — see config.search).
  * Type intent + cross-family taxonomy penalties gate hard; text similarity and category
  * boost score compliant hits. Cross-family soft factor applies below the hard block threshold.
+ *
+ * PHASE 1 IMPROVEMENTS:
+ * - Replaced flat 0.72 cap with tiered caps based on type/color/attribute match
+ * - Better tie-breaking for similar scores
+ * - Stronger audience penalty caps
  */
 export function computeFinalRelevance01(params: {
   hasTypeIntent: boolean;
@@ -133,6 +200,8 @@ export function computeFinalRelevance01(params: {
   applyLexicalToGlobal?: boolean;
   /** Image similar-search: keep final relevance closer to raw cosine so weak visuals cannot rank as strong matches. */
   tightSemanticCap?: boolean;
+  /** Audience mismatch cap (0..1) applied from post-hydration guard */
+  audienceMismatchCap?: number;
 }): number {
   const crossPen = Math.max(0, params.crossFamilyPenalty);
   const intraPen = Math.max(0, params.intraFamilyPenalty ?? 0);
@@ -176,7 +245,7 @@ export function computeFinalRelevance01(params: {
   const attrFactor = 0.5 + attrScore * 0.5;
 
   const crossFamilySoftFactor = params.hasReliableTypeIntent === false
-    ? Math.max(0.72, 1 - crossPen * 0.25)
+    ? Math.max(0.55, 1 - crossPen * 0.35) // Removed flat 0.72 cap
     : Math.max(0, 1 - crossPen * 0.6);
   const intraFamilySoftFactor = params.hasTypeIntent
     ? params.tightSemanticCap
@@ -187,22 +256,31 @@ export function computeFinalRelevance01(params: {
   const raw =
     globalScore * typeGateFactor * categoryBoost * attrFactor * crossFamilySoftFactor * intraFamilySoftFactor;
   const bounded = Math.max(0, Math.min(1, raw));
-  // Prevent final relevance from being unrealistically higher than visual/semantic evidence.
-  // With tightSemanticCap (image search), allow a wider bonus so that products with
-  // strong attribute/type compliance can surface above pure visual similarity.
-  // Previous 0.035/0.07 caps were too restrictive and collapsed all image search
-  // results into a narrow band near raw cosine, making the relevance layer useless.
-  const hasIntent =
-    params.hasTypeIntent || params.hasColorIntent || params.hasStyleIntent || params.hasAudienceIntent;
-  const capBonus = params.tightSemanticCap
-    ? hasIntent
-      ? 0.25
-      : 0.32
-    : hasIntent
-      ? 0.12
-      : 0.2;
-  const softCap = Math.min(1, params.semScore + capBonus);
-  return Math.min(bounded, softCap);
+
+  // Use tiered cap instead of flat cap
+  const tieredCap = computeTieredCap({
+    typeScore: params.typeScore,
+    colorScore: params.colorScore,
+    styleScore: params.styleScore,
+    sleeveScore: params.sleeveScore,
+    semScore: params.semScore,
+    intraFamilyPenalty: intraPen,
+    hasReliableTypeIntent: params.hasReliableTypeIntent,
+    hasColorIntent: params.hasColorIntent,
+    hasStyleIntent: params.hasStyleIntent,
+    hasSleeveIntent: params.hasSleeveIntent,
+    tightSemanticCap: params.tightSemanticCap,
+  });
+
+  // Apply tiered cap
+  let finalCapped = Math.min(bounded, tieredCap);
+
+  // Apply audience mismatch cap if provided (post-hydration guard)
+  if (params.audienceMismatchCap && params.audienceMismatchCap < 1.0) {
+    finalCapped = Math.min(finalCapped, params.audienceMismatchCap);
+  }
+
+  return finalCapped;
 }
 
 export function normalizeQueryGender(g: string | undefined): string | null {

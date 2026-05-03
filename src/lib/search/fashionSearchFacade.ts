@@ -39,6 +39,12 @@ import {
   extractLexicalProductTypeSeeds,
   filterProductTypeSeedsByMappedCategory,
 } from "./productTypeTaxonomy";
+import {
+  extractProductFamily,
+  resolveProductAudience,
+  applyFamilyGuard,
+  getAudienceCap,
+} from "./familyGuard";
 import { config } from "../../config";
 
 export interface UnifiedTextSearchParams {
@@ -259,6 +265,45 @@ function applyNonSportGuardToNormalSearch(
   // Keep recall: only apply when enough non-sport items remain.
   const minKeep = items.length >= 8 ? 4 : 1;
   return filtered.length >= minKeep ? filtered : items;
+}
+
+/**
+ * PHASE 1: Apply post-hydration family and audience guards
+ * Prevents catastrophic errors like:
+ * - Shoe search returning dress products
+ * - Cross-gender mismatches
+ * - Wrong product family in results
+ */
+function applyPostHydrationGuards(
+  results: ProductResult[] | undefined,
+  intentProductCategory: string | undefined,
+): ProductResult[] | undefined {
+  if (!results || results.length === 0) return results;
+  if (!intentProductCategory) return results;
+
+  const guardEnabled = String(process.env.SEARCH_IMAGE_FAMILY_GUARD ?? "1").toLowerCase() !== "0";
+  if (!guardEnabled) return results;
+
+  return results.map((product) => {
+    const productFamily = extractProductFamily(product);
+    const productAudience = resolveProductAudience(product);
+
+    // Apply hard family guard: drop if product family doesn't match intent
+    if (!applyFamilyGuard(intentProductCategory, productFamily)) {
+      return null; // Mark for filtering
+    }
+
+    // Apply soft audience cap
+    const audienceCap = getAudienceCap(undefined, productAudience);
+    if (audienceCap < 1.0 && product.finalRelevance01) {
+      return {
+        ...product,
+        finalRelevance01: Math.min(product.finalRelevance01, audienceCap),
+      };
+    }
+
+    return product;
+  }).filter((p): p is ProductResult => p !== null);
 }
 
 export async function searchBrowse(params: {
@@ -528,8 +573,15 @@ export async function searchImage(
   // than dropping them) and let the upstream kNN + composite ordering dominate.
   // "strict" was silently discarding all hits whose relevance layer hadn't run
   // or whose score was depressed by threshold/preprocessing mismatches.
-  const filteredResults = filterByFinalRelevance(res.results, effectiveMin, "lenient") ?? [];
-  const filteredRelated = filterByFinalRelevance(res.related, effectiveMin, "lenient");
+  let filteredResults = filterByFinalRelevance(res.results, effectiveMin, "lenient") ?? [];
+  let filteredRelated = filterByFinalRelevance(res.related, effectiveMin, "lenient");
+
+  // PHASE 1: Apply post-hydration family and audience guards
+  // This prevents shoes→dresses and other cross-family leakage
+  if (detectionProductCategory) {
+    filteredResults = applyPostHydrationGuards(filteredResults, detectionProductCategory);
+  }
+
   const meta = {
     ...(res.meta ?? {}),
     total_results: filteredResults.length,
