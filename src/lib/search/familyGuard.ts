@@ -22,7 +22,7 @@ export function extractProductFamily(product: any): string | null {
   if (isValidFamily(category)) return normalizeFamily(category);
 
   const types = Array.isArray(product?.product_types)
-    ? product.product_types.map((t) => String(t).toLowerCase().trim()).filter(Boolean)
+    ? product.product_types.map((t: unknown) => String(t).toLowerCase().trim()).filter(Boolean)
     : [];
   for (const type of types) {
     if (isValidFamily(type)) return normalizeFamily(type);
@@ -40,7 +40,7 @@ export function extractProductFamily(product: any): string | null {
 /**
  * Normalize family name to canonical form
  */
-export function normalizeFamily(raw: string): string {
+export function normalizeFamily(raw: string): string | null {
   const s = String(raw ?? "").toLowerCase().trim();
 
   // Tops family
@@ -251,6 +251,7 @@ export function verifyProductPostHydration(
 
   return {
     isValid: true,
+    shouldDrop: false,
     audienceCap,
   };
 }
