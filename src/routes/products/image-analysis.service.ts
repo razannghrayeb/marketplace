@@ -9531,6 +9531,7 @@ export class ImageAnalysisService {
             categoryMapping.productCategory === "outerwear"
               ? "embedding"
               : shopTheLookKnnField();
+          const requestRerankSignalCache = new Map<string, unknown>();
 
           // Always extract and pass color, style, and pattern intent to rerank
           let similarResult = await searchByImageWithSimilarity({
@@ -9561,6 +9562,7 @@ export class ImageAnalysisService {
             sessionId: options.sessionId,
             userId: options.userId,
             sessionFilters: options.sessionFilters ?? undefined,
+            rerankSignalCache: requestRerankSignalCache,
             // Style and pattern intent are handled via filters or blipSignal; do not pass as top-level params
           });
 
@@ -9617,6 +9619,7 @@ export class ImageAnalysisService {
               sessionId: options.sessionId,
               userId: options.userId,
               sessionFilters: options.sessionFilters ?? undefined,
+              rerankSignalCache: requestRerankSignalCache,
             });
           }
 
@@ -9683,6 +9686,7 @@ export class ImageAnalysisService {
               sessionId: options.sessionId,
               userId: options.userId,
               sessionFilters: options.sessionFilters ?? undefined,
+              rerankSignalCache: requestRerankSignalCache,
             });
             if (similarResult.results.length === 0) {
               const fallbackStructuralFilters = preserveHardCategoryInFallback && fallbackCategoryTerms.length > 0
@@ -9727,6 +9731,7 @@ export class ImageAnalysisService {
                 sessionId: options.sessionId,
                 userId: options.userId,
                 sessionFilters: options.sessionFilters ?? undefined,
+                rerankSignalCache: requestRerankSignalCache,
               });
             }
           }
@@ -9767,6 +9772,7 @@ export class ImageAnalysisService {
               sessionId: options.sessionId,
               userId: options.userId,
               sessionFilters: options.sessionFilters ?? undefined,
+              rerankSignalCache: requestRerankSignalCache,
             });
           }
 
@@ -9823,6 +9829,7 @@ export class ImageAnalysisService {
                   sessionId: options.sessionId,
                   userId: options.userId,
                   sessionFilters: options.sessionFilters ?? undefined,
+                  rerankSignalCache: requestRerankSignalCache,
                 })
               ),
             );

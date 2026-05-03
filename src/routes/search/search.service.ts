@@ -2060,7 +2060,7 @@ export async function textSearch(
         const compliance = complianceById.get(String(p.id));
         return !compliance || (compliance.audienceCompliance ?? 1) >= 0.35;
       });
-      if (menResults.length >= 2) results = menResults;
+      results = menResults;
     }
 
     if (results.length === 0) {

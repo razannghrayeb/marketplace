@@ -366,15 +366,15 @@ export function scoreAudienceCompliance(
       const hasMenStyleCue = menStyleCue.test(audienceBlob);
       if (wantG === "men") {
         if (hasKidsCue) score *= 0;
-        else if (hasWomenStyleCue && !hasMenStyleCue) score *= 0.12;
+        else if (hasWomenStyleCue && !hasMenStyleCue) score *= 0;
         else if (/\b(men|mens|male)\b/.test(audienceBlob)) score *= 0.9;
-        else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(audienceBlob)) score *= 0.28;
+        else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(audienceBlob)) score *= 0;
         else score *= 0.78;
       } else if (wantG === "women") {
         if (hasKidsCue) score *= 0;
-        else if (hasMenStyleCue && !hasWomenStyleCue) score *= 0.12;
+        else if (hasMenStyleCue && !hasWomenStyleCue) score *= 0;
         else if (/\b(women|womens|female|ladies|woman)\b/.test(audienceBlob)) score *= 0.9;
-        else if (/\b(men|mens|male|man|boy|boys)\b/.test(audienceBlob)) score *= 0.28;
+        else if (/\b(men|mens|male|man|boy|boys)\b/.test(audienceBlob)) score *= 0;
         else score *= 0.78;
       } else {
         score *= 0.85;

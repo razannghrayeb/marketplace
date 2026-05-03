@@ -235,6 +235,7 @@ export async function searchProductsByImage(req: Request, res: Response) {
       includeRelated,
       pHash,
       softProductTypeHints,
+      debug: req.query.debug === "1" || req.query.debug === "true",
         sessionId,
         userId,
     });
