@@ -55,6 +55,7 @@ import {
 } from "../../lib/search/searchHitRelevance";
 import { merchandiseVisualSimilarity01 } from "../../lib/search/merchandiseVisualSimilarity";
 import {
+  expandProductTypesForQuery,
   extractFashionTypeNounTokens,
   extractLexicalProductTypeSeeds,
   scoreRerankProductTypeBreakdown,
@@ -4456,6 +4457,7 @@ export async function searchByImageWithSimilarity(
     "color",
     "attr_gender",
     "attr_color",
+    "attr_color_source",
     "attr_colors",
     "attr_style",
     "attr_material",
@@ -4465,6 +4467,7 @@ export async function searchByImageWithSimilarity(
     "attr_sleeve",
     "norm_confidence",
     "type_confidence",
+    "product_quality_score",
     "color_confidence_text",
     "color_confidence_image",
     "color_palette_canonical",
@@ -4476,6 +4479,7 @@ export async function searchByImageWithSimilarity(
     "embedding_score_version",
     "embedding_garment_score_version",
     "image_url",
+    "product_url",
     "parent_product_url",
     // Attribute + part embeddings are intentionally omitted here.
     // They are fetched via a separate targeted mget for only the top hits
@@ -4847,6 +4851,91 @@ export async function searchByImageWithSimilarity(
     }
   }
 
+  // Hybrid recall for detection-scoped image search: visual kNN is good at shape,
+  // but it can miss obvious catalog matches for color/type intent. Add a small
+  // metadata channel and let the normal reranker decide final order.
+  if (
+    detectionScoped &&
+    String(process.env.SEARCH_IMAGE_HYBRID_METADATA_RECALL ?? "1").toLowerCase() !== "0"
+  ) {
+    const typeRecallSeeds = [
+      ...(((filters as { productTypes?: string[] }).productTypes ?? []).map((t) => String(t).toLowerCase().trim())),
+      ...((softProductTypeHintsParam ?? []).map((t) => String(t).toLowerCase().trim())),
+    ].filter(Boolean);
+    const typeRecallTerms = [...new Set(expandProductTypesForQuery(typeRecallSeeds))];
+    const colorRecallTerms = [
+      ...((filtersAny.color ? expandColorTermsForFilter(String(filtersAny.color)) : [])),
+      ...((filtersAny.softColor ? expandColorTermsForFilter(String(filtersAny.softColor)) : [])),
+    ].filter(Boolean);
+
+    const should: any[] = [];
+    if (typeRecallTerms.length > 0) {
+      should.push({ terms: { product_types: [...new Set(typeRecallTerms)], boost: 4 } });
+    }
+    if (colorRecallTerms.length > 0) {
+      should.push({ terms: { attr_colors: [...new Set(colorRecallTerms)], boost: 2.2 } });
+      should.push({ terms: { color_palette_canonical: [...new Set(colorRecallTerms)], boost: 1.2 } });
+    }
+    if (cat) {
+      const categoryTerms = Array.isArray(cat) ? cat.map((c) => String(c)) : [String(cat)];
+      const expandedCategoryTerms = [...new Set(categoryTerms.flatMap((c) => getCategorySearchTerms(c)))];
+      if (expandedCategoryTerms.length > 0) {
+        should.push({ terms: { category_canonical: expandedCategoryTerms, boost: 2.5 } });
+        should.push({ terms: { category: expandedCategoryTerms, boost: 1.5 } });
+      }
+    }
+
+    const hasUsefulMetadataRecall = should.length > 0 && typeRecallTerms.length > 0;
+    if (hasUsefulMetadataRecall) {
+      try {
+        const metadataRecallBody = {
+          size: Math.min(220, Math.max(limit * 8, 80)),
+          _source: baseImageKnnSourceFields,
+          query: {
+            bool: {
+              filter: [
+                { bool: { must_not: [{ term: { is_hidden: true } }] } },
+                { terms: { product_types: typeRecallTerms } },
+                {
+                  bool: {
+                    must_not: [
+                      { terms: { category: ["candles & holders", "pots & plants", "home decor"] } },
+                    ],
+                  },
+                },
+              ],
+              should,
+              minimum_should_match: 1,
+            },
+          },
+        };
+        const resp = await osClient.search({ index: config.opensearch.index, body: metadataRecallBody });
+        const metadataHits = (resp.body?.hits?.hits ?? []).map((hit: any) => ({
+          ...hit,
+          _score: Math.min(0.72, Number(hit?._score ?? 0) > 0 ? 0.72 : 0.62),
+          _metadataRecall: true,
+        }));
+        if (metadataHits.length > 0) {
+          const beforeCount = Array.isArray(hits) ? hits.length : 0;
+          hits = mergeKnnHitsByProductId(Array.isArray(hits) ? hits : [], metadataHits, retrievalK);
+          if (breakdownDebug) {
+            console.log("[image-knn][metadata-recall]", {
+              before: beforeCount,
+              metadata: metadataHits.length,
+              afterMerge: hits.length,
+              typeRecallTerms,
+              colorRecallTerms,
+            });
+          }
+        }
+      } catch (err: any) {
+        if (breakdownDebug) {
+          console.warn("[image-knn][metadata-recall] failed", err?.message ?? err);
+        }
+      }
+    }
+  }
+
   stageKnnDoneAt = Date.now();
   const rawKnnProductIds = [
     ...new Set(
@@ -4855,9 +4944,28 @@ export async function searchByImageWithSimilarity(
         .filter(Boolean),
     ),
   ];
+  const endpointLimit = limit;
+  console.log("[hydrate] ids_count", rawKnnProductIds.length, "endpoint_limit", endpointLimit);
+  const productHydrationStartedAt = Date.now();
   const productHydrationPromise = getSearchProductsByIdsOrdered(rawKnnProductIds).then(
-    (products) => ({ products }),
-    (error) => ({ error }),
+    (products) => {
+      console.log(
+        "[hydrate-step] products_ms",
+        Date.now() - productHydrationStartedAt,
+        "count",
+        rawKnnProductIds.length,
+      );
+      return { products };
+    },
+    (error) => {
+      console.log(
+        "[hydrate-step] products_ms",
+        Date.now() - productHydrationStartedAt,
+        "count",
+        rawKnnProductIds.length,
+      );
+      return { error };
+    },
   );
 
   const signals = await signalsPromise;
@@ -8006,15 +8114,22 @@ export async function searchByImageWithSimilarity(
   let results: ProductResult[] = [];
     if (productIds.length > 0) {
     const numericIds = productIds.map((id: string) => parseInt(id, 10));
+    const imagesHydrationStartedAt = Date.now();
+    const imagesHydrationPromise = getImagesForProducts(numericIds).then((imagesByProduct) => {
+      console.log("[hydrate-step] images_ms", Date.now() - imagesHydrationStartedAt);
+      return imagesByProduct;
+    });
     const [productHydration, imagesByProduct, userLifestyle] = await Promise.all([
       productHydrationPromise,
-      getImagesForProducts(numericIds),
+      imagesHydrationPromise,
       personalizationPromise,
     ]);
+    console.log("[hydrate-step] vendors_ms", 0);
     if ((productHydration as any).error) throw (productHydration as any).error;
     const productById = new Map(((productHydration as any).products as any[]).map((p: any) => [String(p.id), p]));
     const products = productIds.map((id: string) => productById.get(String(id))).filter(Boolean);
 
+    const assembleStartedAt = Date.now();
     results = products.map((p: any) => {
       const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
       const idStr = String(p.id);
@@ -8632,6 +8747,7 @@ export async function searchByImageWithSimilarity(
         images: imagesOut,
       };
     }) as ProductResult[];
+    console.log("[hydrate-step] assemble_ms", Date.now() - assembleStartedAt);
   }
   // Final hard contradiction guard on hydrated product metadata.
   // This prevents opposite-gender and shorts-vs-trousers leaks when index fields are sparse/noisy.

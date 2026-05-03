@@ -11,7 +11,7 @@ import {
 } from "./productTypeTaxonomy";
 import { isBeautyRetailListingFromFields } from "./categoryFilter";
 import { extractAttributesSync } from "./attributeExtractor";
-import { tieredColorListCompliance } from "../color/colorCanonical";
+import { canonicalizeFashionColorToken, tieredColorListCompliance } from "../color/colorCanonical";
 import { normalizeColorToken } from "../color/queryColorFilter";
 
 /** Visual / hybrid similarity should dominate tie-breaks when type/color intent is absent. */
@@ -544,6 +544,45 @@ function rawColorList(...parts: unknown[]): string[] {
   ];
 }
 
+type ResolvedProductColor = {
+  colors: string[];
+  confidence: number;
+  source: "metadata" | "url" | "title" | "image" | "none";
+};
+
+function normalizedFashionColorList(values: string[]): string[] {
+  const out: string[] = [];
+  for (const value of values) {
+    const canonical =
+      canonicalizeFashionColorToken(value) ??
+      normalizeColorToken(value) ??
+      String(value).toLowerCase().trim();
+    if (canonical && !out.includes(canonical)) out.push(canonical);
+  }
+  return out;
+}
+
+function resolveProductColorForRanking(params: {
+  metadataColors: string[];
+  urlColors: string[];
+  titleColors: string[];
+  imageColors: string[];
+}): ResolvedProductColor {
+  const metadata = normalizedFashionColorList(params.metadataColors);
+  if (metadata.length > 0) return { colors: metadata, confidence: 1, source: "metadata" };
+
+  const url = normalizedFashionColorList(params.urlColors);
+  if (url.length > 0) return { colors: url, confidence: 0.9, source: "url" };
+
+  const title = normalizedFashionColorList(params.titleColors);
+  if (title.length > 0) return { colors: title, confidence: 0.8, source: "title" };
+
+  const image = normalizedFashionColorList(params.imageColors);
+  if (image.length > 0) return { colors: image, confidence: 0.45, source: "image" };
+
+  return { colors: [], confidence: 0, source: "none" };
+}
+
 function extractColorHintsFromProductUrl(productUrl: unknown): string[] {
   const raw = String(productUrl ?? "").trim();
   if (!raw) return [];
@@ -653,6 +692,16 @@ export function computeHitRelevance(
 
   let imgTierRaw = rawColorList(hit?._source?.color_palette_canonical, attrImg);
   let textTierRaw = rawColorList(attrText);
+  const attrColorSource = String(hit?._source?.attr_color_source ?? "").toLowerCase().trim();
+  const catalogTierRaw = rawColorList(
+    hit?._source?.color,
+    attrColorSource === "catalog" ? hit?._source?.color_primary_canonical : null,
+    attrColorSource === "catalog" ? hit?._source?.attr_color : null,
+  );
+  const urlTierRaw = rawColorList(
+    extractColorHintsFromProductUrl(hit?._source?.product_url),
+    extractColorHintsFromProductUrl(hit?._source?.parent_product_url),
+  );
   let unionTierRaw = rawColorList(
     hit?._source?.color_palette_canonical,
     attrColorsRaw,
@@ -669,7 +718,7 @@ export function computeHitRelevance(
   }
 
   if (unionTierRaw.length === 0) {
-    const urlColorHints = extractColorHintsFromProductUrl(hit?._source?.product_url);
+    const urlColorHints = urlTierRaw;
     if (urlColorHints.length > 0) {
       unionTierRaw = rawColorList(urlColorHints);
       if (textTierRaw.length === 0) {
@@ -695,9 +744,17 @@ export function computeHitRelevance(
     }
   }
 
-  const productColors = [
-    ...new Set(unionTierRaw.map((c) => normalizeColorToken(c) ?? c).filter(Boolean)),
-  ];
+  const titleTierRaw = [...textTierRaw];
+  const resolvedColor = resolveProductColorForRanking({
+    metadataColors: catalogTierRaw,
+    urlColors: urlTierRaw,
+    titleColors: titleTierRaw,
+    imageColors: imgTierRaw,
+  });
+
+  const productColors = resolvedColor.colors.length > 0
+    ? resolvedColor.colors
+    : normalizedFashionColorList(unionTierRaw);
 
   const primaryColor = hit?._source?.color_primary_canonical
     ? String(hit._source.color_primary_canonical).toLowerCase()
@@ -748,10 +805,15 @@ export function computeHitRelevance(
   if (desiredColorsTier.length > 0) {
     const tImg = tieredColorListCompliance(desiredColorsTier, imgTierRaw, rerankColorMode);
     const tText = tieredColorListCompliance(desiredColorsTier, textTierRaw, rerankColorMode);
+    const tResolved = tieredColorListCompliance(desiredColorsTier, resolvedColor.colors, rerankColorMode);
     const tUnion = tieredColorListCompliance(desiredColorsTier, unionTierRaw, rerankColorMode);
     matchedColor = tUnion.bestMatch ?? tImg.bestMatch ?? tText.bestMatch;
     colorTier = tUnion.tier;
-    if (imgTierRaw.length > 0 && textTierRaw.length > 0) {
+    if (resolvedColor.colors.length > 0 && resolvedColor.source !== "image") {
+      colorCompliance = tResolved.compliance;
+      matchedColor = tResolved.bestMatch ?? matchedColor;
+      colorTier = tResolved.tier;
+    } else if (imgTierRaw.length > 0 && textTierRaw.length > 0) {
       colorCompliance = wtImg * tImg.compliance + wtText * tText.compliance;
     } else if (imgTierRaw.length > 0) {
       colorCompliance = tImg.compliance;
@@ -1125,6 +1187,16 @@ export function computeHitRelevance(
   if (garmentVersusBeautyPenalty >= 0.85) {
     finalRelevance01 = Math.min(finalRelevance01, semScore01 * 0.22);
   }
+
+  const productQualityRaw = Number(hit?._source?.product_quality_score);
+  const productQuality =
+    Number.isFinite(productQualityRaw) && productQualityRaw >= 0 && productQualityRaw <= 1
+      ? productQualityRaw
+      : null;
+  const qualityModifier = productQuality == null
+    ? 1
+    : Math.max(0.85, Math.min(1.03, 0.85 + productQuality * 0.18));
+  finalRelevance01 = Math.max(0, Math.min(1, finalRelevance01 * qualityModifier));
 
   // Precision safety for image-led fashion retrieval:
   // when bottoms/footwear color intent is present, mismatched color should not survive

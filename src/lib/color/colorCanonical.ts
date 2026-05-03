@@ -35,6 +35,44 @@ export const FASHION_CANONICAL_COLORS = [
 
 export type FashionCanonicalColor = (typeof FASHION_CANONICAL_COLORS)[number];
 
+const FASHION_COLOR_ALIASES: Record<string, string> = {
+  offwhite: "off-white",
+  "off-white": "off-white",
+  "off white": "off-white",
+  ivory: "off-white",
+  cream: "cream",
+  bone: "off-white",
+  ecru: "off-white",
+  natural: "off-white",
+  eggshell: "off-white",
+  camel: "camel",
+  tan: "tan",
+  sand: "beige",
+  beige: "beige",
+  khaki: "khaki",
+  "toasted-coconut": "beige",
+  "toasted coconut": "beige",
+  beech: "beige",
+  antra: "charcoal",
+  anthracite: "charcoal",
+  charcoal: "charcoal",
+  "dark-gray": "charcoal",
+  "dark-grey": "charcoal",
+  "dark grey": "charcoal",
+  heatheredblack: "black",
+  "heathered-black": "black",
+  "heathered black": "black",
+  indigo: "denim",
+  denim: "denim",
+};
+
+export function canonicalizeFashionColorToken(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const normalized = normalizeToken(String(raw));
+  if (!normalized) return null;
+  return FASHION_COLOR_ALIASES[normalized] ?? FASHION_COLOR_ALIASES[normalized.replace(/-/g, "")] ?? normalized;
+}
+
 /**
  * Ultra-granular shade groups: organized by specific shade names.
  * Tier structure: exact > light-shade > dark-shade > family > bucket > none
@@ -108,6 +146,26 @@ function normalizeToken(s: string): string {
     .replace(/[^a-z0-9-]/g, "")
     .replace(/-+/g, "-")
     .trim();
+}
+
+function specialColorMatchScore(desiredRaw: string, productRaw: string): number | null {
+  const desired = canonicalizeFashionColorToken(desiredRaw);
+  const product = canonicalizeFashionColorToken(productRaw);
+  if (!desired || !product) return null;
+
+  if (desired === "off-white") {
+    if (product === "white") return 0.95;
+    if (["off-white", "cream", "ivory", "bone", "ecru"].includes(product)) return 1;
+    if (["beige", "sand", "tan"].includes(product)) return 0.72;
+    if (["gray", "grey", "silver", "light-gray", "light-grey"].includes(product)) return 0.55;
+    if (["pale-green", "light-green", "mint", "sage"].includes(product)) return 0.35;
+    if (["denim", "denim-blue", "blue", "light-blue"].includes(product)) return 0.2;
+    if (["black", "navy", "charcoal", "dark-gray", "dark-grey"].includes(product)) return 0.1;
+  }
+
+  if (desired === "white" && product === "off-white") return 0.95;
+  if (desired === "cream" && ["off-white", "ivory", "bone", "ecru"].includes(product)) return 1;
+  return null;
 }
 
 const VERY_LIGHT_NEUTRAL_SET = new Set([
@@ -344,18 +402,35 @@ export function tieredColorMatchScore(
   desiredRaw: string,
   productColors: string[],
 ): { score: number; matchedColor: string | null; tier: "exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none" } {
-  const desired = normalizeToken(desiredRaw);
+  const desired = canonicalizeFashionColorToken(desiredRaw) ?? normalizeToken(desiredRaw);
   if (!desired || productColors.length === 0) {
     return { score: 0, matchedColor: null, tier: "none" };
   }
 
-  const prodNorm = productColors.map((c) => ({ raw: c, n: normalizeToken(String(c)) })).filter((x) => x.n);
+  const prodNorm = productColors
+    .map((c) => ({ raw: c, n: canonicalizeFashionColorToken(String(c)) ?? normalizeToken(String(c)) }))
+    .filter((x) => x.n);
 
   // Tier 1: Exact match
   for (const { raw, n } of prodNorm) {
-    if (n === desired || n === desiredRaw.toLowerCase().replace(/\s+/g, "-")) {
+    if (n === desired) {
       return { score: 1, matchedColor: raw, tier: "exact" };
     }
+  }
+
+  let bestSpecial: { score: number; matchedColor: string | null } = { score: 0, matchedColor: null };
+  for (const { raw, n } of prodNorm) {
+    const score = specialColorMatchScore(desired, n);
+    if (score != null && score > bestSpecial.score) {
+      bestSpecial = { score, matchedColor: raw };
+    }
+  }
+  if (bestSpecial.matchedColor) {
+    return {
+      score: bestSpecial.score,
+      matchedColor: bestSpecial.matchedColor,
+      tier: bestSpecial.score >= 0.9 ? "family" : "bucket",
+    };
   }
 
   // Tier 2 & 3: Shade-specific matches (light-shade or dark-shade)

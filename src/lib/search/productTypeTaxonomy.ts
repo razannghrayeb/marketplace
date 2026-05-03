@@ -580,10 +580,14 @@ function lookupPairPenalty(
 const BOTTOM_PENALTY_TBL = buildSymmetricFromList([
   ["m_bt_jog", "m_bt_leg", 0.52],
   ["m_bt_jog", "m_bt_jean", 0.45],
-  ["m_bt_jog", "m_bt_tail", 0.38],
+  ["m_bt_jog", "m_bt_tail", 0.71],
+  ["m_bt_jog", "m_bt_cargo", 0.55],
   ["m_bt_leg", "m_bt_jean", 0.48],
   ["m_bt_leg", "m_bt_tail", 0.42],
+  ["m_bt_leg", "m_bt_cargo", 0.5],
   ["m_bt_jean", "m_bt_tail", 0.35],
+  ["m_bt_jean", "m_bt_cargo", 0.3],
+  ["m_bt_tail", "m_bt_cargo", 0.31],
 ]);
 
 const SHORTS_SKIRT_PENALTY_TBL = buildSymmetricFromList([["shorts", "skirt", 0.58]]);
@@ -618,13 +622,13 @@ const TOPS_PENALTY_TBL = buildSymmetricFromList([
   ["m_tp_hood", "m_tp_tee", 0.42],
   ["m_tp_hood", "m_tp_gen", 0.4],
   ["m_tp_hood", "m_tp_polo", 0.43],
-  ["m_tp_knit", "m_tp_shirt", 0.4],
+  ["m_tp_knit", "m_tp_shirt", 0.72],
   ["m_tp_knit", "m_tp_tee", 0.42],
   ["m_tp_knit", "m_tp_gen", 0.38],
-  ["m_tp_knit", "m_tp_polo", 0.4],
+  ["m_tp_knit", "m_tp_polo", 0.72],
   ["m_tp_shirt", "m_tp_tee", 0.36],
   ["m_tp_shirt", "m_tp_gen", 0.35],
-  ["m_tp_shirt", "m_tp_polo", 0.34],
+  ["m_tp_shirt", "m_tp_polo", 0.15],
   ["m_tp_tee", "m_tp_gen", 0.32],
   ["m_tp_tee", "m_tp_polo", 0.35],
   ["m_tp_gen", "m_tp_polo", 0.34],
@@ -642,6 +646,7 @@ const BOTTOM_MICRO = {
   legging: "m_bt_leg",
   jeans: "m_bt_jean",
   tailored: "m_bt_tail",
+  cargo: "m_bt_cargo",
 } as const;
 
 export function bottomMicroGroup(token: string): keyof typeof BOTTOM_MICRO | null {
@@ -658,10 +663,12 @@ export function bottomMicroGroup(token: string): keyof typeof BOTTOM_MICRO | nul
   ]);
   const leg = new Set(["legging", "leggings", "tights"]);
   const jean = new Set(["jean", "jeans", "denim", "denims"]);
-  const tail = new Set(["pant", "pants", "trouser", "trousers", "chino", "chinos", "cargo", "cargo pants", "slacks"]);
+  const tail = new Set(["pant", "pants", "trouser", "trousers", "chino", "chinos", "slacks", "dress pants", "dress pant"]);
+  const cargo = new Set(["cargo", "cargo pants", "cargos"]);
   if (jog.has(t)) return "jogger";
   if (leg.has(t)) return "legging";
   if (jean.has(t)) return "jeans";
+  if (cargo.has(t)) return "cargo";
   if (tail.has(t)) return "tailored";
   return null;
 }
@@ -1570,20 +1577,19 @@ export function scoreRerankProductTypeBreakdown(
   const exactToken = exactTax.bestQueryType ?? exactTax.bestDocType ?? "";
   const hasExactType = exactTax.score >= 1 && !isBroadExactToken(exactToken);
   const hasSameFamilyType = Math.max(clusterTax.score, parentHypernymScore) > 0 || intraFamilyPenalty > 0;
-  const exactTypeScore = hasExactType
-    ? 1
-    : hasSameFamilyType
-      ? 0.7
-      : docs.length > 0
-        ? 0.2
-        : 0;
-
   const siblingClusterScore = hasExactType ? 1 : clusterTax.score;
 
   const base =
     hasExactType ? 1 : Math.max(clusterTax.score, parentHypernymScore);
 
   const combinedTypeCompliance = Math.max(0, Math.min(1, base - intraFamilyPenalty * wIntra));
+  const exactTypeScore = hasExactType
+    ? 1
+    : hasSameFamilyType
+      ? Math.max(0.2, Math.min(0.65, combinedTypeCompliance))
+      : docs.length > 0
+        ? 0.2
+        : 0;
 
   return {
     exactTypeScore,
