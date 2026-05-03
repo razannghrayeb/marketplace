@@ -101,13 +101,14 @@ function inferImageMode(params: {
   const detections = Array.isArray(params.detections) ? params.detections : [];
   const n = detections.length;
 
-  const personCue = /\b(person|man|woman|model|wearing|wears|street|walking|standing)\b/.test(caption);
+  const strongPersonCue = /\b(person|man|woman|model|street|walking|standing)\b/.test(caption);
+  const weakWearCue = /\b(wearing|wears)\b/.test(caption);
   const flatlayCue = /\b(flatlay|flat lay|collage|arranged|on a table|set of clothing|collection of)\b/.test(caption);
 
   if (flatlayCue) return "flatlay_collage";
 
   if (n <= 0) {
-    return personCue ? "worn_outfit" : "single_product";
+    return strongPersonCue || weakWearCue ? "worn_outfit" : "single_product";
   }
 
   const maxArea = Math.max(...detections.map((d) => Number(d.area_ratio) || 0), 0);
@@ -124,15 +125,41 @@ function inferImageMode(params: {
   }
   const overlapRate = overlapPairs > 0 ? strongOverlapPairs / overlapPairs : 0;
 
-  if (n === 1 && maxArea >= 0.34 && !personCue) {
-    return "single_product";
-  }
+  const spreadAcrossCanvas = (() => {
+    if (n < 2) return false;
+    const centers = detections
+      .map((d) => ({
+        cx: ((Number(d.box?.x1) || 0) + (Number(d.box?.x2) || 0)) / 2,
+        cy: ((Number(d.box?.y1) || 0) + (Number(d.box?.y2) || 0)) / 2,
+      }))
+      .filter((p) => Number.isFinite(p.cx) && Number.isFinite(p.cy));
+    if (centers.length < 2) return false;
+    const minX = Math.min(...centers.map((p) => p.cx));
+    const maxX = Math.max(...centers.map((p) => p.cx));
+    const minY = Math.min(...centers.map((p) => p.cy));
+    const maxY = Math.max(...centers.map((p) => p.cy));
+    return (maxX - minX) >= 0.4 || (maxY - minY) >= 0.28;
+  })();
 
-  if (!personCue && n >= 3 && overlapRate <= 0.18 && avgArea <= 0.14) {
+  const spatialFlatlay = n >= 3 && overlapRate <= 0.18 && avgArea <= 0.18 && spreadAcrossCanvas;
+
+  if (spatialFlatlay && !/\b(person visible|model standing|walking|street)\b/.test(caption)) {
     return "flatlay_collage";
   }
 
-  if (personCue) {
+  if (n === 1 && maxArea >= 0.34 && !strongPersonCue) {
+    return "single_product";
+  }
+
+  if (!strongPersonCue && n >= 3 && overlapRate <= 0.18 && avgArea <= 0.14) {
+    return "flatlay_collage";
+  }
+
+  if (strongPersonCue) {
+    return "worn_outfit";
+  }
+
+  if (weakWearCue && n <= 2) {
     return "worn_outfit";
   }
 
@@ -6062,7 +6089,7 @@ export class ImageAnalysisService {
         let detectionSearchTotalMs = 0;
         let detectionSearchCalls = 0;
         const deterministicTwoPass = shopLookDeterministicTwoPassEnv();
-        let detectionSearchCallLimit = deterministicTwoPass ? 2 : (mainPathOnly ? 1 : maxSearchCallsPerDetection);
+        let detectionSearchCallLimit = deterministicTwoPass ? 2 : (mainPathOnly ? Math.min(2, maxSearchCallsPerDetection) : maxSearchCallsPerDetection);
         const searchReasonsExecuted: string[] = [];
         const searchReasonsSkipped: string[] = [];
         let lastSearchResult: Awaited<ReturnType<typeof searchByImageWithSimilarity>> | null = null;
@@ -6745,9 +6772,19 @@ export class ImageAnalysisService {
             userId: options.userId,
             sessionFilters: options.sessionFilters ?? undefined,
           };
-          const _parallelSearchPromise = initialTypeSearchHints.length > 1
+          const initialTypeSearchCallBudget = deterministicTwoPass
+            ? Math.max(1, Math.min(2, maxSearchCallsPerDetection))
+            : Math.max(1, maxSearchCallsPerDetection - 1);
+          const initialTypeSearchHintsForSearch = initialTypeSearchHints.slice(0, initialTypeSearchCallBudget);
+          if (hotPathDebug && initialTypeSearchHintsForSearch.length < initialTypeSearchHints.length) {
+            console.info(
+              `[initial-type-search-budget] label="${detection.label}" hints=${initialTypeSearchHints.length} used=${initialTypeSearchHintsForSearch.length} budget=${initialTypeSearchCallBudget} reserve_recovery=${deterministicTwoPass ? 0 : 1}`,
+            );
+          }
+
+          const _parallelSearchPromise = initialTypeSearchHintsForSearch.length > 1
             ? Promise.all(
-              initialTypeSearchHints.map((typeHint, index) =>
+              initialTypeSearchHintsForSearch.map((typeHint, index) =>
                 runDetectionSearch(`initial_type_${index + 1}`, {
                   ...initialSearchPayload,
                   softProductTypeHints: [typeHint],
@@ -6770,7 +6807,7 @@ export class ImageAnalysisService {
                 meta: {
                   ...first.meta,
                   split_type_searches: typeResults.length,
-                  split_type_hints: initialTypeSearchHints,
+                  split_type_hints: initialTypeSearchHintsForSearch,
                 } as any,
               };
             })
