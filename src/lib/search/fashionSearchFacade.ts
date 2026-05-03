@@ -68,6 +68,7 @@ export interface UnifiedImageSearchParams {
   predictedCategoryAisles?: string[];
   detectionYoloConfidence?: number;
   detectionProductCategory?: string;
+  detectionLabel?: string;
   knnField?: string;
   /**
    * Forces image search into hard category mode for this call.
@@ -383,6 +384,7 @@ export async function searchImage(
     predictedCategoryAisles,
     detectionYoloConfidence,
     detectionProductCategory,
+    detectionLabel,
     knnField,
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty,
@@ -500,6 +502,7 @@ export async function searchImage(
     predictedCategoryAisles: derivedAisleHints,
     detectionYoloConfidence,
     detectionProductCategory,
+    detectionLabel,
     knnField,
     forceHardCategoryFilter,
     relaxThresholdWhenEmpty: relaxThresholdWhenEmpty ?? false,

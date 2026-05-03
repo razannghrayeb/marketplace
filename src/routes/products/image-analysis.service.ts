@@ -6016,7 +6016,7 @@ export class ImageAnalysisService {
               );
             }
             const payloadForCall =
-              reason === "initial"
+              reason.startsWith("initial")
                 ? payload
                 : {
                   ...payload,
@@ -6033,8 +6033,21 @@ export class ImageAnalysisService {
                     ),
                   ),
                 };
+            const softGateMode = String(process.env.SEARCH_RELEVANCE_GATE_MODE ?? "soft").toLowerCase().trim() !== "strict";
+            const filtersForCall = softGateMode
+              ? (() => {
+                const next = { ...((payloadForCall as any).filters ?? {}) };
+                delete (next as any).productTypes;
+                delete (next as any).color;
+                return next;
+              })()
+              : (payloadForCall as any).filters;
             const startedAt = Date.now();
-            const result = await searchByImageWithSimilarity(payloadForCall);
+            const result = await searchByImageWithSimilarity({
+              ...payloadForCall,
+              filters: filtersForCall,
+              detectionLabel: (payloadForCall as any).detectionLabel ?? label ?? detection.label,
+            });
             const elapsedMs = Date.now() - startedAt;
             detectionSearchTotalMs += elapsedMs;
             detectionSearchCalls += 1;
@@ -6133,9 +6146,6 @@ export class ImageAnalysisService {
             .trim();
           const typeSeedSource = sanitizedLabel || label;
           let typeSeeds = extractLexicalProductTypeSeeds(typeSeedSource);
-          if (blipStructuredConfidence >= imageBlipSoftHintConfidenceMin()) {
-            typeSeeds = [...new Set([...typeSeeds, ...blipStructured.productTypeHints])];
-          }
           typeSeeds = filterProductTypeSeedsByMappedCategory(typeSeeds, categoryMapping.productCategory);
           typeSeeds = tightenTypeSeedsForDetection(label, categoryMapping, typeSeeds, {
             confidence: detection.confidence,
@@ -6604,12 +6614,15 @@ export class ImageAnalysisService {
 
           const preBlipFilters = { ...filters };
           const preBlipSoftTypeHints = [...softProductTypeHints];
+          const initialTypeSearchHints = [
+            ...new Set(preBlipSoftTypeHints.map((t) => String(t).toLowerCase().trim()).filter(Boolean)),
+          ].slice(0, Math.max(1, Math.min(3, detectionSearchCallLimit)));
           // k-means crop color for this detection is already resolved (awaited above at
           // cropColorsPromise). Pass it to the initial search so the reranker has a color
           // bias from the start rather than ordering results purely by cosine similarity.
           const _initialInferredColor = String(inferredColorsByItem[itemColorKey] ?? "").trim() || undefined;
           const _parallelSearchStartedAt = Date.now();
-          const _parallelSearchPromise = runDetectionSearch("initial", {
+          const initialSearchPayload = {
             imageEmbedding: finalFullFrameEmbedding,
             imageEmbeddingGarment:
               Array.isArray(finalGarmentEmbedding) && finalGarmentEmbedding.length > 0
@@ -6623,7 +6636,6 @@ export class ImageAnalysisService {
             detectionYoloConfidence: detection.confidence,
             detectionProductCategory: detectionProductCategoryForSearch,
             filters: preBlipFilters,
-            softProductTypeHints: preBlipSoftTypeHints.length > 0 ? preBlipSoftTypeHints : undefined,
             limit: Math.max(
               resolvedResultsPageSize,
               Math.min(resolveShopLookRetrievalLimit(retrievalLimit * 1.7), retrievalLimit + 180),
@@ -6648,7 +6660,40 @@ export class ImageAnalysisService {
             sessionId: options.sessionId,
             userId: options.userId,
             sessionFilters: options.sessionFilters ?? undefined,
-          });
+          };
+          const _parallelSearchPromise = initialTypeSearchHints.length > 1
+            ? Promise.all(
+              initialTypeSearchHints.map((typeHint, index) =>
+                runDetectionSearch(`initial_type_${index + 1}`, {
+                  ...initialSearchPayload,
+                  softProductTypeHints: [typeHint],
+                }),
+              ),
+            ).then((typeResults) => {
+              const [first, ...rest] = typeResults;
+              if (!first) {
+                return {
+                  results: [],
+                  meta: { total_results: 0, threshold: similarityThreshold },
+                } as Awaited<ReturnType<typeof searchByImageWithSimilarity>>;
+              }
+              return {
+                ...first,
+                results: rest.reduce(
+                  (merged, result) => mergeImageSearchResultsById(merged, result.results, retrievalLimit),
+                  first.results,
+                ),
+                meta: {
+                  ...first.meta,
+                  split_type_searches: typeResults.length,
+                  split_type_hints: initialTypeSearchHints,
+                } as any,
+              };
+            })
+            : runDetectionSearch("initial", {
+              ...initialSearchPayload,
+              softProductTypeHints: preBlipSoftTypeHints.length > 0 ? preBlipSoftTypeHints : undefined,
+            });
 
           // Per-detection BLIP captioning + CLIP consistency gate — runs concurrently with search above.
           const detCaption = await detCaptionPromise;

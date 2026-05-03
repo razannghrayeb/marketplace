@@ -25,6 +25,39 @@ function rerankAudienceWeight(): number {
   return Number.isFinite(n) ? Math.min(50, Math.max(8, n)) : 24;
 }
 
+function isTopIntentToken(value: unknown): boolean {
+  return /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|cami|camisole|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|polo|polos)\b/.test(
+    String(value ?? "").toLowerCase(),
+  );
+}
+
+function isBottomIntentToken(value: unknown): boolean {
+  return /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|skirt|skirts|legging|leggings|jogger|joggers|slack|slacks|chino|chinos|cargo|cargos)\b/.test(
+    String(value ?? "").toLowerCase(),
+  );
+}
+
+function topBottomCategoryConsistencyMultiplier(params: {
+  mergedCategory?: string;
+  astCategories?: string[];
+  docCategory?: unknown;
+  docCanonical?: unknown;
+  docProductTypes?: string[];
+}): number {
+  const detectionBlob = [
+    params.mergedCategory,
+    ...(params.astCategories ?? []),
+  ].join(" ");
+  const productBlob = [
+    params.docCategory,
+    params.docCanonical,
+    ...(params.docProductTypes ?? []),
+  ].join(" ");
+  if (isTopIntentToken(detectionBlob) && isBottomIntentToken(productBlob)) return 0.2;
+  if (isBottomIntentToken(detectionBlob) && isTopIntentToken(productBlob)) return 0.2;
+  return 1;
+}
+
 /** 0..1: query category hints vs document `category` / `category_canonical` (alias-aware). */
 export function scoreCategoryRelevance01(
   mergedCategory: string | undefined,
@@ -891,6 +924,9 @@ export function computeHitRelevance(
     return p;
   })();
   crossFamilyPenalty = Math.max(crossFamilyPenalty, garmentVersusBeautyPenalty);
+  if (productTypeCompliance >= 1) {
+    crossFamilyPenalty = 0;
+  }
 
   // General fallback: if the index misses/undercounts `product_types`, recover
   // type compliance from lexical evidence in title+description.
@@ -1016,7 +1052,17 @@ export function computeHitRelevance(
   const visualComponent =
     similarity * (wSim + 120 * (0.35 + 0.65 * productTypeCompliance));
   const penaltyComponent = crossFamilyPenalty * crossFamilyPenaltyWeight;
-  const rerankScore = typeComponent + attrComponent + visualComponent - penaltyComponent;
+  const categoryConsistencyMultiplier = topBottomCategoryConsistencyMultiplier({
+    mergedCategory,
+    astCategories,
+    docCategory: docCategoryForPenalty,
+    docCanonical: docCanonicalForPenalty,
+    docProductTypes: productTypes,
+  });
+  let rerankScore = typeComponent + attrComponent + visualComponent - penaltyComponent;
+  if (categoryConsistencyMultiplier < 1) {
+    rerankScore *= categoryConsistencyMultiplier;
+  }
 
   const hasReliableTypeIntent = hasTypeIntent && intent.reliableTypeIntent !== false;
   const hasColorIntent = desiredColors.length > 0;
@@ -1072,6 +1118,9 @@ export function computeHitRelevance(
     applyLexicalToGlobal: lexicalScoreDistinct,
     tightSemanticCap,
   });
+  if (categoryConsistencyMultiplier < 1) {
+    finalRelevance01 *= categoryConsistencyMultiplier;
+  }
 
   if (garmentVersusBeautyPenalty >= 0.85) {
     finalRelevance01 = Math.min(finalRelevance01, semScore01 * 0.22);

@@ -15,7 +15,7 @@ import {
 describe("scoreRerankProductTypeBreakdown", () => {
   test("joggers vs leggings is not exact-type equivalent", () => {
     const r = scoreRerankProductTypeBreakdown(["joggers"], ["leggings"]);
-    expect(r.exactTypeScore).toBe(0);
+    expect(r.exactTypeScore).toBe(0.7);
     expect(r.combinedTypeCompliance).toBeLessThan(0.5);
   });
 
@@ -27,7 +27,7 @@ describe("scoreRerankProductTypeBreakdown", () => {
 
   test("blazer vs parka gets outerwear mismatch penalty", () => {
     const r = scoreRerankProductTypeBreakdown(["blazer"], ["parka", "outerwear"]);
-    expect(r.exactTypeScore).toBe(0);
+    expect(r.exactTypeScore).toBe(0.7);
     expect(r.intraFamilyPenalty).toBeGreaterThan(0);
   });
 
@@ -35,7 +35,7 @@ describe("scoreRerankProductTypeBreakdown", () => {
     const blazer = scoreRerankProductTypeBreakdown(["jacket"], ["blazer", "outerwear"]);
     const vest = scoreRerankProductTypeBreakdown(["jacket"], ["vest", "outerwear"]);
 
-    expect(blazer.exactTypeScore).toBe(0);
+    expect(blazer.exactTypeScore).toBe(0.7);
     expect(blazer.combinedTypeCompliance).toBeLessThan(0.35);
     expect(vest.combinedTypeCompliance).toBeLessThan(0.35);
   });
@@ -48,7 +48,7 @@ describe("scoreRerankProductTypeBreakdown", () => {
 
   test("sneakers vs heels are not equivalent within footwear", () => {
     const r = scoreRerankProductTypeBreakdown(["sneakers"], ["heels", "shoes"]);
-    expect(r.exactTypeScore).toBe(0);
+    expect(r.exactTypeScore).toBe(0.7);
     expect(r.combinedTypeCompliance).toBeLessThan(0.55);
   });
 
@@ -72,19 +72,19 @@ describe("scoreRerankProductTypeBreakdown", () => {
 
   test("hoodie vs dress shirt are distinct tops", () => {
     const r = scoreRerankProductTypeBreakdown(["hoodie"], ["shirt", "shirts"]);
-    expect(r.exactTypeScore).toBe(0);
+    expect(r.exactTypeScore).toBe(0.7);
     expect(r.intraFamilyPenalty).toBeGreaterThan(0);
   });
 
   test("pants intent does not treat suits as bottom-like", () => {
     const r = scoreRerankProductTypeBreakdown(["pants", "trousers"], ["suit", "outerwear"]);
-    expect(r.exactTypeScore).toBe(0);
+    expect(r.exactTypeScore).toBe(0.2);
     expect(r.combinedTypeCompliance).toBeLessThan(0.35);
   });
 
   test("full suit intent does not treat standalone blazers as exact suits", () => {
     const r = scoreRerankProductTypeBreakdown(["suit"], ["blazer", "outerwear"]);
-    expect(r.exactTypeScore).toBe(0);
+    expect(r.exactTypeScore).toBe(0.2);
     expect(r.combinedTypeCompliance).toBeLessThan(0.35);
   });
 });

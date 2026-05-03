@@ -93,6 +93,8 @@ export interface ImageSearchParams extends SearchParams {
   detectionYoloConfidence?: number;
   /** Detection-mapped product category (e.g. tops, bottoms); enables category-aware ranking rules. */
   detectionProductCategory?: string;
+  /** Original/refined detected item label for ranking debug. */
+  detectionLabel?: string;
   /**
    * Forces image search into "hard category" mode for this call.
    * When enabled, the OpenSearch `filters.category` terms are applied even if
@@ -276,6 +278,21 @@ export interface ProductResult {
 
     // ── Final score ──────────────────────────────────────────
     finalRelevance01?: number;
+    rankingDebug?: {
+      id?: string;
+      detectedLabel?: string;
+      visualSimilarity?: number;
+      exactTypeScore?: number;
+      typeScore?: number;
+      colorScore?: number;
+      exactColorMatch?: boolean;
+      sameColorFamily?: boolean;
+      familyMismatch?: boolean;
+      nearIdenticalVisual?: boolean;
+      finalScore?: number;
+      boosts?: string[];
+      penalties?: string[];
+    };
 
     // ── Legacy / text-search fields (omitted in image results) ─
     /** @deprecated Use clipCosine. Omitted when there is no separate lexical signal. */
