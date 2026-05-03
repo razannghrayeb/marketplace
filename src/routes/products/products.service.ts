@@ -124,6 +124,8 @@ export interface ImageSearchParams extends SearchParams {
   detectionYoloConfidence?: number;
   /** Product category from detection (e.g. 'tops', 'bottoms'); enables category-specific type flooring. */
   detectionProductCategory?: string;
+  /** Original/refined detected item label for explain/debug output. */
+  detectionLabel?: string;
   /** Raw bytes when embedding is computed by the callee (unified image search path). */
   imageBuffer?: Buffer;
   /** Soft rerank hints when SEARCH_IMAGE_SOFT_CATEGORY=1 */
@@ -349,9 +351,9 @@ function imageDiversityRerankEnabled(): boolean {
 
 /** Phase 9: lambda in MMR (higher = more relevance, lower = more diversity). */
 function imageDiversityLambda(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_DIVERSITY_LAMBDA ?? "0.90");
-  if (!Number.isFinite(raw)) return 0.90;
-  return Math.max(0.5, Math.min(0.98, raw));
+  const raw = Number(process.env.SEARCH_IMAGE_DIVERSITY_LAMBDA ?? "0.45");
+  if (!Number.isFinite(raw)) return 0.45;
+  return Math.max(0.1, Math.min(0.98, raw));
 }
 
 /** Phase 9: cap candidate pool used for diversity reranking (latency guard). */
@@ -359,6 +361,11 @@ function imageDiversityPoolCap(): number {
   const raw = Number(process.env.SEARCH_IMAGE_DIVERSITY_POOL_CAP ?? "120");
   if (!Number.isFinite(raw)) return 120;
   return Math.max(20, Math.min(300, Math.floor(raw)));
+}
+
+function searchRelevanceGateMode(): "soft" | "strict" {
+  const raw = String(process.env.SEARCH_RELEVANCE_GATE_MODE ?? "soft").toLowerCase().trim();
+  return raw === "strict" ? "strict" : "soft";
 }
 
 type ImageSearchContext = {
@@ -921,7 +928,7 @@ function applyImageDiversityRerank(results: ProductResult[], lambda: number): Pr
 function imageSearchKnnPoolLimit(): number {
   const envK = Number(process.env.SEARCH_IMAGE_RETRIEVAL_K);
   const baseFromEnv =
-    Number.isFinite(envK) && envK >= 120 ? Math.floor(envK) : 500;
+    Number.isFinite(envK) && envK >= 120 ? Math.floor(envK) : 600;
 
   if (!imageMerchandiseSimilarityBindingEnabled()) {
     return Math.min(500, Math.max(120, baseFromEnv));
@@ -1006,8 +1013,8 @@ function imageCategoryAwareKnnPoolLimit(detectionProductCategory?: string): numb
 function imageDetectionRerankCandidateCap(): number {
   // Detection search needs a wider rerank pool to avoid early recall collapse
   // for tops/footwear/bags where true matches are often not in the first ANN slice.
-  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_RERANK_CANDIDATE_CAP ?? "320");
-  if (!Number.isFinite(raw)) return 320;
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_RERANK_CANDIDATE_CAP ?? "700");
+  if (!Number.isFinite(raw)) return 700;
   return Math.max(140, Math.min(700, Math.floor(raw)));
 }
 
@@ -1018,9 +1025,9 @@ function imageDetectionRerankCandidateCap(): number {
 function imageDetectionKnnPoolCap(): number {
   // For FAISS HNSW, FAISS traversal depth is controlled by w, NOT by k.
   // k only determines how many results come back — keep it wide enough for quality reranking.
-  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "130");
-  if (!Number.isFinite(raw)) return 130;
-  return Math.max(60, Math.min(600, Math.floor(raw)));
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_KNN_POOL_CAP ?? "600");
+  if (!Number.isFinite(raw)) return 600;
+  return Math.max(60, Math.min(700, Math.floor(raw)));
 }
 
 function imageCategoryAwareMinResultsPolicy(params: {
@@ -1242,6 +1249,168 @@ function isTopLikeCategory(category: string): boolean {
   return /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|sweater|hoodie|cardigan|jacket|coat|blazer|outerwear)\b/.test(
     String(category ?? "").toLowerCase().trim(),
   );
+}
+
+type ImageSearchFamily = "tops" | "bottoms" | "footwear" | "outerwear" | "dress" | "accessory" | "beauty" | "home" | "electronics" | "unknown";
+
+function normalizeImageSearchFamily(value: unknown): ImageSearchFamily {
+  const blob = String(value ?? "").toLowerCase();
+  if (!blob) return "unknown";
+  if (/\b(beauty|makeup|cosmetic|skincare|skin care|fragrance|perfume|lipstick|mascara|serum|lotion)\b/.test(blob)) return "beauty";
+  if (/\b(home|furniture|decor|kitchen|bedding|pillow|lamp|rug|vase)\b/.test(blob)) return "home";
+  if (/\b(electronics?|phone|laptop|tablet|camera|headphones?|charger|computer)\b/.test(blob)) return "electronics";
+  if (/\b(footwear|shoe|shoes|sneaker|sneakers|trainer|trainers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|flat|flats|pump|pumps)\b/.test(blob)) return "footwear";
+  if (/\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|skirt|skirts|legging|leggings|jogger|joggers|slack|slacks|chino|chinos|cargo)\b/.test(blob)) return "bottoms";
+  if (/\b(dress|dresses|gown|gowns|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|abaya|kaftan|caftan)\b/.test(blob)) return "dress";
+  if (/\b(outerwear|outwear|jacket|jackets|coat|coats|blazer|blazers|parka|trench|windbreaker|bomber|shacket|overshirt|vest|waistcoat|gilet)\b/.test(blob)) return "outerwear";
+  if (/\b(accessor|bag|bags|handbag|tote|clutch|purse|backpack|wallet|belt|hat|cap|scarf|jewelry|jewellery|necklace|bracelet|ring|earring|watch|sunglasses)\b/.test(blob)) return "accessory";
+  if (/\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|cami|camisole|sweater|sweaters|hoodie|hoodies|sweatshirt|cardigan|polo|knitwear)\b/.test(blob)) return "tops";
+  return "unknown";
+}
+
+function imageSearchFamilyFromProduct(product: Record<string, unknown>): ImageSearchFamily {
+  const blob = productCategoryFamilyBlob(product);
+  return normalizeImageSearchFamily(blob);
+}
+
+function imageSearchFamilyFromDetection(category: unknown, desiredTypes?: string[]): ImageSearchFamily {
+  return normalizeImageSearchFamily([
+    category,
+    ...(desiredTypes ?? []),
+  ].join(" "));
+}
+
+function isImpossibleImageFamilyMismatch(jobFamily: ImageSearchFamily, productFamily: ImageSearchFamily): boolean {
+  if (productFamily === "beauty" || productFamily === "home" || productFamily === "electronics") return true;
+  if (jobFamily === "unknown" || productFamily === "unknown") return false;
+  if (jobFamily === productFamily) return false;
+  if (jobFamily === "tops" && productFamily === "outerwear") return false;
+  if (jobFamily === "outerwear" && productFamily === "tops") return false;
+  if (jobFamily === "dress" && (productFamily === "tops" || productFamily === "outerwear")) return false;
+  if (jobFamily === "tops" && productFamily === "dress") return false;
+  if (jobFamily === "bottoms" && productFamily === "dress") return false;
+  if (jobFamily === "tops" && productFamily === "footwear") return true;
+  if (jobFamily === "footwear" && productFamily === "tops") return true;
+  if (jobFamily === "bottoms" && productFamily === "accessory") return true;
+  if (jobFamily === "footwear" && productFamily === "accessory") return true;
+  if (jobFamily === "accessory" && (productFamily === "tops" || productFamily === "bottoms" || productFamily === "footwear")) return true;
+  return false;
+}
+
+function colorScoreForImageRanking(explain: Record<string, unknown>): {
+  colorScore: number;
+  exactColorMatch: boolean;
+  sameColorFamily: boolean;
+} {
+  const tier = String(explain.colorTier ?? "none").toLowerCase().trim();
+  const compliance = Math.max(0, Math.min(1, Number(explain.colorCompliance ?? 0)));
+  if (tier === "exact") return { colorScore: 1, exactColorMatch: true, sameColorFamily: true };
+  if (tier === "family" || tier === "light-shade" || tier === "dark-shade") {
+    return { colorScore: Math.max(0.75, compliance), exactColorMatch: false, sameColorFamily: true };
+  }
+  if (tier === "bucket") return { colorScore: Math.max(0.45, Math.min(0.74, compliance)), exactColorMatch: false, sameColorFamily: false };
+  if (compliance > 0) return { colorScore: Math.max(0.15, Math.min(0.75, compliance)), exactColorMatch: false, sameColorFamily: compliance >= 0.55 };
+  return { colorScore: 0.4, exactColorMatch: false, sameColorFamily: false };
+}
+
+function additiveImageRankingScore(params: {
+  visualSimilarity: number;
+  jobFamily: ImageSearchFamily;
+  productFamily: ImageSearchFamily;
+  explain: Record<string, unknown>;
+  availability: unknown;
+}): {
+  finalScore: number;
+  typeScore: number;
+  colorScore: number;
+  metadataQuality: number;
+  availabilityScore: number;
+  exactColorMatch: boolean;
+  sameColorFamily: boolean;
+  nearIdenticalVisual: boolean;
+  familyMismatch: boolean;
+  boosts: string[];
+  penalties: string[];
+} {
+  const visualSimilarity = Math.max(0, Math.min(1, params.visualSimilarity));
+  const exactTypeScore = Number(params.explain.exactTypeScore ?? 0);
+  const typeCompliance = Math.max(0, Math.min(1, Number(params.explain.productTypeCompliance ?? 0)));
+  const categoryScore = Math.max(0, Math.min(1, Number(params.explain.categoryScore ?? params.explain.categoryRelevance01 ?? 0)));
+  const familyMismatch = isImpossibleImageFamilyMismatch(params.jobFamily, params.productFamily);
+  const sameMajorFamily = params.jobFamily !== "unknown" && params.jobFamily === params.productFamily;
+  const adjacentFamily =
+    !sameMajorFamily &&
+    !familyMismatch &&
+    (
+      (params.jobFamily === "tops" && (params.productFamily === "outerwear" || params.productFamily === "dress")) ||
+      (params.jobFamily === "outerwear" && params.productFamily === "tops") ||
+      (params.jobFamily === "dress" && (params.productFamily === "tops" || params.productFamily === "outerwear" || params.productFamily === "bottoms"))
+    );
+  const typeScore =
+    exactTypeScore >= 1
+      ? 1
+      : typeCompliance >= 0.64
+        ? 0.75
+        : sameMajorFamily || categoryScore >= 0.86
+          ? 0.55
+          : adjacentFamily
+            ? 0.25
+            : 0;
+
+  const color = colorScoreForImageRanking(params.explain);
+  const metadataQuality = Math.max(
+    0,
+    Math.min(
+      1,
+      0.34 * Math.max(0, Math.min(1, Number(params.explain.audienceCompliance ?? 0.7))) +
+        0.22 * Math.max(0, Math.min(1, Number(params.explain.styleCompliance ?? 0.4))) +
+        0.22 * Math.max(0, Math.min(1, Number(params.explain.sleeveCompliance ?? 0.4))) +
+        0.22 * Math.max(0, Math.min(1, Number(params.explain.lengthCompliance ?? 0.4))),
+    ),
+  );
+  const availabilityScore = params.availability === false ? 0 : 1;
+  const boosts: string[] = [];
+  const penalties: string[] = [];
+  let finalScore =
+    visualSimilarity * 0.62 +
+    typeScore * 0.18 +
+    color.colorScore * 0.12 +
+    metadataQuality * 0.05 +
+    availabilityScore * 0.03;
+
+  const nearIdenticalVisual = visualSimilarity >= 0.92;
+  if (nearIdenticalVisual && !familyMismatch) {
+    finalScore += 0.15;
+    boosts.push("near_identical_visual");
+  }
+  if (exactTypeScore >= 1 && color.exactColorMatch) {
+    finalScore += 0.12;
+    boosts.push("exact_type_exact_color");
+  } else if (exactTypeScore >= 1 && color.sameColorFamily) {
+    finalScore += 0.08;
+    boosts.push("exact_type_same_color_family");
+  } else if (typeScore >= 0.55 && color.exactColorMatch) {
+    finalScore += 0.05;
+    boosts.push("same_family_exact_color");
+  }
+  if (familyMismatch) {
+    finalScore = Math.min(finalScore, 0.08);
+    penalties.push("impossible_family_mismatch");
+  }
+
+  return {
+    finalScore: Math.min(1, Math.max(0, finalScore)),
+    typeScore,
+    colorScore: color.colorScore,
+    metadataQuality,
+    availabilityScore,
+    exactColorMatch: color.exactColorMatch,
+    sameColorFamily: color.sameColorFamily,
+    nearIdenticalVisual,
+    familyMismatch,
+    boosts,
+    penalties,
+  };
 }
 
 function imageStrictFinalDetectionCategoryGateEnabled(): boolean {
@@ -1931,7 +2100,7 @@ function imageKnnNumCandidatesDetection(k: number): number {
   // For FAISS HNSW, num_candidates maps directly to efSearch (not ef_search in query body).
   // Must be >= 200 so that after category filter selectivity (~15-30%), enough results survive
   // the post-filter to exceed sparseKnnMinHits and avoid fallback retry searches.
-  return Math.max(k, 200);
+  return Math.max(k, 700);
 }
 
 function mergeKnnHitsByProductId(primary: any[], extra: any[], cap: number): any[] {
@@ -5215,12 +5384,7 @@ export async function searchByImageWithSimilarity(
     detectionCategoryNorm === "tops" ||
     detectionCategoryNorm === "bottoms" ||
     detectionCategoryNorm === "dresses";
-  const inferredColorCanHardGateFinal =
-    !hasExplicitColorIntent &&
-    hasInferredColorSignal &&
-    hasDetectionAnchoredTypeIntent &&
-    inferredColorGateSlotSafe &&
-    preferredInferredColorConfidence >= imageDetectionInferredColorGateMinConfidence();
+  const inferredColorCanHardGateFinal = false;
   const suppressHardInferredColorGate =
     !hasExplicitColorIntent &&
     hasInferredColorSignal &&
@@ -5355,13 +5519,18 @@ export async function searchByImageWithSimilarity(
       detectionCategoryNorm === "bags";
     // Root fix: when detection intent is strong and a hit is clearly in-family by both
     // category and type, a large cross-family penalty is contradictory and causes false drops.
+    if (Number(compWithExpandedPenalty.productTypeCompliance ?? 0) >= 1) {
+      compWithExpandedPenalty.crossFamilyPenalty = 0;
+    }
     if (
       hasDetectionAnchoredTypeIntent &&
       isCoreDetectionCategory &&
       Number(compWithExpandedPenalty.categoryRelevance01 ?? 0) >= 0.95 &&
       ((compWithExpandedPenalty.exactTypeScore ?? 0) >= 1 || Number(compWithExpandedPenalty.productTypeCompliance ?? 0) >= 0.88)
     ) {
-      compWithExpandedPenalty.crossFamilyPenalty = Math.min(Number(compWithExpandedPenalty.crossFamilyPenalty ?? 0), 0.18);
+      compWithExpandedPenalty.crossFamilyPenalty = Number(compWithExpandedPenalty.productTypeCompliance ?? 0) >= 1
+        ? 0
+        : Math.min(Number(compWithExpandedPenalty.crossFamilyPenalty ?? 0), 0.18);
     }
     const docLength = inferDocLengthToken(hit);
     const hasLengthIntentForHit = Boolean(desiredLengthForRelevance) && docSupportsLengthIntent(hit);
@@ -6593,6 +6762,8 @@ export async function searchByImageWithSimilarity(
     hasDetectionAnchoredTypeIntent ||
     hasExplicitTypeFilter ||
     hasExplicitCategoryFilter;
+  const relevanceGateMode = searchRelevanceGateMode();
+  const jobFamilyForSafety = imageSearchFamilyFromDetection(params.detectionProductCategory ?? mergedCategoryForRelevance, desiredProductTypes);
   const isDressDetectionIntent = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses";
   const dressPatternSims = isDressDetectionIntent
     ? rankedHitsCandidates
@@ -6619,6 +6790,10 @@ export async function searchByImageWithSimilarity(
       if (!comp) return false;
       if (comp.hardBlocked) return false;
       if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) return false;
+      if (relevanceGateMode === "soft") {
+        const productFamily = imageSearchFamilyFromProduct(h._source ?? {});
+        return !isImpossibleImageFamilyMismatch(jobFamilyForSafety, productFamily);
+      }
       const crossFamily = comp.crossFamilyPenalty ?? 0;
       if (crossFamily >= 0.55) return false;
       const typeComp = comp.productTypeCompliance ?? 0;
@@ -8115,6 +8290,26 @@ export async function searchByImageWithSimilarity(
         }
       }
 
+      const resultJobFamily = imageSearchFamilyFromDetection(params.detectionProductCategory ?? mergedCategoryForRelevance, desiredProductTypes);
+      const resultProductFamily = imageSearchFamilyFromProduct(hydratedBlobSrc);
+      const additiveScore = compliance
+        ? additiveImageRankingScore({
+          visualSimilarity: similarityScore,
+          jobFamily: resultJobFamily,
+          productFamily: resultProductFamily,
+          explain: compliance as unknown as Record<string, unknown>,
+          availability: (p as any)?.availability,
+        })
+        : null;
+      if (additiveScore) {
+        finalRelevance01 = additiveScore.finalScore;
+        finalRelevanceSource = "additive_image_score";
+        if (additiveScore.nearIdenticalVisual && !additiveScore.familyMismatch) {
+          finalRelevance01 = Math.max(finalRelevance01 ?? 0, 0.93);
+          finalRelevanceSource = "near_identical_visual_override";
+        }
+      }
+
       return {
         ...p,
         // Never overwrite canonical catalog color with query-time matched color.
@@ -8215,6 +8410,23 @@ export async function searchByImageWithSimilarity(
             // ── Final score ──────────────────────────────────────
             finalRelevance01,
             finalRelevanceSource,
+            rankingDebug: additiveScore
+              ? {
+                id: idStr,
+                detectedLabel: params.detectionLabel ?? params.detectionProductCategory,
+                visualSimilarity: similarityScore,
+                exactTypeScore: compliance.exactTypeScore,
+                typeScore: additiveScore.typeScore,
+                colorScore: additiveScore.colorScore,
+                exactColorMatch: additiveScore.exactColorMatch,
+                sameColorFamily: additiveScore.sameColorFamily,
+                familyMismatch: additiveScore.familyMismatch,
+                nearIdenticalVisual: additiveScore.nearIdenticalVisual,
+                finalScore: finalRelevance01,
+                boosts: additiveScore.boosts,
+                penalties: additiveScore.penalties,
+              }
+              : undefined,
           }
           : undefined,
         images: imagesOut,
@@ -8497,6 +8709,7 @@ export async function searchByImageWithSimilarity(
   const detectionCategoryForFinalGate = String(params.detectionProductCategory ?? "").toLowerCase().trim();
   if (
     imageStrictFinalDetectionCategoryGateEnabled() &&
+    searchRelevanceGateMode() === "strict" &&
     detectionCategoryForFinalGate &&
     isStrictDetectionCategory(detectionCategoryForFinalGate)
   ) {
@@ -8561,7 +8774,7 @@ export async function searchByImageWithSimilarity(
   // Footwear subtype gate: when the query specifies a clear footwear kind (sneakers, boots,
   // sandals, heels, loafers, flats), hard-block cross-subtype results that slipped through
   // the family gate (e.g. black boots appearing in a sneaker search).
-  if (detectionCategoryForFinalGate === "footwear" && desiredProductTypes.length > 0) {
+  if (searchRelevanceGateMode() === "strict" && detectionCategoryForFinalGate === "footwear" && desiredProductTypes.length > 0) {
     const footwearSubtypeFiltered = results.filter((p: any) =>
       passesFootwearSubtypeGate(p as unknown as Record<string, unknown>, desiredProductTypes),
     );
@@ -8632,11 +8845,12 @@ export async function searchByImageWithSimilarity(
     : diversityLambda;
   const diversityPoolCap = imageDiversityPoolCap();
   if (diversityRerankApplied) {
-    const head = variantCollapsed.results.slice(0, Math.max(limit, diversityPoolCap));
-    const tail = variantCollapsed.results.slice(Math.max(limit, diversityPoolCap));
-    const rerankedHead = applyImageDiversityRerank(head as ProductResult[], effectiveDiversityLambda);
-    const combined = sortProductsByRelevanceAndCategory([...rerankedHead, ...tail]);
-    results = combined.slice(0, limit) as ProductResult[];
+    const relevanceSorted = sortProductsByRelevanceAndCategory(variantCollapsed.results);
+    const lockedTop = relevanceSorted.slice(0, Math.min(15, relevanceSorted.length));
+    const diversityPool = relevanceSorted.slice(lockedTop.length, Math.max(lockedTop.length, diversityPoolCap));
+    const tail = relevanceSorted.slice(Math.max(lockedTop.length, diversityPoolCap));
+    const diversifiedRest = applyImageDiversityRerank(diversityPool as ProductResult[], effectiveDiversityLambda);
+    results = [...lockedTop, ...diversifiedRest, ...tail].slice(0, limit) as ProductResult[];
   } else {
     const combined = sortProductsByRelevanceAndCategory(variantCollapsed.results);
     results = combined.slice(0, limit) as ProductResult[];

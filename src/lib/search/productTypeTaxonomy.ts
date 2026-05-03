@@ -1561,19 +1561,27 @@ export function scoreRerankProductTypeBreakdown(
   const wSib = opts?.siblingClusterWeight ?? DEFAULT_SIBLING_CLUSTER_WEIGHT;
   const wIntra = opts?.intraPenaltyWeight ?? 0.62;
 
-  const exactTax = scoreProductTypeTaxonomyMatch(seeds, docs, { sameClusterWeight: 0 });
-  const exactToken = exactTax.bestQueryType ?? exactTax.bestDocType ?? "";
-  const exactTypeScore = exactTax.score >= 1 && !isBroadExactToken(exactToken) ? 1 : 0;
-
   const clusterTax = scoreProductTypeTaxonomyMatch(seeds, docs, { sameClusterWeight: wSib });
-  const siblingClusterScore = exactTypeScore >= 1 ? 1 : clusterTax.score;
-
   const parentHypernymScore = scoreHypernymDocMatch(seeds, docs);
 
   const intraFamilyPenalty = intraFamilySubtypePenalty(seeds, docs);
 
+  const exactTax = scoreProductTypeTaxonomyMatch(seeds, docs, { sameClusterWeight: 0 });
+  const exactToken = exactTax.bestQueryType ?? exactTax.bestDocType ?? "";
+  const hasExactType = exactTax.score >= 1 && !isBroadExactToken(exactToken);
+  const hasSameFamilyType = Math.max(clusterTax.score, parentHypernymScore) > 0 || intraFamilyPenalty > 0;
+  const exactTypeScore = hasExactType
+    ? 1
+    : hasSameFamilyType
+      ? 0.7
+      : docs.length > 0
+        ? 0.2
+        : 0;
+
+  const siblingClusterScore = hasExactType ? 1 : clusterTax.score;
+
   const base =
-    exactTypeScore >= 1 ? 1 : Math.max(clusterTax.score, parentHypernymScore);
+    hasExactType ? 1 : Math.max(clusterTax.score, parentHypernymScore);
 
   const combinedTypeCompliance = Math.max(0, Math.min(1, base - intraFamilyPenalty * wIntra));
 
