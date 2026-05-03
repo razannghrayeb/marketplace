@@ -1313,6 +1313,68 @@ function colorScoreForImageRanking(explain: Record<string, unknown>): {
   return { colorScore: 0.4, exactColorMatch: false, sameColorFamily: false };
 }
 
+function calibratedVisualBase(sim: number): number {
+  const s = Math.max(0, Math.min(1, sim));
+  if (s >= 0.985) return 0.96;
+  if (s >= 0.970) return 0.94;
+  if (s >= 0.950) return 0.91;
+  if (s >= 0.930) return 0.88;
+  if (s >= 0.900) return 0.84;
+  if (s >= 0.870) return 0.78;
+  if (s >= 0.840) return 0.72;
+  return Math.max(0.55, s * 0.80);
+}
+
+function scoreWithConfidence(score: number, confidence: number): { score: number; confidence: number } {
+  return {
+    score: Math.max(0, Math.min(1, Number.isFinite(score) ? score : 0.6)),
+    confidence: Math.max(0, Math.min(1, Number.isFinite(confidence) ? confidence : 0)),
+  };
+}
+
+function attributeFromCompliance(value: unknown, options?: {
+  hasIntent?: boolean;
+  unknownValue?: number;
+  unknownConfidence?: number;
+}): { score: number; confidence: number; knownMismatch: boolean; missing: boolean } {
+  if (options?.hasIntent === false) {
+    return { score: options.unknownValue ?? 0.6, confidence: 0, knownMismatch: false, missing: false };
+  }
+  const raw = Number(value);
+  if (!Number.isFinite(raw)) {
+    return {
+      score: options?.unknownValue ?? 0.6,
+      confidence: options?.unknownConfidence ?? 0.2,
+      knownMismatch: false,
+      missing: true,
+    };
+  }
+  const score = Math.max(0, Math.min(1, raw));
+  const looksUnknown = score > 0.08 && score < 0.24;
+  return {
+    score: looksUnknown ? (options?.unknownValue ?? 0.6) : score,
+    confidence: looksUnknown ? (options?.unknownConfidence ?? 0.25) : 1,
+    knownMismatch: score <= 0.08,
+    missing: looksUnknown,
+  };
+}
+
+function categoryAttributeWeights(family: ImageSearchFamily): Record<string, number> {
+  if (family === "bottoms") {
+    return { type: 0.25, color: 0.15, length: 0.14, silhouette: 0.13, material: 0.09, pattern: 0.08, rise: 0.06, style: 0.06, audience: 0.04 };
+  }
+  if (family === "dress") {
+    return { type: 0.20, color: 0.14, length: 0.14, silhouette: 0.12, sleeve: 0.10, neckline: 0.08, pattern: 0.08, material: 0.07, style: 0.07 };
+  }
+  if (family === "outerwear") {
+    return { type: 0.24, color: 0.14, length: 0.12, collar: 0.10, closure: 0.10, material: 0.10, silhouette: 0.10, style: 0.10 };
+  }
+  if (family === "footwear") {
+    return { type: 0.28, color: 0.16, silhouette: 0.14, sole: 0.10, toe: 0.08, closure: 0.07, material: 0.08, style: 0.09 };
+  }
+  return { type: 0.24, color: 0.16, sleeve: 0.13, neckline: 0.10, silhouette: 0.09, material: 0.08, pattern: 0.08, style: 0.07, audience: 0.05 };
+}
+
 function additiveImageRankingScore(params: {
   visualSimilarity: number;
   jobFamily: ImageSearchFamily;
@@ -1331,6 +1393,13 @@ function additiveImageRankingScore(params: {
   familyMismatch: boolean;
   boosts: string[];
   penalties: string[];
+  visualBase: number;
+  attributeAgreement: number;
+  familyGate: number;
+  contradictionPenalty: number;
+  qualityModifier: number;
+  maxFinal: number;
+  matchLabel: string;
 } {
   const visualSimilarity = Math.max(0, Math.min(1, params.visualSimilarity));
   const exactTypeScore = Number(params.explain.exactTypeScore ?? 0);
@@ -1346,70 +1415,187 @@ function additiveImageRankingScore(params: {
       (params.jobFamily === "outerwear" && params.productFamily === "tops") ||
       (params.jobFamily === "dress" && (params.productFamily === "tops" || params.productFamily === "outerwear" || params.productFamily === "bottoms"))
     );
+  const familyGate = familyMismatch
+    ? 0
+    : exactTypeScore >= 1 || sameMajorFamily || categoryScore >= 0.92
+      ? 1
+      : typeCompliance >= 0.64
+        ? 0.92
+        : adjacentFamily
+          ? 0.72
+          : 0.55;
   const typeScore =
     exactTypeScore >= 1
       ? 1
-      : typeCompliance >= 0.64
-        ? 0.75
-        : sameMajorFamily || categoryScore >= 0.86
-          ? 0.55
+      : typeCompliance >= 0.82
+        ? 0.82
+        : typeCompliance >= 0.62
+          ? 0.62
           : adjacentFamily
-            ? 0.25
+            ? 0.35
             : 0;
 
+  const visualBase = calibratedVisualBase(visualSimilarity);
+  const nearIdenticalVisual = visualSimilarity >= 0.955;
   const color = colorScoreForImageRanking(params.explain);
-  const metadataQuality = Math.max(
-    0,
-    Math.min(
-      1,
-      0.34 * Math.max(0, Math.min(1, Number(params.explain.audienceCompliance ?? 0.7))) +
-        0.22 * Math.max(0, Math.min(1, Number(params.explain.styleCompliance ?? 0.4))) +
-        0.22 * Math.max(0, Math.min(1, Number(params.explain.sleeveCompliance ?? 0.4))) +
-        0.22 * Math.max(0, Math.min(1, Number(params.explain.lengthCompliance ?? 0.4))),
-    ),
-  );
-  const availabilityScore = params.availability === false ? 0 : 1;
-  const boosts: string[] = [];
-  const penalties: string[] = [];
-  let finalScore =
-    visualSimilarity * 0.62 +
-    typeScore * 0.18 +
-    color.colorScore * 0.12 +
-    metadataQuality * 0.05 +
-    availabilityScore * 0.03;
+  const weights = categoryAttributeWeights(params.jobFamily === "unknown" ? params.productFamily : params.jobFamily);
+  const attrs: Array<{ key: string; weight: number; score: number; confidence: number; knownMismatch?: boolean; missing?: boolean }> = [];
+  const pushAttr = (key: string, weight: number | undefined, attr: { score: number; confidence: number; knownMismatch?: boolean; missing?: boolean }) => {
+    if (!weight || weight <= 0) return;
+    attrs.push({ key, weight, ...attr });
+  };
 
-  const nearIdenticalVisual = visualSimilarity >= 0.92;
-  if (nearIdenticalVisual && !familyMismatch) {
-    finalScore += 0.15;
-    boosts.push("near_identical_visual");
+  pushAttr("type", weights.type, scoreWithConfidence(typeScore, typeScore > 0 ? 1 : 0.9));
+  pushAttr("color", weights.color, scoreWithConfidence(color.colorScore, color.colorScore === 0.4 ? 0.25 : 1));
+  const sleeve = attributeFromCompliance(params.explain.sleeveCompliance, {
+    hasIntent: Boolean(params.explain.hasSleeveIntent),
+    unknownValue: 0.6,
+    unknownConfidence: 0.25,
+  });
+  pushAttr("sleeve", weights.sleeve, sleeve);
+  const length = attributeFromCompliance(params.explain.lengthCompliance, {
+    hasIntent: Boolean(params.explain.hasLengthIntent),
+    unknownValue: 0.6,
+    unknownConfidence: 0.25,
+  });
+  pushAttr("length", weights.length, length);
+  pushAttr("pattern", weights.pattern, attributeFromCompliance(params.explain.patternCompliance ?? params.explain.patternEmbeddingSim, {
+    unknownValue: 0.6,
+    unknownConfidence: 0.2,
+  }));
+  pushAttr("material", weights.material, attributeFromCompliance(params.explain.materialCompliance ?? params.explain.materialEmbeddingSim, {
+    unknownValue: 0.6,
+    unknownConfidence: 0.2,
+  }));
+  pushAttr("style", weights.style, attributeFromCompliance(params.explain.styleCompliance, {
+    unknownValue: 0.6,
+    unknownConfidence: 0.18,
+  }));
+  pushAttr("audience", weights.audience, attributeFromCompliance(params.explain.audienceCompliance, {
+    unknownValue: 0.65,
+    unknownConfidence: 0.25,
+  }));
+  for (const structuralKey of ["neckline", "collar", "closure", "silhouette", "rise", "sole", "toe"]) {
+    pushAttr(structuralKey, weights[structuralKey], { score: 0.6, confidence: 0, missing: true });
   }
-  if (exactTypeScore >= 1 && color.exactColorMatch) {
-    finalScore += 0.12;
-    boosts.push("exact_type_exact_color");
-  } else if (exactTypeScore >= 1 && color.sameColorFamily) {
-    finalScore += 0.08;
-    boosts.push("exact_type_same_color_family");
-  } else if (typeScore >= 0.55 && color.exactColorMatch) {
-    finalScore += 0.05;
-    boosts.push("same_family_exact_color");
+
+  const effective = attrs
+    .map((a) => ({ ...a, effectiveWeight: a.weight * a.confidence }))
+    .filter((a) => a.effectiveWeight > 0);
+  const totalWeight = effective.reduce((sum, a) => sum + a.effectiveWeight, 0);
+  const attributeAgreement = totalWeight > 0
+    ? effective.reduce((sum, a) => sum + a.effectiveWeight * a.score, 0) / totalWeight
+    : 0.6;
+
+  let contradictionPenalty = 1;
+  const penalties: string[] = [];
+  const colorSource = String(params.explain.colorIntentSource ?? "none").toLowerCase();
+  const explicitColor = colorSource === "explicit" || Boolean(params.explain.colorIntentGatesFinalRelevance);
+  if (explicitColor && color.colorScore <= 0.2) {
+    contradictionPenalty *= 0.78;
+    penalties.push("explicit_color_mismatch");
+  } else if (colorSource === "inferred" && color.colorScore <= 0.2) {
+    contradictionPenalty *= 0.92;
+    penalties.push("inferred_color_mismatch");
+  }
+  if (sleeve.knownMismatch) {
+    contradictionPenalty *= Boolean(params.explain.hasSleeveIntent) ? 0.88 : 0.94;
+    penalties.push("sleeve_mismatch");
+  }
+  if (length.knownMismatch) {
+    contradictionPenalty *= Boolean(params.explain.hasLengthIntent) ? 0.84 : 0.92;
+    penalties.push("length_mismatch");
+  }
+  const styleRaw = Number(params.explain.styleCompliance ?? NaN);
+  if (Number.isFinite(styleRaw) && styleRaw <= 0.12 && Boolean(params.explain.hasStyleIntent)) {
+    contradictionPenalty *= 0.70;
+    penalties.push("style_mismatch");
   }
   if (familyMismatch) {
-    finalScore = Math.min(finalScore, 0.08);
     penalties.push("impossible_family_mismatch");
   }
 
+  const missingCriticalAttributes = attrs.filter((a) => a.missing && ["sleeve", "length", "neckline", "collar", "silhouette", "pattern", "material", "style", "audience"].includes(a.key)).length;
+  const knownMismatchCount = attrs.filter((a) => a.knownMismatch).length;
+  const metadataCoverage = attrs.length > 0
+    ? Math.max(0, Math.min(1, effective.reduce((sum, a) => sum + a.effectiveWeight, 0) / attrs.reduce((sum, a) => sum + a.weight, 0)))
+    : 0.4;
+  const qualityModifier =
+    (params.availability === false ? 0.96 : 1) *
+    (0.92 + 0.08 * metadataCoverage);
+
+  let raw =
+    0.78 * visualBase +
+    0.22 * attributeAgreement;
+  raw *= familyGate;
+  raw *= contradictionPenalty;
+  raw *= qualityModifier;
+
+  let maxFinal = 0.995;
+  if (visualSimilarity >= 0.985 && exactTypeScore >= 1 && color.exactColorMatch && knownMismatchCount === 0) {
+    maxFinal = 0.995;
+  } else if (visualSimilarity >= 0.955 && exactTypeScore >= 1 && (color.exactColorMatch || color.sameColorFamily) && knownMismatchCount === 0) {
+    maxFinal = metadataCoverage >= 0.72 ? 0.975 : 0.94;
+  } else if (visualSimilarity >= 0.93 && familyGate >= 0.92 && knownMismatchCount <= 1) {
+    maxFinal = 0.94;
+  } else if (familyGate >= 0.92) {
+    maxFinal = 0.88;
+  } else if (familyGate > 0) {
+    maxFinal = 0.76;
+  } else {
+    maxFinal = 0;
+  }
+  if (knownMismatchCount >= 1 && (explicitColor || Boolean(params.explain.hasSleeveIntent) || Boolean(params.explain.hasLengthIntent) || Boolean(params.explain.hasStyleIntent))) {
+    maxFinal = Math.min(maxFinal, 0.72);
+  }
+  if (missingCriticalAttributes >= 3) {
+    maxFinal = Math.min(maxFinal, 0.90);
+  }
+  if (missingCriticalAttributes >= 2 && visualSimilarity < 0.96) {
+    maxFinal = Math.min(maxFinal, 0.87);
+  }
+  if (exactTypeScore >= 1 && color.exactColorMatch && visualSimilarity >= 0.97 && metadataCoverage < 0.72) {
+    maxFinal = Math.min(maxFinal, 0.95);
+  }
+
+  let finalScore = Math.min(raw, maxFinal);
+  finalScore = Math.min(0.995, Math.max(0, Math.round(finalScore * 10000) / 10000));
+  const matchLabel =
+    visualSimilarity >= 0.985 && finalScore >= 0.985
+      ? "same_product"
+      : finalScore >= 0.95
+        ? "near_identical"
+        : finalScore >= 0.90
+          ? "very_similar"
+          : finalScore >= 0.82
+            ? "similar"
+            : "weak";
+
+  const boosts: string[] = [];
+  if (exactTypeScore >= 1) boosts.push("exact_type");
+  if (color.exactColorMatch) boosts.push("exact_color");
+  else if (color.sameColorFamily) boosts.push("same_color_family");
+  if (nearIdenticalVisual) boosts.push("near_identical_visual_evidence");
+
   return {
-    finalScore: Math.min(1, Math.max(0, finalScore)),
+    finalScore,
     typeScore,
     colorScore: color.colorScore,
-    metadataQuality,
-    availabilityScore,
+    metadataQuality: metadataCoverage,
+    availabilityScore: params.availability === false ? 0 : 1,
     exactColorMatch: color.exactColorMatch,
     sameColorFamily: color.sameColorFamily,
     nearIdenticalVisual,
     familyMismatch,
     boosts,
     penalties,
+    visualBase,
+    attributeAgreement,
+    familyGate,
+    contradictionPenalty,
+    qualityModifier,
+    maxFinal,
+    matchLabel,
   };
 }
 
@@ -8303,11 +8489,13 @@ export async function searchByImageWithSimilarity(
         : null;
       if (additiveScore) {
         finalRelevance01 = additiveScore.finalScore;
-        finalRelevanceSource = "additive_image_score";
-        if (additiveScore.nearIdenticalVisual && !additiveScore.familyMismatch) {
-          finalRelevance01 = Math.max(finalRelevance01 ?? 0, 0.93);
-          finalRelevanceSource = "near_identical_visual_override";
-        }
+        finalRelevanceSource = additiveScore.familyMismatch
+          ? "calibrated_impossible_family"
+          : additiveScore.matchLabel === "same_product"
+            ? "calibrated_same_product"
+            : additiveScore.matchLabel === "near_identical"
+              ? "calibrated_near_identical"
+              : "calibrated_image_score";
       }
 
       return {
@@ -8317,6 +8505,11 @@ export async function searchByImageWithSimilarity(
         color: p.color ?? null,
         similarity_score: similarityScore,
         match_type: (() => {
+          if (additiveScore) {
+            return additiveScore.matchLabel === "same_product" || additiveScore.matchLabel === "near_identical"
+              ? ("exact" as const)
+              : ("similar" as const);
+          }
           const visualOk = similarityScore >= config.clip.matchTypeExactMin;
           if (!visualOk) return "similar" as const;
           if (!compliance) return "exact" as const;
@@ -8422,6 +8615,13 @@ export async function searchByImageWithSimilarity(
                 sameColorFamily: additiveScore.sameColorFamily,
                 familyMismatch: additiveScore.familyMismatch,
                 nearIdenticalVisual: additiveScore.nearIdenticalVisual,
+                visualBase: additiveScore.visualBase,
+                attributeAgreement: additiveScore.attributeAgreement,
+                familyGate: additiveScore.familyGate,
+                contradictionPenalty: additiveScore.contradictionPenalty,
+                qualityModifier: additiveScore.qualityModifier,
+                maxFinal: additiveScore.maxFinal,
+                matchLabel: additiveScore.matchLabel,
                 finalScore: finalRelevance01,
                 boosts: additiveScore.boosts,
                 penalties: additiveScore.penalties,

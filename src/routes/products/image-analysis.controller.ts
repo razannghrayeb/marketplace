@@ -85,6 +85,21 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+function finalRelevanceScore(product: unknown): number {
+  const score = Number((product as any)?.finalRelevance01 ?? 0);
+  return Number.isFinite(score) ? score : 0;
+}
+
+function sortProductsByFinalRelevanceDesc(products: unknown[]): unknown[] {
+  return [...products].sort((a, b) => {
+    const relevanceDelta = finalRelevanceScore(b) - finalRelevanceScore(a);
+    if (Math.abs(relevanceDelta) > 1e-8) return relevanceDelta;
+    const bSimilarity = Number((b as any)?.similarity_score ?? 0);
+    const aSimilarity = Number((a as any)?.similarity_score ?? 0);
+    return (Number.isFinite(bSimilarity) ? bSimilarity : 0) - (Number.isFinite(aSimilarity) ? aSimilarity : 0);
+  });
+}
+
 // ============================================================================
 // Routes
 // ============================================================================
@@ -347,7 +362,12 @@ router.post(
 
       const payload = safeResult as any;
       if (payload.similarProducts && Array.isArray(payload.similarProducts.byDetection)) {
-        const originalByDetection = payload.similarProducts.byDetection as Array<any>;
+        const originalByDetection = (payload.similarProducts.byDetection as Array<any>).map((row) => ({
+          ...row,
+          products: Array.isArray(row.products)
+            ? sortProductsByFinalRelevanceDesc(row.products)
+            : [],
+        }));
 
         const byDetectionAfterProductPaging = productsPaginationEnabled
           ? originalByDetection.map((row) => ({
