@@ -42,8 +42,8 @@ import {
 import {
   extractProductFamily,
   resolveProductAudience,
-  applyFamilyGuard,
   getAudienceCap,
+  normalizeFamily,
 } from "./familyGuard";
 import { config } from "../../config";
 
@@ -277,6 +277,8 @@ function applyNonSportGuardToNormalSearch(
 function applyPostHydrationGuards(
   results: ProductResult[] | undefined,
   intentProductCategory: string | undefined,
+  intentAudience: string | null,
+  intentFilters?: Partial<LegacySearchFilters>,
 ): ProductResult[] {
   if (!results || results.length === 0) return results ?? [];
   if (!intentProductCategory) return results;
@@ -284,26 +286,100 @@ function applyPostHydrationGuards(
   const guardEnabled = String(process.env.SEARCH_IMAGE_FAMILY_GUARD ?? "1").toLowerCase() !== "0";
   if (!guardEnabled) return results;
 
-  return results.map((product) => {
-    const productFamily = extractProductFamily(product);
-    const productAudience = resolveProductAudience(product);
+  const intentFamily = normalizeFamily(intentProductCategory);
+  const desiredColors = (() => {
+    const f = intentFilters as any;
+    if (!f) return [] as string[];
+    if (Array.isArray(f.colors) && f.colors.length > 0) return f.colors.map((c: any) => String(c).toLowerCase().trim());
+    if (typeof f.color === "string" && String(f.color).trim()) return [String(f.color).toLowerCase().trim()];
+    return [] as string[];
+  })();
 
-    // Apply hard family guard: drop if product family doesn't match intent
-    if (!applyFamilyGuard(intentProductCategory, productFamily)) {
-      return null; // Mark for filtering
-    }
+  return results
+    .map((product) => {
+      const productFamily = extractProductFamily(product);
+      const productAudience = resolveProductAudience(product);
+      const nextProduct: ProductResult & { guardReason?: string } = { ...product };
 
-    // Apply soft audience cap
-    const audienceCap = getAudienceCap(null, productAudience);
-    if (audienceCap < 1.0 && product.finalRelevance01) {
-      return {
-        ...product,
-        finalRelevance01: Math.min(product.finalRelevance01, audienceCap),
-      };
-    }
+      // Known wrong family -> drop entirely.
+      if (intentFamily && productFamily && productFamily !== intentFamily) {
+        return null;
+      }
 
-    return product;
-  }).filter((p): p is ProductResult => p !== null);
+      // Start with existing final score (or conservative default)
+      let maxFinal = typeof nextProduct.finalRelevance01 === "number" ? nextProduct.finalRelevance01 : 0.5;
+
+      // Unknown family -> keep with penalty (honest scoring)
+      if (!productFamily) {
+        maxFinal = Math.min(maxFinal, 0.62);
+        nextProduct.guardReason = (nextProduct.guardReason ? `${nextProduct.guardReason};` : "") + "unknown_family_kept_with_penalty";
+      }
+
+      // Opposite gender penalty
+      if (intentAudience && product.normalizedAudience) {
+        const prodAud = String(product.normalizedAudience ?? "").toLowerCase().trim();
+        const wantAud = String(intentAudience ?? "").toLowerCase().trim();
+        if (prodAud && wantAud && prodAud !== "unisex" && prodAud !== wantAud) {
+          maxFinal = Math.min(maxFinal, 0.48);
+          nextProduct.guardReason = (nextProduct.guardReason ? `${nextProduct.guardReason};` : "") + "opposite_gender_penalty";
+        }
+      }
+
+      // Wrong subtype (heuristic): if product has subtype token and it doesn't appear in intent category string
+      if (product.normalizedSubtype && intentProductCategory) {
+        const sub = String(product.normalizedSubtype).toLowerCase().trim();
+        const intentCat = String(intentProductCategory).toLowerCase();
+        if (sub && intentCat && !intentCat.includes(sub)) {
+          maxFinal = Math.min(maxFinal, 0.62);
+          nextProduct.guardReason = (nextProduct.guardReason ? `${nextProduct.guardReason};` : "") + "wrong_subtype_penalty";
+        }
+      }
+
+      // Wrong color (only apply when caller provided explicit color filter/hint)
+      if (desiredColors.length > 0 && product.normalizedColor) {
+        const prodCol = String(product.normalizedColor ?? "").toLowerCase().trim();
+        if (prodCol && !desiredColors.includes(prodCol)) {
+          maxFinal = Math.min(maxFinal, 0.58);
+          nextProduct.guardReason = (nextProduct.guardReason ? `${nextProduct.guardReason};` : "") + "wrong_color_penalty";
+        }
+      }
+
+      // Apply soft audience cap using the real intent when available (existing logic)
+      const audienceCap = getAudienceCap(intentAudience, productAudience);
+      if (audienceCap < 1.0) {
+        maxFinal = Math.min(maxFinal, audienceCap);
+        nextProduct.guardReason = (nextProduct.guardReason ? `${nextProduct.guardReason};` : "") + "audience_cap_applied";
+      }
+
+      // Contract-tier caps: map common product indicators to the user's requested tier caps.
+      // Do NOT boost related items globally — we only cap their maximum final score here.
+      let contractCap = 1;
+      const mt = String(product.match_type ?? "").toLowerCase().trim();
+      if (mt === "exact") contractCap = Math.min(contractCap, 0.94);
+      else if (mt === "related") contractCap = Math.min(contractCap, 0.78);
+      else if (mt === "similar") {
+        // treat visual/similar as weak tier
+        contractCap = Math.min(contractCap, 0.64);
+      }
+      // fallback when visual evidence is very weak
+      if (typeof product.similarity_score === "number" && product.similarity_score < 0.4) contractCap = Math.min(contractCap, 0.56);
+
+      // Final enforce: do not increase score, only cap it according to rules above
+      const enforced = Math.min(maxFinal, contractCap, typeof nextProduct.finalRelevance01 === "number" ? nextProduct.finalRelevance01 : 1);
+      nextProduct.finalRelevance01 = enforced;
+
+      return nextProduct;
+    })
+    .filter((p): p is ProductResult => p !== null);
+}
+
+function resolveIntentAudience(filters: Partial<LegacySearchFilters> | undefined): string | null {
+  const raw = String((filters as any)?.gender ?? "").toLowerCase().trim();
+  if (!raw) return null;
+  if (/^(men|man|male|m|mens|men's)$/.test(raw)) return "men";
+  if (/^(women|woman|female|w|womens|women's)$/.test(raw)) return "women";
+  if (/^(unisex|both|all)$/.test(raw)) return "unisex";
+  return null;
 }
 
 export async function searchBrowse(params: {
@@ -579,7 +655,12 @@ export async function searchImage(
   // PHASE 1: Apply post-hydration family and audience guards
   // This prevents shoes→dresses and other cross-family leakage
   if (detectionProductCategory) {
-    filteredResults = applyPostHydrationGuards(filteredResults, detectionProductCategory);
+    filteredResults = applyPostHydrationGuards(
+      filteredResults,
+      detectionProductCategory,
+      resolveIntentAudience(mergedFilters),
+      mergedFilters,
+    );
   }
 
   const meta = {

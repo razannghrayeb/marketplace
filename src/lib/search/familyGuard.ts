@@ -16,16 +16,19 @@ export function extractProductFamily(product: any): string | null {
   if (normalizedFamily) return normalizeFamily(normalizedFamily);
 
   const canonical = String(product?.category_canonical ?? "").toLowerCase().trim();
-  if (isValidFamily(canonical)) return normalizeFamily(canonical);
+  const canonicalFamily = normalizeFamily(canonical);
+  if (canonicalFamily) return canonicalFamily;
 
   const category = String(product?.category ?? "").toLowerCase().trim();
-  if (isValidFamily(category)) return normalizeFamily(category);
+  const categoryFamily = normalizeFamily(category);
+  if (categoryFamily) return categoryFamily;
 
   const types = Array.isArray(product?.product_types)
     ? product.product_types.map((t: unknown) => String(t).toLowerCase().trim()).filter(Boolean)
     : [];
   for (const type of types) {
-    if (isValidFamily(type)) return normalizeFamily(type);
+    const typeFamily = normalizeFamily(type);
+    if (typeFamily) return typeFamily;
   }
 
   const title = String(product?.name ?? product?.title ?? "").toLowerCase().trim();
@@ -43,9 +46,19 @@ export function extractProductFamily(product: any): string | null {
 export function normalizeFamily(raw: string): string | null {
   const s = String(raw ?? "").toLowerCase().trim();
 
+  if (!s) return null;
+
+  if (/^(tops?|shirts?|blouses?|tees?|t-?shirts?|sweaters?|hoodies?|sweatshirts?|cardigans?|vests?|tanks?|camis?|polos?)$/.test(s)) {
+    return "tops";
+  }
+
   // Tops family
   if (/\b(top|shirt|blouse|tee|t.?shirt|sweater|hoodie|sweatshirt|cardigan|vest|tank|cami|polo|long.?sleeve|short.?sleeve)\b/.test(s)) {
     return "tops";
+  }
+
+  if (/^(bottoms?|pants?|trousers?|jeans?|shorts?|skirts?|leggings?|joggers?|slacks?|chinos?|cargo(?:es)?|bottom)$/.test(s)) {
+    return "bottoms";
   }
 
   // Bottoms family
@@ -53,9 +66,17 @@ export function normalizeFamily(raw: string): string | null {
     return "bottoms";
   }
 
+  if (/^(dresses?|gowns?|frocks?)$/.test(s)) {
+    return "dresses";
+  }
+
   // Dresses family
   if (/\b(dress)\b/.test(s)) {
     return "dresses";
+  }
+
+  if (/^(outerwear|jackets?|coats?|blazers?|parkas?|windbreakers?|trench(?:es)?|shackets?)$/.test(s)) {
+    return "outerwear";
   }
 
   // Outerwear family
@@ -63,14 +84,26 @@ export function normalizeFamily(raw: string): string | null {
     return "outerwear";
   }
 
+  if (/^(footwear|shoes?|sneakers?|boots?|heels?|flats?|sandals?|loafers?|trainers?|pumps?|oxfords?)$/.test(s)) {
+    return "footwear";
+  }
+
   // Footwear family
   if (/\b(shoe|sneaker|boot|heel|flat|sandal|loafer|flip.?flop|footwear|trainer|pump)\b/.test(s)) {
     return "footwear";
   }
 
+  if (/^(bags?|backpacks?|purses?|clutches?|totes?|satchels?|crossbodies?|handbags?|wallets?)$/.test(s)) {
+    return "bags";
+  }
+
   // Bags family
   if (/\b(bag|backpack|purse|clutch|tote|satchel|crossbody|handbag|wallet)\b/.test(s)) {
     return "bags";
+  }
+
+  if (/^(accessories?|hats?|caps?|scarves?|belts?|gloves?|jewelry|jewellery|watches?|sunglasses?|ties?)$/.test(s)) {
+    return "accessories";
   }
 
   // Accessories family
@@ -79,14 +112,6 @@ export function normalizeFamily(raw: string): string | null {
   }
 
   return null;
-}
-
-/**
- * Check if a string represents a valid product family
- */
-function isValidFamily(s: string): boolean {
-  const families = ["tops", "bottoms", "dresses", "outerwear", "footwear", "bags", "accessories"];
-  return families.includes(String(s ?? "").toLowerCase().trim());
 }
 
 /**
@@ -114,8 +139,8 @@ export function applyFamilyGuard(intentFamily: string | null, productFamily: str
   // No intent family → no guard, keep product
   if (!intentFamily) return true;
 
-  // No product family → drop (unknown product)
-  if (!productFamily) return false;
+  // Unknown family should be kept and penalized later, not dropped.
+  if (!productFamily || productFamily === "unknown") return true;
 
   // Same family → keep
   if (intentFamily === productFamily) return true;
