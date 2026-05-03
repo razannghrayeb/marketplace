@@ -2814,7 +2814,7 @@ function imageCrossGroupDedupeEnabled(): boolean {
 
 /** Keep per-detection results category-safe even when fallback paths relax OpenSearch filters. */
 function imageDetectionCategoryGuardEnabled(): boolean {
-  const raw = String(process.env.SEARCH_IMAGE_DETECTION_CATEGORY_GUARD ?? "1").toLowerCase();
+  const raw = String(process.env.SEARCH_IMAGE_DETECTION_CATEGORY_GUARD ?? "0").toLowerCase();
   return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
 }
 
@@ -3088,23 +3088,18 @@ function applyDetectionCategoryGuard(
   categoryMapping: CategoryMapping,
   queryGender?: string,
 ): ProductResult[] {
+  if (!Array.isArray(products) || products.length === 0) return products;
   const guardEnabled = imageDetectionCategoryGuardEnabled();
-  const strictAlwaysOn =
-    categoryMapping.productCategory === "footwear" ||
-    categoryMapping.productCategory === "bags" ||
-    categoryMapping.productCategory === "accessories";
-  if (!guardEnabled && !strictAlwaysOn) return products;
-  if (!shouldUseStrictDetectionCategoryGuard(categoryMapping.productCategory)) return products;
-
+  const queryFamily = String(categoryMapping.productCategory || "").toLowerCase().trim();
   const strictTerms = hardCategoryTermsForDetection(detectionLabel, categoryMapping);
   const fallbackTerms = getCategorySearchTerms(categoryMapping.productCategory);
-  const baseAllowed = strictTerms.length > 0 ? strictTerms : fallbackTerms;
-  const allowedTerms = [...new Set(baseAllowed.map((t) => normalizeLooseText(t)).filter(Boolean))];
+  const allowedTerms = [...new Set((strictTerms.length > 0 ? strictTerms : fallbackTerms).map((t) => normalizeLooseText(t)).filter(Boolean))];
   const desiredSleeveIntent = inferSleeveIntentFromDetectionLabel(detectionLabel);
   const queryGenderNorm = normalizeBinaryGender(queryGender);
-  if (allowedTerms.length === 0) return products;
+  const hardBlockFamilies = new Set(["shoes", "footwear", "bags", "accessories", "beauty", "home"]);
+  const garbageFamilyRe = /\b(beauty|cosmetic|skincare|lotion|serum|makeup|perfume|fragrance|candle|home|decor|furniture|lamp|table|chair)\b/;
 
-  const guarded = products.filter((p) => {
+  const scored = products.map((p) => {
     const categoryText = normalizeLooseText((p as any).category);
     const categoryCanonicalText = normalizeLooseText((p as any).category_canonical);
     const titleText = normalizeLooseText((p as any).title);
@@ -3455,142 +3450,99 @@ function applyShopLookVisualPrecisionGuard(
   const fallback = products.filter((p) => scoreOf(p) >= fallbackMin);
   if (fallback.length >= strictKeepMin) return fallback;
 
-  // Precision-oriented adaptive backfill:
-  // keep result volume healthy for core apparel categories without opening low-similarity drift.
-  const isCoreCategory =
-    categoryNorm === "tops" ||
-    categoryNorm === "bottoms" ||
-    categoryNorm === "footwear" ||
-    categoryNorm === "outerwear";
-  if (!isCoreCategory) return fallback;
+    const candidateCategoryMacro = mapDetectionToCategory(String((p as any).category ?? (p as any).category_canonical ?? ""), 1).productCategory;
+    const detectionNorm = normalizeLooseText(detectionLabel);
+    const exactTypeTerm = allowedTerms.some((term) => term && textHasWholePhrase(haystack, term));
+    const sameExactType = exactTypeTerm;
+    const sameFamily = queryFamily === candidateCategoryMacro || (queryFamily === "tops" && candidateCategoryMacro === "outerwear");
+    const relatedFamily =
+      (queryFamily === "tops" && candidateCategoryMacro === "outerwear") ||
+      (queryFamily === "outerwear" && candidateCategoryMacro === "tops") ||
+      (queryFamily === "dresses" && candidateCategoryMacro === "outerwear");
 
-  const adaptiveFloor =
-    categoryNorm === "tops"
-      ? Math.max(0.38, baseMin - 0.08)
-      : categoryNorm === "bottoms"
-        ? Math.max(0.41, baseMin - 0.06)
-        : categoryNorm === "outerwear"
-          ? Math.max(0.43, baseMin - 0.08)
-          : Math.max(0.47, baseMin - 0.04);
-  const adaptive = products.filter((p) => scoreOf(p) >= adaptiveFloor);
-  return adaptive.length > 0 ? adaptive : fallback;
-}
+    const clearGarbage =
+      (queryFamily === "tops" || queryFamily === "bottoms" || queryFamily === "dresses" || queryFamily === "outerwear") &&
+      (hardBlockFamilies.has(candidateCategoryMacro || "") || garbageFamilyRe.test(haystack));
 
-/** Filter products by minimum formality requirement (when formal wear is detected from BLIP). */
-function applyFormalityFilter(products: ProductResult[], minFormality: number | undefined): ProductResult[] {
-  if (!minFormality || minFormality <= 0 || !Array.isArray(products) || products.length === 0) {
-    return products;
-  }
+    let score = Number((p as any).finalRelevance01 ?? (p as any).similarity_score ?? 0);
+    const penaltyReasons: string[] = [];
+    const boostReasons: string[] = [];
 
-  // Only enforce a hard numeric gate when the product actually carries structured
-  // formality metadata. Missing metadata should not zero out otherwise valid matches.
-  const hasStructuredFormality = products.some((p) => {
-    const v = Number((p as any)?.style?.formality);
-    return Number.isFinite(v);
-  });
-
-  if (!hasStructuredFormality) {
-    if (minFormality >= 8) {
-      const casualFormalConflictRe = /\b(drawstring|jogger|sweatpants?|track\s?pant|trackpant|athletic|sportswear|sport|workout|gym|training|yoga|legging|hoodie)\b/i;
-      const lexFiltered = products.filter((p) => {
-        const blob = [
-          (p as any).title,
-          (p as any).description,
-          (p as any).category,
-          (p as any).brand,
-          Array.isArray((p as any).product_types) ? (p as any).product_types.join(" ") : (p as any).product_types,
-        ]
-          .filter((x) => x != null)
-          .map((x) => String(x))
-          .join(" ");
-        return !casualFormalConflictRe.test(blob);
-      });
-      if (lexFiltered.length !== products.length) {
-        console.log(
-          `[formality-filter] lexical fallback filtered ${products.length} -> ${lexFiltered.length} (minFormality=${minFormality})`,
-        );
-      }
-      return lexFiltered;
+    if (clearGarbage) {
+      score = 0;
+      penaltyReasons.push("hard_block_cross_family");
+    } else if (sameExactType) {
+      score += 0.18;
+      boostReasons.push("same_exact_type");
+    } else if (sameFamily) {
+      score += 0.08;
+      boostReasons.push("same_family");
+    } else if (relatedFamily) {
+      score -= 0.08;
+      penaltyReasons.push("related_family_penalty");
+    } else {
+      score -= 0.35;
+      penaltyReasons.push("cross_family_penalty");
     }
-    console.log(
-      `[formality-filter] skipped hard filter (no structured formality metadata, minFormality=${minFormality})`,
-    );
-    return products;
-  }
 
-  const filtered = products.filter((p) => {
-    const formalityRaw = Number((p as any)?.style?.formality);
-    if (!Number.isFinite(formalityRaw)) return true;
-    return formalityRaw >= minFormality;
+    if (queryGenderNorm === "men" && hasExplicitWomenCue(haystack)) {
+      score -= 0.22;
+      penaltyReasons.push("women_cue_penalty");
+    }
+    if (queryGenderNorm === "women" && hasExplicitMenCue(haystack)) {
+      score -= 0.22;
+      penaltyReasons.push("men_cue_penalty");
+    }
+    if (categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "dresses") {
+      const observedSleeve = inferSleeveFromProductText(haystack);
+      if (isSleeveContradiction(desiredSleeveIntent, observedSleeve)) {
+        score -= 0.12;
+        penaltyReasons.push("sleeve_contradiction");
+      }
+    }
+
+    if (categoryMapping.productCategory === "footwear") {
+      const wantsHeels = /\b(heel|heels|high heel|stiletto|stilettos|pump|pumps|kitten heel|wedge|wedges|slingback|slingbacks)\b/.test(detectionNorm);
+      const wantsSandalsOrFlats = /\b(sandal|sandals|slide|slides|mule|mules|flip flop|flip flops|flat|flats|ballet)\b/.test(detectionNorm);
+      const productIsHeelLed = /\b(heel|heels|high heel|stiletto|stilettos|pump|pumps|kitten heel|wedge|wedges)\b/.test(haystack);
+      if (wantsSandalsOrFlats && !wantsHeels && productIsHeelLed) {
+        score -= 0.18;
+        penaltyReasons.push("heel_shape_penalty");
+      }
+      if (queryGenderNorm === "men" && (hasExplicitWomenCue(haystack) || isFeminineFootwearCue(haystack))) {
+        score = 0;
+        penaltyReasons.push("footwear_gender_hard_block");
+      }
+    }
+
+    const normalizedScore = Math.max(0, Math.min(1, score));
+    return {
+      ...p,
+      finalRelevance01: normalizedScore,
+      explain: {
+        ...(p as any).explain,
+        debugReasons: {
+          sameExactType,
+          sameFamily,
+          relatedFamily,
+          exactColorMatch: false,
+          sameColorFamily: false,
+          visualSimilarity: Number((p as any).similarity_score ?? 0),
+          typeScore: sameExactType ? 1 : sameFamily ? 0.6 : relatedFamily ? 0.35 : 0,
+          colorScore: 0,
+          sleeveScore: isSleeveContradiction(desiredSleeveIntent, inferSleeveFromProductText(haystack)) ? 0 : 0.05,
+          categoryScore: sameFamily ? 0.08 : relatedFamily ? -0.08 : -0.35,
+          finalScore: normalizedScore,
+          penaltyReasons,
+          boostReasons,
+        },
+      },
+    } as ProductResult;
   });
 
-  if (filtered.length !== products.length) {
-    console.log(`[formality-filter] filtered ${products.length} → ${filtered.length} (minFormality=${minFormality})`);
-  }
+  if (!guardEnabled) return scored.sort((a, b) => Number(b.finalRelevance01 ?? 0) - Number(a.finalRelevance01 ?? 0));
 
-  return filtered;
-}
-
-function applyAthleticMismatchGuard(params: {
-  products: ProductResult[];
-  detectionLabel: string;
-  productCategory: string;
-  softStyle?: string;
-  minFormality?: number;
-}): ProductResult[] {
-  const products = Array.isArray(params.products) ? params.products : [];
-  if (products.length === 0) return products;
-
-  const detectionLabel = String(params.detectionLabel ?? "").toLowerCase();
-  const productCategory = String(params.productCategory ?? "").toLowerCase();
-  const softStyle = String(params.softStyle ?? "").toLowerCase();
-  const minFormality = Number(params.minFormality ?? 0);
-
-  const isAthleticIntent =
-    /\b(sport|athlet|training|workout|gym|fitness|running|jogging|activewear|sportswear)\b/.test(softStyle) ||
-    /\b(sport|athlet|training|workout|gym|fitness|running|jogger|track|sportswear|legging)\b/.test(detectionLabel);
-  if (isAthleticIntent) return products;
-
-  const shouldGuardCategory =
-    productCategory === "tops" ||
-    productCategory === "bottoms" ||
-    productCategory === "outerwear" ||
-    (productCategory === "footwear" && minFormality >= 8);
-  if (!shouldGuardCategory) return products;
-
-  const athleticTokenRe = /\b(sport|sportswear|athlet|training|workout|gym|fitness|crossfit|yoga|jogger|track\s?pant|trackpant|running|runner|dry\s?-?fit|dri\s?-?fit|leggings?)\b/i;
-  const athleticBrandRe = /\b(adidas|nike|puma|reebok|asics|under\s?armour|new\s?balance|lululemon|gymshark)\b/i;
-
-  const filtered = products.filter((p) => {
-    const blob = [
-      (p as any).title,
-      (p as any).description,
-      (p as any).category,
-      (p as any).category_canonical,
-      (p as any).brand,
-      Array.isArray((p as any).product_types) ? (p as any).product_types.join(" ") : (p as any).product_types,
-    ]
-      .filter((x) => x != null)
-      .map((x) => String(x))
-      .join(" ");
-    const athleticByKeywords = athleticTokenRe.test(blob);
-    const athleticByBrandAndText = athleticBrandRe.test(String((p as any).brand ?? "")) && athleticTokenRe.test(blob);
-    return !(athleticByKeywords || athleticByBrandAndText);
-  });
-
-  if (filtered.length !== products.length) {
-    console.log(
-      `[athletic-guard] detection="${params.detectionLabel}" category=${params.productCategory} filtered ${products.length} -> ${filtered.length}`,
-    );
-  }
-
-  return filtered;
-}
-
-function buildSafeNonEmptyFallback(params: {
-  candidates: ProductResult[];
-  productCategory: string;
-  similarityThreshold: number;
+  return scored.sort((a, b) => Number(b.finalRelevance01 ?? 0) - Number(a.finalRelevance01 ?? 0));
   limit: number;
 }): ProductResult[] {
   const candidates = Array.isArray(params.candidates) ? params.candidates : [];

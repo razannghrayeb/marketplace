@@ -1041,14 +1041,14 @@ export function computeHitRelevance(
     ? crossFamilyPenalty * (0.55 + 0.45 * typeMetadataConfidence)
     : crossFamilyPenalty;
   const crossPenTrace = Math.max(0, crossFamilyPenaltyForFinal);
-  const hardBlocked = hasReliableTypeIntent && crossPenTrace >= 0.8;
+  const hardBlocked = hasReliableTypeIntent && crossPenTrace >= 0.9;
   const typeGateFactor = !hasReliableTypeIntent
     ? 1
     : productTypeCompliance >= 0.5
       ? 1
       : productTypeCompliance >= 0.2
-        ? 0.3
-        : 0.05;
+        ? 0.55
+        : 0.18;
 
   let finalRelevance01 = computeFinalRelevance01({
     hasTypeIntent,

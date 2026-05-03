@@ -714,7 +714,9 @@ function binaryGenderAllowsUnisexFilter(g: string): boolean {
 function computeTextRecallSize(limit: number, offset: number): number {
   const w = config.search.recallWindow;
   const cap = config.search.recallMax;
-  return Math.min(cap, Math.max(w, offset + limit));
+  const widened = Math.max(w, Math.ceil(limit * 25));
+  const tailRoom = offset + Math.ceil(limit * 1.5);
+  return Math.min(cap, Math.max(widened, tailRoom));
 }
 
 type LengthIntent = "mini" | "midi" | "maxi" | "short" | "long";
@@ -1476,7 +1478,7 @@ export async function textSearch(
           knn: {
             embedding: {
               vector: embedding,
-              k: Math.min(Math.max(recallSize * 2, 80), 400),
+              k: Math.min(Math.max(recallSize * 3, 120), 600),
             },
           },
         });

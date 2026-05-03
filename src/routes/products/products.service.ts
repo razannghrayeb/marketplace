@@ -3360,7 +3360,7 @@ function imageDetectionFinalAcceptFloor(category: string): number {
  * Disable with SEARCH_IMAGE_EXACT_COSINE_RERANK=0.
  */
 function imageExactCosineRerankEnabled(): boolean {
-  const v = String(process.env.SEARCH_IMAGE_EXACT_COSINE_RERANK ?? "1").toLowerCase();
+  const v = String(process.env.SEARCH_IMAGE_EXACT_COSINE_RERANK ?? process.env.SEARCH_EXACT_COSINE_RERANK ?? "1").toLowerCase();
   return v !== "0" && v !== "false";
 }
 
@@ -3776,7 +3776,7 @@ export async function searchByImageWithSimilarity(
     sessionId,
     userId,
     sessionFilters: sessionFiltersFromParams,
-    collapseVariantGroups: collapseVariantGroupsRequested = true,
+    collapseVariantGroups: collapseVariantGroupsRequested = false,
   } = params;
 
   if (!imageEmbedding || imageEmbedding.length === 0) {

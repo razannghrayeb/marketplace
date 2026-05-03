@@ -99,7 +99,7 @@ export const config = {
     /** Image-only kNN gate; compared as raw cosine [0,1] after knnCosinesimilScoreToCosine01. */
     imageSimilarityThreshold: finiteEnvNumber(
       process.env.CLIP_IMAGE_SIMILARITY_THRESHOLD,
-      0.55,
+      0.38,
       0.2,
       0.95,
     ),
