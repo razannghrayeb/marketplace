@@ -87,6 +87,7 @@ RUN set -eux; \
 
 # Runtime OS packages: full stack only when embedding YOLO
 # Add retry logic for apt-get to handle transient network issues
+# Note: X11 libraries (libgl1-mesa, libsm6, libxext6, libxrender1) removed as not needed for headless API
 RUN set -eux; \
   apt_update_max_attempts=5; \
   apt_update_attempt=0; \
@@ -99,7 +100,7 @@ RUN set -eux; \
   apt-get install -y --no-install-recommends \
   wget \
   python3 python3-venv python3-pip \
-  libgl1-mesa libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1; \
+  libglib2.0-0 libgomp1; \
   else \
   apt-get install -y --no-install-recommends wget; \
   fi; \
