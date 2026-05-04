@@ -20,6 +20,23 @@ describe("colorCanonical", () => {
     assert.ok(r.compliance > 0);
   });
 
+  it("white/off-white intent does not over-score brown family colors", () => {
+    const brown = tieredColorListCompliance(["white", "off-white"], ["brown"], "any");
+    const tan = tieredColorListCompliance(["white", "off-white"], ["tan"], "any");
+    assert.ok(brown.compliance <= 0.45);
+    assert.ok(tan.compliance <= 0.45);
+  });
+
+  it("gray intent does not over-score brown products", () => {
+    const brown = tieredColorListCompliance(["gray"], ["brown"], "any");
+    assert.ok(brown.compliance <= 0.18);
+  });
+
+  it("pink intent treats common fuchsia typos as bright-pink family", () => {
+    const typo = tieredColorListCompliance(["pink"], ["fuhsia"], "any");
+    assert.ok(typo.compliance >= 0.7);
+  });
+
   it("tieredColorMatchScore light-blue exact match preferred over white", () => {
     // User searches for "light-blue" → product has both "light-blue" and "white"
     // Should return light-blue as exact match, not white fallback

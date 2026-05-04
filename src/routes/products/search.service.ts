@@ -54,6 +54,7 @@ export async function searchByImageWithSimilarity(
     predictedCategoryAisles,
     detectionYoloConfidence,
     detectionProductCategory,
+    imageMode,
     detectionLabel,
     softProductTypeHints,
     knnField,
@@ -86,6 +87,7 @@ export async function searchByImageWithSimilarity(
     predictedCategoryAisles,
     detectionYoloConfidence,
     detectionProductCategory,
+    imageMode,
     detectionLabel,
     softProductTypeHints,
     knnField,
@@ -225,4 +227,3 @@ export {
   findRelatedProducts,
   type FindRelatedProductsOptions,
 } from "../../lib/search/relatedProducts";
-

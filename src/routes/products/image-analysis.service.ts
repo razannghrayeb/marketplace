@@ -4066,6 +4066,51 @@ function applyRelevanceThresholdFilter(
   return rankApparelByDesiredColor(filtered);
 }
 
+function minCoreResultsPerDetection(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_MIN_RESULTS_PER_DETECTION ?? "8");
+  return Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : 8;
+}
+
+function samePoolSafeFill(params: {
+  current: ProductResult[];
+  pool: ProductResult[];
+  min: number;
+  category?: string;
+}): ProductResult[] {
+  const current = Array.isArray(params.current) ? params.current : [];
+  const pool = Array.isArray(params.pool) ? params.pool : [];
+  const min = Math.max(0, Math.floor(params.min));
+  if (min <= 0 || current.length >= min || pool.length <= current.length) return current;
+
+  const existingIds = new Set(current.map((p: any) => String(p?.id ?? p?.product_id ?? "")));
+  const isSafe = (item: ProductResult): boolean => {
+    const explain = ((item as any)?.explain ?? {}) as Record<string, unknown>;
+    if (Boolean(explain.hardBlocked)) return false;
+    if (Number(explain.crossFamilyPenalty ?? 0) >= 0.55) return false;
+    if (Number(explain.audienceCompliance ?? 1) < 0.45) return false;
+    const hasColorIntent = Boolean(explain.hasColorIntent) || Boolean(explain.colorIntentGatesFinalRelevance);
+    const colorTier = String(explain.colorTier ?? "").toLowerCase().trim();
+    const colorCompliance = Number(explain.colorCompliance ?? NaN);
+    if (hasColorIntent && colorTier === "none" && Number.isFinite(colorCompliance) && colorCompliance < 0.2) return false;
+    return true;
+  };
+
+  const fillers = sortProductsByFinalRelevanceDesc(pool)
+    .filter((item: any) => {
+      const id = String(item?.id ?? item?.product_id ?? "");
+      return id.length > 0 && !existingIds.has(id);
+    })
+    .filter(isSafe)
+    .slice(0, Math.max(0, min - current.length))
+    .map((item) => ({
+      ...item,
+      relevanceFallbackPreserved: true,
+      fallbackReason: "same_pool_safe_fill",
+    }));
+
+  return fillers.length > 0 ? sortProductsByFinalRelevanceDesc([...current, ...fillers]) : current;
+}
+
 function isCoreOutfitCategory(category: string | undefined): boolean {
   const normalized = String(category ?? "").trim().toLowerCase();
   return (
@@ -5982,6 +6027,10 @@ export class ImageAnalysisService {
         ageGroup: "kids",
       };
     }
+    const imageModeForSearch = inferImageMode({
+      caption: blipCaption,
+      detections: analysisResult.detection.items ?? [],
+    });
 
     const detectionSetupStartedAt = Date.now();
 
@@ -6182,6 +6231,7 @@ export class ImageAnalysisService {
             const result = await searchByImageWithSimilarity({
               ...payloadForCall,
               filters: filtersForCall,
+              imageMode: (payloadForCall as any).imageMode ?? imageModeForSearch,
               detectionLabel: (payloadForCall as any).detectionLabel ?? label ?? detection.label,
             });
             const elapsedMs = Date.now() - startedAt;
@@ -6304,7 +6354,7 @@ export class ImageAnalysisService {
             const isShortSleeveTop = /\bshort sleeve top\b/.test(labelNormForTopHints);
             const isMenAudience = String(inferredAudience.gender ?? "").toLowerCase().trim() === "men";
             if (isShortSleeveTop) {
-              const shortTopPriority = ["t-shirt", "tshirt", "tee", "shirt", "polo", "top", "tops"];
+              const shortTopPriority = ["t-shirt", "tshirt", "tee", "shirt", "top", "tops"];
               softProductTypeHints = [...new Set([...shortTopPriority, ...softProductTypeHints])];
             }
             // Avoid overly narrow/feminine seeds for men tops; they collapse recall.
@@ -6965,6 +7015,13 @@ export class ImageAnalysisService {
                 blipCaption ?? "",
                 detCaption,
               );
+              softProductTypeHints = suppressPoloForPlainShortTop(
+                softProductTypeHints,
+                label,
+                detection.raw_label,
+                String(detCaption ?? "").toLowerCase(),
+                String(blipCaption ?? "").toLowerCase(),
+              );
               if (shouldForceTypeFilterForDetection(detection, categoryMapping, softProductTypeHints)) {
                 filters.productTypes = softProductTypeHints.slice(0, 10);
               }
@@ -7352,6 +7409,7 @@ export class ImageAnalysisService {
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
+              imageMode: imageModeForSearch,
               filters: filtersRetry,
               softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
               limit: detectionRetrievalLimit,
@@ -7499,6 +7557,7 @@ export class ImageAnalysisService {
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
+              imageMode: imageModeForSearch,
               filters: fallbackFilters,
               limit: detectionRetrievalLimit,
               similarityThreshold: detectionSimilarityThreshold,
@@ -7543,6 +7602,7 @@ export class ImageAnalysisService {
                 pHash: sourceImagePHash,
                 detectionYoloConfidence: detection.confidence,
                 detectionProductCategory: categoryMapping.productCategory,
+                imageMode: imageModeForSearch,
                 // Keep crop-derived structural intent even in last-resort fallback.
                 filters: fallbackStructuralFilters as any,
                 softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
@@ -7978,6 +8038,7 @@ export class ImageAnalysisService {
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
+              imageMode: imageModeForSearch,
               filters: ablationFilters,
               softProductTypeHints,
               limit: detectionRetrievalLimit,
@@ -8466,7 +8527,7 @@ export class ImageAnalysisService {
                   ? Math.min(minRelevanceThreshold, 0.28)
                 : minRelevanceThreshold;
       const preserveCountForDetection = (isCoreOutfitCategory(detection.category) || suitCaptionTailoredFallback)
-        ? Math.min(3, Math.max(1, Math.floor(resolvedLimitPerItem * 0.12)))
+        ? minCoreResultsPerDetection()
         : 0;
       const inferredDesiredColor = (() => {
         const explicitColor = (detection.appliedFilters as any)?.color;
@@ -8485,13 +8546,21 @@ export class ImageAnalysisService {
           `[relevance-debug] detection="${detection.detection?.label ?? "unknown"}" category="${detection.category}" desiredColor="${String(inferredDesiredColor ?? "")}" source=${(detection.appliedFilters as any)?.color ? "explicit" : "inferred_or_none"}`,
         );
       }
-      const afterProducts = applyRelevanceThresholdFilter(beforeProducts, detectionMinRelevanceThreshold, {
+      const afterProductsRaw = applyRelevanceThresholdFilter(beforeProducts, detectionMinRelevanceThreshold, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category) || suitCaptionTailoredFallback,
         preserveAtLeastCount: preserveCountForDetection,
         detectionLabel: detection.detection?.label,
         category: detection.category,
         desiredColor: inferredDesiredColor,
       });
+      const afterProducts = (isCoreOutfitCategory(detection.category) || suitCaptionTailoredFallback)
+        ? samePoolSafeFill({
+            current: afterProductsRaw,
+            pool: beforeProducts,
+            min: minCoreResultsPerDetection(),
+            category: detection.category,
+          })
+        : afterProductsRaw;
       const droppedByFinalRelevance = Math.max(0, beforeProducts.length - afterProducts.length);
       const droppedByColorGate = beforeProducts.filter((prod) => {
         const relevance = Number((prod as any)?.finalRelevance01 ?? 0);
@@ -8957,6 +9026,10 @@ export class ImageAnalysisService {
         ageGroup: "kids",
       };
     }
+    const selectiveImageModeForSearch = inferImageMode({
+      caption: blipCaption,
+      detections: allItemsToProcess,
+    });
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
     const inferredColorsByItem: Record<string, string | null> = {};
@@ -9468,6 +9541,13 @@ export class ImageAnalysisService {
                 blipCaption ?? "",
                 detCaption,
               );
+              softProductTypeHints = suppressPoloForPlainShortTop(
+                softProductTypeHints,
+                categorySource,
+                detection.raw_label,
+                String(detCaption ?? "").toLowerCase(),
+                String(blipCaption ?? "").toLowerCase(),
+              );
               if (shouldForceTypeFilterForDetection(detection, categoryMapping, softProductTypeHints)) {
                 filters.productTypes = softProductTypeHints.slice(0, 10);
               }
@@ -9579,6 +9659,7 @@ export class ImageAnalysisService {
             pHash: sourceImagePHash,
             detectionYoloConfidence: detection.confidence,
             detectionProductCategory: categoryMapping.productCategory,
+            imageMode: selectiveImageModeForSearch,
             filters,
             softProductTypeHints,
             limit: detectionRetrievalLimit,
@@ -9637,6 +9718,7 @@ export class ImageAnalysisService {
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
+              imageMode: selectiveImageModeForSearch,
               filters: filtersRetry,
               softProductTypeHints,
               limit: detectionRetrievalLimit,
@@ -9704,6 +9786,7 @@ export class ImageAnalysisService {
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
+              imageMode: selectiveImageModeForSearch,
               filters: fallbackFilters,
               softProductTypeHints,
               limit: retrievalLimit,
@@ -9750,6 +9833,7 @@ export class ImageAnalysisService {
                 pHash: sourceImagePHash,
                 detectionYoloConfidence: detection.confidence,
                 detectionProductCategory: categoryMapping.productCategory,
+                imageMode: selectiveImageModeForSearch,
                 // Keep crop-derived structural intent even in last-resort fallback.
                 filters: fallbackStructuralFilters as any,
                 limit: retrievalLimit,
@@ -9790,6 +9874,7 @@ export class ImageAnalysisService {
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
+              imageMode: selectiveImageModeForSearch,
               filters: filtersNoHardTypes,
               softProductTypeHints,
               limit: retrievalLimit,
@@ -9849,6 +9934,7 @@ export class ImageAnalysisService {
                   pHash: sourceImagePHash,
                   detectionYoloConfidence: detection.confidence,
                   detectionProductCategory: categoryMapping.productCategory,
+                  imageMode: selectiveImageModeForSearch,
                   filters,
                   softProductTypeHints,
                   limit: retrievalLimit,
@@ -9930,6 +10016,7 @@ export class ImageAnalysisService {
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
+              imageMode: selectiveImageModeForSearch,
               filters: ablationFilters,
               softProductTypeHints,
               limit: retrievalLimit,
@@ -10161,7 +10248,7 @@ export class ImageAnalysisService {
         );
       const preserveCountForDetection = isCoreOutfitCategory(detection.category)
         || suitCaptionTailoredFallback
-        ? Math.min(3, Math.max(1, Math.floor(resolvedLimitPerItem * 0.12)))
+        ? minCoreResultsPerDetection()
         : 0;
       const inferredDesiredColor = (() => {
         const explicitColor = (detection.appliedFilters as any)?.color;
@@ -10178,13 +10265,21 @@ export class ImageAnalysisService {
       console.log(
         `[relevance-debug-sel] detection="${detection.detection?.label ?? "unknown"}" category="${detection.category}" desiredColor="${String(inferredDesiredColor ?? "")}" source=${(detection.appliedFilters as any)?.color ? "explicit" : "inferred_or_none"}`,
       );
-      const afterProducts = applyRelevanceThresholdFilter(beforeProducts, minRelevanceThresholdSel, {
+      const afterProductsRaw = applyRelevanceThresholdFilter(beforeProducts, minRelevanceThresholdSel, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category) || suitCaptionTailoredFallback,
         preserveAtLeastCount: preserveCountForDetection,
         detectionLabel: detection.detection?.label,
         category: detection.category,
         desiredColor: inferredDesiredColor,
       });
+      const afterProducts = (isCoreOutfitCategory(detection.category) || suitCaptionTailoredFallback)
+        ? samePoolSafeFill({
+            current: afterProductsRaw,
+            pool: beforeProducts,
+            min: minCoreResultsPerDetection(),
+            category: detection.category,
+          })
+        : afterProductsRaw;
       const droppedByFinalRelevance = Math.max(0, beforeProducts.length - afterProducts.length);
       const droppedByColorGate = beforeProducts.filter((prod) => {
         const relevance = Number((prod as any)?.finalRelevance01 ?? 0);

@@ -119,9 +119,9 @@ function sameCanonicalColor(color1: string | null, color2: string | null): boole
  * Scoring logic:
  * - Same color: 1.0
  * - Same family: 0.8
- * - Neutral compatible: 0.55
+ * - Neutral compatible: 0.45
  * - Clear contradiction: 0.15
- * - Unrelated colors: 0.35
+ * - Unrelated colors: 0.18
  * - No color info: 0.5 (uncertain, not penalized)
  */
 export function colorCompatibility(
@@ -150,7 +150,7 @@ export function colorCompatibility(
 
   // Both neutral: compatible (can wear gray with beige, brown with white, etc.)
   if (neutralCompatible(intentColor, productColor)) {
-    return 0.55;
+    return 0.45;
   }
 
   // Clear contradiction
@@ -159,7 +159,7 @@ export function colorCompatibility(
   }
 
   // Unrelated colors (e.g., blue vs red, yellow vs purple)
-  return 0.35;
+  return 0.18;
 }
 
 /**
