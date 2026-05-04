@@ -3510,6 +3510,101 @@ function applySleeveIntentGuard(params: {
   return filtered;
 }
 
+/**
+ * MAIN PATH FIX: Minimum result count for each category to be returned.
+ * Recovery should only run if we cannot meet these minimums from the initial pool.
+ */
+function minMainPathResults(category: string): number {
+  const cat = String(category ?? "").toLowerCase().trim();
+  switch (cat) {
+    case "tops":
+    case "bottoms":
+    case "dresses":
+    case "outerwear":
+    case "footwear":
+      return 8;
+    case "bags":
+    case "accessories":
+      return 6;
+    default:
+      return 8;
+  }
+}
+
+/**
+ * MAIN PATH FIX: Check if a product is compatible with the detection category (soft guard).
+ * This is used to fill from the original pool without breaking category intent.
+ */
+function isMainPathFamilyCompatible(
+  product: ProductResult,
+  category: string,
+): boolean {
+  const fam = String(
+    (product as any).normalizedFamily ??
+    (product as any).debugContract?.productFamily ??
+    ""
+  ).toLowerCase().trim();
+
+  if (!fam) {
+    // If family is unknown, accept if score is high enough
+    const score = Number(
+      (product as any).finalRelevance01 ?? (product as any).mlRerankScore ?? 0
+    );
+    return score >= 0.72;
+  }
+
+  const catNorm = String(category ?? "").toLowerCase().trim();
+
+  if (catNorm === "tops") return fam === "tops";
+  if (catNorm === "bottoms") return fam === "bottoms";
+  if (catNorm === "dresses") return fam === "dresses";
+  if (catNorm === "footwear") return fam === "footwear";
+  if (catNorm === "bags") return fam === "bags";
+  if (catNorm === "accessories") return fam === "accessories";
+
+  // Outerwear can allow tops only if visual score is high
+  if (catNorm === "outerwear") {
+    return fam === "outerwear" || fam === "tops";
+  }
+
+  return true;
+}
+
+/**
+ * MAIN PATH FIX: Fill the display list from the original search pool when guards
+ * have reduced results below the minimum. This preserves similar products that pass
+ * soft compatibility checks.
+ */
+function mainPathCoverageFill({
+  current,
+  pool,
+  category,
+  min,
+}: {
+  current: ProductResult[];
+  pool: ProductResult[];
+  category: string;
+  min: number;
+}): ProductResult[] {
+  if (current.length >= min) return current;
+
+  const seen = new Set(current.map((p: any) => String(p.id ?? "")));
+  const fillers = (Array.isArray(pool) ? pool : [])
+    .filter((p: any) => !seen.has(String(p.id ?? "")))
+    .filter((p) => isMainPathFamilyCompatible(p, category))
+    .sort((a: any, b: any) =>
+      Number(b.finalRelevance01 ?? b.mlRerankScore ?? 0) -
+      Number(a.finalRelevance01 ?? a.mlRerankScore ?? 0)
+    )
+    .slice(0, min - current.length)
+    .map((p: any) => ({
+      ...p,
+      mainPathFillReason: "coverage_from_initial_pool",
+    }));
+
+  return [...current, ...fillers];
+}
+
 function applyShopLookVisualPrecisionGuard(
   products: ProductResult[],
   similarityThreshold: number,
@@ -7302,9 +7397,16 @@ export class ImageAnalysisService {
             searchFirstMs >= shopLookSlowFirstSearchMsThreshold();
           const slowSearchSkipRecoveryMinResults =
             shopLookSlowFirstSearchSkipRecoveryMinResultsByCategory(categoryMapping.productCategory);
-          const sufficientFirstPassResults =
-            similarResult.results.length >= slowSearchSkipRecoveryMinResults;
-          if (slowFirstSearch && sufficientFirstPassResults) {
+          // MAIN PATH FIX: For core categories, never freeze retries if results are below minimum.
+          // Use the actual minimum requirement from minMainPathResults.
+          const isCoreForAdaptive = ["tops", "bottoms", "dresses", "outerwear", "footwear"].includes(
+            String(categoryMapping.productCategory ?? "").toLowerCase(),
+          );
+          const firstPassGoodEnough = isCoreForAdaptive
+            ? similarResult.results.length >= minMainPathResults(categoryMapping.productCategory)
+            : similarResult.results.length >= slowSearchSkipRecoveryMinResults;
+
+          if (slowFirstSearch && firstPassGoodEnough) {
             // Freeze additional retries/recoveries for this detection only.
             // In deterministic two-pass mode, do NOT pin the limit — Pass B must still be
             // available when results are below the Pass B minimum threshold.
@@ -7330,8 +7432,19 @@ export class ImageAnalysisService {
               categoryMapping.productCategory,
               resolvedLimitPerItem,
             );
+            // MAIN PATH FIX: For core fashion categories, always check against minimum threshold.
+            // Do not use recoveryOnlyOnZero for core outfits; it's only for non-core categories.
+            const isCoreCategory = ["tops", "bottoms", "dresses", "outerwear", "footwear"].includes(
+              String(categoryMapping.productCategory ?? "").toLowerCase(),
+            );
+            const shouldRunPassB = isCoreCategory
+              ? similarResult.results.length < minMainPathResults(categoryMapping.productCategory)
+              : (recoveryOnlyOnZero
+                ? similarResult.results.length === 0
+                : similarResult.results.length < passBMinResults);
+
             if (
-              (recoveryOnlyOnZero ? similarResult.results.length === 0 : similarResult.results.length < passBMinResults) &&
+              shouldRunPassB &&
               detectionSearchCalls < detectionSearchCallLimit
             ) {
               // Pass B uses the alternate KNN field to retrieve complementary neighbors;
@@ -7695,15 +7808,19 @@ export class ImageAnalysisService {
               if (similarResult.results.length >= Math.max(4, Math.floor(retrievalLimit * 0.5))) break;
             }
           }
+          }
 
           if (hotPathDebug) {
             console.log(`[skip-trace] detection="${label}" after_knn_search=${similarResult.results.length}`);
           }
 
-          knnCandidateCount = similarResult.results.length;
+          // MAIN PATH FIX: Preserve the full search pool before guards destroy it.
+          // This is the original candidate list from OpenSearch/products.service.
+          const fullSearchPool = Array.isArray(similarResult.results) ? [...similarResult.results] : [];
+          knnCandidateCount = fullSearchPool.length;
 
           precisionSafeResults = applyShopLookVisualPrecisionGuard(
-            similarResult.results,
+            fullSearchPool,
             categoryMapping.productCategory === "footwear" && (detection.area_ratio ?? 0) <= 0.02
               ? shopLookTinyFootwearRecoveryThreshold(detectionSimilarityThreshold)
               : detectionSimilarityThreshold,
@@ -7711,7 +7828,7 @@ export class ImageAnalysisService {
           );
 
           if (hotPathDebug) {
-            console.log(`[skip-trace] detection="${label}" after_precision_guard=${precisionSafeResults.length} (filtered_by=${similarResult.results.length - precisionSafeResults.length})`);
+            console.log(`[skip-trace] detection="${label}" after_precision_guard=${precisionSafeResults.length} (filtered_by=${fullSearchPool.length - precisionSafeResults.length})`);
           }
 
           categorySafeResults = applyDetectionCategoryGuard(
@@ -7770,10 +7887,19 @@ export class ImageAnalysisService {
             }
           }
 
-          similarResult = {
-            ...similarResult,
-            results: athleticSafeResults,
-          };
+          // MAIN PATH FIX: Apply coverage fill from the original pool BEFORE any recovery.
+          // This brings back similar products that were filtered by guards but are still viable.
+          const minNeeded = minMainPathResults(categoryMapping.productCategory);
+          let displayResults = mainPathCoverageFill({
+            current: athleticSafeResults,
+            pool: fullSearchPool,
+            category: categoryMapping.productCategory,
+            min: minNeeded,
+          });
+
+          if (hotPathDebug) {
+            console.log(`[skip-trace] detection="${label}" after_mainpath_coverage_fill=${displayResults.length} (filled_from=${fullSearchPool.length})`);
+          }
 
           // Footwear can go sparse with crop-only embeddings; run recovery when the group
           // is empty or too small, not only for tiny boxes.
@@ -7790,13 +7916,11 @@ export class ImageAnalysisService {
             : Math.max(2, Math.floor(resolvedLimitPerItem * 0.2));
           if (
             detectionSearchCalls < maxSearchCallsPerDetection &&
-            (recoveryOnlyOnZero
-              ? similarResult.results.length === 0
-              : similarResult.results.length < footwearLowCountThreshold) &&
+            displayResults.length < footwearLowCountThreshold &&
             categoryMapping.productCategory === "footwear"
           ) {
             if (hotPathDebug) {
-              console.log(`[recovery-attempt] detection="${label}" type=footwear_recovery reason="low_count(${similarResult.results.length})" subtype_refined=${footwearSubtypeWasRefined}`);
+              console.log(`[recovery-attempt] detection="${label}" type=footwear_recovery reason="low_count(${displayResults.length})" subtype_refined=${footwearSubtypeWasRefined}`);
             }
             const footwearTerms = hardCategoryTermsForDetection(label, categoryMapping, {
               confidence: detection.confidence,
@@ -7863,17 +7987,14 @@ export class ImageAnalysisService {
                 if (hotPathDebug) {
                   console.log(`[recovery-result] detection="${label}" type=footwear_recovery recovered=${footwearRecovery.results.length} products`);
                 }
-                similarResult = {
-                  ...similarResult,
-                  results: mergeImageSearchResultsById(
-                    similarResult.results,
-                    footwearRecovery.results,
-                    retrievalLimit,
-                  ),
-                };
+                displayResults = mergeImageSearchResultsById(
+                  displayResults,
+                  footwearRecovery.results,
+                  retrievalLimit,
+                );
               }
 
-              if (similarResult.results.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) {
+              if (displayResults.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) {
                 break;
               }
             }
@@ -7883,9 +8004,7 @@ export class ImageAnalysisService {
           const topsRecoveryMinKeep = shopLookTopRecoveryMinKeep(resolvedLimitPerItem);
           if (
             detectionSearchCalls < maxSearchCallsPerDetection &&
-            (recoveryOnlyOnZero
-              ? guardedCountForRecovery === 0
-              : guardedCountForRecovery < topsRecoveryMinKeep) &&
+            displayResults.length < minNeeded &&
             categoryMapping.productCategory === "tops" &&
             (((detection.confidence ?? 0) >= 0.45 && (detection.area_ratio ?? 0) >= 0.02) ||
               (vestLikeRecovery &&
@@ -7980,17 +8099,14 @@ export class ImageAnalysisService {
                 if (hotPathDebug) {
                   console.log(`[recovery-result] detection="${label}" type=tops_recovery recovered=${topRecoverySafeResults.length} products`);
                 }
-                similarResult = {
-                  ...similarResult,
-                  results: mergeImageSearchResultsById(
-                    similarResult.results,
-                    topRecoverySafeResults,
-                    retrievalLimit,
-                  ),
-                };
+                displayResults = mergeImageSearchResultsById(
+                  displayResults,
+                  topRecoverySafeResults,
+                  retrievalLimit,
+                );
               }
 
-              if (similarResult.results.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) {
+              if (displayResults.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) {
                 break;
               }
             }
@@ -8005,9 +8121,7 @@ export class ImageAnalysisService {
           if (
             detectionSearchCalls < maxSearchCallsPerDetection &&
             topOrDressCategory &&
-            (recoveryOnlyOnZero
-              ? guardedCountForRecovery === 0
-              : guardedCountForRecovery < topOrDressMinKeep)
+            displayResults.length < minNeeded
           ) {
             const ablationTerms = hardCategoryTermsForDetection(label, categoryMapping, {
               confidence: detection.confidence,
@@ -8081,22 +8195,19 @@ export class ImageAnalysisService {
               minFormality: Number((filters as any).minFormality ?? 0),
             });
 
-            const currentStrength = detectionResultStrength(similarResult.results);
+            const currentStrength = detectionResultStrength(displayResults);
             const ablationStrength = detectionResultStrength(ablationSafeResults);
             const shouldUseAblation =
-              ablationSafeResults.length > similarResult.results.length ||
-              (ablationSafeResults.length >= Math.max(2, similarResult.results.length) && ablationStrength > currentStrength + 0.03);
+              ablationSafeResults.length > displayResults.length ||
+              (ablationSafeResults.length >= Math.max(2, displayResults.length) && ablationStrength > currentStrength + 0.03);
 
             if (shouldUseAblation) {
               if (hotPathDebug) {
                 console.log(
-                  `[recovery-result] detection="${label}" type=${categoryMapping.productCategory}_ablation switched count=${similarResult.results.length}->${ablationSafeResults.length} strength=${currentStrength.toFixed(3)}->${ablationStrength.toFixed(3)}`,
+                  `[recovery-result] detection="${label}" type=${categoryMapping.productCategory}_ablation switched count=${displayResults.length}->${ablationSafeResults.length} strength=${currentStrength.toFixed(3)}->${ablationStrength.toFixed(3)}`,
                 );
               }
-              similarResult = {
-                ...similarResult,
-                results: ablationSafeResults,
-              };
+              displayResults = ablationSafeResults;
             }
           }
 
@@ -8111,7 +8222,7 @@ export class ImageAnalysisService {
           if (
             detectionSearchCalls < maxSearchCallsPerDetection &&
             categoryMapping.productCategory === "tops" &&
-            guardedCountForRecovery === 0
+            displayResults.length === 0
           ) {
             const topRecoveryBaseThreshold = shopLookTopRecoverySimilarityThreshold(similarityThreshold);
             const stagedTopRecoveries: Array<{
@@ -8215,12 +8326,9 @@ export class ImageAnalysisService {
                     `[recovery-stage] detection="${label}" stage=${stage.reason} recovered=${stageAthleticSafe.length}`,
                   );
                 }
-                similarResult = {
-                  ...similarResult,
-                  results: mergeImageSearchResultsById(similarResult.results, stageAthleticSafe, retrievalLimit),
-                };
+                displayResults = mergeImageSearchResultsById(displayResults, stageAthleticSafe, retrievalLimit);
               }
-              if (similarResult.results.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) break;
+              if (displayResults.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) break;
             }
           }
 
@@ -8231,11 +8339,11 @@ export class ImageAnalysisService {
           // 3. Catalog may have limited bag inventory
           if (
             detectionSearchCalls < maxSearchCallsPerDetection &&
-            similarResult.results.length === 0 &&
+            displayResults.length < minNeeded &&
             categoryMapping.productCategory === "bags"
           ) {
             if (hotPathDebug) {
-              console.log(`[recovery-attempt] detection="${label}" type=bag_recovery reason="empty bag search"`);
+              console.log(`[recovery-attempt] detection="${label}" type=bag_recovery reason="low_count(${displayResults.length})"`);
             }
             const bagTerms = hardCategoryTermsForDetection(label, categoryMapping, {
               confidence: detection.confidence,
@@ -8314,24 +8422,23 @@ export class ImageAnalysisService {
                 if (hotPathDebug) {
                   console.log(`[recovery-result] detection="${label}" type=bag_recovery recovered=${bagRecoverySafeResults.length} products`);
                 }
-                similarResult = {
-                  ...similarResult,
-                  results: mergeImageSearchResultsById(
-                    similarResult.results,
-                    bagRecoverySafeResults,
-                    retrievalLimit,
-                  ),
-                };
+                displayResults = mergeImageSearchResultsById(
+                  displayResults,
+                  bagRecoverySafeResults,
+                  retrievalLimit,
+                );
               }
 
-              if (similarResult.results.length >= Math.max(1, Math.floor(resolvedLimitPerItem * 0.15))) {
+              if (displayResults.length >= Math.max(1, Math.floor(resolvedLimitPerItem * 0.15))) {
                 break;
               }
             }
           }
 
-          if (similarResult.results.length === 0) {
-            // Fail-safe: avoid zero-result detections when we already have category-safe
+          // MAIN PATH FIX: Apply fallback only when display results are still below minimum.
+          // Use the minimum threshold, not just zero. Also increase the limit from 4 to the category minimum.
+          if (displayResults.length < minNeeded) {
+            // Fail-safe: avoid low-result detections when we already have category-safe
             // candidates, but keep quality by using a strict score floor.
             const desiredSleeve = inferSleeveIntentFromDetectionLabel(detection.label);
             const sleeveGateStrict =
@@ -8351,24 +8458,19 @@ export class ImageAnalysisService {
               candidates: fallbackPool,
               productCategory: categoryMapping.productCategory,
               similarityThreshold,
-              limit: Math.max(1, Math.min(resolvedLimitPerItem, 4)),
+              limit: Math.max(1, Math.min(resolvedLimitPerItem, minNeeded)),
             });
             if (safeFallback.length > 0) {
-              similarResult = {
-                ...similarResult,
-                results: safeFallback,
-              };
+              displayResults = mergeImageSearchResultsById(displayResults, safeFallback, retrievalLimit);
               if (hotPathDebug) {
                 console.log(
-                  `[nonempty-fallback] detection="${label}" recovered=${safeFallback.length} category=${categoryMapping.productCategory}`,
+                  `[nonempty-fallback] detection="${label}" recovered=${safeFallback.length} category=${categoryMapping.productCategory} total=${displayResults.length}`,
                 );
               }
             }
           }
 
-          }
-
-          if (similarResult.results.length === 0 && !includeEmptyDetectionGroups) {
+          if (displayResults.length === 0 && !includeEmptyDetectionGroups) {
             if (hotPathDebug) {
               console.log(`[detection-skip] label="${label}" reason="empty_and_includeEmpty=false"`);
             }
@@ -8379,10 +8481,10 @@ export class ImageAnalysisService {
             console.info(
               `[detection-substep-timing] label="${label}" crop_clip_ms=${cropEmbedMs} blip_ms=${detCaptionMs} search_first_ms=${searchFirstMs} total_task_ms=${Date.now() - detectionTaskStartedAt}`,
             );
-            console.log(`[detection-result] label="${label}" final_count=${similarResult.results.length}`);
+            console.log(`[detection-result] label="${label}" final_count=${displayResults.length}`);
           }
 
-          const droppedByOtherGates = Math.max(0, knnCandidateCount - athleticSafeResults.length);
+          const droppedByOtherGates = Math.max(0, fullSearchPool.length - athleticSafeResults.length);
 
           return {
             detection: {
@@ -8394,8 +8496,8 @@ export class ImageAnalysisService {
               mask: detection.mask,
             },
             category: categoryMapping.productCategory,
-            products: similarResult.results,
-            count: similarResult.results.length,
+            products: displayResults,
+            count: displayResults.length,
             ...(detectionIndex !== undefined ? { detectionIndex } : {}),
             appliedFilters: {
               category: filters.category,
@@ -8410,12 +8512,14 @@ export class ImageAnalysisService {
             },
             debug: {
               knnCandidateCount,
+              fullSearchPoolCount: fullSearchPool.length,
               afterPrecisionGuard: precisionSafeResults.length,
               afterCategoryGuard: categorySafeResults.length,
               afterSleeveGuard: sleeveSafeResults.length,
               afterFormalityFilter: formalitySafeResults.length,
               afterAthleticGuard: athleticSafeResults.length,
-              afterRecovery: similarResult.results.length,
+              afterMainpathCoverageFill: displayResults.length,
+              afterRecovery: displayResults.length,
               searchCallsUsed: detectionSearchCalls,
               searchCallLimit: detectionSearchCallLimit,
               searchReasonsExecuted,
