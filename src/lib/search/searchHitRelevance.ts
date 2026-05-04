@@ -100,6 +100,43 @@ export function scoreCategoryRelevance01(
 }
 
 /**
+ * PHASE 4-fix: Weighted sum for image search relevance.
+ *
+ * Instead of: score = visual × typeScore × categoryScore (multiplication zeros everything)
+ * Use: score = 0.62·visual + 0.12·category + 0.10·type + 0.08·color + 0.04·style + 0.04·pattern
+ *
+ * Weights chosen so visual similarity dominates (~62%) while metadata provides non-destructive reranking.
+ * For image search (tightSemanticCap=true), this prevents metadata mismatches from killing visually similar products.
+ */
+function computeWeightedImageScore(params: {
+  rawVisualSimilarity: number; // [0, 1] - raw CLIP cosine
+  categoryScore?: number; // [0, 1] - category match
+  typeScore?: number; // [0, 1] - product type compliance
+  colorScore?: number; // [0, 1] - color compliance
+  styleScore?: number; // [0, 1] - style compliance
+  patternScore?: number; // [0, 1] - pattern compliance
+}): number {
+  // Clamp all inputs to [0, 1] to prevent NaN/Inf
+  const visual = Math.max(0, Math.min(1, params.rawVisualSimilarity ?? 0));
+  const category = Math.max(0, Math.min(1, params.categoryScore ?? 1)); // default 1 = no penalty
+  const type = Math.max(0, Math.min(1, params.typeScore ?? 1));
+  const color = Math.max(0, Math.min(1, params.colorScore ?? 1));
+  const style = Math.max(0, Math.min(1, params.styleScore ?? 1));
+  const pattern = Math.max(0, Math.min(1, params.patternScore ?? 1));
+
+  // Weighted sum: visual dominates (62%), metadata adjusts non-destructively
+  const weighted =
+    0.62 * visual +
+    0.12 * category +
+    0.10 * type +
+    0.08 * color +
+    0.04 * style +
+    0.04 * pattern;
+
+  return Math.max(0, Math.min(1, weighted));
+}
+
+/**
  * Compute tiered cap instead of flat cap
  * Caps are determined by product type match quality, color match, and other attributes
  * Returns the maximum allowed final relevance score
@@ -253,9 +290,25 @@ export function computeFinalRelevance01(params: {
       : Math.max(0.4, 1 - intraPen * 0.7)
     : 1;
 
-  const raw =
-    globalScore * typeGateFactor * categoryBoost * attrFactor * crossFamilySoftFactor * intraFamilySoftFactor;
-  const bounded = Math.max(0, Math.min(1, raw));
+  // PHASE 4-fix: For image search (tightSemanticCap), use weighted sum instead of multiplication
+  // This prevents metadata mismatches from killing strong visual matches
+  let bounded: number;
+  if (params.tightSemanticCap) {
+    // Image search: use weighted sum formula (visual dominates, metadata reranks)
+    bounded = computeWeightedImageScore({
+      rawVisualSimilarity: params.semScore,
+      categoryScore: params.catScore,
+      typeScore: params.typeScore,
+      colorScore: params.colorScore,
+      styleScore: params.styleScore,
+      patternScore: typeof params.patternScore === 'number' ? params.patternScore : undefined,
+    });
+  } else {
+    // Text search: use traditional multiplication approach
+    const raw =
+      globalScore * typeGateFactor * categoryBoost * attrFactor * crossFamilySoftFactor * intraFamilySoftFactor;
+    bounded = Math.max(0, Math.min(1, raw));
+  }
 
   // Use tiered cap instead of flat cap
   const tieredCap = computeTieredCap({

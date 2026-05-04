@@ -164,10 +164,215 @@ function filterByFinalRelevance<T extends { finalRelevance01?: number }>(
   return filtered;
 }
 
+/**
+ * PHASE 1-fix: Determine if a product should be rescued by strong visual match.
+ *
+ * Fashion-CLIP returns raw cosine similarities in [0, 1].
+ * Strong visual matches (≥0.62) with acceptable family alignment should survive
+ * even if final relevance gate would drop them.
+ *
+ * Thresholds:
+ * - rawVisualSim ≥ 0.62: product visually similar to query
+ * - family safe: product family matches intent or is "unknown" (no hard conflict)
+ * - no hard color/audience conflict: safety checks
+ */
+function shouldKeepStrongVisualCandidate(params: {
+  similarityScore?: number; // raw cosine [0, 1]
+  clipCosine?: number; // explain.clipCosine [0, 1]
+  normalizedFamily?: string | null;
+  intentFamily?: string | null;
+  hardColorConflict?: boolean;
+  hardAudienceConflict?: boolean;
+}): boolean {
+  const rawSim = params.similarityScore ?? params.clipCosine ?? 0;
+  
+  // Visual: must be clearly similar
+  if (rawSim < 0.62) return false;
+  
+  // Family: accept if product family matches intent, is unknown, or intent has no family
+  const productFamily = String(params.normalizedFamily ?? "").toLowerCase().trim() || "unknown";
+  const intentFamily = String(params.intentFamily ?? "").toLowerCase().trim();
+  
+  const familySafe =
+    !intentFamily || // no intent family = safe
+    productFamily === "unknown" || // unknown = safe
+    productFamily === intentFamily; // exact match = safe
+  
+  if (!familySafe) return false;
+  
+  // Hard conflicts: color and audience must not violently disagree
+  if (params.hardColorConflict || params.hardAudienceConflict) return false;
+  
+  return true;
+}
+
+/**
+ * PHASE 2-fix: Stronger visual override with multi-tier confidence levels.
+ *
+ * Provides more aggressive rescue for visually similar products:
+ * - High confidence (≥0.72): rescue almost anything except obvious mismatches
+ * - Medium confidence (≥0.62): rescue with lenient family check
+ * - Low confidence (≥0.55): minimal rescue only for safe families
+ */
+function getVisualOverrideTier(similarityScore: number): "high" | "medium" | "low" | null {
+  if (similarityScore >= 0.72) return "high";
+  if (similarityScore >= 0.62) return "medium";
+  if (similarityScore >= 0.55) return "low";
+  return null;
+}
+
+function shouldRescueByVisualTier(params: {
+  similarityScore?: number;
+  clipCosine?: number;
+  normalizedFamily?: string | null;
+  intentFamily?: string | null;
+  hardColorConflict?: boolean;
+  hardAudienceConflict?: boolean;
+  // Phase 2: relax family checking
+  allowCrossFamilyRescue?: boolean;
+}): { rescue: boolean; tier: "high" | "medium" | "low" | null; reason?: string } {
+  const rawSim = params.similarityScore ?? params.clipCosine ?? 0;
+  const tier = getVisualOverrideTier(rawSim);
+  
+  if (!tier) return { rescue: false, tier: null, reason: "below_visual_threshold" };
+  
+  const productFamily = String(params.normalizedFamily ?? "").toLowerCase().trim() || "unknown";
+  const intentFamily = String(params.intentFamily ?? "").toLowerCase().trim();
+  
+  // Hard conflicts always block rescue
+  if (params.hardColorConflict) return { rescue: false, tier, reason: "hard_color_conflict" };
+  if (params.hardAudienceConflict) return { rescue: false, tier, reason: "hard_audience_conflict" };
+  
+  // High tier: rescue despite family mismatch (Phase 2 aggressive)
+  if (tier === "high") {
+    return { rescue: true, tier, reason: "high_visual_confidence_override" };
+  }
+  
+  // Medium tier: rescue if family safe or allow cross-family
+  if (tier === "medium") {
+    const familySafe =
+      !intentFamily || // no intent family = safe
+      productFamily === "unknown" || // unknown = safe
+      productFamily === intentFamily; // exact match = safe
+    
+    if (familySafe || params.allowCrossFamilyRescue) {
+      return { rescue: true, tier, reason: familySafe ? "family_safe" : "cross_family_relaxed" };
+    }
+    return { rescue: false, tier, reason: "family_mismatch" };
+  }
+  
+  // Low tier: only rescue for obviously safe families
+  if (tier === "low") {
+    const isSafeFamily = productFamily === "unknown" || productFamily === intentFamily;
+    if (isSafeFamily) {
+      return { rescue: true, tier, reason: "low_visual_safe_family" };
+    }
+    return { rescue: false, tier, reason: "low_visual_risky_family" };
+  }
+  
+  return { rescue: false, tier: null, reason: "unknown_tier" };
+}
+
+/**
+ * PHASE 3-fix: Weighted sum scoring replacing multiplication-based formula.
+ *
+ * Instead of: score = rawVisual × typeScore × categoryScore (multiplication zeros out everything)
+ * Use: score = 0.62·visual + 0.12·family + 0.10·type + 0.08·color + 0.04·style + 0.02·material + 0.02·audience
+ *
+ * No factor should multiply everything to zero. Weighted sum keeps strong visuals alive
+ * while using metadata as reranking signals, not gatekeepers.
+ */
+function computeWeightedImageScore(params: {
+  rawVisualSimilarity: number; // [0, 1]
+  familyScore?: number; // [0, 1]
+  typeScore?: number; // [0, 1]
+  colorScore?: number; // [0, 1]
+  styleScore?: number; // [0, 1]
+  materialScore?: number; // [0, 1]
+  audienceScore?: number; // [0, 1]
+}): number {
+  // Clamp all inputs to [0, 1]
+  const visual = Math.max(0, Math.min(1, params.rawVisualSimilarity ?? 0));
+  const family = Math.max(0, Math.min(1, params.familyScore ?? 1)); // default 1 = no penalty
+  const type = Math.max(0, Math.min(1, params.typeScore ?? 1));
+  const color = Math.max(0, Math.min(1, params.colorScore ?? 1));
+  const style = Math.max(0, Math.min(1, params.styleScore ?? 1));
+  const material = Math.max(0, Math.min(1, params.materialScore ?? 1));
+  const audience = Math.max(0, Math.min(1, params.audienceScore ?? 1));
+  
+  // Weighted sum: visual dominates, metadata provides soft adjustments
+  const score =
+    0.62 * visual +
+    0.12 * family +
+    0.10 * type +
+    0.08 * color +
+    0.04 * style +
+    0.02 * material +
+    0.02 * audience;
+  
+  return Math.max(0, Math.min(1, score));
+}
+
 function expandPredictedTypeHints(seeds: string[]): string[] {
   const normalized = seeds.map((s) => String(s).toLowerCase().trim()).filter(Boolean);
   if (normalized.length === 0) return [];
   return expandProductTypesForQuery(normalized);
+}
+
+/**
+ * PHASE D-fix: Log per-candidate drop reason for debugging.
+ *
+ * Tracks why each product was dropped at each stage:
+ * - finalRelevance gate too low
+ * - family mismatch  
+ * - color conflict
+ * - audience conflict
+ * - post-hydration guard
+ */
+interface CandidateDropLog {
+  id: string;
+  title?: string;
+  category?: string | null;
+  similarity_score?: number;
+  rawVisualSim?: number;
+  finalRelevance01?: number;
+  intentFamily?: string | null;
+  productFamily?: string | null;
+  typeScore?: number;
+  colorScore?: number;
+  audienceScore?: number;
+  dropReason: string;
+  stage: "final_relevance_gate" | "family_guard" | "post_hydration" | "other";
+}
+
+function createDropLog(
+  product: any,
+  reason: string,
+  stage: CandidateDropLog["stage"] = "other"
+): CandidateDropLog {
+  return {
+    id: product.id ?? "unknown",
+    title: product.title,
+    category: product.category,
+    similarity_score: product.similarity_score,
+    rawVisualSim: product.explain?.clipCosine,
+    finalRelevance01: product.finalRelevance01,
+    intentFamily: product.explain?.intentFamily,
+    productFamily: product.normalizedFamily,
+    typeScore: product.explain?.typeScore,
+    colorScore: product.explain?.colorScore,
+    audienceScore: product.explain?.audienceScore,
+    dropReason: reason,
+    stage,
+  };
+}
+
+function logDropReasons(drops: CandidateDropLog[], context: string) {
+  if (drops.length === 0) return;
+  const debug = String(process.env.SEARCH_IMAGE_PIPELINE_DEBUG ?? "").trim() === "1";
+  if (!debug) return;
+  
+  console.log(`[searchImage drops] ${context}: ${drops.length} products dropped`, drops);
 }
 
 async function inferPredictedCategoryAislesFromImage(
@@ -565,9 +770,17 @@ export async function searchImage(
 
   const inheritedSessionFilters =
     sessionFilters ?? (sessionId ? (getSession(sessionId).accumulatedFilters as Partial<LegacySearchFilters>) : undefined);
-  const mergedFilters = inheritedSessionFilters
-    ? { ...inheritedSessionFilters, ...filters }
-    : filters;
+  
+  // PHASE 1-fix: Prevent session filters from poisoning detection-scoped image searches.
+  // Detection searches are self-contained (item detected, category/family inferred).
+  // Inheriting filters from a previous search (e.g., "white shirt") can kill valid matches
+  // (e.g., shoe detections filtered out by color=white).
+  const isDetectionScoped = Boolean(detectionProductCategory || detectionLabel);
+  const mergedFilters = isDetectionScoped
+    ? filters
+    : inheritedSessionFilters
+      ? { ...inheritedSessionFilters, ...filters }
+      : filters;
 
   const inferAislesEnv = () => {
     const v = String(process.env.SEARCH_IMAGE_INFER_YOLO_AISLES ?? "1").toLowerCase();
@@ -665,15 +878,80 @@ export async function searchImage(
   let filteredResults = filterByFinalRelevance(res.results, effectiveMin, "lenient") ?? [];
   let filteredRelated = filterByFinalRelevance(res.related, effectiveMin, "lenient") ?? [];
 
+  // PHASE D-fix: Log products dropped by final relevance gate
+  if (Array.isArray(res.results)) {
+    const resultIds = new Set(filteredResults.map((r) => r.id));
+    const droppedByRelevance = res.results
+      .filter((r) => !resultIds.has(r.id))
+      .map((p) => 
+        createDropLog(
+          p,
+          `finalRelevance01 ${p.finalRelevance01 ?? "null"} < threshold ${effectiveMin}`,
+          "final_relevance_gate"
+        )
+      );
+    logDropReasons(droppedByRelevance, "after_final_relevance_gate");
+  }
+
+  // PHASE 2-fix: Enhanced rescue with multi-tier visual override (more aggressive)
+  // If we have all results available, check if any high-visual items were dropped
+  if (Array.isArray(res.results) && Array.isArray(filteredResults)) {
+    const resultIds = new Set(filteredResults.map((r) => r.id));
+    const dropped = res.results.filter((r) => !resultIds.has(r.id));
+    
+    // Try to rescue dropped items using multi-tier confidence levels
+    const rescued = dropped.filter((item) => {
+      const tier = shouldRescueByVisualTier({
+        similarityScore: item.similarity_score,
+        clipCosine: item.explain?.clipCosine,
+        normalizedFamily: item.normalizedFamily,
+        intentFamily: undefined, // lenient: don't require family match for rescue
+        hardColorConflict: false, // more lenient on color since we're rescuing
+        hardAudienceConflict: false,
+        allowCrossFamilyRescue: true, // Phase 2: allow cross-family for high confidence
+      });
+      
+      // Log rescue decision for Phase D (debugging)
+      if (tier.rescue && String(process.env.SEARCH_IMAGE_PIPELINE_DEBUG ?? "").trim() === "1") {
+        console.log("[searchImage rescue]", {
+          id: item.id,
+          title: item.title,
+          similarity: item.similarity_score,
+          tier: tier.tier,
+          reason: tier.reason,
+        });
+      }
+      
+      return tier.rescue;
+    });
+    
+    if (rescued.length > 0) {
+      filteredResults = [...filteredResults, ...rescued];
+    }
+  }
+
   // PHASE 1: Apply post-hydration family and audience guards
   // This prevents shoes→dresses and other cross-family leakage
   if (detectionProductCategory) {
+    const beforeGuards = filteredResults.length;
     filteredResults = applyPostHydrationGuards(
       filteredResults,
       detectionProductCategory,
       resolveIntentAudience(mergedFilters),
       mergedFilters,
     );
+    
+    // PHASE D-fix: Log products dropped by post-hydration guards
+    if (beforeGuards > filteredResults.length) {
+      const guardDropCount = beforeGuards - filteredResults.length;
+      if (String(process.env.SEARCH_IMAGE_PIPELINE_DEBUG ?? "").trim() === "1") {
+        console.log(`[searchImage] ${guardDropCount} products dropped by post-hydration guards`, {
+          before: beforeGuards,
+          after: filteredResults.length,
+          detectionCategory: detectionProductCategory,
+        });
+      }
+    }
   }
 
   const meta = {
