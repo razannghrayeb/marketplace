@@ -86,13 +86,20 @@ RUN set -eux; \
   rm -rf /var/lib/apt/lists/*
 
 # Runtime OS packages: full stack only when embedding YOLO
+# Add retry logic for apt-get to handle transient network issues
 RUN set -eux; \
-  apt-get update; \
+  apt_update_max_attempts=5; \
+  apt_update_attempt=0; \
+  until apt-get update || [ $apt_update_attempt -ge $apt_update_max_attempts ]; do \
+  apt_update_attempt=$((apt_update_attempt + 1)); \
+  echo "apt-get update failed, retrying ($apt_update_attempt/$apt_update_max_attempts)..."; \
+  sleep $((2 ** apt_update_attempt)); \
+  done; \
   if [ "$EMBEDDED_YOLO" = "1" ]; then \
   apt-get install -y --no-install-recommends \
   wget \
   python3 python3-venv python3-pip \
-  libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1; \
+  libgl1-mesa libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1; \
   else \
   apt-get install -y --no-install-recommends wget; \
   fi; \
