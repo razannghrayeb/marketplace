@@ -278,7 +278,7 @@ function shouldRescueByVisualTier(params: {
  * PHASE 3-fix: Weighted sum scoring replacing multiplication-based formula.
  *
  * Instead of: score = rawVisual × typeScore × categoryScore (multiplication zeros out everything)
- * Use: score = 0.62·visual + 0.12·family + 0.10·type + 0.08·color + 0.04·style + 0.02·material + 0.02·audience
+ * Use: score = 0.54·visual + 0.12·family + 0.08·type + 0.18·color + 0.04·style + 0.02·material + 0.02·audience
  *
  * No factor should multiply everything to zero. Weighted sum keeps strong visuals alive
  * while using metadata as reranking signals, not gatekeepers.
@@ -301,12 +301,12 @@ function computeWeightedImageScore(params: {
   const material = Math.max(0, Math.min(1, params.materialScore ?? 1));
   const audience = Math.max(0, Math.min(1, params.audienceScore ?? 1));
   
-  // Weighted sum: visual dominates, metadata provides soft adjustments
+  // Weighted sum: visual stays important, but color gets the highest metadata weight.
   const score =
-    0.62 * visual +
+    0.54 * visual +
     0.12 * family +
-    0.10 * type +
-    0.08 * color +
+    0.08 * type +
+    0.18 * color +
     0.04 * style +
     0.02 * material +
     0.02 * audience;
