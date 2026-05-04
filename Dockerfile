@@ -69,15 +69,16 @@ ARG EMBEDDED_YOLO=1
 # - gpu (default): installs default PyPI wheels (CUDA-enabled on Linux).
 # - cpu: smaller image, no CUDA.
 ARG YOLO_TORCH_VARIANT=gpu
-# Fixed Ubuntu mirror for APT so builds don't depend on the default archive hosts.
-ARG UBUNTU_APT_MIRROR=https://azure.archive.ubuntu.com/ubuntu
+# Ubuntu APT mirrors. Defaults stay on the standard archive/security hosts, but can be overridden.
+ARG UBUNTU_ARCHIVE_MIRROR=https://archive.ubuntu.com/ubuntu
+ARG UBUNTU_SECURITY_MIRROR=https://security.ubuntu.com/ubuntu
 
 WORKDIR /app
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \
   for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
-  if [ -f "$f" ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|$UBUNTU_APT_MIRROR|g; s|https://archive.ubuntu.com/ubuntu|$UBUNTU_APT_MIRROR|g; s|http://security.ubuntu.com/ubuntu|$UBUNTU_APT_MIRROR|g; s|https://security.ubuntu.com/ubuntu|$UBUNTU_APT_MIRROR|g; s|http://|https://|g" "$f"; fi; \
+  if [ -f "$f" ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|$UBUNTU_ARCHIVE_MIRROR|g; s|https://archive.ubuntu.com/ubuntu|$UBUNTU_ARCHIVE_MIRROR|g; s|http://security.ubuntu.com/ubuntu|$UBUNTU_SECURITY_MIRROR|g; s|https://security.ubuntu.com/ubuntu|$UBUNTU_SECURITY_MIRROR|g; s|http://|https://|g" "$f"; fi; \
   done; \
   apt_update_max_attempts=5; \
   apt_update_attempt=0; \
@@ -106,7 +107,7 @@ RUN set -eux; \
 # Note: X11 libraries (libgl1-mesa, libsm6, libxext6, libxrender1) removed as not needed for headless API
 RUN set -eux; \
   for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
-  if [ -f "$f" ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|$UBUNTU_APT_MIRROR|g; s|https://archive.ubuntu.com/ubuntu|$UBUNTU_APT_MIRROR|g; s|http://security.ubuntu.com/ubuntu|$UBUNTU_APT_MIRROR|g; s|https://security.ubuntu.com/ubuntu|$UBUNTU_APT_MIRROR|g; s|http://|https://|g" "$f"; fi; \
+  if [ -f "$f" ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|$UBUNTU_ARCHIVE_MIRROR|g; s|https://archive.ubuntu.com/ubuntu|$UBUNTU_ARCHIVE_MIRROR|g; s|http://security.ubuntu.com/ubuntu|$UBUNTU_SECURITY_MIRROR|g; s|https://security.ubuntu.com/ubuntu|$UBUNTU_SECURITY_MIRROR|g; s|http://|https://|g" "$f"; fi; \
   done; \
   apt_update_max_attempts=5; \
   apt_update_attempt=0; \
