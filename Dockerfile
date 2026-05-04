@@ -120,7 +120,7 @@ RUN set -eux; \
   apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
   wget \
   python3 python3-venv python3-pip \
-  libglib2.0-0 libgomp1 libxcb1; \
+  libglib2.0-0 libgomp1 libxcb1 libgl1-glvnd-mesa; \
   else \
   apt-get -o Acquire::Retries=5 install -y --no-install-recommends wget; \
   fi; \
