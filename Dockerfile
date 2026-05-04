@@ -1,175 +1,153 @@
-# Default: embedded YOLO (PyTorch venv + entrypoint uvicorn on loopback) so detection always works in one container.
-#
-# Slim API-only (external detector): docker build --build-arg EMBEDDED_YOLO=0 .
-#
-# Optional faster local rebuilds: DOCKER_BUILDKIT=1 docker build . (works with plain Dockerfile too)
-
 # ============================================================================
-# Fashion Marketplace API
-# Multi-stage build for optimized production image
-# ============================================================================
-
 # Stage 0: Download ML models from HuggingFace
-# Pass HF_TOKEN during build: docker build --build-arg HF_TOKEN=hf_xxx
+# ============================================================================
 FROM python:3.11-slim AS model-downloader
+
 ARG HF_TOKEN=""
 ENV HF_TOKEN=${HF_TOKEN}
 ENV HF_HOME=/root/.cache/huggingface
 ENV HF_HUB_DOWNLOAD_TIMEOUT=240
 ENV HF_HUB_ETAG_TIMEOUT=60
-RUN pip install --no-cache-dir huggingface_hub hf_transfer
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
+
+RUN pip install --no-cache-dir huggingface_hub hf_transfer
+
 RUN set -eux; \
   attempts=8; \
   for attempt in $(seq 1 ${attempts}); do \
-  echo "Downloading models (attempt ${attempt}/${attempts})"; \
-  python -c "from huggingface_hub import snapshot_download; import os; token = os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, max_workers=8, allow_patterns=['*.onnx', '*.onnx.data', '*.json', '*.pkl', '*.txt'], ignore_patterns=['*.gitattributes', '.gitattributes', 'README.md']); print('Models downloaded successfully to /models')" && break; \
-  if [ "${attempt}" -eq "${attempts}" ]; then \
-  echo "Model download failed after ${attempts} attempts"; \
-  exit 1; \
-  fi; \
-  wait_seconds=$((2 ** attempt)); \
-  if [ "${wait_seconds}" -gt 60 ]; then wait_seconds=60; fi; \
-  echo "Retrying in ${wait_seconds}s..."; \
-  sleep "${wait_seconds}"; \
+  echo "Downloading models attempt ${attempt}/${attempts}"; \
+  python -c "from huggingface_hub import snapshot_download; import os; token=os.environ.get('HF_TOKEN') or None; snapshot_download(repo_id='razangh/fashion-models', repo_type='model', local_dir='/models', token=token, max_workers=8, allow_patterns=['*.onnx','*.onnx.data','*.json','*.pkl','*.txt'], ignore_patterns=['*.gitattributes','README.md']); print('Models downloaded')" && break; \
+  if [ "${attempt}" -eq "${attempts}" ]; then exit 1; fi; \
+  sleep 10; \
   done
 
-# Pre-download tokenizer vocab files via huggingface_hub (already installed,
-# handles auth + redirects). CLIP BPE: openai/clip-vit-base-patch32 (public).
-# BLIP WordPiece: google-bert/bert-base-uncased (public, same BERT vocab).
-RUN python3 -c "from huggingface_hub import hf_hub_download; import os, shutil; os.makedirs('/models/.cache', exist_ok=True); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'vocab.json'), '/models/.cache/vocab.json'); print('vocab.json ok'); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32', 'merges.txt'), '/models/.cache/merges.txt'); print('merges.txt ok'); shutil.copy(hf_hub_download('google-bert/bert-base-uncased', 'vocab.txt'), '/models/.cache/blip-vocab.txt'); print('blip-vocab.txt ok')"
+RUN python -c "from huggingface_hub import hf_hub_download; import os, shutil; os.makedirs('/models/.cache', exist_ok=True); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32','vocab.json'),'/models/.cache/vocab.json'); shutil.copy(hf_hub_download('openai/clip-vit-base-patch32','merges.txt'),'/models/.cache/merges.txt'); shutil.copy(hf_hub_download('google-bert/bert-base-uncased','vocab.txt'),'/models/.cache/blip-vocab.txt')"
 
-# Stage 1: Build
-FROM node:20-alpine AS builder
+
+# ============================================================================
+# Stage 1: Build Node app
+# ============================================================================
+FROM node:20-bookworm AS builder
 
 WORKDIR /app
 
-# Install pnpm
 RUN corepack enable && corepack prepare pnpm@9 --activate
 
-# Copy package files
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-
-# Install only root workspace dependencies required for API build.
 RUN pnpm install --frozen-lockfile --filter .
 
-# Copy source
 COPY tsconfig.json tsconfig.base.json ./
 COPY src ./src
 
-# Build TypeScript
 RUN pnpm build
 
-# Stage 2: Production (CUDA runtime so onnxruntime CUDA EP can load)
+
+# ============================================================================
+# Stage 2: Production NVIDIA CUDA Runtime
+# ============================================================================
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS production
 
-# 1 = install PyTorch + YOLO venv in this image (~1.5GB+). 0 = slim API image; set YOLO_API_URL to external detector.
 ARG EMBEDDED_YOLO=1
-# Torch wheel source for embedded YOLO:
-# - gpu (default): installs default PyPI wheels (CUDA-enabled on Linux).
-# - cpu: smaller image, no CUDA.
 ARG YOLO_TORCH_VARIANT=gpu
 
 WORKDIR /app
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Fix Ubuntu repo networking issue + install runtime packages
 RUN set -eux; \
-  apt-get update; \
-  apt-get install -y --no-install-recommends curl ca-certificates gnupg; \
-  mkdir -p /etc/apt/keyrings; \
-  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg; \
-  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list; \
-  apt-get update; \
-  apt-get install -y --no-install-recommends nodejs; \
-  corepack enable; \
-  corepack prepare pnpm@9 --activate; \
+  sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/sources.list || true; \
+  sed -i 's|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list || true; \
+  rm -rf /var/lib/apt/lists/*; \
+  apt-get clean; \
+  apt-get update -o Acquire::Retries=5; \
+  apt-get install -y --no-install-recommends \
+  ca-certificates \
+  wget \
+  curl \
+  python3 \
+  python3-venv \
+  python3-pip \
+  libgl1 \
+  libglib2.0-0 \
+  libsm6 \
+  libxext6 \
+  libxrender-dev \
+  libgomp1; \
   rm -rf /var/lib/apt/lists/*
 
-# Runtime OS packages: full stack only when embedding YOLO
-RUN set -eux; \
-  apt-get update; \
-  if [ "$EMBEDDED_YOLO" = "1" ]; then \
-  apt-get install -y --no-install-recommends \
-  wget \
-  python3 python3-venv python3-pip \
-  libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1; \
-  else \
-  apt-get install -y --no-install-recommends wget; \
-  fi; \
-  rm -rf /var/lib/apt/lists/*
+# Copy Node from official Node image instead of installing via NodeSource apt
+COPY --from=builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=builder /usr/local/bin/corepack /usr/local/bin/corepack
+COPY --from=builder /usr/local/lib/node_modules /usr/local/lib/node_modules
+
+RUN ln -sf /usr/local/lib/node_modules/corepack/dist/pnpm.js /usr/local/bin/pnpm \
+  && corepack enable \
+  && corepack prepare pnpm@9 --activate
 
 # Create non-root user
-RUN groupadd -g 1001 nodejs && \
-  useradd -r -u 1001 -g nodejs nodejs
+RUN groupadd -g 1001 nodejs \
+  && useradd -r -u 1001 -g nodejs nodejs
 
-# Copy package files
+# Install production Node dependencies
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-
-# Install only root production dependencies for runtime.
 RUN pnpm install --frozen-lockfile --prod --filter .
 
-# Copy built files
+# Copy built app
 COPY --from=builder /app/dist ./dist
-RUN mkdir -p ./public
-# Copy models downloaded from HuggingFace (razangh/fashion-models)
+
+# Copy downloaded models
 COPY --from=model-downloader /models ./models
 
-# Validate models were downloaded (fail early if missing)
 RUN if [ ! -f "./models/fashion-clip-image.onnx" ] || [ ! -f "./models/fashion-clip-text.onnx" ]; then \
-  echo "❌ ERROR: ML models missing! Model download failed or HF_TOKEN invalid."; \
+  echo "ERROR: ML models missing"; \
   exit 1; \
-  fi && \
-  echo "✅ ML models present: $(ls -lh ./models/*.onnx | wc -l) ONNX files"
+  fi
 
-# YOLO app sources (small); venv is created only when EMBEDDED_YOLO=1
+# Copy YOLO files
 COPY src/lib/model/yolov8_api.py \
   src/lib/model/dual_model_yolo.py \
   src/lib/model/dual-model-yolo.py \
   src/lib/model/image_preprocessor.py \
   /app/yolo/
+
 COPY src/lib/model/proto /app/yolo/proto
 COPY src/lib/model/requirements-yolo-extras.txt /app/yolo/requirements-extras.txt
 
-# GPU torch wheels by default; set YOLO_TORCH_VARIANT=cpu to force CPU build.
+# Install YOLO runtime
 RUN set -eux; \
   if [ "$EMBEDDED_YOLO" = "1" ]; then \
-  python3 -m venv /app/yolo/venv && \
-  /app/yolo/venv/bin/pip install --no-cache-dir --upgrade pip && \
+  python3 -m venv /app/yolo/venv; \
+  /app/yolo/venv/bin/pip install --no-cache-dir --upgrade pip; \
   if [ "$YOLO_TORCH_VARIANT" = "gpu" ]; then \
   /app/yolo/venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu124 torch torchvision; \
   else \
   /app/yolo/venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchvision; \
-  fi && \
-  /app/yolo/venv/bin/pip install --no-cache-dir -r /app/yolo/requirements-extras.txt && \
-  /app/yolo/venv/bin/python3 -c "import torch; print('YOLO torch build:', torch.__version__, 'cuda=', torch.version.cuda, 'cuda_available=', torch.cuda.is_available())" && \
-  \
-  # Pre-download YOLO detector weights during the image build so deploys don't
-  # pay the cold-start download cost on every revision.
-  export HF_HOME=/app/yolo/.cache/huggingface; \
-  export TRANSFORMERS_CACHE=/app/yolo/.cache/huggingface; \
-  /app/yolo/venv/bin/python3 -c "import sys; sys.path.insert(0,'/app/yolo'); from yolov8_api import get_detector; get_detector(); print('✅ YOLO dual-detector warmed (weights cached)')" ; \
+  fi; \
+  /app/yolo/venv/bin/pip install --no-cache-dir -r /app/yolo/requirements-extras.txt; \
+  /app/yolo/venv/bin/python3 -c "import torch; print('torch=', torch.__version__, 'cuda=', torch.version.cuda, 'available=', torch.cuda.is_available())"; \
   else \
-  rm -rf /app/yolo && mkdir -p /app/yolo; \
+  rm -rf /app/yolo; \
+  mkdir -p /app/yolo; \
   fi
 
+# Entrypoint
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 
-# Set ownership
-RUN chown -R nodejs:nodejs /app
+RUN mkdir -p /app/public \
+  && chown -R nodejs:nodejs /app
 
 USER nodejs
 
-# Environment
 ENV NODE_ENV=production
 ENV PORT=8080
 ENV HF_HOME=/app/yolo/.cache/huggingface
 ENV TRANSFORMERS_CACHE=/app/yolo/.cache/huggingface
 
-# YOLO may load PyTorch/HF weights on first boot; Node starts only after entrypoint waits on YOLO health.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://0.0.0.0:${PORT}/health/live || exit 1
-
 EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:${PORT}/health/live || exit 1
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
