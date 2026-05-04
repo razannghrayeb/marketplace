@@ -64,6 +64,13 @@ const FASHION_COLOR_ALIASES: Record<string, string> = {
   "heathered black": "black",
   indigo: "denim",
   denim: "denim",
+  fuchsia: "fuchsia",
+  fuschia: "fuchsia",
+  fushia: "fuchsia",
+  fuhsia: "fuchsia",
+  fichia: "fuchsia",
+  fucsia: "fuchsia",
+  fluxia: "fuchsia",
 };
 
 export function canonicalizeFashionColorToken(raw: string | null | undefined): string | null {
@@ -156,7 +163,9 @@ function specialColorMatchScore(desiredRaw: string, productRaw: string): number 
   if (desired === "off-white") {
     if (product === "white") return 0.95;
     if (["off-white", "cream", "ivory", "bone", "ecru"].includes(product)) return 1;
-    if (["beige", "sand", "tan"].includes(product)) return 0.72;
+    if (["beige", "light-beige", "sand"].includes(product)) return 0.70;
+    if (["tan", "camel"].includes(product)) return 0.42;
+    if (["brown", "light-brown"].includes(product)) return 0.35;
     if (["gray", "grey", "silver", "light-gray", "light-grey"].includes(product)) return 0.55;
     if (["pale-green", "light-green", "mint", "sage"].includes(product)) return 0.35;
     if (["denim", "denim-blue", "blue", "light-blue"].includes(product)) return 0.2;
@@ -165,6 +174,7 @@ function specialColorMatchScore(desiredRaw: string, productRaw: string): number 
 
   if (desired === "white" && product === "off-white") return 0.95;
   if (desired === "cream" && ["off-white", "ivory", "bone", "ecru"].includes(product)) return 1;
+  if (desired === "pink" && ["fuchsia", "fuschia", "fushia", "fuhsia", "magenta", "hot-pink", "bright-pink"].includes(product)) return 0.88;
   return null;
 }
 

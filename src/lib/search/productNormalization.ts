@@ -87,20 +87,14 @@ function normalizeTypeFromCategory(category: string, family: string | null): str
   if (family === "dresses") return "dress";
   if (family === "bottoms") {
     if (/\b(trousers?|slacks?|dress pants?|tailored pants?|chinos?)\b/.test(category)) return "trousers";
-    if (/\b(jean|denim)\b/.test(category)) return "jeans";
-    if (/\b(skirt)\b/.test(category)) return "skirt";
+    if (/\b(jeans?|denim)\b/.test(category)) return "jeans";
+    if (/\b(skirts?)\b/.test(category)) return "skirt";
     if (/\b(short|bermuda)\b/.test(category)) return "shorts";
-    if (/\b(tight|legging)\b/.test(category)) return "leggings";
+    if (/\b(tights?|leggings?)\b/.test(category)) return "leggings";
     return "pants";
   }
   if (family === "tops") {
-    if (/\b(sweater|pullover|jumper|knitwear|knit|turtleneck|turtle neck|turtle-neck)\b/.test(category)) return "sweater";
-    if (/\b(shirt|button\s*up|button-up|button\s*down|collared)\b/.test(category)) return "shirt";
-    if (/\b(blouse)\b/.test(category)) return "blouse";
-    if (/\b(polo)\b/.test(category)) return "polo";
-    if (/\b(t-?shirt|tee)\b/.test(category)) return "tshirt";
-    if (/\b(tank|cami|camisole|sleeveless|vest)\b/.test(category)) return "sleeveless_top";
-    return "top";
+    return normalizeTopType(category);
   }
   if (family === "outerwear") {
     if (/\b(blazer)\b/.test(category)) return "blazer";
@@ -135,9 +129,7 @@ function normalizeSubtypeFromPriority(params: {
 }, family: string | null, type: string | null): string | null {
   const blob = [params.title, params.category, params.productTypes.join(" "), params.url].join(" ");
   if (family === "tops" && type === "sweater") {
-    if (/\b(turtleneck|turtle neck|roll neck|mock neck)\b/.test(blob)) return "turtleneck";
-    if (/\b(knit|knitted|pullover|jumper)\b/.test(blob)) return "knit_pullover";
-    return "sweater";
+    return normalizeSweaterSubtype(blob) ?? "sweater";
   }
   if (family === "tops" && type === "shirt") {
     if (/\b(button\s*up|button-up|button\s*down|button-down|collared)\b/.test(blob)) return "button_up_shirt";
@@ -164,6 +156,35 @@ function normalizeSubtypeFromPriority(params: {
   if (family === "bags" && /\b(crossbody|cross-body)\b/.test(blob)) return "crossbody";
   if (family === "bags" && /\b(tote)\b/.test(blob)) return "tote";
   if (family === "bags" && /\b(clutch)\b/.test(blob)) return "clutch";
+  return null;
+}
+
+function normalizeTopType(blob: string): string {
+  const b = blob.toLowerCase();
+
+  if (/\bpolo\b|\bpolo\s*shirt\b|\bpolos\b/.test(b)) return "polo";
+  if (/\bt-?shirt\b|\btshirts\b|\bt-shirts\b|\btee\b|\btees\b/.test(b)) return "tshirt";
+  if (/\bsweatshirt\b|\bsweatshirts\b/.test(b)) return "sweatshirt";
+  if (/\bhoodie\b|\bhoodies\b/.test(b)) return "hoodie";
+  if (/\bcardigan\b|\bcardigans\b/.test(b)) return "cardigan";
+  if (/\bsweater\b|\bpullover\b|\bpulovers\b|\bjumper\b|\bknitwear\b|\bknit\b|\bturtleneck\b|\bturtle neck\b|\bturtle-neck\b/.test(b)) return "sweater";
+  if (/\bbutton\s*up\b|\bbutton-up\b|\bbutton\s*down\b|\bbutton-down\b|\bdress\s*shirt\b|\bcollared\s*shirt\b/.test(b)) return "shirt";
+  if (/\bblouse\b|\bblouses\b/.test(b)) return "blouse";
+  if (/\btank\b|\bcami\b|\bcamisole\b|\bsleeveless\b/.test(b)) return "sleeveless_top";
+  if (/\bshirt\b|\bshirts\b/.test(b)) return "shirt";
+  return "top";
+}
+
+function normalizeSweaterSubtype(text: string): string | null {
+  const b = text.toLowerCase();
+
+  if (/\bturtleneck\b|\bturtle neck\b|\bturtle-neck\b|\broll neck\b|\bmock neck\b/.test(b)) return "turtleneck_sweater";
+  if (/\bhalf[-\s]?zip\b|\bzipper\b|\bzip neck\b/.test(b)) return "half_zip_sweater";
+  if (/\bcardigan\b|\bcardigans\b/.test(b)) return "cardigan";
+  if (/\bpullover\b|\bpulovers\b|\bjumper\b/.test(b)) return "pullover";
+  if (/\bknitwear\b|\bknit\b|\bknitted\b/.test(b)) return "knitwear";
+  if (/\bsweater\b/.test(b)) return "sweater";
+
   return null;
 }
 
@@ -278,28 +299,32 @@ function normalizeColorFromPriority(
 
 export function normalizeHydratedProduct(product: Record<string, unknown>): NormalizedProductMetadata {
   const title = textValue(product.title ?? product.name);
-  const category = textValue(product.category_canonical ?? product.category);
+  const category = textValue(product.category);
+  const canonical = textValue(product.category_canonical);
+  const structured = [canonical, category].filter(Boolean).join(" ");
   const productTypes = arrayText(product.product_types);
+  const structuredWithTypes = [structured, productTypes.join(" ")].filter(Boolean).join(" ");
   const url = textValue(product.product_url ?? product.parent_product_url);
   const description = textValue(product.description);
 
   const normalizedFamily =
-    familyFromCategory(category) ??
+    familyFromCategory(structuredWithTypes) ??
     familyFromProductTypes(productTypes) ??
     familyFromTitle(title) ??
     familyFromUrl(url) ??
     familyFromDescription(description);
 
   const normalizedType =
-    normalizeTypeFromCategory(category, normalizedFamily) ??
+    normalizeTypeFromCategory(structuredWithTypes, normalizedFamily) ??
     normalizeTypeFromProductTypes(productTypes, normalizedFamily) ??
     normalizeTypeFromTitle(title, normalizedFamily) ??
-    normalizeTypeFromUrl(url, normalizedFamily);
+    normalizeTypeFromUrl(url, normalizedFamily) ??
+    normalizeTypeFromTitle(description, normalizedFamily);
 
   return {
     normalizedFamily,
     normalizedType,
-    normalizedSubtype: normalizeSubtypeFromPriority({ title, category, productTypes, url }, normalizedFamily, normalizedType),
+    normalizedSubtype: normalizeSubtypeFromPriority({ title, category: structured || category, productTypes, url }, normalizedFamily, normalizedType),
     normalizedColor: normalizeColorFromPriority(product, title, url),
     normalizedAudience: normalizeAudience(product, [title, category, productTypes.join(" "), url].join(" ")),
     normalizedMaterial: normalizeMaterial(`${title} ${category}`),

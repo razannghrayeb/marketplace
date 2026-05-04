@@ -93,6 +93,8 @@ export interface ImageSearchParams extends SearchParams {
   detectionYoloConfidence?: number;
   /** Detection-mapped product category (e.g. tops, bottoms); enables category-aware ranking rules. */
   detectionProductCategory?: string;
+  /** Scene mode inferred upstream; propagated into FashionIntent/debug contract. */
+  imageMode?: "single_product" | "worn_outfit" | "flatlay_collage";
   /** Original/refined detected item label for ranking debug. */
   detectionLabel?: string;
   /**

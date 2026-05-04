@@ -46,7 +46,7 @@ import { searchByImageWithSimilarity } from '../products/products.service';
 import type { ProductResult, SearchResultWithRelated } from '../products/types';
 import { findRelatedProducts } from '../../lib/search/relatedProducts';
 import { dedupeSearchResults, filterRelatedAgainstMain } from '../../lib/search/resultDedup';
-import { sortProductsByRelevanceAndCategory, sortProductsByFinalRelevance } from '../../lib/search/sortResults';
+import { sortProductsByFinalRelevance } from '../../lib/search/sortResults';
 import {
   getCategorySearchTerms,
   loadCategoryVocabulary,
@@ -2189,7 +2189,7 @@ export async function textSearch(
       results = await runXgbTieBreakOnSlice(results);
     }
 
-    results = sortProductsByRelevanceAndCategory(results, scoreMap);
+    results = sortProductsByFinalRelevance(results);
 
     let related: ProductResult[] = [];
     if (includeRelated) {

@@ -74,6 +74,7 @@ export interface UnifiedImageSearchParams {
   predictedCategoryAisles?: string[];
   detectionYoloConfidence?: number;
   detectionProductCategory?: string;
+  imageMode?: "single_product" | "worn_outfit" | "flatlay_collage";
   detectionLabel?: string;
   knnField?: string;
   /**
@@ -511,6 +512,7 @@ export async function searchImage(
     predictedCategoryAisles,
     detectionYoloConfidence,
     detectionProductCategory,
+    imageMode,
     detectionLabel,
     knnField,
     forceHardCategoryFilter,
@@ -631,6 +633,7 @@ export async function searchImage(
     predictedCategoryAisles: derivedAisleHints,
     detectionYoloConfidence,
     detectionProductCategory,
+    imageMode,
     detectionLabel,
     knnField,
     forceHardCategoryFilter,

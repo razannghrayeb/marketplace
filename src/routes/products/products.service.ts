@@ -76,6 +76,7 @@ import {
   computeTierBasedScore,
   getTierCap,
 } from "../../lib/search/matchTierAssignment";
+import type { FashionIntent } from "../../lib/search/fashionIntent";
 import { createHash } from "crypto";
 import { rerankImageCandidates } from "../../lib/image/imageReranker";
 
@@ -137,6 +138,8 @@ export interface ImageSearchParams extends SearchParams {
   detectionYoloConfidence?: number;
   /** Product category from detection (e.g. 'tops', 'bottoms'); enables category-specific type flooring. */
   detectionProductCategory?: string;
+  /** Scene mode inferred by image analysis; required by FashionIntent/debug contract. */
+  imageMode?: "single_product" | "worn_outfit" | "flatlay_collage";
   /** Original/refined detected item label for explain/debug output. */
   detectionLabel?: string;
   /** Raw bytes when embedding is computed by the callee (unified image search path). */
@@ -930,6 +933,7 @@ function samePoolSafeFillResults(params: {
       }
       if (
         detectionCategory === "footwear" &&
+        !footwearLegacyVisualFirstEnabled() &&
         desiredProductTypes.length > 0 &&
         !passesFootwearSubtypeGate(p as unknown as Record<string, unknown>, desiredProductTypes)
       ) {
@@ -1485,10 +1489,32 @@ function imageSearchFamilyFromProduct(product: Record<string, unknown>): ImageSe
 }
 
 function imageSearchFamilyFromDetection(category: unknown, desiredTypes?: string[]): ImageSearchFamily {
-  return normalizeImageSearchFamily([
-    category,
-    ...(desiredTypes ?? []),
-  ].join(" "));
+  const categoryFamily = normalizeImageSearchFamily(category);
+  if (categoryFamily !== "unknown") return categoryFamily;
+  return normalizeImageSearchFamily((desiredTypes ?? []).join(" "));
+}
+
+function expectedImageFamilyFromDetectionCategory(category?: string | null): ImageSearchFamily | null {
+  const c = normalizeDetectionCategoryToken(category ?? "");
+  if (c === "tops") return "tops";
+  if (c === "bottoms") return "bottoms";
+  if (c === "dresses") return "dress";
+  if (c === "outerwear" || c === "tailored") return "outerwear";
+  if (c === "footwear" || c === "shoes") return "footwear";
+  if (c === "bags" || c === "accessories") return "accessory";
+  return null;
+}
+
+function expectedFashionFamilyFromDetectionCategory(category?: string | null): FashionIntent["family"] | null {
+  const c = normalizeDetectionCategoryToken(category ?? "");
+  if (c === "tops") return "tops";
+  if (c === "bottoms") return "bottoms";
+  if (c === "dresses") return "dresses";
+  if (c === "outerwear" || c === "tailored") return "outerwear";
+  if (c === "footwear" || c === "shoes") return "footwear";
+  if (c === "bags") return "bags";
+  if (c === "accessories") return "accessories";
+  return null;
 }
 
 function isImpossibleImageFamilyMismatch(jobFamily: ImageSearchFamily, productFamily: ImageSearchFamily): boolean {
@@ -1508,6 +1534,60 @@ function isImpossibleImageFamilyMismatch(jobFamily: ImageSearchFamily, productFa
   return false;
 }
 
+function footwearLegacyVisualFirstEnabled(): boolean {
+  const raw = String(process.env.SEARCH_IMAGE_FOOTWEAR_LEGACY_VISUAL_FIRST ?? "1").toLowerCase().trim();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
+function rankFootwearVisualFirst<T extends ProductResult>(candidates: T[]): T[] {
+  return sortByAuthoritativeFinalScore(
+    candidates
+      .filter((product: any) => {
+        const familyRaw = String(product.normalizedFamily ?? "").toLowerCase().trim();
+        const family = familyRaw
+          ? (familyRaw === "shoes" ? "footwear" : familyRaw)
+          : imageSearchFamilyFromProduct(product as Record<string, unknown>);
+        return !family || family === "unknown" || family === "footwear";
+      })
+      .map((product: any) => {
+        const visual = clampScore01(
+          product.similarity_score ?? product.clipSim ?? product.explain?.clipCosine ?? 0,
+        );
+        const color = clampScore01(product.explain?.colorCompliance ?? 0.5, 0.5);
+        const audience = clampScore01(product.explain?.audienceCompliance ?? 0.65, 0.65);
+        const final = clampScore01(
+          0.82 * visual +
+          0.10 +
+          0.05 * color +
+          0.03 * audience,
+        );
+        const next = synchronizeFinalScore(
+          {
+            ...product,
+            footwearRankingMode: "legacy_visual_first",
+            explain: product.explain
+              ? {
+                ...product.explain,
+                footwearRankingMode: "legacy_visual_first",
+                typeScore: 0,
+                rankingDebug: product.explain.rankingDebug
+                  ? {
+                    ...product.explain.rankingDebug,
+                    footwearRankingMode: "legacy_visual_first",
+                    finalScore: final,
+                  }
+                  : product.explain.rankingDebug,
+              }
+              : product.explain,
+          },
+          final,
+          "footwear_legacy_visual_first",
+        );
+        return next as T;
+      }),
+  );
+}
+
 function colorScoreForImageRanking(explain: Record<string, unknown>): {
   colorScore: number;
   exactColorMatch: boolean;
@@ -1521,6 +1601,9 @@ function colorScoreForImageRanking(explain: Record<string, unknown>): {
   }
   if (tier === "bucket") return { colorScore: Math.max(0.45, Math.min(0.74, compliance)), exactColorMatch: false, sameColorFamily: false };
   if (compliance > 0) return { colorScore: Math.max(0.15, Math.min(0.75, compliance)), exactColorMatch: false, sameColorFamily: compliance >= 0.55 };
+  if (Boolean(explain.hasColorIntent) || Boolean(explain.colorIntentGatesFinalRelevance)) {
+    return { colorScore: 0.18, exactColorMatch: false, sameColorFamily: false };
+  }
   return { colorScore: 0.4, exactColorMatch: false, sameColorFamily: false };
 }
 
@@ -1534,6 +1617,88 @@ function calibratedVisualBase(sim: number): number {
   if (s >= 0.870) return 0.78;
   if (s >= 0.840) return 0.72;
   return Math.max(0.55, s * 0.80);
+}
+
+function normalizeImageTypeToken(raw: unknown): string {
+  const text = String(raw ?? "")
+    .toLowerCase()
+    .trim()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+  if (!text) return "";
+  if (/^t\s?shirt$|^tee$|^tees$|^tshirts?$|^t shirts?$/.test(text)) return "tshirt";
+  if (/^polo shirts?$|^polos$/.test(text)) return "polo";
+  if (/^sweatshirts?$/.test(text)) return "sweatshirt";
+  if (/^hoodies?$/.test(text)) return "hoodie";
+  if (/^cardigans?$/.test(text)) return "cardigan";
+  if (/^shirts?$/.test(text)) return "shirt";
+  if (/^sweaters?$|^pullovers?$|^jumpers?$|^knitwear$|^knits?$/.test(text)) return "sweater";
+  return text.replace(/\s+/g, "_");
+}
+
+function computeImageTypeScore(params: {
+  intentType?: string | null;
+  intentSubtype?: string | null;
+  productType?: string | null;
+  productSubtype?: string | null;
+  reliableTypeIntent: boolean;
+}): { typeScore: number; exactTypeScore: number; productTypeCompliance: number } | null {
+  const intentType = normalizeImageTypeToken(params.intentType);
+  const productType = normalizeImageTypeToken(params.productType);
+  const productSubtype = normalizeImageTypeToken(params.productSubtype);
+  if (!intentType || !productType) return null;
+
+  if (!params.reliableTypeIntent) {
+    const typeScore = productType === intentType ? 0.75 : 0.55;
+    return {
+      typeScore,
+      exactTypeScore: Math.min(typeScore, 0.65),
+      productTypeCompliance: typeScore,
+    };
+  }
+
+  if (intentType === "tshirt_or_shirt") {
+    const typeScore = productType === "tshirt" || productType === "shirt"
+      ? 0.9
+      : productType === "polo"
+        ? 0.62
+        : 0.35;
+    return {
+      typeScore,
+      exactTypeScore: 0,
+      productTypeCompliance: typeScore,
+    };
+  }
+
+  if (intentType === "sweater") {
+    const strongSweaterSubtype = /pullover|knit|turtleneck|sweater/.test(productSubtype);
+    const typeScore =
+      productType === "sweater" && strongSweaterSubtype
+        ? 1
+        : productType === "sweater"
+          ? 0.9
+          : productType === "cardigan"
+            ? 0.72
+            : productType === "sweatshirt"
+              ? 0.62
+              : productType === "hoodie"
+                ? 0.55
+                : productType === "shirt" || productType === "tshirt"
+                  ? 0.25
+                  : 0.35;
+    return {
+      typeScore,
+      exactTypeScore: typeScore >= 1 ? 1 : 0,
+      productTypeCompliance: typeScore,
+    };
+  }
+
+  const typeScore = productType === intentType ? 1 : 0.45;
+  return {
+    typeScore,
+    exactTypeScore: typeScore >= 1 ? 1 : 0,
+    productTypeCompliance: typeScore,
+  };
 }
 
 function scoreWithConfidence(score: number, confidence: number): { score: number; confidence: number } {
@@ -1592,6 +1757,7 @@ function additiveImageRankingScore(params: {
   productFamily: ImageSearchFamily;
   explain: Record<string, unknown>;
   availability: unknown;
+  reliableTypeIntent?: boolean;
 }): {
   finalScore: number;
   typeScore: number;
@@ -1613,8 +1779,11 @@ function additiveImageRankingScore(params: {
   matchLabel: string;
 } {
   const visualSimilarity = Math.max(0, Math.min(1, params.visualSimilarity));
-  const exactTypeScore = Number(params.explain.exactTypeScore ?? 0);
-  const typeCompliance = Math.max(0, Math.min(1, Number(params.explain.productTypeCompliance ?? 0)));
+  const reliableTypeIntent = params.reliableTypeIntent !== false;
+  const exactTypeScoreRaw = Number(params.explain.exactTypeScore ?? 0);
+  const typeComplianceRaw = Math.max(0, Math.min(1, Number(params.explain.productTypeCompliance ?? 0)));
+  const exactTypeScore = reliableTypeIntent ? exactTypeScoreRaw : Math.min(exactTypeScoreRaw, 0.65);
+  const typeCompliance = reliableTypeIntent ? typeComplianceRaw : Math.min(typeComplianceRaw, 0.70);
   const categoryScore = Math.max(0, Math.min(1, Number(params.explain.categoryScore ?? params.explain.categoryRelevance01 ?? 0)));
   const familyMismatch = isImpossibleImageFamilyMismatch(params.jobFamily, params.productFamily);
   const sameMajorFamily = params.jobFamily !== "unknown" && params.jobFamily === params.productFamily;
@@ -1682,10 +1851,11 @@ function additiveImageRankingScore(params: {
     unknownValue: 0.6,
     unknownConfidence: 0.18,
   }));
-  pushAttr("audience", weights.audience, attributeFromCompliance(params.explain.audienceCompliance, {
+  const audience = attributeFromCompliance(params.explain.audienceCompliance, {
     unknownValue: 0.65,
     unknownConfidence: 0.25,
-  }));
+  });
+  pushAttr("audience", weights.audience, audience);
   for (const structuralKey of ["neckline", "collar", "closure", "silhouette", "rise", "sole", "toe"]) {
     pushAttr(structuralKey, weights[structuralKey], { score: 0.6, confidence: 0, missing: true });
   }
@@ -1726,8 +1896,6 @@ function additiveImageRankingScore(params: {
     penalties.push("impossible_family_mismatch");
   }
 
-  const missingCriticalAttributes = attrs.filter((a) => a.missing && ["sleeve", "length", "neckline", "collar", "silhouette", "pattern", "material", "style", "audience"].includes(a.key)).length;
-  const knownMismatchCount = attrs.filter((a) => a.knownMismatch).length;
   const metadataCoverage = attrs.length > 0
     ? Math.max(0, Math.min(1, effective.reduce((sum, a) => sum + a.effectiveWeight, 0) / attrs.reduce((sum, a) => sum + a.weight, 0)))
     : 0.4;
@@ -1735,41 +1903,36 @@ function additiveImageRankingScore(params: {
     (params.availability === false ? 0.96 : 1) *
     (0.92 + 0.08 * metadataCoverage);
 
-  let raw =
-    0.78 * visualBase +
-    0.22 * attributeAgreement;
-  raw *= familyGate;
-  raw *= contradictionPenalty;
-  raw *= qualityModifier;
-
-  let maxFinal = 0.995;
-  if (visualSimilarity >= 0.985 && exactTypeScore >= 1 && color.exactColorMatch && knownMismatchCount === 0) {
-    maxFinal = 0.995;
-  } else if (visualSimilarity >= 0.955 && exactTypeScore >= 1 && (color.exactColorMatch || color.sameColorFamily) && knownMismatchCount === 0) {
-    maxFinal = metadataCoverage >= 0.72 ? 0.975 : 0.94;
-  } else if (visualSimilarity >= 0.93 && familyGate >= 0.92 && knownMismatchCount <= 1) {
-    maxFinal = 0.94;
-  } else if (familyGate >= 0.92) {
-    maxFinal = 0.88;
-  } else if (familyGate > 0) {
-    maxFinal = 0.76;
-  } else {
-    maxFinal = 0;
-  }
-  if (knownMismatchCount >= 1 && (explicitColor || Boolean(params.explain.hasSleeveIntent) || Boolean(params.explain.hasLengthIntent) || Boolean(params.explain.hasStyleIntent))) {
-    maxFinal = Math.min(maxFinal, 0.72);
-  }
-  if (missingCriticalAttributes >= 3) {
-    maxFinal = Math.min(maxFinal, 0.90);
-  }
-  if (missingCriticalAttributes >= 2 && visualSimilarity < 0.96) {
-    maxFinal = Math.min(maxFinal, 0.87);
-  }
-  if (exactTypeScore >= 1 && color.exactColorMatch && visualSimilarity >= 0.97 && metadataCoverage < 0.72) {
-    maxFinal = Math.min(maxFinal, 0.95);
-  }
-
-  let finalScore = Math.min(raw, maxFinal);
+  const familyScore = familyMismatch
+    ? 0
+    : sameMajorFamily
+      ? 1
+      : adjacentFamily
+        ? 0.72
+        : familyGate > 0
+          ? 0.55
+          : 0;
+  const colorScore = color.colorScore;
+  const audienceScore = audience.score;
+  const finalContinuous = reliableTypeIntent
+    ? (
+        0.68 * visualSimilarity +
+        0.12 * familyScore +
+        0.08 * colorScore +
+        0.07 * audienceScore +
+        0.05 * typeScore
+      )
+    : (
+        0.74 * visualSimilarity +
+        0.12 * familyScore +
+        0.08 * colorScore +
+        0.04 * audienceScore +
+        0.02 * typeScore
+      );
+  const maxFinal = familyMismatch ? 0 : 0.995;
+  let finalScore = familyMismatch
+    ? 0
+    : finalContinuous * contradictionPenalty * qualityModifier;
   finalScore = Math.min(0.995, Math.max(0, Math.round(finalScore * 10000) / 10000));
   const matchLabel =
     visualSimilarity >= 0.985 && finalScore >= 0.985
@@ -1783,7 +1946,7 @@ function additiveImageRankingScore(params: {
             : "weak";
 
   const boosts: string[] = [];
-  if (exactTypeScore >= 1) boosts.push("exact_type");
+  if (reliableTypeIntent && exactTypeScore >= 1) boosts.push("exact_type");
   if (color.exactColorMatch) boosts.push("exact_color");
   else if (color.sameColorFamily) boosts.push("same_color_family");
   if (nearIdenticalVisual) boosts.push("near_identical_visual_evidence");
@@ -3362,6 +3525,23 @@ function extractCanonicalColorTokensFromSource(src: Record<string, unknown>): {
   return { tokens, hasBadColorCode };
 }
 
+function extractKnownProductColorTokensForScoring(src: Record<string, unknown>): string[] {
+  const structured = extractCanonicalColorTokensFromSource(src).tokens;
+  if (structured.length > 0) return structured;
+
+  const titleColor = inferCanonicalColorFromText(
+    [
+      src.title,
+      src.product_url,
+      src.parent_product_url,
+    ]
+      .filter((x) => x != null)
+      .map((x) => String(x))
+      .join(" "),
+  );
+  return titleColor ? [titleColor] : [];
+}
+
 function normalizedCatalogTypeTokens(src: Record<string, unknown>): string[] {
   const rawTokens = [
     src.category,
@@ -3444,6 +3624,13 @@ function refineDetectionIntentPhase2(params: {
     .map((x) => String(x ?? "").toLowerCase().trim())
     .filter(Boolean);
 
+  const explicitEvidenceBlob = [
+    detectionLabel,
+    ...blipTokens,
+  ]
+    .join(" ")
+    .toLowerCase();
+
   const blob = [
     detectionLabel,
     detectionCategory,
@@ -3483,7 +3670,7 @@ function refineDetectionIntentPhase2(params: {
   const shortSleeveTopLike = /\b(short sleeve top|short\s*sleeve)\b/.test(blob);
   const hasSweaterCue = /\b(sweater|knit|knitted|pullover|jumper)\b/.test(blob);
   const hasShirtCue = /\b(button|button-up|button up|button-down|button down|collar|shirt\s*collar|shirt|blouse)\b/.test(blob);
-  const hasPoloCue = /\b(polo|polo shirt|collared polo|placket)\b/.test(blob);
+  const hasPoloCue = /\b(polo|polo shirt|collared polo|placket)\b/.test(explicitEvidenceBlob);
   const bottomsLike = detectionCategory === "bottoms" || /\b(trouser|trousers|pants?|chino|chinos|slack|slacks)\b/.test(blob);
   const hasWideLegCue = /\b(wide\s*leg|wide-leg|palazzo|flowy|tailored|dress pant|pleated)\b/.test(blob);
   const shortsLike = /\b(short|shorts)\b/.test(blob);
@@ -3510,6 +3697,10 @@ function refineDetectionIntentPhase2(params: {
   if (shortSleeveTopLike && hasPoloCue) {
     preferred = prependUnique(preferred, ["polo", "polo shirt", "collared polo"]);
     desired = prependUnique(desired, ["polo", "polo shirt", "collared polo"]);
+    inferredSleeve = "short";
+  } else if (shortSleeveTopLike) {
+    preferred = prependUnique(removeTokens(preferred, /\b(polo|polos|polo shirt|collared polo)\b/), ["tshirt", "t-shirt", "tee", "shirt"]);
+    desired = prependUnique(removeTokens(desired, /\b(polo|polos|polo shirt|collared polo)\b/), ["tshirt", "t-shirt", "tee", "shirt", "top"]);
     inferredSleeve = "short";
   }
 
@@ -3542,6 +3733,147 @@ function refineDetectionIntentPhase2(params: {
     inferredSleeve,
     inferredStyle,
   };
+}
+
+function inferTopIntentType(params: {
+  detectionLabel?: string | null;
+  caption?: string | null;
+  cropCaption?: string | null;
+  blipProductType?: string | null;
+}): { type: string; subtype?: string; confidence: number } {
+  const label = String(params.detectionLabel ?? "").toLowerCase();
+  const text = [
+    params.caption,
+    params.cropCaption,
+    params.blipProductType,
+  ]
+    .map((x) => String(x ?? "").toLowerCase())
+    .join(" ");
+  const combined = `${label} ${text}`;
+
+  if (!/\b(short\s*sleeve\s*top|long\s*sleeve\s*top|top|shirt|t-?shirt|tshirt|tee|polo|sweater|pullover|knitwear|knit|hoodie|sweatshirt|cardigan)\b/.test(combined)) {
+    return { type: "top", confidence: 0.4 };
+  }
+  if (/\bpolo\b/.test(text)) return { type: "polo", confidence: 0.88 };
+  if (/\bt-?shirt\b|\btshirt\b|\btee\b/.test(text)) return { type: "tshirt", confidence: 0.78 };
+  if (/\bcardigan\b/.test(text)) return { type: "cardigan", subtype: "cardigan", confidence: 0.82 };
+  if (/\bhoodie\b/.test(text)) return { type: "hoodie", confidence: 0.78 };
+  if (/\bsweatshirt\b/.test(text)) return { type: "sweatshirt", confidence: 0.78 };
+  if (/\bsweater\b|\bpullover\b|\bknitwear\b|\bknit\b/.test(text)) {
+    return { type: "sweater", subtype: /\bpullover\b|\bknitwear\b|\bknit\b/.test(text) ? "knit_pullover" : "sweater", confidence: 0.82 };
+  }
+  if (/\bshirt\b/.test(text)) return { type: "shirt", confidence: 0.72 };
+  if (/short\s*sleeve/.test(label)) {
+    return { type: "tshirt_or_shirt", subtype: "short_sleeve_top", confidence: 0.48 };
+  }
+  if (/\bcardigan\b/.test(label)) return { type: "cardigan", subtype: "cardigan", confidence: 0.68 };
+  if (/\bhoodie\b/.test(label)) return { type: "hoodie", confidence: 0.64 };
+  if (/\bsweatshirt\b/.test(label)) return { type: "sweatshirt", confidence: 0.64 };
+  if (/\bsweater\b|\bpullover\b|\bknitwear\b|\bknit\b/.test(label)) {
+    return { type: "sweater", subtype: "knit_pullover", confidence: 0.68 };
+  }
+  return { type: "top", confidence: 0.42 };
+}
+
+function repairIntentFromDetection(intent: FashionIntent, params: ImageSearchParams): FashionIntent {
+  const category = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  const expected = expectedFashionFamilyFromDetectionCategory(params.detectionProductCategory);
+  const appendRepairReason = (reason: string) => {
+    const existing = String((intent as any).repairReason ?? "").trim();
+    (intent as any).repairReason = existing ? `${existing};${reason}` : reason;
+  };
+  const topFamilyMismatch =
+    category === "tops" &&
+    intent.family !== "tops";
+  const topIntentText = [
+    params.detectionLabel,
+    params.blipSignal?.productType,
+    intent.type,
+    intent.subtype,
+  ]
+    .map((x) => String(x ?? "").toLowerCase())
+    .join(" ");
+  const trueOuterwearFromTopDetection =
+    /\b(jacket|coat|blazer|parka|trench|windbreaker|outerwear)\b/.test(topIntentText);
+
+  if (topFamilyMismatch) {
+    console.error("[FATAL_INTENT_FAMILY_BUG]", {
+      detectionLabel: params.detectionLabel,
+      detectionProductCategory: params.detectionProductCategory,
+      intent,
+    });
+
+    if (!trueOuterwearFromTopDetection) {
+      (intent as any).family = "tops";
+      appendRepairReason("repaired_top_detection_family");
+    }
+  }
+
+  if (category === "bottoms" && intent.family !== "bottoms") {
+    console.error("[BUG_REPAIR_INTENT_FAMILY]", {
+      detectionLabel: params.detectionLabel,
+      detectionProductCategory: params.detectionProductCategory,
+      beforeFamily: intent.family,
+      expected: "bottoms",
+    });
+    (intent as any).family = "bottoms";
+    appendRepairReason("repaired_bottom_detection_family");
+  }
+
+  if ((category === "footwear" || category === "shoes") && intent.family !== "footwear") {
+    console.error("[BUG_REPAIR_INTENT_FAMILY]", {
+      detectionLabel: params.detectionLabel,
+      detectionProductCategory: params.detectionProductCategory,
+      beforeFamily: intent.family,
+      expected: "footwear",
+    });
+    (intent as any).family = "footwear";
+    appendRepairReason("repaired_footwear_detection_family");
+  }
+
+  if (
+    expected &&
+    !["tops", "bottoms", "footwear"].includes(category) &&
+    intent.family !== expected
+  ) {
+    console.error("[BUG_REPAIR_INTENT_FAMILY]", {
+      detectionLabel: params.detectionLabel,
+      detectionProductCategory: params.detectionProductCategory,
+      beforeFamily: intent.family,
+      expected,
+    });
+    (intent as any).family = expected;
+    appendRepairReason("family_repaired_from_detectionProductCategory");
+  }
+
+  if (expected === "tops") {
+    const inferredTop = inferTopIntentType({
+      detectionLabel: params.detectionLabel,
+      blipProductType: params.blipSignal?.productType,
+    });
+    const label = String(params.detectionLabel ?? "").toLowerCase();
+    const captionType = String(params.blipSignal?.productType ?? "").toLowerCase();
+
+    if (label.includes("short sleeve") && intent.type === "polo" && !captionType.includes("polo")) {
+      intent.type = inferredTop.type === "polo" ? "tshirt_or_shirt" : inferredTop.type;
+      intent.subtype = inferredTop.subtype ?? "short_sleeve_top";
+      appendRepairReason("polo_downgraded_without_polo_evidence");
+    } else if (label.includes("short sleeve") && inferredTop.type === "tshirt_or_shirt") {
+      intent.type = "tshirt_or_shirt";
+      intent.subtype = "short_sleeve_top";
+    }
+  }
+
+  if (process.env.NODE_ENV !== "production") {
+    if (category === "tops" && intent.family !== "tops" && !trueOuterwearFromTopDetection) {
+      throw new Error(`BUG: top detection produced ${intent.family}`);
+    }
+    if ((category === "bottoms" || category === "footwear" || category === "shoes") && expected && intent.family !== expected) {
+      throw new Error(`BUG: ${expected} detection produced ${intent.family}`);
+    }
+  }
+
+  return intent;
 }
 
 /**
@@ -6373,6 +6705,11 @@ export async function searchByImageWithSimilarity(
       rerankColorMode: rerankColorModeForRelevance,
       hasExplicitColorIntent,
     });
+    (compWithExpandedPenalty as any).reliableTypeIntent = hasReliableTypeIntentForRelevance;
+    if (!hasReliableTypeIntentForRelevance) {
+      compWithExpandedPenalty.exactTypeScore = Math.min(compWithExpandedPenalty.exactTypeScore ?? 0, 0.65);
+      compWithExpandedPenalty.productTypeCompliance = Math.min(compWithExpandedPenalty.productTypeCompliance ?? 0, 0.70);
+    }
     const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
     const isCoreDetectionCategory =
       detectionCategoryNorm === "tops" ||
@@ -6428,15 +6765,16 @@ export async function searchByImageWithSimilarity(
       // contradicts desired/inferred color tokens (e.g. query white, doc color blue).
       const srcForColor = (hit._source ?? {}) as Record<string, unknown>;
       const sourceColor = extractCanonicalColorTokensFromSource(srcForColor);
-      const catalogColorNorm = sourceColor.tokens[0] ?? "";
+      const knownProductColorTokens = extractKnownProductColorTokensForScoring(srcForColor);
+      const catalogColorNorm = knownProductColorTokens[0] ?? sourceColor.tokens[0] ?? "";
       const lightNeutralTokens = new Set(["white", "off-white", "cream", "ivory", "ecru"]);
       const desiredHasLightNeutralIntent = desiredColorsTierForRelevance.some((c) =>
         lightNeutralTokens.has(String(c ?? "").toLowerCase().trim()),
       );
-      const sourceHasLightNeutralColor = sourceColor.tokens.some((c) =>
+      const sourceHasLightNeutralColor = knownProductColorTokens.some((c) =>
         lightNeutralTokens.has(String(c ?? "").toLowerCase().trim()),
       );
-      const sourceHasNonLightNeutralColor = sourceColor.tokens.some(
+      const sourceHasNonLightNeutralColor = knownProductColorTokens.some(
         (c) => !lightNeutralTokens.has(String(c ?? "").toLowerCase().trim()),
       );
       const lightNeutralTopColorConflict =
@@ -6448,20 +6786,25 @@ export async function searchByImageWithSimilarity(
         !sourceHasLightNeutralColor;
       const hasHardCatalogColorConflict =
         hasAnyColorTokenIntent &&
-        sourceColor.tokens.length > 0 &&
-        (tieredColorListCompliance(desiredColorsTierForRelevance, sourceColor.tokens, rerankColorModeForRelevance)
+        knownProductColorTokens.length > 0 &&
+        (tieredColorListCompliance(desiredColorsTierForRelevance, knownProductColorTokens, rerankColorModeForRelevance)
           .compliance <= 0 || lightNeutralTopColorConflict);
 
-      if (hasHardCatalogColorConflict) {
-        comp.colorCompliance = (comp.colorCompliance ?? 0) * 0.35;
-      }
-
-      if (!hasAnyColorTokenIntent) {
+      if (hasAnyColorTokenIntent && knownProductColorTokens.length > 0) {
+        const knownColor = tieredColorListCompliance(
+          desiredColorsTierForRelevance,
+          knownProductColorTokens,
+          rerankColorModeForRelevance,
+        );
+        comp.colorCompliance = knownColor.compliance;
+        comp.matchedColor = knownColor.bestMatch ?? catalogColorNorm ?? comp.matchedColor ?? null;
+        comp.colorTier = knownColor.tier;
+      } else if (!hasAnyColorTokenIntent) {
         comp.colorCompliance = Math.max(0, Math.min(1, cs));
       } else if (!hasHardCatalogColorConflict && (comp.colorCompliance ?? 0) < 0.12 && cs >= 0.42) {
         comp.colorCompliance = Math.max(
           comp.colorCompliance ?? 0,
-          Math.min(1, cs * 0.82),
+          Math.min(0.55, cs),
         );
       }
     }
@@ -6748,8 +7091,7 @@ export async function searchByImageWithSimilarity(
       desiredProductTypes,
       preferredDesiredProductTypes,
       hit,
-      reliableTypeIntent:
-        hasReliableTypeIntentForRelevance || hasDetectionAnchoredTypeIntent,
+      reliableTypeIntent: hasReliableTypeIntentForRelevance,
       crossFamilyPenalty: comp.crossFamilyPenalty ?? 0,
       productTypeCompliance: comp.productTypeCompliance ?? 0,
     });
@@ -8814,6 +9156,23 @@ export async function searchByImageWithSimilarity(
         color: p.color,
       });
 
+      if (compliance && desiredColorsTierForRelevance.length > 0 && normalized.normalizedColor) {
+        const knownColorCompliance = tieredColorListCompliance(
+          desiredColorsTierForRelevance,
+          [normalized.normalizedColor],
+          rerankColorModeForRelevance,
+        );
+        compliance.colorCompliance = knownColorCompliance.compliance;
+        compliance.matchedColor = knownColorCompliance.bestMatch ?? normalized.normalizedColor;
+        compliance.colorTier = knownColorCompliance.tier;
+        explainColorCompliance = knownColorCompliance.compliance;
+        explainMatchedColor = knownColorCompliance.bestMatch ?? normalized.normalizedColor;
+        explainColorTier = knownColorCompliance.tier;
+      } else if (compliance && desiredColorsTierForRelevance.length > 0) {
+        compliance.colorCompliance = Math.min(Number(compliance.colorCompliance ?? 0.5), 0.55);
+        explainColorCompliance = Math.min(Number(explainColorCompliance ?? 0.5), 0.55);
+      }
+
       const isBottomsDetectionForGenderGate =
         String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms";
       const hasBinaryQueryGenderIntent = queryGenderNorm === "men" || queryGenderNorm === "women";
@@ -9224,8 +9583,66 @@ export async function searchByImageWithSimilarity(
         }
       }
 
-      const resultJobFamily = imageSearchFamilyFromDetection(params.detectionProductCategory ?? mergedCategoryForRelevance, desiredProductTypes);
+      const resultJobFamily =
+        expectedImageFamilyFromDetectionCategory(params.detectionProductCategory) ??
+        imageSearchFamilyFromDetection(params.detectionProductCategory ?? mergedCategoryForRelevance, desiredProductTypes);
       const resultProductFamily = imageSearchFamilyFromProduct(hydratedBlobSrc);
+      // Assign match tier based on normalized metadata and intent alignment.
+      const contractTier = inferContractTierFromProduct(
+        normalized.normalizedFamily,
+        normalized.normalizedType,
+        params.detectionProductCategory
+      );
+      const topIntent = expectedFashionFamilyFromDetectionCategory(params.detectionProductCategory) === "tops"
+        ? inferTopIntentType({
+            detectionLabel: params.detectionLabel,
+            blipProductType: blipSignal?.productType,
+          })
+        : null;
+      const reliableTopIntent = topIntent && topIntent.confidence >= 0.45
+        ? topIntent
+        : null;
+      const fashionFamily =
+        expectedFashionFamilyFromDetectionCategory(params.detectionProductCategory) ??
+        (resultJobFamily === "dress"
+          ? "dresses"
+          : resultJobFamily === "accessory"
+            ? "accessories"
+            : resultJobFamily === "unknown" || resultJobFamily === "beauty" || resultJobFamily === "home" || resultJobFamily === "electronics"
+              ? undefined
+              : resultJobFamily);
+      const fashionIntent = repairIntentFromDetection(buildFashionIntentFromSearch({
+        imageMode: params.imageMode ?? "worn_outfit",
+        family: fashionFamily,
+        type: reliableTopIntent?.type ?? desiredProductTypes[0] ?? undefined,
+        subtype: reliableTopIntent?.subtype,
+        color: explicitColorsForRelevance[0] ?? undefined,
+        audience: queryGenderNorm as any,
+        style: desiredStyleForRelevance,
+        typeConfidence: reliableTopIntent?.confidence,
+      }), params);
+      const semanticTypeScore = compliance && (
+        fashionIntent.family === "tops" ||
+        resultJobFamily === "tops" ||
+        !hasReliableTypeIntentForRelevance
+      )
+        ? computeImageTypeScore({
+          intentType: fashionIntent.type,
+          intentSubtype: fashionIntent.subtype,
+          productType: normalized.normalizedType,
+          productSubtype: normalized.normalizedSubtype,
+          reliableTypeIntent: hasReliableTypeIntentForRelevance,
+        })
+        : null;
+      if (compliance && semanticTypeScore) {
+        (compliance as any).semanticTypeScore = semanticTypeScore.typeScore;
+        compliance.exactTypeScore = semanticTypeScore.exactTypeScore;
+        compliance.productTypeCompliance = semanticTypeScore.productTypeCompliance;
+      }
+      if (compliance && !hasReliableTypeIntentForRelevance) {
+        compliance.exactTypeScore = Math.min(compliance.exactTypeScore ?? 0, 0.65);
+        compliance.productTypeCompliance = Math.min(compliance.productTypeCompliance ?? 0, 0.70);
+      }
       const additiveScore = compliance
         ? additiveImageRankingScore({
           visualSimilarity: similarityScore,
@@ -9233,6 +9650,7 @@ export async function searchByImageWithSimilarity(
           productFamily: resultProductFamily,
           explain: compliance as unknown as Record<string, unknown>,
           availability: (p as any)?.availability,
+          reliableTypeIntent: hasReliableTypeIntentForRelevance,
         })
         : null;
       if (additiveScore) {
@@ -9246,19 +9664,6 @@ export async function searchByImageWithSimilarity(
               : "calibrated_image_score";
       }
 
-      // Assign match tier based on normalized metadata and intent alignment
-      const contractTier = inferContractTierFromProduct(
-        normalized.normalizedFamily,
-        normalized.normalizedType,
-        params.detectionProductCategory
-      );
-      const fashionIntent = buildFashionIntentFromSearch({
-        family: resultJobFamily,
-        type: desiredProductTypes[0] ?? undefined,
-        color: explicitColorsForRelevance[0] ?? undefined,
-        audience: queryGenderNorm as any,
-        style: desiredStyleForRelevance,
-      });
       const tierAssignment = assignMatchTier(contractTier, normalized, fashionIntent);
 
       // Tier assignment is debug-first. In production stabilization it must not cap
@@ -9338,6 +9743,7 @@ export async function searchByImageWithSimilarity(
             parentHypernymScore: compliance.parentHypernymScore,
             intraFamilyPenalty: compliance.intraFamilyPenalty,
             productTypeCompliance: compliance.productTypeCompliance,
+            semanticTypeScore: (compliance as any).semanticTypeScore,
             categoryScore: compliance.categoryRelevance01,
 
             // ── Metadata compliance (0-1) ────────────────────────
@@ -9358,9 +9764,9 @@ export async function searchByImageWithSimilarity(
             blipAlignment: blipAlignById.get(idStr) ?? 0,
             blipColorConflictFactor: blipColorConflictFactorById.get(idStr) ?? 1,
             colorContradictionPenalty: (compliance as any).colorContradictionPenalty ?? 1,
-            keywordSubtypeBoost: keywordSubtypeBoostById.get(idStr) ?? 0,
-            keywordSubtypeOverlap: keywordSubtypeOverlapById.get(idStr) ?? 0,
-            keywordSubtypeExactHit: keywordSubtypeExactHitById.get(idStr) ?? false,
+            keywordSubtypeBoost: hasReliableTypeIntentForRelevance ? (keywordSubtypeBoostById.get(idStr) ?? 0) : 0,
+            keywordSubtypeOverlap: hasReliableTypeIntentForRelevance ? (keywordSubtypeOverlapById.get(idStr) ?? 0) : 0,
+            keywordSubtypeExactHit: hasReliableTypeIntentForRelevance ? (keywordSubtypeExactHitById.get(idStr) ?? false) : false,
             imageCompositeScore,
             imageCompositeScore01,
 
@@ -9431,10 +9837,10 @@ export async function searchByImageWithSimilarity(
           : undefined,
         debugContract: includeDebug
           ? {
-          imageMode: (params as any)?.imageMode ?? null,
-          intentFamily: resultJobFamily ?? null,
-          intentType: Array.isArray(desiredProductTypes) && desiredProductTypes.length > 0 ? desiredProductTypes[0] : null,
-          intentSubtype: Array.isArray(desiredProductTypes) && desiredProductTypes.length > 1 ? desiredProductTypes[1] : null,
+          imageMode: fashionIntent.imageMode ?? params.imageMode ?? "worn_outfit",
+          intentFamily: fashionIntent.family ?? null,
+          intentType: fashionIntent.type ?? null,
+          intentSubtype: fashionIntent.subtype ?? (Array.isArray(desiredProductTypes) && desiredProductTypes.length > 1 ? desiredProductTypes[1] : null),
           productFamily: resultProductFamily ?? null,
           productType: normalized.normalizedType ?? null,
           productSubtype: normalized.normalizedSubtype ?? null,
@@ -9491,24 +9897,33 @@ export async function searchByImageWithSimilarity(
 
   const countAfterHydration = results.length;
 
+  const useFootwearLegacyVisualFirst =
+    footwearLegacyVisualFirstEnabled() &&
+    isFootwearDetectionIntent;
   const resultsBeforeFinalRelevanceFilter = results;
-  const sparseHydratedApparelPool =
-    apparelDetectionCategory &&
-    hasDetectionAnchoredTypeIntent &&
-    resultsBeforeFinalRelevanceFilter.length > 0 &&
-    resultsBeforeFinalRelevanceFilter.length <= 12;
-  const effectiveFinalResultMin = sparseHydratedApparelPool
-    ? Math.min(effectiveFinalAcceptMin, hasStrongVisualEvidence ? 0.14 : 0.18)
-    : effectiveFinalAcceptMin;
-  results = results.filter(
-    (p: any) =>
-      typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalResultMin,
-  ) as ProductResult[];
+  let effectiveFinalResultMin = effectiveFinalAcceptMin;
+  if (useFootwearLegacyVisualFirst) {
+    results = rankFootwearVisualFirst(resultsBeforeFinalRelevanceFilter).slice(0, limit) as ProductResult[];
+  } else {
+    const sparseHydratedApparelPool =
+      apparelDetectionCategory &&
+      hasDetectionAnchoredTypeIntent &&
+      resultsBeforeFinalRelevanceFilter.length > 0 &&
+      resultsBeforeFinalRelevanceFilter.length <= 12;
+    effectiveFinalResultMin = sparseHydratedApparelPool
+      ? Math.min(effectiveFinalAcceptMin, hasStrongVisualEvidence ? 0.14 : 0.18)
+      : effectiveFinalAcceptMin;
+    results = results.filter(
+      (p: any) =>
+        typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalResultMin,
+    ) as ProductResult[];
+  }
 
   // Main-path deterministic keep rule:
   // if strict mode would return empty for detection-anchored tops/bottoms, keep the
   // strongest in-family visual candidates instead of collapsing to zero.
   if (
+    !useFootwearLegacyVisualFirst &&
     mainPathStrict &&
     hasDetectionAnchoredTypeIntent &&
     results.length === 0 &&
@@ -9557,7 +9972,7 @@ export async function searchByImageWithSimilarity(
   const strongVisualOverrideMax = imageStrongVisualOverrideMaxCount();
   const droppedByFinalRelevanceBeforeOverride = Math.max(0, resultsBeforeFinalRelevanceFilter.length - results.length);
   let rescuedByStrongVisualOverride = 0;
-  if (strongVisualOverrideMax > 0 && resultsBeforeFinalRelevanceFilter.length > results.length) {
+  if (!useFootwearLegacyVisualFirst && strongVisualOverrideMax > 0 && resultsBeforeFinalRelevanceFilter.length > results.length) {
     const existingIds = new Set(results.map((p) => String((p as any).id)));
     const inferredColorCanGateStrongOverride =
       hasInferredColorSignal &&
@@ -9629,7 +10044,7 @@ export async function searchByImageWithSimilarity(
     }
   }
 
-  if (results.length === 0 && resultsBeforeFinalRelevanceFilter.length > 0) {
+  if (!useFootwearLegacyVisualFirst && results.length === 0 && resultsBeforeFinalRelevanceFilter.length > 0) {
     imageSearchPipelineDegraded = true;
     const detectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
     const topFocusedFallback = detectionCategoryNorm === "tops"
@@ -9661,7 +10076,7 @@ export async function searchByImageWithSimilarity(
     results = sortByAuthoritativeFinalScore(fallbackMapped).slice(0, limit) as ProductResult[];
   }
 
-  if (hasDetectionAnchoredTypeIntent) {
+  if (!useFootwearLegacyVisualFirst && hasDetectionAnchoredTypeIntent) {
     const isDressDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses";
     const filtered = results.filter((p: any) => {
       const ex = (p.explain ?? {}) as any;
@@ -9803,7 +10218,7 @@ export async function searchByImageWithSimilarity(
   // Footwear subtype gate: when the query specifies a clear footwear kind (sneakers, boots,
   // sandals, heels, loafers, flats), hard-block cross-subtype results that slipped through
   // the family gate (e.g. black boots appearing in a sneaker search).
-  if (searchRelevanceGateMode() === "strict" && detectionCategoryForFinalGate === "footwear" && desiredProductTypes.length > 0) {
+  if (!useFootwearLegacyVisualFirst && searchRelevanceGateMode() === "strict" && detectionCategoryForFinalGate === "footwear" && desiredProductTypes.length > 0) {
     const footwearSubtypeFiltered = results.filter((p: any) =>
       passesFootwearSubtypeGate(p as unknown as Record<string, unknown>, desiredProductTypes),
     );
@@ -9813,7 +10228,7 @@ export async function searchByImageWithSimilarity(
   }
 
   const beforeSamePoolSafeFillCount = results.length;
-  if (hasDetectionAnchoredTypeIntent && imageMinResultsTarget > 0 && resultsBeforeFinalRelevanceFilter.length > results.length) {
+  if (!useFootwearLegacyVisualFirst && hasDetectionAnchoredTypeIntent && imageMinResultsTarget > 0 && resultsBeforeFinalRelevanceFilter.length > results.length) {
     results = samePoolSafeFillResults({
       finalResults: results,
       rankedCandidates: resultsBeforeFinalRelevanceFilter,

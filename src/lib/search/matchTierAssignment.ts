@@ -19,7 +19,7 @@
 export type MatchTier = "exact" | "strong" | "related" | "weak" | "fallback" | "blocked";
 
 import type { FashionIntent } from "./fashionIntent";
-import { defaultConfidence } from "./fashionIntent";
+import { defaultConfidence, type ImageMode } from "./fashionIntent";
 import { colorCompatibility } from "./colorCompatibilityMatrix";
 
 export interface TierAssignmentResult {
@@ -53,6 +53,7 @@ export interface NormalizedProduct {
  * Used during interim phase while detection pipeline is being refactored
  */
 export function buildFashionIntentFromSearch(props: {
+  imageMode?: ImageMode | null;
   family?: string | null;
   type?: string | null;
   subtype?: string | null;
@@ -88,7 +89,7 @@ export function buildFashionIntentFromSearch(props: {
   if (props.material) conf.material = 0.6;
   
   return {
-    imageMode: "single_product",
+    imageMode: props.imageMode ?? "worn_outfit",
     family: (props.family as any) || "unknown",
     type: props.type || "",
     subtype: props.subtype || undefined,

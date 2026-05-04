@@ -10,12 +10,12 @@ describe("normalizeHydratedProduct", () => {
     const pullover = normalizeHydratedProduct({ title: "Grey Knitwear Pullover" });
     expect(pullover.normalizedFamily).toBe("tops");
     expect(pullover.normalizedType).toBe("sweater");
-    expect(pullover.normalizedSubtype).toBe("knit_pullover");
+    expect(pullover.normalizedSubtype).toBe("pullover");
 
     const turtleneck = normalizeHydratedProduct({ title: "Turtleneck Dark Grey Cotton Pullover" });
     expect(turtleneck.normalizedFamily).toBe("tops");
     expect(turtleneck.normalizedType).toBe("sweater");
-    expect(turtleneck.normalizedSubtype).toBe("turtleneck");
+    expect(turtleneck.normalizedSubtype).toBe("turtleneck_sweater");
   });
 
   test("normalizes dresses, trousers, and bags without description poisoning", () => {
@@ -47,11 +47,29 @@ describe("normalizeHydratedProduct", () => {
 
   test("normalizes real catalog category labels", () => {
     expect(normalizeHydratedProduct({ category: "women pullover" }).normalizedType).toBe("sweater");
+    expect(normalizeHydratedProduct({ category: "Sweatshirts" }).normalizedType).toBe("sweatshirt");
+    expect(normalizeHydratedProduct({ category: "Knitwear" }).normalizedType).toBe("sweater");
+    expect(normalizeHydratedProduct({ category: "Cardigan" }).normalizedType).toBe("cardigan");
+    expect(normalizeHydratedProduct({ category: "T-Shirts" }).normalizedType).toBe("tshirt");
+    expect(normalizeHydratedProduct({ title: "Marc O Polo Men T-Shirt", category: "T-Shirts" }).normalizedType).toBe("tshirt");
+    expect(normalizeHydratedProduct({ category: "Polo Shirts" }).normalizedType).toBe("polo");
+    expect(normalizeHydratedProduct({ category: "Shirts" }).normalizedType).toBe("shirt");
     expect(normalizeHydratedProduct({ category: "Dress Shoes" }).normalizedFamily).toBe("footwear");
     expect(normalizeHydratedProduct({ category: "BALLERINAS" }).normalizedType).toBe("flat");
     expect(normalizeHydratedProduct({ category: "CROSSBODY BAGS" }).normalizedFamily).toBe("bags");
     expect(normalizeHydratedProduct({ category: "TRACKSUITS & TRACK TROUSERS" }).normalizedFamily).toBe("bottoms");
     expect(normalizeHydratedProduct({ category: "COATS & JACKETS" }).normalizedFamily).toBe("outerwear");
     expect(normalizeHydratedProduct({ category: "ABAYAS" }).normalizedFamily).toBe("dresses");
+  });
+
+  test("does not let description text poison structured family", () => {
+    const normalized = normalizeHydratedProduct({
+      title: "White Cotton T-Shirt",
+      category: "T-Shirts",
+      description: "Pair with jeans or dress it up with sneakers.",
+    });
+
+    expect(normalized.normalizedFamily).toBe("tops");
+    expect(normalized.normalizedType).toBe("tshirt");
   });
 });

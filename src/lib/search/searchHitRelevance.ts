@@ -867,6 +867,11 @@ export function computeHitRelevance(
       0,
       Math.min(1, productTypeCompliance * spurious.complianceScale),
     );
+
+    if (intent.reliableTypeIntent === false) {
+      exactTypeScore = Math.min(exactTypeScore, 0.65);
+      productTypeCompliance = Math.min(productTypeCompliance, 0.70);
+    }
   }
 
   const wcText = Number(hit?._source?.color_confidence_text);
