@@ -124,14 +124,14 @@ function computeWeightedImageScore(params: {
   const style = Math.max(0, Math.min(1, params.styleScore ?? 1));
   const pattern = Math.max(0, Math.min(1, params.patternScore ?? 1));
 
-  // Weighted sum: visual dominates (62%), metadata adjusts non-destructively
+  // Weighted sum: visual remains primary, but color is the strongest metadata signal.
   const weighted =
-    0.62 * visual +
+    0.54 * visual +
     0.12 * category +
     0.10 * type +
-    0.08 * color +
-    0.04 * style +
-    0.04 * pattern;
+    0.18 * color +
+    0.03 * style +
+    0.03 * pattern;
 
   return Math.max(0, Math.min(1, weighted));
 }

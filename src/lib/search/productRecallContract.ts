@@ -50,9 +50,35 @@ function strictBottomsContract(): ProductRecallContract {
       "dress pant",
       "straight pant",
       "pleated trouser",
+      "pant",
+      "pants",
+      "jean",
+      "jeans",
+      "denim",
+      "legging",
+      "leggings",
+      "tight",
+      "tights",
+      "short",
+      "shorts",
+      "bermudas",
+      "skirt",
+      "skirts",
+      "skort",
+      "skorts",
+      "culottes",
+      "cargo pants",
+      "joggers",
+      "jogging bottoms",
+      "tracksuits & track trousers",
+      "chino",
+      "chinos",
+      "3/4 pant",
+      "3/4 tight",
+      "7/8 tight",
     ],
-    relatedTypes: ["chino", "loose pant"],
-    weakTypes: ["jeans", "cargo pants", "utility pants", "joggers"],
+    relatedTypes: ["loose pant", "utility pants", "sweatpants", "track pants"],
+    weakTypes: ["tight", "tights", "skort", "culottes", "bermuda"],
     badTypes: ["shorts", "skirt", "dress", "shirt", "shoe"],
     blockedFamilies: ["tops", "dresses", "footwear", "bags", "accessories", "outerwear"],
   };
@@ -66,9 +92,20 @@ function strictButtonUpShirtContract(): ProductRecallContract {
       "collared shirt",
       "shirt",
       "blouse",
+      "top",
+      "tee",
+      "tshirt",
+      "t shirt",
+      "polo",
+      "polo shirt",
+      "tunic",
+      "tank top",
+      "camisole",
+      "baselayer",
+      "bodysuit",
     ],
-    relatedTypes: ["overshirt", "long sleeve top"],
-    weakTypes: ["cardigan", "sweater", "sweatshirt", "hoodie"],
+    relatedTypes: ["overshirt", "long sleeve top", "short sleeve top", "sleeveless top", "crop top", "woven shirts", "woven tops"],
+    weakTypes: ["cardigan", "sweater", "sweatshirt", "hoodie", "pullover", "knitwear"],
     badTypes: ["pants", "trousers", "dress", "shoe", "bag"],
     blockedFamilies: ["bottoms", "dresses", "footwear", "bags", "accessories"],
   };
@@ -76,9 +113,9 @@ function strictButtonUpShirtContract(): ProductRecallContract {
 
 function strictSweaterContract(): ProductRecallContract {
   return {
-    exactTypes: ["sweater", "pullover", "knit pullover", "turtleneck sweater", "knitwear"],
-    relatedTypes: ["cardigan", "long sleeve top"],
-    weakTypes: ["hoodie", "sweatshirt"],
+    exactTypes: ["sweater", "pullover", "knit pullover", "turtleneck sweater", "knitwear", "jumper", "cardigan", "hoodie", "sweatshirt","t-shirt"],
+    relatedTypes: ["long sleeve top", "overshirt", "baselayer"],
+    weakTypes: ["tank top", "tee", "shirt"],
     badTypes: ["pants", "trousers", "dress", "shoe", "bag"],
     blockedFamilies: ["bottoms", "dresses", "footwear", "bags", "accessories"],
   };
@@ -94,9 +131,16 @@ function strictDressesContract(): ProductRecallContract {
       "mini dress",
       "maxi dress",
       "casual dress",
+      "jumpsuit",
+      "romper",
+      "playsuit",
+      "babydoll",
+      "kaftan",
+      "abaya",
+      "jilbab",
     ],
-    relatedTypes: ["halter dress", "sundress", "slip dress"],
-    weakTypes: ["gown", "kaftan", "abaya"],
+    relatedTypes: ["halter dress", "sundress", "slip dress", "midi dress", "mini dress", "maxi dress"],
+    weakTypes: ["gown", "kimono", "dress/top"],
     badTypes: ["tank top", "cami", "shirt", "skirt", "pants"],
     blockedFamilies: ["tops", "bottoms", "footwear", "bags", "accessories", "outerwear"],
   };
@@ -104,9 +148,28 @@ function strictDressesContract(): ProductRecallContract {
 
 function strictTopFallbackContract(): ProductRecallContract {
   return {
-    exactTypes: ["top", "shirt", "blouse", "tee", "tshirt", "sleeveless_top"],
-    relatedTypes: ["long sleeve top", "overshirt"],
-    weakTypes: ["sweater", "cardigan", "hoodie", "sweatshirt"],
+    exactTypes: [
+      "top",
+      "shirt",
+      "blouse",
+      "tee",
+      "tshirt",
+      "sleeveless_top",
+      "tank top",
+      "camisole",
+      "polo",
+      "polo shirt",
+      "crop top",
+      "basic top",
+      "long sleeve",
+      "short sleeve",
+      "baselayer",
+      "bodysuit",
+      "track top",
+      "loungewear",
+    ],
+    relatedTypes: ["long sleeve top", "overshirt", "knit top", "woven tops", "woven shirts", "shirt men", "women shirt", "men shirt"],
+    weakTypes: ["sweater", "cardigan", "hoodie", "sweatshirt", "pullover", "jumper", "knitwear", "rugby shirts"],
     badTypes: ["pants", "trousers", "dress", "shoe", "bag"],
     blockedFamilies: ["bottoms", "dresses", "footwear", "bags", "accessories"],
   };
@@ -125,36 +188,36 @@ export function buildProductRecallContract(params: {
     const footwearContract = (() => {
       if (includesAny(blob, /\b(sneaker|sneakers|trainer|trainers|running\s*shoe|low\s*top)\b/)) {
         return {
-          exactTypes: ["sneaker", "low top sneaker", "trainer", "running shoe"],
-          relatedTypes: ["shoe", "casual shoe"],
-          weakTypes: ["boot", "loafer", "flat", "sandal", "heel"],
+          exactTypes: ["sneaker", "low top sneaker", "trainer", "running shoe", "athletic shoe", "sport shoe", "tennis shoe"],
+          relatedTypes: ["shoe", "casual shoe", "trainers", "sneakers"],
+          weakTypes: ["boot", "loafer", "flat", "sandal", "heel", "mule", "slide"],
         };
       }
       if (includesAny(blob, /\b(boot|boots|chelsea|ankle\s*boot)\b/)) {
         return {
-          exactTypes: ["boot", "ankle boot", "chelsea boot"],
-          relatedTypes: ["shoe"],
-          weakTypes: ["sneaker", "loafer", "flat", "sandal", "heel"],
+          exactTypes: ["boot", "ankle boot", "chelsea boot", "ski boots", "snowboard boots", "after ski boot"],
+          relatedTypes: ["shoe", "shoes", "footwear"],
+          weakTypes: ["sneaker", "loafer", "flat", "sandal", "heel", "pump"],
         };
       }
       if (includesAny(blob, /\b(loafer|loafers|flat|flats|oxford|oxfords)\b/)) {
         return {
-          exactTypes: ["loafer", "flat", "oxford"],
-          relatedTypes: ["shoe", "casual shoe"],
-          weakTypes: ["sneaker", "boot", "sandal", "heel"],
+          exactTypes: ["loafer", "flat", "oxford", "ballerina", "ballerinas", "ballet flat", "ballet flats"],
+          relatedTypes: ["shoe", "casual shoe", "dress shoe"],
+          weakTypes: ["sneaker", "boot", "sandal", "heel", "pump"],
         };
       }
       if (includesAny(blob, /\b(sandal|sandals|heel|heels|pump|pumps)\b/)) {
         return {
-          exactTypes: ["sandal", "heel", "pump"],
-          relatedTypes: ["shoe"],
-          weakTypes: ["sneaker", "boot", "loafer", "flat"],
+          exactTypes: ["sandal", "heel", "pump", "flat sandal", "dress shoe", "espadrille", "slide", "mule"],
+          relatedTypes: ["shoe", "footwear", "women shoes"],
+          weakTypes: ["sneaker", "boot", "loafer", "flat", "oxford"],
         };
       }
       return {
-        exactTypes: ["shoe"],
-        relatedTypes: ["sneaker", "trainer", "boot", "loafer", "flat", "sandal", "heel"],
-        weakTypes: ["casual shoe"],
+        exactTypes: ["shoe", "footwear", "shoes"],
+        relatedTypes: ["sneaker", "trainer", "boot", "loafer", "flat", "sandal", "heel", "pump", "oxford", "ballerina"],
+        weakTypes: ["casual shoe", "dress shoe", "men shoes", "women shoes"],
       };
     })();
     const contract = {
