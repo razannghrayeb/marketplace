@@ -78,13 +78,11 @@ RUN set -eux; \
 
 # Copy Node from official Node image instead of installing via NodeSource apt
 COPY --from=builder /usr/local/bin/node /usr/local/bin/node
-COPY --from=builder /usr/local/bin/corepack /usr/local/bin/corepack
+COPY --from=builder /usr/local/bin/npm /usr/local/bin/npm
 COPY --from=builder /usr/local/lib/node_modules /usr/local/lib/node_modules
 
-RUN ln -sf /usr/local/lib/node_modules/corepack/dist/pnpm.js /usr/local/bin/pnpm \
-  && corepack enable \
-  && corepack prepare pnpm@9 --activate
-
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+ && npm install -g pnpm@9
 # Create non-root user
 RUN groupadd -g 1001 nodejs \
   && useradd -r -u 1001 -g nodejs nodejs
