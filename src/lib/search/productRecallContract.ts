@@ -91,6 +91,7 @@ function strictButtonUpShirtContract(): ProductRecallContract {
       "button down shirt",
       "collared shirt",
       "shirt",
+      "short sleeve top",
       "blouse",
       "top",
       "tee",
@@ -151,6 +152,7 @@ function strictTopFallbackContract(): ProductRecallContract {
     exactTypes: [
       "top",
       "shirt",
+      "short sleeve top",
       "blouse",
       "tee",
       "tshirt",

@@ -14,6 +14,143 @@ import { extractAttributesSync } from "./attributeExtractor";
 import { canonicalizeFashionColorToken, tieredColorListCompliance } from "../color/colorCanonical";
 import { normalizeColorToken } from "../color/queryColorFilter";
 
+/**
+ * Detect if a color is dark blue/navy (likely denim)
+ */
+function isDarkBlueOrNavy(color: string | undefined): boolean {
+  if (!color) return false;
+  const c = String(color).toLowerCase().trim();
+  return /\b(dark\s*blue|navy|indigo|midnight blue|denim blue)\b/.test(c) || c === "blue";
+}
+
+/**
+ * Detect if a color is light blue (not ideal for denim)
+ */
+function isLightBlue(color: string | undefined): boolean {
+  if (!color) return false;
+  const c = String(color).toLowerCase().trim();
+  return /\b(light\s*blue|sky\s*blue|powder\s*blue|baby\s*blue|periwinkle|cornflower)\b/.test(c);
+}
+
+/**
+ * Detect if bottom product likely has denim material based on color/visual cues
+ */
+function bottomLikesDedemLooksDenim(color: string | undefined, caption: string | undefined): boolean {
+  const colorMatch = isDarkBlueOrNavy(color);
+  const captionMatch = caption
+    ? /\b(denim|jean|denims|jeans)\b/.test(String(caption).toLowerCase())
+    : false;
+  return colorMatch && (captionMatch || isDarkBlueOrNavy(color));
+}
+
+/**
+ * Get color score for bottoms with denim specificity
+ * For dark blue jeans: prioritize dark-blue/navy > blue > black > gray
+ */
+function getBottomsColorScore(intentColor: string | undefined, productColor: string | undefined): number {
+  if (!intentColor || !productColor) return 0;
+  
+  const intent = String(intentColor).toLowerCase().trim();
+  const product = String(productColor).toLowerCase().trim();
+  
+  if (product === intent) return 1.0;
+  
+  // If intent is dark blue or navy
+  if (isDarkBlueOrNavy(intent)) {
+    if (isDarkBlueOrNavy(product)) return 0.95; // Exact dark blue match
+    if (product === "blue") return 0.75; // Generic blue is okay but not ideal
+    if (product === "black") return 0.35; // Black is somewhat acceptable
+    if (product === "gray" || product === "grey") return 0.25; // Gray is poor match
+    return 0; // Other colors don't match
+  }
+  
+  // If intent is generic blue
+  if (intent === "blue") {
+    if (product === "blue") return 1.0;
+    if (isDarkBlueOrNavy(product)) return 0.85; // Dark blue is still a match
+    if (isLightBlue(product)) return 0.55; // Light blue is acceptable but weaker
+    return 0;
+  }
+  
+  // Generic matching for other colors
+  if (product === intent) return 1.0;
+  if (product.includes(intent) || intent.includes(product)) return 0.7;
+  return 0;
+}
+
+/**
+ * Unified color scoring authority for bottoms
+ * Returns a single authoritative score that should be used for both colorScore and other color fields
+ * 
+ * @param intentFamily product family (e.g., "bottoms")
+ * @param intentColor the desired color from intent
+ * @param productColor the actual product color
+ * @param productMaterial the actual product material (denim, etc.)
+ * @returns unified 0-1 color score
+ */
+export function computeUnifiedBottomColorScore(params: {
+  intentFamily?: string;
+  intentColor?: string;
+  productColor?: string;
+  productMaterial?: string;
+}): number {
+  // Only special handling for bottoms
+  if (params.intentFamily?.toLowerCase() !== "bottoms") {
+    if (!params.intentColor || !params.productColor) return 0;
+    return params.intentColor.toLowerCase() === params.productColor.toLowerCase() ? 1.0 : 0;
+  }
+  
+  return getBottomsColorScore(params.intentColor, params.productColor);
+}
+
+/**
+ * Comprehensive bottoms-specific scorer for dark blue jeans and similar items.
+ * 
+ * Scoring formula:
+ * score = 0.40 * visual + 0.22 * type + 0.22 * color + 0.08 * material + 0.08 * audience
+ * 
+ * Then apply penalties:
+ * - Intent is dark-blue/navy but product is light-blue: -0.08
+ * - Intent looks like denim but product is not jeans/denim: -0.10
+ */
+export function scoreBottomCandidate(params: {
+  visualSimilarity: number; // 0-1
+  typeScore: number; // 0-1: how well product type matches intent type
+  colorScore: number; // 0-1: how well product color matches intent color
+  materialScore?: number; // 0-1: 0.5 default, 1.0 if denim/material matched
+  audienceScore: number; // 0-1
+  // Context flags for penalties
+  intentColorDarkBlue?: boolean;
+  productColorLightBlue?: boolean;
+  intentLooksDenim?: boolean;
+  productTypeNotDenimJeans?: boolean;
+}): number {
+  const visual = Math.max(0, Math.min(1, params.visualSimilarity ?? 0));
+  const type = Math.max(0, Math.min(1, params.typeScore ?? 0));
+  const color = Math.max(0, Math.min(1, params.colorScore ?? 0));
+  const material = Math.max(0, Math.min(1, params.materialScore ?? 0.5));
+  const audience = Math.max(0, Math.min(1, params.audienceScore ?? 1));
+
+  let score =
+    0.40 * visual +
+    0.22 * type +
+    0.22 * color +
+    0.08 * material +
+    0.08 * audience;
+
+  // Penalty: intent is dark-blue/navy but product is light-blue
+  if (params.intentColorDarkBlue && params.productColorLightBlue) {
+    score -= 0.08;
+  }
+
+  // Penalty: intent looks like denim but product is not jeans/denim
+  if (params.intentLooksDenim && params.productTypeNotDenimJeans) {
+    score -= 0.10;
+  }
+
+  return Math.max(0, Math.min(1, score));
+}
+
 /** Visual / hybrid similarity should dominate tie-breaks when type/color intent is absent. */
 function rerankSimilarityWeight(): number {
   const n = Number(process.env.SEARCH_RERANK_SIM_WEIGHT);

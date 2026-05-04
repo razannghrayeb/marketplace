@@ -22,6 +22,45 @@ import type { FashionIntent } from "./fashionIntent";
 import { defaultConfidence, type ImageMode } from "./fashionIntent";
 import { colorCompatibility } from "./colorCompatibilityMatrix";
 
+/**
+ * Bottoms type equivalence mapping for jeans, pants, trousers, chinos.
+ * Used to prevent jeans from being marked as "type mismatch" when intent is pants.
+ */
+const BOTTOMS_TYPE_EQUIVALENCE: Record<string, Set<string>> = {
+  pants: new Set(["pants", "trousers", "pant", "trouser", "jeans", "jean", "denim", "chinos", "chino", "cargo", "cargo pants"]),
+  trousers: new Set(["trousers", "pants", "trouser", "pant", "jeans", "jean", "denim", "chinos", "chino", "cargo", "cargo pants"]),
+  jeans: new Set(["jeans", "jean", "denim", "pants", "pant", "trousers", "trouser", "chinos", "chino"]),
+  denim: new Set(["denim", "jeans", "jean", "pants", "pant", "trousers", "trouser"]),
+  chinos: new Set(["chinos", "chino", "pants", "pant", "trousers", "trouser"]),
+  chino: new Set(["chino", "chinos", "pants", "pant", "trousers", "trouser"]),
+};
+
+/**
+ * Check if two bottoms types are equivalent
+ * Returns 1.0 for exact match, 0.95 for jeans/denim with pants intent, 0 otherwise
+ */
+function bottomsTypeEquivalence(intentType: string, productType: string): number {
+  const intent = intentType.toLowerCase().trim();
+  const product = productType.toLowerCase().trim();
+  
+  if (intent === product) return 1.0;
+  
+  const equivalents = BOTTOMS_TYPE_EQUIVALENCE[intent];
+  if (!equivalents) return 0;
+  
+  if (equivalents.has(product)) {
+    // Jeans/denim with pants/trousers intent: 0.95 score (very high)
+    if ((product === "jeans" || product === "jean" || product === "denim") &&
+        (intent === "pants" || intent === "pant" || intent === "trousers" || intent === "trouser")) {
+      return 0.95;
+    }
+    // Other equivalences: 0.90 score
+    return 0.90;
+  }
+  
+  return 0;
+}
+
 export interface TierAssignmentResult {
   tier: MatchTier;
   reason: string;
@@ -229,9 +268,19 @@ function computeMatchStrength(product: NormalizedProduct, intent: FashionIntent)
     ? canonicalEq(product.normalizedFamily, intent.family)
     : false;
 
-  const typeMatch = product.normalizedType && intent.type
-    ? canonicalEq(product.normalizedType, intent.type)
-    : false;
+  // Type matching: use equivalence for bottoms, exact match for others
+  let typeMatch = false;
+  let typeEquivalenceScore = 0;
+  if (product.normalizedType && intent.type) {
+    if (canonicalEq(product.normalizedType, intent.type)) {
+      typeMatch = true;
+      typeEquivalenceScore = 1.0;
+    } else if (familyMatch && product.normalizedFamily && canonicalEq(product.normalizedFamily, "bottoms")) {
+      // Use bottoms equivalence for same-family type matching
+      typeEquivalenceScore = bottomsTypeEquivalence(intent.type, product.normalizedType);
+      typeMatch = typeEquivalenceScore >= 0.85; // Accept if equivalence score is high
+    }
+  }
 
   const subtypeMatch = product.normalizedSubtype && intent.subtype
     ? canonicalEq(product.normalizedSubtype, intent.subtype)
@@ -258,6 +307,16 @@ function computeMatchStrength(product: NormalizedProduct, intent: FashionIntent)
 
   // Strong: family + type (even if color unclear)
   if (familyMatch && typeMatch) {
+    return "strong";
+  }
+
+  // Strong: bottoms with high equivalence score and good color match
+  if (familyMatch && typeEquivalenceScore >= 0.85 && (subtypeMatch || colorCompatScore >= 0.55)) {
+    return "strong";
+  }
+
+  // Strong: bottoms with high equivalence score (jeans for pants intent)
+  if (familyMatch && typeEquivalenceScore >= 0.90) {
     return "strong";
   }
 
@@ -298,10 +357,20 @@ function buildTierReason(product: NormalizedProduct, intent: FashionIntent, targ
     parts.push(`family match (${product.normalizedFamily})`);
   }
 
-  if (product.normalizedType && intent.type && canonicalEq(product.normalizedType, intent.type)) {
-    parts.push(`type match (${product.normalizedType})`);
-  } else if (intent.type) {
-    parts.push(`type mismatch (expected ${intent.type}, got ${product.normalizedType || "unknown"})`);
+  if (product.normalizedType && intent.type) {
+    if (canonicalEq(product.normalizedType, intent.type)) {
+      parts.push(`type match (${product.normalizedType})`);
+    } else if (product.normalizedFamily && canonicalEq(product.normalizedFamily, "bottoms")) {
+      // Check bottoms equivalence
+      const equiv = bottomsTypeEquivalence(intent.type, product.normalizedType);
+      if (equiv >= 0.85) {
+        parts.push(`type equivalent (${intent.type} ≈ ${product.normalizedType})`);
+      } else {
+        parts.push(`type mismatch (expected ${intent.type}, got ${product.normalizedType})`);
+      }
+    } else {
+      parts.push(`type mismatch (expected ${intent.type}, got ${product.normalizedType})`);
+    }
   }
 
   if (product.normalizedSubtype && intent.subtype && canonicalEq(product.normalizedSubtype, intent.subtype)) {
