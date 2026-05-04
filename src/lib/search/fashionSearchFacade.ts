@@ -44,6 +44,7 @@ import {
   resolveProductAudience,
   getAudienceCap,
   normalizeFamily,
+  isStrongOppositeFamily,
 } from "./familyGuard";
 import { config } from "../../config";
 
@@ -511,13 +512,34 @@ function applyPostHydrationGuards(
       const productAudience = resolveProductAudience(product);
       const nextProduct: ProductResult & { guardReason?: string } = { ...product };
 
-      // Known wrong family -> drop entirely.
-      if (intentFamily && productFamily && productFamily !== intentFamily) {
-        return null;
-      }
-
       // Start with existing final score (or conservative default)
       let maxFinal = typeof nextProduct.finalRelevance01 === "number" ? nextProduct.finalRelevance01 : 0.5;
+      const rawVisual = Math.max(
+        0,
+        Math.min(
+          1,
+          Number(
+            nextProduct.similarity_score ??
+              (nextProduct.explain as any)?.clipCosine ??
+              (nextProduct.explain as any)?.merchandiseSimilarity ??
+              0,
+          ) || 0,
+        ),
+      );
+
+      // Known wrong family is usually a metadata problem, not proof that the
+      // visual neighbor is bad. Hard-drop only obvious opposite-family clashes
+      // unless the visual evidence is near-identical.
+      if (intentFamily && productFamily && productFamily !== intentFamily) {
+        const strongOpposite = isStrongOppositeFamily(intentFamily, productFamily);
+        if (strongOpposite && rawVisual < 0.9) {
+          return null;
+        }
+        maxFinal = Math.min(maxFinal, rawVisual >= 0.72 ? 0.74 : 0.62);
+        nextProduct.guardReason =
+          (nextProduct.guardReason ? `${nextProduct.guardReason};` : "") +
+          (strongOpposite ? "strong_family_mismatch_visual_override" : "family_mismatch_soft_penalty");
+      }
 
       // Unknown family -> keep with penalty (honest scoring)
       if (!productFamily) {
@@ -525,7 +547,7 @@ function applyPostHydrationGuards(
         nextProduct.guardReason = (nextProduct.guardReason ? `${nextProduct.guardReason};` : "") + "unknown_family_kept_with_penalty";
       }
 
-      // Opposite gender penalty
+      // Opposite audience stays a hard conflict; other metadata issues below are penalties.
       if (intentAudience && product.normalizedAudience) {
         const prodAud = String(product.normalizedAudience ?? "").toLowerCase().trim();
         const wantAud = String(intentAudience ?? "").toLowerCase().trim();

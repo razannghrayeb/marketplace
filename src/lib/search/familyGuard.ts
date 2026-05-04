@@ -132,7 +132,30 @@ function inferFamilyFromTitle(title: string): string | null {
 }
 
 /**
- * Apply hard family guard: drop product if it doesn't match intent family
+ * Return true only for high-confidence cross-family contradictions that should
+ * still be hard-blocked. Ordinary family mismatches are scoring signals; many
+ * catalog rows have sparse or noisy category fields, so broad hard drops hurt
+ * image recall.
+ */
+const STRONG_OPPOSITE_FAMILY_PAIRS = new Set([
+  "footwear|tops",
+  "bags|bottoms",
+  "dresses|footwear",
+  "accessories|dresses",
+  "accessories|footwear",
+]);
+
+export function isStrongOppositeFamily(a: string | null, b: string | null): boolean {
+  const left = normalizeFamily(String(a ?? "")) ?? String(a ?? "").toLowerCase().trim();
+  const right = normalizeFamily(String(b ?? "")) ?? String(b ?? "").toLowerCase().trim();
+  if (!left || !right || left === right) return false;
+
+  const pair = [left, right].sort().join("|");
+  return STRONG_OPPOSITE_FAMILY_PAIRS.has(pair);
+}
+
+/**
+ * Apply family guard: hard-drop only obvious opposite-family contradictions.
  * Returns true if product should be kept, false if it should be dropped
  */
 export function applyFamilyGuard(intentFamily: string | null, productFamily: string | null): boolean {
@@ -145,8 +168,8 @@ export function applyFamilyGuard(intentFamily: string | null, productFamily: str
   // Same family → keep
   if (intentFamily === productFamily) return true;
 
-  // Different family → drop (hard guard)
-  return false;
+  // Ordinary mismatches are penalized later instead of being hard-dropped.
+  return !isStrongOppositeFamily(intentFamily, productFamily);
 }
 
 /**

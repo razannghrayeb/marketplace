@@ -8,6 +8,7 @@ import { hammingDistance } from "../products/canonical";
 export interface DedupSearchResultItem {
   id?: string | number;
   canonical_id?: string | number | null;
+  variant_group_key?: string | number | null;
   image_cdn?: string | null;
   image_url?: string | null;
   images?: Array<{ url?: string | null; is_primary?: boolean; p_hash?: string | null }>;
@@ -65,7 +66,7 @@ function scoreOf(p: DedupSearchResultItem): number {
 }
 
 /**
- * Keep highest-scoring item per duplicate key (id → canonical → image URL → pHash neighborhood).
+ * Keep highest-scoring item per duplicate key (id â†’ canonical â†’ image URL â†’ pHash neighborhood).
  */
 export function dedupeSearchResults<T extends DedupSearchResultItem>(items: T[], opts?: DedupOptions): T[] {
   const hammingMax = opts?.imageHammingMax ?? config.search.dedupeImageHammingMax;
@@ -110,31 +111,22 @@ export function dedupeSearchResults<T extends DedupSearchResultItem>(items: T[],
 /**
  * Image-search dedupe keeps recall high:
  * - always remove exact duplicate product IDs
- * - optionally remove exact same primary image URL
- * - optionally remove exact same primary pHash
  *
- * Unlike text dedupe, this does NOT collapse by canonical group or near-pHash.
+ * Unlike text dedupe, this does NOT collapse by canonical group, image URL, or pHash.
+ * Those fields are frequently shared by variants, placeholders, or re-used vendor
+ * media, and using them as hard duplicate keys can collapse a good visual pool to
+ * only a couple of products.
  */
 export function dedupeImageSearchResults<T extends DedupSearchResultItem>(items: T[]): T[] {
   const sorted = [...items].sort((a, b) => scoreOf(b) - scoreOf(a));
   const seenIds = new Set<string>();
-  const seenUrls = new Set<string>();
-  const seenPhashes = new Set<string>();
   const out: T[] = [];
 
   for (const p of sorted) {
     const idStr = p.id != null ? String(p.id) : "";
     if (idStr && seenIds.has(idStr)) continue;
 
-    const url = primaryImageUrl(p);
-    if (url && seenUrls.has(url)) continue;
-
-    const ph = primaryPHash(p);
-    if (ph && ph.length >= 8 && seenPhashes.has(ph)) continue;
-
     if (idStr) seenIds.add(idStr);
-    if (url) seenUrls.add(url);
-    if (ph && ph.length >= 8) seenPhashes.add(ph);
     out.push(p);
   }
 
@@ -142,12 +134,14 @@ export function dedupeImageSearchResults<T extends DedupSearchResultItem>(items:
 }
 
 export type FilterRelatedAgainstMainOpts = {
-  /** Use narrow image dedupe (id / same URL / same pHash only); default text dedupe. */
+  /** Use image dedupe (exact product id only); default text dedupe. */
   imageSearch?: boolean;
 };
 
 /**
- * Drop related items that duplicate main list by id or primary image URL, then dedupe related.
+ * Drop related items that duplicate main list, then dedupe related.
+ * Image search only removes exact product-id overlap so visually similar variants
+ * or products that reuse media can still appear in `related`.
  */
 export function filterRelatedAgainstMain<T extends DedupSearchResultItem>(
   main: T[],
@@ -158,7 +152,9 @@ export function filterRelatedAgainstMain<T extends DedupSearchResultItem>(
   if (related.length === 0) return [];
 
   const idSet = new Set(main.map((m) => String(m.id)));
-  const urlSet = new Set(main.map((m) => primaryImageUrl(m)).filter(Boolean) as string[]);
+  const urlSet = opts?.imageSearch
+    ? new Set<string>()
+    : new Set(main.map((m) => primaryImageUrl(m)).filter(Boolean) as string[]);
 
   const filtered = related.filter((r) => {
     if (idSet.has(String(r.id))) return false;
