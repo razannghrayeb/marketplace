@@ -6860,18 +6860,11 @@ export class ImageAnalysisService {
             }
           }
 
-          // tops/bottoms/outerwear: catalog `embedding` holds full-frame CLIP vectors;
-          // query with full-frame vector for proper distribution alignment.
-          // dresses: use `embedding_garment` — the garment crop is more precise for a
-          // dress that spans 40-80% of the image, and the catalog field is indexed from
-          // the same garment-crop pipeline. The two-pass fallback at passBKnnField
-          // automatically queries `embedding` when garment-field results are low.
-          const knnFieldUsed =
-            categoryMapping.productCategory === "tops" ||
-            categoryMapping.productCategory === "bottoms" ||
-            categoryMapping.productCategory === "outerwear"
-              ? "embedding"
-              : shopTheLookKnnField();
+          // PHASE 1-fix: Always use embedding_garment for all categories
+          // Crop-based detection should compare against garment embeddings, not full-product
+          // embeddings. Pass B logic (embedding fallback) handles cases where garment results
+          // are insufficient.
+          const knnFieldUsed = shopTheLookKnnField();
           const textureMaterial = await textureMaterialPromise;
           if (textureMaterial.material && textureMaterial.confidence >= imageMinMaterialConfidenceEnv()) {
             (filters as any).material = textureMaterial.material;
