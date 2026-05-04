@@ -1070,10 +1070,10 @@ async function extractDetectionCropColorsForRanking(params: {
           left = Math.floor(w * (longSleeveTopLike ? 0.14 : 0.12));
           width = Math.max(16, Math.floor(w * (longSleeveTopLike ? 0.72 : 0.76)));
           top = Math.floor(h * (longSleeveTopLike ? 0.06 : 0.08));
-          // BUGFIX: Reduce short-sleeve top crop from 0.62 to 0.50 to avoid pants spillover
-          // When detection box includes both shirt and pants, 62% captures too much of the lower
-          // dark fabric, causing navy/black to dominate over the white shirt color.
-          const bottom = Math.floor(h * (longSleeveTopLike ? 0.58 : 0.50));
+          // Keep short-sleeve top color extraction focused on the upper torso/chest region.
+          // Wider crops admit jeans and shadow pixels from the lower box, which can drown out
+          // a white/off-white shirt with navy/black noise.
+          const bottom = Math.floor(h * (longSleeveTopLike ? 0.58 : 0.40));
           height = Math.max(24, bottom - top);
         } else if (footwear) {
           // Shoe boxes frequently include floor pixels around edges.

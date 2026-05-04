@@ -30,6 +30,12 @@ export interface ProductContract {
  * This is the central place where intent → search terms mapping happens
  */
 export function buildSemanticContract(intent: FashionIntent): ProductContract {
+  // Special handling for suits (not generic outerwear)
+  const typeLower = normalizeType(intent.type);
+  if (/\b(suit|suits|tuxedo|tuxedos)\b/.test(typeLower)) {
+    return buildSuitContract(intent);
+  }
+
   switch (intent.family) {
     case "dresses":
       return buildDressContract(intent);
@@ -56,6 +62,88 @@ export function buildSemanticContract(intent: FashionIntent): ProductContract {
         blockedFamilies: [],
       };
   }
+}
+
+/**
+ * Build contract specifically for suit intent (not generic outerwear)
+ * Suits are tailored, formal garments with strict type matching
+ */
+function buildSuitContract(intent: FashionIntent): ProductContract {
+  const typeLower = normalizeType(intent.type);
+
+  // exactTypes: suit-specific variants
+  const exactTypes = [typeLower, intent.subtype && normalizeType(intent.subtype)]
+    .filter(Boolean) as string[];
+
+  // strongTypes: other suit/formal variants (blazer, dress jacket, formal coat)
+  // These are visually similar and serve the same formal purpose
+  const strongTypes = [
+    "suit",
+    "suits",
+    "tuxedo",
+    "tuxedos",
+    "suit jacket",
+    "dress jacket",
+    "blazer",
+    "blazers",
+    "sport coat",
+    "sportcoat",
+    "formal jacket",
+    "dress jacket",
+    "waistcoat",
+    "vest",
+  ];
+
+  // relatedTypes: formal outerwear that's less exactly a suit
+  // Coats, structured jackets, etc. that might work in formal contexts
+  const relatedTypes = [
+    "coat",
+    "coats",
+    "wool coat",
+    "formal coat",
+    "overcoat",
+    "structured jacket",
+    "tailored jacket",
+    "gilet",
+  ];
+
+  // weakTypes: casual outerwear that's NOT formal (should score low)
+  // Jackets, parkas, denim that don't match suit formality
+  const weakTypes = ["jacket", "jackets", "parka", "parkas", "windbreaker", "rain jacket"];
+
+  // badTypes: MUST NOT return these for suit intent
+  // Shirts, pants, casual tops are not suits despite sometimes being worn together
+  const badTypes = [
+    "shirt",
+    "blouse",
+    "button up",
+    "button down",
+    "casual shirt",
+    "dress shirt",
+    "top",
+    "tshirt",
+    "t-shirt",
+    "pants",
+    "trouser",
+    "jeans",
+    "denim",
+    "dress",
+    "skirt",
+    "shorts",
+    "casual jacket",
+    "denim jacket",
+    "bomber",
+    "windbreaker",
+    "rain coat",
+    "sweatshirt",
+    "hoodie",
+    "sweater",
+    "cardigan",
+  ];
+
+  const blockedFamilies = ["tops", "bottoms", "dresses", "footwear", "bags", "accessories"];
+
+  return { exactTypes, strongTypes, relatedTypes, weakTypes, badTypes, blockedFamilies };
 }
 
 function buildDressContract(intent: FashionIntent): ProductContract {

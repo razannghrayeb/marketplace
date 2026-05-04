@@ -1544,12 +1544,16 @@ function isImpossibleImageFamilyMismatch(jobFamily: ImageSearchFamily, productFa
 
 type MainPathAdmissionDecision = {
   admitted: boolean;
-  score: number;
   reason: string;
   productFamily: ImageSearchFamily;
   structuralScore: number;
   visualFloor: number;
   penalties: MainPathPenaltyTier[];
+  // Type-aware cap: if product type doesn't match detection intent,
+  // limit final score to this value. Only applied if admitted=true.
+  typeMismatchCap?: number;
+  // Minimum floor for admitted candidates (survival threshold)
+  admissionFloor: number;
 };
 
 type MainPathPenaltyTier = {
@@ -1655,8 +1659,8 @@ function colorAdmissionPenalty(params: {
     const ratio = explicitFloor > 0 ? params.colorScore / explicitFloor : 1;
     if (ratio >= 0.75) return { property: "color", tier: "minor", multiplier: 0.90, reason: "explicit_color_slight_mismatch", value: params.colorScore, threshold: explicitFloor };
     if (ratio >= 0.45) return { property: "color", tier: "moderate", multiplier: 0.78, reason: "explicit_color_mismatch", value: params.colorScore, threshold: explicitFloor };
-    if (ratio >= 0.2) return { property: "color", tier: "major", multiplier: 0.64, reason: "explicit_color_strong_mismatch", value: params.colorScore, threshold: explicitFloor };
-    return { property: "color", tier: "severe", multiplier: 0.52, reason: "explicit_color_absent", value: params.colorScore, threshold: explicitFloor };
+    if (ratio >= 0.2) return { property: "color", tier: "major", multiplier: 0.58, reason: "explicit_color_strong_mismatch", value: params.colorScore, threshold: explicitFloor };
+    return { property: "color", tier: "severe", multiplier: 0.42, reason: "explicit_color_absent", value: params.colorScore, threshold: explicitFloor };
   }
 
   if (!params.hasColorPreferenceForRanking) {
@@ -1762,6 +1766,38 @@ function applyTopLongSleeveVisualEquivalenceToCompliance(params: {
   return true;
 }
 
+function applyTopShortSleeveVisualEquivalenceToCompliance(params: {
+  source: Record<string, unknown>;
+  compliance: HitCompliance;
+  detectionCategory: string | null | undefined;
+  desiredSleeve?: string | null;
+}): boolean {
+  if (normalizeDetectionCategoryToken(params.detectionCategory) !== "tops") return false;
+  if (String(params.desiredSleeve ?? "").toLowerCase().trim() !== "short") return false;
+
+  const sourceBlob = [
+    params.source.title,
+    params.source.description,
+    params.source.category,
+    params.source.category_canonical,
+    params.source.normalized_type,
+    Array.isArray(params.source.product_types) ? params.source.product_types.join(" ") : params.source.product_types,
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x).toLowerCase())
+    .join(" ");
+  const hasShortSleeveCue = /\b(short sleeve|short-sleeve|tshirt|t-?shirt|tee|polo)\b/.test(sourceBlob);
+  const hasLongSleeveContradiction = /\b(long sleeve|long-sleeve|sweater|hoodie|sweatshirt|pullover|cardigan)\b/.test(sourceBlob);
+  if (!hasShortSleeveCue || hasLongSleeveContradiction) return false;
+
+  params.compliance.sleeveCompliance = Math.max(params.compliance.sleeveCompliance ?? 0, 0.9);
+  params.compliance.productTypeCompliance = Math.max(params.compliance.productTypeCompliance ?? 0, 0.9);
+  params.compliance.exactTypeScore = Math.max(params.compliance.exactTypeScore ?? 0, 1);
+  params.compliance.crossFamilyPenalty = Math.min(params.compliance.crossFamilyPenalty ?? 0, 0.08);
+  (params.compliance as any).topShortSleeveVisualEquivalence = "short_sleeve_top_like";
+  return true;
+}
+
 function dressLengthAdmissionPenalty(category: string, hasLengthIntent: boolean, lengthScore: number): MainPathPenaltyTier {
   if (normalizeDetectionCategoryToken(category) !== "dresses") {
     return noAdmissionPenalty("dress_length", "not_dress_detection", lengthScore);
@@ -1809,6 +1845,12 @@ function evaluateMainPathAdmission(params: {
     desiredProductTypes: params.desiredProductTypes,
     rawVisual: params.rawVisual,
   });
+  applyTopShortSleeveVisualEquivalenceToCompliance({
+    source: params.source,
+    compliance: comp,
+    detectionCategory: params.detectionCategory,
+    desiredSleeve: params.desiredSleeve,
+  });
   const exactTypeScore = (comp.exactTypeScore ?? 0) >= 1 ? 1 : 0;
   const structuralScore = Math.max(
     exactTypeScore,
@@ -1846,13 +1888,13 @@ function evaluateMainPathAdmission(params: {
   };
 
   if (!params.hasDetectionAnchoredTypeIntent) {
-    return { admitted: false, score: 0, reason: "not_detection_scoped", penalties: [], ...baseDecision };
+    return { admitted: false, reason: "not_detection_scoped", penalties: [], admissionFloor: 0, ...baseDecision };
   }
   if (isImpossibleImageFamilyMismatch(params.expectedFamily, productFamily)) {
-    return { admitted: false, score: 0, reason: "family_mismatch", penalties: [], ...baseDecision };
+    return { admitted: false, reason: "family_mismatch", penalties: [], admissionFloor: 0, ...baseDecision };
   }
   if (params.hasAudienceIntent && audienceScore < 0.45) {
-    return { admitted: false, score: 0, reason: "audience_conflict", penalties: [], ...baseDecision };
+    return { admitted: false, reason: "audience_conflict", penalties: [], admissionFloor: 0, ...baseDecision };
   }
 
   const penalties = [
@@ -1879,13 +1921,59 @@ function evaluateMainPathAdmission(params: {
     topSleeveAdmissionPenalty(category, params.hasSleeveIntent, sleeveScore),
     dressLengthAdmissionPenalty(category, params.hasLengthIntent, lengthScore),
   ];
+  
+  // Compute type-aware score cap based on detection category and product type.
+  // If product type doesn't match intent, we apply a cap to prevent wrong types
+  // from outranking correct ones via visual similarity alone.
+  let typeMismatchCap: number | undefined;
+  const productTypeTokens = Array.isArray(params.source.product_types) 
+    ? (params.source.product_types as unknown[]).map(t => String(t ?? "").toLowerCase().trim()).filter(Boolean)
+    : [];
+  
+  // For tops: cap non-matching types (e.g., tshirt/polo under sweater intent)
+  if (category === "tops") {
+    const hasExactTypeMatch = exactTypeScore >= 1;
+    const hasTightTypeMatch = (comp.productTypeCompliance ?? 0) >= 0.82;
+    if (!hasExactTypeMatch && !hasTightTypeMatch) {
+      // Check if it's a narrow type that should be capped
+      const isTshirtOrPolo = productTypeTokens.some(t => /\b(tshirt|t-shirt|tee|polo|polo shirt)\b/.test(t));
+      const isKnitwear = productTypeTokens.some(t => /\b(sweater|sweatshirt|hoodie|cardigan|pullover|knitwear|knit)\b/.test(t));
+      // T-shirt/polo under sweater/knitwear intent should be capped
+      if (isTshirtOrPolo && isKnitwear === false && params.rawVisual >= 0.60) {
+        typeMismatchCap = 0.68;
+      }
+    }
+  }
+  // For other categories, apply similar logic as needed
+  else if (category === "bottoms") {
+    const hasExactTypeMatch = exactTypeScore >= 1;
+    if (!hasExactTypeMatch && (comp.productTypeCompliance ?? 0) < 0.75) {
+      typeMismatchCap = 0.70;
+    }
+  }
+  else if (category === "bags") {
+    const hasExactTypeMatch = exactTypeScore >= 1;
+    if (!hasExactTypeMatch && (comp.productTypeCompliance ?? 0) < 0.74) {
+      typeMismatchCap = 0.72;
+    }
+  }
+  else if (category === "footwear") {
+    const hasExactTypeMatch = exactTypeScore >= 1;
+    if (!hasExactTypeMatch && (comp.productTypeCompliance ?? 0) < 0.78) {
+      typeMismatchCap = 0.74;
+    }
+  }
+  
+  // Compute admission floor based on penalties (for survival threshold, not ranking)
   const penaltyMultiplier = penalties.reduce((acc, penalty) => acc * penalty.multiplier, 1);
-  const score = clampScore01(baseScore * penaltyMultiplier);
+  const admissionFloor = clampScore01(baseScore * penaltyMultiplier);
+  
   return {
     admitted: true,
-    score,
     reason: "main_path_visual_admission",
     penalties,
+    admissionFloor,
+    typeMismatchCap,
     ...baseDecision,
   };
 }
@@ -2004,6 +2092,8 @@ function computeImageTypeScore(params: {
   const productSubtype = normalizeImageTypeToken(params.productSubtype);
   if (!intentType || !productType) return null;
 
+  const topAliases = new Set(["tshirt", "t-shirt", "tee", "shirt", "short_sleeve_top"]);
+
   if (!params.reliableTypeIntent) {
     const typeScore = productType === intentType ? 0.75 : 0.55;
     return {
@@ -2014,14 +2104,16 @@ function computeImageTypeScore(params: {
   }
 
   if (intentType === "tshirt_or_shirt") {
-    const typeScore = productType === "tshirt" || productType === "shirt"
-      ? 0.9
+    const typeScore = topAliases.has(productType)
+      ? 1
       : productType === "polo"
-        ? 0.62
-        : 0.35;
+        ? 0.92
+        : productType === "blouse" || productType === "button_down_shirt"
+          ? 0.82
+          : 0.35;
     return {
       typeScore,
-      exactTypeScore: 0,
+      exactTypeScore: topAliases.has(productType) ? 1 : 0,
       productTypeCompliance: typeScore,
     };
   }
@@ -8199,12 +8291,28 @@ export async function searchByImageWithSimilarity(
     }
     if (mainPathAdmission.admitted && hasDetectionAnchoredTypeIntent) {
       const previousScore = comp.finalRelevance01 ?? 0;
-      comp.finalRelevance01 = mainPathAdmission.score;
-      if (mainPathAdmission.score > previousScore) {
-        mainPathVisualAdmissionLifted += 1;
-      } else if (mainPathAdmission.score < previousScore) {
+      let cappedScore = comp.finalRelevance01 ?? 0;
+      
+      // Apply type-aware score cap: if product type doesn't match detection intent,
+      // limit the score to prevent wrong types from outranking correct matches.
+      if (mainPathAdmission.typeMismatchCap !== undefined && cappedScore > mainPathAdmission.typeMismatchCap) {
+        cappedScore = mainPathAdmission.typeMismatchCap;
         mainPathVisualAdmissionPenalized += 1;
+      } else if (cappedScore >= mainPathAdmission.admissionFloor) {
+        // Score is already sufficient and not capped by type mismatch
+        // Track if admission helped (lifted) or was neutral/penalized
+        if (cappedScore > previousScore) {
+          mainPathVisualAdmissionLifted += 1;
+        } else if (cappedScore < previousScore) {
+          mainPathVisualAdmissionPenalized += 1;
+        }
+      } else {
+        // Ensure minimum admission floor for admitted candidates
+        cappedScore = mainPathAdmission.admissionFloor;
+        mainPathVisualAdmissionLifted += 1;
       }
+      
+      comp.finalRelevance01 = cappedScore;
       finalScoreSourceById.set(idStr, mainPathAdmission.reason);
     }
   }
@@ -10111,7 +10219,13 @@ export async function searchByImageWithSimilarity(
               ? "calibrated_near_identical"
               : "calibrated_image_score";
         if (strictMainPathAdmission?.admitted) {
-          finalRelevance01 = strictMainPathAdmission.score;
+          // Admission already applied caps to finalRelevance01 earlier in the pipeline.
+          // Just ensure it's at least at the admission floor.
+          finalRelevance01 = Math.max(finalRelevance01 ?? 0, strictMainPathAdmission.admissionFloor);
+          // Apply type mismatch cap if it exists
+          if (strictMainPathAdmission.typeMismatchCap !== undefined && finalRelevance01 > strictMainPathAdmission.typeMismatchCap) {
+            finalRelevance01 = strictMainPathAdmission.typeMismatchCap;
+          }
           finalRelevanceSource = strictMainPathAdmission.reason;
         } else {
           finalRelevance01 = calibratedImageFinal;
@@ -10264,7 +10378,8 @@ export async function searchByImageWithSimilarity(
             mainPathAdmission: includeDebug && strictMainPathAdmission
               ? {
                 admitted: strictMainPathAdmission.admitted,
-                score: strictMainPathAdmission.score,
+                admissionFloor: strictMainPathAdmission.admissionFloor,
+                typeMismatchCap: strictMainPathAdmission.typeMismatchCap,
                 reason: strictMainPathAdmission.reason,
                 productFamily: strictMainPathAdmission.productFamily,
                 structuralScore: strictMainPathAdmission.structuralScore,

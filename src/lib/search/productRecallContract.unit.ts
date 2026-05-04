@@ -32,6 +32,15 @@ describe("buildProductRecallContract", () => {
     expect(contract.badTypes).toContain("tank top");
   });
 
+  test("includes short sleeve tops in generic top recall", () => {
+    const contract = buildProductRecallContract({
+      desiredProductTypes: ["top"],
+      detectionCategory: "tops",
+    });
+
+    expect(contract.exactTypes).toContain("short sleeve top");
+  });
+
   test("uses visual-first recall budgets", () => {
     const budgets = allocateRecallBudgets(100);
 
