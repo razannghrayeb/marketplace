@@ -76,31 +76,12 @@ ARG UBUNTU_SECURITY_MIRROR=https://security.ubuntu.com/ubuntu
 WORKDIR /app
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN set -eux; \
-  for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
-  if [ -f "$f" ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|$UBUNTU_ARCHIVE_MIRROR|g; s|https://archive.ubuntu.com/ubuntu|$UBUNTU_ARCHIVE_MIRROR|g; s|http://security.ubuntu.com/ubuntu|$UBUNTU_SECURITY_MIRROR|g; s|https://security.ubuntu.com/ubuntu|$UBUNTU_SECURITY_MIRROR|g; s|http://|https://|g" "$f"; fi; \
-  done; \
-  apt_update_max_attempts=5; \
-  apt_update_attempt=0; \
-  until apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update || [ $apt_update_attempt -ge $apt_update_max_attempts ]; do \
-  apt_update_attempt=$((apt_update_attempt + 1)); \
-  echo "apt-get update failed, retrying ($apt_update_attempt/$apt_update_max_attempts)..."; \
-  sleep $((2 ** apt_update_attempt)); \
-  done; \
-  apt-get -o Acquire::Retries=5 install -y --no-install-recommends curl ca-certificates gnupg; \
-  mkdir -p /etc/apt/keyrings; \
-  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg; \
-  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list; \
-  apt_update_attempt=0; \
-  until apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update || [ $apt_update_attempt -ge $apt_update_max_attempts ]; do \
-  apt_update_attempt=$((apt_update_attempt + 1)); \
-  echo "apt-get update failed, retrying ($apt_update_attempt/$apt_update_max_attempts)..."; \
-  sleep $((2 ** apt_update_attempt)); \
-  done; \
-  apt-get -o Acquire::Retries=5 install -y --no-install-recommends nodejs; \
-  corepack enable; \
-  corepack prepare pnpm@9 --activate; \
-  rm -rf /var/lib/apt/lists/*
+RUN set -eux; for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do if [ -f "$f" ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|$UBUNTU_ARCHIVE_MIRROR|g; s|https://archive.ubuntu.com/ubuntu|$UBUNTU_ARCHIVE_MIRROR|g; s|http://security.ubuntu.com/ubuntu|$UBUNTU_SECURITY_MIRROR|g; s|https://security.ubuntu.com/ubuntu|$UBUNTU_SECURITY_MIRROR|g; s|http://|https://|g" "$f"; fi; done; apt_update_max_attempts=5; apt_update_attempt=0; until apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::By-Hash=force update || [ $apt_update_attempt -ge $apt_update_max_attempts ]; do apt_update_attempt=$((apt_update_attempt + 1)); echo "apt-get update failed, retrying ($apt_update_attempt/$apt_update_max_attempts)..."; wait_seconds=$((apt_update_attempt * apt_update_attempt)); if [ "$wait_seconds" -lt 2 ]; then wait_seconds=2; fi; if [ "$wait_seconds" -gt 60 ]; then wait_seconds=60; fi; sleep "$wait_seconds"; done; apt-get -o Acquire::Retries=5 install -y --no-install-recommends curl ca-certificates gnupg; mkdir -p /etc/apt/keyrings; curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg; echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list; apt_update_attempt=0; until apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::By-Hash=force update || [ $apt_update_attempt -ge $apt_update_max_attempts ]; do apt_update_attempt=$((apt_update_attempt + 1)); echo "apt-get update failed, retrying ($apt_update_attempt/$apt_update_max_attempts)..."; wait_seconds=$((apt_update_attempt * apt_update_attempt)); if [ "$wait_seconds" -lt 2 ]; then wait_seconds=2; fi; if [ "$wait_seconds" -gt 60 ]; then wait_seconds=60; fi; sleep "$wait_seconds"; done; apt-get -o Acquire::Retries=5 install -y --no-install-recommends nodejs; corepack enable; corepack prepare pnpm@9 --activate; rm -rf /var/lib/apt/lists/*
+
+# Runtime OS packages: full stack only when embedding YOLO
+# Add retry logic for apt-get to handle transient network issues
+# Note: X11 libraries (libgl1-mesa, libsm6, libxext6, libxrender1) removed as not needed for headless API
+RUN set -eux; for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do if [ -f "$f" ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|$UBUNTU_ARCHIVE_MIRROR|g; s|https://archive.ubuntu.com/ubuntu|$UBUNTU_ARCHIVE_MIRROR|g; s|http://security.ubuntu.com/ubuntu|$UBUNTU_SECURITY_MIRROR|g; s|https://security.ubuntu.com/ubuntu|$UBUNTU_SECURITY_MIRROR|g; s|http://|https://|g" "$f"; fi; done; apt_update_max_attempts=5; apt_update_attempt=0; until apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::By-Hash=force update || [ $apt_update_attempt -ge $apt_update_max_attempts ]; do apt_update_attempt=$((apt_update_attempt + 1)); echo "apt-get update failed, retrying ($apt_update_attempt/$apt_update_max_attempts)..."; wait_seconds=$((apt_update_attempt * apt_update_attempt)); if [ "$wait_seconds" -lt 2 ]; then wait_seconds=2; fi; if [ "$wait_seconds" -gt 60 ]; then wait_seconds=60; fi; sleep "$wait_seconds"; done; if [ "$EMBEDDED_YOLO" = "1" ]; then apt-get -o Acquire::Retries=5 install -y --no-install-recommends wget python3 python3-venv python3-pip libglib2.0-0 libgomp1 libxcb1 libgl1-mesa; else apt-get -o Acquire::Retries=5 install -y --no-install-recommends wget; fi; rm -rf /var/lib/apt/lists/*
 
 # Runtime OS packages: full stack only when embedding YOLO
 # Add retry logic for apt-get to handle transient network issues
@@ -111,10 +92,13 @@ RUN set -eux; \
   done; \
   apt_update_max_attempts=5; \
   apt_update_attempt=0; \
-  until apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update || [ $apt_update_attempt -ge $apt_update_max_attempts ]; do \
-  apt_update_attempt=$((apt_update_attempt + 1)); \
-  echo "apt-get update failed, retrying ($apt_update_attempt/$apt_update_max_attempts)..."; \
-  sleep $((2 ** apt_update_attempt)); \
+  until apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::By-Hash=force update || [ $apt_update_attempt -ge $apt_update_max_attempts ]; do 
+  apt_update_attempt=$((apt_update_attempt + 1)); 
+  echo "apt-get update failed, retrying ($apt_update_attempt/$apt_update_max_attempts)..."; 
+  wait_seconds=$((apt_update_attempt * apt_update_attempt)); 
+  if [ "$wait_seconds" -lt 2 ]; then wait_seconds=2; fi; 
+  if [ "$wait_seconds" -gt 60 ]; then wait_seconds=60; fi; 
+  sleep "$wait_seconds"; \
   done; \
   if [ "$EMBEDDED_YOLO" = "1" ]; then \
   apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
