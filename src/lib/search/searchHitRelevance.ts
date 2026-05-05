@@ -386,7 +386,7 @@ export interface HitCompliance {
   intraFamilyPenalty: number;
   colorCompliance: number;
   matchedColor: string | null;
-  colorTier: "exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none";
+  colorTier: "exact" | "near-exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none";
   crossFamilyPenalty: number;
   audienceCompliance: number;
   styleCompliance: number;

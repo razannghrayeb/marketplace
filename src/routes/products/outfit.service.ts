@@ -22,6 +22,7 @@ import {
 } from "../../lib/recommendations";
 import { catalogGenderFromCaption } from "../../lib/image/captionAttributeInference";
 import { coarseColorBucket } from "../../lib/color/colorCanonical";
+import { mapHexToFashionCanonical } from "../../lib/color/garmentColorPipeline";
 
 // ============================================================================
 // Types
@@ -37,6 +38,11 @@ export interface CompleteStyleOptions {
   sourceMode?: "default" | "tryon";
   audienceGenderHint?: "men" | "women" | "unisex";
   allowLegacyFallback?: boolean;
+  /** Caller-supplied weather context overrides season inferred from the product's style profile. */
+  weather?: {
+    temperatureC?: number;
+    season?: "spring" | "summer" | "fall" | "winter";
+  };
 }
 
 export interface StyleRecommendationResponse {
@@ -173,15 +179,17 @@ export async function getOutfitRecommendations(
       occasionHint: sourceStyle.occasion,
       styleHints: [sourceStyle.aesthetic, sourceStyle.occasion === "active" ? "sporty" : ""].filter(Boolean),
       colorHints: [sourceProduct.color || sourceStyle.colorProfile.primary].filter(Boolean),
-      weatherHint: sourceStyle.season === "winter"
-        ? { season: "winter", temperatureC: 8 }
-        : sourceStyle.season === "summer"
-          ? { season: "summer", temperatureC: 30 }
-          : sourceStyle.season === "spring"
-            ? { season: "spring", temperatureC: 20 }
-            : sourceStyle.season === "fall"
-              ? { season: "fall", temperatureC: 16 }
-              : undefined,
+      weatherHint: options.weather ?? (
+        sourceStyle.season === "winter"
+          ? { season: "winter", temperatureC: 8 }
+          : sourceStyle.season === "summer"
+            ? { season: "summer", temperatureC: 30 }
+            : sourceStyle.season === "spring"
+              ? { season: "spring", temperatureC: 20 }
+              : sourceStyle.season === "fall"
+                ? { season: "fall", temperatureC: 16 }
+                : undefined
+      ),
       detectedCategories: detectedCategoryMap,
     }
   );
@@ -354,6 +362,65 @@ export async function getOutfitRecommendationsFromProduct(
     };
   }
   return formatted;
+}
+
+/**
+ * Get outfit recommendations using a wardrobe item as the anchor.
+ * If the item is linked to a catalog product, the full DB-backed pipeline runs.
+ * Otherwise a synthetic Product is built from wardrobe metadata.
+ */
+export async function getOutfitRecommendationsFromWardrobeItem(
+  wardrobeItemId: number,
+  userId: number,
+  options: CompleteStyleOptions = {}
+): Promise<StyleRecommendationResponse | null> {
+  const result = await pg.query(`
+    SELECT wi.id, wi.product_id, wi.name, wi.brand,
+           wi.image_url, wi.image_cdn, wi.dominant_colors,
+           p.title, p.category, p.color, p.gender,
+           p.price_cents, p.currency, p.description,
+           p.image_url  AS product_image_url,
+           p.image_cdn  AS product_image_cdn,
+           c.name       AS category_name
+    FROM wardrobe_items wi
+    LEFT JOIN products   p ON p.id  = wi.product_id
+    LEFT JOIN categories c ON c.id  = wi.category_id
+    WHERE wi.id = $1 AND wi.user_id = $2
+  `, [wardrobeItemId, userId]);
+
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+
+  // Prefer the catalog path when the item has an attached product — highest quality.
+  if (row.product_id) {
+    return getOutfitRecommendations(row.product_id, options, userId);
+  }
+
+  // Derive color from dominant_colors hex values when no named color is available.
+  let color: string | undefined = row.color || undefined;
+  if (!color && Array.isArray(row.dominant_colors) && row.dominant_colors.length > 0) {
+    for (const dc of row.dominant_colors) {
+      if (dc?.hex) {
+        const canonical = mapHexToFashionCanonical(dc.hex);
+        if (canonical) { color = canonical; break; }
+      }
+    }
+  }
+
+  const syntheticProduct: Product = {
+    id: 0,
+    title: row.title || row.name || "Wardrobe Item",
+    brand: row.brand || undefined,
+    category: row.category || row.category_name || undefined,
+    color,
+    gender: row.gender || undefined,
+    price_cents: row.price_cents || 0,
+    currency: row.currency || "USD",
+    image_url: row.image_cdn || row.product_image_cdn || row.image_url || row.product_image_url || undefined,
+    description: row.description || undefined,
+  };
+
+  return getOutfitRecommendationsFromProduct(syntheticProduct, options, userId);
 }
 
 /**
