@@ -38,4 +38,15 @@ describe('buildCompareDecisionRequest', () => {
     expect(req.compareGoal).toBe('best_value')
     expect(req.occasion).toBe('work')
   })
+
+  it('coerces string firstAttractionProductId and productIds to numbers', () => {
+    const req = buildCompareDecisionRequest([1, '2'] as unknown as number[], {
+      mode: 'standard',
+      currentSelfRaw: '',
+      aspirationalSelfRaw: '',
+      firstAttractionProductId: '2',
+    })
+    expect(req.productIds).toEqual([1, 2])
+    expect(req.userSignals?.firstAttractionProductId).toBe(2)
+  })
 })

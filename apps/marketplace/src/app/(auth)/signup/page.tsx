@@ -67,7 +67,7 @@ export default function SignupPage() {
       >
         <div className="bg-white rounded-3xl shadow-elevated border border-neutral-200 p-8">
           <h1 className="font-display text-2xl font-bold text-neutral-800 text-center">Create account</h1>
-          <p className="text-neutral-500 text-center mt-2">Join StyleAI to save favorites and use your wardrobe</p>
+          <p className="text-neutral-500 text-center mt-2">Join Bolden to save favorites and use your wardrobe</p>
 
           <div className="mt-6">
             <label className="block text-sm font-medium text-neutral-700 mb-2">I am a</label>

@@ -49,7 +49,12 @@ const path = require('path')
 const nextConfig = {
   // Allow a second dev server (e.g. port 3010) without clobbering `.next` — avoids webpack "reading 'call'" / chunk 404s.
   distDir: process.env.NEXT_DIST_DIR || '.next',
+  /** Tree-shake icon/chart barrels so client bundles stay smaller (faster parse + TTI). */
+  experimental: {
+    optimizePackageImports: ['lucide-react', 'recharts', 'framer-motion'],
+  },
   images: {
+    formats: ['image/avif', 'image/webp'],
     remotePatterns: [
       { protocol: 'https', hostname: '**', pathname: '/**' },
       { protocol: 'http', hostname: '**', pathname: '/**' },

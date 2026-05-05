@@ -15,7 +15,7 @@ import {
 import type { VendorProductCount, CategoryCount } from '@/types/catalog-admin'
 import { EmptyState, Section } from '@/components/catalog-admin/ui'
 
-const COLORS = ['#7c3aed', '#c026d3', '#db2777', '#4f46e5', '#059669', '#ea580c', '#0891b2']
+const COLORS = ['#2a2623', '#7d4b3a', '#3d3030', '#c9ae9f', '#b99e90', '#a56f5a', '#6d3f34']
 
 interface Props {
   vendorCounts: VendorProductCount[]
@@ -49,7 +49,7 @@ export function CatalogOverviewCharts({ vendorCounts, catCounts }: Props) {
                 contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e5e7eb' }}
                 formatter={(value: number) => value.toLocaleString()}
               />
-              <Bar dataKey="total" name="Total" fill="#3b82f6" radius={[3, 3, 0, 0]} />
+              <Bar dataKey="total" name="Total" fill="#2a2623" radius={[3, 3, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         ) : (
@@ -67,8 +67,8 @@ export function CatalogOverviewCharts({ vendorCounts, catCounts }: Props) {
                 contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e5e7eb' }}
                 formatter={(value: number) => value.toLocaleString()}
               />
-              <Bar dataKey="available" name="Available" fill="#059669" radius={[3, 3, 0, 0]} stackId="a" />
-              <Bar dataKey="unavailable" name="Unavailable" fill="#fda4af" radius={[0, 0, 0, 0]} stackId="a" />
+              <Bar dataKey="available" name="Available" fill="#3d3030" radius={[3, 3, 0, 0]} stackId="a" />
+              <Bar dataKey="unavailable" name="Unavailable" fill="#e4d7cd" radius={[0, 0, 0, 0]} stackId="a" />
             </BarChart>
           </ResponsiveContainer>
         ) : (
@@ -126,7 +126,7 @@ export function CatalogOverviewCharts({ vendorCounts, catCounts }: Props) {
                 contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e5e7eb' }}
                 formatter={(value: number) => value.toLocaleString()}
               />
-              <Bar dataKey="total" name="Total" fill="#c026d3" radius={[0, 3, 3, 0]} />
+              <Bar dataKey="total" name="Total" fill="#7d4b3a" radius={[0, 3, 3, 0]} />
             </BarChart>
           </ResponsiveContainer>
         ) : (

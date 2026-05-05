@@ -1,9 +1,25 @@
 'use client'
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+} from 'recharts'
 import { api } from '@/lib/api/client'
 import { endpoints } from '@/lib/api/endpoints'
+
+type AnyObj = Record<string, unknown>
+
+function toArray(input: unknown): AnyObj[] {
+  if (Array.isArray(input)) return input.filter((x): x is AnyObj => !!x && typeof x === 'object')
+  return []
+}
 
 export default function AdminCanonicalsPage() {
   const qc = useQueryClient()
@@ -54,6 +70,52 @@ export default function AdminCanonicalsPage() {
     onSuccess: invalidate,
   })
 
+  const listObj = (list.data && typeof list.data === 'object' ? list.data : {}) as AnyObj
+  const listRows = useMemo(
+    () =>
+      toArray(listObj.canonicals)
+        .map((c) => {
+          const products = toArray(c.products)
+          return {
+            id: String(c.id ?? c.canonicalId ?? '—'),
+            label: String(c.label ?? c.name ?? c.canonical_label ?? '—'),
+            productCount: products.length || Number(c.productCount ?? c.product_count ?? 0),
+          }
+        })
+        .filter((r) => r.id !== '—'),
+    [listObj],
+  )
+
+  const detailObj = (detail.data && typeof detail.data === 'object' ? detail.data : {}) as AnyObj
+  const detailProducts = useMemo(
+    () =>
+      toArray(detailObj.products).map((p) => ({
+        id: String(p.id ?? p.productId ?? '—'),
+        title: String(p.title ?? p.name ?? '—'),
+        brand: String(p.brand ?? '—'),
+      })),
+    [detailObj],
+  )
+  const canonicalSizeHistogram = useMemo(
+    () => {
+      const bins = {
+        '1': 0,
+        '2-3': 0,
+        '4-7': 0,
+        '8+': 0,
+      }
+      for (const row of listRows) {
+        const n = Number(row.productCount) || 0
+        if (n <= 1) bins['1'] += 1
+        else if (n <= 3) bins['2-3'] += 1
+        else if (n <= 7) bins['4-7'] += 1
+        else bins['8+'] += 1
+      }
+      return Object.entries(bins).map(([bucket, groups]) => ({ bucket, groups }))
+    },
+    [listRows],
+  )
+
   return (
     <div className="space-y-8">
       <div>
@@ -76,6 +138,7 @@ export default function AdminCanonicalsPage() {
           </button>
         </div>
         {mergeM.isError && <p className="text-sm text-neutral-800">{(mergeM.error as Error).message}</p>}
+        {mergeM.isSuccess && <p className="text-sm text-emerald-700">Groups merged successfully.</p>}
       </section>
 
       <section className="rounded-2xl border border-neutral-200 bg-white p-5 space-y-4">
@@ -92,6 +155,8 @@ export default function AdminCanonicalsPage() {
             Detach
           </button>
         </div>
+        {detachM.isError && <p className="text-sm text-red-600">{(detachM.error as Error).message}</p>}
+        {detachM.isSuccess && <p className="text-sm text-emerald-700">Product detached successfully.</p>}
       </section>
 
       <section className="rounded-2xl border border-neutral-200 bg-white p-5 space-y-4">
@@ -102,20 +167,77 @@ export default function AdminCanonicalsPage() {
           value={canonicalId}
           onChange={(e) => setCanonicalId(e.target.value)}
         />
-        <pre className="text-xs font-mono bg-neutral-900 text-neutral-50 p-4 rounded-xl overflow-auto max-h-64">
-          {detail.isFetching ? 'Loading…' : JSON.stringify(detail.data, null, 2)}
-        </pre>
+        {detail.isFetching ? (
+          <p className="text-sm text-neutral-500">Loading canonical details…</p>
+        ) : !canonicalId.trim() ? (
+          <p className="text-sm text-neutral-500">Enter a canonical ID to view details.</p>
+        ) : detailProducts.length === 0 ? (
+          <p className="text-sm text-neutral-500">No products attached or canonical not found.</p>
+        ) : (
+          <div className="overflow-x-auto rounded-xl border border-neutral-200">
+            <table className="w-full text-sm">
+              <thead className="bg-neutral-50 text-neutral-600">
+                <tr>
+                  <th className="text-left px-3 py-2 font-medium">Product ID</th>
+                  <th className="text-left px-3 py-2 font-medium">Title</th>
+                  <th className="text-left px-3 py-2 font-medium">Brand</th>
+                </tr>
+              </thead>
+              <tbody>
+                {detailProducts.map((p) => (
+                  <tr key={p.id} className="border-t border-neutral-100">
+                    <td className="px-3 py-2">{p.id}</td>
+                    <td className="px-3 py-2">{p.title}</td>
+                    <td className="px-3 py-2">{p.brand}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
-      <section>
+      <section className="rounded-2xl border border-neutral-200 bg-white p-5 space-y-3">
         <h2 className="font-semibold mb-3">List</h2>
         {list.isLoading ? (
           <p className="text-sm text-neutral-500">Loading…</p>
+        ) : listRows.length === 0 ? (
+          <p className="text-sm text-neutral-500">No canonical groups found.</p>
         ) : (
-          <pre className="text-xs font-mono bg-neutral-50 p-4 rounded-xl overflow-auto max-h-[400px]">
-            {JSON.stringify(list.data, null, 2)}
-          </pre>
+          <div className="overflow-x-auto rounded-xl border border-neutral-200">
+            <table className="w-full text-sm">
+              <thead className="bg-neutral-50 text-neutral-600">
+                <tr>
+                  <th className="text-left px-3 py-2 font-medium">Canonical ID</th>
+                  <th className="text-left px-3 py-2 font-medium">Label</th>
+                  <th className="text-left px-3 py-2 font-medium">Products</th>
+                </tr>
+              </thead>
+              <tbody>
+                {listRows.slice(0, 100).map((row) => (
+                  <tr key={row.id} className="border-t border-neutral-100">
+                    <td className="px-3 py-2">{row.id}</td>
+                    <td className="px-3 py-2">{row.label}</td>
+                    <td className="px-3 py-2">{row.productCount}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
+      </section>
+
+      <section className="rounded-2xl border border-neutral-200 bg-white p-5">
+        <h2 className="font-semibold mb-3">Histogram · Canonical group sizes</h2>
+        <ResponsiveContainer width="100%" height={260}>
+          <BarChart data={canonicalSizeHistogram}>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} />
+            <XAxis dataKey="bucket" tick={{ fontSize: 12 }} />
+            <YAxis tick={{ fontSize: 12 }} />
+            <Tooltip />
+            <Bar dataKey="groups" fill="#7c3aed" radius={[6, 6, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
       </section>
     </div>
   )

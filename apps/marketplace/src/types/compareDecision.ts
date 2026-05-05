@@ -110,10 +110,6 @@ export type CompareDecisionResponse = {
     }
     hiddenFlaw: string
     microStory: string
-    decisionRationale: {
-      whyThisWon: string[]
-      tradeoffsToKnow: string[]
-    }
     scores: {
       value: number
       quality: number

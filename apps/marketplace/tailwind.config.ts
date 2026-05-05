@@ -1,14 +1,35 @@
 import type { Config } from 'tailwindcss'
 
 const config: Config = {
-  content: ['./src/**/*.{js,ts,jsx,tsx,mdx}'],
+  /** Include CSS so utilities used only via `@apply` in `globals.css` are generated (e.g. `text-btn`). */
+  content: ['./src/**/*.{js,ts,jsx,tsx,mdx}', './src/**/*.css'],
   theme: {
     extend: {
       fontFamily: {
-        display: ['var(--font-display)', 'system-ui', 'sans-serif'],
+        display: ['var(--font-display)', 'Georgia', 'Times New Roman', 'serif'],
         sans: ['var(--font-sans)', 'system-ui', 'sans-serif'],
       },
+      fontSize: {
+        /** Align with globals typography scale */
+        body: ['16px', { lineHeight: '1.5' }],
+        small: ['13px', { lineHeight: '1.45' }],
+        nav: ['15px', { lineHeight: '1.45' }],
+        product: ['16px', { lineHeight: '1.35' }],
+        btn: ['14px', { lineHeight: '1.35' }],
+      },
       colors: {
+        /** Luxury editorial palette */
+        ink: '#2B2521',
+        muted: '#6F6258',
+        accent: '#7A4E3A',
+        page: '#F5F1EC',
+        /** Primary UI — button & CTA charcoal */
+        brand: {
+          DEFAULT: '#3d3030',
+          hover: '#504545',
+          active: '#2c2424',
+          muted: '#ede8e4',
+        },
         neutral: {
           25: '#FCFCFC',
           50: '#FAFAFA',

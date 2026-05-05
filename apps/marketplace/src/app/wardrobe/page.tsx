@@ -16,6 +16,7 @@ import {
   patchBodyFromMetaForm,
   wardrobeMetaFormFromItem,
 } from '@/types/wardrobeItem'
+import { formatStoredPriceAsUsd } from '@/lib/money/displayUsd'
 
 type WardrobeItem = WardrobeItemDto
 
@@ -26,6 +27,7 @@ interface CompleteLookSuggestion {
   brand?: string
   category?: string
   price_cents?: number
+  currency?: string
   image_url?: string
   image_cdn?: string
   score?: number
@@ -33,6 +35,9 @@ interface CompleteLookSuggestion {
 }
 
 const COMPLETE_LOOK_FETCH_CAP = 48
+/** First paint shows this many cards so “Show more” appears when the API returns more. */
+const COMPLETE_STYLE_INITIAL_VISIBLE = 4
+const COMPLETE_STYLE_PAGE_INCREMENT = 8
 
 function suggestionProductId(s: CompleteLookSuggestion): number | null {
   const n = Number(s.id ?? s.product_id)
@@ -44,8 +49,6 @@ export default function WardrobePage() {
   const queryClient = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
-  const COMPLETE_STYLE_LIMIT_STEP = 8
-  const COMPLETE_STYLE_LIMIT_MAX = 48
   const [selectedItem, setSelectedItem] = useState<WardrobeItem | null>(null)
   const [showCompleteStyle, setShowCompleteStyle] = useState(false)
   const [showUploadModal, setShowUploadModal] = useState(false)
@@ -54,7 +57,7 @@ export default function WardrobePage() {
   const [editingItem, setEditingItem] = useState<WardrobeItem | null>(null)
   const [editMeta, setEditMeta] = useState<WardrobeItemMetaForm>(() => emptyWardrobeMetaForm())
   /** Visible count only; suggestions are fetched once (cap below) and sliced client-side so “Show more” does not refetch. */
-  const [completeLookVisible, setCompleteLookVisible] = useState(8)
+  const [completeLookVisible, setCompleteLookVisible] = useState(COMPLETE_STYLE_INITIAL_VISIBLE)
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['wardrobe'],
@@ -142,7 +145,15 @@ export default function WardrobePage() {
   const completeStyleSuggestionsAll = useMemo(() => {
     const raw = completeStyleQuery.data
     if (!raw || !Array.isArray(raw)) return [] as CompleteLookSuggestion[]
-    return (raw as CompleteLookSuggestion[]).filter((s) => suggestionProductId(s) != null)
+    const seen = new Set<number>()
+    const out: CompleteLookSuggestion[] = []
+    for (const s of raw as CompleteLookSuggestion[]) {
+      const pid = suggestionProductId(s)
+      if (pid == null || seen.has(pid)) continue
+      seen.add(pid)
+      out.push(s)
+    }
+    return out
   }, [completeStyleQuery.data])
 
   const completeStyleSuggestionsVisible = useMemo(
@@ -237,24 +248,21 @@ export default function WardrobePage() {
     </div>
   )
 
-  const formatPrice = (cents: number, currency = 'USD') =>
-    new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 0 }).format(cents / 100)
-
   if (!isAuth) {
     return (
       <div className="min-h-[60vh] flex items-center justify-center px-4">
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="max-w-md text-center">
           <div className="relative w-20 h-20 mx-auto mb-6">
-            <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 opacity-15 blur-xl" />
-            <div className="relative w-20 h-20 rounded-2xl bg-gradient-to-br from-violet-100 to-fuchsia-100 flex items-center justify-center">
-              <Shirt className="w-9 h-9 text-violet-600" />
+            <div className="absolute inset-0 rounded-2xl bg-brand opacity-15 blur-xl" />
+            <div className="relative w-20 h-20 rounded-2xl bg-gradient-to-br from-[#f4ece6] to-[#ede0d7] flex items-center justify-center">
+              <Shirt className="w-9 h-9 text-[#2a2623]" />
             </div>
           </div>
           <h2 className="font-display text-2xl font-bold text-neutral-900 mb-2">Sign in for your wardrobe</h2>
           <p className="text-neutral-500 mb-8">Upload your clothes, get style suggestions, and complete looks with AI.</p>
           <a
             href="/login"
-            className="inline-flex items-center gap-2 px-6 py-3 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-500 text-white font-semibold shadow-lg shadow-violet-500/20 hover:from-violet-500 hover:to-fuchsia-400 active:scale-[0.97] transition-all"
+            className="inline-flex items-center gap-2 px-6 py-3 rounded-full bg-brand text-white font-semibold shadow-lg shadow-brand/20 hover:bg-brand-hover active:scale-[0.97] transition-all"
           >
             Sign in
           </a>
@@ -269,7 +277,7 @@ export default function WardrobePage() {
     return (
       <div className="min-h-[60vh] flex items-center justify-center px-4">
         <div className="max-w-md text-center">
-          <div className="w-16 h-16 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center mx-auto mb-5">
+          <div className="w-16 h-16 rounded-2xl bg-[#f4ece6] text-[#2a2623] flex items-center justify-center mx-auto mb-5">
             <Shirt className="w-8 h-8" />
           </div>
           <p className="text-neutral-900 font-bold text-lg mb-2">Unable to load wardrobe</p>
@@ -281,9 +289,7 @@ export default function WardrobePage() {
 
   const openCompleteStyle = (item: WardrobeItem) => {
     setSelectedItem(item)
-    setCompleteLookVisible(8)
-    setCompleteStyleLimit(COMPLETE_STYLE_LIMIT_STEP)
-    setCompleteStyleAudienceGender(undefined)
+    setCompleteLookVisible(COMPLETE_STYLE_INITIAL_VISIBLE)
     setShowCompleteStyle(true)
   }
 
@@ -294,15 +300,15 @@ export default function WardrobePage() {
       <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={handleFileChange} className="hidden" />
 
       {/* ── Header ── */}
-      <div className="relative overflow-hidden bg-gradient-to-b from-violet-50 via-fuchsia-50/40 to-neutral-100 border-b border-neutral-200/60">
-        <div className="pointer-events-none absolute -top-16 -right-16 h-64 w-64 rounded-full bg-violet-200/40 blur-3xl" aria-hidden />
-        <div className="pointer-events-none absolute top-8 -left-12 h-48 w-48 rounded-full bg-fuchsia-200/30 blur-3xl" aria-hidden />
+      <div className="relative overflow-hidden bg-gradient-to-b from-[#f7f0eb] via-[#f3ece6] to-neutral-100 border-b border-neutral-200/60">
+        <div className="pointer-events-none absolute -top-16 -right-16 h-64 w-64 rounded-full bg-[#c9ae9f]/35 blur-3xl" aria-hidden />
+        <div className="pointer-events-none absolute top-8 -left-12 h-48 w-48 rounded-full bg-[#d8c6bb]/35 blur-3xl" aria-hidden />
 
         <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-6">
           <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="p-2.5 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-md shadow-violet-500/20">
+                <div className="p-2.5 rounded-xl bg-brand text-white shadow-md shadow-brand/20">
                   <Shirt className="w-5 h-5" />
                 </div>
                 <div>
@@ -317,7 +323,7 @@ export default function WardrobePage() {
                 <button
                   onClick={() => cameraInputRef.current?.click()}
                   disabled={addMutation.isPending}
-                  className="p-2.5 rounded-xl border border-neutral-200/80 bg-white/80 text-neutral-500 hover:text-violet-600 hover:border-violet-200 hover:bg-violet-50/50 backdrop-blur-sm transition-all"
+                  className="p-2.5 rounded-xl border border-neutral-200/80 bg-white/80 text-neutral-500 hover:text-[#2a2623] hover:border-[#d8c6bb] hover:bg-[#f7f0eb]/70 backdrop-blur-sm transition-all"
                   title="Take a photo"
                 >
                   <Camera className="w-5 h-5" />
@@ -325,7 +331,7 @@ export default function WardrobePage() {
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   disabled={addMutation.isPending}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-500 text-white font-semibold shadow-md shadow-violet-500/20 hover:from-violet-500 hover:to-fuchsia-400 active:scale-[0.97] transition-all disabled:opacity-60"
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-brand text-white font-semibold shadow-md shadow-brand/20 hover:bg-brand-hover active:scale-[0.97] transition-all disabled:opacity-60"
                 >
                   {addMutation.isPending ? (
                     <>
@@ -346,7 +352,7 @@ export default function WardrobePage() {
               <motion.p
                 initial={{ opacity: 0, y: -4 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="mt-3 text-sm text-rose-600 bg-rose-50 border border-rose-200/60 px-4 py-2 rounded-xl"
+                className="mt-3 text-sm text-[#7d4b3a] bg-[#f7f0eb] border border-[#d8c6bb] px-4 py-2 rounded-xl"
               >
                 {(addMutation.error as Error)?.message ?? 'Upload failed'}
               </motion.p>
@@ -374,9 +380,9 @@ export default function WardrobePage() {
             className="py-16 max-w-lg mx-auto text-center"
           >
             <div className="relative w-24 h-24 mx-auto mb-6">
-              <div className="absolute inset-0 rounded-3xl bg-gradient-to-br from-violet-500 to-fuchsia-500 opacity-15 blur-xl" />
-              <div className="relative w-24 h-24 rounded-3xl bg-gradient-to-br from-violet-100 to-fuchsia-100 flex items-center justify-center">
-                <Shirt className="w-10 h-10 text-violet-600" />
+              <div className="absolute inset-0 rounded-3xl bg-brand opacity-15 blur-xl" />
+              <div className="relative w-24 h-24 rounded-3xl bg-gradient-to-br from-[#f4ece6] to-[#ede0d7] flex items-center justify-center">
+                <Shirt className="w-10 h-10 text-[#2a2623]" />
               </div>
             </div>
             <h2 className="font-display text-xl font-bold text-neutral-900 mb-2">Your wardrobe is empty</h2>
@@ -385,7 +391,7 @@ export default function WardrobePage() {
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={addMutation.isPending}
-                className="inline-flex items-center gap-2 px-6 py-3 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-500 text-white font-semibold shadow-lg shadow-violet-500/20 hover:from-violet-500 hover:to-fuchsia-400 active:scale-[0.97] transition-all"
+                className="inline-flex items-center gap-2 px-6 py-3 rounded-full bg-brand text-white font-semibold shadow-lg shadow-brand/20 hover:bg-brand-hover active:scale-[0.97] transition-all"
               >
                 <Upload className="w-4 h-4" />
                 Choose photo
@@ -393,7 +399,7 @@ export default function WardrobePage() {
               <button
                 onClick={() => cameraInputRef.current?.click()}
                 disabled={addMutation.isPending}
-                className="inline-flex items-center gap-2 px-6 py-3 rounded-full bg-violet-100 text-violet-700 font-semibold hover:bg-violet-200 active:scale-[0.97] transition-all"
+                className="inline-flex items-center gap-2 px-6 py-3 rounded-full border-2 border-brand bg-white text-brand font-semibold hover:bg-brand-muted active:scale-[0.97] transition-all"
               >
                 <Camera className="w-4 h-4" />
                 Take a photo
@@ -411,7 +417,7 @@ export default function WardrobePage() {
               <motion.div
                 key={item.id}
                 variants={{ hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0 } }}
-                className="group relative rounded-2xl overflow-hidden bg-white border border-neutral-200/60 shadow-sm hover:shadow-xl hover:shadow-violet-500/10 hover:-translate-y-0.5 transition-all duration-300"
+                className="group relative rounded-2xl overflow-hidden bg-white border border-neutral-200/60 shadow-sm hover:shadow-xl hover:shadow-[#2a2623]/10 hover:-translate-y-0.5 transition-all duration-300"
               >
                 <div className="aspect-square relative bg-neutral-100 overflow-hidden">
                   {(item.image_url || item.image_cdn) ? (
@@ -432,7 +438,7 @@ export default function WardrobePage() {
                     <button
                       type="button"
                       onClick={() => openCompleteStyle(item)}
-                      className="flex-1 min-w-[6rem] flex items-center justify-center gap-1 px-2 py-2 rounded-xl bg-white/90 backdrop-blur-sm text-violet-700 text-[11px] font-semibold hover:bg-white transition-colors"
+                      className="flex-1 min-w-[6rem] flex items-center justify-center gap-1 px-2 py-2 rounded-xl bg-white/90 backdrop-blur-sm text-[#2a2623] text-[11px] font-semibold hover:bg-white transition-colors"
                     >
                       <Wand2 className="w-3.5 h-3.5 shrink-0" />
                       Style
@@ -440,7 +446,7 @@ export default function WardrobePage() {
                     <button
                       type="button"
                       onClick={() => openEditModal(item)}
-                      className="p-2 rounded-xl bg-white/90 backdrop-blur-sm text-neutral-500 hover:text-violet-600 hover:bg-white transition-colors"
+                      className="p-2 rounded-xl bg-white/90 backdrop-blur-sm text-neutral-500 hover:text-[#2a2623] hover:bg-white transition-colors"
                       title="Edit details"
                     >
                       <Pencil className="w-3.5 h-3.5" />
@@ -448,7 +454,7 @@ export default function WardrobePage() {
                     <button
                       type="button"
                       onClick={() => deleteMutation.mutate(item.id)}
-                      className="p-2 rounded-xl bg-white/90 backdrop-blur-sm text-neutral-500 hover:text-rose-500 hover:bg-white transition-colors"
+                      className="p-2 rounded-xl bg-white/90 backdrop-blur-sm text-neutral-500 hover:text-[#7d4b3a] hover:bg-white transition-colors"
                       title="Remove item"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -460,7 +466,7 @@ export default function WardrobePage() {
                   <p className="font-semibold text-neutral-800 text-sm truncate">{item.name || 'Unnamed item'}</p>
                   <div className="flex items-center gap-2 mt-1 flex-wrap">
                     {item.category && (
-                      <span className="text-xs font-medium text-violet-600 bg-violet-50 px-2 py-0.5 rounded-full">{item.category}</span>
+                      <span className="text-xs font-medium text-[#2a2623] bg-[#f7f0eb] px-2 py-0.5 rounded-full">{item.category}</span>
                     )}
                     {item.color && (
                       <span className="text-xs text-neutral-500">{item.color}</span>
@@ -501,12 +507,12 @@ export default function WardrobePage() {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 40, scale: 0.97 }}
               transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-              className="w-full max-w-2xl max-h-[85vh] overflow-y-auto bg-white rounded-3xl shadow-2xl"
+              className="w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden bg-white rounded-3xl shadow-2xl"
             >
               {/* Modal header */}
-              <div className="sticky top-0 z-10 bg-white/90 backdrop-blur-md border-b border-neutral-100 px-6 py-4 flex items-center justify-between rounded-t-3xl">
+              <div className="shrink-0 z-10 bg-white/90 backdrop-blur-md border-b border-neutral-100 px-6 py-4 flex items-center justify-between rounded-t-3xl">
                 <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white">
+                  <div className="p-2 rounded-xl bg-brand text-white">
                     <Wand2 className="w-4 h-4" />
                   </div>
                   <div>
@@ -522,7 +528,7 @@ export default function WardrobePage() {
                 </button>
               </div>
 
-                <div className="p-6">
+                <div className="flex-1 min-h-0 overflow-y-auto p-6">
                 {/* Selected item */}
                 <div className="flex items-center gap-4 p-3 rounded-2xl bg-neutral-50 border border-neutral-200/60 mb-6">
                   <div className="w-16 h-16 rounded-xl overflow-hidden bg-neutral-100 flex-shrink-0 ring-1 ring-neutral-200/60">
@@ -538,40 +544,9 @@ export default function WardrobePage() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="font-semibold text-neutral-800 text-sm truncate">{selectedItem.name || 'Your item'}</p>
-                    {selectedItem.category && <p className="text-xs text-violet-600 mt-0.5">{selectedItem.category}</p>}
+                    {selectedItem.category && <p className="text-xs text-[#2a2623] mt-0.5">{selectedItem.category}</p>}
                   </div>
                   <span className="text-xs font-medium text-neutral-400 uppercase tracking-wider">Styling for</span>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2 mb-6">
-                  {(['men', 'women', 'unisex'] as const).map((gender) => {
-                    const active = completeStyleAudienceGender === gender
-                    return (
-                      <button
-                        key={gender}
-                        type="button"
-                        onClick={() => setCompleteStyleAudienceGender(gender)}
-                        className={`px-3 py-1.5 rounded-full text-sm font-semibold border transition-colors ${
-                          active
-                            ? 'bg-violet-600 text-white border-violet-600'
-                            : 'bg-white text-neutral-600 border-neutral-200 hover:border-violet-200 hover:text-violet-700'
-                        }`}
-                      >
-                        {gender === 'men' ? 'Men' : gender === 'women' ? 'Women' : 'Unisex'}
-                      </button>
-                    )
-                  })}
-                  <button
-                    type="button"
-                    onClick={() => setCompleteStyleAudienceGender(undefined)}
-                    className={`px-3 py-1.5 rounded-full text-sm font-semibold border transition-colors ${
-                      completeStyleAudienceGender === undefined
-                        ? 'bg-violet-600 text-white border-violet-600'
-                        : 'bg-white text-neutral-600 border-neutral-200 hover:border-violet-200 hover:text-violet-700'
-                    }`}
-                  >
-                    Auto
-                  </button>
                 </div>
 
                 {/* Suggestions */}
@@ -590,7 +565,6 @@ export default function WardrobePage() {
                     <p className="text-sm text-neutral-500">{(completeStyleQuery.error as Error)?.message}</p>
                   </div>
                 ) : completeStyleSuggestionsAll.length > 0 ? (
-                  <>
                   <motion.div
                     initial="hidden"
                     animate="visible"
@@ -598,22 +572,14 @@ export default function WardrobePage() {
                     className="grid grid-cols-2 gap-4"
                   >
                     {completeStyleSuggestionsVisible.map((s) => {
-                ) : completeStyleQuery.data && completeStyleQuery.data.length > 0 ? (
-                  <>
-                    <motion.div
-                      initial="hidden"
-                      animate="visible"
-                      variants={{ visible: { transition: { staggerChildren: 0.06 } }, hidden: {} }}
-                      className="grid grid-cols-2 gap-4"
-                    >
-                      {(completeStyleQuery.data as CompleteLookSuggestion[])
-                        .filter((s) => suggestionProductId(s) != null)
-                        .map((s) => {
                         const pid = suggestionProductId(s)!
                         const cents = s.price_cents
                         const priceLabel =
                           typeof cents === 'number' && Number.isFinite(cents) && cents > 0
-                            ? formatPrice(Math.round(cents))
+                            ? formatStoredPriceAsUsd(Math.round(cents), s.currency, {
+                                minimumFractionDigits: 0,
+                                maximumFractionDigits: 0,
+                              })
                             : '—'
                         return (
                       <motion.div
@@ -622,7 +588,7 @@ export default function WardrobePage() {
                       >
                         <Link
                           href={`/products/${pid}`}
-                          className="block group rounded-2xl border border-neutral-200/60 bg-white overflow-hidden hover:shadow-lg hover:shadow-violet-500/10 hover:-translate-y-0.5 transition-all duration-300"
+                          className="block group rounded-2xl border border-neutral-200/60 bg-white overflow-hidden hover:shadow-lg hover:shadow-[#2a2623]/10 hover:-translate-y-0.5 transition-all duration-300"
                         >
                           <div className="aspect-[3/4] relative bg-neutral-100 overflow-hidden">
                             <Image
@@ -634,7 +600,7 @@ export default function WardrobePage() {
                             />
                             {s.reason && (
                               <div className="absolute top-2 left-2 right-2">
-                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-white/90 backdrop-blur-sm text-[10px] font-semibold text-violet-700 shadow-sm line-clamp-2">
+                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-white/90 backdrop-blur-sm text-[10px] font-semibold text-[#2a2623] shadow-sm line-clamp-2">
                                   <Sparkles className="w-3 h-3 shrink-0" />
                                   {s.reason}
                                 </span>
@@ -642,11 +608,11 @@ export default function WardrobePage() {
                             )}
                           </div>
                           <div className="p-3">
-                            <p className="text-[10px] font-semibold text-violet-600 uppercase tracking-wider">{s.brand || s.category || ''}</p>
+                            <p className="text-[10px] font-semibold text-[#2a2623] uppercase tracking-wider">{s.brand || s.category || ''}</p>
                             <p className="text-sm font-semibold text-neutral-900 line-clamp-2 mt-0.5">{s.title}</p>
                             <div className="flex items-center justify-between mt-1.5 gap-2">
-                              <p className="text-sm font-bold text-violet-700 tabular-nums">{priceLabel}</p>
-                              <span className="text-xs text-violet-600 font-semibold flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                              <p className="text-sm font-bold text-[#2a2623] tabular-nums">{priceLabel}</p>
+                              <span className="text-xs text-[#7d4b3a] font-semibold flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
                                 View <ChevronRight className="w-3 h-3" />
                               </span>
                             </div>
@@ -656,47 +622,6 @@ export default function WardrobePage() {
                         )
                       })}
                   </motion.div>
-                  {completeStyleSuggestionsAll.length > completeLookVisible ? (
-                      <div className="flex justify-center mt-6">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setCompleteLookVisible((n) =>
-                              Math.min(n + 8, completeStyleSuggestionsAll.length, COMPLETE_LOOK_FETCH_CAP),
-                            )
-                          }
-                          className="inline-flex items-center gap-2 px-6 py-2.5 rounded-full border border-violet-200 bg-white text-sm font-semibold text-violet-700 hover:bg-violet-50"
-                        >
-                          <ChevronDown className="w-4 h-4" />
-                          Show more
-                        </button>
-                      </div>
-                    ) : null}
-                    </motion.div>
-
-                    {(() => {
-                      const dataLen = Array.isArray(completeStyleQuery.data) ? completeStyleQuery.data.length : 0
-                      const canLoadMore =
-                        dataLen >= completeStyleLimit && completeStyleLimit < COMPLETE_STYLE_LIMIT_MAX
-                      if (!canLoadMore) return null
-                      return (
-                        <div className="mt-5 flex justify-center">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setCompleteStyleLimit((prev) =>
-                                Math.min(COMPLETE_STYLE_LIMIT_MAX, prev + COMPLETE_STYLE_LIMIT_STEP)
-                              )
-                            }
-                            disabled={completeStyleQuery.isFetching}
-                            className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-violet-200 bg-violet-50 text-violet-700 font-semibold text-sm hover:bg-violet-100 transition-colors disabled:opacity-60"
-                          >
-                            {completeStyleQuery.isFetching ? 'Loading…' : 'Load more'}
-                          </button>
-                        </div>
-                      )
-                    })()}
-                  </>
                 ) : (
                   <div className="text-center py-12">
                     <div className="w-14 h-14 rounded-2xl bg-neutral-100 flex items-center justify-center mx-auto mb-4">
@@ -707,6 +632,38 @@ export default function WardrobePage() {
                   </div>
                 )}
               </div>
+
+              {!completeStyleQuery.isLoading &&
+                !completeStyleQuery.isError &&
+                completeStyleSuggestionsAll.length > 0 && (
+                  <div className="shrink-0 border-t border-neutral-100 bg-white px-6 py-4 rounded-b-3xl">
+                    <p className="text-xs text-center text-neutral-500 mb-3">
+                      Showing{' '}
+                      {Math.min(completeLookVisible, completeStyleSuggestionsAll.length)} of{' '}
+                      {completeStyleSuggestionsAll.length}
+                    </p>
+                    {completeStyleSuggestionsAll.length > completeLookVisible ? (
+                      <div className="flex justify-center">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setCompleteLookVisible((n) =>
+                              Math.min(
+                                n + COMPLETE_STYLE_PAGE_INCREMENT,
+                                completeStyleSuggestionsAll.length,
+                                COMPLETE_LOOK_FETCH_CAP,
+                              ),
+                            )
+                          }
+                          className="inline-flex w-full sm:w-auto justify-center items-center gap-2 px-6 py-2.5 rounded-full border-2 border-brand bg-white text-sm font-semibold text-brand hover:bg-brand-muted"
+                        >
+                          <ChevronDown className="w-4 h-4" />
+                          Show more
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                )}
             </motion.div>
           </motion.div>
         )}
@@ -753,7 +710,7 @@ export default function WardrobePage() {
               </div>
               {metaFields(uploadMeta, setUploadMeta)}
               {addMutation.isError && (
-                <p className="mt-3 text-sm text-rose-600">{(addMutation.error as Error)?.message ?? 'Upload failed'}</p>
+                <p className="mt-3 text-sm text-red-600">{(addMutation.error as Error)?.message ?? 'Upload failed'}</p>
               )}
               <div className="flex gap-2 mt-5">
                 <button
@@ -770,7 +727,7 @@ export default function WardrobePage() {
                   type="button"
                   disabled={addMutation.isPending}
                   onClick={() => addMutation.mutate({ file: pendingUploadFile, meta: uploadMeta })}
-                  className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-500 text-white text-sm font-semibold disabled:opacity-60"
+                  className="flex-1 py-2.5 rounded-xl bg-brand text-white text-sm font-semibold hover:bg-brand-hover disabled:opacity-60"
                 >
                   {addMutation.isPending ? 'Uploading…' : 'Upload'}
                 </button>
@@ -815,7 +772,7 @@ export default function WardrobePage() {
               </div>
               {metaFields(editMeta, setEditMeta)}
               {editMutation.isError && (
-                <p className="mt-3 text-sm text-rose-600">{(editMutation.error as Error)?.message ?? 'Update failed'}</p>
+                <p className="mt-3 text-sm text-red-600">{(editMutation.error as Error)?.message ?? 'Update failed'}</p>
               )}
               <div className="flex gap-2 mt-5">
                 <button
@@ -829,7 +786,7 @@ export default function WardrobePage() {
                   type="button"
                   disabled={editMutation.isPending}
                   onClick={() => editMutation.mutate({ id: editingItem.id, meta: editMeta })}
-                  className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-500 text-white text-sm font-semibold disabled:opacity-60"
+                  className="flex-1 py-2.5 rounded-xl bg-brand text-white text-sm font-semibold hover:bg-brand-hover disabled:opacity-60"
                 >
                   {editMutation.isPending ? 'Saving…' : 'Save'}
                 </button>
