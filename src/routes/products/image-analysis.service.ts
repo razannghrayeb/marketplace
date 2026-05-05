@@ -40,8 +40,6 @@ import {
   getYOLOv8Client,
   extractOutfitComposition,
   dedupeDetectionsBySameLabelIou,
-  dropWeakDuplicateDetections,
-  mergeNearbyShoeBoxes,
   boundingBoxIou,
   Detection,
   OutfitComposition,
@@ -68,7 +66,7 @@ import {
   filterProductTypeSeedsByMappedCategory,
 } from "../../lib/search/productTypeTaxonomy";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
-import { sortProductsByFinalRelevance } from "../../lib/search/sortResults";
+import { sortProductsByRelevanceAndCategory } from "../../lib/search/sortResults";
 import {
   computeOutfitCoherence,
   type OutfitCoherenceResult,
@@ -90,85 +88,6 @@ type BlipSignal = {
   occasion?: string | null;
   confidence?: number;
 };
-
-type ImageMode = "worn_outfit" | "flatlay_collage" | "single_product";
-
-function inferImageMode(params: {
-  caption?: string | null;
-  detections: Detection[];
-}): ImageMode {
-  const caption = String(params.caption ?? "").toLowerCase().trim();
-  const detections = Array.isArray(params.detections) ? params.detections : [];
-  const n = detections.length;
-
-  const strongPersonCue = /\b(person|man|woman|model|street|walking|standing)\b/.test(caption);
-  const weakWearCue = /\b(wearing|wears)\b/.test(caption);
-  const flatlayCue = /\b(flatlay|flat lay|collage|arranged|on a table|set of clothing|collection of)\b/.test(caption);
-
-  if (flatlayCue) return "flatlay_collage";
-
-  if (n <= 0) {
-    return strongPersonCue || weakWearCue ? "worn_outfit" : "single_product";
-  }
-
-  const maxArea = Math.max(...detections.map((d) => Number(d.area_ratio) || 0), 0);
-  const avgArea = detections.reduce((sum, d) => sum + (Number(d.area_ratio) || 0), 0) / Math.max(1, n);
-
-  let overlapPairs = 0;
-  let strongOverlapPairs = 0;
-  for (let i = 0; i < detections.length; i++) {
-    for (let j = i + 1; j < detections.length; j++) {
-      const iou = boundingBoxIou(detections[i].box, detections[j].box);
-      overlapPairs += 1;
-      if (iou >= 0.2) strongOverlapPairs += 1;
-    }
-  }
-  const overlapRate = overlapPairs > 0 ? strongOverlapPairs / overlapPairs : 0;
-
-  const spreadAcrossCanvas = (() => {
-    if (n < 2) return false;
-    const centers = detections
-      .map((d) => ({
-        cx: ((Number(d.box?.x1) || 0) + (Number(d.box?.x2) || 0)) / 2,
-        cy: ((Number(d.box?.y1) || 0) + (Number(d.box?.y2) || 0)) / 2,
-      }))
-      .filter((p) => Number.isFinite(p.cx) && Number.isFinite(p.cy));
-    if (centers.length < 2) return false;
-    const minX = Math.min(...centers.map((p) => p.cx));
-    const maxX = Math.max(...centers.map((p) => p.cx));
-    const minY = Math.min(...centers.map((p) => p.cy));
-    const maxY = Math.max(...centers.map((p) => p.cy));
-    return (maxX - minX) >= 0.4 || (maxY - minY) >= 0.28;
-  })();
-
-  const spatialFlatlay = n >= 3 && overlapRate <= 0.18 && avgArea <= 0.18 && spreadAcrossCanvas;
-
-  if (spatialFlatlay && !/\b(person visible|model standing|walking|street)\b/.test(caption)) {
-    return "flatlay_collage";
-  }
-
-  if (n === 1 && maxArea >= 0.34 && !strongPersonCue) {
-    return "single_product";
-  }
-
-  if (!strongPersonCue && n >= 3 && overlapRate <= 0.18 && avgArea <= 0.14) {
-    return "flatlay_collage";
-  }
-
-  if (strongPersonCue) {
-    return "worn_outfit";
-  }
-
-  if (weakWearCue && n <= 2) {
-    return "worn_outfit";
-  }
-
-  if (n >= 2 && overlapRate > 0.22) {
-    return "worn_outfit";
-  }
-
-  return n > 1 ? "flatlay_collage" : "single_product";
-}
 
 function inferApparelAudienceFallback(params: {
   caption?: string | null;
@@ -1070,10 +989,7 @@ async function extractDetectionCropColorsForRanking(params: {
           left = Math.floor(w * (longSleeveTopLike ? 0.14 : 0.12));
           width = Math.max(16, Math.floor(w * (longSleeveTopLike ? 0.72 : 0.76)));
           top = Math.floor(h * (longSleeveTopLike ? 0.06 : 0.08));
-          // Keep short-sleeve top color extraction focused on the upper torso/chest region.
-          // Wider crops admit jeans and shadow pixels from the lower box, which can drown out
-          // a white/off-white shirt with navy/black noise.
-          const bottom = Math.floor(h * (longSleeveTopLike ? 0.58 : 0.40));
+          const bottom = Math.floor(h * (longSleeveTopLike ? 0.58 : 0.62));
           height = Math.max(24, bottom - top);
         } else if (footwear) {
           // Shoe boxes frequently include floor pixels around edges.
@@ -1339,32 +1255,14 @@ function shopLookPerDetectionConcurrency(detections?: Array<{ label: string; con
   return Math.min(cap, Math.max(minConcurrency, n));
 }
 
-/** Primary search calls per detection. Extra zero-result recovery calls are configured separately. */
+/** Max search calls per detection (initial + retries/fallbacks). Default 3 to preserve recall on hard detections. */
 function shopLookMaxSearchCallsPerDetection(): number {
-  const fallbackDefault = shopLookDeterministicTwoPassEnv() ? "2" : "1";
-  const raw = Number(
-    process.env.SEARCH_IMAGE_DETECTION_SEARCH_CALL_LIMIT ??
-    process.env.SEARCH_IMAGE_SHOP_MAX_SEARCH_CALLS ??
-    fallbackDefault,
-  );
-  if (!Number.isFinite(raw)) return Number(fallbackDefault);
-  return Math.max(1, Math.min(8, Math.floor(raw)));
-}
-
-function shopLookZeroResultExtraCalls(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_ZERO_RESULT_EXTRA_CALLS ?? "1");
-  if (!Number.isFinite(raw)) return 1;
-  return Math.max(0, Math.min(3, Math.floor(raw)));
-}
-
-function shopLookRecoveryOnlyOnZeroEnv(): boolean {
-  const raw = String(process.env.SEARCH_IMAGE_RECOVERY_ONLY_ON_ZERO ?? "1").toLowerCase().trim();
-  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
-}
-
-function shopLookSplitTypeSearchEnabled(): boolean {
-  const raw = String(process.env.SEARCH_IMAGE_SPLIT_TYPE_SEARCH_ENABLED ?? "0").toLowerCase().trim();
-  return raw === "1" || raw === "true" || raw === "on" || raw === "yes";
+  if (shopLookDeterministicTwoPassEnv()) return 2;
+  const raw = Number(process.env.SEARCH_IMAGE_SHOP_MAX_SEARCH_CALLS ?? "3");
+  if (!Number.isFinite(raw)) return 3;
+  // A value of 1 collapses recall for hard categories (tops/bottoms/footwear) because
+  // no retry/recovery path can run. Keep at least 2 calls to preserve pipeline robustness.
+  return Math.max(2, Math.min(8, Math.floor(raw)));
 }
 
 function shopLookDeterministicTwoPassEnv(): boolean {
@@ -3513,101 +3411,6 @@ function applySleeveIntentGuard(params: {
   return filtered;
 }
 
-/**
- * MAIN PATH FIX: Minimum result count for each category to be returned.
- * Recovery should only run if we cannot meet these minimums from the initial pool.
- */
-function minMainPathResults(category: string): number {
-  const cat = String(category ?? "").toLowerCase().trim();
-  switch (cat) {
-    case "tops":
-    case "bottoms":
-    case "dresses":
-    case "outerwear":
-    case "footwear":
-      return 8;
-    case "bags":
-    case "accessories":
-      return 6;
-    default:
-      return 8;
-  }
-}
-
-/**
- * MAIN PATH FIX: Check if a product is compatible with the detection category (soft guard).
- * This is used to fill from the original pool without breaking category intent.
- */
-function isMainPathFamilyCompatible(
-  product: ProductResult,
-  category: string,
-): boolean {
-  const fam = String(
-    (product as any).normalizedFamily ??
-    (product as any).debugContract?.productFamily ??
-    ""
-  ).toLowerCase().trim();
-
-  if (!fam) {
-    // If family is unknown, accept if score is high enough
-    const score = Number(
-      (product as any).finalRelevance01 ?? (product as any).mlRerankScore ?? 0
-    );
-    return score >= 0.72;
-  }
-
-  const catNorm = String(category ?? "").toLowerCase().trim();
-
-  if (catNorm === "tops") return fam === "tops";
-  if (catNorm === "bottoms") return fam === "bottoms";
-  if (catNorm === "dresses") return fam === "dresses";
-  if (catNorm === "footwear") return fam === "footwear";
-  if (catNorm === "bags") return fam === "bags";
-  if (catNorm === "accessories") return fam === "accessories";
-
-  // Outerwear can allow tops only if visual score is high
-  if (catNorm === "outerwear") {
-    return fam === "outerwear" || fam === "tops";
-  }
-
-  return true;
-}
-
-/**
- * MAIN PATH FIX: Fill the display list from the original search pool when guards
- * have reduced results below the minimum. This preserves similar products that pass
- * soft compatibility checks.
- */
-function mainPathCoverageFill({
-  current,
-  pool,
-  category,
-  min,
-}: {
-  current: ProductResult[];
-  pool: ProductResult[];
-  category: string;
-  min: number;
-}): ProductResult[] {
-  if (current.length >= min) return current;
-
-  const seen = new Set(current.map((p: any) => String(p.id ?? "")));
-  const fillers = (Array.isArray(pool) ? pool : [])
-    .filter((p: any) => !seen.has(String(p.id ?? "")))
-    .filter((p) => isMainPathFamilyCompatible(p, category))
-    .sort((a: any, b: any) =>
-      Number(b.finalRelevance01 ?? b.mlRerankScore ?? 0) -
-      Number(a.finalRelevance01 ?? a.mlRerankScore ?? 0)
-    )
-    .slice(0, min - current.length)
-    .map((p: any) => ({
-      ...p,
-      mainPathFillReason: "coverage_from_initial_pool",
-    }));
-
-  return [...current, ...fillers];
-}
-
 function applyShopLookVisualPrecisionGuard(
   products: ProductResult[],
   similarityThreshold: number,
@@ -4164,51 +3967,6 @@ function applyRelevanceThresholdFilter(
   return rankApparelByDesiredColor(filtered);
 }
 
-function minCoreResultsPerDetection(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_MIN_RESULTS_PER_DETECTION ?? "8");
-  return Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : 8;
-}
-
-function samePoolSafeFill(params: {
-  current: ProductResult[];
-  pool: ProductResult[];
-  min: number;
-  category?: string;
-}): ProductResult[] {
-  const current = Array.isArray(params.current) ? params.current : [];
-  const pool = Array.isArray(params.pool) ? params.pool : [];
-  const min = Math.max(0, Math.floor(params.min));
-  if (min <= 0 || current.length >= min || pool.length <= current.length) return current;
-
-  const existingIds = new Set(current.map((p: any) => String(p?.id ?? p?.product_id ?? "")));
-  const isSafe = (item: ProductResult): boolean => {
-    const explain = ((item as any)?.explain ?? {}) as Record<string, unknown>;
-    if (Boolean(explain.hardBlocked)) return false;
-    if (Number(explain.crossFamilyPenalty ?? 0) >= 0.55) return false;
-    if (Number(explain.audienceCompliance ?? 1) < 0.45) return false;
-    const hasColorIntent = Boolean(explain.hasColorIntent) || Boolean(explain.colorIntentGatesFinalRelevance);
-    const colorTier = String(explain.colorTier ?? "").toLowerCase().trim();
-    const colorCompliance = Number(explain.colorCompliance ?? NaN);
-    if (hasColorIntent && colorTier === "none" && Number.isFinite(colorCompliance) && colorCompliance < 0.2) return false;
-    return true;
-  };
-
-  const fillers = sortProductsByFinalRelevanceDesc(pool)
-    .filter((item: any) => {
-      const id = String(item?.id ?? item?.product_id ?? "");
-      return id.length > 0 && !existingIds.has(id);
-    })
-    .filter(isSafe)
-    .slice(0, Math.max(0, min - current.length))
-    .map((item) => ({
-      ...item,
-      relevanceFallbackPreserved: true,
-      fallbackReason: "same_pool_safe_fill",
-    }));
-
-  return fillers.length > 0 ? sortProductsByFinalRelevanceDesc([...current, ...fillers]) : current;
-}
-
 function isCoreOutfitCategory(category: string | undefined): boolean {
   const normalized = String(category ?? "").trim().toLowerCase();
   return (
@@ -4227,7 +3985,8 @@ function finalRelevanceScore(product: unknown): number {
 }
 
 function sortProductsByFinalRelevanceDesc(products: ProductResult[]): ProductResult[] {
-  return sortProductsByFinalRelevance(products);
+  // Use centralized sorting utility to ensure consistent ordering across all APIs
+  return sortProductsByRelevanceAndCategory(products);
 }
 
 function sortDetectionProductsByFinalRelevance(row: DetectionSimilarProducts): DetectionSimilarProducts {
@@ -5338,8 +5097,6 @@ export interface GroupedSimilarProducts {
   threshold: number;
   /** All detected categories */
   detectedCategories: string[];
-  /** Inferred scene mode to control detection search behavior. */
-  imageMode?: ImageMode;
   /**
    * Shop-the-look coverage: how many detections yielded at least one product vs total detection jobs.
    * Coherence should be read together with `coverageRatio` (see `outfitCoherence`).
@@ -5671,16 +5428,10 @@ export class ImageAnalysisService {
           );
 
           if (accessoryDetections.length > 0) {
-            let mergedDetectionsRaw = dedupeDetectionsBySameLabelIou(
+            const mergedDetectionsRaw = dedupeDetectionsBySameLabelIou(
               [...detectionResult.detections, ...accessoryDetections],
               yoloShopDedupeIouThreshold(),
             ).map((row) => row.detection);
-
-            // PHASE 1: Drop weak duplicate detections (confidence < 0.45 overlapping stronger same-family)
-            mergedDetectionsRaw = dropWeakDuplicateDetections(mergedDetectionsRaw, 0.45, 0.65);
-
-            // PHASE 1: Merge nearby shoe boxes and apply expansion
-            mergedDetectionsRaw = mergeNearbyShoeBoxes(mergedDetectionsRaw, 100);
 
             const mergedDetections = mergedDetectionsRaw
               .filter((d) => shouldKeepDetectionForShopTheLook(d, mergedDetectionsRaw))
@@ -5861,10 +5612,6 @@ export class ImageAnalysisService {
           totalAvailableProducts: 0,
           threshold: similarityThreshold,
           detectedCategories: [],
-          imageMode: inferImageMode({
-            caption: null,
-            detections: analysisResult.detection?.items ?? [],
-          }),
           pagination: {
             mode: "per_detection",
             page: resolvedResultsPage,
@@ -5894,10 +5641,6 @@ export class ImageAnalysisService {
             totalAvailableProducts: 0,
             threshold: similarityThreshold,
             detectedCategories: fallbackDetectedCategories,
-            imageMode: inferImageMode({
-              caption: null,
-              detections: fallbackDetection.items,
-            }),
             pagination: {
               mode: "per_detection",
               page: resolvedResultsPage,
@@ -6022,10 +5765,6 @@ export class ImageAnalysisService {
           totalAvailableProducts: pagedFallback.totalAvailableProducts,
           threshold: similarityThreshold,
           detectedCategories: fallbackDetectedCategories,
-          imageMode: inferImageMode({
-            caption: fallbackCaption,
-            detections: fallbackDetection.items,
-          }),
           pagination: {
             mode: "per_detection",
             page: resolvedResultsPage,
@@ -6125,10 +5864,6 @@ export class ImageAnalysisService {
         ageGroup: "kids",
       };
     }
-    const imageModeForSearch = inferImageMode({
-      caption: blipCaption,
-      detections: analysisResult.detection.items ?? [],
-    });
 
     const detectionSetupStartedAt = Date.now();
 
@@ -6165,7 +5900,7 @@ export class ImageAnalysisService {
         }))
         : (() => {
           // First, deduplicate by IoU for same-label detections
-          let iouDedupedDetections = dedupeDetectionsBySameLabelIou(
+          const iouDedupedDetections = dedupeDetectionsBySameLabelIou(
             analysisResult.detection.items,
             yoloShopDedupeIouThreshold(),
           ).map(({ detection, originalIndex }) => ({
@@ -6173,19 +5908,9 @@ export class ImageAnalysisService {
             detectionIndex: originalIndex,
           }));
 
-          // PHASE 1: Drop weak duplicate detections (confidence < 0.45 overlapping stronger same-family)
-          let cleanedDetections = dropWeakDuplicateDetections(
-            iouDedupedDetections.map(d => d.detection),
-            0.45,
-            0.65
-          );
-
-          // PHASE 1: Merge nearby shoe boxes and apply expansion
-          cleanedDetections = mergeNearbyShoeBoxes(cleanedDetections, 100);
-
           // Then, deduplicate by category to keep only highest confidence per category
           const categoryDedupedDetections = dedupeDetectionsByCategoryHighestConfidence(
-            cleanedDetections
+            iouDedupedDetections.map(d => d.detection)
           );
 
           // Return deduplicated results with best matches
@@ -6229,11 +5954,7 @@ export class ImageAnalysisService {
     const detectionSearchTotalDurations: number[] = [];
     const detectionSearchCallCounts: number[] = [];
     const detectionTaskDurations: number[] = [];
-    const primarySearchCallsPerDetection = shopLookMaxSearchCallsPerDetection();
-    const zeroResultExtraCalls = shopLookZeroResultExtraCalls();
-    const maxSearchCallsPerDetection = primarySearchCallsPerDetection + zeroResultExtraCalls;
-    const recoveryOnlyOnZero = shopLookRecoveryOnlyOnZeroEnv();
-    const splitTypeSearchEnabled = shopLookSplitTypeSearchEnabled();
+    const maxSearchCallsPerDetection = shopLookMaxSearchCallsPerDetection();
     const mainPathOnly = shopLookMainPathOnlyEnv();
     const maxDetectionTaskMs = shopLookMaxDetectionTaskMs();
     const hotPathDebug = String(process.env.SEARCH_DEBUG ?? "") === "1";
@@ -6245,10 +5966,6 @@ export class ImageAnalysisService {
         embeddingBatchMs: detectionEmbeddingBatchMs,
         embeddingBatchReady: detectionEmbeddingBatchReady,
         mainPathOnly,
-        primarySearchCallsPerDetection,
-        zeroResultExtraCalls,
-        recoveryOnlyOnZero,
-        splitTypeSearchEnabled,
         blipApiUrlConfigured: Boolean(process.env.BLIP_API_URL),
         rankerApiUrlConfigured: Boolean(process.env.RANKER_API_URL),
       });
@@ -6261,7 +5978,7 @@ export class ImageAnalysisService {
         let detectionSearchTotalMs = 0;
         let detectionSearchCalls = 0;
         const deterministicTwoPass = shopLookDeterministicTwoPassEnv();
-        let detectionSearchCallLimit = deterministicTwoPass ? 2 : (mainPathOnly ? Math.min(2, maxSearchCallsPerDetection) : maxSearchCallsPerDetection);
+        let detectionSearchCallLimit = deterministicTwoPass ? 2 : (mainPathOnly ? 1 : maxSearchCallsPerDetection);
         const searchReasonsExecuted: string[] = [];
         const searchReasonsSkipped: string[] = [];
         let lastSearchResult: Awaited<ReturnType<typeof searchByImageWithSimilarity>> | null = null;
@@ -6329,7 +6046,6 @@ export class ImageAnalysisService {
             const result = await searchByImageWithSimilarity({
               ...payloadForCall,
               filters: filtersForCall,
-              imageMode: (payloadForCall as any).imageMode ?? imageModeForSearch,
               detectionLabel: (payloadForCall as any).detectionLabel ?? label ?? detection.label,
             });
             const elapsedMs = Date.now() - startedAt;
@@ -6452,7 +6168,7 @@ export class ImageAnalysisService {
             const isShortSleeveTop = /\bshort sleeve top\b/.test(labelNormForTopHints);
             const isMenAudience = String(inferredAudience.gender ?? "").toLowerCase().trim() === "men";
             if (isShortSleeveTop) {
-              const shortTopPriority = ["t-shirt", "tshirt", "tee", "shirt", "top", "tops"];
+              const shortTopPriority = ["t-shirt", "tshirt", "tee", "shirt", "polo", "top", "tops"];
               softProductTypeHints = [...new Set([...shortTopPriority, ...softProductTypeHints])];
             }
             // Avoid overly narrow/feminine seeds for men tops; they collapse recall.
@@ -6863,11 +6579,18 @@ export class ImageAnalysisService {
             }
           }
 
-          // PHASE 1-fix: Always use embedding_garment for all categories
-          // Crop-based detection should compare against garment embeddings, not full-product
-          // embeddings. Pass B logic (embedding fallback) handles cases where garment results
-          // are insufficient.
-          const knnFieldUsed = shopTheLookKnnField();
+          // tops/bottoms/outerwear: catalog `embedding` holds full-frame CLIP vectors;
+          // query with full-frame vector for proper distribution alignment.
+          // dresses: use `embedding_garment` — the garment crop is more precise for a
+          // dress that spans 40-80% of the image, and the catalog field is indexed from
+          // the same garment-crop pipeline. The two-pass fallback at passBKnnField
+          // automatically queries `embedding` when garment-field results are low.
+          const knnFieldUsed =
+            categoryMapping.productCategory === "tops" ||
+            categoryMapping.productCategory === "bottoms" ||
+            categoryMapping.productCategory === "outerwear"
+              ? "embedding"
+              : shopTheLookKnnField();
           const textureMaterial = await textureMaterialPromise;
           if (textureMaterial.material && textureMaterial.confidence >= imageMinMaterialConfidenceEnv()) {
             (filters as any).material = textureMaterial.material;
@@ -6938,19 +6661,9 @@ export class ImageAnalysisService {
             userId: options.userId,
             sessionFilters: options.sessionFilters ?? undefined,
           };
-          const initialTypeSearchCallBudget = deterministicTwoPass
-            ? Math.max(1, Math.min(2, maxSearchCallsPerDetection))
-            : Math.max(1, maxSearchCallsPerDetection - 1);
-          const initialTypeSearchHintsForSearch = initialTypeSearchHints.slice(0, initialTypeSearchCallBudget);
-          if (hotPathDebug && initialTypeSearchHintsForSearch.length < initialTypeSearchHints.length) {
-            console.info(
-              `[initial-type-search-budget] label="${detection.label}" hints=${initialTypeSearchHints.length} used=${initialTypeSearchHintsForSearch.length} budget=${initialTypeSearchCallBudget} reserve_recovery=${deterministicTwoPass ? 0 : 1}`,
-            );
-          }
-
-          const _parallelSearchPromise = splitTypeSearchEnabled && initialTypeSearchHintsForSearch.length > 1
+          const _parallelSearchPromise = initialTypeSearchHints.length > 1
             ? Promise.all(
-              initialTypeSearchHintsForSearch.map((typeHint, index) =>
+              initialTypeSearchHints.map((typeHint, index) =>
                 runDetectionSearch(`initial_type_${index + 1}`, {
                   ...initialSearchPayload,
                   softProductTypeHints: [typeHint],
@@ -6973,7 +6686,7 @@ export class ImageAnalysisService {
                 meta: {
                   ...first.meta,
                   split_type_searches: typeResults.length,
-                  split_type_hints: initialTypeSearchHintsForSearch,
+                  split_type_hints: initialTypeSearchHints,
                 } as any,
               };
             })
@@ -7105,13 +6818,6 @@ export class ImageAnalysisService {
                 label,
                 blipCaption ?? "",
                 detCaption,
-              );
-              softProductTypeHints = suppressPoloForPlainShortTop(
-                softProductTypeHints,
-                label,
-                detection.raw_label,
-                String(detCaption ?? "").toLowerCase(),
-                String(blipCaption ?? "").toLowerCase(),
               );
               if (shouldForceTypeFilterForDetection(detection, categoryMapping, softProductTypeHints)) {
                 filters.productTypes = softProductTypeHints.slice(0, 10);
@@ -7393,16 +7099,9 @@ export class ImageAnalysisService {
             searchFirstMs >= shopLookSlowFirstSearchMsThreshold();
           const slowSearchSkipRecoveryMinResults =
             shopLookSlowFirstSearchSkipRecoveryMinResultsByCategory(categoryMapping.productCategory);
-          // MAIN PATH FIX: For core categories, never freeze retries if results are below minimum.
-          // Use the actual minimum requirement from minMainPathResults.
-          const isCoreForAdaptive = ["tops", "bottoms", "dresses", "outerwear", "footwear"].includes(
-            String(categoryMapping.productCategory ?? "").toLowerCase(),
-          );
-          const firstPassGoodEnough = isCoreForAdaptive
-            ? similarResult.results.length >= minMainPathResults(categoryMapping.productCategory)
-            : similarResult.results.length >= slowSearchSkipRecoveryMinResults;
-
-          if (slowFirstSearch && firstPassGoodEnough) {
+          const sufficientFirstPassResults =
+            similarResult.results.length >= slowSearchSkipRecoveryMinResults;
+          if (slowFirstSearch && sufficientFirstPassResults) {
             // Freeze additional retries/recoveries for this detection only.
             // In deterministic two-pass mode, do NOT pin the limit — Pass B must still be
             // available when results are below the Pass B minimum threshold.
@@ -7428,21 +7127,7 @@ export class ImageAnalysisService {
               categoryMapping.productCategory,
               resolvedLimitPerItem,
             );
-            // MAIN PATH FIX: For core fashion categories, always check against minimum threshold.
-            // Do not use recoveryOnlyOnZero for core outfits; it's only for non-core categories.
-            const isCoreCategory = ["tops", "bottoms", "dresses", "outerwear", "footwear"].includes(
-              String(categoryMapping.productCategory ?? "").toLowerCase(),
-            );
-            const shouldRunPassB = isCoreCategory
-              ? similarResult.results.length < minMainPathResults(categoryMapping.productCategory)
-              : (recoveryOnlyOnZero
-                ? similarResult.results.length === 0
-                : similarResult.results.length < passBMinResults);
-
-            if (
-              shouldRunPassB &&
-              detectionSearchCalls < detectionSearchCallLimit
-            ) {
+            if (similarResult.results.length < passBMinResults && detectionSearchCalls < detectionSearchCallLimit) {
               // Pass B uses the alternate KNN field to retrieve complementary neighbors;
               // category constraints are intentionally kept — dropping them floods the pool
               // with off-category items that downstream precision guards then eject, leaving
@@ -7487,7 +7172,6 @@ export class ImageAnalysisService {
             (
               similarResult.results.length === 0 ||
               (
-                !shopLookRecoveryOnlyOnZeroEnv() &&
                 (categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "bottoms") &&
                 similarResult.results.length <= 1
               )
@@ -7518,7 +7202,6 @@ export class ImageAnalysisService {
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
-              imageMode: imageModeForSearch,
               filters: filtersRetry,
               softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
               limit: detectionRetrievalLimit,
@@ -7666,7 +7349,6 @@ export class ImageAnalysisService {
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
-              imageMode: imageModeForSearch,
               filters: fallbackFilters,
               limit: detectionRetrievalLimit,
               similarityThreshold: detectionSimilarityThreshold,
@@ -7711,7 +7393,6 @@ export class ImageAnalysisService {
                 pHash: sourceImagePHash,
                 detectionYoloConfidence: detection.confidence,
                 detectionProductCategory: categoryMapping.productCategory,
-                imageMode: imageModeForSearch,
                 // Keep crop-derived structural intent even in last-resort fallback.
                 filters: fallbackStructuralFilters as any,
                 softProductTypeHints: softProductTypeHints.length > 0 ? softProductTypeHints : undefined,
@@ -7804,19 +7485,15 @@ export class ImageAnalysisService {
               if (similarResult.results.length >= Math.max(4, Math.floor(retrievalLimit * 0.5))) break;
             }
           }
-          }
 
           if (hotPathDebug) {
             console.log(`[skip-trace] detection="${label}" after_knn_search=${similarResult.results.length}`);
           }
 
-          // MAIN PATH FIX: Preserve the full search pool before guards destroy it.
-          // This is the original candidate list from OpenSearch/products.service.
-          const fullSearchPool = Array.isArray(similarResult.results) ? [...similarResult.results] : [];
-          knnCandidateCount = fullSearchPool.length;
+          knnCandidateCount = similarResult.results.length;
 
           precisionSafeResults = applyShopLookVisualPrecisionGuard(
-            fullSearchPool,
+            similarResult.results,
             categoryMapping.productCategory === "footwear" && (detection.area_ratio ?? 0) <= 0.02
               ? shopLookTinyFootwearRecoveryThreshold(detectionSimilarityThreshold)
               : detectionSimilarityThreshold,
@@ -7824,7 +7501,7 @@ export class ImageAnalysisService {
           );
 
           if (hotPathDebug) {
-            console.log(`[skip-trace] detection="${label}" after_precision_guard=${precisionSafeResults.length} (filtered_by=${fullSearchPool.length - precisionSafeResults.length})`);
+            console.log(`[skip-trace] detection="${label}" after_precision_guard=${precisionSafeResults.length} (filtered_by=${similarResult.results.length - precisionSafeResults.length})`);
           }
 
           categorySafeResults = applyDetectionCategoryGuard(
@@ -7883,19 +7560,10 @@ export class ImageAnalysisService {
             }
           }
 
-          // MAIN PATH FIX: Apply coverage fill from the original pool BEFORE any recovery.
-          // This brings back similar products that were filtered by guards but are still viable.
-          const minNeeded = minMainPathResults(categoryMapping.productCategory);
-          let displayResults = mainPathCoverageFill({
-            current: athleticSafeResults,
-            pool: fullSearchPool,
-            category: categoryMapping.productCategory,
-            min: minNeeded,
-          });
-
-          if (hotPathDebug) {
-            console.log(`[skip-trace] detection="${label}" after_mainpath_coverage_fill=${displayResults.length} (filled_from=${fullSearchPool.length})`);
-          }
+          similarResult = {
+            ...similarResult,
+            results: athleticSafeResults,
+          };
 
           // Footwear can go sparse with crop-only embeddings; run recovery when the group
           // is empty or too small, not only for tiny boxes.
@@ -7912,11 +7580,11 @@ export class ImageAnalysisService {
             : Math.max(2, Math.floor(resolvedLimitPerItem * 0.2));
           if (
             detectionSearchCalls < maxSearchCallsPerDetection &&
-            displayResults.length < footwearLowCountThreshold &&
+            similarResult.results.length < footwearLowCountThreshold &&
             categoryMapping.productCategory === "footwear"
           ) {
             if (hotPathDebug) {
-              console.log(`[recovery-attempt] detection="${label}" type=footwear_recovery reason="low_count(${displayResults.length})" subtype_refined=${footwearSubtypeWasRefined}`);
+              console.log(`[recovery-attempt] detection="${label}" type=footwear_recovery reason="low_count(${similarResult.results.length})" subtype_refined=${footwearSubtypeWasRefined}`);
             }
             const footwearTerms = hardCategoryTermsForDetection(label, categoryMapping, {
               confidence: detection.confidence,
@@ -7983,14 +7651,17 @@ export class ImageAnalysisService {
                 if (hotPathDebug) {
                   console.log(`[recovery-result] detection="${label}" type=footwear_recovery recovered=${footwearRecovery.results.length} products`);
                 }
-                displayResults = mergeImageSearchResultsById(
-                  displayResults,
-                  footwearRecovery.results,
-                  retrievalLimit,
-                );
+                similarResult = {
+                  ...similarResult,
+                  results: mergeImageSearchResultsById(
+                    similarResult.results,
+                    footwearRecovery.results,
+                    retrievalLimit,
+                  ),
+                };
               }
 
-              if (displayResults.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) {
+              if (similarResult.results.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) {
                 break;
               }
             }
@@ -8000,7 +7671,7 @@ export class ImageAnalysisService {
           const topsRecoveryMinKeep = shopLookTopRecoveryMinKeep(resolvedLimitPerItem);
           if (
             detectionSearchCalls < maxSearchCallsPerDetection &&
-            displayResults.length < minNeeded &&
+            guardedCountForRecovery < topsRecoveryMinKeep &&
             categoryMapping.productCategory === "tops" &&
             (((detection.confidence ?? 0) >= 0.45 && (detection.area_ratio ?? 0) >= 0.02) ||
               (vestLikeRecovery &&
@@ -8095,14 +7766,17 @@ export class ImageAnalysisService {
                 if (hotPathDebug) {
                   console.log(`[recovery-result] detection="${label}" type=tops_recovery recovered=${topRecoverySafeResults.length} products`);
                 }
-                displayResults = mergeImageSearchResultsById(
-                  displayResults,
-                  topRecoverySafeResults,
-                  retrievalLimit,
-                );
+                similarResult = {
+                  ...similarResult,
+                  results: mergeImageSearchResultsById(
+                    similarResult.results,
+                    topRecoverySafeResults,
+                    retrievalLimit,
+                  ),
+                };
               }
 
-              if (displayResults.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) {
+              if (similarResult.results.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) {
                 break;
               }
             }
@@ -8117,7 +7791,7 @@ export class ImageAnalysisService {
           if (
             detectionSearchCalls < maxSearchCallsPerDetection &&
             topOrDressCategory &&
-            displayResults.length < minNeeded
+            guardedCountForRecovery < topOrDressMinKeep
           ) {
             const ablationTerms = hardCategoryTermsForDetection(label, categoryMapping, {
               confidence: detection.confidence,
@@ -8148,7 +7822,6 @@ export class ImageAnalysisService {
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
-              imageMode: imageModeForSearch,
               filters: ablationFilters,
               softProductTypeHints,
               limit: detectionRetrievalLimit,
@@ -8191,19 +7864,22 @@ export class ImageAnalysisService {
               minFormality: Number((filters as any).minFormality ?? 0),
             });
 
-            const currentStrength = detectionResultStrength(displayResults);
+            const currentStrength = detectionResultStrength(similarResult.results);
             const ablationStrength = detectionResultStrength(ablationSafeResults);
             const shouldUseAblation =
-              ablationSafeResults.length > displayResults.length ||
-              (ablationSafeResults.length >= Math.max(2, displayResults.length) && ablationStrength > currentStrength + 0.03);
+              ablationSafeResults.length > similarResult.results.length ||
+              (ablationSafeResults.length >= Math.max(2, similarResult.results.length) && ablationStrength > currentStrength + 0.03);
 
             if (shouldUseAblation) {
               if (hotPathDebug) {
                 console.log(
-                  `[recovery-result] detection="${label}" type=${categoryMapping.productCategory}_ablation switched count=${displayResults.length}->${ablationSafeResults.length} strength=${currentStrength.toFixed(3)}->${ablationStrength.toFixed(3)}`,
+                  `[recovery-result] detection="${label}" type=${categoryMapping.productCategory}_ablation switched count=${similarResult.results.length}->${ablationSafeResults.length} strength=${currentStrength.toFixed(3)}->${ablationStrength.toFixed(3)}`,
                 );
               }
-              displayResults = ablationSafeResults;
+              similarResult = {
+                ...similarResult,
+                results: ablationSafeResults,
+              };
             }
           }
 
@@ -8218,7 +7894,7 @@ export class ImageAnalysisService {
           if (
             detectionSearchCalls < maxSearchCallsPerDetection &&
             categoryMapping.productCategory === "tops" &&
-            displayResults.length === 0
+            guardedCountForRecovery === 0
           ) {
             const topRecoveryBaseThreshold = shopLookTopRecoverySimilarityThreshold(similarityThreshold);
             const stagedTopRecoveries: Array<{
@@ -8322,9 +7998,12 @@ export class ImageAnalysisService {
                     `[recovery-stage] detection="${label}" stage=${stage.reason} recovered=${stageAthleticSafe.length}`,
                   );
                 }
-                displayResults = mergeImageSearchResultsById(displayResults, stageAthleticSafe, retrievalLimit);
+                similarResult = {
+                  ...similarResult,
+                  results: mergeImageSearchResultsById(similarResult.results, stageAthleticSafe, retrievalLimit),
+                };
               }
-              if (displayResults.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) break;
+              if (similarResult.results.length >= Math.max(2, Math.floor(resolvedLimitPerItem * 0.2))) break;
             }
           }
 
@@ -8335,11 +8014,11 @@ export class ImageAnalysisService {
           // 3. Catalog may have limited bag inventory
           if (
             detectionSearchCalls < maxSearchCallsPerDetection &&
-            displayResults.length < minNeeded &&
+            similarResult.results.length === 0 &&
             categoryMapping.productCategory === "bags"
           ) {
             if (hotPathDebug) {
-              console.log(`[recovery-attempt] detection="${label}" type=bag_recovery reason="low_count(${displayResults.length})"`);
+              console.log(`[recovery-attempt] detection="${label}" type=bag_recovery reason="empty bag search"`);
             }
             const bagTerms = hardCategoryTermsForDetection(label, categoryMapping, {
               confidence: detection.confidence,
@@ -8418,23 +8097,24 @@ export class ImageAnalysisService {
                 if (hotPathDebug) {
                   console.log(`[recovery-result] detection="${label}" type=bag_recovery recovered=${bagRecoverySafeResults.length} products`);
                 }
-                displayResults = mergeImageSearchResultsById(
-                  displayResults,
-                  bagRecoverySafeResults,
-                  retrievalLimit,
-                );
+                similarResult = {
+                  ...similarResult,
+                  results: mergeImageSearchResultsById(
+                    similarResult.results,
+                    bagRecoverySafeResults,
+                    retrievalLimit,
+                  ),
+                };
               }
 
-              if (displayResults.length >= Math.max(1, Math.floor(resolvedLimitPerItem * 0.15))) {
+              if (similarResult.results.length >= Math.max(1, Math.floor(resolvedLimitPerItem * 0.15))) {
                 break;
               }
             }
           }
 
-          // MAIN PATH FIX: Apply fallback only when display results are still below minimum.
-          // Use the minimum threshold, not just zero. Also increase the limit from 4 to the category minimum.
-          if (displayResults.length < minNeeded) {
-            // Fail-safe: avoid low-result detections when we already have category-safe
+          if (similarResult.results.length === 0) {
+            // Fail-safe: avoid zero-result detections when we already have category-safe
             // candidates, but keep quality by using a strict score floor.
             const desiredSleeve = inferSleeveIntentFromDetectionLabel(detection.label);
             const sleeveGateStrict =
@@ -8454,19 +8134,24 @@ export class ImageAnalysisService {
               candidates: fallbackPool,
               productCategory: categoryMapping.productCategory,
               similarityThreshold,
-              limit: Math.max(1, Math.min(resolvedLimitPerItem, minNeeded)),
+              limit: Math.max(1, Math.min(resolvedLimitPerItem, 4)),
             });
             if (safeFallback.length > 0) {
-              displayResults = mergeImageSearchResultsById(displayResults, safeFallback, retrievalLimit);
+              similarResult = {
+                ...similarResult,
+                results: safeFallback,
+              };
               if (hotPathDebug) {
                 console.log(
-                  `[nonempty-fallback] detection="${label}" recovered=${safeFallback.length} category=${categoryMapping.productCategory} total=${displayResults.length}`,
+                  `[nonempty-fallback] detection="${label}" recovered=${safeFallback.length} category=${categoryMapping.productCategory}`,
                 );
               }
             }
           }
 
-          if (displayResults.length === 0 && !includeEmptyDetectionGroups) {
+          }
+
+          if (similarResult.results.length === 0 && !includeEmptyDetectionGroups) {
             if (hotPathDebug) {
               console.log(`[detection-skip] label="${label}" reason="empty_and_includeEmpty=false"`);
             }
@@ -8477,10 +8162,10 @@ export class ImageAnalysisService {
             console.info(
               `[detection-substep-timing] label="${label}" crop_clip_ms=${cropEmbedMs} blip_ms=${detCaptionMs} search_first_ms=${searchFirstMs} total_task_ms=${Date.now() - detectionTaskStartedAt}`,
             );
-            console.log(`[detection-result] label="${label}" final_count=${displayResults.length}`);
+            console.log(`[detection-result] label="${label}" final_count=${similarResult.results.length}`);
           }
 
-          const droppedByOtherGates = Math.max(0, fullSearchPool.length - athleticSafeResults.length);
+          const droppedByOtherGates = Math.max(0, knnCandidateCount - athleticSafeResults.length);
 
           return {
             detection: {
@@ -8492,8 +8177,8 @@ export class ImageAnalysisService {
               mask: detection.mask,
             },
             category: categoryMapping.productCategory,
-            products: displayResults,
-            count: displayResults.length,
+            products: similarResult.results,
+            count: similarResult.results.length,
             ...(detectionIndex !== undefined ? { detectionIndex } : {}),
             appliedFilters: {
               category: filters.category,
@@ -8508,14 +8193,12 @@ export class ImageAnalysisService {
             },
             debug: {
               knnCandidateCount,
-              fullSearchPoolCount: fullSearchPool.length,
               afterPrecisionGuard: precisionSafeResults.length,
               afterCategoryGuard: categorySafeResults.length,
               afterSleeveGuard: sleeveSafeResults.length,
               afterFormalityFilter: formalitySafeResults.length,
               afterAthleticGuard: athleticSafeResults.length,
-              afterMainpathCoverageFill: displayResults.length,
-              afterRecovery: displayResults.length,
+              afterRecovery: similarResult.results.length,
               searchCallsUsed: detectionSearchCalls,
               searchCallLimit: detectionSearchCallLimit,
               searchReasonsExecuted,
@@ -8627,7 +8310,7 @@ export class ImageAnalysisService {
                   ? Math.min(minRelevanceThreshold, 0.28)
                 : minRelevanceThreshold;
       const preserveCountForDetection = (isCoreOutfitCategory(detection.category) || suitCaptionTailoredFallback)
-        ? minCoreResultsPerDetection()
+        ? Math.min(3, Math.max(1, Math.floor(resolvedLimitPerItem * 0.12)))
         : 0;
       const inferredDesiredColor = (() => {
         const explicitColor = (detection.appliedFilters as any)?.color;
@@ -8646,21 +8329,13 @@ export class ImageAnalysisService {
           `[relevance-debug] detection="${detection.detection?.label ?? "unknown"}" category="${detection.category}" desiredColor="${String(inferredDesiredColor ?? "")}" source=${(detection.appliedFilters as any)?.color ? "explicit" : "inferred_or_none"}`,
         );
       }
-      const afterProductsRaw = applyRelevanceThresholdFilter(beforeProducts, detectionMinRelevanceThreshold, {
+      const afterProducts = applyRelevanceThresholdFilter(beforeProducts, detectionMinRelevanceThreshold, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category) || suitCaptionTailoredFallback,
         preserveAtLeastCount: preserveCountForDetection,
         detectionLabel: detection.detection?.label,
         category: detection.category,
         desiredColor: inferredDesiredColor,
       });
-      const afterProducts = (isCoreOutfitCategory(detection.category) || suitCaptionTailoredFallback)
-        ? samePoolSafeFill({
-            current: afterProductsRaw,
-            pool: beforeProducts,
-            min: minCoreResultsPerDetection(),
-            category: detection.category,
-          })
-        : afterProductsRaw;
       const droppedByFinalRelevance = Math.max(0, beforeProducts.length - afterProducts.length);
       const droppedByColorGate = beforeProducts.filter((prod) => {
         const relevance = Number((prod as any)?.finalRelevance01 ?? 0);
@@ -8786,10 +8461,6 @@ export class ImageAnalysisService {
         totalProducts: newTotalProducts,
         threshold: similarityThreshold,
         detectedCategories,
-        imageMode: inferImageMode({
-          caption: blipCaption,
-          detections: analysisResult.detection?.items ?? [],
-        }),
         shopTheLookStats: {
           totalDetections: totalDetectionJobs,
           coveredDetections,
@@ -9126,10 +8797,6 @@ export class ImageAnalysisService {
         ageGroup: "kids",
       };
     }
-    const selectiveImageModeForSearch = inferImageMode({
-      caption: blipCaption,
-      detections: allItemsToProcess,
-    });
 
     const captionColors = blipCaption ? inferColorFromCaption(blipCaption) : {};
     const inferredColorsByItem: Record<string, string | null> = {};
@@ -9641,13 +9308,6 @@ export class ImageAnalysisService {
                 blipCaption ?? "",
                 detCaption,
               );
-              softProductTypeHints = suppressPoloForPlainShortTop(
-                softProductTypeHints,
-                categorySource,
-                detection.raw_label,
-                String(detCaption ?? "").toLowerCase(),
-                String(blipCaption ?? "").toLowerCase(),
-              );
               if (shouldForceTypeFilterForDetection(detection, categoryMapping, softProductTypeHints)) {
                 filters.productTypes = softProductTypeHints.slice(0, 10);
               }
@@ -9746,7 +9406,6 @@ export class ImageAnalysisService {
             categoryMapping.productCategory === "outerwear"
               ? "embedding"
               : shopTheLookKnnField();
-          const requestRerankSignalCache = new Map<string, unknown>();
 
           // Always extract and pass color, style, and pattern intent to rerank
           let similarResult = await searchByImageWithSimilarity({
@@ -9759,7 +9418,6 @@ export class ImageAnalysisService {
             pHash: sourceImagePHash,
             detectionYoloConfidence: detection.confidence,
             detectionProductCategory: categoryMapping.productCategory,
-            imageMode: selectiveImageModeForSearch,
             filters,
             softProductTypeHints,
             limit: detectionRetrievalLimit,
@@ -9778,7 +9436,6 @@ export class ImageAnalysisService {
             sessionId: options.sessionId,
             userId: options.userId,
             sessionFilters: options.sessionFilters ?? undefined,
-            rerankSignalCache: requestRerankSignalCache,
             // Style and pattern intent are handled via filters or blipSignal; do not pass as top-level params
           });
 
@@ -9787,7 +9444,6 @@ export class ImageAnalysisService {
             (
               similarResult.results.length === 0 ||
               (
-                !shopLookRecoveryOnlyOnZeroEnv() &&
                 (categoryMapping.productCategory === "tops" || categoryMapping.productCategory === "bottoms") &&
                 similarResult.results.length <= 1
               )
@@ -9818,7 +9474,6 @@ export class ImageAnalysisService {
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
-              imageMode: selectiveImageModeForSearch,
               filters: filtersRetry,
               softProductTypeHints,
               limit: detectionRetrievalLimit,
@@ -9837,7 +9492,6 @@ export class ImageAnalysisService {
               sessionId: options.sessionId,
               userId: options.userId,
               sessionFilters: options.sessionFilters ?? undefined,
-              rerankSignalCache: requestRerankSignalCache,
             });
           }
 
@@ -9886,7 +9540,6 @@ export class ImageAnalysisService {
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
-              imageMode: selectiveImageModeForSearch,
               filters: fallbackFilters,
               softProductTypeHints,
               limit: retrievalLimit,
@@ -9905,7 +9558,6 @@ export class ImageAnalysisService {
               sessionId: options.sessionId,
               userId: options.userId,
               sessionFilters: options.sessionFilters ?? undefined,
-              rerankSignalCache: requestRerankSignalCache,
             });
             if (similarResult.results.length === 0) {
               const fallbackStructuralFilters = preserveHardCategoryInFallback && fallbackCategoryTerms.length > 0
@@ -9933,7 +9585,6 @@ export class ImageAnalysisService {
                 pHash: sourceImagePHash,
                 detectionYoloConfidence: detection.confidence,
                 detectionProductCategory: categoryMapping.productCategory,
-                imageMode: selectiveImageModeForSearch,
                 // Keep crop-derived structural intent even in last-resort fallback.
                 filters: fallbackStructuralFilters as any,
                 limit: retrievalLimit,
@@ -9951,7 +9602,6 @@ export class ImageAnalysisService {
                 sessionId: options.sessionId,
                 userId: options.userId,
                 sessionFilters: options.sessionFilters ?? undefined,
-                rerankSignalCache: requestRerankSignalCache,
               });
             }
           }
@@ -9974,7 +9624,6 @@ export class ImageAnalysisService {
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
-              imageMode: selectiveImageModeForSearch,
               filters: filtersNoHardTypes,
               softProductTypeHints,
               limit: retrievalLimit,
@@ -9993,16 +9642,13 @@ export class ImageAnalysisService {
               sessionId: options.sessionId,
               userId: options.userId,
               sessionFilters: options.sessionFilters ?? undefined,
-              rerankSignalCache: requestRerankSignalCache,
             });
           }
 
           const lowQualityFallbackWanted =
             shopLookLowQualityMultiCropFallbackEnabled() &&
             shouldUseLowQualityMultiCropFallback(detection) &&
-            (shopLookRecoveryOnlyOnZeroEnv()
-              ? similarResult.results.length === 0
-              : similarResult.results.length < Math.max(3, Math.floor(retrievalLimit * 0.35)));
+            similarResult.results.length < Math.max(3, Math.floor(retrievalLimit * 0.35));
           if (lowQualityFallbackWanted) {
             const expandedRaw = expandDetectionBox(detection.box, imageWidth, imageHeight, 0.22);
             let expandedBox = expandedRaw;
@@ -10034,7 +9680,6 @@ export class ImageAnalysisService {
                   pHash: sourceImagePHash,
                   detectionYoloConfidence: detection.confidence,
                   detectionProductCategory: categoryMapping.productCategory,
-                  imageMode: selectiveImageModeForSearch,
                   filters,
                   softProductTypeHints,
                   limit: retrievalLimit,
@@ -10053,7 +9698,6 @@ export class ImageAnalysisService {
                   sessionId: options.sessionId,
                   userId: options.userId,
                   sessionFilters: options.sessionFilters ?? undefined,
-                  rerankSignalCache: requestRerankSignalCache,
                 })
               ),
             );
@@ -10079,12 +9723,7 @@ export class ImageAnalysisService {
             : categoryMapping.productCategory === "outerwear"
               ? Math.max(3, Math.min(8, Math.floor(resolvedLimitPerItem * 0.35)))
               : Math.max(3, Math.min(8, Math.floor(resolvedLimitPerItem * 0.35)));
-          if (
-            apparelRecoveryCategory &&
-            (shopLookRecoveryOnlyOnZeroEnv()
-              ? similarResult.results.length === 0
-              : similarResult.results.length < apparelRecoveryMinKeep)
-          ) {
+          if (apparelRecoveryCategory && similarResult.results.length < apparelRecoveryMinKeep) {
             const ablationTerms = hardCategoryTermsForDetection(categorySource, categoryMapping, {
               confidence: detection.confidence,
               areaRatio: detection.area_ratio,
@@ -10116,7 +9755,6 @@ export class ImageAnalysisService {
               pHash: sourceImagePHash,
               detectionYoloConfidence: detection.confidence,
               detectionProductCategory: categoryMapping.productCategory,
-              imageMode: selectiveImageModeForSearch,
               filters: ablationFilters,
               softProductTypeHints,
               limit: retrievalLimit,
@@ -10348,7 +9986,7 @@ export class ImageAnalysisService {
         );
       const preserveCountForDetection = isCoreOutfitCategory(detection.category)
         || suitCaptionTailoredFallback
-        ? minCoreResultsPerDetection()
+        ? Math.min(3, Math.max(1, Math.floor(resolvedLimitPerItem * 0.12)))
         : 0;
       const inferredDesiredColor = (() => {
         const explicitColor = (detection.appliedFilters as any)?.color;
@@ -10365,21 +10003,13 @@ export class ImageAnalysisService {
       console.log(
         `[relevance-debug-sel] detection="${detection.detection?.label ?? "unknown"}" category="${detection.category}" desiredColor="${String(inferredDesiredColor ?? "")}" source=${(detection.appliedFilters as any)?.color ? "explicit" : "inferred_or_none"}`,
       );
-      const afterProductsRaw = applyRelevanceThresholdFilter(beforeProducts, minRelevanceThresholdSel, {
+      const afterProducts = applyRelevanceThresholdFilter(beforeProducts, minRelevanceThresholdSel, {
         preserveAtLeastOne: isCoreOutfitCategory(detection.category) || suitCaptionTailoredFallback,
         preserveAtLeastCount: preserveCountForDetection,
         detectionLabel: detection.detection?.label,
         category: detection.category,
         desiredColor: inferredDesiredColor,
       });
-      const afterProducts = (isCoreOutfitCategory(detection.category) || suitCaptionTailoredFallback)
-        ? samePoolSafeFill({
-            current: afterProductsRaw,
-            pool: beforeProducts,
-            min: minCoreResultsPerDetection(),
-            category: detection.category,
-          })
-        : afterProductsRaw;
       const droppedByFinalRelevance = Math.max(0, beforeProducts.length - afterProducts.length);
       const droppedByColorGate = beforeProducts.filter((prod) => {
         const relevance = Number((prod as any)?.finalRelevance01 ?? 0);
@@ -10494,10 +10124,6 @@ export class ImageAnalysisService {
         totalAvailableProducts: pagedSel.totalAvailableProducts,
         threshold: options.similarityThreshold ?? config.clip.imageSimilarityThreshold,
         detectedCategories: [...new Set(relevanceFilteredResultsSelWithColorSource.map((r) => r.category))],
-        imageMode: inferImageMode({
-          caption: blipCaption,
-          detections: allItemsToProcess,
-        }),
         pagination: {
           mode: "per_detection",
           page: resolvedResultsPage,

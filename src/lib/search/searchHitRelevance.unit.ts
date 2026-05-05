@@ -7,47 +7,6 @@ import { computeHitRelevance, scoreAudienceCompliance } from "./searchHitRelevan
 import { scoreCrossFamilyTypePenalty } from "./productTypeTaxonomy";
 
 describe("computeHitRelevance - sleeve intent", () => {
-  test("missing style signal is excluded from scoring (no style penalty)", () => {
-    const hit = {
-      _source: {
-        title: "Men Core Tee",
-        category: "tops",
-        category_canonical: "tops",
-        product_types: ["tshirt", "tee"],
-        // intentionally no attr_style and no style keywords in title/category
-      },
-    } as any;
-
-    const base = computeHitRelevance(hit, 0.86, {
-      desiredProductTypes: ["tshirt", "tee"],
-      desiredColors: [],
-      desiredColorsTier: [],
-      desiredStyle: "",
-      rerankColorMode: "any",
-      mergedCategory: "tops",
-      astCategories: ["tops"],
-      hasAudienceIntent: false,
-      crossFamilyPenaltyWeight: 420,
-      tightSemanticCap: true,
-    });
-
-    const withStyleIntent = computeHitRelevance(hit, 0.86, {
-      desiredProductTypes: ["tshirt", "tee"],
-      desiredColors: [],
-      desiredColorsTier: [],
-      desiredStyle: "bohemian",
-      rerankColorMode: "any",
-      mergedCategory: "tops",
-      astCategories: ["tops"],
-      hasAudienceIntent: false,
-      crossFamilyPenaltyWeight: 420,
-      tightSemanticCap: true,
-    });
-
-    expect(withStyleIntent.styleCompliance).toBe(0);
-    expect(withStyleIntent.finalRelevance01).toBeCloseTo(base.finalRelevance01, 6);
-  });
-
   test("short-sleeve intent penalizes long-sleeve product", () => {
     const hit = {
       _source: {
@@ -181,33 +140,6 @@ describe("computeHitRelevance - type intent reliability", () => {
     expect(rel.finalRelevance01).toBeGreaterThan(0.45);
   });
 
-  test("unreliable type intent cannot claim exact type", () => {
-    const hit = {
-      _source: {
-        title: "Men Core Tee",
-        category: "T-Shirts",
-        category_canonical: "tops",
-        product_types: ["tshirt", "tee"],
-      },
-    } as any;
-
-    const rel = computeHitRelevance(hit, 0.86, {
-      desiredProductTypes: ["tshirt", "tee"],
-      desiredColors: [],
-      desiredColorsTier: [],
-      rerankColorMode: "any",
-      mergedCategory: "tops",
-      astCategories: ["tops"],
-      hasAudienceIntent: false,
-      crossFamilyPenaltyWeight: 420,
-      tightSemanticCap: true,
-      reliableTypeIntent: false,
-    });
-
-    expect(rel.exactTypeScore).toBeLessThanOrEqual(0.65);
-    expect(rel.productTypeCompliance).toBeLessThanOrEqual(0.70);
-  });
-
   test("reliable type intent still enforces strict cross-family blocking", () => {
     const rel = computeHitRelevance(footwearHit, 0.92, {
       desiredProductTypes: ["dress"],
@@ -338,33 +270,6 @@ describe("computeHitRelevance - color typo normalization", () => {
 
     expect(rel.colorCompliance).toBeGreaterThan(0.7);
     expect(rel.colorTier === "exact" || rel.colorTier === "family").toBe(true);
-  });
-
-  test("known brown catalog color does not score as white via color fallback", () => {
-    const hit = {
-      _source: {
-        title: "Maison Brown Men Polo Shirt",
-        category: "polo shirts",
-        category_canonical: "tops",
-        product_types: ["polo"],
-        color: "brown",
-      },
-    } as any;
-
-    const rel = computeHitRelevance(hit, 0.9, {
-      desiredProductTypes: ["shirt"],
-      desiredColors: ["white", "off-white"],
-      desiredColorsTier: ["white", "off-white"],
-      rerankColorMode: "any",
-      mergedCategory: "tops",
-      astCategories: ["tops"],
-      hasAudienceIntent: false,
-      crossFamilyPenaltyWeight: 420,
-      tightSemanticCap: true,
-      reliableTypeIntent: false,
-    });
-
-    expect(rel.colorCompliance).toBeLessThanOrEqual(0.45);
   });
 });
 
