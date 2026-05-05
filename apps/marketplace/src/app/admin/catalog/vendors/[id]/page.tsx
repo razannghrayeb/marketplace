@@ -56,7 +56,7 @@ export default async function VendorDetailPage({ params }: Props) {
               href={vendor.url}
               target="_blank"
               rel="noreferrer"
-              className="text-xs text-blue-600 flex items-center gap-1 border border-blue-200 rounded-lg px-2.5 py-1 hover:bg-blue-50"
+              className="text-xs text-[#2a2623] flex items-center gap-1 border border-[#d8c6bb] rounded-lg px-2.5 py-1 hover:bg-[#f7f0eb]"
             >
               Open site <ExternalLink className="w-3 h-3" />
             </a>
@@ -96,7 +96,7 @@ export default async function VendorDetailPage({ params }: Props) {
                   <span className="text-xs text-gray-600 w-28 truncate">{cat}</span>
                   <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
                     <div
-                      className="h-full bg-blue-400 rounded-full"
+                      className="h-full bg-brand rounded-full"
                       style={{ width: `${Math.round((count / vendor.total_products) * 100)}%` }}
                     />
                   </div>
@@ -245,12 +245,12 @@ export default async function VendorDetailPage({ params }: Props) {
                     <td className="px-3 py-2 text-xs font-medium tabular-nums">
                       {formatCents(p.price_cents)}
                       {p.sales_price_cents && (
-                        <span className="text-teal-600 ml-1">{formatCents(p.sales_price_cents)}</span>
+                        <span className="text-[#7d4b3a] ml-1">{formatCents(p.sales_price_cents)}</span>
                       )}
                     </td>
                     <td className="px-3 py-2">
                       {p.availability ? (
-                        <span className="text-teal-600 text-xs font-medium">In</span>
+                        <span className="text-[#7d4b3a] text-xs font-medium">In</span>
                       ) : (
                         <span className="text-red-400 text-xs">Out</span>
                       )}

@@ -8,8 +8,8 @@ export function PageLoader({ label = 'Loading…' }: { label?: string }) {
       aria-live="polite"
     >
       <div className="relative">
-        <div className="absolute inset-0 rounded-full bg-gradient-to-br from-violet-400 to-fuchsia-400 opacity-25 blur-xl" />
-        <Loader2 className="relative h-12 w-12 animate-spin text-violet-600" aria-hidden />
+        <div className="absolute inset-0 rounded-full bg-gradient-to-br from-orange-500 to-orange-500 opacity-25 blur-xl" />
+        <Loader2 className="relative h-12 w-12 animate-spin text-[#2a2623]" aria-hidden />
       </div>
       <p className="text-sm font-medium text-neutral-600">{label}</p>
       <div className="flex w-full max-w-md flex-col gap-2">

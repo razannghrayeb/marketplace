@@ -7,6 +7,8 @@ export const endpoints = {
   auth: {
     signup: '/api/auth/signup',
     login: '/api/auth/login',
+    forgotPassword: '/api/auth/forgot-password',
+    resetPassword: '/api/auth/reset-password',
     refresh: '/api/auth/refresh',
     logout: '/api/auth/logout',
     me: '/api/auth/me',
@@ -31,7 +33,6 @@ export const endpoints = {
     imageDelete: (id: number | string, imageId: number | string) => `/products/${id}/images/${imageId}`,
     recommendationsBatch: '/products/recommendations/batch',
     completeStylePost: '/products/complete-style',
-    completeStyleTryOn: '/products/complete-style/try-on',
     variantsBatch: '/products/variants/batch',
   },
   search: {
@@ -78,11 +79,6 @@ export const endpoints = {
     toggle: '/api/favorites/toggle',
     check: (productId: number | string) => `/api/favorites/check/${productId}`,
     checkBatch: '/api/favorites/check',
-  },
-  cart: {
-    root: '/api/cart',
-    item: (productId: number | string) => `/api/cart/${productId}`,
-    clear: '/api/cart/clear',
   },
   wardrobe: {
     items: '/api/wardrobe/items',

@@ -9,10 +9,18 @@ const PLACEHOLDER_URL = 'https://placeholder.supabase.co'
 const PLACEHOLDER_KEY =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiJ9.placeholder'
 
+function firstEnv(...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = process.env[key]?.trim()
+    if (value) return value
+  }
+  return undefined
+}
+
 function getOrCreateBrowser(): SupabaseClient<Database> {
   if (browserClient) return browserClient
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()
+  const url = firstEnv('NEXT_PUBLIC_SUPABASE_URL', 'SUPABASE_URL')
+  const key = firstEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY', 'SUPABASE_ANON_KEY')
   if (url && key) {
     browserClient = createClient<Database>(url, key)
     return browserClient
@@ -23,9 +31,9 @@ function getOrCreateBrowser(): SupabaseClient<Database> {
 
 function getOrCreateAdmin(): SupabaseClient<Database> {
   if (adminClient) return adminClient
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()
-  const service = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()
+  const url = firstEnv('NEXT_PUBLIC_SUPABASE_URL', 'SUPABASE_URL')
+  const service = firstEnv('SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_ADMIN_KEY')
+  const anon = firstEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY', 'SUPABASE_ANON_KEY')
   if (url && service) {
     adminClient = createClient<Database>(url, service, {
       auth: { autoRefreshToken: false, persistSession: false },

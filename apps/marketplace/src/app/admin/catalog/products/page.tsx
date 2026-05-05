@@ -21,6 +21,9 @@ const PAGE_SIZE = 50
 export default function ProductsPage() {
   const [products, setProducts] = useState<Product[]>([])
   const [total, setTotal]       = useState(0)
+  /** Live GET /products omits an exact total; Next stays enabled while true. */
+  const [hasMore, setHasMore]   = useState<boolean | undefined>(undefined)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [vendorOptions, setVendorOptions] = useState<Array<{ value: string; label: string }>>([
     { value: '', label: 'All vendors' },
   ])
@@ -47,6 +50,7 @@ export default function ProductsPage() {
   const load = useCallback((f: ProductFilters, s: SortConfig, p: number) => {
     startTransition(async () => {
       try {
+        setLoadError(null)
         const params = new URLSearchParams()
         if (f.search)        params.set('search', f.search)
         if (f.vendor_id)     params.set('vendor_id', String(f.vendor_id))
@@ -61,9 +65,28 @@ export default function ProductsPage() {
 
         const res = await fetch(`/api/catalog/products?${params}`)
         const json = await res.json()
-        setProducts(json.data ?? [])
-        setTotal(json.total ?? 0)
+        if (!res.ok) {
+          throw new Error(json?.error || 'Failed to load catalog products')
+        }
+        const items = Array.isArray(json.data)
+          ? json.data
+          : Array.isArray(json.results)
+            ? json.results
+            : []
+        setProducts(items)
+        const totalCount =
+          typeof json.total === 'number'
+            ? json.total
+            : typeof json?.meta?.total === 'number'
+              ? json.meta.total
+              : items.length
+        setTotal(totalCount)
       } catch (e) {
+        const msg = e instanceof Error ? e.message : 'Failed to load products'
+        setLoadError(msg)
+        setProducts([])
+        setTotal(0)
+        setHasMore(undefined)
         console.error(e)
       }
     })
@@ -78,6 +101,7 @@ export default function ProductsPage() {
       has_sale: hasSale || undefined,
       has_issues: hasIssues || undefined,
     }
+    setFilters(f)
     setPage(1)
     load(f, sort, 1)
   }, [debouncedSearch, vendorId, category, availability, hasSale, hasIssues, sort, load])
@@ -126,19 +150,29 @@ export default function ProductsPage() {
       : <ChevronDown className="w-3 h-3" />
   }
 
-  const totalPages = Math.ceil(total / PAGE_SIZE)
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const resultsSummary =
+    hasMore === true
+      ? `${((page - 1) * PAGE_SIZE + products.length).toLocaleString()}+`
+      : total.toLocaleString()
 
   return (
     <div className="flex flex-col h-screen overflow-hidden">
       <PageHeader
         title="Products"
-        sub={`${total.toLocaleString()} rows`}
+        sub={hasMore === true ? 'Live catalog (API)' : `${total.toLocaleString()} rows`}
         actions={
-          <span className="text-xs bg-purple-50 text-purple-700 border border-purple-200 px-2.5 py-1 rounded-full font-medium">
-            {total.toLocaleString()} total
+          <span className="text-xs bg-[#f4ece6] text-[#2a2623] border border-[#d8c6bb] px-2.5 py-1 rounded-full font-medium">
+            {hasMore === true ? 'Paged · more available' : `${total.toLocaleString()} total`}
           </span>
         }
       />
+
+      {loadError && (
+        <div className="mx-4 mt-3 rounded-xl border border-[#d8c6bb] bg-[#f7f0eb] px-3 py-2 text-xs text-[#2a2623]">
+          Could not load products: {loadError}
+        </div>
+      )}
 
       {/* Filters bar */}
       <div className="bg-white border-b border-gray-200 px-4 py-2.5 flex flex-wrap gap-2 items-center shrink-0">
@@ -267,9 +301,9 @@ export default function ProductsPage() {
                   <td className="px-3 py-2 text-xs font-medium tabular-nums">{formatCents(p.price_cents, p.currency ?? undefined)}</td>
                   <td className="px-3 py-2">
                     {p.sales_price_cents ? (
-                      <span className="text-teal-600 text-xs font-medium tabular-nums">
+                      <span className="text-[#2a2623] text-xs font-medium tabular-nums">
                         {formatCents(p.sales_price_cents, p.currency ?? undefined)}
-                        {disc && <span className="ml-1 text-[10px] text-teal-500">−{disc}%</span>}
+                        {disc && <span className="ml-1 text-[10px] text-[#3d3030]">-{disc}%</span>}
                       </span>
                     ) : <span className="text-gray-300">—</span>}
                   </td>
@@ -294,7 +328,10 @@ export default function ProductsPage() {
       {/* Pagination */}
       <div className="bg-white border-t border-gray-200 px-4 py-2.5 flex items-center justify-between shrink-0">
         <span className="text-xs text-gray-400">
-          Page {page} of {totalPages} · {total.toLocaleString()} results
+          Page {page}
+          {hasMore !== true ? ` of ${totalPages}` : ''}
+          {' · '}
+          {resultsSummary} results
         </span>
         <div className="flex gap-2">
           <button
@@ -305,7 +342,10 @@ export default function ProductsPage() {
             ← Prev
           </button>
           <button
-            disabled={page >= totalPages}
+            disabled={
+              hasMore === false ||
+              (hasMore === undefined && page >= totalPages)
+            }
             onClick={() => { const p = page + 1; setPage(p); load(filters, sort, p) }}
             className="text-xs px-3 py-1.5 border border-gray-200 rounded-lg disabled:opacity-40 hover:bg-gray-50"
           >

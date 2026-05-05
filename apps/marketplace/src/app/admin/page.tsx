@@ -1,7 +1,6 @@
-'use client'
+import { redirect } from 'next/navigation'
 
-import { AdminOverviewSection } from '@/components/admin/AdminOverviewSection'
-
-export default function AdminOverviewPage() {
-  return <AdminOverviewSection />
+/** Admin UI is catalog-only; landing sends admins straight to the database overview. */
+export default function AdminRootPage() {
+  redirect('/admin/catalog')
 }

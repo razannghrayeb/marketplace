@@ -3,14 +3,40 @@
 @tailwind utilities;
 
 @layer base {
+  /**
+   * Font stacks: `--font-display` and `--font-sans` are injected on `<html>` by `next/font`
+   * (see `src/app/layout.tsx`). Do not override them here.
+   */
   :root {
-    --font-display: 'Inter', system-ui, sans-serif;
-    --font-sans: 'Inter', system-ui, sans-serif;
-    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 24px -4px rgba(109, 40, 217, 0.07),
-      0 0 0 1px rgba(0, 0, 0, 0.03);
-    --shadow-card-hover: 0 12px 40px -12px rgba(109, 40, 217, 0.18), 0 4px 16px -4px rgba(0, 0, 0, 0.08),
-      0 0 0 1px rgba(139, 92, 246, 0.12);
-    --shadow-soft: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+    /* Luxury editorial text (use in CSS and `text-ink` / `text-muted` in Tailwind) */
+    --color-text-primary: #2b2521;
+    --color-text-muted: #6f6258;
+    --color-accent: #7a4e3a;
+    --color-page-bg: #f5f1ec;
+
+    /* Editorial neutral palette (stone / oat / espresso) */
+    --tz-page-lime: #e7e2de;
+    --tz-pink-50: #ffffff;
+    --tz-pink-100: #c6bab4;
+    --tz-pink-200: #aa8a76;
+    --tz-pink-300: #8c5a49;
+    --tz-pink-400: #57504a;
+    --tz-cream: #ffffff;
+    --tz-cream-2: #fffef6;
+    --tz-burgundy: #2b2521;
+    --tz-burgundy-strong: #1a1614;
+    --tz-burgundy-soft: #6f6258;
+    --tz-ink: #2b2521;
+    /* Matches Tailwind `brand` — primary buttons site-wide */
+    --tz-brand: #3d3030;
+    --tz-brand-hover: #504545;
+    --tz-brand-muted: #ede8e4;
+
+    --shadow-card: 0 1px 2px rgba(22, 22, 22, 0.05), 0 8px 28px -8px rgba(22, 22, 22, 0.1),
+      0 0 0 1px rgba(22, 22, 22, 0.04);
+    --shadow-card-hover: 0 14px 44px -14px rgba(22, 22, 22, 0.2), 0 4px 16px -4px rgba(22, 22, 22, 0.1),
+      0 0 0 1px rgba(22, 22, 22, 0.1);
+    --shadow-soft: 0 1px 3px rgba(22, 22, 22, 0.06), 0 1px 2px rgba(22, 22, 22, 0.04);
   }
 
   html {
@@ -18,47 +44,196 @@
   }
 
   body {
-    @apply antialiased;
+    @apply antialiased font-sans text-base;
+    color: var(--color-text-primary);
     font-feature-settings: 'rlig' 1, 'calt' 1;
+    line-height: 1.5;
+    background-color: var(--color-page-bg);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply font-display;
+    color: var(--color-text-primary);
+    font-weight: 600;
+    letter-spacing: -0.03em;
+    line-height: 1.05;
+  }
+
+  h1 {
+    font-size: clamp(56px, 7vw, 96px);
+    font-weight: 600;
+  }
+
+  h2 {
+    font-size: clamp(40px, 5vw, 64px);
+    font-weight: 600;
+  }
+
+  h3 {
+    font-size: clamp(1.75rem, 2.2vw, 2.25rem);
+    font-weight: 600;
+  }
+
+  h4 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+  }
+
+  p {
+    color: var(--color-text-primary);
   }
 
   ::selection {
-    @apply bg-fuchsia-200/80 text-violet-900;
+    background: rgba(158, 147, 139, 0.24);
+    color: var(--color-text-primary);
   }
 }
 
 @layer components {
+  /* Full-page wash — class name kept for back-compat */
+  .tz-pink-bg {
+    background-color: var(--color-page-bg);
+    background-image:
+      radial-gradient(ellipse 120% 85% at 0% -25%, rgba(191, 179, 170, 0.22) 0%, transparent 55%),
+      radial-gradient(ellipse 100% 75% at 100% 5%, rgba(118, 105, 97, 0.1) 0%, transparent 52%),
+      radial-gradient(ellipse 95% 70% at 50% 105%, rgba(189, 177, 168, 0.1) 0%, transparent 50%),
+      radial-gradient(ellipse 80% 55% at 90% 90%, rgba(154, 143, 135, 0.1) 0%, transparent 46%);
+    background-attachment: fixed;
+  }
+
+  .tz-flowers-strip {
+    background-image: url('/brand/tz-hero-banner.png');
+    background-size: cover;
+    background-position: center bottom;
+    background-repeat: no-repeat;
+  }
+
+  .tz-cream-card {
+    background-color: var(--tz-cream);
+  }
+
+  .tz-burgundy {
+    color: var(--tz-burgundy);
+  }
+  .tz-burgundy-strong {
+    color: var(--tz-burgundy-strong);
+  }
+
+  .tz-headline {
+    color: var(--color-text-primary);
+    font-family: var(--font-display), Georgia, serif;
+    font-weight: 600;
+    line-height: 1.05;
+    letter-spacing: -0.03em;
+    font-size: clamp(1.75rem, 4vw, 3rem);
+    text-transform: none;
+  }
+  .tz-headline em {
+    font-style: normal;
+    font-weight: 600;
+    text-transform: none;
+    color: var(--color-text-muted);
+    margin-right: 0.25em;
+    letter-spacing: -0.02em;
+    font-family: var(--font-display), Georgia, serif;
+  }
+  .tz-headline-xl {
+    font-size: clamp(2.25rem, 7vw, 4.25rem);
+    line-height: 1.02;
+  }
+
+  .tz-eyebrow {
+    font-family: var(--font-sans), system-ui, sans-serif;
+    color: var(--color-text-primary);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  .tz-link {
+    font-family: var(--font-sans), system-ui, sans-serif;
+    color: var(--color-text-primary);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: none;
+    font-size: 14px;
+    border-bottom: 1px solid var(--color-accent);
+    padding-bottom: 2px;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .tz-link:hover {
+    color: var(--color-accent);
+  }
+
+  /* Brand utilities omitted from @apply — Tailwind can fail to resolve nested theme colors here (500 + blank FOUC page). */
   .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-semibold text-sm
-           text-white shadow-md shadow-violet-500/25
-           bg-gradient-to-r from-violet-600 via-violet-500 to-fuchsia-500
-           hover:from-violet-500 hover:via-fuchsia-500 hover:to-rose-500 hover:shadow-lg hover:shadow-fuchsia-500/20
-           active:scale-[0.98] transition-all duration-300;
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-sans font-semibold
+           tracking-[0.04em] text-white shadow-md active:scale-[0.98] transition-all duration-300;
+    font-size: 14px;
+    line-height: 1.35;
+    background-color: var(--tz-brand);
+    box-shadow: 0 4px 6px -1px rgb(61 48 48 / 0.1), 0 0 0 1px rgb(61 48 48 / 0.22);
+  }
+  .btn-primary:hover {
+    background-color: var(--tz-brand-hover);
+    box-shadow: 0 10px 15px -3px rgb(61 48 48 / 0.14), 0 0 0 1px rgb(61 48 48 / 0.3);
+  }
+  .btn-primary:focus-visible {
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+    box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--tz-brand);
   }
 
   .btn-secondary {
-    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-semibold text-sm
-           bg-white text-violet-900 border-2 border-violet-200/80
-           hover:bg-violet-50 hover:border-violet-300 hover:shadow-md hover:shadow-violet-500/10
-           transition-all duration-200 active:scale-[0.98];
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-sans font-semibold
+           tracking-[0.04em] border-2 active:scale-[0.98] transition-all duration-200;
+    font-size: 14px;
+    line-height: 1.35;
+    background-color: var(--tz-brand-muted);
+    color: var(--tz-brand);
+    border-color: var(--tz-brand);
+  }
+  .btn-secondary:hover {
+    background-color: var(--tz-brand);
+    color: #fff;
+    border-color: var(--tz-brand);
+  }
+  .btn-secondary:focus-visible {
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+    box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--tz-brand);
   }
 
   .btn-ghost {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full font-medium text-sm
-           text-neutral-600 hover:bg-violet-50 hover:text-violet-800
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full font-sans font-medium
+           tracking-[0.04em] text-neutral-700 hover:bg-white/60 hover:text-neutral-900
            transition-all duration-200;
+    font-size: 14px;
+    line-height: 1.35;
   }
 
   .btn-on-dark {
-    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-semibold text-sm
-           bg-white text-violet-900 shadow-lg shadow-black/10 hover:bg-violet-50
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-sans font-semibold
+           tracking-[0.04em] bg-white text-neutral-950 shadow-lg shadow-black/10 hover:bg-[#f4ece6]
            active:scale-[0.98] transition-all duration-200;
+    font-size: 14px;
+    line-height: 1.35;
   }
 
   .btn-on-dark-ghost {
-    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-semibold text-sm
-           bg-white/15 text-white border-2 border-white/35 backdrop-blur-md
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-sans font-semibold
+           tracking-[0.04em] bg-white/15 text-white border-2 border-white/35 backdrop-blur-md
            hover:bg-white/25 hover:border-white/50 transition-all duration-200 active:scale-[0.98];
+    font-size: 14px;
+    line-height: 1.35;
   }
 
   .card-hover {
@@ -69,52 +244,116 @@
   }
 
   .surface-card {
-    @apply rounded-2xl border border-neutral-200/80 bg-white/95 backdrop-blur-sm;
+    @apply rounded-2xl border border-black/10 bg-white/95 backdrop-blur-sm;
     box-shadow: var(--shadow-card);
   }
   .surface-card:hover {
-    @apply border-violet-200/70;
+    border-color: rgba(10, 10, 10, 0.18);
     box-shadow: var(--shadow-card-hover);
   }
 
+  .tz-sheet {
+    background: linear-gradient(145deg, rgba(255,255,255,0.94), rgba(244,240,236,0.96));
+    border-radius: 28px;
+    box-shadow: 0 24px 60px -40px rgba(10, 10, 10, 0.18);
+    overflow: hidden;
+    @apply ring-1 ring-black/5;
+  }
+
+  .tz-product-card {
+    @apply relative overflow-hidden rounded-[22px];
+    background: #ffffff;
+  }
+
+  .tz-icon-btn {
+    @apply inline-flex h-9 w-9 items-center justify-center rounded-full bg-white shadow-md transition-all hover:scale-105;
+    color: var(--tz-brand);
+  }
+  .tz-icon-btn:hover {
+    background-color: var(--tz-brand-muted);
+  }
+
   .text-gradient-accent {
-    @apply bg-clip-text text-transparent bg-gradient-to-r from-violet-600 via-fuchsia-500 to-rose-500;
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(90deg, var(--color-text-primary) 0%, var(--color-text-muted) 100%);
   }
 
   .heading-display {
-    @apply font-display font-bold tracking-tight text-neutral-900;
+    @apply font-display font-semibold tracking-tight;
+    color: var(--color-text-primary);
+    letter-spacing: -0.03em;
+    line-height: 1.05;
   }
 
+  /** Section labels — Inter/Manrope caps */
   .section-eyebrow {
-    @apply text-xs font-semibold uppercase tracking-[0.15em] text-violet-600;
+    font-family: var(--font-sans), system-ui, sans-serif;
+    color: var(--color-text-primary);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  /** Product titles — sans semibold */
+  .product-title-ui {
+    font-family: var(--font-sans), system-ui, sans-serif;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.35;
+    color: var(--color-text-primary);
+  }
+
+  /** Prices — sans bold */
+  .product-price-ui {
+    font-family: var(--font-sans), system-ui, sans-serif;
+    font-weight: 700;
+    color: var(--color-text-primary);
   }
 
   .section-divider {
-    @apply h-1 w-12 rounded-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-rose-400 mx-auto mb-5;
+    background: var(--tz-burgundy);
+    @apply h-1 w-12 rounded-full mx-auto mb-5;
   }
 
   .section-divider-left {
-    @apply h-1 w-12 rounded-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-rose-400 mb-4;
+    background: var(--tz-burgundy);
+    @apply h-1 w-12 rounded-full mb-4;
   }
 
   .glass-panel {
     @apply rounded-[1.75rem] border border-white/70 bg-white/55 backdrop-blur-md shadow-xl;
-    box-shadow: 0 4px 32px -8px rgba(109, 40, 217, 0.12), 0 0 0 1px rgba(255, 255, 255, 0.5) inset,
+    box-shadow: 0 4px 32px -8px rgba(10, 10, 10, 0.12), 0 0 0 1px rgba(255, 255, 255, 0.5) inset,
       var(--shadow-soft);
   }
 
   .mesh-bg {
-    background-image: radial-gradient(at 40% 20%, rgba(167, 139, 250, 0.35) 0px, transparent 50%),
-      radial-gradient(at 80% 0%, rgba(244, 114, 182, 0.22) 0px, transparent 45%),
-      radial-gradient(at 0% 50%, rgba(56, 189, 248, 0.15) 0px, transparent 45%),
-      radial-gradient(at 80% 100%, rgba(251, 191, 36, 0.12) 0px, transparent 40%);
+    background-image:
+      radial-gradient(at 40% 20%, rgba(205, 184, 172, 0.38) 0px, transparent 50%),
+      radial-gradient(at 80% 0%, rgba(212, 174, 158, 0.34) 0px, transparent 45%),
+      radial-gradient(at 0% 50%, rgba(186, 167, 156, 0.36) 0px, transparent 45%),
+      radial-gradient(at 80% 100%, rgba(235, 225, 217, 0.5) 0px, transparent 40%);
+  }
+
+  .admin-mesh-bg {
+    background-color: #f4efeb;
+    background-image: radial-gradient(at 35% 15%, rgba(255, 255, 255, 0.9) 0px, transparent 52%),
+      radial-gradient(at 85% 10%, rgba(170, 138, 118, 0.2) 0px, transparent 48%),
+      radial-gradient(at 0% 55%, rgba(201, 174, 159, 0.16) 0px, transparent 46%),
+      radial-gradient(at 90% 95%, rgba(234, 220, 210, 0.28) 0px, transparent 42%);
   }
 
   .input-field {
-    @apply w-full px-4 py-3 rounded-xl border border-neutral-200 bg-white
-           text-neutral-800 placeholder-neutral-400
-           focus:outline-none focus:ring-2 focus:ring-violet-500/20 focus:border-violet-400
+    @apply w-full px-4 py-3 rounded-xl border border-black/10 bg-white font-sans
+           focus:outline-none focus:ring-2 focus:ring-black/15 focus:border-neutral-950
            transition-all duration-200;
+    font-size: 16px;
+    line-height: 1.5;
+    color: var(--color-text-primary);
+  }
+  .input-field::placeholder {
+    color: var(--color-text-muted);
+    opacity: 0.75;
   }
 
   .scrollbar-none {
@@ -132,13 +371,33 @@
   }
 
   .skeleton-shimmer {
-    @apply relative overflow-hidden bg-neutral-200/80 rounded-2xl;
+    @apply relative overflow-hidden rounded-2xl;
+    background: rgba(10, 10, 10, 0.06);
   }
   .skeleton-shimmer::after {
     content: '';
     @apply absolute inset-0 -translate-x-full;
     background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
     animation: shimmer-skeleton 1.5s ease-in-out infinite;
+  }
+
+  @keyframes tz-float {
+    0%,
+    100% {
+      transform: translateY(0px);
+    }
+    50% {
+      transform: translateY(-10px);
+    }
+  }
+  .tz-float-slow {
+    animation: tz-float 6s ease-in-out infinite;
+  }
+  .tz-float-mid {
+    animation: tz-float 5s ease-in-out infinite;
+  }
+  .tz-float-fast {
+    animation: tz-float 4s ease-in-out infinite;
   }
 }
 
@@ -148,11 +407,16 @@
 }
 
 ::-webkit-scrollbar-track {
-  @apply bg-neutral-100 rounded-full;
+  background: rgba(10, 10, 10, 0.06);
+  border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb {
-  @apply bg-neutral-300 rounded-full hover:bg-neutral-400;
+  background: rgba(10, 10, 10, 0.25);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(10, 10, 10, 0.4);
 }
 
 .scrollbar-hide {
@@ -161,4 +425,117 @@
 }
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
+}
+
+/* Discover hero — alternating column marquees (stacked stills) */
+@keyframes discover-hero-marquee-up {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-50%);
+  }
+}
+@keyframes discover-hero-marquee-down {
+  from {
+    transform: translateY(-50%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+.discover-hero-marquee-up {
+  animation: discover-hero-marquee-up var(--discover-marquee-duration, 34s) linear infinite;
+}
+.discover-hero-marquee-down {
+  animation: discover-hero-marquee-down var(--discover-marquee-duration, 34s) linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .discover-hero-marquee-up,
+  .discover-hero-marquee-down {
+    animation: none;
+    transform: translateY(0);
+  }
+}
+
+/* Discover premium hero — soft gradient + light fabric grain (replaces heavy rock strip) */
+.discover-hero-premium-bg {
+  position: relative;
+  background: linear-gradient(135deg, #efe6dc 0%, #cdbbaa 100%);
+}
+.discover-hero-premium-bg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.08;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cfilter id='nf'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23nf)' opacity='0.35'/%3E%3C/svg%3E");
+}
+
+@keyframes discover-hero-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .discover-hero-float-card {
+    animation: discover-hero-float 7s ease-in-out infinite;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .discover-hero-float-card {
+    animation: none;
+  }
+}
+
+/* Discover landing — warm beige “cut stone”: rigid facets + coarse grain (hero strip only) */
+.discover-hero-rock-bg {
+  position: relative;
+  background: linear-gradient(165deg, #e0d2c4 0%, #c9b6a2 32%, #ae9a86 68%, #958472 100%);
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.35), inset 0 -3px 0 rgba(62, 48, 38, 0.22);
+}
+.discover-hero-rock-bg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.38;
+  mix-blend-mode: multiply;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+/* Hard chisel lines + plate breaks (rigid, not soft grey haze) */
+.discover-hero-rock-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.55;
+  pointer-events: none;
+  background-image: linear-gradient(105deg, rgba(255, 255, 255, 0.14) 0%, transparent 42%),
+    linear-gradient(-18deg, transparent 55%, rgba(62, 48, 38, 0.12) 55%, rgba(62, 48, 38, 0.12) 56%, transparent 56%),
+    repeating-linear-gradient(
+      90deg,
+      rgba(62, 48, 38, 0.07),
+      rgba(62, 48, 38, 0.07) 1px,
+      transparent 1px,
+      transparent 5px
+    ),
+    repeating-linear-gradient(
+      0deg,
+      rgba(255, 252, 248, 0.12),
+      rgba(255, 252, 248, 0.12) 1px,
+      transparent 1px,
+      transparent 7px
+    ),
+    repeating-linear-gradient(
+      -72deg,
+      transparent,
+      transparent 10px,
+      rgba(62, 48, 38, 0.045) 10px,
+      rgba(62, 48, 38, 0.045) 11px
+    );
 }

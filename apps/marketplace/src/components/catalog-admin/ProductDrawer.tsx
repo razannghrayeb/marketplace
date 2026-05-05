@@ -79,7 +79,10 @@ export function ProductDrawer({ product: p, onClose }: Props) {
   useEffect(() => {
     if (tab === 'style' && !styleData && !styleError) {
       setLoadingS(true)
-      const base = process.env.NEXT_PUBLIC_MARKETPLACE_API_URL || 'http://localhost:4000'
+      const base =
+        process.env.NEXT_PUBLIC_API_URL ||
+        process.env.NEXT_PUBLIC_MARKETPLACE_API_URL ||
+        'https://marketplace-359201620993.asia-southeast1.run.app'
       fetch(`${base}/products/${p.id}/complete-style?maxPerCategory=5&maxTotal=12`)
         .then((r) => r.json())
         .then((d) => {
@@ -184,12 +187,12 @@ export function ProductDrawer({ product: p, onClose }: Props) {
                   <p className="text-[11px] text-gray-400 uppercase tracking-wide mb-1">Price</p>
                   <p className="text-lg font-semibold text-gray-900">{formatCents(p.price_cents, p.currency ?? undefined)}</p>
                 </div>
-                <div className={`rounded-xl p-3 ${p.sales_price_cents ? 'bg-teal-50' : 'bg-gray-50'}`}>
+                <div className={`rounded-xl p-3 ${p.sales_price_cents ? 'bg-[#f7f0eb]' : 'bg-gray-50'}`}>
                   <p className="text-[11px] text-gray-400 uppercase tracking-wide mb-1">Sale price</p>
                   {p.sales_price_cents ? (
                     <>
-                      <p className="text-lg font-semibold text-teal-600">{formatCents(p.sales_price_cents, p.currency ?? undefined)}</p>
-                      {disc && <p className="text-[11px] text-teal-500">-{disc}% off</p>}
+                      <p className="text-lg font-semibold text-[#2a2623]">{formatCents(p.sales_price_cents, p.currency ?? undefined)}</p>
+                      {disc && <p className="text-[11px] text-[#7d4b3a]">-{disc}% off</p>}
                     </>
                   ) : (
                     <p className="text-gray-300 text-sm">-</p>
@@ -238,7 +241,7 @@ export function ProductDrawer({ product: p, onClose }: Props) {
                         aria-label={`Open ${label}`}
                         className="shrink-0"
                       >
-                        <ExternalLink className="w-3 h-3 text-blue-500" />
+                        <ExternalLink className="w-3 h-3 text-[#7d4b3a]" />
                       </a>
                     </div>
                   </div>
@@ -307,7 +310,7 @@ export function ProductDrawer({ product: p, onClose }: Props) {
                         <span className="text-gray-400">{h.recorded_at.slice(0, 10)}</span>
                         <span className="font-medium">{formatCents(h.price_cents, h.currency)}</span>
                         {h.sales_price_cents && (
-                          <span className="text-teal-600">{formatCents(h.sales_price_cents, h.currency)} (sale)</span>
+                          <span className="text-[#7d4b3a]">{formatCents(h.sales_price_cents, h.currency)} (sale)</span>
                         )}
                       </div>
                     ))}
@@ -327,7 +330,7 @@ export function ProductDrawer({ product: p, onClose }: Props) {
                 </div>
               ) : styleData ? (
                 <>
-                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                  <div className="bg-[#f7f0eb] border border-[#d8c6bb] rounded-lg p-3">
                     <p className="text-xs text-gray-600 mb-2">
                       <span className="font-semibold">{styleData.detectedCategory || 'Unknown'}</span>
                       {' - '}

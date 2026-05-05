@@ -1,5 +1,6 @@
 'use client'
 
+import { memo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api/client'
 import { endpoints } from '@/lib/api/endpoints'
@@ -22,6 +23,8 @@ export function ProductGrid({ limit = 12, category }: ProductGridProps) {
       })
       return res
     },
+    staleTime: 120_000,
+    gcTime: 600_000,
   })
 
   if (isLoading) {
@@ -70,10 +73,11 @@ export function ProductGrid({ limit = 12, category }: ProductGridProps) {
   )
 }
 
-function ProductGridWithVariants({ products }: { products: Product[] }) {
+const ProductGridWithVariants = memo(function ProductGridWithVariants({ products }: { products: Product[] }) {
   const ids = products.map((p) => p.id)
+  const idKey = ids.join(',')
   const { data: variantsData } = useQuery({
-    queryKey: ['variants', ids.join(',')],
+    queryKey: ['variants', idKey],
     queryFn: async () => {
       const res = await api.post<Record<string, { minPriceCents: number; maxPriceCents: number }>>(
         endpoints.products.variantsBatch,
@@ -82,6 +86,8 @@ function ProductGridWithVariants({ products }: { products: Product[] }) {
       return (res as { data?: Record<string, { minPriceCents: number; maxPriceCents: number }> }).data ?? {}
     },
     enabled: ids.length > 0,
+    staleTime: 120_000,
+    gcTime: 600_000,
   })
 
   return (
@@ -102,4 +108,4 @@ function ProductGridWithVariants({ products }: { products: Product[] }) {
       })}
     </div>
   )
-}
+})

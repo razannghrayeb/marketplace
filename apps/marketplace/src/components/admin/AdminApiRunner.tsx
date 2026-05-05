@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { api } from '@/lib/api/client'
 import { ADMIN_API_CATALOG, catalogGroups, type CatalogOp } from '@/lib/admin-api-catalog'
 import { useAuthStore } from '@/store/auth'
@@ -40,11 +41,18 @@ function parseJsonObject(raw: string, label: string): Record<string, string | nu
 }
 
 export function AdminApiRunner() {
+  const searchParams = useSearchParams()
   const user = useAuthStore((s) => s.user)
   const groups = useMemo(() => catalogGroups(), [])
-  const [group, setGroup] = useState(groups[0] ?? 'Auth')
+  const initialGroup = searchParams.get('group')
+  const [group, setGroup] = useState(
+    initialGroup && groups.includes(initialGroup) ? initialGroup : (groups[0] ?? 'Auth')
+  )
   const opsInGroup = useMemo(() => ADMIN_API_CATALOG.filter((o) => o.group === group), [group])
-  const [opId, setOpId] = useState(opsInGroup[0]?.id ?? '')
+  const initialOp = searchParams.get('op')
+  const [opId, setOpId] = useState(
+    initialOp && ADMIN_API_CATALOG.some((o) => o.id === initialOp) ? initialOp : (opsInGroup[0]?.id ?? '')
+  )
   const selected: CatalogOp | undefined = useMemo(
     () => ADMIN_API_CATALOG.find((o) => o.id === opId),
     [opId]
@@ -69,6 +77,21 @@ export function AdminApiRunner() {
     setPathValues({})
     setError('')
   }, [selected?.id])
+
+  useEffect(() => {
+    const qpGroup = searchParams.get('group')
+    const qpOp = searchParams.get('op')
+    if (qpGroup && groups.includes(qpGroup) && qpGroup !== group) {
+      setGroup(qpGroup)
+      const firstInGroup = ADMIN_API_CATALOG.find((o) => o.group === qpGroup)
+      if (firstInGroup) setOpId(firstInGroup.id)
+    }
+    if (qpOp && ADMIN_API_CATALOG.some((o) => o.id === qpOp) && qpOp !== opId) {
+      setOpId(qpOp)
+      const op = ADMIN_API_CATALOG.find((o) => o.id === qpOp)
+      if (op && op.group !== group) setGroup(op.group)
+    }
+  }, [searchParams, groups, group, opId])
 
   const run = async () => {
     if (!selected) return
