@@ -113,11 +113,6 @@ export const ADMIN_API_CATALOG: CatalogOp[] = [
   op({ id: 'fav-check-batch', group: 'Favorites', label: 'Check batch', method: 'POST', pathTemplate: '/api/favorites/check', auth: 'user', defaultBody: '{"product_ids":[1,2]}' }),
 
   // —— Cart ——
-  op({ id: 'cart-get', group: 'Cart', label: 'Get cart', method: 'GET', pathTemplate: '/api/cart', auth: 'user' }),
-  op({ id: 'cart-add', group: 'Cart', label: 'Add to cart', method: 'POST', pathTemplate: '/api/cart', auth: 'user', defaultBody: '{"product_id":1,"quantity":1}' }),
-  op({ id: 'cart-patch', group: 'Cart', label: 'Update line item', method: 'PATCH', pathTemplate: '/api/cart/:productId', auth: 'user', defaultBody: '{"quantity":2}' }),
-  op({ id: 'cart-delete', group: 'Cart', label: 'Remove line item', method: 'DELETE', pathTemplate: '/api/cart/:productId', auth: 'user' }),
-  op({ id: 'cart-clear', group: 'Cart', label: 'Clear cart', method: 'DELETE', pathTemplate: '/api/cart/clear', auth: 'user' }),
 
   // —— Wardrobe (representative set) ——
   op({ id: 'wd-items', group: 'Wardrobe', label: 'List items', method: 'GET', pathTemplate: '/api/wardrobe/items', auth: 'user' }),

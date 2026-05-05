@@ -2,6 +2,7 @@
   "name": "marketplace",
   "version": "1.0.0",
   "private": true,
+  "packageManager": "pnpm@9.15.9",
   "scripts": {
     "dev": "node ./node_modules/next/dist/bin/next dev -p 3001",
     "dev:3010": "cross-env NEXT_DIST_DIR=.next-3010 node ./node_modules/next/dist/bin/next dev -p 3010",

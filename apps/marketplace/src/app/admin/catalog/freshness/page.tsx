@@ -7,9 +7,9 @@ function FreshnessBar({ fresh, recent, aging, stale }: {
 }) {
   return (
     <div className="h-2 rounded-full overflow-hidden flex w-full">
-      <div className="bg-teal-400 transition-all" style={{ width: `${fresh}%` }} title={`Fresh: ${fresh}%`} />
-      <div className="bg-blue-400 transition-all" style={{ width: `${recent}%` }} title={`Recent: ${recent}%`} />
-      <div className="bg-amber-400 transition-all" style={{ width: `${aging}%` }} title={`Aging: ${aging}%`} />
+      <div className="bg-brand-active transition-all" style={{ width: `${fresh}%` }} title={`Fresh: ${fresh}%`} />
+      <div className="bg-brand transition-all" style={{ width: `${recent}%` }} title={`Recent: ${recent}%`} />
+      <div className="bg-[#c9ae9f] transition-all" style={{ width: `${aging}%` }} title={`Aging: ${aging}%`} />
       <div className="bg-red-400 transition-all" style={{ width: `${stale}%` }} title={`Stale: ${stale}%`} />
     </div>
   )
@@ -18,7 +18,7 @@ function FreshnessBar({ fresh, recent, aging, stale }: {
 export default async function FreshnessPage() {
   const [stats, vendorFresh] = await Promise.all([
     fetchFreshnessStats().catch(() => null),
-    fetchVendorFreshness().catch(() => []),
+    fetchVendorFreshness(),
   ])
 
   const total = stats
@@ -32,9 +32,9 @@ export default async function FreshnessPage() {
         sub="Scrape staleness analysis by vendor"
         actions={
           <div className="flex items-center gap-3 text-[11px] text-gray-500">
-            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-teal-400 inline-block" /> Fresh &lt;1d</span>
-            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-blue-400 inline-block" /> Recent 1–7d</span>
-            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-amber-400 inline-block" /> Aging 7–14d</span>
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-brand-active inline-block" /> Fresh &lt;1d</span>
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-brand inline-block" /> Recent 1–7d</span>
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-[#c9ae9f] inline-block" /> Aging 7–14d</span>
             <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-400 inline-block" /> Stale &gt;14d</span>
           </div>
         }
@@ -75,7 +75,7 @@ export default async function FreshnessPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-100">
-                  {['Vendor', 'Freshness distribution', 'Fresh', 'Recent', 'Aging', 'Stale', 'Last scrape'].map(h => (
+                  {['Vendor', 'Products', 'Freshness distribution', 'Fresh', 'Recent', 'Aging', 'Stale', 'Last scrape'].map(h => (
                     <th key={h} className="text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wide px-4 py-2.5 whitespace-nowrap">
                       {h}
                     </th>
@@ -84,8 +84,9 @@ export default async function FreshnessPage() {
               </thead>
               <tbody>
                 {vendorFresh.map(v => (
-                  <tr key={v.vendor_id} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
+                  <tr key={String(v.vendor_id)} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
                     <td className="px-4 py-3 font-medium text-gray-900">{v.vendor_name}</td>
+                    <td className="px-4 py-3 text-xs tabular-nums text-gray-600">{v.product_count.toLocaleString()}</td>
                     <td className="px-4 py-3 w-48">
                       <FreshnessBar
                         fresh={v.fresh_pct}
@@ -94,9 +95,9 @@ export default async function FreshnessPage() {
                         stale={v.stale_pct}
                       />
                     </td>
-                    <td className="px-4 py-3 text-xs text-teal-600 tabular-nums font-medium">{v.fresh_pct}%</td>
-                    <td className="px-4 py-3 text-xs text-blue-600 tabular-nums">{v.recent_pct}%</td>
-                    <td className="px-4 py-3 text-xs text-amber-600 tabular-nums">{v.aging_pct}%</td>
+                    <td className="px-4 py-3 text-xs text-[#2a2623] tabular-nums font-medium">{v.fresh_pct}%</td>
+                    <td className="px-4 py-3 text-xs text-[#7d4b3a] tabular-nums">{v.recent_pct}%</td>
+                    <td className="px-4 py-3 text-xs text-[#3d3030] tabular-nums">{v.aging_pct}%</td>
                     <td className="px-4 py-3 text-xs text-red-500 tabular-nums">{v.stale_pct}%</td>
                     <td className="px-4 py-3 text-[11px] text-gray-400 whitespace-nowrap">
                       {v.last_scrape ? formatRelativeTime(v.last_scrape) : (
@@ -106,7 +107,18 @@ export default async function FreshnessPage() {
                   </tr>
                 ))}
                 {vendorFresh.length === 0 && (
-                  <tr><td colSpan={7} className="px-4 py-8 text-center text-xs text-gray-400">No data</td></tr>
+                  <tr>
+                    <td colSpan={8} className="px-4 py-8 text-center text-xs text-gray-500 leading-relaxed">
+                      {stats && total > 0 ? (
+                        <>
+                          <span className="font-semibold text-gray-700">No vendor rows returned.</span>{' '}
+                          KPI cards above still count every product row; refresh after fixing catalog queries or Supabase access.
+                        </>
+                      ) : (
+                        'No catalog rows to analyze.'
+                      )}
+                    </td>
+                  </tr>
                 )}
               </tbody>
             </table>

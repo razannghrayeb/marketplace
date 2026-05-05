@@ -162,6 +162,8 @@ export interface ProductsQueryResult {
   total: number
   page: number
   pageSize: number
+  /** Live API has another page (exact total may be unknown). */
+  has_more?: boolean
 }
 
 // ─── Freshness Types ───────────────────────────────────────────────────────────
@@ -176,6 +178,8 @@ export interface FreshnessStats {
 export interface VendorFreshness {
   vendor_id: number | string
   vendor_name: string
+  /** Row count in aggregate (same basis as KPI totals). */
+  product_count: number
   fresh_pct: number
   recent_pct: number
   aging_pct: number

@@ -1,13 +1,20 @@
 /**
- * API client for Fashion Marketplace backend (Render)
+ * API client for Fashion Marketplace backend (Cloud Run)
  * Backend uses snake_case: access_token, refresh_token
  */
 
 /** Backend origin only (no trailing slash). Same join rules for GET and POST so paths stay consistent. */
-const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'https://marketplace-933737368483.europe-west1.run.app').replace(
-  /\/+$/,
-  '',
-)
+const DEFAULT_CLOUD_API = 'https://marketplace-359201620993.asia-southeast1.run.app'
+
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL || DEFAULT_CLOUD_API).replace(/\/+$/, '')
+
+if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
+  const mode =
+    API_BASE === DEFAULT_CLOUD_API.replace(/\/+$/, '')
+      ? 'hosted Cloud Run (local code changes will NOT apply until you redeploy the API)'
+      : 'custom backend'
+  console.info(`[marketplace] NEXT_PUBLIC_API_URL → ${API_BASE} (${mode})`)
+}
 
 function joinApiUrl(path: string): string {
   const p = path.startsWith('/') ? path : `/${path}`
@@ -30,9 +37,19 @@ async function apiFetch(input: string | URL, init?: RequestInit): Promise<Respon
 
 export type ApiResponse<T> = {
   success: boolean
+  /** Some list/search handlers expose hit count at the root alongside `data`. */
+  total?: number
   data?: T
-  meta?: { total?: number; total_results?: number; page?: number; limit?: number; pages?: number }
-  pagination?: { page?: number; limit?: number; total?: number; pages?: number }
+  meta?: {
+    total?: number
+    total_results?: number
+    open_search_total_estimate?: number
+    total_above_threshold?: number
+    page?: number
+    limit?: number
+    pages?: number
+  }
+  pagination?: { page?: number; limit?: number; total?: number; pages?: number; has_more?: boolean }
   error?: { message: string; code?: string; details?: unknown }
   /** Some endpoints (e.g. POST /search/multi-image) return top-level fields */
   results?: unknown
@@ -70,7 +87,21 @@ async function getAuthHeaders(): Promise<HeadersInit> {
 async function handleResponse<T>(res: Response): Promise<ApiResponse<T>> {
   const json = await res.json().catch(() => ({}))
   if (!res.ok) {
-    if (res.status === 401 && typeof window !== 'undefined') {
+    /** Don't redirect on wrong-password login/signup — those return 401/400 with a JSON body. */
+    let pathname = ''
+    try {
+      pathname = new URL(res.url).pathname
+    } catch {
+      pathname = res.url
+    }
+    const isCredentialAuthFailure =
+      /^\/api\/auth\/(login|signup|forgot-password|reset-password)$/.test(pathname) ||
+      pathname.endsWith('/api/auth/login') ||
+      pathname.endsWith('/api/auth/signup') ||
+      pathname.endsWith('/api/auth/forgot-password') ||
+      pathname.endsWith('/api/auth/reset-password')
+
+    if (res.status === 401 && typeof window !== 'undefined' && !isCredentialAuthFailure) {
       const refreshToken = localStorage.getItem('refreshToken')
       if (refreshToken) {
         const refreshed = await refreshTokens(refreshToken)

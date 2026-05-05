@@ -6,18 +6,17 @@ import Image from 'next/image'
 import Link from 'next/link'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { Heart, Shirt, ArrowLeft, ShoppingBag } from 'lucide-react'
+import { Heart, Shirt, ArrowLeft } from 'lucide-react'
 import { api } from '@/lib/api/client'
 import { endpoints } from '@/lib/api/endpoints'
 import { useAuthStore } from '@/store/auth'
 import type { Product } from '@/types/product'
+import { formatStoredPriceAsUsd, storedAmountToUsdCents } from '@/lib/money/displayUsd'
+import { extractVendorFieldsFromRecords } from '@/lib/vendorLogo'
+import { VendorSourceBadge } from '@/components/product/VendorSourceBadge'
 
-function formatPrice(cents: number, currency = 'USD') {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency,
-    minimumFractionDigits: 0,
-  }).format(cents / 100)
+function formatPrice(storedCents: number, currency?: string | null) {
+  return formatStoredPriceAsUsd(storedCents, currency, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 function parseProductPayload(res: { success?: boolean; data?: unknown; error?: { message?: string } }): Product {
@@ -38,6 +37,7 @@ function parseProductPayload(res: { success?: boolean; data?: unknown; error?: {
   }
   return {
     ...p,
+    ...extractVendorFieldsFromRecords(p, {}),
     id: pid,
     title: String(p.title ?? p.name ?? ''),
     price_cents: Number(p.price_cents) || 0,
@@ -53,25 +53,54 @@ function parseProductPayload(res: { success?: boolean; data?: unknown; error?: {
   } as Product
 }
 
-/** Only allow in-app return to Discover (avoid open redirects). */
-function safeDiscoverReturn(raw: string | null): string | null {
+/** In-app back targets from `?from=` (block open redirects). */
+function safeProductReturnFrom(raw: string | null): { href: string; label: string } | null {
   if (!raw) return null
   try {
-    const decoded = decodeURIComponent(raw)
-    if (!/^\/search(\?|$)/.test(decoded)) return null
-    if (decoded.includes('..')) return null
-    return decoded
+    const decoded = decodeURIComponent(raw.trim())
+    if (!decoded.startsWith('/') || decoded.includes('..')) return null
+
+    const pathOnly = decoded.split('?')[0] ?? ''
+
+    if (/^\/search(\?|$)/.test(decoded)) {
+      return { href: decoded, label: 'Back to Discover' }
+    }
+    if (/^\/products(\?|$)/.test(decoded)) {
+      return { href: decoded, label: 'Back to catalog' }
+    }
+    if (/^\/sales(\?|$)/.test(decoded)) {
+      return { href: decoded, label: 'Back to sale' }
+    }
+    if (pathOnly === '/compare') {
+      return { href: '/compare', label: 'Back to Compare' }
+    }
+    if (pathOnly === '/try-on') {
+      return { href: '/try-on', label: 'Back to Try on' }
+    }
+    return null
   } catch {
     return null
   }
 }
 
+function ProductBackLink({ href, label, className = 'mb-8' }: { href: string; label: string; className?: string }) {
+  const base =
+    'inline-flex items-center gap-2 text-neutral-600 hover:text-neutral-800 transition-colors font-medium hover:underline'
+  /** Client-side navigation keeps React Query cache + listing UI; `scroll={false}` pairs with listing scroll restore. */
+  return (
+    <Link href={href} scroll={false} prefetch={true} className={`${base} ${className}`}>
+      <ArrowLeft className="w-4 h-4 shrink-0" aria-hidden />
+      {label}
+    </Link>
+  )
+}
+
 function ProductDetailContent() {
   const params = useParams()
   const searchParams = useSearchParams()
-  const discoverBack = safeDiscoverReturn(searchParams.get('from'))
-  const backHref = discoverBack ?? '/products'
-  const backLabel = discoverBack ? 'Back to Discover' : 'Back to shop'
+  const returnFrom = safeProductReturnFrom(searchParams.get('from'))
+  const backHref = returnFrom?.href ?? '/products'
+  const backLabel = returnFrom?.label ?? 'Back to shop'
 
   const id = params.id as string
   const numericId = id ? Number(id) : NaN
@@ -121,11 +150,6 @@ function ProductDetailContent() {
     },
   })
 
-  const addToCart = useMutation({
-    mutationFn: () => api.post(endpoints.cart.root, { product_id: numericId, quantity: 1 }),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ['cart'] }),
-  })
-
   if (isLoading) {
     return (
       <div className="max-w-7xl mx-auto px-4 py-10">
@@ -146,9 +170,7 @@ function ProductDetailContent() {
       <div className="max-w-7xl mx-auto px-4 py-10 text-center">
         <p className="text-neutral-800 font-medium mb-2">Could not load this product</p>
         <p className="text-neutral-600 text-sm mb-6">{(error as Error)?.message ?? 'It may have been removed or the link is invalid.'}</p>
-        <Link href={backHref} className="text-neutral-800 font-medium hover:underline">
-          ← {backLabel}
-        </Link>
+        <ProductBackLink href={backHref} label={backLabel} className="mb-2" />
       </div>
     )
   }
@@ -159,20 +181,18 @@ function ProductDetailContent() {
     product.image_url ||
     (product.images?.length ? product.images.find((i) => i.is_primary)?.url ?? product.images[0]?.url : null) ||
     'https://placehold.co/600x800/f5ede4/1a1a1a?text=No+Image'
-  const hasSale = product.sales_price_cents && product.sales_price_cents < product.price_cents
+  const hasSale =
+    !!product.sales_price_cents &&
+    storedAmountToUsdCents(product.sales_price_cents, product.currency) > 0 &&
+    storedAmountToUsdCents(product.sales_price_cents, product.currency) <
+      storedAmountToUsdCents(Number(product.price_cents) || 0, product.currency)
 
   const variantInfo = variantsData?.[String(product.id)]
   const showMinMax = variantInfo && variantInfo.minPriceCents !== variantInfo.maxPriceCents
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
-      <Link
-        href={backHref}
-        className="inline-flex items-center gap-2 text-neutral-600 hover:text-neutral-800 mb-8 transition-colors"
-      >
-        <ArrowLeft className="w-4 h-4" />
-        {backLabel}
-      </Link>
+      <ProductBackLink href={backHref} label={backLabel} />
 
       <motion.div
         initial={{ opacity: 0, y: 20 }}
@@ -188,8 +208,9 @@ function ProductDetailContent() {
             sizes="(max-width: 1024px) 100vw, 50vw"
             priority
           />
+          <VendorSourceBadge product={product} variant="detail" />
           {hasSale && (
-            <span className="absolute top-4 left-4 px-3 py-1 rounded-full bg-violet-600 text-white text-sm font-medium">
+            <span className="absolute top-4 left-4 px-3 py-1 rounded-full bg-brand text-white text-sm font-medium">
               Sale
             </span>
           )}
@@ -212,7 +233,7 @@ function ProductDetailContent() {
               </span>
             ) : hasSale ? (
               <>
-                <span className="text-2xl font-bold text-violet-600">
+                <span className="text-2xl font-bold text-[#2a2623]">
                   {formatPrice(product.sales_price_cents!, product.currency)}
                 </span>
                 <span className="text-lg text-neutral-400 line-through">
@@ -236,19 +257,10 @@ function ProductDetailContent() {
                 <Link href="/login" className="text-neutral-800 font-medium hover:underline">
                   Sign in
                 </Link>{' '}
-                to save items or add them to your bag.
+                to save items.
               </p>
             )}
             <div className="flex flex-wrap gap-4">
-              <button
-                type="button"
-                className="btn-primary flex items-center gap-2"
-                disabled={!isAuth || addToCart.isPending}
-                onClick={() => addToCart.mutate()}
-              >
-                <ShoppingBag className="w-5 h-5" />
-                {addToCart.isPending ? 'Adding…' : 'Add to bag'}
-              </button>
               <button
                 type="button"
                 className="btn-secondary flex items-center gap-2"
@@ -256,20 +268,11 @@ function ProductDetailContent() {
                 onClick={() => toggleFavorite.mutate()}
               >
                 <Heart
-                  className={`w-5 h-5 ${favorited ? 'fill-violet-600 text-violet-600' : ''}`}
+                  className={`w-5 h-5 ${favorited ? 'fill-brand text-brand' : ''}`}
                 />
                 {favorited ? 'Saved' : 'Save'}
               </button>
-              {isAuth && (
-                <Link href="/cart" className="btn-secondary text-sm flex items-center">
-                  View cart
-                </Link>
-              )}
             </div>
-            {addToCart.isError && (
-              <p className="text-sm text-neutral-800">Could not add to cart. Try again.</p>
-            )}
-            {addToCart.isSuccess && <p className="text-sm text-green-700">Added to your bag.</p>}
           </div>
 
           <div className="mt-12 pt-8 border-t border-neutral-200">

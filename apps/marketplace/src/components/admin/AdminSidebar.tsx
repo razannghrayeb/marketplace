@@ -19,32 +19,32 @@ import {
   Clock,
   Bell,
   TrendingDown,
+  X,
 } from 'lucide-react'
 import { useAdminBasePath } from '@/components/admin/AdminBasePathContext'
+import { BoldenLogoMark, boldenWordmarkClassName } from '@/components/brand/BoldenLogoMark'
 
 type NavItem = {
   segment: '' | 'moderation' | 'canonicals' | 'jobs' | 'reco' | 'system' | 'console' | 'alerts'
   label: string
   icon: LucideIcon
-  color: string
   exact?: boolean
 }
 
 type CatalogLinkItem = {
-  href: string
+  segment: 'catalog' | 'catalog/vendors' | 'catalog/products' | 'catalog/prices' | 'catalog/freshness'
   label: string
   icon: LucideIcon
-  color: string
 }
 
 const CATALOG_LINKS: { section: string; items: CatalogLinkItem[] } = {
   section: 'Catalog database',
   items: [
-    { href: '/admin/catalog', label: 'Scraper overview', icon: LayoutDashboard, color: 'bg-teal-600' },
-    { href: '/admin/catalog/vendors', label: 'Vendors', icon: Store, color: 'bg-blue-500' },
-    { href: '/admin/catalog/products', label: 'Products', icon: Package, color: 'bg-purple-500' },
-    { href: '/admin/catalog/prices', label: 'Prices', icon: TrendingUp, color: 'bg-green-500' },
-    { href: '/admin/catalog/freshness', label: 'Freshness', icon: Clock, color: 'bg-slate-500' },
+    { segment: 'catalog', label: 'Scraper overview', icon: LayoutDashboard },
+    { segment: 'catalog/vendors', label: 'Vendors', icon: Store },
+    { segment: 'catalog/products', label: 'Products', icon: Package },
+    { segment: 'catalog/prices', label: 'Prices', icon: TrendingUp },
+    { segment: 'catalog/freshness', label: 'Freshness', icon: Clock },
   ],
 }
 
@@ -52,18 +52,18 @@ const ADMIN_SECTIONS: { section: string; items: NavItem[] }[] = [
   {
     section: 'Operations',
     items: [
-      { segment: '', label: 'Overview', icon: LayoutDashboard, color: 'bg-violet-600', exact: true },
-      { segment: 'moderation', label: 'Moderation', icon: Shield, color: 'bg-fuchsia-500' },
-      { segment: 'canonicals', label: 'Canonicals', icon: GitMerge, color: 'bg-rose-500' },
-      { segment: 'jobs', label: 'Jobs', icon: Timer, color: 'bg-violet-500' },
+      { segment: '', label: 'Overview', icon: LayoutDashboard, exact: true },
+      { segment: 'moderation', label: 'Moderation', icon: Shield },
+      { segment: 'canonicals', label: 'Canonicals', icon: GitMerge },
+      { segment: 'jobs', label: 'Jobs', icon: Timer },
     ],
   },
   {
     section: 'Intelligence & system',
     items: [
-      { segment: 'reco', label: 'Reco labeling', icon: Brain, color: 'bg-fuchsia-600' },
-      { segment: 'system', label: 'System', icon: Activity, color: 'bg-violet-700' },
-      { segment: 'console', label: 'API console', icon: Terminal, color: 'bg-neutral-700' },
+      { segment: 'reco', label: 'Reco labeling', icon: Brain },
+      { segment: 'system', label: 'System', icon: Activity },
+      { segment: 'console', label: 'API console', icon: Terminal },
     ],
   },
 ]
@@ -72,118 +72,149 @@ const BUSINESS_SECTIONS: { section: string; items: NavItem[] }[] = [
   {
     section: 'Dead Stock Risk',
     items: [
-      { segment: '', label: 'DSR Overview', icon: TrendingDown, color: 'bg-red-500', exact: true },
-      { segment: 'alerts', label: 'Alerts', icon: Bell, color: 'bg-orange-500' },
+      { segment: '', label: 'DSR Overview', icon: TrendingDown, exact: true },
+      { segment: 'alerts', label: 'Alerts', icon: Bell },
     ],
   },
   {
     section: 'Operations',
     items: [
-      { segment: 'moderation', label: 'Moderation', icon: Shield, color: 'bg-fuchsia-500' },
-      { segment: 'jobs', label: 'Jobs', icon: Timer, color: 'bg-violet-500' },
-      { segment: 'console', label: 'API console', icon: Terminal, color: 'bg-neutral-700' },
+      { segment: 'moderation', label: 'Moderation', icon: Shield },
+      { segment: 'jobs', label: 'Jobs', icon: Timer },
+      { segment: 'console', label: 'API console', icon: Terminal },
     ],
   },
 ]
 
-export function AdminSidebar({ brandLabel = 'Admin' }: { brandLabel?: string }) {
+const ICON_BG_IDLE = 'bg-[#f1e8e2] text-[#0a0a0a] ring-1 ring-[#0a0a0a]/12'
+const ICON_BG_ACTIVE = 'bg-[#0a0a0a] text-[#ffffff] ring-1 ring-[#0a0a0a]'
+
+export function AdminSidebar({
+  brandLabel = 'Admin',
+  onDismiss,
+}: {
+  brandLabel?: string
+  /** Collapse mobile drawer (nav tap or close button); backdrop uses shell */
+  onDismiss?: () => void
+}) {
   const pathname = usePathname()
   const base = useAdminBasePath()
   const isBusiness = base === '/dashboard'
   const SECTIONS = isBusiness ? BUSINESS_SECTIONS : ADMIN_SECTIONS
+  const adminCatalogOnly = !isBusiness && brandLabel === 'Admin'
 
   return (
-    <aside className="w-[220px] min-w-[220px] h-full shrink-0 flex flex-col overflow-y-auto border-r border-neutral-200 bg-white/95 backdrop-blur-sm">
-      <div className="px-4 py-5 border-b border-neutral-100">
+    <aside
+      className={clsx(
+        'flex h-full w-[min(88vw,260px)] shrink-0 flex-col overflow-y-auto border-r border-[#0a0a0a]/10 bg-[#ffffff]/98 shadow-[4px_0_32px_rgba(10,10,10,0.08)] backdrop-blur-sm md:w-[220px] md:min-w-[220px] md:max-w-[220px] md:shadow-none',
+      )}
+    >
+      <div className="border-b border-[#0a0a0a]/10 px-4 py-5">
         <div className="flex items-center gap-2.5">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-600 via-fuchsia-500 to-rose-500 flex items-center justify-center shadow-md shadow-violet-500/25">
-            <span className="text-white text-xs font-display font-bold tracking-tight">S</span>
-          </div>
-          <div>
-            <p className="text-sm font-display font-semibold text-neutral-900 leading-none">StyleAI</p>
-            <p className="text-[10px] text-neutral-500 mt-1 font-medium">
+          <BoldenLogoMark tone="default" className="h-9 w-9 shrink-0 ring-1 ring-[#0a0a0a]/10" />
+          <div className="min-w-0 flex-1">
+            <p className={clsx('text-sm tz-burgundy', boldenWordmarkClassName)}>Bolden</p>
+            <p className="mt-1 text-[10px] font-medium text-[#0a0a0a]/65">
               {brandLabel === 'Business' ? 'Business · internal' : 'Admin · internal'}
             </p>
           </div>
+          {onDismiss ? (
+            <button
+              type="button"
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[#0a0a0a]/70 ring-1 ring-[#0a0a0a]/12 hover:bg-[#f1e8e2] md:hidden"
+              aria-label="Close navigation"
+              onClick={onDismiss}
+            >
+              <X className="h-4 w-4" strokeWidth={2} />
+            </button>
+          ) : null}
         </div>
       </div>
 
       <nav className="flex-1 py-3">
-        {SECTIONS.map(({ section, items }) => (
-          <div key={section} className="mb-4">
-            <p className="px-4 py-1 text-[10px] font-semibold text-neutral-400 uppercase tracking-widest">
-              {section}
+        {!adminCatalogOnly &&
+          SECTIONS.map(({ section, items }) => (
+            <div key={section} className="mb-4">
+              <p className="px-4 py-1 text-[10px] font-semibold text-[#0a0a0a]/55 uppercase tracking-widest">
+                {section}
+              </p>
+              {items.map(({ segment, label, icon: Icon, exact }) => {
+                const href = segment === '' ? base : `${base}/${segment}`
+                const active = exact
+                  ? pathname === href || pathname === `${href}/`
+                  : pathname === href || pathname.startsWith(`${href}/`)
+                return (
+                  <Link
+                    key={href}
+                    href={href}
+                    onClick={() => onDismiss?.()}
+                    className={clsx(
+                      'flex items-center gap-2.5 px-4 py-2 mx-2 rounded-lg text-sm transition-colors',
+                      active
+                        ? 'bg-[#f3e9e2] tz-burgundy font-semibold shadow-sm ring-1 ring-[#0a0a0a]/10'
+                        : 'text-[#0a0a0a]/75 hover:bg-[#f1e8e2]/80 hover:text-[#0a0a0a]'
+                    )}
+                  >
+                    <span
+                      className={clsx(
+                        'w-5 h-5 rounded-md flex items-center justify-center shrink-0',
+                        active ? ICON_BG_ACTIVE : ICON_BG_IDLE
+                      )}
+                    >
+                      <Icon className="w-3 h-3" />
+                    </span>
+                    <span className="flex-1">{label}</span>
+                    {active && <ChevronRight className="w-3 h-3 text-[#0a0a0a]/60 shrink-0" />}
+                  </Link>
+                )
+              })}
+            </div>
+          ))}
+        {!isBusiness && (
+          <div className={clsx('mb-4', adminCatalogOnly && 'pt-1')}>
+            <p className="px-4 py-1 text-[10px] font-semibold text-[#0a0a0a]/55 uppercase tracking-widest">
+              {CATALOG_LINKS.section}
             </p>
-            {items.map(({ segment, label, icon: Icon, color, exact }) => {
-              const href = segment === '' ? base : `${base}/${segment}`
-              const active = exact
-                ? pathname === href || pathname === `${href}/`
-                : pathname === href || pathname.startsWith(`${href}/`)
+            {CATALOG_LINKS.items.map(({ segment, label, icon: Icon }) => {
+              const href = `${base}/${segment}`
+              const active =
+                segment === 'catalog'
+                  ? pathname === href || pathname === `${href}/`
+                  : pathname === href || pathname.startsWith(`${href}/`)
               return (
                 <Link
                   key={href}
                   href={href}
+                  onClick={() => onDismiss?.()}
                   className={clsx(
                     'flex items-center gap-2.5 px-4 py-2 mx-2 rounded-lg text-sm transition-colors',
                     active
-                      ? 'bg-violet-100 text-violet-950 font-medium shadow-sm'
-                      : 'text-neutral-600 hover:bg-violet-50/80 hover:text-violet-950'
+                      ? 'bg-[#f3e9e2] tz-burgundy font-semibold shadow-sm ring-1 ring-[#0a0a0a]/10'
+                      : 'text-[#0a0a0a]/75 hover:bg-[#f1e8e2]/80 hover:text-[#0a0a0a]'
                   )}
                 >
                   <span
                     className={clsx(
-                      'w-5 h-5 rounded-md flex items-center justify-center shrink-0 shadow-sm',
-                      color
+                      'w-5 h-5 rounded-md flex items-center justify-center shrink-0',
+                      active ? ICON_BG_ACTIVE : ICON_BG_IDLE
                     )}
                   >
-                    <Icon className="w-3 h-3 text-white" />
+                    <Icon className="w-3 h-3" />
                   </span>
                   <span className="flex-1">{label}</span>
-                  {active && <ChevronRight className="w-3 h-3 text-violet-400 shrink-0" />}
+                  {active && <ChevronRight className="w-3 h-3 text-[#0a0a0a]/60 shrink-0" />}
                 </Link>
               )
             })}
           </div>
-        ))}
-        {!isBusiness && <div className="mb-4">
-          <p className="px-4 py-1 text-[10px] font-semibold text-neutral-400 uppercase tracking-widest">
-            {CATALOG_LINKS.section}
-          </p>
-          {CATALOG_LINKS.items.map(({ href, label, icon: Icon, color }) => {
-            const active =
-              href === '/admin/catalog'
-                ? pathname === href || pathname === `${href}/`
-                : pathname === href || pathname.startsWith(`${href}/`)
-            return (
-              <Link
-                key={href}
-                href={href}
-                className={clsx(
-                  'flex items-center gap-2.5 px-4 py-2 mx-2 rounded-lg text-sm transition-colors',
-                  active
-                    ? 'bg-teal-100 text-teal-950 font-medium shadow-sm'
-                    : 'text-neutral-600 hover:bg-teal-50/80 hover:text-teal-950'
-                )}
-              >
-                <span
-                  className={clsx(
-                    'w-5 h-5 rounded-md flex items-center justify-center shrink-0 shadow-sm',
-                    color
-                  )}
-                >
-                  <Icon className="w-3 h-3 text-white" />
-                </span>
-                <span className="flex-1">{label}</span>
-                {active && <ChevronRight className="w-3 h-3 text-teal-600 shrink-0" />}
-              </Link>
-            )
-          })}
-        </div>}
+        )}
       </nav>
 
-      <div className="px-4 py-3 border-t border-neutral-100 mt-auto">
-        <p className="text-[11px] text-neutral-500 leading-relaxed">
-          Marketplace tools · same palette as storefront
+      <div className="px-4 py-3 border-t border-[#0a0a0a]/10 mt-auto">
+        <p className="text-[11px] text-[#0a0a0a]/65 leading-relaxed">
+          {brandLabel === 'Business'
+            ? 'Business dashboard — not shown to shoppers'
+            : 'Admin only — account must have admin role; not linked for guests'}
         </p>
       </div>
     </aside>

@@ -13,7 +13,7 @@ export default async function VendorsPage() {
         title="Vendors"
         sub={`${vendors.length} active vendors`}
         actions={
-          <span className="text-xs text-blue-600 bg-blue-50 px-2.5 py-1 rounded-full border border-blue-200 font-medium">
+          <span className="text-xs text-[#2a2623] bg-[#f7f0eb] px-2.5 py-1 rounded-full border border-[#d8c6bb] font-medium">
             {vendors.length} vendors
           </span>
         }
@@ -42,11 +42,11 @@ export default async function VendorsPage() {
                     <tr key={v.id} className="border-b border-gray-50 hover:bg-gray-50 transition-colors group">
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2.5">
-                          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${isStale ? 'bg-red-400' : 'bg-teal-400'}`} />
+                          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${isStale ? 'bg-red-400' : 'bg-orange-500'}`} />
                           <div>
                             <Link
                               href={`/admin/catalog/vendors/${v.id}`}
-                              className="font-medium text-gray-900 hover:text-blue-600 transition-colors"
+                              className="font-medium text-gray-900 hover:text-[#2a2623] transition-colors"
                             >
                               {v.name}
                             </Link>
@@ -61,7 +61,7 @@ export default async function VendorsPage() {
                         </div>
                       </td>
                       <td className="px-4 py-3 font-medium tabular-nums">{v.total_products.toLocaleString()}</td>
-                      <td className="px-4 py-3 text-teal-600 font-medium tabular-nums">{v.available_products.toLocaleString()}</td>
+                      <td className="px-4 py-3 text-[#7d4b3a] font-medium tabular-nums">{v.available_products.toLocaleString()}</td>
                       <td className="px-4 py-3 text-red-500 tabular-nums">{v.unavailable_products.toLocaleString()}</td>
                       <td className="px-4 py-3">
                         {v.missing_category > 0 ? (
