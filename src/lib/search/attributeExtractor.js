@@ -370,12 +370,14 @@ var STYLE_PHRASES = [
 ];
 // Gender
 var GENDER_PHRASES = [
+    ["women", "women"],
     ["women's", "women"],
     ["womens", "women"],
     ["woman's", "women"],
     ["ladies", "women"],
     ["lady's", "women"],
     ["female", "women"],
+    ["men", "men"],
     ["men's", "men"],
     ["mens", "men"],
     ["man's", "men"],
@@ -672,29 +674,16 @@ function initML() {
                     return [2 /*return*/, pipeline !== null];
                 case 2:
                     mlInitPromise = (function () { return __awaiter(_this, void 0, void 0, function () {
-                        var createPipeline, err_1;
                         return __generator(this, function (_a) {
-                            switch (_a.label) {
-                                case 0:
-                                    _a.trys.push([0, 3, , 4]);
-                                    return [4 /*yield*/, Promise.resolve().then(function () { return require("@xenova/transformers"); })];
-                                case 1:
-                                    createPipeline = (_a.sent()).pipeline;
-                                    return [4 /*yield*/, createPipeline("zero-shot-classification", "Xenova/mobilebert-uncased-mnli", { quantized: true })];
-                                case 2:
-                                    // Use a small, fast zero-shot model
-                                    pipeline = _a.sent();
-                                    mlInitialized = true;
-                                    console.log("ML attribute extractor initialized");
-                                    return [3 /*break*/, 4];
-                                case 3:
-                                    err_1 = _a.sent();
-                                    console.warn("ML attribute extractor not available:", err_1);
-                                    mlInitialized = true;
-                                    pipeline = null;
-                                    return [3 /*break*/, 4];
-                                case 4: return [2 /*return*/];
-                            }
+                            // @xenova/transformers bundles onnxruntime-web which conflicts with
+                            // onnxruntime-node at runtime (registers an incompatible backend and
+                            // causes "TypeError: not a valid backend" globally). The ML zero-shot
+                            // classifier is a nice-to-have fallback — disable it to keep the ONNX
+                            // runtime healthy for CLIP and BLIP.
+                            console.warn("[attributeExtractor] ML pipeline disabled — @xenova/transformers conflicts with onnxruntime-node");
+                            mlInitialized = true;
+                            pipeline = null;
+                            return [2 /*return*/];
                         });
                     }); })();
                     return [4 /*yield*/, mlInitPromise];
@@ -714,7 +703,7 @@ var FIT_LABELS = ["slim fit", "regular fit", "loose fit", "oversized", "fitted",
  */
 function extractWithML(normalizedTitle_1, missingAttributes_1) {
     return __awaiter(this, arguments, void 0, function (normalizedTitle, missingAttributes, threshold) {
-        var attributes, confidence, mlAvailable, result, result, result, err_2;
+        var attributes, confidence, mlAvailable, result, result, result, err_1;
         if (threshold === void 0) { threshold = 0.7; }
         return __generator(this, function (_a) {
             switch (_a.label) {
@@ -767,8 +756,8 @@ function extractWithML(normalizedTitle_1, missingAttributes_1) {
                     _a.label = 8;
                 case 8: return [3 /*break*/, 10];
                 case 9:
-                    err_2 = _a.sent();
-                    console.warn("ML extraction failed:", err_2);
+                    err_1 = _a.sent();
+                    console.warn("ML extraction failed:", err_1);
                     return [3 /*break*/, 10];
                 case 10: return [2 /*return*/, { attributes: attributes, confidence: confidence }];
             }

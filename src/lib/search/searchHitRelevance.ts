@@ -489,7 +489,6 @@ function inferSleeveFromCatalogSignals(
   const bag = [
     src.category,
     src.category_canonical,
-    ...(Array.isArray(src.product_types) ? src.product_types : []),
     title,
     description,
   ]
@@ -876,6 +875,28 @@ export function computeHitRelevance(
     matchedColor = null;
   }
 
+  // Debug help: when catalog color is missing, log visual-derived color signals
+  // so engineers can verify that matches come from image/text rather than metadata.
+  try {
+    const hasCatalogColor = typeof hit?._source?.color === "string" && String(hit?._source?.color).trim() !== "";
+    if (!hasCatalogColor && matchedColor) {
+      // Keep this debug-level and safe for prod use; toggle by inspecting logs.
+      // eslint-disable-next-line no-console
+      console.debug("color-debug: matchedColor", {
+        matchedColor,
+        colorTier,
+        colorCompliance: Math.round(colorCompliance * 1000) / 1000,
+        resolvedSource: resolvedColor.source,
+        resolvedColors: resolvedColor.colors,
+        imgTierRaw,
+        textTierRaw,
+        unionTierRaw,
+      });
+    }
+  } catch (e) {
+    // swallow any logging errors
+  }
+
   const docCategoryForPenalty =
     typeof hit?._source?.category === "string" ? hit._source.category : undefined;
   const docCanonicalForPenalty =
@@ -951,7 +972,9 @@ export function computeHitRelevance(
       sleeveCompliance = 0.15;
     } else if (inferredObserved === wantedSleeve) {
       // Inferred sleeve from type/category cues is weaker than explicit sleeve metadata.
-      sleeveCompliance = observed ? 1 : 0.62;
+      // Keep this conservative so noisy catalog signals (e.g. bad type tags) do not
+      // incorrectly satisfy sleeve intent for long-sleeve products.
+      sleeveCompliance = observed ? 1 : 0.28;
     } else if (!observed) {
       // Avoid hard contradiction penalty when mismatch comes from heuristic inference only.
       sleeveCompliance = 0.12;
@@ -1136,6 +1159,28 @@ export function computeHitRelevance(
   const colorScoreForFinal = hasColorIntentForFinalRelevance
     ? confidenceBlend(colorCompliance, colorMetadataConfidence, 0.34)
     : colorCompliance;
+  // Strongly prioritize exact catalog/text/image color matches: if tier is "exact",
+  // boost the color score so color-matching items gain higher final relevance.
+  // Use a high floor to make exact matches dominant while respecting existing confidence.
+  if (colorTier === "exact") {
+    // Ensure colorScoreForFinal is very high for exact matches
+    const boosted = Math.max(colorScoreForFinal, 0.98);
+    // clamp to 1
+    // eslint-disable-next-line no-param-reassign
+    // (we're still in local scope; this keeps downstream code compatible)
+    // assign back
+    // @ts-ignore-next-line
+    // (no-op for TS) 
+    (globalThis as any); // keep linter quiet
+    // Apply boosted value
+    // eslint-disable-next-line prefer-const
+    let _c = boosted;
+    // replace colorScoreForFinal value in local scope by shadowing name
+    // Note: TS doesn't allow reassigning const, so create a new var used below
+    var colorScoreForFinalBoosted = _c;
+  } else {
+    var colorScoreForFinalBoosted = colorScoreForFinal;
+  }
   const styleScoreForFinal = normalizedDesiredStyle
     ? confidenceBlend(styleCompliance, styleMetadataConfidence, 0.32)
     : styleCompliance;
@@ -1165,7 +1210,7 @@ export function computeHitRelevance(
     catScore: categoryRelevance01,
     semScore: semScore01,
     lexScore: lexScore01,
-    colorScore: colorScoreForFinal,
+    colorScore: colorScoreForFinalBoosted,
     audScore: audienceCompliance,
     styleScore: styleScoreForFinal,
     patternScore: patternScoreForFinal, // new
@@ -1220,6 +1265,35 @@ export function computeHitRelevance(
   // Detect explicit suit queries and relax color gating so coordinated
   // trousers/dress-pants and shoes surface alongside jackets.
   const suitIntent = /\b(suit|suits|two[-\s]?piece|three[-\s]?piece|matching\s*suit)\b/.test(intentBlob);
+
+  // Document-level family detection (used for hard-blocking non-matching families)
+  const docBlobForFamily = [src.category, src.category_canonical, src.title, ...(Array.isArray(productTypes) ? productTypes : [])]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  const docIsTopLike = /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|overshirt|overshirts|polo|polos)\b/.test(docBlobForFamily);
+  const docIsBottomLike = /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts?|skirt|skirts|leggings?)\b/.test(docBlobForFamily);
+  const docIsFootwearLike = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(docBlobForFamily);
+  const docIsDressLike = /\b(dress|dresses|gown)\b/.test(docBlobForFamily);
+
+  // Hard family restrictions: if the user strongly intends a family (top/bottom/footwear/dress)
+  // then do not allow hits from other families to surface (set final relevance to 0).
+  // This is intentionally strict per request; can be made configurable later.
+  try {
+    if (hasTypeIntent) {
+      if (isFootwearLikeIntent && !docIsFootwearLike) {
+        finalRelevance01 = 0;
+      } else if (isTopLikeIntent && !docIsTopLike) {
+        finalRelevance01 = 0;
+      } else if (isBottomLikeIntent && !docIsBottomLike) {
+        finalRelevance01 = 0;
+      } else if (/\b(dress|dresses|gown)\b/.test(intentBlob) && !docIsDressLike) {
+        finalRelevance01 = 0;
+      }
+    }
+  } catch (e) {
+    // noop
+  }
 
   if (hasColorIntentForFinalRelevance && (isTopLikeIntent || isBottomLikeIntent || isFootwearLikeIntent)) {
     const suitRelax = suitIntent;
