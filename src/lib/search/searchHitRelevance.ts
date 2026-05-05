@@ -1172,17 +1172,68 @@ export function computeHitRelevance(
   const hitStyle = typeof hitStyleRaw === "string" ? hitStyleRaw.toLowerCase().trim() : "";
   const title = typeof hit?._source?.title === "string" ? hit._source.title.toLowerCase() : "";
 
+  /** Infer a coarse style bucket from catalog signals when attr_style is absent */
+  function inferStyleFromSignals(): string | null {
+    const haystack = [
+      title,
+      typeof hit?._source?.description === "string" ? hit._source.description.toLowerCase() : "",
+      typeof hit?._source?.category === "string" ? hit._source.category.toLowerCase() : "",
+      typeof hit?._source?.category_canonical === "string" ? hit._source.category_canonical.toLowerCase() : "",
+      ...(Array.isArray(hit?._source?.product_types)
+        ? (hit._source.product_types as unknown[]).map((t) => String(t).toLowerCase())
+        : []),
+      typeof hit?._source?.brand === "string" ? hit._source.brand.toLowerCase() : "",
+    ].join(" ");
+
+    if (/\b(running|training|athletic|sport(?:s|wear)|workout|gym|active|performance|exercise|fitness)\b/.test(haystack)) return "athletic";
+    if (/\b(casual|everyday|lifestyle|relaxed|weekend|streetwear|street)\b/.test(haystack)) return "casual";
+    if (/\b(formal|dress\s+shirt|office|business|workwear|professional|suit|gala|evening\s+wear|black.?tie)\b/.test(haystack)) return "formal";
+    if (/\b(bohemian|boho|hippie|free.?spirit)\b/.test(haystack)) return "bohemian";
+    if (/\b(preppy|classic|heritage|ivy.?league|nautical)\b/.test(haystack)) return "preppy";
+    if (/\b(minimalist|minimal|clean|simple|basic|essential)\b/.test(haystack)) return "minimalist";
+    if (/\b(luxury|couture|high.?end|designer|premium)\b/.test(haystack)) return "luxury";
+    if (/\b(vintage|retro|90s|80s|70s|throwback)\b/.test(haystack)) return "vintage";
+    if (/\b(outdoor|hiking|camping|adventure|trekking|mountaineer)\b/.test(haystack)) return "outdoor";
+    return null;
+  }
+
+  // Style-bucket equivalence: coarser groupings that are close enough to not penalize
+  const STYLE_CLUSTERS: Record<string, string[]> = {
+    athletic: ["athletic", "sport", "active", "performance", "outdoor"],
+    casual: ["casual", "streetwear", "lifestyle", "relaxed"],
+    formal: ["formal", "business", "professional"],
+    minimalist: ["minimalist", "minimal", "basic"],
+  };
+  function stylesAreCompatible(a: string, b: string): boolean {
+    for (const cluster of Object.values(STYLE_CLUSTERS)) {
+      if (cluster.includes(a) && cluster.includes(b)) return true;
+    }
+    return false;
+  }
+
   let styleCompliance = 0;
+  let hasUsableStyleSignal = false;
   if (normalizedDesiredStyle) {
     if (hitStyle) {
-      // If explicit indexed style exists, treat mismatch as hard contradiction.
+      hasUsableStyleSignal = true;
+      // Explicit indexed style — hard match/mismatch.
       if (hitStyle === normalizedDesiredStyle) styleCompliance = 1;
       else if (hitStyle.includes(normalizedDesiredStyle) || normalizedDesiredStyle.includes(hitStyle)) styleCompliance = 0.7;
+      else if (stylesAreCompatible(hitStyle, normalizedDesiredStyle)) styleCompliance = 0.5;
       else styleCompliance = 0;
     } else if (title.includes(normalizedDesiredStyle)) {
+      hasUsableStyleSignal = true;
       styleCompliance = 0.6;
     } else {
-      styleCompliance = 0;
+      // No explicit style field — infer from catalog signals; weaker than explicit.
+      // If inference has no usable signal, exclude style from scoring for this product.
+      const inferred = inferStyleFromSignals();
+      if (inferred) {
+        hasUsableStyleSignal = true;
+        if (inferred === normalizedDesiredStyle) styleCompliance = 0.55;
+        else if (stylesAreCompatible(inferred, normalizedDesiredStyle)) styleCompliance = 0.38;
+        else styleCompliance = 0.10; // inferred but wrong style — light penalty
+      }
     }
   }
 
@@ -1379,7 +1430,7 @@ export function computeHitRelevance(
         : 0.08;
   const attrComponentRaw =
     colorCompliance * 90 * docTrust +
-    styleCompliance * 65 * docTrust +
+    (hasUsableStyleSignal ? styleCompliance * 65 * docTrust : 0) +
     patternCompliance * 40 * docTrust + // new
     sleeveCompliance * 52 * docTrust +
     audienceCompliance * wAud * docTrust;
@@ -1445,7 +1496,7 @@ export function computeHitRelevance(
     patternScore: patternScoreForFinal, // new
     sleeveScore: sleeveScoreForFinal,
     hasColorIntent: hasColorIntentForFinalRelevance,
-    hasStyleIntent: Boolean(normalizedDesiredStyle),
+    hasStyleIntent: Boolean(normalizedDesiredStyle) && hasUsableStyleSignal,
     hasPatternIntent: Boolean(normalizedDesiredPattern), // new
     hasSleeveIntent: hasSleeveIntentForDoc,
     hasAudienceIntent,
