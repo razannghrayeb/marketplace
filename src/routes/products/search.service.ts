@@ -54,7 +54,6 @@ export async function searchByImageWithSimilarity(
     predictedCategoryAisles,
     detectionYoloConfidence,
     detectionProductCategory,
-    imageMode,
     detectionLabel,
     softProductTypeHints,
     knnField,
@@ -66,12 +65,10 @@ export async function searchByImageWithSimilarity(
     inferredColorsByItemConfidence,
     inferredColorKey,
     debugRawCosineFirst,
-    debug,
     sessionId,
     userId,
     sessionFilters,
     collapseVariantGroups,
-    rerankSignalCache,
   } = params;
 
   // Phase 2 alignment: route through the unified canonical facade.
@@ -87,7 +84,6 @@ export async function searchByImageWithSimilarity(
     predictedCategoryAisles,
     detectionYoloConfidence,
     detectionProductCategory,
-    imageMode,
     detectionLabel,
     softProductTypeHints,
     knnField,
@@ -99,12 +95,10 @@ export async function searchByImageWithSimilarity(
     inferredColorsByItemConfidence,
     inferredColorKey,
     debugRawCosineFirst,
-    debug,
     sessionId,
     userId,
     sessionFilters,
     collapseVariantGroups,
-    rerankSignalCache,
   }) as Promise<SearchResultWithRelated>;
 }
 
@@ -227,3 +221,4 @@ export {
   findRelatedProducts,
   type FindRelatedProductsOptions,
 } from "../../lib/search/relatedProducts";
+
