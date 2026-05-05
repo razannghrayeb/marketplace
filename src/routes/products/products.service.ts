@@ -1459,7 +1459,6 @@ function additiveImageRankingScore(params: {
     unknownValue: 0.6,
     unknownConfidence: 0.25,
   });
-  pushAttr("length", weights.length, length);
   pushAttr("pattern", weights.pattern, attributeFromCompliance(params.explain.patternCompliance ?? params.explain.patternEmbeddingSim, {
     unknownValue: 0.6,
     unknownConfidence: 0.2,
@@ -1467,10 +1466,6 @@ function additiveImageRankingScore(params: {
   pushAttr("material", weights.material, attributeFromCompliance(params.explain.materialCompliance ?? params.explain.materialEmbeddingSim, {
     unknownValue: 0.6,
     unknownConfidence: 0.2,
-  }));
-  pushAttr("style", weights.style, attributeFromCompliance(params.explain.styleCompliance, {
-    unknownValue: 0.6,
-    unknownConfidence: 0.18,
   }));
   pushAttr("audience", weights.audience, attributeFromCompliance(params.explain.audienceCompliance, {
     unknownValue: 0.65,
@@ -1503,12 +1498,14 @@ function additiveImageRankingScore(params: {
     contradictionPenalty *= Boolean(params.explain.hasSleeveIntent) ? 0.88 : 0.94;
     penalties.push("sleeve_mismatch");
   }
-  if (length.knownMismatch) {
+  const lengthKnownMismatch = Boolean(length.knownMismatch) && Boolean(params.explain.hasLengthIntent);
+  if (lengthKnownMismatch) {
     contradictionPenalty *= Boolean(params.explain.hasLengthIntent) ? 0.84 : 0.92;
     penalties.push("length_mismatch");
   }
   const styleRaw = Number(params.explain.styleCompliance ?? NaN);
-  if (Number.isFinite(styleRaw) && styleRaw <= 0.12 && Boolean(params.explain.hasStyleIntent)) {
+  const styleKnownMismatch = Number.isFinite(styleRaw) && styleRaw <= 0.12 && Boolean(params.explain.hasStyleIntent);
+  if (styleKnownMismatch) {
     contradictionPenalty *= 0.70;
     penalties.push("style_mismatch");
   }
@@ -1516,8 +1513,11 @@ function additiveImageRankingScore(params: {
     penalties.push("impossible_family_mismatch");
   }
 
-  const missingCriticalAttributes = attrs.filter((a) => a.missing && ["sleeve", "length", "neckline", "collar", "silhouette", "pattern", "material", "style", "audience"].includes(a.key)).length;
-  const knownMismatchCount = attrs.filter((a) => a.knownMismatch).length;
+  const missingCriticalAttributes = attrs.filter((a) => a.missing && ["sleeve", "neckline", "collar", "silhouette", "pattern", "material", "audience"].includes(a.key)).length;
+  const knownMismatchCount =
+    attrs.filter((a) => a.knownMismatch).length +
+    (lengthKnownMismatch ? 1 : 0) +
+    (styleKnownMismatch ? 1 : 0);
   const metadataCoverage = attrs.length > 0
     ? Math.max(0, Math.min(1, effective.reduce((sum, a) => sum + a.effectiveWeight, 0) / attrs.reduce((sum, a) => sum + a.weight, 0)))
     : 0.4;
@@ -4937,6 +4937,9 @@ export async function searchByImageWithSimilarity(
   }
 
   stageKnnDoneAt = Date.now();
+  const rerankPhaseStartedAt = Date.now();
+  const rerankTimings: Record<string, number> = {};
+  
   const rawKnnProductIds = [
     ...new Set(
       (Array.isArray(hits) ? hits : [])
@@ -4969,6 +4972,8 @@ export async function searchByImageWithSimilarity(
   );
 
   const signals = await signalsPromise;
+  rerankTimings['signals_wait_ms'] = Date.now() - rerankPhaseStartedAt;
+  
   colorQueryEmbedding = signals.colorQueryEmbedding;
   textureQueryEmbedding = signals.textureQueryEmbedding;
   materialQueryEmbedding = signals.materialQueryEmbedding;
@@ -5012,10 +5017,13 @@ export async function searchByImageWithSimilarity(
       const uniqueIds = [...new Set(topIds)];
       if (uniqueIds.length > 0) {
         try {
+          const mgetStartedAt = Date.now();
           const mgetResp = await (osClient as any).mget(
             { index: config.opensearch.index, body: { ids: uniqueIds }, _source: attrFieldsToFetch },
             { requestTimeout: 8_000, maxRetries: 0 },
           );
+          rerankTimings['attr_mget_ms'] = Date.now() - mgetStartedAt;
+          
           const byId = new Map<string, any>();
           for (const doc of (mgetResp.body?.docs ?? [])) {
             if (doc?.found && doc?._source) byId.set(String(doc._id ?? ""), doc._source);
@@ -5034,6 +5042,7 @@ export async function searchByImageWithSimilarity(
 
   if (hasQueryPartEmbeddings && Array.isArray(hits) && hits.length > 0) {
     try {
+      const partSimilarityStartedAt = Date.now();
       const { cosineSimilarity } = await import("../../lib/image/clip");
 
       for (const hit of hits) {
@@ -5068,6 +5077,7 @@ export async function searchByImageWithSimilarity(
 
         partSimByDocId.set(productId, partSims);
       }
+      rerankTimings['part_similarity_ms'] = Date.now() - partSimilarityStartedAt;
     } catch (err) {
       console.warn("[image-search] part similarity computation failed", {
         message: err instanceof Error ? err.message : String(err),
@@ -5962,6 +5972,7 @@ export async function searchByImageWithSimilarity(
 
   // After compliance + merchandise sim: compute per-hit embedding similarities,
   // BLIP alignment (as soft reranking factor), and composite score.
+  const attributeSimilarityStartedAt = Date.now();
   for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
     const visualSimRaw =
@@ -5995,6 +6006,14 @@ export async function searchByImageWithSimilarity(
     const materialSim = runMaterial
       ? cosineSimilarity01(materialQueryEmbedding ?? undefined, hit._source?.embedding_material)
       : 0;
+    // Detect presence of document-side attribute embeddings so missing vectors do not
+    // reduce composite/deep-fusion influence. If an attribute vector is absent, it
+    // will be excluded and remaining attributes are reweighted proportionally.
+    const hasColorVec = runColor && Array.isArray(hit._source?.embedding_color) && (hit._source.embedding_color.length ?? 0) > 0;
+    const hasStyleVec = runStyle && Array.isArray(hit._source?.embedding_style) && (hit._source.embedding_style.length ?? 0) > 0;
+    const hasPatternVec = runPattern && Array.isArray(hit._source?.embedding_pattern) && (hit._source.embedding_pattern.length ?? 0) > 0;
+    const hasTextureVec = runTexture && Array.isArray(hit._source?.embedding_texture) && (hit._source.embedding_texture.length ?? 0) > 0;
+    const hasMaterialVec = runMaterial && Array.isArray(hit._source?.embedding_material) && (hit._source.embedding_material.length ?? 0) > 0;
     const comp = complianceById.get(idStr);
     const hasStyleIntentForComposite = hasExplicitStyleIntent || hasSoftStyleHint;
     const hasColorIntentForComposite =
@@ -6026,16 +6045,25 @@ export async function searchByImageWithSimilarity(
     const typeComplianceForComposite = comp?.productTypeCompliance ?? 0;
     const typeSoftForComposite =
       desiredProductTypes.length > 0 && wTypeComposite > 0 ? typeComplianceForComposite : 0;
-    const composite =
-      visualSimRaw * 1000 +
-      (categorySoft * aisleSoftWeight +
-        typeSoftForComposite * wTypeComposite +
-        colorSimEff * wColor +
-        styleSimEff * wStyle +
-        textureSim * wTexture +
-        materialSim * wMaterial +
-        patternSim * wPattern) *
-      attrGate;
+    // Normalize attribute weights to only include attributes that actually have
+    // document embeddings. This prevents missing vectors from depressing the
+    // attribute block — remaining attributes are upweighted proportionally.
+    const originalAttrWeightSum = wColor + wStyle + wTexture + wMaterial + wPattern;
+    const presentAttrWeightSum =
+      (hasColorVec ? wColor : 0) +
+      (hasStyleVec ? wStyle : 0) +
+      (hasTextureVec ? wTexture : 0) +
+      (hasMaterialVec ? wMaterial : 0) +
+      (hasPatternVec ? wPattern : 0);
+    const attrScale = presentAttrWeightSum > 0 ? originalAttrWeightSum / presentAttrWeightSum : 0;
+    const attrScoreSum =
+      (hasColorVec ? colorSimEff * wColor * attrScale : 0) +
+      (hasStyleVec ? styleSimEff * wStyle * attrScale : 0) +
+      (hasTextureVec ? textureSim * wTexture * attrScale : 0) +
+      (hasMaterialVec ? materialSim * wMaterial * attrScale : 0) +
+      (hasPatternVec ? patternSim * wPattern * attrScale : 0);
+
+    const composite = visualSimRaw * 1000 + (categorySoft * aisleSoftWeight + typeSoftForComposite * wTypeComposite + attrScoreSum) * attrGate;
     imageCompositeById.set(idStr, composite);
 
     const deepText = deepFusionTextAlignment01({
@@ -6048,18 +6076,26 @@ export async function searchByImageWithSimilarity(
     });
     deepFusionTextById.set(idStr, Math.round(deepText * 1000) / 1000);
 
-    const attrBlend =
-      0.32 * colorSimEff +
-      0.22 * styleSimEff +
-      0.16 * patternSim +
-      0.15 * textureSim +
-      0.15 * materialSim;
+    // Deep-fusion attribute blend: normalize coefficients to only include present
+    // attribute embeddings so missing vectors don't reduce attrBlend.
+    const dfCoeffs: Array<{ present: boolean; coeff: number; sim: number }> = [
+      { present: hasColorVec, coeff: 0.32, sim: colorSimEff },
+      { present: hasStyleVec, coeff: 0.22, sim: styleSimEff },
+      { present: hasPatternVec, coeff: 0.16, sim: patternSim },
+      { present: hasTextureVec, coeff: 0.15, sim: textureSim },
+      { present: hasMaterialVec, coeff: 0.15, sim: materialSim },
+    ];
+    const presentDfWeight = dfCoeffs.reduce((s, c) => s + (c.present ? c.coeff : 0), 0);
+    const dfScale = presentDfWeight > 0 ? 1 / presentDfWeight : 0;
+    const attrBlend = dfCoeffs.reduce((sum, c) => sum + (c.present ? c.sim * c.coeff * dfScale : 0), 0);
     const deepFusionScore = Math.max(
       0,
       Math.min(1, 0.55 * deepText + 0.45 * attrBlend),
     );
     deepFusionScoreById.set(idStr, Math.round(deepFusionScore * 1000) / 1000);
   }
+  rerankTimings['attribute_similarity_ms'] = Date.now() - attributeSimilarityStartedAt;
+  
   const compositeValues = Array.from(imageCompositeById.values());
   const compositeMin = compositeValues.length > 0 ? Math.min(...compositeValues) : 0;
   const compositeMax = compositeValues.length > 0 ? Math.max(...compositeValues) : 1;
@@ -6871,6 +6907,8 @@ export async function searchByImageWithSimilarity(
     return count;
   };
 
+  rerankTimings['final_relevance_ms'] = Date.now() - attributeSimilarityStartedAt - (rerankTimings['attribute_similarity_ms'] ?? 0);
+
   const sortedByRelevance = [...baseCandidates].sort((a: any, b: any) => {
     const ida = String(a._source.product_id);
     const idb = String(b._source.product_id);
@@ -6957,9 +6995,12 @@ export async function searchByImageWithSimilarity(
     return rb - ra;
   });
 
+  rerankTimings['sorting_ms'] = Date.now() - attributeSimilarityStartedAt - (rerankTimings['attribute_similarity_ms'] ?? 0) - (rerankTimings['final_relevance_ms'] ?? 0);
+
   // Post-filter by gender using both indexed gender and title keywords.
   // This is a safety net for index mislabeling (so "women" caption doesn't return "men" products).
   // We only apply it when caller explicitly requested gender.
+  const postFilteringStartedAt = Date.now();
   const rankedHitsCandidates = (() => {
     if (!filtersAny.gender) return sortedByRelevance;
     const wantG = normalizeQueryGender(filtersAny.gender);
@@ -8090,6 +8131,9 @@ export async function searchByImageWithSimilarity(
       ];
     }
   }
+
+  rerankTimings['post_filtering_ms'] = Date.now() - postFilteringStartedAt;
+  rerankTimings['total_rerank_ms'] = Date.now() - rerankPhaseStartedAt;
 
   stageRerankDoneAt = Date.now();
 
@@ -9315,6 +9359,19 @@ export async function searchByImageWithSimilarity(
     finalize_exact_phash_ms: finalizeExactPhashMs,
     finalize_near_exact_ms: finalizeNearExactMs,
   };
+
+  // Log detailed reranking breakdown
+  if (String(process.env.DEBUG_RERANK_TIMING ?? "").toLowerCase() === "1" || rerankTimings['total_rerank_ms'] > 4000) {
+    console.warn("[rerank-timing-breakdown]", {
+      ...rerankTimings,
+      hits_processed: Math.min(baseCandidates.length, 500),
+      has_color_query: runColor,
+      has_style_query: runStyle,
+      has_pattern_query: runPattern,
+      has_texture_query: runTexture,
+      has_material_query: runMaterial,
+    });
+  }
 
   if (searchEvalEnabled()) {
     emitImageSearchEval({

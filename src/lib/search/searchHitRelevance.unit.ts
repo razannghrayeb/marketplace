@@ -65,7 +65,7 @@ describe("computeHitRelevance - sleeve intent", () => {
     expect(rel.finalRelevance01).toBeGreaterThan(0.75);
   });
 
-  test("infers short sleeve from t-shirt signals when sleeve metadata is missing", () => {
+  test("keeps inferred short sleeve conservative when sleeve metadata is missing", () => {
     const hit = {
       _source: {
         title: "Men Core Tee",
@@ -90,7 +90,8 @@ describe("computeHitRelevance - sleeve intent", () => {
       tightSemanticCap: true,
     });
 
-    expect(rel.sleeveCompliance).toBeGreaterThan(0.5);
+    expect(rel.sleeveCompliance).toBeGreaterThan(0.2);
+    expect(rel.sleeveCompliance).toBeLessThan(0.4);
   });
 });
 
