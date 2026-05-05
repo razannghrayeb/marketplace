@@ -85,6 +85,14 @@ function rembgIndexTimeoutMs(): number {
   return 30_000;
 }
 
+// Shorter timeout for live search queries — rembg runs in parallel with YOLO so the
+// effective penalty is max(0, queryTimeout - yoloMs). Default 5s vs catalog's 30s.
+function rembgQueryTimeoutMs(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_REMBG_QUERY_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw >= 500) return Math.min(30_000, Math.floor(raw));
+  return 5_000;
+}
+
 /**
  * Remove background — flatten to white JPEG @ quality 92 (same as bulk reindex).
  */
@@ -184,19 +192,30 @@ export async function prepareBufferForPrimaryCatalogEmbedding(
 export async function prepareBufferForImageSearchQuery(
   rawBuffer: Buffer,
 ): Promise<PrepareBufferResult> {
-  /** Default `conditional` matches catalog indexing (`prepareBufferForPrimaryCatalogEmbedding`) so query vs index CLIP space stays aligned. Set `always` for stronger cutouts on busy user photos. */
   const mode = String(process.env.SEARCH_IMAGE_QUERY_REMBG ?? "conditional").toLowerCase().trim();
 
   if (mode === "off" || mode === "0" || mode === "false") {
     return { buffer: rawBuffer, bgRemoved: false };
   }
 
+  // Use a shorter timeout for live queries — rembg runs in parallel with YOLO so the
+  // effective extra wait is max(0, rembgQueryTimeoutMs - yoloMs) instead of the full timeout.
+  const timeoutMs = rembgQueryTimeoutMs();
+
   if (mode === "conditional" || mode === "catalog") {
-    return prepareBufferForPrimaryCatalogEmbedding(rawBuffer);
+    const flag = String(process.env.SEARCH_IMAGE_BG_REMOVAL ?? "1").toLowerCase().trim();
+    if (flag === "0" || flag === "false" || flag === "off") {
+      return { buffer: rawBuffer, bgRemoved: false };
+    }
+    return preparePrimaryImageBufferForCatalogEmbedding(rawBuffer, {
+      enableBgRemoval: true,
+      threshold: catalogBgRemovalThresholdFromEnv(),
+      rembgTimeoutMs: timeoutMs,
+    });
   }
 
   // always — try rembg whenever sidecar is up
-  const cleaned = await removeBackgroundCatalogAligned(rawBuffer, rembgIndexTimeoutMs());
+  const cleaned = await removeBackgroundCatalogAligned(rawBuffer, timeoutMs);
   if (cleaned && cleaned.length > 0) {
     return { buffer: cleaned, bgRemoved: true };
   }

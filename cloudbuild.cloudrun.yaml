@@ -6,106 +6,29 @@
 
 steps:
   - name: gcr.io/cloud-builders/docker
-    id: Pull cache image (best-effort)
-    entrypoint: bash
     args:
-      - -c
-      - |
-        set -euo pipefail
-        IMAGE_BASE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}"
-        docker pull "${IMAGE_BASE}:latest" || true
-
-  - name: gcr.io/cloud-builders/docker
-    id: Build image
-    secretEnv: ['HF_TOKEN']
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        set -euo pipefail
-        # Required for Dockerfile RUN --mount=type=cache (BuildKit frontend)
-        export DOCKER_BUILDKIT=1
-        export BUILDKIT_PROGRESS=plain
-        IMAGE_BASE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}"
-        CACHE_IMAGE="${IMAGE_BASE}:latest"
-        HF_TOKEN_VALUE="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"
-        if [ -n "${HF_TOKEN:-}" ]; then
-          HF_TOKEN_VALUE="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}"
-        fi
-        if [ -z "${HF_TOKEN:-}" ]; then
-          echo "ERROR: HF_TOKEN is required at build time for model download."
-          echo "Set Secret Manager secret 'hf-token' and grant Cloud Build access, or pass _HF_TOKEN substitution."
-          exit 1
-        fi
-
-        docker build \
-          --build-arg HF_TOKEN="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" \
-          --build-arg EMBEDDED_YOLO=${_EMBEDDED_YOLO} \
-          --build-arg BUILDKIT_INLINE_CACHE=1 \
-          --cache-from "${CACHE_IMAGE}" \
-          -t "${IMAGE_BASE}:$BUILD_ID" \
-          -t "${IMAGE_BASE}:latest" \
-          .
-
-  - name: gcr.io/cloud-builders/docker
-    id: Push image
-    args:
-      - push
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$BUILD_ID
-
-  - name: gcr.io/cloud-builders/docker
-    id: Push cache image (latest)
-    args:
-      - push
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:latest
+      - build
+      - -t
+      - asia-southeast1-docker.pkg.dev/project-e37dc752-631b-4693-a24/marketplace-repo/marketplace:$SHORT_SHA
+      - .
 
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    id: Deploy Cloud Run
-    entrypoint: bash
     args:
-      - -c
-      - |
-        set -euo pipefail
-
-        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$BUILD_ID"
-        ENV_VARS="NODE_ENV=production"
-        if [ -n "${_COMMON_ENV_VARS}" ]; then
-          ENV_VARS="$$ENV_VARS,${_COMMON_ENV_VARS}"
-        fi
-
-        SECRET_FLAGS=()
-        SECRET_MAPPINGS="${_COMMON_SECRETS}"
-        if [ -n "$$SECRET_MAPPINGS" ]; then
-          SECRET_FLAGS=(--update-secrets "$$SECRET_MAPPINGS")
-        fi
-
-        GPU_FLAGS=()
-        GPU_TYPE_LOWER="$(echo "${_GPU_TYPE}" | tr '[:upper:]' '[:lower:]')"
-        if [ -n "${_GPU_COUNT}" ] && [ "${_GPU_COUNT}" != "0" ] && [ "$$GPU_TYPE_LOWER" != "none" ]; then
-          # Cloud Run GPU requires Gen2 execution environment.
-          GPU_FLAGS=(
-            --execution-environment gen2
-            --gpu "${_GPU_COUNT}"
-            --gpu-type "${_GPU_TYPE}"
-          )
-        fi
-
-        gcloud run deploy "${_SERVICE}" \
-          --project "$PROJECT_ID" \
-          --region "${_REGION}" \
-          --platform managed \
-          --image "$$IMAGE" \
-          --allow-unauthenticated \
-          --port 8080 \
-          --memory "${_MEMORY}" \
-          --cpu "${_CPU}" \
-          --timeout "${_TIMEOUT}" \
-          --concurrency "${_CONCURRENCY}" \
-          --min-instances "${_MIN_INSTANCES}" \
-          --max-instances "${_MAX_INSTANCES}" \
-          --set-env-vars "$$ENV_VARS" \
-          "$${GPU_FLAGS[@]}" \
-          "$${SECRET_FLAGS[@]}"
+      - gcloud
+      - run
+      - deploy
+      - marketplace
+      - --image
+      - asia-southeast1-docker.pkg.dev/project-e37dc752-631b-4693-a24/marketplace-repo/marketplace:$SHORT_SHA
+      - --region
+      - asia-southeast1
+      - --platform
+      - managed
+      - --allow-unauthenticated
+      - --port
+      - "8080"
+      - --timeout
+      - "3600"
 
 substitutions:
   _REGION: us-central1
@@ -126,13 +49,15 @@ substitutions:
   # Set GPU only when needed (example: _GPU_COUNT=1,_GPU_TYPE=nvidia-l4)
   _GPU_COUNT: "0"
   _GPU_TYPE: "none"
+  _BLIP_API_URL: ""
+  _BLIP_API_TIMEOUT_MS: "8000"
 
   _COMMON_ENV_VARS: "OS_INDEX=products,CORS_ORIGIN=*"
 
   _COMMON_SECRETS: "DATABASE_URL=database-url:latest,SUPABASE_URL=supabase-url:latest,SUPABASE_ANON_KEY=supabase-anon-key:latest,SUPABASE_SERVICE_ROLE_KEY=supabase-service-role-key:latest,OS_NODE=os-node:latest,REDIS_URL=redis-url:latest,JWT_SECRET=jwt-secret:latest,GEMINI_API_KEY=gemini-api-key:latest,GCLOUD_PROJECT=gcloud-project:latest,R2_ACCOUNT_ID=r2-account-id:latest,R2_ACCESS_KEY_ID=r2-access-key-id:latest,R2_SECRET_ACCESS_KEY=r2-secret-access-key:latest,R2_BUCKET=r2-bucket:latest,R2_PUBLIC_BASE_URL=r2-public-base-url:latest"
 
 images:
-  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:$BUILD_ID
+  - asia-southeast1-docker.pkg.dev/project-e37dc752-631b-4693-a24/marketplace-repo/marketplace:$SHORT_SHA
 
 options:
   logging: CLOUD_LOGGING_ONLY

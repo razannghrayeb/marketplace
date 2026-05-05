@@ -7,6 +7,9 @@ ultralytics>=8.1.0
 fastapi>=0.100.0
 uvicorn[standard]>=0.22.0
 python-multipart>=0.0.6
+grpcio>=1.66.0
+grpcio-tools>=1.66.0
+protobuf>=5.27.0
 
 # Image processing
 pillow>=10.0.0

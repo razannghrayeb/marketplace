@@ -38,6 +38,54 @@ interface EngineOptions {
   version?: string;
 }
 
+const OCCASION_OVERALL_WINNER_MIN_SCORE = 0.55;
+
+function resolveOverallWeights(request: CompareDecisionRequest): {
+  value: number;
+  quality: number;
+  style: number;
+  risk: number;
+  occasion: number;
+  practical: number;
+  expressive: number;
+} {
+  const hasOccasion = Boolean(request.occasion);
+  const base = hasOccasion
+    ? { value: 0.16, quality: 0.18, style: 0.14, risk: 0.13, occasion: 0.22, practical: 0.1, expressive: 0.07 }
+    : { value: 0.2, quality: 0.2, style: 0.18, risk: 0.16, occasion: 0.1, practical: 0.08, expressive: 0.08 };
+
+  switch (request.compareGoal) {
+    case "best_value":
+      return { ...base, value: base.value + 0.08, quality: base.quality - 0.03, style: base.style - 0.02, risk: base.risk - 0.02, practical: base.practical - 0.01 };
+    case "premium_quality":
+      return { ...base, quality: base.quality + 0.08, value: base.value - 0.03, style: base.style + 0.01, risk: base.risk - 0.03, practical: base.practical - 0.01, expressive: base.expressive - 0.02 };
+    case "style_match":
+      return { ...base, style: base.style + 0.08, expressive: base.expressive + 0.04, value: base.value - 0.04, quality: base.quality - 0.03, risk: base.risk - 0.03, practical: base.practical - 0.02 };
+    case "low_risk_return":
+      return { ...base, risk: base.risk + 0.08, quality: base.quality + 0.03, value: base.value - 0.03, style: base.style - 0.03, expressive: base.expressive - 0.03, practical: base.practical - 0.02 };
+    case "occasion_fit":
+      return { ...base, occasion: base.occasion + 0.08, style: base.style + 0.03, expressive: base.expressive + 0.02, value: base.value - 0.03, quality: base.quality - 0.03, risk: base.risk - 0.03, practical: base.practical - 0.04 };
+    default:
+      return base;
+  }
+}
+
+function applyOccasionMismatchPenalty(
+  overallScore: number,
+  occasionScore: number,
+  requestedOccasion?: CompareDecisionRequest["occasion"]
+): number {
+  if (!requestedOccasion) return overallScore;
+  if (occasionScore >= 0.65) return overallScore;
+
+  const severity = clamp01((0.65 - occasionScore) / 0.65);
+  const penaltyWeight =
+    requestedOccasion === "formal" || requestedOccasion === "work" || requestedOccasion === "party"
+      ? 0.28
+      : 0.22;
+  return clamp01(overallScore - severity * penaltyWeight);
+}
+
 function pickWinner(
   scored: Array<{ productId: number; score: number }>
 ): number | undefined {
@@ -80,6 +128,155 @@ function toTensionAxes(
       positions: products.map((p) => ({ productId: p.productId, value: p.practicalStatement })),
     },
   ];
+}
+
+function metricDeltaLabel(delta: number, metric: string): string {
+  const points = Math.abs(Math.round(delta * 100));
+  if (points >= 12) return `a clear ${points}-point lead in ${metric}`;
+  if (points >= 6) return `a ${points}-point lead in ${metric}`;
+  if (points >= 3) return `a slight ${points}-point lead in ${metric}`;
+  return `almost tied in ${metric}`;
+}
+
+function metricTrailLabel(delta: number, metric: string): string {
+  const points = Math.abs(Math.round(delta * 100));
+  if (points >= 12) return `about ${points} points behind on ${metric}`;
+  if (points >= 6) return `about ${points} points behind on ${metric}`;
+  if (points >= 3) return `slightly behind on ${metric} (about ${points} points)`;
+  return `almost tied in ${metric}`;
+}
+
+function buildRelativeDecisionNudge(
+  current: {
+    profile: ProductDecisionProfile;
+    scores: { practical: number; expressive: number; quality: number; value: number; overall: number };
+  },
+  peers: Array<{
+    profile: ProductDecisionProfile;
+    scores: { practical: number; expressive: number; quality: number; value: number; overall: number };
+  }>
+): string {
+  if (peers.length === 0) {
+    return "Strong all-around pick if you want balance without major tradeoffs.";
+  }
+  const topPeer = peers.sort((a, b) => b.scores.overall - a.scores.overall)[0];
+  const practicalDelta = current.scores.practical - topPeer.scores.practical;
+  const expressiveDelta = current.scores.expressive - topPeer.scores.expressive;
+  const qualityDelta = current.scores.quality - topPeer.scores.quality;
+  const valueDelta = current.scores.value - topPeer.scores.value;
+
+  const advantages: Array<{ metric: string; delta: number }> = [
+    { metric: "daily practicality", delta: practicalDelta },
+    { metric: "expressive style", delta: expressiveDelta },
+    { metric: "quality confidence", delta: qualityDelta },
+    { metric: "value for price", delta: valueDelta },
+  ].sort((a, b) => b.delta - a.delta);
+
+  const best = advantages[0];
+  const weakest = advantages[advantages.length - 1];
+
+  if (best.delta <= 0.02) {
+    return `Compared with ${topPeer.profile.title}, the difference is small, so this is mostly a personal style call.`;
+  }
+
+  const tradeoff =
+    weakest.delta < -0.03
+      ? `Main tradeoff: it is ${metricTrailLabel(weakest.delta, weakest.metric)}.`
+      : "Tradeoff is small versus the closest alternative.";
+
+  return `Compared with ${topPeer.profile.title}, this has ${metricDeltaLabel(best.delta, best.metric)}. ${tradeoff}`;
+}
+
+function metricDisplayLabel(metric: keyof ProductDecisionProfile["derivedSignals"] | "value" | "quality" | "style" | "risk" | "occasion" | "practical" | "expressive"): string {
+  switch (metric) {
+    case "value":
+      return "better value for the price";
+    case "quality":
+      return "stronger quality confidence";
+    case "style":
+      return "closer style fit";
+    case "risk":
+      return "lower return-risk profile";
+    case "occasion":
+      return "better occasion fit";
+    case "practical":
+      return "easier day-to-day wear";
+    case "expressive":
+      return "stronger statement energy";
+    default:
+      return metric;
+  }
+}
+
+function buildDecisionRationale(
+  current: {
+    profile: ProductDecisionProfile;
+    scores: {
+      value: number;
+      quality: number;
+      style: number;
+      risk: number;
+      occasion: number;
+      practical: number;
+      expressive: number;
+      overall: number;
+    };
+  },
+  peers: Array<{
+    profile: ProductDecisionProfile;
+    scores: {
+      value: number;
+      quality: number;
+      style: number;
+      risk: number;
+      occasion: number;
+      practical: number;
+      expressive: number;
+      overall: number;
+    };
+  }>
+): { whyThisWon: string[]; tradeoffsToKnow: string[] } {
+  if (peers.length === 0) {
+    return {
+      whyThisWon: ["Solid all-around profile with balanced scoring signals."],
+      tradeoffsToKnow: ["No direct comparison tradeoffs available."],
+    };
+  }
+
+  const nearestPeer = [...peers].sort(
+    (a, b) =>
+      Math.abs(current.scores.overall - a.scores.overall) - Math.abs(current.scores.overall - b.scores.overall)
+  )[0];
+
+  const dimensions: Array<{
+    metric: "value" | "quality" | "style" | "risk" | "occasion" | "practical" | "expressive";
+    delta: number;
+  }> = [
+    { metric: "value", delta: current.scores.value - nearestPeer.scores.value },
+    { metric: "quality", delta: current.scores.quality - nearestPeer.scores.quality },
+    { metric: "style", delta: current.scores.style - nearestPeer.scores.style },
+    { metric: "risk", delta: current.scores.risk - nearestPeer.scores.risk },
+    { metric: "occasion", delta: current.scores.occasion - nearestPeer.scores.occasion },
+    { metric: "practical", delta: current.scores.practical - nearestPeer.scores.practical },
+    { metric: "expressive", delta: current.scores.expressive - nearestPeer.scores.expressive },
+  ];
+
+  const strengths = [...dimensions].sort((a, b) => b.delta - a.delta).slice(0, 3);
+  const tradeoffs = [...dimensions].sort((a, b) => a.delta - b.delta).slice(0, 2);
+
+  const whyThisWon = strengths.map((s) =>
+    s.delta > 0.02
+      ? `Leads ${nearestPeer.profile.title} with ${metricDeltaLabel(s.delta, metricDisplayLabel(s.metric))}.`
+      : `Stays close to ${nearestPeer.profile.title} on ${metricDisplayLabel(s.metric)}.`
+  );
+
+  const tradeoffsToKnow = tradeoffs.map((t) =>
+    t.delta < -0.02
+      ? `Compared with ${nearestPeer.profile.title}, this is ${metricTrailLabel(t.delta, metricDisplayLabel(t.metric))}.`
+      : `${metricDisplayLabel(t.metric)} is very close to ${nearestPeer.profile.title}, so this comes down to your personal preference.`
+  );
+
+  return { whyThisWon, tradeoffsToKnow };
 }
 
 function scoreDataQuality(profiles: ProductDecisionProfile[]): { overallScore: number; notes: string[] } {
@@ -141,6 +338,7 @@ export function runCompareDecisionEngine(
 
   const minPrice = Math.min(...profiles.map((p) => p.effectivePrice));
   const maxPrice = Math.max(...profiles.map((p) => p.effectivePrice));
+  const overallWeights = resolveOverallWeights(request);
 
   const productResults = profiles.map((profile) => {
     const value = scoreValue(profile, minPrice, maxPrice);
@@ -159,19 +357,20 @@ export function runCompareDecisionEngine(
     const practical = scorePractical(profile);
     const expressive = scoreExpressive(profile);
     const overall = clamp01(
-      value * 0.2 +
-        quality * 0.2 +
-        style * 0.18 +
-        risk * 0.16 +
-        occasion * 0.1 +
-        practical * 0.08 +
-        expressive * 0.08
+      value * overallWeights.value +
+        quality * overallWeights.quality +
+        style * overallWeights.style +
+        risk * overallWeights.risk +
+        occasion * overallWeights.occasion +
+        practical * overallWeights.practical +
+        expressive * overallWeights.expressive
     );
+    const occasionAdjustedOverall = applyOccasionMismatchPenalty(overall, occasion, request.occasion);
 
     const friction = scoreFrictionIndex(profile);
     const regretProbability = scoreRegretProbability(profile, attraction, friction.index);
     const regret = buildRegretFlash(profile, regretProbability);
-    const consequence = buildConsequences(profile, { practical, expressive, overall });
+    const consequence = buildConsequences(profile, { practical, expressive, overall }, request.occasion, occasion);
     const compliment = predictCompliment(profile, occasion);
     const wearFrequency = estimateWearFrequency(profile, inferMajorCategory(profile));
     const photoRealityGap = analyzePhotoRealityGap(profile);
@@ -186,7 +385,7 @@ export function runCompareDecisionEngine(
         style,
         risk,
         occasion,
-        overall,
+        overall: occasionAdjustedOverall,
         practical,
         expressive,
         currentSelf: identity.currentSelfScore,
@@ -217,6 +416,12 @@ export function runCompareDecisionEngine(
       expressive: r.scores.expressive,
     }));
 
+  const occasionEligible =
+    request.occasion != null
+      ? productResults.filter((r) => r.scores.occasion >= OCCASION_OVERALL_WINNER_MIN_SCORE)
+      : productResults;
+  const overallWinnerPool = occasionEligible.length > 0 ? occasionEligible : productResults;
+
   const winnersByContext: CompareDecisionResponse["winnersByContext"] = {
     practical: pickWinner(productResults.map((r) => ({ productId: r.profile.id, score: r.scores.practical }))),
     expressive: pickWinner(productResults.map((r) => ({ productId: r.profile.id, score: r.scores.expressive }))),
@@ -229,7 +434,7 @@ export function runCompareDecisionEngine(
     style: pickWinner(productResults.map((r) => ({ productId: r.profile.id, score: r.scores.style }))),
     risk: pickWinner(productResults.map((r) => ({ productId: r.profile.id, score: r.scores.risk }))),
     occasion: pickWinner(productResults.map((r) => ({ productId: r.profile.id, score: r.scores.occasion }))),
-    overall: pickWinner(productResults.map((r) => ({ productId: r.profile.id, score: r.scores.overall }))),
+    overall: pickWinner(overallWinnerPool.map((r) => ({ productId: r.profile.id, score: r.scores.overall }))),
   };
 
   const dataQuality = scoreDataQuality(profiles);
@@ -244,6 +449,7 @@ export function runCompareDecisionEngine(
     sortedOverallScores: sortedByOverall.map((s) => s.overall),
     dataQuality: dataQuality.overallScore,
     winnersByContext,
+    allOverallScores: productResults.map((r) => r.scores.overall),
   });
 
   const whyNotBoth = detectWhyNotBoth({
@@ -279,16 +485,42 @@ export function runCompareDecisionEngine(
         firstAttractionProductId: request.userSignals?.firstAttractionProductId,
         attractionScores,
         explanation: [
-          "Attraction combines visual boldness, silhouette clarity, color energy, and emotional pull.",
+          "Attraction blends first-glance impact: boldness, silhouette clarity, color energy, and overall emotional pull.",
           request.userSignals?.firstAttractionProductId
-            ? "First-attraction signal was included as a bounded deterministic boost."
-            : "No first-attraction input provided, so attraction is purely product-derived.",
+            ? "Your first-attraction pick was included as a small tie-breaker boost."
+            : "No first-attraction input was provided, so this score is based only on product signals.",
         ],
       },
       visualDifferences: buildVisualDifferences(profiles),
       consequences: productResults.map((r) => ({
         productId: r.profile.id,
-        ifYouChooseThis: r.consequence,
+        ifYouChooseThis: [
+          ...r.consequence,
+          buildRelativeDecisionNudge(
+            {
+              profile: r.profile,
+              scores: {
+                practical: r.scores.practical,
+                expressive: r.scores.expressive,
+                quality: r.scores.quality,
+                value: r.scores.value,
+                overall: r.scores.overall,
+              },
+            },
+            productResults
+              .filter((candidate) => candidate.profile.id !== r.profile.id)
+              .map((candidate) => ({
+                profile: candidate.profile,
+                scores: {
+                  practical: candidate.scores.practical,
+                  expressive: candidate.scores.expressive,
+                  quality: candidate.scores.quality,
+                  value: candidate.scores.value,
+                  overall: candidate.scores.overall,
+                },
+              }))
+          ),
+        ],
       })),
       regretFlash: productResults.map((r) => ({
         productId: r.profile.id,
@@ -311,6 +543,36 @@ export function runCompareDecisionEngine(
       photoRealityGap: r.photoRealityGap,
       hiddenFlaw: r.hiddenFlaw,
       microStory: r.microStory,
+      decisionRationale: buildDecisionRationale(
+        {
+          profile: r.profile,
+          scores: {
+            value: r.scores.value,
+            quality: r.scores.quality,
+            style: r.scores.style,
+            risk: r.scores.risk,
+            occasion: r.scores.occasion,
+            practical: r.scores.practical,
+            expressive: r.scores.expressive,
+            overall: r.scores.overall,
+          },
+        },
+        productResults
+          .filter((candidate) => candidate.profile.id !== r.profile.id)
+          .map((candidate) => ({
+            profile: candidate.profile,
+            scores: {
+              value: candidate.scores.value,
+              quality: candidate.scores.quality,
+              style: candidate.scores.style,
+              risk: candidate.scores.risk,
+              occasion: candidate.scores.occasion,
+              practical: candidate.scores.practical,
+              expressive: candidate.scores.expressive,
+              overall: candidate.scores.overall,
+            },
+          }))
+      ),
       scores: r.scores,
     })),
     tensionAxes: toTensionAxes(
@@ -347,8 +609,13 @@ export function runCompareDecisionEngine(
             quality_texture: 0.2,
             style_goal_fit: 0.3,
             risk_return_inverse: 0.3,
-            overall_value: 0.2,
-            overall_quality: 0.2,
+            overall_value: overallWeights.value,
+            overall_quality: overallWeights.quality,
+            overall_style: overallWeights.style,
+            overall_risk: overallWeights.risk,
+            overall_occasion: overallWeights.occasion,
+            overall_practical: overallWeights.practical,
+            overall_expressive: overallWeights.expressive,
           },
           scoreBreakdownByProduct: productResults.map((r) => ({
             productId: r.profile.id,
@@ -369,6 +636,15 @@ export function runCompareDecisionEngine(
       : undefined,
   };
 
+  response.decisionConfidence.explanation = [
+    ...response.decisionConfidence.explanation,
+    response.decisionConfidence.level === "toss_up"
+      ? "Recommendation: pick your top priority (value, quality, or style expression) to break this close tie."
+      : response.decisionConfidence.level === "leaning_choice"
+        ? "Recommendation: the leading option is stronger, but double-check fit details and return comfort before checkout."
+        : "Recommendation: confidence is high enough to choose the leading option unless your personal style preference points elsewhere.",
+  ];
+
   options.publisher?.publish({
     name: "response_generated",
     payload: {
@@ -380,3 +656,106 @@ export function runCompareDecisionEngine(
 
   return serializeCompareDecisionResponse(response);
 }
+
+// Strengthen color intent for tops when inferred color is black.
+// This keeps charcoal/gray as fallback while ensuring exact black rises to the top.
+function applyTopBlackColorPriority<T extends { explain?: any; finalRelevance01?: number; rerankScore?: number }>(
+  products: T[],
+  detectionLabel: string,
+  inferredItemColor?: string | null,
+): T[] {
+  const isTop = /top|shirt|blouse|sweater|knitwear/i.test(detectionLabel || "");
+  const wantsBlack = (inferredItemColor || "").toLowerCase() === "black";
+  if (!isTop || !wantsBlack) return products;
+
+  for (const p of products) {
+    const ex = p.explain || {};
+    const matchedColor = String(ex.matchedColor || "").toLowerCase();
+    const colorTier = String(ex.colorTier || "").toLowerCase();
+    const colorCompliance = Number(ex.colorCompliance ?? 0);
+
+    const exactBlack = matchedColor === "black" && colorTier === "exact";
+    const isCharcoal = matchedColor === "charcoal";
+    const isGray = matchedColor === "gray" || matchedColor === "grey";
+
+    let delta = 0;
+    if (exactBlack) {
+      // Strong boost for true black
+      delta += 0.07 + Math.max(0, (colorCompliance - 0.9)) * 0.12;
+    } else if (isCharcoal) {
+      // Moderate boost for charcoal
+      delta += 0.035 + Math.max(0, (colorCompliance - 0.85)) * 0.07;
+    } else if (isGray) {
+      // Mild penalty for gray
+      delta -= 0.025;
+      if (colorTier === "bucket" || colorTier === "family" || colorTier === "light-shade" || colorTier === "dark-shade") delta -= 0.015;
+    } else {
+      // Strong penalty for all other colors
+      delta -= 0.09;
+      if (colorTier === "bucket" || colorTier === "family" || colorTier === "light-shade" || colorTier === "dark-shade") delta -= 0.03;
+    }
+
+    if (typeof p.finalRelevance01 === "number") {
+      p.finalRelevance01 = Math.max(0, Math.min(1, p.finalRelevance01 + delta));
+    }
+    if (typeof p.rerankScore === "number") {
+      p.rerankScore += delta * 100;
+    }
+
+    if (!p.explain) p.explain = {};
+    p.explain.topBlackPriorityDelta = delta;
+  }
+
+  products.sort((a, b) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
+  return products;
+}
+
+// Generalized: Strengthen color intent for tops (or any garment) for any inferred color.
+function applyColorIntentPriority<T extends { explain?: any; finalRelevance01?: number; rerankScore?: number }>(
+  products: T[],
+  detectionLabel: string,
+  inferredItemColor?: string | null,
+): T[] {
+  if (!inferredItemColor) return products;
+  // Optionally restrict to tops: const isTop = /top|shirt|blouse|sweater|knitwear/i.test(detectionLabel || "");
+  // if (!isTop) return products;
+
+  const intentColor = (inferredItemColor || "").toLowerCase();
+
+  for (const p of products) {
+    const ex = p.explain || {};
+    const matchedColor = String(ex.matchedColor || "").toLowerCase();
+    const colorTier = String(ex.colorTier || "").toLowerCase();
+    const colorCompliance = Number(ex.colorCompliance ?? 0);
+
+    let delta = 0;
+    if (matchedColor === intentColor && colorTier === "exact") {
+      // Strong boost for exact color match
+      delta += 0.07 + Math.max(0, (colorCompliance - 0.9)) * 0.12;
+    } else if (colorTier === "light-shade" || colorTier === "dark-shade") {
+      // Good boost for shade-specific matches (better than family/bucket)
+      delta += 0.045 + Math.max(0, (colorCompliance - 0.85)) * 0.08;
+    } else if (colorTier === "family" || colorTier === "bucket") {
+      // Mild boost for similar color family/bucket
+      delta += 0.025 + Math.max(0, (colorCompliance - 0.8)) * 0.05;
+    } else {
+      // Strong penalty for unrelated colors
+      delta -= 0.09;
+      if (colorTier !== "none") delta -= 0.03;
+    }
+
+    if (typeof p.finalRelevance01 === "number") {
+      p.finalRelevance01 = Math.max(0, Math.min(1, p.finalRelevance01 + delta));
+    }
+    if (typeof p.rerankScore === "number") {
+      p.rerankScore += delta * 100;
+    }
+
+    if (!p.explain) p.explain = {};
+    p.explain.colorIntentPriorityDelta = delta;
+  }
+  products.sort((a, b) => (b.finalRelevance01 ?? 0) - (a.finalRelevance01 ?? 0));
+  return products;
+}
+// In the per-detection ranking flow, after base scoring and before final slicing/return:
+// products = applyTopBlackColorPriority(products, detection.label, inferredColorForThisDetection);

@@ -94,17 +94,33 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
   const blueLead = b - Math.max(r, g);
   const redLead = r - Math.max(g, b);
   const greenLead = g - Math.max(r, b);
+  const minChannel = Math.min(r, g, b);
+
+  // White footwear and studio-lit light garments often pick up a cool cast in
+  // shadows. If all RGB channels are still very high and chroma is low, keep
+  // the cluster in the white family instead of promoting a tiny blue bias.
+  if (lab[0] > 88 && minChannel >= 224 && chroma < 16) {
+    if (lab[0] > 93 || minChannel >= 238) return "white";
+    return "off-white";
+  }
 
   // Achromatic neutrals — widen gate to chroma < 11 so very desaturated
   // darks (near-black leather, dark charcoal wool) don't bleed into navy/brown.
   if (chroma < 11) {
+    // Dark brown leather/suede can be low-chroma under shadow and was collapsing
+    // into charcoal. Preserve warm-neutral hues before generic gray buckets.
+    if (lab[0] >= 16 && lab[0] <= 62 && lab[1] >= 1.5 && lab[2] >= 4.5) {
+      if (lab[0] < 35) return "brown";
+      if (lab[0] < 48) return "camel";
+      return "tan";
+    }
     // Keep very light cool tones from collapsing into white/off-white.
     if (lab[0] > 78 && lab[2] <= -3 && blueLead >= 6) return "light-blue";
     // Pale yellows are often low-chroma in studio lighting; avoid mapping to beige/off-white.
     if (lab[0] > 72 && lab[2] >= 12 && lab[1] >= -2) return "yellow";
     if (lab[0] < 14) return "black";
     if (lab[0] < 36) return "charcoal";
-    if (lab[0] < 60) return "gray";
+    if (lab[0] < 68) return "gray";
     if (lab[0] < 78) return "silver";
     if (lab[0] > 92) return "white";
     return "off-white";
@@ -114,6 +130,14 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
   // which otherwise collapses dark red/green/brown → black.
   if (lab[0] < 42 && blueLead >= 8 && chroma >= 10) {
     return lab[0] < 30 ? "navy" : "blue";
+  }
+  // Taupe/brown leather and warm greige fabrics often have R as the leading
+  // channel, but also keep green above blue. Treat that as warm-neutral before
+  // the dark-red shortcut below; true burgundy usually has blue >= green.
+  if (redLead >= 8 && g >= b + 5 && lab[2] >= 6 && chroma >= 10) {
+    if (lab[0] < 34) return "brown";
+    if (lab[0] < 48) return "camel";
+    return "tan";
   }
   if (lab[0] < 30 && redLead >= 10 && chroma >= 12) {
     return "burgundy";
@@ -172,6 +196,193 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
   }
 
   return bestName;
+}
+
+// ─── Canonical color set (keep in sync with CANONICAL_REF_RGB keys above) ──
+const CANONICAL_COLOR_SET = new Set(Object.keys(CANONICAL_REF_RGB));
+
+/**
+ * Vendor text-name → canonical token. Covers common CSS names, fashion aliases,
+ * and locale variants so raw catalog strings map correctly without image analysis.
+ */
+const CATALOG_COLOR_NAME_MAP: Record<string, string> = {
+  // blues
+  "light blue": "light-blue",
+  "sky blue": "light-blue",
+  "baby blue": "light-blue",
+  "powder blue": "light-blue",
+  "cobalt blue": "blue",
+  "royal blue": "blue",
+  "electric blue": "blue",
+  "cornflower blue": "blue",
+  "dark blue": "navy",
+  "midnight blue": "navy",
+  "navy blue": "navy",
+  "indigo": "navy",
+  "denim": "blue",
+  // greens
+  "forest green": "green",
+  "dark green": "green",
+  "hunter green": "green",
+  "emerald": "green",
+  "emerald green": "green",
+  "mint": "green",
+  "mint green": "green",
+  "sage": "olive",
+  "sage green": "olive",
+  "army green": "olive",
+  "military green": "olive",
+  "khaki green": "olive",
+  "moss": "olive",
+  "moss green": "olive",
+  // reds / pinks
+  "dark red": "burgundy",
+  "wine": "burgundy",
+  "wine red": "burgundy",
+  "maroon": "burgundy",
+  "crimson": "red",
+  "scarlet": "red",
+  "cherry": "burgundy",
+  "cherry red": "burgundy",
+  "rust": "burgundy",
+  "terracotta": "burgundy",
+  "light pink": "pink",
+  "hot pink": "pink",
+  "fuchsia": "pink",
+  "magenta": "pink",
+  "rose": "pink",
+  "blush": "pink",
+  "blush pink": "pink",
+  "dusty pink": "pink",
+  "dusty rose": "pink",
+  "mauve": "pink",
+  "salmon": "pink",
+  "coral": "orange",
+  // purples
+  "lavender": "purple",
+  "violet": "purple",
+  "plum": "purple",
+  "lilac": "purple",
+  "light purple": "purple",
+  "dark purple": "purple",
+  "grape": "purple",
+  // yellows / oranges / golds
+  "light yellow": "yellow",
+  "mustard": "gold",
+  "mustard yellow": "gold",
+  "golden": "gold",
+  "champagne": "gold",
+  "amber": "gold",
+  "bronze": "gold",
+  "light orange": "orange",
+  "dark orange": "orange",
+  "burnt orange": "orange",
+  // teals / aquas
+  "aqua": "teal",
+  "turquoise": "teal",
+  "mint blue": "teal",
+  "cyan": "teal",
+  // neutrals
+  "light gray": "silver",
+  "light grey": "silver",
+  "pale gray": "silver",
+  "pale grey": "silver",
+  "dark gray": "charcoal",
+  "dark grey": "charcoal",
+  "slate": "charcoal",
+  "slate gray": "charcoal",
+  "slate grey": "charcoal",
+  "charcoal gray": "charcoal",
+  "charcoal grey": "charcoal",
+  "light brown": "tan",
+  "dark brown": "brown",
+  "chocolate": "brown",
+  "chocolate brown": "brown",
+  "mocha": "brown",
+  "espresso": "brown",
+  "chestnut": "brown",
+  "cognac": "camel",
+  "caramel": "camel",
+  "tan brown": "tan",
+  "khaki": "tan",
+  "sand": "beige",
+  "taupe": "beige",
+  "nude": "beige",
+  "neutral": "beige",
+  "stone": "beige",
+  "linen": "cream",
+  "ecru": "cream",
+  "natural": "cream",
+  "off white": "off-white",
+  "offwhite": "off-white",
+  "bone": "off-white",
+  "eggshell": "off-white",
+  "milk": "white",
+  "snow": "white",
+  // metallics
+  "silver gray": "silver",
+  "silver grey": "silver",
+  "metallic": "silver",
+  "metallic silver": "silver",
+  "metallic gold": "gold",
+  "gunmetal": "charcoal",
+  "antra": "charcoal",
+  "anthracite": "charcoal",
+  "heathered black": "black",
+  "heathered_black": "black",
+  "toasted coconut": "beige",
+  "beech": "beige",
+};
+
+/**
+ * Normalize a raw vendor catalog color string to a canonical fashion token.
+ * Handles: hex codes, CSS names, fashion aliases, already-canonical tokens.
+ * Returns null when the string cannot be mapped (caller falls back to image analysis).
+ */
+export function normalizeCatalogColorToCanonical(colorStr: string | null | undefined): string | null {
+  if (!colorStr) return null;
+  const raw = String(colorStr).trim().toLowerCase().replace(/\s+/g, " ");
+  if (!raw) return null;
+
+  // Already a canonical token
+  if (CANONICAL_COLOR_SET.has(raw)) return raw;
+
+  // Hex code ("#rrggbb" or "rrggbb")
+  if (raw.startsWith("#") || /^[0-9a-f]{6}$/i.test(raw)) {
+    const hex = raw.startsWith("#") ? raw : `#${raw}`;
+    return mapHexToFashionCanonical(hex);
+  }
+
+  // Text name lookup
+  const mapped = CATALOG_COLOR_NAME_MAP[raw];
+  if (mapped) return mapped;
+
+  // Partial match: if the raw string *contains* a canonical token, use it
+  // (e.g. "dark olive green" → "olive", "cobalt" → "blue" via "cobalt blue")
+  for (const token of CANONICAL_COLOR_SET) {
+    if (raw.includes(token)) return token;
+  }
+
+  return null;
+}
+
+/**
+ * Reuse garment color canonical mapping for pre-extracted hex colors.
+ */
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  const cleaned = String(hex || "").replace("#", "").trim();
+  if (cleaned.length !== 6) return null;
+  const n = Number.parseInt(cleaned, 16);
+  if (!Number.isFinite(n)) return null;
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+export function mapHexToFashionCanonical(hex?: string | null): string | null {
+  const raw = String(hex || "").trim();
+  if (!raw) return null;
+  const rgb = hexToRgb(raw);
+  if (!rgb) return null;
+  return mapRgbToCanonical(rgb.r, rgb.g, rgb.b);
 }
 
 type Cluster = { r: number; g: number; b: number; w: number };
@@ -293,10 +504,20 @@ export async function extractGarmentFashionColors(
     pixels.push([data[i], data[i + 1], data[i + 2]]);
   }
 
+  // Strip near-white studio background pixels before clustering so they don't
+  // dilute a dark/coloured garment into "white" or "off-white".
+  // Heuristic: all channels >= 238 AND low saturation (max−min <= 15).
+  // Safety fallback: if >70 % of pixels would be removed the garment is itself
+  // light-coloured (white shirt, ivory dress) — keep all pixels in that case.
+  const bgFiltered = pixels.filter(([r, g, b]) => {
+    return !(r >= 238 && g >= 238 && b >= 238 && Math.max(r, g, b) - Math.min(r, g, b) <= 15);
+  });
+  const effectivePixels = bgFiltered.length >= pixels.length * 0.3 ? bgFiltered : pixels;
+
   // Subsample for speed
   const step = 2;
   const sampled: [number, number, number][] = [];
-  for (let i = 0; i < pixels.length; i += step) sampled.push(pixels[i]);
+  for (let i = 0; i < effectivePixels.length; i += step) sampled.push(effectivePixels[i]);
 
   const clusters = kMeansRgb(sampled, k, 8);
   const canonList: string[] = [];

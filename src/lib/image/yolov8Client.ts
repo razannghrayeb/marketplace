@@ -13,6 +13,9 @@ import {
   isYoloCircuitOpenError,
 } from "./yoloCircuitBreaker";
 import { mapDetectionToCategory } from "../detection/categoryMapper";
+import * as path from "path";
+import * as grpc from "@grpc/grpc-js";
+import * as protoLoader from "@grpc/proto-loader";
 
 // ============================================================================
 // Types
@@ -68,6 +71,12 @@ export interface HealthResponse {
   ok: boolean;
   model_path: string;
   model_loaded: boolean;
+  runtime_device?: string;
+  cuda_available?: boolean;
+  cuda_device_name?: string;
+  cuda_device_count?: number;
+  configured_device?: string;
+  requested_device?: string;
   num_classes: number;
   class_names: string[];
   config: {
@@ -134,6 +143,22 @@ export interface OutfitComposition {
  */
 let yoloUrlConflictWarned = false;
 let yoloDeprecatedEnvWarned = false;
+const YOLO_PROTO_PATH = path.resolve(process.cwd(), "src", "lib", "model", "proto", "yolo.proto");
+
+type GrpcYoloClient = {
+  Health: (
+    request: Record<string, never>,
+    metadata: grpc.Metadata,
+    options: grpc.CallOptions,
+    callback: (err: grpc.ServiceError | null, response: any) => void,
+  ) => void;
+  Detect: (
+    request: Record<string, unknown>,
+    metadata: grpc.Metadata,
+    options: grpc.CallOptions,
+    callback: (err: grpc.ServiceError | null, response: any) => void,
+  ) => void;
+};
 
 export function resolveYoloServiceBaseUrl(override?: string): string {
   const o = override?.trim();
@@ -176,19 +201,87 @@ function yoloReadinessTimeoutMs(): number {
   return Math.min(180_000, Math.max(5_000, n));
 }
 
+function yoloTransport(): "http" | "grpc" | "auto" {
+  const raw = String(process.env.YOLO_TRANSPORT ?? "auto").toLowerCase().trim();
+  return raw === "grpc" || raw === "http" || raw === "auto" ? raw : "auto";
+}
+
+function resolveYoloGrpcAddress(): string {
+  return process.env.YOLO_GRPC_ADDRESS?.trim() || "127.0.0.1:50052";
+}
+
+let grpcClient: GrpcYoloClient | null = null;
+
+function getGrpcClient(): GrpcYoloClient {
+  if (grpcClient) return grpcClient;
+  const packageDefinition = protoLoader.loadSync(YOLO_PROTO_PATH, {
+    keepCase: false,
+    longs: String,
+    enums: String,
+    defaults: true,
+    oneofs: true,
+  });
+  const proto = grpc.loadPackageDefinition(packageDefinition) as any;
+  const Ctor = proto.marketplace.yolo.v1.YoloDetector;
+  grpcClient = new Ctor(resolveYoloGrpcAddress(), grpc.credentials.createInsecure()) as GrpcYoloClient;
+  return grpcClient;
+}
+
+function boxFromGrpc(box: any): BoundingBox {
+  return {
+    x1: Number(box?.x1 ?? 0),
+    y1: Number(box?.y1 ?? 0),
+    x2: Number(box?.x2 ?? 0),
+    y2: Number(box?.y2 ?? 0),
+  };
+}
+
+function detectionResponseFromGrpc(response: any): DetectionResponse {
+  const summary: Record<string, number> = {};
+  const rows = Array.isArray(response?.summary) ? response.summary : [];
+  for (const row of rows) {
+    const label = String(row?.label ?? "");
+    if (label) summary[label] = Number(row?.count ?? 0);
+  }
+  return {
+    success: Boolean(response?.success),
+    detections: (Array.isArray(response?.detections) ? response.detections : []).map((d: any) => ({
+      label: String(d?.label ?? ""),
+      raw_label: String(d?.rawLabel ?? d?.raw_label ?? d?.label ?? ""),
+      confidence: Number(d?.confidence ?? 0),
+      box: boxFromGrpc(d?.box),
+      box_normalized: boxFromGrpc(d?.boxNormalized ?? d?.box_normalized),
+      area_ratio: Number(d?.areaRatio ?? d?.area_ratio ?? 0),
+    })),
+    count: Number(response?.count ?? 0),
+    image_size: {
+      width: Number(response?.imageSize?.width ?? response?.image_size?.width ?? 0),
+      height: Number(response?.imageSize?.height ?? response?.image_size?.height ?? 0),
+    },
+    model: String(response?.model ?? "dual-detector-v1"),
+    summary,
+  };
+}
+
 export class YOLOv8Client {
   private baseUrl: string;
+  private grpcAddress: string;
+  private transport: "http" | "grpc" | "auto";
   /** Batch / reload long operations */
   private timeout: number;
   private detectTimeoutMs: number;
+  private runtimeLogged = false;
   private readonly circuit = new YoloCircuitBreaker();
 
   constructor(baseUrl?: string, timeout?: number) {
     this.baseUrl = resolveYoloServiceBaseUrl(baseUrl);
+    this.grpcAddress = resolveYoloGrpcAddress();
+    this.transport = yoloTransport();
     this.timeout = timeout || 30000;
     this.detectTimeoutMs = yoloDetectTimeoutMs();
     console.info(
-      `[YOLOv8] HTTP client: base URL=${this.baseUrl} (YOLOV8_SERVICE_URL canonical; YOLO_API_URL deprecated alias); detect timeout=${this.detectTimeoutMs}ms`,
+      `[YOLOv8] client: transport=${this.transport} grpc=${this.grpcAddress} http=${this.baseUrl} ` +
+        `(YOLOV8_SERVICE_URL canonical; YOLO_API_URL deprecated alias); detect timeout=${this.detectTimeoutMs}ms`,
     );
   }
 
@@ -215,6 +308,15 @@ export class YOLOv8Client {
         }
         console.warn(
           `[YOLOv8] service unhealthy at ${this.baseUrl}: ok=${health?.ok} model_loaded=${health?.model_loaded}`
+        );
+      }
+      if (!this.runtimeLogged) {
+        this.runtimeLogged = true;
+        const runtimeDevice = health.runtime_device || "unknown";
+        const cuda = typeof health.cuda_available === "boolean" ? String(health.cuda_available) : "unknown";
+        const cudaName = health.cuda_device_name || "n/a";
+        console.info(
+          `[YOLOv8] runtime device=${runtimeDevice} cuda_available=${cuda} cuda_device=${cudaName}`
         );
       }
       return {
@@ -262,6 +364,14 @@ export class YOLOv8Client {
    * Health check endpoint
    */
   async health(): Promise<HealthResponse> {
+    if (this.transport === "grpc" || this.transport === "auto") {
+      try {
+        return await this.grpcHealth();
+      } catch (e) {
+        if (this.transport === "grpc") throw e;
+      }
+    }
+
     const response = await fetch(`${this.baseUrl}/health`, {
       method: "GET",
       signal: AbortSignal.timeout(yoloReadinessTimeoutMs()),
@@ -275,6 +385,46 @@ export class YOLOv8Client {
     }
 
     return response.json();
+  }
+
+  private grpcHealth(): Promise<HealthResponse> {
+    return new Promise((resolve, reject) => {
+      try {
+        getGrpcClient().Health(
+          {},
+          new grpc.Metadata(),
+          { deadline: Date.now() + yoloReadinessTimeoutMs() },
+          (err, response) => {
+            if (err) return reject(err);
+            resolve({
+              ok: Boolean(response?.ok),
+              model_path: String(response?.modelPath ?? response?.model_path ?? ""),
+              model_loaded: Boolean(response?.modelLoaded ?? response?.model_loaded),
+              runtime_device: String(response?.runtimeDevice ?? response?.runtime_device ?? "unknown"),
+              cuda_available: Boolean(response?.cudaAvailable ?? response?.cuda_available),
+              cuda_device_name: String(response?.cudaDeviceName ?? response?.cuda_device_name ?? ""),
+              cuda_device_count: Number(response?.cudaDeviceCount ?? response?.cuda_device_count ?? 0),
+              configured_device: String(response?.configuredDevice ?? response?.configured_device ?? "") || undefined,
+              requested_device: String(response?.requestedDevice ?? response?.requested_device ?? "") || undefined,
+              num_classes: Number(response?.numClasses ?? response?.num_classes ?? 0),
+              class_names: Array.isArray(response?.classNames)
+                ? response.classNames.map(String)
+                : Array.isArray(response?.class_names)
+                  ? response.class_names.map(String)
+                  : [],
+              config: {
+                confidence_threshold: 0.6,
+                iou_threshold: 0,
+                max_detections: 300,
+                min_box_area_ratio: 0,
+              },
+            });
+          },
+        );
+      } catch (error) {
+        reject(error);
+      }
+    });
   }
 
   /**
@@ -306,6 +456,19 @@ export class YOLOv8Client {
     } catch (e) {
       if (isYoloCircuitOpenError(e)) throw e;
       throw e;
+    }
+
+    if (this.transport === "grpc" || this.transport === "auto") {
+      try {
+        const data = await this.grpcDetectFromBuffer(imageBuffer, filename, options);
+        this.circuit.onSuccess();
+        return data;
+      } catch (e) {
+        if (this.transport === "grpc") {
+          this.circuit.onFailure();
+          throw e;
+        }
+      }
     }
 
     const formData = new FormData();
@@ -362,6 +525,35 @@ export class YOLOv8Client {
       if (!failureCounted) this.circuit.onFailure();
       throw e;
     }
+  }
+
+  private grpcDetectFromBuffer(
+    imageBuffer: Buffer,
+    filename: string,
+    options: DetectOptions,
+  ): Promise<DetectionResponse> {
+    return new Promise((resolve, reject) => {
+      try {
+        getGrpcClient().Detect(
+          {
+            imageBytes: imageBuffer,
+            filename,
+            confidence: Number(options.confidence ?? 0.6),
+            enhanceContrast: Boolean(options.preprocessing?.enhanceContrast),
+            enhanceSharpness: Boolean(options.preprocessing?.enhanceSharpness),
+            bilateralFilter: Boolean(options.preprocessing?.bilateralFilter),
+          },
+          new grpc.Metadata(),
+          { deadline: Date.now() + this.detectTimeoutMs },
+          (err, response) => {
+            if (err) return reject(err);
+            resolve(detectionResponseFromGrpc(response));
+          },
+        );
+      } catch (error) {
+        reject(error);
+      }
+    });
   }
 
   /**
@@ -508,12 +700,31 @@ export function dedupeDetectionsBySameLabelIou(
   }
   const kept: typeof withIdx = [];
   for (const group of byLabel.values()) {
+    const groupLabel = String(group[0]?.detection.label ?? "").toLowerCase();
+    const isTopLikeLabel = /\b(top|shirt|blouse|tee|t-?shirt|tank|cami|camisole|sleeveless|vest)\b/.test(groupLabel);
     const sorted = [...group].sort((a, b) => b.detection.confidence - a.detection.confidence);
     const groupKept: typeof withIdx = [];
     for (const row of sorted) {
-      const overlaps = groupKept.some(
-        (k) => boundingBoxIou(row.detection.box, k.detection.box) >= iouThreshold,
-      );
+      const overlaps = groupKept.some((k) => {
+        const iou = boundingBoxIou(row.detection.box, k.detection.box);
+        if (iou < iouThreshold) return false;
+
+        if (!isTopLikeLabel) return true;
+
+        // Keep layered top instances (e.g., shirt over tank) when one box is
+        // substantially smaller than the other, even if IoU is high.
+        const rowArea = Math.max(0, row.detection.box.x2 - row.detection.box.x1) * Math.max(0, row.detection.box.y2 - row.detection.box.y1);
+        const keptArea = Math.max(0, k.detection.box.x2 - k.detection.box.x1) * Math.max(0, k.detection.box.y2 - k.detection.box.y1);
+        const minArea = Math.min(rowArea, keptArea);
+        const maxArea = Math.max(rowArea, keptArea);
+        const relativeArea = maxArea > 0 ? minArea / maxArea : 1;
+
+        if (relativeArea <= 0.72 && iou <= 0.88) {
+          return false;
+        }
+
+        return true;
+      });
       if (!overlaps) groupKept.push(row);
     }
     kept.push(...groupKept);
@@ -575,6 +786,211 @@ export function groupByCategory(
 /**
  * Extract outfit composition from detections
  */
+/**
+ * Drop weak duplicate detections:
+ * - Remove detections with confidence < 0.45 that overlap with higher-confidence items of the same family
+ * - Prevents noisy weak detections from becoming independent search jobs
+ * - Example: Weak second vest overlapping strong vest should be removed
+ */
+export function dropWeakDuplicateDetections(
+  detections: Detection[],
+  confidenceThreshold: number = 0.45,
+  iouThreshold: number = 0.65
+): Detection[] {
+  if (detections.length <= 1) return detections;
+
+  const sorted = [...detections].sort((a, b) => b.confidence - a.confidence);
+  const kept: Detection[] = [];
+
+  for (const detection of sorted) {
+    // Keep if confidence is above threshold
+    if (detection.confidence >= confidenceThreshold) {
+      kept.push(detection);
+      continue;
+    }
+
+    // Check if this weak detection overlaps with any higher-confidence detection of same family
+    const sameFamily = mapDetectionToCategory(detection.label, detection.confidence, {
+      box_normalized: (detection as any).box_normalized,
+    }).productCategory;
+
+    let overlapsStronger = false;
+    for (const keptDet of kept) {
+      const keptFamily = mapDetectionToCategory(keptDet.label, keptDet.confidence, {
+        box_normalized: (keptDet as any).box_normalized,
+      }).productCategory;
+
+      if (sameFamily === keptFamily) {
+        const iou = boundingBoxIou(detection.box, keptDet.box);
+        if (iou >= iouThreshold) {
+          overlapsStronger = true;
+          break;
+        }
+      }
+    }
+
+    // Only keep weak detection if it doesn't overlap with stronger same-family item
+    if (!overlapsStronger) {
+      kept.push(detection);
+    }
+  }
+
+  // Restore original order
+  kept.sort((a, b) => {
+    const aIdx = detections.indexOf(a);
+    const bIdx = detections.indexOf(b);
+    return aIdx - bIdx;
+  });
+
+  return kept;
+}
+
+/**
+ * Merge nearby shoe boxes into a single expanded crop
+ * - Finds shoe detections that are close together
+ * - Merges them into a single larger box
+ * - Applies expansion factor (1.4 to 1.8x) to capture full shoe region
+ */
+export function mergeNearbyShoeBoxes(
+  detections: Detection[],
+  proximityThreshold: number = 100 // pixels
+): Detection[] {
+  const shoeDetections = detections.filter((d) => {
+    const category = mapDetectionToCategory(d.label, d.confidence, {
+      box_normalized: (d as any).box_normalized,
+    }).productCategory;
+    return category === "footwear";
+  });
+
+  if (shoeDetections.length <= 1) {
+    // No merging needed, return original detections
+    return detections;
+  }
+
+  const nonShoes = detections.filter((d) => {
+    const category = mapDetectionToCategory(d.label, d.confidence, {
+      box_normalized: (d as any).box_normalized,
+    }).productCategory;
+    return category !== "footwear";
+  });
+
+  // Merge nearby shoes
+  const merged: Detection[] = [];
+  const used = new Set<number>();
+
+  for (let i = 0; i < shoeDetections.length; i++) {
+    if (used.has(i)) continue;
+
+    const shoe = shoeDetections[i];
+    const cluster = [i];
+    used.add(i);
+
+    // Find nearby shoes
+    for (let j = i + 1; j < shoeDetections.length; j++) {
+      if (used.has(j)) continue;
+
+      const otherShoe = shoeDetections[j];
+      const dist = boxCenterDistance(shoe.box, otherShoe.box);
+
+      if (dist <= proximityThreshold) {
+        cluster.push(j);
+        used.add(j);
+      }
+    }
+
+    if (cluster.length === 1) {
+      // No nearby shoes, expand this shoe box
+      merged.push(expandShoeBox(shoe, 1.6));
+    } else {
+      // Merge cluster of shoes
+      const clusteredShoes = cluster.map((idx) => shoeDetections[idx]);
+      const mergedBox = mergeBoxes(clusteredShoes.map((s) => s.box));
+      const mergedDet: Detection = {
+        ...shoe,
+        label: "shoe",
+        box: mergedBox,
+        box_normalized: normalizeBox(mergedBox, shoe.box_normalized),
+        confidence: Math.max(...clusteredShoes.map((s) => s.confidence)),
+        area_ratio: calculateAreaRatio(mergedBox),
+      };
+      merged.push(expandShoeBox(mergedDet, 1.6));
+    }
+  }
+
+  return [...nonShoes, ...merged];
+}
+
+/**
+ * Expand a shoe detection box by a factor (1.4 to 1.8x typical)
+ * - Useful for tiny shoe crops that might miss important pixels
+ * - Prevents too-tight crops that can harm visual similarity
+ */
+export function expandShoeBox(detection: Detection, expansionFactor: number = 1.6): Detection {
+  const box = detection.box;
+  const width = box.x2 - box.x1;
+  const height = box.y2 - box.y1;
+  const centerX = (box.x1 + box.x2) / 2;
+  const centerY = (box.y1 + box.y2) / 2;
+
+  const newWidth = width * expansionFactor;
+  const newHeight = height * expansionFactor;
+
+  return {
+    ...detection,
+    box: {
+      x1: centerX - newWidth / 2,
+      y1: centerY - newHeight / 2,
+      x2: centerX + newWidth / 2,
+      y2: centerY + newHeight / 2,
+    },
+    box_normalized: detection.box_normalized, // Caller should normalize if needed
+  };
+}
+
+/**
+ * Helper: Calculate center-to-center distance between two boxes
+ */
+function boxCenterDistance(a: BoundingBox, b: BoundingBox): number {
+  const centerXA = (a.x1 + a.x2) / 2;
+  const centerYA = (a.y1 + a.y2) / 2;
+  const centerXB = (b.x1 + b.x2) / 2;
+  const centerYB = (b.y1 + b.y2) / 2;
+  return Math.sqrt(
+    Math.pow(centerXA - centerXB, 2) + Math.pow(centerYA - centerYB, 2)
+  );
+}
+
+/**
+ * Helper: Merge multiple boxes into a single encompassing box
+ */
+function mergeBoxes(boxes: BoundingBox[]): BoundingBox {
+  if (boxes.length === 0) return { x1: 0, y1: 0, x2: 0, y2: 0 };
+  return {
+    x1: Math.min(...boxes.map((b) => b.x1)),
+    y1: Math.min(...boxes.map((b) => b.y1)),
+    x2: Math.max(...boxes.map((b) => b.x2)),
+    y2: Math.max(...boxes.map((b) => b.y2)),
+  };
+}
+
+/**
+ * Helper: Normalize a pixel box to 0-1 range
+ */
+function normalizeBox(pixelBox: BoundingBox, referenceNormalized: BoundingBox): BoundingBox {
+  // If we don't have reference normalized box, return as-is
+  if (!referenceNormalized) return pixelBox;
+  return pixelBox; // Already in pixel space, caller will normalize
+}
+
+/**
+ * Helper: Calculate area ratio (area / total image area)
+ */
+function calculateAreaRatio(box: BoundingBox): number {
+  const width = Math.max(0, box.x2 - box.x1);
+  const height = Math.max(0, box.y2 - box.y1);
+  return (width * height) / (1920 * 1440); // Approximate standard image size
+}
+
 export function extractOutfitComposition(
   detections: Detection[]
 ): OutfitComposition {

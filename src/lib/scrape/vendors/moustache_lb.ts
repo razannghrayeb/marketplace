@@ -1,5 +1,6 @@
 import { load } from "cheerio";
 import type { ScrapedProduct } from "../types";
+import { normalizeColorTokensFromRaw } from "../../color/queryColorFilter";
 
 const VENDOR_NAME = "Moustache";
 const VENDOR_URL = "https://moustachestores.com";
@@ -13,6 +14,23 @@ function safeText(s?: string | null) {
 
 function normalizeUrl(url: string): string {
   return new URL(url, VENDOR_URL).toString();
+}
+
+function canonicalizeParentProductUrl(url: string): string {
+  try {
+    const parsed = new URL(url, VENDOR_URL);
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    const last = segments[segments.length - 1] ?? "";
+    if (/-lebanon-\d+$/i.test(last)) {
+      segments[segments.length - 1] = last.replace(/-\d+$/i, "");
+      parsed.pathname = `/${segments.join("/")}`;
+    }
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return url.split("#")[0].split("?")[0];
+  }
 }
 
 function moneyToCents(s: string): number {
@@ -114,26 +132,30 @@ function normalizeVariantValue(value: any): string | null {
   return v;
 }
 
-function looksLikeColorToken(token: string): boolean {
-  const normalized = token.toLowerCase().replace(/[^a-z]/g, "");
-  if (!normalized) return false;
-  const known = new Set([
-    "black","white","blue","navy","red","green","olive","pink","purple","yellow",
-    "orange","brown","tan","beige","camel","cream","ivory","grey","gray","silver",
-    "gold","burgundy","maroon","wine","khaki","stone","natural","oat","ecru",
-    "denim","indigo","mustard","rust","sage","lilac","teal","aqua","mint",
-    "chocolate","espresso","mocha","bone","sand","taupe","graphite","charcoal",
-    "coal","henna","merlot","plum","rose","bordeaux","sienna","smoke",
-  ]);
-  return known.has(normalized);
+function isCodeLikeColorValue(value: string | null | undefined): boolean {
+  const v = String(value ?? "").trim();
+  if (!v) return false;
+  if (/^\d{3,}$/.test(v)) return true;
+  if (/^[a-z]{0,2}\d{3,}[a-z0-9-]*$/i.test(v)) return true;
+  return false;
 }
 
-function extractColorFromTitle(title: string | null | undefined): string | null {
-  const words = (title ?? "").split(/\s+/).map((w) => w.replace(/[^a-zA-Z]/g, ""));
-  for (const word of words) {
-    if (looksLikeColorToken(word)) return word.toLowerCase();
+function resolveColorValue(
+  rawColor: string | null | undefined,
+  title: string | null | undefined,
+  description: string | null | undefined
+): string | null {
+  const normalizedRaw = normalizeVariantValue(rawColor);
+  if (normalizedRaw && !isCodeLikeColorValue(normalizedRaw)) {
+    const fromRaw = normalizeColorTokensFromRaw(normalizedRaw)[0] ?? null;
+    return fromRaw ?? normalizedRaw;
   }
-  return null;
+
+  const inferred = normalizeColorTokensFromRaw(
+    [normalizedRaw, title, description].filter(Boolean).join(" ")
+  )[0] ?? null;
+
+  return inferred ?? normalizedRaw ?? null;
 }
 
 function looksLikeSizeValue(value: string | null | undefined): boolean {
@@ -332,7 +354,9 @@ export function parseProductPage(
   productJsonOverride?: any | null
 ): ScrapedProduct | ScrapedProduct[] | null {
   const $ = load(productHtml);
-  const parentProductUrl = productUrl.split("#")[0].split("?")[0];
+  const parentProductUrl = canonicalizeParentProductUrl(
+    productUrl.split("#")[0].split("?")[0]
+  );
 
   const productJson = productJsonOverride ?? extractShopifyProductJson($);
 
@@ -512,7 +536,7 @@ export function parseProductPage(
       .map((v) => v?.id)
       .filter((v) => v != null)
       .map((v) => String(v));
-    const variantIdValue = variantIds.length ? variantIds.join(",") : null;
+    const variantIdValue = variantIds.length ? variantIds[0] : null;
 
     let groupImage: string | null = null;
     for (const v of variants) {
@@ -533,12 +557,14 @@ export function parseProductPage(
       ? `${parentProductUrl}?variant=${primaryVariantId}`
       : parentProductUrl;
 
+    const resolvedColor = resolveColorValue(groupColor, title, description);
+
     rows.push({
       ...base,
       product_url: groupProductUrl,
       variant_id: variantIdValue,
       size: sizeValue ?? "one size",
-      color: groupColor ?? extractColorFromTitle(title) ?? null,
+      color: resolvedColor,
       price_cents: price,
       sales_price_cents: sale,
       availability: groupAvailable,

@@ -43,7 +43,7 @@ export async function findRelatedProducts(
   if (brandShould.length === 0 && categoryShould.length === 0) return [];
 
   const filter: object[] = [
-    { term: { is_hidden: false } },
+    { bool: { must_not: [{ term: { is_hidden: true } }] } },
     {
       bool: {
         should: [...brandShould, ...categoryShould],
@@ -111,6 +111,7 @@ export async function findRelatedProducts(
 
   const searchBody = {
     size: limit,
+    _source: ["product_id"],
     query: {
       bool: queryBool,
     },

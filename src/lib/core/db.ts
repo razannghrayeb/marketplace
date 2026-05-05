@@ -39,7 +39,7 @@ function resolvePoolMax(): number {
   }
 
   if (process.env.NODE_ENV === "production") {
-    return 2;
+    return 10;
   }
 
   return 10;
@@ -260,4 +260,39 @@ export async function getProductsByIdsOrdered(ids: (number | string)[]): Promise
   // are numbers. Normalize keys to string to preserve order reliably.
   const productMap = new Map(result.rows.map(p => [String(p.id), p]));
   return numericIds.map(id => productMap.get(String(id))).filter(Boolean);
+}
+
+/**
+ * Lightweight projection for search result cards.
+ *
+ * Avoid `SELECT p.*` on real-time search paths: product descriptions and other
+ * enrichment blobs can be large, and the UI only needs card/list metadata here.
+ */
+export async function getSearchProductsByIdsOrdered(ids: (number | string)[]): Promise<any[]> {
+  if (ids.length === 0) return [];
+
+  const numericIds = ids
+    .map((id) => (typeof id === "string" ? parseInt(id, 10) : id))
+    .filter((id) => Number.isFinite(id));
+  if (numericIds.length === 0) return [];
+
+  // Hydration step: fetch only essential Shop page fields
+  const result = await pg.query(
+    `SELECT
+       p.id,
+       p.title,
+       p.brand,
+       p.category,
+       COALESCE(p.currency, 'USD') AS currency,
+       p.price_cents,
+       p.sales_price_cents,
+       p.image_url,
+       p.image_cdn
+     FROM products p
+     WHERE p.id = ANY($1::int[])`,
+    [numericIds],
+  );
+
+  const productMap = new Map(result.rows.map((p) => [String(p.id), p]));
+  return numericIds.map((id) => productMap.get(String(id))).filter(Boolean);
 }

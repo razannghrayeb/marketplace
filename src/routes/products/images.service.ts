@@ -135,6 +135,20 @@ export async function uploadProductImage(
 ): Promise<UploadImageResult> {
   const { isPrimary = false, contentType = "image/jpeg" } = options;
 
+  const primaryState = await pg.query<{
+    has_primary_image: boolean;
+    has_product_primary: boolean;
+  }>(
+    `SELECT
+        EXISTS(SELECT 1 FROM product_images WHERE product_id = $1 AND is_primary = true) AS has_primary_image,
+        EXISTS(SELECT 1 FROM products WHERE id = $1 AND primary_image_id IS NOT NULL) AS has_product_primary`,
+    [productId],
+  );
+  const hasPrimaryImage = Boolean(primaryState.rows[0]?.has_primary_image);
+  const hasProductPrimary = Boolean(primaryState.rows[0]?.has_product_primary);
+  const effectiveIsPrimary =
+    isPrimary || (!hasPrimaryImage && !hasProductPrimary);
+
   // Validate image
   const validation = await validateImage(buffer);
   if (!validation.valid) {
@@ -187,17 +201,21 @@ export async function uploadProductImage(
   }
 
   // Insert into database
+  if (effectiveIsPrimary) {
+    await pg.query(`UPDATE product_images SET is_primary = false WHERE product_id = $1`, [productId]);
+  }
+
   const result = await pg.query(
     `INSERT INTO product_images (product_id, r2_key, cdn_url, embedding, p_hash, is_primary)
      VALUES ($1, $2, $3, $4::vector, $5, $6)
      RETURNING id, product_id, r2_key, cdn_url, p_hash, is_primary, created_at`,
-    [productId, key, cdnUrl, toPgVectorParam(embedding), pHash, isPrimary]
+    [productId, key, cdnUrl, toPgVectorParam(embedding), pHash, effectiveIsPrimary]
   );
 
   const image = result.rows[0] as ProductImage;
 
   // If primary, update the product record
-  if (isPrimary) {
+  if (effectiveIsPrimary) {
     await pg.query(
       `UPDATE products SET primary_image_id = $1, image_cdn = $2 WHERE id = $3`,
       [image.id, cdnUrl, productId]
@@ -315,6 +333,7 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
   const hasGender = await productsTableHasGenderColumn();
   const productResult = await pg.query(
     `SELECT id, vendor_id, title, description, brand, category, price_cents, availability, last_seen, image_cdn, color,
+            product_url, parent_product_url, image_url,
             ${hasGender ? "gender" : "NULL::text AS gender"},
             ${hasIsHidden ? "is_hidden" : "false AS is_hidden"},
             ${hasCanonicalId ? "canonical_id" : "NULL::integer AS canonical_id"}
@@ -395,6 +414,8 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
     availability: Boolean(product.availability),
     isHidden: Boolean(product.is_hidden),
     canonicalId: hasCanonicalId ? product.canonical_id : null,
+    productUrl: product.product_url ?? null,
+    parentProductUrl: product.parent_product_url ?? null,
     imageCdn: product.image_cdn,
     pHash: primaryImage?.p_hash ?? null,
     lastSeenAt: product.last_seen,

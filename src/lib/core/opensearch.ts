@@ -43,6 +43,32 @@ function buildOsClientConfig() {
 
 export const osClient = new Client(buildOsClientConfig());
 
+function readEfSearchFromIndexSettings(indexSettings: any): string | undefined {
+  if (!indexSettings) return undefined;
+  return (
+    indexSettings?.knn?.algo_param?.ef_search ??
+    indexSettings?.["knn.algo_param"]?.ef_search ??
+    indexSettings?.["index.knn.algo_param"]?.ef_search ??
+    indexSettings?.["knn.algo_param.ef_search"] ??
+    indexSettings?.["index.knn.algo_param.ef_search"] ??
+    indexSettings?.index?.knn?.algo_param?.ef_search ??
+    indexSettings?.index?.["knn.algo_param"]?.ef_search ??
+    indexSettings?.index?.["index.knn.algo_param"]?.ef_search ??
+    indexSettings?.index?.["knn.algo_param.ef_search"] ??
+    indexSettings?.index?.["index.knn.algo_param.ef_search"]
+  );
+}
+
+function readEfSearchFromSettingsPayload(indexPayload: any): string | undefined {
+  if (!indexPayload) return undefined;
+  return (
+    readEfSearchFromIndexSettings(indexPayload?.settings?.index) ??
+    readEfSearchFromIndexSettings(indexPayload?.settings) ??
+    readEfSearchFromIndexSettings(indexPayload?.defaults?.index) ??
+    readEfSearchFromIndexSettings(indexPayload?.defaults)
+  );
+}
+
 /**
  * Single source of truth for embedding dimension.
  * Shared with clip.ts via the EXPECTED_EMBEDDING_DIM env var.
@@ -55,6 +81,7 @@ const EMBEDDING_DIM = parseInt(process.env.EXPECTED_EMBEDDING_DIM || "512", 10);
  */
 export async function ensureIndex() {
   const index = config.opensearch.index;
+  const efSearchValue = parseInt(process.env.OS_EF_SEARCH || "100", 10);
   const exists = await osClient.indices.exists({ index });
   if (!exists.body) {
     await osClient.indices.create({
@@ -63,7 +90,11 @@ export async function ensureIndex() {
         settings: {
           index: {
             knn: true,
-            "knn.algo_param.ef_search": 1024,
+            // ef_search from OS_EF_SEARCH env var (default 100).
+            // With k=200 as the new default pool limit, ef_search=100 is
+            // sufficient — HNSW traversal = max(ef_search, k) = 200. Halving traversal cuts
+            // disk I/O in half on memory-pressured managed nodes.
+            "knn.algo_param.ef_search": efSearchValue,
           },
           analysis: {
             analyzer: {
@@ -182,7 +213,9 @@ export async function ensureIndex() {
               },
             },
             last_seen_at: { type: "date" },
-            // CLIP image embedding for vector search (primary image)
+            // CLIP image embedding for vector search (primary image).
+            // HNSW + FP16 scalar quantization: 2x memory reduction, ~2x SIMD speedup,
+            // <0.5% recall loss. m=24 (was 48): still high-recall, ~1.5x faster traversal.
             embedding: {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
@@ -192,13 +225,14 @@ export async function ensureIndex() {
                 engine: "faiss",
                 parameters: {
                   ef_construction: 256,
-                  m: 48,
+                  m: 24,
+                  encoder: { name: "sq", parameters: { type: "fp16" } },
                 },
               },
             },
             /** Vector score semantics for `embedding`: v1 legacy OpenSearch score path, v2 cosine-normalized path. */
             embedding_score_version: { type: "keyword" },
-            // Garment ROI CLIP vector (see processImageForGarmentEmbedding); use SEARCH_IMAGE_KNN_FIELD=embedding_garment
+            // Garment ROI CLIP vector — HNSW + FP16 SQ, same rationale as `embedding`.
             embedding_garment: {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
@@ -209,22 +243,26 @@ export async function ensureIndex() {
                 parameters: {
                   ef_construction: 128,
                   m: 16,
+                  encoder: { name: "sq", parameters: { type: "fp16" } },
                 },
               },
             },
             /** Vector score semantics for `embedding_garment`: v1 legacy OpenSearch score path, v2 cosine-normalized path. */
             embedding_garment_score_version: { type: "keyword" },
-            // Per-attribute embeddings for multi-vector weighted search
+            // Per-attribute embeddings for multi-vector weighted search.
+            // IVF + FP16 SQ: these are reranking signals, not primary retrieval — IVF gives
+            // 10-50x faster approximate search vs HNSW with acceptable recall at nprobes=8.
             embedding_color: {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
-                name: "hnsw",
+                name: "ivf",
                 space_type: "cosinesimil",
                 engine: "faiss",
                 parameters: {
-                  ef_construction: 128,
-                  m: 16,
+                  nlist: 128,
+                  nprobes: 8,
+                  encoder: { name: "sq", parameters: { type: "fp16" } },
                 },
               },
             },
@@ -232,12 +270,13 @@ export async function ensureIndex() {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
-                name: "hnsw",
+                name: "ivf",
                 space_type: "cosinesimil",
                 engine: "faiss",
                 parameters: {
-                  ef_construction: 128,
-                  m: 16,
+                  nlist: 128,
+                  nprobes: 8,
+                  encoder: { name: "sq", parameters: { type: "fp16" } },
                 },
               },
             },
@@ -245,12 +284,13 @@ export async function ensureIndex() {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
-                name: "hnsw",
+                name: "ivf",
                 space_type: "cosinesimil",
                 engine: "faiss",
                 parameters: {
-                  ef_construction: 128,
-                  m: 16,
+                  nlist: 128,
+                  nprobes: 8,
+                  encoder: { name: "sq", parameters: { type: "fp16" } },
                 },
               },
             },
@@ -258,12 +298,13 @@ export async function ensureIndex() {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
-                name: "hnsw",
+                name: "ivf",
                 space_type: "cosinesimil",
                 engine: "faiss",
                 parameters: {
-                  ef_construction: 128,
-                  m: 16,
+                  nlist: 128,
+                  nprobes: 8,
+                  encoder: { name: "sq", parameters: { type: "fp16" } },
                 },
               },
             },
@@ -271,30 +312,28 @@ export async function ensureIndex() {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
-                name: "hnsw",
+                name: "ivf",
                 space_type: "cosinesimil",
                 engine: "faiss",
                 parameters: {
-                  ef_construction: 128,
-                  m: 16,
+                  nlist: 128,
+                  nprobes: 8,
+                  encoder: { name: "sq", parameters: { type: "fp16" } },
                 },
               },
             },
             // ====================================================================
-            // PART-LEVEL EMBEDDINGS (Phase 1)
+            // PART-LEVEL EMBEDDINGS — IVF + FP16 SQ (same rationale as attributes)
             // ====================================================================
             // Sleeve area of tops/dresses
             embedding_part_sleeve: {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
-                name: "hnsw",
+                name: "ivf",
                 space_type: "cosinesimil",
                 engine: "faiss",
-                parameters: {
-                  ef_construction: 128,
-                  m: 16,
-                },
+                parameters: { nlist: 128, nprobes: 8, encoder: { name: "sq", parameters: { type: "fp16" } } },
               },
             },
             // Neckline area of tops
@@ -302,13 +341,10 @@ export async function ensureIndex() {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
-                name: "hnsw",
+                name: "ivf",
                 space_type: "cosinesimil",
                 engine: "faiss",
-                parameters: {
-                  ef_construction: 128,
-                  m: 16,
-                },
+                parameters: { nlist: 128, nprobes: 8, encoder: { name: "sq", parameters: { type: "fp16" } } },
               },
             },
             // Hem/bottom edge of garments
@@ -316,13 +352,10 @@ export async function ensureIndex() {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
-                name: "hnsw",
+                name: "ivf",
                 space_type: "cosinesimil",
                 engine: "faiss",
-                parameters: {
-                  ef_construction: 128,
-                  m: 16,
-                },
+                parameters: { nlist: 128, nprobes: 8, encoder: { name: "sq", parameters: { type: "fp16" } } },
               },
             },
             // Waistline area of pants/skirts
@@ -330,13 +363,10 @@ export async function ensureIndex() {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
-                name: "hnsw",
+                name: "ivf",
                 space_type: "cosinesimil",
                 engine: "faiss",
-                parameters: {
-                  ef_construction: 128,
-                  m: 16,
-                },
+                parameters: { nlist: 128, nprobes: 8, encoder: { name: "sq", parameters: { type: "fp16" } } },
               },
             },
             // Heel area of shoes
@@ -344,13 +374,10 @@ export async function ensureIndex() {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
-                name: "hnsw",
+                name: "ivf",
                 space_type: "cosinesimil",
                 engine: "faiss",
-                parameters: {
-                  ef_construction: 128,
-                  m: 16,
-                },
+                parameters: { nlist: 128, nprobes: 8, encoder: { name: "sq", parameters: { type: "fp16" } } },
               },
             },
             // Toe area of shoes
@@ -358,13 +385,10 @@ export async function ensureIndex() {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
-                name: "hnsw",
+                name: "ivf",
                 space_type: "cosinesimil",
                 engine: "faiss",
-                parameters: {
-                  ef_construction: 128,
-                  m: 16,
-                },
+                parameters: { nlist: 128, nprobes: 8, encoder: { name: "sq", parameters: { type: "fp16" } } },
               },
             },
             // Handle area of bags
@@ -372,13 +396,10 @@ export async function ensureIndex() {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
-                name: "hnsw",
+                name: "ivf",
                 space_type: "cosinesimil",
                 engine: "faiss",
-                parameters: {
-                  ef_construction: 128,
-                  m: 16,
-                },
+                parameters: { nlist: 128, nprobes: 8, encoder: { name: "sq", parameters: { type: "fp16" } } },
               },
             },
             // Main body area of bags
@@ -386,13 +407,10 @@ export async function ensureIndex() {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
-                name: "hnsw",
+                name: "ivf",
                 space_type: "cosinesimil",
                 engine: "faiss",
-                parameters: {
-                  ef_construction: 128,
-                  m: 16,
-                },
+                parameters: { nlist: 128, nprobes: 8, encoder: { name: "sq", parameters: { type: "fp16" } } },
               },
             },
             // Pattern/texture patch for detailed matching
@@ -400,13 +418,10 @@ export async function ensureIndex() {
               type: "knn_vector",
               dimension: EMBEDDING_DIM,
               method: {
-                name: "hnsw",
+                name: "ivf",
                 space_type: "cosinesimil",
                 engine: "faiss",
-                parameters: {
-                  ef_construction: 128,
-                  m: 16,
-                },
+                parameters: { nlist: 128, nprobes: 8, encoder: { name: "sq", parameters: { type: "fp16" } } },
               },
             },
           },
@@ -414,6 +429,119 @@ export async function ensureIndex() {
       },
     });
     console.log(`Created OpenSearch index: ${index}`);
+  }
+}
+
+/**
+ * Apply ef_search and other live-tunable kNN settings to the existing index.
+ * Safe to run against a live index — no reindex required.
+ * Run this once after deploying to fix the ef_search=1024 bottleneck on existing indexes.
+ * 
+ * Configurable via OS_EF_SEARCH env var (defaults to 100).
+ */
+export async function applyIndexSpeedSettings(): Promise<void> {
+  const index = config.opensearch.index;
+  const expected = String(process.env.OS_EF_SEARCH || "100");
+
+  const readCurrentEfSearch = async (): Promise<string | undefined> => {
+    const settingsResp = await osClient.indices.getSettings({
+      index,
+      include_defaults: true as any,
+    });
+    return readEfSearchFromSettingsPayload(settingsResp.body?.[index]);
+  };
+
+  try {
+    const cur = await readCurrentEfSearch();
+    console.log(`[opensearch] ef_search on ${index} before apply: ${cur ?? "unknown"}`);
+  } catch {
+    // non-fatal read — proceed with write
+  }
+
+  const efSearchValue = parseInt(expected, 10);
+  const applyAttempts: Array<{ label: string; body: Record<string, unknown> }> = [
+    // Preferred index-settings shape.
+    {
+      label: "nested-index",
+      body: { index: { "knn.algo_param.ef_search": efSearchValue } },
+    },
+    // Some managed clusters only honor flattened keys.
+    {
+      label: "flat-index-key",
+      body: { "index.knn.algo_param.ef_search": efSearchValue },
+    },
+    // Some variants expose `knn.algo_param` object.
+    {
+      label: "flat-object-key",
+      body: { "index.knn.algo_param": { ef_search: efSearchValue } },
+    },
+  ];
+
+  let applied: string | undefined;
+  for (const attempt of applyAttempts) {
+    try {
+      await osClient.indices.putSettings({
+        index,
+        body: attempt.body as any,
+      });
+      applied = await readCurrentEfSearch();
+      if (String(applied) === expected) {
+        if (process.env.NODE_ENV !== "production") {
+          console.log(`[opensearch] ef_search apply mode: ${attempt.label}`);
+        }
+        break;
+      }
+    } catch {
+      // Try the next write shape.
+    }
+  }
+
+  try {
+    const after = await osClient.indices.getSettings({ index, include_defaults: true as any });
+    const indexPayload = after.body?.[index];
+    applied = applied ?? readEfSearchFromSettingsPayload(indexPayload);
+    console.log(`[opensearch] ef_search on ${index} after apply: ${applied ?? "unknown — verify manually"}`);
+    if (String(applied) !== expected) {
+      const settingsIndexKeys = Object.keys(indexPayload?.settings?.index ?? {});
+      const settingsKeys = Object.keys(indexPayload?.settings ?? {});
+      const defaultsIndexKeys = Object.keys(indexPayload?.defaults?.index ?? {});
+      const defaultsKeys = Object.keys(indexPayload?.defaults ?? {});
+      console.warn(`[opensearch] WARNING: ef_search may not have applied — got ${applied}, expected ${expected}`);
+      console.warn(
+        `[opensearch] debug setting keys`,
+        JSON.stringify({ settingsIndexKeys, settingsKeys, defaultsIndexKeys, defaultsKeys })
+      );
+    }
+  } catch {
+    console.warn(`[opensearch] Could not verify ef_search was applied to ${index}`);
+  }
+}
+
+/**
+ * Preload FAISS graph segments into native memory for all shards of the index.
+ * Without this, the first kNN queries after a restart pay the disk-read cost
+ * for each FAISS segment file — making early searches 5-20x slower.
+ *
+ * Uses the OpenSearch kNN warmup API: GET /_plugins/_knn/warmup/<index>
+ * Safe to call on a live index — read-only operation.
+ */
+export async function warmupKnnIndex(): Promise<void> {
+  const index = config.opensearch.index;
+  try {
+    const resp = await (osClient.transport as any).request({
+      method: "GET",
+      path: `/_plugins/_knn/warmup/${encodeURIComponent(index)}`,
+    });
+    const shards = resp?.body?._shards;
+    console.log(
+      `[opensearch] kNN warmup complete for ${index}:`,
+      shards
+        ? `total=${shards.total} successful=${shards.successful} failed=${shards.failed}`
+        : "ok",
+    );
+  } catch (err: any) {
+    // Non-fatal: warmup API may not be available on all managed clusters.
+    console.warn(`[opensearch] kNN warmup failed (non-fatal, queries may be slow initially):`, err?.message ?? err);
   }
 }
 

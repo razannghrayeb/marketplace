@@ -7,6 +7,44 @@ import { pg } from "../../lib/core/index";
 import { mergeCanonicals, getCanonicalWithProducts, findSimilarByPHash } from "../../lib/products";
 import { triggerJob, getScheduleInfo, getQueueMetrics } from "../../lib/scheduler";
 
+const productsColumnExistsCache = new Map<string, boolean>();
+const tableExistsCache = new Map<string, boolean>();
+
+async function productsTableHasColumn(columnName: string): Promise<boolean> {
+  if (productsColumnExistsCache.has(columnName)) {
+    return productsColumnExistsCache.get(columnName)!;
+  }
+  const result = await pg.query(
+    `SELECT 1
+     FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = 'products'
+       AND column_name = $1
+     LIMIT 1`,
+    [columnName],
+  );
+  const exists = (result.rowCount ?? 0) > 0;
+  productsColumnExistsCache.set(columnName, exists);
+  return exists;
+}
+
+async function tableExists(tableName: string): Promise<boolean> {
+  if (tableExistsCache.has(tableName)) {
+    return tableExistsCache.get(tableName)!;
+  }
+  const result = await pg.query(
+    `SELECT 1
+     FROM information_schema.tables
+     WHERE table_schema = 'public'
+       AND table_name = $1
+     LIMIT 1`,
+    [tableName],
+  );
+  const exists = (result.rowCount ?? 0) > 0;
+  tableExistsCache.set(tableName, exists);
+  return exists;
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -105,13 +143,24 @@ export async function getFlaggedProducts(options: {
 }): Promise<{ products: any[]; total: number }> {
   const { page = 1, limit = 50, includeHidden = true } = options;
   const offset = (page - 1) * limit;
+  const [hasIsFlagged, hasIsHidden, hasFlagReason] = await Promise.all([
+    productsTableHasColumn("is_flagged"),
+    productsTableHasColumn("is_hidden"),
+    productsTableHasColumn("flag_reason"),
+  ]);
 
-  const hiddenClause = includeHidden ? "" : "AND is_hidden = false";
+  if (!hasIsFlagged) {
+    return { products: [], total: 0 };
+  }
+
+  const hiddenClause = !includeHidden && hasIsHidden ? "AND is_hidden = false" : "";
+  const flagReasonSelect = hasFlagReason ? "flag_reason" : "NULL::text AS flag_reason";
+  const isHiddenSelect = hasIsHidden ? "is_hidden" : "false AS is_hidden";
 
   const [countResult, productsResult] = await Promise.all([
     pg.query(`SELECT COUNT(*) FROM products WHERE is_flagged = true ${hiddenClause}`),
     pg.query(
-      `SELECT id, title, brand, category, price_cents, source, is_hidden, flag_reason, created_at
+      `SELECT id, title, brand, category, price_cents, vendor_id::text AS source, ${isHiddenSelect}, ${flagReasonSelect}, created_at
        FROM products 
        WHERE is_flagged = true ${hiddenClause}
        ORDER BY created_at DESC
@@ -135,11 +184,21 @@ export async function getHiddenProducts(options: {
 }): Promise<{ products: any[]; total: number }> {
   const { page = 1, limit = 50 } = options;
   const offset = (page - 1) * limit;
+  const [hasIsHidden, hasFlagReason] = await Promise.all([
+    productsTableHasColumn("is_hidden"),
+    productsTableHasColumn("flag_reason"),
+  ]);
+
+  if (!hasIsHidden) {
+    return { products: [], total: 0 };
+  }
+
+  const flagReasonSelect = hasFlagReason ? "flag_reason" : "NULL::text AS flag_reason";
 
   const [countResult, productsResult] = await Promise.all([
     pg.query(`SELECT COUNT(*) FROM products WHERE is_hidden = true`),
     pg.query(
-      `SELECT id, title, brand, category, price_cents, source, flag_reason, updated_at
+      `SELECT id, title, brand, category, price_cents, vendor_id::text AS source, ${flagReasonSelect}, updated_at
        FROM products 
        WHERE is_hidden = true
        ORDER BY updated_at DESC
@@ -332,6 +391,11 @@ export async function getJobHistory(options: {
   jobType?: string;
 }): Promise<any[]> {
   const { limit = 50, jobType } = options;
+  const hasJobSchedules = await tableExists("job_schedules");
+
+  if (!hasJobSchedules) {
+    return [];
+  }
 
   const typeClause = jobType ? `WHERE job_type = $2` : "";
   const params = jobType ? [limit, jobType] : [limit];
@@ -362,14 +426,38 @@ export async function getDashboardStats(): Promise<{
   productsWithoutCanonical: number;
   priceRecordsToday: number;
 }> {
+  const [hasIsHidden, hasIsFlagged, hasCanonicalId, hasCanonicalProducts, hasPriceHistory] = await Promise.all([
+    productsTableHasColumn("is_hidden"),
+    productsTableHasColumn("is_flagged"),
+    productsTableHasColumn("canonical_id"),
+    tableExists("canonical_products"),
+    tableExists("price_history"),
+  ]);
+
+  const hiddenExpr = hasIsHidden
+    ? "(SELECT COUNT(*) FROM products WHERE is_hidden = true) as hidden_products"
+    : "0::bigint as hidden_products";
+  const flaggedExpr = hasIsFlagged
+    ? "(SELECT COUNT(*) FROM products WHERE is_flagged = true) as flagged_products"
+    : "0::bigint as flagged_products";
+  const withoutCanonicalExpr = hasCanonicalId
+    ? "(SELECT COUNT(*) FROM products WHERE canonical_id IS NULL) as products_without_canonical"
+    : "0::bigint as products_without_canonical";
+  const canonicalsExpr = hasCanonicalProducts
+    ? "(SELECT COUNT(*) FROM canonical_products) as total_canonicals"
+    : "0::bigint as total_canonicals";
+  const priceRecordsTodayExpr = hasPriceHistory
+    ? "(SELECT COUNT(*) FROM price_history WHERE recorded_at > CURRENT_DATE) as price_records_today"
+    : "0::bigint as price_records_today";
+
   const result = await pg.query(`
     SELECT
       (SELECT COUNT(*) FROM products) as total_products,
-      (SELECT COUNT(*) FROM products WHERE is_hidden = true) as hidden_products,
-      (SELECT COUNT(*) FROM products WHERE is_flagged = true) as flagged_products,
-      (SELECT COUNT(*) FROM canonical_products) as total_canonicals,
-      (SELECT COUNT(*) FROM products WHERE canonical_id IS NULL) as products_without_canonical,
-      (SELECT COUNT(*) FROM price_history WHERE recorded_at > CURRENT_DATE) as price_records_today
+      ${hiddenExpr},
+      ${flaggedExpr},
+      ${canonicalsExpr},
+      ${withoutCanonicalExpr},
+      ${priceRecordsTodayExpr}
   `);
 
   const row = result.rows[0];

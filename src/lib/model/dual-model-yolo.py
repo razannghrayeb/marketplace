@@ -45,7 +45,8 @@ for pkg, imp in [("ultralytics","ultralytics"),
     except ImportError: _pip(pkg)
 
 # ── imports ───────────────────────────────────────────────────────────────────
-import os, io, warnings, tempfile, urllib.request
+import os, io, warnings, tempfile, urllib.request, logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import cv2
@@ -57,6 +58,27 @@ from PIL import Image, ImageDraw, ImageFont
 from ultralytics import YOLO
 from huggingface_hub import hf_hub_download
 from transformers import pipeline as hf_pipeline
+
+
+class _SuppressSequentialPipelineGpuWarning(logging.Filter):
+    """Hide the known Transformers pipeline sequential-on-GPU advisory."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return "using the pipelines sequentially on GPU" not in msg
+
+
+logging.getLogger("transformers.pipelines.base").addFilter(_SuppressSequentialPipelineGpuWarning())
+
+_CUDA_AVAILABLE = torch.cuda.is_available()
+_DEVICE_ID = 0 if _CUDA_AVAILABLE else -1
+_TORCH_DEVICE = os.getenv("YOLO_DEVICE", "cuda" if _CUDA_AVAILABLE else "cpu").strip().lower()
+if _TORCH_DEVICE == "cuda" and not _CUDA_AVAILABLE:
+    print("[YOLO] YOLO_DEVICE=cuda requested but CUDA is unavailable; falling back to CPU.")
+    _TORCH_DEVICE = "cpu"
+if _TORCH_DEVICE not in {"cuda", "cpu"}:
+    print(f"[YOLO] Unsupported YOLO_DEVICE='{_TORCH_DEVICE}', falling back to auto.")
+    _TORCH_DEVICE = "cuda" if _CUDA_AVAILABLE else "cpu"
+_YOLO_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yolo")
 
 warnings.filterwarnings("ignore")
 
@@ -112,6 +134,13 @@ class DualDetector:
         """
         self.conf        = conf
         self.overlap_iou = overlap_iou
+        # Accessories (especially bags/wallets) tend to be smaller and lower-confidence
+        # than apparel; use a dedicated floor to improve recall without affecting clothing.
+        try:
+            acc = float(os.getenv("YOLO_ACCESSORY_MIN_CONF", "0.35"))
+        except Exception:
+            acc = 0.35
+        self.accessory_min_conf = max(0.05, min(0.95, acc))
         self._model_a    = None
         self._model_b    = None
         self._font       = self._load_font()
@@ -120,18 +149,18 @@ class DualDetector:
     # ── private: setup ────────────────────────────────────────────────────────
 
     def _load_models(self):
+        print(f"Loading models on device: {_TORCH_DEVICE} (cuda={_CUDA_AVAILABLE})")
         print("Loading Model A: deepfashion2_yolov8s-seg …")
         path = hf_hub_download(repo_id="Bingsu/adetailer",
                                filename="deepfashion2_yolov8s-seg.pt")
-        self._model_a = YOLO(path)
+        self._model_a = YOLO(path).to(_TORCH_DEVICE)
         print(f"  ✓ {len(self._model_a.names)} clothing classes")
 
         print("Loading Model B: yolos-fashionpedia …")
-        device = 0 if torch.cuda.is_available() else -1
         self._model_b = hf_pipeline(
             "object-detection",
             model="valentinafeve/yolos-fashionpedia",
-            device=device,
+            device=0 if _TORCH_DEVICE == "cuda" else -1,
         )
         print(f"  ✓ Fashionpedia  |  keeping: {self._KEEP_B}")
         print(f"  ✓ Both models conf ≥ {self.conf}\n")
@@ -162,6 +191,11 @@ class DualDetector:
         if lbl in ("hat","headband, head covering, hair accessory"):
             return self._COLORS["hat"]
         return self._COLORS["clothing"]
+
+    @staticmethod
+    def _is_bag_like_label(lbl: str) -> bool:
+        s = str(lbl).lower()
+        return "bag" in s or "wallet" in s or "purse" in s or "clutch" in s or "tote" in s
 
     def _to_pil(self, image) -> tuple[Image.Image, str | None]:
         """
@@ -211,14 +245,27 @@ class DualDetector:
             "a_plot"      : np.ndarray HxWx3 RGB Model A annotated frame
         """
         effective_conf = float(conf) if conf is not None else self.conf
+        effective_conf_b = min(effective_conf, self.accessory_min_conf)
 
         # Resolve to a file path for Model A (YOLO needs a path or array)
         pil_img, tmp = self._to_pil(image)
         img_source   = tmp if tmp else (image if isinstance(image, str) else pil_img)
 
-        # --- Model A: clothing ---
-        res_a    = self._model_a.predict(source=img_source,
-                                         conf=effective_conf, verbose=False)[0]
+        # --- Run Model A and Model B in parallel ---
+        def _run_a():
+            return self._model_a.predict(
+                source=img_source, conf=effective_conf, verbose=False,
+                device=0 if _TORCH_DEVICE == "cuda" else "cpu",
+            )[0]
+
+        def _run_b():
+            return self._model_b(pil_img, threshold=effective_conf_b)
+
+        fut_a = _YOLO_EXECUTOR.submit(_run_a)
+        fut_b = _YOLO_EXECUTOR.submit(_run_b)
+        res_a  = fut_a.result()
+        raw_b  = fut_b.result()
+
         orig_rgb = cv2.cvtColor(res_a.orig_img, cv2.COLOR_BGR2RGB)
         a_plot   = cv2.cvtColor(res_a.plot(),   cv2.COLOR_BGR2RGB)
 
@@ -236,12 +283,11 @@ class DualDetector:
                 })
 
         # --- Model B: accessories ---
-        raw_b = self._model_b(pil_img)
         acc   = []
         for det in raw_b:
             lbl, score = det["label"], det["score"]
             if lbl not in self._KEEP_B: continue
-            if score < effective_conf:       continue
+            if score < effective_conf_b:     continue
             b = det["box"]
             acc.append({
                 "label":  lbl,
@@ -253,8 +299,10 @@ class DualDetector:
         # --- Cross-model NMS ---
         suppressed = {
             ai for ai, a in enumerate(acc)
-            if any(self._iou(a["box"], c["box"]) > self.overlap_iou
-                   for c in clothing)
+            # Bags/wallets naturally overlap torso clothing and should not be suppressed.
+            if (not self._is_bag_like_label(a["label"])) and any(
+                self._iou(a["box"], c["box"]) > self.overlap_iou for c in clothing
+            )
         }
         acc = [p for i, p in enumerate(acc) if i not in suppressed]
 

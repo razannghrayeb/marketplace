@@ -55,6 +55,12 @@ function parseOptionalInt(raw: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+function parseOptionalNumber(raw: unknown): number | undefined {
+  if (raw === null || raw === undefined || raw === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 function parseStringArray(raw: unknown): string[] {
   if (Array.isArray(raw)) {
     return Array.from(new Set(raw.map((v) => String(v || "").trim()).filter(Boolean))).slice(0, 20);
@@ -102,6 +108,46 @@ function parseOccasionHint(raw: unknown): "formal" | "semi-formal" | "casual" | 
   if (["party", "date"].includes(s)) return "party";
   if (["beach", "resort"].includes(s)) return "beach";
   return undefined;
+}
+
+function parseWeatherSeason(raw: unknown): "spring" | "summer" | "fall" | "winter" | undefined {
+  if (raw == null) return undefined;
+  const s = String(raw).toLowerCase().trim();
+  if (["spring"].includes(s)) return "spring";
+  if (["summer"].includes(s)) return "summer";
+  if (["fall", "autumn"].includes(s)) return "fall";
+  if (["winter"].includes(s)) return "winter";
+  return undefined;
+}
+
+function parseStyleHints(raw: unknown): string[] {
+  const allowed = new Set([
+    "casual",
+    "formal",
+    "minimalist",
+    "streetwear",
+    "classic",
+    "vintage",
+    "sporty",
+    "athleisure",
+    "boho",
+    "elegant",
+    "chic",
+    "edgy",
+    "business",
+    "romantic",
+  ]);
+  return parseStringArray(raw)
+    .map((v) => v.toLowerCase().trim())
+    .filter((v) => allowed.has(v))
+    .slice(0, 12);
+}
+
+function parseColorHints(raw: unknown): string[] {
+  return parseStringArray(raw)
+    .map((v) => v.toLowerCase().replace(/[_-]/g, " ").trim())
+    .filter(Boolean)
+    .slice(0, 12);
 }
 
 function normalizeAnalysisCategory(raw: unknown): string | null {
@@ -631,6 +677,10 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
         ? ageGroupHintRaw.trim()
         : undefined;
     const occasionHint = parseOccasionHint(req.body.occasion ?? req.body.occasion_hint);
+    const styleHints = parseStyleHints(req.body.style_tags ?? req.body.style_hints ?? req.body.style ?? req.body.aesthetic);
+    const colorHints = parseColorHints(req.body.color_hints ?? req.body.colors ?? req.body.color ?? req.body.palette);
+    const weatherTempC = parseOptionalNumber(req.body.weather_temp_c ?? req.body.temperature_c ?? req.body.temperature);
+    const weatherSeason = parseWeatherSeason(req.body.weather_season ?? req.body.season);
 
     const hasItems = Array.isArray(itemIds) && itemIds.length > 0;
     if (!hasItems && productIds.length === 0) {
@@ -653,6 +703,12 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
           audienceGenderHint,
           ageGroupHint,
           occasionHint,
+          styleHints,
+          colorHints,
+          weatherHint:
+            weatherTempC !== undefined || weatherSeason
+              ? { temperatureC: weatherTempC, season: weatherSeason }
+              : undefined,
         })
       : await completeLookSuggestionsForCatalogProducts(
           userId,
@@ -663,6 +719,12 @@ export async function completeLook(req: Request, res: Response, next: NextFuncti
             audienceGenderHint,
             ageGroupHint,
             occasionHint,
+            styleHints,
+            colorHints,
+            weatherHint:
+              weatherTempC !== undefined || weatherSeason
+                ? { temperatureC: weatherTempC, season: weatherSeason }
+                : undefined,
           },
         );
     const suggestions = result.suggestions.map((s) => ({

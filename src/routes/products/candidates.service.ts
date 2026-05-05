@@ -50,8 +50,8 @@ export async function getCandidateScoresForProducts(
   const {
     baseProductId,
     limit = 30,
-    clipLimit = 200,
-    textLimit = 200,
+    clipLimit = 120,
+    textLimit = 120,
     usePHashDedup = true,
     pHashThreshold = 5,
   } = params;
@@ -275,7 +275,7 @@ async function runClipSearch(
     query: {
       bool: {
         must: { knn: { embedding: { vector: embedding, k: fetchLimit } } },
-        filter: [{ term: { is_hidden: false } }],
+            filter: [{ bool: { must_not: [{ term: { is_hidden: true } }] } }],
       },
     },
   };
@@ -316,7 +316,7 @@ async function runTextSearch(
     // Add hidden filter
     if (!textQuery.query.bool) textQuery.query = { bool: { must: textQuery.query } };
     if (!textQuery.query.bool.filter) textQuery.query.bool.filter = [];
-    textQuery.query.bool.filter.push({ term: { is_hidden: false } });
+    textQuery.query.bool.filter.push({ bool: { must_not: [{ term: { is_hidden: true } }] } });
 
     const resp = await osClient.search({ index: config.opensearch.index, body: textQuery });
     const hits = resp.body.hits.hits || [];

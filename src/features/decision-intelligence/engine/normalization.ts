@@ -16,6 +16,17 @@ function toArray(input: unknown): string[] {
 export function inferSubcategory(product: RawProduct): string | undefined {
   const text = `${product.subcategory || ""} ${product.title} ${product.category}`.toLowerCase();
   const subtypeKeywords = [
+    "suit jacket",
+    "dress jacket",
+    "waistcoat",
+    "gilet",
+    "vest top",
+    "sleeveless top",
+    "tank top",
+    "tailored jacket",
+    "structured jacket",
+    "tuxedo",
+    "vest",
     "sneaker",
     "heel",
     "boot",
@@ -27,6 +38,8 @@ export function inferSubcategory(product: RawProduct): string | undefined {
     "hoodie",
     "skirt",
     "jeans",
+    "jacket",
+    "coat",
   ];
   const found = subtypeKeywords.find((k) => text.includes(k));
   return found || product.subcategory;

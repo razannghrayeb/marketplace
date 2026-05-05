@@ -45,11 +45,11 @@ export interface CandidateWithScores {
 // ============================================================================
 
 const COLOR_GROUPS: Record<string, string[]> = {
-  neutral: ["black", "white", "gray", "grey", "beige", "cream", "ivory", "navy", "khaki", "tan", "brown", "charcoal"],
-  warm: ["red", "orange", "yellow", "coral", "peach", "rust", "burgundy", "maroon", "terracotta", "gold"],
-  cool: ["blue", "green", "purple", "teal", "cyan", "mint", "lavender", "violet", "turquoise", "aqua"],
-  pastel: ["pink", "baby blue", "light pink", "blush", "powder", "soft", "pale"],
-  bright: ["neon", "hot pink", "electric", "bright", "vivid", "fluorescent"],
+  neutral:  ["black", "white", "gray", "grey", "beige", "cream", "ivory", "navy", "khaki", "tan", "brown", "charcoal"],
+  warm:     ["red", "orange", "yellow", "coral", "peach", "rust", "burgundy", "maroon", "terracotta", "mustard"],
+  cool:     ["blue", "green", "purple", "teal", "cyan", "mint", "lavender", "violet", "turquoise", "aqua", "sage", "emerald"],
+  pastel:   ["pink", "blush", "lilac", "light blue", "baby blue", "powder", "pale"],
+  bright:   ["neon", "hot pink", "electric", "vivid", "fluorescent", "fuchsia", "magenta"],
   metallic: ["silver", "gold", "bronze", "copper", "metallic", "rose gold"],
 };
 
@@ -99,48 +99,47 @@ function getColorGroup(color: string | null): string {
 }
 
 /**
- * Compute color harmony score between base and candidate
+ * Compute color harmony score between base and candidate (0–1).
+ * Metallics work universally; neutrals are flexible; non-neutral pairs
+ * use the complementary-color map and group-based fallbacks.
  */
 export function computeColorScore(base: BaseProductContext, candidate: ProductResult): number {
-  const baseColor = base.color?.toLowerCase() || detectColor(base);
+  const baseColor    = base.color?.toLowerCase()      || detectColor(base);
   const candidateColor = candidate.color?.toLowerCase() || detectColor(candidate);
-  
-  if (!baseColor || !candidateColor) {
-    return 0.5; // Neutral score if colors unknown
-  }
-  
-  const baseGroup = getColorGroup(baseColor);
+
+  if (!baseColor || !candidateColor) return 0.5;
+
+  const baseGroup      = getColorGroup(baseColor);
   const candidateGroup = getColorGroup(candidateColor);
-  
-  // Same color = good but not great (avoid too matchy)
-  if (baseColor === candidateColor) {
-    return 0.7;
-  }
-  
-  // Neutrals match everything well
+
+  // Metallics are universally harmonious (silver/gold elevate any outfit)
+  if (baseGroup === "metallic" || candidateGroup === "metallic") return 0.88;
+
+  // Neutrals match everything; same neutral = strong monochromatic match
   if (baseGroup === "neutral" || candidateGroup === "neutral") {
-    return 0.85;
+    return baseColor === candidateColor ? 0.95 : 0.85;
   }
-  
-  // Check complementary colors
+
+  // Exact same color
+  if (baseColor === candidateColor) return 0.72;
+
+  // Complementary pairs (explicitly listed)
   const complements = COLOR_COMPLEMENTS[baseColor] || [];
-  if (complements.some(c => candidateColor.includes(c) || c === "any")) {
+  if (complements.some(c => c === "any" || candidateColor.includes(c) || c.includes(candidateColor))) {
     return 0.95;
   }
-  
-  // Same color family = decent match
-  if (baseGroup === candidateGroup) {
-    return 0.65;
-  }
-  
-  // Warm + cool can work for contrast
+
+  // Same color family (e.g., two warm tones)
+  if (baseGroup === candidateGroup) return 0.65;
+
+  // Warm + cool contrast — can work stylistically
   if ((baseGroup === "warm" && candidateGroup === "cool") ||
-      (baseGroup === "cool" && candidateGroup === "warm")) {
-    return 0.6;
-  }
-  
-  // Default
-  return 0.4;
+      (baseGroup === "cool" && candidateGroup === "warm")) return 0.58;
+
+  // Pastel pairs well with neutrals and other pastels (handled above), moderate with others
+  if (baseGroup === "pastel" || candidateGroup === "pastel") return 0.55;
+
+  return 0.40;
 }
 
 // ============================================================================

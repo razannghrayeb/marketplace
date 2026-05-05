@@ -34,12 +34,12 @@ const upload = multer({
     files: 10, // Max 10 files for batch
   },
   fileFilter: (_req, file, cb) => {
-    const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+    const allowedTypes = ["image/jpeg", "image/png", "image/webp"];
     if (allowedTypes.includes(file.mimetype)) {
       cb(null, true);
     } else {
       cb(
-        new Error("Invalid file type. Only JPEG, PNG, WebP, and GIF are allowed.")
+        new Error("Invalid file type. Only JPEG, PNG, and WebP are allowed.")
       );
     }
   },
@@ -83,6 +83,21 @@ function parsePositiveInt(value: unknown): number | null {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function finalRelevanceScore(product: unknown): number {
+  const score = Number((product as any)?.finalRelevance01 ?? 0);
+  return Number.isFinite(score) ? score : 0;
+}
+
+function sortProductsByFinalRelevanceDesc(products: unknown[]): unknown[] {
+  return [...products].sort((a, b) => {
+    const relevanceDelta = finalRelevanceScore(b) - finalRelevanceScore(a);
+    if (Math.abs(relevanceDelta) > 1e-8) return relevanceDelta;
+    const bSimilarity = Number((b as any)?.similarity_score ?? 0);
+    const aSimilarity = Number((a as any)?.similarity_score ?? 0);
+    return (Number.isFinite(bSimilarity) ? bSimilarity : 0) - (Number.isFinite(aSimilarity) ? aSimilarity : 0);
+  });
 }
 
 // ============================================================================
@@ -285,8 +300,11 @@ router.post(
         req.query.products_page !== undefined || req.query.products_limit !== undefined;
       const productsLimit = clamp(productsLimitRaw ?? baseLimitPerItem ?? 22, 1, 80);
       const productsOffset = (productsPage - 1) * productsLimit;
+      // Fetch enough items so page N can be sliced from the service results.
+      // Do NOT cap at the UI output limit (80) — that silently drops page 2+ items.
+      // The service enforces its own retrieval cap (~220 by default).
       const fetchLimitPerItem = productsPaginationEnabled
-        ? clamp(productsLimit * productsPage, 1, 80)
+        ? Math.min(productsOffset + productsLimit, 500)
         : baseLimitPerItem ?? undefined;
 
       const detectionsPage = parsePositiveInt(req.query.detections_page) ?? 1;
@@ -313,7 +331,9 @@ router.post(
           ? parseInt(req.query.products_limit as string, 10)
           : undefined,
         filterByDetectedCategory: req.query.filter_category !== "false",
-        groupByDetection: req.query.group_by_detection !== "false",
+        // Default to merged detection groups to avoid duplicate full search passes
+        // for near-identical detections (e.g. two shoes), which increases latency.
+        groupByDetection: req.query.group_by_detection === "true",
         includeEmptyDetectionGroups: req.query.include_empty_groups === "true",
         sessionId: (req.query.session_id as string) || (req.headers["x-session-id"] as string | undefined),
         userId: Number.isFinite(Number((req.query.user_id as string) || (req as any).userId))
@@ -342,7 +362,12 @@ router.post(
 
       const payload = safeResult as any;
       if (payload.similarProducts && Array.isArray(payload.similarProducts.byDetection)) {
-        const originalByDetection = payload.similarProducts.byDetection as Array<any>;
+        const originalByDetection = (payload.similarProducts.byDetection as Array<any>).map((row) => ({
+          ...row,
+          products: Array.isArray(row.products)
+            ? sortProductsByFinalRelevanceDesc(row.products)
+            : [],
+        }));
 
         const byDetectionAfterProductPaging = productsPaginationEnabled
           ? originalByDetection.map((row) => ({

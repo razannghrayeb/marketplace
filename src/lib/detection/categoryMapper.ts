@@ -58,22 +58,26 @@ export interface NormalizedBox {
 export function inferDressLengthFromBox(box: NormalizedBox | undefined): "maxi" | "midi" | "mini" | undefined {
   if (!box || typeof box.y2 !== 'number') return undefined;
 
-  const boxHeight = Math.max(0, (box.y2 ?? 0) - (box.y1 ?? 0));
-  // Skip length inference when the dress box is small (likely not full-body)
-  // or when the detection covers the entire image (no reliable framing).
+  const y1 = box.y1 ?? 0;
+  const y2 = box.y2;
+  const boxHeight = Math.max(0, y2 - y1);
+
+  // Skip length inference when the dress box is tiny (not a full-body view)
+  // or covers the entire image (no frame of reference).
   if (boxHeight < 0.25 || boxHeight > 0.95) return undefined;
 
-  // Use box-relative proportions instead of assuming fixed waist position:
-  // the bottom 60% of the dress box is hem area.
-  const hemRatio = box.y2;
+  // Portrait / close-crop detection: box starts very near the image top AND
+  // spans most of the image height. In this framing the absolute hem position
+  // (y2) is unreliable — the image may be cropped to the dress itself rather
+  // than showing the full body. Skip inference to avoid mis-classifying a
+  // mini or midi as maxi because y2 is large due to cropping.
+  if (y1 < 0.06 && boxHeight > 0.65) return undefined;
 
-  if (hemRatio > 0.88) {
-    return "maxi";
-  } else if (hemRatio > 0.72) {
-    return "midi";
-  } else if (hemRatio > 0.0) {
-    return "mini";
-  }
+  // Full-body framing: use the absolute hem position as the length signal.
+  const hemRatio = y2;
+  if (hemRatio > 0.88) return "maxi";
+  if (hemRatio > 0.72) return "midi";
+  if (hemRatio > 0.0) return "mini";
 
   return undefined;
 }
@@ -104,20 +108,20 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
   },
   "long sleeve outwear": {
     productCategory: "outerwear",
-    confidence: 0.9,
-    alternativeCategories: ["jackets", "coats", "blazers"],
+    confidence: 0.92,
+    alternativeCategories: ["jackets", "coats", "blazers", "vests"],
     attributes: { sleeveLength: "long" },
   },
   "short sleeve outwear": {
     productCategory: "outerwear",
-    confidence: 0.85,
-    alternativeCategories: ["blazers", "vests"],
+    confidence: 0.88,
+    alternativeCategories: ["blazers", "vests", "jackets"],
     attributes: { sleeveLength: "short" },
   },
   vest: {
-    productCategory: "tops",
-    confidence: 0.8,
-    alternativeCategories: ["outerwear", "activewear"],
+    productCategory: "outerwear",
+    confidence: 0.82,
+    alternativeCategories: ["vests", "tops", "activewear"],
     attributes: { sleeveLength: "sleeveless" },
   },
   sling: {
@@ -147,25 +151,25 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
   "short sleeve dress": {
     productCategory: "dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["midi-dresses", "mini-dresses", "maxi-dresses"],
     attributes: { sleeveLength: "short" },
   },
   "long sleeve dress": {
     productCategory: "dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["midi-dresses", "maxi-dresses", "mini-dresses"],
     attributes: { sleeveLength: "long" },
   },
   "vest dress": {
     productCategory: "dresses",
     confidence: 0.9,
-    alternativeCategories: ["jumpsuits"],
+    alternativeCategories: ["midi-dresses", "mini-dresses", "jumpsuits"],
     attributes: { sleeveLength: "sleeveless" },
   },
   "sling dress": {
     productCategory: "dresses",
     confidence: 0.9,
-    alternativeCategories: [],
+    alternativeCategories: ["midi-dresses", "mini-dresses", "maxi-dresses"],
     attributes: { sleeveLength: "sleeveless" },
   },
 
@@ -280,37 +284,37 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
   dress: {
     productCategory: "dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["midi-dresses", "mini-dresses", "maxi-dresses"],
     attributes: {},
   },
   gown: {
     productCategory: "dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["maxi-dresses"],
     attributes: { formalityHint: 9 },
   },
   maxi_dress: {
-    productCategory: "dresses",
+    productCategory: "maxi-dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["dresses", "midi-dresses"],
     attributes: { dressLength: "maxi" },
   },
   long_dress: {
-    productCategory: "dresses",
+    productCategory: "maxi-dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["dresses", "midi-dresses"],
     attributes: { dressLength: "long" },
   },
   mini_dress: {
-    productCategory: "dresses",
+    productCategory: "mini-dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["dresses", "midi-dresses"],
     attributes: { dressLength: "mini" },
   },
   midi_dress: {
-    productCategory: "dresses",
+    productCategory: "midi-dresses",
     confidence: 0.95,
-    alternativeCategories: [],
+    alternativeCategories: ["dresses", "mini-dresses", "maxi-dresses"],
     attributes: { dressLength: "midi" },
   },
   jumpsuit: {
@@ -393,6 +397,78 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
     productCategory: "footwear",
     confidence: 0.95,
     alternativeCategories: ["flats"],
+    attributes: {},
+  },
+  oxfords: {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["oxfords"],
+    attributes: { formalityHint: 7 },
+  },
+  pumps: {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["pumps"],
+    attributes: { formalityHint: 8 },
+  },
+  trainers: {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["sneakers"],
+    attributes: { formalityHint: 3 },
+  },
+  "dress shoes": {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["oxfords"],
+    attributes: { formalityHint: 8 },
+  },
+  "dress shoe": {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["oxfords"],
+    attributes: { formalityHint: 8 },
+  },
+  "running shoes": {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["sneakers"],
+    attributes: { formalityHint: 3 },
+  },
+  "running shoe": {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["sneakers"],
+    attributes: { formalityHint: 3 },
+  },
+  "athletic shoes": {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["sneakers"],
+    attributes: { formalityHint: 3 },
+  },
+  "athletic shoe": {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["sneakers"],
+    attributes: { formalityHint: 3 },
+  },
+  stilettos: {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["heels"],
+    attributes: { formalityHint: 9 },
+  },
+  mules: {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["mules"],
+    attributes: { formalityHint: 5 },
+  },
+  "ankle boots": {
+    productCategory: "footwear",
+    confidence: 0.95,
+    alternativeCategories: ["boots"],
     attributes: {},
   },
 
@@ -558,6 +634,75 @@ const FUZZY_PATTERNS: FuzzyPattern[] = [
     },
   },
 
+  // Specific footwear subtypes — BEFORE generic shoe patterns so we catch these first.
+  {
+    pattern: /\b(oxfords?|brogues?|derbies?|loafers?|moccasins?|dress\s*shoes?|formal\s*shoes?|penny\s*loafers?)\b/i,
+    mapping: {
+      productCategory: "footwear",
+      confidence: 0.92,
+      alternativeCategories: ["oxfords", "dress shoes"],
+      attributes: { formalityHint: 8 },
+    },
+  },
+  {
+    pattern: /\b(pumps?|stilettos?|heels?|wedges?|kitten\s*heels?|platform|slingbacks?)\b/i,
+    mapping: {
+      productCategory: "footwear",
+      confidence: 0.92,
+      alternativeCategories: ["heels"],
+      attributes: { formalityHint: 8 },
+    },
+  },
+  {
+    pattern: /\b(sneakers?|trainers?|running\s*shoes?|athletic\s*shoes?|sport\s*shoes?|tennis\s*shoes?)\b/i,
+    mapping: {
+      productCategory: "footwear",
+      confidence: 0.92,
+      alternativeCategories: ["sneakers"],
+      attributes: { formalityHint: 3 },
+    },
+  },
+  {
+    pattern: /\b(boots?|ankle\s*boots?|chelsea\s*boots?|combat\s*boots?|hiking\s*boots?|rain\s*boots?|cowboy\s*boots?)\b/i,
+    mapping: {
+      productCategory: "footwear",
+      confidence: 0.92,
+      alternativeCategories: ["boots"],
+      attributes: {},
+    },
+  },
+  {
+    pattern: /\b(sandals?|slides?|flip\s*flops?|mules?|clogs?)\b/i,
+    mapping: {
+      productCategory: "footwear",
+      confidence: 0.92,
+      alternativeCategories: ["sandals"],
+      attributes: { formalityHint: 2 },
+    },
+  },
+  {
+    pattern: /\b(flats?|ballet\s*flats?|ballerinas?)\b/i,
+    mapping: {
+      productCategory: "footwear",
+      confidence: 0.92,
+      alternativeCategories: ["flats"],
+      attributes: {},
+    },
+  },
+
+  // Bag-specific patterns that frequently appear in captions / detector outputs.
+  // Keep these before generic footwear so bag-like labels do not fall through to
+  // unknown categories and get dropped by strict bag recovery filters.
+  {
+    pattern: /\b(handbag|hand bags?|purse|purses|wallet|wallets|tote bag|tote bags?|backpack|backpacks|crossbody bag|crossbody bags?|satchel|satchels|messenger bag|messenger bags?|shoulder bag|shoulder bags?|bucket bag|bucket bags?|hobo bag|hobo bags?|clutch|clutches)\b/i,
+    mapping: {
+      productCategory: "bags",
+      confidence: 0.88,
+      alternativeCategories: ["bags", "accessories"],
+      attributes: {},
+    },
+  },
+
   // Ambiguous category disambiguation
   {
     pattern: /\bblazer\b|\bsuit\s*jacket\b|\bsport\s*coat\b/i,
@@ -650,7 +795,8 @@ export function mapDetectionToCategory(
     mapping.alternativeCategories = [...mapping.alternativeCategories];
     mapping.confidence = mapping.confidence * detectionConfidence;
     
-    // Try to infer dress length from bounding box if this is a dress
+    // Infer dress length from bounding box — store as attribute only; keep productCategory="dresses"
+    // so isDressLikeDetectionCategory, isStrictDetectionCategory, and kNN pool sizing still fire.
     if (mapping.productCategory === "dresses" && detectionBox?.box_normalized) {
       const inferredLength = inferDressLengthFromBox({
         y1: detectionBox.box_normalized.y1 ?? 0,
@@ -658,9 +804,18 @@ export function mapDetectionToCategory(
       });
       if (inferredLength) {
         mapping.attributes.dressLength = inferredLength;
+        // Surface length-specific DB categories as alternatives for soft scoring without
+        // changing the primary category (which drives pool sizing and strict gate logic).
+        const lengthCategory = inferredLength === "maxi" ? "maxi-dresses" : inferredLength === "midi" ? "midi-dresses" : "mini-dresses";
+        const otherLengths = ["midi-dresses", "maxi-dresses", "mini-dresses"].filter(c => c !== lengthCategory);
+        mapping.alternativeCategories = [
+          lengthCategory,
+          ...otherLengths,
+          ...mapping.alternativeCategories.filter(c => !["midi-dresses","maxi-dresses","mini-dresses"].includes(c)),
+        ];
       }
     }
-    
+
     return mapping;
   }
 
@@ -670,10 +825,8 @@ export function mapDetectionToCategory(
       const result = { ...mapping };
       result.attributes = { ...mapping.attributes };
       result.alternativeCategories = [...mapping.alternativeCategories];
-      // Slight confidence penalty for fuzzy match
       result.confidence = result.confidence * detectionConfidence * 0.9;
-      
-      // Try to infer dress length from bounding box
+
       if (result.productCategory === "dresses" && detectionBox?.box_normalized) {
         const inferredLength = inferDressLengthFromBox({
           y1: detectionBox.box_normalized.y1 ?? 0,
@@ -681,9 +834,16 @@ export function mapDetectionToCategory(
         });
         if (inferredLength) {
           result.attributes.dressLength = inferredLength;
+          const lengthCategory = inferredLength === "maxi" ? "maxi-dresses" : inferredLength === "midi" ? "midi-dresses" : "mini-dresses";
+          const otherLengths = ["midi-dresses", "maxi-dresses", "mini-dresses"].filter(c => c !== lengthCategory);
+          result.alternativeCategories = [
+            lengthCategory,
+            ...otherLengths,
+            ...result.alternativeCategories.filter(c => !["midi-dresses","maxi-dresses","mini-dresses"].includes(c)),
+          ];
         }
       }
-      
+
       return result;
     }
   }
@@ -713,12 +873,12 @@ export function getSearchCategories(mapping: CategoryMapping): string[] {
  * Returns true when confidence is below threshold.
  *
  * @param mapping - The category mapping result
- * @param threshold - Confidence threshold (default 0.8)
+ * @param threshold - Confidence threshold (default 0.85, raised from 0.8 to prevent low-confidence alternative leakage)
  * @returns True if alternatives should be included in search
  */
 export function shouldUseAlternatives(
   mapping: CategoryMapping,
-  threshold: number = 0.8
+  threshold: number = 0.85
 ): boolean {
   return mapping.confidence < threshold && mapping.alternativeCategories.length > 0;
 }

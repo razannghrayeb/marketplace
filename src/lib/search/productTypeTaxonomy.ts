@@ -18,13 +18,14 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   ["shorts", "short", "bermuda", "board shorts"],
   ["skirt", "skirts", "mini skirt", "midi skirt"],
   // Footwear (7) — was one mega-cluster; now siblings are distinguishable in rerank
-  ["sneaker", "sneakers", "trainer", "trainers", "shoe", "shoes"],
-  ["boot", "boots", "ankle boot", "chelsea boot"],
-  ["sandal", "sandals", "flip flop", "flip flops"],
-  ["heel", "heels", "pump", "pumps", "stiletto", "stilettos"],
-  ["flat", "flats", "ballerina", "ballet flat", "loafer", "loafers", "oxford", "oxfords", "brogue", "brogues"],
+  ["sneaker", "sneakers", "trainer", "trainers", "running shoe", "running shoes", "athletic shoe", "athletic shoes", "sport shoe", "sport shoes", "tennis shoe", "tennis shoes"],
+  ["boot", "boots", "ankle boot", "ankle boots", "chelsea boot", "chelsea boots", "combat boot", "combat boots"],
+  ["sandal", "sandals", "flip flop", "flip flops", "flip-flop", "flip-flops", "gladiator sandal", "gladiator sandals"],
+  ["heel", "heels", "pump", "pumps", "stiletto", "stilettos", "wedge", "wedges", "slingback", "slingbacks", "kitten heel", "kitten heels"],
+  ["flat", "flats", "ballerina", "ballerinas", "ballet flat", "ballet flats", "loafer", "loafers", "moccasin", "moccasins", "oxford", "oxfords", "derby", "derbies", "brogue", "brogues", "dress shoe", "dress shoes"],
   ["mule", "mules", "slide", "slides", "clog", "clogs"],
   ["slipper", "slippers", "slip-on", "slip on", "slip ons", "slip-ons", "espadrille", "espadrilles"],
+  ["shoe", "shoes"],
   // Tops (6)
   ["hoodie", "hoodies", "sweatshirt", "sweatshirts", "pullover", "pullovers"],
   ["sweater", "sweaters", "cardigan", "cardigans", "jumper", "jumpers", "knitwear"],
@@ -32,11 +33,24 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   ["tshirt", "tee", "tees", "t-shirt", "tank", "camisole", "camis"],
   ["top", "tops", "cami"],
   ["polo", "polos", "polo shirt"],
+  // Tailored / formal (2)
+  ["suit", "suits", "tuxedo", "tuxedos", "suit jacket", "dress jacket"],
+  ["vest", "vests", "gilet", "gilets", "waistcoat", "waistcoats"],
   // Outerwear (3)
-  ["blazer", "blazers", "suit", "suits", "sport coat", "sportcoat", "suit jacket", "dress jacket"],
+  ["blazer", "blazers", "sport coat", "sportcoat"],
   [
     "jacket",
     "jackets",
+    "shirt jacket",
+    "shirt jackets",
+    "shacket",
+    "shackets",
+    "overshirt",
+    "overshirts",
+    "bomber",
+    "bomber jacket",
+  ],
+  [
     "coat",
     "coats",
     "parka",
@@ -44,14 +58,10 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
     "trench",
     "windbreaker",
     "windbreakers",
-    "vest",
-    "vests",
-    "gilet",
-    "poncho",
-    "anorak",
-    "bomber",
-    "bomber jacket",
+    "overcoat",
+    "overcoats",
   ],
+  ["poncho", "anorak"],
   // Dress (2)
   ["dress", "dresses", "gown", "gowns", "frock", "midi dress", "maxi dress", "mini dress"],
   ["jumpsuit", "jumpsuits", "romper", "rompers", "playsuit", "playsuits"],
@@ -136,6 +146,42 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   ],
 ] as const;
 
+const BROAD_TOP_QUERY_EXPANSION = [
+  "top",
+  "tops",
+  "shirt",
+  "shirts",
+  "blouse",
+  "blouses",
+  "button down",
+  "button-down",
+  "tshirt",
+  "tee",
+  "tees",
+  "t-shirt",
+  "tank",
+  "tank top",
+  "camisole",
+  "cami",
+  "camis",
+  "polo",
+  "polos",
+  "polo shirt",
+  "sweater",
+  "sweaters",
+  "cardigan",
+  "cardigans",
+  "jumper",
+  "jumpers",
+  "knitwear",
+  "hoodie",
+  "hoodies",
+  "sweatshirt",
+  "sweatshirts",
+  "pullover",
+  "pullovers",
+] as const;
+
 /** Map specific surface forms to indexed hypernyms (index-time recall). */
 export const TYPE_TO_HYPERNYM: Record<string, string> = {
   jeans: "pants",
@@ -157,8 +203,22 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   sneakers: "shoes",
   trainer: "shoes",
   trainers: "shoes",
+  "running shoe": "shoes",
+  "running shoes": "shoes",
+  "athletic shoe": "shoes",
+  "athletic shoes": "shoes",
+  "sport shoe": "shoes",
+  "sport shoes": "shoes",
+  "tennis shoe": "shoes",
+  "tennis shoes": "shoes",
   boot: "shoes",
   boots: "shoes",
+  "ankle boot": "shoes",
+  "ankle boots": "shoes",
+  "chelsea boot": "shoes",
+  "chelsea boots": "shoes",
+  "combat boot": "shoes",
+  "combat boots": "shoes",
   sandal: "shoes",
   sandals: "shoes",
   loafer: "shoes",
@@ -167,12 +227,22 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   heels: "shoes",
   flat: "shoes",
   flats: "shoes",
+  "ballet flat": "shoes",
+  "ballet flats": "shoes",
   mule: "shoes",
   mules: "shoes",
   oxford: "shoes",
   oxfords: "shoes",
   pump: "shoes",
   pumps: "shoes",
+  derby: "shoes",
+  derbies: "shoes",
+  brogue: "shoes",
+  brogues: "shoes",
+  moccasin: "shoes",
+  moccasins: "shoes",
+  "dress shoe": "shoes",
+  "dress shoes": "shoes",
   slide: "shoes",
   slides: "shoes",
   slipper: "shoes",
@@ -218,12 +288,41 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
 
   blazer: "outerwear",
   blazers: "outerwear",
-  suit: "outerwear",
-  suits: "outerwear",
+  "sport coat": "outerwear",
+  sportcoat: "outerwear",
+  "suit jacket": "tailored",
+  "dress jacket": "tailored",
+  suit: "tailored",
+  suits: "tailored",
+  tuxedo: "tailored",
+  tuxedos: "tailored",
   jacket: "outerwear",
   jackets: "outerwear",
+  "shirt jacket": "outerwear",
+  "shirt jackets": "outerwear",
+  shacket: "outerwear",
+  shackets: "outerwear",
+  overshirt: "outerwear",
+  overshirts: "outerwear",
+  bomber: "outerwear",
+  "bomber jacket": "outerwear",
   coat: "outerwear",
   coats: "outerwear",
+  parka: "outerwear",
+  parkas: "outerwear",
+  trench: "outerwear",
+  windbreaker: "outerwear",
+  windbreakers: "outerwear",
+  overcoat: "outerwear",
+  overcoats: "outerwear",
+  vest: "tailored",
+  vests: "tailored",
+  gilet: "tailored",
+  gilets: "tailored",
+  waistcoat: "tailored",
+  waistcoats: "tailored",
+  poncho: "outerwear",
+  anorak: "outerwear",
 
   tote: "bag",
   totes: "bag",
@@ -311,6 +410,9 @@ const CLUSTER_FAMILY: readonly string[] = [
   "tops",
   "tops",
   "tops",
+  "tailored",
+  "tailored",
+  "outerwear",
   "outerwear",
   "outerwear",
   "dress",
@@ -364,7 +466,7 @@ const FAMILY_PAIR_PENALTY: Record<string, Record<string, number>> = {
     modest_full: 1,
     dress: 0.72,
     tops: 0.2,
-    outerwear: 0.12,
+    outerwear: 0.62,
     footwear: 0.92,
     head_covering: 0.88,
     bags: 0.9,
@@ -402,8 +504,22 @@ const FAMILY_PAIR_PENALTY: Record<string, Record<string, number>> = {
   outerwear: {
     modest_full: 0.22,
     dress: 0.15,
+    bottoms: 0.62,
+    shorts_skirt: 0.58,
     head_covering: 0.28,
     footwear: 0.92,
+    bags: 0.9,
+    jewellery: 0.85,
+  },
+  tailored: {
+    modest_full: 0.28,
+    dress: 0.16,
+    bottoms: 0.68,
+    shorts_skirt: 0.62,
+    tops: 0.56,
+    outerwear: 0.34,
+    head_covering: 0.3,
+    footwear: 0.88,
     bags: 0.9,
     jewellery: 0.85,
   },
@@ -464,10 +580,14 @@ function lookupPairPenalty(
 const BOTTOM_PENALTY_TBL = buildSymmetricFromList([
   ["m_bt_jog", "m_bt_leg", 0.52],
   ["m_bt_jog", "m_bt_jean", 0.45],
-  ["m_bt_jog", "m_bt_tail", 0.38],
+  ["m_bt_jog", "m_bt_tail", 0.71],
+  ["m_bt_jog", "m_bt_cargo", 0.55],
   ["m_bt_leg", "m_bt_jean", 0.48],
   ["m_bt_leg", "m_bt_tail", 0.42],
+  ["m_bt_leg", "m_bt_cargo", 0.5],
   ["m_bt_jean", "m_bt_tail", 0.35],
+  ["m_bt_jean", "m_bt_cargo", 0.3],
+  ["m_bt_tail", "m_bt_cargo", 0.31],
 ]);
 
 const SHORTS_SKIRT_PENALTY_TBL = buildSymmetricFromList([["shorts", "skirt", 0.58]]);
@@ -502,13 +622,13 @@ const TOPS_PENALTY_TBL = buildSymmetricFromList([
   ["m_tp_hood", "m_tp_tee", 0.42],
   ["m_tp_hood", "m_tp_gen", 0.4],
   ["m_tp_hood", "m_tp_polo", 0.43],
-  ["m_tp_knit", "m_tp_shirt", 0.4],
+  ["m_tp_knit", "m_tp_shirt", 0.72],
   ["m_tp_knit", "m_tp_tee", 0.42],
   ["m_tp_knit", "m_tp_gen", 0.38],
-  ["m_tp_knit", "m_tp_polo", 0.4],
+  ["m_tp_knit", "m_tp_polo", 0.72],
   ["m_tp_shirt", "m_tp_tee", 0.36],
   ["m_tp_shirt", "m_tp_gen", 0.35],
-  ["m_tp_shirt", "m_tp_polo", 0.34],
+  ["m_tp_shirt", "m_tp_polo", 0.15],
   ["m_tp_tee", "m_tp_gen", 0.32],
   ["m_tp_tee", "m_tp_polo", 0.35],
   ["m_tp_gen", "m_tp_polo", 0.34],
@@ -526,6 +646,7 @@ const BOTTOM_MICRO = {
   legging: "m_bt_leg",
   jeans: "m_bt_jean",
   tailored: "m_bt_tail",
+  cargo: "m_bt_cargo",
 } as const;
 
 export function bottomMicroGroup(token: string): keyof typeof BOTTOM_MICRO | null {
@@ -542,15 +663,17 @@ export function bottomMicroGroup(token: string): keyof typeof BOTTOM_MICRO | nul
   ]);
   const leg = new Set(["legging", "leggings", "tights"]);
   const jean = new Set(["jean", "jeans", "denim", "denims"]);
-  const tail = new Set(["pant", "pants", "trouser", "trousers", "chino", "chinos", "cargo", "cargo pants", "slacks"]);
+  const tail = new Set(["pant", "pants", "trouser", "trousers", "chino", "chinos", "slacks", "dress pants", "dress pant"]);
+  const cargo = new Set(["cargo", "cargo pants", "cargos"]);
   if (jog.has(t)) return "jogger";
   if (leg.has(t)) return "legging";
   if (jean.has(t)) return "jeans";
+  if (cargo.has(t)) return "cargo";
   if (tail.has(t)) return "tailored";
   return null;
 }
 
-const SHORTS_MICRO = new Set(["shorts", "short", "bermuda", "board shorts"]);
+const SHORTS_MICRO = new Set(["shorts", "bermuda", "bermudas", "board shorts"]);
 const SKIRT_MICRO = new Set(["skirt", "skirts", "mini skirt", "midi skirt"]);
 
 function shortsSkirtMicro(token: string): "shorts" | "skirt" | null {
@@ -574,21 +697,43 @@ const FOOTWEAR_MICRO = {
 export function footwearMicroGroup(token: string): keyof typeof FOOTWEAR_MICRO | null {
   const t = token.toLowerCase().trim();
   if (!t) return null;
-  const athletic = new Set(["sneaker", "sneakers", "trainer", "trainers", "shoe", "shoes"]);
-  const boot = new Set(["boot", "boots", "ankle boot", "chelsea boot"]);
-  const sandal = new Set(["sandal", "sandals", "flip flop", "flip flops"]);
-  const heel = new Set(["heel", "heels", "pump", "pumps", "stiletto", "stilettos"]);
+  const athletic = new Set([
+    "sneaker",
+    "sneakers",
+    "trainer",
+    "trainers",
+    "running shoe",
+    "running shoes",
+    "athletic shoe",
+    "athletic shoes",
+    "sport shoe",
+    "sport shoes",
+    "tennis shoe",
+    "tennis shoes",
+  ]);
+  const genericShoe = new Set(["shoe", "shoes"]);
+  const boot = new Set(["boot", "boots", "ankle boot", "ankle boots", "chelsea boot", "chelsea boots", "combat boot", "combat boots"]);
+  const sandal = new Set(["sandal", "sandals", "flip flop", "flip flops", "flip-flop", "flip-flops", "gladiator sandal", "gladiator sandals"]);
+  const heel = new Set(["heel", "heels", "pump", "pumps", "stiletto", "stilettos", "wedge", "wedges", "slingback", "slingbacks", "kitten heel", "kitten heels"]);
   const flatDress = new Set([
     "flat",
     "flats",
     "ballerina",
+    "ballerinas",
     "ballet flat",
+    "ballet flats",
     "loafer",
     "loafers",
+    "moccasin",
+    "moccasins",
     "oxford",
     "oxfords",
+    "derby",
+    "derbies",
     "brogue",
     "brogues",
+    "dress shoe",
+    "dress shoes",
   ]);
   const mule = new Set(["mule", "mules", "slide", "slides", "clog", "clogs"]);
   const slipper = new Set([
@@ -602,6 +747,7 @@ export function footwearMicroGroup(token: string): keyof typeof FOOTWEAR_MICRO |
     "espadrilles",
   ]);
   if (athletic.has(t)) return "athletic";
+  if (genericShoe.has(t)) return null;
   if (boot.has(t)) return "boot";
   if (sandal.has(t)) return "sandal";
   if (heel.has(t)) return "heel";
@@ -632,16 +778,26 @@ export function topsMicroGroup(token: string): keyof typeof TOPS_MICRO | null {
   return null;
 }
 
-const OUTER_MICRO_BLAZER = new Set([
-  "blazer",
-  "blazers",
-  "sport coat",
-  "sportcoat",
-  "suit jacket",
+const OUTER_MICRO_SUIT = new Set([
+  "suit",
+  "suits",
+  "tuxedo",
+  "tuxedos",
 ]);
+const OUTER_MICRO_BLAZER = new Set(["blazer", "blazers", "sport coat", "sportcoat", "suit jacket", "dress jacket"]);
 const OUTER_MICRO_JACKET = new Set([
   "jacket",
   "jackets",
+  "shirt jacket",
+  "shirt jackets",
+  "shacket",
+  "shackets",
+  "overshirt",
+  "overshirts",
+  "bomber",
+  "bomber jacket",
+]);
+const OUTER_MICRO_COAT = new Set([
   "coat",
   "coats",
   "parka",
@@ -649,25 +805,38 @@ const OUTER_MICRO_JACKET = new Set([
   "trench",
   "windbreaker",
   "windbreakers",
+  "overcoat",
+  "overcoats",
+]);
+const OUTER_MICRO_VEST = new Set([
   "vest",
   "vests",
   "gilet",
+  "gilets",
+  "waistcoat",
+  "waistcoats",
   "poncho",
   "anorak",
-  "bomber",
-  "bomber jacket",
 ]);
 
-function outerMicroGroup(token: string): "blazer" | "jacket" | null {
+function outerMicroGroup(token: string): "suit" | "blazer" | "jacket" | "coat" | "vest" | null {
   const t = token.toLowerCase().trim();
+  if (OUTER_MICRO_SUIT.has(t)) return "suit";
   if (OUTER_MICRO_BLAZER.has(t)) return "blazer";
   if (OUTER_MICRO_JACKET.has(t)) return "jacket";
+  if (OUTER_MICRO_COAT.has(t)) return "coat";
+  if (OUTER_MICRO_VEST.has(t)) return "vest";
   return null;
 }
 
+// Penalty between outerwear micro-types. Keep generic jacket reasonably close to
+// coats, but do not let blazer/suit/vest drift into plain jacket searches.
 const OUTER_PAIR_PENALTY: Record<string, Record<string, number>> = {
-  blazer: { blazer: 0, jacket: 0.48 },
-  jacket: { blazer: 0.48, jacket: 0 },
+  suit: { suit: 0, blazer: 0.50, jacket: 0.65, coat: 0.72, vest: 0.58 },
+  blazer: { suit: 0.50, blazer: 0, jacket: 0.44, coat: 0.58, vest: 0.50 },
+  jacket: { suit: 0.65, blazer: 0.44, jacket: 0, coat: 0.32, vest: 0.50 },
+  coat: { suit: 0.72, blazer: 0.58, jacket: 0.32, coat: 0, vest: 0.62 },
+  vest: { suit: 0.58, blazer: 0.50, jacket: 0.50, coat: 0.62, vest: 0 },
 };
 
 const DRESS_MICRO = {
@@ -753,6 +922,33 @@ function headMicroGroup(token: string): keyof typeof HEAD_MICRO | null {
   return null;
 }
 
+/**
+ * Cross-cluster soft siblings: token pairs from different clusters within the same family
+ * that are visually/functionally related but not synonyms (e.g. vest-as-top ↔ tank/cami).
+ * Score kept at 0.58 — above zero but below the within-cluster default of 0.64.
+ */
+const SOFT_SIBLING_RAW: [string, string, number][] = [
+  ["vest", "tank", 0.58],
+  ["vest", "cami", 0.58],
+  ["vest", "camisole", 0.58],
+  ["vest", "camis", 0.58],
+  ["vests", "tank", 0.58],
+  ["vests", "cami", 0.58],
+  ["vests", "camisole", 0.58],
+  ["vests", "camis", 0.58],
+];
+
+const SOFT_SIBLING_MAP = (() => {
+  const m = new Map<string, Map<string, number>>();
+  for (const [a, b, score] of SOFT_SIBLING_RAW) {
+    if (!m.has(a)) m.set(a, new Map());
+    if (!m.has(b)) m.set(b, new Map());
+    m.get(a)!.set(b, score);
+    m.get(b)!.set(a, score);
+  }
+  return m;
+})();
+
 let clusterIndex: Map<string, Set<string>> | null = null;
 let typeToFamilyIndex: Map<string, string> | null = null;
 
@@ -807,6 +1003,7 @@ const GARMENT_LIKE_FAMILIES = new Set<string>([
   "tops",
   "shorts_skirt",
   "outerwear",
+  "tailored",
   "modest_full",
   "activewear",
   "swimwear",
@@ -877,13 +1074,17 @@ export function extractLexicalProductTypeSeeds(rawQuery: string): string[] {
   const qNorm = normalizeForLexicalMatch(rawQuery);
   if (!qNorm) return [];
   const hits: string[] = [];
+  const isVestTopQuery = /\b(?:sleeveless\s+)?vest\s+top\b/.test(qNorm);
+  if (isVestTopQuery) hits.push("tank");
   for (const phrase of getProductTypePhrasesLongestFirst()) {
     if (!phrase || phrase.length < 2) continue;
+    if (isVestTopQuery && phrase === "vest") continue;
     if (phraseMatchesWholeWords(qNorm, phrase)) hits.push(phrase);
   }
   const fam = getTypeToFamily();
   for (const w of qNorm.split(/\s+/)) {
     if (w.length < 2) continue;
+    if (isVestTopQuery && w === "vest") continue;
     if (fam.has(w)) hits.push(w);
   }
   return [...new Set(hits)];
@@ -900,6 +1101,7 @@ export function intentFamiliesForProductCategory(productCategory: string): Set<s
     tops: ["tops"],
     bottoms: ["bottoms", "shorts_skirt"],
     outerwear: ["outerwear"],
+    tailored: ["tailored"],
     footwear: ["footwear"],
     bags: ["bags"],
     // Keep "accessories" separate from bags to avoid headwear/hair labels
@@ -1178,6 +1380,9 @@ export function inferMacroFamiliesFromListingCategoryFields(
   if (/\b(coat|coats|jacket|jackets|blazer|blazers|parka|parkas|puffer|vests?)\b/.test(combined)) {
     out.add("outerwear");
   }
+  if (/\b(suit|suits|tuxedo|tuxedos|waistcoat|waistcoats|vest|vests|gilet|gilets)\b/.test(combined)) {
+    out.add("tailored");
+  }
   if (/\b(bag|bags|handbag|handbags|tote|totes|backpack|backpacks)\b/.test(combined)) {
     out.add("bags");
   }
@@ -1231,6 +1436,9 @@ export function expandProductTypesForQuery(seeds: string[]): string[] {
     const key = s.toLowerCase().trim();
     if (!key) continue;
     out.add(key);
+    if (key === "top" || key === "tops") {
+      for (const t of BROAD_TOP_QUERY_EXPANSION) out.add(t);
+    }
     const cluster = idx.get(key);
     if (cluster) {
       for (const t of cluster) out.add(t);
@@ -1290,6 +1498,22 @@ export function scoreProductTypeTaxonomyMatch(
     }
   }
 
+  // Soft cross-cluster siblings (e.g. vest-as-top ↔ tank/cami)
+  if (best < wCluster) {
+    for (const qt of q) {
+      const softRow = SOFT_SIBLING_MAP.get(qt);
+      if (!softRow) continue;
+      for (const dt of d) {
+        const softScore = softRow.get(dt);
+        if (softScore !== undefined && softScore > best) {
+          best = softScore;
+          bestQ = qt;
+          bestD = dt;
+        }
+      }
+    }
+  }
+
   return { score: best, bestQueryType: bestQ, bestDocType: bestD };
 }
 
@@ -1344,21 +1568,28 @@ export function scoreRerankProductTypeBreakdown(
   const wSib = opts?.siblingClusterWeight ?? DEFAULT_SIBLING_CLUSTER_WEIGHT;
   const wIntra = opts?.intraPenaltyWeight ?? 0.62;
 
-  const exactTax = scoreProductTypeTaxonomyMatch(seeds, docs, { sameClusterWeight: 0 });
-  const exactToken = exactTax.bestQueryType ?? exactTax.bestDocType ?? "";
-  const exactTypeScore = exactTax.score >= 1 && !isBroadExactToken(exactToken) ? 1 : 0;
-
   const clusterTax = scoreProductTypeTaxonomyMatch(seeds, docs, { sameClusterWeight: wSib });
-  const siblingClusterScore = exactTypeScore >= 1 ? 1 : clusterTax.score;
-
   const parentHypernymScore = scoreHypernymDocMatch(seeds, docs);
 
   const intraFamilyPenalty = intraFamilySubtypePenalty(seeds, docs);
 
+  const exactTax = scoreProductTypeTaxonomyMatch(seeds, docs, { sameClusterWeight: 0 });
+  const exactToken = exactTax.bestQueryType ?? exactTax.bestDocType ?? "";
+  const hasExactType = exactTax.score >= 1 && !isBroadExactToken(exactToken);
+  const hasSameFamilyType = Math.max(clusterTax.score, parentHypernymScore) > 0 || intraFamilyPenalty > 0;
+  const siblingClusterScore = hasExactType ? 1 : clusterTax.score;
+
   const base =
-    exactTypeScore >= 1 ? 1 : Math.max(clusterTax.score, parentHypernymScore);
+    hasExactType ? 1 : Math.max(clusterTax.score, parentHypernymScore);
 
   const combinedTypeCompliance = Math.max(0, Math.min(1, base - intraFamilyPenalty * wIntra));
+  const exactTypeScore = hasExactType
+    ? 1
+    : hasSameFamilyType
+      ? Math.max(0.2, Math.min(0.65, combinedTypeCompliance))
+      : docs.length > 0
+        ? 0.2
+        : 0;
 
   return {
     exactTypeScore,

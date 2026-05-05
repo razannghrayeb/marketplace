@@ -16,24 +16,31 @@ export function scoreFrictionIndex(
   };
 
   const index = weightedSum(values, decisionScoringConfig.frictionWeights);
+  const clampedIndex = clamp01(index);
 
   const explanation: string[] = [];
   if (values.inverseStylingEase > 0.55) {
-    explanation.push("Requires more styling effort to look intentional.");
+    explanation.push("Needs a bit more styling effort to look fully put together.");
   }
   if (values.inverseVersatility > 0.55) {
-    explanation.push("Works in fewer outfit combinations.");
+    explanation.push("Pairs well with fewer pieces already in your closet.");
   }
   if (values.maintenanceBurden > 0.55) {
-    explanation.push("Care routine is above average for repeat wear.");
+    explanation.push("Care needs are a little higher than average.");
   }
   if (values.statementPenalty > 0.6) {
-    explanation.push("High statement profile can reduce everyday utility.");
+    explanation.push("Its bolder look may make it less of an everyday default.");
   }
 
   if (explanation.length === 0) {
-    explanation.push("Low-friction item with strong repeat-wear practicality.");
+    if (clampedIndex <= 0.24) {
+      explanation.push("Very easy to wear on repeat through the week.");
+    } else if (clampedIndex <= 0.34) {
+      explanation.push("Low-friction choice with strong repeat-wear potential.");
+    } else {
+      explanation.push("Generally practical, with a few styling limits to keep in mind.");
+    }
   }
 
-  return { index: clamp01(index), explanation };
+  return { index: clampedIndex, explanation };
 }

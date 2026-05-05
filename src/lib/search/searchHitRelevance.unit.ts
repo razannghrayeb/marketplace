@@ -3,7 +3,7 @@ declare const describe: any;
 declare const test: any;
 declare const expect: any;
 
-import { computeHitRelevance } from "./searchHitRelevance";
+import { computeHitRelevance, scoreAudienceCompliance } from "./searchHitRelevance";
 import { scoreCrossFamilyTypePenalty } from "./productTypeTaxonomy";
 
 describe("computeHitRelevance - sleeve intent", () => {
@@ -64,6 +64,34 @@ describe("computeHitRelevance - sleeve intent", () => {
     expect(rel.sleeveCompliance).toBe(1);
     expect(rel.finalRelevance01).toBeGreaterThan(0.75);
   });
+
+  test("infers short sleeve from t-shirt signals when sleeve metadata is missing", () => {
+    const hit = {
+      _source: {
+        title: "Men Core Tee",
+        category: "T-Shirts",
+        category_canonical: "tops",
+        product_types: ["tee"],
+        attr_sleeve: null,
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.84, {
+      desiredProductTypes: ["tshirt", "tee"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      desiredStyle: "casual",
+      desiredSleeve: "short",
+      rerankColorMode: "any",
+      mergedCategory: "tops",
+      astCategories: ["tops"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+    });
+
+    expect(rel.sleeveCompliance).toBeGreaterThan(0.5);
+  });
 });
 
 describe("scoreCrossFamilyTypePenalty - category fallback", () => {
@@ -110,6 +138,33 @@ describe("computeHitRelevance - type intent reliability", () => {
 
     expect(rel.crossFamilyPenalty).toBeGreaterThanOrEqual(0.8);
     expect(rel.finalRelevance01).toBeGreaterThan(0.45);
+  });
+
+  test("unreliable type intent cannot claim exact type", () => {
+    const hit = {
+      _source: {
+        title: "Men Core Tee",
+        category: "T-Shirts",
+        category_canonical: "tops",
+        product_types: ["tshirt", "tee"],
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.86, {
+      desiredProductTypes: ["tshirt", "tee"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "tops",
+      astCategories: ["tops"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: false,
+    });
+
+    expect(rel.exactTypeScore).toBeLessThanOrEqual(0.65);
+    expect(rel.productTypeCompliance).toBeLessThanOrEqual(0.70);
   });
 
   test("reliable type intent still enforces strict cross-family blocking", () => {
@@ -160,6 +215,34 @@ describe("computeHitRelevance - type intent reliability", () => {
 });
 
 describe("computeHitRelevance - color typo normalization", () => {
+  test("tops color intent caps mismatched color relevance", () => {
+    const hit = {
+      _source: {
+        title: "Women Red Cotton Shirt",
+        category: "shirts",
+        category_canonical: "tops",
+        product_types: ["shirt"],
+        color: "red",
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.92, {
+      desiredProductTypes: ["shirt"],
+      desiredColors: ["blue"],
+      desiredColorsTier: ["blue"],
+      rerankColorMode: "any",
+      mergedCategory: "tops",
+      astCategories: ["tops"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.colorCompliance).toBeLessThan(0.2);
+    expect(rel.finalRelevance01).toBeLessThan(0.2);
+  });
+
   test("pink intent matches catalog color typo fuhsia", () => {
     const hit = {
       _source: {
@@ -214,5 +297,62 @@ describe("computeHitRelevance - color typo normalization", () => {
 
     expect(rel.colorCompliance).toBeGreaterThan(0.7);
     expect(rel.colorTier === "exact" || rel.colorTier === "family").toBe(true);
+  });
+
+  test("known brown catalog color does not score as white via color fallback", () => {
+    const hit = {
+      _source: {
+        title: "Maison Brown Men Polo Shirt",
+        category: "polo shirts",
+        category_canonical: "tops",
+        product_types: ["polo"],
+        color: "brown",
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.9, {
+      desiredProductTypes: ["shirt"],
+      desiredColors: ["white", "off-white"],
+      desiredColorsTier: ["white", "off-white"],
+      rerankColorMode: "any",
+      mergedCategory: "tops",
+      astCategories: ["tops"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: false,
+    });
+
+    expect(rel.colorCompliance).toBeLessThanOrEqual(0.45);
+  });
+});
+
+describe("scoreAudienceCompliance - cue-based gender inference", () => {
+  test("women query is penalized by masculine style cues even without gender words", () => {
+    const hit = {
+      _source: {
+        title: "Tailored Oxford Shirt",
+        category: "shirts",
+        category_canonical: "tops",
+        product_types: ["shirt", "oxford"],
+      },
+    } as any;
+
+    const compliance = scoreAudienceCompliance(undefined, "women", hit);
+    expect(compliance).toBeLessThan(0.4);
+  });
+
+  test("men query is penalized by feminine style cues even without gender words", () => {
+    const hit = {
+      _source: {
+        title: "Floral Blouse",
+        category: "shirts",
+        category_canonical: "tops",
+        product_types: ["blouse"],
+      },
+    } as any;
+
+    const compliance = scoreAudienceCompliance(undefined, "men", hit);
+    expect(compliance).toBeLessThan(0.4);
   });
 });

@@ -26,7 +26,7 @@ export function predictCompliment(
     return {
       score,
       type: "direct_compliments",
-      explanation: ["High visibility and expressive contrast tend to attract immediate comments."],
+      explanation: ["This look is likely to get quick compliments because it stands out in a clear, stylish way."],
     };
   }
   if (score >= 0.62) {
@@ -34,15 +34,19 @@ export function predictCompliment(
       score,
       type: profile.styleSignals.polished > profile.styleSignals.expressive ? "polished_respect" : "stylish_attention",
       explanation: [
-        "Balanced social visibility with coherent styling suggests noticeable positive reactions.",
+        "People are likely to notice this in a positive way without it feeling too loud.",
       ],
     };
   }
   if (score >= 0.45) {
+    const primaryDriver =
+      profile.styleSignals.polished >= profile.styleSignals.expressive
+        ? "polished consistency"
+        : "expressive styling cues";
     return {
       score,
       type: "subtle_admiration",
-      explanation: ["Likely to be appreciated more for consistency than for statement impact."],
+      explanation: [`This is more likely to be appreciated for ${primaryDriver} than for big statement energy.`],
     };
   }
   return {
@@ -50,8 +54,8 @@ export function predictCompliment(
     type: "low_reaction_high_utility",
     explanation: [
       occasionScore > 0.6
-        ? "This item leans practical and occasion-appropriate over social spotlight."
-        : "Low social visibility profile keeps reactions muted while staying useful.",
+        ? "This is more about being useful and occasion-right than grabbing a lot of attention."
+        : "Reactions may be quieter, but it stays useful and easy to wear.",
     ],
   };
 }

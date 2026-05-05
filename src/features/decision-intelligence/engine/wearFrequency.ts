@@ -37,10 +37,10 @@ export function estimateWearFrequency(
   );
 
   const explanation = [
-    `Estimated ${estimatedMonthlyWear} wears/month from repeat-wear potential and category baseline usage.`,
+    `Estimated around ${estimatedMonthlyWear} wears per month based on how easy this category is to rewear.`,
   ];
   if (profile.usageSignals.versatility < 0.45) {
-    explanation.push("Lower versatility caps weekly rotation potential.");
+    explanation.push("Lower versatility may limit how often you naturally reach for it each week.");
   }
 
   return { estimatedMonthlyWear, confidence, explanation };

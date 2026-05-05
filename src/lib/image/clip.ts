@@ -24,7 +24,7 @@ const MODEL_DIR = path.join(process.cwd(), "models");
  * - `CLIP_EXECUTION_PROVIDERS=cuda,cpu` — try CUDA first (Linux GPU / Cloud Run GPU), then CPU.
  * - `CLIP_EXECUTION_PROVIDERS=dml,cpu` — DirectML on Windows with GPU.
  * - `CLIP_USE_GPU=true` — shorthand for `cuda,cpu`.
- * - Default: `cpu` (safe for Cloud Run without GPU).
+ * - Default: `cuda,cpu` (GPU-first with CPU fallback).
  *
  * Requires a GPU-capable onnxruntime build where deployed; otherwise creation falls back to CPU.
  */
@@ -34,16 +34,34 @@ export function getClipExecutionProviders(): string[] {
     return raw.split(",").map((s) => s.trim()).filter(Boolean);
   }
   const gpu = process.env.CLIP_USE_GPU?.trim().toLowerCase();
-  if (gpu === "true" || gpu === "1" || gpu === "yes") {
-    return ["cuda", "cpu"];
+  if (gpu === "false" || gpu === "0" || gpu === "no") {
+    return ["cpu"];
   }
-  return ["cpu"];
+  return ["cuda", "cpu"];
+}
+
+let resolvedClipProviders: string[] = ["cpu"];
+
+function providersSuggestGpu(providers: string[]): boolean {
+  return providers.some((p) => {
+    const v = String(p).toLowerCase();
+    return v === "cuda" || v === "dml" || v === "coreml" || v === "tensorrt";
+  });
+}
+
+function logClipRuntimeProviders(scope: "image" | "text", providers: string[]): void {
+  const gpu = providersSuggestGpu(providers);
+  console.log(
+    `[CLIP] ${scope} runtime providers=${providers.join(",")} (device_hint=${gpu ? "gpu" : "cpu"})`
+  );
 }
 
 async function createClipInferenceSession(modelPath: string): Promise<ort.InferenceSession> {
   const providers = getClipExecutionProviders();
   try {
-    return await ort.InferenceSession.create(modelPath, { executionProviders: providers });
+    const session = await ort.InferenceSession.create(modelPath, { executionProviders: providers });
+    resolvedClipProviders = [...providers];
+    return session;
   } catch (err) {
     const first = providers[0]?.toLowerCase();
     if (first && first !== "cpu") {
@@ -53,7 +71,9 @@ async function createClipInferenceSession(modelPath: string): Promise<ort.Infere
         "failed; falling back to CPU:",
         (err as Error).message
       );
-      return await ort.InferenceSession.create(modelPath, { executionProviders: ["cpu"] });
+      const session = await ort.InferenceSession.create(modelPath, { executionProviders: ["cpu"] });
+      resolvedClipProviders = ["cpu"];
+      return session;
     }
     throw err;
   }
@@ -509,6 +529,7 @@ async function _doInit(modelType?: ClipModelType): Promise<void> {
   console.log(`[CLIP]   ${activeConfig.description}`);
   imageSession = await createClipInferenceSession(imageModelPath);
   console.log(`[CLIP] ✅ Image model loaded`);
+  logClipRuntimeProviders("image", resolvedClipProviders);
 
   // ── Load text model ───────────────────────────────────────────────────────
   // FIX: use isUsableModelFile (size-aware) instead of just fs.existsSync
@@ -516,6 +537,7 @@ async function _doInit(modelType?: ClipModelType): Promise<void> {
     console.log(`[CLIP] Loading text model: ${activeConfig.name}...`);
     textSession = await createClipInferenceSession(textModelPath);
     console.log(`[CLIP] ✅ Text model loaded`);
+    logClipRuntimeProviders("text", resolvedClipProviders);
 
     // Pre-load BPE tokenizer so the first text embedding is fast
     console.log(`[CLIP] Loading BPE tokenizer...`);

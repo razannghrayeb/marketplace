@@ -93,6 +93,10 @@ export interface ImageSearchParams extends SearchParams {
   detectionYoloConfidence?: number;
   /** Detection-mapped product category (e.g. tops, bottoms); enables category-aware ranking rules. */
   detectionProductCategory?: string;
+  /** Scene mode inferred upstream; propagated into FashionIntent/debug contract. */
+  imageMode?: "single_product" | "worn_outfit" | "flatlay_collage";
+  /** Original/refined detected item label for ranking debug. */
+  detectionLabel?: string;
   /**
    * Forces image search into "hard category" mode for this call.
    * When enabled, the OpenSearch `filters.category` terms are applied even if
@@ -126,6 +130,8 @@ export interface ImageSearchParams extends SearchParams {
   inferredColorKey?: string | null;
   /** Debug path: bypass rerank/final gates and return top-k by raw exact cosine (with existing category constraints). */
   debugRawCosineFirst?: boolean;
+  /** Include heavy per-product debug payloads in response. */
+  debug?: boolean;
   /** Optional session context used to inherit conversational filters. */
   sessionId?: string;
   /** Optional authenticated user used for wardrobe-driven personalization. */
@@ -134,6 +140,8 @@ export interface ImageSearchParams extends SearchParams {
   sessionFilters?: Partial<SearchFilters>;
   /** When true, merge same variant family into one representative result. */
   collapseVariantGroups?: boolean;
+  /** Optional request-scoped memo for rerank visual signals across recovery calls. */
+  rerankSignalCache?: Map<string, unknown>;
 }
 
 export interface TextSearchParams extends SearchParams {
@@ -171,6 +179,7 @@ export interface ProductResult {
   image_url?: string;
   image_cdn?: string;
   images?: ProductImage[];
+  product_url?: string | null;
   parent_product_url?: string | null;
   variant_group_key?: string | null;
   variant_group_size?: number;
@@ -181,6 +190,15 @@ export interface ProductResult {
   /** Cosine similarity in [0, 1] (from OpenSearch score via 2·score−1). */
   similarity_score?: number;
   match_type?: "exact" | "similar" | "related"; // How the product matched
+  normalizedFamily?: string | null;
+  normalizedType?: string | null;
+  normalizedSubtype?: string | null;
+  normalizedColor?: string | null;
+  normalizedAudience?: "men" | "women" | "unisex" | "unknown";
+  normalizedMaterial?: string | null;
+  normalizedStyle?: string | null;
+  normalizedOccasion?: string | null;
+  normalizedSilhouette?: string | null;
   // Deterministic reranking fields (Phase 3)
   rerankScore?: number;
   /** Calibrated 0..1 relevance (text search acceptance gating). */
@@ -188,6 +206,13 @@ export interface ProductResult {
   /** True when the product was preserved by a fallback gate despite scoring below the requested relevance threshold. */
   relevanceFallbackPreserved?: boolean;
   mlRerankScore?: number;
+  // Match-tier assignment (Phase 4)
+  /** Assigned tier based on normalized metadata and contract tier. */
+  matchTier?: "exact" | "strong" | "related" | "weak" | "fallback" | "blocked";
+  /** Reason for tier assignment (e.g., "exact family & type match", "related family"). */
+  tierReason?: string;
+  /** Score cap applied for this tier (e.g., 0.94 for exact, 0.78 for strong). */
+  tierCap?: number;
   explain?: {
     // ── Raw signals ──────────────────────────────────────────
     /** Raw CLIP cosine similarity [0,1]. */
@@ -275,6 +300,28 @@ export interface ProductResult {
 
     // ── Final score ──────────────────────────────────────────
     finalRelevance01?: number;
+    rankingDebug?: {
+      id?: string;
+      detectedLabel?: string;
+      visualSimilarity?: number;
+      exactTypeScore?: number;
+      typeScore?: number;
+      colorScore?: number;
+      exactColorMatch?: boolean;
+      sameColorFamily?: boolean;
+      familyMismatch?: boolean;
+      nearIdenticalVisual?: boolean;
+      visualBase?: number;
+      attributeAgreement?: number;
+      familyGate?: number;
+      contradictionPenalty?: number;
+      qualityModifier?: number;
+      maxFinal?: number;
+      matchLabel?: string;
+      finalScore?: number;
+      boosts?: string[];
+      penalties?: string[];
+    };
 
     // ── Legacy / text-search fields (omitted in image results) ─
     /** @deprecated Use clipCosine. Omitted when there is no separate lexical signal. */
@@ -357,6 +404,21 @@ export interface SearchResultWithRelated {
     did_you_mean?: string; // Suggestion if not auto-applied
     /** True when every candidate in the recall window scored below the path final-accept gate (text vs image env). */
     below_relevance_threshold?: boolean;
+    knn_timed_out?: number;
+    detection_observability?: {
+      category?: string;
+      knn_hits: number;
+      after_visual_gate: number;
+      after_final_gate: number;
+      zero_result_rate: number;
+      color_compliance_at_10: number;
+      cross_category_leak_at_10: number;
+    };
+    detection_observilaty?: {
+      hadDetections?: boolean;
+      yoloConfidence?: number;
+      category?: string;
+    };
     /** Image search: kNN recall passed CLIP gate but every hit failed final relevance gate (hard mode). */
     below_final_relevance_gate?: boolean;
     relevance_gate_soft?: boolean;
@@ -383,19 +445,34 @@ export interface SearchResultWithRelated {
     /** Session/user personalization and variant handling diagnostics. */
     session_id?: string;
     user_id?: number;
+    /** True when image search runs in strict main-path mode (rescue/fallback branches disabled). */
+    main_path_strict?: boolean;
     personalization_applied?: boolean;
     variant_group_collapsing_applied?: boolean;
     variant_group_count?: number;
     variant_group_representatives?: number;
     recall_size?: number;
     final_accept_min?: number;
+    /** True when compact "<color> <product_type>" intent forces hard relevance gate. */
+    strict_color_type_intent?: boolean;
     /** Floor used after sparse recall when strict gate yields too few hits (≤ `image_min_results_target`). */
     final_accept_min_effective?: number;
     relevance_relaxed_for_min_count?: boolean;
     image_min_results_target?: number;
+    gate_counts?: {
+      open_search_hits: number;
+      ranked_hits: number;
+      accepted_after_final_accept_min: number;
+      accepted_after_soft_gate: number;
+      accepted_after_color_post: number;
+      hydrated_results: number;
+      deduped_results: number;
+      paged_results: number;
+    };
     /** Count after relevance gate + dedupe (before pagination slice). */
     total_above_threshold?: number;
     open_search_total_estimate?: number;
+    timing?: Record<string, number>;
     pipeline_counts?: {
       /** True when kNN hits were re-scored with exact cosine(query, stored vector). */
       exact_cosine_rerank: boolean;
@@ -412,11 +489,22 @@ export interface SearchResultWithRelated {
       dropped_by_visual_threshold: number;
       hits_after_final_accept_min: number;
       dropped_by_final_relevance_before_override: number;
+      main_path_visual_admission_evaluated: number;
+      main_path_visual_admission_lifted: number;
+      main_path_visual_admission_penalized: number;
+      main_path_visual_admission_rejects: Record<string, number>;
+      main_path_visual_admission_penalty_tiers: Record<string, number>;
       rescued_by_strong_visual_override: number;
+      same_pool_safe_fill?: number;
       hits_after_color_postfilter: number;
+      hits_after_gender_postfilter: number;
+      hits_after_structured_postfilters: number;
       hits_after_hydration: number;
+      hits_before_dedupe: number;
       dropped_by_dedupe: number;
       hits_after_dedupe: number;
+      dropped_by_variant_group_collapse: number;
+      hits_after_variant_collapse: number;
       dropped_by_limit: number;
       final_returned_count: number;
     };
@@ -443,8 +531,8 @@ export interface CandidateResult {
 export interface CandidateGeneratorParams {
   baseProductId: string;
   limit?: number; // final number of candidates returned (default 30)
-  clipLimit?: number; // how many to pull from CLIP kNN (default 200)
-  textLimit?: number; // how many to pull from text search (default 200)
+  clipLimit?: number; // how many to pull from CLIP kNN (default 120)
+  textLimit?: number; // how many to pull from text search (default 120)
   usePHashDedup?: boolean; // use pHash to filter near-duplicates (default false)
   pHashThreshold?: number; // max Hamming distance to consider duplicate (default 5)
 }

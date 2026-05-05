@@ -1,4 +1,4 @@
-import type { ProductDecisionProfile } from "../types";
+import type { CompareOccasion, ProductDecisionProfile } from "../types";
 
 function topKey<T extends Record<string, number>>(obj: T): keyof T {
   return Object.entries(obj).sort((a, b) => b[1] - a[1])[0][0] as keyof T;
@@ -46,36 +46,103 @@ function formatExpressionLever(key: keyof ProductDecisionProfile["styleSignals"]
   }
 }
 
+function secondKey<T extends Record<string, number>>(obj: T): keyof T {
+  const sorted = Object.entries(obj).sort((a, b) => b[1] - a[1]);
+  return (sorted[1]?.[0] ?? sorted[0][0]) as keyof T;
+}
+
+function categoryNoun(category: string): string {
+  const normalized = category.trim().toLowerCase();
+  if (!normalized) return "piece";
+  if (normalized.endsWith("dresses")) return "dress";
+  if (normalized.endsWith("ies")) return `${normalized.slice(0, -3)}y`;
+  if (normalized.endsWith("s")) return normalized.slice(0, -1);
+  return normalized;
+}
+
+function buildOccasionGuidance(
+  requestedOccasion: CompareOccasion | undefined,
+  occasionScore: number
+): string | undefined {
+  if (!requestedOccasion) return undefined;
+
+  if (requestedOccasion === "casual") {
+    if (occasionScore < 0.58) return "For casual plans specifically, this may feel a bit dressier and need more intentional styling.";
+    if (occasionScore >= 0.72) return "For casual days, this should feel easy, relaxed, and low-effort to style.";
+    return undefined;
+  }
+
+  if (requestedOccasion === "work") {
+    if (occasionScore < 0.58) return "For work settings, this can read a bit too expressive, so you may need more polished styling.";
+    if (occasionScore >= 0.72) return "For work, this has a polished, dependable vibe that should be easy to wear confidently.";
+    return undefined;
+  }
+
+  if (requestedOccasion === "formal") {
+    if (occasionScore < 0.58) return "For formal events, this may read a little too relaxed unless you style it up with stronger accessories.";
+    if (occasionScore >= 0.72) return "For formal events, this has the polished presence you usually want in dressier settings.";
+    return undefined;
+  }
+
+  if (requestedOccasion === "party") {
+    if (occasionScore < 0.58) return "For party plans, this can feel more quiet than standout, so styling details will matter more.";
+    if (occasionScore >= 0.72) return "For party plans, this carries strong social energy and should stand out in the right way.";
+    return undefined;
+  }
+
+  if (requestedOccasion === "travel") {
+    if (occasionScore < 0.58) return "For travel, this may need more planning than ideal, especially if you want easy repeat outfits.";
+    if (occasionScore >= 0.72) return "For travel, this looks easy to repeat, pack around, and wear across different plans.";
+    return undefined;
+  }
+
+  return undefined;
+}
+
 export function buildConsequences(
   profile: ProductDecisionProfile,
-  scores: { practical: number; expressive: number; overall: number }
+  scores: { practical: number; expressive: number; overall: number },
+  requestedOccasion?: CompareOccasion,
+  occasionScore: number = 0.5
 ): string[] {
   const bullets: string[] = [];
   const primaryUsageLever = formatUsageLever(topKey(profile.usageSignals));
+  const secondaryUsageLever = formatUsageLever(secondKey(profile.usageSignals));
   const primaryExpressionLever = formatExpressionLever(topKey(profile.styleSignals));
+  const contextAdjustedPractical =
+    requestedOccasion != null ? scores.practical * (0.55 + occasionScore * 0.45) : scores.practical;
 
-  if (scores.practical >= 0.75) {
-    bullets.push(`High daily utility driven by ${primaryUsageLever}, so this integrates quickly into outfit rotation.`);
-  } else if (scores.practical >= 0.6) {
-    bullets.push(`Practical enough for steady weekly use, with ${primaryUsageLever} doing most of the work.`);
+  if (contextAdjustedPractical >= 0.8) {
+    bullets.push(
+      `Easy winner for real life: ${primaryUsageLever} and ${secondaryUsageLever} make this one simple to wear on repeat.`
+    );
+  } else if (contextAdjustedPractical >= 0.72) {
+    bullets.push(`Great day-to-day option. ${primaryUsageLever} helps it slide into your weekly outfits with less effort.`);
+  } else if (contextAdjustedPractical >= 0.6) {
+    bullets.push(`Solid for regular wear, with ${primaryUsageLever} doing most of the work.`);
   } else {
-    bullets.push(`More deliberate piece: weaker ${primaryUsageLever} means styling effort stays higher day to day.`);
+    bullets.push(`More of a planned look than a grab-and-go piece, so you'll likely style it with intention.`);
   }
 
-  if (scores.expressive >= 0.7) {
-    bullets.push(`Strong statement direction anchored by ${primaryExpressionLever}, likely to draw more social attention.`);
-  } else if (scores.expressive >= 0.5) {
-    bullets.push(`Balanced expression: ${primaryExpressionLever} adds personality without dominating the whole look.`);
+  const occasionGuidance = buildOccasionGuidance(requestedOccasion, occasionScore);
+  if (occasionGuidance) {
+    bullets.push(occasionGuidance);
+  }
+
+  if (scores.expressive >= 0.72) {
+    bullets.push(`This one has clear statement energy. ${primaryExpressionLever} gives it a stronger "notice me" vibe.`);
+  } else if (scores.expressive >= 0.58) {
+    bullets.push(`Balanced style personality: ${primaryExpressionLever} adds character without taking over your whole look.`);
   } else {
-    bullets.push(`Lower statement pressure overall; ${primaryExpressionLever} reads subtle rather than spotlight-seeking.`);
+    bullets.push(`More on the subtle side. ${primaryExpressionLever} feels polished and quiet instead of spotlight-seeking.`);
   }
 
   if (profile.usageSignals.occasionRange < 0.4) {
-    bullets.push(`Narrow occasion lane for ${profile.category.toLowerCase()} styling, better as a selective-context option.`);
+    bullets.push(`Best for specific moments. This ${categoryNoun(profile.category)} is less flexible across different occasions.`);
   } else if (profile.usageSignals.occasionRange < 0.6) {
-    bullets.push(`Moderate occasion spread: works best when the styling context is planned in advance.`);
+    bullets.push(`Moderately flexible: it works best when you already know the vibe or have a plan.`);
   } else {
-    bullets.push(`Broad occasion coverage for ${profile.category.toLowerCase()} wear, from casual to polished plans.`);
+    bullets.push(`Very flexible: you can dress this ${categoryNoun(profile.category)} down for casual plans or up for polished moments.`);
   }
 
   return bullets;

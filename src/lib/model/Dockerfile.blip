@@ -3,6 +3,8 @@ FROM us-docker.pkg.dev/deeplearning-platform-release/gcr.io/pytorch-gpu.2-2.py31
 WORKDIR /app
 
 COPY requirements-blip.txt .
+RUN pip uninstall -y torch torchvision torchaudio || true
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 torch torchvision torchaudio
 RUN pip install --no-cache-dir -r requirements-blip.txt
 
 # Build-time model bake from Hugging Face.

@@ -53,6 +53,10 @@ export type CompareDecisionResponse = {
     };
     hiddenFlaw: string;
     microStory: string;
+    decisionRationale: {
+      whyThisWon: string[];
+      tradeoffsToKnow: string[];
+    };
     scores: {
       value: number;
       quality: number;
@@ -215,6 +219,16 @@ export function legacyCompareToDecisionResponse(
       microStory:
         s.highlights[0] ??
         `${s.level_label} pick — see highlights and concerns for nuance.`,
+      decisionRationale: {
+        whyThisWon:
+          s.highlights.slice(0, 3).length > 0
+            ? s.highlights.slice(0, 3)
+            : ["Balanced signals with no major red flags in legacy scoring."],
+        tradeoffsToKnow:
+          s.concerns.slice(0, 2).length > 0
+            ? s.concerns.slice(0, 2)
+            : ["No strong tradeoff surfaced by legacy compare output."],
+      },
       scores: {
         value: overall,
         quality: overall,

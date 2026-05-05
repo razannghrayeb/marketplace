@@ -1,0 +1,1330 @@
+\documentclass[12pt,a4paper]{report}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{setspace}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\geometry{margin=1in}
+\onehalfspacing
+\setlist[itemize]{leftmargin=*,itemsep=0.25em}
+\setlist[enumerate]{leftmargin=*,itemsep=0.25em}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue}
+
+\title{AI-Powered Unified Fashion Discovery Platform for the Lebanese Market}
+\author{Student Name (ID): [Fill] \\ Supervisor Name: [Fill]}
+\date{[Fill]}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\clearpage
+
+
+\chapter{Signature Page}
+Student Signature: \_\_\_\_\_\_\_\_\_\_\_\_
+
+Supervisor Signature: \_\_\_\_\_\_\_\_\_\_\_\_
+
+
+\chapter{Acknowledgments}
+The author acknowledges the guidance of the supervisor, the support of faculty members, and the collaborative contributions of teammates involved in backend engineering, frontend development, and system testing.
+
+
+\chapter{Abstract}
+This project presents the design and implementation of an AI-powered fashion aggregation platform that unifies fragmented product catalogs and enables inspiration-driven discovery. Traditional e-commerce systems are optimized for keyword queries and are weak at visual and outfit-based intent. To address this limitation, the platform combines multimodal retrieval (text and image), shop-the-look detection, recommendation and outfit completion, wardrobe intelligence, virtual try-on, and intelligent product comparison in one architecture.
+
+
+The system is implemented as a modular Node.js/TypeScript API using Express, PostgreSQL, OpenSearch, Redis/BullMQ, and cloud/object storage integrations. The machine-learning stack integrates CLIP embeddings, YOLO-based detection, BLIP captioning, Gemini-assisted intent/attribute processing, XGBoost ranking, and Vertex AI virtual try-on. Results indicate strong practical capability for real-time product discovery and decision support, while also revealing known gaps (e.g., checkout workflow and certain auth hardening features). The project demonstrates a production-oriented, extensible architecture for local-market fashion intelligence.
+
+
+\chapter*{References}
+\addcontentsline{toc}{chapter}{References}
+
+\chapter*{Appendices}
+\addcontentsline{toc}{chapter}{Appendices}
+
+
+\chapter{1. Introduction}
+\section{1.1 Background and Motivation}
+Fashion search behavior is shifting from text-only lookup toward visual and contextual discovery. Users increasingly discover outfits from social media and real-world observations, then seek similar purchasable items. In fragmented markets, this process is inefficient because products are distributed across separate stores and inconsistent metadata structures.
+
+
+\section{1.2 Problem Statement}
+The core problem is the absence of a unified, intelligent platform that can convert visual inspiration into actionable shopping options across multiple vendors. This includes:
+
+\begin{itemize}
+\item Fragmented catalogs
+\item Limited visual search support
+\item Weak cross-product decision support
+\item Insufficient outfit-level reasoning
+\item Performance constraints in real-time retrieval
+\end{itemize}
+
+\section{1.3 Objectives}
+The project objectives are to:
+
+\begin{itemize}
+\item Aggregate fashion products into a unified index
+\item Support multimodal search (text, image, and multi-image prompts)
+\item Enable shop-the-look decomposition and retrieval
+\item Provide intelligent comparison and recommendation features
+\item Offer outfit completion and wardrobe-assisted styling workflows
+\item Maintain scalable and low-latency system behavior
+\end{itemize}
+
+\section{1.4 Significance and Impact}
+The platform reduces user effort, improves discovery relevance, increases merchant visibility, and demonstrates an applied software + AI solution tailored to a local ecosystem with strong extensibility toward regional scaling.
+
+
+\chapter{2. Literature Review / Related Work}
+\section{2.1 Traditional E-Commerce Search}
+Conventional systems rely on keyword and metadata matching, which is effective for explicit queries but weak for visual intent and implicit style attributes.
+
+
+\section{2.2 Multimodal Retrieval Systems}
+Modern systems align image and text in shared embedding spaces to support similarity search. Practical quality depends on embedding fidelity, indexing strategy, and reranking logic.
+
+
+\section{2.3 Fashion-Specific AI Systems}
+Fashion introduces complex attributes (color harmony, texture, pattern, layering, style compatibility). Specialized pipelines often include detection, captioning, and recommendation signals.
+
+
+\section{2.4 Gaps in Existing Approaches}
+Most solutions remain fragmented: they focus on one capability (search, recommendation, or comparison) rather than an integrated end-to-end decision pipeline.
+
+
+\section{2.5 Identified Gap and Proposed Solution}
+This project addresses an integration gap by combining aggregation, multimodal discovery, intelligent compare, outfit completion, wardrobe intelligence, and virtual try-on within one production-oriented architecture.
+
+
+\chapter{3. System Analysis and Design}
+\section{3.1 Requirements Analysis}
+\subsection{3.1.1 Functional Requirements}
+\begin{itemize}
+\item User authentication, profile, cart, and favorites
+\item Text/image/multi-image/multi-vector search
+\item Shop-the-look image analysis and per-item retrieval
+\item Product recommendation, compare, and complete-style
+\item Wardrobe management and style intelligence
+\item Async virtual try-on workflow
+\item Ingestion and labeling pipelines for data enrichment
+\end{itemize}
+
+\subsection{3.1.2 Non-Functional Requirements}
+\begin{itemize}
+\item Low response latency and throughput resilience
+\item Scalable modular architecture
+\item Fault tolerance with graceful degradation for optional ML services
+\item Operational observability (health and metrics)
+\item Security controls for protected routes and admin actions
+\end{itemize}
+
+\section{3.2 System Architecture}
+\subsection{3.2.1 Architectural Style and Rationale}
+The platform uses a modular service-layer monolith as the default runtime shape, with optional split-role deployment for operational scaling. This means one codebase and one API contract, while allowing different runtime responsibilities (\texttt{api}, \texttt{ml}, or \texttt{all}) based on environment configuration.
+
+The selected style balances three goals:
+\begin{itemize}
+\item fast feature iteration in a capstone/product-discovery phase
+\item strict module boundaries to reduce coupling and simplify testing
+\item progressive path toward service decomposition without rewriting business contracts
+\end{itemize}
+
+The primary internal boundary is \texttt{routes -> controller -> service}, where:
+\begin{itemize}
+\item routes map endpoint paths and middleware
+\item controllers normalize/validate request context and shape responses
+\item services contain business logic, DB/search I/O, and orchestration logic
+\end{itemize}
+
+\subsection{3.2.2 Logical View (Layered Architecture)}
+The logical architecture is organized into four layers:
+\begin{itemize}
+\item Presentation layer: storefront and admin clients consuming REST endpoints
+\item API layer: Express middleware stack and route modules
+\item Intelligence layer: retrieval, reranking, detection, recommendation, compare, and try-on orchestration
+\item Data layer: PostgreSQL (transactional/system-of-record), OpenSearch (retrieval index), Redis/BullMQ (asynchronous jobs), object storage (images/artifacts)
+\end{itemize}
+
+The key architectural principle is separation of transaction-heavy workflows (auth/cart/favorites/wardrobe state) from compute-heavy workflows (search embeddings, detection, try-on generation), even when they share the same deployment unit.
+
+\subsection{3.2.3 Runtime View (Request Lifecycle)}
+A typical synchronous request follows:
+\begin{enumerate}
+\item middleware entry (security headers, CORS, parsing, logging, metrics, rate limiting)
+\item controller-level validation and request normalization
+\item service execution across PostgreSQL/OpenSearch/external ML clients as needed
+\item response shaping to a stable API contract
+\item centralized error middleware for normalized failure payloads
+\end{enumerate}
+
+For asynchronous workflows (ingest and try-on), the runtime pattern is:
+\begin{enumerate}
+\item API accepts request and persists job state
+\item job is queued in Redis/BullMQ
+\item worker performs heavy processing and stores outputs
+\item client polls status endpoint until completion/failure
+\end{enumerate}
+
+This split prevents long-running ML tasks from blocking request threads and keeps latency predictable for user-facing endpoints.
+
+\subsection{3.2.4 Module and Route Topology}
+The route topology is domain-oriented rather than technical-function oriented. Major mounted domains include:
+\begin{itemize}
+\item \texttt{/search} and \texttt{/products} for discovery and catalog experiences
+\item \texttt{/api/images} for detection and shop-the-look operations
+\item \texttt{/api/wardrobe} and \texttt{/api/tryon} for personal styling workflows
+\item \texttt{/api/compare} for decision intelligence
+\item \texttt{/api/auth}, \texttt{/api/cart}, \texttt{/api/favorites} for account and commerce primitives
+\item \texttt{/admin}, \texttt{/metrics}, and \texttt{/health} for operations and governance
+\end{itemize}
+
+Each module is responsible for its own controller/service logic while reusing shared core libraries (database pool, OpenSearch client, shared ranking/feature utilities, image/model adapters).
+
+\subsection{3.2.5 Data Architecture and Responsibilities}
+Data responsibilities are intentionally split by access pattern:
+\begin{itemize}
+\item PostgreSQL: authoritative relational state (users, product metadata references, wardrobe entities, try-on jobs, workflow tracking)
+\item OpenSearch: denormalized, vectorized retrieval index optimized for BM25 + kNN hybrid search
+\item Redis/BullMQ: ephemeral queueing and workflow coordination for asynchronous pipelines
+\item Object storage: binary assets (product images, user uploads, generated outputs)
+\end{itemize}
+
+The architecture follows a ``source-of-truth + projection'' model: relational state remains authoritative, while OpenSearch acts as a query-optimized projection for low-latency retrieval.
+
+\subsection{3.2.6 Intelligence Architecture (ML/AI Integration)}
+The intelligence layer is orchestration-centric rather than model-centric. The API coordinates multiple model/services:
+\begin{itemize}
+\item embedding and similarity services for image/text retrieval
+\item detection/captioning services for item decomposition and semantic enrichment
+\item ranker service for recommendation and reranking
+\item cloud inference for virtual try-on generation
+\end{itemize}
+
+A core architectural decision is graceful degradation:
+\begin{itemize}
+\item if optional signals fail (e.g., captioning/ranker), fallback heuristics keep endpoints operational
+\item failures are isolated to signal quality when possible, not elevated to full endpoint outages
+\end{itemize}
+
+\subsection{3.2.7 Deployment Architecture}
+The system supports two deployment patterns:
+\begin{itemize}
+\item Monolith deployment (\texttt{SERVICE\_ROLE=all}): simplest operational model for integrated environments
+\item Split-role deployment (\texttt{SERVICE\_ROLE=api} and \texttt{SERVICE\_ROLE=ml}): separates request-facing endpoints from compute-heavy paths while preserving API contracts
+\end{itemize}
+
+This gives a staged scalability strategy: start with lower operational complexity, then isolate pressure points (ML-heavy traffic) when load or cost profile requires it.
+
+\subsection{3.2.8 Security and Reliability by Design}
+Architectural controls are embedded at the platform boundary:
+\begin{itemize}
+\item security middleware and rate limiting at ingress
+\item auth/admin middleware for protected domain enforcement
+\item health/readiness endpoints for orchestrator-level lifecycle decisions
+\item metrics endpoint for runtime observability and SLO tracking
+\item centralized error handling for consistent failure semantics
+\end{itemize}
+
+\subsection{3.2.9 Architectural Trade-offs}
+Key trade-offs in this design include:
+\begin{itemize}
+\item Monolith simplicity vs microservice isolation: chosen approach favors faster integration and lower cognitive overhead during rapid feature expansion.
+\item Shared runtime dependencies vs strict service autonomy: shared code paths accelerate delivery but require stronger operational guardrails.
+\item Hybrid retrieval quality vs infrastructure complexity: BM25 + vector + reranking improves relevance but increases calibration and monitoring requirements.
+\end{itemize}
+
+Overall, the architecture is intentionally evolutionary: it is stable enough for production-like operation, while still adaptable for future decomposition into independently scaled services.
+
+\begin{figure}[htbp]
+\centering
+\fbox{
+\begin{minipage}{0.95\textwidth}
+\small
+\begin{verbatim}
+                    +----------------------------------+
+                    |     Presentation Layer           |
+                    |  Marketplace UI / Admin UI       |
+                    +----------------+-----------------+
+                                     |
+                                     v
+                    +----------------------------------+
+                    |         API Layer (Express)      |
+                    |  Routes -> Controllers -> Services|
+                    |  Auth, Search, Compare, Wardrobe |
+                    +----------------+-----------------+
+                                     |
+                  +------------------+------------------+
+                  |                                     |
+                  v                                     v
+     +-----------------------------+       +-----------------------------+
+     |      Intelligence Layer     |       |        Data Layer           |
+     |  CLIP / YOLO / BLIP /       |<----->| PostgreSQL (source of truth)|
+     |  Gemini / XGBoost / Try-On  |       | OpenSearch (retrieval index)|
+     |  Orchestration + Reranking  |       | Redis/BullMQ (async jobs)   |
+     +-----------------------------+       | Object Storage (images/files)|
+                  |                         +-----------------------------+
+                  v
+     +-----------------------------+
+     | External ML/Cloud Services  |
+     | Vertex AI / Model Endpoints |
+     +-----------------------------+
+\end{verbatim}
+\end{minipage}
+}
+\caption{High-level system architecture showing layered responsibilities and major runtime interactions.}
+\label{fig:system-architecture}
+\end{figure}
+
+\noindent Figure~\ref{fig:system-architecture} summarizes the platform decomposition and interaction boundaries used throughout implementation and deployment.
+
+
+\section{3.3 Feasibility and Risk Analysis}
+Technical feasibility is supported by mature infrastructure and tooling. Key architectural risks include external model dependency, data quality variability from aggregated sources, and configuration/secret management complexity in distributed deployment.
+
+
+\chapter{4. Implementation}
+\section{4.1 Development Methodology}
+Implementation follows iterative delivery with modular boundaries (\texttt{routes} -> \texttt{controller} -> \texttt{service}) and continuous integration of search, recommendation, wardrobe, compare, and try-on capabilities. The architecture prioritizes testable service layers, explicit API contracts, and feature-level observability.
+
+
+\section{4.2 Tools, Technologies, and Frameworks}
+\begin{itemize}
+\item Backend runtime: Node.js 18+, TypeScript, Express
+\item Data layer: PostgreSQL (Supabase), OpenSearch (BM25 + kNN), Redis + BullMQ
+\item Storage layer: Cloudflare R2 and Supabase storage
+\item Intelligence layer: Fashion-CLIP (ONNX), YOLO, BLIP, Gemini-assisted intent/attribute extraction, XGBoost ranker, Vertex AI try-on
+\item Frontend clients: marketplace and admin applications
+\item Deployment options: monolith mode, split service roles, Docker Compose, Cloud Run
+\end{itemize}
+
+\section{4.3 Feature Implementation by Module}
+\subsection{4.3.1 Discover and Semantic Search}
+Main entry points:
+
+\begin{itemize}
+\item \texttt{GET /search}
+\item \texttt{GET /products/search}
+\end{itemize}
+
+Pipeline behavior:
+
+\begin{enumerate}
+\item Parse query and filters.
+\item Run NLP-oriented query processing (intent/entity/negation/conversational context where available).
+\item Build hybrid OpenSearch query using lexical + vector signals.
+\item Apply relevance and business-aware reranking.
+\item Hydrate results with product metadata and return paginated payload.
+\end{enumerate}
+
+Engineering notes:
+
+\begin{itemize}
+\item Search is mounted under \texttt{/search} (not \texttt{/api/search}).
+\item Faceted browsing is exposed through \texttt{/products/facets}.
+\item Trending/autocomplete endpoints provide retrieval-assistance UX.
+\end{itemize}
+
+\subsection{4.3.2 Visual Search (Single Image)}
+Main entry points:
+
+\begin{itemize}
+\item \texttt{POST /products/search/image} (preferred integration path)
+\item \texttt{POST /search/image} (alternate mount)
+\end{itemize}
+
+Pipeline behavior:
+
+\begin{enumerate}
+\item Accept multipart image input.
+\item Generate image embeddings and optional attribute vectors.
+\item Optionally extract caption/semantic hints (BLIP path when available).
+\item Run vector retrieval on OpenSearch embedding fields.
+\item Apply attribute-aware reranking (e.g., color/style alignment).
+\item Return scored results with diagnostics metadata.
+\end{enumerate}
+
+Degradation behavior:
+
+\begin{itemize}
+\item If optional captioning/auxiliary signals are unavailable, pipeline continues with image-only retrieval.
+\item Retrieval remains functional as long as core embedding path is available.
+\end{itemize}
+
+\subsection{4.3.3 Multi-Image and Multi-Vector Search}
+Main entry points:
+
+\begin{itemize}
+\item \texttt{POST /search/multi-image}
+\item \texttt{POST /search/multi-vector}
+\end{itemize}
+
+Multi-image behavior:
+
+\begin{itemize}
+\item Accepts up to multiple images with an optional natural-language prompt.
+\item Uses prompt parsing and per-attribute embedding extraction.
+\item Blends attribute-level signals into a weighted ranking decision.
+\end{itemize}
+
+Multi-vector behavior:
+
+\begin{itemize}
+\item Enables explicit weight control over dimensions (e.g., color/style/texture/material/pattern).
+\item Useful for advanced users and experimental ranking control.
+\end{itemize}
+
+\subsection{4.3.4 Shop-the-Look (Detection + Per-Item Search)}
+Main entry points:
+
+\begin{itemize}
+\item \texttt{POST /api/images/search}
+\item \texttt{POST /api/images/search/url}
+\item \texttt{POST /api/images/detect}
+\end{itemize}
+
+Extended endpoints in the same subsystem:
+
+\begin{itemize}
+\item \texttt{POST /api/images/analyze}
+\item \texttt{POST /api/images/search/selective}
+\item \texttt{POST /api/images/detect/url}
+\item \texttt{POST /api/images/detect/batch}
+\item status/metadata endpoints used for operational inspection
+\end{itemize}
+
+Purpose:
+
+\begin{itemize}
+\item Convert one outfit image into multiple actionable shopping paths.
+\item Preserve item-level granularity so users can shop each detected garment separately.
+\end{itemize}
+
+Input contract patterns:
+
+\begin{itemize}
+\item multipart upload mode: direct image file
+\item URL mode: remote image reference
+\item selective mode: user-guided item/region emphasis
+\item optional context: session/user identifiers, filter inheritance, ranking toggles
+\end{itemize}
+
+Detailed pipeline:
+
+\begin{enumerate}
+\item Request parsing and validation:
+\end{enumerate}
+\begin{itemize}
+\item validate image presence and size/type constraints
+\item normalize request-level options (limits, filters, mode flags)
+\end{itemize}
+\begin{enumerate}
+\item Detection stage:
+\end{enumerate}
+\begin{itemize}
+\item run detector and produce bounding boxes + labels + confidences
+\item optionally return detect-only response for UI overlays/debug
+\end{itemize}
+\begin{enumerate}
+\item Region preparation:
+\end{enumerate}
+\begin{itemize}
+\item crop or isolate regions of interest per detection
+\item generate region-level descriptors for retrieval
+\end{itemize}
+\begin{enumerate}
+\item Per-detection retrieval:
+\end{enumerate}
+\begin{itemize}
+\item run similarity search independently per detected item
+\item enforce retrieval caps per detection to bound response size
+\end{itemize}
+\begin{enumerate}
+\item Per-detection reranking:
+\end{enumerate}
+\begin{itemize}
+\item combine embedding proximity with optional attribute/metadata relevance
+\item apply relevance floors and remove obviously weak candidates
+\end{itemize}
+\begin{enumerate}
+\item Diversity and deduplication:
+\end{enumerate}
+\begin{itemize}
+\item collapse highly similar/variant-near results when enabled
+\item avoid repetitive outputs in the same detection group
+\end{itemize}
+\begin{enumerate}
+\item Grouped response assembly:
+\end{enumerate}
+\begin{itemize}
+\item return one result bucket per detection (label, confidence, products)
+\item include processing metadata and ranking diagnostics
+\end{itemize}
+
+Session and personalization behavior:
+
+\begin{itemize}
+\item Session context can propagate into item-level retrieval to preserve user intent continuity.
+\item User context can enable personalized boosting when profile signals are available.
+\item Fail-safe policy: missing session/profile data does not break base retrieval.
+\end{itemize}
+
+Quality controls:
+
+\begin{itemize}
+\item confidence thresholds for detection acceptance
+\item bounded per-detection result counts
+\item optional category/audience filters to reduce contamination
+\item resilience paths for sparse retrieval (fallback query behavior)
+\end{itemize}
+
+Failure and degradation model:
+
+\begin{itemize}
+\item invalid input -> validation error response
+\item detection service unavailable -> endpoint returns controlled failure (or detect-disabled path)
+\item partial-stage failure in one detection bucket should not invalidate all successful buckets when recoverable
+\end{itemize}
+
+Output behavior:
+
+\begin{itemize}
+\item response returns grouped product suggestions by detected fashion item
+\item each candidate can include score/reason-style metadata when available
+\item diagnostics may include detection counts, dropped candidates, collapse metrics, and ranking mode flags
+\end{itemize}
+
+\subsection{4.3.5 Compare and Decision Intelligence}
+Main entry points:
+
+\begin{itemize}
+\item \texttt{POST /api/compare} (primary decision-intelligence path)
+\item \texttt{POST /api/compare/decision} (adapter path)
+\item supporting quality/price/review/enhanced endpoints
+\end{itemize}
+
+Important additional compare endpoints:
+
+\begin{itemize}
+\item \texttt{GET /api/compare/quality/:productId}
+\item \texttt{POST /api/compare/analyze-text}
+\item \texttt{GET /api/compare/price/:productId}
+\item \texttt{GET /api/compare/baseline/:category}
+\item \texttt{POST /api/compare/admin/compute-baselines}
+\item \texttt{GET /api/compare/tooltips}
+\item review and enhanced compare endpoints for sentiment/logistics enrichment
+\end{itemize}
+
+Purpose:
+
+\begin{itemize}
+\item Move beyond "cheapest vs expensive" by giving structured purchase decisions.
+\item Support direct alternatives, scenario-based choices, and outfit-context comparisons.
+\end{itemize}
+
+\texttt{POST /api/compare} full pipeline:
+
+\begin{enumerate}
+\item Input normalization:
+\end{enumerate}
+\begin{itemize}
+\item accept IDs from JSON body or form-data
+\item coerce arrays/strings into normalized unique numeric IDs
+\end{itemize}
+\begin{enumerate}
+\item Request schema validation:
+\end{enumerate}
+\begin{itemize}
+\item enforce 2..5 products
+\item normalize aliases for goal, mode, occasion, and auxiliary signals
+\end{itemize}
+\begin{enumerate}
+\item Product loading and profile shaping:
+\end{enumerate}
+\begin{itemize}
+\item fetch product rows and normalize attributes
+\item derive comparison-ready signals (price/text/style/metadata proxies)
+\end{itemize}
+\begin{enumerate}
+\item Comparability gate:
+\end{enumerate}
+\begin{itemize}
+\item block invalid cross-domain sets
+\item enforce audience/category coherence rules where required
+\end{itemize}
+\begin{enumerate}
+\item Mode resolution:
+\end{enumerate}
+\begin{itemize}
+\item \texttt{direct\_head\_to\_head} for same-type alternatives
+\item \texttt{scenario\_compare} for subtype/context differences
+\item \texttt{outfit\_compare} for cross-slot set logic
+\end{itemize}
+\begin{enumerate}
+\item Multi-axis scoring:
+\end{enumerate}
+\begin{itemize}
+\item compute normalized dimensions: value, quality, style, risk, occasion
+\item include practical vs expressive decision signals
+\end{itemize}
+\begin{enumerate}
+\item Goal-aware weighting:
+\end{enumerate}
+\begin{itemize}
+\item rebalance dimension weights by objective (\texttt{best\_value}, \texttt{premium\_quality}, \texttt{style\_match}, etc.)
+\item apply occasion mismatch penalties when user context requires it
+\end{itemize}
+\begin{enumerate}
+\item Winner and confidence decision:
+\end{enumerate}
+\begin{itemize}
+\item determine leaders per context and overall
+\item classify confidence (\texttt{clear\_choice}, \texttt{leaning\_choice}, \texttt{toss\_up})
+\item optionally trigger "why-not-both" when margin is small and complementarity is high
+\end{itemize}
+\begin{enumerate}
+\item Response serialization:
+\end{enumerate}
+\begin{itemize}
+\item map engine output to stable frontend decision contract
+\item include reasoning blocks, contextual winners, and confidence narrative
+\end{itemize}
+
+Legacy/adapter path (\texttt{POST /api/compare/decision}):
+
+\begin{itemize}
+\item exists for compatibility with older compare contract clients
+\item runs legacy-style decision flow and adapts output to newer schema
+\item useful during migration but not the primary strategic path
+\end{itemize}
+
+Heuristic and analytical sub-features:
+
+\begin{itemize}
+\item text quality analysis (description/detail richness)
+\item price risk/anomaly analysis
+\item image originality/quality proxies
+\item return/shipping/policy interpretation
+\item optional enhanced logistics/merchant/review intelligence
+\end{itemize}
+
+Observability and diagnostics:
+
+\begin{itemize}
+\item decision pipeline emits stage-level operational events
+\item useful KPIs include mode distribution, fallback usage rate, toss-up frequency, and data quality warnings
+\end{itemize}
+
+Error model:
+
+\begin{itemize}
+\item invalid request -> 400
+\item products not found -> 404
+\item insufficient product data -> 422
+\item unexpected engine failure -> 500
+\end{itemize}
+
+Response quality safeguards:
+
+\begin{itemize}
+\item comparability checks prevent misleading comparisons
+\item confidence labeling prevents overconfident recommendations on ambiguous sets
+\item mode-aware narration avoids forcing a single-winner message in outfit-context scenarios
+\end{itemize}
+
+\subsection{4.3.6 CompleteStyle for Products (This is NOT Complete-Look)}
+Main entry points:
+
+\begin{itemize}
+\item \texttt{GET /products/:id/complete-style}
+\item \texttt{POST /products/complete-style}
+\item \texttt{POST /products/complete-style/try-on}
+\end{itemize}
+
+Important distinction:
+
+\begin{itemize}
+\item \texttt{complete-style} = complementary product recommendation from a source anchor product.
+\item It is a recommendation pipeline focused on completing a product-centered outfit suggestion.
+\item It is explicitly documented as a separate pipeline from \texttt{complete-look}.
+\end{itemize}
+
+Unified CompleteStyle pipeline stages:
+
+\begin{enumerate}
+\item Request normalization:
+\end{enumerate}
+\begin{itemize}
+\item options merging and clamping (\texttt{maxPerCategory}, \texttt{maxTotal}, price filters, brand exclusion/preference, audience hints)
+\end{itemize}
+\begin{enumerate}
+\item Source anchor resolution:
+\end{enumerate}
+\begin{itemize}
+\item resolve catalog source product or payload product
+\end{itemize}
+\begin{enumerate}
+\item Source understanding:
+\end{enumerate}
+\begin{itemize}
+\item detect category, infer style profile, infer audience metadata
+\end{itemize}
+\begin{enumerate}
+\item Candidate retrieval:
+\end{enumerate}
+\begin{itemize}
+\item expand complementary categories
+\item retrieve oversampled candidates with hard filters + soft boosts
+\end{itemize}
+\begin{enumerate}
+\item Candidate scoring:
+\end{enumerate}
+\begin{itemize}
+\item hard gates (reject invalid/incompatible/self rows)
+\item soft compatibility signals (style, color harmony, occasion, attributes, brand preference)
+\end{itemize}
+\begin{enumerate}
+\item Reranking and confidence filtering:
+\end{enumerate}
+\begin{itemize}
+\item ML ranker when available, heuristic fallback otherwise
+\end{itemize}
+\begin{enumerate}
+\item Wardrobe fusion (user-aware):
+\end{enumerate}
+\begin{itemize}
+\item mark owned items
+\item inject owned extras in sparse categories
+\item preserve relevance-first ordering
+\end{itemize}
+\begin{enumerate}
+\item Coverage balancing:
+\end{enumerate}
+\begin{itemize}
+\item prioritize essentials, enforce category caps, dedupe, controlled relaxation
+\end{itemize}
+\begin{enumerate}
+\item Response mapping:
+\end{enumerate}
+\begin{itemize}
+\item return grouped recommendations with reasons/scores and completion metadata
+\end{itemize}
+
+Resilience model:
+
+\begin{itemize}
+\item Ranker unavailable -> heuristic fallback.
+\item Visual signal unavailable -> disable visual contribution only.
+\item Wardrobe unavailable -> continue without wardrobe merge.
+\end{itemize}
+
+\subsection{4.3.7 Complete-Look for Wardrobe and Catalog Anchors}
+Main entry point:
+
+\begin{itemize}
+\item \texttt{POST /api/wardrobe/complete-look}
+\end{itemize}
+
+Supported request modes:
+
+\begin{itemize}
+\item \texttt{item\_ids} (wardrobe anchors)
+\item \texttt{product\_ids} (catalog anchors)
+\end{itemize}
+
+Core purpose:
+
+\begin{itemize}
+\item Build coherent multi-item outfit sets, not just per-item complements.
+\item Output includes \texttt{suggestions}, \texttt{outfitSets}, and \texttt{missingCategories}.
+\end{itemize}
+
+Complete-Look pipeline stages:
+
+\begin{enumerate}
+\item Anchor intake and mode detection (\texttt{wardrobe} vs \texttt{catalog-product})
+\item Slot inference (tops, bottoms, shoes, dresses, outerwear, bags, accessories)
+\item Gap detection (essential + complement slots; weather-aware constraints)
+\item Candidate retrieval per missing slot:
+\end{enumerate}
+\begin{itemize}
+\item strict filters first
+\item vector/lexical retrieval blend
+\item controlled recall relaxation if sparse
+\end{itemize}
+\begin{enumerate}
+\item Candidate scoring with stylist features:
+\end{enumerate}
+\begin{itemize}
+\item category compatibility
+\item color harmony
+\item style alignment
+\item pattern/material/formality alignment
+\end{itemize}
+\begin{enumerate}
+\item Fashion-aware reranking:
+\end{enumerate}
+\begin{itemize}
+\item blend of fashion score and base retrieval score
+\end{itemize}
+\begin{enumerate}
+\item Outfit set builder:
+\end{enumerate}
+\begin{itemize}
+\item enumerate cross-slot combinations from top candidates
+\item score pairwise coherence between recommended pieces
+\end{itemize}
+\begin{enumerate}
+\item Coherence gate:
+\end{enumerate}
+\begin{itemize}
+\item remove low-coherence set combinations
+\end{itemize}
+\begin{enumerate}
+\item Return top outfit sets with explanatory signals.
+\end{enumerate}
+
+Why Complete-Look is distinct:
+
+\begin{itemize}
+\item CompleteStyle is a product-centric recommendation pipeline.
+\item Complete-Look is a set-construction stylist pipeline with pairwise outfit coherence gating.
+\item Complete-Look includes explicit slot and set-level reasoning that cannot be reduced to simple nearest-neighbor retrieval.
+\end{itemize}
+
+\subsection{4.3.8 Recommendations, Wardrobe, and Styling Intelligence}
+Recommendations:
+
+\begin{itemize}
+\item \texttt{GET /products/:id/recommendations}
+\item \texttt{POST /products/recommendations/batch}
+\end{itemize}
+
+Wardrobe core:
+
+\begin{itemize}
+\item CRUD item management and profile computation
+\item gap detection and compatibility graph endpoints
+\item outfit suggestions and coherence scoring
+\item layering analysis and weather checks
+\item photo analysis and re-analysis pipelines
+\end{itemize}
+
+Wardrobe intelligence value:
+
+\begin{itemize}
+\item Bridges marketplace recommendations with user-owned inventory.
+\item Enables style-consistent, practicality-aware suggestions.
+\end{itemize}
+
+Detailed recommendation flow:
+
+\begin{enumerate}
+\item Candidate generation:
+\end{enumerate}
+\begin{itemize}
+\item retrieve similarity candidates from vector/text signals
+\item include category-compatible products
+\end{itemize}
+\begin{enumerate}
+\item Feature engineering:
+\end{enumerate}
+\begin{itemize}
+\item style/color/price similarity features
+\item optional image-derived and historical behavior signals
+\end{itemize}
+\begin{enumerate}
+\item Ranking stage:
+\end{enumerate}
+\begin{itemize}
+\item ML ranker path (XGBoost service) when available
+\item heuristic fallback weights when ranker unavailable
+\end{itemize}
+\begin{enumerate}
+\item Post-processing:
+\end{enumerate}
+\begin{itemize}
+\item deduplicate near-identical results
+\item enforce caps/diversity and optional policy filters
+\end{itemize}
+\begin{enumerate}
+\item Response:
+\end{enumerate}
+\begin{itemize}
+\item ranked items plus optional score/reason metadata
+\end{itemize}
+
+Wardrobe detailed capabilities:
+
+\begin{itemize}
+\item profile computation from owned items (style/color/category distributions)
+\item compatibility graph creation for pairwise item fit
+\item wardrobe gap analysis for missing essentials
+\item outfit suggestion generation from owned inventory
+\item image/photo analysis for item auto-categorization
+\item coherence scoring for user-defined outfits
+\item layering analysis with weather-awareness constraints
+\end{itemize}
+
+\subsection{4.3.9 Authentication and User Management}
+Main entry points:
+
+\begin{itemize}
+\item \texttt{POST /api/auth/signup}
+\item \texttt{POST /api/auth/login}
+\item \texttt{POST /api/auth/refresh}
+\item \texttt{POST /api/auth/logout}
+\item \texttt{GET/PATCH /api/auth/me}
+\end{itemize}
+
+Auth flow:
+
+\begin{enumerate}
+\item Signup/login validates credentials and account status.
+\item Access + refresh tokens are issued with bounded lifetimes.
+\item Protected routes rely on auth middleware.
+\item Refresh endpoint rotates token sessions.
+\item Logout blacklists refresh token to prevent reuse.
+\end{enumerate}
+
+Current limitations:
+
+\begin{itemize}
+\item no email verification
+\item no forgot/reset password flow
+\item strong JWT secret must be enforced by production environment configuration
+\end{itemize}
+
+\subsection{4.3.10 Cart and Favorites}
+Cart entry points:
+
+\begin{itemize}
+\item \texttt{GET /api/cart}
+\item \texttt{POST /api/cart}
+\item \texttt{PATCH /api/cart/:productId}
+\item \texttt{DELETE /api/cart/:productId}
+\item \texttt{DELETE /api/cart/clear}
+\end{itemize}
+
+Cart behavior:
+
+\begin{enumerate}
+\item Validate authenticated user context.
+\item Upsert/add item with quantity semantics.
+\item Join product data for display-ready cart payload.
+\item Recompute totals server-side for consistency.
+\end{enumerate}
+
+Favorites entry points:
+
+\begin{itemize}
+\item \texttt{GET /api/favorites}
+\item \texttt{POST /api/favorites/toggle}
+\item \texttt{GET /api/favorites/check/:productId}
+\item \texttt{POST /api/favorites/check} (batch)
+\end{itemize}
+
+Favorites behavior:
+
+\begin{itemize}
+\item toggle persistence by user/product
+\item supports single and batch existence checks for fast UI rendering
+\end{itemize}
+
+\subsection{4.3.11 Ingest Pipeline and Labeling Pipeline}
+Ingest entry points:
+
+\begin{itemize}
+\item \texttt{POST /api/ingest/image}
+\item \texttt{GET /api/ingest/:jobId}
+\end{itemize}
+
+Ingest processing flow (worker-based):
+
+\begin{enumerate}
+\item Accept upload and register ingest job.
+\item Queue job through Redis/BullMQ.
+\item Worker downloads/validates image payload.
+\item Compute embeddings and run detection.
+\item Produce derivative artifacts and metadata.
+\item Persist generated records and mark job status.
+\end{enumerate}
+
+Design characteristics:
+
+\begin{itemize}
+\item asynchronous execution to protect API latency
+\item status polling contract for frontend reliability
+\item fault isolation between ingestion and user-facing request path
+\end{itemize}
+
+Labeling entry points:
+
+\begin{itemize}
+\item task retrieval/assignment/submission/skip/stats endpoints under \texttt{/api/labeling}
+\end{itemize}
+
+Labeling purpose:
+
+\begin{itemize}
+\item provide active-learning feedback loops for recommendation quality
+\item collect supervised signals for model refinement
+\end{itemize}
+
+\subsection{4.3.12 Image Analysis Subsystem}
+Main entry points:
+
+\begin{itemize}
+\item \texttt{POST /api/images/analyze}
+\item \texttt{POST /api/images/search}
+\item \texttt{POST /api/images/search/selective}
+\item \texttt{POST /api/images/search/url}
+\item \texttt{POST /api/images/detect}
+\item \texttt{POST /api/images/detect/url}
+\item \texttt{POST /api/images/detect/batch}
+\end{itemize}
+
+Subsystem behavior:
+
+\begin{enumerate}
+\item detection-only mode for diagnostics and UI overlays
+\item search mode for retrieval over detected items
+\item selective mode for user-directed region/item intent
+\item URL-based mode for remote image workflows
+\item batch mode for throughput-oriented image processing
+\end{enumerate}
+
+\subsection{4.3.13 Admin and Operations Endpoints}
+Admin scope:
+
+\begin{itemize}
+\item product moderation (hide/unhide/flag/unflag)
+\item canonical grouping and catalog hygiene
+\item operational job triggers and stats endpoints
+\end{itemize}
+
+Security posture:
+
+\begin{itemize}
+\item admin endpoints are protected by auth + admin-role middleware
+\item operations remain auditable through structured logs and metrics
+\end{itemize}
+
+\subsection{4.3.14 Metrics, Health, and Observability}
+Health endpoints:
+
+\begin{itemize}
+\item \texttt{GET /health/live}
+\item \texttt{GET /health/ready}
+\end{itemize}
+
+Metrics endpoint:
+
+\begin{itemize}
+\item \texttt{GET /metrics} (Prometheus format)
+\end{itemize}
+
+Observability goals:
+
+\begin{itemize}
+\item enable readiness/liveness orchestration
+\item expose request volume and latency instrumentation
+\item support incident triage and deployment confidence checks
+\end{itemize}
+
+\subsection{4.3.15 Data and Search Infrastructure Internals}
+PostgreSQL responsibilities:
+
+\begin{itemize}
+\item source-of-truth for users, catalog metadata, wardrobe, try-on jobs, and workflow tables
+\item migration-driven schema evolution
+\end{itemize}
+
+OpenSearch responsibilities:
+
+\begin{itemize}
+\item vector and lexical retrieval index
+\item hybrid query execution and ranking candidate retrieval
+\end{itemize}
+
+Redis/BullMQ responsibilities:
+
+\begin{itemize}
+\item queueing and background processing
+\item decoupling heavy compute from synchronous API paths
+\end{itemize}
+
+Storage responsibilities:
+
+\begin{itemize}
+\item image and generated asset persistence
+\item stable URL/object references for downstream services
+\end{itemize}
+
+\subsection{4.3.16 Virtual Try-On}
+Main entry points under \texttt{/api/tryon}:
+
+\begin{itemize}
+\item submit (\texttt{/}, \texttt{/from-wardrobe}, \texttt{/from-product}, \texttt{/batch})
+\item status/history (\texttt{/:id}, \texttt{/history}, \texttt{/saved})
+\item lifecycle management (\texttt{cancel}, \texttt{delete}, \texttt{save})
+\end{itemize}
+
+Operational model:
+
+\begin{itemize}
+\item async job lifecycle (\texttt{pending -> processing -> completed/failed})
+\item immediate acceptance on submit and polling-based retrieval
+\item dependency on Vertex AI credentials/project configuration
+\end{itemize}
+
+Detailed try-on flow:
+
+\begin{enumerate}
+\item Accept person/garment sources (file or product/wardrobe references).
+\item Validate user context and rate limit boundaries.
+\item Create async job record and return accepted response.
+\item Background processor calls external try-on model endpoint.
+\item Persist generated result artifacts and status transitions.
+\item Expose history/saved management for user experience continuity.
+\end{enumerate}
+
+Failure handling:
+
+\begin{itemize}
+\item configuration and migration errors are surfaced with actionable error codes
+\item job-level failures do not crash API process; they transition to failed state
+\end{itemize}
+
+\section{4.4 Security, Reliability, and Operations Controls}
+Security controls:
+
+\begin{itemize}
+\item Helmet and CORS middleware
+\item API rate limiting and bounded payload parsing
+\item JWT access/refresh authentication
+\item refresh token blacklist logout behavior
+\item route-level protection for user and admin scopes
+\end{itemize}
+
+Reliability controls:
+
+\begin{itemize}
+\item health probes (\texttt{/health/live}, \texttt{/health/ready})
+\item Prometheus metrics (\texttt{/metrics})
+\item graceful startup/degradation around model/index initialization
+\item queue-based asynchronous processing for heavy jobs
+\end{itemize}
+
+Operational controls:
+
+\begin{itemize}
+\item deployment runbooks and env contracts
+\item migration-driven schema evolution
+\item index management scripts and reindex support
+\item role-based service deployment options (monolith or split-role modes)
+\end{itemize}
+
+\chapter{5. Testing and Evaluation}
+\section{5.1 Testing Strategy}
+The system applies mixed validation layers:
+
+\begin{enumerate}
+\item Unit tests for relevance, compatibility, and feature-engine logic.
+\item Service-level tests for decision/ranking behavior.
+\item Scripted evaluations for search quality and image relevance.
+\item Type-check and regression matrix validation for stylist pipelines.
+\end{enumerate}
+
+Representative validation evidence includes:
+
+\begin{itemize}
+\item search relevance utility tests
+\item decision-intelligence feature tests
+\item complete-look matrix validation
+\item TypeScript compile-time integrity checks
+\end{itemize}
+
+\section{5.2 Evaluation Methodology}
+Evaluation is performed along practical engineering dimensions:
+
+\begin{itemize}
+\item Retrieval quality for text, image, and multi-image queries
+\item Robustness of compare decisions under heterogeneous product sets
+\item Outfit completion quality at both per-item and set level
+\item Stability under optional component failure
+\item Operational readiness (health/metrics/deployability)
+\end{itemize}
+
+\section{5.3 Feature-Specific Evaluation Notes}
+\subsection{5.3.1 Search and Discovery}
+\begin{itemize}
+\item Hybrid retrieval improves recall over lexical-only approaches.
+\item Attribute-aware reranking improves semantic alignment in visual search.
+\item Session/personalization propagation improves contextual relevance continuity.
+\end{itemize}
+
+\subsection{5.3.2 Compare Decision Intelligence}
+\begin{itemize}
+\item Multi-axis scoring improves explainability versus single-score ranking.
+\item Confidence classification (\texttt{clear\_choice}, \texttt{leaning\_choice}, \texttt{toss\_up}) enables safer UX messaging.
+\item Comparability gates reduce misleading cross-domain comparisons.
+\end{itemize}
+
+\subsection{5.3.3 CompleteStyle (Product)}
+\begin{itemize}
+\item Category expansion + scoring + balancing improves recommendation completeness.
+\item Wardrobe-aware fusion provides practical personalization.
+\item Controlled relaxation preserves non-empty useful outputs without violating hard safety gates.
+\end{itemize}
+
+\subsection{5.3.4 Complete-Look (Wardrobe/Catalog)}
+\begin{itemize}
+\item Slot inference and missing-category logic improve outfit assembly quality.
+\item Pairwise coherence scoring reduces incoherent combinations that would pass item-level relevance.
+\item Coherence gating enforces stylist consistency at set-level output.
+\end{itemize}
+
+\section{5.4 Known Gaps and Evaluation Constraints}
+\begin{itemize}
+\item Checkout/payment/order lifecycle is not fully implemented.
+\item Email verification and password reset are absent.
+\item Test distribution is uneven across all modules.
+\item Some environment/migration setup errors can degrade specific features if not operationally enforced.
+\item Privacy policy artifacts are less formal than technical controls.
+\end{itemize}
+
+\chapter{6. Entrepreneurial / Innovation Aspects}
+\section{6.1 Market Relevance}
+The platform addresses a clear local need: unifying fragmented fashion inventory and reducing search friction in a multi-store ecosystem.
+
+
+\section{6.2 Innovation}
+Innovation lies in end-to-end integration:
+
+\begin{itemize}
+\item Multimodal search and shop-the-look
+\item Decision intelligence (compare + rank + complete style)
+\item Wardrobe-aware recommendations
+\item Cloud try-on and operationalized ML components
+\end{itemize}
+
+\section{6.3 Commercialization and Scalability}
+The architecture supports expansion via:
+
+\begin{itemize}
+\item Additional vendors and catalogs
+\item Region-level rollout
+\item Service-role split deployment (API vs ML)
+\item Feature-level monetization opportunities (premium try-on/styling intelligence)
+\end{itemize}
+
+\section{6.4 Ethical and Societal Considerations}
+Ethical priorities include fair product representation, transparent recommendation logic, and responsible handling of user-uploaded images and identity-related data in try-on scenarios.
+
+
+\chapter{7. Project Management and Teamwork}
+\section{7.1 Timeline and Milestones}
+Typical milestones:
+
+\begin{enumerate}
+\item Requirements and architecture definition
+\item Core API and search foundation
+\item Intelligence modules (recommendation/compare/wardrobe/try-on)
+\item Testing, hardening, and documentation consolidation
+\item Deployment-readiness and operational monitoring
+\end{enumerate}
+
+\section{7.2 Resource Management}
+Key resources included cloud services, ML model runtime dependencies, search infrastructure, and structured documentation for maintainability.
+
+
+\section{7.3 Team Roles}
+Representative role split:
+
+\begin{itemize}
+\item Backend/AI integration engineering
+\item Frontend/dashboard integration
+\item Data/ML pipeline support
+\item Quality assurance and release stabilization
+\end{itemize}
+
+\chapter{8. Results and Discussion}
+\section{8.1 Objective Achievement}
+The project successfully delivers a technically rich unified fashion discovery platform with multimodal retrieval, comparison, recommendation, wardrobe intelligence, and virtual try-on capabilities.
+
+
+\section{8.2 Strengths}
+\begin{itemize}
+\item Broad feature integration under one API ecosystem
+\item Practical use of modern AI/ML components
+\item Scalable and modular architecture with clear separation of concerns
+\item Mature operational signals (health, metrics, deployment docs)
+\end{itemize}
+
+\section{8.3 Limitations}
+\begin{itemize}
+\item Commerce completion capabilities remain partial (no full order lifecycle)
+\item Some security/config defaults require strict production governance
+\item Reliance on external ML and cloud services introduces operational coupling
+\item Coverage and policy documentation can be further strengthened
+\end{itemize}
+
+\section{8.4 Contribution to Practice}
+This work demonstrates how computer science concepts (information retrieval, machine learning, distributed systems, API engineering, and software architecture) can be integrated into a market-relevant product with real deployment pathways.
+
+
+\chapter{9. Conclusion and Future Work}
+\section{9.1 Conclusion}
+This capstone implements a professional-grade fashion discovery platform that bridges the gap between inspiration and purchase intent. The system advances beyond simple search by combining multimodal retrieval, decision intelligence, and style-aware workflows in a cohesive architecture.
+
+
+\section{9.2 Future Work}
+Recommended next steps:
+
+\begin{itemize}
+\item Implement checkout, orders, and payment lifecycle
+\item Add email verification and password recovery
+\item Expand automated integration and end-to-end test suites
+\item Introduce online experimentation (A/B testing) for ranking and UX decisions
+\item Formalize privacy/data-retention policy and governance artifacts
+\item Strengthen model lifecycle management (monitoring, retraining, drift control)
+\end{itemize}
+
+\chapter{References}
+[1] Project root documentation and system overview: \texttt{README.md}
+
+[2] Feature mapping and endpoint integration: \texttt{docs/FEATURES.md}
+
+[3] API contract details: \texttt{docs/api-reference.md}
+
+[4] Architecture and module guidelines: \texttt{docs/architecture.md}
+
+[5] Implementation audit and known gaps: \texttt{docs/IMPLEMENTATION\_STATUS.md}
+
+[6] Embeddings and retrieval pipelines: \texttt{docs/embeddings-and-search-pipelines.md}
+
+[7] ML stack details: \texttt{docs/ml-models.md}
+
+[8] Data model and migrations: \texttt{docs/database.md}
+
+[9] Deployment guides: \texttt{docs/deployment.md}, \texttt{docs/deploy-cloud-run.md}
+
+
+\chapter{Appendices}
+\section{Appendix A: API Endpoint Domains}
+\begin{itemize}
+\item \texttt{/search}, \texttt{/products}, \texttt{/api/images}, \texttt{/api/compare}, \texttt{/api/wardrobe}, \texttt{/api/tryon}, \texttt{/api/auth}, \texttt{/api/cart}, \texttt{/api/favorites}, \texttt{/admin}, \texttt{/metrics}, \texttt{/health}
+\end{itemize}
+
+\section{Appendix B: Suggested Figures/Tables for Final DOCX}
+\begin{itemize}
+\item System architecture diagram (layered + module map)
+\item Search pipeline flow (text/image/multi-image)
+\item Database entity overview
+\item Try-on async state machine
+\item Feature-to-endpoint traceability matrix
+\end{itemize}
+\end{document}

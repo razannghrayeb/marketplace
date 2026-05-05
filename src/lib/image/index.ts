@@ -32,6 +32,7 @@ export {
   processImageForGarmentEmbeddingWithOptionalBox,
   computeImageSearchGarmentQueryEmbedding,
   computeShopTheLookGarmentEmbeddingFromDetection,
+  computeShopTheLookGarmentEmbeddingsFromDetections,
   extractGarmentPaddedRoiFromPreparedImage,
   extractPaddedDetectionCropBuffer,
   GARMENT_DETECTION_PAD_RATIO,

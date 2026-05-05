@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package marketplace.rerank.v1;
+
+service ImageReranker {
+  rpc RerankImagePairs(RerankRequest) returns (RerankResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ready = 1;
+  string status = 2;
+  string execution_provider = 3;
+}
+
+message Candidate {
+  string id = 1;
+  bytes image_bytes = 2;
+  string image_url = 3;
+}
+
+message RerankRequest {
+  bytes query_image_bytes = 1;
+  repeated Candidate candidates = 2;
+}
+
+message Score {
+  string id = 1;
+  float score = 2;
+}
+
+message RerankResponse {
+  repeated Score scores = 1;
+  uint32 count = 2;
+  uint32 max_batch_size = 3;
+}

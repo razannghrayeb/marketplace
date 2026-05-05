@@ -32,6 +32,32 @@ const BLIP_API_TIMEOUT_MS = Math.max(
   Number(process.env.BLIP_API_TIMEOUT_MS || 8000) || 8000
 );
 
+/**
+ * ONNX Runtime execution providers for BLIP local sessions.
+ * - `BLIP_EXECUTION_PROVIDERS=cuda,cpu` — try CUDA first, then CPU.
+ * - `BLIP_EXECUTION_PROVIDERS=dml,cpu` — DirectML on Windows.
+ * - `BLIP_USE_GPU=true` — shorthand for `cuda,cpu`.
+ * - Default: `cuda,cpu` (GPU-first with CPU fallback).
+ */
+function getBlipExecutionProviders(): string[] {
+  const raw = process.env.BLIP_EXECUTION_PROVIDERS?.trim();
+  if (raw) {
+    return raw.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  const gpu = process.env.BLIP_USE_GPU?.trim().toLowerCase();
+  if (gpu === 'false' || gpu === '0' || gpu === 'no') {
+    return ['cpu'];
+  }
+  return ['cuda', 'cpu'];
+}
+
+function providersSuggestGpu(providers: string[]): boolean {
+  return providers.some((p) => {
+    const v = p.toLowerCase();
+    return v === 'cuda' || v === 'dml' || v === 'coreml' || v === 'tensorrt';
+  });
+}
+
 // BLIP uses standard BERT WordPiece vocab. google-bert/bert-base-uncased is
 // public and doesn't require authentication (unlike the Xenova repo).
 const BLIP_VOCAB_URL =
@@ -159,6 +185,19 @@ export class BlipService {
   private visionSession:  ort.InferenceSession | null = null;
   private decoderSession: ort.InferenceSession | null = null;
   private mode: 'onnx-local' | 'remote-api' | 'disabled' = 'disabled';
+  private runtimeLogged = false;
+  private resolvedProviders: string[] = ['cpu'];
+
+  private logRuntimeDetails(extra?: Record<string, unknown>) {
+    if (this.runtimeLogged) return;
+    this.runtimeLogged = true;
+    const details: Record<string, unknown> = {
+      mode: this.mode,
+      device_hint: this.mode === 'onnx-local' ? 'cpu' : 'unknown-remote',
+      ...extra,
+    };
+    console.log('[BLIP] runtime', details);
+  }
 
   async init() {
     if (BLIP_API_URL) {
@@ -168,18 +207,44 @@ export class BlipService {
       }
       this.mode = 'remote-api';
       console.log(`[BLIP] remote API mode ready: ${BLIP_API_URL}`);
+      this.logRuntimeDetails({ endpoint: BLIP_API_URL });
       return;
     }
 
     await loadVocab();
 
-    [this.visionSession, this.decoderSession] = await Promise.all([
-      ort.InferenceSession.create(path.join(MODEL_DIR, 'blip-vision.onnx'),       { executionProviders: ['cpu'] }),
-      ort.InferenceSession.create(path.join(MODEL_DIR, 'blip-text-decoder.onnx'), { executionProviders: ['cpu'] }),
-    ]);
+    const providers = getBlipExecutionProviders();
+    try {
+      [this.visionSession, this.decoderSession] = await Promise.all([
+        ort.InferenceSession.create(path.join(MODEL_DIR, 'blip-vision.onnx'), { executionProviders: providers }),
+        ort.InferenceSession.create(path.join(MODEL_DIR, 'blip-text-decoder.onnx'), { executionProviders: providers }),
+      ]);
+      this.resolvedProviders = [...providers];
+    } catch (err) {
+      const first = providers[0]?.toLowerCase();
+      if (first && first !== 'cpu') {
+        console.warn(
+          '[BLIP] executionProviders',
+          providers.join(','),
+          'failed; falling back to CPU:',
+          (err as Error).message,
+        );
+        [this.visionSession, this.decoderSession] = await Promise.all([
+          ort.InferenceSession.create(path.join(MODEL_DIR, 'blip-vision.onnx'), { executionProviders: ['cpu'] }),
+          ort.InferenceSession.create(path.join(MODEL_DIR, 'blip-text-decoder.onnx'), { executionProviders: ['cpu'] }),
+        ]);
+        this.resolvedProviders = ['cpu'];
+      } else {
+        throw err;
+      }
+    }
 
     this.mode = 'onnx-local';
     console.log('[BLIP] vision + decoder ready');
+    this.logRuntimeDetails({
+      execution_providers: this.resolvedProviders,
+      device_hint: providersSuggestGpu(this.resolvedProviders) ? 'gpu' : 'cpu',
+    });
   }
 
   async caption(imageBuffer: Buffer): Promise<string> {

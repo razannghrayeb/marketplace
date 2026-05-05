@@ -61,7 +61,7 @@ export function TryOnCompleteStylePanel({ garmentFile, jobId, enabled }: Props) 
         <Loader2 className="h-8 w-8 animate-spin text-violet-500" />
         <p className="mt-3 text-sm font-medium text-neutral-700">Building your outfit…</p>
         <p className="mt-1 max-w-xs text-center text-xs text-neutral-500">
-          Matching your garment to the catalog and pulling complementary pieces.
+          Building outfit suggestions directly from your try-on garment.
         </p>
       </div>
     )

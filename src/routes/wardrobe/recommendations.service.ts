@@ -32,6 +32,13 @@ import {
   type OutfitNarrative,
 } from "../../lib/outfit/outfitNarrative";
 import type { ProductCategory, StyleProfile, StyleRecommendation } from "../../lib/outfit/completestyle";
+import { mapHexToFashionCanonical } from "../../lib/color/garmentColorPipeline";
+import {
+  getStyleAwareSlotTerms,
+  resolveWeatherContext,
+  type FashionAesthetic,
+  type OutfitOccasion,
+} from "../../lib/outfit/styleAwareSlotQuery";
 
 // ============================================================================
 // Types
@@ -65,12 +72,16 @@ export interface CompleteLookSuggestion extends ProductRecommendation {
     embeddingNorm: number;
     categoryCompat: number;
     colorHarmony: number;
+    colorPreferenceAlignment?: number;
     styleAlignment?: number;
     patternAlignment?: number;
     formalityAlignment?: number;
+    weatherAlignment?: number;
     materialAlignment?: number;
     footwearStyleAlignment?: number;
     bagStyleAlignment?: number;
+    bagColorAlignment?: number;
+    colorDecisionAlignment?: number;
     accessoryStyleAlignment?: number;
   };
   stylistSignals?: {
@@ -121,11 +132,13 @@ const STYLE_TERMS_LEXICON = [
   "sporty",
   "athleisure",
   "boho",
+  "bohemian",
   "elegant",
   "chic",
   "edgy",
   "business",
   "romantic",
+  "modern",
 ] as const;
 
 function isTrackedOutfitSlot(value: string): boolean {
@@ -137,7 +150,7 @@ function normalizeWardrobeCategory(value?: string | null): string | null {
   const raw = value.toLowerCase().trim();
   if (!raw) return null;
   if (raw.includes("dress") || raw.includes("gown")) return "dresses";
-  if (raw.includes("top") || raw.includes("shirt") || raw.includes("blouse") || raw.includes("hoodie") || raw.includes("sweater"))
+  if (raw.includes("top") || raw.includes("shirt") || raw.includes("polo") || raw.includes("blouse") || raw.includes("hoodie") || raw.includes("sweater"))
     return "tops";
   if (
     raw.includes("bottom") ||
@@ -161,8 +174,9 @@ function normalizeWardrobeCategory(value?: string | null): string | null {
     return "shoes";
   if (raw.includes("outerwear") || raw.includes("coat") || raw.includes("jacket") || raw.includes("blazer") || raw.includes("cardigan"))
     return "outerwear";
-  if (raw.includes("bag") || raw.includes("tote") || raw.includes("clutch") || raw.includes("wallet")) return "bags";
-  if (raw.includes("accessor") || raw.includes("watch") || raw.includes("scarf") || raw.includes("hat") || raw.includes("sunglass") || raw.includes("jewelry"))
+  if (raw.includes("bag") || raw.includes("tote") || raw.includes("clutch") || raw.includes("backpack") || raw.includes("crossbody") || raw.includes("satchel") || raw.includes("messenger") || raw.includes("purse"))
+    return "bags";
+  if (raw.includes("accessor") || raw.includes("wallet") || raw.includes("card holder") || raw.includes("watch") || raw.includes("scarf") || raw.includes("hat") || raw.includes("sunglass") || raw.includes("jewelry"))
     return "accessories";
   return raw;
 }
@@ -237,8 +251,8 @@ export function inferMissingCategoriesForOutfit(params: {
 function categoryLabelToSlot(label?: string | null): string {
   const text = String(label || "").toLowerCase().trim();
   if (!text) return "accessories";
-  if (text.includes("bag") || text.includes("backpack") || text.includes("crossbody") || text.includes("clutch") || text.includes("tote") || text.includes("wallet")) return "bags";
-  if (text.includes("accessor") || text.includes("watch") || text.includes("scarf") || text.includes("hat") || text.includes("belt") || text.includes("jewel") || text.includes("sunglass")) return "accessories";
+  if (text.includes("bag") || text.includes("backpack") || text.includes("crossbody") || text.includes("clutch") || text.includes("tote") || text.includes("satchel") || text.includes("messenger") || text.includes("purse")) return "bags";
+  if (text.includes("wallet") || text.includes("card holder") || text.includes("accessor") || text.includes("watch") || text.includes("scarf") || text.includes("hat") || text.includes("belt") || text.includes("jewel") || text.includes("sunglass")) return "accessories";
   if (text.includes("shoe") || text.includes("sneaker") || text.includes("boot") || text.includes("heel") || text.includes("sandal") || text.includes("loafer") || text.includes("flat") || text.includes("mule") || text.includes("trainer")) return "shoes";
   if (text.includes("dress")) return "dresses";
   if (text.includes("outer") || text.includes("jacket") || text.includes("coat") || text.includes("blazer")) return "outerwear";
@@ -265,7 +279,7 @@ function slotMismatchRegex(slot: string): RegExp | null {
   if (slot !== "dresses" && slot !== "outerwear") {
     if (sleepwear.test(slot)) return sleepwear;
   }
-  if (slot === "bags") return /\b(headband|hair accessory|hairband|headwear|hat|cap|beanie|duffle|luggage|suitcase|travel accessory|key ring|keychain)\b/;
+  if (slot === "bags") return /\b(wallet|card holder|card case|coin purse|phone case|bag charm|strap|headband|hair accessory|hairband|headwear|hat|cap|beanie|duffle|luggage|suitcase|travel accessory|key ring|keychain)\b/;
   if (slot === "accessories") {
     return /\b(handbag|bag|tote|clutch|wallet|crossbody|backpack|satchel|messenger)\b/;
   }
@@ -294,6 +308,10 @@ function sourceMatchesSlot(slot: string, source: any): boolean {
   if (slot === "bottoms" && /\b(top|tops|shirt|shirts|blouse|blouses|t-?shirt|tee|polo|hoodie|sweater|sweatshirt|cardigan|tank|camisole|knitwear|short sleeves?|long sleeves?)\b/.test(blob)) {
     return false;
   }
+  // Swimwear and underwear are not outfit bottoms.
+  if (slot === "bottoms" && /\b(bikini|swimsuit|swimwear|swim wear|swimming|swim brief|swim short|underwear|briefs?|thong|panty|panties|boxer|lingerie)\b/.test(blob)) {
+    return false;
+  }
   if (slot === "tops" && /\b(shoe|shoes|sneaker|boot|heel|loafer|sandal|bag|bags|handbag|tote|clutch|purse|wallet)\b/.test(blob)) {
     return false;
   }
@@ -301,6 +319,11 @@ function sourceMatchesSlot(slot: string, source: any): boolean {
   // Require the text intent to agree with the canonical slot when the index is noisy.
   // This prevents mislabeled items (e.g. shirts indexed as shoes) from leaking through.
   if (canonical && canonical !== slot) {
+    if (slot === "accessories") {
+      const strongAccessoryIntent = /\b(watch|watches|scarf|scarves|hat|hats|cap|caps|sunglass|sunglasses|jewel|jewelry|jewellery|necklace|earring|bracelet|ring|belt)\b/.test(blob);
+      const bagLikeIntent = /\b(bag|bags|handbag|handbags|tote|totes|clutch|clutches|wallet|crossbody|backpack|satchel|messenger)\b/.test(blob);
+      if (strongAccessoryIntent && !bagLikeIntent) return true;
+    }
     // Special case: hooded/hoodie items can be used as tops even if categorizied as outerwear
     if (slot === "tops" && /\b(hoodie|hooded)\b/.test(blob)) return true;
     
@@ -349,7 +372,7 @@ function buildSlotIntentFilter(slot: string): any | null {
         : slot === "bottoms"
           ? topTerms.concat(shoeTerms).concat(["bag", "handbag", "backpack", "wallet"])
           : slot === "bags"
-            ? ["shirt", "top", "pant", "shoe", "sneaker", "jacket", "wallet", "backpack", "duffle", "luggage", "suitcase", "travel accessory", "key ring", "keychain"]
+            ? ["shirt", "top", "pant", "shoe", "sneaker", "jacket", "wallet", "card holder", "card case", "coin purse", "phone case", "bag charm", "strap", "duffle", "luggage", "suitcase", "travel accessory", "key ring", "keychain"]
             : [];
 
   if (slot === "bags") {
@@ -368,6 +391,13 @@ function buildSlotIntentFilter(slot: string): any | null {
                 { match_phrase: { title: "luggage" } },
                 { match_phrase: { title: "suitcase" } },
                 { match_phrase: { title: "travel accessory" } },
+                { match_phrase: { title: "wallet" } },
+                { match_phrase: { title: "card holder" } },
+                { match_phrase: { title: "card case" } },
+                { match_phrase: { title: "coin purse" } },
+                { match_phrase: { title: "phone case" } },
+                { match_phrase: { title: "bag charm" } },
+                { match_phrase: { title: "strap" } },
                 { match_phrase: { title: "key ring" } },
                 { match_phrase: { title: "keychain" } },
               ],
@@ -456,6 +486,22 @@ function scoreFootwearStyleCompatibility(
   }
 
   return 0.74;
+}
+
+function scoreFootwearDressAlignment(
+  currentCategoryList: string[],
+  source: any,
+): number {
+  if (!currentCategoryList.includes("dresses")) return 1;
+  const blob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.attr_style || "")} ${String(source?.product_types || "")}`.toLowerCase();
+  const isSneaker = /\b(sneaker|sneakers|trainer|trainers|running shoe|athletic|gym|sport|canvas shoe|basketball shoe)\b/.test(blob);
+  const isDressFriendly =
+    /\b(heel|heels|pump|pumps|stiletto|kitten heel|sandal|sandals|flat|flats|loafer|loafers|mule|mules|espadrille|mary jane|strappy)\b/.test(
+      blob
+    );
+  if (isDressFriendly) return 0.98;
+  if (isSneaker) return 0.34;
+  return 0.72;
 }
 
 function scoreBagStyleCompatibility(
@@ -557,14 +603,132 @@ function dedupeCompleteLookSuggestions(items: CompleteLookSuggestion[]): Complet
   return out;
 }
 
+function normalizeTitleForVariantDiversity(title?: string | null): string {
+  const base = String(title || "").toLowerCase();
+  const noPunct = base.replace(/[^a-z0-9\s-]/g, " ");
+  const tokens = noPunct
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((t) => !COLOR_FAMILIES_BY_NAME[t])
+    .filter((t) => !/^(aw|ss)?\d{2,}[a-z0-9-]*$/.test(t))
+    .filter((t) => !/^\d{2,}$/.test(t));
+  return tokens.join(" ").trim().slice(0, 110);
+}
+
+function enforceVariantDiversity(
+  items: CompleteLookSuggestion[],
+  maxPerSignature: number = 2,
+): CompleteLookSuggestion[] {
+  const bySignature = new Map<string, number>();
+  const out: CompleteLookSuggestion[] = [];
+  for (const item of items) {
+    const sig = `${String(item.brand || "").toLowerCase().trim()}|${normalizeTitleForVariantDiversity(item.title)}`;
+    const seen = bySignature.get(sig) || 0;
+    if (seen >= maxPerSignature) continue;
+    bySignature.set(sig, seen + 1);
+    out.push(item);
+  }
+  return out;
+}
+
 function minimumSlotScore(slot: string): number {
   const normalized = normalizeWardrobeCategory(slot) || String(slot || "").toLowerCase().trim();
-  if (normalized === "bags" || normalized === "accessories") return 0.62;
-  if (normalized === "shoes") return 0.58;
-  // Slightly lower floor for bottoms to avoid under-recommendation while preserving precision.
-  if (normalized === "bottoms") return 0.54;
-  if (normalized === "tops" || normalized === "outerwear" || normalized === "dresses") return 0.57;
-  return 0.56;
+  if (normalized === "bags" || normalized === "accessories") return 0.44;
+  if (normalized === "shoes") return 0.42;
+  if (normalized === "bottoms") return 0.42;
+  if (normalized === "tops" || normalized === "outerwear" || normalized === "dresses") return 0.45;
+  return 0.42;
+}
+
+/**
+ * Outfit-level coherence gate.
+ *
+ * After each slot is scored independently, outliers that are too far from the
+ * outfit's formality centre are penalised. This prevents a single formal item
+ * (blazer, formality 7) from coexisting with a beach item (flip-flops, formality 1)
+ * in the same completion set.
+ *
+ * Logic:
+ *   1. Take the top suggestion per slot to compute the outfit's formality centre.
+ *   2. Any suggestion whose formality deviates more than `MAX_FORMALITY_GAP` from
+ *      that centre receives a proportional score penalty.
+ *   3. Hard-incompatible aesthetic pairs (e.g. active + formal) are penalised more.
+ */
+function enforceOutfitCoherence(suggestions: CompleteLookSuggestion[]): CompleteLookSuggestion[] {
+  if (suggestions.length <= 2) return suggestions;
+
+  const MAX_FORMALITY_GAP = 3.5;
+
+  // Collect formality from top item per slot
+  const topBySlot = new Map<string, number>();
+  for (const s of suggestions) {
+    const slot = normalizeWardrobeCategory(s.stylistSignals?.slot || s.category) || "accessories";
+    if (!topBySlot.has(slot)) {
+      const f = s.stylistSignals?.formalityScore;
+      if (f != null && Number.isFinite(f)) topBySlot.set(slot, f);
+    }
+  }
+
+  if (topBySlot.size < 2) return suggestions;
+
+  const formalityValues = Array.from(topBySlot.values());
+  formalityValues.sort((a, b) => a - b);
+  // Use median as the outfit's formality centre
+  const mid = Math.floor(formalityValues.length / 2);
+  const centre =
+    formalityValues.length % 2 === 0
+      ? (formalityValues[mid - 1] + formalityValues[mid]) / 2
+      : formalityValues[mid];
+
+  // Collect dominant aesthetic tokens from all suggestions
+  const aestheticCounts: Record<string, number> = {};
+  for (const s of suggestions) {
+    const ae = String(s.stylistSignals?.aesthetic || "").toLowerCase().trim();
+    if (ae) aestheticCounts[ae] = (aestheticCounts[ae] || 0) + 1;
+  }
+  const dominantAesthetic = Object.entries(aestheticCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+
+  // Hard-incompatible aesthetic pairs
+  const HARD_CLASHES: Array<[string, string]> = [
+    ["active", "formal"],
+    ["active", "romantic"],
+    ["sporty", "formal"],
+    ["streetwear", "formal"],
+    ["beach", "formal"],
+  ];
+  function isHardAestheticClash(a: string, b: string): boolean {
+    return HARD_CLASHES.some(
+      ([x, y]) => (a.includes(x) && b.includes(y)) || (a.includes(y) && b.includes(x))
+    );
+  }
+
+  return suggestions
+    .map((s) => {
+      const f = s.stylistSignals?.formalityScore ?? centre;
+      const diff = Math.abs(f - centre);
+      let penalty = 1;
+
+      // Formality outlier penalty
+      if (diff > MAX_FORMALITY_GAP) {
+        const excess = diff - MAX_FORMALITY_GAP;
+        penalty *= Math.max(0.3, 1 - excess * 0.14);
+      }
+
+      // Aesthetic clash penalty
+      if (dominantAesthetic) {
+        const candidateAe = String(s.stylistSignals?.aesthetic || "").toLowerCase().trim();
+        if (candidateAe && isHardAestheticClash(dominantAesthetic, candidateAe)) {
+          penalty *= 0.45;
+        }
+      }
+
+      if (penalty >= 0.99) return s;
+      return {
+        ...s,
+        score: Math.round((s.score || 0) * penalty * 1000) / 1000,
+      };
+    })
+    .sort((a, b) => (b.score || 0) - (a.score || 0));
 }
 
 // ============================================================================
@@ -860,6 +1024,7 @@ type CompleteLookAnchorRow = {
   product_id?: number | null;
   embedding?: unknown;
   dominant_colors?: Array<{ hex?: string }>;
+  color?: string | null;
   name?: string | null;
   title?: string | null;
   gender?: string | null;
@@ -877,11 +1042,20 @@ export type CompleteLookCatalogFilters = {
 
 type AudienceGender = "men" | "women" | "unisex";
 type AudienceAgeGroup = "kids" | "adult";
+type WeatherSeason = "spring" | "summer" | "fall" | "winter";
+
+type WeatherHint = {
+  temperatureC?: number;
+  season?: WeatherSeason;
+};
 
 type CompleteLookAudienceOptions = {
   audienceGenderHint?: string | null;
   ageGroupHint?: string | null;
   occasionHint?: string | null;
+  styleHints?: string[];
+  colorHints?: string[];
+  weatherHint?: WeatherHint;
   allowUserAudienceFallback?: boolean;
   enforceNeutralAudienceWhenUnknown?: boolean;
   useDetectedCategoryForCurrentItems?: boolean;
@@ -911,8 +1085,10 @@ function buildAttributionTags(
   if (!fitBreakdown) return ["general_complement"];
   const tags: string[] = [];
   if ((fitBreakdown.colorHarmony ?? 0) > 0.75) tags.push("color_match");
+  if ((fitBreakdown.colorPreferenceAlignment ?? 0) > 0.8) tags.push("preferred_color_match");
   if ((fitBreakdown.styleAlignment ?? 0) > 0.75) tags.push("style_match");
   if ((fitBreakdown.formalityAlignment ?? 0) > 0.75) tags.push("formality_match");
+  if ((fitBreakdown.weatherAlignment ?? 0) > 0.75) tags.push("weather_appropriate");
   if ((fitBreakdown.categoryCompat ?? 0) > 0.75) tags.push("category_complement");
   if ((fitBreakdown.embeddingNorm ?? 0) > 0.75) tags.push("visual_similarity");
   return tags.length > 0 ? tags : ["general_complement"];
@@ -936,20 +1112,17 @@ async function runCompleteLookCore(
     }
   };
 
-  // Pass 0: use detected category if provided (e.g., image-detected "hoodie" for a jacket)
-  if (audienceOptions.useDetectedCategoryForCurrentItems) {
-    for (const row of currentItems as Array<any>) {
-      if (row.detected_category) {
-        pushCategory(normalizeWardrobeCategory(row.detected_category));
-      }
+  // Pass 0: always use detected category first when available.
+  // This keeps image-derived anchors authoritative even when stored category labels are noisy.
+  for (const row of currentItems as Array<any>) {
+    if (row.detected_category) {
+      pushCategory(normalizeWardrobeCategory(row.detected_category));
     }
   }
 
-  // Pass 1: trust structured category signal first (unless detected category was used).
-  if (!audienceOptions.useDetectedCategoryForCurrentItems) {
-    for (const row of currentItems) {
-      pushCategory(normalizeWardrobeCategory(row.category_name));
-    }
+  // Pass 1: trust structured category signal as a fallback/additional signal.
+  for (const row of currentItems) {
+    pushCategory(normalizeWardrobeCategory(row.category_name));
   }
 
   // Pass 2: only use weak text hints when structured categories are sparse.
@@ -1004,6 +1177,18 @@ async function runCompleteLookCore(
   const hintedAudienceGender = normalizeAudienceGenderValue(audienceOptions.audienceGenderHint);
   const hintedAgeGroup = normalizeAudienceAgeGroupValue(audienceOptions.ageGroupHint);
   const hintedOccasion = normalizeOccasionHint(audienceOptions.occasionHint);
+  const hintedStyleTerms = normalizeStyleHints(audienceOptions.styleHints);
+  const inferredStyleTerms = inferStyleTermsFromCurrentItems(currentItems, styleProfile?.occasion_coverage || []);
+  const extractedTitleStyleTerms = currentItems
+    .map((item) =>
+      extractStyleTokensFromText(
+        `${String(item.name || "")} ${String(item.title || "")} ${String(item.category_name || "")}`
+      )
+    )
+    .flat();
+  const preferredStyleTerms = Array.from(
+    new Set(hintedStyleTerms.concat(inferredStyleTerms).concat(visualContext.styleTerms).concat(extractedTitleStyleTerms))
+  ).slice(0, 12);
   const inferredFromAnchors = await inferPreferredAudienceGender(userId, currentItems, {
     allowWardrobeHistory: false,
     allowUserProfile: false,
@@ -1021,17 +1206,32 @@ async function runCompleteLookCore(
 
   let inferredOccasion: InferredOccasion = hintedOccasion || "casual";
   if (!hintedOccasion) {
+    const coverageOccasion = inferOccasionFromCoverageSignals(
+      styleProfile?.occasion_coverage || [],
+      preferredStyleTerms,
+      currentItems,
+    );
     const occasionInference = await inferOccasion(
       currentItems.map((row) => ({
         title: String(row.title || row.name || ""),
         category: String(row.category_name || ""),
-        color: undefined,
+        color: String(row.color || "") || undefined,
         styleTokens: extractStyleTokensFromText(
           `${String(row.title || "")} ${String(row.name || "")} ${String(row.category_name || "")}`,
         ),
       })),
     );
-    inferredOccasion = occasionInference.occasion;
+    inferredOccasion =
+      coverageOccasion && occasionInference.confidence < 0.58
+        ? coverageOccasion
+        : occasionInference.occasion;
+    if (
+      coverageOccasion === "active" &&
+      occasionInference.occasion === "casual" &&
+      (preferredStyleTerms.includes("sporty") || preferredStyleTerms.includes("athleisure"))
+    ) {
+      inferredOccasion = "active";
+    }
   }
   const enforceNeutralAudienceWhenUnknown =
     Boolean(audienceOptions.enforceNeutralAudienceWhenUnknown) || !inferredAudienceGender;
@@ -1048,23 +1248,33 @@ async function runCompleteLookCore(
       .filter(Boolean)
   );
 
+  const wardrobeCanonicalColors = extractWardrobeCanonicalColors(currentItems);
   const wardrobeColorFamilies = extractWardrobeColorFamilies(currentItems);
+  const explicitWeather = normalizeWeatherHint(audienceOptions.weatherHint);
+  const inferredWeather = inferWeatherHintFromContext({
+    currentItems,
+    seasonCoverage: styleProfile?.season_coverage || [],
+    inferredOccasion,
+  });
+  const hintedWeather = explicitWeather || inferredWeather;
+  const explicitColorSignals = extractColorHintSignals(
+    audienceOptions.colorHints,
+  );
+  const inferredColorSignals = inferColorPreferenceSignals({
+    wardrobeCanonicalColors,
+    wardrobeColorFamilies,
+    colorPalette: (styleProfile as any)?.color_palette,
+  });
+  const preferredColorHints =
+    explicitColorSignals.colors.size > 0 || explicitColorSignals.families.size > 0
+      ? new Set<string>([...inferredColorSignals.colors, ...explicitColorSignals.colors])
+      : inferredColorSignals.colors;
+  const preferredColorFamilies =
+    explicitColorSignals.colors.size > 0 || explicitColorSignals.families.size > 0
+      ? new Set<string>([...inferredColorSignals.families, ...explicitColorSignals.families])
+      : inferredColorSignals.families;
   const preferredPatterns = topHistogramKeys(styleProfile?.pattern_histogram, 3);
   const preferredMaterials = topHistogramKeys(styleProfile?.material_histogram, 3);
-  const preferredStyleTerms = Array.from(
-    new Set(
-      inferStyleTermsFromCurrentItems(currentItems, styleProfile?.occasion_coverage || [])
-        .concat(visualContext.styleTerms)
-        .concat(
-          // Extract additional style terms from titles and categories for better keyword coverage
-          currentItems
-            .map(item => extractStyleTokensFromText(
-              `${String(item.name || "")} ${String(item.title || "")} ${String(item.category_name || "")}`
-            ))
-            .flat()
-        )
-    )
-  ).slice(0, 12);
   const preferredFormality =
     hintedOccasion || !styleProfile?.occasion_coverage?.length
       ? occasionToFormality(inferredOccasion)
@@ -1080,6 +1290,7 @@ async function runCompleteLookCore(
     "price_usd",
     "image_cdn",
     "color_primary_canonical",
+    "color_palette_canonical",
     "attr_color",
     "attr_style",
     "attr_pattern",
@@ -1169,15 +1380,40 @@ async function runCompleteLookCore(
             category,
             currentCategoryList.length > 0 ? currentCategoryList : ["other"]
           );
-          const candidateColor = normalizeColorName(source.color_primary_canonical || source.attr_color);
-          const colorHarmony = computeColorHarmonyWithWardrobe(wardrobeColorFamilies, candidateColor);
+          const candidateColor = extractCandidateColorFromSource(source);
+          const colorDecisionAlignment = scoreSlotColorAlignment(
+            category,
+            candidateColor,
+            wardrobeColorFamilies,
+            currentCategoryList,
+          );
+          const bagColorAlignment = category === "bags" ? colorDecisionAlignment : 1;
+          const colorHarmonyBase = computeColorHarmonyWithWardrobe(
+            wardrobeColorFamilies,
+            candidateColor,
+            wardrobeCanonicalColors,
+          );
+          const colorPreferenceAlignment = scoreColorPreferenceAlignment(
+            candidateColor,
+            preferredColorHints,
+            preferredColorFamilies,
+          );
+          const colorHarmony = Math.max(
+            0,
+            Math.min(1, colorHarmonyBase * 0.52 + colorDecisionAlignment * 0.28 + colorPreferenceAlignment * 0.2)
+          );
           const styleAlignment = computeStyleAlignment(source, preferredStyleTerms);
           const patternAlignment = computeTokenAffinity(source.attr_pattern, preferredPatterns);
           const materialAlignment = computeTokenAffinity(source.attr_material, preferredMaterials);
           const formalityAlignment = computeFormalityAlignment(source, preferredFormality);
+          const weatherAlignment = scoreWeatherAlignment(category, source, hintedWeather);
           const footwearStyleAlignment =
             category === "shoes"
               ? scoreFootwearStyleCompatibility(inferredOccasion, preferredStyleTerms, source)
+              : 1;
+          const footwearDressAlignment =
+            category === "shoes"
+              ? scoreFootwearDressAlignment(currentCategoryList, source)
               : 1;
           const bagStyleAlignment =
             category === "bags"
@@ -1192,21 +1428,58 @@ async function runCompleteLookCore(
           if (preferredStyleTerms.length > 0 && styleAlignment < 0.52 && formalityAlignment < 0.5) {
             continue;
           }
+          if (shouldEnforceStrictColorGate(category, currentCategoryList) && colorDecisionAlignment < 0.4) {
+            continue;
+          }
+          if ((preferredColorHints.size > 0 || preferredColorFamilies.size > 0) && colorPreferenceAlignment < 0.4) {
+            continue;
+          }
+          if (hintedWeather && weatherAlignment < 0.32) {
+            continue;
+          }
 
-          // Fashion-aware blend: emphasize style/color over raw retrieval.
+          // Aesthetic keyword alignment: how well the product title matches
+          // aesthetic-specific terms for this slot (e.g. "chunky sneakers" for
+          // streetwear shoes). Treated as a proper scoring dimension (not a
+          // multiplier) so items without explicit style words in their title
+          // aren't systematically penalised.
+          const titleBlob = String(source?.title || "").toLowerCase();
+          const hasPrimaryTerms = slotQuerySpec.primaryTerms.length > 0;
+          const primaryHits = slotQuerySpec.primaryTerms.filter((t) => titleBlob.includes(String(t || "").toLowerCase())).length;
+          const boostHits = slotQuerySpec.boostTerms.filter((t) => titleBlob.includes(String(t || "").toLowerCase())).length;
+          const avoidHits = slotQuerySpec.avoidTerms.filter((t) => titleBlob.includes(String(t || "").toLowerCase())).length;
+          let aestheticKeywordAlignment: number;
+          if (!hasPrimaryTerms) {
+            // No aesthetic context — neutral score, no penalty.
+            aestheticKeywordAlignment = 0.72;
+          } else {
+            const posDen = Math.max(1, slotQuerySpec.primaryTerms.length + 0.5 * slotQuerySpec.boostTerms.length);
+            const positive = Math.min(1, (primaryHits + 0.5 * boostHits) / posDen);
+            const avoidPenalty = slotQuerySpec.avoidTerms.length > 0 ? Math.min(1, avoidHits / Math.max(1, slotQuerySpec.avoidTerms.length)) : 0;
+            // Range: 0.62 (no match, no avoid) → 1.0 (full match).
+            // Avoid terms can reduce but not eliminate a good score.
+            aestheticKeywordAlignment = Math.max(0.28, (0.62 + 0.38 * positive) * (1 - 0.5 * avoidPenalty));
+          }
+
+          // Weighted scoring: aestheticKeywordAlignment is a first-class dimension
+          // (12% weight) rather than a global multiplier. This prevents the common
+          // case where products lack explicit style words in their titles (a sneaker
+          // won't say "streetwear") from tanking otherwise good candidates.
           const finalScore =
-            embeddingNorm * 0.24 +
-            categoryCompat * 0.2 +
-            colorHarmony * 0.2 +
-            styleAlignment * 0.2 +
-            patternAlignment * 0.08 +
+            embeddingNorm * 0.15 +
+            categoryCompat * 0.14 +
+            colorHarmony * 0.19 +
+            styleAlignment * 0.18 +
+            aestheticKeywordAlignment * 0.12 +
+            patternAlignment * 0.06 +
             materialAlignment * 0.04 +
-            formalityAlignment * 0.04;
+            formalityAlignment * 0.07 +
+            weatherAlignment * 0.05;
 
           const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment * accessoryStyleAlignment);
-          const slotAwareFinalScore = Math.round((finalScore * (0.7 + slotStyleScore * 0.3)) * 1000) / 1000;
+          const slotAwareFinalScore = Math.round((finalScore * (0.7 + slotStyleScore * 0.3) * footwearDressAlignment) * 1000) / 1000;
 
-          const floor = relaxedFloor ? Math.max(0.5, minimumSlotScore(category) - 0.04) : minimumSlotScore(category);
+          const floor = relaxedFloor ? Math.max(0.32, minimumSlotScore(category) - 0.06) : minimumSlotScore(category);
           if (slotAwareFinalScore < floor) {
             continue;
           }
@@ -1217,6 +1490,8 @@ async function runCompleteLookCore(
           if (colorHarmony >= 0.75) reasons.push("good color harmony");
           if (styleAlignment >= 0.75) reasons.push("style-aware match");
           if (formalityAlignment >= 0.8) reasons.push("occasion/formality aligned");
+          if (weatherAlignment >= 0.78) reasons.push("weather appropriate");
+          if (colorPreferenceAlignment >= 0.82) reasons.push("matches preferred colors");
           if (category === "shoes" && footwearStyleAlignment >= 0.85) reasons.push("footwear fits the occasion");
           if (category === "bags" && bagStyleAlignment >= 0.85) reasons.push("bag style suits the outfit");
           if (category === "accessories" && accessoryStyleAlignment >= 0.82) reasons.push("accessories suit the occasion");
@@ -1226,12 +1501,16 @@ async function runCompleteLookCore(
             embeddingNorm: Math.round(embeddingNorm * 1000) / 1000,
             categoryCompat: Math.round(categoryCompat * 1000) / 1000,
             colorHarmony: Math.round(colorHarmony * 1000) / 1000,
+            colorPreferenceAlignment: Math.round(colorPreferenceAlignment * 1000) / 1000,
             styleAlignment: Math.round(styleAlignment * 1000) / 1000,
             patternAlignment: Math.round(patternAlignment * 1000) / 1000,
             materialAlignment: Math.round(materialAlignment * 1000) / 1000,
             formalityAlignment: Math.round(formalityAlignment * 1000) / 1000,
+            weatherAlignment: Math.round(weatherAlignment * 1000) / 1000,
             footwearStyleAlignment: Math.round(footwearStyleAlignment * 1000) / 1000,
             bagStyleAlignment: Math.round(bagStyleAlignment * 1000) / 1000,
+            bagColorAlignment: Math.round(bagColorAlignment * 1000) / 1000,
+            colorDecisionAlignment: Math.round(colorDecisionAlignment * 1000) / 1000,
             accessoryStyleAlignment: Math.round(accessoryStyleAlignment * 1000) / 1000,
           };
 
@@ -1265,9 +1544,49 @@ async function runCompleteLookCore(
         return scored;
       };
 
+      // Compute aesthetic-aware slot terms once per category (reused inside runSearch)
+      const weatherCtx = resolveWeatherContext(hintedWeather?.temperatureC, hintedWeather?.season);
+      const detectedAesthetic = inferPreferredAesthetic(preferredStyleTerms) as FashionAesthetic;
+      const slotQuerySpec = getStyleAwareSlotTerms({
+        aesthetic: detectedAesthetic,
+        occasion: inferredOccasion as OutfitOccasion,
+        sourceCategory: currentCategoryList[0] || "unknown",
+        targetSlot: category,
+        weather: weatherCtx,
+      });
+      if (slotQuerySpec.primaryTerms.length > 0) {
+        console.info("[outfit-stylist]", {
+          slot: category,
+          aesthetic: detectedAesthetic,
+          occasion: inferredOccasion,
+          styleTerms: preferredStyleTerms.slice(0, 6),
+          primaryTerms: slotQuerySpec.primaryTerms.slice(0, 4),
+        });
+      }
+
       const runSearch = async (filters: any[], useVector: boolean) => {
         const styleHint = preferredStyleTerms.slice(0, 4).join(" ").trim();
         const lexicalHint = `${canonical} ${styleHint}`.trim();
+
+        // Build style-aware should clauses for lexical search
+        const styleAwareShould: any[] = [
+          // Broad fallback: generic category + style hint
+          {
+            multi_match: {
+              query: lexicalHint,
+              fields: ["title^3", "category^2", "brand", "attr_style", "attr_pattern", "attr_material"],
+            },
+          },
+        ];
+        // Primary aesthetic terms get a strong boost so they surface above generic matches
+        for (const term of slotQuerySpec.primaryTerms.slice(0, 6)) {
+          styleAwareShould.push({ match_phrase: { title: { query: term, boost: 4 } } });
+        }
+        // Secondary terms get a lighter boost
+        for (const term of slotQuerySpec.boostTerms.slice(0, 4)) {
+          styleAwareShould.push({ match_phrase: { title: { query: term, boost: 1.8 } } });
+        }
+
         const queryBody: any = centroid && useVector
           ? {
               size: perCategoryPool,
@@ -1291,14 +1610,7 @@ async function runCompleteLookCore(
               query: {
                 bool: {
                   filter: filters,
-                  should: [
-                    {
-                      multi_match: {
-                        query: lexicalHint,
-                        fields: ["title^3", "category^2", "brand", "attr_style", "attr_pattern", "attr_material"],
-                      },
-                    },
-                  ],
+                  should: styleAwareShould,
                   minimum_should_match: 0,
                 },
               },
@@ -1313,15 +1625,73 @@ async function runCompleteLookCore(
         return response.body.hits.hits || [];
       };
 
-      let hits = await runSearch(buildFilters(true), true);
-      let scored = scoreHits(hits);
+      /**
+       * Aesthetic-targeted search: requires at least one specific style term to match.
+       * This is the key fix for shoes/bags always returning the same generic items —
+       * the KNN vector path retrieves visually similar items but ignores whether a shoe
+       * is "strappy sandals" vs "combat boots". This search guarantees aesthetically
+       * appropriate items reach the scoring pool regardless of embedding similarity.
+       */
+      const runAestheticSearch = async (filters: any[]): Promise<any[]> => {
+        if (slotQuerySpec.primaryTerms.length === 0) return [];
+        try {
+          // Use `match` with `operator: "and"` instead of `match_phrase` so that
+          // product titles with extra words still match.
+          // e.g. "Women's Strappy Flat Sandals" matches "strappy sandals" because
+          // both tokens appear in the title even though they aren't adjacent.
+          const shouldClauses = [
+            ...slotQuerySpec.primaryTerms.slice(0, 8).map((term) => ({
+              match: { title: { query: term, operator: "and", boost: 3 } },
+            })),
+            ...slotQuerySpec.boostTerms.slice(0, 4).map((term) => ({
+              match: { title: { query: term, operator: "and", boost: 1.5 } },
+            })),
+          ];
+          const res = await osClient.search({
+            index: config.opensearch.index,
+            body: {
+              size: perCategoryPool,
+              query: {
+                bool: {
+                  filter: filters,
+                  should: shouldClauses,
+                  minimum_should_match: 1, // MUST match at least one aesthetic term
+                },
+              },
+              sort: [{ _score: { order: "desc" } }, { last_seen_at: { order: "desc", missing: "_last" } }],
+              _source: sourceFields,
+            },
+          });
+          return res.body.hits.hits || [];
+        } catch {
+          return [];
+        }
+      };
+
+      // Always run both the vector search and the aesthetic-targeted search in parallel.
+      // The vector search finds visually similar items; the aesthetic search guarantees
+      // style-appropriate items (e.g. "strappy sandals" for bohemian, "combat boots"
+      // for edgy) are in the pool even when they aren't near the embedding centroid.
+      let [hits, aestheticHits] = await Promise.all([
+        runSearch(buildFilters(true), true),
+        runAestheticSearch(buildFilters(true)),
+      ]);
+      let scored = dedupeCompleteLookSuggestions(
+        scoreHits(hits).concat(scoreHits(aestheticHits)).sort((a, b) => b.score - a.score)
+      );
+
       if (scored.length < minPerCategory) {
         const lexicalHits = await runSearch(buildFilters(true), false);
         scored = dedupeCompleteLookSuggestions(scored.concat(scoreHits(lexicalHits)).sort((a, b) => b.score - a.score));
       }
       if (scored.length === 0 && userPriceTier) {
-        hits = await runSearch(buildFilters(false), true);
-        scored = scoreHits(hits);
+        const [relaxedHits, relaxedAestheticHits] = await Promise.all([
+          runSearch(buildFilters(false), true),
+          runAestheticSearch(buildFilters(false)),
+        ]);
+        scored = dedupeCompleteLookSuggestions(
+          scoreHits(relaxedHits).concat(scoreHits(relaxedAestheticHits)).sort((a, b) => b.score - a.score)
+        );
         if (scored.length < minPerCategory) {
           const relaxedLexicalHits = await runSearch(buildFilters(false), false);
           scored = dedupeCompleteLookSuggestions(scored.concat(scoreHits(relaxedLexicalHits)).sort((a, b) => b.score - a.score));
@@ -1366,6 +1736,7 @@ async function runCompleteLookCore(
       .flat()
       .sort((a, b) => b.score - a.score)
   );
+  mergedSuggestions = enforceVariantDiversity(mergedSuggestions, 2);
 
   if (mergedSuggestions.length < limit) {
     const topUp = await fetchCategoryTopUpSuggestions({
@@ -1376,10 +1747,14 @@ async function runCompleteLookCore(
       preferredPatterns,
       preferredMaterials,
       preferredFormality,
+      preferredColorHints,
+      preferredColorFamilies,
+      weatherHint: hintedWeather,
       inferredAudienceGender,
       inferredAgeGroup,
       enforceNeutralAudienceWhenUnknown,
       wardrobeColorFamilies,
+      wardrobeCanonicalColors,
       currentCategoryList,
       needed: limit - mergedSuggestions.length,
     }).catch(() => []);
@@ -1387,6 +1762,7 @@ async function runCompleteLookCore(
       mergedSuggestions = dedupeCompleteLookSuggestions(
         mergedSuggestions.concat(topUp).sort((a, b) => b.score - a.score)
       );
+      mergedSuggestions = enforceVariantDiversity(mergedSuggestions, 2);
     }
   }
 
@@ -1394,12 +1770,23 @@ async function runCompleteLookCore(
     suggestions: mergedSuggestions,
     preferredStyleTerms,
     preferredFormality,
+    inferredOccasion,
     wardrobeColorFamilies,
+    wardrobeCanonicalColors,
+    preferredColorHints,
+    preferredColorFamilies,
+    weatherHint: hintedWeather,
     currentCategoryList,
     inferredAudienceGender,
     inferredAgeGroup,
     limit,
   }).catch(() => mergedSuggestions);
+  mergedSuggestions = enforceVariantDiversity(mergedSuggestions, 2);
+
+  // Outfit-level coherence: penalise cross-slot formality/aesthetic outliers
+  // (e.g. formal blazer + beach sandals coexisting in the same set).
+  mergedSuggestions = enforceOutfitCoherence(mergedSuggestions);
+  mergedSuggestions = enforceVariantDiversity(mergedSuggestions, 2);
 
   mergedSuggestions = mergedSuggestions.slice(0, limit);
 
@@ -1448,10 +1835,15 @@ async function runCompleteLookCore(
   );
 
   const seedAnchor = currentItems[0];
+  const narrativeAnchorCategory =
+    normalizeWardrobeCategory((seedAnchor as any)?.detected_category) ||
+    currentCategoryList[0] ||
+    normalizeWardrobeCategory(seedAnchor?.category_name) ||
+    "unknown";
   const seedProduct = {
     id: Number(seedAnchor?.product_id || seedAnchor?.id || 0),
     title: String(seedAnchor?.title || seedAnchor?.name || "Current item"),
-    category: String(seedAnchor?.category_name || "unknown"),
+    category: narrativeAnchorCategory,
     color: undefined,
     price_cents: 0,
     currency: "USD",
@@ -1474,7 +1866,7 @@ async function runCompleteLookCore(
   const narrativeStart = Date.now();
   const outfitNarrative = await generateOutfitNarrativeWithCache({
     seedProduct,
-    detectedCategory: (normalizeWardrobeCategory(seedAnchor?.category_name) || "unknown") as ProductCategory,
+    detectedCategory: narrativeAnchorCategory as ProductCategory,
     style: styleForNarrative,
     recommendations: styleRecommendations,
     userGender: seedAnchor?.gender,
@@ -1528,12 +1920,16 @@ function inferPreferredAesthetic(preferredStyleTerms: string[]): StyleProfileAes
   const tokenSet = new Set(preferredStyleTerms.map((t) => String(t).toLowerCase().trim()).filter(Boolean));
   if (!tokenSet.size) return null;
   const has = (x: string) => tokenSet.has(x);
-  if (has("streetwear") || has("edgy")) return "streetwear";
+  // Order matters: check more specific/distinctive aesthetics first
+  if (has("edgy")) return "edgy";
+  if (has("streetwear")) return "streetwear";
   if (has("sporty") || has("athleisure")) return "sporty";
-  if (has("minimalist") || has("business")) return "minimalist";
-  if (has("classic") || has("formal") || has("elegant")) return "classic";
-  if (has("boho")) return "bohemian";
+  if (has("bohemian") || has("boho")) return "bohemian";
   if (has("romantic") || has("chic")) return "romantic";
+  if (has("minimalist")) return "minimalist";
+  if (has("classic") || has("elegant")) return "classic";
+  if (has("modern")) return "modern";
+  if (has("business")) return "classic"; // business → classic for slot queries
   if (has("vintage")) return "classic";
   return null;
 }
@@ -1571,7 +1967,12 @@ async function rerankCompleteLookFashionAware(params: {
   suggestions: CompleteLookSuggestion[];
   preferredStyleTerms: string[];
   preferredFormality: "casual" | "business" | "formal" | "mixed";
+  inferredOccasion?: InferredOccasion;
   wardrobeColorFamilies: Set<string>;
+  wardrobeCanonicalColors: Set<string>;
+  preferredColorHints: Set<string>;
+  preferredColorFamilies: Set<string>;
+  weatherHint?: WeatherHint;
   currentCategoryList: string[];
   inferredAudienceGender: AudienceGender | null;
   inferredAgeGroup: AudienceAgeGroup | null;
@@ -1660,7 +2061,16 @@ async function rerankCompleteLookFashionAware(params: {
     );
 
     const candidateColor = normalizeColorName(product.color || style.colorProfile.primary);
-    const colorHarmony = computeColorHarmonyWithWardrobe(params.wardrobeColorFamilies, candidateColor);
+    const colorHarmony = computeColorHarmonyWithWardrobe(
+      params.wardrobeColorFamilies,
+      candidateColor,
+      params.wardrobeCanonicalColors,
+    );
+    const colorPreferenceAlignment = scoreColorPreferenceAlignment(
+      candidateColor,
+      params.preferredColorHints,
+      params.preferredColorFamilies,
+    );
 
     const styleTokenBlob = `${product.title} ${product.category || ""} ${style.aesthetic} ${style.occasion}`.toLowerCase();
     const styleTokenScore =
@@ -1671,22 +2081,39 @@ async function rerankCompleteLookFashionAware(params: {
           : 0.46;
 
     const formalityScore = scoreFormalityCompatibility(targetFormalityScore, style.formality);
+    const weatherAlignment = scoreWeatherAlignment(categoryNorm, {
+      title: product.title,
+      category: product.category,
+      attr_material: product.description,
+      attr_style: style.aesthetic,
+      product_types: style.occasion,
+    }, params.weatherHint);
     const aestheticScore = aestheticCompatibility(preferredAesthetic, style.aesthetic as StyleProfileAesthetic);
     const baseRetrieval = Math.max(0, Math.min(1, Number(s.score || 0)));
 
     const fashionScore =
       categoryCompat * 0.22 +
-      colorHarmony * 0.16 +
-      styleTokenScore * 0.24 +
-      formalityScore * 0.2 +
+      (colorHarmony * 0.65 + colorPreferenceAlignment * 0.35) * 0.18 +
+      styleTokenScore * 0.22 +
+      formalityScore * 0.18 +
+      weatherAlignment * 0.12 +
       aestheticScore * 0.18;
-
-    const final = Math.round((fashionScore * 0.72 + baseRetrieval * 0.28) * 1000) / 1000;
+    const slotForSanity = normalizeWardrobeCategory(s.stylistSignals?.slot || s.category || categoryNorm) || categoryNorm;
+    const sanity = computeFashionSanityScore({
+      slot: slotForSanity,
+      source: row,
+      preferredFormality: params.preferredFormality,
+      inferredOccasion: params.inferredOccasion,
+      currentCategoryList: params.currentCategoryList,
+    });
+    const final = Math.round((fashionScore * 0.72 + baseRetrieval * 0.28) * (0.62 + sanity * 0.38) * 1000) / 1000;
     const reasons: string[] = [];
     if (styleTokenScore >= 0.85) reasons.push("style-aligned");
     if (formalityScore >= 0.86) reasons.push("formality-consistent");
     if (aestheticScore >= 0.84) reasons.push("aesthetic-compatible");
     if (colorHarmony >= 0.78) reasons.push("harmonious palette");
+    if (colorPreferenceAlignment >= 0.82) reasons.push("preferred-color aligned");
+    if (weatherAlignment >= 0.78) reasons.push("weather-appropriate");
     if (reasons.length === 0) reasons.push("fashion-balanced");
 
     return {
@@ -1704,8 +2131,8 @@ async function rerankCompleteLookFashionAware(params: {
       },
     };
   }));
-
-  return rescored.sort((a, b) => (b.score || 0) - (a.score || 0));
+  const ranked = rescored.sort((a, b) => (b.score || 0) - (a.score || 0));
+  return enforceFashionDiversity(ranked, params.limit);
 }
 
 /**
@@ -1716,11 +2143,12 @@ export async function completeLookSuggestions(
   currentItemIds: number[],
   limit: number = 10,
   requestCatalogFilters?: CompleteLookCatalogFilters,
-  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint"> = {}
+  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint" | "styleHints" | "colorHints" | "weatherHint"> = {}
 ): Promise<CompleteLookSuggestionsResult> {
   const currentItemsResult = await pg.query(
     `SELECT wi.id, wi.product_id, wi.embedding, wi.dominant_colors, wi.name, wi.image_url, wi.image_cdn,
             p.title,
+            p.color,
             COALESCE(wam.audience_gender, p.gender) as gender,
             wam.age_group,
             wam.style_tags,
@@ -1731,7 +2159,8 @@ export async function completeLookSuggestions(
      LEFT JOIN products p ON p.id = wi.product_id
      LEFT JOIN categories c ON wi.category_id = c.id
      LEFT JOIN wardrobe_item_audience_metadata wam ON wam.wardrobe_item_id = wi.id
-     WHERE wi.id = ANY($1) AND wi.user_id = $2`,
+     WHERE wi.id = ANY($1) AND wi.user_id = $2
+     ORDER BY array_position($1::int[], wi.id)`,
     [currentItemIds, userId]
   );
 
@@ -1751,6 +2180,9 @@ export async function completeLookSuggestions(
     audienceGenderHint: options.audienceGenderHint,
     ageGroupHint: options.ageGroupHint,
     occasionHint: options.occasionHint,
+    styleHints: options.styleHints,
+    colorHints: options.colorHints,
+    weatherHint: options.weatherHint,
   });
 }
 
@@ -1762,7 +2194,7 @@ export async function completeLookSuggestionsForCatalogProducts(
   productIds: number[],
   limit: number = 10,
   requestCatalogFilters?: CompleteLookCatalogFilters,
-  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint"> & { detectedCategories?: Map<number, string> } = {}
+  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint" | "styleHints" | "colorHints" | "weatherHint"> & { detectedCategories?: Map<number, string> } = {}
 ): Promise<CompleteLookSuggestionsResult> {
   if (!Array.isArray(productIds) || productIds.length === 0) {
     return {
@@ -1781,6 +2213,7 @@ export async function completeLookSuggestionsForCatalogProducts(
             NULL::text as embedding,
             p.title as name,
             p.title,
+            p.color,
             p.image_url as image_url,
             p.image_cdn,
             p.gender,
@@ -1817,6 +2250,9 @@ export async function completeLookSuggestionsForCatalogProducts(
     audienceGenderHint: options.audienceGenderHint,
     ageGroupHint: options.ageGroupHint,
     occasionHint: options.occasionHint,
+    styleHints: options.styleHints,
+    colorHints: options.colorHints,
+    weatherHint: options.weatherHint,
     allowUserAudienceFallback: false,
     enforceNeutralAudienceWhenUnknown: true,
     useDetectedCategoryForCurrentItems: true,
@@ -2321,9 +2757,19 @@ function inferStyleTermsFromCurrentItems(
 function computeStyleAlignment(source: any, preferredStyleTerms: string[]): number {
   if (preferredStyleTerms.length === 0) return 0.62;
   const blob = `${String(source?.attr_style || "")} ${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.product_types || "")}`.toLowerCase();
-  if (!blob.trim()) return 0.58;
+  if (!blob.trim()) return 0.62;
 
-  let best = 0.45;
+  // Hard mismatch detection: formal items for casual request and vice-versa.
+  const styleSet = new Set(preferredStyleTerms.map((t) => String(t || "").toLowerCase().trim()));
+  const isCasualStyle = styleSet.has("casual") || styleSet.has("streetwear") || styleSet.has("sporty") || styleSet.has("athleisure") || styleSet.has("boho") || styleSet.has("bohemian");
+  const isFormalStyle = styleSet.has("formal") || styleSet.has("business") || styleSet.has("elegant");
+  if (isCasualStyle && /\b(formal gown|evening gown|cocktail dress|black tie|tuxedo|tailored suit)\b/.test(blob)) return 0.34;
+  if (isFormalStyle && /\b(athletic|skate|surf|streetwear graphic|sportswear)\b/.test(blob)) return 0.38;
+
+  // Default to neutral — product titles rarely carry explicit style labels
+  // (a sneaker won't say "streetwear", a tote won't say "classic").
+  // Reward exact matches, but don't penalize for absence.
+  let best = 0.62;
   for (const token of preferredStyleTerms) {
     if (!token) continue;
     if (blob === token) best = Math.max(best, 0.92);
@@ -2384,10 +2830,14 @@ async function fetchCategoryTopUpSuggestions(params: {
   preferredPatterns: string[];
   preferredMaterials: string[];
   preferredFormality: "casual" | "business" | "formal" | "mixed";
+  preferredColorHints: Set<string>;
+  preferredColorFamilies: Set<string>;
+  weatherHint?: WeatherHint;
   inferredAudienceGender: AudienceGender | null;
   inferredAgeGroup: AudienceAgeGroup | null;
   enforceNeutralAudienceWhenUnknown?: boolean;
   wardrobeColorFamilies: Set<string>;
+  wardrobeCanonicalColors: Set<string>;
   currentCategoryList: string[];
   needed: number;
 }): Promise<CompleteLookSuggestion[]> {
@@ -2461,6 +2911,7 @@ async function fetchCategoryTopUpSuggestions(params: {
         "price_usd",
         "image_cdn",
         "color_primary_canonical",
+        "color_palette_canonical",
         "attr_color",
         "attr_style",
         "attr_pattern",
@@ -2505,17 +2956,40 @@ async function fetchCategoryTopUpSuggestions(params: {
       guessedSlot,
       params.currentCategoryList.length > 0 ? params.currentCategoryList : ["other"]
     );
-    const colorHarmony = computeColorHarmonyWithWardrobe(
+    const candidateColor = extractCandidateColorFromSource(source);
+    const colorDecisionAlignment = scoreSlotColorAlignment(
+      matchedSlot,
+      candidateColor,
       params.wardrobeColorFamilies,
-      normalizeColorName(source.color_primary_canonical || source.attr_color)
+      params.currentCategoryList,
+    );
+    const bagColorAlignment = matchedSlot === "bags" ? colorDecisionAlignment : 1;
+    const colorHarmonyBase = computeColorHarmonyWithWardrobe(
+      params.wardrobeColorFamilies,
+      candidateColor,
+      params.wardrobeCanonicalColors,
+    );
+    const colorPreferenceAlignment = scoreColorPreferenceAlignment(
+      candidateColor,
+      params.preferredColorHints,
+      params.preferredColorFamilies,
+    );
+    const colorHarmony = Math.max(
+      0,
+      Math.min(1, colorHarmonyBase * 0.52 + colorDecisionAlignment * 0.28 + colorPreferenceAlignment * 0.2)
     );
     const styleAlignment = computeStyleAlignment(source, params.preferredStyleTerms);
     const patternAlignment = computeTokenAffinity(source.attr_pattern, params.preferredPatterns);
     const materialAlignment = computeTokenAffinity(source.attr_material, params.preferredMaterials);
     const formalityAlignment = computeFormalityAlignment(source, params.preferredFormality);
+    const weatherAlignment = scoreWeatherAlignment(matchedSlot, source, params.weatherHint);
     const footwearStyleAlignment =
       matchedSlot === "shoes"
         ? scoreFootwearStyleCompatibility(topupOccasion, params.preferredStyleTerms, source)
+        : 1;
+    const footwearDressAlignment =
+      matchedSlot === "shoes"
+        ? scoreFootwearDressAlignment(params.currentCategoryList, source)
         : 1;
     const bagStyleAlignment =
       matchedSlot === "bags"
@@ -2526,17 +3000,22 @@ async function fetchCategoryTopUpSuggestions(params: {
         ? scoreAccessoryStyleCompatibility(topupOccasion, params.preferredStyleTerms, source)
         : 1;
 
+    if (shouldEnforceStrictColorGate(matchedSlot, params.currentCategoryList) && colorDecisionAlignment < 0.4) continue;
+    if ((params.preferredColorHints.size > 0 || params.preferredColorFamilies.size > 0) && colorPreferenceAlignment < 0.4) continue;
+    if (params.weatherHint && weatherAlignment < 0.32) continue;
+
     const score =
-      embeddingNorm * 0.28 +
-      categoryCompat * 0.22 +
-      colorHarmony * 0.16 +
+      embeddingNorm * 0.24 +
+      categoryCompat * 0.2 +
+      colorHarmony * 0.18 +
       styleAlignment * 0.16 +
       patternAlignment * 0.08 +
       materialAlignment * 0.05 +
-      formalityAlignment * 0.05;
+      formalityAlignment * 0.06 +
+      weatherAlignment * 0.03;
 
     const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment * accessoryStyleAlignment);
-    const slotAwareScore = Math.round((score * (0.72 + slotStyleScore * 0.28)) * 1000) / 1000;
+    const slotAwareScore = Math.round((score * (0.72 + slotStyleScore * 0.28) * footwearDressAlignment) * 1000) / 1000;
 
     if (slotAwareScore < minimumSlotScore(matchedSlot)) continue;
 
@@ -2558,17 +3037,21 @@ async function fetchCategoryTopUpSuggestions(params: {
         embeddingNorm: Math.round(embeddingNorm * 1000) / 1000,
         categoryCompat: Math.round(categoryCompat * 1000) / 1000,
         colorHarmony: Math.round(colorHarmony * 1000) / 1000,
+        colorPreferenceAlignment: Math.round(colorPreferenceAlignment * 1000) / 1000,
         styleAlignment: Math.round(styleAlignment * 1000) / 1000,
         patternAlignment: Math.round(patternAlignment * 1000) / 1000,
         materialAlignment: Math.round(materialAlignment * 1000) / 1000,
         formalityAlignment: Math.round(formalityAlignment * 1000) / 1000,
+        weatherAlignment: Math.round(weatherAlignment * 1000) / 1000,
         footwearStyleAlignment: Math.round(footwearStyleAlignment * 1000) / 1000,
         bagStyleAlignment: Math.round(bagStyleAlignment * 1000) / 1000,
+        bagColorAlignment: Math.round(bagColorAlignment * 1000) / 1000,
+        colorDecisionAlignment: Math.round(colorDecisionAlignment * 1000) / 1000,
         accessoryStyleAlignment: Math.round(accessoryStyleAlignment * 1000) / 1000,
       },
       stylistSignals: {
         slot: guessedSlot,
-        color: normalizeColorName(source.color_primary_canonical || source.attr_color),
+        color: candidateColor,
         formalityScore: preferredFormalityToScore(inferCandidateFormality(source)),
         styleTokens: extractStyleTokensFromText(
           `${String(source.title || "")} ${String(source.category || "")} ${String(source.attr_style || "")}`
@@ -2583,14 +3066,20 @@ async function fetchCategoryTopUpSuggestions(params: {
 const COLOR_FAMILIES_BY_NAME: Record<string, string> = {
   black: "neutral",
   white: "neutral",
+  "off-white": "neutral",
+  cream: "neutral",
+  ivory: "neutral",
   gray: "neutral",
   grey: "neutral",
+  silver: "neutral",
+  charcoal: "neutral",
   beige: "neutral",
   navy: "neutral",
   brown: "earth",
   tan: "earth",
   camel: "earth",
   blue: "blue",
+  "light-blue": "blue",
   teal: "blue",
   cyan: "blue",
   aqua: "blue",
@@ -2676,6 +3165,276 @@ function normalizeColorName(value?: string): string | null {
   return parts[0] || null;
 }
 
+function normalizeStyleHints(hints?: string[] | null): string[] {
+  if (!Array.isArray(hints)) return [];
+  const allow = new Set(STYLE_TERMS_LEXICON as readonly string[]);
+  const out = new Set<string>();
+  for (const raw of hints) {
+    const token = String(raw || "").toLowerCase().trim();
+    if (!token) continue;
+    if (allow.has(token)) out.add(token);
+  }
+  return Array.from(out).slice(0, 12);
+}
+
+function inferOccasionFromCoverageSignals(
+  occasionCoverage: string[],
+  preferredStyleTerms: string[],
+  currentItems: CompleteLookAnchorRow[],
+): InferredOccasion | null {
+  const score: Record<InferredOccasion, number> = {
+    formal: 0,
+    "semi-formal": 0,
+    casual: 0,
+    active: 0,
+    party: 0,
+    beach: 0,
+  };
+
+  for (const occ of occasionCoverage || []) {
+    const normalized = normalizeOccasionHint(occ);
+    if (normalized) score[normalized] += 2;
+  }
+
+  for (const t of preferredStyleTerms || []) {
+    if (t === "sporty" || t === "athleisure") score.active += 1.8;
+    if (t === "business" || t === "classic") score["semi-formal"] += 1.4;
+    if (t === "formal" || t === "elegant") score.formal += 1.6;
+    if (t === "streetwear" || t === "casual") score.casual += 1.2;
+    if (t === "chic" || t === "romantic") score.party += 0.9;
+  }
+
+  const text = currentItems
+    .map((i) => `${String(i.name || "")} ${String(i.title || "")} ${String(i.category_name || "")}`)
+    .join(" ")
+    .toLowerCase();
+
+  if (/\b(gym|athletic|training|running|jogger|activewear|track|sport)\b/.test(text)) score.active += 2.2;
+  if (/\b(tuxedo|gown|cocktail|sequin|evening|party|heels?|clutch)\b/.test(text)) score.party += 2.1;
+  if (/\b(office|work|blazer|shirt|trouser|loafer|tailored)\b/.test(text)) score["semi-formal"] += 1.8;
+  if (/\b(formal|wedding|black tie)\b/.test(text)) score.formal += 1.8;
+  if (/\b(beach|resort|swim|sandals?|linen shorts?)\b/.test(text)) score.beach += 2.1;
+  if (/\b(jeans|tee|hoodie|everyday|casual)\b/.test(text)) score.casual += 1.1;
+
+  let winner: InferredOccasion | null = null;
+  let best = 0;
+  for (const key of Object.keys(score) as InferredOccasion[]) {
+    if (score[key] > best) {
+      best = score[key];
+      winner = key;
+    }
+  }
+
+  return best >= 1.8 ? winner : null;
+}
+
+function inferWeatherHintFromContext(params: {
+  currentItems: CompleteLookAnchorRow[];
+  seasonCoverage: string[];
+  inferredOccasion: InferredOccasion;
+}): WeatherHint | undefined {
+  const seasonCounts: Record<WeatherSeason, number> = {
+    spring: 0,
+    summer: 0,
+    fall: 0,
+    winter: 0,
+  };
+  for (const s of params.seasonCoverage || []) {
+    const v = String(s || "").toLowerCase().trim();
+    if (v === "spring") seasonCounts.spring += 1;
+    if (v === "summer") seasonCounts.summer += 1;
+    if (v === "fall" || v === "autumn") seasonCounts.fall += 1;
+    if (v === "winter") seasonCounts.winter += 1;
+  }
+
+  const text = params.currentItems
+    .map((i) => `${String(i.name || "")} ${String(i.title || "")} ${String(i.category_name || "")}`)
+    .join(" ")
+    .toLowerCase();
+
+  const coldHits = (text.match(/\b(wool|coat|jacket|parka|puffer|sweater|hoodie|boots?|thermal|cashmere)\b/g) || []).length;
+  const hotHits = (text.match(/\b(shorts?|tank|sleeveless|linen|sandals?|slides?|beach|resort|lightweight)\b/g) || []).length;
+
+  let season: WeatherSeason | undefined;
+  let bestSeason = 0;
+  for (const k of ["spring", "summer", "fall", "winter"] as WeatherSeason[]) {
+    if (seasonCounts[k] > bestSeason) {
+      bestSeason = seasonCounts[k];
+      season = k;
+    }
+  }
+
+  if (!season) {
+    if (coldHits >= hotHits + 1) season = "winter";
+    else if (hotHits >= coldHits + 1) season = "summer";
+  }
+  if (!season && params.inferredOccasion === "beach") season = "summer";
+
+  let temperatureC: number | undefined;
+  if (season === "winter") temperatureC = 7;
+  else if (season === "fall") temperatureC = 16;
+  else if (season === "spring") temperatureC = 18;
+  else if (season === "summer") temperatureC = 30;
+
+  if (temperatureC !== undefined) {
+    temperatureC += Math.min(7, hotHits * 1.5);
+    temperatureC -= Math.min(7, coldHits * 1.5);
+    temperatureC = Math.max(-10, Math.min(42, temperatureC));
+  }
+
+  if (temperatureC === undefined && !season) return undefined;
+  return { temperatureC, season };
+}
+
+function inferColorPreferenceSignals(params: {
+  wardrobeCanonicalColors: Set<string>;
+  wardrobeColorFamilies: Set<string>;
+  colorPalette?: Array<{ hex?: string; weight?: number }> | null;
+}): { colors: Set<string>; families: Set<string> } {
+  const colorScores = new Map<string, number>();
+  const familyScores = new Map<string, number>();
+
+  for (const color of params.wardrobeCanonicalColors) {
+    colorScores.set(color, (colorScores.get(color) || 0) + 1);
+    const fam = COLOR_FAMILIES_BY_NAME[color];
+    if (fam) familyScores.set(fam, (familyScores.get(fam) || 0) + 1);
+  }
+
+  for (const palette of params.colorPalette || []) {
+    const canonical = palette?.hex ? mapHexToFashionCanonical(palette.hex) : null;
+    if (!canonical) continue;
+    const w = Number.isFinite(Number(palette?.weight)) ? Math.max(0.15, Number(palette?.weight)) : 0.25;
+    colorScores.set(canonical, (colorScores.get(canonical) || 0) + w);
+    const fam = COLOR_FAMILIES_BY_NAME[canonical];
+    if (fam) familyScores.set(fam, (familyScores.get(fam) || 0) + w);
+  }
+
+  for (const fam of params.wardrobeColorFamilies) {
+    familyScores.set(fam, (familyScores.get(fam) || 0) + 0.4);
+  }
+
+  const colors = new Set(
+    Array.from(colorScores.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4)
+      .map(([k]) => k)
+  );
+  const families = new Set(
+    Array.from(familyScores.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([k]) => k)
+  );
+
+  return { colors, families };
+}
+
+function normalizeWeatherHint(input?: WeatherHint | null): WeatherHint | undefined {
+  if (!input) return undefined;
+  const out: WeatherHint = {};
+  const temp = Number(input.temperatureC);
+  if (Number.isFinite(temp)) {
+    out.temperatureC = Math.max(-25, Math.min(50, temp));
+  }
+  const season = String(input.season || "").toLowerCase().trim();
+  if (season === "spring" || season === "summer" || season === "fall" || season === "winter") {
+    out.season = season;
+  }
+  return out.temperatureC !== undefined || out.season ? out : undefined;
+}
+
+function extractColorHintSignals(colorHints?: string[] | null): { colors: Set<string>; families: Set<string> } {
+  const colors = new Set<string>();
+  const families = new Set<string>();
+  if (!Array.isArray(colorHints)) return { colors, families };
+
+  for (const raw of colorHints) {
+    const normalized = normalizeColorName(String(raw || ""));
+    if (!normalized) continue;
+    colors.add(normalized);
+    const fam = COLOR_FAMILIES_BY_NAME[normalized];
+    if (fam) families.add(fam);
+  }
+  return { colors, families };
+}
+
+function scoreColorPreferenceAlignment(
+  candidateColor: string | null,
+  preferredColors: Set<string>,
+  preferredFamilies: Set<string>,
+): number {
+  if (preferredColors.size === 0 && preferredFamilies.size === 0) return 0.64;
+  if (!candidateColor) return 0.42;
+  if (preferredColors.has(candidateColor)) return 0.96;
+  const family = COLOR_FAMILIES_BY_NAME[candidateColor] || "other";
+  if (preferredFamilies.has(family)) return 0.86;
+  if (family === "neutral") return 0.72;
+  return 0.36;
+}
+
+function scoreWeatherAlignment(slotRaw: string, source: any, weatherHint?: WeatherHint): number {
+  if (!weatherHint || (weatherHint.temperatureC === undefined && !weatherHint.season)) return 0.66;
+  const slot = normalizeWardrobeCategory(slotRaw) || slotRaw;
+  const blob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.attr_material || "")} ${String(source?.attr_style || "")} ${String(source?.product_types || "")}`.toLowerCase();
+
+  const hasHeavySignal = /\b(wool|fleece|puffer|thermal|down|cashmere|heavy|coat|parka|snow|fur-lined|insulated|boots?)\b/.test(blob);
+  const hasLightSignal = /\b(linen|cotton|breathable|airy|shorts?|tank|sleeveless|sandal|slides?|espadrille|beach|resort)\b/.test(blob);
+  const hasRainSignal = /\b(rain|waterproof|windbreaker|trench)\b/.test(blob);
+
+  let score = 0.7;
+  const t = weatherHint.temperatureC;
+  if (Number.isFinite(t)) {
+    if ((t as number) >= 30) {
+      if (slot === "outerwear") score -= 0.52;
+      if (slot === "shoes" && /\b(boots?)\b/.test(blob)) score -= 0.32;
+      if (hasHeavySignal) score -= 0.34;
+      if (hasLightSignal) score += 0.18;
+    } else if ((t as number) >= 24) {
+      if (slot === "outerwear") score -= 0.34;
+      if (hasHeavySignal) score -= 0.2;
+      if (hasLightSignal) score += 0.12;
+    } else if ((t as number) <= 8) {
+      if (slot === "outerwear") score += 0.2;
+      if (slot === "shoes" && /\b(sandal|slides?|espadrille)\b/.test(blob)) score -= 0.36;
+      if (hasHeavySignal) score += 0.2;
+      if (hasLightSignal) score -= 0.2;
+    } else if ((t as number) <= 14) {
+      if (slot === "outerwear") score += 0.12;
+      if (hasHeavySignal) score += 0.08;
+      if (hasLightSignal) score -= 0.08;
+    }
+  }
+
+  if (weatherHint.season === "summer") {
+    if (slot === "outerwear") score -= 0.34;
+    if (hasHeavySignal) score -= 0.22;
+    if (hasLightSignal) score += 0.12;
+  }
+  if (weatherHint.season === "winter") {
+    if (slot === "outerwear") score += 0.16;
+    if (hasHeavySignal) score += 0.14;
+    if (hasLightSignal) score -= 0.18;
+  }
+  if (weatherHint.season === "fall" || weatherHint.season === "spring") {
+    if (slot === "outerwear") score += hasRainSignal ? 0.12 : 0.06;
+  }
+
+  return Math.max(0.2, Math.min(1, score));
+}
+
+function extractCandidateColorFromSource(source: any): string | null {
+  const primary = normalizeColorName(source?.color_primary_canonical || source?.attr_color);
+  if (primary) return primary;
+  const palette = Array.isArray(source?.color_palette_canonical) ? source.color_palette_canonical : [];
+  for (const p of palette) {
+    const normalized = normalizeColorName(String(p || ""));
+    if (normalized) return normalized;
+  }
+  const titleColor = normalizeColorName(String(source?.title || ""));
+  if (titleColor) return titleColor;
+  return null;
+}
+
 function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
   const cleaned = hex.replace("#", "").trim();
   if (cleaned.length !== 6) return null;
@@ -2695,18 +3454,67 @@ function rgbToFamily(r: number, g: number, b: number): string {
   return "blue";
 }
 
-function extractWardrobeColorFamilies(items: Array<{ dominant_colors?: Array<{ hex?: string }> }>): Set<string> {
+function extractWardrobeColorFamilies(items: Array<{
+  dominant_colors?: Array<{ hex?: string }>;
+  color?: string | null;
+  title?: string | null;
+  name?: string | null;
+  category_name?: string | null;
+}>): Set<string> {
   const families = new Set<string>();
+  const addColorHintsFromText = (text?: string | null) => {
+    const raw = String(text || "").toLowerCase().trim();
+    if (!raw) return;
+    const parts = raw.split(/[^a-z]+/).filter(Boolean);
+    for (const part of parts) {
+      const normalized = normalizeColorName(part);
+      if (!normalized) continue;
+      const family = COLOR_FAMILIES_BY_NAME[normalized];
+      if (family) families.add(family);
+    }
+  };
   for (const item of items) {
+    const namedColor = normalizeColorName(item.color || undefined);
+    if (namedColor) {
+      const namedFamily = COLOR_FAMILIES_BY_NAME[namedColor];
+      if (namedFamily) families.add(namedFamily);
+    }
+    addColorHintsFromText(item.title);
+    addColorHintsFromText(item.name);
+    addColorHintsFromText(item.category_name);
+
     if (!item.dominant_colors || !Array.isArray(item.dominant_colors)) continue;
     for (const c of item.dominant_colors) {
       if (!c?.hex) continue;
+      const pipelineCanonical = mapHexToFashionCanonical(c.hex);
+      if (pipelineCanonical) {
+        const family = COLOR_FAMILIES_BY_NAME[pipelineCanonical];
+        if (family) families.add(family);
+      }
       const rgb = hexToRgb(c.hex);
       if (!rgb) continue;
       families.add(rgbToFamily(rgb.r, rgb.g, rgb.b));
     }
   }
   return families;
+}
+
+function extractWardrobeCanonicalColors(items: Array<{
+  dominant_colors?: Array<{ hex?: string }>;
+  color?: string | null;
+}>): Set<string> {
+  const out = new Set<string>();
+  for (const item of items) {
+    const named = normalizeColorName(item.color || undefined);
+    if (named) out.add(named);
+    if (!Array.isArray(item.dominant_colors)) continue;
+    for (const c of item.dominant_colors) {
+      if (!c?.hex) continue;
+      const canonical = mapHexToFashionCanonical(c.hex);
+      if (canonical) out.add(canonical);
+    }
+  }
+  return out;
 }
 
 function computeCategoryCompatibility(targetCategory: string, currentCategories: string[]): number {
@@ -2731,9 +3539,22 @@ function computeCategoryCompatibility(targetCategory: string, currentCategories:
   return best;
 }
 
-function computeColorHarmonyWithWardrobe(wardrobeFamilies: Set<string>, candidateColor: string | null): number {
+function computeColorHarmonyWithWardrobe(
+  wardrobeFamilies: Set<string>,
+  candidateColor: string | null,
+  wardrobeCanonicalColors?: Set<string>,
+): number {
   if (wardrobeFamilies.size === 0) return 0.6;
   if (!candidateColor) return 0.52;
+  if (wardrobeCanonicalColors && wardrobeCanonicalColors.size > 0) {
+    let bestPair = 0.45;
+    for (const anchorColor of wardrobeCanonicalColors) {
+      bestPair = Math.max(bestPair, scoreColorPair(anchorColor, candidateColor));
+    }
+    // Blend exact color-pair harmony with family-level harmony.
+    const familyBase = computeColorHarmonyWithWardrobe(wardrobeFamilies, candidateColor, undefined);
+    return Math.max(0, Math.min(1, bestPair * 0.65 + familyBase * 0.35));
+  }
   const candidateFamily = COLOR_FAMILIES_BY_NAME[candidateColor] || "other";
   if (candidateFamily === "neutral" || wardrobeFamilies.has("neutral")) return 0.9;
   if (wardrobeFamilies.has(candidateFamily)) return 0.82;
@@ -2749,6 +3570,37 @@ function computeColorHarmonyWithWardrobe(wardrobeFamilies: Set<string>, candidat
     if (comp.includes(fam)) return 0.75;
   }
   return 0.46;
+}
+
+function scoreSlotColorAlignment(
+  slot: string,
+  candidateColor: string | null,
+  wardrobeFamilies: Set<string>,
+  currentCategoryList: string[],
+): number {
+  if (!candidateColor) return 0.55;
+  const family = COLOR_FAMILIES_BY_NAME[candidateColor] || "other";
+  const hasDressAnchor = currentCategoryList.includes("dresses");
+  if (!hasDressAnchor) return computeColorHarmonyWithWardrobe(wardrobeFamilies, candidateColor);
+
+  const normalizedSlot = normalizeWardrobeCategory(slot) || slot;
+
+  // Dress-led looks: apply color intelligence to all slots,
+  // with stricter constraints for bags/accessories.
+  if (family === "neutral") return 0.95;
+  if (family === "pink") return normalizedSlot === "shoes" ? 0.84 : 0.88;
+  if (family === "earth") return normalizedSlot === "accessories" ? 0.76 : 0.8;
+  if (family === "blue") return normalizedSlot === "accessories" ? 0.68 : 0.74;
+  if (family === "red") return normalizedSlot === "bags" || normalizedSlot === "accessories" ? 0.4 : 0.5;
+  if (family === "green") return normalizedSlot === "bags" || normalizedSlot === "accessories" ? 0.36 : 0.48;
+  return 0.52;
+}
+
+function shouldEnforceStrictColorGate(slot: string, currentCategoryList: string[]): boolean {
+  const normalizedSlot = normalizeWardrobeCategory(slot) || slot;
+  const hasDressAnchor = currentCategoryList.includes("dresses");
+  // Keep strict anti-clash gating for dress-led styling only.
+  return hasDressAnchor && (normalizedSlot === "bags" || normalizedSlot === "accessories" || normalizedSlot === "shoes");
 }
 
 function buildOutfitSets(
@@ -2843,6 +3695,83 @@ function scoreStyleTokenOverlap(a: string[] | undefined, b: string[] | undefined
   if (union <= 0) return 0.62;
   const jaccard = overlap / union;
   return 0.44 + jaccard * 0.56;
+}
+
+function inferFashionArchetype(slot: string, text: string): string {
+  const s = text.toLowerCase();
+  const normalizedSlot = normalizeWardrobeCategory(slot) || slot;
+  if (normalizedSlot === "shoes") {
+    if (/\b(heel|heels|pump|pumps|stiletto|kitten heel|mary jane|strappy)\b/.test(s)) return "heels";
+    if (/\b(sandal|sandals|espadrille|slides?)\b/.test(s)) return "sandals";
+    if (/\b(flat|flats|ballet)\b/.test(s)) return "flats";
+    if (/\b(loafer|loafers|oxford|oxfords)\b/.test(s)) return "loafers";
+    if (/\b(boot|boots)\b/.test(s)) return "boots";
+    if (/\b(sneaker|sneakers|trainer|trainers|athletic|running)\b/.test(s)) return "sneakers";
+  }
+  if (normalizedSlot === "bags") {
+    if (/\b(clutch)\b/.test(s)) return "clutch";
+    if (/\b(crossbody|shoulder)\b/.test(s)) return "crossbody";
+    if (/\b(tote|shopper)\b/.test(s)) return "tote";
+    if (/\b(backpack)\b/.test(s)) return "backpack";
+  }
+  if (normalizedSlot === "accessories") {
+    if (/\b(earring|earrings)\b/.test(s)) return "earrings";
+    if (/\b(necklace|pendant)\b/.test(s)) return "necklace";
+    if (/\b(bracelet|bangle)\b/.test(s)) return "bracelet";
+    if (/\b(belt)\b/.test(s)) return "belt";
+    if (/\b(sunglasses|glasses)\b/.test(s)) return "eyewear";
+  }
+  return "generic";
+}
+
+function computeFashionSanityScore(params: {
+  slot: string;
+  source: any;
+  preferredFormality: "casual" | "business" | "formal" | "mixed";
+  inferredOccasion?: InferredOccasion;
+  currentCategoryList: string[];
+}): number {
+  const slot = normalizeWardrobeCategory(params.slot) || params.slot;
+  const text = `${String(params.source?.title || "")} ${String(params.source?.category || "")} ${String(params.source?.product_types || "")}`.toLowerCase();
+  let score = 0.72;
+  if (!String(params.source?.title || "").trim()) score -= 0.18;
+  if (/open-graph|placeholder|default|image not available/.test(String(params.source?.image_url || ""))) score -= 0.2;
+  if (/open-graph|placeholder|default/.test(text)) score -= 0.18;
+
+  const preferredFormal = params.preferredFormality === "business" || params.preferredFormality === "formal";
+  const occasionFormal = params.inferredOccasion === "formal" || params.inferredOccasion === "semi-formal" || params.inferredOccasion === "party";
+  if (slot === "shoes") {
+    const isSneaker = /\b(sneaker|sneakers|trainer|trainers|athletic|running)\b/.test(text);
+    if ((preferredFormal || occasionFormal) && isSneaker) score -= 0.3;
+    if (params.currentCategoryList.includes("dresses") && isSneaker) score -= 0.24;
+  }
+  if (slot === "bags" || slot === "accessories") {
+    if (/\b(keychain|key ring|phone case|hair accessory|scrunchie)\b/.test(text)) score -= 0.24;
+  }
+  return Math.max(0.25, Math.min(1, score));
+}
+
+function enforceFashionDiversity(items: CompleteLookSuggestion[], limit: number): CompleteLookSuggestion[] {
+  const out: CompleteLookSuggestion[] = [];
+  const bySlotArchetype = new Map<string, number>();
+  const bySlotBrand = new Map<string, number>();
+  for (const item of items) {
+    if (out.length >= Math.max(limit * 3, 40)) break;
+    const slot = normalizeWardrobeCategory(item.stylistSignals?.slot || item.category) || "accessories";
+    const blob = `${String(item.title || "")} ${String(item.category || "")}`.toLowerCase();
+    const archetype = inferFashionArchetype(slot, blob);
+    const brand = String(item.brand || "unknown").toLowerCase().trim();
+    const sk = `${slot}|${archetype}`;
+    const bk = `${slot}|${brand}`;
+    const saCount = bySlotArchetype.get(sk) || 0;
+    const sbCount = bySlotBrand.get(bk) || 0;
+    if (saCount >= 6) continue;
+    if (sbCount >= 5) continue;
+    bySlotArchetype.set(sk, saCount + 1);
+    bySlotBrand.set(bk, sbCount + 1);
+    out.push(item);
+  }
+  return out;
 }
 
 function extractFormalityScore(item: CompleteLookSuggestion): number {

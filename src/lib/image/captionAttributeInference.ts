@@ -43,50 +43,110 @@ export function inferColorFromCaption(caption: string): {
   topColor?: string | null;
   jeansColor?: string | null;
   garmentColor?: string | null;
+  shoeColor?: string | null;
+  bagColor?: string | null;
 } {
   const s = String(caption || "").toLowerCase();
+
+  // Guard against cross-garment color bleeding:
+  // "black leather jacket and jeans" should not set jeansColor=black.
+  const INTERVENING_GARMENT_CUE_RE =
+    /\b(jacket|coat|blazer|sweater|hoodie|cardigan|shirt|blouse|top|tee|t-?shirt|dress|gown|skirt|shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|bag|wallet|purse|hat|scarf|belt|sunglasses|vest|outerwear)\b/;
 
   const mapColorWord = (w: string): string | null => {
     const x = w.toLowerCase().trim();
     if (!x) return null;
     if (x === "navy" || x === "dark-blue" || x === "dark blue" || x === "midnight-blue" || x === "midnight blue")
       return "navy";
-    if (x === "blue" || x === "denim") return "blue";
+    if (
+      x === "light-blue" || x === "light blue" || x === "baby blue" || x === "baby-blue" ||
+      x === "sky blue" || x === "sky-blue" || x === "powder blue" || x === "powder-blue" ||
+      x === "pastel blue" || x === "pastel-blue" || x === "ice blue" || x === "ice-blue"
+    )
+      return "light-blue";
+    if (x === "blue" || x === "denim" || x === "cobalt" || x === "indigo" || x === "sapphire") return "blue";
     if (x === "black") return "black";
-    if (x === "grey" || x === "gray") return "gray";
+    if (x === "charcoal") return "charcoal";
+    if (x === "grey" || x === "gray" || x === "silver") return "gray";
     if (x === "white" || x === "ivory" || x === "cream" || x === "off-white" || x === "off white") return "off-white";
-    if (x === "beige" || x === "tan" || x === "camel" || x === "brown") return x === "beige" ? "beige" : "tan";
-    if (x === "green" || x === "olive") return "green";
-    if (x === "red" || x === "burgundy") return "red";
-    if (x === "pink") return "pink";
-    if (x === "yellow" || x === "gold") return "yellow";
+    if (x === "beige" || x === "taupe" || x === "khaki") return "beige";
+    if (x === "tan" || x === "camel") return "camel";
+    if (x === "brown" || x === "chocolate" || x === "mocha" || x === "caramel" || x === "cognac") return "brown";
+    if (x === "green" || x === "olive" || x === "sage" || x === "mint" || x === "emerald" || x === "forest" || x === "moss") return "green";
+    if (x === "red" || x === "burgundy" || x === "maroon" || x === "wine" || x === "crimson") return "red";
+    if (x === "pink" || x === "blush" || x === "fuchsia" || x === "magenta" || x === "rose" || x === "salmon" || x === "dusty pink") return "pink";
+    if (x === "purple" || x === "violet" || x === "lavender" || x === "lilac" || x === "plum" || x === "mauve") return "purple";
+    if (x === "yellow" || x === "gold" || x === "mustard" || x === "lemon" || x === "canary") return "yellow";
+    if (x === "orange" || x === "coral" || x === "rust" || x === "terracotta" || x === "peach" || x === "amber") return "orange";
+    if (x === "teal" || x === "turquoise" || x === "aqua" || x === "cyan" || x === "peacock") return "teal";
     return null;
   };
 
   const colorTokens =
-    "black|navy|blue|denim|grey|gray|white|ivory|cream|off[- ]white|beige|tan|camel|brown|green|olive|red|burgundy|pink|yellow|gold";
+    "black|charcoal|navy|light[- ]blue|baby[- ]blue|sky[- ]blue|powder[- ]blue|pastel[- ]blue|ice[- ]blue|blue|denim|cobalt|indigo|grey|gray|white|ivory|cream|off[- ]white|beige|tan|camel|taupe|khaki|brown|chocolate|mocha|green|olive|sage|mint|emerald|red|burgundy|maroon|wine|crimson|pink|blush|fuchsia|magenta|rose|salmon|purple|violet|lavender|lilac|plum|mauve|yellow|gold|mustard|lemon|orange|coral|rust|terracotta|peach|amber|teal|turquoise|aqua|silver";
 
-  let topColor: string | null = null;
-  const topMatch = s.match(
-    new RegExp(`\\b(${colorTokens})\\b[^.]{0,40}\\b(top|shirt|blouse|tee|t-shirt|t shirt|tunic)\\b`),
-  );
-  if (topMatch?.[1]) topColor = mapColorWord(topMatch[1]);
+  // Helper: find the color token with the SHORTEST gap before a target garment keyword.
+  // Using .match() finds the leftmost color, which is wrong when a different garment type
+  // sits between that color and the target (e.g. "blue sweater and grey pants" → "blue" wins
+  // the leftmost match for "pants", but "grey" is the correct closest color).
+  function nearestColorBefore(text: string, garmentRe: string): string | null {
+    const colorPat = new RegExp(
+      `\\b(${colorTokens})\\b`,
+      "g",
+    );
+    const garmentPat = new RegExp(`^([^.]{0,35})\\b(?:${garmentRe})\\b`);
+    let cm: RegExpExecArray | null;
+    let bestGap = Infinity;
+    let best: string | null = null;
+    while ((cm = colorPat.exec(text)) !== null) {
+      const afterColor = text.slice(cm.index + cm[0].length);
+      const gm = afterColor.match(garmentPat);
+      if (gm) {
+        const between = String(gm[1] || "");
+        // Reject matches where another garment type appears between color and target garment.
+        // Example: "black jacket and jeans" => black belongs to jacket, not jeans.
+        if (INTERVENING_GARMENT_CUE_RE.test(between)) continue;
+        const gap = between.length;
+        if (gap < bestGap) {
+          bestGap = gap;
+          best = mapColorWord(cm[1]);
+        }
+      }
+    }
+    return best;
+  }
 
-  let jeansColor: string | null = null;
-  const jeansMatch = s.match(
-    /\b(black|navy|blue|denim|grey|gray|beige|tan|camel|brown|white|off[- ]white|cream|olive|green|red|pink|yellow|gold)\b[^.]{0,30}\b(jeans|pants|trousers|chinos|cargo)\b/,
-  );
-  if (jeansMatch?.[1]) jeansColor = mapColorWord(jeansMatch[1]);
+  // Top garments: include sweater/cardigan/pullover/hoodie so BLIP captions like
+  // "blue sweater" correctly set topColor="blue" (previously only shirt/blouse/tee matched).
+  const topGarments = "top|shirt|blouse|tee|t-shirt|t shirt|tunic|sweater|cardigan|pullover|jumper|hoodie|sweatshirt|knitwear";
+  const topColor = nearestColorBefore(s, topGarments);
 
-  let garmentColor: string | null = null;
-  const garmentMatch = s.match(
-    new RegExp(
-      `\\b(${colorTokens})\\b[^.]{0,40}\\b(dress|dresses|skirt|skirts|jacket|coat|blazer|sweater|gown)\\b`,
-    ),
-  );
-  if (garmentMatch?.[1]) garmentColor = mapColorWord(garmentMatch[1]);
+  // Bottom garments: find nearest (not leftmost) color before the garment type.
+  // Leftmost-match bug: "blue sweater and grey pants" → regex returns "blue" (not "grey").
+  const bottomGarments = "jeans|pants|trousers|chinos|cargo|shorts|leggings";
+  let jeansColor = nearestColorBefore(s, bottomGarments);
+  // Default bare "jeans" mention to "blue": without an explicit color word, jeans strongly
+  // implies blue/denim. Only apply when no color was extracted (e.g. "black leather jacket
+  // and jeans" — "black" is blocked by the intervening jacket cue, leaving jeansColor null).
+  if (!jeansColor && /\bjeans\b/.test(s)) {
+    jeansColor = "blue";
+  }
 
-  return { topColor, jeansColor, garmentColor };
+  // Garment color for dresses, outerwear, skirts: use nearest-color approach.
+  // "sweater" is now in topGarments so this slot covers dresses/skirts/outerwear specifically.
+  const garmentGarments = "dress|dresses|skirt|skirts|jacket|coat|blazer|gown|romper|jumpsuit|vest|gilet|waistcoat";
+  const garmentColor = nearestColorBefore(s, garmentGarments);
+
+  // Footwear color slot — allows per-detection BLIP captions like "white loafer" to propagate.
+  const footwearGarments =
+    "shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals|trainer|trainers|flat|flats|slipper|slippers|mule|mules|pump|pumps|oxford|oxfords";
+  const shoeColor = nearestColorBefore(s, footwearGarments);
+
+  // Bag/accessory color slot.
+  const bagGarments = "bag|bags|handbag|handbags|purse|purses|tote|totes|clutch|clutches|wallet|wallets|satchel|satchels";
+  const bagColor = nearestColorBefore(s, bagGarments);
+
+  return { topColor, jeansColor, garmentColor, shoeColor, bagColor };
 }
 
 /** Single best color token for catalog backfill when category slot is unknown. */
