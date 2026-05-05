@@ -1667,10 +1667,12 @@ function colorAdmissionPenalty(params: {
     return noAdmissionPenalty("color", "no_color_constraint", params.colorScore);
   }
   if (params.colorTier === "none" && params.colorScore < 0.08) {
-    return { property: "color", tier: "moderate", multiplier: 0.86, reason: "inferred_color_no_match", value: params.colorScore, threshold: 0.08 };
+    // Complete color mismatch under inferred intent: strong penalty so wrong-color
+    // products cannot be lifted to the same admission floor as matching ones.
+    return { property: "color", tier: "major", multiplier: 0.45, reason: "inferred_color_no_match", value: params.colorScore, threshold: 0.08 };
   }
   if (params.colorScore < 0.2) {
-    return { property: "color", tier: "minor", multiplier: 0.94, reason: "inferred_color_weak_match", value: params.colorScore, threshold: 0.2 };
+    return { property: "color", tier: "moderate", multiplier: 0.78, reason: "inferred_color_weak_match", value: params.colorScore, threshold: 0.2 };
   }
   return noAdmissionPenalty("color", "inferred_color_usable", params.colorScore, 0.2);
 }
@@ -1978,8 +1980,17 @@ function evaluateMainPathAdmission(params: {
   
   // Compute admission floor based on penalties (for survival threshold, not ranking)
   const penaltyMultiplier = penalties.reduce((acc, penalty) => acc * penalty.multiplier, 1);
-  const admissionFloor = clampScore01(baseScore * penaltyMultiplier);
-  
+  let admissionFloor = clampScore01(baseScore * penaltyMultiplier);
+
+  // Hard cap: wrong-color products (colorTier="none") must not get an admission floor
+  // as high as correctly-colored products. Without this, visual similarity alone can
+  // lift a green product to the same floor as a white one.
+  const isColorMismatch = params.hasColorPreferenceForRanking && colorTier === "none";
+  if (isColorMismatch) {
+    const colorFloorCap = params.hasExplicitColorIntent ? 0.38 : 0.52;
+    admissionFloor = Math.min(admissionFloor, colorFloorCap);
+  }
+
   return {
     admitted: true,
     reason: "main_path_visual_admission",
@@ -2997,9 +3008,18 @@ function computeExplicitFinalRelevance(params: {
       ? Math.max(complianceFromAttrs, 0.85)
       : complianceFromAttrs;
 
+  // Color gate floor: wrong-color products must be penalized significantly.
+  // "none" tier = zero color-family match — apply a near-zero floor so products
+  // with completely wrong colors score proportionally low.
+  const colorGateFloor =
+    colorTier === "none"
+      ? 0.08
+      : colorTier === "bucket"
+        ? 0.32
+        : 0.50;
   const colorGate =
     colorIntentStrength > 0
-      ? Math.max(0.50, 1 - 0.65 * colorIntentStrength * (1 - params.colorMatch))
+      ? Math.max(colorGateFloor, 1 - 0.65 * colorIntentStrength * (1 - params.colorMatch))
       : 1;
   const colorTierFactor =
     colorIntentStrength > 0

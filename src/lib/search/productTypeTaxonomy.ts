@@ -1252,23 +1252,27 @@ function intraFamilySubtypePenalty(querySeeds: string[], docTypes: string[]): nu
   const docs = docTypes.map((s) => s.toLowerCase().trim()).filter(Boolean);
   if (seeds.length === 0 || docs.length === 0) return 0;
 
-  let maxPen = 0;
+  // For each doc type, find the MINIMUM penalty across all seeds (best-matching seed wins).
+  // A broad seed list (e.g. 51 shoe types) should not penalise a sneaker product just because
+  // "stiletto" is also in the list — if ANY seed is compatible with the doc, penalty = 0.
+  // Then take the MAX across doc types (worst doc is the bottleneck).
+  let worstDocPen = 0;
 
-  for (const s of seeds) {
-    for (const d of docs) {
+  for (const d of docs) {
+    let minSeedPen = Infinity; // lowest penalty found for this doc across all seeds
+
+    for (const s of seeds) {
       const bq = bottomMicroGroup(s);
       const bd = bottomMicroGroup(d);
       if (bq && bd) {
-        const ia = BOTTOM_MICRO[bq];
-        const ib = BOTTOM_MICRO[bd];
-        maxPen = Math.max(maxPen, lookupPairPenalty(BOTTOM_PENALTY_TBL, ia, ib));
+        minSeedPen = Math.min(minSeedPen, lookupPairPenalty(BOTTOM_PENALTY_TBL, BOTTOM_MICRO[bq], BOTTOM_MICRO[bd]));
       }
 
       const fq = footwearMicroGroup(s);
       const fd = footwearMicroGroup(d);
       if (fq && fd) {
-        maxPen = Math.max(
-          maxPen,
+        minSeedPen = Math.min(
+          minSeedPen,
           lookupPairPenalty(FOOTWEAR_PENALTY_TBL, FOOTWEAR_MICRO[fq], FOOTWEAR_MICRO[fd]),
         );
       }
@@ -1276,8 +1280,8 @@ function intraFamilySubtypePenalty(querySeeds: string[], docTypes: string[]): nu
       const tq = topsMicroGroup(s);
       const td = topsMicroGroup(d);
       if (tq && td) {
-        maxPen = Math.max(
-          maxPen,
+        minSeedPen = Math.min(
+          minSeedPen,
           lookupPairPenalty(TOPS_PENALTY_TBL, TOPS_MICRO[tq], TOPS_MICRO[td]),
         );
       }
@@ -1285,14 +1289,14 @@ function intraFamilySubtypePenalty(querySeeds: string[], docTypes: string[]): nu
       const oq = outerMicroGroup(s);
       const od = outerMicroGroup(d);
       if (oq && od) {
-        maxPen = Math.max(maxPen, OUTER_PAIR_PENALTY[oq][od] ?? 0);
+        minSeedPen = Math.min(minSeedPen, OUTER_PAIR_PENALTY[oq][od] ?? 0);
       }
 
       const dq = dressMicroGroup(s);
       const dd = dressMicroGroup(d);
       if (dq && dd) {
-        maxPen = Math.max(
-          maxPen,
+        minSeedPen = Math.min(
+          minSeedPen,
           lookupPairPenalty(DRESS_PENALTY_TBL, DRESS_MICRO[dq], DRESS_MICRO[dd]),
         );
       }
@@ -1300,14 +1304,14 @@ function intraFamilySubtypePenalty(querySeeds: string[], docTypes: string[]): nu
       const sq = shortsSkirtMicro(s);
       const sd = shortsSkirtMicro(d);
       if (sq && sd) {
-        maxPen = Math.max(maxPen, lookupPairPenalty(SHORTS_SKIRT_PENALTY_TBL, sq, sd));
+        minSeedPen = Math.min(minSeedPen, lookupPairPenalty(SHORTS_SKIRT_PENALTY_TBL, sq, sd));
       }
 
       const mq = modestEthnicMicroGroup(s);
       const md = modestEthnicMicroGroup(d);
       if (mq && md) {
-        maxPen = Math.max(
-          maxPen,
+        minSeedPen = Math.min(
+          minSeedPen,
           lookupPairPenalty(MODEST_PENALTY_TBL, MODEST_MICRO[mq], MODEST_MICRO[md]),
         );
       }
@@ -1315,11 +1319,20 @@ function intraFamilySubtypePenalty(querySeeds: string[], docTypes: string[]): nu
       const hq = headMicroGroup(s);
       const hd = headMicroGroup(d);
       if (hq && hd) {
-        maxPen = Math.max(maxPen, lookupPairPenalty(HEAD_PENALTY_TBL, HEAD_MICRO[hq], HEAD_MICRO[hd]));
+        minSeedPen = Math.min(minSeedPen, lookupPairPenalty(HEAD_PENALTY_TBL, HEAD_MICRO[hq], HEAD_MICRO[hd]));
       }
+
+      // Perfect match found for this seed — no need to check remaining seeds
+      if (minSeedPen === 0) break;
     }
+
+    // If no family match was found for this doc type, no intra-family penalty applies
+    const docPen = minSeedPen === Infinity ? 0 : minSeedPen;
+    worstDocPen = Math.max(worstDocPen, docPen);
+    if (worstDocPen >= 1) break;
   }
-  return maxPen;
+
+  return worstDocPen;
 }
 
 /**
@@ -1419,6 +1432,13 @@ export function scoreCrossFamilyTypePenalty(
     dFam = new Set([...dFam, ...dFromCategory]);
   }
   if (dFam.size === 0) return 0;
+
+  // If any query family directly matches a doc family, the product IS in the right
+  // family — skip the penalty even if spurious inferred families (e.g. "top" in
+  // "Top Rated Sneakers" adding "tops") are also present.
+  for (const qf of qFam) {
+    if (dFam.has(qf)) return 0;
+  }
 
   let max = 0;
   for (const qf of qFam) {

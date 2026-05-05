@@ -7,6 +7,47 @@ import { computeHitRelevance, scoreAudienceCompliance } from "./searchHitRelevan
 import { scoreCrossFamilyTypePenalty } from "./productTypeTaxonomy";
 
 describe("computeHitRelevance - sleeve intent", () => {
+  test("missing style signal is excluded from scoring (no style penalty)", () => {
+    const hit = {
+      _source: {
+        title: "Men Core Tee",
+        category: "tops",
+        category_canonical: "tops",
+        product_types: ["tshirt", "tee"],
+        // intentionally no attr_style and no style keywords in title/category
+      },
+    } as any;
+
+    const base = computeHitRelevance(hit, 0.86, {
+      desiredProductTypes: ["tshirt", "tee"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      desiredStyle: "",
+      rerankColorMode: "any",
+      mergedCategory: "tops",
+      astCategories: ["tops"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+    });
+
+    const withStyleIntent = computeHitRelevance(hit, 0.86, {
+      desiredProductTypes: ["tshirt", "tee"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      desiredStyle: "bohemian",
+      rerankColorMode: "any",
+      mergedCategory: "tops",
+      astCategories: ["tops"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+    });
+
+    expect(withStyleIntent.styleCompliance).toBe(0);
+    expect(withStyleIntent.finalRelevance01).toBeCloseTo(base.finalRelevance01, 6);
+  });
+
   test("short-sleeve intent penalizes long-sleeve product", () => {
     const hit = {
       _source: {
