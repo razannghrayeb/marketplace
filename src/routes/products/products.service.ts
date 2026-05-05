@@ -1712,16 +1712,26 @@ function topSleeveAdmissionPenalty(category: string, hasSleeveIntent: boolean, s
 
 function admissionEffectiveColorScore(params: {
   hasColorPreferenceForRanking: boolean;
+  hasInferredColorSignal?: boolean;
   colorScore: number;
   colorTier: string;
 }): number {
-  if (!params.hasColorPreferenceForRanking) return 0.65;
   const tier = String(params.colorTier ?? "none").toLowerCase().trim();
   const score = clampScore01(params.colorScore, 0);
-  if (tier === "exact") return Math.max(score, 1);
-  if (tier === "family") return Math.max(score, 0.82);
-  if (tier === "bucket") return Math.max(score, 0.68);
-  return score;
+  if (params.hasColorPreferenceForRanking) {
+    if (tier === "exact") return Math.max(score, 1);
+    if (tier === "family") return Math.max(score, 0.82);
+    if (tier === "bucket") return Math.max(score, 0.68);
+    return score;
+  }
+  if (params.hasInferredColorSignal) {
+    // Soft color signal: reward correct color, penalize clear mismatches
+    if (tier === "exact") return 0.90;
+    if (tier === "family") return 0.78;
+    if (tier === "bucket") return 0.70;
+    return 0.52;  // wrong/missing color match for inferred color intent
+  }
+  return 0.65;  // no color signal → neutral
 }
 
 function isLongSleeveTopVisualIntent(params: {
@@ -1824,6 +1834,7 @@ function evaluateMainPathAdmission(params: {
   hasReliableTypeIntent: boolean;
   hasExplicitColorIntent: boolean;
   hasColorPreferenceForRanking: boolean;
+  hasInferredColorSignal: boolean;
   hasAudienceIntent: boolean;
   desiredSleeve?: string | null;
   desiredProductTypes?: string[];
@@ -1865,6 +1876,7 @@ function evaluateMainPathAdmission(params: {
   const colorTier = String(comp.colorTier ?? "none").toLowerCase().trim();
   const effectiveColorScore = admissionEffectiveColorScore({
     hasColorPreferenceForRanking: params.hasColorPreferenceForRanking,
+    hasInferredColorSignal: params.hasInferredColorSignal,
     colorScore,
     colorTier,
   });
@@ -1876,9 +1888,9 @@ function evaluateMainPathAdmission(params: {
       ? Math.min(comp.crossFamilyPenalty ?? 0, 0.12)
       : comp.crossFamilyPenalty ?? 0;
   const baseScore = clampScore01(
-    0.62 * params.effectiveVisual +
+    0.51 * params.effectiveVisual +
       0.16 * structuralScore +
-      0.16 * effectiveColorScore +
+      0.27 * effectiveColorScore +
       0.06 * audienceScore,
   );
   const baseDecision = {
@@ -7082,9 +7094,10 @@ export async function searchByImageWithSimilarity(
     lexicalMatchQuery: textQueryForRelevance || undefined,
     tightSemanticCap: true,
     softColorBiasOnly,
-    // Detection-derived productTypes are useful hints but can be noisy;
-    // keep strict type gating only for explicit user intent anchors.
-    // YOLO/detection hints remain in scoring but should not hard-gate image retrieval by default.
+    // Detection-derived productTypes are reliable for specific, high-confidence categories.
+    // Suits/formal wear: always reliable (narrow taxonomy, low false-positive rate).
+    // Common apparel: reliable when detection is anchored to a specific product type.
+    // Generic top-level ("top", "tops") are intentionally kept unreliable to avoid over-filtering.
     reliableTypeIntent:
       forceStrictInferredTypeIntentEnv() ||
       hasExplicitTypeFilter ||
@@ -7092,7 +7105,7 @@ export async function searchByImageWithSimilarity(
       hasTextTypeIntent ||
       (hasDetectionAnchoredTypeIntent &&
         desiredProductTypes.some((t) =>
-          /\b(suit|suits|blazer|blazers|sport\s*coat|dress\s*jacket|waistcoat|vest|tuxedo)\b/.test(
+          /\b(suit|suits|blazer|blazers|sport\s*coat|dress\s*jacket|waistcoat|vest|tuxedo|tshirt|t-shirt|tee|polo|dress|gown|jumpsuit|shoe|sneaker|boot|sandal|loafer|jeans?|denim|pants?|trousers?|chinos?|shorts?|skirt|leggings?)\b/.test(
             String(t).toLowerCase(),
           ),
         )),
@@ -7101,7 +7114,8 @@ export async function searchByImageWithSimilarity(
   const hasDerivedTypeIntentForSafetyGate = desiredProductTypes.length > 0;
   const shouldUseVisualPrimarySort =
     imageSearchVisualPrimaryRanking &&
-    !hasReliableTypeIntentForRelevance;
+    !hasReliableTypeIntentForRelevance &&
+    !hasInferredColorSignal;
   const hasStrictTypeIntentForMerchandiseGate =
     forceStrictInferredTypeIntentEnv() || hasExplicitTypeFilter || hasTextTypeIntent;
 
@@ -8267,6 +8281,7 @@ export async function searchByImageWithSimilarity(
       hasReliableTypeIntent: hasReliableTypeIntentForRelevance,
       hasExplicitColorIntent,
       hasColorPreferenceForRanking,
+      hasInferredColorSignal,
       hasAudienceIntent: hasAudienceIntentForRelevance,
       desiredSleeve: desiredSleeveForRelevance,
       desiredProductTypes,
@@ -8369,9 +8384,9 @@ export async function searchByImageWithSimilarity(
       const vb = rankedVisualForSort(b);
       if (Math.abs(vb - va) > 0.01) return vb - va;
     }
-    // Priority 1: when color intent exists, keep exact/family color matches first.
+    // Priority 1: when color intent exists (explicit, hard, or soft inferred), keep exact/family color matches first.
     // exact > family > others
-    if (hasColorPreferenceForRanking) {
+    if (hasColorPreferenceForRanking || hasInferredColorSignal) {
       const cpA = colorIntentPriorityForSort(compA);
       const cpB = colorIntentPriorityForSort(compB);
       if (cpB !== cpA) return cpB - cpA;
@@ -8394,7 +8409,7 @@ export async function searchByImageWithSimilarity(
     const fa = compA?.finalRelevance01 ?? 0;
     const fb = compB?.finalRelevance01 ?? 0;
     const detectionCategoryForSort = String(params.detectionProductCategory ?? "").toLowerCase().trim();
-    if (hasColorPreferenceForRanking) {
+    if (hasColorPreferenceForRanking || hasInferredColorSignal) {
       const ca = Math.max(0, Math.min(1, complianceById.get(ida)?.colorCompliance ?? 0));
       const cb = Math.max(0, Math.min(1, complianceById.get(idb)?.colorCompliance ?? 0));
       const ta = colorTierRankForSort(compA?.colorTier) / 4;
@@ -8403,7 +8418,7 @@ export async function searchByImageWithSimilarity(
       const colorBonusScale = hasExplicitColorIntent
         ? 0.12
         : hasInferredColorSignal
-          ? (isTopColorIntentSort ? 0.1 : 0.08)
+          ? (isTopColorIntentSort ? 0.18 : 0.14)
           : 0.05;
       const faAdj = fa + colorBonusScale * (0.55 * ta + 0.45 * ca);
       const fbAdj = fb + colorBonusScale * (0.55 * tb + 0.45 * cb);
@@ -8411,9 +8426,9 @@ export async function searchByImageWithSimilarity(
     }
     const topsColorOrderingWindow =
       detectionCategoryForSort === "tops" && hasDetectionAnchoredTypeIntent
-        ? (hasColorPreferenceForRanking ? 0.16 : 0.08)
-        : (hasColorPreferenceForRanking ? 0.08 : 0.04);
-    if (hasColorPreferenceForRanking && Math.abs(fb - fa) <= topsColorOrderingWindow) {
+        ? ((hasColorPreferenceForRanking || hasInferredColorSignal) ? 0.16 : 0.08)
+        : ((hasColorPreferenceForRanking || hasInferredColorSignal) ? 0.08 : 0.04);
+    if ((hasColorPreferenceForRanking || hasInferredColorSignal) && Math.abs(fb - fa) <= topsColorOrderingWindow) {
       const ta = colorTierRankForSort(compA?.colorTier);
       const tb = colorTierRankForSort(compB?.colorTier);
       if (tb !== ta) return tb - ta;
