@@ -17,11 +17,13 @@ import {
   Package,
   TrendingUp,
   Clock,
+  Bell,
+  TrendingDown,
 } from 'lucide-react'
 import { useAdminBasePath } from '@/components/admin/AdminBasePathContext'
 
 type NavItem = {
-  segment: '' | 'moderation' | 'canonicals' | 'jobs' | 'reco' | 'system' | 'console'
+  segment: '' | 'moderation' | 'canonicals' | 'jobs' | 'reco' | 'system' | 'console' | 'alerts'
   label: string
   icon: LucideIcon
   color: string
@@ -46,7 +48,7 @@ const CATALOG_LINKS: { section: string; items: CatalogLinkItem[] } = {
   ],
 }
 
-const SECTIONS: { section: string; items: NavItem[] }[] = [
+const ADMIN_SECTIONS: { section: string; items: NavItem[] }[] = [
   {
     section: 'Operations',
     items: [
@@ -66,9 +68,29 @@ const SECTIONS: { section: string; items: NavItem[] }[] = [
   },
 ]
 
+const BUSINESS_SECTIONS: { section: string; items: NavItem[] }[] = [
+  {
+    section: 'Dead Stock Risk',
+    items: [
+      { segment: '', label: 'DSR Overview', icon: TrendingDown, color: 'bg-red-500', exact: true },
+      { segment: 'alerts', label: 'Alerts', icon: Bell, color: 'bg-orange-500' },
+    ],
+  },
+  {
+    section: 'Operations',
+    items: [
+      { segment: 'moderation', label: 'Moderation', icon: Shield, color: 'bg-fuchsia-500' },
+      { segment: 'jobs', label: 'Jobs', icon: Timer, color: 'bg-violet-500' },
+      { segment: 'console', label: 'API console', icon: Terminal, color: 'bg-neutral-700' },
+    ],
+  },
+]
+
 export function AdminSidebar({ brandLabel = 'Admin' }: { brandLabel?: string }) {
   const pathname = usePathname()
   const base = useAdminBasePath()
+  const isBusiness = base === '/dashboard'
+  const SECTIONS = isBusiness ? BUSINESS_SECTIONS : ADMIN_SECTIONS
 
   return (
     <aside className="w-[220px] min-w-[220px] h-full shrink-0 flex flex-col overflow-y-auto border-r border-neutral-200 bg-white/95 backdrop-blur-sm">
@@ -123,7 +145,7 @@ export function AdminSidebar({ brandLabel = 'Admin' }: { brandLabel?: string }) 
             })}
           </div>
         ))}
-        <div className="mb-4">
+        {!isBusiness && <div className="mb-4">
           <p className="px-4 py-1 text-[10px] font-semibold text-neutral-400 uppercase tracking-widest">
             {CATALOG_LINKS.section}
           </p>
@@ -156,7 +178,7 @@ export function AdminSidebar({ brandLabel = 'Admin' }: { brandLabel?: string }) 
               </Link>
             )
           })}
-        </div>
+        </div>}
       </nav>
 
       <div className="px-4 py-3 border-t border-neutral-100 mt-auto">

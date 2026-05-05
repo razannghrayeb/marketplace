@@ -165,6 +165,14 @@ export const endpoints = {
     recoLabels: '/admin/reco/labels',
     recoStats: '/admin/reco/stats',
   },
+  dashboard: {
+    summary: '/api/dashboard/summary',
+    products: '/api/dashboard/products',
+    productSignals: (id: number | string) => `/api/dashboard/products/${id}/signals`,
+    alerts: '/api/dashboard/alerts',
+    dismissAlert: (id: number | string) => `/api/dashboard/alerts/${id}/dismiss`,
+    generateAlerts: '/api/dashboard/alerts/generate',
+  },
   health: {
     live: '/health/live',
     ready: '/health/ready',
