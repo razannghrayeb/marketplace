@@ -1292,6 +1292,12 @@ function isImpossibleImageFamilyMismatch(jobFamily: ImageSearchFamily, productFa
   if (jobFamily === "bottoms" && productFamily === "dress") return false;
   if (jobFamily === "tops" && productFamily === "footwear") return true;
   if (jobFamily === "footwear" && productFamily === "tops") return true;
+  if (jobFamily === "footwear" && productFamily === "dress") return true;
+  if (jobFamily === "dress" && productFamily === "footwear") return true;
+  if (jobFamily === "footwear" && productFamily === "bottoms") return true;
+  if (jobFamily === "bottoms" && productFamily === "footwear") return true;
+  if (jobFamily === "footwear" && productFamily === "outerwear") return true;
+  if (jobFamily === "outerwear" && productFamily === "footwear") return true;
   if (jobFamily === "bottoms" && productFamily === "accessory") return true;
   if (jobFamily === "footwear" && productFamily === "accessory") return true;
   if (jobFamily === "accessory" && (productFamily === "tops" || productFamily === "bottoms" || productFamily === "footwear")) return true;
@@ -1852,7 +1858,7 @@ function computeExplicitFinalRelevance(params: {
   typeMatch: boolean;
   catSoft: number;
   colorMatch: number;
-  colorTier?: "exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none";
+  colorTier?: "exact" | "near-exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none";
   styleMatch: number;
   sleeveMatch: number;
   lengthMatch: number;
@@ -2050,13 +2056,15 @@ function computeExplicitFinalRelevance(params: {
     colorIntentStrength > 0
       ? colorTier === "exact"
         ? 1.06 + 0.04 * colorIntentStrength
-        : (colorTier === "light-shade" || colorTier === "dark-shade")
-          ? 1.04 + 0.045 * colorIntentStrength
-          : colorTier === "family"
-            ? 1.06 + 0.05 * colorIntentStrength
-            : colorTier === "bucket"
-              ? 0.88 - 0.06 * colorIntentStrength
-              : 0.74 - 0.12 * colorIntentStrength
+        : colorTier === "near-exact"
+          ? 1.05 + 0.035 * colorIntentStrength
+          : (colorTier === "light-shade" || colorTier === "dark-shade")
+            ? 1.04 + 0.045 * colorIntentStrength
+            : colorTier === "family"
+              ? 1.06 + 0.05 * colorIntentStrength
+              : colorTier === "bucket"
+                ? 0.88 - 0.06 * colorIntentStrength
+                : 0.74 - 0.12 * colorIntentStrength
       : 1;
 
   // ── Intent coverage gate ─────────────────────────────────────────
@@ -3494,9 +3502,10 @@ function expandColorIntentWithNearest(tokens: string[]): string[] {
   return out;
 }
 
-function downgradeColorTierOneStep(tier: string | null | undefined): "exact" | "family" | "bucket" | "none" {
+function downgradeColorTierOneStep(tier: string | null | undefined): "exact" | "near-exact" | "family" | "bucket" | "none" {
   const t = String(tier ?? "none").toLowerCase().trim();
-  if (t === "exact") return "family";
+  if (t === "exact") return "near-exact";
+  if (t === "near-exact") return "family";
   if (t === "family") return "bucket";
   if (t === "bucket") return "none";
   return "none";
@@ -3527,11 +3536,13 @@ function applyExpandedColorTierPenalty(params: {
   const tierPenalty =
     tier === "exact"
       ? (explicit ? 0.86 : 0.9)
-      : tier === "family"
-        ? (explicit ? 0.74 : 0.8)
-        : tier === "bucket"
-          ? (explicit ? 0.58 : 0.66)
-          : 0.6;
+      : tier === "near-exact"
+        ? (explicit ? 0.84 : 0.88)
+        : tier === "family"
+          ? (explicit ? 0.74 : 0.8)
+          : tier === "bucket"
+            ? (explicit ? 0.58 : 0.66)
+            : 0.6;
 
   const next = { ...comp };
   next.colorCompliance = Math.max(0, Math.min(1, Number(comp.colorCompliance ?? 0) * tierPenalty));

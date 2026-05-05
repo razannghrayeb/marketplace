@@ -3078,26 +3078,161 @@ const COLOR_FAMILIES_BY_NAME: Record<string, string> = {
   brown: "earth",
   tan: "earth",
   camel: "earth",
+  khaki: "earth",
+  rust: "earth",
+  terracotta: "earth",
+  mustard: "earth",
   blue: "blue",
   "light-blue": "blue",
   teal: "blue",
   cyan: "blue",
   aqua: "blue",
+  turquoise: "blue",
   red: "red",
   maroon: "red",
   burgundy: "red",
+  wine: "red",
+  coral: "red",
   pink: "pink",
   fuchsia: "pink",
   magenta: "pink",
+  blush: "pink",
+  rose: "pink",
   green: "green",
   olive: "green",
   emerald: "green",
+  sage: "green",
+  mint: "green",
   yellow: "earth",
   orange: "earth",
   gold: "earth",
-  purple: "pink",
-  violet: "pink",
-  lavender: "pink",
+  purple: "purple",
+  violet: "purple",
+  lavender: "purple",
+  lilac: "purple",
+  plum: "purple",
+};
+
+/** Hue angle (0-360) and temperature for named colors — used for complementary/analogous scoring. */
+const COLOR_HUE_MAP: Record<string, { hue: number; temp: "neutral" | "warm" | "cool" }> = {
+  red:        { hue: 0,   temp: "warm" },
+  coral:      { hue: 16,  temp: "warm" },
+  orange:     { hue: 30,  temp: "warm" },
+  rust:       { hue: 20,  temp: "warm" },
+  terracotta: { hue: 18,  temp: "warm" },
+  gold:       { hue: 50,  temp: "warm" },
+  mustard:    { hue: 50,  temp: "warm" },
+  yellow:     { hue: 60,  temp: "warm" },
+  olive:      { hue: 80,  temp: "warm" },
+  sage:       { hue: 110, temp: "cool" },
+  green:      { hue: 120, temp: "cool" },
+  mint:       { hue: 150, temp: "cool" },
+  emerald:    { hue: 140, temp: "cool" },
+  teal:       { hue: 180, temp: "cool" },
+  turquoise:  { hue: 175, temp: "cool" },
+  aqua:       { hue: 185, temp: "cool" },
+  cyan:       { hue: 190, temp: "cool" },
+  blue:       { hue: 210, temp: "cool" },
+  navy:       { hue: 220, temp: "cool" },
+  purple:     { hue: 270, temp: "cool" },
+  violet:     { hue: 280, temp: "cool" },
+  lavender:   { hue: 275, temp: "cool" },
+  lilac:      { hue: 280, temp: "cool" },
+  plum:       { hue: 300, temp: "cool" },
+  magenta:    { hue: 300, temp: "cool" },
+  fuchsia:    { hue: 315, temp: "cool" },
+  pink:       { hue: 330, temp: "warm" },
+  blush:      { hue: 340, temp: "warm" },
+  rose:       { hue: 345, temp: "warm" },
+  burgundy:   { hue: 345, temp: "warm" },
+  maroon:     { hue: 340, temp: "warm" },
+  wine:       { hue: 348, temp: "warm" },
+};
+
+/**
+ * Named fashion color pairs with known compatibility scores.
+ * Key is alphabetically sorted "colorA|colorB". Values 0-1 (1 = perfect match).
+ * Covers the most common high-performing and clash combos in fashion styling.
+ */
+const NAMED_COLOR_PAIR_SCORE: Record<string, number> = {
+  // Neutrals with chromatic colors — almost always safe
+  "beige|black":    0.96,
+  "beige|brown":    0.88,
+  "beige|burgundy": 0.88,
+  "beige|camel":    0.85,
+  "beige|coral":    0.87,
+  "beige|navy":     0.93,
+  "beige|olive":    0.84,
+  "beige|rust":     0.88,
+  "beige|white":    0.93,
+  "black|camel":    0.92,
+  "black|gold":     0.90,
+  "black|ivory":    0.94,
+  "black|navy":     0.83,
+  "black|pink":     0.88,
+  "black|red":      0.87,
+  "black|silver":   0.90,
+  "black|white":    0.98,
+  "brown|cream":    0.88,
+  "brown|gold":     0.84,
+  "brown|tan":      0.85,
+  "brown|white":    0.87,
+  "camel|cream":    0.88,
+  "camel|navy":     0.92,
+  "camel|white":    0.92,
+  "cream|navy":     0.91,
+  "cream|pink":     0.88,
+  "cream|teal":     0.84,
+  "cream|terracotta": 0.85,
+  "gray|navy":      0.88,
+  "gray|pink":      0.86,
+  "gray|white":     0.91,
+  "ivory|navy":     0.91,
+  "khaki|navy":     0.88,
+  "khaki|white":    0.90,
+  // Classic chromatic pairs
+  "blue|white":     0.93,
+  "burgundy|camel": 0.92,
+  "burgundy|cream": 0.88,
+  "burgundy|gold":  0.86,
+  "burgundy|gray":  0.82,
+  "coral|navy":     0.88,
+  "coral|white":    0.90,
+  "emerald|gold":   0.88,
+  "emerald|navy":   0.85,
+  "emerald|white":  0.88,
+  "gold|navy":      0.88,
+  "gold|white":     0.86,
+  "lavender|gray":  0.82,
+  "lavender|white": 0.88,
+  "mustard|navy":   0.88,
+  "navy|orange":    0.87,
+  "navy|red":       0.82,
+  "navy|white":     0.96,
+  "navy|yellow":    0.84,
+  "olive|rust":     0.86,
+  "olive|tan":      0.84,
+  "olive|white":    0.83,
+  "pink|white":     0.91,
+  "pink|gray":      0.85,
+  "red|white":      0.88,
+  "rust|cream":     0.87,
+  "rust|navy":      0.84,
+  "tan|white":      0.90,
+  "teal|coral":     0.87,
+  "teal|white":     0.88,
+  "terracotta|white": 0.84,
+  "white|yellow":   0.83,
+  // Tricky pairs — decent but need care
+  "green|orange":   0.74,
+  "mustard|olive":  0.78,
+  "navy|burgundy":  0.79,
+  "purple|yellow":  0.76,
+  // Known clashing combos
+  "orange|pink":    0.35,
+  "red|orange":     0.40,
+  "green|purple":   0.38,
+  "red|pink":       0.42,
 };
 
 const GOOD_PAIRINGS: Record<string, string[]> = {
@@ -3365,11 +3500,35 @@ function scoreColorPreferenceAlignment(
 ): number {
   if (preferredColors.size === 0 && preferredFamilies.size === 0) return 0.64;
   if (!candidateColor) return 0.42;
+  // Exact color match
   if (preferredColors.has(candidateColor)) return 0.96;
   const family = COLOR_FAMILIES_BY_NAME[candidateColor] || "other";
+  // Neutral candidate — always safe alongside preferred colors
+  if (family === "neutral") return 0.74;
+  // Same color family as a preferred color
   if (preferredFamilies.has(family)) return 0.86;
-  if (family === "neutral") return 0.72;
-  return 0.36;
+  // Check if this candidate harmonizes with any specific preferred color via
+  // the named pair table or hue math (complementary/analogous welcome)
+  const candidateHue = COLOR_HUE_MAP[candidateColor];
+  if (candidateHue) {
+    let bestPairScore = 0;
+    for (const pref of preferredColors) {
+      const pairKey = [candidateColor, pref].sort().join("|");
+      const named = NAMED_COLOR_PAIR_SCORE[pairKey];
+      if (named !== undefined) {
+        bestPairScore = Math.max(bestPairScore, named);
+        continue;
+      }
+      const prefHue = COLOR_HUE_MAP[pref];
+      if (!prefHue) continue;
+      const diff = Math.abs(candidateHue.hue - prefHue.hue);
+      const hueDist = Math.min(diff, 360 - diff);
+      if (hueDist < 55) bestPairScore = Math.max(bestPairScore, 0.80);
+      else if (hueDist >= 155 && hueDist <= 205) bestPairScore = Math.max(bestPairScore, 0.78);
+    }
+    if (bestPairScore >= 0.76) return Math.min(0.92, bestPairScore);
+  }
+  return 0.38;
 }
 
 function scoreWeatherAlignment(slotRaw: string, source: any, weatherHint?: WeatherHint): number {
@@ -3667,20 +3826,50 @@ function scoreColorPair(colorA: string | null | undefined, colorB: string | null
   const a = normalizeColorName(colorA || undefined);
   const b = normalizeColorName(colorB || undefined);
   if (!a || !b) return 0.56;
-  if (a === b) return 0.88;
+  // Monochromatic — same named color, always cohesive
+  if (a === b) return 0.90;
+
+  // Named pair lookup wins when available (covers the most fashion-relevant combos)
+  const pairKey = [a, b].sort().join("|");
+  const namedScore = NAMED_COLOR_PAIR_SCORE[pairKey];
+  if (namedScore !== undefined) return namedScore;
+
   const familyA = COLOR_FAMILIES_BY_NAME[a] || "other";
   const familyB = COLOR_FAMILIES_BY_NAME[b] || "other";
-  if (familyA === "neutral" || familyB === "neutral") return 0.9;
+
+  // Neutrals go with everything
+  if (familyA === "neutral" || familyB === "neutral") return 0.90;
+
+  // Hue-based scoring for pairs not in the named table
+  const hueA = COLOR_HUE_MAP[a];
+  const hueB = COLOR_HUE_MAP[b];
+  if (hueA && hueB) {
+    const diff = Math.abs(hueA.hue - hueB.hue);
+    const hueDist = Math.min(diff, 360 - diff);
+    // Monochromatic zone (< 25°): same hue family, very cohesive
+    if (hueDist < 25) return 0.84;
+    // Analogous zone (25–55°): adjacent on wheel, harmonious
+    if (hueDist < 55) return 0.80;
+    // Complementary zone (155–205°): opposite sides, high-contrast fashion staple
+    if (hueDist >= 155 && hueDist <= 205) return 0.82;
+    // Split-complementary / triadic zone (110–145° or 215–250°): creative, trendy
+    if ((hueDist >= 110 && hueDist <= 145) || (hueDist >= 215 && hueDist <= 250)) return 0.75;
+    // Warm-cool tension without clear harmony
+    if (hueA.temp !== hueB.temp) return 0.58;
+  }
+
+  // Family-level fallback
   if (familyA === familyB) return 0.82;
-  const complementary: Record<string, string[]> = {
-    blue: ["earth", "red"],
-    green: ["pink", "red"],
-    red: ["blue", "green"],
-    earth: ["blue"],
-    pink: ["green"],
+  const complementaryFamilies: Record<string, string[]> = {
+    blue:   ["earth", "red", "green"],
+    green:  ["pink", "red", "earth"],
+    red:    ["blue", "green"],
+    earth:  ["blue", "green"],
+    pink:   ["green", "blue"],
+    purple: ["earth", "green"],
   };
-  if ((complementary[familyA] || []).includes(familyB)) return 0.75;
-  return 0.45;
+  if ((complementaryFamilies[familyA] || []).includes(familyB)) return 0.74;
+  return 0.52;
 }
 
 function scoreStyleTokenOverlap(a: string[] | undefined, b: string[] | undefined): number {
