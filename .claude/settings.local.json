@@ -14,7 +14,17 @@
       "Bash(node -e ' *)",
       "Bash(curl -sk \"https://avnadmin:AVNS_G97kQ2PFQD6JlaLg-D-@os-991a95b-rolash1030-7288.a.aivencloud.com:21921/products_v1/_mapping\" -o C:/tmp/mapping.json)",
       "Bash(psql -h 0.0.0.0 -p 5432 -U postgres -d fashion -c ' *)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(Get-ChildItem -Path \"d:\\\\marketplace\\\\src\\\\lib\\\\search\" -Recurse -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object -Property FullName, Length)",
+      "Bash(Format-Table -AutoSize)",
+      "PowerShell(Get-ChildItem -Path \"d:\\\\marketplace\\\\src\\\\lib\\\\search\" -Recurse -ErrorAction SilentlyContinue | Select-Object -Property @{Name=\"Path\";Expression={$_.FullName}}, @{Name=\"Size \\(bytes\\)\";Expression={$_.Length}} | Format-Table -AutoSize)",
+      "PowerShell(Get-ChildItem -Path \"d:\\\\marketplace\\\\src\\\\routes\\\\search\" -Recurse -ErrorAction SilentlyContinue | Select-Object -Property @{Name=\"Path\";Expression={$_.FullName}}, @{Name=\"Size \\(bytes\\)\";Expression={$_.Length}} | Format-Table -AutoSize)",
+      "Bash(find d:\\\\\\\\marketplace\\\\\\\\src -type f -name \"*score*\")",
+      "PowerShell(Get-ChildItem -Path \"d:\\\\marketplace\\\\src\\\\lib\\\\ranker\" -Recurse -ErrorAction SilentlyContinue | Select-Object -Property @{Name=\"Path\";Expression={$_.FullName}}, @{Name=\"Size \\(bytes\\)\";Expression={$_.Length}})",
+      "Bash(find d:\\\\\\\\marketplace\\\\\\\\src -type d -name \"*rank*\")",
+      "Bash(find d:\\\\\\\\marketplace\\\\\\\\src\\\\\\\\lib\\\\\\\\image -type f)",
+      "Bash(find d:\\\\\\\\marketplace\\\\\\\\src\\\\\\\\lib\\\\\\\\model -type f)"
     ]
   }
 }

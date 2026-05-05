@@ -61,6 +61,205 @@ function bottomsTypeEquivalence(intentType: string, productType: string): number
   return 0;
 }
 
+function topTypeEquivalence(intentType: string, productType: string): number {
+  const intent = intentType.toLowerCase().trim();
+  const product = productType.toLowerCase().trim();
+
+  if (intent === product) return 1.0;
+  if (intent !== "tshirt_or_shirt") return 0;
+  if (["tshirt", "tee", "t-shirt", "shirt", "short sleeve top"].includes(product)) return 1.0;
+  if (["polo", "polo shirt", "blouse", "button down", "button-down", "button down shirt"].includes(product)) return 0.9;
+  return 0;
+}
+
+/**
+ * Suit type equivalence for formal wear matching
+ * Suit, suit jacket, blazer, dress jacket are all acceptable for suit intent
+ * Returns 1.0 for exact match, 0.95 for suit jacket/blazer variants, 0 otherwise
+ */
+function suitTypeEquivalence(intentType: string, productType: string): number {
+  const intent = intentType.toLowerCase().trim();
+  const product = productType.toLowerCase().trim();
+
+  if (intent === product) return 1.0;
+
+  const isSuitIntent = /\b(suit|suits|tuxedo|tuxedos)\b/.test(intent);
+  if (!isSuitIntent) return 0;
+
+  const isFormalWear = /\b(suit|suits|tuxedo|tuxedos|suit jacket|dress jacket|blazer|blazers|sport coat|sportcoat|formal jacket|waistcoat|vest)\b/.test(product);
+
+  if (!isFormalWear) return 0;
+
+  if (intent.includes("tuxedo") && product.includes("tuxedo")) return 1.0;
+  if ((intent.includes("suit") && product.includes("suit")) || (intent.includes("suit") && (product.includes("jacket") || product.includes("blazer")))) {
+    return 1.0;
+  }
+
+  if (/\b(suit|suits)\b/.test(intent) && /\b(suit jacket|blazer|dress jacket|formal jacket)\b/.test(product)) {
+    return 0.98;
+  }
+
+  return 0;
+}
+
+/**
+ * Footwear type equivalence — groups sneakers, boots, sandals, formal shoes, heels
+ */
+function footwearTypeEquivalence(intentType: string, productType: string): number {
+  const intent = intentType.toLowerCase().trim();
+  const product = productType.toLowerCase().trim();
+
+  if (intent === product) return 1.0;
+
+  const sneakerFamily = new Set(["sneaker", "sneakers", "trainer", "trainers", "athletic shoe", "athletic shoes", "running shoe", "running shoes", "sport shoe", "sport shoes", "tennis shoe", "tennis shoes", "gym shoe", "gym shoes", "low top", "high top"]);
+  const bootFamily = new Set(["boot", "boots", "ankle boot", "ankle boots", "chelsea boot", "chelsea boots", "combat boot", "combat boots", "knee-high boot", "knee high boot", "knee boot", "knee boots", "booties", "bootie", "western boot", "western boots", "riding boot", "riding boots"]);
+  const sandalFamily = new Set(["sandal", "sandals", "slide", "slides", "flip flop", "flip flops", "flip-flop", "flip-flops", "thong sandal", "thong sandals", "mule", "mules", "slingback", "slingbacks"]);
+  const formalFamily = new Set(["oxford", "oxfords", "loafer", "loafers", "dress shoe", "dress shoes", "derby", "derbies", "brogue", "brogues", "moccasin", "moccasins", "monk strap", "monk straps", "boat shoe", "boat shoes"]);
+  const heelFamily = new Set(["heel", "heels", "pump", "pumps", "stiletto", "stilettos", "block heel", "block heels", "wedge", "wedges", "kitten heel", "kitten heels", "platform heel", "platform heels"]);
+  const genericShoe = new Set(["shoe", "shoes", "footwear"]);
+
+  // Same sub-family: exact equivalence
+  if (sneakerFamily.has(intent) && sneakerFamily.has(product)) return 1.0;
+  if (bootFamily.has(intent) && bootFamily.has(product)) return 1.0;
+  if (sandalFamily.has(intent) && sandalFamily.has(product)) return 1.0;
+  if (formalFamily.has(intent) && formalFamily.has(product)) return 1.0;
+  if (heelFamily.has(intent) && heelFamily.has(product)) return 1.0;
+
+  // Generic "shoe/footwear" intent accepts any specific type
+  if (genericShoe.has(intent)) return 0.9;
+  // Generic product under specific intent: still very acceptable
+  if (genericShoe.has(product)) return 0.9;
+
+  // Cross sub-family (e.g. sneaker vs boot): both are footwear, lower equivalence
+  const allFootwear = new Set([...sneakerFamily, ...bootFamily, ...sandalFamily, ...formalFamily, ...heelFamily]);
+  if (allFootwear.has(intent) && allFootwear.has(product)) return 0.7;
+
+  return 0;
+}
+
+/**
+ * Outerwear type equivalence — jackets, coats, blazers, hoodies, parkas
+ */
+function outerwearTypeEquivalence(intentType: string, productType: string): number {
+  const intent = intentType.toLowerCase().trim();
+  const product = productType.toLowerCase().trim();
+
+  if (intent === product) return 1.0;
+
+  const jacketFamily = new Set(["jacket", "jackets", "bomber jacket", "bomber", "denim jacket", "leather jacket", "utility jacket", "trucker jacket", "field jacket"]);
+  const coatFamily = new Set(["coat", "coats", "overcoat", "trench coat", "trench", "wool coat", "pea coat", "peacoat", "duffle coat", "wrap coat", "top coat"]);
+  const blazerFamily = new Set(["blazer", "blazers", "sport coat", "sportcoat", "tailored jacket"]);
+  const hoodieFamily = new Set(["hoodie", "hoodies", "sweatshirt", "sweatshirts", "zip hoodie", "pullover hoodie", "zip-up hoodie"]);
+  const parkaFamily = new Set(["parka", "parkas", "puffer", "puffer jacket", "down jacket", "quilted jacket", "anorak", "padded jacket", "puffer coat"]);
+  const windFamily = new Set(["windbreaker", "windbreakers", "rain jacket", "shell jacket", "waterproof jacket", "softshell", "softshell jacket"]);
+  const genericOuter = new Set(["outerwear", "outer", "layering piece", "shacket"]);
+
+  if (jacketFamily.has(intent) && jacketFamily.has(product)) return 1.0;
+  if (coatFamily.has(intent) && coatFamily.has(product)) return 1.0;
+  if (blazerFamily.has(intent) && blazerFamily.has(product)) return 1.0;
+  if (hoodieFamily.has(intent) && hoodieFamily.has(product)) return 1.0;
+  if (parkaFamily.has(intent) && parkaFamily.has(product)) return 1.0;
+  if (windFamily.has(intent) && windFamily.has(product)) return 1.0;
+
+  // Jacket ↔ coat: very close
+  if ((jacketFamily.has(intent) || coatFamily.has(intent)) && (jacketFamily.has(product) || coatFamily.has(product))) return 0.88;
+
+  // Generic outerwear accepts any type
+  if (genericOuter.has(intent) || genericOuter.has(product)) return 0.9;
+
+  // Other cross-type outerwear
+  const allOuter = new Set([...jacketFamily, ...coatFamily, ...blazerFamily, ...hoodieFamily, ...parkaFamily, ...windFamily]);
+  if (allOuter.has(intent) && allOuter.has(product)) return 0.75;
+
+  return 0;
+}
+
+/**
+ * Dress type equivalence — length variants, style variants, and dress-adjacent pieces
+ */
+function dressTypeEquivalence(intentType: string, productType: string): number {
+  const intent = intentType.toLowerCase().trim();
+  const product = productType.toLowerCase().trim();
+
+  if (intent === product) return 1.0;
+
+  const genericDress = new Set(["dress", "dresses"]);
+
+  // Generic "dress" intent accepts all dress variants
+  if (genericDress.has(intent) || genericDress.has(product)) return 0.95;
+
+  const miniFamily = new Set(["mini dress", "minidress", "short dress"]);
+  const midiFamily = new Set(["midi dress", "mididress", "knee length dress", "knee-length dress", "tea length dress"]);
+  const maxiFamily = new Set(["maxi dress", "maxidress", "floor length dress", "long dress", "gown"]);
+  const wrapFamily = new Set(["wrap dress", "wrap"]);
+  const bodyconFamily = new Set(["bodycon dress", "bodycon", "bandage dress", "fitted dress"]);
+  const shirtDressFamily = new Set(["shirt dress", "shirtdress"]);
+  const slipFamily = new Set(["slip dress", "slipdress"]);
+  const jumpsuitFamily = new Set(["jumpsuit", "romper", "playsuit", "one piece", "one-piece"]);
+
+  // Length variants — all treat as equivalent dresses
+  const allLengths = new Set([...miniFamily, ...midiFamily, ...maxiFamily]);
+  if (allLengths.has(intent) && allLengths.has(product)) return 0.9;
+
+  if (wrapFamily.has(intent) && wrapFamily.has(product)) return 1.0;
+  if (bodyconFamily.has(intent) && bodyconFamily.has(product)) return 1.0;
+  if (shirtDressFamily.has(intent) && shirtDressFamily.has(product)) return 1.0;
+  if (slipFamily.has(intent) && slipFamily.has(product)) return 1.0;
+
+  // Jumpsuit/romper are dress-adjacent (separate silhouette but same occasion)
+  if (jumpsuitFamily.has(intent) && jumpsuitFamily.has(product)) return 1.0;
+  if (jumpsuitFamily.has(intent) || jumpsuitFamily.has(product)) return 0.75;
+
+  return 0;
+}
+
+/**
+ * Bag type equivalence — crossbody, tote, backpack, clutch, satchel
+ */
+function bagTypeEquivalence(intentType: string, productType: string): number {
+  const intent = intentType.toLowerCase().trim();
+  const product = productType.toLowerCase().trim();
+
+  if (intent === product) return 1.0;
+
+  const genericBag = new Set(["bag", "bags", "handbag", "purse"]);
+  if (genericBag.has(intent) || genericBag.has(product)) return 0.9;
+
+  const crossbodyFamily = new Set(["crossbody", "crossbody bag", "cross body bag", "shoulder bag", "shoulder purse"]);
+  const toteFamily = new Set(["tote", "tote bag", "shopper", "shopper bag", "shopping bag"]);
+  const backpackFamily = new Set(["backpack", "rucksack", "daypack", "knapsack"]);
+  const clutchFamily = new Set(["clutch", "clutch bag", "evening bag", "minaudiere", "wristlet"]);
+  const satchelFamily = new Set(["satchel", "satchel bag", "structured bag", "doctor bag", "top handle bag"]);
+  const beltBagFamily = new Set(["belt bag", "fanny pack", "waist bag", "bum bag"]);
+
+  if (crossbodyFamily.has(intent) && crossbodyFamily.has(product)) return 1.0;
+  if (toteFamily.has(intent) && toteFamily.has(product)) return 1.0;
+  if (backpackFamily.has(intent) && backpackFamily.has(product)) return 1.0;
+  if (clutchFamily.has(intent) && clutchFamily.has(product)) return 1.0;
+  if (satchelFamily.has(intent) && satchelFamily.has(product)) return 1.0;
+  if (beltBagFamily.has(intent) && beltBagFamily.has(product)) return 1.0;
+
+  return 0;
+}
+
+/**
+ * Central dispatcher: routes to the family-specific equivalence function.
+ * Uses the intent's family (falls back to product's family) as the routing key.
+ */
+function getTypeEquivalenceScore(family: string, intentType: string, productType: string): number {
+  const fam = String(family ?? "").toLowerCase().trim();
+  switch (fam) {
+    case "tops":      return topTypeEquivalence(intentType, productType);
+    case "bottoms":   return bottomsTypeEquivalence(intentType, productType);
+    case "footwear":  return footwearTypeEquivalence(intentType, productType);
+    case "outerwear": return outerwearTypeEquivalence(intentType, productType);
+    case "dresses":   return dressTypeEquivalence(intentType, productType);
+    case "bags":      return bagTypeEquivalence(intentType, productType);
+    case "suits":     return suitTypeEquivalence(intentType, productType);
+    default:          return 0;
+  }
+}
+
 export interface TierAssignmentResult {
   tier: MatchTier;
   reason: string;
@@ -85,6 +284,8 @@ export interface NormalizedProduct {
   normalizedStyle?: string | null;
   normalizedOccasion?: string | null;
   normalizedSilhouette?: string | null;
+  /** For bottoms: detected material score (0-1). 1.0 = denim, 0.5 = unknown/generic, 0 = non-denim */
+  materialScore?: number;
 }
 
 /**
@@ -268,17 +469,17 @@ function computeMatchStrength(product: NormalizedProduct, intent: FashionIntent)
     ? canonicalEq(product.normalizedFamily, intent.family)
     : false;
 
-  // Type matching: use equivalence for bottoms, exact match for others
+  // Type matching: dispatch to the family-specific equivalence function
   let typeMatch = false;
   let typeEquivalenceScore = 0;
   if (product.normalizedType && intent.type) {
     if (canonicalEq(product.normalizedType, intent.type)) {
       typeMatch = true;
       typeEquivalenceScore = 1.0;
-    } else if (familyMatch && product.normalizedFamily && canonicalEq(product.normalizedFamily, "bottoms")) {
-      // Use bottoms equivalence for same-family type matching
-      typeEquivalenceScore = bottomsTypeEquivalence(intent.type, product.normalizedType);
-      typeMatch = typeEquivalenceScore >= 0.85; // Accept if equivalence score is high
+    } else {
+      const dispatchFamily = intent.family || product.normalizedFamily || "";
+      typeEquivalenceScore = getTypeEquivalenceScore(dispatchFamily, intent.type, product.normalizedType);
+      typeMatch = typeEquivalenceScore >= 0.85;
     }
   }
 
@@ -360,16 +561,14 @@ function buildTierReason(product: NormalizedProduct, intent: FashionIntent, targ
   if (product.normalizedType && intent.type) {
     if (canonicalEq(product.normalizedType, intent.type)) {
       parts.push(`type match (${product.normalizedType})`);
-    } else if (product.normalizedFamily && canonicalEq(product.normalizedFamily, "bottoms")) {
-      // Check bottoms equivalence
-      const equiv = bottomsTypeEquivalence(intent.type, product.normalizedType);
+    } else {
+      const dispatchFamily = intent.family || product.normalizedFamily || "";
+      const equiv = getTypeEquivalenceScore(dispatchFamily, intent.type, product.normalizedType);
       if (equiv >= 0.85) {
         parts.push(`type equivalent (${intent.type} ≈ ${product.normalizedType})`);
       } else {
         parts.push(`type mismatch (expected ${intent.type}, got ${product.normalizedType})`);
       }
-    } else {
-      parts.push(`type mismatch (expected ${intent.type}, got ${product.normalizedType})`);
     }
   }
 
@@ -476,42 +675,49 @@ export function computeTierBasedScore(params: {
   return Math.max(0, Math.min(1, tierBoundedScore));
 }
 
+// Canonical normalized family names as returned by normalizeFamily() in familyGuard.ts
+const CANONICAL_EXACT_FAMILIES = new Set([
+  "footwear", "bags", "dresses",
+]);
+const CANONICAL_RELATED_FAMILIES = new Set([
+  "tops", "bottoms", "outerwear", "suits", "swimwear", "activewear", "accessories", "jewellery",
+]);
+// Legacy singular/alternate names for backward compatibility
+const LEGACY_KNOWN_FAMILIES = new Set([
+  "top", "bottom", "dress", "gown", "shoe", "boot", "coat", "jacket", "blazer",
+  "cardigan", "shirt", "sweater", "trouser", "pant", "sock", "jeans", "blouse",
+  "bag", "suit", "tuxedo", "swimsuit",
+]);
+
 /**
- * Infer contract tier from product metadata (for kNN products without explicit _recallChannel)
- * This maps product families/types to whether they would be in exact/related/weak tiers
- * based on canonical category and product type classification.
+ * Infer contract tier from product metadata (for kNN products without explicit _recallChannel).
+ * Uses canonical normalized plural family names that normalizeFamily() in familyGuard.ts produces.
  */
 export function inferContractTierFromProduct(
   normalizedFamily: string | null | undefined,
   normalizedType: string | null | undefined,
-  detectionCategory: string | null | undefined
+  _detectionCategory: string | null | undefined
 ): ContractTier {
-  // If no family/type, default to weak (fallback recall)
   if (!normalizedFamily && !normalizedType) {
     return "weak";
   }
 
-  // Exact tier: when family+type alignment is very strong
-  if (normalizedFamily && normalizedType) {
-    const knownExactFamilies = ["dress", "shirt", "sweater", "trouser", "pant", "pant", "sock", "shoe", "boot"];
-    const isKnownExact = knownExactFamilies.some((f) => canonicalEq(f, normalizedFamily));
-    if (isKnownExact) {
+  const fam = String(normalizedFamily ?? "").toLowerCase().trim();
+
+  if (fam) {
+    // Exact tier: families with reliable type metadata (footwear, bags, dresses have clear type taxonomy)
+    if (normalizedType && CANONICAL_EXACT_FAMILIES.has(fam)) {
       return "exact";
     }
-  }
-
-  // Related tier: when family is known but type uncertain
-  if (normalizedFamily) {
-    const knownFamilies = [
-      "dress", "shirt", "sweater", "trouser", "pant", "sock", "shoe", "boot",
-      "coat", "jacket", "blazer", "cardigan", "top", "blouse", "jeans",
-    ];
-    const isKnown = knownFamilies.some((f) => canonicalEq(f, normalizedFamily));
-    if (isKnown) {
+    // Related tier: canonical apparel families (plural normalized forms)
+    if (CANONICAL_RELATED_FAMILIES.has(fam)) {
+      return "related";
+    }
+    // Related tier: legacy singular/alternate forms
+    if (LEGACY_KNOWN_FAMILIES.has(fam)) {
       return "related";
     }
   }
 
-  // Weak tier: uncertain family/type
   return "weak";
 }

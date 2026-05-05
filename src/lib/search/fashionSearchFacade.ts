@@ -301,12 +301,13 @@ function computeWeightedImageScore(params: {
   const material = Math.max(0, Math.min(1, params.materialScore ?? 1));
   const audience = Math.max(0, Math.min(1, params.audienceScore ?? 1));
   
-  // Weighted sum: visual stays important, but color gets the highest metadata weight.
+  // Weighted sum: visual is primary; color is second-strongest so same-color
+  // products clearly outrank color-mismatched ones at equal CLIP scores.
   const score =
-    0.54 * visual +
-    0.12 * family +
+    0.47 * visual +
+    0.10 * family +
     0.08 * type +
-    0.18 * color +
+    0.27 * color +
     0.04 * style +
     0.02 * material +
     0.02 * audience;
