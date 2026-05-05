@@ -1,6 +1,6 @@
 import fetch from "node-fetch";
 import { extractProductUrls, parseProductPage } from "./vendors/moustache_lb";
-import { getOrCreateVendorId, markUnseenProductsUnavailable, upsertProduct } from "./ingest";
+import { deleteProductByUrl, getOrCreateVendorId, markUnseenProductsUnavailable, upsertProduct } from "./ingest";
 
 // Start from a collection page (we can add more later)
 const SEED_URLS = [
@@ -11,6 +11,12 @@ const SEED_URLS = [
 const VENDOR_NAME = "Moustache";
 const VENDOR_URL = "https://moustachestores.com";
 
+class NotFoundError extends Error {
+  constructor(url: string) {
+    super(`404: ${url}`);
+  }
+}
+
 async function fetchHtml(url: string): Promise<string> {
   const res = await fetch(url, {
     headers: {
@@ -20,6 +26,7 @@ async function fetchHtml(url: string): Promise<string> {
     },
   });
 
+  if (res.status === 404) throw new NotFoundError(url);
   if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
   return await res.text();
 }
@@ -169,6 +176,8 @@ export async function runMoustache() {
       const productOrList = parseProductPage(html, url, productJson);
 
       if (!productOrList) {
+        console.log(`No product found - deleting from DB: ${url}`);
+        await deleteProductByUrl(url).catch(() => {});
         failed++;
         continue;
       }
@@ -188,8 +197,13 @@ export async function runMoustache() {
         console.log(`Progress: ${saved}/${allProductUrls.size}`);
       }
     } catch (e: any) {
-      failed++;
-      console.log(`Failed: ${url} -> ${e.message}`);
+      if (e instanceof NotFoundError) {
+        console.log(`404 - deleting from DB: ${url}`);
+        await deleteProductByUrl(url).catch(() => {});
+      } else {
+        failed++;
+        console.log(`Failed: ${url} -> ${e.message}`);
+      }
     } finally {
       await sleep(500);
     }

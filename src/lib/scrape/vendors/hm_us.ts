@@ -315,19 +315,20 @@ function extractDescription(details: any, aemData: any): string | null {
   return findFirstStringByKeys(aemData, ["description", "productDescription", "longDescription", "shortDescription"]);
 }
 
-function findPriceFields(aemData: any): { currency?: string; value?: number; formatted?: string } {
+function findPriceFields(aemData: any): { currency?: string; value?: number; saleValue?: number; formatted?: string } {
   const s = JSON.stringify(aemData);
 
-  // We prefer whitePriceValue + priceCurrency (you saw both)
   const valueMatch = s.match(/"whitePriceValue"\s*:\s*"([^"]+)"/);
   const currencyMatch = s.match(/"priceCurrency"\s*:\s*"([^"]+)"/);
   const formattedMatch = s.match(/"whitePrice"\s*:\s*"([^"]+)"/);
+  const saleMatch = s.match(/"redPriceValue"\s*:\s*"([^"]+)"/);
 
   const value = valueMatch ? Number(valueMatch[1]) : undefined;
   const currency = currencyMatch ? currencyMatch[1] : undefined;
   const formatted = formattedMatch ? formattedMatch[1] : undefined;
+  const saleValue = saleMatch ? Number(saleMatch[1]) : undefined;
 
-  return { currency, value, formatted };
+  return { currency, value, saleValue, formatted };
 }
 
 export async function scrapeHmProductPage(productUrl: string): Promise<ScrapedProduct[]> {
@@ -344,17 +345,18 @@ export async function scrapeHmProductPage(productUrl: string): Promise<ScrapedPr
   }
 
   const html = await res.text();
-  const nextData = extractNextDataJson(html);
+
+  let nextData: any;
+  try {
+    nextData = extractNextDataJson(html);
+  } catch {
+    return [];
+  }
 
   const pageProps = nextData?.props?.pageProps;
   const productPageProps = pageProps?.productPageProps;
   const aemData = productPageProps?.aemData;
   const jsonLd = extractJsonLdProduct(html);
-
-  if (!aemData) {
-    // Some pages don't expose aemData; we'll fall back to other sources.
-    // Keep aemData null and use generic extractors below.
-  }
 
   const details =
     aemData?.productArticleDetails ??
@@ -368,60 +370,53 @@ export async function scrapeHmProductPage(productUrl: string): Promise<ScrapedPr
     jsonLd?.name ??
     findFirstStringByKeys(nextData, ["baseProductName", "name"]);
 
-  const articleCode: string | undefined =
-    details?.articleCode ??
-    productPageProps?.articleCode ??
-    findFirstStringByKeys(nextData, ["articleCode", "code"]);
-
-  if (!title) throw new Error("Missing baseProductName");
-  if (!articleCode) throw new Error("Missing articleCode");
+  if (!title) return [];
 
   const price = aemData ? findPriceFields(aemData) : {};
   const priceValue = price.value ?? jsonLd?.price;
-  if (!priceValue || Number.isNaN(priceValue) || priceValue <= 0) {
-    throw new Error(`Invalid price for ${productUrl} (found: ${price.formatted ?? "none"})`);
-  }
+  if (!priceValue || Number.isNaN(priceValue) || priceValue <= 0) return [];
 
   const currency = price.currency ?? jsonLd?.currency ?? "USD";
   const price_cents = Math.round(priceValue * 100);
 
-  const images = aemData ? collectImageUrls(aemData) : [];
-  const image_url = images[0] ?? jsonLd?.image; // pick first; you can store more later if your schema supports it
+  const hasSale = price.saleValue != null && price.saleValue > 0 && price.saleValue < priceValue;
+  const sales_price_cents = hasSale ? Math.round(price.saleValue! * 100) : null;
 
-  // Sizes (optional): if we find size array, we emit one row per size
+  const images = aemData ? collectImageUrls(aemData) : [];
+  const image_url = images[0] ?? jsonLd?.image ?? null;
+
   const sizes = extractSizes(aemData ?? nextData, details);
+  const sizeValue = sizes && sizes.length > 0
+    ? sizes.map((sz) => normalizeSizeValue(sz)).filter(Boolean).join(", ")
+    : null;
+
   const color = extractColor(details, aemData ?? nextData);
   const brand = extractBrand(details, aemData ?? nextData);
   const category = extractCategory(details, aemData ?? nextData);
   const description = extractDescription(details, aemData ?? nextData) ?? jsonLd?.description ?? null;
 
-  const base: Omit<ScrapedProduct, "size"> = {
+  const articleCode: string | undefined =
+    details?.articleCode ??
+    productPageProps?.articleCode ??
+    findFirstStringByKeys(nextData, ["articleCode", "code"]);
+
+  return [{
     vendor_name: VENDOR_NAME,
     vendor_url: VENDOR_URL,
     product_url: productUrl,
+    parent_product_url: productUrl,
+    variant_id: articleCode ?? null,
     title,
     brand: brand ?? null,
     category: category ?? null,
     description: description ?? null,
-    color,
+    size: sizeValue,
+    color: color ?? null,
     currency,
     price_cents,
+    sales_price_cents,
+    availability: true,
     image_url,
-    // Optional fields (use only if your type includes them)
-    // brand: VENDOR_NAME,
-    // category: details?.categoryPath,
-    // description: details?.pageId,
-  } as any;
-
-  if (sizes && sizes.length) {
-    return sizes.map((sz: any) => ({
-      ...base,
-      size: (sz.name ?? sz.size ?? "").toString() || null,
-      // If later you find stock value, you can map available here
-      // available: typeof sz.stock === "number" ? sz.stock > 0 : true,
-    })) as any;
-  }
-
-  // Fallback: single row without size
-  return [{ ...base, size: null } as any];
+    image_urls: images.length > 1 ? images : null,
+  }];
 }

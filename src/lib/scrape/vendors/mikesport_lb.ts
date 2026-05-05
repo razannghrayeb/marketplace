@@ -121,15 +121,19 @@ function looksLikeSizeValue(value: string | null | undefined): boolean {
   const v = (value ?? "").trim().toLowerCase();
   if (!v) return false;
   if (v === "one size" || v === "onesize" || v === "os") return true;
-  if (/^(xxs|xs|s|m|l|xl|xxl|xxxl|xxxxl)$/.test(v)) return true;
+  if (/^(\d+x[ls]|x{1,4}[ls]|s|m|l)(\/(\d+x[ls]|x{1,4}[ls]|s|m|l))?$/.test(v)) return true;
   if (/^\d{1,3}(\.\d+)?$/.test(v)) return true;
   if (/^\d{1,3}\s?(eu|us|uk|fr|it)$/.test(v)) return true;
-  if (/^\d{1,3}\s?-\s?\d{1,3}\s?(eu|us|uk|fr|it)$/.test(v)) return true;
-  if (/^\d{1,3}\s?1\/2\s?(eu|us|uk|fr|it)?$/.test(v)) return true;
+  if (/^\d{1,3}\s?-\s?\d{1,3}\s?(eu|us|uk|fr|it)?$/.test(v)) return true;
+  if (/^\d{1,3}\s+\d+\/\d+\s*(eu|us|uk|fr|it)?$/.test(v)) return true;
   if (/^\d{1,3}\.\d\s?(eu|us|uk|fr|it)?$/.test(v)) return true;
+  if (/^\d{1,2}\s?-\s?\d{1,3}\s?months?$/.test(v)) return true;
+  if (/^\d{1,3}\s?months?$/.test(v)) return true;
   if (/^\d{1,2}\s?-\s?\d{1,2}\s?years?$/.test(v)) return true;
   if (/^\d{1,2}\s?years?$/.test(v)) return true;
   if (/^\d{1,2}y$/.test(v)) return true;
+  if (/^\d{1,3}-$/.test(v)) return true;
+  if (/^[a-z]{1,3}\d{1,4}$/i.test(v)) return true;
   return false;
 }
 
@@ -309,7 +313,6 @@ export async function fetchAllMikesportRawProducts(): Promise<any[]> {
     if (maxPages != null && page > (startPage + maxPages - 1)) break;
     const url = `${BASE}/products.json?limit=250&page=${page}`;
     let res: Response | null = null;
-    let lastStatus: number | null = null;
     const attempts = 5;
     for (let i = 0; i < attempts; i += 1) {
       res = await fetch(url, {
@@ -321,7 +324,6 @@ export async function fetchAllMikesportRawProducts(): Promise<any[]> {
 
       if (res.ok || res.status === 400) break;
 
-      lastStatus = res.status;
       if (res.status === 503 || res.status === 502 || res.status === 429) {
         const delay = 750 * Math.pow(2, i);
         await new Promise((r) => setTimeout(r, delay));

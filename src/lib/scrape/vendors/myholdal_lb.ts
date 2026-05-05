@@ -76,6 +76,7 @@ function looksLikeSizeValue(value: string | null | undefined): boolean {
   if (v === "one size" || v === "onesize" || v === "os") return true;
   if (/^(xxs|xs|s|m|l|xl|xxl|xxxl|xxxxl)$/.test(v)) return true;
   if (/^\d{1,3}(\.\d+)?$/.test(v)) return true;
+  if (/^\d+(\.\d+)?\s*(ml|l|g|kg|oz|fl\.?\s*oz)$/i.test(v)) return true;
   if (/^\d{1,3}\s?(eu|us|uk|fr|it)$/.test(v)) return true;
   if (/^\d{1,3}\s?-\s?\d{1,3}\s?(eu|us|uk|fr|it)$/.test(v)) return true;
   if (/^\d{1,3}\s?1\/2\s?(eu|us|uk|fr|it)?$/.test(v)) return true;
@@ -93,6 +94,107 @@ function looksLikeGenderValue(value: string | null | undefined): boolean {
   if (v === "girls" || v === "girl" || v === "boys" || v === "boy") return true;
   if (v === "kids" || v === "kid" || v === "unisex") return true;
   return false;
+}
+
+function looksLikeLanguageValue(value: string | null | undefined): boolean {
+  const v = (value ?? "").trim().toLowerCase();
+  if (!v) return false;
+  const languages = new Set([
+    "english","french","arabic","german","italian","spanish","portuguese",
+    "dutch","turkish","chinese","japanese","korean","russian","greek",
+    "en","fr","ar","de","it","es","pt","nl","tr",
+  ]);
+  return languages.has(v);
+}
+
+// Words that are never a valid color — discard them.
+// The check is on the full lower-cased value, so "baby blue" won't match "baby".
+const NON_COLOR_WORDS = new Set([
+  "print", "tank", "overview",
+  "damaged hair", "dry hair", "normal hair", "oily hair",
+  "stripes", "checks", "plaid", "bleach", "rinse", "baby",
+]);
+
+const BRAND_COLOR_MAP: Record<string, string> = {
+  // French color words
+  "noir": "black", "blanc": "white", "rouge": "red", "bleu": "blue",
+  "vert": "green", "gris": "grey", "rose": "pink", "lilas": "lilac",
+  "jaune": "yellow", "orange": "orange", "violet": "purple",
+  // Multi-word French
+  "bleu nuit": "navy", "bleu marine": "navy", "bleu ciel": "light blue",
+  "rose pale": "light pink", "vert olive": "olive", "gris clair": "light grey",
+  // Lacoste / Longchamp / other brand fancy names
+  "abysm": "navy", "nidus": "brown", "malachite": "green", "greek": "blue",
+  "ipomee": "purple", "ipomee chine": "purple", "evernia": "olive",
+  "magnet": "dark grey", "lazuli": "blue", "magnet lazuli": "blue",
+  "tawny port": "burgundy", "tawny": "orange", "pale banana": "yellow",
+  "petunia": "purple", "marine": "navy", "corsair": "navy", "pond": "teal",
+  "azalea": "pink", "cobalt": "blue", "ecru": "cream", "vanilla": "cream",
+  "midnight": "navy", "ocean": "blue", "forest": "dark green",
+  "charcoal": "dark grey", "graphite": "dark grey", "slate": "grey",
+  "smoke": "grey", "champagne": "gold", "cognac": "brown", "caramel": "brown",
+  "stone": "beige", "sand": "beige", "bone": "beige", "ivory": "cream",
+  "fuchsia": "pink", "bordeaux": "burgundy", "merlot": "burgundy",
+  "lavender": "purple", "lilac": "purple", "coral": "coral", "teal": "teal",
+  "sinople": "green", "scille": "blue", "ladigue": "teal",
+  "stainless steel": "silver", "stainless": "silver", "flour": "off white",
+  "mellow": "yellow", "baby blue": "light blue", "sky": "light blue",
+  "mint": "mint", "sage": "sage", "khaki": "khaki", "olive": "olive",
+  // Cosmetic shades
+  "peony": "pink", "hazelnut": "brown", "icy gold": "gold",
+  "rose brown": "brown", "taupe beige": "beige", "warm peach": "peach",
+  "peach amber": "peach", "haze": "grey", "rum": "brown",
+};
+
+function normalizeColor(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  // Pure number → not a color
+  if (/^\d+$/.test(trimmed)) return null;
+
+  const lower = trimmed.toLowerCase();
+
+  // Non-color keyword (stainless steel, print, tank, hair types, etc.)
+  if (NON_COLOR_WORDS.has(lower)) return null;
+
+  // Skin tone descriptions (e.g. "4 - Fair to Light Skin with Pink Undertones")
+  // Try to pull a real color word out instead of discarding entirely
+  if (lower.includes("skin") || lower.includes("undertone") || /^\d+\s*[-–]/.test(trimmed)) {
+    const colorWords = ["pink", "peach", "beige", "warm", "cool", "ivory", "golden", "tan", "brown", "nude"];
+    for (const word of colorWords) {
+      if (lower.includes(word)) return word;
+    }
+    return null;
+  }
+
+  // Discard gender / language values that slipped through
+  if (looksLikeGenderValue(trimmed) || looksLikeLanguageValue(trimmed)) return null;
+
+  // Multi-color "NAVY / WHITE" or "BLACK / BEIGE" → keep first color only
+  if (trimmed.includes("/")) {
+    const first = trimmed.split("/")[0].trim();
+    if (first) return normalizeColor(first);
+  }
+
+  // Code prefix: "BK3 BLACK" or "BG6 BEIGE" → strip the code, keep the color word
+  const codePrefix = trimmed.match(/^[A-Za-z]{1,3}\d+\s+(.+)$/);
+  if (codePrefix) return normalizeColor(codePrefix[1]);
+
+  // Trailing code: "GREEN 132" or "LIGHT PINK T03" → strip the trailing code
+  const trailingCode = trimmed.replace(/\s+[A-Za-z]?\d{2,3}$/, "").trim();
+  if (trailingCode !== trimmed) return normalizeColor(trailingCode);
+
+  // Strip makeup finish prefixes (e.g. "SATIN ROSE BROWN" → "ROSE BROWN")
+  const stripped = trimmed.replace(
+    /^(satin|matte|glossy|sheer|shimmer|metallic|velvet|glitter|cream)\s+/i, ""
+  ).trim();
+
+  const key = stripped.toLowerCase();
+  if (BRAND_COLOR_MAP[key]) return BRAND_COLOR_MAP[key];
+
+  return stripped.toLowerCase() || null;
 }
 
 function cleanupColorCandidate(value: string | null | undefined): string | null {
@@ -286,7 +388,11 @@ function guessOptionIndexes(productJson: any): { colorIndex: number; sizeIndex: 
 
   if (colorIndex >= 0) {
     const values = optionValuesAt(colorIndex);
-    if (values.length > 0 && values.every((v) => looksLikeSizeValue(v))) {
+    if (values.length > 0 && (
+      values.every((v) => looksLikeSizeValue(v)) ||
+      values.every((v) => looksLikeGenderValue(v)) ||
+      values.every((v) => looksLikeLanguageValue(v))
+    )) {
       colorIndex = -1;
     }
   }
@@ -458,8 +564,8 @@ export function parseProductPage(
       brand,
       category,
       description,
-      size: fallbackSize,
-      color: fallbackColor,
+      size: fallbackSize ?? "one size",
+      color: normalizeColor(fallbackColor),
 
       return_policy: RETURN_POLICY,
       currency,
@@ -484,7 +590,12 @@ export function parseProductPage(
   const groupMap = new Map<string, { color: string | null; variants: any[] }>();
   for (const v of np.variants) {
     const optionsList = [v?.option1, v?.option2, v?.option3];
-    const colorValue = colorIndex >= 0 ? normalizeVariantValue(optionsList[colorIndex]) : null;
+    const rawColorValue = colorIndex >= 0 ? normalizeVariantValue(optionsList[colorIndex]) : null;
+    // Treat gender or language values as null — they are not colors
+    const colorValue =
+      rawColorValue && (looksLikeGenderValue(rawColorValue) || looksLikeLanguageValue(rawColorValue))
+        ? null
+        : rawColorValue;
     const key = colorValue ?? "__default__";
     const entry = groupMap.get(key) ?? { color: colorValue, variants: [] };
     entry.variants.push(v);
@@ -503,7 +614,7 @@ export function parseProductPage(
       return_policy: RETURN_POLICY,
       currency,
       image_urls,
-      color: fallbackColor,
+      color: normalizeColor(fallbackColor),
     };
 
   for (const { color: groupColor, variants } of groupMap.values()) {
@@ -550,8 +661,8 @@ export function parseProductPage(
       ...base,
       product_url: groupProductUrl,
       variant_id: variantIdValue,
-      size: sizeValue ?? fallbackSize,
-      color: groupColor ?? fallbackColor,
+      size: sizeValue ?? fallbackSize ?? "one size",
+      color: normalizeColor(groupColor) ?? normalizeColor(fallbackColor),
       price_cents: price,
       sales_price_cents: sale,
       availability: groupAvailable,

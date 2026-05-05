@@ -3,6 +3,8 @@
 import { scrapeAllMikesport } from "./vendors/mikesport_lb";
 import { getOrCreateVendorId, markUnseenProductsUnavailable, upsertProduct } from "./ingest";
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export async function runMikesport() {
   console.log("Starting MikeSport scrape (ALL products via products.json pagination)...");
 
@@ -34,6 +36,8 @@ export async function runMikesport() {
         error: e?.message ?? e,
       });
     }
+
+    await sleep(50);
   }
 
   const vendorId = await getOrCreateVendorId("Mike Sport", "https://lb.mikesport.com");

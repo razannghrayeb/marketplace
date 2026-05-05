@@ -1,4 +1,5 @@
 // src/lib/scrape/vendors/hm_discover_us.ts
+import fetch from "node-fetch";
 
 const BASE = "https://www2.hm.com";
 
@@ -40,25 +41,45 @@ export async function discoverHmProductUrlsBySearch(opts: {
   query: string;
   maxPages?: number;
   delayMs?: number;
+  locale?: string;
 }): Promise<string[]> {
-  const { query, maxPages = 80, delayMs = 250 } = opts;
+  const { query, maxPages = 80, delayMs = 250, locale = "en_us" } = opts;
 
   const urls = new Set<string>();
 
   for (let page = 1; page <= maxPages; page++) {
-    const url = `${BASE}/en_us/search-results.html?q=${encodeURIComponent(query)}&page=${page}`;
+    const url = `${BASE}/${locale}/search-results.html?q=${encodeURIComponent(query)}&page=${page}`;
     const res = await fetch(url, {
       headers: {
         "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
       },
+      redirect: "follow",
     });
 
-    if (!res.ok) break;
+    if (!res.ok) {
+      console.warn(`[HM discover] q="${query}" page=${page}: HTTP ${res.status} — stopping`);
+      break;
+    }
 
     const html = await res.text();
-    const nextData = extractNextDataJson(html);
+    let nextData: any;
+    try {
+      nextData = extractNextDataJson(html);
+    } catch {
+      console.warn(`[HM discover] q="${query}" page=${page}: __NEXT_DATA__ not found, skipping`);
+      break;
+    }
 
     const before = urls.size;
     collectProductUrls(nextData, urls);

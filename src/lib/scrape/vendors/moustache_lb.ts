@@ -108,7 +108,32 @@ function normalizeOptionName(name: string | null | undefined): string {
 
 function normalizeVariantValue(value: any): string | null {
   const v = String(value ?? "").trim();
-  return v.length ? v : null;
+  if (!v) return null;
+  // Shopify dummy option values — treat as no value
+  if (/^(default\s*title|default|one|n\/a|na|none|-)$/i.test(v)) return null;
+  return v;
+}
+
+function looksLikeColorToken(token: string): boolean {
+  const normalized = token.toLowerCase().replace(/[^a-z]/g, "");
+  if (!normalized) return false;
+  const known = new Set([
+    "black","white","blue","navy","red","green","olive","pink","purple","yellow",
+    "orange","brown","tan","beige","camel","cream","ivory","grey","gray","silver",
+    "gold","burgundy","maroon","wine","khaki","stone","natural","oat","ecru",
+    "denim","indigo","mustard","rust","sage","lilac","teal","aqua","mint",
+    "chocolate","espresso","mocha","bone","sand","taupe","graphite","charcoal",
+    "coal","henna","merlot","plum","rose","bordeaux","sienna","smoke",
+  ]);
+  return known.has(normalized);
+}
+
+function extractColorFromTitle(title: string | null | undefined): string | null {
+  const words = (title ?? "").split(/\s+/).map((w) => w.replace(/[^a-zA-Z]/g, ""));
+  for (const word of words) {
+    if (looksLikeColorToken(word)) return word.toLowerCase();
+  }
+  return null;
 }
 
 function looksLikeSizeValue(value: string | null | undefined): boolean {
@@ -225,6 +250,56 @@ function pickGroupPrice(variants: any[]): { price: number; sale: number | null }
   return { price, sale: null };
 }
 
+// Known garment category keywords to search for in the title (order matters — more specific first)
+const CATEGORY_KEYWORDS: [RegExp, string][] = [
+  [/pyjama\s*set|pajama\s*set/i,  "pajama set"],
+  [/\bt[\-\s]?shirt\b/i,          "t-shirt"],
+  [/\bpolo\b/i,                   "polo shirt"],
+  [/\bjeans\b/i,                  "jeans"],
+  [/\bchino\b/i,                  "chinos"],
+  [/\btrousers?\b/i,              "trousers"],
+  [/\bshorts?\b/i,                "shorts"],
+  [/\bleggings?\b/i,              "leggings"],
+  [/\bdress\b/i,                  "dress"],
+  [/\bskirt\b/i,                  "skirt"],
+  [/\bblouse\b/i,                 "blouse"],
+  [/\bjacket\b/i,                 "jacket"],
+  [/\bhoodie\b/i,                 "hoodie"],
+  [/\bsweater|sweatshirt\b/i,     "sweater"],
+  [/\bcoat\b/i,                   "coat"],
+  [/\bbra\b/i,                    "bra"],
+  [/\bthong\b/i,                  "thong"],
+  [/\bstring\b/i,                 "thong"],
+  [/\bslip\b/i,                   "slip"],
+  [/\bunderwear\b/i,              "underwear"],
+  [/\bbikini\b/i,                 "bikini"],
+  [/\bswimwear\b/i,               "swimwear"],
+  [/\bsocks?\b/i,                 "socks"],
+  [/\bbelt\b/i,                   "belt"],
+  [/\bbracelet\b/i,               "bracelet"],
+  [/\bnecklace\b/i,               "necklace"],
+  [/\bring\b/i,                   "ring"],
+  [/\bbag\b/i,                    "bag"],
+];
+
+// Brand-like patterns that are NOT real categories
+const BRAND_TYPE_PATTERN = /^(penti|tom\s*tailor|jack\s*dapper|moustache|zara|h&m|nike|adidas)\s*(women|men|kids|unisex|girl|boy)?$/i;
+
+function inferCategory(productType: string | null, title: string | null): string | null {
+  // Use product_type only if it's a real category (not a brand name)
+  if (productType && !BRAND_TYPE_PATTERN.test(productType.trim())) {
+    return productType;
+  }
+
+  // Fall back to scanning the title for known category keywords
+  const t = title ?? "";
+  for (const [pattern, label] of CATEGORY_KEYWORDS) {
+    if (pattern.test(t)) return label;
+  }
+
+  return null;
+}
+
 /**
  * Listing page -> product URLs
  * Shopify pattern: /products/<handle>
@@ -313,19 +388,9 @@ export function parseProductPage(
     safeText($('meta[property="og:description"]').attr("content")) ??
     null;
 
-  let category: string | null = null;
-  try {
-    const slug = new URL(productUrl).pathname.split("/").pop() || "";
-    const parts = slug.split("-").filter(Boolean);
-    if (parts.length >= 2) category = `${parts[0]} ${parts[1]}`.toLowerCase();
-  } catch {
-    // ignore
-  }
-
-  if (!category) {
-    const type = safeText(productJson?.product_type ?? productJson?.type);
-    if (type) category = type;
-  }
+  // Use Shopify's product_type if it's a real category, otherwise infer from the title
+  const rawType = safeText(productJson?.product_type ?? productJson?.type)?.toLowerCase() ?? null;
+  const category: string | null = inferCategory(rawType, title);
 
   let image_url =
     safeText($('meta[property="og:image"]').attr("content")) ??
@@ -404,7 +469,9 @@ export function parseProductPage(
   const groupMap = new Map<string, { color: string | null; variants: any[] }>();
   for (const v of productJson.variants) {
     const optionsList = [v?.option1, v?.option2, v?.option3];
-    const colorValue = colorIndex >= 0 ? normalizeVariantValue(optionsList[colorIndex]) : null;
+    const rawColorValue = colorIndex >= 0 ? normalizeVariantValue(optionsList[colorIndex]) : null;
+    // Numeric-only values are internal product codes (e.g. "14482"), not real colors
+    const colorValue = rawColorValue && /^\d+$/.test(rawColorValue) ? null : rawColorValue;
     const key = colorValue ?? "__default__";
     const entry = groupMap.get(key) ?? { color: colorValue, variants: [] };
     entry.variants.push(v);
@@ -460,16 +527,18 @@ export function parseProductPage(
       }
     }
 
-    const groupProductUrl = groupColor
-      ? `${parentProductUrl}#color=${encodeURIComponent(groupColor)}`
+    // Use ?variant=ID so the link opens the correct variant on Shopify
+    const primaryVariantId = variantIds.length ? variantIds[0] : null;
+    const groupProductUrl = primaryVariantId
+      ? `${parentProductUrl}?variant=${primaryVariantId}`
       : parentProductUrl;
 
     rows.push({
       ...base,
       product_url: groupProductUrl,
       variant_id: variantIdValue,
-      size: sizeValue,
-      color: groupColor,
+      size: sizeValue ?? "one size",
+      color: groupColor ?? extractColorFromTitle(title) ?? null,
       price_cents: price,
       sales_price_cents: sale,
       availability: groupAvailable,

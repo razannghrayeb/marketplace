@@ -10,8 +10,9 @@ function isRetryableSupabaseError(err: any): boolean {
   if (!err || typeof err !== "object") return false;
   const status = typeof err.status === "number" ? err.status : null;
   if (status && RETRYABLE_STATUS.has(status)) return true;
-  const msg = String(err.message ?? "");
-  return /502|503|504|bad gateway|gateway|cloudflare/i.test(msg);
+  const msg = String(err.message ?? "").toLowerCase();
+  return /502|503|504|bad gateway|gateway|cloudflare/i.test(msg) ||
+    /fetch failed|econnrefused|enotfound|etimedout|econnreset|network/i.test(msg);
 }
 
 async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
@@ -195,6 +196,18 @@ export async function markUnseenProductsUnavailable(
  * Mark products for a vendor as unavailable if they were not seen during this crawl.
  * Uses last_seen cutoff to avoid huge URL lists (prevents 414 Request-URI Too Large).
  */
+/**
+ * Permanently delete a product by its URL (called when the vendor returns a 404).
+ */
+export async function deleteProductByUrl(productUrl: string): Promise<void> {
+  const base = productUrl.split("#")[0].split("?")[0];
+  const { error } = await supabaseAdmin
+    .from("products")
+    .delete()
+    .like("product_url", `${base}%`);
+  if (error) throw error;
+}
+
 export async function markProductsUnavailableBefore(
   vendorId: number,
   cutoffIso: string
