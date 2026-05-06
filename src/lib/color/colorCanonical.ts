@@ -64,6 +64,17 @@ const FASHION_COLOR_ALIASES: Record<string, string> = {
   "heathered black": "black",
   indigo: "denim",
   denim: "denim",
+  pink: "pink",
+  blush: "pink",
+  rose: "pink",
+  fuchsia: "pink",
+  fuschia: "pink",
+  fushia: "pink",
+  fuhsia: "pink",
+  magenta: "pink",
+  hotpink: "pink",
+  "hot-pink": "pink",
+  "hot pink": "pink",
 };
 
 export function canonicalizeFashionColorToken(raw: string | null | undefined): string | null {

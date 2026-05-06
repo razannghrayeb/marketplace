@@ -1426,6 +1426,38 @@ export function scoreCrossFamilyTypePenalty(
       max = Math.max(max, pairPenalty(qf, df));
     }
   }
+  const qHints = inferGarmentHintsFromQuerySeeds(seeds);
+  const dHints = dedupeGarmentHints([
+    ...inferGarmentHintsFromQuerySeeds(docProductTypes),
+    ...inferGarmentHintsFromCategoryString(opts?.categoryCanonical),
+    ...inferGarmentHintsFromCategoryString(opts?.category),
+  ]);
+  for (const qh of qHints) {
+    for (const dh of dHints) {
+      if (!garmentHintsConflict(qh, dh)) continue;
+      const severeBottomAxis =
+        (qh.kind === "bottom" && dh.kind === "shorts_skirt") ||
+        (qh.kind === "shorts_skirt" && dh.kind === "bottom");
+      max = Math.max(max, severeBottomAxis ? 0.92 : 0.72);
+    }
+  }
+  const queryHasFullSuitIntent = seeds.some((s) =>
+    /\b(suit|suits|tuxedo|tuxedos|matching\s*suit|two[-\s]?piece|three[-\s]?piece)\b/.test(s),
+  );
+  const docBlob = [
+    ...docProductTypes,
+    opts?.categoryCanonical,
+    opts?.category,
+  ]
+    .filter(Boolean)
+    .map((x) => String(x).toLowerCase())
+    .join(" ");
+  const docIsOuterwearWithoutSuit =
+    /\b(coat|coats|overcoat|overcoats|parka|parkas|trench|outerwear|jacket|jackets)\b/.test(docBlob) &&
+    !/\b(suit|suits|tuxedo|suit\s+jackets?|dress\s+jackets?)\b/.test(docBlob);
+  if (queryHasFullSuitIntent && docIsOuterwearWithoutSuit) {
+    max = Math.max(max, 0.94);
+  }
   return max;
 }
 
@@ -1587,9 +1619,7 @@ export function scoreRerankProductTypeBreakdown(
     ? 1
     : hasSameFamilyType
       ? Math.max(0.2, Math.min(0.65, combinedTypeCompliance))
-      : docs.length > 0
-        ? 0.2
-        : 0;
+      : 0;
 
   return {
     exactTypeScore,

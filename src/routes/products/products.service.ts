@@ -1298,7 +1298,16 @@ function isImpossibleImageFamilyMismatch(jobFamily: ImageSearchFamily, productFa
   return false;
 }
 
-function colorScoreForImageRanking(explain: Record<string, unknown>): {
+function colorScoreForImageRanking(
+  explain: Record<string, unknown>,
+  options?: {
+    hasColorPreference?: boolean;
+    hasExplicitColorIntent?: boolean;
+    hasInferredColorSignal?: boolean;
+    hasCropColorSignal?: boolean;
+    colorIntentStrength?: number;
+  },
+): {
   colorScore: number;
   exactColorMatch: boolean;
   sameColorFamily: boolean;
@@ -1311,7 +1320,22 @@ function colorScoreForImageRanking(explain: Record<string, unknown>): {
   }
   if (tier === "bucket") return { colorScore: Math.max(0.45, Math.min(0.74, compliance)), exactColorMatch: false, sameColorFamily: false };
   if (compliance > 0) return { colorScore: Math.max(0.15, Math.min(0.75, compliance)), exactColorMatch: false, sameColorFamily: compliance >= 0.55 };
-  return { colorScore: 0.4, exactColorMatch: false, sameColorFamily: false };
+  if (options?.hasColorPreference) {
+    const strength = Math.max(0, Math.min(1, Number(options.colorIntentStrength ?? 0.65)));
+    const mismatchScore = options.hasExplicitColorIntent
+      ? 0.08
+      : options.hasInferredColorSignal
+        ? 0.12
+        : options.hasCropColorSignal
+          ? 0.18
+          : 0.16;
+    return {
+      colorScore: Math.max(0.06, Math.min(0.22, mismatchScore * (0.85 + 0.3 * (1 - strength)))),
+      exactColorMatch: false,
+      sameColorFamily: false,
+    };
+  }
+  return { colorScore: 0.55, exactColorMatch: false, sameColorFamily: false };
 }
 
 function calibratedVisualBase(sim: number): number {
@@ -1382,10 +1406,16 @@ function additiveImageRankingScore(params: {
   productFamily: ImageSearchFamily;
   explain: Record<string, unknown>;
   availability: unknown;
+  hasColorPreference?: boolean;
+  hasExplicitColorIntent?: boolean;
+  hasInferredColorSignal?: boolean;
+  hasCropColorSignal?: boolean;
+  colorIntentStrength?: number;
 }): {
   finalScore: number;
   typeScore: number;
   colorScore: number;
+  colorInfluence: number;
   metadataQuality: number;
   availabilityScore: number;
   exactColorMatch: boolean;
@@ -1403,6 +1433,8 @@ function additiveImageRankingScore(params: {
   matchLabel: string;
 } {
   const visualSimilarity = Math.max(0, Math.min(1, params.visualSimilarity));
+  const hasColorPreference = Boolean(params.hasColorPreference);
+  const colorIntentStrength = Math.max(0, Math.min(1, Number(params.colorIntentStrength ?? (hasColorPreference ? 0.65 : 0))));
   const exactTypeScore = Number(params.explain.exactTypeScore ?? 0);
   const typeCompliance = Math.max(0, Math.min(1, Number(params.explain.productTypeCompliance ?? 0)));
   const categoryScore = Math.max(0, Math.min(1, Number(params.explain.categoryScore ?? params.explain.categoryRelevance01 ?? 0)));
@@ -1438,8 +1470,26 @@ function additiveImageRankingScore(params: {
 
   const visualBase = calibratedVisualBase(visualSimilarity);
   const nearIdenticalVisual = visualSimilarity >= 0.955;
-  const color = colorScoreForImageRanking(params.explain);
-  const weights = categoryAttributeWeights(params.jobFamily === "unknown" ? params.productFamily : params.jobFamily);
+  const color = colorScoreForImageRanking(params.explain, {
+    hasColorPreference,
+    hasExplicitColorIntent: params.hasExplicitColorIntent,
+    hasInferredColorSignal: params.hasInferredColorSignal,
+    hasCropColorSignal: params.hasCropColorSignal,
+    colorIntentStrength,
+  });
+  const weights = { ...categoryAttributeWeights(params.jobFamily === "unknown" ? params.productFamily : params.jobFamily) };
+  if (hasColorPreference) {
+    weights.color = Math.max(
+      weights.color ?? 0,
+      params.hasExplicitColorIntent
+        ? 0.36
+        : params.hasInferredColorSignal
+          ? 0.32
+          : params.hasCropColorSignal
+            ? 0.28
+            : 0.30,
+    );
+  }
   const attrs: Array<{ key: string; weight: number; score: number; confidence: number; knownMismatch?: boolean; missing?: boolean }> = [];
   const pushAttr = (key: string, weight: number | undefined, attr: { score: number; confidence: number; knownMismatch?: boolean; missing?: boolean }) => {
     if (!weight || weight <= 0) return;
@@ -1447,7 +1497,10 @@ function additiveImageRankingScore(params: {
   };
 
   pushAttr("type", weights.type, scoreWithConfidence(typeScore, typeScore > 0 ? 1 : 0.9));
-  pushAttr("color", weights.color, scoreWithConfidence(color.colorScore, color.colorScore === 0.4 ? 0.25 : 1));
+  pushAttr("color", weights.color, scoreWithConfidence(
+    color.colorScore,
+    hasColorPreference ? 1 : 0,
+  ));
   const sleeve = attributeFromCompliance(params.explain.sleeveCompliance, {
     hasIntent: Boolean(params.explain.hasSleeveIntent),
     unknownValue: 0.6,
@@ -1486,13 +1539,16 @@ function additiveImageRankingScore(params: {
   let contradictionPenalty = 1;
   const penalties: string[] = [];
   const colorSource = String(params.explain.colorIntentSource ?? "none").toLowerCase();
-  const explicitColor = colorSource === "explicit" || Boolean(params.explain.colorIntentGatesFinalRelevance);
+  const explicitColor = Boolean(params.hasExplicitColorIntent) || colorSource === "explicit" || Boolean(params.explain.colorIntentGatesFinalRelevance);
   if (explicitColor && color.colorScore <= 0.2) {
-    contradictionPenalty *= 0.78;
+    contradictionPenalty *= 0.62;
     penalties.push("explicit_color_mismatch");
-  } else if (colorSource === "inferred" && color.colorScore <= 0.2) {
-    contradictionPenalty *= 0.92;
+  } else if ((params.hasInferredColorSignal || colorSource === "inferred") && color.colorScore <= 0.2) {
+    contradictionPenalty *= 0.74;
     penalties.push("inferred_color_mismatch");
+  } else if ((params.hasCropColorSignal || hasColorPreference) && color.colorScore <= 0.2) {
+    contradictionPenalty *= 0.84;
+    penalties.push("soft_color_mismatch");
   }
   if (sleeve.knownMismatch) {
     contradictionPenalty *= Boolean(params.explain.hasSleeveIntent) ? 0.88 : 0.94;
@@ -1525,9 +1581,18 @@ function additiveImageRankingScore(params: {
     (params.availability === false ? 0.96 : 1) *
     (0.92 + 0.08 * metadataCoverage);
 
-  let raw =
-    0.78 * visualBase +
-    0.22 * attributeAgreement;
+  const colorInfluence = hasColorPreference
+    ? params.hasExplicitColorIntent
+      ? 0.36
+      : params.hasInferredColorSignal
+        ? 0.32
+        : params.hasCropColorSignal
+          ? 0.26
+          : 0.30
+    : 0;
+  let raw = hasColorPreference
+    ? (1 - colorInfluence) * (0.70 * visualBase + 0.30 * attributeAgreement) + colorInfluence * color.colorScore
+    : 0.78 * visualBase + 0.22 * attributeAgreement;
   raw *= familyGate;
   raw *= contradictionPenalty;
   raw *= qualityModifier;
@@ -1548,6 +1613,17 @@ function additiveImageRankingScore(params: {
   }
   if (knownMismatchCount >= 1 && (explicitColor || Boolean(params.explain.hasSleeveIntent) || Boolean(params.explain.hasLengthIntent) || Boolean(params.explain.hasStyleIntent))) {
     maxFinal = Math.min(maxFinal, 0.72);
+  }
+  if (hasColorPreference && !color.sameColorFamily) {
+    const colorMismatchCap = explicitColor
+      ? (nearIdenticalVisual ? 0.82 : 0.64)
+      : params.hasInferredColorSignal
+        ? (nearIdenticalVisual ? 0.88 : 0.74)
+        : (nearIdenticalVisual ? 0.92 : 0.82);
+    maxFinal = Math.min(maxFinal, colorMismatchCap);
+  }
+  if (hasColorPreference && color.colorScore <= 0.2 && !nearIdenticalVisual) {
+    maxFinal = Math.min(maxFinal, explicitColor ? 0.52 : params.hasInferredColorSignal ? 0.66 : 0.74);
   }
   if (missingCriticalAttributes >= 3) {
     maxFinal = Math.min(maxFinal, 0.90);
@@ -1582,6 +1658,7 @@ function additiveImageRankingScore(params: {
     finalScore,
     typeScore,
     colorScore: color.colorScore,
+    colorInfluence,
     metadataQuality: metadataCoverage,
     availabilityScore: params.availability === false ? 0 : 1,
     exactColorMatch: color.exactColorMatch,
@@ -1597,6 +1674,120 @@ function additiveImageRankingScore(params: {
     qualityModifier,
     maxFinal,
     matchLabel,
+  };
+}
+
+type AdditiveImageRankingScore = ReturnType<typeof additiveImageRankingScore>;
+
+function isProtectiveFinalRelevanceSource(source: unknown): boolean {
+  const s = String(source ?? "").toLowerCase();
+  return (
+    s.includes("cap") ||
+    s.includes("correction") ||
+    s.includes("dampen") ||
+    s.includes("penalty") ||
+    s.includes("conflict") ||
+    s.includes("hard_gate") ||
+    s.includes("cross_family")
+  );
+}
+
+function isHardBlockedFinalRelevanceSource(source: unknown): boolean {
+  const s = String(source ?? "").toLowerCase();
+  return (
+    s.includes("hard_gate") ||
+    s.includes("impossible_family") ||
+    s === "bottom_cross_family_cap" ||
+    s === "tailored_intent_casual_hard_gate" ||
+    s === "sport_keyword_hard_gate" ||
+    s === "bottoms_gender_hard_cap"
+  );
+}
+
+function calibratedImageSource(additiveScore: AdditiveImageRankingScore, preservedPrior: boolean): string {
+  const suffix = preservedPrior ? "_preserving_prior" : "";
+  if (additiveScore.familyMismatch) return `calibrated_impossible_family${suffix}`;
+  if (additiveScore.matchLabel === "same_product") return `calibrated_same_product${suffix}`;
+  if (additiveScore.matchLabel === "near_identical") return `calibrated_near_identical${suffix}`;
+  return `calibrated_image_score${suffix}`;
+}
+
+function blendCalibratedImageRankingScore(params: {
+  priorScore: unknown;
+  priorSource: unknown;
+  additiveScore: AdditiveImageRankingScore;
+  hasColorPreference: boolean;
+  hasExplicitColorIntent: boolean;
+  hasInferredColorSignal: boolean;
+}): {
+  rankingScore: number;
+  acceptanceScore: number;
+  source: string;
+  priorScore: number;
+  calibratedScore: number;
+  blendWeight: number;
+  preservedPrior: boolean;
+  protectivePrior: boolean;
+  hardBlockedPrior: boolean;
+} {
+  const priorScore = clamp01(Number(params.priorScore ?? 0));
+  const calibratedScore = clamp01(params.additiveScore.finalScore);
+  const protectivePrior = isProtectiveFinalRelevanceSource(params.priorSource);
+  const hardBlockedPrior = isHardBlockedFinalRelevanceSource(params.priorSource);
+  const colorMismatch = params.hasColorPreference && !params.additiveScore.sameColorFamily;
+  const highConfidenceVisual =
+    params.additiveScore.nearIdenticalVisual &&
+    params.additiveScore.familyGate >= 0.92 &&
+    !hardBlockedPrior;
+
+  const blendWeight = hardBlockedPrior
+    ? 0.12
+    : protectivePrior
+      ? params.hasColorPreference
+        ? 0.30
+        : 0.40
+      : params.hasColorPreference
+        ? colorMismatch
+          ? 0.72
+          : 0.62
+        : 0.48;
+
+  let rankingScore = priorScore * (1 - blendWeight) + calibratedScore * blendWeight;
+
+  if (hardBlockedPrior || params.additiveScore.familyMismatch) {
+    rankingScore = Math.min(rankingScore, priorScore, calibratedScore);
+  } else if (protectivePrior && calibratedScore > priorScore && !highConfidenceVisual) {
+    const maxLift = params.hasColorPreference ? 0.035 : 0.07;
+    rankingScore = Math.min(rankingScore, priorScore + maxLift);
+  }
+
+  if (colorMismatch && !highConfidenceVisual) {
+    const maxColorMismatchScore = params.hasExplicitColorIntent
+      ? 0.58
+      : params.hasInferredColorSignal
+        ? 0.70
+        : 0.78;
+    rankingScore = Math.min(rankingScore, Math.max(calibratedScore, maxColorMismatchScore));
+  }
+
+  rankingScore = Math.min(0.995, Math.max(0, Math.round(rankingScore * 10000) / 10000));
+
+  const visualAcceptance = hardBlockedPrior || params.additiveScore.familyMismatch
+    ? 0
+    : Math.min(0.995, params.additiveScore.visualBase * Math.max(0.55, params.additiveScore.familyGate) * 0.96);
+  const acceptanceScore = Math.max(priorScore, rankingScore, visualAcceptance);
+  const preservedPrior = protectivePrior && calibratedScore > priorScore && rankingScore < calibratedScore - 1e-6;
+
+  return {
+    rankingScore,
+    acceptanceScore: Math.min(0.995, Math.max(0, Math.round(acceptanceScore * 10000) / 10000)),
+    source: calibratedImageSource(params.additiveScore, preservedPrior),
+    priorScore,
+    calibratedScore,
+    blendWeight,
+    preservedPrior,
+    protectivePrior,
+    hardBlockedPrior,
   };
 }
 
@@ -5328,6 +5519,40 @@ export async function searchByImageWithSimilarity(
     .map((t) => String(t).toLowerCase().trim())
     .filter(Boolean);
   const preferredDesiredProductTypes = [...new Set(softHintsMerged)];
+  // BLIP-driven override: if BLIP signals a men's suit (or query text mentions 'suit'),
+  // prefer suit tops and prefer formal bottoms (avoid joggers/athletic bottoms).
+  try {
+    const blipProd = normalizeSimpleToken((blipSignal as any)?.productType ?? "");
+    const blipGender = normalizeQueryGender((blipSignal as any)?.gender ?? "") ?? "";
+    const imgQ = String(imageSearchTextQuery ?? "").toLowerCase();
+    const blipIndicatesSuit = /\bsuit\b/.test(blipProd) || /\bsuit\b/.test(imgQ);
+    if (blipGender === "men" && blipIndicatesSuit) {
+      const suitSeeds = ["suit", "suits", "tuxedo", "tuxedos"];
+      for (const s of suitSeeds) {
+        if (!preferredDesiredProductTypes.includes(s)) preferredDesiredProductTypes.push(s);
+        if (!desiredProductTypes.includes(s)) desiredProductTypes.push(s);
+      }
+      const suitFormalBottoms = [
+        "pants",
+        "pant",
+        "trousers",
+        "trouser",
+        "slacks",
+        "slack",
+        "dress pants",
+        "formal pants",
+        "suit pants",
+        "tailored pants",
+        "dress pant",
+      ];
+      for (const b of suitFormalBottoms) {
+        if (!desiredProductTypes.includes(b)) desiredProductTypes.push(b);
+        if (!preferredDesiredProductTypes.includes(b)) preferredDesiredProductTypes.push(b);
+      }
+    }
+  } catch (e) {
+    // defensive: do not fail image search on unexpected BLIP signal shapes
+  }
   if (softHintsMerged.length > 0) {
     desiredProductTypes = [...new Set([...desiredProductTypes, ...softHintsMerged])];
   }
@@ -8211,6 +8436,7 @@ export async function searchByImageWithSimilarity(
       const authoritativeColorNorm = authoritativeColorTokens[0] ?? "";
       let finalRelevance01 = compliance?.finalRelevance01;
       let finalRelevanceSource = finalScoreSourceById.get(idStr) ?? "computed";
+      let acceptanceRelevance01 = finalRelevance01;
       let explainColorCompliance = compliance?.colorCompliance;
       let explainMatchedColor = compliance?.matchedColor;
       let explainColorTier = compliance?.colorTier;
@@ -8637,24 +8863,56 @@ export async function searchByImageWithSimilarity(
 
       const resultJobFamily = imageSearchFamilyFromDetection(params.detectionProductCategory ?? mergedCategoryForRelevance, desiredProductTypes);
       const resultProductFamily = imageSearchFamilyFromProduct(hydratedBlobSrc);
+      const preCalibrationFinalRelevance01 = finalRelevance01;
+      const preCalibrationFinalRelevanceSource = finalRelevanceSource;
+      const additiveExplain = compliance
+        ? {
+          ...(compliance as unknown as Record<string, unknown>),
+          colorCompliance: explainColorCompliance ?? compliance.colorCompliance,
+          matchedColor: explainMatchedColor ?? compliance.matchedColor,
+          colorTier: explainColorTier ?? compliance.colorTier,
+          hasColorIntent: hasColorPreferenceForRanking || Boolean(compliance.hasColorIntent),
+          colorIntentGatesFinalRelevance: hasColorIntentForFinal,
+          colorIntentSource: hasExplicitColorIntent
+            ? "explicit"
+            : inferredColorTokens.length > 0
+              ? "inferred"
+              : hasCropColorSignal
+                ? "crop"
+                : "none",
+        }
+        : null;
       const additiveScore = compliance
         ? additiveImageRankingScore({
           visualSimilarity: similarityScore,
           jobFamily: resultJobFamily,
           productFamily: resultProductFamily,
-          explain: compliance as unknown as Record<string, unknown>,
+          explain: additiveExplain as Record<string, unknown>,
           availability: (p as any)?.availability,
+          hasColorPreference: hasColorPreferenceForRanking,
+          hasExplicitColorIntent,
+          hasInferredColorSignal,
+          hasCropColorSignal,
+          colorIntentStrength: colorIntentStrengthForFinal,
+        })
+        : null;
+      const calibrationBlend = additiveScore
+        ? blendCalibratedImageRankingScore({
+          priorScore: preCalibrationFinalRelevance01,
+          priorSource: preCalibrationFinalRelevanceSource,
+          additiveScore,
+          hasColorPreference: hasColorPreferenceForRanking,
+          hasExplicitColorIntent,
+          hasInferredColorSignal,
         })
         : null;
       if (additiveScore) {
-        finalRelevance01 = additiveScore.finalScore;
-        finalRelevanceSource = additiveScore.familyMismatch
-          ? "calibrated_impossible_family"
-          : additiveScore.matchLabel === "same_product"
-            ? "calibrated_same_product"
-            : additiveScore.matchLabel === "near_identical"
-              ? "calibrated_near_identical"
-              : "calibrated_image_score";
+        finalRelevance01 = calibrationBlend?.rankingScore ?? additiveScore.finalScore;
+        acceptanceRelevance01 = calibrationBlend?.acceptanceScore ?? Math.max(
+          clamp01(Number(preCalibrationFinalRelevance01 ?? 0)),
+          clamp01(Number(finalRelevance01 ?? 0)),
+        );
+        finalRelevanceSource = calibrationBlend?.source ?? calibratedImageSource(additiveScore, false);
       }
 
       return {
@@ -8762,6 +9020,10 @@ export async function searchByImageWithSimilarity(
             // ── Final score ──────────────────────────────────────
             finalRelevance01,
             finalRelevanceSource,
+            preCalibrationFinalRelevance01,
+            preCalibrationFinalRelevanceSource,
+            calibratedImageScore: additiveScore?.finalScore,
+            acceptanceRelevance01,
             rankingDebug: additiveScore
               ? {
                 id: idStr,
@@ -8770,6 +9032,7 @@ export async function searchByImageWithSimilarity(
                 exactTypeScore: compliance.exactTypeScore,
                 typeScore: additiveScore.typeScore,
                 colorScore: additiveScore.colorScore,
+                colorInfluence: additiveScore.colorInfluence,
                 exactColorMatch: additiveScore.exactColorMatch,
                 sameColorFamily: additiveScore.sameColorFamily,
                 familyMismatch: additiveScore.familyMismatch,
@@ -8782,6 +9045,13 @@ export async function searchByImageWithSimilarity(
                 maxFinal: additiveScore.maxFinal,
                 matchLabel: additiveScore.matchLabel,
                 finalScore: finalRelevance01,
+                calibratedScore: additiveScore.finalScore,
+                acceptanceScore: acceptanceRelevance01,
+                priorScore: calibrationBlend?.priorScore,
+                priorSource: preCalibrationFinalRelevanceSource,
+                blendWeight: calibrationBlend?.blendWeight,
+                preservedPrior: calibrationBlend?.preservedPrior,
+                protectivePrior: calibrationBlend?.protectivePrior,
                 boosts: additiveScore.boosts,
                 penalties: additiveScore.penalties,
               }
@@ -8832,8 +9102,13 @@ export async function searchByImageWithSimilarity(
     ? Math.min(effectiveFinalAcceptMin, hasStrongVisualEvidence ? 0.14 : 0.18)
     : effectiveFinalAcceptMin;
   results = results.filter(
-    (p: any) =>
-      typeof p.finalRelevance01 === "number" && p.finalRelevance01 >= effectiveFinalResultMin,
+    (p: any) => {
+      const rankingScore = typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : 0;
+      const acceptanceScore = typeof (p.explain as any)?.acceptanceRelevance01 === "number"
+        ? Number((p.explain as any).acceptanceRelevance01)
+        : rankingScore;
+      return Math.max(rankingScore, acceptanceScore) >= effectiveFinalResultMin;
+    },
   ) as ProductResult[];
 
   // Main-path deterministic keep rule:
@@ -9480,12 +9755,83 @@ export async function searchByImageWithSimilarity(
         const rerankScore = rerankScoreById.get(String(product.id));
         if (rerankScore === undefined) return product;
         const baseFinal = Number(product.finalRelevance01 ?? product.similarity_score ?? 0);
-        const blended = Math.max(0, Math.min(1, baseFinal * 0.3 + rerankScore * 0.7));
+        const explain = ((product as any).explain ?? {}) as Record<string, any>;
+        if (Math.abs(rerankScore - baseFinal) <= 1e-4) {
+          return {
+            ...product,
+            mlRerankScore: rerankScore,
+            rerankScore: Math.max(Number(product.rerankScore ?? 0), rerankScore),
+            explain: {
+              ...explain,
+              mlRerankScore: rerankScore,
+              onnxRerankWeight: 0,
+              finalRelevanceBeforeOnnx: baseFinal,
+              onnxRerankSkipped: "base_score_fallback",
+              acceptanceRelevance01: Math.max(Number(explain.acceptanceRelevance01 ?? 0), baseFinal),
+            },
+          };
+        }
+        const desiredColorsForProduct = Array.isArray(explain.desiredColorsEffective)
+          ? explain.desiredColorsEffective
+          : Array.isArray(explain.desiredColors)
+            ? explain.desiredColors
+            : [];
+        const hasColorPreferenceForProduct =
+          desiredColorsForProduct.length > 0 ||
+          Boolean(explain.hasColorIntent) ||
+          String(explain.colorIntentSource ?? "none").toLowerCase() !== "none";
+        const colorComplianceForProduct = clamp01(Number(explain.colorCompliance ?? 0));
+        const colorTierForProduct = String(explain.colorTier ?? "none").toLowerCase();
+        const weakColorForProduct =
+          hasColorPreferenceForProduct &&
+          (colorTierForProduct === "none" || colorComplianceForProduct < 0.38);
+        const typeComplianceForProduct = clamp01(Number(explain.productTypeCompliance ?? 0));
+        const exactTypeForProduct = Number(explain.exactTypeScore ?? 0);
+        const crossFamilyForProduct = clamp01(Number(explain.crossFamilyPenalty ?? 0));
+        const weakTypeForProduct =
+          Boolean(explain.hasTypeIntent) &&
+          exactTypeForProduct < 1 &&
+          typeComplianceForProduct < 0.34;
+        const onnxWeight = crossFamilyForProduct >= 0.5
+          ? 0.10
+          : weakColorForProduct
+            ? 0.14
+            : weakTypeForProduct
+              ? 0.18
+              : hasColorPreferenceForProduct
+                ? 0.22
+                : 0.38;
+        const rawBlended = Math.max(0, Math.min(1, baseFinal * (1 - onnxWeight) + rerankScore * onnxWeight));
+        const maxLift = weakColorForProduct
+          ? 0.02
+          : weakTypeForProduct
+            ? 0.035
+            : hasColorPreferenceForProduct
+              ? 0.055
+              : 0.10;
+        const blended = rerankScore > baseFinal
+          ? Math.min(rawBlended, baseFinal + maxLift)
+          : rawBlended;
+        const acceptanceRelevance01 = Math.max(
+          Number(explain.acceptanceRelevance01 ?? 0),
+          baseFinal,
+          blended,
+        );
+        const finalRelevanceSource = String(explain.finalRelevanceSource ?? "computed");
         return {
           ...product,
           mlRerankScore: rerankScore,
           rerankScore: Math.max(Number(product.rerankScore ?? 0), rerankScore),
           finalRelevance01: blended,
+          explain: {
+            ...explain,
+            mlRerankScore: rerankScore,
+            onnxRerankWeight: onnxWeight,
+            finalRelevanceBeforeOnnx: baseFinal,
+            finalRelevance01: blended,
+            finalRelevanceSource: `${finalRelevanceSource}+onnx_pair_rerank`,
+            acceptanceRelevance01,
+          },
         };
       });
     }
