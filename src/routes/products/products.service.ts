@@ -344,6 +344,18 @@ function imageDeepFusionWeight(): number {
   return Math.max(0, Math.min(0.4, raw));
 }
 
+function imageFinalRerankWeight(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_FINAL_RERANK_WEIGHT ?? "0.18");
+  if (!Number.isFinite(raw)) return 0.18;
+  return Math.max(0, Math.min(0.45, raw));
+}
+
+function imageFinalRerankMaxDelta(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_FINAL_RERANK_MAX_DELTA ?? "0.08");
+  if (!Number.isFinite(raw)) return 0.08;
+  return Math.max(0, Math.min(0.25, raw));
+}
+
 /** Phase 9: apply MMR-style diversity reranking after relevance sort + dedupe. Default ON. */
 function imageDiversityRerankEnabled(): boolean {
   const v = String(process.env.SEARCH_IMAGE_DIVERSITY_RERANK ?? "1").toLowerCase();
@@ -2824,8 +2836,8 @@ function hasOppositeGenderSignalForQuery(
 
   const menRe = /\b(men|mens|male|man|gents?|gentlemen)\b/;
   const womenRe = /\b(women|womens|female|lady|ladies|woman)\b/;
-  const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|handbag|clutch|tote|purse|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt)\b/;
-  const menStyleCue = /\b(suit|suits|tie|oxford|oxfords|dress\s*shirt|button\s*down|button-down|briefs|boxer|boxers|cargo\s*pants?|chino|chinos|loafer|loafers|briefcase|messenger|sport\s*coat|blazer)\b/;
+  const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt)\b/;
+  const menStyleCue = /\b(briefs?|boxers?|jockstrap|menswear)\b/;
   const hasMenCue = menRe.test(blob);
   const hasWomenCue = womenRe.test(blob);
   const hasWomenStyleCue = womenStyleCue.test(blob);
@@ -8227,15 +8239,7 @@ export async function searchByImageWithSimilarity(
   ) {
     const suitFirstHits = rankedHits.filter((h: any) => hasActualSuitCatalogCue((h as any)?._source ?? {}));
     if (suitFirstHits.length > 0) {
-      const suitFirstIds = new Set(
-        suitFirstHits
-          .map((h: any) => String((h as any)?._source?.product_id ?? ""))
-          .filter(Boolean),
-      );
-      rankedHits = [
-        ...suitFirstHits,
-        ...rankedHits.filter((h: any) => !suitFirstIds.has(String((h as any)?._source?.product_id ?? ""))),
-      ];
+      rankedHits = suitFirstHits;
     }
   }
 
@@ -9611,7 +9615,10 @@ export async function searchByImageWithSimilarity(
         const rerankScore = rerankScoreById.get(String(product.id));
         if (rerankScore === undefined) return product;
         const baseFinal = Number(product.finalRelevance01 ?? product.similarity_score ?? 0);
-        const blended = Math.max(0, Math.min(1, baseFinal * 0.3 + rerankScore * 0.7));
+        const w = imageFinalRerankWeight();
+        const maxDelta = imageFinalRerankMaxDelta();
+        const rawBlended = Math.max(0, Math.min(1, baseFinal * (1 - w) + rerankScore * w));
+        const blended = Math.max(0, Math.min(1, Math.max(baseFinal - maxDelta, Math.min(baseFinal + maxDelta, rawBlended))));
         return {
           ...product,
           mlRerankScore: rerankScore,

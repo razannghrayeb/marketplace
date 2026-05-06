@@ -222,6 +222,75 @@ for (const c of categoryTreatmentCases) {
   if (typeof c.maxFinal === "number") assert.ok(rel.finalRelevance01 <= c.maxFinal, `${c.name}: final ${rel.finalRelevance01}`);
 }
 
+const trouserVsShorts = relevance(
+  {
+    title: "Bermuda Shorts",
+    category: "Shorts",
+    category_canonical: "bottoms",
+    product_types: ["shorts"],
+  },
+  {
+    desiredProductTypes: ["trousers"],
+    mergedCategory: "bottoms",
+    astCategories: ["bottoms"],
+  },
+);
+assert.ok(trouserVsShorts.crossFamilyPenalty >= 0.8, `trouser intent vs shorts: cross ${trouserVsShorts.crossFamilyPenalty}`);
+assert.ok(trouserVsShorts.finalRelevance01 <= 0.02, `trouser intent vs shorts: final ${trouserVsShorts.finalRelevance01}`);
+
+const suitVsCoat = relevance(
+  {
+    title: "Wool Overcoat",
+    category: "Coats",
+    category_canonical: "outerwear",
+    product_types: ["coat"],
+  },
+  {
+    desiredProductTypes: ["suits"],
+    mergedCategory: "tailored",
+    astCategories: ["tailored"],
+  },
+);
+assert.ok(suitVsCoat.finalRelevance01 <= 0.02, `full suit intent vs coat: final ${suitVsCoat.finalRelevance01}`);
+assert.equal(suitVsCoat.hardBlocked, true, "full suit intent vs coat should hard block");
+
+const womenSuitUnknownGender = relevance(
+  {
+    title: "Tailored Suit Set",
+    category: "Tailored",
+    category_canonical: "tailored",
+    product_types: ["suit"],
+  },
+  {
+    desiredProductTypes: ["suits"],
+    mergedCategory: "tailored",
+    astCategories: ["tailored"],
+    audienceGenderForScoring: "women",
+    hasAudienceIntent: true,
+  },
+);
+assert.ok(
+  womenSuitUnknownGender.audienceCompliance >= 0.7,
+  `women suit with unknown gender should not be treated as men's-only: audience ${womenSuitUnknownGender.audienceCompliance}`,
+);
+
+const menDressAudience = relevance(
+  {
+    title: "Floral Midi Dress",
+    category: "Dresses",
+    category_canonical: "dresses",
+    product_types: ["dress"],
+  },
+  {
+    desiredProductTypes: ["dress"],
+    mergedCategory: "dresses",
+    astCategories: ["dresses"],
+    audienceGenderForScoring: "men",
+    hasAudienceIntent: true,
+  },
+);
+assert.equal(menDressAudience.audienceCompliance, 0, `men query vs dress audience ${menDressAudience.audienceCompliance}`);
+
 const blipCases: Array<{
   name: string;
   caption: string;
