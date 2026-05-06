@@ -3338,6 +3338,11 @@ function applySleeveIntentGuard(params: {
 
   const isDressCategory = category === "dresses";
   const isTopCategory = category === "tops";
+  const isOuterwearCategory = category === "outerwear";
+  // Long sleeves are the default for outerwear (jackets/blazers/coats/suits) so the
+  // reranker's sleeveCompliance score is too sparse to use as a hard filter for "long"
+  // intent — treat outerwear like tops/dresses (contradiction-only) when intent is long.
+  const useContradictionOnlyForOuterwear = isOuterwearCategory && desiredSleeve === "long";
   const minCompliance = isTopCategory
     ? (desiredSleeve === "short" || desiredSleeve === "sleeveless" ? 0.34 : 0.3)
     : desiredSleeve === "short" || desiredSleeve === "sleeveless"
@@ -3358,10 +3363,9 @@ function applySleeveIntentGuard(params: {
       .join(" ");
 
     const observedSleeve = inferSleeveFromProductText(blob);
-    if (isDressCategory || isTopCategory) {
-      // For tops and dresses, sleeve metadata is sparse and the reranker's sleeveCompliance
-      // score is unreliable as a hard filter. Use only explicit text contradiction to avoid
-      // dropping correctly-categorized products that have no sleeve metadata.
+    if (isDressCategory || isTopCategory || useContradictionOnlyForOuterwear) {
+      // Sleeve metadata is sparse; sleeveCompliance score is unreliable as a hard filter.
+      // Use only explicit text contradiction to avoid dropping valid items.
       return !isSleeveContradiction(desiredSleeve, observedSleeve);
     }
 
@@ -6202,6 +6206,120 @@ export class ImageAnalysisService {
                 (t) => !/\b(camisole|cami|tank|sleeveless|crop top)\b/i.test(String(t)),
               );
             }
+          }
+          // Footwear: catalog product_types is dirty so cast a wide net per detection subtype
+          // to let text-based fallback rescue valid items.
+          if (categoryMapping.productCategory === "footwear") {
+            const footLabel = String(label ?? "").toLowerCase();
+            const isSneaker = /\b(sneaker|trainer|runner|athletic)\b/.test(footLabel);
+            const isBoot = /\b(boot|booties?|chelsea|combat)\b/.test(footLabel);
+            const isSandal = /\b(sandal|slide|flip\s*flop|slipper)\b/.test(footLabel);
+            const isHeel = /\b(heel|pump|stiletto|wedge)\b/.test(footLabel);
+            const isLoafer = /\b(loafer|moccasin|slip.?on)\b/.test(footLabel);
+            const isFlat = /\b(flat|ballet|oxford|derby|brogue)\b/.test(footLabel);
+            const genericFoot = [
+              "shoe", "shoes", "footwear",
+            ];
+            let footPriority: string[] = [...genericFoot];
+            if (isSneaker) {
+              footPriority = [
+                ...footPriority,
+                "sneaker", "sneakers", "trainer", "trainers", "running shoe", "running shoes",
+                "athletic shoe", "athletic shoes", "tennis shoe", "tennis shoes",
+                "low top", "high top", "casual sneaker",
+              ];
+            } else if (isBoot) {
+              footPriority = [
+                ...footPriority,
+                "boot", "boots", "ankle boot", "ankle boots", "chelsea boot", "chelsea boots",
+                "combat boot", "combat boots", "hiking boot", "work boot", "knee high boot",
+                "boot leather", "leather boot",
+              ];
+            } else if (isSandal) {
+              footPriority = [
+                ...footPriority,
+                "sandal", "sandals", "slide", "slides", "flip flop", "flip-flop", "flip flops",
+                "slipper", "slippers", "thong sandal",
+              ];
+            } else if (isHeel) {
+              footPriority = [
+                ...footPriority,
+                "heel", "heels", "high heel", "high heels", "pump", "pumps",
+                "stiletto", "stilettos", "wedge", "wedges", "platform heel",
+              ];
+            } else if (isLoafer) {
+              footPriority = [
+                ...footPriority,
+                "loafer", "loafers", "moccasin", "moccasins", "slip on", "slip-on",
+                "penny loafer", "driving shoe",
+              ];
+            } else if (isFlat) {
+              footPriority = [
+                ...footPriority,
+                "flat", "flats", "ballet flat", "oxford", "oxfords", "derby", "brogue",
+                "lace up", "lace-up shoe", "dress shoe",
+              ];
+            } else {
+              footPriority = [
+                ...footPriority,
+                "sneaker", "sneakers", "boot", "boots", "loafer", "loafers",
+                "sandal", "sandals", "heel", "heels", "flat", "flats", "trainer", "trainers",
+              ];
+            }
+            softProductTypeHints = [...new Set([...footPriority, ...softProductTypeHints])];
+          }
+          // Bottoms: same wide-net strategy per detection subtype.
+          if (categoryMapping.productCategory === "bottoms") {
+            const botLabel = String(label ?? "").toLowerCase();
+            const isJeans = /\b(jean|denim)\b/.test(botLabel);
+            const isShorts = /\b(short|shorts)\b/.test(botLabel);
+            const isSkirt = /\b(skirt)\b/.test(botLabel);
+            const isTrousers = /\b(trouser|pant|slack|chino|cargo)\b/.test(botLabel);
+            const isLeggings = /\b(legging|jogger|sweatpant|track\s*pant)\b/.test(botLabel);
+            const genericBot = [
+              "bottoms", "bottom", "pants", "pant",
+            ];
+            let botPriority: string[] = [...genericBot];
+            if (isJeans) {
+              botPriority = [
+                ...botPriority,
+                "jeans", "jean", "denim", "denim pants", "denim jeans",
+                "skinny jeans", "straight jeans", "bootcut jeans", "wide leg jeans",
+                "boyfriend jeans", "mom jeans", "high waist jeans",
+              ];
+            } else if (isShorts) {
+              botPriority = [
+                ...botPriority,
+                "shorts", "short", "denim shorts", "cargo shorts", "bermuda shorts",
+                "chino shorts", "athletic shorts", "running shorts",
+              ];
+            } else if (isSkirt) {
+              botPriority = [
+                ...botPriority,
+                "skirt", "skirts", "mini skirt", "midi skirt", "maxi skirt",
+                "pencil skirt", "a-line skirt", "pleated skirt", "denim skirt",
+              ];
+            } else if (isTrousers) {
+              botPriority = [
+                ...botPriority,
+                "trousers", "trouser", "pants", "slacks", "slack",
+                "dress pants", "formal pants", "tailored pants", "suit pants",
+                "chinos", "chino", "cargo pants", "cargos", "wide leg pants",
+              ];
+            } else if (isLeggings) {
+              botPriority = [
+                ...botPriority,
+                "leggings", "legging", "jogger", "joggers", "sweatpants", "sweatpant",
+                "track pants", "athletic pants", "yoga pants", "lounge pants",
+              ];
+            } else {
+              botPriority = [
+                ...botPriority,
+                "jeans", "jean", "denim", "trousers", "trouser", "pants", "slacks",
+                "shorts", "short", "skirt", "skirts", "leggings", "joggers", "chinos",
+              ];
+            }
+            softProductTypeHints = [...new Set([...botPriority, ...softProductTypeHints])];
           }
           softProductTypeHints = recoverTailoredTopTypes(
             softProductTypeHints,

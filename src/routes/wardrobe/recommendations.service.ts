@@ -1398,9 +1398,12 @@ async function runCompleteLookCore(
             preferredColorHints,
             preferredColorFamilies,
           );
+          // Color is the most user-visible signal in outfit completion: anchor
+          // pair score gets the dominant weight, with slot-aware decision and
+          // user-preferred color hints layered on top.
           const colorHarmony = Math.max(
             0,
-            Math.min(1, colorHarmonyBase * 0.52 + colorDecisionAlignment * 0.28 + colorPreferenceAlignment * 0.2)
+            Math.min(1, colorHarmonyBase * 0.60 + colorDecisionAlignment * 0.24 + colorPreferenceAlignment * 0.16)
           );
           const styleAlignment = computeStyleAlignment(source, preferredStyleTerms);
           const patternAlignment = computeTokenAffinity(source.attr_pattern, preferredPatterns);
@@ -1429,6 +1432,17 @@ async function runCompleteLookCore(
             continue;
           }
           if (shouldEnforceStrictColorGate(category, currentCategoryList) && colorDecisionAlignment < 0.4) {
+            continue;
+          }
+          // Hard color-clash gate: when the candidate is chromatic and clearly
+          // clashes with the anchor's color (pair score < 0.5), drop it for
+          // visible slots regardless of dress anchoring.
+          if (
+            (category === "bottoms" || category === "shoes" || category === "bags" || category === "outerwear") &&
+            wardrobeCanonicalColors.size > 0 &&
+            candidateColor &&
+            colorHarmonyBase < 0.5
+          ) {
             continue;
           }
           if ((preferredColorHints.size > 0 || preferredColorFamilies.size > 0) && colorPreferenceAlignment < 0.4) {
@@ -1461,20 +1475,20 @@ async function runCompleteLookCore(
             aestheticKeywordAlignment = Math.max(0.28, (0.62 + 0.38 * positive) * (1 - 0.5 * avoidPenalty));
           }
 
-          // Weighted scoring: aestheticKeywordAlignment is a first-class dimension
-          // (12% weight) rather than a global multiplier. This prevents the common
-          // case where products lack explicit style words in their titles (a sneaker
-          // won't say "streetwear") from tanking otherwise good candidates.
+          // Weighted scoring: color compatibility carries the highest weight
+          // because it is the most visible signal when the user evaluates an
+          // outfit completion. Aesthetic keyword alignment remains a first-class
+          // dimension so titles without explicit style words aren't penalised.
           const finalScore =
-            embeddingNorm * 0.15 +
-            categoryCompat * 0.14 +
-            colorHarmony * 0.19 +
-            styleAlignment * 0.18 +
-            aestheticKeywordAlignment * 0.12 +
-            patternAlignment * 0.06 +
+            embeddingNorm * 0.13 +
+            categoryCompat * 0.13 +
+            colorHarmony * 0.25 +
+            styleAlignment * 0.16 +
+            aestheticKeywordAlignment * 0.11 +
+            patternAlignment * 0.05 +
             materialAlignment * 0.04 +
             formalityAlignment * 0.07 +
-            weatherAlignment * 0.05;
+            weatherAlignment * 0.06;
 
           const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment * accessoryStyleAlignment);
           const slotAwareFinalScore = Math.round((finalScore * (0.7 + slotStyleScore * 0.3) * footwearDressAlignment) * 1000) / 1000;
@@ -2754,6 +2768,66 @@ function inferStyleTermsFromCurrentItems(
   return Array.from(terms);
 }
 
+/** Coarse aesthetic family inferred from text — used for compatibility matrix. */
+function inferAestheticFamily(blob: string): "athleisure" | "streetwear" | "formal" | "elegant" | "boho" | "minimalist" | "classic" | "modern" | "edgy" | null {
+  const b = blob.toLowerCase();
+  if (/\b(athletic|gym|workout|running|tennis|sport|sporty|track|jogger|sweatpant|hoodie|technical fabric)\b/.test(b)) return "athleisure";
+  if (/\b(streetwear|street|graphic|skate|hype|oversized|baggy|cargo|distressed|hip[- ]?hop)\b/.test(b)) return "streetwear";
+  if (/\b(tuxedo|black tie|formal gown|evening gown|cocktail dress|tailored suit|black-tie)\b/.test(b)) return "formal";
+  if (/\b(elegant|cocktail|silk|satin|chiffon|pearl|lace|sequin|embellished)\b/.test(b)) return "elegant";
+  if (/\b(boho|bohemian|fringe|crochet|tassel|paisley|kaftan|peasant|flowy|ethnic)\b/.test(b)) return "boho";
+  if (/\b(minimalist|clean lines?|understated|simple|essential|basic)\b/.test(b)) return "minimalist";
+  if (/\b(classic|preppy|tailored|oxford|loafer|cardigan|trench|polo)\b/.test(b)) return "classic";
+  if (/\b(edgy|leather|stud|spike|punk|gothic|combat|moto|biker)\b/.test(b)) return "edgy";
+  if (/\b(modern|contemporary|sleek|architectural)\b/.test(b)) return "modern";
+  return null;
+}
+
+/** Mutual aesthetic compatibility — symmetric. 1.0 = perfect, 0.3 = clash. */
+function aestheticCompatibility(a: string, b: string): number {
+  if (a === b) return 1.0;
+  const key = [a, b].sort().join("|");
+  const matrix: Record<string, number> = {
+    "classic|minimalist":   0.92,
+    "classic|modern":       0.88,
+    "classic|elegant":      0.86,
+    "classic|formal":       0.82,
+    "classic|streetwear":   0.50,
+    "classic|athleisure":   0.42,
+    "classic|edgy":         0.55,
+    "classic|boho":         0.55,
+    "elegant|formal":       0.92,
+    "elegant|minimalist":   0.84,
+    "elegant|modern":       0.82,
+    "elegant|athleisure":   0.30,
+    "elegant|streetwear":   0.32,
+    "elegant|edgy":         0.62,
+    "elegant|boho":         0.66,
+    "formal|minimalist":    0.78,
+    "formal|modern":        0.78,
+    "formal|athleisure":    0.22,
+    "formal|streetwear":    0.24,
+    "formal|edgy":          0.55,
+    "formal|boho":          0.40,
+    "minimalist|modern":    0.92,
+    "minimalist|athleisure": 0.70,
+    "minimalist|streetwear": 0.66,
+    "minimalist|edgy":      0.68,
+    "minimalist|boho":      0.50,
+    "modern|streetwear":    0.74,
+    "modern|athleisure":    0.74,
+    "modern|edgy":          0.78,
+    "modern|boho":          0.58,
+    "athleisure|streetwear": 0.86,
+    "athleisure|edgy":      0.66,
+    "athleisure|boho":      0.45,
+    "boho|edgy":            0.58,
+    "boho|streetwear":      0.55,
+    "edgy|streetwear":      0.82,
+  };
+  return matrix[key] ?? 0.55;
+}
+
 function computeStyleAlignment(source: any, preferredStyleTerms: string[]): number {
   if (preferredStyleTerms.length === 0) return 0.62;
   const blob = `${String(source?.attr_style || "")} ${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.product_types || "")}`.toLowerCase();
@@ -2763,19 +2837,38 @@ function computeStyleAlignment(source: any, preferredStyleTerms: string[]): numb
   const styleSet = new Set(preferredStyleTerms.map((t) => String(t || "").toLowerCase().trim()));
   const isCasualStyle = styleSet.has("casual") || styleSet.has("streetwear") || styleSet.has("sporty") || styleSet.has("athleisure") || styleSet.has("boho") || styleSet.has("bohemian");
   const isFormalStyle = styleSet.has("formal") || styleSet.has("business") || styleSet.has("elegant");
-  if (isCasualStyle && /\b(formal gown|evening gown|cocktail dress|black tie|tuxedo|tailored suit)\b/.test(blob)) return 0.34;
-  if (isFormalStyle && /\b(athletic|skate|surf|streetwear graphic|sportswear)\b/.test(blob)) return 0.38;
+  if (isCasualStyle && /\b(formal gown|evening gown|cocktail dress|black tie|tuxedo|tailored suit)\b/.test(blob)) return 0.30;
+  if (isFormalStyle && /\b(athletic|skate|surf|streetwear graphic|sportswear|hoodie|sweatpant|jogger|track pant)\b/.test(blob)) return 0.34;
 
-  // Default to neutral — product titles rarely carry explicit style labels
-  // (a sneaker won't say "streetwear", a tote won't say "classic").
-  // Reward exact matches, but don't penalize for absence.
-  let best = 0.62;
+  // Direct token overlap: high reward when explicit.
+  let directBest = 0;
   for (const token of preferredStyleTerms) {
     if (!token) continue;
-    if (blob === token) best = Math.max(best, 0.92);
-    else if (blob.includes(token)) best = Math.max(best, 0.82);
+    if (blob === token) directBest = Math.max(directBest, 0.94);
+    else if (blob.includes(token)) directBest = Math.max(directBest, 0.84);
   }
-  return best;
+
+  // Aesthetic-family compatibility: gives a richer signal even when titles
+  // don't carry explicit style labels (most product titles don't).
+  const candidateFamily = inferAestheticFamily(blob);
+  let familyBest = 0;
+  if (candidateFamily) {
+    for (const token of preferredStyleTerms) {
+      const t = String(token || "").toLowerCase().trim();
+      if (!t) continue;
+      const prefFamily =
+        ["minimalist", "classic", "modern", "elegant", "formal", "boho", "bohemian", "edgy", "streetwear", "athleisure", "sporty", "athletic", "casual"].includes(t)
+          ? (t === "bohemian" ? "boho" : t === "sporty" || t === "athletic" ? "athleisure" : t === "casual" ? null : t)
+          : null;
+      if (!prefFamily) continue;
+      familyBest = Math.max(familyBest, aestheticCompatibility(prefFamily, candidateFamily));
+    }
+  }
+
+  // If neither signal fired, default to neutral — most titles lack explicit style words.
+  if (directBest === 0 && familyBest === 0) return 0.62;
+  // Blend: direct token match dominates, but family compat fills the gap.
+  return Math.max(directBest, familyBest);
 }
 
 function computeTokenAffinity(candidateRaw: unknown, preferredTokens: string[]): number {
@@ -3739,27 +3832,63 @@ function scoreSlotColorAlignment(
 ): number {
   if (!candidateColor) return 0.55;
   const family = COLOR_FAMILIES_BY_NAME[candidateColor] || "other";
-  const hasDressAnchor = currentCategoryList.includes("dresses");
-  if (!hasDressAnchor) return computeColorHarmonyWithWardrobe(wardrobeFamilies, candidateColor);
-
   const normalizedSlot = normalizeWardrobeCategory(slot) || slot;
+  const hasDressAnchor = currentCategoryList.includes("dresses");
 
-  // Dress-led looks: apply color intelligence to all slots,
-  // with stricter constraints for bags/accessories.
+  // Universal: neutral candidates are safe choices for every slot.
   if (family === "neutral") return 0.95;
-  if (family === "pink") return normalizedSlot === "shoes" ? 0.84 : 0.88;
-  if (family === "earth") return normalizedSlot === "accessories" ? 0.76 : 0.8;
-  if (family === "blue") return normalizedSlot === "accessories" ? 0.68 : 0.74;
-  if (family === "red") return normalizedSlot === "bags" || normalizedSlot === "accessories" ? 0.4 : 0.5;
-  if (family === "green") return normalizedSlot === "bags" || normalizedSlot === "accessories" ? 0.36 : 0.48;
-  return 0.52;
+
+  // Dress-led looks: tighter rules for the slots most visible alongside a dress.
+  if (hasDressAnchor) {
+    if (family === "pink") return normalizedSlot === "shoes" ? 0.84 : 0.88;
+    if (family === "earth") return normalizedSlot === "accessories" ? 0.76 : 0.8;
+    if (family === "blue") return normalizedSlot === "accessories" ? 0.68 : 0.74;
+    if (family === "red") return normalizedSlot === "bags" || normalizedSlot === "accessories" ? 0.4 : 0.5;
+    if (family === "green") return normalizedSlot === "bags" || normalizedSlot === "accessories" ? 0.36 : 0.48;
+    return 0.52;
+  }
+
+  // Top + bottom looks: bottoms should harmonise tightly with the existing
+  // wardrobe palette; shoes should not clash with the bottom; bags can be a
+  // contrast piece but should still avoid hard clashes.
+  const baseHarmony = computeColorHarmonyWithWardrobe(wardrobeFamilies, candidateColor);
+  if (normalizedSlot === "bottoms") {
+    // Bottoms anchor the lower half — stricter on chromatic clashes.
+    if (baseHarmony >= 0.82) return Math.min(0.95, baseHarmony + 0.04);
+    if (baseHarmony < 0.55) return Math.max(0.30, baseHarmony - 0.10);
+    return baseHarmony;
+  }
+  if (normalizedSlot === "shoes") {
+    // Shoes rarely clash with neutrals; a mid clash with chromatic anchor is harsh.
+    if (baseHarmony < 0.5) return Math.max(0.28, baseHarmony - 0.12);
+    return baseHarmony;
+  }
+  if (normalizedSlot === "bags") {
+    // Allow bags a wider contrast envelope but still penalise clear clashes.
+    if (baseHarmony < 0.45) return Math.max(0.30, baseHarmony - 0.08);
+    return baseHarmony;
+  }
+  return baseHarmony;
 }
 
 function shouldEnforceStrictColorGate(slot: string, currentCategoryList: string[]): boolean {
   const normalizedSlot = normalizeWardrobeCategory(slot) || slot;
   const hasDressAnchor = currentCategoryList.includes("dresses");
-  // Keep strict anti-clash gating for dress-led styling only.
-  return hasDressAnchor && (normalizedSlot === "bags" || normalizedSlot === "accessories" || normalizedSlot === "shoes");
+  // Strict anti-clash gating: dress-led looks plus the visually dominant
+  // outfit slots (shoes, bottoms, bags). These are the pieces where the
+  // wrong color is most obvious in the final outfit.
+  if (hasDressAnchor) {
+    return (
+      normalizedSlot === "bags" ||
+      normalizedSlot === "accessories" ||
+      normalizedSlot === "shoes"
+    );
+  }
+  return (
+    normalizedSlot === "shoes" ||
+    normalizedSlot === "bottoms" ||
+    normalizedSlot === "bags"
+  );
 }
 
 function buildOutfitSets(
