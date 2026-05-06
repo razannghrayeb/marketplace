@@ -252,8 +252,8 @@ export function scoreAudienceCompliance(
     ? hit._source.product_types.map((t) => String(t).toLowerCase()).join(" ")
     : "";
   const audienceBlob = `${title} ${category} ${canonical} ${productTypes}`;
-  const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt)\b/;
-  const menStyleCue = /\b(briefs?|boxers?|jockstrap|menswear)\b/;
+  const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|handbag|clutch|tote|purse|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt)\b/;
+  const menStyleCue = /\b(suit|suits|tie|oxford|oxfords|dress\s*shirt|button\s*down|button-down|briefs|boxer|boxers|cargo\s*pants?|chino|chinos|loafer|loafers|briefcase|messenger|sport\s*coat|blazer)\b/;
 
   let score = 1;
   let factors = 0;
@@ -288,15 +288,15 @@ export function scoreAudienceCompliance(
       const hasMenStyleCue = menStyleCue.test(audienceBlob);
       if (wantG === "men") {
         if (hasKidsCue) score *= 0;
-        else if (hasWomenStyleCue && !hasMenStyleCue) score *= 0;
+        else if (hasWomenStyleCue && !hasMenStyleCue) score *= 0.12;
         else if (/\b(men|mens|male)\b/.test(audienceBlob)) score *= 0.9;
-        else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(audienceBlob)) score *= 0;
+        else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(audienceBlob)) score *= 0.28;
         else score *= 0.78;
       } else if (wantG === "women") {
         if (hasKidsCue) score *= 0;
-        else if (hasMenStyleCue && !hasWomenStyleCue) score *= 0;
+        else if (hasMenStyleCue && !hasWomenStyleCue) score *= 0.12;
         else if (/\b(women|womens|female|ladies|woman)\b/.test(audienceBlob)) score *= 0.9;
-        else if (/\b(men|mens|male|man|boy|boys)\b/.test(audienceBlob)) score *= 0;
+        else if (/\b(men|mens|male|man|boy|boys)\b/.test(audienceBlob)) score *= 0.28;
         else score *= 0.78;
       } else {
         score *= 0.85;
@@ -311,47 +311,6 @@ export function scoreAudienceCompliance(
 
   if (factors === 0) return 1;
   return Math.max(0, Math.min(1, Math.pow(score, 1 / factors)));
-}
-
-function hasStrictFullSuitIntent(intentBlob: string): boolean {
-  const blob = String(intentBlob ?? "").toLowerCase();
-  if (!blob.trim()) return false;
-  const jacketOnly =
-    /\b(?:suit|dress)\s+jackets?\b/.test(blob) &&
-    !/\b(suits|tuxedos?|two[-\s]?piece|three[-\s]?piece|matching\s+suit|suit\s+set|full\s+suit)\b/.test(blob);
-  if (jacketOnly) return false;
-  return /\b(suits?|tuxedos?|two[-\s]?piece|three[-\s]?piece|matching\s+suit|suit\s+set|full\s+suit)\b/.test(blob);
-}
-
-function hasActualSuitCatalogCue(src: Record<string, unknown>, productTypes: string[]): boolean {
-  const blob = [
-    src.title,
-    src.description,
-    src.category,
-    src.category_canonical,
-    ...(Array.isArray(productTypes) ? productTypes : []),
-  ]
-    .filter((x) => x != null)
-    .map((x) => String(x))
-    .join(" ")
-    .toLowerCase();
-  if (!blob.trim()) return false;
-
-  const norm = blob.replace(/[^a-z0-9\s\-_/]/g, " ").replace(/\s+/g, " ").trim();
-  if (!norm) return false;
-  if (/\b(suit|suits|tuxedo|tuxedos)\b/i.test(norm)) {
-    const withoutSuitJacket = norm.replace(/\bsuit jacket\b/gi, "").trim();
-    if (/\b(suit|suits)\b/i.test(withoutSuitJacket) || /\btuxedo\b/i.test(withoutSuitJacket)) return true;
-  }
-
-  const hasBlazer = /\b(blazer|blazers|suit jacket|dress jacket|sport coat|sportcoat)\b/i.test(norm);
-  const hasSuitBottomHint = /\b(pant|pants|trouser|trousers|slacks|dress pants|2p|2-piece|two piece|set|full set)\b/i.test(norm);
-  if (hasBlazer && hasSuitBottomHint) return true;
-
-  const catCanon = String(src.category_canonical ?? "").toLowerCase();
-  const catRaw = String(src.category ?? "").toLowerCase();
-  if (catCanon === "tailored" || /\b(suit|suits|tailored|tailoring|waistcoat|waistcoats)\b/.test(catRaw)) return true;
-  return false;
 }
 
 /** When indexed hits expose separate hybrid components, rerank uses them for sem vs lex. */
@@ -427,7 +386,7 @@ export interface HitCompliance {
   intraFamilyPenalty: number;
   colorCompliance: number;
   matchedColor: string | null;
-  colorTier: "exact" | "near-exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none";
+  colorTier: "exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none";
   crossFamilyPenalty: number;
   audienceCompliance: number;
   styleCompliance: number;
@@ -553,32 +512,6 @@ function inferSleeveFromCatalogSignals(
   }
 
   return null;
-}
-
-function inferredSleeveConfidence(
-  src: Record<string, unknown>,
-  title: string,
-  description: string,
-  inferred: "short" | "long" | "sleeveless",
-): number {
-  const bag = [
-    src.category,
-    src.category_canonical,
-    title,
-    description,
-    ...(Array.isArray(src.product_types) ? src.product_types : []),
-  ]
-    .map((x) => String(x ?? "").toLowerCase())
-    .join(" ");
-
-  if (inferred === "long") {
-    if (/\b(hoodie|hoodies|hooded|sweater|sweaters|cardigan|cardigans|pullover|pullovers)\b/.test(bag)) return 0.72;
-    if (/\b(jacket|jackets|coat|coats|parka|parkas|trench|blazer|blazers|windbreaker|overcoat|outerwear)\b/.test(bag)) return 0.66;
-    return 0.48;
-  }
-
-  if (inferred === "sleeveless") return 0.72;
-  return 0.42;
 }
 
 function docSupportsSleeveIntent(src: Record<string, unknown>): boolean {
@@ -867,30 +800,20 @@ export function computeHitRelevance(
 
   let colorCompliance = 0;
   let matchedColor: string | null = null;
-  let colorTier: "exact" | "near-exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none" = "none";
+  let colorTier: "exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none" = "none";
   if (desiredColorsTier.length > 0) {
     const tImg = tieredColorListCompliance(desiredColorsTier, imgTierRaw, rerankColorMode);
     const tText = tieredColorListCompliance(desiredColorsTier, textTierRaw, rerankColorMode);
     const tResolved = tieredColorListCompliance(desiredColorsTier, resolvedColor.colors, rerankColorMode);
     const tUnion = tieredColorListCompliance(desiredColorsTier, unionTierRaw, rerankColorMode);
-    
+    matchedColor = tUnion.bestMatch ?? tImg.bestMatch ?? tText.bestMatch;
+    colorTier = tUnion.tier;
     if (resolvedColor.colors.length > 0 && resolvedColor.source !== "image") {
       colorCompliance = tResolved.compliance;
       matchedColor = tResolved.bestMatch ?? matchedColor;
       colorTier = tResolved.tier;
     } else if (imgTierRaw.length > 0 && textTierRaw.length > 0) {
       colorCompliance = wtImg * tImg.compliance + wtText * tText.compliance;
-      // When image and text both present, use whichever found a match; prioritize image tier
-      if (tImg.tier !== "none" && tText.tier !== "none") {
-        colorTier = tImg.tier;
-        matchedColor = tImg.bestMatch ?? matchedColor;
-      } else if (tImg.tier !== "none") {
-        colorTier = tImg.tier;
-        matchedColor = tImg.bestMatch ?? matchedColor;
-      } else if (tText.tier !== "none") {
-        colorTier = tText.tier;
-        matchedColor = tText.bestMatch ?? matchedColor;
-      }
     } else if (imgTierRaw.length > 0) {
       colorCompliance = tImg.compliance;
       matchedColor = tImg.bestMatch ?? matchedColor;
@@ -900,62 +823,7 @@ export function computeHitRelevance(
       matchedColor = tText.bestMatch ?? matchedColor;
       colorTier = tText.tier;
     } else {
-      // Only use union tier if no dedicated image/text sources found a match
-      // This prevents incorrect secondary/accent colors from polluting primary color matching
       colorCompliance = tUnion.compliance;
-      matchedColor = tUnion.bestMatch;
-      colorTier = tUnion.tier;
-    }
-
-    // Guard: if image color contradicts union/metadata colors, prioritize image tier
-    // Prevents secondary/accent colors in metadata from false-positive matching
-    if (imgTierRaw.length > 0 && tImg.tier === "none" && colorTier === "exact") {
-      // Image explicitly doesn't match desired color, but union/metadata says exact match
-      // This indicates metadata pollution (e.g., white secondary color on a blue shirt)
-      colorTier = "none";
-      colorCompliance = 0;
-      matchedColor = null;
-    }
-
-    // Additional guard: when image is the primary color source and text/resolved also don't match,
-    // and we got an "exact" match from union alone, something is wrong with the merged colors.
-    // Demote to prevent false positives.
-    if (
-      colorTier === "exact" &&
-      imgTierRaw.length > 0 &&
-      textTierRaw.length > 0 &&
-      tImg.tier === "none" &&
-      tText.tier === "none"
-    ) {
-      // Both image and text sources explicitly don't match, but union says exact.
-      // This is a strong signal of metadata confusion (e.g., secondary colors incorrectly
-      // merged into primary palette). Force reset.
-      colorTier = "none";
-      colorCompliance = 0;
-      matchedColor = null;
-    }
-
-    // Final guard: "exact" match requires confidence. If achieved via union merge without
-    // image/text confirmation, require high compliance score to prevent false positives.
-    if (colorTier === "exact" && imgTierRaw.length > 0 && textTierRaw.length === 0) {
-      // "exact" match came from image alone, which is trustworthy
-      // But verify: if image confidence is very low (< 0.4), demote tier
-      if (colorCompliance < 0.4) {
-        colorTier = "family";
-        colorCompliance = Math.max(0.35, colorCompliance);
-      }
-    }
-
-    // Guard: if product has NO catalog color (null), "exact" matches need very high confidence
-    // This prevents false positives when inferring colors from potentially ambiguous images
-    const hasCatalogColorMetadata = typeof hit?._source?.color === "string" && String(hit?._source?.color).trim() !== "";
-    if (!hasCatalogColorMetadata && colorTier === "exact") {
-      // Product color is inferred only, not from explicit metadata
-      // Require very high compliance to mark as exact
-      if (colorCompliance < 0.85) {
-        colorTier = colorCompliance >= 0.65 ? "family" : "bucket";
-        colorCompliance = Math.max(0.5, colorCompliance * 0.75);
-      }
     }
   }
 
@@ -977,11 +845,7 @@ export function computeHitRelevance(
         : colorTier === "family" ? 0.08 
         : 0.15;
       colorCompliance = colorCompliance * catalogContradictionPenalty;
-      
-      // If catalog explicitly contradicts, force tier down
-      if (colorTier === "exact") {
-        colorTier = "none";
-      }
+      if (colorTier === "exact") colorTier = "none";
       // Demote family/shade tiers to bucket so it gets gated by bucketLimit logic
       if (colorTier === "family" || colorTier === "light-shade" || colorTier === "dark-shade") colorTier = "bucket";
       // Keep `matchedColor` tied to query-vs-hit match evidence only; do not replace it
@@ -1108,9 +972,9 @@ export function computeHitRelevance(
       sleeveCompliance = 0.15;
     } else if (inferredObserved === wantedSleeve) {
       // Inferred sleeve from type/category cues is weaker than explicit sleeve metadata.
-      // Strong garment defaults like hoodies/cardigans are useful evidence, while
-      // generic inferred defaults remain below explicit sleeve metadata.
-      sleeveCompliance = observed ? 1 : inferredSleeveConfidence(src, title, description, inferredObserved);
+      // Keep this conservative so noisy catalog signals (e.g. bad type tags) do not
+      // incorrectly satisfy sleeve intent for long-sleeve products.
+      sleeveCompliance = observed ? 1 : 0.28;
     } else if (!observed) {
       // Avoid hard contradiction penalty when mismatch comes from heuristic inference only.
       sleeveCompliance = 0.12;
@@ -1379,10 +1243,6 @@ export function computeHitRelevance(
     : Math.max(0.85, Math.min(1.03, 0.85 + productQuality * 0.18));
   finalRelevance01 = Math.max(0, Math.min(1, finalRelevance01 * qualityModifier));
 
-  // Note: color attributes are computed above (colorTier, colorCompliance, matchedColor).
-  // Intentionally do NOT cap or suppress `finalRelevance01` here — keep final relevance
-  // unchanged while preserving computed attribute values for downstream use.
-
   // Precision safety for image-led fashion retrieval:
   // when bottoms/footwear color intent is present, mismatched color should not survive
   // as a strong final match even if visual similarity is high.
@@ -1399,14 +1259,12 @@ export function computeHitRelevance(
     );
   const isBottomLikeIntent =
     /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts?|skirt|skirts|leggings?)\b/.test(intentBlob);
-  const isTrouserLikeIntent =
-    /\b(pants?|trousers?|slacks?|chinos?|cargo(?:\s+pants?)?|joggers?|jeans?|leggings?)\b/.test(intentBlob) &&
-    !/\b(shorts?|bermuda|skorts?|skirts?)\b/.test(intentBlob);
   const isFootwearLikeIntent =
     /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(intentBlob);
 
-  // Full-suit queries should not degrade into generic coat/outerwear retrieval.
-  const strictFullSuitIntent = hasStrictFullSuitIntent(intentBlob);
+  // Detect explicit suit queries and relax color gating so coordinated
+  // trousers/dress-pants and shoes surface alongside jackets.
+  const suitIntent = /\b(suit|suits|two[-\s]?piece|three[-\s]?piece|matching\s*suit)\b/.test(intentBlob);
 
   // Document-level family detection (used for hard-blocking non-matching families)
   const docBlobForFamily = [src.category, src.category_canonical, src.title, ...(Array.isArray(productTypes) ? productTypes : [])]
@@ -1415,25 +1273,15 @@ export function computeHitRelevance(
     .toLowerCase();
   const docIsTopLike = /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|overshirt|overshirts|polo|polos)\b/.test(docBlobForFamily);
   const docIsBottomLike = /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts?|skirt|skirts|leggings?)\b/.test(docBlobForFamily);
-  const docIsShortsSkirtLike = /\b(shorts?|bermuda|board\s+shorts?|skorts?|skirts?)\b/.test(docBlobForFamily);
   const docIsFootwearLike = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(docBlobForFamily);
   const docIsDressLike = /\b(dress|dresses|gown)\b/.test(docBlobForFamily);
-
-  let suitBlocked = false;
-  let bottomSubtypeBlocked = false;
 
   // Hard family restrictions: if the user strongly intends a family (top/bottom/footwear/dress)
   // then do not allow hits from other families to surface (set final relevance to 0).
   // This is intentionally strict per request; can be made configurable later.
   try {
-    if (hasReliableTypeIntent) {
-      if (strictFullSuitIntent && !hasActualSuitCatalogCue(src, productTypes)) {
-        finalRelevance01 = 0;
-        suitBlocked = true;
-      } else if (isTrouserLikeIntent && docIsShortsSkirtLike) {
-        finalRelevance01 = 0;
-        bottomSubtypeBlocked = true;
-      } else if (isFootwearLikeIntent && !docIsFootwearLike) {
+    if (hasTypeIntent) {
+      if (isFootwearLikeIntent && !docIsFootwearLike) {
         finalRelevance01 = 0;
       } else if (isTopLikeIntent && !docIsTopLike) {
         finalRelevance01 = 0;
@@ -1447,8 +1295,24 @@ export function computeHitRelevance(
     // noop
   }
 
-  // Color intent present for garment-like queries: do not restrict final relevance here.
-  // Upstream attribute signals (colorTier, colorCompliance) remain available for rerank/explain.
+  if (hasColorIntentForFinalRelevance && (isTopLikeIntent || isBottomLikeIntent || isFootwearLikeIntent)) {
+    const suitRelax = suitIntent;
+    const noneTierLimit = suitRelax ? (isBottomLikeIntent ? 0.16 : isTopLikeIntent ? 0.18 : 0.12) : (isBottomLikeIntent ? 0.06 : isTopLikeIntent ? 0.08 : 0.08);
+    const lowComplianceLimit = suitRelax ? (isBottomLikeIntent ? 0.2 : isTopLikeIntent ? 0.22 : 0.18) : (isBottomLikeIntent ? 0.1 : isTopLikeIntent ? 0.12 : 0.12);
+    const bucketLimit = suitRelax ? (isBottomLikeIntent ? 0.5 : 0.56) : (isBottomLikeIntent ? 0.32 : 0.36);
+    // Shade tiers (light-shade, dark-shade) get slightly higher cap than bucket but lower than family
+    const shadeLimit = bucketLimit + 0.08;
+
+    if (colorTier === "none") {
+      finalRelevance01 = Math.min(finalRelevance01, noneTierLimit);
+    } else if (colorCompliance < 0.2) {
+      finalRelevance01 = Math.min(finalRelevance01, lowComplianceLimit);
+    } else if ((isBottomLikeIntent || isTopLikeIntent) && colorTier === "bucket") {
+      finalRelevance01 = Math.min(finalRelevance01, bucketLimit);
+    } else if ((isBottomLikeIntent || isTopLikeIntent) && (colorTier === "light-shade" || colorTier === "dark-shade")) {
+      finalRelevance01 = Math.min(finalRelevance01, shadeLimit);
+    }
+  }
 
   let negationBlocked = false;
   if (negationExcludeTerms && negationExcludeTerms.length > 0) {
@@ -1533,7 +1397,7 @@ export function computeHitRelevance(
     hasSleeveIntent: hasSleeveIntentForDoc,
     hasAudienceIntent,
     typeGateFactor,
-    hardBlocked: hardBlocked || negationBlocked || swimBlocked || suitBlocked || bottomSubtypeBlocked,
+    hardBlocked: hardBlocked || negationBlocked || swimBlocked,
     // swimBlocked: true when a swimwear hit was zeroed due to short/shorts intent
     // without explicit swim intent from the user.
     // Included in `hardBlocked` above via `swimBlocked` variable.
