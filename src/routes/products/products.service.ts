@@ -9674,13 +9674,16 @@ export async function searchByImageWithSimilarity(
   }
 
   // Always sort by finalRelevance01 descending as the primary signal.
-  // Tie-breaker: for detection-anchored `bottoms` or `tops`, prefer strong
-  // visual similarity early so visually-correct items (e.g. pants) are not
-  // demoted by metadata-only signals. Otherwise prefer product-type
-  // compliance then (optionally) raw visual similarity.
+  // When unified scorer is enabled, prefer `explain.unifiedScorer.score` instead
+  // so experiments drive ordering without changing the pipeline.
+  const unifiedScorerEnabled = isUnifiedImageScorerEnabled();
   results.sort((a: any, b: any) => {
-    const fa = a.finalRelevance01 ?? 0;
-    const fb = b.finalRelevance01 ?? 0;
+    const aExplain = (a.explain ?? {}) as any;
+    const bExplain = (b.explain ?? {}) as any;
+    const aUnified = unifiedScorerEnabled ? Number(aExplain?.unifiedScorer?.score ?? NaN) : NaN;
+    const bUnified = unifiedScorerEnabled ? Number(bExplain?.unifiedScorer?.score ?? NaN) : NaN;
+    const fa = Number.isFinite(aUnified) ? aUnified : Number(a.finalRelevance01 ?? 0);
+    const fb = Number.isFinite(bUnified) ? bUnified : Number(b.finalRelevance01 ?? 0);
     if (Math.abs(fb - fa) > 1e-6) return fb - fa;
 
     const simA = Number(a.similarity_score ?? 0);

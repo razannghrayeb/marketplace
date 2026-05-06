@@ -3243,7 +3243,7 @@ function shouldUseStrictDetectionCategoryGuard(productCategory: string): boolean
 
 function isApparelFamilyCategory(productCategory: string): boolean {
   const c = String(productCategory || "").toLowerCase();
-  return c === "tops" || c === "bottoms" || c === "dresses" || c === "outerwear";
+  return c === "tops" || c === "bottoms" || c === "dresses" || c === "outerwear" || c === "tailored";
 }
 
 function isAccessoryLikeCategory(productCategory: string): boolean {
@@ -3456,9 +3456,16 @@ function applyDetectionCategoryGuard(
                 ? /\b(dress|dresses|gown|gowns|top|tops|shirt|shirts|blouse|blouses|jacket|jackets|shoe|shoes|boot|boots)\b/.test(
                   haystack,
                 )
-                : /\b(dress|dresses|gown|gowns|top|tops|shirt|shirts|pant|pants|trouser|trousers|skirt|skirts|shoe|shoes|boot|boots)\b/.test(
-                  haystack,
-                );
+                : categoryMapping.productCategory === "tailored"
+                  // For tailored (suits/blazers): only contradiction is wrong-category items
+                  // (dresses, bottoms-only, footwear, bags). Tops/jackets/coats are partially
+                  // overlapping and can carry suit-jacket-like products — don't contradict.
+                  ? /\b(dress|dresses|gown|gowns|skirt|skirts|shoe|shoes|sneaker|sneakers|boot|boots|sandal|sandals|heel|heels|bag|bags|wallet|purse)\b/.test(
+                    haystack,
+                  )
+                  : /\b(dress|dresses|gown|gowns|top|tops|shirt|shirts|pant|pants|trouser|trousers|skirt|skirts|shoe|shoes|boot|boots)\b/.test(
+                    haystack,
+                  );
         if (!contradictsApparelFamily) {
           return true;
         }

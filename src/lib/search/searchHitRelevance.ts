@@ -13,6 +13,7 @@ import { isBeautyRetailListingFromFields } from "./categoryFilter";
 import { extractAttributesSync } from "./attributeExtractor";
 import { canonicalizeFashionColorToken, tieredColorListCompliance } from "../color/colorCanonical";
 import { normalizeColorToken } from "../color/queryColorFilter";
+import { inferProductGender, complianceFromInferredGender, type ProductGender } from "./productGenderInference";
 
 /** Visual / hybrid similarity should dominate tie-breaks when type/color intent is absent. */
 function rerankSimilarityWeight(): number {
@@ -252,8 +253,9 @@ export function scoreAudienceCompliance(
     ? hit._source.product_types.map((t) => String(t).toLowerCase()).join(" ")
     : "";
   const audienceBlob = `${title} ${category} ${canonical} ${productTypes}`;
-  const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|handbag|clutch|tote|purse|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt)\b/;
-  const menStyleCue = /\b(tie|oxford|oxfords|dress\s*shirt|button\s*down|button-down|briefs|boxer|boxers|briefcase|messenger|sport\s*coat)\b/;
+  // Style-cue regexes (womenStyleCue / menStyleCue) were inlined here previously.
+  // Replaced by inferProductGender — see ./productGenderInference for the full
+  // cascade (URL → title → category → garment type → style cues → size system).
 
   let score = 1;
   let factors = 0;
@@ -283,24 +285,21 @@ export function scoreAudienceCompliance(
   if (wantG) {
     factors += 1;
     if (!docG) {
+      // No explicit gender field on the doc → infer from cascading signals
+      // (URL path, title, category, description, garment type, style cues, size).
+      // This replaces the previous regex chain which only checked title/category
+      // for a few hardcoded words and missed obvious cases (e.g., URL with /mens/).
+      // Kids cue still hard-zeroes for adult-gender queries.
       const hasKidsCue = /\b(kids?|child|children|boys?|girls?|toddler|baby|youth)\b/.test(audienceBlob);
-      const hasWomenStyleCue = womenStyleCue.test(audienceBlob);
-      const hasMenStyleCue = menStyleCue.test(audienceBlob);
-      const hasWomenOnlyGarmentCue = /\b(dress|dresses|gown|skirt|skirts|camisole|cami|heels?|pumps?|stiletto)\b/.test(audienceBlob);
-      if (wantG === "men") {
-        if (hasKidsCue) score *= 0;
-        else if (hasWomenStyleCue && !hasMenStyleCue) score *= hasWomenOnlyGarmentCue ? 0 : 0.12;
-        else if (/\b(men|mens|male)\b/.test(audienceBlob)) score *= 0.9;
-        else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(audienceBlob)) score *= 0.28;
-        else score *= 0.78;
-      } else if (wantG === "women") {
-        if (hasKidsCue) score *= 0;
-        else if (hasMenStyleCue && !hasWomenStyleCue) score *= 0.12;
-        else if (/\b(women|womens|female|ladies|woman)\b/.test(audienceBlob)) score *= 0.9;
-        else if (/\b(men|mens|male|man|boy|boys)\b/.test(audienceBlob)) score *= 0.28;
-        else score *= 0.78;
+      if (hasKidsCue && (wantG === "men" || wantG === "women")) {
+        score *= 0;
       } else {
-        score *= 0.85;
+        const inferred = inferProductGender(hit?._source ?? {});
+        const inferredCompliance = complianceFromInferredGender(
+          inferred,
+          wantG as ProductGender,
+        );
+        score *= inferredCompliance;
       }
     } else if (docG === "unisex" || docG === wantG) {
       score *= 1;
