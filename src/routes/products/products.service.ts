@@ -7910,29 +7910,91 @@ export async function searchByImageWithSimilarity(
               ? 0.4
               : 0.3
         : 0.38;
+      const dbgDropsRescue = String(process.env.SEARCH_IMAGE_DEBUG_DROPS ?? "").toLowerCase() === "1";
       const preferredTypeAligned = visualGatedHits.filter((h: any) => {
         const comp = complianceById.get(String(h._source.product_id));
         if (!comp) return false;
-        if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) return false;
-        if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
+        if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) {
+          if (dbgDropsRescue) {
+            console.warn('[image-search][rescue-preferred-drop]', {
+              product_id: h._source.product_id,
+              title: h._source.title,
+              reason: 'child_audience_signals',
+              suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+            });
+          }
+          return false;
+        }
+        if ((comp.crossFamilyPenalty ?? 0) >= 0.62) {
+          if (dbgDropsRescue) {
+            console.warn('[image-search][rescue-preferred-drop]', {
+              product_id: h._source.product_id,
+              title: h._source.title,
+              reason: 'cross_family_penalty',
+              crossFamilyPenalty: comp.crossFamilyPenalty,
+              suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+            });
+          }
+          return false;
+        }
 
         // Must pass type intent
         if (!((comp.exactTypeScore ?? 0) >= 1 || (comp.productTypeCompliance ?? 0) >= minTypeCompliance)) {
+          if (dbgDropsRescue) {
+            console.warn('[image-search][rescue-preferred-drop]', {
+              product_id: h._source.product_id,
+              title: h._source.title,
+              reason: 'type_compliance_floor',
+              exactTypeScore: comp.exactTypeScore,
+              productTypeCompliance: comp.productTypeCompliance,
+              minTypeCompliance: minTypeCompliance,
+              suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+            });
+          }
           return false;
         }
 
         // Apply sleeve gating only for restrictive sleeve intents where mismatches are high-impact.
         if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < preferredSleeveMin) {
+          if (dbgDropsRescue) {
+            console.warn('[image-search][rescue-preferred-drop]', {
+              product_id: h._source.product_id,
+              title: h._source.title,
+              reason: 'sleeve_compliance_floor',
+              sleeveCompliance: comp.sleeveCompliance,
+              preferredSleeveMin: preferredSleeveMin,
+              suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+            });
+          }
           return false;
         }
 
         // Must pass color intent if set (avoid color mismatches in rescue)
         if (hasExplicitColorIntent && (comp.colorCompliance ?? 0) < 0.4) {
+          if (dbgDropsRescue) {
+            console.warn('[image-search][rescue-preferred-drop]', {
+              product_id: h._source.product_id,
+              title: h._source.title,
+              reason: 'explicit_color_intent_floor',
+              colorCompliance: comp.colorCompliance,
+              suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+            });
+          }
           return false;
         }
         const inferredRescueColorFloor =
           inferredColorSoftGateCategory ? (isFootwearDetectionIntent ? 0.02 : 0.04) : 0.1;
         if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < inferredRescueColorFloor) {
+          if (dbgDropsRescue) {
+            console.warn('[image-search][rescue-preferred-drop]', {
+              product_id: h._source.product_id,
+              title: h._source.title,
+              reason: 'inferred_color_intent_floor',
+              colorCompliance: comp.colorCompliance,
+              inferredRescueColorFloor: inferredRescueColorFloor,
+              suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+            });
+          }
           return false;
         }
         // Soft color intent should NOT gate rescue admission — only explicit color gates.
@@ -7946,12 +8008,45 @@ export async function searchByImageWithSimilarity(
         const fallbackTypeAligned = visualGatedHits.filter((h: any) => {
           const comp = complianceById.get(String(h._source.product_id));
           if (!comp) return false;
-          if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) return false;
+          if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) {
+            if (dbgDropsRescue) {
+              console.warn('[image-search][rescue-fallback-drop]', {
+                product_id: h._source.product_id,
+                title: h._source.title,
+                reason: 'child_audience_signals',
+                suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+              });
+            }
+            return false;
+          }
           // Stronger gender gate: when gender is explicitly filtered, reject hard mismatches (audienceCompliance === 0)
           // and also reject low compliance (< 0.75) to prevent women's shoes from appearing in men's searches
           const minAudienceCompliance = filtersAny.gender ? 0.75 : 0.55;
-          if ((comp.audienceCompliance ?? 1) < minAudienceCompliance) return false;
-          if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
+          if ((comp.audienceCompliance ?? 1) < minAudienceCompliance) {
+            if (dbgDropsRescue) {
+              console.warn('[image-search][rescue-fallback-drop]', {
+                product_id: h._source.product_id,
+                title: h._source.title,
+                reason: 'audience_compliance_floor',
+                audienceCompliance: comp.audienceCompliance,
+                minAudienceCompliance: minAudienceCompliance,
+                suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+              });
+            }
+            return false;
+          }
+          if ((comp.crossFamilyPenalty ?? 0) >= 0.62) {
+            if (dbgDropsRescue) {
+              console.warn('[image-search][rescue-fallback-drop]', {
+                product_id: h._source.product_id,
+                title: h._source.title,
+                reason: 'cross_family_penalty',
+                crossFamilyPenalty: comp.crossFamilyPenalty,
+                suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+              });
+            }
+            return false;
+          }
           // CRITICAL FIX: Allow sparse-metadata products to be rescued by visual similarity.
           // Only enforce strict type floor if product has explicit product_types metadata.
           // If product_types is empty/sparse (productTypeCompliance=0), allow rescue if visual is strong.
@@ -7963,18 +8058,88 @@ export async function searchByImageWithSimilarity(
             // Sparse metadata (no explicit product_types): allow if visual similarity is strong enough
             // This prevents valid candidates from being rejected solely due to missing metadata
             const sparseMetadataVisualFloor = params.detectionProductCategory === "tops" ? 0.68 : 0.70;
-            if (visualSim < sparseMetadataVisualFloor) return false;
+            if (visualSim < sparseMetadataVisualFloor) {
+              if (dbgDropsRescue) {
+                console.warn('[image-search][rescue-fallback-drop]', {
+                  product_id: h._source.product_id,
+                  title: h._source.title,
+                  reason: 'sparse_metadata_visual_floor',
+                  visualSim: visualSim,
+                  sparseMetadataVisualFloor: sparseMetadataVisualFloor,
+                  suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+                });
+              }
+              return false;
+            }
           } else {
             // Product has explicit type metadata: apply strict floor
             const fallbackTypeFloor = params.detectionProductCategory === "tops" ? 0.14 : 0.22;
-            if (exactType < 1 && typeComp < fallbackTypeFloor) return false;
+            if (exactType < 1 && typeComp < fallbackTypeFloor) {
+              if (dbgDropsRescue) {
+                console.warn('[image-search][rescue-fallback-drop]', {
+                  product_id: h._source.product_id,
+                  title: h._source.title,
+                  reason: 'type_compliance_explicit_floor',
+                  exactTypeScore: exactType,
+                  productTypeCompliance: typeComp,
+                  fallbackTypeFloor: fallbackTypeFloor,
+                  suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+                });
+              }
+              return false;
+            }
           }
-          if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < fallbackSleeveMin) return false;
-          if (hasExplicitColorIntent && (comp.colorCompliance ?? 0) < 0.18) return false;
+          if (enforceSleeveGate && (comp.sleeveCompliance ?? 0) < fallbackSleeveMin) {
+            if (dbgDropsRescue) {
+              console.warn('[image-search][rescue-fallback-drop]', {
+                product_id: h._source.product_id,
+                title: h._source.title,
+                reason: 'sleeve_compliance_floor',
+                sleeveCompliance: comp.sleeveCompliance,
+                fallbackSleeveMin: fallbackSleeveMin,
+                suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+              });
+            }
+            return false;
+          }
+          if (hasExplicitColorIntent && (comp.colorCompliance ?? 0) < 0.18) {
+            if (dbgDropsRescue) {
+              console.warn('[image-search][rescue-fallback-drop]', {
+                product_id: h._source.product_id,
+                title: h._source.title,
+                reason: 'explicit_color_intent_floor',
+                colorCompliance: comp.colorCompliance,
+                suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+              });
+            }
+            return false;
+          }
           const inferredFallbackColorFloor =
             inferredColorSoftGateCategory ? (isFootwearDetectionIntent ? 0.01 : 0.02) : 0.06;
-          if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < inferredFallbackColorFloor) return false;
-          if (shouldSuppressAthleticCandidates && isAthleticCatalogCandidate(h._source ?? {})) return false;
+          if (hasInferredColorIntentForRescue && (comp.colorCompliance ?? 0) < inferredFallbackColorFloor) {
+            if (dbgDropsRescue) {
+              console.warn('[image-search][rescue-fallback-drop]', {
+                product_id: h._source.product_id,
+                title: h._source.title,
+                reason: 'inferred_color_intent_floor',
+                colorCompliance: comp.colorCompliance,
+                inferredFallbackColorFloor: inferredFallbackColorFloor,
+                suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+              });
+            }
+            return false;
+          }
+          if (shouldSuppressAthleticCandidates && isAthleticCatalogCandidate(h._source ?? {})) {
+            if (dbgDropsRescue) {
+              console.warn('[image-search][rescue-fallback-drop]', {
+                product_id: h._source.product_id,
+                title: h._source.title,
+                reason: 'athletic_suppression',
+                suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+              });
+            }
+            return false;
+          }
           // Soft color intent does not gate fallback — only explicit color does.
           // This prevents crop-derived colors from blocking valid type matches.
           return true;
@@ -7990,13 +8155,62 @@ export async function searchByImageWithSimilarity(
         rescuePool = visualGatedHits.filter((h: any) => {
           const comp = complianceById.get(String(h._source.product_id));
           if (!comp) return false;
-          if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) return false;
-          if ((comp.hardBlocked ?? false) === true) return false;
-          if ((comp.crossFamilyPenalty ?? 0) >= 0.62) return false;
+          if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) {
+            if (dbgDropsRescue) {
+              console.warn('[image-search][rescue-sparse-fallback-drop]', {
+                product_id: h._source.product_id,
+                title: h._source.title,
+                reason: 'child_audience_signals',
+                stage: 'sparse_catalog_fallback',
+                suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+              });
+            }
+            return false;
+          }
+          if ((comp.hardBlocked ?? false) === true) {
+            if (dbgDropsRescue) {
+              console.warn('[image-search][rescue-sparse-fallback-drop]', {
+                product_id: h._source.product_id,
+                title: h._source.title,
+                reason: 'hard_blocked',
+                stage: 'sparse_catalog_fallback',
+                suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+              });
+            }
+            return false;
+          }
+          if ((comp.crossFamilyPenalty ?? 0) >= 0.62) {
+            if (dbgDropsRescue) {
+              console.warn('[image-search][rescue-sparse-fallback-drop]', {
+                product_id: h._source.product_id,
+                title: h._source.title,
+                reason: 'cross_family_penalty',
+                crossFamilyPenalty: comp.crossFamilyPenalty,
+                stage: 'sparse_catalog_fallback',
+                suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+              });
+            }
+            return false;
+          }
           const typeComp = comp.productTypeCompliance ?? 0;
           const exactType = comp.exactTypeScore ?? 0;
           if (exactType >= 1) return true;
-          return typeComp >= minTypeFloor;
+          if (typeComp < minTypeFloor) {
+            if (dbgDropsRescue) {
+              console.warn('[image-search][rescue-sparse-fallback-drop]', {
+                product_id: h._source.product_id,
+                title: h._source.title,
+                reason: 'type_compliance_floor',
+                exactTypeScore: exactType,
+                productTypeCompliance: typeComp,
+                minTypeFloor: minTypeFloor,
+                stage: 'sparse_catalog_fallback',
+                suit_cues: explainActualSuitCatalogCue(h._source ?? {})
+              });
+            }
+            return false;
+          }
+          return true;
         });
       }
       // Last-resort fail-open for core detection categories (tops/shoes/bags):
