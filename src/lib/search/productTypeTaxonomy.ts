@@ -481,6 +481,10 @@ const FAMILY_PAIR_PENALTY: Record<string, Record<string, number>> = {
     head_covering: 0.42,
     bags: 0.9,
     jewellery: 0.85,
+    // Tops vs outerwear: jackets/blazers/coats are visually similar to sweaters/shirts and
+    // were leaking into top searches at zero penalty. Treat them as a soft cross-family
+    // mismatch so visual-only similarity cannot promote a jacket above a real sweater.
+    outerwear: 0.55,
   },
   footwear: {
     modest_full: 0.45,
@@ -510,6 +514,10 @@ const FAMILY_PAIR_PENALTY: Record<string, Record<string, number>> = {
     footwear: 0.92,
     bags: 0.9,
     jewellery: 0.85,
+    // Symmetric with tops -> outerwear above. Pure tops should not bleed into a coat/blazer
+    // search either; overshirt/shacket products are still indexed under outerwear cluster
+    // and remain reachable when desiredProductTypes contain matching surface forms.
+    tops: 0.55,
   },
   tailored: {
     modest_full: 0.28,

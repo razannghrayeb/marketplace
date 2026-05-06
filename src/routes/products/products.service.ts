@@ -1597,6 +1597,35 @@ function additiveImageRankingScore(params: {
   raw *= contradictionPenalty;
   raw *= qualityModifier;
 
+  // Near-identical visual floor.
+  // When the candidate is visually nearly identical to the query, in the same family/type,
+  // and shares the color family, the raw score must not be dragged below a visual-driven
+  // floor by sparse catalog metadata. Without this floor an exact-match item with missing
+  // attr_sleeve/attr_color loses to a less-similar item that happens to have richer
+  // catalog fields. At visual >= 0.97 the pixels are far more authoritative than catalog
+  // metadata, so we allow up to one known soft attribute mismatch (sleeve/length) but not
+  // explicit color contradictions.
+  if (
+    nearIdenticalVisual &&
+    exactTypeScore >= 1 &&
+    (color.sameColorFamily || color.exactColorMatch) &&
+    familyGate >= 0.92 &&
+    !explicitColor && // do not lift over an explicit color contradiction
+    !(hasColorPreference && color.colorScore <= 0.2) &&
+    knownMismatchCount <= (visualSimilarity >= 0.97 ? 1 : 0) &&
+    contradictionPenalty >= 0.85
+  ) {
+    // Stronger floor at higher visual similarity. At v>=0.985 the items are essentially
+    // the same garment/photo; at v>=0.955 they are visual twins. Visual evidence at this
+    // strength dominates per-attribute catalog noise.
+    const floorMultiplier = color.exactColorMatch
+      ? (visualSimilarity >= 0.985 ? 0.99 : 0.97)
+      : (visualSimilarity >= 0.985 ? 0.97 : visualSimilarity >= 0.97 ? 0.96 : 0.94);
+    const visualFloor =
+      visualBase * familyGate * qualityModifier * floorMultiplier;
+    if (visualFloor > raw) raw = visualFloor;
+  }
+
   let maxFinal = 0.995;
   if (visualSimilarity >= 0.985 && exactTypeScore >= 1 && color.exactColorMatch && knownMismatchCount === 0) {
     maxFinal = 0.995;
@@ -9073,14 +9102,26 @@ export async function searchByImageWithSimilarity(
       }
       // Detection-scoped image search needs a hard numeric audience guard because many
       // catalog rows don't carry clean gender keywords for the heuristic checker.
+      // Per category: footwear is the strictest because shoe styles map cleanly to
+      // gender; bottoms next; tops/outerwear/dresses use a still-meaningful 0.6 floor
+      // so cross-gender items don't slip through on visual similarity alone.
       if (queryGenderNormForPost && hasDetectionAnchoredTypeIntent) {
         const audienceCompliance = Number((p as any)?.explain?.audienceCompliance ?? 1);
-        const isFootwearDetection =
-          String(params.detectionProductCategory ?? "").toLowerCase().trim() === "footwear" ||
-          String(params.detectionProductCategory ?? "").toLowerCase().trim() === "shoes";
-        const isBottomsDetection =
-          String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms";
-        const minAudienceCompliance = isFootwearDetection ? 0.75 : isBottomsDetection ? 0.7 : 0.45;
+        const detectionCategory = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+        const isFootwearDetection = detectionCategory === "footwear" || detectionCategory === "shoes";
+        const isBottomsDetection = detectionCategory === "bottoms";
+        const isApparelTopLikeDetection =
+          detectionCategory === "tops" ||
+          detectionCategory === "outerwear" ||
+          detectionCategory === "tailored" ||
+          detectionCategory === "dresses";
+        const minAudienceCompliance = isFootwearDetection
+          ? 0.75
+          : isBottomsDetection
+            ? 0.7
+            : isApparelTopLikeDetection
+              ? 0.6
+              : 0.45;
         if (audienceCompliance < minAudienceCompliance) return false;
       }
       if (shouldRejectShortsForTrouserIntent && isShortsCatalogCandidate(src)) {
