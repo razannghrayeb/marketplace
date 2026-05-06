@@ -3102,6 +3102,14 @@ function hasTailoredTopCatalogCue(src: Record<string, unknown>): boolean {
 // Stricter than hasTailoredTopCatalogCue: only accepts full suits (not blazers/jackets).
 // Used to front-rank results for strict suit queries so blazers don't appear first.
 function hasActualSuitCatalogCue(src: Record<string, unknown>): boolean {
+  return explainActualSuitCatalogCue(src).matched;
+}
+
+function explainActualSuitCatalogCue(src: Record<string, unknown>): {
+  matched: boolean;
+  reasons: string[];
+  normalizedText: string;
+} {
   const blob = [
     src.title,
     src.description,
@@ -3113,29 +3121,37 @@ function hasActualSuitCatalogCue(src: Record<string, unknown>): boolean {
     .map((x) => String(x))
     .join(" ")
     .toLowerCase();
-  if (!blob.trim()) return false;
-  // Normalize and remove punctuation for robust matching
+  if (!blob.trim()) return { matched: false, reasons: ["empty_blob"], normalizedText: "" };
+
   const norm = blob.replace(/[^a-z0-9\s\-_/]/g, " ").replace(/\s+/g, " ").trim();
-  if (!norm) return false;
-  // If any explicit suit/tux token exists (covers suit-2p, suit_txd, suit-2pnos, etc.) allow
-  if (/\b(suit|suits|tuxedo|tuxedos)\b/i.test(norm)) {
-    // Exclude cases where only "suit jacket" appears without other suit cues
+  if (!norm) return { matched: false, reasons: ["empty_normalized_blob"], normalizedText: "" };
+
+  const reasons: string[] = [];
+  const hasSuitToken = /\b(suit|suits|tuxedo|tuxedos)\b/i.test(norm);
+  if (hasSuitToken) {
     const withoutSuitJacket = norm.replace(/\bsuit jacket\b/gi, "").trim();
-    if (/\b(suit|suits)\b/i.test(withoutSuitJacket) || /\btuxedo\b/i.test(withoutSuitJacket)) return true;
+    if (/\b(suit|suits)\b/i.test(withoutSuitJacket) || /\btuxedo\b/i.test(withoutSuitJacket)) {
+      reasons.push("explicit_suit_token");
+      return { matched: true, reasons, normalizedText: norm };
+    }
+    reasons.push("suit_jacket_only");
   }
 
-  // Some vendors tag suit sets as blazer + pant or 'set' without the word 'suit'.
-  // Detect patterns like "blazer" + "trousers|pants|set|2p" to infer a suit product.
   const hasBlazer = /\b(blazer|blazers|suit jacket|dress jacket|sport coat|sportcoat)\b/i.test(norm);
   const hasSuitBottomHint = /\b(pant|pants|trouser|trousers|slacks|dress pants|2p|set|full set)\b/i.test(norm);
-  if (hasBlazer && hasSuitBottomHint) return true;
+  if (hasBlazer && hasSuitBottomHint) {
+    reasons.push("blazer_plus_bottom_hint");
+    return { matched: true, reasons, normalizedText: norm };
+  }
 
-  // Fallback: category canonical or category string explicitly mentions tailored-like aisle
   const catCanon = String(src.category_canonical ?? "").toLowerCase();
   const catRaw = String(src.category ?? "").toLowerCase();
-  if (catCanon === "tailored" || /\b(suit|suits|tailored|tailoring|waistcoat|waistcoats)\b/.test(catRaw)) return true;
+  if (catCanon === "tailored" || /\b(suit|suits|tailored|tailoring|waistcoat|waistcoats)\b/.test(catRaw)) {
+    reasons.push("tailored_category");
+    return { matched: true, reasons, normalizedText: norm };
+  }
 
-  return false;
+  return { matched: false, reasons: reasons.length > 0 ? reasons : ["no_suit_cue_match"], normalizedText: norm };
 }
 
 function hasVestLikeTopCatalogCue(src: Record<string, unknown>): boolean {
@@ -7539,20 +7555,37 @@ export async function searchByImageWithSimilarity(
   const strongVisualOverrideMinSim = imageStrongVisualOverrideMinSimilarity();
   const rankedHitsCategorySafe = strictCategorySafetyActive
     ? rankedHitsCandidates.filter((h: any) => {
+      const src = (h?._source ?? {}) as Record<string, unknown>;
+      const suitCue = explainActualSuitCatalogCue(src);
+      const suitLike = suitCue.matched || hasTailoredTopCatalogCue(src) || hasTailoredTypeIntent(desiredProductTypes);
       const comp = complianceById.get(String(h._source.product_id));
       if (!comp) return false;
-      if (comp.hardBlocked) return false;
-      if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) return false;
+      if (comp.hardBlocked) {
+        if (suitPathDebugEnabled && suitLike) debugImageDrop("category_safety", h, ["hard_blocked"]);
+        return false;
+      }
+      if (!hasKidsAudienceIntent && hasChildAudienceSignals(h._source ?? {})) {
+        if (suitPathDebugEnabled && suitLike) debugImageDrop("category_safety", h, ["child_audience_signal"]);
+        return false;
+      }
       if (relevanceGateMode === "soft") {
         const productFamily = imageSearchFamilyFromProduct(h._source ?? {});
-        return !isImpossibleImageFamilyMismatch(jobFamilyForSafety, productFamily);
+        const keep = !isImpossibleImageFamilyMismatch(jobFamilyForSafety, productFamily);
+        if (!keep && suitPathDebugEnabled && suitLike) {
+          debugImageDrop("category_safety", h, ["impossible_family_mismatch"], { jobFamilyForSafety, productFamily });
+        }
+        return keep;
       }
       const crossFamily = comp.crossFamilyPenalty ?? 0;
-      if (crossFamily >= 0.55) return false;
+      if (crossFamily >= 0.55) {
+        if (suitPathDebugEnabled && suitLike) debugImageDrop("category_safety", h, ["cross_family_penalty_high"], { crossFamily });
+        return false;
+      }
       const typeComp = comp.productTypeCompliance ?? 0;
       const exactType = comp.exactTypeScore ?? 0;
       const visualStrong = visualSimFromHit(h) >= strongVisualOverrideMinSim;
       if ((hasExplicitTypeFilter || (hasExplicitCategoryFilter && hasDerivedTypeIntentForSafetyGate)) && exactType < 1 && typeComp < 0.28) {
+        if (suitPathDebugEnabled && suitLike) debugImageDrop("category_safety", h, ["explicit_type_floor_fail"], { exactType, typeComp });
         return false;
       }
       // Category-specific type floor with confidence-aware relaxation.
@@ -7610,6 +7643,14 @@ export async function searchByImageWithSimilarity(
             return true;
           }
         }
+        if (suitPathDebugEnabled && suitLike) {
+          debugImageDrop("category_safety", h, ["detection_type_floor_fail"], {
+            exactType,
+            typeComp,
+            detAnchoredTypeFloor,
+            visualStrong,
+          });
+        }
         return false;
       }
       // Shirt-focused tops intent should not leak into outerwear/jackets unless explicitly requested.
@@ -7643,7 +7684,14 @@ export async function searchByImageWithSimilarity(
           const hasLayeredOuterwearCue = /\b(shirt\s*[- ]\s*jacket|shacket|overshirt|overshirts)\b/.test(srcBlob);
           // "shirt jacket" style items should not outrank true shirts when intent is shirt-only.
           if (hasLayeredOuterwearCue) return false;
-          if (hasOuterwearCue && !hasShirtCue) return false;
+          if (hasOuterwearCue && !hasShirtCue) {
+            if (suitPathDebugEnabled && suitLike) debugImageDrop("category_safety", h, ["shirt_vs_outerwear_conflict"], {
+              hasOuterwearCue,
+              hasShirtCue,
+              hasLayeredOuterwearCue,
+            });
+            return false;
+          }
         }
       }
       const lengthComp = Number((comp as any).lengthCompliance ?? 0);
@@ -7663,12 +7711,14 @@ export async function searchByImageWithSimilarity(
         lengthComp < dressLengthMin &&
         !visualStrong
       ) {
+        if (suitPathDebugEnabled && suitLike) debugImageDrop("category_safety", h, ["dress_length_floor_fail"], { lengthComp, dressLengthMin });
         return false;
       }
       if (hasStrongDressPatternIntent && isDressDetectionIntent) {
         const patternSim = Number(patternSimById.get(String(h?._source?.product_id)) ?? 0);
         const rawVisual = visualSimFromHit(h);
         if (rawVisual < nearIdenticalRawMin && patternSim < dressPatternMin) {
+          if (suitPathDebugEnabled && suitLike) debugImageDrop("category_safety", h, ["dress_pattern_floor_fail"], { rawVisual, patternSim, dressPatternMin });
           return false;
         }
       }
@@ -7768,6 +7818,37 @@ export async function searchByImageWithSimilarity(
   }, 0);
   const hasStrongVisualEvidence =
     strongestVisualCandidate >= Math.max(0.7, similarityThreshold - 0.1);
+  const imageSearchDropDebugEnabled =
+    String(process.env.SEARCH_IMAGE_DEBUG_DROPS ?? "").toLowerCase().trim() === "1" ||
+    String(process.env.SEARCH_IMAGE_DEBUG_DROPS ?? "").toLowerCase().trim() === "true";
+  const suitPathDebugEnabled = imageSearchDropDebugEnabled && (
+    hasStrictSuitTopIntent(desiredProductTypes) ||
+    hasTailoredTypeIntent(desiredProductTypes) ||
+    detectionCategoryNorm === "tops" ||
+    detectionCategoryNorm === "outerwear" ||
+    detectionCategoryNorm === "tailored"
+  );
+  const debugImageDrop = (stage: string, hit: any, reasons: string[], extra?: Record<string, unknown>) => {
+    if (!imageSearchDropDebugEnabled) return;
+    const src = (hit?._source ?? {}) as Record<string, unknown>;
+    console.warn("[search-image][drop-debug]", {
+      stage,
+      product_id: String(src.product_id ?? hit?.id ?? ""),
+      title: String(src.title ?? ""),
+      category: String(src.category ?? src.category_canonical ?? ""),
+      reasons,
+      suit_cue: explainActualSuitCatalogCue(src),
+      finalRelevance01: Number((hit as any)?.finalRelevance01 ?? 0),
+      similarity_score: Number((hit as any)?.similarity_score ?? 0),
+      crossFamilyPenalty: Number((hit as any)?.explain?.crossFamilyPenalty ?? 0),
+      productTypeCompliance: Number((hit as any)?.explain?.productTypeCompliance ?? 0),
+      exactTypeScore: Number((hit as any)?.explain?.exactTypeScore ?? 0),
+      colorCompliance: Number((hit as any)?.explain?.colorCompliance ?? 0),
+      sleeveCompliance: Number((hit as any)?.explain?.sleeveCompliance ?? 0),
+      audienceCompliance: Number((hit as any)?.explain?.audienceCompliance ?? 0),
+      ...extra,
+    });
+  };
   const detectionFinalAcceptFloor = hasDetectionAnchoredTypeIntent
     ? imageDetectionFinalAcceptFloor(detectionCategoryNorm)
     : finalAcceptMin;
@@ -8537,6 +8618,33 @@ export async function searchByImageWithSimilarity(
     rankedHits.length > 0
   ) {
     const suitFirstHits = rankedHits.filter((h: any) => hasActualSuitCatalogCue((h as any)?._source ?? {}));
+    if (suitPathDebugEnabled && suitFirstHits.length === 0) {
+      const suitLikeInRanked = rankedHits.filter((h: any) => {
+        const src = (h as any)?._source ?? {};
+        return hasTailoredTopCatalogCue(src) || explainActualSuitCatalogCue(src).reasons.length > 0;
+      });
+      if (suitLikeInRanked.length > 0) {
+        console.warn("[search-image][suit-debug] suit intent reached final promotion block but no item qualified as an actual suit", {
+          detectionCategory: detectionCategoryNormForTailored,
+          desiredProductTypes,
+          rankedHits: rankedHits.length,
+          suitLikeInRanked: suitLikeInRanked.length,
+          examples: suitLikeInRanked.slice(0, 10).map((h: any) => {
+            const src = (h as any)?._source ?? {};
+            return {
+              product_id: String(src.product_id ?? ""),
+              title: String(src.title ?? ""),
+              category: String(src.category ?? src.category_canonical ?? ""),
+              cue: explainActualSuitCatalogCue(src),
+              finalRelevance01: Number((h as any)?.finalRelevance01 ?? 0),
+              similarity_score: Number((h as any)?.similarity_score ?? 0),
+              productTypeCompliance: Number((h as any)?.explain?.productTypeCompliance ?? 0),
+              crossFamilyPenalty: Number((h as any)?.explain?.crossFamilyPenalty ?? 0),
+            };
+          }),
+        });
+      }
+    }
     if (suitFirstHits.length > 0) {
       const suitFirstIds = new Set(
         suitFirstHits

@@ -8,14 +8,25 @@ export type SortableProduct = {
   category?: string | null;
   color?: string | null;
   finalRelevance01?: number;
-  rerankScore?: number;
-  similarity_score?: number;
   explain?: {
+    unifiedScorer?: {
+      score?: number;
+      [key: string]: any;
+    };
     styleCompliance?: number;
     [key: string]: any;
   };
+  rerankScore?: number;
+  similarity_score?: number;
   [key: string]: any;
 };
+
+function primarySortScore(product: SortableProduct): number {
+  const unified = Number(product.explain?.unifiedScorer?.score ?? NaN);
+  if (Number.isFinite(unified)) return unified;
+  const fallback = Number(product.finalRelevance01 ?? 0);
+  return Number.isFinite(fallback) ? fallback : 0;
+}
 
 /**
  * Sort products by finalRelevance01 (descending), then tie-break by color, style,
@@ -27,8 +38,8 @@ export function sortProductsByRelevanceAndCategory<T extends SortableProduct>(
 ): T[] {
   return [...products].sort((a: any, b: any) => {
     // Primary sort: final relevance descending.
-    const fa = typeof a.finalRelevance01 === "number" ? a.finalRelevance01 : 0;
-    const fb = typeof b.finalRelevance01 === "number" ? b.finalRelevance01 : 0;
+    const fa = primarySortScore(a);
+    const fb = primarySortScore(b);
     if (Math.abs(fb - fa) > 1e-8) return fb - fa;
 
     // Tie-breaker: prioritize same color / color presence.
@@ -66,8 +77,8 @@ export function sortProductsByRelevanceAndCategory<T extends SortableProduct>(
  */
 export function sortProductsByFinalRelevance<T extends SortableProduct>(products: T[]): T[] {
   return [...products].sort((a: any, b: any) => {
-    const fa = a.finalRelevance01 ?? 0;
-    const fb = b.finalRelevance01 ?? 0;
+    const fa = primarySortScore(a);
+    const fb = primarySortScore(b);
     if (Math.abs(fb - fa) > 1e-6) return fb - fa;
 
     // Fallback tie-breaker
