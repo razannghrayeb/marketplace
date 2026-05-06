@@ -8,6 +8,7 @@ import { Request, Response } from "express";
 import {
   getOutfitRecommendations,
   getOutfitRecommendationsFromProduct,
+  getOutfitRecommendationsFromWardrobeItem,
   getProductStyleProfile,
   type CompleteStyleOptions,
 } from "./outfit.service";
@@ -53,7 +54,33 @@ function parseCompleteStyleOptions(query: any): CompleteStyleOptions {
     options.excludeBrands = String(query.excludeBrands).split(",").map(b => b.trim());
   }
 
+  // Weather hint (query params: weather_temp, weather_season)
+  const weatherTempRaw = query.weather_temp ?? query.weatherTemp;
+  const weatherSeasonRaw = query.weather_season ?? query.weatherSeason;
+  if (weatherTempRaw !== undefined || weatherSeasonRaw !== undefined) {
+    const w: NonNullable<CompleteStyleOptions["weather"]> = {};
+    if (weatherTempRaw !== undefined && weatherTempRaw !== "") {
+      const t = Number(weatherTempRaw);
+      if (Number.isFinite(t)) w.temperatureC = t;
+    }
+    const s = String(weatherSeasonRaw || "").toLowerCase();
+    if (s === "spring" || s === "summer" || s === "fall" || s === "winter") {
+      w.season = s;
+    }
+    if (w.temperatureC !== undefined || w.season) options.weather = w;
+  }
+
   return options;
+}
+
+function parseWeatherFromBody(raw: any): CompleteStyleOptions["weather"] | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const out: NonNullable<CompleteStyleOptions["weather"]> = {};
+  const t = Number(raw.temperatureC ?? raw.temperature_c ?? raw.tempC ?? raw.temp);
+  if (Number.isFinite(t)) out.temperatureC = t;
+  const s = String(raw.season || "").toLowerCase();
+  if (s === "spring" || s === "summer" || s === "fall" || s === "winter") out.season = s;
+  return out.temperatureC !== undefined || out.season ? out : undefined;
 }
 
 // ============================================================================
@@ -113,7 +140,17 @@ export async function completeStyle(req: Request, res: Response) {
  */
 export async function completeStyleFromBody(req: Request, res: Response) {
   try {
-    const { product, product_id: productIdRaw, options: bodyOptions } = req.body;
+    const {
+      product,
+      product_id: productIdRaw,
+      wardrobe_item_id: wardrobeItemIdRaw,
+      options: bodyOptions,
+    } = req.body;
+
+    const wardrobeItemIdCandidate =
+      wardrobeItemIdRaw !== undefined && wardrobeItemIdRaw !== null
+        ? parseInt(String(wardrobeItemIdRaw), 10)
+        : Number.NaN;
 
     // Only an explicit top-level `product_id` should trigger DB-backed mode.
     // If callers send a `product` object (even with an `id`), treat it as
@@ -124,8 +161,12 @@ export async function completeStyleFromBody(req: Request, res: Response) {
         ? parseInt(String(productIdRaw), 10)
         : Number.NaN;
 
-    if (!Number.isFinite(productIdCandidate) && (!product || !product.title)) {
-      return res.status(400).json({ success: false, error: { message: "Product with title is required" } });
+    if (
+      !Number.isFinite(productIdCandidate) &&
+      !Number.isFinite(wardrobeItemIdCandidate) &&
+      (!product || !product.title)
+    ) {
+      return res.status(400).json({ success: false, error: { message: "product_id, wardrobe_item_id, or product with title is required" } });
     }
 
     const queryOptions = parseCompleteStyleOptions(req.query);
@@ -161,9 +202,22 @@ export async function completeStyleFromBody(req: Request, res: Response) {
         bodyOptions?.audienceGenderHint === "unisex"
           ? bodyOptions.audienceGenderHint
           : queryOptions.audienceGenderHint,
+      weather: parseWeatherFromBody(bodyOptions?.weather) ?? parseWeatherFromBody(req.body?.weather) ?? queryOptions.weather,
     };
 
     const userId = getOptionalUserId(req);
+
+    // Wardrobe-item-anchored flow: caller passes `wardrobe_item_id` and is authenticated.
+    if (Number.isFinite(wardrobeItemIdCandidate) && wardrobeItemIdCandidate >= 1) {
+      if (!userId) {
+        return res.status(401).json({ success: false, error: { message: "Authentication required to use a wardrobe item as anchor" } });
+      }
+      const result = await getOutfitRecommendationsFromWardrobeItem(wardrobeItemIdCandidate, userId, options);
+      if (!result) {
+        return res.status(404).json({ success: false, error: { message: "Wardrobe item not found" } });
+      }
+      return res.json({ success: true, data: result });
+    }
 
     // Prefer DB-backed product flow when ID is provided so POST and GET share
     // the same complete-look recommendation pipeline.
