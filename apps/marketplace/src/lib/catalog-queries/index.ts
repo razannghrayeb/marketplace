@@ -36,6 +36,41 @@ type ProductAggregateRow = {
 const DAY_MS = 24 * 60 * 60 * 1000
 const BATCH_SIZE = 1000
 const AGGREGATE_CACHE_TTL_MS = 60_000
+const SLOW_QUERY_CACHE_TTL_MS = 5 * 60 * 1000 // 5 minutes — slow COUNT queries cached server-side
+
+type CacheEntry<T> = { data: T; expiresAt: number; inFlight?: Promise<T> }
+
+function makeCache<T>() {
+  let entry: CacheEntry<T> | null = null
+  return {
+    get: () => (entry && entry.expiresAt > Date.now() ? entry.data : null),
+    getInflight: () => entry?.inFlight ?? null,
+    set: (data: T) => { entry = { data, expiresAt: Date.now() + SLOW_QUERY_CACHE_TTL_MS } },
+    setInflight: (p: Promise<T>) => { if (!entry) { entry = { data: null as unknown as T, expiresAt: 0, inFlight: p } } else { entry.inFlight = p } },
+    clearInflight: () => { if (entry) entry.inFlight = undefined },
+  }
+}
+
+const _overviewCache = makeCache<import('@/types/catalog-admin').OverviewKPIs>()
+const _vendorStatsCache = makeCache<import('@/types/catalog-admin').VendorStats[]>()
+const _vendorCountsCache = makeCache<import('@/types/catalog-admin').VendorProductCount[]>()
+const _freshnessCache = makeCache<import('@/types/catalog-admin').FreshnessStats>()
+const _catCountsCache = makeCache<import('@/types/catalog-admin').CategoryCount[]>()
+const _vendorFreshnessCache = makeCache<import('@/types/catalog-admin').VendorFreshness[]>()
+
+const EXCLUDED_VENDOR_NAMES = ['H&M']
+
+let _excludedVendorIds: Promise<number[]> | null = null
+async function getExcludedVendorIds(): Promise<number[]> {
+  if (EXCLUDED_VENDOR_NAMES.length === 0) return []
+  if (!_excludedVendorIds) {
+    _excludedVendorIds = (async () => {
+      const { data } = await sb.from('vendors').select('id').in('name', EXCLUDED_VENDOR_NAMES)
+      return (data ?? []).map((v: { id: number }) => Number(v.id)).filter(Number.isFinite)
+    })()
+  }
+  return _excludedVendorIds!
+}
 
 /** GET /products clamps `limit` to 100 — requesting more makes `rows.length < limit` and stops after page 1. */
 const BACKEND_PRODUCT_PAGE_SIZE = 100
@@ -377,250 +412,250 @@ async function fetchProductAggregateRows(): Promise<ProductAggregateRow[]> {
 }
 
 async function fetchOverviewKPIsFallback(): Promise<OverviewKPIs> {
-  const [vendorsRes, rows] = await Promise.all([
-    sb.from('vendors').select('id', { count: 'exact', head: true }),
-    fetchProductAggregateRows(),
-  ])
+  const cached = _overviewCache.get()
+  if (cached) return cached
+  const inflight = _overviewCache.getInflight()
+  if (inflight) return inflight
 
-  const now = Date.now()
-  const fallbackVendorCount = new Set(
-    rows
-      .map((row) => row.vendor_id)
-      .filter((id): id is number => typeof id === 'number' && Number.isFinite(id))
-  ).size
-  const totalVendors =
-    vendorsRes.error ? fallbackVendorCount : (vendorsRes.count ?? fallbackVendorCount)
+  const promise = (async () => {
+    const since24h = new Date(Date.now() - DAY_MS).toISOString()
+    const excludedIds = await getExcludedVendorIds()
+    const exStr = excludedIds.length > 0 ? `(${excludedIds.join(',')})` : null
 
-  let available = 0
-  let unavailable = 0
-  let seenToday = 0
-  let updated24h = 0
-  let missingCategory = 0
-  let missingColor = 0
-  let missingSize = 0
-  let missingImageUrl = 0
-  let missingImageUrls = 0
-  let missingVariantId = 0
-  let missingParentUrl = 0
-  let withSalePrice = 0
+    const pq = (q: ReturnType<typeof sb.from>) =>
+      exStr ? q.not('vendor_id', 'in', exStr) : q
 
-  for (const row of rows) {
-    if (row.availability === true) available++
-    if (row.availability === false) unavailable++
-    if (isBlank(row.category)) missingCategory++
-    if (isBlank(row.color)) missingColor++
-    if (isBlank(row.size)) missingSize++
-    if (!row.image_url) missingImageUrl++
-    if (isMissingImageUrls(row.image_urls)) missingImageUrls++
-    if (isBlank(row.variant_id)) missingVariantId++
-    if (isBlank(row.parent_product_url)) missingParentUrl++
-    if ((row.sales_price_cents ?? 0) > 0) withSalePrice++
+    const [
+      vendorsRes, totalRes, availableRes, unavailableRes,
+      seenTodayRes, missingCategoryRes, missingColorRes, missingSizeRes,
+      missingImageUrlRes, missingVariantIdRes, missingParentUrlRes, withSalePriceRes,
+    ] = await Promise.all([
+      sb.from('vendors').select('*', { count: 'exact', head: true }).not('name', 'in', `(${EXCLUDED_VENDOR_NAMES.map(n => `"${n}"`).join(',')})`),
+      pq(sb.from('products').select('*', { count: 'exact', head: true })),
+      pq(sb.from('products').select('*', { count: 'exact', head: true })).eq('availability', true),
+      pq(sb.from('products').select('*', { count: 'exact', head: true })).eq('availability', false),
+      pq(sb.from('products').select('*', { count: 'exact', head: true })).gte('last_seen', since24h),
+      pq(sb.from('products').select('*', { count: 'exact', head: true })).is('category', null),
+      pq(sb.from('products').select('*', { count: 'exact', head: true })).is('color', null),
+      pq(sb.from('products').select('*', { count: 'exact', head: true })).is('size', null),
+      pq(sb.from('products').select('*', { count: 'exact', head: true })).is('image_url', null),
+      pq(sb.from('products').select('*', { count: 'exact', head: true })).is('variant_id', null),
+      pq(sb.from('products').select('*', { count: 'exact', head: true })).is('parent_product_url', null),
+      pq(sb.from('products').select('*', { count: 'exact', head: true })).not('sales_price_cents', 'is', null),
+    ])
 
-    if (row.last_seen) {
-      const ageMs = now - new Date(row.last_seen).getTime()
-      if (ageMs <= DAY_MS) {
-        seenToday++
-        updated24h++
-      }
+    const result: OverviewKPIs = {
+      total_vendors: vendorsRes.count ?? 0,
+      total_products: totalRes.count ?? 0,
+      available_products: availableRes.count ?? 0,
+      unavailable_products: unavailableRes.count ?? 0,
+      products_seen_today: seenTodayRes.count ?? 0,
+      missing_category: missingCategoryRes.count ?? 0,
+      missing_color: missingColorRes.count ?? 0,
+      missing_size: missingSizeRes.count ?? 0,
+      missing_image_url: missingImageUrlRes.count ?? 0,
+      missing_image_urls: missingImageUrlRes.count ?? 0,
+      missing_variant_id: missingVariantIdRes.count ?? 0,
+      missing_parent_url: missingParentUrlRes.count ?? 0,
+      with_sale_price: withSalePriceRes.count ?? 0,
+      updated_last_24h: seenTodayRes.count ?? 0,
     }
-  }
+    _overviewCache.set(result)
+    return result
+  })()
 
-  return {
-    total_vendors: totalVendors,
-    total_products: rows.length,
-    available_products: available,
-    unavailable_products: unavailable,
-    products_seen_today: seenToday,
-    missing_category: missingCategory,
-    missing_color: missingColor,
-    missing_size: missingSize,
-    missing_image_url: missingImageUrl,
-    missing_image_urls: missingImageUrls,
-    missing_variant_id: missingVariantId,
-    missing_parent_url: missingParentUrl,
-    with_sale_price: withSalePrice,
-    updated_last_24h: updated24h,
+  _overviewCache.setInflight(promise)
+  try {
+    return await promise
+  } finally {
+    _overviewCache.clearInflight()
   }
 }
 
 async function fetchCategoryCountsFallback(): Promise<CategoryCount[]> {
-  const rows = await fetchProductAggregateRows()
-  const counts = new Map<string, number>()
-  for (const row of rows) {
-    const category = row.category ?? '(uncategorized)'
-    counts.set(category, (counts.get(category) ?? 0) + 1)
-  }
+  const cached = _catCountsCache.get()
+  if (cached) return cached
+  const inflight = _catCountsCache.getInflight()
+  if (inflight) return inflight
 
-  return Array.from(counts.entries())
-    .map(([category, count]) => ({ category, count }))
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 20)
+  const promise = (async () => {
+    const excludedIds = await getExcludedVendorIds()
+    const exStr = excludedIds.length > 0 ? `(${excludedIds.join(',')})` : null
+
+    const counts = new Map<string, number>()
+    let from = 0
+    while (true) {
+      let q = sb.from('products').select('category').range(from, from + BATCH_SIZE - 1)
+      if (exStr) q = q.not('vendor_id', 'in', exStr)
+      const { data, error } = await q
+      if (error || !data || data.length === 0) break
+      for (const row of data as Array<{ category: string | null }>) {
+        const cat = row.category ?? '(uncategorized)'
+        counts.set(cat, (counts.get(cat) ?? 0) + 1)
+      }
+      if (data.length < BATCH_SIZE) break
+      from += BATCH_SIZE
+    }
+    const result = Array.from(counts.entries())
+      .map(([category, count]) => ({ category, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 20)
+    _catCountsCache.set(result)
+    return result
+  })()
+
+  _catCountsCache.setInflight(promise)
+  try {
+    return await promise
+  } finally {
+    _catCountsCache.clearInflight()
+  }
 }
 
 async function fetchVendorProductCountsFallback(): Promise<VendorProductCount[]> {
-  const [vendorsRes, rows] = await Promise.all([sb.from('vendors').select('id, name'), fetchProductAggregateRows()])
+  const cached = _vendorCountsCache.get()
+  if (cached) return cached
+  const inflight = _vendorCountsCache.getInflight()
+  if (inflight) return inflight
 
-  const vendorNames = new Map<number, string>()
-  if (!vendorsRes.error) {
-    for (const vendor of ((vendorsRes.data ?? []) as Array<{ id: number | string; name: string }>)) {
-      vendorNames.set(Number(vendor.id), vendor.name)
+  const promise = (async () => {
+    const [vendorsRes, statsRes] = await Promise.all([
+      sb.from('vendors').select('id, name')
+        .not('name', 'in', `(${EXCLUDED_VENDOR_NAMES.map(n => `"${n}"`).join(',')})`),
+      sb.rpc('get_vendor_stats'),
+    ])
+    if (vendorsRes.error || !vendorsRes.data) return []
+
+    type StatRow = { vendor_id: number; total: number; available: number }
+    const statsMap = new Map<number, StatRow>()
+    for (const row of ((statsRes.data ?? []) as StatRow[])) {
+      statsMap.set(Number(row.vendor_id), row)
     }
-  }
 
-  const totals = new Map<number, VendorProductCount>()
-
-  for (const row of rows) {
-    const vendorId = Number(row.vendor_id)
-    const entry = totals.get(vendorId) ?? {
-      vendor_name: vendorNames.get(vendorId) ?? `Vendor ${vendorId || 'Unknown'}`,
-      total: 0,
-      available: 0,
-      unavailable: 0,
-    }
-
-    entry.total += 1
-    if (row.availability === true) entry.available += 1
-    if (row.availability === false) entry.unavailable += 1
-    totals.set(vendorId, entry)
-  }
-
-  for (const [vendorId, vendorName] of vendorNames.entries()) {
-    if (!totals.has(vendorId)) {
-      totals.set(vendorId, {
-        vendor_name: vendorName,
-        total: 0,
-        available: 0,
-        unavailable: 0,
+    const result = (vendorsRes.data as Array<{ id: number; name: string }>)
+      .map((v) => {
+        const s = statsMap.get(v.id)
+        const total = Number(s?.total ?? 0)
+        const available = Number(s?.available ?? 0)
+        return { vendor_name: v.name, total, available, unavailable: total - available }
       })
-    }
-  }
+      .filter((v) => v.total > 0)
+      .sort((a, b) => b.total - a.total)
 
-  return Array.from(totals.values()).sort((a, b) => b.total - a.total)
+    _vendorCountsCache.set(result)
+    return result
+  })()
+
+  _vendorCountsCache.setInflight(promise)
+  try {
+    return await promise
+  } finally {
+    _vendorCountsCache.clearInflight()
+  }
 }
 
 async function fetchVendorStatsFallback(): Promise<VendorStats[]> {
-  const [vendorsRes, rows] = await Promise.all([
-    sb.from('vendors').select('id, name, url, ship_to_lebanon'),
-    fetchProductAggregateRows(),
-  ])
+  const cached = _vendorStatsCache.get()
+  if (cached) return cached
+  const inflight = _vendorStatsCache.getInflight()
+  if (inflight) return inflight
 
-  const vendorMap = new Map<number, VendorStats>()
+  const promise = (async () => {
+    const [vendorsRes, statsRes] = await Promise.all([
+      sb.from('vendors').select('id, name, url, ship_to_lebanon')
+        .not('name', 'in', `(${EXCLUDED_VENDOR_NAMES.map(n => `"${n}"`).join(',')})`),
+      sb.rpc('get_vendor_stats'),
+    ])
 
-  if (!vendorsRes.error) {
-    for (const vendor of ((vendorsRes.data ?? []) as Array<{ id: number | string; name: string; url: string; ship_to_lebanon: boolean }>)) {
-      vendorMap.set(Number(vendor.id), {
-        id: Number(vendor.id),
-        name: vendor.name,
-        url: vendor.url,
-        ship_to_lebanon: vendor.ship_to_lebanon,
-        total_products: 0,
-        available_products: 0,
-        unavailable_products: 0,
-        missing_category: 0,
-        missing_image_url: 0,
-        missing_image_urls: 0,
-        missing_variant_id: 0,
-        missing_parent_url: 0,
-        missing_color: 0,
-        missing_size: 0,
-        latest_last_seen: null,
-        health_score: 0,
+    if (vendorsRes.error || !vendorsRes.data) return []
+
+    const vendors = vendorsRes.data as Array<{ id: number; name: string; url: string; ship_to_lebanon: boolean }>
+    type StatRow = { vendor_id: number; total: number; available: number; missing_category: number; missing_image_url: number; missing_image_urls: number; missing_variant_id: number; missing_parent_url: number; missing_color: number; missing_size: number; healthy: number; latest_last_seen: string | null }
+    const statsMap = new Map<number, StatRow>()
+    for (const row of ((statsRes.data ?? []) as StatRow[])) {
+      statsMap.set(Number(row.vendor_id), row)
+    }
+
+    const result = vendors
+      .map((vendor) => {
+        const s = statsMap.get(vendor.id)
+        const total = Number(s?.total ?? 0)
+        const available = Number(s?.available ?? 0)
+        const healthy = Number(s?.healthy ?? 0)
+        return {
+          id: vendor.id,
+          name: vendor.name,
+          url: vendor.url,
+          ship_to_lebanon: vendor.ship_to_lebanon,
+          total_products: total,
+          available_products: available,
+          unavailable_products: total - available,
+          missing_category: Number(s?.missing_category ?? 0),
+          missing_image_url: Number(s?.missing_image_url ?? 0),
+          missing_image_urls: Number(s?.missing_image_urls ?? 0),
+          missing_variant_id: Number(s?.missing_variant_id ?? 0),
+          missing_parent_url: Number(s?.missing_parent_url ?? 0),
+          missing_color: Number(s?.missing_color ?? 0),
+          missing_size: Number(s?.missing_size ?? 0),
+          latest_last_seen: s?.latest_last_seen ?? null,
+          health_score: total > 0 ? Math.round((healthy / total) * 100) : 0,
+        }
       })
-    }
+      .filter((v) => v.total_products > 0)
+      .sort((a, b) => b.total_products - a.total_products)
+
+    _vendorStatsCache.set(result)
+    return result
+  })()
+
+  _vendorStatsCache.setInflight(promise)
+  try {
+    return await promise
+  } finally {
+    _vendorStatsCache.clearInflight()
   }
-
-  const sevenDaysAgo = Date.now() - 7 * DAY_MS
-
-  for (const row of rows) {
-    const vendorId = Number(row.vendor_id)
-    if (!vendorMap.has(vendorId)) {
-      vendorMap.set(vendorId, {
-        id: vendorId,
-        name: `Vendor ${vendorId || 'Unknown'}`,
-        url: '',
-        ship_to_lebanon: false,
-        total_products: 0,
-        available_products: 0,
-        unavailable_products: 0,
-        missing_category: 0,
-        missing_image_url: 0,
-        missing_image_urls: 0,
-        missing_variant_id: 0,
-        missing_parent_url: 0,
-        missing_color: 0,
-        missing_size: 0,
-        latest_last_seen: null,
-        health_score: 0,
-      })
-    }
-    const stats = vendorMap.get(vendorId)!
-
-    stats.total_products += 1
-    if (row.availability === true) stats.available_products += 1
-    if (row.availability === false) stats.unavailable_products += 1
-    if (isBlank(row.category)) stats.missing_category += 1
-    if (!row.image_url) stats.missing_image_url += 1
-    if (isMissingImageUrls(row.image_urls)) stats.missing_image_urls += 1
-    if (isBlank(row.variant_id)) stats.missing_variant_id += 1
-    if (isBlank(row.parent_product_url)) stats.missing_parent_url += 1
-    if (isBlank(row.color)) stats.missing_color += 1
-    if (isBlank(row.size)) stats.missing_size += 1
-
-    if (row.last_seen) {
-      if (!stats.latest_last_seen || new Date(row.last_seen) > new Date(stats.latest_last_seen)) {
-        stats.latest_last_seen = row.last_seen
-      }
-    }
-  }
-
-  for (const stats of vendorMap.values()) {
-    if (stats.total_products === 0) {
-      stats.health_score = 0
-      continue
-    }
-
-    let healthyProducts = 0
-    const vendorRows = rows.filter((row) => Number(row.vendor_id) === stats.id)
-    for (const row of vendorRows) {
-      const isHealthy =
-        !!row.image_url &&
-        !isBlank(row.category) &&
-        !!row.last_seen &&
-        new Date(row.last_seen).getTime() >= sevenDaysAgo
-
-      if (isHealthy) healthyProducts += 1
-    }
-
-    stats.health_score = Math.round((healthyProducts / stats.total_products) * 100)
-  }
-
-  return Array.from(vendorMap.values()).sort((a, b) => b.total_products - a.total_products)
 }
 
 async function fetchFreshnessStatsFallback(): Promise<FreshnessStats> {
-  const rows = await fetchProductAggregateRows()
-  const now = Date.now()
-  const stats: FreshnessStats = {
-    fresh_count: 0,
-    recent_count: 0,
-    aging_count: 0,
-    stale_count: 0,
-  }
+  const cached = _freshnessCache.get()
+  if (cached) return cached
+  const inflight = _freshnessCache.getInflight()
+  if (inflight) return inflight
 
-  for (const row of rows) {
-    if (!row.last_seen) {
-      stats.stale_count += 1
-      continue
+  const promise = (async () => {
+    const now = Date.now()
+    const freshCut = new Date(now - DAY_MS).toISOString()
+    const recentCut = new Date(now - 7 * DAY_MS).toISOString()
+    const agingCut = new Date(now - 14 * DAY_MS).toISOString()
+    const excludedIds = await getExcludedVendorIds()
+    const exStr = excludedIds.length > 0 ? `(${excludedIds.join(',')})` : null
+
+    const pq = (q: ReturnType<typeof sb.from>) =>
+      exStr ? q.not('vendor_id', 'in', exStr) : q
+
+    const [freshRes, recentRes, agingRes, staleRes] = await Promise.all([
+      pq(sb.from('products').select('*', { count: 'exact', head: true })).gte('last_seen', freshCut),
+      pq(sb.from('products').select('*', { count: 'exact', head: true })).gte('last_seen', recentCut).lt('last_seen', freshCut),
+      pq(sb.from('products').select('*', { count: 'exact', head: true })).gte('last_seen', agingCut).lt('last_seen', recentCut),
+      pq(sb.from('products').select('*', { count: 'exact', head: true })).lt('last_seen', agingCut),
+    ])
+
+    const result: FreshnessStats = {
+      fresh_count: freshRes.count ?? 0,
+      recent_count: recentRes.count ?? 0,
+      aging_count: agingRes.count ?? 0,
+      stale_count: staleRes.count ?? 0,
     }
+    _freshnessCache.set(result)
+    return result
+  })()
 
-    const ageDays = (now - new Date(row.last_seen).getTime()) / DAY_MS
-    if (ageDays < 1) stats.fresh_count += 1
-    else if (ageDays < 7) stats.recent_count += 1
-    else if (ageDays < 14) stats.aging_count += 1
-    else stats.stale_count += 1
+  _freshnessCache.setInflight(promise)
+  try {
+    return await promise
+  } finally {
+    _freshnessCache.clearInflight()
   }
-
-  return stats
 }
 
 export async function fetchOverviewKPIs(): Promise<OverviewKPIs> {
@@ -664,6 +699,11 @@ export async function fetchProducts(
   if (filters.search) {
     const term = filters.search.trim()
     query = query.or(`title.ilike.%${term}%,brand.ilike.%${term}%,category.ilike.%${term}%`)
+  }
+
+  const excludedIds = await getExcludedVendorIds()
+  if (excludedIds.length > 0 && !filters.vendor_id) {
+    query = query.not('vendor_id', 'in', `(${excludedIds.join(',')})`)
   }
 
   if (filters.vendor_id) query = query.eq('vendor_id', filters.vendor_id)
@@ -860,6 +900,7 @@ async function fetchRecentPriceChangesFallback(limit = 50) {
   type RawHistoryRow = {
     product_id: number
     price_cents: number
+    sales_price_cents: number | null
     recorded_at: string
     product?: {
       title?: string | null
@@ -878,6 +919,7 @@ async function fetchRecentPriceChangesFallback(limit = 50) {
       .select(`
         product_id,
         price_cents,
+        sales_price_cents,
         recorded_at,
         product:products(
           title,
@@ -915,7 +957,17 @@ async function fetchRecentPriceChangesFallback(limit = 50) {
     for (let i = 1; i < rows.length; i += 1) {
       const previous = rows[i - 1]
       const current = rows[i]
-      if (previous.price_cents === current.price_cents) continue
+
+      // Use effective price: sale price if active, otherwise regular price
+      const prevEffective = (previous.sales_price_cents && previous.sales_price_cents > 0)
+        ? previous.sales_price_cents
+        : previous.price_cents
+      const currEffective = (current.sales_price_cents && current.sales_price_cents > 0)
+        ? current.sales_price_cents
+        : current.price_cents
+
+      if (prevEffective === currEffective) continue
+      if (currEffective <= 0 || prevEffective <= 0) continue
 
       const vendorField = current.product?.vendor
       const vendorName = Array.isArray(vendorField)
@@ -927,13 +979,11 @@ async function fetchRecentPriceChangesFallback(limit = 50) {
         product_title: current.product?.title ?? 'Untitled product',
         vendor_name: vendorName,
         image_url: current.product?.image_url ?? null,
-        old_price: previous.price_cents,
-        new_price: current.price_cents,
-        change_pct: previous.price_cents
-          ? Number((((current.price_cents - previous.price_cents) / previous.price_cents) * 100).toFixed(1))
-          : 0,
+        old_price: prevEffective,
+        new_price: currEffective,
+        change_pct: Number((((currEffective - prevEffective) / prevEffective) * 100).toFixed(1)),
         recorded_at: current.recorded_at,
-        is_discount: current.price_cents < previous.price_cents,
+        is_discount: currEffective < prevEffective,
       })
     }
   }
@@ -960,44 +1010,26 @@ async function fetchCurrentSaleProductsFallback(limit = 20): Promise<CurrentSale
     vendor?: { name?: string | null } | Array<{ name?: string | null }>
   }
 
-  const rows: RawSaleRow[] = []
-  let from = 0
+  const excludedIds = await getExcludedVendorIds()
+  let saleQuery = sb
+    .from('products')
+    .select(`id, title, image_url, price_cents, sales_price_cents, last_seen, vendor:vendors(name)`)
+    .not('sales_price_cents', 'is', null)
+    .gt('price_cents', 0)
+    .order('last_seen', { ascending: false })
+    .limit(limit * 10)
+  if (excludedIds.length > 0) saleQuery = saleQuery.not('vendor_id', 'in', `(${excludedIds.join(',')})`)
+  const { data, error } = await saleQuery
 
-  while (true) {
-    const to = from + BATCH_SIZE - 1
-    const { data, error } = await sb
-      .from('products')
-      .select(`
-        id,
-        title,
-        image_url,
-        price_cents,
-        sales_price_cents,
-        last_seen,
-        vendor:vendors(name)
-      `)
-      .not('sales_price_cents', 'is', null)
-      .range(from, to)
+  if (error) return fetchCurrentSaleProductsFromBackend(limit)
 
-    if (error) {
-      return fetchCurrentSaleProductsFromBackend(limit)
-    }
-
-    const batch = (data as RawSaleRow[]) ?? []
-    rows.push(...batch)
-
-    if (batch.length < BATCH_SIZE) break
-    from += BATCH_SIZE
-  }
-
-  const result = rows
+  const result = ((data as RawSaleRow[]) ?? [])
     .filter((row) => (row.price_cents ?? 0) > 0 && (row.sales_price_cents ?? 0) > 0 && (row.sales_price_cents ?? 0) < (row.price_cents ?? 0))
     .map((row) => {
       const vendorField = row.vendor
       const vendorName = Array.isArray(vendorField)
         ? vendorField[0]?.name ?? 'Unknown vendor'
         : vendorField?.name ?? 'Unknown vendor'
-
       return {
         product_id: row.id,
         product_title: row.title ?? 'Untitled product',
@@ -1049,99 +1081,102 @@ export async function fetchFreshnessStats(): Promise<FreshnessStats> {
 }
 
 export async function fetchVendorFreshness(): Promise<VendorFreshness[]> {
-  const [vendorsRes, rows] = await Promise.all([
-    sb.from('vendors').select('id, name'),
-    fetchProductAggregateRows(),
-  ])
+  const cached = _vendorFreshnessCache.get()
+  if (cached) return cached
+  const inflight = _vendorFreshnessCache.getInflight()
+  if (inflight) return inflight
 
-  // Names from `vendors` when allowed (same pattern as fetchOverviewKPIsFallback). If this query
-  // fails (RLS, schema drift), we still break down freshness by vendor_id from product rows alone.
-  const vendorNames = new Map<string, string>()
-  if (!vendorsRes.error && vendorsRes.data) {
-    for (const vendor of (vendorsRes.data as Array<{ id: number | string; name: string }>)) {
-      vendorNames.set(String(vendor.id), vendor.name ?? String(vendor.id))
-    }
+  const promise = (async () => {
+    const now = Date.now()
+    const freshCut = new Date(now - DAY_MS).toISOString()
+    const recentCut = new Date(now - 7 * DAY_MS).toISOString()
+    const agingCut = new Date(now - 14 * DAY_MS).toISOString()
+
+    const vendorsRes = await sb
+      .from('vendors')
+      .select('id, name')
+      .not('name', 'in', `(${EXCLUDED_VENDOR_NAMES.map(n => `"${n}"`).join(',')})`)
+    if (vendorsRes.error || !vendorsRes.data?.length) return []
+
+    const vendors = vendorsRes.data as Array<{ id: number | string; name: string }>
+
+    const results = await Promise.all(
+      vendors.map(async (vendor) => {
+        const vid = vendor.id
+        const [freshRes, recentRes, agingRes, staleRes, lastRes] = await Promise.all([
+          sb.from('products').select('*', { count: 'exact', head: true }).eq('vendor_id', vid).gte('last_seen', freshCut),
+          sb.from('products').select('*', { count: 'exact', head: true }).eq('vendor_id', vid).gte('last_seen', recentCut).lt('last_seen', freshCut),
+          sb.from('products').select('*', { count: 'exact', head: true }).eq('vendor_id', vid).gte('last_seen', agingCut).lt('last_seen', recentCut),
+          sb.from('products').select('*', { count: 'exact', head: true }).eq('vendor_id', vid).lt('last_seen', agingCut),
+          sb.from('products').select('last_seen').eq('vendor_id', vid).not('last_seen', 'is', null).order('last_seen', { ascending: false }).limit(1),
+        ])
+
+        const fresh = freshRes.count ?? 0
+        const recent = recentRes.count ?? 0
+        const aging = agingRes.count ?? 0
+        const stale = staleRes.count ?? 0
+        const product_count = fresh + recent + aging + stale
+        const denom = Math.max(1, product_count)
+        const lastRow = lastRes.data?.[0] as { last_seen: string } | undefined
+
+        return {
+          vendor_id: String(vid),
+          vendor_name: vendor.name ?? String(vid),
+          product_count,
+          fresh_pct: Math.round((fresh / denom) * 100),
+          recent_pct: Math.round((recent / denom) * 100),
+          aging_pct: Math.round((aging / denom) * 100),
+          stale_pct: Math.round((stale / denom) * 100),
+          last_scrape: lastRow?.last_seen ?? null,
+        }
+      })
+    )
+
+    const result = results
+      .filter((v) => v.product_count > 0)
+      .sort((a, b) => b.product_count - a.product_count)
+    _vendorFreshnessCache.set(result)
+    return result
+  })()
+
+  _vendorFreshnessCache.setInflight(promise)
+  try {
+    return await promise
+  } finally {
+    _vendorFreshnessCache.clearInflight()
   }
-
-  const now = Date.now()
-  const map = new Map<
-    string,
-    { name: string; fresh: number; recent: number; aging: number; stale: number; last: number }
-  >()
-
-  for (const row of rows) {
-    const vendorId =
-      row.vendor_id != null && Number.isFinite(Number(row.vendor_id))
-        ? String(row.vendor_id)
-        : '__none__'
-    const name =
-      vendorId === '__none__'
-        ? 'Unknown vendor'
-        : vendorNames.get(vendorId) ?? `Vendor ${vendorId}`
-    if (!map.has(vendorId)) {
-      map.set(vendorId, { name, fresh: 0, recent: 0, aging: 0, stale: 0, last: 0 })
-    }
-
-    const entry = map.get(vendorId)!
-    const ageDays = row.last_seen ? (now - new Date(row.last_seen).getTime()) / DAY_MS : 999
-
-    if (ageDays < 1) entry.fresh += 1
-    else if (ageDays < 7) entry.recent += 1
-    else if (ageDays < 14) entry.aging += 1
-    else entry.stale += 1
-
-    if (row.last_seen) {
-      entry.last = Math.max(entry.last, new Date(row.last_seen).getTime())
-    }
-  }
-
-  const out: VendorFreshness[] = Array.from(map.entries()).map(([vendor_id, entry]) => {
-    const product_count = entry.fresh + entry.recent + entry.aging + entry.stale
-    const denom = Math.max(1, product_count)
-    return {
-      vendor_id,
-      vendor_name: entry.name,
-      product_count,
-      fresh_pct: Math.round((entry.fresh / denom) * 100),
-      recent_pct: Math.round((entry.recent / denom) * 100),
-      aging_pct: Math.round((entry.aging / denom) * 100),
-      stale_pct: Math.round((entry.stale / denom) * 100),
-      last_scrape: entry.last ? new Date(entry.last).toISOString() : null,
-    }
-  })
-
-  out.sort((a, b) => b.product_count - a.product_count)
-  return out
 }
 
 export async function fetchDistinctCategories(): Promise<string[]> {
-  const rows = await fetchProductAggregateRows()
-  return Array.from(new Set(rows.map((row) => row.category).filter(Boolean) as string[])).sort((a, b) => a.localeCompare(b))
+  const excludedIds = await getExcludedVendorIds()
+  const exStr = excludedIds.length > 0 ? `(${excludedIds.join(',')})` : null
+
+  const categories = new Set<string>()
+  let from = 0
+  while (true) {
+    const to = from + BATCH_SIZE - 1
+    const baseQ = sb.from('products').select('category').not('category', 'is', null).range(from, to)
+    const res = await (exStr ? baseQ.not('vendor_id', 'in', exStr) : baseQ)
+    const data = res.data as Array<{ category: string | null }> | null
+    const error = res.error
+    if (error || !data?.length) break
+    for (const row of data) {
+      if (row.category) categories.add(row.category)
+    }
+    if (data.length < BATCH_SIZE) break
+    from += BATCH_SIZE
+  }
+  return Array.from(categories).sort((a, b) => a.localeCompare(b))
 }
 
 export async function fetchDistinctVendors(): Promise<Array<{ id: number; name: string }>> {
-  const byId = new Map<number, string>()
-
   const { data, error } = await sb
     .from('vendors')
     .select('id, name')
+    .not('name', 'in', `(${EXCLUDED_VENDOR_NAMES.map(n => `"${n}"`).join(',')})`)
     .order('name')
-
-  if (!error && data) {
-    for (const vendor of data as Array<{ id: number; name: string }>) {
-      const id = Number(vendor.id)
-      if (Number.isFinite(id) && vendor.name) byId.set(id, vendor.name)
-    }
-  }
-
-  const rows = await fetchProductAggregateRows()
-  for (const row of rows) {
-    const id = Number(row.vendor_id)
-    if (!Number.isFinite(id) || byId.has(id)) continue
-    byId.set(id, `Vendor ${id}`)
-  }
-
-  const out = Array.from(byId.entries()).map(([id, name]) => ({ id, name }))
-  out.sort((a, b) => a.name.localeCompare(b.name))
-  return out
+  if (error || !data) return []
+  return (data as Array<{ id: number; name: string }>)
+    .filter((v) => Number.isFinite(Number(v.id)) && !!v.name)
+    .map((v) => ({ id: Number(v.id), name: v.name }))
 }

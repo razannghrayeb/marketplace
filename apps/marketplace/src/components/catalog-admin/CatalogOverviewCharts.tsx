@@ -41,9 +41,15 @@ export function CatalogOverviewCharts({ vendorCounts, catCounts }: Props) {
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <Section title="Products by vendor">
         {hasVendorData ? (
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={vendorCounts} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
-              <XAxis dataKey="vendor_name" tick={{ fontSize: 11 }} tickLine={false} />
+          <ResponsiveContainer width="100%" height={260}>
+            <BarChart data={vendorCounts} margin={{ top: 4, right: 8, bottom: 60, left: 0 }}>
+              <XAxis
+                dataKey="vendor_name"
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                tick={{ fontSize: 11, angle: -35, textAnchor: 'end' } as any}
+                tickLine={false}
+                interval={0}
+              />
               <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
               <Tooltip
                 contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e5e7eb' }}
@@ -59,9 +65,15 @@ export function CatalogOverviewCharts({ vendorCounts, catCounts }: Props) {
 
       <Section title="Availability by vendor">
         {hasVendorData ? (
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={availData} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
-              <XAxis dataKey="name" tick={{ fontSize: 11 }} tickLine={false} />
+          <ResponsiveContainer width="100%" height={260}>
+            <BarChart data={availData} margin={{ top: 4, right: 8, bottom: 60, left: 0 }}>
+              <XAxis
+                dataKey="name"
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                tick={{ fontSize: 11, angle: -35, textAnchor: 'end' } as any}
+                tickLine={false}
+                interval={0}
+              />
               <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
               <Tooltip
                 contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e5e7eb' }}

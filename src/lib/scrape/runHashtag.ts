@@ -25,12 +25,3 @@ export async function runHashtagCrawl() {
   return { found: products.length, inserted, updated };
 }
 
-runHashtagCrawl()
-  .then(({ found, inserted, updated }) => {
-    console.log(`Done. Found=${found}, Inserted=${inserted}, Updated=${updated}`);
-    process.exit(0);
-  })
-  .catch((err) => {
-    console.error("Hashtag crawl failed", err);
-    process.exit(1);
-  });

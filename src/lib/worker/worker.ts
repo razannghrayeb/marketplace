@@ -16,6 +16,7 @@ import { runMoustache } from "../scrape/runMoustache";
 import { runMyholdal } from "../scrape/runMyholdal";
 import { runHm } from "../scrape/runHm";
 import { runMikesport } from "../scrape/runMikesport";
+import { runFashionstands } from "../scrape/runFashionstands";
 import { generateAlerts } from "../dsr/alertGenerator";
 
 // ============================================================================
@@ -38,7 +39,8 @@ async function handleNightlyCrawl(): Promise<{ vendors: Record<string, string> }
     { name: "moustache", fn: () => runMoustache() },
     { name: "myholdal",  fn: () => runMyholdal() },
     { name: "hm",        fn: () => runHm() },
-    { name: "mikesport", fn: () => runMikesport() },
+    { name: "mikesport",      fn: () => runMikesport() },
+    { name: "fashionstands",  fn: () => runFashionstands() },
   ];
 
   const settled = await Promise.allSettled(
