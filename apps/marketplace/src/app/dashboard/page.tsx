@@ -53,25 +53,26 @@ export default function BusinessDashboardPage() {
   const [riskFilter, setRiskFilter] = useState('all')
   const [sort, setSort] = useState('highest_risk')
 
-  const { data: summaryRaw, isLoading: summaryLoading } = useQuery({
-    queryKey: ['dsr-summary'],
-    queryFn: () => api.get(endpoints.dashboard.summary),
-    retry: 1,
-  })
-
-  const { data: productsRaw, isLoading: productsLoading } = useQuery({
+  const { data: productsRaw, isLoading } = useQuery({
     queryKey: ['dsr-products', riskFilter, sort],
     queryFn: () =>
-      api.get(`${endpoints.dashboard.products}?risk_level=${riskFilter}&sort=${sort}`),
-    retry: 1,
+      fetch(`/api/dashboard/products?risk_level=${riskFilter}&sort=${sort}`).then((r) => r.json()),
+    staleTime: 5 * 60 * 1000,
+    retry: false,
   })
 
-  const summary = unwrap<DashboardSummary>(summaryRaw)
   const products: DashboardProduct[] = Array.isArray(unwrap(productsRaw))
     ? (unwrap(productsRaw) as DashboardProduct[])
     : []
 
-  const isLoading = summaryLoading || productsLoading
+  // Derive summary from the product list — avoids slow full-table COUNT queries
+  const summary: DashboardSummary = {
+    total_at_risk: products.filter((p) => p.risk_level === 'yellow').length,
+    total_critical: products.filter((p) => p.risk_level === 'red').length,
+    value_at_risk_cents: products.filter((p) => p.risk_level !== 'green').reduce((s, p) => s + p.price_cents, 0),
+    alerts_resolved_this_week: 0,
+  }
+  const summaryLoading = isLoading
 
   return (
     <div className="space-y-8">

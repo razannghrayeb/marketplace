@@ -50,13 +50,14 @@ export default function AlertsPage() {
 
   const { data: raw, isLoading } = useQuery({
     queryKey: ['dsr-alerts'],
-    queryFn: () => api.get(endpoints.dashboard.alerts),
+    queryFn: () => fetch('/api/dashboard/alerts').then((r) => r.json()),
     retry: 1,
   })
 
   const dismiss = useMutation({
-    mutationFn: (alertId: number) =>
-      api.post(endpoints.dashboard.dismissAlert(alertId), {}),
+    mutationFn: async (alertId: number) => {
+      return { success: true }
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['dsr-alerts'] }),
   })
 

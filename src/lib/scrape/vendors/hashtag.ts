@@ -60,7 +60,7 @@ function isRetryableFetchError(err: unknown): boolean {
   return typeof code === "string" && RETRYABLE_ERROR_CODES.has(code);
 }
 
-async function fetchWithRetry(url: string, init: RequestInit, attempts = 4): Promise<Response> {
+async function fetchWithRetry(url: string, init: RequestInit, attempts = 5): Promise<Response> {
   let lastErr: unknown = null;
 
   for (let i = 0; i < attempts; i += 1) {
@@ -71,6 +71,13 @@ async function fetchWithRetry(url: string, init: RequestInit, attempts = 4): Pro
         ...init,
         signal: controller.signal,
       });
+      if (res.status === 429 && i < attempts - 1) {
+        clearTimeout(timeout);
+        const backoffMs = 3000 * Math.pow(2, i);
+        console.log(`429 rate-limited, waiting ${backoffMs}ms before retry ${i + 1}...`);
+        await sleep(backoffMs);
+        continue;
+      }
       return res;
     } catch (err) {
       lastErr = err;
@@ -347,7 +354,7 @@ export async function scrapeHashtagCollection(collectionUrl: string): Promise<Sc
       const variantRows = await scrapeHashtagProduct(productUrl);
       results.push(...variantRows);
 
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 3000));
     } catch (error) {
       console.error("Failed scraping product:", productUrl, error);
     }
