@@ -1140,13 +1140,17 @@ function correctDetectionByPosition(detection: Detection): Detection {
   const centerY = (bn.y1 + bn.y2) / 2;
   const boxHeight = bn.y2 - bn.y1;
 
-  // Outerwear detected in lower body region (center below 0.6, not tall enough to be full-body)
-  // is almost certainly bottoms (shorts, pants).
+  // Outerwear detected in lower body region is sometimes bottoms (shorts/pants).
+  // Restrict aggressively: legitimate jackets routinely have boxHeight 0.3-0.5 and
+  // centerY 0.55-0.65 (mid-portrait crops). Only reclassify when the box is *clearly*
+  // a small lower-third item: top of the box well below the waist, height short,
+  // and detection confidence weak (high-confidence outerwear should never be flipped).
   if (
     /\b(outwear|outerwear|jacket)\b/.test(label) &&
-    centerY > 0.54 &&
-    boxHeight < 0.5 &&
-    bn.y1 > 0.35
+    centerY > 0.72 &&
+    boxHeight < 0.28 &&
+    bn.y1 > 0.62 &&
+    (Number.isFinite(detection.confidence) ? detection.confidence : 1) < 0.5
   ) {
     const corrected = { ...detection };
     corrected.label = "shorts";
@@ -1789,15 +1793,21 @@ function isBottomCatalogCue(text: string): boolean {
 function hardCategoryTermsForDetection(
   detectionLabel: string,
   categoryMapping: CategoryMapping,
-  opts?: { confidence?: number; areaRatio?: number },
+  opts?: { confidence?: number; areaRatio?: number; forceSuitCue?: boolean },
   caption?: string | null,
 ): string[] {
   const l = String(detectionLabel || "").toLowerCase();
   const hasLongSleeveCue = /\blong sleeve\b|\bfull sleeve\b/.test(l);
   const captionText = String(caption ?? "").toLowerCase();
-  const hasCaptionSuitCue = /\b(suit|suiting|blazer|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|vest)\b/.test(
-    captionText,
-  );
+  // forceSuitCue lets the detection-loop caller propagate a contextual-formality-derived
+  // suit signal (e.g. structured top + tailored bottom + formal portrait) even when
+  // BLIP/YOLO never said the literal word "suit" or "blazer". Without this the
+  // outerwear branch below narrows to jackets and suits never reach the candidate pool.
+  const hasCaptionSuitCue =
+    Boolean(opts?.forceSuitCue) ||
+    /\b(suit|suiting|blazer|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|vest)\b/.test(
+      captionText,
+    );
   const baseTerms = getCategorySearchTerms(categoryMapping.productCategory).map((t) =>
     String(t).toLowerCase().trim(),
   );
@@ -6151,17 +6161,30 @@ export class ImageAnalysisService {
             confidence: detection.confidence,
             areaRatio: detection.area_ratio,
           });
+          // Synthetic formality cue forces suit-type recovery when the contextual signal
+          // is strong (structured top + tailored bottom, BLIP-derived formality, etc.) even
+          // when neither YOLO label nor BLIP caption literally contain the word "suit" or
+          // "blazer". Without this, a clear suit photo where BLIP says "man in formal
+          // portrait" gets treated as a generic jacket detection and suits never reach the
+          // kNN candidate pool.
+          const formalitySuitCue =
+            categoryMapping.productCategory === "outerwear" &&
+            contextualFormalityScore >= 7
+              ? " suit blazer "
+              : "";
           const strongTypeSeeds = recoverFormalOuterwearTypes(
             typeSeeds,
             categoryMapping.productCategory,
             label,
             blipCaption ?? "",
+            formalitySuitCue,
           );
           let softProductTypeHints = recoverFormalOuterwearTypes(
             [...new Set([...strongTypeSeeds, ...expandedTypeHints.slice(0, 8)])],
             categoryMapping.productCategory,
             label,
             blipCaption ?? "",
+            formalitySuitCue,
           );
           if (categoryMapping.productCategory === "tops") {
             const labelNormForTopHints = String(label ?? "").toLowerCase();
@@ -6195,7 +6218,17 @@ export class ImageAnalysisService {
           );
           const hasSuitCaptionCue =
             /\b(suit|suiting|blazer|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|vest)\b/.test(blipCaptionNorm) ||
-            (/\btie\b/.test(blipCaptionNorm) && contextualFormalityScore >= 6);
+            (/\btie\b/.test(blipCaptionNorm) && contextualFormalityScore >= 6) ||
+            // Strong contextual formality (BLIP "formal/business/wedding" + structured top
+            // + tailored bottom) is a reliable suit signal even when the caption never
+            // uses the literal word "suit" or "blazer".
+            (contextualFormalityScore >= 8 &&
+              (categoryMapping.productCategory === "tops" ||
+                categoryMapping.productCategory === "outerwear")) ||
+            // Wedding / black-tie / ceremony cues are virtually always suit-anchored.
+            /\b(wedding|black-tie|black tie|ceremony|bow tie|bowtie|business formal)\b/.test(
+              blipCaptionNorm,
+            );
           if (hasSuitCaptionCue && categoryMapping.productCategory === "tops") {
             const suitTopPriority = [
               "suit",
@@ -6551,12 +6584,23 @@ export class ImageAnalysisService {
               const terms = hardCategoryTermsForDetection(label, categoryMapping, {
                 confidence: detection.confidence,
                 areaRatio: detection.area_ratio,
+                // Propagate the broader suit-cue determination (which considers
+                // contextual formality and wedding/black-tie cues, not just literal
+                // "suit"/"blazer" words in the caption) so suit listings are kept in
+                // the hard-category recall pool for outerwear detections.
+                forceSuitCue: hasSuitCaptionCue,
               }, blipCaption ?? "");
               const categoryTerms = formalFootwearIntent ? pruneAthleticFootwearTerms(terms) : terms;
               filters.category = categoryTerms.length === 1 ? categoryTerms[0] : categoryTerms;
               // CRITICAL FIX: When hard filter is applied, predictedCategoryAisles must NOT include alternatives
               // Alternatives would cause soft boosting to override the hard filter in reranking
               predictedCategoryAisles = [categoryMapping.productCategory];
+              // When the suit cue fires for outerwear, expand the predicted aisles to
+              // include "tailored" so the soft category boost doesn't strip suit
+              // candidates that came in via the merged tailored+outerwear hard filter.
+              if (hasSuitCaptionCue && categoryMapping.productCategory === "outerwear") {
+                predictedCategoryAisles = ["outerwear", "tailored"];
+              }
             } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
               if (shopLookSingleCategoryHintEnv()) {
                 predictedCategoryAisles = [categoryMapping.productCategory];

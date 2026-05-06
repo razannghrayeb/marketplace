@@ -24,7 +24,10 @@
       "PowerShell(Get-ChildItem -Path \"d:\\\\marketplace\\\\src\\\\lib\\\\ranker\" -Recurse -ErrorAction SilentlyContinue | Select-Object -Property @{Name=\"Path\";Expression={$_.FullName}}, @{Name=\"Size \\(bytes\\)\";Expression={$_.Length}})",
       "Bash(find d:\\\\\\\\marketplace\\\\\\\\src -type d -name \"*rank*\")",
       "Bash(find d:\\\\\\\\marketplace\\\\\\\\src\\\\\\\\lib\\\\\\\\image -type f)",
-      "Bash(find d:\\\\\\\\marketplace\\\\\\\\src\\\\\\\\lib\\\\\\\\model -type f)"
+      "Bash(find d:\\\\\\\\marketplace\\\\\\\\src\\\\\\\\lib\\\\\\\\model -type f)",
+      "PowerShell(Write-Output '--- search ---'; Get-ChildItem \"d:\\\\marketplace\\\\src\\\\lib\\\\search\" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }; Write-Output '--- ranker ---'; Get-ChildItem \"d:\\\\marketplace\\\\src\\\\lib\\\\ranker\" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }; Write-Output '--- detection ---'; Get-ChildItem \"d:\\\\marketplace\\\\src\\\\lib\\\\detection\" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }; Write-Output '--- query ---'; Get-ChildItem \"d:\\\\marketplace\\\\src\\\\lib\\\\query\" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }; Write-Output '--- queryProcessor ---'; Get-ChildItem \"d:\\\\marketplace\\\\src\\\\lib\\\\queryProcessor\" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })",
+      "PowerShell(\\(Get-Content 'd:\\\\marketplace\\\\src\\\\routes\\\\products\\\\image-analysis.service.ts'\\).Length)",
+      "Bash(echo \"EXITCODE=$?\")"
     ]
   }
 }
