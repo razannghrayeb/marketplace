@@ -2222,6 +2222,299 @@ const FORMAL_OUTERWEAR_RECOVERY_TYPES = [
   "blazers",
 ];
 
+// ────────────────────────────────────────────────────────────────────────────
+// Outerwear & Suit Signal Path
+// ────────────────────────────────────────────────────────────────────────────
+// A single function that consolidates every signal we have for an outerwear /
+// tailored / suit detection (YOLO label, BLIP caption, contextual formality,
+// wedding/tie/black-tie cues, structured-top + tailored-bottom co-detection)
+// into one structured decision. The detection loop reads from this signal to
+// route recall (filters.category, productTypes, predictedAisles) and rerank
+// (detectionProductCategory, priority seed types) in one place — replacing the
+// previously scattered hasSuitCaptionCue / recoverFormalOuterwearTypes /
+// suitCaptionForTailored / forceSuitCue boolean checks.
+// ────────────────────────────────────────────────────────────────────────────
+
+export type OuterwearSuitSubtype =
+  | "suit_full"
+  | "suit_jacket"
+  | "blazer"
+  | "jacket"
+  | "coat"
+  | "vest"
+  | "unknown";
+
+export interface OuterwearSuitSignal {
+  isOuterwearOrSuit: boolean;
+  subtype: OuterwearSuitSubtype;
+  formalityScore: number;
+  isTailored: boolean;
+  isFormal: boolean;
+  suitCue: boolean;
+  detectionCategoryForSearch: "tailored" | "outerwear";
+  filterCategoryAliases: string[];
+  predictedAisles: string[];
+  prioritySeedTypes: string[];
+  signalSources: {
+    yoloLabel: string;
+    blipSuitCue: boolean;
+    blipFormalCue: boolean;
+    contextualFormality: number;
+    weddingCue: boolean;
+    tieCue: boolean;
+    structuredTopAndTailoredBottom: boolean;
+  };
+}
+
+const OUTERWEAR_BASE_TYPES = [
+  "jacket",
+  "jackets",
+  "coat",
+  "coats",
+  "blazer",
+  "blazers",
+  "shirt jacket",
+  "shacket",
+  "shackets",
+  "overshirt",
+  "overshirts",
+  "bomber",
+  "bomber jacket",
+  "parka",
+  "parkas",
+  "trench",
+  "windbreaker",
+  "windbreakers",
+  "overcoat",
+  "overcoats",
+];
+
+const SUIT_FULL_TYPES = [
+  "suit",
+  "suits",
+  "tuxedo",
+  "tuxedos",
+  "two piece suit",
+  "three piece suit",
+];
+
+const BLAZER_TYPES = [
+  "blazer",
+  "blazers",
+  "sport coat",
+  "sportcoat",
+  "suit jacket",
+  "dress jacket",
+  "tailored jacket",
+  "structured jacket",
+];
+
+const VEST_TYPES = [
+  "vest",
+  "vests",
+  "waistcoat",
+  "waistcoats",
+  "gilet",
+  "gilets",
+];
+
+const COAT_ONLY_TYPES = [
+  "coat",
+  "coats",
+  "overcoat",
+  "overcoats",
+  "parka",
+  "parkas",
+  "trench",
+  "windbreaker",
+  "windbreakers",
+  "long coat",
+  "wool coat",
+];
+
+const JACKET_ONLY_TYPES = [
+  "jacket",
+  "jackets",
+  "bomber",
+  "bomber jacket",
+  "shirt jacket",
+  "shacket",
+  "shackets",
+  "overshirt",
+  "overshirts",
+  "leather jacket",
+  "denim jacket",
+];
+
+/**
+ * Extract a unified outerwear/suit signal from all available image-search inputs.
+ * Returns `isOuterwearOrSuit: false` when this code path doesn't apply, so callers
+ * can keep their normal flow for tops/bottoms/dresses/footwear/etc.
+ */
+export function inferOuterwearSuitSignal(input: {
+  yoloLabel: string;
+  detectionRawLabel?: string | null;
+  productCategoryFromMapping: string;
+  blipCaption: string | null | undefined;
+  contextualFormalityScore: number;
+}): OuterwearSuitSignal {
+  const labelNorm = String(input.yoloLabel ?? "").toLowerCase().trim();
+  const rawLabelNorm = String(input.detectionRawLabel ?? "").toLowerCase();
+  const captionNorm = String(input.blipCaption ?? "").toLowerCase();
+  const productCategory = String(input.productCategoryFromMapping ?? "").toLowerCase().trim();
+  const formality = Math.max(0, Math.min(10, Number(input.contextualFormalityScore) || 0));
+
+  // Step 1: gate. Only run for outerwear/tailored category. Everything else short-circuits.
+  if (productCategory !== "outerwear" && productCategory !== "tailored") {
+    return {
+      isOuterwearOrSuit: false,
+      subtype: "unknown",
+      formalityScore: formality,
+      isTailored: false,
+      isFormal: false,
+      suitCue: false,
+      detectionCategoryForSearch: "outerwear",
+      filterCategoryAliases: [],
+      predictedAisles: [],
+      prioritySeedTypes: [],
+      signalSources: {
+        yoloLabel: labelNorm,
+        blipSuitCue: false,
+        blipFormalCue: false,
+        contextualFormality: formality,
+        weddingCue: false,
+        tieCue: false,
+        structuredTopAndTailoredBottom: false,
+      },
+    };
+  }
+
+  // Step 2: extract individual signals.
+  const blipSuitCue = /\b(suit|suiting|blazer|sport\s*coat|dress\s*jacket|suit\s*jacket|tuxedo|waistcoat)\b/.test(captionNorm);
+  const blipFormalCue = /\b(formal|business\s*formal|smart|tailored|elegant)\b/.test(captionNorm);
+  const weddingCue = /\b(wedding|black[-\s]?tie|ceremony|bow\s*tie|bowtie)\b/.test(captionNorm);
+  const tieCue = /\btie\b/.test(captionNorm);
+  // Inferred from contextualFormalityScore: scoreContextualFormalityFromDetections returns
+  // 7 for structured-top + tailored-bottom co-detection (8 with shirt-recovery confirming it).
+  const structuredTopAndTailoredBottom = formality >= 7 && formality < 9;
+
+  // Step 3: classify subtype. Strongest signal wins.
+  // Vest takes priority — a labeled vest detection is unambiguous regardless of formality.
+  const isVestLabel = /\b(vest|gilet|waistcoat)\b/.test(labelNorm) &&
+    !/\b(sweater|cardigan|hoodie|pullover|jacket|coat|sweatshirt|overshirt)\b/.test(labelNorm);
+
+  const isExplicitSuitLabel = /\b(suit|suits|tuxedo)\b/.test(labelNorm);
+  const isExplicitBlazerLabel = /\b(blazer|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket|tailored\s*jacket)\b/.test(labelNorm);
+  const isExplicitCoatLabel = /\b(coat|coats|parka|trench|windbreaker|overcoat)\b/.test(labelNorm) &&
+    !/\b(sport\s*coat|dress\s*coat)\b/.test(labelNorm);
+  const isExplicitJacketLabel = /\b(jacket|jackets|bomber|shacket|overshirt|shirt\s*jacket)\b/.test(labelNorm) &&
+    !isExplicitBlazerLabel;
+
+  // Aggregate suit cue: BLIP caption OR (formality≥8 + outerwear category) OR wedding/black-tie OR
+  // (tie + formality≥6) OR structured-top+tailored-bottom + tie/wedding signal.
+  const suitCue =
+    blipSuitCue ||
+    weddingCue ||
+    (tieCue && formality >= 6) ||
+    (formality >= 8) ||
+    (structuredTopAndTailoredBottom && (blipFormalCue || tieCue));
+
+  let subtype: OuterwearSuitSubtype;
+  if (isVestLabel) {
+    subtype = "vest";
+  } else if (isExplicitSuitLabel) {
+    subtype = "suit_full";
+  } else if (isExplicitBlazerLabel) {
+    subtype = suitCue ? "suit_jacket" : "blazer";
+  } else if (isExplicitCoatLabel) {
+    subtype = "coat";
+  } else if (suitCue) {
+    // Detection said "jacket"/"long sleeve outwear" but cues say suit → treat as suit_jacket.
+    subtype = "suit_jacket";
+  } else if (isExplicitJacketLabel || /\blong\s*sleeve\s*outwear\b/.test(labelNorm)) {
+    subtype = "jacket";
+  } else {
+    // Outerwear/tailored category but unclassified label → fallback to jacket as safest neutral.
+    subtype = "jacket";
+  }
+
+  const isTailored = subtype === "suit_full" || subtype === "suit_jacket" || subtype === "blazer" || (subtype === "vest" && (suitCue || blipFormalCue));
+  const isFormal = formality >= 7 || suitCue;
+
+  // Step 4: derive routing recommendations.
+  // Detection product category for search: tailored when suit-cue, outerwear otherwise.
+  const detectionCategoryForSearch: "tailored" | "outerwear" =
+    (subtype === "suit_full" || subtype === "suit_jacket" || (subtype === "blazer" && isFormal))
+      ? "tailored"
+      : "outerwear";
+
+  const filterCategoryAliases: string[] = (() => {
+    switch (subtype) {
+      case "suit_full":
+        return [...SUIT_FULL_TYPES, "tailored", ...BLAZER_TYPES];
+      case "suit_jacket":
+        return [...BLAZER_TYPES, ...SUIT_FULL_TYPES, "tailored", "outerwear"];
+      case "blazer":
+        return [...BLAZER_TYPES, ...(suitCue ? SUIT_FULL_TYPES : []), "outerwear", "tailored"];
+      case "vest":
+        return [...VEST_TYPES, ...(suitCue ? SUIT_FULL_TYPES : []), "tailored"];
+      case "coat":
+        return [...COAT_ONLY_TYPES, "outerwear"];
+      case "jacket":
+        return [...JACKET_ONLY_TYPES, "outerwear", ...(suitCue ? BLAZER_TYPES : [])];
+      default:
+        return [...OUTERWEAR_BASE_TYPES];
+    }
+  })();
+
+  const predictedAisles: string[] = (() => {
+    if (detectionCategoryForSearch === "tailored") return ["tailored", "outerwear"];
+    if (suitCue || isTailored) return ["outerwear", "tailored"];
+    return ["outerwear"];
+  })();
+
+  const prioritySeedTypes: string[] = (() => {
+    switch (subtype) {
+      case "suit_full":
+        return [...SUIT_FULL_TYPES, ...BLAZER_TYPES];
+      case "suit_jacket":
+        return [...BLAZER_TYPES, ...SUIT_FULL_TYPES];
+      case "blazer":
+        return [...BLAZER_TYPES, ...(suitCue ? SUIT_FULL_TYPES : [])];
+      case "vest":
+        return [...VEST_TYPES];
+      case "coat":
+        return [...COAT_ONLY_TYPES];
+      case "jacket":
+        return [...JACKET_ONLY_TYPES, ...(suitCue ? BLAZER_TYPES : [])];
+      default:
+        return [];
+    }
+  })();
+
+  return {
+    isOuterwearOrSuit: true,
+    subtype,
+    formalityScore: formality,
+    isTailored,
+    isFormal,
+    suitCue,
+    detectionCategoryForSearch,
+    filterCategoryAliases,
+    predictedAisles,
+    prioritySeedTypes,
+    signalSources: {
+      yoloLabel: labelNorm,
+      blipSuitCue,
+      blipFormalCue,
+      contextualFormality: formality,
+      weddingCue,
+      tieCue,
+      structuredTopAndTailoredBottom,
+    },
+  };
+}
+
 const TAILORED_TOP_RECOVERY_TYPES = [
   "suit",
   "suits",
@@ -6229,6 +6522,44 @@ export class ImageAnalysisService {
             /\b(wedding|black-tie|black tie|ceremony|bow tie|bowtie|business formal)\b/.test(
               blipCaptionNorm,
             );
+
+          // ──────────────────────────────────────────────────────────────────
+          // Outerwear & Suit signal path
+          // ──────────────────────────────────────────────────────────────────
+          // Single-source-of-truth signal for outerwear/tailored/suit detections.
+          // When this fires it consolidates the routing decisions (priority seed
+          // types, filter category aliases, predicted aisles, tailored-vs-outerwear
+          // routing) that previously lived in scattered conditionals. Falls back
+          // to the existing per-branch logic for non-outerwear detections.
+          const outerwearSuitSignal = inferOuterwearSuitSignal({
+            yoloLabel: label,
+            detectionRawLabel: detection.raw_label,
+            productCategoryFromMapping: categoryMapping.productCategory,
+            blipCaption,
+            contextualFormalityScore,
+          });
+          if (outerwearSuitSignal.isOuterwearOrSuit && outerwearSuitSignal.prioritySeedTypes.length > 0) {
+            // Push subtype-specific priority seeds (e.g. ["suit","suits","tuxedo",
+            // "blazer",...] for a suit_full detection) to the front so they survive
+            // truncation in initialTypeSearchHints (top-3) and the kNN candidate
+            // pool actually contains suits / blazers / etc., not just generic
+            // jackets that happen to be visually similar.
+            softProductTypeHints = [
+              ...new Set([
+                ...outerwearSuitSignal.prioritySeedTypes,
+                ...softProductTypeHints,
+              ]),
+            ];
+            const existingProductTypes = Array.isArray(filters.productTypes)
+              ? filters.productTypes
+              : [];
+            filters.productTypes = [
+              ...new Set([
+                ...existingProductTypes,
+                ...outerwearSuitSignal.prioritySeedTypes,
+              ]),
+            ].slice(0, 12);
+          }
           if (hasSuitCaptionCue && categoryMapping.productCategory === "tops") {
             const suitTopPriority = [
               "suit",
@@ -6543,9 +6874,15 @@ export class ImageAnalysisService {
             hasSuitCaptionCue && categoryMapping.productCategory === "tops";
           const suitCaptionForTailored =
             hasSuitCaptionCue && categoryMapping.productCategory === "outerwear";
-          const detectionProductCategoryForSearch = suitCaptionForTailored
-            ? "tailored"
-            : categoryMapping.productCategory;
+          // Use the outerwear/suit signal's recommended detection category when it
+          // applies; falls back to the legacy suitCaptionForTailored bool otherwise.
+          // For non-outerwear detections (tops/bottoms/dresses/footwear/etc.) the
+          // signal's isOuterwearOrSuit is false and we keep categoryMapping unchanged.
+          const detectionProductCategoryForSearch = outerwearSuitSignal.isOuterwearOrSuit
+            ? outerwearSuitSignal.detectionCategoryForSearch
+            : suitCaptionForTailored
+              ? "tailored"
+              : categoryMapping.productCategory;
           const accessoryOrFootwearConfident =
             (accessoryLikeCategory || footwearLikeCategory) &&
             (((detection.confidence ?? 0) >= 0.72) || ((detection.area_ratio ?? 0) >= 0.025));
@@ -6588,19 +6925,27 @@ export class ImageAnalysisService {
                 // contextual formality and wedding/black-tie cues, not just literal
                 // "suit"/"blazer" words in the caption) so suit listings are kept in
                 // the hard-category recall pool for outerwear detections.
-                forceSuitCue: hasSuitCaptionCue,
+                forceSuitCue: hasSuitCaptionCue || outerwearSuitSignal.suitCue,
               }, blipCaption ?? "");
               const categoryTerms = formalFootwearIntent ? pruneAthleticFootwearTerms(terms) : terms;
-              filters.category = categoryTerms.length === 1 ? categoryTerms[0] : categoryTerms;
-              // CRITICAL FIX: When hard filter is applied, predictedCategoryAisles must NOT include alternatives
-              // Alternatives would cause soft boosting to override the hard filter in reranking
-              predictedCategoryAisles = [categoryMapping.productCategory];
-              // When the suit cue fires for outerwear, expand the predicted aisles to
-              // include "tailored" so the soft category boost doesn't strip suit
-              // candidates that came in via the merged tailored+outerwear hard filter.
-              if (hasSuitCaptionCue && categoryMapping.productCategory === "outerwear") {
-                predictedCategoryAisles = ["outerwear", "tailored"];
-              }
+              // For outerwear detections that the signal classified as suit/tailored,
+              // merge the signal's filterCategoryAliases into the hard-filter terms
+              // so the OpenSearch category clause matches both outerwear and tailored
+              // aisles in one query (catalog suits are often indexed under "tailored",
+              // "Suits", or even pure "Tuxedos" — they need to be reachable via this
+              // same filter or kNN simply never returns them).
+              const augmentedCategoryTerms = outerwearSuitSignal.isOuterwearOrSuit
+                ? [...new Set([...categoryTerms, ...outerwearSuitSignal.filterCategoryAliases])]
+                : categoryTerms;
+              filters.category = augmentedCategoryTerms.length === 1
+                ? augmentedCategoryTerms[0]
+                : augmentedCategoryTerms;
+              // Predicted aisles drive the soft category boost. Use the signal's
+              // recommendation when it applies; otherwise keep the legacy single-aisle
+              // behavior to avoid false-boost on alternative categories.
+              predictedCategoryAisles = outerwearSuitSignal.isOuterwearOrSuit
+                ? outerwearSuitSignal.predictedAisles
+                : [categoryMapping.productCategory];
             } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
               if (shopLookSingleCategoryHintEnv()) {
                 predictedCategoryAisles = [categoryMapping.productCategory];

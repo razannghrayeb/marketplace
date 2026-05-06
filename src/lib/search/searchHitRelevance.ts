@@ -1275,15 +1275,18 @@ export function computeHitRelevance(
   ]
     .map((x) => String(x).toLowerCase())
     .join(" ");
-  // Note: overshirt/shacket are intentionally NOT in the intent-side regex.
+  // Note 1: overshirt/shacket are intentionally NOT in the intent-side regex.
   // `expandProductTypesForQuery("overshirt")` expands to the JACKET cluster
   // (jacket/jackets/shacket/bomber...). If overshirt were here, every outerwear
   // query whose expansion happens to include overshirt would be misclassified as
   // a top intent, then real jackets (docIsTopLike=false) would be hard-cut to 0.
   // The doc-side regex below DOES still include overshirt — overshirts can validly
   // satisfy a top-intent query.
+  // Note 2: `shirts?` uses negative lookahead so compound tokens like "shirt jacket",
+  // "dress jacket", "suit jacket" (which the suit/outerwear expansion injects into
+  // intentBlob) don't accidentally trigger top intent.
   const isTopLikeIntent =
-    /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|polo|polos|loungewear)\b/.test(
+    /\b(top|tops|shirts?(?!\s+jackets?\b)|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|polo|polos|loungewear)\b/.test(
       intentBlob,
     );
   const isBottomLikeIntent =
@@ -1311,7 +1314,13 @@ export function computeHitRelevance(
   const docIsBottomLike = /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts?|skirt|skirts|leggings?)\b/.test(docBlobForFamily);
   const docIsFootwearLike = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(docBlobForFamily);
   const docIsDressLike = /\b(dress|dresses|gown|jumpsuit|romper|playsuit)\b/.test(docBlobForFamily);
-  const docIsOuterwearLike = /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers|overcoat|overcoats|shacket|shackets)\b/.test(docBlobForFamily);
+  // docIsOuterwearLike must include tailored vocabulary (suit/tuxedo/sport-coat/
+  // dress-jacket/waistcoat/vest/gilet) so a pure suit listing titled "Black
+  // Tuxedo Suit" with category="Suits" still satisfies an outerwear/jacket
+  // intent. Without this, a jacket-photo query whose BLIP caption never said
+  // "suit" would hard-cut every suit candidate the recall path brought in via
+  // recoverFormalOuterwearTypes / forceSuitCue.
+  const docIsOuterwearLike = /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers|overcoat|overcoats|shacket|shackets|suit|suits|tuxedo|tuxedos|sport\s*coat|dress\s*jacket|waistcoat|waistcoats|vest|vests|gilet|gilets|tailored)\b/.test(docBlobForFamily);
 
   // Hard family restrictions: if the user strongly intends a family (top/bottom/footwear/dress/outerwear)
   // then do not allow hits from other families to surface (set final relevance to 0).
