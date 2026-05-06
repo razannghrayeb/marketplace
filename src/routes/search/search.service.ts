@@ -59,6 +59,7 @@ import {
   extractFashionTypeNounTokens,
   extractLexicalProductTypeSeeds,
 } from '../../lib/search/productTypeTaxonomy';
+import { attrGenderFilterClause } from '../products/opensearchFilters';
 import {
   buildQueryUnderstanding,
   searchDomainGateEnabled,
@@ -140,6 +141,62 @@ function hasActualSuitCatalogCue(src: Record<string, unknown>): boolean {
   const catCanon = String(src.category_canonical ?? "").toLowerCase();
   const catRaw = String(src.category ?? "").toLowerCase();
   if (catCanon === "tailored" || /\b(suit|suits|tailored|tailoring|waistcoat|waistcoats)\b/.test(catRaw)) return true;
+  return false;
+}
+
+function hasStrictFullSuitTextIntent(raw: string, desiredProductTypes: string[]): boolean {
+  const blob = [
+    raw,
+    ...(desiredProductTypes ?? []),
+  ].join(" ").toLowerCase();
+  if (!blob.trim()) return false;
+  const jacketOnly =
+    /\b(?:suit|dress)\s+jackets?\b/.test(blob) &&
+    !/\b(suits|tuxedos?|two[-\s]?piece|three[-\s]?piece|matching\s+suit|suit\s+set|full\s+suit)\b/.test(blob);
+  if (jacketOnly) return false;
+  return /\b(suits?|tuxedos?|two[-\s]?piece|three[-\s]?piece|matching\s+suit|suit\s+set|full\s+suit)\b/.test(blob);
+}
+
+function hasStrictTrouserTextIntent(desiredProductTypes: string[]): boolean {
+  const blob = (desiredProductTypes ?? []).map((t) => String(t).toLowerCase()).join(" ");
+  if (!blob.trim()) return false;
+  const hasTrouserLike = /\b(trouser|trousers|pant|pants|slack|slacks|chino|chinos|cargo|cargo pants?)\b/.test(blob);
+  const hasShortLike = /\b(short|shorts|bermuda|bermudas)\b/.test(blob);
+  return hasTrouserLike && !hasShortLike;
+}
+
+function hasHardOppositeGenderSignal(src: Record<string, unknown>, queryGenderRaw: string | null | undefined): boolean {
+  const queryGender = normalizeQueryGender(queryGenderRaw ?? "");
+  if (!queryGender || queryGender === "unisex") return false;
+
+  const explicitSignals = [(src as any).audience_gender, (src as any).attr_gender, (src as any).gender]
+    .map((value) => normalizeQueryGender(String(value ?? "")))
+    .filter((value): value is "men" | "women" | "unisex" => Boolean(value));
+  if (explicitSignals.some((g) => g !== "unisex" && g !== queryGender)) return true;
+
+  const blob = [
+    src.title,
+    src.brand,
+    src.category,
+    (src as any).category_canonical,
+    (src as any).description,
+    Array.isArray((src as any).product_types) ? (src as any).product_types.join(" ") : (src as any).product_types,
+  ]
+    .map((value) => String(value ?? "").toLowerCase())
+    .join(" ");
+  if (!blob.trim()) return false;
+
+  const menRe = /\b(men|mens|male|man|gents?|gentlemen)\b/;
+  const womenRe = /\b(women|womens|female|lady|ladies|woman)\b/;
+  const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt)\b/;
+  const menStyleCue = /\b(briefs?|boxers?|jockstrap|menswear)\b/;
+  const hasMenCue = menRe.test(blob);
+  const hasWomenCue = womenRe.test(blob);
+  const hasWomenStyleCue = womenStyleCue.test(blob);
+  const hasMenStyleCue = menStyleCue.test(blob);
+
+  if (queryGender === "men") return (hasWomenCue || hasWomenStyleCue) && !(hasMenCue || hasMenStyleCue);
+  if (queryGender === "women") return (hasMenCue || hasMenStyleCue) && !(hasWomenCue || hasWomenStyleCue);
   return false;
 }
 
@@ -1278,10 +1335,17 @@ export async function textSearch(
         (inferredAudienceHardFilterEnabled() && ast.confidence >= genderHardFilterMinConfidence())
       );
     const gNorm = merged.gender ? merged.gender.toLowerCase() : "";
+    const gCanonical = merged.gender ? normalizeQueryGender(merged.gender) : null;
 
-    if (merged.gender && useHardAudienceFilter && normalizeQueryGender(merged.gender)) {
-      const g = gNorm;
-      const unisexOr = binaryGenderAllowsUnisexFilter(g)
+    if (merged.gender && useHardAudienceFilter && gCanonical) {
+      const genderVariants = attrGenderFilterClause(gCanonical).terms.attr_gender;
+      const oppositeGender =
+        gCanonical === "men"
+          ? attrGenderFilterClause("women").terms.attr_gender
+          : gCanonical === "women"
+            ? attrGenderFilterClause("men").terms.attr_gender
+            : [];
+      const unisexOr = binaryGenderAllowsUnisexFilter(gCanonical)
         ? ([
             { term: { attr_gender: "unisex" } },
             { term: { audience_gender: "unisex" } },
@@ -1291,16 +1355,27 @@ export async function textSearch(
         bool: {
           _name: "strict_gender_filter",
           should: [
-            { term: { attr_gender: g } },
-            { term: { audience_gender: g } },
-            { match_phrase: { title: g } },
+            { terms: { attr_gender: genderVariants } },
+            { terms: { audience_gender: genderVariants } },
+            ...genderVariants.map((g) => ({ match_phrase: { title: g } })),
             ...unisexOr,
           ],
+          must_not: oppositeGender.length > 0
+            ? [
+                {
+                  bool: {
+                    should: oppositeGender.map((g) => ({ match_phrase: { title: g } })),
+                    minimum_should_match: 1,
+                  },
+                },
+              ]
+            : undefined,
           minimum_should_match: 1,
         },
       });
-    } else if (merged.gender && normalizeQueryGender(merged.gender)) {
-      const unisexSoft = binaryGenderAllowsUnisexFilter(gNorm)
+    } else if (merged.gender && gCanonical) {
+      const genderVariants = attrGenderFilterClause(gCanonical).terms.attr_gender;
+      const unisexSoft = binaryGenderAllowsUnisexFilter(gCanonical)
         ? ([
             { term: { attr_gender: { value: "unisex", boost: 4.2 } } },
             { term: { audience_gender: { value: "unisex", boost: 4.2 } } },
@@ -1310,9 +1385,9 @@ export async function textSearch(
         bool: {
           _name: "soft_gender_boost",
           should: [
-            { term: { attr_gender: { value: gNorm, boost: 6.0 } } },
-            { term: { audience_gender: { value: gNorm, boost: 6.0 } } },
-            { match_phrase: { title: { query: gNorm, boost: 4.0 } } },
+            ...genderVariants.map((g) => ({ term: { attr_gender: { value: g, boost: 6.0 } } })),
+            ...genderVariants.map((g) => ({ term: { audience_gender: { value: g, boost: 6.0 } } })),
+            ...genderVariants.map((g) => ({ match_phrase: { title: { query: g, boost: 4.0 } } })),
             ...unisexSoft,
           ],
           minimum_should_match: 0,
@@ -1802,6 +1877,11 @@ export async function textSearch(
     const desiredProductTypes = [
       ...new Set([...astProductTypes, ...lexicalTypeSeeds.map((s) => s.toLowerCase())]),
     ];
+    const strictFullSuitTextIntent = hasStrictFullSuitTextIntent(
+      `${rawQuery} ${ast.searchQuery || ""}`,
+      desiredProductTypes,
+    );
+    const strictTrouserTextIntent = hasStrictTrouserTextIntent(desiredProductTypes);
     const desiredColors = [...new Set(rerankDesiredColors)];
     const desiredColorsTier = rerankDesiredColorsRaw.length > 0 ? rerankDesiredColorsRaw : desiredColors;
     const rerankColorMode = ast.filters?.colorMode ?? "any";
@@ -1919,10 +1999,14 @@ export async function textSearch(
           .filter((id) => (complianceById.get(id)?.finalRelevance01 ?? 0) >= softFloorMin)
       : [];
 
+    const failClosedWhenNoSoftFloor = strictFullSuitTextIntent || strictTrouserTextIntent;
+
     let finalProductIds = relevanceGateSoft
       ? softFloorPassedIds.length > 0
         ? softFloorPassedIds
-        : sortedIds
+        : failClosedWhenNoSoftFloor
+          ? []
+          : sortedIds
       : thresholdPassedIds;
     const countAfterSoftGate = finalProductIds.length;
     let countAfterColorPost = finalProductIds.length;
@@ -2041,21 +2125,24 @@ export async function textSearch(
     // behind lexicographic category order before the final top-k slice.
     results = sortProductsByFinalRelevance(results);
 
-    // Suit-specific post-filter: when the query clearly targets suits, keep only products
-    // that have an actual suit/tuxedo catalog cue after hydration.
-    const hasSuitTextIntent = desiredProductTypes.some((t) => /\b(suits?|tuxedo)\b/.test(t));
-    if (hasSuitTextIntent && results.length > 0) {
+    if (queryGenderForAudience && results.length > 0) {
+      results = results.filter((p: any) => {
+        const compliance = complianceById.get(String(p.id));
+        if ((compliance?.audienceCompliance ?? 1) === 0) return false;
+        return !hasHardOppositeGenderSignal(p as Record<string, unknown>, queryGenderForAudience);
+      });
+    }
+
+    // Suit-specific post-filter: when the query clearly targets full suits, keep only
+    // products that have an actual suit/tuxedo catalog cue after hydration.
+    if (strictFullSuitTextIntent && results.length > 0) {
       const suitResults = results.filter((p: any) => hasActualSuitCatalogCue((p as any) ?? {}));
       if (suitResults.length > 0) {
-        const suitResultIds = new Set(suitResults.map((p: any) => String((p as any)?.id ?? "")).filter(Boolean));
-        results = [
-          ...suitResults,
-          ...results.filter((p: any) => !suitResultIds.has(String((p as any)?.id ?? ""))),
-        ];
+        results = suitResults;
       }
     }
     // For men's suit queries, also filter out women's products (audienceCompliance hard gate).
-    if (hasSuitTextIntent && queryGenderForAudience === "men" && results.length > 0) {
+    if (strictFullSuitTextIntent && queryGenderForAudience === "men" && results.length > 0) {
       const menResults = results.filter((p: any) => {
         const compliance = complianceById.get(String(p.id));
         return !compliance || (compliance.audienceCompliance ?? 1) >= 0.35;

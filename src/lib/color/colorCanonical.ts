@@ -104,7 +104,7 @@ export const COLOR_FAMILY_GROUPS: string[][] = [
   
   // Pink family - split into tones
   ["blush", "dusty-rose", "dusty-pink", "rose", "mauve"],                // soft pinks
-  ["hot-pink", "fuchsia", "magenta", "fuschia", "bright-pink"],          // bright pinks
+  ["pink", "hot-pink", "fuchsia", "magenta", "fuschia", "fushia", "fuhsia", "bright-pink"], // bright pinks
   ["salmon", "coral", "peachy-pink", "apricot", "terracotta"],           // warm pinks
   
   // Purple family

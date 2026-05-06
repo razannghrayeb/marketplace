@@ -252,8 +252,8 @@ export function scoreAudienceCompliance(
     ? hit._source.product_types.map((t) => String(t).toLowerCase()).join(" ")
     : "";
   const audienceBlob = `${title} ${category} ${canonical} ${productTypes}`;
-  const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|handbag|clutch|tote|purse|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt)\b/;
-  const menStyleCue = /\b(suit|suits|tie|oxford|oxfords|dress\s*shirt|button\s*down|button-down|briefs|boxer|boxers|cargo\s*pants?|chino|chinos|loafer|loafers|briefcase|messenger|sport\s*coat|blazer)\b/;
+  const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt)\b/;
+  const menStyleCue = /\b(briefs?|boxers?|jockstrap|menswear)\b/;
 
   let score = 1;
   let factors = 0;
@@ -288,15 +288,15 @@ export function scoreAudienceCompliance(
       const hasMenStyleCue = menStyleCue.test(audienceBlob);
       if (wantG === "men") {
         if (hasKidsCue) score *= 0;
-        else if (hasWomenStyleCue && !hasMenStyleCue) score *= 0.12;
+        else if (hasWomenStyleCue && !hasMenStyleCue) score *= 0;
         else if (/\b(men|mens|male)\b/.test(audienceBlob)) score *= 0.9;
-        else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(audienceBlob)) score *= 0.28;
+        else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(audienceBlob)) score *= 0;
         else score *= 0.78;
       } else if (wantG === "women") {
         if (hasKidsCue) score *= 0;
-        else if (hasMenStyleCue && !hasWomenStyleCue) score *= 0.12;
+        else if (hasMenStyleCue && !hasWomenStyleCue) score *= 0;
         else if (/\b(women|womens|female|ladies|woman)\b/.test(audienceBlob)) score *= 0.9;
-        else if (/\b(men|mens|male|man|boy|boys)\b/.test(audienceBlob)) score *= 0.28;
+        else if (/\b(men|mens|male|man|boy|boys)\b/.test(audienceBlob)) score *= 0;
         else score *= 0.78;
       } else {
         score *= 0.85;
@@ -311,6 +311,47 @@ export function scoreAudienceCompliance(
 
   if (factors === 0) return 1;
   return Math.max(0, Math.min(1, Math.pow(score, 1 / factors)));
+}
+
+function hasStrictFullSuitIntent(intentBlob: string): boolean {
+  const blob = String(intentBlob ?? "").toLowerCase();
+  if (!blob.trim()) return false;
+  const jacketOnly =
+    /\b(?:suit|dress)\s+jackets?\b/.test(blob) &&
+    !/\b(suits|tuxedos?|two[-\s]?piece|three[-\s]?piece|matching\s+suit|suit\s+set|full\s+suit)\b/.test(blob);
+  if (jacketOnly) return false;
+  return /\b(suits?|tuxedos?|two[-\s]?piece|three[-\s]?piece|matching\s+suit|suit\s+set|full\s+suit)\b/.test(blob);
+}
+
+function hasActualSuitCatalogCue(src: Record<string, unknown>, productTypes: string[]): boolean {
+  const blob = [
+    src.title,
+    src.description,
+    src.category,
+    src.category_canonical,
+    ...(Array.isArray(productTypes) ? productTypes : []),
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x))
+    .join(" ")
+    .toLowerCase();
+  if (!blob.trim()) return false;
+
+  const norm = blob.replace(/[^a-z0-9\s\-_/]/g, " ").replace(/\s+/g, " ").trim();
+  if (!norm) return false;
+  if (/\b(suit|suits|tuxedo|tuxedos)\b/i.test(norm)) {
+    const withoutSuitJacket = norm.replace(/\bsuit jacket\b/gi, "").trim();
+    if (/\b(suit|suits)\b/i.test(withoutSuitJacket) || /\btuxedo\b/i.test(withoutSuitJacket)) return true;
+  }
+
+  const hasBlazer = /\b(blazer|blazers|suit jacket|dress jacket|sport coat|sportcoat)\b/i.test(norm);
+  const hasSuitBottomHint = /\b(pant|pants|trouser|trousers|slacks|dress pants|2p|2-piece|two piece|set|full set)\b/i.test(norm);
+  if (hasBlazer && hasSuitBottomHint) return true;
+
+  const catCanon = String(src.category_canonical ?? "").toLowerCase();
+  const catRaw = String(src.category ?? "").toLowerCase();
+  if (catCanon === "tailored" || /\b(suit|suits|tailored|tailoring|waistcoat|waistcoats)\b/.test(catRaw)) return true;
+  return false;
 }
 
 /** When indexed hits expose separate hybrid components, rerank uses them for sem vs lex. */
@@ -512,6 +553,32 @@ function inferSleeveFromCatalogSignals(
   }
 
   return null;
+}
+
+function inferredSleeveConfidence(
+  src: Record<string, unknown>,
+  title: string,
+  description: string,
+  inferred: "short" | "long" | "sleeveless",
+): number {
+  const bag = [
+    src.category,
+    src.category_canonical,
+    title,
+    description,
+    ...(Array.isArray(src.product_types) ? src.product_types : []),
+  ]
+    .map((x) => String(x ?? "").toLowerCase())
+    .join(" ");
+
+  if (inferred === "long") {
+    if (/\b(hoodie|hoodies|hooded|sweater|sweaters|cardigan|cardigans|pullover|pullovers)\b/.test(bag)) return 0.72;
+    if (/\b(jacket|jackets|coat|coats|parka|parkas|trench|blazer|blazers|windbreaker|overcoat|outerwear)\b/.test(bag)) return 0.66;
+    return 0.48;
+  }
+
+  if (inferred === "sleeveless") return 0.72;
+  return 0.42;
 }
 
 function docSupportsSleeveIntent(src: Record<string, unknown>): boolean {
@@ -1041,9 +1108,9 @@ export function computeHitRelevance(
       sleeveCompliance = 0.15;
     } else if (inferredObserved === wantedSleeve) {
       // Inferred sleeve from type/category cues is weaker than explicit sleeve metadata.
-      // Keep this conservative so noisy catalog signals (e.g. bad type tags) do not
-      // incorrectly satisfy sleeve intent for long-sleeve products.
-      sleeveCompliance = observed ? 1 : 0.28;
+      // Strong garment defaults like hoodies/cardigans are useful evidence, while
+      // generic inferred defaults remain below explicit sleeve metadata.
+      sleeveCompliance = observed ? 1 : inferredSleeveConfidence(src, title, description, inferredObserved);
     } else if (!observed) {
       // Avoid hard contradiction penalty when mismatch comes from heuristic inference only.
       sleeveCompliance = 0.12;
@@ -1332,12 +1399,14 @@ export function computeHitRelevance(
     );
   const isBottomLikeIntent =
     /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts?|skirt|skirts|leggings?)\b/.test(intentBlob);
+  const isTrouserLikeIntent =
+    /\b(pants?|trousers?|slacks?|chinos?|cargo(?:\s+pants?)?|joggers?|jeans?|leggings?)\b/.test(intentBlob) &&
+    !/\b(shorts?|bermuda|skorts?|skirts?)\b/.test(intentBlob);
   const isFootwearLikeIntent =
     /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(intentBlob);
 
-  // Detect explicit suit queries and relax color gating so coordinated
-  // trousers/dress-pants and shoes surface alongside jackets.
-  const suitIntent = /\b(suit|suits|two[-\s]?piece|three[-\s]?piece|matching\s*suit)\b/.test(intentBlob);
+  // Full-suit queries should not degrade into generic coat/outerwear retrieval.
+  const strictFullSuitIntent = hasStrictFullSuitIntent(intentBlob);
 
   // Document-level family detection (used for hard-blocking non-matching families)
   const docBlobForFamily = [src.category, src.category_canonical, src.title, ...(Array.isArray(productTypes) ? productTypes : [])]
@@ -1346,15 +1415,25 @@ export function computeHitRelevance(
     .toLowerCase();
   const docIsTopLike = /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|overshirt|overshirts|polo|polos)\b/.test(docBlobForFamily);
   const docIsBottomLike = /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts?|skirt|skirts|leggings?)\b/.test(docBlobForFamily);
+  const docIsShortsSkirtLike = /\b(shorts?|bermuda|board\s+shorts?|skorts?|skirts?)\b/.test(docBlobForFamily);
   const docIsFootwearLike = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(docBlobForFamily);
   const docIsDressLike = /\b(dress|dresses|gown)\b/.test(docBlobForFamily);
+
+  let suitBlocked = false;
+  let bottomSubtypeBlocked = false;
 
   // Hard family restrictions: if the user strongly intends a family (top/bottom/footwear/dress)
   // then do not allow hits from other families to surface (set final relevance to 0).
   // This is intentionally strict per request; can be made configurable later.
   try {
-    if (hasTypeIntent) {
-      if (isFootwearLikeIntent && !docIsFootwearLike) {
+    if (hasReliableTypeIntent) {
+      if (strictFullSuitIntent && !hasActualSuitCatalogCue(src, productTypes)) {
+        finalRelevance01 = 0;
+        suitBlocked = true;
+      } else if (isTrouserLikeIntent && docIsShortsSkirtLike) {
+        finalRelevance01 = 0;
+        bottomSubtypeBlocked = true;
+      } else if (isFootwearLikeIntent && !docIsFootwearLike) {
         finalRelevance01 = 0;
       } else if (isTopLikeIntent && !docIsTopLike) {
         finalRelevance01 = 0;
@@ -1454,7 +1533,7 @@ export function computeHitRelevance(
     hasSleeveIntent: hasSleeveIntentForDoc,
     hasAudienceIntent,
     typeGateFactor,
-    hardBlocked: hardBlocked || negationBlocked || swimBlocked,
+    hardBlocked: hardBlocked || negationBlocked || swimBlocked || suitBlocked || bottomSubtypeBlocked,
     // swimBlocked: true when a swimwear hit was zeroed due to short/shorts intent
     // without explicit swim intent from the user.
     // Included in `hardBlocked` above via `swimBlocked` variable.
