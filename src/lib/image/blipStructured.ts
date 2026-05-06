@@ -86,9 +86,7 @@ function rankProductTypeHint(token: string): number {
   if (!t) return 999;
   if (/\b(dress|dresses|gown|gowns|frock|midi dress|maxi dress|mini dress)\b/.test(t)) return 0;
   if (/\b(jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits)\b/.test(t)) return 1;
-  // Suits have highest priority in tailored/formal category (before generic jackets)
-  if (/\b(suit|suits|tuxedo|tuxedos|suit jacket|dress jacket)\b/.test(t)) return 1.5;
-  if (/\b(blazer|blazers|sport coat|sportcoat|jacket|jackets|coat|coats|parka|parkas|trench|windbreaker|windbreakers|vest|vests|gilet|poncho|anorak|bomber|bomber jacket)\b/.test(t)) return 2;
+  if (/\b(blazer|blazers|sport coat|sportcoat|suit jacket|jacket|jackets|coat|coats|parka|parkas|trench|windbreaker|windbreakers|vest|vests|gilet|poncho|anorak|bomber|bomber jacket)\b/.test(t)) return 2;
   if (/\b(hoodie|hoodies|sweatshirt|sweatshirts|pullover|pullovers|sweater|sweaters|cardigan|cardigans|jumper|jumpers|knitwear|shirt|shirts|blouse|blouses|button down|button-down|tshirt|tee|tees|t-shirt|tank|camisole|camis|top|tops|cami|polo|polos|polo shirt)\b/.test(t)) return 3;
   if (/\b(pant|pants|trouser|trousers|chino|chinos|cargo pants|cargo|slacks|jean|jeans|denim|denims|legging|leggings|tights)\b/.test(t)) return 4;
   if (/\b(shorts|short|bermuda|board shorts|skirt|skirts|mini skirt|midi skirt)\b/.test(t)) return 5;
@@ -100,7 +98,7 @@ function rankProductTypeHint(token: string): number {
 
 function inferStyleFromCaption(caption: string): StructuredBlipStyle {
   const s = caption.toLowerCase();
-  if (/\b(formal|elegant|gown|tailored|blazer|suit|tie|tuxedo)\b/.test(s)) {
+  if (/\b(formal|elegant|gown|tailored|blazer)\b/.test(s)) {
     return { attrStyle: "formal", occasion: "formal", formality: 0.86 };
   }
   if (/\b(smart casual|semi formal|semi-formal|office|workwear)\b/.test(s)) {
@@ -115,64 +113,13 @@ function inferStyleFromCaption(caption: string): StructuredBlipStyle {
   return {};
 }
 
-/**
- * Apply caption-driven overrides for well-known garment signals.
- * Captures signals that lexical extraction might miss or misclassify.
- * Example: "man in a suit and tie" correctly overrides detected "shirt" → "suit"
- */
-function applyCaptionOverridesToTypeHints(
-  caption: string,
-  hints: string[]
-): string[] {
-  const s = caption.toLowerCase();
-
-  // **SUIT OVERRIDE**: Caption explicitly mentions "suit" or "tie"
-  // Override: Remove generic shirt/top/outerwear confusion, inject "suit" + formal variants
-  if (/\b(suit|suits|tie|tuxedo)\b/.test(s)) {
-    // Remove conflicting types that might have been detected
-    const filtered = hints.filter(
-      (t) =>
-        !/\b(shirt|blouse|button.*up|casual.*shirt|dress.*shirt|polo|tee|t.?shirt|top|camisole|tank|cami)\b/.test(
-          t
-        )
-    );
-
-    // Always include suit variants if not already present
-    const suitVariants = ["suit", "suit jacket", "blazer", "dress jacket", "formal jacket"];
-    for (const variant of suitVariants) {
-      if (!filtered.includes(variant)) {
-        filtered.unshift(variant);
-      }
-    }
-    return filtered.slice(0, 12);
-  }
-
-  // **FORMAL OUTERWEAR OVERRIDE**: Caption mentions "blazer" + formal context
-  if (/\b(blazer|blazers|sport\s+coat|sportcoat)\b/.test(s) && /\b(formal|tailored|structured)\b/.test(s)) {
-    const filtered = hints.filter(
-      (t) =>
-        !/\b(casual.*jacket|denim.*jacket|shirt jacket|shacket|bomber|windbreaker|rain)\b/.test(t)
-    );
-    if (!filtered.includes("blazer")) {
-      filtered.unshift("blazer");
-    }
-    return filtered.slice(0, 12);
-  }
-
-  return hints;
-}
-
 export function buildStructuredBlipOutput(rawCaption: string): StructuredBlipOutput {
   const normalizedCaption = String(rawCaption || "").replace(/\s+/g, " ").trim().toLowerCase();
   const audience = inferAudienceFromCaption(normalizedCaption);
   const slotColors = inferColorFromCaption(normalizedCaption);
   const lexicalTypes = extractLexicalProductTypeSeeds(normalizedCaption).map(normalizeTypeToken);
   const expanded = expandProductTypesForQuery(lexicalTypes).map(normalizeTypeToken);
-  let mergedHints = [...new Set([...lexicalTypes, ...expanded])].filter(Boolean);
-  
-  // Apply caption-driven overrides **before** filtering and ranking
-  mergedHints = applyCaptionOverridesToTypeHints(normalizedCaption, mergedHints);
-  
+  const mergedHints = [...new Set([...lexicalTypes, ...expanded])].filter(Boolean);
   const hasApparel = mergedHints.some((t) => isApparelHint(t));
   const productTypeHints = (hasApparel ? mergedHints.filter((t) => !isFootwearHint(t)) : mergedHints)
     .sort((a, b) => rankProductTypeHint(a) - rankProductTypeHint(b) || a.localeCompare(b))

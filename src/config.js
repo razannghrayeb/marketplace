@@ -1,7 +1,45 @@
 "use strict";
+var _a, _b, _c, _d, _e, _f;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.config = void 0;
-require("dotenv/config");
+var fs_1 = require("fs");
+var path_1 = require("path");
+var dotenv_1 = require("dotenv");
+/**
+ * Load an env file only when it exists.
+ *
+ * Local testing:
+ * - create `.env.local` and set `NODE_ENV=local` (or `ENV_FILE=.env.local`)
+ *
+ * Cloud deploy:
+ * - Cloud Run injects environment variables directly, usually no `.env.*` file exists
+ * - we avoid failing the server if the file isn't present
+ */
+function loadDotEnv() {
+    var envFile = process.env.ENV_FILE ||
+        (process.env.NODE_ENV ? ".env.".concat(process.env.NODE_ENV) : "");
+    var candidates = [];
+    if (envFile)
+        candidates.push(envFile);
+    candidates.push(".env");
+    for (var _i = 0, candidates_1 = candidates; _i < candidates_1.length; _i++) {
+        var candidate = candidates_1[_i];
+        var resolved = path_1.default.resolve(process.cwd(), candidate);
+        if (fs_1.default.existsSync(resolved)) {
+            dotenv_1.default.config({ path: resolved, override: false });
+            return;
+        }
+    }
+}
+loadDotEnv();
+function finiteEnvNumber(raw, fallback, min, max) {
+    if (raw === undefined || String(raw).trim() === "")
+        return fallback;
+    var n = Number(raw);
+    if (!Number.isFinite(n))
+        return fallback;
+    return Math.min(max, Math.max(min, n));
+}
 function getRedisConfig() {
     return {
         restUrl: process.env.UPSTASH_REDIS_REST_URL || "",
@@ -32,7 +70,7 @@ exports.config = {
         ssl: { rejectUnauthorized: false },
     },
     opensearch: {
-        node: process.env.OS_NODE || "https://avnadmin:AVNS_QJfJVot3ZhsDwtSsqZR@os-2bd583f8-ghrazan2006-96c3.j.aivencloud.com:13309",
+        node: process.env.OS_NODE || "https://avnadmin:AVNS_seqtyHr-NLC1nO4M5Yt@os-270aa11c-lau-6d81.j.aivencloud.com:12588",
         index: process.env.OS_INDEX || "products",
         username: process.env.OS_USERNAME || "",
         password: process.env.OS_PASSWORD || "",
@@ -49,17 +87,131 @@ exports.config = {
         // Model type: "fashion-clip" (recommended) | "vit-l-14" | "vit-b-32"
         // Fashion-CLIP is fine-tuned for apparel and captures fabric textures, styles better
         modelType: process.env.CLIP_MODEL_TYPE || "fashion-clip",
-        // Similarity thresholds
-        similarityThreshold: Number(process.env.CLIP_SIMILARITY_THRESHOLD || 0.7),
+        // Similarity thresholds (image kNN + text hybrid min_score caps); text gate default aligns with SEARCH_FINAL_ACCEPT_MIN_TEXT
+        similarityThreshold: Number(process.env.CLIP_SIMILARITY_THRESHOLD || 0.6),
+        /** Image-only kNN gate; compared as raw cosine [0,1] after knnCosinesimilScoreToCosine01. */
+        imageSimilarityThreshold: finiteEnvNumber(process.env.CLIP_IMAGE_SIMILARITY_THRESHOLD, 0.38, 0.2, 0.95),
         duplicateThreshold: Number(process.env.CLIP_DUPLICATE_THRESHOLD || 0.92),
+        /**
+         * `match_type: "exact"` when normalized similarity ≥ this (image + text hybrid UI).
+         * Fashion CLIP scores rarely reach 0.8 unless near-duplicates; tune with prod p85.
+         */
+        matchTypeExactMin: finiteEnvNumber(process.env.CLIP_MATCH_TYPE_EXACT_MIN, 0.58, 0.35, 0.95),
+    },
+    search: {
+        /** OpenSearch candidates before rerank (tune with SEARCH_RECALL_WINDOW). */
+        recallWindow: finiteEnvNumber(process.env.SEARCH_RECALL_WINDOW, 500, 50, 2000),
+        recallMax: finiteEnvNumber(process.env.SEARCH_RECALL_MAX, 600, 100, 2000),
+        /** Text acceptance gate (defaults to legacy SEARCH_FINAL_ACCEPT_MIN when set). */
+        finalAcceptMinText: finiteEnvNumber((_a = process.env.SEARCH_FINAL_ACCEPT_MIN_TEXT) !== null && _a !== void 0 ? _a : process.env.SEARCH_FINAL_ACCEPT_MIN, 0.6, 0.35, 0.95),
+        /** Image / vision acceptance gate — products below this `finalRelevance01` are omitted (see imageSearchMinResults for opt-in sparse recall). */
+        finalAcceptMinImage: finiteEnvNumber(process.env.SEARCH_FINAL_ACCEPT_MIN_IMAGE, 0.42, 0.15, 0.95),
+        /** Backward-compat alias used by older call sites; maps to text gate. */
+        finalAcceptMin: finiteEnvNumber((_b = process.env.SEARCH_FINAL_ACCEPT_MIN_TEXT) !== null && _b !== void 0 ? _b : process.env.SEARCH_FINAL_ACCEPT_MIN, 0.6, 0.35, 0.95),
+        filterHardMinConfidence: finiteEnvNumber(process.env.SEARCH_FILTER_HARD_MIN_CONFIDENCE, 0.55, 0.35, 0.95),
+        domainEmbeddingRejectBelow: finiteEnvNumber(process.env.SEARCH_DOMAIN_EMBEDDING_REJECT_BELOW, 0.3, 0.15, 0.55),
+        /** max = divide by top hit score (default); tanh = Math.tanh(raw/scale) for calibration across queries */
+        similarityNormalize: String((_c = process.env.SEARCH_SIMILARITY_NORMALIZE) !== null && _c !== void 0 ? _c : "max").toLowerCase() === "tanh"
+            ? "tanh"
+            : "max",
+        similarityTanhScale: finiteEnvNumber(process.env.SEARCH_SIMILARITY_TANH_SCALE, 10, 1, 50),
+        /** hard = drop hits below text gate (SEARCH_FINAL_ACCEPT_MIN_TEXT); soft = keep reranked order, no min gate */
+        relevanceGateMode: String((_d = process.env.SEARCH_RELEVANCE_GATE_MODE) !== null && _d !== void 0 ? _d : "soft").toLowerCase() === "soft"
+            ? "soft"
+            : "hard",
+        /**
+         * In `soft` mode, we still want to avoid extremely low `finalRelevance01`
+         * products. If there are any candidates above this floor, prefer them;
+         * otherwise fall back to the full candidate set to avoid returning zero results.
+         */
+        softFinalRelevanceFloorMin: finiteEnvNumber(process.env.SEARCH_SOFT_FINAL_RELEVANCE_FLOOR_MIN, 0.03, 0, 1),
+        /**
+         * With SEARCH_USE_XGB_RANKER: score a recall prefix before pagination (default on).
+         * Set SEARCH_XGB_RERANK_FULL_RECALL=false for legacy page-only tie-break (after slice).
+         */
+        xgbRerankFullRecall: (function () {
+            var _a;
+            var v = String((_a = process.env.SEARCH_XGB_RERANK_FULL_RECALL) !== null && _a !== void 0 ? _a : "").toLowerCase().trim();
+            if (v === "0" || v === "false" || v === "off" || v === "no")
+                return false;
+            return true;
+        })(),
+        /** Hard cap on XGB batch size; head window is at least max(this, offset+limit) when full-recall is on. */
+        xgbFullRecallMax: finiteEnvNumber(process.env.SEARCH_XGB_FULL_RECALL_MAX, 500, 20, 2000),
+        /**
+         * pHash Hamming max for treating two primary images as near-duplicates (lower = keep more distinct listings).
+         * SEARCH_DEDUPE_IMAGE_HAMMING_MAX (default 7; was 10).
+         */
+        dedupeImageHammingMax: finiteEnvNumber(process.env.SEARCH_DEDUPE_IMAGE_HAMMING_MAX, 7, 4, 14),
+        /** Key segment for QueryAST Redis cache (future: per-request locale). */
+        queryAstCacheLocale: ((_e = process.env.SEARCH_QUERY_AST_LOCALE) === null || _e === void 0 ? void 0 : _e.trim()) || "default",
+        /** TTL for SEARCH_QUERY_AST_REDIS serialized AST (seconds). */
+        queryAstRedisTtlSec: finiteEnvNumber(process.env.SEARCH_QUERY_AST_REDIS_TTL_SEC, 600, 60, 3600),
+        /**
+         * When SEARCH_KNN_TEXT_IN_MUST would place kNN in must, demote to should-boost if fashion
+         * embedding score vs prototype is below threshold (proactive zero-hit avoidance).
+         */
+        knnDemoteLowFashionEmb: (function () {
+            var _a;
+            var v = String((_a = process.env.SEARCH_KNN_DEMOTE_LOW_FASHION_EMB) !== null && _a !== void 0 ? _a : "").toLowerCase().trim();
+            return v === "1" || v === "true";
+        })(),
+        knnDemoteFashionEmbMax: finiteEnvNumber(process.env.SEARCH_KNN_DEMOTE_FASHION_EMB_MAX, 0.52, 0.35, 0.65),
+        /** Hard gender filter also matches unisex audience fields (default on). */
+        genderUnisexOr: (function () {
+            var _a;
+            var v = String((_a = process.env.SEARCH_GENDER_UNISEX_OR) !== null && _a !== void 0 ? _a : "1").toLowerCase().trim();
+            return v !== "0" && v !== "false" && v !== "off" && v !== "no";
+        })(),
+        /**
+         * When true (or client sends ?rankingDebug=1), product search responses include `meta.ranking_debug`
+         * and per-item `explain` / `finalRelevance01` remain populated for staging analysis.
+         */
+        searchRankingDebug: (function () {
+            var _a;
+            var v = String((_a = process.env.SEARCH_RANKING_DEBUG) !== null && _a !== void 0 ? _a : "").toLowerCase().trim();
+            return v === "1" || v === "true";
+        })(),
+        /** Lower bound for image kNN relax paths; must match products.service `imageRelaxSimilarityFloor`. */
+        searchImageRelaxFloor: finiteEnvNumber(process.env.SEARCH_IMAGE_RELAX_FLOOR, 0.45, 0.2, 0.92),
+        /**
+         * When image search returns fewer than this many hits after the strict relevance gate,
+         * widen the relevance floor once (still within visual-gated candidates). Default 0 = off (quality-first).
+         */
+        imageSearchMinResults: finiteEnvNumber(process.env.SEARCH_IMAGE_MIN_RESULTS, 0, 0, 80),
+        /** Subtracted from finalAcceptMinImage when sparse recall is enabled (floored at 0.45). */
+        imageSearchRelevanceRelaxDelta: finiteEnvNumber(process.env.SEARCH_IMAGE_RELEVANCE_RELAX_DELTA, 0.08, 0.04, 0.28),
+        /**
+         * Floor for relevance when SEARCH_IMAGE_MIN_RESULTS widens the gate: max(finalAcceptMin * fraction, finalAcceptMin - delta).
+         * Higher = stricter (fewer weak metadata matches). Default 0.78 (was 0.6 in code).
+         */
+        imageSearchRelevanceRelaxMinFraction: finiteEnvNumber(process.env.SEARCH_IMAGE_RELEVANCE_RELAX_MIN_FRACTION, 0.78, 0.55, 0.95),
+        /**
+         * On broad image search (no category/type/color/text), multiply SEARCH_IMAGE_AISLE_SOFT_WEIGHT by this
+         * so YOLO/aisle hints do not reorder above stronger CLIP neighbors. Set 1 to disable reduction.
+         */
+        imageSearchVisualPrimaryAisleMult: finiteEnvNumber(process.env.SEARCH_IMAGE_VISUAL_PRIMARY_AISLE_MULT, 0.52, 0.15, 1),
+        /** Cap BLIP caption wait for POST /products/search/image (ms). */
+        blipCaptionTimeoutMs: finiteEnvNumber(process.env.SEARCH_BLIP_CAPTION_TIMEOUT_MS, 900, 200, 8000),
+        /**
+         * When true (default), primary image upload runs BLIP once to fill missing `products.description`,
+         * `color`, and `gender` (if column exists) from caption heuristics.
+         */
+        blipFillMissingOnImageUpload: (function () {
+            var _a;
+            var v = String((_a = process.env.PRODUCT_IMAGE_BLIP_FILL_MISSING) !== null && _a !== void 0 ? _a : "1").toLowerCase().trim();
+            return v !== "0" && v !== "false" && v !== "off" && v !== "no";
+        })(),
     },
     tryon: {
-        // Google Cloud Vertex AI Virtual Try-On
-        // Auth: gcloud auth application-default login  OR  GOOGLE_APPLICATION_CREDENTIALS=/key.json
+        // Google Cloud Vertex AI — Virtual Try-On (publishers/google/models/...:predict)
+        // https://cloud.google.com/vertex-ai/generative-ai/docs/image/generate-virtual-try-on-images
         project: process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || "",
         location: process.env.TRYON_LOCATION || "us-central1",
         model: process.env.TRYON_MODEL || "virtual-try-on-001",
         timeout: Number(process.env.TRYON_TIMEOUT || 60000),
+        /** Optional gs://bucket/prefix — when set, API may write outputs there (see Google docs) */
+        storageUri: ((_f = process.env.TRYON_STORAGE_URI) === null || _f === void 0 ? void 0 : _f.trim()) || "",
     },
     jwt: {
         secret: process.env.JWT_SECRET || "change-me-in-production",

@@ -21,6 +21,7 @@ export type MatchTier = "exact" | "strong" | "related" | "weak" | "fallback" | "
 import type { FashionIntent } from "./fashionIntent";
 import { defaultConfidence, type ImageMode } from "./fashionIntent";
 import { colorCompatibility } from "./colorCompatibilityMatrix";
+import { config } from "../../config";
 
 /**
  * Bottoms type equivalence mapping for jeans, pants, trousers, chinos.
@@ -490,10 +491,25 @@ function computeMatchStrength(product: NormalizedProduct, intent: FashionIntent)
   const colorCompatScore = colorCompatibility(intent.color, product.normalizedColor);
   const colorMatch = colorCompatScore >= 0.8; // Exact or same-family color
 
-  const audienceMatch = product.normalizedAudience && intent.audience
-    ? product.normalizedAudience === intent.audience ||
-      product.normalizedAudience === "unisex" ||
-      intent.audience === "unisex"
+  // Strict audience handling: honor `SEARCH_GENDER_UNISEX_OR` toggle from config.
+  // If both product and intent specify a non-unisex audience and they differ,
+  // treat as a hard mismatch (fallback) to enforce strict cross-gender restrictions.
+  const genderUnisexOr = Boolean(config.search?.genderUnisexOr);
+  const productAudience = product.normalizedAudience;
+  const intentAudience = intent.audience;
+
+  if (productAudience && intentAudience && productAudience !== intentAudience) {
+    const productIsUnisex = productAudience === "unisex";
+    const intentIsUnisex = intentAudience === "unisex";
+    const unisexAccept = genderUnisexOr && (productIsUnisex || intentIsUnisex);
+    if (!unisexAccept) {
+      // Enforce strict audience mismatch → hard block (exclude from results)
+      return "blocked";
+    }
+  }
+
+  const audienceMatch = productAudience && intentAudience
+    ? productAudience === intentAudience || (genderUnisexOr && (productAudience === "unisex" || intentAudience === "unisex"))
     : false;
 
   // Exact: family + type + (subtype or color match)
