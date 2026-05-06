@@ -220,26 +220,81 @@ function categoryWeights(detectionCategory: string): CategoryWeights {
 function checkHardGates(input: UnifiedScoreInputs): string | null {
   const c = String(input.detectionProductCategory ?? "").toLowerCase().trim();
 
-  // Gate 1: family alignment based on detection category.
-  // Skip when YOLO is too uncertain or category is too broad to enforce.
-  const yoloOk = input.detectionYoloConfidence >= 0.65;
+  // ── Gate 1: family alignment ──
+  // Block when doc has a CLEAR OPPOSITE family signal (e.g. dress doc vs tops query).
+  // Do NOT block when doc has no family signals at all — sparse-metadata docs
+  // (brand-only titles, empty categories) should fall through to scoring rather
+  // than being silently dropped. This fixes the "many products dropped, no results"
+  // issue while still hard-blocking actual cross-category candidates.
+  //
+  // Block also requires reasonable YOLO confidence so a borderline detection
+  // doesn't aggressively reject candidates that may genuinely match.
+  const yoloOk = input.detectionYoloConfidence >= 0.70;
   if (yoloOk) {
-    if (c === "tops" && !input.docIsTopLike) return "family_top_intent_non_top_doc";
-    if (c === "bottoms" && !input.docIsBottomLike) return "family_bottom_intent_non_bottom_doc";
-    if ((c === "footwear" || c === "shoes") && !input.docIsFootwearLike) return "family_footwear_intent_non_footwear_doc";
-    if (c === "dresses" && !input.docIsDressLike) return "family_dress_intent_non_dress_doc";
-    if ((c === "outerwear" || c === "tailored") && !input.docIsOuterwearOrTailoredLike) return "family_outerwear_intent_non_outerwear_doc";
-    if (c === "bags" && !input.docIsBagLike) return "family_bag_intent_non_bag_doc";
+    if (c === "tops") {
+      // For tops detection, block ONLY when doc has a clear non-top family signal.
+      // Outerwear is partially overlapping (overshirt, shacket) — handled by intra
+      // and cross-family caps below, not the hard gate.
+      const oppositeSignal =
+        input.docIsBottomLike ||
+        input.docIsFootwearLike ||
+        input.docIsDressLike ||
+        input.docIsBagLike;
+      if (oppositeSignal && !input.docIsTopLike) return "family_top_intent_opposite_doc";
+    } else if (c === "bottoms") {
+      const oppositeSignal =
+        input.docIsTopLike ||
+        input.docIsFootwearLike ||
+        input.docIsDressLike ||
+        input.docIsOuterwearOrTailoredLike ||
+        input.docIsBagLike;
+      if (oppositeSignal && !input.docIsBottomLike) return "family_bottom_intent_opposite_doc";
+    } else if (c === "footwear" || c === "shoes") {
+      const oppositeSignal =
+        input.docIsTopLike ||
+        input.docIsBottomLike ||
+        input.docIsDressLike ||
+        input.docIsOuterwearOrTailoredLike ||
+        input.docIsBagLike;
+      if (oppositeSignal && !input.docIsFootwearLike) return "family_footwear_intent_opposite_doc";
+    } else if (c === "dresses") {
+      const oppositeSignal =
+        input.docIsBottomLike ||
+        input.docIsFootwearLike ||
+        input.docIsOuterwearOrTailoredLike ||
+        input.docIsBagLike;
+      if (oppositeSignal && !input.docIsDressLike) return "family_dress_intent_opposite_doc";
+    } else if (c === "outerwear" || c === "tailored") {
+      const oppositeSignal =
+        input.docIsBottomLike ||
+        input.docIsFootwearLike ||
+        input.docIsDressLike ||
+        input.docIsBagLike;
+      if (oppositeSignal && !input.docIsOuterwearOrTailoredLike) return "family_outerwear_intent_opposite_doc";
+    } else if (c === "bags") {
+      const oppositeSignal =
+        input.docIsTopLike ||
+        input.docIsBottomLike ||
+        input.docIsFootwearLike ||
+        input.docIsDressLike;
+      if (oppositeSignal && !input.docIsBagLike) return "family_bag_intent_opposite_doc";
+    }
   }
 
-  // Gate 2: cross-family penalty severe (catches cases the doc-family regex misses,
-  // e.g. when the doc has both top and outerwear words).
-  if (input.crossFamilyPenalty >= 0.80 && input.reliableTypeIntent) return "cross_family_severe";
+  // ── Gate 2: severe cross-family penalty ──
+  // Catches the few cases the regex above doesn't (e.g. shorts vs trouser intent
+  // produces 0.92 cross-family penalty even though both are bottoms).
+  if (input.crossFamilyPenalty >= 0.85 && input.reliableTypeIntent) return "cross_family_severe";
 
-  // Gate 3: audience hard contradiction.
-  if (input.hasAudienceIntent && input.audienceCompliance <= 0.05) return "audience_hard_contradiction";
+  // ── Gate 3: cross-gender contradiction ──
+  // Strict (< 0.30) because scoreAudienceCompliance soft-multiplies down to ~0.35
+  // for women-cue docs against men query (and vice versa). Without this, cross-gender
+  // products slip through. User explicitly wants no cross-gender.
+  if (input.hasAudienceIntent && input.audienceCompliance < 0.30) return "audience_contradiction";
 
-  // Gate 4: hard color contradiction with explicit user intent (filters.color set).
+  // ── Gate 4: hard color contradiction with explicit user filter ──
+  // Only fires when the user explicitly typed/filtered a color (not when color was
+  // inferred from BLIP/crop) AND tier is none AND raw compliance is essentially 0.
   if (
     input.hasExplicitColorIntent &&
     String(input.colorTier).toLowerCase() === "none" &&
@@ -251,6 +306,31 @@ function checkHardGates(input: UnifiedScoreInputs): string | null {
   return null;
 }
 
+/**
+ * Effective intra-family penalty.
+ *
+ * `intraFamilyPenalty` from productTypeTaxonomy is computed as MAX over all
+ * (query_seed × doc_type) pairs. This means a polo doc gets penalized 0.72 against
+ * a query that includes "knit" alongside "polo" because (knit, polo) pairs to 0.72
+ * in TOPS_PENALTY_TBL — even though the query also includes "polo" which pairs to
+ * 0 with the doc. When an exact type match exists, the worst-pair penalty is the
+ * wrong signal: there's a query seed that matches the doc perfectly, the user
+ * intent is satisfied, intra-family mismatch shouldn't apply.
+ *
+ * Compensation:
+ *   - exactTypeScore ≥ 1 → effective penalty = 0
+ *   - productTypeCompliance ≥ 0.82 → effective penalty halved
+ *   - productTypeCompliance ≥ 0.62 → effective penalty * 0.7
+ *   - otherwise → effective penalty as-is
+ */
+function effectiveIntraFamilyPenalty(input: UnifiedScoreInputs): number {
+  const raw = clamp01(input.intraFamilyPenalty);
+  if (input.exactTypeScore >= 1) return 0;
+  if (input.productTypeCompliance >= 0.82) return raw * 0.5;
+  if (input.productTypeCompliance >= 0.62) return raw * 0.7;
+  return raw;
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Caps
 // ────────────────────────────────────────────────────────────────────────────
@@ -259,45 +339,64 @@ function computeCaps(input: UnifiedScoreInputs): { reason: string; value: number
   const caps: { reason: string; value: number }[] = [];
   const tier = String(input.colorTier ?? "none").toLowerCase();
 
-  // Sleeve mismatch caps.
-  if (input.hasSleeveIntent) {
-    if (input.sleeveCompliance <= 0.10) caps.push({ reason: "sleeve_hard_mismatch", value: 0.55 });
-    else if (input.sleeveCompliance <= 0.30) caps.push({ reason: "sleeve_weak_match", value: 0.75 });
+  // ── Continuous caps ──
+  // Use linear interpolation instead of stepped values so similar penalties produce
+  // unique caps. Stepped caps caused visible score ties at 0.55, 0.65, 0.75, 0.78.
+  // Each cap is clamped to a sensible floor to keep the formula bounded.
+
+  // Sleeve mismatch — when intent active, mismatch caps the score continuously.
+  // sleeveCompliance 0.0 → cap 0.50, 0.30 → cap 0.78, 0.50+ → no cap.
+  if (input.hasSleeveIntent && input.sleeveCompliance < 0.50) {
+    const cap = 0.50 + input.sleeveCompliance * 0.93; // [0.50, 0.965)
+    caps.push({ reason: "sleeve_mismatch_cap", value: cap });
   }
 
-  // Length mismatch caps.
-  if (input.hasLengthIntent) {
-    if (input.lengthCompliance <= 0.15) caps.push({ reason: "length_hard_mismatch", value: 0.55 });
-    else if (input.lengthCompliance <= 0.40) caps.push({ reason: "length_weak_match", value: 0.75 });
+  // Length mismatch — same shape as sleeve.
+  if (input.hasLengthIntent && input.lengthCompliance < 0.55) {
+    const cap = 0.50 + input.lengthCompliance * 0.85;
+    caps.push({ reason: "length_mismatch_cap", value: cap });
   }
 
-  // Color mismatch caps. Different intent strengths → different ceilings.
+  // Color mismatch — discrete tier transitions but with continuous compliance bonus.
   if (input.hasColorIntent && tier === "none") {
-    const v = input.hasExplicitColorIntent ? 0.20 : input.hasInferredColorSignal ? 0.45 : 0.65;
-    caps.push({ reason: "color_tier_none", value: v });
+    const baseCap = input.hasExplicitColorIntent ? 0.18 : input.hasInferredColorSignal ? 0.42 : 0.62;
+    const cap = baseCap + clamp01(input.colorCompliance) * 0.06; // tiny continuous lift
+    caps.push({ reason: "color_tier_none_cap", value: cap });
   } else if (input.hasColorIntent && tier === "bucket") {
-    const v = input.hasExplicitColorIntent ? 0.65 : 0.78;
-    caps.push({ reason: "color_tier_bucket", value: v });
+    const baseCap = input.hasExplicitColorIntent ? 0.60 : 0.74;
+    const cap = baseCap + clamp01(input.colorCompliance) * 0.08;
+    caps.push({ reason: "color_tier_bucket_cap", value: cap });
   }
 
-  // Audience compliance caps (soft contradictions; hard contradiction already
-  // gated to 0 above).
-  if (input.hasAudienceIntent) {
-    if (input.audienceCompliance < 0.50) caps.push({ reason: "audience_low_compliance", value: 0.55 });
-    else if (input.audienceCompliance < 0.70) caps.push({ reason: "audience_weak_compliance", value: 0.78 });
+  // Audience — continuous between 0.30 (gated to 0 above) and 0.85.
+  if (input.hasAudienceIntent && input.audienceCompliance < 0.85) {
+    const ac = clamp01(input.audienceCompliance);
+    // ac=0.30 → cap 0.50, ac=0.50 → 0.62, ac=0.70 → 0.78, ac=0.85 → 0.87.
+    const cap = 0.36 + ac * 0.60;
+    caps.push({ reason: "audience_compliance_cap", value: cap });
   }
 
-  // Intra-family subtype mismatch (e.g. blazer-vs-bomber, hoodie-vs-cardigan, sneaker-vs-boot).
-  if (input.intraFamilyPenalty >= 0.50) caps.push({ reason: "intra_family_severe", value: 0.65 });
-  else if (input.intraFamilyPenalty >= 0.30) caps.push({ reason: "intra_family_moderate", value: 0.78 });
+  // Intra-family subtype — use EFFECTIVE penalty (zero when exactTypeScore=1).
+  // This fixes the polo-vs-tee scenario: if doc IS a polo and query has polo, we
+  // shouldn't cap because the expansion also added "tee" which pairs unfavorably.
+  const intra = effectiveIntraFamilyPenalty(input);
+  if (intra > 0.10) {
+    // intra=0.10 → cap 0.92, intra=0.30 → 0.79, intra=0.50 → 0.66, intra=0.72 → 0.51.
+    const cap = 0.99 - intra * 0.67;
+    caps.push({ reason: "intra_family_cap", value: cap });
+  }
 
   // Cross-family soft cap (≥ 0.80 was already a hard gate).
-  if (input.crossFamilyPenalty >= 0.50) caps.push({ reason: "cross_family_strong", value: 0.55 });
-  else if (input.crossFamilyPenalty >= 0.30) caps.push({ reason: "cross_family_moderate", value: 0.75 });
+  if (input.crossFamilyPenalty >= 0.20) {
+    // cf=0.20 → cap 0.86, cf=0.40 → 0.74, cf=0.60 → 0.62, cf=0.78 → 0.51.
+    const cap = 0.98 - input.crossFamilyPenalty * 0.60;
+    caps.push({ reason: "cross_family_cap", value: cap });
+  }
 
-  // Style mismatch (when style intent present).
+  // Style hard mismatch only — soft mismatches blend through component score.
   if (input.hasStyleIntent && input.styleCompliance <= 0.10) {
-    caps.push({ reason: "style_hard_mismatch", value: 0.65 });
+    const cap = 0.60 + input.styleCompliance * 0.5; // small continuous variation
+    caps.push({ reason: "style_hard_mismatch_cap", value: cap });
   }
 
   return caps;
@@ -316,24 +415,81 @@ function computeFloor(
   const sameColorFamily =
     tier === "exact" || tier === "family" || tier === "light-shade" || tier === "dark-shade";
 
+  let floor = 0;
+  let reason: string | null = null;
+
+  // ── Visual-anchored floors ──
   // Tier 1: visually identical (sim ≥ 0.97), exact type, same color family.
-  // Pixels are authoritative; metadata sparseness must not drag this below
-  // a visual-anchored floor.
   if (sim >= 0.97 && components.type >= 0.85 && sameColorFamily) {
-    return { floor: components.visual * 0.97, reason: "near_identical_floor" };
+    const f = components.visual * 0.97;
+    if (f > floor) { floor = f; reason = "near_identical_floor"; }
   }
 
   // Tier 2: very close visual + good type + same color family.
   if (sim >= 0.95 && components.type >= 0.70 && sameColorFamily) {
-    return { floor: components.visual * 0.92, reason: "high_visual_aligned_floor" };
+    const f = components.visual * 0.92;
+    if (f > floor) { floor = f; reason = "high_visual_aligned_floor"; }
   }
 
   // Tier 3: close visual + decent type + acceptable color (not contradiction).
   if (sim >= 0.90 && components.type >= 0.50 && tier !== "none") {
-    return { floor: components.visual * 0.80, reason: "close_visual_acceptable_floor" };
+    const f = components.visual * 0.80;
+    if (f > floor) { floor = f; reason = "close_visual_acceptable_floor"; }
   }
 
-  return { floor: 0, reason: null };
+  // ── Color-priority floors ──
+  // Color is the most perceptually important attribute for fashion shopping.
+  // When a candidate has an exact catalog color match AND meaningful type
+  // alignment AND no audience contradiction, it deserves a high floor regardless
+  // of intra-family or moderate cross-family caps that would otherwise drag it
+  // down. This addresses the user's requirement: same-color products must rank
+  // first.
+  const audienceOk = !input.hasAudienceIntent || input.audienceCompliance >= 0.70;
+  if (tier === "exact" && input.hasColorIntent && audienceOk) {
+    // Floor scales with type + visual evidence so a wrong-type-but-exact-color item
+    // doesn't get inflated.
+    let colorFloor = 0;
+    if (input.exactTypeScore >= 1) {
+      colorFloor = sim >= 0.85 ? 0.88 : sim >= 0.75 ? 0.83 : sim >= 0.65 ? 0.78 : 0.72;
+    } else if (components.type >= 0.70) {
+      colorFloor = sim >= 0.85 ? 0.82 : sim >= 0.75 ? 0.76 : 0.70;
+    } else if (components.type >= 0.50) {
+      colorFloor = sim >= 0.80 ? 0.72 : 0.66;
+    }
+    if (colorFloor > floor) { floor = colorFloor; reason = "exact_color_priority_floor"; }
+  }
+
+  if (tier === "family" && input.hasColorIntent && audienceOk) {
+    let familyColorFloor = 0;
+    if (input.exactTypeScore >= 1) {
+      familyColorFloor = sim >= 0.85 ? 0.80 : sim >= 0.75 ? 0.74 : sim >= 0.65 ? 0.68 : 0.62;
+    } else if (components.type >= 0.70) {
+      familyColorFloor = sim >= 0.80 ? 0.72 : 0.66;
+    }
+    if (familyColorFloor > floor) { floor = familyColorFloor; reason = "family_color_priority_floor"; }
+  }
+
+  return { floor, reason };
+}
+
+/**
+ * Micro tie-breakers added to the final score (in [0, 0.012] range, so they
+ * differentiate ties without affecting band placement). Without these, many
+ * candidates land exactly on cap values (0.55, 0.65, 0.78) creating visible
+ * score ties.
+ */
+function computeTieBreakers(input: UnifiedScoreInputs): number {
+  const sim = clamp01(input.osSimilarity01);
+  let bonus = 0;
+  // Visual sim contributes up to 0.005.
+  bonus += sim * 0.005;
+  // Exact color match contributes 0.003.
+  if (String(input.colorTier).toLowerCase() === "exact") bonus += 0.003;
+  // Exact type contributes 0.002.
+  if (input.exactTypeScore >= 1) bonus += 0.002;
+  // Color compliance fine-grained contribution up to 0.002.
+  bonus += clamp01(input.colorCompliance) * 0.002;
+  return bonus;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -397,9 +553,14 @@ export function scoreCandidateUnified(input: UnifiedScoreInputs): UnifiedScoreRe
   // 5. Coherence floor.
   const { floor, reason: floorReason } = computeFloor(input, components);
 
-  // 6. Final = max(floor, min(base, effectiveCap)).
+  // 6. Final = max(floor, min(base, effectiveCap)) + micro tie-breakers.
+  // Tie-breakers (≤ 0.012) split candidates that would otherwise land on identical
+  // cap values. Score is clamped to (0, 0.998) so tie-breakers never push a
+  // capped/floored score above its band.
   const cappedBase = Math.min(base, effectiveCap);
-  const score = clamp01(Math.max(floor, cappedBase));
+  const beforeTieBreak = clamp01(Math.max(floor, cappedBase));
+  const tieBreaker = computeTieBreakers(input);
+  const score = clamp01(Math.min(0.998, beforeTieBreak + tieBreaker));
   const rounded = Math.round(score * 10000) / 10000;
 
   return {
