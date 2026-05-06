@@ -2784,7 +2784,7 @@ function inferAestheticFamily(blob: string): "athleisure" | "streetwear" | "form
 }
 
 /** Mutual aesthetic compatibility — symmetric. 1.0 = perfect, 0.3 = clash. */
-function aestheticCompatibility(a: string, b: string): number {
+function aestheticFamilyCompatibility(a: string, b: string): number {
   if (a === b) return 1.0;
   const key = [a, b].sort().join("|");
   const matrix: Record<string, number> = {
@@ -2861,7 +2861,7 @@ function computeStyleAlignment(source: any, preferredStyleTerms: string[]): numb
           ? (t === "bohemian" ? "boho" : t === "sporty" || t === "athletic" ? "athleisure" : t === "casual" ? null : t)
           : null;
       if (!prefFamily) continue;
-      familyBest = Math.max(familyBest, aestheticCompatibility(prefFamily, candidateFamily));
+      familyBest = Math.max(familyBest, aestheticFamilyCompatibility(prefFamily, candidateFamily));
     }
   }
 
