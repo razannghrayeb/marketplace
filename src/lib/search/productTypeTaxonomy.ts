@@ -17,7 +17,7 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   // Shorts / skirt (2)
   ["shorts", "short", "bermuda", "board shorts"],
   ["skirt", "skirts", "mini skirt", "midi skirt"],
-  // Footwear (8) — was one mega-cluster; now siblings are distinguishable in rerank
+  // Footwear (7) — was one mega-cluster; now siblings are distinguishable in rerank
   ["sneaker", "sneakers", "trainer", "trainers", "running shoe", "running shoes", "athletic shoe", "athletic shoes", "sport shoe", "sport shoes", "tennis shoe", "tennis shoes"],
   ["boot", "boots", "ankle boot", "ankle boots", "chelsea boot", "chelsea boots", "combat boot", "combat boots"],
   ["sandal", "sandals", "flip flop", "flip flops", "flip-flop", "flip-flops", "gladiator sandal", "gladiator sandals"],
@@ -404,7 +404,6 @@ const CLUSTER_FAMILY: readonly string[] = [
   "footwear",
   "footwear",
   "footwear",
-  "footwear",
   "tops",
   "tops",
   "tops",
@@ -413,7 +412,6 @@ const CLUSTER_FAMILY: readonly string[] = [
   "tops",
   "tailored",
   "tailored",
-  "outerwear",
   "outerwear",
   "outerwear",
   "outerwear",
@@ -467,7 +465,6 @@ const FAMILY_PAIR_PENALTY: Record<string, Record<string, number>> = {
   bottoms: {
     modest_full: 1,
     dress: 0.72,
-    shorts_skirt: 0.86,
     tops: 0.2,
     outerwear: 0.62,
     footwear: 0.92,
@@ -499,7 +496,6 @@ const FAMILY_PAIR_PENALTY: Record<string, Record<string, number>> = {
   shorts_skirt: {
     modest_full: 0.85,
     dress: 0.45,
-    bottoms: 0.86,
     footwear: 0.88,
     head_covering: 0.78,
     bags: 0.9,
@@ -969,12 +965,6 @@ function buildClusterIndex(): Map<string, Set<string>> {
 
 function buildTypeToFamily(): Map<string, string> {
   const m = new Map<string, string>();
-  if (CLUSTER_FAMILY.length !== PRODUCT_TYPE_CLUSTERS.length) {
-    console.warn("[productTypeTaxonomy] CLUSTER_FAMILY length mismatch", {
-      clusterCount: PRODUCT_TYPE_CLUSTERS.length,
-      familyCount: CLUSTER_FAMILY.length,
-    });
-  }
   PRODUCT_TYPE_CLUSTERS.forEach((cluster, i) => {
     const fam = CLUSTER_FAMILY[i] ?? "other";
     for (const t of cluster) {

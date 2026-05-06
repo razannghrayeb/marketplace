@@ -344,18 +344,6 @@ function imageDeepFusionWeight(): number {
   return Math.max(0, Math.min(0.4, raw));
 }
 
-function imageFinalRerankWeight(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_FINAL_RERANK_WEIGHT ?? "0.18");
-  if (!Number.isFinite(raw)) return 0.18;
-  return Math.max(0, Math.min(0.45, raw));
-}
-
-function imageFinalRerankMaxDelta(): number {
-  const raw = Number(process.env.SEARCH_IMAGE_FINAL_RERANK_MAX_DELTA ?? "0.08");
-  if (!Number.isFinite(raw)) return 0.08;
-  return Math.max(0, Math.min(0.25, raw));
-}
-
 /** Phase 9: apply MMR-style diversity reranking after relevance sort + dedupe. Default ON. */
 function imageDiversityRerankEnabled(): boolean {
   const v = String(process.env.SEARCH_IMAGE_DIVERSITY_RERANK ?? "1").toLowerCase();
@@ -1304,12 +1292,6 @@ function isImpossibleImageFamilyMismatch(jobFamily: ImageSearchFamily, productFa
   if (jobFamily === "bottoms" && productFamily === "dress") return false;
   if (jobFamily === "tops" && productFamily === "footwear") return true;
   if (jobFamily === "footwear" && productFamily === "tops") return true;
-  if (jobFamily === "footwear" && productFamily === "dress") return true;
-  if (jobFamily === "dress" && productFamily === "footwear") return true;
-  if (jobFamily === "footwear" && productFamily === "bottoms") return true;
-  if (jobFamily === "bottoms" && productFamily === "footwear") return true;
-  if (jobFamily === "footwear" && productFamily === "outerwear") return true;
-  if (jobFamily === "outerwear" && productFamily === "footwear") return true;
   if (jobFamily === "bottoms" && productFamily === "accessory") return true;
   if (jobFamily === "footwear" && productFamily === "accessory") return true;
   if (jobFamily === "accessory" && (productFamily === "tops" || productFamily === "bottoms" || productFamily === "footwear")) return true;
@@ -1323,56 +1305,12 @@ function colorScoreForImageRanking(explain: Record<string, unknown>): {
 } {
   const tier = String(explain.colorTier ?? "none").toLowerCase().trim();
   const compliance = Math.max(0, Math.min(1, Number(explain.colorCompliance ?? 0)));
-  // Embedding similarity is image-derived and conflates tonality (e.g. navy ~ gray
-  // both register as "dark cool"). Trust it ONLY when there's no specific color intent.
-  const embeddingSim = Math.max(
-    0,
-    Math.min(
-      1,
-      Number(explain.colorEmbeddingSim ?? explain.colorSimEffective ?? explain.colorSimRaw ?? 0),
-    ),
-  );
-  const desiredColorsEffective = Array.isArray(explain.desiredColorsEffective)
-    ? (explain.desiredColorsEffective as unknown[]).filter(Boolean)
-    : [];
-  const hasColorIntent = desiredColorsEffective.length > 0;
-
   if (tier === "exact") return { colorScore: 1, exactColorMatch: true, sameColorFamily: true };
-  if (tier === "near-exact") {
-    return { colorScore: Math.max(0.92, compliance), exactColorMatch: false, sameColorFamily: true };
-  }
   if (tier === "family" || tier === "light-shade" || tier === "dark-shade") {
-    return { colorScore: Math.max(0.78, compliance), exactColorMatch: false, sameColorFamily: true };
+    return { colorScore: Math.max(0.75, compliance), exactColorMatch: false, sameColorFamily: true };
   }
-  if (tier === "bucket") {
-    return { colorScore: Math.max(0.50, Math.min(0.74, compliance)), exactColorMatch: false, sameColorFamily: false };
-  }
-  // tier === "none"
-  // With color intent: the upstream classifier already concluded the catalog color
-  // does NOT match any tier (exact/near-exact/family/bucket). Compliance can still be
-  // misleadingly high (e.g. gray query vs navy product → 0.78 compliance) so we cap
-  // the colorScore aggressively and explicitly mark sameColorFamily=false.
-  if (hasColorIntent) {
-    if (compliance > 0) {
-      return {
-        colorScore: Math.max(0.15, Math.min(0.5, compliance * 0.6)),
-        exactColorMatch: false,
-        sameColorFamily: false,
-      };
-    }
-    return { colorScore: 0.25, exactColorMatch: false, sameColorFamily: false };
-  }
-  // No color intent — use embedding similarity as a soft proxy for visual color match.
-  if (embeddingSim >= 0.97) {
-    return { colorScore: Math.max(0.95, embeddingSim), exactColorMatch: embeddingSim >= 0.99, sameColorFamily: true };
-  }
-  if (embeddingSim >= 0.92) {
-    return { colorScore: Math.max(0.82, embeddingSim * 0.92), exactColorMatch: false, sameColorFamily: true };
-  }
-  if (embeddingSim >= 0.82) {
-    return { colorScore: Math.max(0.62, embeddingSim * 0.8), exactColorMatch: false, sameColorFamily: false };
-  }
-  if (compliance > 0) return { colorScore: Math.max(0.15, Math.min(0.7, compliance)), exactColorMatch: false, sameColorFamily: compliance >= 0.55 };
+  if (tier === "bucket") return { colorScore: Math.max(0.45, Math.min(0.74, compliance)), exactColorMatch: false, sameColorFamily: false };
+  if (compliance > 0) return { colorScore: Math.max(0.15, Math.min(0.75, compliance)), exactColorMatch: false, sameColorFamily: compliance >= 0.55 };
   return { colorScore: 0.4, exactColorMatch: false, sameColorFamily: false };
 }
 
@@ -1423,21 +1361,19 @@ function attributeFromCompliance(value: unknown, options?: {
 }
 
 function categoryAttributeWeights(family: ImageSearchFamily): Record<string, number> {
-  // Color bumped ~35-40% across all families per user request — color is a primary
-  // similarity signal. Type rebalanced down slightly to keep totals near 1.0.
   if (family === "bottoms") {
-    return { type: 0.21, color: 0.21, length: 0.13, silhouette: 0.12, material: 0.08, pattern: 0.07, rise: 0.05, style: 0.07, audience: 0.06 };
+    return { type: 0.25, color: 0.15, length: 0.14, silhouette: 0.13, material: 0.09, pattern: 0.08, rise: 0.06, style: 0.06, audience: 0.04 };
   }
   if (family === "dress") {
-    return { type: 0.17, color: 0.20, length: 0.13, silhouette: 0.11, sleeve: 0.09, neckline: 0.07, pattern: 0.08, material: 0.08, style: 0.07 };
+    return { type: 0.20, color: 0.14, length: 0.14, silhouette: 0.12, sleeve: 0.10, neckline: 0.08, pattern: 0.08, material: 0.07, style: 0.07 };
   }
   if (family === "outerwear") {
-    return { type: 0.21, color: 0.20, length: 0.10, collar: 0.09, closure: 0.09, material: 0.10, silhouette: 0.10, style: 0.11 };
+    return { type: 0.24, color: 0.14, length: 0.12, collar: 0.10, closure: 0.10, material: 0.10, silhouette: 0.10, style: 0.10 };
   }
   if (family === "footwear") {
-    return { type: 0.24, color: 0.22, silhouette: 0.13, sole: 0.09, toe: 0.07, closure: 0.06, material: 0.08, style: 0.11 };
+    return { type: 0.28, color: 0.16, silhouette: 0.14, sole: 0.10, toe: 0.08, closure: 0.07, material: 0.08, style: 0.09 };
   }
-  return { type: 0.21, color: 0.21, sleeve: 0.11, neckline: 0.09, silhouette: 0.08, material: 0.08, pattern: 0.07, style: 0.08, audience: 0.07 };
+  return { type: 0.24, color: 0.16, sleeve: 0.13, neckline: 0.10, silhouette: 0.09, material: 0.08, pattern: 0.08, style: 0.07, audience: 0.05 };
 }
 
 function additiveImageRankingScore(params: {
@@ -1535,13 +1471,6 @@ function additiveImageRankingScore(params: {
     unknownValue: 0.65,
     unknownConfidence: 0.25,
   }));
-  // Style was previously allocated weight in categoryAttributeWeights but never pushed,
-  // wasting weight and lowering metadataCoverage. Push it now.
-  pushAttr("style", weights.style, attributeFromCompliance(params.explain.styleCompliance, {
-    hasIntent: Boolean(params.explain.hasStyleIntent),
-    unknownValue: 0.6,
-    unknownConfidence: 0.25,
-  }));
   for (const structuralKey of ["neckline", "collar", "closure", "silhouette", "rise", "sole", "toe"]) {
     pushAttr(structuralKey, weights[structuralKey], { score: 0.6, confidence: 0, missing: true });
   }
@@ -1592,11 +1521,9 @@ function additiveImageRankingScore(params: {
   const metadataCoverage = attrs.length > 0
     ? Math.max(0, Math.min(1, effective.reduce((sum, a) => sum + a.effectiveWeight, 0) / attrs.reduce((sum, a) => sum + a.weight, 0)))
     : 0.4;
-  // Narrowed quality penalty band: catalog metadata is sparse so a wide [0.92, 1.0]
-  // penalty was unfairly suppressing visually-confident matches. Now [0.95, 1.0].
   const qualityModifier =
     (params.availability === false ? 0.96 : 1) *
-    (0.95 + 0.05 * metadataCoverage);
+    (0.92 + 0.08 * metadataCoverage);
 
   let raw =
     0.78 * visualBase +
@@ -1605,16 +1532,11 @@ function additiveImageRankingScore(params: {
   raw *= contradictionPenalty;
   raw *= qualityModifier;
 
-  // Finer-grained maxFinal tiers — lets visually near-exact items score above 0.94
-  // even when catalog color is missing (we now use embedding-derived sameColorFamily).
   let maxFinal = 0.995;
   if (visualSimilarity >= 0.985 && exactTypeScore >= 1 && color.exactColorMatch && knownMismatchCount === 0) {
     maxFinal = 0.995;
-  } else if (visualSimilarity >= 0.97 && exactTypeScore >= 1 && (color.exactColorMatch || color.sameColorFamily) && knownMismatchCount === 0) {
-    // New tier: near-exact visual + exact type + same color family — was capped at 0.94.
-    maxFinal = metadataCoverage >= 0.72 ? 0.985 : 0.97;
   } else if (visualSimilarity >= 0.955 && exactTypeScore >= 1 && (color.exactColorMatch || color.sameColorFamily) && knownMismatchCount === 0) {
-    maxFinal = metadataCoverage >= 0.72 ? 0.975 : 0.95;
+    maxFinal = metadataCoverage >= 0.72 ? 0.975 : 0.94;
   } else if (visualSimilarity >= 0.93 && familyGate >= 0.92 && knownMismatchCount <= 1) {
     maxFinal = 0.94;
   } else if (familyGate >= 0.92) {
@@ -1628,31 +1550,27 @@ function additiveImageRankingScore(params: {
     maxFinal = Math.min(maxFinal, 0.72);
   }
   if (missingCriticalAttributes >= 3) {
-    maxFinal = Math.min(maxFinal, 0.92);
+    maxFinal = Math.min(maxFinal, 0.90);
   }
   if (missingCriticalAttributes >= 2 && visualSimilarity < 0.96) {
     maxFinal = Math.min(maxFinal, 0.87);
   }
   if (exactTypeScore >= 1 && color.exactColorMatch && visualSimilarity >= 0.97 && metadataCoverage < 0.72) {
-    maxFinal = Math.min(maxFinal, 0.97);
+    maxFinal = Math.min(maxFinal, 0.95);
   }
 
   let finalScore = Math.min(raw, maxFinal);
   finalScore = Math.min(0.995, Math.max(0, Math.round(finalScore * 10000) / 10000));
-  // Finer match tiers — gives users clearer differentiation between exact, near-exact,
-  // very-similar, similar, related, and weak matches.
   const matchLabel =
-    visualSimilarity >= 0.985 && finalScore >= 0.985 && color.exactColorMatch
+    visualSimilarity >= 0.985 && finalScore >= 0.985
       ? "same_product"
-      : finalScore >= 0.97
-        ? "near_exact"
-        : finalScore >= 0.93
+      : finalScore >= 0.95
+        ? "near_identical"
+        : finalScore >= 0.90
           ? "very_similar"
-          : finalScore >= 0.86
+          : finalScore >= 0.82
             ? "similar"
-            : finalScore >= 0.76
-              ? "related"
-              : "weak";
+            : "weak";
 
   const boosts: string[] = [];
   if (exactTypeScore >= 1) boosts.push("exact_type");
@@ -1934,7 +1852,7 @@ function computeExplicitFinalRelevance(params: {
   typeMatch: boolean;
   catSoft: number;
   colorMatch: number;
-  colorTier?: "exact" | "near-exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none";
+  colorTier?: "exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none";
   styleMatch: number;
   sleeveMatch: number;
   lengthMatch: number;
@@ -2132,15 +2050,13 @@ function computeExplicitFinalRelevance(params: {
     colorIntentStrength > 0
       ? colorTier === "exact"
         ? 1.06 + 0.04 * colorIntentStrength
-        : colorTier === "near-exact"
-          ? 1.05 + 0.035 * colorIntentStrength
-          : (colorTier === "light-shade" || colorTier === "dark-shade")
-            ? 1.04 + 0.045 * colorIntentStrength
-            : colorTier === "family"
-              ? 1.06 + 0.05 * colorIntentStrength
-              : colorTier === "bucket"
-                ? 0.88 - 0.06 * colorIntentStrength
-                : 0.74 - 0.12 * colorIntentStrength
+        : (colorTier === "light-shade" || colorTier === "dark-shade")
+          ? 1.04 + 0.045 * colorIntentStrength
+          : colorTier === "family"
+            ? 1.06 + 0.05 * colorIntentStrength
+            : colorTier === "bucket"
+              ? 0.88 - 0.06 * colorIntentStrength
+              : 0.74 - 0.12 * colorIntentStrength
       : 1;
 
   // ── Intent coverage gate ─────────────────────────────────────────
@@ -2836,8 +2752,8 @@ function hasOppositeGenderSignalForQuery(
 
   const menRe = /\b(men|mens|male|man|gents?|gentlemen)\b/;
   const womenRe = /\b(women|womens|female|lady|ladies|woman)\b/;
-  const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt)\b/;
-  const menStyleCue = /\b(briefs?|boxers?|jockstrap|menswear)\b/;
+  const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|handbag|clutch|tote|purse|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt)\b/;
+  const menStyleCue = /\b(suit|suits|tie|oxford|oxfords|dress\s*shirt|button\s*down|button-down|briefs|boxer|boxers|cargo\s*pants?|chino|chinos|loafer|loafers|briefcase|messenger|sport\s*coat|blazer)\b/;
   const hasMenCue = menRe.test(blob);
   const hasWomenCue = womenRe.test(blob);
   const hasWomenStyleCue = womenStyleCue.test(blob);
@@ -3578,10 +3494,9 @@ function expandColorIntentWithNearest(tokens: string[]): string[] {
   return out;
 }
 
-function downgradeColorTierOneStep(tier: string | null | undefined): "exact" | "near-exact" | "family" | "bucket" | "none" {
+function downgradeColorTierOneStep(tier: string | null | undefined): "exact" | "family" | "bucket" | "none" {
   const t = String(tier ?? "none").toLowerCase().trim();
-  if (t === "exact") return "near-exact";
-  if (t === "near-exact") return "family";
+  if (t === "exact") return "family";
   if (t === "family") return "bucket";
   if (t === "bucket") return "none";
   return "none";
@@ -3612,13 +3527,11 @@ function applyExpandedColorTierPenalty(params: {
   const tierPenalty =
     tier === "exact"
       ? (explicit ? 0.86 : 0.9)
-      : tier === "near-exact"
-        ? (explicit ? 0.84 : 0.88)
-        : tier === "family"
-          ? (explicit ? 0.74 : 0.8)
-          : tier === "bucket"
-            ? (explicit ? 0.58 : 0.66)
-            : 0.6;
+      : tier === "family"
+        ? (explicit ? 0.74 : 0.8)
+        : tier === "bucket"
+          ? (explicit ? 0.58 : 0.66)
+          : 0.6;
 
   const next = { ...comp };
   next.colorCompliance = Math.max(0, Math.min(1, Number(comp.colorCompliance ?? 0) * tierPenalty));
@@ -3796,7 +3709,6 @@ function imageDetectionFinalAcceptFloor(category: string): number {
   if (c === "tops") return 0.14;
   if (c === "bottoms") return 0.16;
   if (c === "dresses") return 0.16;
-  if (c === "outerwear" || c === "tailored") return 0.16;
   return 0.2;
 }
 
@@ -5369,29 +5281,22 @@ export async function searchByImageWithSimilarity(
   const hasExplicitCategoryFilter = !isDetectionScopedQuery && filterCategory != null;
   const hasTextTypeIntent = Boolean(textQueryForRelevance);
   let hasDetectionAnchoredTypeIntent = false;
-  // For detection-scoped queries, use only the canonical detection category + predicted aisles as the
-  // category intent signal. Using the full flat filterCategory array (which may include dozens of retrieval
-  // vocabulary terms such as "cardigan" from outerwear aliases) pollutes the intent blob and triggers
-  // false-positive family guards (e.g., "cardigan" in outerwear terms → isTopLikeIntent=true → all suit
-  // products zeroed out). Canonical categories are expanded correctly via getCategorySearchTerms() inside
-  // scoreCategoryRelevance01, so precision is preserved.
+  // CRITICAL FIX: When hard category filter is active (filterCategory is set), do NOT include predictedCategoryAisles
+  // predictedCategoryAisles may contain alternatives that would override the hard filter in relevance scoring
+  // After fix in image-analysis.service.ts, predictedCategoryAisles should only contain primary category when hard filter applied,
+  // but this provides additional safety to prevent alternative category leakage in relevance
   const astCategoriesForRelevance = normalizeImageCategoryIntentArray([
     ...new Set(
       [
-        ...(isDetectionScopedQuery
-          ? [
-              String(params.detectionProductCategory ?? "").toLowerCase().trim(),
-              ...(predictedCategoryAisles ?? []).map((x) => String(x).toLowerCase().trim()),
-            ].filter(Boolean)
-          : filterCategory == null && (predictedCategoryAisles ?? []).length > 0
-            ? (predictedCategoryAisles ?? []).map((x) => String(x).toLowerCase().trim()).filter(Boolean)
-            : (Array.isArray(filterCategory)
-                ? filterCategory
-                : filterCategory
-                  ? [String(filterCategory)]
-                  : []
-              ).map((x) => String(x).toLowerCase().trim())
-        ),
+        ...(filterCategory == null && (predictedCategoryAisles ?? []).length > 0
+          ? (predictedCategoryAisles ?? []).map((x) => String(x).toLowerCase().trim()).filter(Boolean)
+          : []),
+        ...(Array.isArray(filterCategory)
+          ? filterCategory
+          : filterCategory
+            ? [String(filterCategory)]
+            : []
+        ).map((x) => String(x).toLowerCase().trim()),
       ].filter(Boolean),
     ),
   ]);
@@ -5992,36 +5897,13 @@ export async function searchByImageWithSimilarity(
         comp.colorCompliance = (comp.colorCompliance ?? 0) * 0.35;
       }
 
-      // Guard: if product has NO catalog color (null), demote inferred-only "exact" matches
-      // This prevents false positives when color is inferred from potentially ambiguous images
-      const hasCatalogColor = 
-        typeof hit._source?.color === "string" && String(hit._source.color).trim() !== "" ||
-        typeof hit._source?.attr_color === "string" && String(hit._source.attr_color).trim() !== "";
-      if (!hasCatalogColor && String(comp.colorTier ?? "").toLowerCase() === "exact") {
-        // Product has no explicit color metadata, only inferred/image colors
-        // Require very high compliance for exact tier, otherwise demote
-        if ((comp.colorCompliance ?? 0) < 0.90) {
-          comp.colorTier = (comp.colorCompliance ?? 0) >= 0.68 ? "family" : "bucket";
-          comp.colorCompliance = Math.max(0.4, (comp.colorCompliance ?? 0) * 0.8);
-        }
-      }
-
       if (!hasAnyColorTokenIntent) {
         comp.colorCompliance = Math.max(0, Math.min(1, cs));
       } else if (!hasHardCatalogColorConflict && (comp.colorCompliance ?? 0) < 0.12 && cs >= 0.42) {
-        // Guard: only boost colorCompliance if color signals are reasonably confident.
-        // If inferred color is low confidence and crop has conflicts, don't artificially boost.
-        const inferredColorConfidence = preferredInferredColorConfidence ?? 0;
-        const cropHasConflict = inferredCropColorConflict;
-        const lowConfidenceColorSignal = inferredColorConfidence < 0.55;
-        const shouldNotBoost = lowConfidenceColorSignal && cropHasConflict;
-        
-        if (!shouldNotBoost) {
-          comp.colorCompliance = Math.max(
-            comp.colorCompliance ?? 0,
-            Math.min(1, cs * 0.82),
-          );
-        }
+        comp.colorCompliance = Math.max(
+          comp.colorCompliance ?? 0,
+          Math.min(1, cs * 0.82),
+        );
       }
     }
   }
@@ -6249,7 +6131,7 @@ export async function searchByImageWithSimilarity(
   const finalScoreSourceById = new Map<string, string>();
 
   // Pre-compute detection category for efficiency (used many times per result in the loop below).
-  const normalizedDetectionCategory = normalizeDetectionCategoryToken(params.detectionProductCategory);
+  const normalizedDetectionCategory = String(params.detectionProductCategory ?? "").toLowerCase().trim();
   const isTopDetection = normalizedDetectionCategory === "tops";
   const isDressDetection = normalizedDetectionCategory === "dresses";
   const isBottomsDetection = normalizedDetectionCategory === "bottoms";
@@ -7458,8 +7340,7 @@ export async function searchByImageWithSimilarity(
     detectionCategoryNorm === "tops" ||
     detectionCategoryNorm === "bottoms" ||
     detectionCategoryNorm === "dresses" ||
-    detectionCategoryNorm === "outerwear" ||
-    detectionCategoryNorm === "tailored";
+    detectionCategoryNorm === "outerwear";
   const sparseVisualCandidatePool =
     visualGatedHits.length > 0 &&
     visualGatedHits.length <= Math.max(8, Math.min(fetchLimit, 24));
@@ -7624,7 +7505,7 @@ export async function searchByImageWithSimilarity(
       // category-safe visual neighbors instead of returning an empty group.
       if (rescuePool.length === 0) {
         const dc = String(params.detectionProductCategory ?? "").toLowerCase().trim();
-        const isCoreDetection = dc === "tops" || dc === "footwear" || dc === "shoes" || dc === "bags" || dc === "outerwear" || dc === "tailored" || dc === "bottoms";
+        const isCoreDetection = dc === "tops" || dc === "footwear" || dc === "shoes" || dc === "bags";
         if (isCoreDetection) {
           rescuePool = visualGatedHits.filter((h: any) => {
             const comp = complianceById.get(String(h._source.product_id));
@@ -8239,7 +8120,15 @@ export async function searchByImageWithSimilarity(
   ) {
     const suitFirstHits = rankedHits.filter((h: any) => hasActualSuitCatalogCue((h as any)?._source ?? {}));
     if (suitFirstHits.length > 0) {
-      rankedHits = suitFirstHits;
+      const suitFirstIds = new Set(
+        suitFirstHits
+          .map((h: any) => String((h as any)?._source?.product_id ?? ""))
+          .filter(Boolean),
+      );
+      rankedHits = [
+        ...suitFirstHits,
+        ...rankedHits.filter((h: any) => !suitFirstIds.has(String((h as any)?._source?.product_id ?? ""))),
+      ];
     }
   }
 
@@ -9146,30 +9035,6 @@ export async function searchByImageWithSimilarity(
         return sim >= dressVisualOverrideMin && crossFamily < 0.42;
       }
       if (exactType >= 1 || typeComp >= 0.3) return true;
-      // When product_types is empty, typeComp is always 0 regardless of actual relevance.
-      // Use category score as a proxy to avoid unfairly dropping well-categorized items.
-      const srcPT = (p as any).product_types;
-      const hasEmptyProductTypes = !Array.isArray(srcPT) || (srcPT as unknown[]).length === 0;
-      if (hasEmptyProductTypes) {
-        const catScore = Number(ex.categoryScore ?? ex.categoryRelevance01 ?? 0);
-        if (catScore >= 0.7 && crossFamily < 0.4) return true;
-      }
-      const textTypeHaystack = textTokenSet(
-        [
-          String((p as any).title ?? ""),
-          String((p as any).category ?? ""),
-          ...(Array.isArray(srcPT) ? srcPT : srcPT != null ? [srcPT] : []),
-        ].join(" "),
-      );
-      const textTypeMatch = desiredProductTypes.some((desiredType) => {
-        const desiredTokens = textTokenSet(String(desiredType ?? ""));
-        if (desiredTokens.size === 0) return false;
-        for (const token of desiredTokens) {
-          if (!textTypeHaystack.has(token)) return false;
-        }
-        return true;
-      });
-      if (textTypeMatch && crossFamily < 0.45) return true;
       return sim >= 0.96 && crossFamily < 0.35;
     });
     if (filtered.length > 0) {
@@ -9615,10 +9480,7 @@ export async function searchByImageWithSimilarity(
         const rerankScore = rerankScoreById.get(String(product.id));
         if (rerankScore === undefined) return product;
         const baseFinal = Number(product.finalRelevance01 ?? product.similarity_score ?? 0);
-        const w = imageFinalRerankWeight();
-        const maxDelta = imageFinalRerankMaxDelta();
-        const rawBlended = Math.max(0, Math.min(1, baseFinal * (1 - w) + rerankScore * w));
-        const blended = Math.max(0, Math.min(1, Math.max(baseFinal - maxDelta, Math.min(baseFinal + maxDelta, rawBlended))));
+        const blended = Math.max(0, Math.min(1, baseFinal * 0.3 + rerankScore * 0.7));
         return {
           ...product,
           mlRerankScore: rerankScore,

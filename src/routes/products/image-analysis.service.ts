@@ -3338,11 +3338,6 @@ function applySleeveIntentGuard(params: {
 
   const isDressCategory = category === "dresses";
   const isTopCategory = category === "tops";
-  const isOuterwearCategory = category === "outerwear";
-  // Long sleeves are the default for outerwear (jackets/blazers/coats/suits) so the
-  // reranker's sleeveCompliance score is too sparse to use as a hard filter for "long"
-  // intent — treat outerwear like tops/dresses (contradiction-only) when intent is long.
-  const useContradictionOnlyForOuterwear = isOuterwearCategory && desiredSleeve === "long";
   const minCompliance = isTopCategory
     ? (desiredSleeve === "short" || desiredSleeve === "sleeveless" ? 0.34 : 0.3)
     : desiredSleeve === "short" || desiredSleeve === "sleeveless"
@@ -3363,9 +3358,10 @@ function applySleeveIntentGuard(params: {
       .join(" ");
 
     const observedSleeve = inferSleeveFromProductText(blob);
-    if (isDressCategory || isTopCategory || useContradictionOnlyForOuterwear) {
-      // Sleeve metadata is sparse; sleeveCompliance score is unreliable as a hard filter.
-      // Use only explicit text contradiction to avoid dropping valid items.
+    if (isDressCategory || isTopCategory) {
+      // For tops and dresses, sleeve metadata is sparse and the reranker's sleeveCompliance
+      // score is unreliable as a hard filter. Use only explicit text contradiction to avoid
+      // dropping correctly-categorized products that have no sleeve metadata.
       return !isSleeveContradiction(desiredSleeve, observedSleeve);
     }
 
@@ -6170,35 +6166,10 @@ export class ImageAnalysisService {
           if (categoryMapping.productCategory === "tops") {
             const labelNormForTopHints = String(label ?? "").toLowerCase();
             const isShortSleeveTop = /\bshort sleeve top\b/.test(labelNormForTopHints);
-            const isLongSleeveTop = /\blong sleeve top\b/.test(labelNormForTopHints);
             const isMenAudience = String(inferredAudience.gender ?? "").toLowerCase().trim() === "men";
             if (isShortSleeveTop) {
-              // Expanded set of short-sleeve top variants — catalog data is dirty so we
-              // cast a wide net so text-based fallback matching can rescue valid products.
-              const shortTopPriority = [
-                "t-shirt", "tshirt", "t shirt", "tee", "tees",
-                "shirt", "shirts", "polo", "polo shirt", "polo shirts",
-                "top", "tops", "henley", "crew neck", "crewneck",
-                "v-neck", "vneck", "round neck",
-                "short sleeve", "short sleeve shirt", "short sleeve top",
-                "tank top", "jersey", "overshirt",
-              ];
+              const shortTopPriority = ["t-shirt", "tshirt", "tee", "shirt", "polo", "top", "tops"];
               softProductTypeHints = [...new Set([...shortTopPriority, ...softProductTypeHints])];
-            } else if (isLongSleeveTop) {
-              const longTopPriority = [
-                "shirt", "shirts", "dress shirt", "button up", "button-up", "button down",
-                "long sleeve shirt", "long sleeve top", "long sleeve",
-                "sweater", "sweaters", "pullover", "knit", "knitwear",
-                "henley", "top", "tops", "blouse", "jersey", "overshirt",
-              ];
-              softProductTypeHints = [...new Set([...longTopPriority, ...softProductTypeHints])];
-            } else if (!isShortSleeveTop && !isLongSleeveTop) {
-              // Generic top label — boost broad top vocabulary for text-based rescue.
-              const genericTopPriority = [
-                "top", "tops", "shirt", "shirts", "t-shirt", "tshirt", "tee",
-                "blouse", "polo", "sweater", "sweaters", "pullover", "henley", "jersey",
-              ];
-              softProductTypeHints = [...new Set([...genericTopPriority, ...softProductTypeHints])];
             }
             // Avoid overly narrow/feminine seeds for men tops; they collapse recall.
             if (isMenAudience) {
@@ -6206,120 +6177,6 @@ export class ImageAnalysisService {
                 (t) => !/\b(camisole|cami|tank|sleeveless|crop top)\b/i.test(String(t)),
               );
             }
-          }
-          // Footwear: catalog product_types is dirty so cast a wide net per detection subtype
-          // to let text-based fallback rescue valid items.
-          if (categoryMapping.productCategory === "footwear") {
-            const footLabel = String(label ?? "").toLowerCase();
-            const isSneaker = /\b(sneaker|trainer|runner|athletic)\b/.test(footLabel);
-            const isBoot = /\b(boot|booties?|chelsea|combat)\b/.test(footLabel);
-            const isSandal = /\b(sandal|slide|flip\s*flop|slipper)\b/.test(footLabel);
-            const isHeel = /\b(heel|pump|stiletto|wedge)\b/.test(footLabel);
-            const isLoafer = /\b(loafer|moccasin|slip.?on)\b/.test(footLabel);
-            const isFlat = /\b(flat|ballet|oxford|derby|brogue)\b/.test(footLabel);
-            const genericFoot = [
-              "shoe", "shoes", "footwear",
-            ];
-            let footPriority: string[] = [...genericFoot];
-            if (isSneaker) {
-              footPriority = [
-                ...footPriority,
-                "sneaker", "sneakers", "trainer", "trainers", "running shoe", "running shoes",
-                "athletic shoe", "athletic shoes", "tennis shoe", "tennis shoes",
-                "low top", "high top", "casual sneaker",
-              ];
-            } else if (isBoot) {
-              footPriority = [
-                ...footPriority,
-                "boot", "boots", "ankle boot", "ankle boots", "chelsea boot", "chelsea boots",
-                "combat boot", "combat boots", "hiking boot", "work boot", "knee high boot",
-                "boot leather", "leather boot",
-              ];
-            } else if (isSandal) {
-              footPriority = [
-                ...footPriority,
-                "sandal", "sandals", "slide", "slides", "flip flop", "flip-flop", "flip flops",
-                "slipper", "slippers", "thong sandal",
-              ];
-            } else if (isHeel) {
-              footPriority = [
-                ...footPriority,
-                "heel", "heels", "high heel", "high heels", "pump", "pumps",
-                "stiletto", "stilettos", "wedge", "wedges", "platform heel",
-              ];
-            } else if (isLoafer) {
-              footPriority = [
-                ...footPriority,
-                "loafer", "loafers", "moccasin", "moccasins", "slip on", "slip-on",
-                "penny loafer", "driving shoe",
-              ];
-            } else if (isFlat) {
-              footPriority = [
-                ...footPriority,
-                "flat", "flats", "ballet flat", "oxford", "oxfords", "derby", "brogue",
-                "lace up", "lace-up shoe", "dress shoe",
-              ];
-            } else {
-              footPriority = [
-                ...footPriority,
-                "sneaker", "sneakers", "boot", "boots", "loafer", "loafers",
-                "sandal", "sandals", "heel", "heels", "flat", "flats", "trainer", "trainers",
-              ];
-            }
-            softProductTypeHints = [...new Set([...footPriority, ...softProductTypeHints])];
-          }
-          // Bottoms: same wide-net strategy per detection subtype.
-          if (categoryMapping.productCategory === "bottoms") {
-            const botLabel = String(label ?? "").toLowerCase();
-            const isJeans = /\b(jean|denim)\b/.test(botLabel);
-            const isShorts = /\b(short|shorts)\b/.test(botLabel);
-            const isSkirt = /\b(skirt)\b/.test(botLabel);
-            const isTrousers = /\b(trouser|pant|slack|chino|cargo)\b/.test(botLabel);
-            const isLeggings = /\b(legging|jogger|sweatpant|track\s*pant)\b/.test(botLabel);
-            const genericBot = [
-              "bottoms", "bottom", "pants", "pant",
-            ];
-            let botPriority: string[] = [...genericBot];
-            if (isJeans) {
-              botPriority = [
-                ...botPriority,
-                "jeans", "jean", "denim", "denim pants", "denim jeans",
-                "skinny jeans", "straight jeans", "bootcut jeans", "wide leg jeans",
-                "boyfriend jeans", "mom jeans", "high waist jeans",
-              ];
-            } else if (isShorts) {
-              botPriority = [
-                ...botPriority,
-                "shorts", "short", "denim shorts", "cargo shorts", "bermuda shorts",
-                "chino shorts", "athletic shorts", "running shorts",
-              ];
-            } else if (isSkirt) {
-              botPriority = [
-                ...botPriority,
-                "skirt", "skirts", "mini skirt", "midi skirt", "maxi skirt",
-                "pencil skirt", "a-line skirt", "pleated skirt", "denim skirt",
-              ];
-            } else if (isTrousers) {
-              botPriority = [
-                ...botPriority,
-                "trousers", "trouser", "pants", "slacks", "slack",
-                "dress pants", "formal pants", "tailored pants", "suit pants",
-                "chinos", "chino", "cargo pants", "cargos", "wide leg pants",
-              ];
-            } else if (isLeggings) {
-              botPriority = [
-                ...botPriority,
-                "leggings", "legging", "jogger", "joggers", "sweatpants", "sweatpant",
-                "track pants", "athletic pants", "yoga pants", "lounge pants",
-              ];
-            } else {
-              botPriority = [
-                ...botPriority,
-                "jeans", "jean", "denim", "trousers", "trouser", "pants", "slacks",
-                "shorts", "short", "skirt", "skirts", "leggings", "joggers", "chinos",
-              ];
-            }
-            softProductTypeHints = [...new Set([...botPriority, ...softProductTypeHints])];
           }
           softProductTypeHints = recoverTailoredTopTypes(
             softProductTypeHints,
@@ -6680,15 +6537,10 @@ export class ImageAnalysisService {
             categoryMapping.productCategory === "dresses" ||
             categoryMapping.productCategory === "outerwear" ||
             categoryMapping.productCategory === "footwear";
-          // In main-path-only mode recovery is disabled, so we need better KNN precision
-          // from the start. Lower the confidence/area thresholds so the hard category
-          // filter fires for more core apparel detections and prevents non-category items
-          // (e.g. white dresses, bags) from flooding the tops/bottoms KNN retrieval pool.
-          const _mainPathOnlyMode = shopLookMainPathOnlyEnv();
           const forceCoreMainPathHardCategory =
             coreApparelLikeCategory &&
-            (detection.confidence ?? 0) >= (_mainPathOnlyMode ? 0.45 : 0.55) &&
-            (detection.area_ratio ?? 0) >= (_mainPathOnlyMode ? 0.02 : 0.03) &&
+            (detection.confidence ?? 0) >= 0.55 &&
+            (detection.area_ratio ?? 0) >= 0.03 &&
             !suitCaptionForTop;
           const forceHardCategoryFilterUsed = Boolean(
             shouldHardCategory || forceCoreMainPathHardCategory,
@@ -6762,15 +6614,9 @@ export class ImageAnalysisService {
 
           const preBlipFilters = { ...filters };
           const preBlipSoftTypeHints = [...softProductTypeHints];
-          // All unique type hints for the reranker — not capped by call limit.
-          // The cap only controls how many parallel search calls may fire.
-          const allTypeSearchHints = [
+          const initialTypeSearchHints = [
             ...new Set(preBlipSoftTypeHints.map((t) => String(t).toLowerCase().trim()).filter(Boolean)),
-          ];
-          // Limit parallel searches to the allowed call budget; single-search path
-          // receives the full allTypeSearchHints list as softProductTypeHints.
-          const maxParallelTypeSearches = Math.max(1, Math.min(3, detectionSearchCallLimit));
-          const initialTypeSearchHints = allTypeSearchHints.slice(0, maxParallelTypeSearches);
+          ].slice(0, Math.max(1, Math.min(3, detectionSearchCallLimit)));
           // k-means crop color for this detection is already resolved (awaited above at
           // cropColorsPromise). Pass it to the initial search so the reranker has a color
           // bias from the start rather than ordering results purely by cosine similarity.
@@ -6820,8 +6666,6 @@ export class ImageAnalysisService {
               initialTypeSearchHints.map((typeHint, index) =>
                 runDetectionSearch(`initial_type_${index + 1}`, {
                   ...initialSearchPayload,
-                  // Parallel path: one cluster-representative hint per call for diversity.
-                  // allTypeSearchHints carries full diversity; each call gets one slice.
                   softProductTypeHints: [typeHint],
                 }),
               ),
@@ -6848,9 +6692,7 @@ export class ImageAnalysisService {
             })
             : runDetectionSearch("initial", {
               ...initialSearchPayload,
-              // Single-search path: pass ALL type hints so the reranker has full type
-              // diversity for compliance scoring (not limited by the call budget).
-              softProductTypeHints: allTypeSearchHints.length > 0 ? allTypeSearchHints : undefined,
+              softProductTypeHints: preBlipSoftTypeHints.length > 0 ? preBlipSoftTypeHints : undefined,
             });
 
           // Per-detection BLIP captioning + CLIP consistency gate — runs concurrently with search above.
