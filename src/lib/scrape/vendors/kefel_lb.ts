@@ -66,6 +66,6 @@ export function parseKefelCard(lines: string[]): ScrapedProduct | null {
     availability,
     image_url: null,
     image_urls: [],
-    return_policy: null,
+    return_policy: undefined,
   };
 }
