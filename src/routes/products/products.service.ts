@@ -1626,6 +1626,36 @@ function additiveImageRankingScore(params: {
     if (visualFloor > raw) raw = visualFloor;
   }
 
+  // Same-color coherence floor.
+  // Applies UNIFORMLY across all types (tops, bottoms, dresses, outerwear, footwear,
+  // accessories). When the candidate shares the color family with the query and is in
+  // the same garment family, perceptual similarity is high regardless of marginal CLIP
+  // differences — a user looking at two same-color items sees them as very similar.
+  // This floor ensures a same-color, same-family item cannot be silently dragged below
+  // a visual-anchored coherence threshold by a different-color but slightly more
+  // visually-similar item.
+  // Conditions are stricter than the near-identical floor above so it doesn't fire on
+  // weak visual evidence: requires moderate visual (>=0.70) AND exact-type or strong
+  // category match AND no contradictions.
+  if (
+    hasColorPreference &&
+    (color.exactColorMatch || color.sameColorFamily) &&
+    familyGate >= 0.92 &&
+    visualSimilarity >= 0.70 &&
+    !explicitColor &&
+    !(hasColorPreference && color.colorScore <= 0.2) &&
+    contradictionPenalty >= 0.85 &&
+    (exactTypeScore >= 1 || typeCompliance >= 0.5 || categoryScore >= 0.92)
+  ) {
+    // Multiplier scales with color tier: exact match gets a slightly higher floor than
+    // same-family. The floor stays below the near-identical floor above so they
+    // compose cleanly when both fire.
+    const coherenceMultiplier = color.exactColorMatch ? 0.92 : 0.86;
+    const colorCoherenceFloor =
+      visualBase * familyGate * qualityModifier * coherenceMultiplier;
+    if (colorCoherenceFloor > raw) raw = colorCoherenceFloor;
+  }
+
   let maxFinal = 0.995;
   if (visualSimilarity >= 0.985 && exactTypeScore >= 1 && color.exactColorMatch && knownMismatchCount === 0) {
     maxFinal = 0.995;
