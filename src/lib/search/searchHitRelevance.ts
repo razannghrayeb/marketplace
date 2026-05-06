@@ -253,7 +253,7 @@ export function scoreAudienceCompliance(
     : "";
   const audienceBlob = `${title} ${category} ${canonical} ${productTypes}`;
   const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|handbag|clutch|tote|purse|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt)\b/;
-  const menStyleCue = /\b(suit|suits|tie|oxford|oxfords|dress\s*shirt|button\s*down|button-down|briefs|boxer|boxers|cargo\s*pants?|chino|chinos|loafer|loafers|briefcase|messenger|sport\s*coat|blazer)\b/;
+  const menStyleCue = /\b(tie|oxford|oxfords|dress\s*shirt|button\s*down|button-down|briefs|boxer|boxers|briefcase|messenger|sport\s*coat)\b/;
 
   let score = 1;
   let factors = 0;
@@ -286,9 +286,10 @@ export function scoreAudienceCompliance(
       const hasKidsCue = /\b(kids?|child|children|boys?|girls?|toddler|baby|youth)\b/.test(audienceBlob);
       const hasWomenStyleCue = womenStyleCue.test(audienceBlob);
       const hasMenStyleCue = menStyleCue.test(audienceBlob);
+      const hasWomenOnlyGarmentCue = /\b(dress|dresses|gown|skirt|skirts|camisole|cami|heels?|pumps?|stiletto)\b/.test(audienceBlob);
       if (wantG === "men") {
         if (hasKidsCue) score *= 0;
-        else if (hasWomenStyleCue && !hasMenStyleCue) score *= 0.12;
+        else if (hasWomenStyleCue && !hasMenStyleCue) score *= hasWomenOnlyGarmentCue ? 0 : 0.12;
         else if (/\b(men|mens|male)\b/.test(audienceBlob)) score *= 0.9;
         else if (/\b(women|womens|female|ladies|woman|girl|girls)\b/.test(audienceBlob)) score *= 0.28;
         else score *= 0.78;
@@ -512,6 +513,23 @@ function inferSleeveFromCatalogSignals(
   }
 
   return null;
+}
+
+function hasStrongLongSleeveCatalogDefault(
+  src: Record<string, unknown>,
+  title: string,
+  description: string,
+): boolean {
+  const bag = [
+    src.category,
+    src.category_canonical,
+    title,
+    description,
+  ]
+    .map((x) => String(x ?? "").toLowerCase())
+    .join(" ");
+
+  return /\b(hoodie|hooded|sweater|cardigan|pullover|jacket|coat|parka|trench|blazer|windbreaker|overcoat)\b/.test(bag);
 }
 
 function docSupportsSleeveIntent(src: Record<string, unknown>): boolean {
@@ -974,7 +992,11 @@ export function computeHitRelevance(
       // Inferred sleeve from type/category cues is weaker than explicit sleeve metadata.
       // Keep this conservative so noisy catalog signals (e.g. bad type tags) do not
       // incorrectly satisfy sleeve intent for long-sleeve products.
-      sleeveCompliance = observed ? 1 : 0.28;
+      sleeveCompliance = observed
+        ? 1
+        : wantedSleeve === "long" && hasStrongLongSleeveCatalogDefault(src, title, description)
+          ? 0.68
+          : 0.28;
     } else if (!observed) {
       // Avoid hard contradiction penalty when mismatch comes from heuristic inference only.
       sleeveCompliance = 0.12;
@@ -1194,7 +1216,7 @@ export function computeHitRelevance(
     ? crossFamilyPenalty * (0.55 + 0.45 * typeMetadataConfidence)
     : crossFamilyPenalty;
   const crossPenTrace = Math.max(0, crossFamilyPenaltyForFinal);
-  const hardBlocked = hasReliableTypeIntent && crossPenTrace >= 0.9;
+  const hardBlocked = hasReliableTypeIntent && (crossPenTrace >= 0.9 || crossFamilyPenalty >= 0.9);
   const typeGateFactor = !hasReliableTypeIntent
     ? 1
     : productTypeCompliance >= 0.5
@@ -1280,7 +1302,7 @@ export function computeHitRelevance(
   // then do not allow hits from other families to surface (set final relevance to 0).
   // This is intentionally strict per request; can be made configurable later.
   try {
-    if (hasTypeIntent) {
+    if (hasTypeIntent && hasReliableTypeIntent) {
       if (isFootwearLikeIntent && !docIsFootwearLike) {
         finalRelevance01 = 0;
       } else if (isTopLikeIntent && !docIsTopLike) {
@@ -1293,6 +1315,10 @@ export function computeHitRelevance(
     }
   } catch (e) {
     // noop
+  }
+
+  if ((hardBlocked || (hasReliableTypeIntent && crossFamilyPenalty >= 0.9)) && productTypeCompliance < 0.2) {
+    finalRelevance01 = Math.min(finalRelevance01, 0.02);
   }
 
   if (hasColorIntentForFinalRelevance && (isTopLikeIntent || isBottomLikeIntent || isFootwearLikeIntent)) {
