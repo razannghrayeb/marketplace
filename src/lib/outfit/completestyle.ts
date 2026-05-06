@@ -1396,16 +1396,46 @@ function normalizeOutfitText(value: unknown): string {
 }
 
 function isRelevantForRequestedCategories(product: Product, categories: ProductCategory[]): boolean {
-  const haystack = normalizeOutfitText(`${product.title} ${product.category || ""} ${product.description || ""}`);
-  if (!haystack.trim()) return false;
+  const title = normalizeOutfitText(product.title);
+  const categoryField = normalizeOutfitText(product.category || "");
+  const description = normalizeOutfitText(product.description || "");
+  const haystack = `${title} ${categoryField} ${description}`.trim();
+  if (!haystack) return false;
 
-  return categories.some((cat) => {
+  // Prefer explicit indexed category matches first (strong signal)
+  for (const cat of categories) {
     const keywords = CATEGORY_KEYWORDS[cat] || [];
-    return keywords.some((keyword) => {
+    for (const keyword of keywords) {
       const token = normalizeOutfitText(keyword).trim();
-      return token.length >= 3 && haystack.includes(token);
-    });
-  });
+      if (token.length < 3) continue;
+      // Exact-ish match against indexed category field (strong)
+      if (categoryField.split(/\W+/).includes(token)) return true;
+    }
+  }
+
+  // Fallback: allow title/description matches but apply additional guards for core garments
+  for (const cat of categories) {
+    const keywords = CATEGORY_KEYWORDS[cat] || [];
+    for (const keyword of keywords) {
+      const token = normalizeOutfitText(keyword).trim();
+      if (token.length < 3) continue;
+      if (title.includes(token) || description.includes(token)) {
+        // If the target category is a bottom-like category, ensure the candidate
+        // appears to be a core garment (avoid accessories like charms, balls, etc.)
+        const bottomLike = ["jeans", "pants", "shorts", "skirt", "leggings"].includes(cat);
+        if (bottomLike) {
+          const coreBlob = `${product.title} ${product.category || ""}`.toLowerCase();
+          if (!CORE_GARMENT_HINT.test(coreBlob)) {
+            // Not a core garment — skip this candidate
+            continue;
+          }
+        }
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 function productNearDuplicateKey(product: Product): string {
