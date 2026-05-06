@@ -3720,6 +3720,7 @@ function imageDetectionFinalAcceptFloor(category: string): number {
   if (c === "tops") return 0.14;
   if (c === "bottoms") return 0.16;
   if (c === "dresses") return 0.16;
+  if (c === "outerwear" || c === "tailored") return 0.16;
   return 0.2;
 }
 
@@ -5292,22 +5293,29 @@ export async function searchByImageWithSimilarity(
   const hasExplicitCategoryFilter = !isDetectionScopedQuery && filterCategory != null;
   const hasTextTypeIntent = Boolean(textQueryForRelevance);
   let hasDetectionAnchoredTypeIntent = false;
-  // CRITICAL FIX: When hard category filter is active (filterCategory is set), do NOT include predictedCategoryAisles
-  // predictedCategoryAisles may contain alternatives that would override the hard filter in relevance scoring
-  // After fix in image-analysis.service.ts, predictedCategoryAisles should only contain primary category when hard filter applied,
-  // but this provides additional safety to prevent alternative category leakage in relevance
+  // For detection-scoped queries, use only the canonical detection category + predicted aisles as the
+  // category intent signal. Using the full flat filterCategory array (which may include dozens of retrieval
+  // vocabulary terms such as "cardigan" from outerwear aliases) pollutes the intent blob and triggers
+  // false-positive family guards (e.g., "cardigan" in outerwear terms → isTopLikeIntent=true → all suit
+  // products zeroed out). Canonical categories are expanded correctly via getCategorySearchTerms() inside
+  // scoreCategoryRelevance01, so precision is preserved.
   const astCategoriesForRelevance = normalizeImageCategoryIntentArray([
     ...new Set(
       [
-        ...(filterCategory == null && (predictedCategoryAisles ?? []).length > 0
-          ? (predictedCategoryAisles ?? []).map((x) => String(x).toLowerCase().trim()).filter(Boolean)
-          : []),
-        ...(Array.isArray(filterCategory)
-          ? filterCategory
-          : filterCategory
-            ? [String(filterCategory)]
-            : []
-        ).map((x) => String(x).toLowerCase().trim()),
+        ...(isDetectionScopedQuery
+          ? [
+              String(params.detectionProductCategory ?? "").toLowerCase().trim(),
+              ...(predictedCategoryAisles ?? []).map((x) => String(x).toLowerCase().trim()),
+            ].filter(Boolean)
+          : filterCategory == null && (predictedCategoryAisles ?? []).length > 0
+            ? (predictedCategoryAisles ?? []).map((x) => String(x).toLowerCase().trim()).filter(Boolean)
+            : (Array.isArray(filterCategory)
+                ? filterCategory
+                : filterCategory
+                  ? [String(filterCategory)]
+                  : []
+              ).map((x) => String(x).toLowerCase().trim())
+        ),
       ].filter(Boolean),
     ),
   ]);
@@ -5908,13 +5916,36 @@ export async function searchByImageWithSimilarity(
         comp.colorCompliance = (comp.colorCompliance ?? 0) * 0.35;
       }
 
+      // Guard: if product has NO catalog color (null), demote inferred-only "exact" matches
+      // This prevents false positives when color is inferred from potentially ambiguous images
+      const hasCatalogColor = 
+        typeof hit._source?.color === "string" && String(hit._source.color).trim() !== "" ||
+        typeof hit._source?.attr_color === "string" && String(hit._source.attr_color).trim() !== "";
+      if (!hasCatalogColor && String(comp.colorTier ?? "").toLowerCase() === "exact") {
+        // Product has no explicit color metadata, only inferred/image colors
+        // Require very high compliance for exact tier, otherwise demote
+        if ((comp.colorCompliance ?? 0) < 0.90) {
+          comp.colorTier = (comp.colorCompliance ?? 0) >= 0.68 ? "family" : "bucket";
+          comp.colorCompliance = Math.max(0.4, (comp.colorCompliance ?? 0) * 0.8);
+        }
+      }
+
       if (!hasAnyColorTokenIntent) {
         comp.colorCompliance = Math.max(0, Math.min(1, cs));
       } else if (!hasHardCatalogColorConflict && (comp.colorCompliance ?? 0) < 0.12 && cs >= 0.42) {
-        comp.colorCompliance = Math.max(
-          comp.colorCompliance ?? 0,
-          Math.min(1, cs * 0.82),
-        );
+        // Guard: only boost colorCompliance if color signals are reasonably confident.
+        // If inferred color is low confidence and crop has conflicts, don't artificially boost.
+        const inferredColorConfidence = preferredInferredColorConfidence ?? 0;
+        const cropHasConflict = inferredCropColorConflict;
+        const lowConfidenceColorSignal = inferredColorConfidence < 0.55;
+        const shouldNotBoost = lowConfidenceColorSignal && cropHasConflict;
+        
+        if (!shouldNotBoost) {
+          comp.colorCompliance = Math.max(
+            comp.colorCompliance ?? 0,
+            Math.min(1, cs * 0.82),
+          );
+        }
       }
     }
   }
@@ -6142,7 +6173,7 @@ export async function searchByImageWithSimilarity(
   const finalScoreSourceById = new Map<string, string>();
 
   // Pre-compute detection category for efficiency (used many times per result in the loop below).
-  const normalizedDetectionCategory = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  const normalizedDetectionCategory = normalizeDetectionCategoryToken(params.detectionProductCategory);
   const isTopDetection = normalizedDetectionCategory === "tops";
   const isDressDetection = normalizedDetectionCategory === "dresses";
   const isBottomsDetection = normalizedDetectionCategory === "bottoms";
@@ -7351,7 +7382,8 @@ export async function searchByImageWithSimilarity(
     detectionCategoryNorm === "tops" ||
     detectionCategoryNorm === "bottoms" ||
     detectionCategoryNorm === "dresses" ||
-    detectionCategoryNorm === "outerwear";
+    detectionCategoryNorm === "outerwear" ||
+    detectionCategoryNorm === "tailored";
   const sparseVisualCandidatePool =
     visualGatedHits.length > 0 &&
     visualGatedHits.length <= Math.max(8, Math.min(fetchLimit, 24));
@@ -7516,7 +7548,7 @@ export async function searchByImageWithSimilarity(
       // category-safe visual neighbors instead of returning an empty group.
       if (rescuePool.length === 0) {
         const dc = String(params.detectionProductCategory ?? "").toLowerCase().trim();
-        const isCoreDetection = dc === "tops" || dc === "footwear" || dc === "shoes" || dc === "bags";
+        const isCoreDetection = dc === "tops" || dc === "footwear" || dc === "shoes" || dc === "bags" || dc === "outerwear" || dc === "tailored" || dc === "bottoms";
         if (isCoreDetection) {
           rescuePool = visualGatedHits.filter((h: any) => {
             const comp = complianceById.get(String(h._source.product_id));
@@ -9046,6 +9078,30 @@ export async function searchByImageWithSimilarity(
         return sim >= dressVisualOverrideMin && crossFamily < 0.42;
       }
       if (exactType >= 1 || typeComp >= 0.3) return true;
+      // When product_types is empty, typeComp is always 0 regardless of actual relevance.
+      // Use category score as a proxy to avoid unfairly dropping well-categorized items.
+      const srcPT = (p as any).product_types;
+      const hasEmptyProductTypes = !Array.isArray(srcPT) || (srcPT as unknown[]).length === 0;
+      if (hasEmptyProductTypes) {
+        const catScore = Number(ex.categoryScore ?? ex.categoryRelevance01 ?? 0);
+        if (catScore >= 0.7 && crossFamily < 0.4) return true;
+      }
+      const textTypeHaystack = textTokenSet(
+        [
+          String((p as any).title ?? ""),
+          String((p as any).category ?? ""),
+          ...(Array.isArray(srcPT) ? srcPT : srcPT != null ? [srcPT] : []),
+        ].join(" "),
+      );
+      const textTypeMatch = desiredProductTypes.some((desiredType) => {
+        const desiredTokens = textTokenSet(String(desiredType ?? ""));
+        if (desiredTokens.size === 0) return false;
+        for (const token of desiredTokens) {
+          if (!textTypeHaystack.has(token)) return false;
+        }
+        return true;
+      });
+      if (textTypeMatch && crossFamily < 0.45) return true;
       return sim >= 0.96 && crossFamily < 0.35;
     });
     if (filtered.length > 0) {

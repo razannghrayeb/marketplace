@@ -6166,10 +6166,35 @@ export class ImageAnalysisService {
           if (categoryMapping.productCategory === "tops") {
             const labelNormForTopHints = String(label ?? "").toLowerCase();
             const isShortSleeveTop = /\bshort sleeve top\b/.test(labelNormForTopHints);
+            const isLongSleeveTop = /\blong sleeve top\b/.test(labelNormForTopHints);
             const isMenAudience = String(inferredAudience.gender ?? "").toLowerCase().trim() === "men";
             if (isShortSleeveTop) {
-              const shortTopPriority = ["t-shirt", "tshirt", "tee", "shirt", "polo", "top", "tops"];
+              // Expanded set of short-sleeve top variants — catalog data is dirty so we
+              // cast a wide net so text-based fallback matching can rescue valid products.
+              const shortTopPriority = [
+                "t-shirt", "tshirt", "t shirt", "tee", "tees",
+                "shirt", "shirts", "polo", "polo shirt", "polo shirts",
+                "top", "tops", "henley", "crew neck", "crewneck",
+                "v-neck", "vneck", "round neck",
+                "short sleeve", "short sleeve shirt", "short sleeve top",
+                "tank top", "jersey", "overshirt",
+              ];
               softProductTypeHints = [...new Set([...shortTopPriority, ...softProductTypeHints])];
+            } else if (isLongSleeveTop) {
+              const longTopPriority = [
+                "shirt", "shirts", "dress shirt", "button up", "button-up", "button down",
+                "long sleeve shirt", "long sleeve top", "long sleeve",
+                "sweater", "sweaters", "pullover", "knit", "knitwear",
+                "henley", "top", "tops", "blouse", "jersey", "overshirt",
+              ];
+              softProductTypeHints = [...new Set([...longTopPriority, ...softProductTypeHints])];
+            } else if (!isShortSleeveTop && !isLongSleeveTop) {
+              // Generic top label — boost broad top vocabulary for text-based rescue.
+              const genericTopPriority = [
+                "top", "tops", "shirt", "shirts", "t-shirt", "tshirt", "tee",
+                "blouse", "polo", "sweater", "sweaters", "pullover", "henley", "jersey",
+              ];
+              softProductTypeHints = [...new Set([...genericTopPriority, ...softProductTypeHints])];
             }
             // Avoid overly narrow/feminine seeds for men tops; they collapse recall.
             if (isMenAudience) {
@@ -6537,10 +6562,15 @@ export class ImageAnalysisService {
             categoryMapping.productCategory === "dresses" ||
             categoryMapping.productCategory === "outerwear" ||
             categoryMapping.productCategory === "footwear";
+          // In main-path-only mode recovery is disabled, so we need better KNN precision
+          // from the start. Lower the confidence/area thresholds so the hard category
+          // filter fires for more core apparel detections and prevents non-category items
+          // (e.g. white dresses, bags) from flooding the tops/bottoms KNN retrieval pool.
+          const _mainPathOnlyMode = shopLookMainPathOnlyEnv();
           const forceCoreMainPathHardCategory =
             coreApparelLikeCategory &&
-            (detection.confidence ?? 0) >= 0.55 &&
-            (detection.area_ratio ?? 0) >= 0.03 &&
+            (detection.confidence ?? 0) >= (_mainPathOnlyMode ? 0.45 : 0.55) &&
+            (detection.area_ratio ?? 0) >= (_mainPathOnlyMode ? 0.02 : 0.03) &&
             !suitCaptionForTop;
           const forceHardCategoryFilterUsed = Boolean(
             shouldHardCategory || forceCoreMainPathHardCategory,
@@ -6614,9 +6644,15 @@ export class ImageAnalysisService {
 
           const preBlipFilters = { ...filters };
           const preBlipSoftTypeHints = [...softProductTypeHints];
-          const initialTypeSearchHints = [
+          // All unique type hints for the reranker — not capped by call limit.
+          // The cap only controls how many parallel search calls may fire.
+          const allTypeSearchHints = [
             ...new Set(preBlipSoftTypeHints.map((t) => String(t).toLowerCase().trim()).filter(Boolean)),
-          ].slice(0, Math.max(1, Math.min(3, detectionSearchCallLimit)));
+          ];
+          // Limit parallel searches to the allowed call budget; single-search path
+          // receives the full allTypeSearchHints list as softProductTypeHints.
+          const maxParallelTypeSearches = Math.max(1, Math.min(3, detectionSearchCallLimit));
+          const initialTypeSearchHints = allTypeSearchHints.slice(0, maxParallelTypeSearches);
           // k-means crop color for this detection is already resolved (awaited above at
           // cropColorsPromise). Pass it to the initial search so the reranker has a color
           // bias from the start rather than ordering results purely by cosine similarity.
@@ -6666,6 +6702,8 @@ export class ImageAnalysisService {
               initialTypeSearchHints.map((typeHint, index) =>
                 runDetectionSearch(`initial_type_${index + 1}`, {
                   ...initialSearchPayload,
+                  // Parallel path: one cluster-representative hint per call for diversity.
+                  // allTypeSearchHints carries full diversity; each call gets one slice.
                   softProductTypeHints: [typeHint],
                 }),
               ),
@@ -6692,7 +6730,9 @@ export class ImageAnalysisService {
             })
             : runDetectionSearch("initial", {
               ...initialSearchPayload,
-              softProductTypeHints: preBlipSoftTypeHints.length > 0 ? preBlipSoftTypeHints : undefined,
+              // Single-search path: pass ALL type hints so the reranker has full type
+              // diversity for compliance scoring (not limited by the call budget).
+              softProductTypeHints: allTypeSearchHints.length > 0 ? allTypeSearchHints : undefined,
             });
 
           // Per-detection BLIP captioning + CLIP consistency gate — runs concurrently with search above.
