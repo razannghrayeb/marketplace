@@ -53,6 +53,11 @@ import {
   type HitCompliance,
   type SearchHitRelevanceIntent,
 } from "../../lib/search/searchHitRelevance";
+import {
+  scoreCandidateUnified,
+  isUnifiedImageScorerEnabled,
+  computeDocFamilySignals as computeUnifiedDocFamilySignals,
+} from "../../lib/search/unifiedImageScorer";
 import { merchandiseVisualSimilarity01 } from "../../lib/search/merchandiseVisualSimilarity";
 import {
   expandProductTypesForQuery,
@@ -7196,6 +7201,90 @@ export async function searchByImageWithSimilarity(
     }
   }
 
+  // ──────────────────────────────────────────────────────────────────────
+  // FINAL hard family cut for image search (post-tuning, pre-sort).
+  // ──────────────────────────────────────────────────────────────────────
+  // The rerank loop above runs many "Math.max(boost, comp.finalRelevance01)"
+  // tuning blocks (tops/bottoms/dress/outerwear/bag/footwear/tailored main-path
+  // tuning, near-identical floor, pre-gate visual color override, etc.) that
+  // can lift a candidate's score back up after a hard cut applied earlier in
+  // the same loop. Apply the family-conformance cut HERE, after all tuning,
+  // so it is the final word on cross-family candidates and cannot be undone.
+  //
+  // Trigger: hasDetectionAnchoredTypeIntent (always true for image search per
+  // detection) + reasonable YOLO confidence. Independent of the upstream
+  // `reliableTypeIntent` flag because that has too many opt-out conditions.
+  const detectionCatForFamilyCut = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  const yoloConfForFamilyCut = Number(params.detectionYoloConfidence ?? 0);
+  const apparelDetectionCategoryForCut =
+    detectionCatForFamilyCut === "tops" ||
+    detectionCatForFamilyCut === "bottoms" ||
+    detectionCatForFamilyCut === "dresses" ||
+    detectionCatForFamilyCut === "outerwear" ||
+    detectionCatForFamilyCut === "tailored" ||
+    detectionCatForFamilyCut === "footwear" ||
+    detectionCatForFamilyCut === "shoes" ||
+    detectionCatForFamilyCut === "bags";
+  if (
+    hasDetectionAnchoredTypeIntent &&
+    apparelDetectionCategoryForCut &&
+    yoloConfForFamilyCut >= 0.65
+  ) {
+    for (const hit of baseCandidates) {
+      const idStr = String(hit._source.product_id);
+      const comp = complianceById.get(idStr);
+      if (!comp) continue;
+      const src = (hit?._source ?? {}) as Record<string, unknown>;
+      const productTypesArr = Array.isArray(src.product_types)
+        ? (src.product_types as unknown[]).map((t) => String(t ?? "").toLowerCase())
+        : [];
+      const docBlobForCut = [
+        src.title,
+        src.category,
+        src.category_canonical,
+        ...productTypesArr,
+      ]
+        .map((v) => String(v ?? "").toLowerCase())
+        .join(" ");
+      if (!docBlobForCut.trim()) continue;
+      const docIsTopLikeCut = /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|overshirt|overshirts|polo|polos|tunic|loungewear|knitwear|pullover)\b/.test(docBlobForCut);
+      const docIsBottomLikeCut = /\b(bottom|bottoms|pants?|trousers?|jeans?|denim|shorts?|skirt|skirts|leggings?|joggers?|chinos?|culottes?|slacks?)\b/.test(docBlobForCut);
+      const docIsFootwearLikeCut = /\b(footwear|shoe|shoes|sneaker|sneakers|trainer|trainers|boot|boots|loafer|loafers|heel|heels|pump|pumps|sandal|sandals|slipper|slippers|clog|clogs|mule|mules|flats?|oxford|oxfords)\b/.test(docBlobForCut);
+      const docIsDressLikeCut = /\b(dress|dresses|gown|gowns|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|sundress|abaya|kaftan|caftan)\b/.test(docBlobForCut);
+      const docIsOuterwearOrTailoredCut = /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers|overcoat|overcoats|shacket|shackets|overshirt|overshirts|suit|suits|tuxedo|tuxedos|sport\s*coat|dress\s*jacket|waistcoat|waistcoats|gilet|gilets|tailored|vest|vests|poncho|anorak)\b/.test(docBlobForCut);
+      const docIsBagLikeCut = /\b(bag|bags|handbag|handbags|tote|totes|clutch|clutches|purse|purses|backpack|backpacks|crossbody|satchel|satchels|wallet|wallets|fanny\s*pack|duffel|duffle)\b/.test(docBlobForCut);
+
+      let familyMismatch = false;
+      let cutReason = "";
+      if (detectionCatForFamilyCut === "tops") {
+        // Allow knitwear-cardigan-sweater-shirt etc.; block jackets/coats/dresses/etc.
+        if (!docIsTopLikeCut) familyMismatch = true;
+        cutReason = "image_top_intent_non_top_doc";
+      } else if (detectionCatForFamilyCut === "bottoms") {
+        if (!docIsBottomLikeCut) familyMismatch = true;
+        cutReason = "image_bottom_intent_non_bottom_doc";
+      } else if (detectionCatForFamilyCut === "footwear" || detectionCatForFamilyCut === "shoes") {
+        if (!docIsFootwearLikeCut) familyMismatch = true;
+        cutReason = "image_footwear_intent_non_footwear_doc";
+      } else if (detectionCatForFamilyCut === "dresses") {
+        if (!docIsDressLikeCut) familyMismatch = true;
+        cutReason = "image_dress_intent_non_dress_doc";
+      } else if (detectionCatForFamilyCut === "outerwear" || detectionCatForFamilyCut === "tailored") {
+        // Outerwear/tailored: accept jackets, coats, blazers, suits, tuxedos, vests.
+        if (!docIsOuterwearOrTailoredCut) familyMismatch = true;
+        cutReason = "image_outerwear_intent_non_outerwear_doc";
+      } else if (detectionCatForFamilyCut === "bags") {
+        if (!docIsBagLikeCut) familyMismatch = true;
+        cutReason = "image_bag_intent_non_bag_doc";
+      }
+
+      if (familyMismatch) {
+        comp.finalRelevance01 = 0;
+        finalScoreSourceById.set(idStr, `${cutReason}_hard_gate`);
+      }
+    }
+  }
+
   const colorTierRankForSort = (tier: unknown): number => {
     const t = String(tier ?? "none").toLowerCase().trim();
     if (t === "exact") return 4;
@@ -9000,6 +9089,55 @@ export async function searchByImageWithSimilarity(
           colorIntentStrength: colorIntentStrengthForFinal,
         })
         : null;
+      let unifiedScorerResult: any = undefined;
+      if (isUnifiedImageScorerEnabled() && compliance) {
+        try {
+          const docSignals = computeUnifiedDocFamilySignals(hydratedBlobSrc as Record<string, unknown>);
+          const unifiedInputs = {
+            exactTypeScore: Number(compliance.exactTypeScore ?? 0),
+            productTypeCompliance: Number(compliance.productTypeCompliance ?? 0),
+            siblingClusterScore: Number(compliance.siblingClusterScore ?? 0),
+            parentHypernymScore: Number(compliance.parentHypernymScore ?? 0),
+            intraFamilyPenalty: Number(compliance.intraFamilyPenalty ?? 0),
+            crossFamilyPenalty: Number(compliance.crossFamilyPenalty ?? 0),
+            colorCompliance: Number(explainColorCompliance ?? compliance.colorCompliance ?? 0),
+            colorTier: String(compliance.colorTier ?? "none"),
+            audienceCompliance: Number(compliance.audienceCompliance ?? 0),
+            styleCompliance: Number(compliance.styleCompliance ?? 0),
+            sleeveCompliance: Number(compliance.sleeveCompliance ?? 0),
+            lengthCompliance: Number((compliance as any).lengthCompliance ?? 0),
+            patternCompliance: Number((compliance as any).patternCompliance ?? (compliance as any).patternEmbeddingSim ?? 0),
+            materialCompliance: Number((compliance as any).materialCompliance ?? (compliance as any).materialEmbeddingSim ?? 0),
+            categoryRelevance01: Number(compliance.categoryRelevance01 ?? 0),
+            osSimilarity01: Number(compliance.osSimilarity01 ?? similarityScore ?? 0),
+
+            hasTypeIntent: Boolean(compliance.hasTypeIntent),
+            hasColorIntent: Boolean(hasColorPreferenceForRanking || compliance.hasColorIntent),
+            hasSleeveIntent: Boolean(compliance.hasSleeveIntent),
+            hasLengthIntent: Boolean((compliance as any).hasLengthIntent),
+            hasStyleIntent: Boolean(styleIntentGatesFinalRelevance),
+            hasAudienceIntent: Boolean(hasAudienceIntentForRelevance),
+            hasExplicitColorIntent: Boolean(hasExplicitColorIntent),
+            hasInferredColorSignal: Boolean(hasInferredColorSignal),
+            hasCropColorSignal: Boolean(hasCropColorSignal),
+            reliableTypeIntent: Boolean(hasReliableTypeIntentForRelevance),
+
+            detectionProductCategory: params.detectionProductCategory ?? null,
+            detectionYoloConfidence: Number(params.detectionYoloConfidence ?? 0),
+
+            docIsTopLike: Boolean(docSignals.docIsTopLike),
+            docIsBottomLike: Boolean(docSignals.docIsBottomLike),
+            docIsFootwearLike: Boolean(docSignals.docIsFootwearLike),
+            docIsDressLike: Boolean(docSignals.docIsDressLike),
+            docIsOuterwearOrTailoredLike: Boolean(docSignals.docIsOuterwearOrTailoredLike),
+            docIsBagLike: Boolean(docSignals.docIsBagLike),
+          };
+          unifiedScorerResult = scoreCandidateUnified(unifiedInputs as any);
+        } catch (err) {
+          console.warn('[unified-scorer] scoring failed', err instanceof Error ? err.message : err);
+          unifiedScorerResult = undefined;
+        }
+      }
       const calibrationBlend = additiveScore
         ? blendCalibratedImageRankingScore({
           priorScore: preCalibrationFinalRelevance01,
@@ -9160,6 +9298,7 @@ export async function searchByImageWithSimilarity(
                 penalties: additiveScore.penalties,
               }
               : undefined,
+            unifiedScorer: unifiedScorerResult ? { score: unifiedScorerResult.score, detail: unifiedScorerResult } : undefined,
           }
           : undefined,
         images: imagesOut,
