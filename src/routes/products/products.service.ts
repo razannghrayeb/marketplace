@@ -6001,6 +6001,21 @@ export async function searchByImageWithSimilarity(
           /\b(suit|suits|blazer|blazers|sport\s*coat|dress\s*jacket|waistcoat|vest|tuxedo)\b/.test(
             String(t).toLowerCase(),
           ),
+        )) ||
+      // High-confidence YOLO detections in clear apparel categories: enable hard family
+      // intent so cross-family items (e.g. jackets in a sweater query) are blocked by the
+      // gates in computeHitRelevance/searchHitRelevance. Without this, plain image search
+      // never triggers the strict cuts and visual similarity alone resurrects jackets.
+      (hasDetectionAnchoredTypeIntent &&
+        Number(params.detectionYoloConfidence ?? 0) >= 0.80 &&
+        (
+          params.detectionProductCategory === "tops" ||
+          params.detectionProductCategory === "bottoms" ||
+          params.detectionProductCategory === "dresses" ||
+          params.detectionProductCategory === "footwear" ||
+          params.detectionProductCategory === "shoes" ||
+          params.detectionProductCategory === "outerwear" ||
+          params.detectionProductCategory === "tailored"
         )),
   };
   const hasReliableTypeIntentForRelevance = Boolean(relevanceIntent.reliableTypeIntent);
@@ -6057,11 +6072,17 @@ export async function searchByImageWithSimilarity(
   const colorByHitId = new Map<string, string | null>();
   const lengthComplianceById = new Map<string, number>();
   const hasLengthIntentById = new Map<string, boolean>();
+  // Preserve the strict finalRelevance01 from computeHitRelevance so the image-search
+  // path can re-apply its hard family cuts and color tier caps after computeExplicitFinalRelevance
+  // overwrites comp.finalRelevance01 with its looser score. Without this, the cross-family
+  // gate ("sweater query → jacket doc") and color-tier caps are silently lost in image search.
+  const strictFinalById = new Map<string, number>();
   for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
     const sim = visualSimFromHit(hit);
     const rel = computeHitRelevance(hit, sim, relevanceIntent);
     const { primaryColor, ...comp } = rel;
+    strictFinalById.set(idStr, Number(comp.finalRelevance01 ?? 0));
     const compWithExpandedPenalty = applyExpandedColorTierPenalty({
       comp,
       primaryDesiredColors: primaryDesiredColorSet,
@@ -6535,6 +6556,30 @@ export async function searchByImageWithSimilarity(
       );
     } else {
       comp.finalRelevance01 = baseFinal;
+    }
+    // ── Preserve strict cuts from computeHitRelevance ─────────────────
+    // computeHitRelevance applies hard family cuts (cross-family intent like "sweater query
+    // returns jacket doc" → 0) and color tier caps (colorTier=none → max 0.06-0.18 etc).
+    // When the strict score was zeroed or near-zero by those gates, the looser
+    // computeExplicitFinalRelevance score above must NOT resurrect the candidate. Cap
+    // baseFinal by the strict score in those regimes; otherwise keep baseFinal unchanged
+    // so the richer composite/blip/parts signals from the explicit formula can take effect.
+    const strictFinal = strictFinalById.get(idStr) ?? comp.finalRelevance01 ?? 0;
+    if (strictFinal <= 0.02) {
+      // Hard family cut or hard color contradiction. Preserve.
+      comp.finalRelevance01 = 0;
+      finalScoreSourceById.set(idStr, "image_family_color_hard_gate");
+    } else if (strictFinal < 0.30) {
+      // Soft color tier cap (colorTier=none → 0.06-0.18; colorCompliance<0.2 → 0.10-0.22;
+      // bucket → 0.32-0.56; shade → bucket+0.08). Cap baseFinal at strictFinal + small
+      // bonus so explicit score cannot overcap a strict color/type cap by more than ~0.04.
+      const allowedCap = Math.min(strictFinal + 0.04, strictFinal * 1.15);
+      if ((comp.finalRelevance01 ?? 0) > allowedCap) {
+        comp.finalRelevance01 = allowedCap;
+        if (!finalScoreSourceById.has(idStr)) {
+          finalScoreSourceById.set(idStr, "image_strict_compliance_cap");
+        }
+      }
     }
     // Record the base final (pre-rescue) for conservative boost capping later.
     baseFinalById.set(idStr, baseFinal);

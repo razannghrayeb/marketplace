@@ -1275,14 +1275,28 @@ export function computeHitRelevance(
   ]
     .map((x) => String(x).toLowerCase())
     .join(" ");
+  // Note: overshirt/shacket are intentionally NOT in the intent-side regex.
+  // `expandProductTypesForQuery("overshirt")` expands to the JACKET cluster
+  // (jacket/jackets/shacket/bomber...). If overshirt were here, every outerwear
+  // query whose expansion happens to include overshirt would be misclassified as
+  // a top intent, then real jackets (docIsTopLike=false) would be hard-cut to 0.
+  // The doc-side regex below DOES still include overshirt — overshirts can validly
+  // satisfy a top-intent query.
   const isTopLikeIntent =
-    /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|overshirt|overshirts|polo|polos|loungewear)\b/.test(
+    /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|polo|polos|loungewear)\b/.test(
       intentBlob,
     );
   const isBottomLikeIntent =
     /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts?|skirt|skirts|leggings?)\b/.test(intentBlob);
   const isFootwearLikeIntent =
     /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(intentBlob);
+  // Outerwear-specific intent: jackets/coats/blazers should not silently allow
+  // tops/dresses/bottoms to pass when the user uploaded a clearly outer garment.
+  const isOuterwearLikeIntent =
+    /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers|overcoat|overcoats|shacket|shackets)\b/.test(
+      intentBlob,
+    ) && !isTopLikeIntent;
+  const isDressLikeIntent = /\b(dress|dresses|gown|gowns|sundress|jumpsuit|romper|playsuit)\b/.test(intentBlob);
 
   // Detect explicit suit queries and relax color gating so coordinated
   // trousers/dress-pants and shoes surface alongside jackets.
@@ -1296,9 +1310,10 @@ export function computeHitRelevance(
   const docIsTopLike = /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|overshirt|overshirts|polo|polos)\b/.test(docBlobForFamily);
   const docIsBottomLike = /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts?|skirt|skirts|leggings?)\b/.test(docBlobForFamily);
   const docIsFootwearLike = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(docBlobForFamily);
-  const docIsDressLike = /\b(dress|dresses|gown)\b/.test(docBlobForFamily);
+  const docIsDressLike = /\b(dress|dresses|gown|jumpsuit|romper|playsuit)\b/.test(docBlobForFamily);
+  const docIsOuterwearLike = /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers|overcoat|overcoats|shacket|shackets)\b/.test(docBlobForFamily);
 
-  // Hard family restrictions: if the user strongly intends a family (top/bottom/footwear/dress)
+  // Hard family restrictions: if the user strongly intends a family (top/bottom/footwear/dress/outerwear)
   // then do not allow hits from other families to surface (set final relevance to 0).
   // This is intentionally strict per request; can be made configurable later.
   try {
@@ -1309,7 +1324,11 @@ export function computeHitRelevance(
         finalRelevance01 = 0;
       } else if (isBottomLikeIntent && !docIsBottomLike) {
         finalRelevance01 = 0;
-      } else if (/\b(dress|dresses|gown)\b/.test(intentBlob) && !docIsDressLike) {
+      } else if (isDressLikeIntent && !docIsDressLike) {
+        finalRelevance01 = 0;
+      } else if (isOuterwearLikeIntent && !docIsOuterwearLike) {
+        // Outerwear-only intent (jacket/coat/blazer query) should not pick up
+        // sweaters/shirts/dresses unless they explicitly carry an outerwear cue.
         finalRelevance01 = 0;
       }
     }
