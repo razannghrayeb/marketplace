@@ -2492,6 +2492,7 @@ export async function imageSearch(
       results,
       total: unified.meta?.total_results ?? results.length,
       tookMs: Date.now() - startTime,
+      meta: unified.meta as Record<string, unknown> | undefined,
     };
   } catch (error) {
     console.error('[imageSearch] Error:', error);

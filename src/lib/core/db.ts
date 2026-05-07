@@ -251,7 +251,7 @@ export async function getProductsByIdsOrdered(ids: (number | string)[]): Promise
     `SELECT p.*, v.name as vendor_name
      FROM products p
      LEFT JOIN vendors v ON v.id = p.vendor_id
-     WHERE p.id = ANY($1::int[])`,
+     WHERE p.id = ANY($1::bigint[])`,
     [numericIds]
   );
   
@@ -289,7 +289,7 @@ export async function getSearchProductsByIdsOrdered(ids: (number | string)[]): P
        p.image_url,
        p.image_cdn
      FROM products p
-     WHERE p.id = ANY($1::int[])`,
+     WHERE p.id = ANY($1::bigint[])`,
     [numericIds],
   );
 

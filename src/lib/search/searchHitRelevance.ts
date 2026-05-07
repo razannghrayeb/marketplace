@@ -566,6 +566,8 @@ type ResolvedProductColor = {
   source: "metadata" | "url" | "title" | "image" | "none";
 };
 
+type ColorComplianceResult = ReturnType<typeof tieredColorListCompliance>;
+
 function normalizedFashionColorList(values: string[]): string[] {
   const out: string[] = [];
   for (const value of values) {
@@ -597,6 +599,63 @@ function resolveProductColorForRanking(params: {
   if (image.length > 0) return { colors: image, confidence: 0.45, source: "image" };
 
   return { colors: [], confidence: 0, source: "none" };
+}
+
+// Image palettes are dominance-ordered; secondary entries often include logos,
+// trim, shadows, or background bleed, so only the primary color gets exact authority.
+function imagePaletteColorComplianceForRanking(params: {
+  desiredColorsTier: string[];
+  imageColors: string[];
+  rerankColorMode: "any" | "all";
+}): ColorComplianceResult {
+  const allImageColors = tieredColorListCompliance(
+    params.desiredColorsTier,
+    params.imageColors,
+    params.rerankColorMode,
+  );
+  if (params.imageColors.length <= 1 || allImageColors.compliance <= 0) {
+    return allImageColors;
+  }
+
+  const primaryImageColor = params.imageColors[0];
+  const primary = tieredColorListCompliance(
+    params.desiredColorsTier,
+    [primaryImageColor],
+    params.rerankColorMode,
+  );
+  if (primary.compliance > 0) {
+    return primary;
+  }
+
+  if (allImageColors.tier === "exact") {
+    return {
+      compliance: Math.min(allImageColors.compliance, 0.42),
+      bestMatch: allImageColors.bestMatch,
+      tier: "bucket",
+    };
+  }
+
+  if (
+    allImageColors.tier === "family" ||
+    allImageColors.tier === "light-shade" ||
+    allImageColors.tier === "dark-shade"
+  ) {
+    return {
+      compliance: Math.min(allImageColors.compliance, 0.38),
+      bestMatch: allImageColors.bestMatch,
+      tier: "bucket",
+    };
+  }
+
+  if (allImageColors.tier === "bucket") {
+    return {
+      compliance: Math.min(allImageColors.compliance, 0.28),
+      bestMatch: allImageColors.bestMatch,
+      tier: "bucket",
+    };
+  }
+
+  return allImageColors;
 }
 
 function extractColorHintsFromProductUrl(productUrl: unknown): string[] {
@@ -819,7 +878,11 @@ export function computeHitRelevance(
   let matchedColor: string | null = null;
   let colorTier: "exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none" = "none";
   if (desiredColorsTier.length > 0) {
-    const tImg = tieredColorListCompliance(desiredColorsTier, imgTierRaw, rerankColorMode);
+    const tImg = imagePaletteColorComplianceForRanking({
+      desiredColorsTier,
+      imageColors: imgTierRaw,
+      rerankColorMode,
+    });
     const tText = tieredColorListCompliance(desiredColorsTier, textTierRaw, rerankColorMode);
     const tResolved = tieredColorListCompliance(desiredColorsTier, resolvedColor.colors, rerankColorMode);
     const tUnion = tieredColorListCompliance(desiredColorsTier, unionTierRaw, rerankColorMode);
@@ -1321,6 +1384,12 @@ export function computeHitRelevance(
   // recoverFormalOuterwearTypes / forceSuitCue.
   const docIsOuterwearLike = /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers|overcoat|overcoats|shacket|shackets|suit|suits|tuxedo|tuxedos|sport\s*coat|dress\s*jacket|waistcoat|waistcoats|vest|vests|gilet|gilets|tailored)\b/.test(docBlobForFamily);
 
+  // Suit searches are composite: products.service may add formal-bottom hints
+  // (pants/trousers/slacks) to a suit intent so coordinated bottoms can rank.
+  // Those bottom hints must not make the hard family gate reject actual suit,
+  // tuxedo, blazer, or tailored listings.
+  const suitIntentAllowsTailoredDoc = suitIntent && docIsOuterwearLike;
+
   // Hard family restrictions: if the user strongly intends a family (top/bottom/footwear/dress/outerwear)
   // then do not allow hits from other families to surface (set final relevance to 0).
   // This is intentionally strict per request; can be made configurable later.
@@ -1328,9 +1397,9 @@ export function computeHitRelevance(
     if (hasTypeIntent && hasReliableTypeIntent) {
       if (isFootwearLikeIntent && !docIsFootwearLike) {
         finalRelevance01 = 0;
-      } else if (isTopLikeIntent && !docIsTopLike) {
+      } else if (isTopLikeIntent && !docIsTopLike && !suitIntentAllowsTailoredDoc) {
         finalRelevance01 = 0;
-      } else if (isBottomLikeIntent && !docIsBottomLike) {
+      } else if (isBottomLikeIntent && !docIsBottomLike && !suitIntentAllowsTailoredDoc) {
         finalRelevance01 = 0;
       } else if (isDressLikeIntent && !docIsDressLike) {
         finalRelevance01 = 0;

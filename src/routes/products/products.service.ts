@@ -5218,16 +5218,22 @@ export async function searchByImageWithSimilarity(
         .filter(Boolean),
     ),
   ];
+  // Optimization: only hydrate what we reasonably need
+  // If limit=20, hydrate ~60 (3x), if limit=50, hydrate ~150 (3x)
+  // This reduces hydration requests from ~4 down to 1-2 while preserving ranking quality
+  const effectiveLimit = Math.max(limit, 20); // Ensure we have at least 20 results to work with
+  const hydrationCap = Math.min(rawKnnProductIds.length, Math.ceil(effectiveLimit * 3));
+  const idsToHydrate = rawKnnProductIds.slice(0, hydrationCap);
   const endpointLimit = limit;
-  console.log("[hydrate] ids_count", rawKnnProductIds.length, "endpoint_limit", endpointLimit);
+  console.log("[hydrate] ids_count", idsToHydrate.length, "endpoint_limit", endpointLimit, "raw_knn_count", rawKnnProductIds.length);
   const productHydrationStartedAt = Date.now();
-  const productHydrationPromise = getSearchProductsByIdsOrdered(rawKnnProductIds).then(
+  const productHydrationPromise = getSearchProductsByIdsOrdered(idsToHydrate).then(
     (products) => {
       console.log(
         "[hydrate-step] products_ms",
         Date.now() - productHydrationStartedAt,
         "count",
-        rawKnnProductIds.length,
+        idsToHydrate.length,
       );
       return { products };
     },
@@ -5236,7 +5242,7 @@ export async function searchByImageWithSimilarity(
         "[hydrate-step] products_ms",
         Date.now() - productHydrationStartedAt,
         "count",
-        rawKnnProductIds.length,
+        idsToHydrate.length,
       );
       return { error };
     },
@@ -8877,7 +8883,10 @@ export async function searchByImageWithSimilarity(
     Math.max(limit * 10, 150),
   );
   const hitsForHydrate = rankedHits.slice(0, maxHydrate);
-  const productIds = hitsForHydrate.map((hit: any) => hit._source.product_id);
+  const productIds = hitsForHydrate
+    .map((hit: any) => String(hit?._source?.product_id ?? ""))
+    .filter(Boolean);
+  const uniqueProductIds = [...new Set(productIds)];
   const scoreMap = new Map<string, number>();
   hitsForHydrate.forEach((hit: any) => {
     const id = String(hit._source.product_id);
@@ -8891,22 +8900,68 @@ export async function searchByImageWithSimilarity(
   // Fetch product card data. Product rows started hydrating right after kNN,
   // overlapping PostgreSQL I/O with reranking and post-filter work.
   let results: ProductResult[] = [];
-    if (productIds.length > 0) {
-    const numericIds = productIds.map((id: string) => parseInt(id, 10));
-    const imagesHydrationStartedAt = Date.now();
-    const imagesHydrationPromise = getImagesForProducts(numericIds).then((imagesByProduct) => {
-      console.log("[hydrate-step] images_ms", Date.now() - imagesHydrationStartedAt);
-      return imagesByProduct;
-    });
-    const [productHydration, imagesByProduct, userLifestyle] = await Promise.all([
+  let hydrationCandidateIdCount = 0;
+  let hydratedProductRowsCount = 0;
+  let hydrationPrefetchMissCount = 0;
+  let hydrationMissingProductRowsCount = 0;
+  if (uniqueProductIds.length > 0) {
+    hydrationCandidateIdCount = uniqueProductIds.length;
+    const [productHydration, userLifestyle] = await Promise.all([
       productHydrationPromise,
-      imagesHydrationPromise,
       personalizationPromise,
     ]);
-    console.log("[hydrate-step] vendors_ms", 0);
     if ((productHydration as any).error) throw (productHydration as any).error;
     const productById = new Map(((productHydration as any).products as any[]).map((p: any) => [String(p.id), p]));
+    const missingHydrationIds = uniqueProductIds.filter((id) => !productById.has(String(id)));
+    hydrationPrefetchMissCount = missingHydrationIds.length;
+    if (missingHydrationIds.length > 0) {
+      const missingHydrationStartedAt = Date.now();
+      const missingProducts = await getSearchProductsByIdsOrdered(missingHydrationIds);
+      for (const product of missingProducts) {
+        productById.set(String(product.id), product);
+      }
+      if (breakdownDebug) {
+        console.log(
+          "[hydrate-step] products_missing_ms",
+          Date.now() - missingHydrationStartedAt,
+          "count",
+          missingHydrationIds.length,
+          "found",
+          missingProducts.length,
+        );
+      }
+    }
+    const stillMissingHydrationIds = uniqueProductIds.filter((id) => !productById.has(String(id)));
+    hydrationMissingProductRowsCount = stillMissingHydrationIds.length;
+    if (breakdownDebug && stillMissingHydrationIds.length > 0) {
+      console.warn("[hydrate] product rows missing after final hydration", {
+        requested: uniqueProductIds.length,
+        missing: stillMissingHydrationIds.length,
+        sample_ids: stillMissingHydrationIds.slice(0, 10),
+      });
+    }
     const products = productIds.map((id: string) => productById.get(String(id))).filter(Boolean);
+    const hydratedProductIds = [...new Set(products.map((product: any) => String(product.id)))];
+    hydratedProductRowsCount = hydratedProductIds.length;
+    const numericIds = [
+      ...new Set(
+        hydratedProductIds
+          .map((id) => parseInt(id, 10))
+          .filter(Number.isFinite),
+      ),
+    ];
+    const imagesHydrationStartedAt = Date.now();
+    const imagesByProduct =
+      numericIds.length > 0
+        ? await getImagesForProducts(numericIds).then((hydratedImages) => {
+          console.log("[hydrate-step] images_ms", Date.now() - imagesHydrationStartedAt);
+          return hydratedImages;
+        })
+        : new Map<number, ProductImage[]>();
+    if (numericIds.length === 0) {
+      console.log("[hydrate-step] images_ms", Date.now() - imagesHydrationStartedAt);
+    }
+    console.log("[hydrate-step] vendors_ms", 0);
 
     const assembleStartedAt = Date.now();
     results = products.map((p: any) => {
@@ -10302,6 +10357,7 @@ export async function searchByImageWithSimilarity(
         dropped_by_visual_threshold: droppedByVisualThreshold,
         dropped_by_final_relevance_before_override: droppedByFinalRelevanceBeforeOverride,
         rescued_by_strong_visual_override: rescuedByStrongVisualOverride,
+        dropped_by_hydration: Math.max(0, hydrationCandidateIdCount - hydratedProductRowsCount),
         dropped_by_dedupe: droppedByDedupe,
         dropped_by_limit: droppedByLimit,
       },
@@ -10488,6 +10544,10 @@ export async function searchByImageWithSimilarity(
         dropped_by_final_relevance_before_override: droppedByFinalRelevanceBeforeOverride,
         rescued_by_strong_visual_override: rescuedByStrongVisualOverride,
         hits_after_color_postfilter: countAfterColorPostfilter,
+        hydration_candidate_ids: hydrationCandidateIdCount,
+        hydration_prefetch_miss_ids: hydrationPrefetchMissCount,
+        hydrated_product_rows: hydratedProductRowsCount,
+        hydration_missing_product_rows: hydrationMissingProductRowsCount,
         hits_after_hydration: countAfterHydration,
         dropped_by_dedupe: droppedByDedupe,
         hits_after_dedupe: countAfterDedupe,
@@ -10518,7 +10578,7 @@ async function findSimilarByPHash(
   // Compute Hamming distance in SQL via bit XOR on the hex strings converted to bit(64).
   // This avoids fetching every row into Node.js and filters at the DB level.
   // The bit-count trick: count '1' chars in the XOR text representation.
-  const excludeClause = excludeNumeric.length > 0 ? "AND id != ALL($3::int[])" : "";
+  const excludeClause = excludeNumeric.length > 0 ? "AND id != ALL($3::bigint[])" : "";
   const params: unknown[] = excludeNumeric.length > 0
     ? [normalizedInput, maxDistance, excludeNumeric]
     : [normalizedInput, maxDistance];

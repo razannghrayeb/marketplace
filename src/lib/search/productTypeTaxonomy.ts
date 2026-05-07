@@ -1460,9 +1460,19 @@ export function scoreCrossFamilyTypePenalty(
     .filter(Boolean)
     .map((x) => String(x).toLowerCase())
     .join(" ");
+  const docHasExplicitSuitCue =
+    /\b(suit|suits|tuxedo|tuxedos|suit\s+jackets?|dress\s+jackets?|matching\s*suit|two[-\s]?piece|three[-\s]?piece)\b/.test(
+      docBlob,
+    );
+  if (queryHasFullSuitIntent && docHasExplicitSuitCue) {
+    // A suit query may be expanded with pants/trousers so coordinated bottoms can rank.
+    // Do not let those auxiliary bottom hints penalize actual suit/tuxedo listings,
+    // especially sparse catalog rows where the suit cue lives in category/title only.
+    max = Math.min(max, 0.18);
+  }
   const docIsOuterwearWithoutSuit =
     /\b(coat|coats|overcoat|overcoats|parka|parkas|trench|outerwear|jacket|jackets)\b/.test(docBlob) &&
-    !/\b(suit|suits|tuxedo|suit\s+jackets?|dress\s+jackets?)\b/.test(docBlob);
+    !docHasExplicitSuitCue;
   if (queryHasFullSuitIntent && docIsOuterwearWithoutSuit) {
     max = Math.max(max, 0.94);
   }
