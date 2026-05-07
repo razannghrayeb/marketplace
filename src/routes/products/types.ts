@@ -455,6 +455,8 @@ export interface SearchResultWithRelated {
     ordered_stage_counts?: Record<string, number>;
     /** Small examples of candidates removed by major gates, for staging diagnostics. */
     stage_drop_samples?: Record<string, unknown[]>;
+    /** Narrow image-search diagnostics emitted only when SEARCH_IMAGE_DEBUG_SHOES_BAGS=1. */
+    shoe_bag_debug?: Record<string, unknown>;
     pipeline_counts?: {
       /** True when kNN hits were re-scored with exact cosine(query, stored vector). */
       exact_cosine_rerank: boolean;

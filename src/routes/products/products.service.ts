@@ -369,6 +369,17 @@ function imageDiversityPoolCap(): number {
   return Math.max(20, Math.min(300, Math.floor(raw)));
 }
 
+function imageShoeBagPipelineDebugEnabled(): boolean {
+  const raw = String(
+    process.env.SEARCH_IMAGE_DEBUG_SHOES_BAGS ??
+      process.env.SEARCH_IMAGE_DEBUG_FOOTWEAR_BAGS ??
+      "",
+  )
+    .toLowerCase()
+    .trim();
+  return raw === "1" || raw === "true" || raw === "on" || raw === "yes";
+}
+
 function searchRelevanceGateMode(): "soft" | "strict" {
   const raw = String(process.env.SEARCH_RELEVANCE_GATE_MODE ?? "soft").toLowerCase().trim();
   return raw === "strict" ? "strict" : "soft";
@@ -5984,11 +5995,27 @@ export async function searchByImageWithSimilarity(
   ];
   const bagLikeDetectionIntent =
     detectionCategoryNorm === "bags" ||
+    detectionCategoryNorm === "accessories" ||
     desiredProductTypes.some((t) =>
       /\b(bag|bags|handbag|handbags|purse|wallet|clutch|satchel|crossbody|tote|backpack)\b/.test(
         String(t ?? "").toLowerCase(),
       ),
     );
+  const shoeBagPipelineDebugIntent =
+    isFootwearDetectionIntent ||
+    bagLikeDetectionIntent ||
+    /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|bag|bags|handbag|tote|clutch|purse|backpack|crossbody)\b/.test(
+      [
+        params.detectionProductCategory,
+        params.detectionLabel,
+        mergedCategoryForRelevance,
+        ...(predictedCategoryAisles ?? []),
+      ]
+        .map((v) => String(v ?? "").toLowerCase())
+        .join(" "),
+    );
+  const shoeBagPipelineDebugEnabled =
+    imageShoeBagPipelineDebugEnabled() && shoeBagPipelineDebugIntent;
   const warmNeutralColors = new Set([
     "beige",
     "camel",
@@ -6566,6 +6593,7 @@ export async function searchByImageWithSimilarity(
   const keywordSubtypeOverlapById = new Map<string, number>();
   const keywordSubtypeExactHitById = new Map<string, boolean>();
   const finalScoreSourceById = new Map<string, string>();
+  const shoeBagTuningDebugById = new Map<string, Record<string, unknown>>();
 
   // Pre-compute detection category for efficiency (used many times per result in the loop below).
   const normalizedDetectionCategory = String(params.detectionProductCategory ?? "").toLowerCase().trim();
@@ -7015,6 +7043,7 @@ export async function searchByImageWithSimilarity(
         ((comp.exactTypeScore ?? 0) >= 1 || bagStructuralComp >= 0.26) &&
         bagVisualComp >= 0.58 &&
         (comp.crossFamilyPenalty ?? 0) < 0.52;
+      const bagFinalBefore = Math.max(0, Math.min(1, Number(comp.finalRelevance01 ?? 0)));
       if (strongBagEvidence) {
         let blendedBagMain =
           0.60 * bagVisualComp +
@@ -7044,10 +7073,47 @@ export async function searchByImageWithSimilarity(
         // CRITICAL: Prevent tuning from inflating weak visual candidates above strong ones.
         const bagVisualCeiling = Math.min(1, bagVisualComp * 1.12 + 0.02);
         bagBoosted = Math.min(bagBoosted, bagVisualCeiling);
+        if (shoeBagPipelineDebugEnabled) {
+          shoeBagTuningDebugById.set(idStr, {
+            kind: "bags",
+            applied: bagBoosted > bagFinalBefore,
+            beforeFinal: Math.round(bagFinalBefore * 1000) / 1000,
+            tunedFinal: Math.round(bagBoosted * 1000) / 1000,
+            visual: Math.round(bagVisualComp * 1000) / 1000,
+            structural: Math.round(bagStructuralComp * 1000) / 1000,
+            type: Math.round(bagTypeComp * 1000) / 1000,
+            category: Math.round(bagCategoryComp * 1000) / 1000,
+            taxonomy: Math.round(bagTaxonomyComp * 1000) / 1000,
+            color: Math.round(bagColorComp * 1000) / 1000,
+            colorTier: comp.colorTier ?? null,
+            pattern: Math.round(bagPatternComp * 1000) / 1000,
+            audience: Math.round(bagAudienceComp * 1000) / 1000,
+            crossFamilyPenalty: Math.round(Number(comp.crossFamilyPenalty ?? 0) * 1000) / 1000,
+            exactTypeScore: Number(comp.exactTypeScore ?? 0),
+            visualCeiling: Math.round(bagVisualCeiling * 1000) / 1000,
+            source: "bags_main_path_tuning",
+          });
+        }
         if (bagBoosted > (comp.finalRelevance01 ?? 0)) {
           comp.finalRelevance01 = bagBoosted;
           finalScoreSourceById.set(idStr, "bags_main_path_tuning");
         }
+      } else if (shoeBagPipelineDebugEnabled) {
+        shoeBagTuningDebugById.set(idStr, {
+          kind: "bags",
+          applied: false,
+          reason: "weak_bag_evidence",
+          beforeFinal: Math.round(bagFinalBefore * 1000) / 1000,
+          visual: Math.round(bagVisualComp * 1000) / 1000,
+          structural: Math.round(bagStructuralComp * 1000) / 1000,
+          type: Math.round(bagTypeComp * 1000) / 1000,
+          category: Math.round(bagCategoryComp * 1000) / 1000,
+          taxonomy: Math.round(bagTaxonomyComp * 1000) / 1000,
+          color: Math.round(bagColorComp * 1000) / 1000,
+          colorTier: comp.colorTier ?? null,
+          crossFamilyPenalty: Math.round(Number(comp.crossFamilyPenalty ?? 0) * 1000) / 1000,
+          exactTypeScore: Number(comp.exactTypeScore ?? 0),
+        });
       }
     }
     // Main-path footwear tuning:
@@ -7071,6 +7137,7 @@ export async function searchByImageWithSimilarity(
         ((comp.exactTypeScore ?? 0) >= 1 || shoeStructuralComp >= 0.26) &&
         shoeVisualComp >= 0.58 &&
         (comp.crossFamilyPenalty ?? 0) < 0.52;
+      const shoeFinalBefore = Math.max(0, Math.min(1, Number(comp.finalRelevance01 ?? 0)));
       if (strongShoeEvidence) {
         let blendedShoeMain =
           0.58 * shoeVisualComp +
@@ -7100,10 +7167,46 @@ export async function searchByImageWithSimilarity(
         // CRITICAL: Prevent tuning from inflating weak visual candidates above strong ones.
         const shoeVisualCeiling = Math.min(1, shoeVisualComp * 1.12 + 0.02);
         shoeBoosted = Math.min(shoeBoosted, shoeVisualCeiling);
+        if (shoeBagPipelineDebugEnabled) {
+          shoeBagTuningDebugById.set(idStr, {
+            kind: "footwear",
+            applied: shoeBoosted > shoeFinalBefore,
+            beforeFinal: Math.round(shoeFinalBefore * 1000) / 1000,
+            tunedFinal: Math.round(shoeBoosted * 1000) / 1000,
+            visual: Math.round(shoeVisualComp * 1000) / 1000,
+            structural: Math.round(shoeStructuralComp * 1000) / 1000,
+            type: Math.round(shoeTypeComp * 1000) / 1000,
+            category: Math.round(shoeCategoryComp * 1000) / 1000,
+            taxonomy: Math.round(shoeTaxonomyComp * 1000) / 1000,
+            color: Math.round(shoeColorComp * 1000) / 1000,
+            colorTier: comp.colorTier ?? null,
+            audience: Math.round(shoeAudienceComp * 1000) / 1000,
+            crossFamilyPenalty: Math.round(Number(comp.crossFamilyPenalty ?? 0) * 1000) / 1000,
+            exactTypeScore: Number(comp.exactTypeScore ?? 0),
+            visualCeiling: Math.round(shoeVisualCeiling * 1000) / 1000,
+            source: "footwear_main_path_tuning",
+          });
+        }
         if (shoeBoosted > (comp.finalRelevance01 ?? 0)) {
           comp.finalRelevance01 = shoeBoosted;
           finalScoreSourceById.set(idStr, "footwear_main_path_tuning");
         }
+      } else if (shoeBagPipelineDebugEnabled) {
+        shoeBagTuningDebugById.set(idStr, {
+          kind: "footwear",
+          applied: false,
+          reason: "weak_footwear_evidence",
+          beforeFinal: Math.round(shoeFinalBefore * 1000) / 1000,
+          visual: Math.round(shoeVisualComp * 1000) / 1000,
+          structural: Math.round(shoeStructuralComp * 1000) / 1000,
+          type: Math.round(shoeTypeComp * 1000) / 1000,
+          category: Math.round(shoeCategoryComp * 1000) / 1000,
+          taxonomy: Math.round(shoeTaxonomyComp * 1000) / 1000,
+          color: Math.round(shoeColorComp * 1000) / 1000,
+          colorTier: comp.colorTier ?? null,
+          crossFamilyPenalty: Math.round(Number(comp.crossFamilyPenalty ?? 0) * 1000) / 1000,
+          exactTypeScore: Number(comp.exactTypeScore ?? 0),
+        });
       }
     }
     // Main-path outerwear tuning:
@@ -8651,12 +8754,14 @@ export async function searchByImageWithSimilarity(
       hardBlocked: comp?.hardBlocked ?? null,
       colorSimEffective: Math.round((colorSimById.get(id) ?? 0) * 1000) / 1000,
       styleSimEffective: Math.round((styleSimById.get(id) ?? 0) * 1000) / 1000,
+      shoeBagTuning: shoeBagTuningDebugById.get(id),
     };
   };
   const debugProductSummary = (product: any): Record<string, unknown> => {
     const explain = ((product as any)?.explain ?? {}) as Record<string, unknown>;
+    const id = String((product as any)?.id ?? "");
     return {
-      product_id: String((product as any)?.id ?? ""),
+      product_id: id,
       title: String((product as any)?.title ?? "").slice(0, 140),
       category: String((product as any)?.category_canonical ?? (product as any)?.category ?? ""),
       product_types: Array.isArray((product as any)?.product_types)
@@ -8675,6 +8780,7 @@ export async function searchByImageWithSimilarity(
       audienceCompliance: Number((explain as any)?.audienceCompliance ?? NaN),
       crossFamilyPenalty: Number((explain as any)?.crossFamilyPenalty ?? NaN),
       hardBlocked: Boolean((explain as any)?.hardBlocked),
+      shoeBagTuning: shoeBagTuningDebugById.get(id),
     };
   };
   const sampleDroppedHits = (before: any[], after: any[], cap = 5): Record<string, unknown>[] => {
@@ -8698,6 +8804,12 @@ export async function searchByImageWithSimilarity(
       .map(debugProductSummary);
   };
   const stageDropSamples: Record<string, Record<string, unknown>[]> = {};
+  if (rankedHitsCandidates.length > rankedHitsForGates.length) {
+    stageDropSamples.category_safety = sampleDroppedHits(rankedHitsCandidates, rankedHitsForGates);
+  }
+  if (rankedHitsForGates.length > visualGatedHits.length) {
+    stageDropSamples.visual_threshold = sampleDroppedHits(rankedHitsForGates, visualGatedHits);
+  }
 
   let relevanceRelaxedForMinCount = false;
   const minResultsPolicy = imageCategoryAwareMinResultsPolicy({
@@ -8733,6 +8845,9 @@ export async function searchByImageWithSimilarity(
   }
   const countAfterFinalAcceptMin = rankedHits.length;
   const belowFinalRelevanceGate = visualGatedHits.length > 0 && rankedHits.length === 0;
+  if (visualGatedHits.length > rankedHits.length) {
+    stageDropSamples.final_accept_min = sampleDroppedHits(visualGatedHits, rankedHits);
+  }
 
   const hitsBeforeExplicitColorPostfilter = rankedHits;
   if (hasExplicitColorIntent && desiredColorsForRelevance.length > 0) {
@@ -9326,13 +9441,11 @@ export async function searchByImageWithSimilarity(
       } else if (
         (hasColorIntentForFinal || hasColorPreferenceForRanking) &&
         authoritativeColorNorm &&
-        compliance &&
-        !(
-          !hasExplicitColorIntent &&
-          hasDetectionAnchoredTypeIntent &&
-          String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops"
-        )
+        compliance
       ) {
+        // Hydrated catalog color is the authoritative product color when present.
+        // Even soft inferred-color top searches should not report a contradictory
+        // visual/caption color as an exact product-color match.
         const colorCorrectionHardMode = hasColorIntentForFinal;
         const authoritativeColor = tieredColorListCompliance(
           desiredColorsTierForRelevance,
@@ -9712,7 +9825,7 @@ export async function searchByImageWithSimilarity(
             intraFamilyPenalty: Number(compliance.intraFamilyPenalty ?? 0),
             crossFamilyPenalty: Number(compliance.crossFamilyPenalty ?? 0),
             colorCompliance: Number(explainColorCompliance ?? compliance.colorCompliance ?? 0),
-            colorTier: String(compliance.colorTier ?? "none"),
+            colorTier: String(explainColorTier ?? compliance.colorTier ?? "none"),
             audienceCompliance: Number(compliance.audienceCompliance ?? 0),
             styleCompliance: Number(compliance.styleCompliance ?? 0),
             sleeveCompliance: Number(compliance.sleeveCompliance ?? 0),
@@ -10834,6 +10947,68 @@ export async function searchByImageWithSimilarity(
     console.warn('[search-image] final sort failed:', (e as Error).message);
   }
 
+  const shoeBagPipelineDebug = shoeBagPipelineDebugEnabled
+    ? {
+      detection: {
+        category: params.detectionProductCategory ?? null,
+        normalizedCategory: detectionCategoryNorm,
+        label: params.detectionLabel ?? null,
+        yoloConfidence: params.detectionYoloConfidence ?? null,
+        isFootwearIntent: isFootwearDetectionIntent,
+        isBagIntent: bagLikeDetectionIntent,
+      },
+      retrieval: {
+        knnField: knnFieldResolved,
+        retrievalK,
+        candidateK: fetchLimit,
+        softCategory,
+        hardCategoryFilter: !softCategory && Boolean(desiredCatalogTerms && desiredCatalogTerms.size > 0),
+        dualKnnFusion: useDualKnn,
+        partEmbeddingFields,
+      },
+      intent: {
+        desiredProductTypes,
+        desiredColors: desiredColorsForRelevance,
+        desiredColorsTier: desiredColorsTierForRelevance,
+        colorMode: rerankColorModeForRelevance,
+        hasExplicitColorIntent,
+        hasInferredColorSignal,
+        hasCropColorSignal,
+        inferredColorTrusted: hasTrustedInferredColorSignal,
+        inferredCropColorConflict,
+        forceTrustInferredFootwearColor,
+        preferredInferredColorKey: preferredInferredColorKey ?? null,
+        preferredInferredColorConfidence: Number.isFinite(preferredInferredColorConfidence)
+          ? Math.round(preferredInferredColorConfidence * 1000) / 1000
+          : null,
+      },
+      stageCounts: orderedStageCounts,
+      drops: {
+        category_safety: stageDropSamples.category_safety ?? [],
+        visual_threshold: stageDropSamples.visual_threshold ?? [],
+        final_accept_min: stageDropSamples.final_accept_min ?? [],
+        inferred_color_postfilter: stageDropSamples.inferred_color_postfilter ?? [],
+        gender_postfilter: stageDropSamples.gender_postfilter ?? [],
+        bag_gate: stageDropSamples.bag_gate ?? [],
+        late_detection_family_gate: stageDropSamples.late_detection_family_gate ?? [],
+        strict_final_detection_category_gate: stageDropSamples.strict_final_detection_category_gate ?? [],
+        footwear_subtype_gate: stageDropSamples.footwear_subtype_gate ?? [],
+      },
+      topCandidates: {
+        visualGated: visualGatedHits.slice(0, 10).map(debugHitSummary),
+        rankedBeforeHydration: rankedHits.slice(0, 10).map(debugHitSummary),
+        final: results.slice(0, 10).map(debugProductSummary),
+      },
+      tuning: Array.from(shoeBagTuningDebugById.entries())
+        .slice(0, 30)
+        .map(([productId, debug]) => ({ productId, ...debug })),
+    }
+    : undefined;
+
+  if (shoeBagPipelineDebugEnabled && shoeBagPipelineDebug) {
+    console.warn("[image-search][shoes-bags-debug]", shoeBagPipelineDebug);
+  }
+
   return {
     results,
     related: related.length > 0 ? related : undefined,
@@ -10869,6 +11044,7 @@ export async function searchByImageWithSimilarity(
       variant_group_count: variantGroupCount,
       variant_group_representatives: variantRepresentativeCount,
       detection_observability: detectionObservability,
+      shoe_bag_debug: shoeBagPipelineDebug,
       ordered_stage_counts: orderedStageCounts,
       stage_drop_samples: stageDropSamples,
       timing,

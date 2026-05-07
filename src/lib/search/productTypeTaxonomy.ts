@@ -15,7 +15,7 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   ["jean", "jeans", "denim", "denims"],
   ["pant", "pants", "trouser", "trousers", "chino", "chinos", "cargo pants", "cargo", "slacks"],
   // Shorts / skirt (2)
-  ["shorts", "short", "bermuda", "board shorts"],
+  ["shorts", "bermuda", "board shorts"],
   ["skirt", "skirts", "mini skirt", "midi skirt"],
   // Footwear (7) — was one mega-cluster; now siblings are distinguishable in rerank
   ["sneaker", "sneakers", "trainer", "trainers", "running shoe", "running shoes", "athletic shoe", "athletic shoes", "sport shoe", "sport shoes", "tennis shoe", "tennis shoes"],
@@ -1067,6 +1067,9 @@ function phraseMatchesWholeWords(queryNorm: string, phrase: string): boolean {
   return re.test(queryNorm);
 }
 
+const GENERIC_SHORTS_QUERY_SEEDS = new Set(["shorts", "bermuda", "bermudas"]);
+const GENERIC_SHORTS_EXPANSION_EXCLUDES = new Set(["short", "board shorts"]);
+
 export function getProductTypePhrasesLongestFirst(): string[] {
   if (sortedTypePhrases) return sortedTypePhrases;
   const s = new Set<string>();
@@ -1096,6 +1099,35 @@ export function extractLexicalProductTypeSeeds(rawQuery: string): string[] {
     if (fam.has(w)) hits.push(w);
   }
   return [...new Set(hits)];
+}
+
+export type ExplicitSleeveIntent = "short" | "long" | "sleeveless";
+
+/**
+ * Extract sleeve intent only from explicit sleeve/no-sleeve phrases.
+ * Plain "short top" / "long top" are intentionally ignored because those can
+ * describe garment length or fit, and ambiguous conflicting phrases fail closed.
+ */
+export function extractExplicitSleeveIntent(rawText: string): ExplicitSleeveIntent | undefined {
+  const qNorm = normalizeForLexicalMatch(rawText);
+  if (!qNorm) return undefined;
+
+  const hits = new Set<ExplicitSleeveIntent>();
+  if (/\b(short\s+sleeves?|short\s+sleeved|shortsleeve|short-sleeve(?:d)?)\b/.test(qNorm)) {
+    hits.add("short");
+  }
+  if (/\b(long\s+sleeves?|long\s+sleeved|longsleeve|long-sleeve(?:d)?)\b/.test(qNorm)) {
+    hits.add("long");
+  }
+  if (
+    /\b(sleeveless|no\s+sleeves?|without\s+sleeves?|tank\s+tops?|camisoles?|cami\b|vest\s+tops?|spaghetti\s+straps?|strapless|halter)\b/.test(
+      qNorm,
+    )
+  ) {
+    hits.add("sleeveless");
+  }
+
+  return hits.size === 1 ? [...hits][0] : undefined;
 }
 
 /** Map vision/catalog aisle strings to taxonomy macro families (tops, dress, outerwear, …). */
@@ -1379,7 +1411,7 @@ export function inferMacroFamiliesFromListingCategoryFields(
   if (/\b(pants?|jeans?|trousers?|leggings?|joggers?|chinos?|cargos?)\b/.test(combined)) {
     out.add("bottoms");
   }
-  if (/\b(shorts?|skirt|skirts)\b/.test(combined)) {
+  if (/\b(shorts|bermudas?|skirt|skirts)\b/.test(combined)) {
     out.add("shorts_skirt");
   }
   if (/\b(dresses?|gown|gowns)\b/.test(combined)) {
@@ -1491,7 +1523,12 @@ export function expandProductTypesForQuery(seeds: string[]): string[] {
     }
     const cluster = idx.get(key);
     if (cluster) {
-      for (const t of cluster) out.add(t);
+      for (const t of cluster) {
+        if (GENERIC_SHORTS_QUERY_SEEDS.has(key) && GENERIC_SHORTS_EXPANSION_EXCLUDES.has(t)) {
+          continue;
+        }
+        out.add(t);
+      }
     }
   }
   return [...out];

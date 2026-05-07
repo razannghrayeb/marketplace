@@ -101,6 +101,25 @@ function clamp01(x: number): number {
   return Math.max(0, Math.min(1, x));
 }
 
+function effectiveColorTier(input: Pick<UnifiedScoreInputs, "colorTier" | "colorCompliance">): string {
+  const tier = String(input.colorTier ?? "none").toLowerCase();
+  const compliance = clamp01(Number(input.colorCompliance));
+
+  // Treat impossible tier/compliance pairs as the weaker signal. This protects
+  // unified scoring from stale upstream tiers after catalog color correction.
+  if (tier === "exact" && compliance < 0.6) {
+    return compliance >= 0.35 ? "family" : "none";
+  }
+  if (
+    (tier === "family" || tier === "light-shade" || tier === "dark-shade" || tier === "bucket") &&
+    compliance <= 0.01
+  ) {
+    return "none";
+  }
+
+  return tier;
+}
+
 /**
  * Visual base curve. Same as legacy calibratedVisualBase (products.service.ts:1341)
  * so the unified scorer doesn't change visual semantics — only how visual is
@@ -139,7 +158,7 @@ function computeTypeScore(input: UnifiedScoreInputs): number {
 }
 
 function computeColorScore(input: UnifiedScoreInputs): number {
-  const tier = String(input.colorTier ?? "none").toLowerCase();
+  const tier = effectiveColorTier(input);
   const compliance = clamp01(input.colorCompliance);
   const hasIntent = input.hasColorIntent;
 
@@ -337,7 +356,7 @@ function effectiveIntraFamilyPenalty(input: UnifiedScoreInputs): number {
 
 function computeCaps(input: UnifiedScoreInputs): { reason: string; value: number }[] {
   const caps: { reason: string; value: number }[] = [];
-  const tier = String(input.colorTier ?? "none").toLowerCase();
+  const tier = effectiveColorTier(input);
 
   // ── Continuous caps ──
   // Use linear interpolation instead of stepped values so similar penalties produce
@@ -411,7 +430,7 @@ function computeFloor(
   components: { visual: number; type: number; color: number; attrs: number },
 ): { floor: number; reason: string | null } {
   const sim = clamp01(input.osSimilarity01);
-  const tier = String(input.colorTier ?? "none").toLowerCase();
+  const tier = effectiveColorTier(input);
   const sameColorFamily =
     tier === "exact" || tier === "family" || tier === "light-shade" || tier === "dark-shade";
 
@@ -484,7 +503,7 @@ function computeTieBreakers(input: UnifiedScoreInputs): number {
   // Visual sim contributes up to 0.005.
   bonus += sim * 0.005;
   // Exact color match contributes 0.003.
-  if (String(input.colorTier).toLowerCase() === "exact") bonus += 0.003;
+  if (effectiveColorTier(input) === "exact") bonus += 0.003;
   // Exact type contributes 0.002.
   if (input.exactTypeScore >= 1) bonus += 0.002;
   // Color compliance fine-grained contribution up to 0.002.

@@ -44,6 +44,14 @@ describe("categoryFilter", () => {
     expect(inferCategoryCanonical("Bags", "")).toBe("accessories");
     expect(inferCategoryCanonical(null, "Men crew neck tee shirt")).toBe("tops");
     expect(inferCategoryCanonical(null, "Top Handle Bag")).toBe("accessories");
+    expect(inferCategoryCanonical("TOP HANDLE BAGS", "")).toBe("bags");
+    expect(inferCategoryCanonical("Knit Tops", "")).toBe("tops");
+    expect(inferCategoryCanonical("Woven Tops", "")).toBe("tops");
+    expect(inferCategoryCanonical("Long Sleeve", "")).toBe("tops");
+    expect(inferCategoryCanonical("Short Sleeve", "")).toBe("tops");
+    expect(inferCategoryCanonical("Polo Short Sleeve", "")).toBe("tops");
+    expect(inferCategoryCanonical("After Ski Boot", "")).toBe("footwear");
+    expect(inferCategoryCanonical("SKIN CARE", "")).toBe("beauty");
     expect(inferCategoryCanonical("CONCEALERS", "")).toBe("beauty");
     expect(inferCategoryCanonical(null, "Men's suit jacket")).toBe("tailored");
     expect(inferCategoryCanonical(null, "Sleeveless vest top")).toBe("tops");

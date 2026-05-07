@@ -730,8 +730,36 @@ function extractFilters(query: string): ExtractedFilters {
     if (!productTypesFound.includes(t)) productTypesFound.push(t);
   };
 
-  for (const word of words) {
+  const shortAsLengthOrSleeveNeighbor = new Set([
+    "sleeve",
+    "sleeves",
+    "sleeved",
+    "top",
+    "tops",
+    "shirt",
+    "shirts",
+    "tshirt",
+    "t-shirt",
+    "tee",
+    "tees",
+    "polo",
+    "blouse",
+    "blouses",
+    "dress",
+    "dresses",
+    "jacket",
+    "jackets",
+    "coat",
+    "coats",
+  ]);
+  const isShortLengthOrSleeveToken = (index: number): boolean =>
+    String(words[index] ?? "").toLowerCase() === "short" &&
+    shortAsLengthOrSleeveNeighbor.has(String(words[index + 1] ?? "").toLowerCase());
+
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
     const lw = word.toLowerCase();
+    if (isShortLengthOrSleeveToken(i)) continue;
     const mapped = PRODUCT_TYPE_SINGLE[lw];
     if (mapped) addProductType(mapped);
   }
@@ -766,7 +794,9 @@ function extractFilters(query: string): ExtractedFilters {
     f.category = "tailored";
   }
   if (!f.category) {
-  for (const word of words) {
+  for (let i = 0; i < words.length; i++) {
+    if (isShortLengthOrSleeveToken(i)) continue;
+    const word = words[i];
     const cat = findCategory(word);
     if (cat) { f.category = cat.term; break; }
   }
@@ -810,7 +840,9 @@ function extractFilters(query: string): ExtractedFilters {
       watch: "accessories", watches: "accessories", wallet: "accessories",
       scarf: "accessories", sunglasses: "accessories",
     };
-    for (const word of words) {
+    for (let i = 0; i < words.length; i++) {
+      if (isShortLengthOrSleeveToken(i)) continue;
+      const word = words[i];
       const cat = PRODUCT_TYPE_TO_CATEGORY[word.toLowerCase()];
       if (cat) { f.category = cat; break; }
     }
@@ -1029,4 +1061,3 @@ function generateExpansions(
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-

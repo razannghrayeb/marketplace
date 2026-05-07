@@ -33,7 +33,7 @@ function isTopIntentToken(value: unknown): boolean {
 }
 
 function isBottomIntentToken(value: unknown): boolean {
-  return /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|skirt|skirts|legging|leggings|jogger|joggers|slack|slacks|chino|chinos|cargo|cargos)\b/.test(
+  return /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts|bermudas?|skirt|skirts|legging|leggings|jogger|joggers|slack|slacks|chino|chinos|cargo|cargos)\b/.test(
     String(value ?? "").toLowerCase(),
   );
 }
@@ -1362,7 +1362,7 @@ export function computeHitRelevance(
       intentBlob,
     );
   const isBottomLikeIntent =
-    /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts?|skirt|skirts|leggings?)\b/.test(intentBlob);
+    /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts|bermudas?|skirt|skirts|leggings?)\b/.test(intentBlob);
   const isFootwearLikeIntent =
     /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(intentBlob);
   // Outerwear-specific intent: jackets/coats/blazers should not silently allow
@@ -1383,7 +1383,7 @@ export function computeHitRelevance(
     .join(" ")
     .toLowerCase();
   const docIsTopLike = /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|overshirt|overshirts|polo|polos)\b/.test(docBlobForFamily);
-  const docIsBottomLike = /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts?|skirt|skirts|leggings?)\b/.test(docBlobForFamily);
+  const docIsBottomLike = /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts|bermudas?|skirt|skirts|leggings?)\b/.test(docBlobForFamily);
   const docIsFootwearLike = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(docBlobForFamily);
   const docIsDressLike = /\b(dress|dresses|gown|jumpsuit|romper|playsuit)\b/.test(docBlobForFamily);
   // docIsOuterwearLike must include tailored vocabulary (suit/tuxedo/sport-coat/
@@ -1475,7 +1475,7 @@ export function computeHitRelevance(
   // but did NOT ask for swimwear, exclude swimwear listings completely.
   let swimBlocked = false;
   try {
-    const swimRegex = /\b(swim|swimwear|swimsuit|bikini|one[-\s]?piece|tankini|trunks|boardshorts?|board[-\s]?shorts?|swimshorts?|swim[-\s]?short)\b/;
+    const swimRegex = /\b(swim|swimwear|swimsuit|bikini|one[-\s]?piece|tankini|trunks|boardshorts?|board[-\s]?shorts?|swimshorts?|swim[-\s]?short|bottom[-\s]?sw|suit[-\s]?sw|beach\s*wear|beachwear)\b/;
     const docBlobForSwim = [src.category, src.category_canonical, src.title, ...(Array.isArray(productTypes) ? productTypes : [])]
       .filter(Boolean)
       .join(" ")
