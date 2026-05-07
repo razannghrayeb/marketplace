@@ -8,6 +8,7 @@ import {
   filterProductTypeSeedsByMappedCategory,
 } from "./productTypeTaxonomy";
 import { canonicalTypeIdsToProductTypeTokens } from "./loadProductSearchEnrichment";
+import { inferCatalogGenderValue } from "./productGenderInference";
 
 const LBP_TO_USD = 89000;
 
@@ -364,7 +365,18 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
 
   const primaryAttrColor = toLowerTrim(attrColorPrimary);
   const attrGenderRaw =
-    toLowerTrim(attributes.gender) || toLowerTrim(input.catalogGender ?? null);
+    toLowerTrim(attributes.gender) ||
+    toLowerTrim(input.catalogGender ?? null) ||
+    inferCatalogGenderValue({
+      title: input.title,
+      description: input.description,
+      category: input.category,
+      category_canonical: categoryCanonical,
+      product_url: input.productUrl,
+      parent_product_url: input.parentProductUrl,
+      product_types: productTypesIndexed,
+      attr_style: attributes.style,
+    });
   const audience = inferAudienceFromTitle(input.title || "", attrGenderRaw);
   const productQualityScore = computeProductQualityScore({
     imageCdn: input.imageCdn,

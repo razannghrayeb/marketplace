@@ -48,4 +48,16 @@ describe("extractProductTypesFromTitle - robust type normalization", () => {
     expect(doc.category_canonical).toBe("outerwear");
     expect(doc.product_types).not.toContain("shirt");
   });
+
+  test("infers audience gender from parent product URL when title has no gender cue", () => {
+    const doc = buildProductSearchDocument({
+      productId: 2,
+      title: "Clean Oxford Shirt",
+      category: "shirts",
+      parentProductUrl: "https://shop.test/collections/women-shirts/clean-oxford",
+    });
+
+    expect(doc.attr_gender).toBe("women");
+    expect(doc.audience_gender).toBe("women");
+  });
 });

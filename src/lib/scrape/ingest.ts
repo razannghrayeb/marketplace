@@ -4,6 +4,7 @@ import type { ScrapedProduct } from "./types";
 import { supabaseAdmin } from "../supabaseAdmin";
 import { savePrimaryProductImageFromUrl } from "../productImages";
 import { inferCategoryCanonical } from "../search/categoryFilter";
+import { inferCatalogGenderValue } from "../search/productGenderInference";
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
@@ -147,6 +148,16 @@ export async function upsertProduct(p: ScrapedProduct): Promise<number> {
 
   const categoryCanonical = inferCategoryCanonical(p.category ?? null, p.title);
   const productTypes = inferProductTypes(categoryCanonical, p.title);
+  const inferredGender = inferCatalogGenderValue({
+    title: p.title,
+    description: p.description,
+    category: p.category,
+    category_canonical: categoryCanonical,
+    product_url: p.product_url,
+    parent_product_url: p.parent_product_url,
+    product_types: productTypes,
+    size: p.size,
+  });
 
   // 1) Upsert into products
   // IMPORTANT: this assumes you have a UNIQUE constraint on (vendor_id, product_url)
@@ -195,6 +206,19 @@ export async function upsertProduct(p: ScrapedProduct): Promise<number> {
 
   const productId = Number(productRows?.[0]?.id);
   if (!productId) throw new Error("Upsert succeeded but no product id returned.");
+
+  if (inferredGender) {
+    const { error: genderErr } = await withRetry(async () => {
+      const res = await supabaseAdmin
+        .from("products")
+        .update({ gender: inferredGender })
+        .eq("id", productId)
+        .or("gender.is.null,gender.eq.");
+      if (res.error && isRetryableSupabaseError(res.error)) throw res.error;
+      return res;
+    });
+    if (genderErr) throw genderErr;
+  }
 
   // 2) Save image into Supabase Storage + product_images + set products.primary_image_id
   // if (p.image_url) {

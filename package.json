@@ -19,6 +19,8 @@
     "migrate:product-variants": "npx tsx scripts/migrate-to-product-variants.ts",
     "verify:product-variants": "npx tsx scripts/verify-product-variants.ts",
     "backfill:parent-descriptions": "npx tsx scripts/backfill-parent-descriptions.ts",
+    "backfill:product-gender": "npx tsx scripts/backfill-product-gender.ts",
+    "sync:product-gender-os": "npx tsx scripts/backfill-product-gender.ts --apply --os-only",
     "docs:endpoints": "npx tsx scripts/generate-endpoint-matrix.ts",
     "migrate:run": "npx tsx scripts/run-migration.ts",
     "migrate:bootstrap": "npx tsx scripts/bootstrap-db.ts",
