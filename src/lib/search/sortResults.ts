@@ -23,7 +23,9 @@ export type SortableProduct = {
 
 function primarySortScore(product: SortableProduct): number {
   const unified = Number(product.explain?.unifiedScorer?.score ?? NaN);
-  if (Number.isFinite(unified)) return unified;
+  if (Number.isFinite(unified)) {
+    return unified;
+  }
   const fallback = Number(product.finalRelevance01 ?? 0);
   return Number.isFinite(fallback) ? fallback : 0;
 }
@@ -36,10 +38,33 @@ export function sortProductsByRelevanceAndCategory<T extends SortableProduct>(
   products: T[],
   scoreMap?: Map<string, number>,
 ): T[] {
+  const dbgUnified = String(process.env.SEARCH_IMAGE_DEBUG_UNIFIED ?? "").toLowerCase() === "1";
+  
   return [...products].sort((a: any, b: any) => {
     // Primary sort: final relevance descending.
     const fa = primarySortScore(a);
     const fb = primarySortScore(b);
+    
+    if (dbgUnified && products.length <= 10) {
+      const aUnified = a.explain?.unifiedScorer?.score;
+      const aFinal = a.finalRelevance01;
+      const bUnified = b.explain?.unifiedScorer?.score;
+      const bFinal = b.finalRelevance01;
+      if (Math.abs(fb - fa) > 1e-8) {
+        console.warn('[sortResults] Primary sort:', {
+          a_id: a.id,
+          a_unified: aUnified,
+          a_final: aFinal,
+          a_score: fa,
+          b_id: b.id,
+          b_unified: bUnified,
+          b_final: bFinal,
+          b_score: fb,
+          winner: fb > fa ? 'b' : 'a'
+        });
+      }
+    }
+    
     if (Math.abs(fb - fa) > 1e-8) return fb - fa;
 
     // Tie-breaker: prioritize same color / color presence.

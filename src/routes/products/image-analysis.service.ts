@@ -1825,7 +1825,7 @@ function hardCategoryTermsForDetection(
     }
     if (isShortTop) {
       const shortTopTerms = baseTerms.filter((t) =>
-        /\b(t-?shirt|tshirt|tee|top|tops|tank|camisole|cami|crop top|polo|polos)\b/.test(t),
+        /\b(t-?shirt|tshirt|tee|shirt|shirts|blouse|blouses|top|tops|tank|camisole|cami|crop top|polo|polos)\b/.test(t),
       );
       return shortTopTerms.length > 0 ? shortTopTerms : baseTerms;
     }
@@ -2068,7 +2068,7 @@ function tightenTypeSeedsForDetection(
     const isTailoredIntent = hasFormalTailoringCue(detectionLabel);
     if (topIntent.isShortTop) {
       const shortTop = normalized.filter((t) =>
-        /\b(tshirt|t-?shirt|tee|tees|top|tops|tank|camisole|cami|crop top)\b/.test(t) ||
+        /\b(tshirt|t-?shirt|tee|tees|shirt|shirts|blouse|blouses|top|tops|tank|camisole|cami|crop top)\b/.test(t) ||
         (/\bpolo(?:s)?\b/.test(t) && hasExplicitPoloCue(detectionLabel)),
       );
       return shortTop.length > 0 ? shortTop : normalized;
@@ -3572,10 +3572,22 @@ function applyDetectionCategoryGuard(
   });
 
   const categoryNorm = String(categoryMapping.productCategory ?? "").toLowerCase().trim();
+  const isShortTopIntent =
+    categoryNorm === "tops" && parseTopDetectionIntent(detectionLabel).isShortTop;
+  // Keep sparse short-sleeve top pools on the main path: generic catalog shirts may
+  // lack exact tee/top terms, but are still safe when they have no family contradiction.
   const shouldTopFailOpen =
     categoryNorm === "tops" &&
     products.length >= 3 &&
-    guarded.length < Math.max(1, Math.floor(products.length * 0.28));
+    (
+      guarded.length < Math.max(1, Math.floor(products.length * 0.28)) ||
+      (
+        isShortTopIntent &&
+        products.length <= 8 &&
+        guarded.length < products.length &&
+        guarded.length < 4
+      )
+    );
 
   if (!shouldTopFailOpen) {
     return guarded;
@@ -7813,7 +7825,7 @@ export class ImageAnalysisService {
 
           const lowQualityFallbackWanted =
             shopLookLowQualityMultiCropFallbackEnabled() &&
-            detectionSearchCalls < maxSearchCallsPerDetection &&
+            detectionSearchCalls < detectionSearchCallLimit &&
             shouldUseLowQualityMultiCropFallback(detection) &&
             similarResult.results.length === 0;
           if (lowQualityFallbackWanted) {
@@ -7838,7 +7850,7 @@ export class ImageAnalysisService {
             const altVectors = [expandedEmb, centerEmb].filter(
               (v): v is number[] => Array.isArray(v) && v.length > 0,
             );
-            const remainingSearchBudget = Math.max(0, maxSearchCallsPerDetection - detectionSearchCalls);
+            const remainingSearchBudget = Math.max(0, detectionSearchCallLimit - detectionSearchCalls);
             const altResults = await Promise.all(
               altVectors.slice(0, remainingSearchBudget).map((alt, idx) =>
                 runDetectionSearch(`fallback_multicrop_${idx + 1}`, {
@@ -7975,7 +7987,7 @@ export class ImageAnalysisService {
             ? Math.max(3, Math.floor(resolvedLimitPerItem * 0.35))
             : Math.max(2, Math.floor(resolvedLimitPerItem * 0.2));
           if (
-            detectionSearchCalls < maxSearchCallsPerDetection &&
+            detectionSearchCalls < detectionSearchCallLimit &&
             similarResult.results.length < footwearLowCountThreshold &&
             categoryMapping.productCategory === "footwear"
           ) {
@@ -8009,7 +8021,7 @@ export class ImageAnalysisService {
               recoveryVectors.push(finalEmbedding);
             }
 
-            const footwearSearchBudget = Math.max(0, maxSearchCallsPerDetection - detectionSearchCalls);
+            const footwearSearchBudget = Math.max(0, detectionSearchCallLimit - detectionSearchCalls);
             const footwearRecoveries = await Promise.all(
               recoveryVectors.slice(0, footwearSearchBudget).map((recoveryVector, idx) =>
                 runDetectionSearch(`recovery_footwear_${idx + 1}`, {
@@ -8066,7 +8078,7 @@ export class ImageAnalysisService {
           const vestLikeRecovery = /\bvest\b/.test(String(label ?? "").toLowerCase());
           const topsRecoveryMinKeep = shopLookTopRecoveryMinKeep(resolvedLimitPerItem);
           if (
-            detectionSearchCalls < maxSearchCallsPerDetection &&
+            detectionSearchCalls < detectionSearchCallLimit &&
             guardedCountForRecovery < topsRecoveryMinKeep &&
             categoryMapping.productCategory === "tops" &&
             (((detection.confidence ?? 0) >= 0.45 && (detection.area_ratio ?? 0) >= 0.02) ||
@@ -8102,7 +8114,7 @@ export class ImageAnalysisService {
             if (Array.isArray(finalEmbedding) && finalEmbedding.length > 0) recoveryVectors.push(finalEmbedding);
             if (Array.isArray(recoveryEmbedding) && recoveryEmbedding.length > 0) recoveryVectors.push(recoveryEmbedding);
 
-            const topsSearchBudget = Math.max(0, maxSearchCallsPerDetection - detectionSearchCalls);
+            const topsSearchBudget = Math.max(0, detectionSearchCallLimit - detectionSearchCalls);
             const topRecoveries = await Promise.all(
               recoveryVectors.slice(0, topsSearchBudget).map((recoveryVector, idx) =>
                 runDetectionSearch(`recovery_tops_${idx + 1}`, {
@@ -8185,7 +8197,7 @@ export class ImageAnalysisService {
             ? topsRecoveryMinKeep
             : Math.max(3, Math.min(8, Math.floor(resolvedLimitPerItem * 0.35)));
           if (
-            detectionSearchCalls < maxSearchCallsPerDetection &&
+            detectionSearchCalls < detectionSearchCallLimit &&
             topOrDressCategory &&
             guardedCountForRecovery < topOrDressMinKeep
           ) {
@@ -8288,7 +8300,7 @@ export class ImageAnalysisService {
               Number((filters as any).minFormality ?? 0),
             );
           if (
-            detectionSearchCalls < maxSearchCallsPerDetection &&
+            detectionSearchCalls < detectionSearchCallLimit &&
             categoryMapping.productCategory === "tops" &&
             guardedCountForRecovery === 0
           ) {
@@ -8319,7 +8331,7 @@ export class ImageAnalysisService {
                 ];
 
             for (const stage of stagedTopRecoveries) {
-              if (detectionSearchCalls >= maxSearchCallsPerDetection) break;
+              if (detectionSearchCalls >= detectionSearchCallLimit) break;
               const stageFilters: Partial<import("./types").SearchFilters> = {};
               Object.assign(
                 stageFilters,
@@ -8409,7 +8421,7 @@ export class ImageAnalysisService {
           // 2. Crop embedding may not capture bag handle/texture well
           // 3. Catalog may have limited bag inventory
           if (
-            detectionSearchCalls < maxSearchCallsPerDetection &&
+            detectionSearchCalls < detectionSearchCallLimit &&
             similarResult.results.length === 0 &&
             categoryMapping.productCategory === "bags"
           ) {
@@ -8443,7 +8455,7 @@ export class ImageAnalysisService {
               bagRecoveryVectors.push(finalGarmentEmbedding);
             }
 
-            const bagSearchBudget = Math.max(0, maxSearchCallsPerDetection - detectionSearchCalls);
+            const bagSearchBudget = Math.max(0, detectionSearchCallLimit - detectionSearchCalls);
             const bagRecoveries = await Promise.all(
               bagRecoveryVectors.slice(0, bagSearchBudget).map((recoveryVector, idx) =>
                 runDetectionSearch(`recovery_bag_${idx + 1}`, {
