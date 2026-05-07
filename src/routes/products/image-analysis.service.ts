@@ -393,6 +393,45 @@ function detectionResultStrength(products: ProductResult[]): number {
   return total / top.length;
 }
 
+function summarizeDroppedProductForLog(product: ProductResult): Record<string, unknown> {
+  const explain = ((product as any)?.explain ?? {}) as Record<string, unknown>;
+  const round = (value: unknown) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.round(n * 1000) / 1000 : null;
+  };
+  return {
+    product_id: String((product as any)?.id ?? ""),
+    title: String((product as any)?.title ?? "").slice(0, 120),
+    category: String((product as any)?.category_canonical ?? (product as any)?.category ?? ""),
+    product_types: Array.isArray((product as any)?.product_types)
+      ? (product as any).product_types.slice(0, 6)
+      : (product as any)?.product_types,
+    color: (product as any)?.color ?? null,
+    similarity_score: round((product as any)?.similarity_score),
+    finalRelevance01: round((product as any)?.finalRelevance01),
+    finalRelevanceSource: String(explain.finalRelevanceSource ?? ""),
+    acceptanceRelevance01: round(explain.acceptanceRelevance01),
+    productTypeCompliance: round(explain.productTypeCompliance),
+    categoryScore: round(explain.categoryScore ?? explain.categoryRelevance01),
+    colorCompliance: round(explain.colorCompliance),
+    colorTier: String(explain.colorTier ?? ""),
+    audienceCompliance: round(explain.audienceCompliance),
+    crossFamilyPenalty: round(explain.crossFamilyPenalty),
+    hardBlocked: Boolean(explain.hardBlocked),
+  };
+}
+
+function sampleDroppedProductsForLog(before: ProductResult[], after: ProductResult[], cap = 5): Record<string, unknown>[] {
+  const afterIds = new Set((after ?? []).map((p) => String((p as any)?.id ?? "")).filter(Boolean));
+  return (before ?? [])
+    .filter((p) => {
+      const id = String((p as any)?.id ?? "");
+      return id && !afterIds.has(id);
+    })
+    .slice(0, cap)
+    .map(summarizeDroppedProductForLog);
+}
+
 function shopLookTinyFootwearRecoveryThreshold(baseThreshold: number): number {
   const raw = Number(process.env.SEARCH_IMAGE_SHOP_TINY_FOOTWEAR_MIN_SIM ?? "0.53");
   const floor = Number.isFinite(raw) ? raw : 0.53;
@@ -7896,6 +7935,14 @@ export class ImageAnalysisService {
 
           if (hotPathDebug) {
             console.log(`[skip-trace] detection="${label}" after_knn_search=${similarResult.results.length}`);
+            const searchMeta = (similarResult as any)?.meta;
+            if (searchMeta?.ordered_stage_counts) {
+              console.log(`[skip-trace-stages] detection="${label}" ${JSON.stringify(searchMeta.ordered_stage_counts)}`);
+            }
+            const stageDropSamples = searchMeta?.stage_drop_samples;
+            if (stageDropSamples && Object.keys(stageDropSamples).length > 0) {
+              console.log(`[skip-trace-drops] detection="${label}" ${JSON.stringify(stageDropSamples)}`);
+            }
           }
 
           knnCandidateCount = similarResult.results.length;
@@ -8750,6 +8797,11 @@ export class ImageAnalysisService {
         const source = String((prod as any)?.explain?.finalRelevanceSource ?? "").toLowerCase();
         return relevance < detectionMinRelevanceThreshold && source.includes("color");
       }).length;
+      if (hotPathDebug && droppedByFinalRelevance > 0) {
+        console.log(
+          `[relevance-gate-drop] detection="${detection.detection?.label ?? "unknown"}" category="${detection.category}" before=${beforeProducts.length} after=${afterProducts.length} threshold=${detectionMinRelevanceThreshold} dropped=${droppedByFinalRelevance} color_drops=${droppedByColorGate} samples=${JSON.stringify(sampleDroppedProductsForLog(beforeProducts, afterProducts))}`,
+        );
+      }
       return {
         ...detection,
         products: afterProducts,
@@ -10226,6 +10278,14 @@ export class ImageAnalysisService {
             options.similarityThreshold ?? config.clip.imageSimilarityThreshold;
 
           console.log(`[skip-trace] detection="${categorySource}" after_knn_search=${similarResult.results.length}`);
+          const searchMeta = (similarResult as any)?.meta;
+          if (searchMeta?.ordered_stage_counts) {
+            console.log(`[skip-trace-stages] detection="${categorySource}" ${JSON.stringify(searchMeta.ordered_stage_counts)}`);
+          }
+          const stageDropSamples = searchMeta?.stage_drop_samples;
+          if (stageDropSamples && Object.keys(stageDropSamples).length > 0) {
+            console.log(`[skip-trace-drops] detection="${categorySource}" ${JSON.stringify(stageDropSamples)}`);
+          }
           const knnCandidates = similarResult.results.length;
 
           const precisionSafeResults = applyShopLookVisualPrecisionGuard(
@@ -10424,6 +10484,11 @@ export class ImageAnalysisService {
         const source = String((prod as any)?.explain?.finalRelevanceSource ?? "").toLowerCase();
         return relevance < minRelevanceThresholdSel && source.includes("color");
       }).length;
+      if (droppedByFinalRelevance > 0) {
+        console.log(
+          `[relevance-gate-drop-sel] detection="${detection.detection?.label ?? "unknown"}" category="${detection.category}" before=${beforeProducts.length} after=${afterProducts.length} threshold=${minRelevanceThresholdSel} dropped=${droppedByFinalRelevance} color_drops=${droppedByColorGate} samples=${JSON.stringify(sampleDroppedProductsForLog(beforeProducts, afterProducts))}`,
+        );
+      }
       return {
         ...detection,
         products: afterProducts,
