@@ -868,8 +868,8 @@ export function computeHitRelevance(
 
   const wcText = Number(hit?._source?.color_confidence_text);
   const wcImg = Number(hit?._source?.color_confidence_image);
-  const wText = Number.isFinite(wcText) && wcText > 0 ? wcText : 0;
-  const wImg = Number.isFinite(wcImg) && wcImg > 0 ? wcImg : 0;
+  const wText = Number.isFinite(wcText) && wcText > 0 ? wcText : (textTierRaw.length > 0 ? 0.55 : 0);
+  const wImg = Number.isFinite(wcImg) && wcImg > 0 ? wcImg : (imgTierRaw.length > 0 ? 0.7 : 0);
   const wSum = wText + wImg + 1e-6;
   const wtImg = wImg / wSum;
   const wtText = wText / wSum;
@@ -888,7 +888,17 @@ export function computeHitRelevance(
     const tUnion = tieredColorListCompliance(desiredColorsTier, unionTierRaw, rerankColorMode);
     matchedColor = tUnion.bestMatch ?? tImg.bestMatch ?? tText.bestMatch;
     colorTier = tUnion.tier;
-    if (resolvedColor.colors.length > 0 && resolvedColor.source !== "image") {
+    const titleColorContradictsImagePalette =
+      resolvedColor.source === "title" &&
+      imgTierRaw.length > 0 &&
+      textTierRaw.length > 0 &&
+      tText.compliance > 0 &&
+      tImg.compliance <= 0;
+    if (
+      resolvedColor.colors.length > 0 &&
+      resolvedColor.source !== "image" &&
+      !titleColorContradictsImagePalette
+    ) {
       colorCompliance = tResolved.compliance;
       matchedColor = tResolved.bestMatch ?? matchedColor;
       colorTier = tResolved.tier;

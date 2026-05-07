@@ -442,6 +442,34 @@ describe("computeHitRelevance - image palette color authority", () => {
     expect(rel.colorTier).toBe("exact");
     expect(rel.colorCompliance).toBe(1);
   });
+
+  test("does not let title color override contradictory image palette", () => {
+    const hit = {
+      _source: {
+        title: "Brown Leather Shoe",
+        category: "shoes",
+        category_canonical: "footwear",
+        product_types: ["shoe"],
+        attr_colors_text: ["brown"],
+        attr_colors_image: ["charcoal", "black", "silver"],
+        color_palette_canonical: ["charcoal", "black", "silver"],
+        color_confidence_text: 0.55,
+        color_confidence_image: 0.9,
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.86, {
+      ...baseIntent,
+      desiredProductTypes: ["shoe"],
+      desiredColors: ["brown"],
+      desiredColorsTier: ["brown"],
+      mergedCategory: "footwear",
+      astCategories: ["footwear"],
+    });
+
+    expect(rel.colorTier).not.toBe("exact");
+    expect(rel.colorCompliance).toBeLessThan(0.6);
+  });
 });
 
 describe("scoreAudienceCompliance - cue-based gender inference", () => {
