@@ -5378,6 +5378,7 @@ export async function searchByImageWithSimilarity(
   };
 
   const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
+  let countAfterEarlyImageKeyCollapse = rawOpenSearchHitCount;
 
   // Collapse size/style variants at the earliest possible point — before any quality gate.
   // Vendors index every size variant as a separate product sharing the same image_url,
@@ -5397,6 +5398,7 @@ export async function searchByImageWithSimilarity(
       seenImageKeys.add(key);
       return true;
     });
+    countAfterEarlyImageKeyCollapse = hits.length;
   }
 
   const rawCosineDebugAllowed =
@@ -8517,6 +8519,83 @@ export async function searchByImageWithSimilarity(
     }
   }
 
+  const debugHitSummary = (hit: any): Record<string, unknown> => {
+    const src = (hit?._source ?? {}) as Record<string, unknown>;
+    const id = String(src.product_id ?? "");
+    const comp = complianceById.get(id);
+    return {
+      product_id: id,
+      title: String(src.title ?? "").slice(0, 140),
+      category: String(src.category_canonical ?? src.category ?? ""),
+      product_types: Array.isArray(src.product_types) ? src.product_types.slice(0, 6) : src.product_types,
+      catalog_colors: [
+        src.color,
+        src.attr_color,
+        src.color_primary_canonical,
+        Array.isArray(src.color_palette_canonical) ? src.color_palette_canonical.slice(0, 5) : src.color_palette_canonical,
+      ].filter((x) => x != null && String(x).trim().length > 0),
+      visual: Math.round(visualSimFromHit(hit) * 1000) / 1000,
+      finalRelevance01: comp?.finalRelevance01 != null ? Math.round(Number(comp.finalRelevance01) * 1000) / 1000 : null,
+      exactTypeScore: comp?.exactTypeScore ?? null,
+      productTypeCompliance: comp?.productTypeCompliance != null ? Math.round(Number(comp.productTypeCompliance) * 1000) / 1000 : null,
+      categoryRelevance01: comp?.categoryRelevance01 != null ? Math.round(Number(comp.categoryRelevance01) * 1000) / 1000 : null,
+      colorCompliance: comp?.colorCompliance != null ? Math.round(Number(comp.colorCompliance) * 1000) / 1000 : null,
+      colorTier: comp?.colorTier ?? null,
+      audienceCompliance: comp?.audienceCompliance != null ? Math.round(Number(comp.audienceCompliance) * 1000) / 1000 : null,
+      styleCompliance: comp?.styleCompliance != null ? Math.round(Number(comp.styleCompliance) * 1000) / 1000 : null,
+      sleeveCompliance: comp?.sleeveCompliance != null ? Math.round(Number(comp.sleeveCompliance) * 1000) / 1000 : null,
+      crossFamilyPenalty: comp?.crossFamilyPenalty != null ? Math.round(Number(comp.crossFamilyPenalty) * 1000) / 1000 : null,
+      hardBlocked: comp?.hardBlocked ?? null,
+      colorSimEffective: Math.round((colorSimById.get(id) ?? 0) * 1000) / 1000,
+      styleSimEffective: Math.round((styleSimById.get(id) ?? 0) * 1000) / 1000,
+    };
+  };
+  const debugProductSummary = (product: any): Record<string, unknown> => {
+    const explain = ((product as any)?.explain ?? {}) as Record<string, unknown>;
+    return {
+      product_id: String((product as any)?.id ?? ""),
+      title: String((product as any)?.title ?? "").slice(0, 140),
+      category: String((product as any)?.category_canonical ?? (product as any)?.category ?? ""),
+      product_types: Array.isArray((product as any)?.product_types)
+        ? (product as any).product_types.slice(0, 6)
+        : (product as any)?.product_types,
+      color: (product as any)?.color ?? null,
+      similarity_score: Number((product as any)?.similarity_score ?? 0),
+      finalRelevance01: Number((product as any)?.finalRelevance01 ?? 0),
+      acceptanceRelevance01: Number((explain as any)?.acceptanceRelevance01 ?? NaN),
+      finalRelevanceSource: String((explain as any)?.finalRelevanceSource ?? ""),
+      exactTypeScore: Number((explain as any)?.exactTypeScore ?? NaN),
+      productTypeCompliance: Number((explain as any)?.productTypeCompliance ?? NaN),
+      categoryScore: Number((explain as any)?.categoryScore ?? (explain as any)?.categoryRelevance01 ?? NaN),
+      colorCompliance: Number((explain as any)?.colorCompliance ?? NaN),
+      colorTier: String((explain as any)?.colorTier ?? ""),
+      audienceCompliance: Number((explain as any)?.audienceCompliance ?? NaN),
+      crossFamilyPenalty: Number((explain as any)?.crossFamilyPenalty ?? NaN),
+      hardBlocked: Boolean((explain as any)?.hardBlocked),
+    };
+  };
+  const sampleDroppedHits = (before: any[], after: any[], cap = 5): Record<string, unknown>[] => {
+    const afterIds = new Set((after ?? []).map((h: any) => String(h?._source?.product_id ?? "")).filter(Boolean));
+    return (before ?? [])
+      .filter((h: any) => {
+        const id = String(h?._source?.product_id ?? "");
+        return id && !afterIds.has(id);
+      })
+      .slice(0, cap)
+      .map(debugHitSummary);
+  };
+  const sampleDroppedProducts = (before: any[], after: any[], cap = 5): Record<string, unknown>[] => {
+    const afterIds = new Set((after ?? []).map((p: any) => String((p as any)?.id ?? "")).filter(Boolean));
+    return (before ?? [])
+      .filter((p: any) => {
+        const id = String((p as any)?.id ?? "");
+        return id && !afterIds.has(id);
+      })
+      .slice(0, cap)
+      .map(debugProductSummary);
+  };
+  const stageDropSamples: Record<string, Record<string, unknown>[]> = {};
+
   let relevanceRelaxedForMinCount = false;
   const minResultsPolicy = imageCategoryAwareMinResultsPolicy({
     detectionProductCategory: params.detectionProductCategory,
@@ -8552,6 +8631,7 @@ export async function searchByImageWithSimilarity(
   const countAfterFinalAcceptMin = rankedHits.length;
   const belowFinalRelevanceGate = visualGatedHits.length > 0 && rankedHits.length === 0;
 
+  const hitsBeforeExplicitColorPostfilter = rankedHits;
   if (hasExplicitColorIntent && desiredColorsForRelevance.length > 0) {
     const strictColorPost = String(process.env.SEARCH_COLOR_POSTFILTER_STRICT ?? "1").toLowerCase() !== "0";
     const explicitColorCategory = String(params.detectionProductCategory ?? "").toLowerCase();
@@ -8572,8 +8652,14 @@ export async function searchByImageWithSimilarity(
     }
   }
 
+  const countAfterExplicitColorPostfilter = rankedHits.length;
+  if (hitsBeforeExplicitColorPostfilter.length > rankedHits.length) {
+    stageDropSamples.explicit_color_postfilter = sampleDroppedHits(hitsBeforeExplicitColorPostfilter, rankedHits);
+  }
+
   // Detection-anchored inferred color (e.g., from item crop) can still leak unrelated
   // colors through visual rescue. Apply category-aware postfiltering.
+  const hitsBeforeInferredColorPostfilter = rankedHits;
   if (
     !hasExplicitColorIntent &&
     hasInferredColorSignal &&
@@ -8708,9 +8794,15 @@ export async function searchByImageWithSimilarity(
     }
   }
 
+  const countAfterInferredColorPostfilter = rankedHits.length;
+  if (hitsBeforeInferredColorPostfilter.length > rankedHits.length) {
+    stageDropSamples.inferred_color_postfilter = sampleDroppedHits(hitsBeforeInferredColorPostfilter, rankedHits);
+  }
+
   // Non-sport guard at core ranking level: detection-anchored apparel searches with
   // casual/non-athletic intent should avoid training/workout products that leak through
   // fallback branches outside route-level athletic guards.
+  const hitsBeforeAthleticPostfilter = rankedHits;
   if (hasDetectionAnchoredTypeIntent && rankedHits.length > 0) {
     const nonAthleticSoftStyle = hasSoftStyleHint && !athleticIntentRe.test(softStyleForRelevance);
     const nonAthleticTypeIntent =
@@ -8738,11 +8830,17 @@ export async function searchByImageWithSimilarity(
     }
   }
 
+  const countAfterAthleticPostfilter = rankedHits.length;
+  if (hitsBeforeAthleticPostfilter.length > rankedHits.length) {
+    stageDropSamples.athletic_postfilter = sampleDroppedHits(hitsBeforeAthleticPostfilter, rankedHits);
+  }
+
   const countAfterColorPostfilter = rankedHits.length;
 
   // Hard gate for explicit gender intent: filter out products with hard gender mismatches.
   // When user specifies men/women, reject products where audience compliance is 0 or null gender
   // with conflicting title keywords.
+  const hitsBeforeGenderPostfilter = rankedHits;
   if (filtersAny.gender) {
     const queryGenderNorm = normalizeQueryGender(filtersAny.gender);
     if (queryGenderNorm) {
@@ -8764,10 +8862,14 @@ export async function searchByImageWithSimilarity(
     }
   }
   const countAfterGenderPostfilter = rankedHits.length;
+  if (hitsBeforeGenderPostfilter.length > rankedHits.length) {
+    stageDropSamples.gender_postfilter = sampleDroppedHits(hitsBeforeGenderPostfilter, rankedHits);
+  }
 
   const isBagDetectionIntent =
     hasDetectionAnchoredTypeIntent &&
     String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bags";
+  const hitsBeforeBagGate = rankedHits;
   if (isBagDetectionIntent && rankedHits.length > 0) {
     const bagSafeHits = rankedHits.filter((h: any) => isBagCatalogCandidate((h as any)?._source ?? {}));
     if (bagSafeHits.length > 0) {
@@ -8781,14 +8883,23 @@ export async function searchByImageWithSimilarity(
       rankedHits = bagCategoryAlignedHits.length > 0 ? bagCategoryAlignedHits : bagSafeHits;
     }
   }
+  const countAfterBagGate = rankedHits.length;
+  if (hitsBeforeBagGate.length > rankedHits.length) {
+    stageDropSamples.bag_gate = sampleDroppedHits(hitsBeforeBagGate, rankedHits);
+  }
 
   // Detection-anchored bottoms with trouser intent should reject shorts candidates.
   const shouldRejectShortsForTrouserIntent =
     hasDetectionAnchoredTypeIntent &&
     detectionCategoryNorm === "bottoms" &&
     hasStrictTrouserIntent(desiredProductTypes);
+  const hitsBeforeShortsGuard = rankedHits;
   if (shouldRejectShortsForTrouserIntent && rankedHits.length > 0) {
     rankedHits = rankedHits.filter((h: any) => !isShortsCatalogCandidate((h as any)?._source ?? {}));
+  }
+  const countAfterShortsGuard = rankedHits.length;
+  if (hitsBeforeShortsGuard.length > rankedHits.length) {
+    stageDropSamples.shorts_guard = sampleDroppedHits(hitsBeforeShortsGuard, rankedHits);
   }
 
   const detectionCategoryNormForTailored = detectionCategoryNorm;
@@ -8815,6 +8926,7 @@ export async function searchByImageWithSimilarity(
         isTailoredStyleIntent
       )
     );
+  const hitsBeforeTailoredGuard = rankedHits;
   if (isTailoredIntentForDetection && rankedHits.length > 0) {
     const tailoredSafeHits = rankedHits.filter((h: any) => {
       const src = (h as any)?._source ?? {};
@@ -8825,6 +8937,10 @@ export async function searchByImageWithSimilarity(
     if (tailoredSafeHits.length > 0) {
       rankedHits = tailoredSafeHits;
     }
+  }
+  const countAfterTailoredGuard = rankedHits.length;
+  if (hitsBeforeTailoredGuard.length > rankedHits.length) {
+    stageDropSamples.tailored_guard = sampleDroppedHits(hitsBeforeTailoredGuard, rankedHits);
   }
   if (
     hasDetectionAnchoredTypeIntent &&
@@ -9680,6 +9796,8 @@ export async function searchByImageWithSimilarity(
   }
   // Final hard contradiction guard on hydrated product metadata.
   // This prevents opposite-gender and shorts-vs-trousers leaks when index fields are sparse/noisy.
+  const countAfterHydrationAssembly = results.length;
+  const productsBeforeHydratedMetadataGuard = results;
   if ((queryGenderNormForPost || shouldRejectShortsForTrouserIntent) && results.length > 0) {
     results = results.filter((p: any) => {
       const src = p as Record<string, unknown>;
@@ -9717,6 +9835,10 @@ export async function searchByImageWithSimilarity(
     });
   }
 
+  const countAfterHydratedMetadataGuard = results.length;
+  if (productsBeforeHydratedMetadataGuard.length > results.length) {
+    stageDropSamples.hydrated_metadata_guard = sampleDroppedProducts(productsBeforeHydratedMetadataGuard, results);
+  }
   const countAfterHydration = results.length;
 
   const resultsBeforeFinalRelevanceFilter = results;
@@ -9737,6 +9859,10 @@ export async function searchByImageWithSimilarity(
       return Math.max(rankingScore, acceptanceScore) >= effectiveFinalResultMin;
     },
   ) as ProductResult[];
+  const countAfterFinalResultRelevanceGate = results.length;
+  if (resultsBeforeFinalRelevanceFilter.length > results.length) {
+    stageDropSamples.final_result_relevance_gate = sampleDroppedProducts(resultsBeforeFinalRelevanceFilter, results);
+  }
 
   // Main-path deterministic keep rule:
   // if strict mode would return empty for detection-anchored tops/bottoms, keep the
@@ -9786,6 +9912,7 @@ export async function searchByImageWithSimilarity(
       results = rescueKeep as ProductResult[];
     }
   }
+  const countAfterMainPathStrictKeep = results.length;
 
   const strongVisualOverrideMax = imageStrongVisualOverrideMaxCount();
   const droppedByFinalRelevanceBeforeOverride = Math.max(0, resultsBeforeFinalRelevanceFilter.length - results.length);
@@ -9861,6 +9988,7 @@ export async function searchByImageWithSimilarity(
       results = [...results, ...strongMisses] as ProductResult[];
     }
   }
+  const countAfterStrongVisualOverride = results.length;
 
   if (results.length === 0 && resultsBeforeFinalRelevanceFilter.length > 0) {
     imageSearchPipelineDegraded = true;
@@ -9893,7 +10021,9 @@ export async function searchByImageWithSimilarity(
     });
     results = sortProductsByRelevanceAndCategory(fallbackMapped).slice(0, limit) as ProductResult[];
   }
+  const countAfterZeroResultFallback = results.length;
 
+  const productsBeforeLateDetectionFamilyGate = results;
   if (hasDetectionAnchoredTypeIntent) {
     const isDressDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses";
     const filtered = results.filter((p: any) => {
@@ -9965,10 +10095,15 @@ export async function searchByImageWithSimilarity(
       }
     }
   }
+  const countAfterLateDetectionFamilyGate = results.length;
+  if (productsBeforeLateDetectionFamilyGate.length > results.length) {
+    stageDropSamples.late_detection_family_gate = sampleDroppedProducts(productsBeforeLateDetectionFamilyGate, results);
+  }
 
   // Final hard family gate: rescue/override paths can re-introduce visually-similar
   // but category-incorrect items. Clamp to detection category family at the end.
   const detectionCategoryForFinalGate = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+  const productsBeforeStrictFinalDetectionCategoryGate = results;
   if (
     imageStrictFinalDetectionCategoryGateEnabled() &&
     searchRelevanceGateMode() === "strict" &&
@@ -10032,10 +10167,15 @@ export async function searchByImageWithSimilarity(
       }
     }
   }
+  const countAfterStrictFinalDetectionCategoryGate = results.length;
+  if (productsBeforeStrictFinalDetectionCategoryGate.length > results.length) {
+    stageDropSamples.strict_final_detection_category_gate = sampleDroppedProducts(productsBeforeStrictFinalDetectionCategoryGate, results);
+  }
 
   // Footwear subtype gate: when the query specifies a clear footwear kind (sneakers, boots,
   // sandals, heels, loafers, flats), hard-block cross-subtype results that slipped through
   // the family gate (e.g. black boots appearing in a sneaker search).
+  const productsBeforeFootwearSubtypeGate = results;
   if (searchRelevanceGateMode() === "strict" && detectionCategoryForFinalGate === "footwear" && desiredProductTypes.length > 0) {
     const footwearSubtypeFiltered = results.filter((p: any) =>
       passesFootwearSubtypeGate(p as unknown as Record<string, unknown>, desiredProductTypes),
@@ -10043,6 +10183,10 @@ export async function searchByImageWithSimilarity(
     if (footwearSubtypeFiltered.length > 0) {
       results = footwearSubtypeFiltered as ProductResult[];
     }
+  }
+  const countAfterFootwearSubtypeGate = results.length;
+  if (productsBeforeFootwearSubtypeGate.length > results.length) {
+    stageDropSamples.footwear_subtype_gate = sampleDroppedProducts(productsBeforeFootwearSubtypeGate, results);
   }
 
   // Always sort by finalRelevance01 descending as the primary signal.
@@ -10090,10 +10234,14 @@ export async function searchByImageWithSimilarity(
   const dedupedResults = dedupeImageSearchResults(results as any) as ProductResult[];
   const countAfterDedupe = dedupedResults.length;
   const droppedByDedupe = Math.max(0, results.length - countAfterDedupe);
+  if (results.length > countAfterDedupe) {
+    stageDropSamples.dedupe = sampleDroppedProducts(results, dedupedResults);
+  }
   const variantCollapsingApplied = collapseVariantGroupsRequested !== false;
   const variantCollapsed = variantCollapsingApplied
     ? collapseVariantGroups(dedupedResults)
     : { results: dedupedResults, groupCount: 0, representativeCount: dedupedResults.length };
+  const countAfterVariantCollapse = variantCollapsed.results.length;
   const variantGroupCount = variantCollapsed.groupCount;
   const variantRepresentativeCount = variantCollapsed.representativeCount;
   const preserveColorCohesionForDetection =
@@ -10125,6 +10273,39 @@ export async function searchByImageWithSimilarity(
   }
   const finalReturnedCount = results.length;
   const droppedByLimit = Math.max(0, countAfterDedupe - finalReturnedCount);
+  const orderedStageCounts = {
+    raw_open_search_hits: rawOpenSearchHitCount,
+    after_early_image_key_collapse: countAfterEarlyImageKeyCollapse,
+    base_candidates: baseCandidates.length,
+    ranked_candidates: rankedHitsCandidates.length,
+    after_category_safety: rankedHitsForGates.length,
+    threshold_passed_visual: thresholdPassedByVisual.length,
+    visual_gated_hits: visualGatedHits.length,
+    after_final_accept_min: countAfterFinalAcceptMin,
+    after_explicit_color_postfilter: countAfterExplicitColorPostfilter,
+    after_inferred_color_postfilter: countAfterInferredColorPostfilter,
+    after_athletic_postfilter: countAfterAthleticPostfilter,
+    after_gender_postfilter: countAfterGenderPostfilter,
+    after_bag_gate: countAfterBagGate,
+    after_shorts_guard: countAfterShortsGuard,
+    after_tailored_guard: countAfterTailoredGuard,
+    hydration_candidate_ids: hydrationCandidateIdCount,
+    hydration_prefetch_miss_ids: hydrationPrefetchMissCount,
+    hydrated_product_rows: hydratedProductRowsCount,
+    hydration_missing_product_rows: hydrationMissingProductRowsCount,
+    after_hydration_assembly: countAfterHydrationAssembly,
+    after_hydrated_metadata_guard: countAfterHydratedMetadataGuard,
+    after_final_result_relevance_gate: countAfterFinalResultRelevanceGate,
+    after_main_path_strict_keep: countAfterMainPathStrictKeep,
+    after_strong_visual_override: countAfterStrongVisualOverride,
+    after_zero_result_fallback: countAfterZeroResultFallback,
+    after_late_detection_family_gate: countAfterLateDetectionFamilyGate,
+    after_strict_final_detection_category_gate: countAfterStrictFinalDetectionCategoryGate,
+    after_footwear_subtype_gate: countAfterFootwearSubtypeGate,
+    after_dedupe: countAfterDedupe,
+    after_variant_collapse: countAfterVariantCollapse,
+    final_returned_count: finalReturnedCount,
+  };
   const topObs = results.slice(0, 10);
   const colorComplianceAt10 =
     topObs.length > 0
@@ -10352,11 +10533,26 @@ export async function searchByImageWithSimilarity(
       variant_group_count: variantGroupCount,
       variant_group_representatives: variantRepresentativeCount,
       relevance_intent: relevanceIntentDebug,
+      ordered_stage_counts: orderedStageCounts,
+      stage_drop_samples: stageDropSamples,
       drops_debug: {
         dropped_by_category_safety: droppedByCategorySafety,
         dropped_by_visual_threshold: droppedByVisualThreshold,
         dropped_by_final_relevance_before_override: droppedByFinalRelevanceBeforeOverride,
         rescued_by_strong_visual_override: rescuedByStrongVisualOverride,
+        dropped_by_early_image_key_collapse: Math.max(0, rawOpenSearchHitCount - countAfterEarlyImageKeyCollapse),
+        dropped_by_explicit_color_postfilter: Math.max(0, countAfterFinalAcceptMin - countAfterExplicitColorPostfilter),
+        dropped_by_inferred_color_postfilter: Math.max(0, countAfterExplicitColorPostfilter - countAfterInferredColorPostfilter),
+        dropped_by_athletic_postfilter: Math.max(0, countAfterInferredColorPostfilter - countAfterAthleticPostfilter),
+        dropped_by_gender_postfilter: Math.max(0, countAfterAthleticPostfilter - countAfterGenderPostfilter),
+        dropped_by_bag_gate: Math.max(0, countAfterGenderPostfilter - countAfterBagGate),
+        dropped_by_shorts_guard: Math.max(0, countAfterBagGate - countAfterShortsGuard),
+        dropped_by_tailored_guard: Math.max(0, countAfterShortsGuard - countAfterTailoredGuard),
+        dropped_by_hydrated_metadata_guard: Math.max(0, countAfterHydrationAssembly - countAfterHydratedMetadataGuard),
+        dropped_by_final_result_relevance_gate: Math.max(0, countAfterHydratedMetadataGuard - countAfterFinalResultRelevanceGate),
+        dropped_by_late_detection_family_gate: Math.max(0, countAfterZeroResultFallback - countAfterLateDetectionFamilyGate),
+        dropped_by_strict_final_detection_category_gate: Math.max(0, countAfterLateDetectionFamilyGate - countAfterStrictFinalDetectionCategoryGate),
+        dropped_by_footwear_subtype_gate: Math.max(0, countAfterStrictFinalDetectionCategoryGate - countAfterFootwearSubtypeGate),
         dropped_by_hydration: Math.max(0, hydrationCandidateIdCount - hydratedProductRowsCount),
         dropped_by_dedupe: droppedByDedupe,
         dropped_by_limit: droppedByLimit,
@@ -10528,12 +10724,15 @@ export async function searchByImageWithSimilarity(
       variant_group_count: variantGroupCount,
       variant_group_representatives: variantRepresentativeCount,
       detection_observability: detectionObservability,
+      ordered_stage_counts: orderedStageCounts,
+      stage_drop_samples: stageDropSamples,
       timing,
       pipeline_counts: {
         exact_cosine_rerank: exactCosineRerank,
         dual_knn_fusion: useDualKnn,
         image_rank_visual_first: imageSearchVisualPrimaryRanking,
         raw_open_search_hits: rawOpenSearchHitCount,
+        after_early_image_key_collapse: countAfterEarlyImageKeyCollapse,
         base_candidates: baseCandidates.length,
         ranked_candidates: rankedHitsCandidates.length,
         dropped_by_category_safety: droppedByCategorySafety,
@@ -10543,14 +10742,29 @@ export async function searchByImageWithSimilarity(
         hits_after_final_accept_min: countAfterFinalAcceptMin,
         dropped_by_final_relevance_before_override: droppedByFinalRelevanceBeforeOverride,
         rescued_by_strong_visual_override: rescuedByStrongVisualOverride,
+        hits_after_explicit_color_postfilter: countAfterExplicitColorPostfilter,
+        hits_after_inferred_color_postfilter: countAfterInferredColorPostfilter,
         hits_after_color_postfilter: countAfterColorPostfilter,
+        hits_after_athletic_postfilter: countAfterAthleticPostfilter,
+        hits_after_gender_postfilter: countAfterGenderPostfilter,
+        hits_after_bag_gate: countAfterBagGate,
+        hits_after_shorts_guard: countAfterShortsGuard,
+        hits_after_tailored_guard: countAfterTailoredGuard,
         hydration_candidate_ids: hydrationCandidateIdCount,
         hydration_prefetch_miss_ids: hydrationPrefetchMissCount,
         hydrated_product_rows: hydratedProductRowsCount,
         hydration_missing_product_rows: hydrationMissingProductRowsCount,
         hits_after_hydration: countAfterHydration,
+        hits_after_hydrated_metadata_guard: countAfterHydratedMetadataGuard,
+        hits_after_final_result_relevance_gate: countAfterFinalResultRelevanceGate,
+        hits_after_main_path_strict_keep: countAfterMainPathStrictKeep,
+        hits_after_zero_result_fallback: countAfterZeroResultFallback,
+        hits_after_late_detection_family_gate: countAfterLateDetectionFamilyGate,
+        hits_after_strict_final_detection_category_gate: countAfterStrictFinalDetectionCategoryGate,
+        hits_after_footwear_subtype_gate: countAfterFootwearSubtypeGate,
         dropped_by_dedupe: droppedByDedupe,
         hits_after_dedupe: countAfterDedupe,
+        hits_after_variant_collapse: countAfterVariantCollapse,
         dropped_by_limit: droppedByLimit,
         final_returned_count: finalReturnedCount,
       },

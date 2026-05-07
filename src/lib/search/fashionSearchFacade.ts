@@ -153,6 +153,43 @@ function filterByFinalRelevance<T extends { finalRelevance01?: number }>(
   return filtered;
 }
 
+function summarizeImageFacadeDrop(product: ProductResult): Record<string, unknown> {
+  const explain = ((product as any)?.explain ?? {}) as Record<string, unknown>;
+  const round = (value: unknown) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.round(n * 1000) / 1000 : null;
+  };
+  return {
+    product_id: String((product as any)?.id ?? ""),
+    title: String((product as any)?.title ?? "").slice(0, 120),
+    category: String((product as any)?.category_canonical ?? (product as any)?.category ?? ""),
+    product_types: Array.isArray((product as any)?.product_types)
+      ? (product as any).product_types.slice(0, 6)
+      : (product as any)?.product_types,
+    color: (product as any)?.color ?? null,
+    similarity_score: round((product as any)?.similarity_score),
+    finalRelevance01: round((product as any)?.finalRelevance01),
+    finalRelevanceSource: String(explain.finalRelevanceSource ?? ""),
+    acceptanceRelevance01: round(explain.acceptanceRelevance01),
+    productTypeCompliance: round(explain.productTypeCompliance),
+    categoryScore: round(explain.categoryScore ?? explain.categoryRelevance01),
+    colorCompliance: round(explain.colorCompliance),
+    colorTier: String(explain.colorTier ?? ""),
+    hardBlocked: Boolean(explain.hardBlocked),
+  };
+}
+
+function sampleImageFacadeDrops(before: ProductResult[] | undefined, after: ProductResult[] | undefined, cap = 5): Record<string, unknown>[] {
+  const afterIds = new Set((after ?? []).map((item) => String((item as any)?.id ?? "")).filter(Boolean));
+  return (before ?? [])
+    .filter((item) => {
+      const id = String((item as any)?.id ?? "");
+      return id && !afterIds.has(id);
+    })
+    .slice(0, cap)
+    .map(summarizeImageFacadeDrop);
+}
+
 function expandPredictedTypeHints(seeds: string[]): string[] {
   const normalized = seeds.map((s) => String(s).toLowerCase().trim()).filter(Boolean);
   if (normalized.length === 0) return [];
@@ -530,9 +567,45 @@ export async function searchImage(
   // or whose score was depressed by threshold/preprocessing mismatches.
   const filteredResults = filterByFinalRelevance(res.results, effectiveMin, "lenient") ?? [];
   const filteredRelated = filterByFinalRelevance(res.related, effectiveMin, "lenient");
-  const meta = {
+  const facadeDroppedResults = Math.max(0, (res.results ?? []).length - filteredResults.length);
+  const facadeDroppedRelated = Math.max(0, (res.related ?? []).length - (filteredRelated ?? []).length);
+  const facadeDropSamples = sampleImageFacadeDrops(res.results, filteredResults);
+  if (facadeDroppedResults > 0 || facadeDroppedRelated > 0) {
+    console.warn("[searchImage][facade-filter]", {
+      before_results: (res.results ?? []).length,
+      after_results: filteredResults.length,
+      before_related: (res.related ?? []).length,
+      after_related: (filteredRelated ?? []).length,
+      effective_min: effectiveMin,
+      dropped_results: facadeDroppedResults,
+      dropped_related: facadeDroppedRelated,
+      samples: facadeDropSamples,
+    });
+  }
+  const previousOrderedStageCounts = ((res.meta as any)?.ordered_stage_counts ?? {}) as Record<string, number>;
+  const previousStageDropSamples = ((res.meta as any)?.stage_drop_samples ?? {}) as Record<string, unknown[]>;
+  const previousPipelineCounts = (res.meta as any)?.pipeline_counts;
+  const meta: any = {
     ...(res.meta ?? {}),
     total_results: filteredResults.length,
+    ordered_stage_counts: {
+      ...previousOrderedStageCounts,
+      after_facade_final_relevance_filter: filteredResults.length,
+    },
+    stage_drop_samples:
+      facadeDroppedResults > 0
+        ? {
+            ...previousStageDropSamples,
+            facade_final_relevance_filter: facadeDropSamples,
+          }
+        : previousStageDropSamples,
+    pipeline_counts: previousPipelineCounts
+      ? {
+          ...previousPipelineCounts,
+          hits_after_facade_final_relevance_filter: filteredResults.length,
+          dropped_by_facade_final_relevance_filter: facadeDroppedResults,
+        }
+      : previousPipelineCounts,
   };
 
   return {
