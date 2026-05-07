@@ -42,6 +42,7 @@ export function inferAudienceFromCaption(caption: string): { gender?: string; ag
 export function inferColorFromCaption(caption: string): {
   topColor?: string | null;
   jeansColor?: string | null;
+  jeansColorDefaulted?: boolean;
   garmentColor?: string | null;
   shoeColor?: string | null;
   bagColor?: string | null;
@@ -125,11 +126,13 @@ export function inferColorFromCaption(caption: string): {
   // Leftmost-match bug: "blue sweater and grey pants" → regex returns "blue" (not "grey").
   const bottomGarments = "jeans|pants|trousers|chinos|cargo|shorts|leggings";
   let jeansColor = nearestColorBefore(s, bottomGarments);
+  let jeansColorDefaulted = false;
   // Default bare "jeans" mention to "blue": without an explicit color word, jeans strongly
   // implies blue/denim. Only apply when no color was extracted (e.g. "black leather jacket
   // and jeans" — "black" is blocked by the intervening jacket cue, leaving jeansColor null).
   if (!jeansColor && /\bjeans\b/.test(s)) {
     jeansColor = "blue";
+    jeansColorDefaulted = true;
   }
 
   // Garment color for dresses, outerwear, skirts: use nearest-color approach.
@@ -146,13 +149,60 @@ export function inferColorFromCaption(caption: string): {
   const bagGarments = "bag|bags|handbag|handbags|purse|purses|tote|totes|clutch|clutches|wallet|wallets|satchel|satchels";
   const bagColor = nearestColorBefore(s, bagGarments);
 
-  return { topColor, jeansColor, garmentColor, shoeColor, bagColor };
+  return { topColor, jeansColor, jeansColorDefaulted, garmentColor, shoeColor, bagColor };
 }
 
-/** Single best color token for catalog backfill when category slot is unknown. */
-export function primaryColorHintFromCaption(caption: string): string | null {
-  const { topColor, jeansColor, garmentColor } = inferColorFromCaption(caption);
-  return garmentColor ?? topColor ?? jeansColor ?? null;
+type CaptionColorProductContext = {
+  title?: string | null;
+  category?: string | null;
+};
+
+type CaptionColorSlot = "top" | "bottom" | "garment" | "shoe" | "bag" | "unknown";
+
+function inferCaptionColorSlotForProduct(context?: CaptionColorProductContext): CaptionColorSlot {
+  const text = normalizeProductText(context?.title, context?.category).toLowerCase();
+  if (!text) return "unknown";
+
+  if (/\b(bag|bags|handbag|purse|tote|clutch|wallet|satchel|backpack|duffel|duffle)\b/.test(text)) {
+    return "bag";
+  }
+  if (/\b(shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals|trainer|trainers|flat|flats|slipper|slippers|mule|mules|pump|pumps|oxford|oxfords)\b/.test(text)) {
+    return "shoe";
+  }
+  if (/\b(jeans?|denim|pants?|trousers?|chinos?|cargo|shorts?|leggings?|tights?|pantyhose)\b/.test(text)) {
+    return "bottom";
+  }
+  if (/\b(dress|dresses|gown|skirt|skirts|jacket|coat|blazer|romper|jumpsuit|vest|gilet|waistcoat)\b/.test(text)) {
+    return "garment";
+  }
+  if (/\b(top|tops|shirt|shirts|blouse|blouses|tee|tees|t-?shirt|tshirt|polo|sweater|cardigan|pullover|jumper|hoodie|sweatshirt|knitwear|tunic|bodysuit)\b/.test(text)) {
+    return "top";
+  }
+
+  return "unknown";
+}
+
+function onlyColorWhenUnambiguous(colors: Array<string | null | undefined>): string | null {
+  const distinct = colors.filter((c): c is string => Boolean(c));
+  const unique = [...new Set(distinct)];
+  return unique.length === 1 ? unique[0] : null;
+}
+
+/** Single best color token for catalog backfill. Product context prevents cross-garment color bleed. */
+export function primaryColorHintFromCaption(
+  caption: string,
+  context?: CaptionColorProductContext,
+): string | null {
+  const { topColor, jeansColor, jeansColorDefaulted, garmentColor, shoeColor, bagColor } = inferColorFromCaption(caption);
+  const slot = inferCaptionColorSlotForProduct(context);
+
+  if (slot === "top") return topColor ?? null;
+  if (slot === "bottom") return jeansColorDefaulted ? null : jeansColor ?? null;
+  if (slot === "garment") return garmentColor ?? null;
+  if (slot === "shoe") return shoeColor ?? null;
+  if (slot === "bag") return bagColor ?? null;
+
+  return onlyColorWhenUnambiguous([garmentColor, topColor, jeansColor, shoeColor, bagColor]);
 }
 
 function normalizeProductText(...texts: Array<string | null | undefined>): string {

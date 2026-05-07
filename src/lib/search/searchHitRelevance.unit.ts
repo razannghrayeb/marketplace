@@ -3,7 +3,7 @@ declare const describe: any;
 declare const test: any;
 declare const expect: any;
 
-import { computeHitRelevance, scoreAudienceCompliance } from "./searchHitRelevance";
+import { computeHitRelevance, scoreAudienceCompliance, type SearchHitRelevanceIntent } from "./searchHitRelevance";
 import { scoreCrossFamilyTypePenalty } from "./productTypeTaxonomy";
 
 describe("computeHitRelevance - sleeve intent", () => {
@@ -110,6 +110,14 @@ describe("scoreCrossFamilyTypePenalty - category fallback", () => {
     });
     expect(p).toBeGreaterThanOrEqual(0.8);
   });
+
+  test("suit query with formal-bottom expansion does not penalize suit category rows", () => {
+    const p = scoreCrossFamilyTypePenalty(["suit", "pants", "trousers"], [], {
+      categoryCanonical: "tailored",
+      category: "Suits",
+    });
+    expect(p).toBeLessThan(0.3);
+  });
 });
 
 describe("computeHitRelevance - type intent reliability", () => {
@@ -177,6 +185,92 @@ describe("computeHitRelevance - type intent reliability", () => {
       rerankColorMode: "any",
       mergedCategory: "tops",
       astCategories: ["tops"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.crossFamilyPenalty).toBeGreaterThanOrEqual(0.8);
+    expect(rel.finalRelevance01).toBeLessThan(0.2);
+  });
+});
+
+describe("computeHitRelevance - suit composite intent", () => {
+  test("formal-bottom expansion does not reject tailored suit listings", () => {
+    const suitHit = {
+      _source: {
+        title: "Men Black Two Piece Suit",
+        category: "Suits",
+        category_canonical: "tailored",
+        product_types: ["suit"],
+        attr_gender: "men",
+      },
+    } as any;
+
+    const rel = computeHitRelevance(suitHit, 0.86, {
+      desiredProductTypes: ["suit", "pants", "trousers", "slacks"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "tailored",
+      astCategories: ["tailored"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.productTypeCompliance).toBeGreaterThanOrEqual(1);
+    expect(rel.finalRelevance01).toBeGreaterThan(0.3);
+  });
+
+  test("formal-bottom expansion keeps sparse suit category rows viable", () => {
+    const sparseSuitHit = {
+      _source: {
+        title: "Men Black Suit",
+        category: "Suits",
+        category_canonical: "tailored",
+        product_types: [],
+        attr_gender: "men",
+      },
+    } as any;
+
+    const rel = computeHitRelevance(sparseSuitHit, 0.86, {
+      desiredProductTypes: ["suit", "pants", "trousers", "slacks"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "tailored",
+      astCategories: ["tailored"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.crossFamilyPenalty).toBeLessThan(0.3);
+    expect(rel.finalRelevance01).toBeGreaterThan(0.3);
+  });
+
+  test("suit composite intent still rejects unrelated footwear", () => {
+    const shoeHit = {
+      _source: {
+        title: "Men Running Sneaker",
+        category: "shoes",
+        category_canonical: "footwear",
+        product_types: ["sneaker", "shoes"],
+        attr_gender: "men",
+      },
+    } as any;
+
+    const rel = computeHitRelevance(shoeHit, 0.9, {
+      desiredProductTypes: ["suit", "pants", "trousers", "slacks"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "tailored",
+      astCategories: ["tailored"],
       hasAudienceIntent: false,
       crossFamilyPenaltyWeight: 420,
       tightSemanticCap: true,
@@ -271,6 +365,82 @@ describe("computeHitRelevance - color typo normalization", () => {
 
     expect(rel.colorCompliance).toBeGreaterThan(0.7);
     expect(rel.colorTier === "exact" || rel.colorTier === "family").toBe(true);
+  });
+});
+
+describe("computeHitRelevance - image palette color authority", () => {
+  const baseIntent: SearchHitRelevanceIntent = {
+    desiredProductTypes: ["shirt"],
+    desiredColors: ["white"],
+    desiredColorsTier: ["white"],
+    rerankColorMode: "any",
+    mergedCategory: "tops",
+    astCategories: ["tops"],
+    hasAudienceIntent: false,
+    crossFamilyPenaltyWeight: 420,
+    tightSemanticCap: true,
+    reliableTypeIntent: true,
+  };
+
+  test("does not treat a secondary image-palette white as authoritative exact color", () => {
+    const hit = {
+      _source: {
+        title: "Women Printed Shirt",
+        category: "shirts",
+        category_canonical: "tops",
+        product_types: ["shirt"],
+        attr_colors_image: ["charcoal", "white", "off-white", "multicolor"],
+        color_palette_canonical: ["charcoal", "white", "off-white", "multicolor"],
+        color_confidence_image: 0.92,
+        attr_color_source: "image",
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.86, baseIntent);
+
+    expect(rel.colorTier === "exact").toBe(false);
+    expect(rel.colorCompliance).toBeLessThan(0.6);
+  });
+
+  test("keeps a primary off-white image palette as a strong white-family match", () => {
+    const hit = {
+      _source: {
+        title: "Women Light Shirt",
+        category: "shirts",
+        category_canonical: "tops",
+        product_types: ["shirt"],
+        attr_colors_image: ["off-white", "silver", "white", "tan"],
+        color_palette_canonical: ["off-white", "silver", "white", "tan"],
+        color_confidence_image: 0.9,
+        attr_color_source: "image",
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.86, baseIntent);
+
+    expect(rel.colorTier).toBe("family");
+    expect(rel.matchedColor).toBe("off-white");
+    expect(rel.colorCompliance).toBeGreaterThan(0.8);
+  });
+
+  test("keeps a primary white image palette as exact", () => {
+    const hit = {
+      _source: {
+        title: "Women White Shirt",
+        category: "shirts",
+        category_canonical: "tops",
+        product_types: ["shirt"],
+        attr_colors_image: ["white", "silver", "off-white", "multicolor"],
+        color_palette_canonical: ["white", "silver", "off-white", "multicolor"],
+        color_confidence_image: 0.9,
+        attr_color_source: "image",
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.86, baseIntent);
+
+    expect(rel.colorTier).toBe("exact");
+    expect(rel.colorCompliance).toBe(1);
   });
 });
 

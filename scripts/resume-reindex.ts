@@ -687,7 +687,7 @@ async function processProduct(
   sidecarAvailable: boolean,
   enrichMap: Map<number, any>
 ): Promise<ProductResult> {
-  const { id, vendor_id, title, description, brand, category,
+  const { id, vendor_id, title, description, color, brand, category,
           price_cents, availability, last_seen, image_url,
           is_hidden, canonical_id } = product;
 
@@ -727,6 +727,7 @@ async function processProduct(
       description: description ?? null,
       brand,
       category,
+      catalogColor: color ?? null,
       priceCents: price_cents,
       availability: Boolean(availability),
       isHidden: is_hidden ?? false,

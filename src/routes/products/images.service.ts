@@ -632,12 +632,14 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
  */
 export async function getImagesForProducts(productIds: number[]): Promise<Map<number, ProductImage[]>> {
   if (productIds.length === 0) return new Map();
+  const uniqueProductIds = [...new Set(productIds.filter((id) => Number.isFinite(id)))];
+  if (uniqueProductIds.length === 0) return new Map();
 
   const result = await pg.query(
     `SELECT id, product_id, r2_key, cdn_url, p_hash, is_primary, created_at
-     FROM product_images WHERE product_id = ANY($1)
+     FROM product_images WHERE product_id = ANY($1::bigint[])
      ORDER BY product_id, is_primary DESC, created_at ASC`,
-    [productIds]
+    [uniqueProductIds]
   );
 
   const imageMap = new Map<number, ProductImage[]>();

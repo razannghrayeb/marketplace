@@ -469,6 +469,10 @@ export interface SearchResultWithRelated {
       dropped_by_final_relevance_before_override: number;
       rescued_by_strong_visual_override: number;
       hits_after_color_postfilter: number;
+      hydration_candidate_ids: number;
+      hydration_prefetch_miss_ids: number;
+      hydrated_product_rows: number;
+      hydration_missing_product_rows: number;
       hits_after_hydration: number;
       dropped_by_dedupe: number;
       hits_after_dedupe: number;

@@ -269,7 +269,9 @@ async function main() {
               : null;
 
             if (textGender && String(row.gender ?? "").trim().length === 0) {
-              const genderUpdated = await updateGenderFromText(id, textGender);
+              const genderUpdated = opts.dryRun
+                ? true
+                : await updateGenderFromText(id, textGender);
               if (genderUpdated) updated++;
             }
 

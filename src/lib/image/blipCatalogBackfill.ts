@@ -63,11 +63,11 @@ export async function applyBlipCaptionToMissingProductFields(
     productsTableHasColumn("details"),
   ]);
   const selectSql = hasGender
-    ? `SELECT description, color, gender, title, ${hasDetails ? "details" : "NULL::text AS details"}, ${hasStyle ? "style" : "NULL::text AS style"},
+    ? `SELECT description, color, gender, title, category, ${hasDetails ? "details" : "NULL::text AS details"}, ${hasStyle ? "style" : "NULL::text AS style"},
               ${hasMaterial ? "material" : "NULL::text AS material"},
               ${hasOccasion ? "occasion" : "NULL::text AS occasion"}
        FROM products WHERE id = $1`
-    : `SELECT description, color, title, ${hasDetails ? "details" : "NULL::text AS details"}, ${hasStyle ? "style" : "NULL::text AS style"},
+    : `SELECT description, color, title, category, ${hasDetails ? "details" : "NULL::text AS details"}, ${hasStyle ? "style" : "NULL::text AS style"},
               ${hasMaterial ? "material" : "NULL::text AS material"},
               ${hasOccasion ? "occasion" : "NULL::text AS occasion"}
        FROM products WHERE id = $1`;
@@ -80,6 +80,7 @@ export async function applyBlipCaptionToMissingProductFields(
   const fields: string[] = [];
   let pi = 1;
   const title = (cur as { title?: unknown }).title as string | null | undefined;
+  const category = (cur as { category?: unknown }).category as string | null | undefined;
   const description = (cur as { description?: unknown }).description as string | null | undefined;
   const details = (cur as { details?: unknown }).details as string | null | undefined;
   const textHints = inferCatalogFieldsFromProductText(title, description, details);
@@ -143,7 +144,7 @@ export async function applyBlipCaptionToMissingProductFields(
     }
   }
   if (hasCaptionSignals && isCatalogFieldBlank(cur.color) && !textHints.color) {
-    const pc = primaryColorHintFromCaption(c);
+    const pc = primaryColorHintFromCaption(c, { title, category });
     if (pc) {
       updates.push(`color = $${pi++}`);
       vals.push(pc);
