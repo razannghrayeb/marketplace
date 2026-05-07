@@ -25,6 +25,9 @@
  */
 
 export type ProductGender = "men" | "women" | "unisex" | "unknown";
+export type CatalogGender = Exclude<ProductGender, "unknown">;
+
+export const DEFAULT_CATALOG_GENDER_MIN_CONFIDENCE = 0.45;
 
 export interface InferredGenderResult {
   gender: ProductGender;
@@ -34,7 +37,7 @@ export interface InferredGenderResult {
   signals: string[]; // human-readable trace for debugging
 }
 
-interface ProductGenderInput {
+export interface ProductGenderInput {
   title?: unknown;
   category?: unknown;
   category_canonical?: unknown;
@@ -55,6 +58,22 @@ function lower(v: unknown): string {
   return String(v ?? "").toLowerCase();
 }
 
+function normalizedUrlText(v: unknown): string {
+  let s = lower(v).trim();
+  if (!s) return "";
+  try {
+    s = decodeURIComponent(s);
+  } catch {
+    // Keep the raw value when a vendor URL contains malformed escapes.
+  }
+  return s
+    .replace(/https?:\/\//g, " ")
+    .replace(/['\u2019]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Direct gender word matchers
 // ────────────────────────────────────────────────────────────────────────────
@@ -63,10 +82,26 @@ const MEN_DIRECT_RE = /\b(men|mens|men's|male|gentleman|gentlemen|gent|gents|boy
 const WOMEN_DIRECT_RE = /\b(women|womens|women's|female|lady|ladies|ladies'|girl|girls|girl's|womenswear|women[-\s]wear|woman)\b/;
 const UNISEX_DIRECT_RE = /\b(unisex|gender[-\s]neutral|all[-\s]gender|both[-\s]genders|for[-\s]everyone)\b/;
 
-// URL path gender (high signal — explicitly placed by retailer)
-const MEN_URL_RE = /\/(mens?|man|gentleman|menswear|male|boy|boys)\//;
-const WOMEN_URL_RE = /\/(womens?|woman|lady|ladies|womenswear|female|girl|girls)\//;
-const UNISEX_URL_RE = /\/(unisex|gender[-]?neutral)\//;
+// URL path gender (high signal: explicitly placed by retailer). We normalize
+// URL separators first so `/men-s/`, `/collections/women-shoes`, query slugs,
+// and canonical parent URLs all become token-safe text.
+const MEN_URL_TOKEN_RE = /\b(men|mens|menswear|man|male|gentleman|gentlemen|gent|gents|boy|boys)\b/;
+const WOMEN_URL_TOKEN_RE = /\b(women|womens|womenswear|woman|female|lady|ladies|girl|girls)\b/;
+const UNISEX_URL_TOKEN_RE = /\b(unisex|gender\s*neutral|all\s*gender|all\s*genders)\b/;
+
+function detectGenderFromUrl(value: unknown): CatalogGender | null {
+  const text = normalizedUrlText(value);
+  if (!text) return null;
+
+  const hasMen = MEN_URL_TOKEN_RE.test(text);
+  const hasWomen = WOMEN_URL_TOKEN_RE.test(text);
+  const hasUnisex = UNISEX_URL_TOKEN_RE.test(text);
+
+  if (hasMen && !hasWomen) return "men";
+  if (hasWomen && !hasMen) return "women";
+  if (hasUnisex && !hasMen && !hasWomen) return "unisex";
+  return null;
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Garment-type priors. These are 90%+ one gender in retail catalogs.
@@ -158,18 +193,22 @@ export function inferProductGender(input: ProductGenderInput): InferredGenderRes
   }
 
   // ── Layer 2: URL path (high confidence — retailer chose this URL) ──
-  const urlBlob = `${lower(input.product_url)} ${lower(input.parent_product_url)}`;
-  if (MEN_URL_RE.test(urlBlob)) {
-    menScore += 3.0;
-    signals.push("url=men");
-  }
-  if (WOMEN_URL_RE.test(urlBlob)) {
-    womenScore += 3.0;
-    signals.push("url=women");
-  }
-  if (UNISEX_URL_RE.test(urlBlob)) {
-    unisexScore += 2.0;
-    signals.push("url=unisex");
+  const productUrlGender = detectGenderFromUrl(input.product_url);
+  const parentUrlGender = detectGenderFromUrl(input.parent_product_url);
+  for (const [label, gender] of [
+    ["url", productUrlGender],
+    ["parent_url", parentUrlGender],
+  ] as const) {
+    if (gender === "men") {
+      menScore += 3.0;
+      signals.push(`${label}=men`);
+    } else if (gender === "women") {
+      womenScore += 3.0;
+      signals.push(`${label}=women`);
+    } else if (gender === "unisex") {
+      unisexScore += 2.0;
+      signals.push(`${label}=unisex`);
+    }
   }
 
   // ── Layer 3: title (high confidence when explicit gender word present) ──
@@ -311,7 +350,7 @@ export function inferProductGender(input: ProductGenderInput): InferredGenderRes
 
   // Pick representative source (the strongest signal type that contributed).
   const source: InferredGenderResult["source"] =
-    signals.find((s) => s.startsWith("url"))
+    signals.find((s) => s.startsWith("url") || s.startsWith("parent_url"))
       ? "url"
       : signals.find((s) => s.startsWith("title"))
         ? "title"
@@ -334,6 +373,16 @@ export function inferProductGender(input: ProductGenderInput): InferredGenderRes
     evidence: { men: menScore, women: womenScore, unisex: unisexScore },
     signals,
   };
+}
+
+export function inferCatalogGenderValue(
+  input: ProductGenderInput,
+  minConfidence = DEFAULT_CATALOG_GENDER_MIN_CONFIDENCE,
+): CatalogGender | null {
+  const inferred = inferProductGender(input);
+  if (inferred.gender === "unknown") return null;
+  if (inferred.confidence < minConfidence) return null;
+  return inferred.gender;
 }
 
 /**

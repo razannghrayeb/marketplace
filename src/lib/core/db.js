@@ -347,7 +347,7 @@ function getSearchProductsByIdsOrdered(ids) {
                         .filter(function (id) { return Number.isFinite(id); });
                     if (numericIds.length === 0)
                         return [2 /*return*/, []];
-                    return [4 /*yield*/, exports.pg.query("SELECT\n       p.id,\n       p.title,\n       p.brand,\n       p.category,\n       COALESCE(p.currency, 'USD') AS currency,\n       p.price_cents,\n       p.sales_price_cents,\n       p.image_url,\n       p.image_cdn\n     FROM products p\n     WHERE p.id = ANY($1::int[])", [numericIds])];
+                    return [4 /*yield*/, exports.pg.query("SELECT\n       p.id,\n       p.title,\n       p.brand,\n       p.category,\n       p.color,\n       COALESCE(p.currency, 'USD') AS currency,\n       p.price_cents,\n       p.sales_price_cents,\n       p.image_url,\n       p.image_cdn\n     FROM products p\n     WHERE p.id = ANY($1::int[])", [numericIds])];
                 case 1:
                     result = _a.sent();
                     productMap = new Map(result.rows.map(function (p) { return [String(p.id), p]; }));

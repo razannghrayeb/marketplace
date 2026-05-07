@@ -139,6 +139,9 @@ interface ProductRow {
   availability: boolean;
   last_seen: string | null;
   image_url: string;
+  product_url: string | null;
+  parent_product_url: string | null;
+  gender: string | null;
   is_hidden: boolean | null;
   canonical_id: string | null;
 }
@@ -689,6 +692,7 @@ async function processProduct(
 ): Promise<ProductResult> {
   const { id, vendor_id, title, description, color, brand, category,
           price_cents, availability, last_seen, image_url,
+          product_url, parent_product_url, gender,
           is_hidden, canonical_id } = product;
 
   try {
@@ -728,6 +732,9 @@ async function processProduct(
       brand,
       category,
       catalogColor: color ?? null,
+      catalogGender: gender ?? null,
+      productUrl: product_url ?? null,
+      parentProductUrl: parent_product_url ?? null,
       priceCents: price_cents,
       availability: Boolean(availability),
       isHidden: is_hidden ?? false,
@@ -1075,6 +1082,7 @@ async function main() {
   }
   const hasIsHidden    = await columnExists("products", "is_hidden");
   const hasCanonicalId = await columnExists("products", "canonical_id");
+  const hasGender      = await columnExists("products", "gender");
   const hasDetectionsTable = await tableExists("product_image_detections");
   const hasDetectionLabelColumn = hasDetectionsTable
     ? await columnExists("product_image_detections", "label")
@@ -1089,6 +1097,7 @@ async function main() {
   const optionalCols = [
     hasIsHidden    ? "is_hidden"    : "NULL::boolean AS is_hidden",
     hasCanonicalId ? "canonical_id" : "NULL::text AS canonical_id",
+    hasGender      ? "gender"       : "NULL::text AS gender",
   ].join(", ");
 
   // ── 6. Load progress ───────────────────────────────────────────────────────
@@ -1160,7 +1169,8 @@ async function main() {
     // Fetch next page
     const batchRes = await queryWithRetry(
             `SELECT id, vendor_id, title, description, color, brand, category,
-              price_cents, availability, last_seen, image_url, ${optionalCols}
+              price_cents, availability, last_seen, image_url,
+              product_url, parent_product_url, ${optionalCols}
        FROM products
        WHERE image_url IS NOT NULL
          AND id > $1::bigint
