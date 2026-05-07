@@ -518,6 +518,9 @@ function normalizeDetectionProductCategoryToken(token: string | null | undefined
     )
   ) return "footwear";
   if (/\b(trouser|trousers|pants?|slacks?|jeans?|shorts?|bottoms?)\b/.test(normalized)) return "bottoms";
+  if (/\b(tailored|suits?|tuxedos?|suit\s*jacket|dress\s*jacket|sport\s*coat|waistcoats?|gilets?)\b/.test(normalized)) {
+    return "tailored";
+  }
   if (/\b(blazer|blazers|shirt|shirts|tee|t-?shirt|tops?|sweater|hoodie|outerwear)\b/.test(normalized)) {
     return normalized.includes("outerwear") ? "outerwear" : "tops";
   }
@@ -3710,6 +3713,7 @@ function applySleeveIntentGuard(params: {
 
   const isDressCategory = category === "dresses";
   const isTopCategory = category === "tops";
+  const isOuterwearCategory = category === "outerwear";
   const minCompliance = isTopCategory
     ? (desiredSleeve === "short" || desiredSleeve === "sleeveless" ? 0.34 : 0.3)
     : desiredSleeve === "short" || desiredSleeve === "sleeveless"
@@ -3730,10 +3734,10 @@ function applySleeveIntentGuard(params: {
       .join(" ");
 
     const observedSleeve = inferSleeveFromProductText(blob);
-    if (isDressCategory || isTopCategory) {
-      // For tops and dresses, sleeve metadata is sparse and the reranker's sleeveCompliance
-      // score is unreliable as a hard filter. Use only explicit text contradiction to avoid
-      // dropping correctly-categorized products that have no sleeve metadata.
+    if (isDressCategory || isTopCategory || isOuterwearCategory) {
+      // Sleeve metadata is sparse for apparel, especially outerwear/tailored listings.
+      // Use only explicit text contradiction so full suits are not dropped just because
+      // a YOLO "long sleeve outwear" label produced low sleeveCompliance.
       return !isSleeveContradiction(desiredSleeve, observedSleeve);
     }
 

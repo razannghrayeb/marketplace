@@ -349,6 +349,30 @@ const PRIMARY_MAPPINGS: Record<string, CategoryMapping> = {
     alternativeCategories: ["blazers"],
     attributes: { formalityHint: 7 },
   },
+  suit: {
+    productCategory: "tailored",
+    confidence: 0.92,
+    alternativeCategories: ["suits", "blazers", "outerwear"],
+    attributes: { formalityHint: 9 },
+  },
+  suits: {
+    productCategory: "tailored",
+    confidence: 0.92,
+    alternativeCategories: ["suits", "blazers", "outerwear"],
+    attributes: { formalityHint: 9 },
+  },
+  tuxedo: {
+    productCategory: "tailored",
+    confidence: 0.94,
+    alternativeCategories: ["tuxedos", "suits", "blazers", "outerwear"],
+    attributes: { formalityHint: 10 },
+  },
+  tuxedos: {
+    productCategory: "tailored",
+    confidence: 0.94,
+    alternativeCategories: ["tuxedos", "suits", "blazers", "outerwear"],
+    attributes: { formalityHint: 10 },
+  },
   parka: {
     productCategory: "outerwear",
     confidence: 0.9,
@@ -704,6 +728,15 @@ const FUZZY_PATTERNS: FuzzyPattern[] = [
   },
 
   // Ambiguous category disambiguation
+  {
+    pattern: /\bsuits?\b|\btuxedos?\b/i,
+    mapping: {
+      productCategory: "tailored",
+      confidence: 0.92,
+      alternativeCategories: ["suits", "blazers", "outerwear"],
+      attributes: { formalityHint: 9 },
+    },
+  },
   {
     pattern: /\bblazer\b|\bsuit\s*jacket\b|\bsport\s*coat\b/i,
     mapping: {

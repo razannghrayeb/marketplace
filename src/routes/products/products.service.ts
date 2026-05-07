@@ -1301,7 +1301,7 @@ function normalizeImageSearchFamily(value: unknown): ImageSearchFamily {
   if (/\b(footwear|shoe|shoes|sneaker|sneakers|trainer|trainers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|flat|flats|pump|pumps)\b/.test(blob)) return "footwear";
   if (/\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|skirt|skirts|legging|leggings|jogger|joggers|slack|slacks|chino|chinos|cargo)\b/.test(blob)) return "bottoms";
   if (/\b(dress|dresses|gown|gowns|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|abaya|kaftan|caftan)\b/.test(blob)) return "dress";
-  if (/\b(outerwear|outwear|jacket|jackets|coat|coats|blazer|blazers|parka|trench|windbreaker|bomber|shacket|overshirt|vest|waistcoat|gilet)\b/.test(blob)) return "outerwear";
+  if (/\b(outerwear|outwear|tailored|suit|suits|tuxedo|tuxedos|jacket|jackets|coat|coats|blazer|blazers|sport\s*coat|dress\s*jacket|suit\s*jacket|parka|trench|windbreaker|bomber|shacket|overshirt|vest|waistcoat|gilet)\b/.test(blob)) return "outerwear";
   if (/\b(accessor|bag|bags|handbag|tote|clutch|purse|backpack|wallet|belt|hat|cap|scarf|jewelry|jewellery|necklace|bracelet|ring|earring|watch|sunglasses)\b/.test(blob)) return "accessory";
   if (/\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|cami|camisole|sweater|sweaters|hoodie|hoodies|sweatshirt|cardigan|polo|knitwear)\b/.test(blob)) return "tops";
   return "unknown";
@@ -1922,7 +1922,7 @@ type CatalogFamilySignals = {
 function catalogFamilySignals(product: Record<string, unknown>): CatalogFamilySignals {
   const blob = productCategoryFamilyBlob(product);
   const hasFootwear = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|after\s*ski\s*boot|ski\s*boots?|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|ballerina|ballerinas|flat|flats|espadrille|espadrilles|oxford|oxfords|pump|pumps|mule|mules|clog|clogs|slipper|slippers)\b/.test(blob);
-  const hasOuterwear = /\b(outerwear|outwear|jacket|jackets|shirt\s+jackets?|shacket|shackets|overshirt|overshirts|coat|coats|overcoat|overcoats|blazer|blazers|sport\s+coat|sportcoat|suit\s+jackets?|dress\s+jackets?|parka|parkas|blouson|blousons|trench|trenches|windbreaker|windbreakers|bomber|bombers|vest|vests|gilet|gilets|waistcoat|waistcoats|poncho|ponchos|anorak|anoraks|cape|capes|fleece)\b/.test(blob);
+  const hasOuterwear = /\b(outerwear|outwear|tailored|suit|suits|tuxedo|tuxedos|jacket|jackets|shirt\s+jackets?|shacket|shackets|overshirt|overshirts|coat|coats|overcoat|overcoats|blazer|blazers|sport\s+coat|sportcoat|suit\s+jackets?|dress\s+jackets?|parka|parkas|blouson|blousons|trench|trenches|windbreaker|windbreakers|bomber|bombers|vest|vests|gilet|gilets|waistcoat|waistcoats|poncho|ponchos|anorak|anoraks|cape|capes|fleece)\b/.test(blob);
   const hasTopCore = /\b(top|tops|knit\s*tops?|woven\s*tops?|shirt|shirts|shirting|woven\s*shirts?|chemise|t-?shirt|tshirt|tee|tees|blouse|blouses|tank|cami|camisole|sweater|sweaters|cardigan|cardigans|hoodie|hoodies|hoody|sweatshirt|sweatshirts|pullover|pullovers|jumper|jumpers|polo|polos|polo\s*shirts?|polo\s*short\s*sleeve|henley|tunic|knitwear|bodysuit|bodysuits|body|jersey|jerseys|loungewear|crop\s*top|button\s*down|button-down|long\s*sleeve|short\s*sleeve|baselayer)\b/.test(blob);
   const hasTop = hasTopCore || (hasOuterwear && /\b(hoodie|hoody|sweatshirt|cardigan|pullover|fleece)\b/.test(blob));
   const hasBottom = /\b(bottom|bottoms|bottom-sw|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|swim\s*short|skirt|skirts|legging|leggings|tight|tights|7\/8\s*tight|jogging|jogger|joggers|sweatpants?|slack|slacks|culotte|culottes|palazzo|chino|chinos|cargo|track\s*(?:pants?|trousers?)|tracksuits?\s*&\s*track\s*trousers)\b/.test(blob);
@@ -1943,7 +1943,7 @@ function catalogFamilySignals(product: Record<string, unknown>): CatalogFamilySi
 
 function isStrictDetectionCategory(cat: string): boolean {
   const c = String(cat || "").toLowerCase().trim();
-  return c === "tops" || c === "dresses" || c === "footwear" || c === "bottoms" || c === "outerwear";
+  return c === "tops" || c === "dresses" || c === "footwear" || c === "bottoms" || c === "outerwear" || c === "tailored";
 }
 
 function passesStrictDetectionCategoryFamily(
@@ -1966,6 +1966,7 @@ function passesStrictDetectionCategoryFamily(
     hasBagAccessory,
     hasBeautyHomeOrEquipment,
   } = signals;
+  const hasTailoredSuitCue = /\b(tailored|suit|suits|tuxedo|tuxedos|blazer|blazers|sport\s+coat|sportcoat|suit\s+jackets?|dress\s+jackets?|waistcoat|waistcoats|gilet|gilets|vests?)\b/.test(blob);
   if (hasBeautyHomeOrEquipment) return false;
 
   if (d === "footwear") {
@@ -1984,9 +1985,10 @@ function passesStrictDetectionCategoryFamily(
     return true;
   }
 
-  if (d === "outerwear") {
+  if (d === "outerwear" || d === "tailored") {
     if (!hasOuterwear) return false;
-    if (hasFootwear || hasBagAccessory || hasBottom || hasDressOnePiece) return false;
+    if (hasFootwear || hasBagAccessory || hasDressOnePiece) return false;
+    if (hasBottom && !hasTailoredSuitCue) return false;
     return true;
   }
 

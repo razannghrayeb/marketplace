@@ -11,6 +11,8 @@ export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
     "black out", "raven", "ebony", "obsidian", "noir", "nero", "caviar", "ink black",
     "night black", "phantom black", "carbon black", "washed black", "faded black",
     "matte black", "mat black", "black heather", "black denim", "black rinse",
+    "onix", "aurora onix", "raven black", "black as night", "off noir", "eclipse",
+    "dark matter",
   ],
   white: [
     "white", "off white", "off-white", "offwhite", "ivory", "cream", "bone", "ecru",
@@ -20,6 +22,9 @@ export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
     "coconut milk", "vanilla", "flour", "parchment", "paper white", "marshmallow",
     "winter white", "warm white", "broken white", "star white", "sea salt", "seasalt",
     "pearl white", "undyed white", "whitecap", "white cap",
+    "pearl", "moonbeam", "soapstone", "salt", "alpine snow", "cheese white",
+    "smoked pearl", "white dune", "crystal white", "frost", "warm ivory",
+    "cool vanilla", "bone white", "paper", "crema", "white eyelet",
   ],
   gray: [
     "gray", "grey", "heather grey", "heather gray", "silver", "charcoal",
@@ -33,6 +38,11 @@ export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
     "metallic silver", "silver metallic", "lunar silver", "chrome", "steel", "lead",
     "fog", "mist", "cloud grey", "cloud gray", "glacier grey", "glacier gray",
     "galactic grey", "moonstone", "quiet shade", "turbulence", "ironstone", "coal",
+    "glacier", "castlerock", "earth day grey", "medium ash", "medium grey",
+    "silver melee", "storm front", "foggy grey", "grey skies", "cosmic grey",
+    "mindful grey", "dash grey", "meteor grey", "vanadis grey", "shipyard",
+    "asphlat", "asphalt grey", "inviting grey", "soot", "heathered soot",
+    "taupe grey", "tungsten rinse", "tungsten blue stone",
   ],
   blue: [
     "blue", "navy", "cobalt", "denim", "sky blue", "mid blue", "midnight blue",
@@ -47,6 +57,18 @@ export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
     "collegiate navy", "ink", "inkwell", "legend ink", "blue void", "deep sea",
     "deep navy", "deep blue", "thunder blue", "steel blue", "blue slate",
     "slate blue", "blue stone", "bluestone", "dark blue", "navy blue", "chambray",
+    "horizon", "photo blue", "light photo blue", "solid cape blue", "cape blue",
+    "lucid blue", "night indigo", "carbon midnight", "faded indigo", "blue topaz",
+    "capri", "danube", "arona", "bluefin", "blue shadow", "wham blue",
+    "aurora ink", "preloved ink", "legink", "glacier blue", "dark petrol",
+    "petrol blue", "washed midnight", "blue beyond", "lets scuba", "let's scuba",
+    "scuba", "tradewinds", "abimes", "celeste", "blue opal", "world indigo",
+    "blue spark", "dawn sky", "dark foggy blue", "blue frost", "blue cendre",
+    "classic blue", "pure blue", "vibrant blue", "open air blue", "bluebell",
+    "bellwether blue", "phoenix blue", "moonlit blue", "thrift blue",
+    "blue dusk", "soft blue", "faded blue", "sun faded blue", "whisper blue",
+    "horizon blue", "kingfisher blue", "vintage tint", "salt lake",
+    "skywriting", "spring lake", "longbay", "ocean cavern", "shadow rinse",
   ],
   red: [
     "red", "burgundy", "maroon", "wine", "cherry", "crimson", "scarlet", "ruby",
@@ -54,10 +76,13 @@ export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
     "shadow red", "fire", "flame", "lava", "goji", "tomato", "berry red", "poppy",
     "rosewood", "henna", "paprika", "silt red", "pomegranate", "syrah", "merlot",
     "bordeaux", "bordo", "oxblood", "garnet", "currant", "zinfandel", "sangria",
-    "tawny port",
+    "tawny port", "cranberry", "corrida", "rouge", "urgent red", "rose red",
+    "vivid red", "shocking red", "red flame", "cabernet", "aurora ruby",
+    "classic red", "bright red", "poppy red", "fiery red", "goji berry",
+    "port royale",
   ],
   green: [
-    "green", "olive", "khaki", "sage", "mint", "forest green", "forest-green",
+    "green", "olive", "sage", "mint", "forest green", "forest-green",
     "hunter green", "army green", "emerald", "lime", "moss", "kaki", "military",
     "pine", "fir", "evergreen", "laurel", "thyme", "oregano", "eucalyptus",
     "bay leaf", "artichoke", "fennel", "celery", "pistachio", "matcha", "avocado",
@@ -67,7 +92,14 @@ export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
     "tapenade", "taiga", "field green", "terrain", "garden green", "leaf green",
     "bamboo", "apple green", "neon green", "cyber green", "hyper green",
     "green strike", "chlorophyll", "oil green", "dark olive", "olive drab",
-    "olive strata", "cargo khaki", "trench coat khaki",
+    "olive strata", "cargo khaki", "khaki green",
+    "honeydew", "grape leaf", "deep cypress", "cypress", "lima", "myrtle",
+    "duck green", "green terrain", "terrain", "algal green", "algal", "olivine",
+    "pea pod", "sinople", "marsh green", "mantis green", "jade tint", "jade green",
+    "lichen", "elm", "twig green", "arden green", "rack green", "camper green",
+    "sulphur spring green", "aloha green", "silver green", "linen green", "celadon",
+    "black sage", "black sage green", "fennel seed", "kambaba", "sagebrush",
+    "white sage", "dark forest", "fatigue", "heathered fatigue", "grass green",
   ],
   beige: [
     "beige", "taupe", "stone", "sand", "light khaki", "toasted coconut", "beech",
@@ -75,6 +107,13 @@ export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
     "canvas", "linen", "oatmeal", "oat", "wheat", "straw", "raffia", "rattan",
     "sandstone", "warm sand", "sanddrift", "dune", "desert", "parsnip", "cornstalk",
     "putty", "biscotti", "biscuit", "eggnog", "almond", "sesame", "flax",
+    "quicksand", "silt", "stucco", "angora", "shell beige", "crystal sand",
+    "cavern", "bungee cord", "brindle", "chinchilla", "porcini taupe",
+    "khaki", "classic khaki", "smooth khaki", "trench coat khaki",
+    "khaki stone", "deep sand", "fair", "nude", "delicate nude", "snake taupe",
+    "peyote", "turtledove", "brazilian sand", "canvas tan", "soft sand",
+    "sparkled beige", "heathered tan", "heather beech", "heathered oatmeal",
+    "heathered oat", "heather oatmeal", "heather taupe", "heather beige",
   ],
   camel: [
     "camel", "tan", "camel brown", "light brown", "warm beige", "light camel",
@@ -87,11 +126,16 @@ export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
     "hazelnut", "mahogany", "tobacco", "cinnamon", "ginger", "maple", "oak",
     "wood", "cedar", "bark", "acorn", "fawn", "truffle", "umber", "earth brown",
     "saddle brown", "carob", "pecan", "praline", "sepia", "cork",
+    "syrup", "americano", "briquette", "cob", "dark mahogany", "preloved brown",
+    "tiger's eye", "tigereye", "gum", "toasty toffee", "costa riche",
+    "mink brown", "dark tan", "light chocolate", "affogato", "rum",
+    "burnt sugar", "coffee bean",
   ],
   purple: [
     "purple", "violet", "plum", "lavender", "lilac", "mauve", "grape", "orchid",
     "iris", "amethyst", "wisteria", "eggplant", "aubergine", "ube", "raisin",
-    "mulberry", "hyacinth", "grapeberry",
+    "mulberry", "hyacinth", "grapeberry", "mystic purple", "grape ice",
+    "alpine plum", "violet tone", "dark iris", "ice lavender", "burnished lilac",
   ],
   pink: [
     "pink", "blush", "fuchsia", "fuschia", "fushia", "fuhsia", "magenta",
@@ -99,23 +143,34 @@ export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
     "guava", "hibiscus", "strawberry", "raspberry", "bubblegum", "taffy",
     "peony", "carnation", "flamingo", "aster", "baby pink", "pale pink",
     "light pink", "clear pink", "bliss pink", "glow pink", "elemental pink",
-    "vivid pink", "neon pink", "rose gold", "nude", "skin", "bridal rose",
+    "vivid pink", "neon pink", "rose gold", "skin", "bridal rose",
+    "blushbaby", "cold pink", "tea rose", "ancient rose", "body rose",
+    "rose parade", "rebellious rose", "fiery pink", "bisou", "french bisou",
+    "sky pink", "rose quartz", "tourmaline pink", "neutral rose", "boss pink",
+    "reseda pink", "toasted rose", "chewing gum pink", "matte bright pink",
+    "whisper pink", "rose dusk", "soft rose", "petal pink", "light rose",
   ],
   yellow: [
     "yellow", "mustard", "golden", "gold", "lemon", "canary", "butter", "banana",
     "corn", "sunflower", "dandelion", "turmeric", "ochre", "citrine", "champagne",
     "honey gold", "lucid lemon", "solar yellow", "volt", "barely volt", "limelight",
+    "minions yellow", "powder yellow", "yellow sizzle", "acidity", "flashy yellow",
+    "crew yellow", "willo", "yzw", "banana crepe", "aged brass", "brass",
+    "multigold", "golden palm",
   ],
   orange: [
     "orange", "rust", "peach", "coral", "burnt orange", "terracotta", "terra cotta",
     "amber", "tangerine", "papaya", "mango", "pumpkin", "kumquat", "marmalade",
     "mandarin", "clementine", "apricot", "copper", "ember", "sunrise", "sunset",
-    "afterglow", "carrot", "tomato orange",
+    "afterglow", "carrot", "tomato orange", "soft orange", "burnt sunrise",
+    "semi coral", "sunkiss", "sunbasque", "ember glow", "bergamotto", "soho sizzle",
   ],
   teal: [
     "teal", "turquoise", "aqua", "cyan", "peacock", "acqua", "aquaverde",
     "aquamarine", "seafoam", "sea foam", "water green", "watergreen", "sea green",
     "tidal teal", "legacy teal", "preloved teal", "real teal", "deep turquoise",
+    "magic aqua", "deepest aqua", "aquarius", "aquarius blue", "reef", "pool",
+    "blue topaz",
   ],
   multicolor: [
     "multicolor", "multi color", "multi-color", "multicolour", "colour block",
@@ -123,6 +178,8 @@ export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
     "rainbow", "print", "camo", "camouflage", "leopard", "zebra", "tie dye",
     "tie-dye", "plaid", "gingham", "stripe", "herringbone", "floral", "hearts",
     "confetti", "ombre", "gradient", "marble", "aop", "allover", "check", "dots",
+    "jacquard", "diagonal jacquard", "unicorn star", "multi stripe", "multi-colored",
+    "multi coloured", "dreamy geo combo", "geo combo",
   ],
 };
 
@@ -184,7 +241,7 @@ for (const word of [
 }
 
 const EXTRA_NON_COLOR_VALUE_RE =
-  /^(?:adult|youth|men|women|boys?|girls?|slim|straight|athletic|bikini|force|birthday|congratulation|usa|no pocket|one(?:\s+size(?:\s+for\s+(?:kids?|men|women|youth|adult))?)?|colors?\s+can\s+be\s+customi[sz]ed|supplier\s+colou?r|[ml]\/?[xl]|xs\/s|s\/m|m\/l|l\/xl|xl\/2xl|2xs\/xs|xl\/rg|l\/rg|m\/rg|xxxs|ns|w\d+\s*[-/]\s*l\d+|\d+w\s*[-/]\s*\d+l|\d+(?:\.\d+)?\s*(?:cm|w\s*cm|oz|ml|eu|eeu|l)|\d+\s+\d\/\d\s*eu|\d{2,3}\s*[a-z]{1,2}|[0-9]{2,3}[a-z]?)$/i;
+  /^(?:adult|youth|men|women|boys?|girls?|slim|straight|athletic|bikini|force|birthday|congratulation|usa|no pocket|pocket|ankle|thong|one(?:\s+size(?:\s+for\s+(?:kids?|men|women|youth|adult))?)?|colors?\s+can\s+be\s+customi[sz]ed|supplier\s+colou?r|[ml]\/?[xl]|xs\/s|s\/m|m\/l|l\/xl|xl\/2xl|2xs\/xs|xl\/rg|l\/rg|m\/rg|xxxs|ns|w\d+\s*[-/]\s*l\d+|\d+w\s*[-/]\s*\d+l|\d+(?:\.\d+)?\s*(?:cm|w\s*cm|oz|ml|eu|eeu|l)|\d+\s+\d\/\d\s*eu|\d+\s*[-/]\s*\d+(?:\s*(?:years?|yrs?|cm|in|inseam|eu))?|\d+\s*(?:years?|yrs?)|\d{2,3}\s*[a-z]{1,2}|[0-9]{2,3}[a-z]?)$/i;
 
 function normalizeRawColorString(raw: string | null | undefined): string {
   return String(raw ?? "")
@@ -212,7 +269,16 @@ function normalizeRawColorString(raw: string | null | undefined): string {
 
 function isNonColorValue(raw: string | null | undefined): boolean {
   const value = normalizeRawColorString(raw);
-  return !value || NON_COLOR_VALUE_RE.test(value) || EXTRA_NON_COLOR_VALUE_RE.test(value);
+  if (!value) return true;
+  if (COLOR_NOISE_WORDS.has(value)) return true;
+  if (hasKnownColorCue(value)) return false;
+  const withoutLeadingCode = value
+    .replace(/^(?:[a-z]{1,4}\s*)?\d+[a-z0-9]*\s+/, "")
+    .trim();
+  if (withoutLeadingCode && withoutLeadingCode !== value && hasKnownColorCue(withoutLeadingCode)) {
+    return false;
+  }
+  return NON_COLOR_VALUE_RE.test(value) || EXTRA_NON_COLOR_VALUE_RE.test(value);
 }
 
 const COLOR_ALIAS_TO_CANONICAL = (() => {
@@ -223,6 +289,46 @@ const COLOR_ALIAS_TO_CANONICAL = (() => {
   }
   return map;
 })();
+
+const EXACT_COLOR_CANONICAL_OVERRIDES: Record<string, string> = {
+  pelican: "white",
+  pepper: "gray",
+};
+
+function hasKnownColorCue(raw: string): boolean {
+  const key = normalizeRawColorString(raw)
+    .replace(/["â€œâ€'`]/g, " ")
+    .replace(/[()]/g, " ")
+    .replace(/[_-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!key || COLOR_NOISE_WORDS.has(key)) return false;
+  if (EXACT_COLOR_CANONICAL_OVERRIDES[key]) return true;
+  if (COLOR_ALIAS_TO_CANONICAL.has(key)) return true;
+  for (const alias of COLOR_ALIAS_TO_CANONICAL.keys()) {
+    if (alias.length < 3) continue;
+    const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`\\b${escaped}\\b`).test(key)) return true;
+    if (alias.length >= 5 && key.includes(alias)) return true;
+  }
+  return false;
+}
+
+function exactAliasCanonical(raw: string): string | null {
+  const key = normalizeRawColorString(raw)
+    .replace(/["â€œâ€'`]/g, " ")
+    .replace(/[()]/g, " ")
+    .replace(/[_-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return key
+    ? EXACT_COLOR_CANONICAL_OVERRIDES[key] ?? COLOR_ALIAS_TO_CANONICAL.get(key) ?? null
+    : null;
+}
+
+function hasCompositeColorSeparator(raw: string): boolean {
+  return /[\/,&+|]/.test(String(raw ?? "")) || /\b(?:and|with)\b/i.test(String(raw ?? ""));
+}
 
 const COLOR_BUCKET_TO_CANONICAL: Record<string, string> = {
   black: "black",
@@ -244,7 +350,7 @@ const GROUP_KEYWORD_HINTS: Record<string, string[]> = {
   white: [
     "bone", "alabaster", "porcelain", "vanilla", "ivory", "cream", "ecru", "off", "snow", "milk",
     "pearl", "eggshell", "chalk", "linen", "pale", "cloud", "frost", "buttermilk", "oat",
-    "beech", "birch", "parchment", "flour", "crema", "coconut", "whipped cream",
+    "beech", "birch", "parchment", "flour", "crema", "coconut", "whipped cream", "pelican",
   ],
   gray: [
     "graphite", "slate", "steel", "tungsten", "anthracite", "charcoal", "ash", "smoke", "mist",
@@ -256,7 +362,7 @@ const GROUP_KEYWORD_HINTS: Record<string, string[]> = {
   blue: [
     "navy", "blue", "indigo", "denim", "cobalt", "azure", "sky", "ocean", "marine", "royal",
     "sapphire", "teal blue", "lapis", "aqua blue", "turquin", "ultramarine", "chambray",
-    "pelican", "atlantic", "sea glass", "spring lake", "longbay", "skywriting",
+    "atlantic", "sea glass", "spring lake", "longbay", "skywriting",
     "midnight", "inkwell", "ocean cavern", "estate blue", "ray blue",
   ],
   green: [
@@ -276,8 +382,7 @@ const GROUP_KEYWORD_HINTS: Record<string, string[]> = {
   ],
   red: [
     "red", "burgundy", "bordeaux", "bordo", "maroon", "wine", "crimson", "scarlet", "ruby", "cherry",
-    "sangria", "oxblood", "claret", "tomato", "cinnabar", "vermilion", "brick", "pepper",
-    "merlot",
+    "sangria", "oxblood", "claret", "tomato", "cinnabar", "vermilion", "brick", "merlot",
   ],
   pink: [
     "pink", "rose", "blush", "fuchsia", "magenta", "mauve", "peony", "berry", "raspberry",
@@ -333,7 +438,7 @@ function inferBucketFromKeywordHints(raw: string): string | null {
       if (!w) continue;
       if (s === w) score += 4;
       else if (new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(s)) score += 2;
-      else if (s.includes(w)) score += 1;
+      else if (w.length >= 5 && s.includes(w)) score += 1;
     }
     if (score > bestScore) {
       bestScore = score;
@@ -378,11 +483,12 @@ function inferColorFromFamilyCluster(raw: string): string | null {
     for (const member of cluster.normalizedMembers) {
       if (!member) continue;
       if (key === member) score += 4;
-      else if (key.includes(member)) score += 2;
+      else if (member.length >= 5 && key.includes(member)) score += 2;
       else {
         const words = member.split(" ").filter(Boolean);
         for (const w of words) {
           if (w.length < 3) continue;
+          if (COLOR_NOISE_WORDS.has(w)) continue;
           if (new RegExp(`\\b${w}\\b`).test(key)) score += 1;
         }
       }
@@ -409,6 +515,12 @@ export function inferColorGroupFromRaw(raw: string | null | undefined): RawColor
     .trim();
   if (!source || isNonColorValue(source)) return "unknown";
 
+  const isComposite = hasCompositeColorSeparator(String(raw));
+  const exact = !isComposite ? exactAliasCanonical(source) : null;
+  if (exact) {
+    return (coarseColorBucket(exact) as RawColorGroup) ?? "unknown";
+  }
+
   const candidates: string[] = [];
   const addCandidate = (token: string) => {
     const c = String(token ?? "").trim();
@@ -419,7 +531,7 @@ export function inferColorGroupFromRaw(raw: string | null | undefined): RawColor
     if (bucket) candidates.push(bucket);
   };
 
-  addCandidate(source);
+  if (!isComposite) addCandidate(source);
   const parts = source
     .replace(/\band\b/g, ",")
     .replace(/\\/g, "/")
@@ -428,6 +540,7 @@ export function inferColorGroupFromRaw(raw: string | null | undefined): RawColor
     .filter(Boolean);
   for (const p of parts) {
     if (isNonColorValue(p)) continue;
+    if (COLOR_NOISE_WORDS.has(p)) continue;
     if (/^\d+([.\s]\d+)?$/.test(p)) continue;
     addCandidate(p);
     const words = p.split(/\s+/g).filter(Boolean);
@@ -476,6 +589,8 @@ export function normalizeColorToken(raw: string | null | undefined): string | nu
     .trim();
   if (!keyBase || isNonColorValue(keyBase)) return null;
   const key = COLOR_COMMON_MISSPELLINGS[keyBase] ?? keyBase;
+  const exactOverride = EXACT_COLOR_CANONICAL_OVERRIDES[key];
+  if (exactOverride) return exactOverride;
   const direct = COLOR_ALIAS_TO_CANONICAL.get(key);
   if (direct) return direct;
 
@@ -514,6 +629,10 @@ export function normalizeColorTokensFromRaw(raw: string | null | undefined): str
   const source = normalizeRawColorString(raw);
   if (!source || isNonColorValue(source)) return [];
 
+  const isComposite = hasCompositeColorSeparator(String(raw));
+  const exact = !isComposite ? exactAliasCanonical(source) : null;
+  if (exact) return [exact];
+
   const out: string[] = [];
   const add = (token: string) => {
     const norm = normalizeColorToken(token) ?? inferColorFromFamilyCluster(token);
@@ -521,7 +640,7 @@ export function normalizeColorTokensFromRaw(raw: string | null | undefined): str
   };
 
   // 1) Whole-phrase attempt first for values like "mid wash denim".
-  add(source);
+  if (!isComposite) add(source);
 
   // 2) Split composite merchant formats.
   const parts = source
@@ -532,6 +651,7 @@ export function normalizeColorTokensFromRaw(raw: string | null | undefined): str
     .filter(Boolean);
   for (const p of parts) {
     if (isNonColorValue(p)) continue;
+    if (COLOR_NOISE_WORDS.has(p)) continue;
     if (/^\d+([.\s]\d+)?$/.test(p)) continue;
     add(p);
 

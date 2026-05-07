@@ -30,7 +30,19 @@ function buildOsClientConfig() {
     }
   }
 
-  console.log("OS config:", nodeUrl, username, password?.length);
+  const logUrl = (() => {
+    try {
+      const parsed = new URL(nodeUrl);
+      if (parsed.username || parsed.password) {
+        parsed.username = "***";
+        parsed.password = "***";
+      }
+      return parsed.toString();
+    } catch {
+      return nodeUrl.replace(/:\/\/[^:@/]+:[^@/]+@/, "://***:***@");
+    }
+  })();
+  console.log("OS config:", logUrl, username ? "***" : undefined, password?.length);
 
   return {
     node: nodeUrl,
