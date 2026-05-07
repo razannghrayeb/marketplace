@@ -1036,6 +1036,39 @@ function imageDetectionKnnPoolCap(): number {
   return Math.max(60, Math.min(700, Math.floor(raw)));
 }
 
+function imageHybridMetadataRecallSize(limit: number, hasColorRecall: boolean): number {
+  const raw = Number(process.env.SEARCH_IMAGE_HYBRID_METADATA_RECALL_SIZE);
+  if (Number.isFinite(raw)) return Math.max(20, Math.min(220, Math.floor(raw)));
+  const base = hasColorRecall ? Math.max(limit * 3, 60) : Math.max(limit * 2, 48);
+  return Math.min(hasColorRecall ? 120 : 80, base);
+}
+
+function imageMetadataRecallSparsePoolMin(limit: number): number {
+  const raw = Number(process.env.SEARCH_IMAGE_HYBRID_METADATA_RECALL_SPARSE_POOL_MIN);
+  if (Number.isFinite(raw)) return Math.max(20, Math.min(600, Math.floor(raw)));
+  return Math.max(limit * 2, 80);
+}
+
+function imageHydrationPrefetchCap(detectionScoped: boolean): number {
+  const raw = Number(
+    detectionScoped
+      ? process.env.SEARCH_IMAGE_DETECTION_HYDRATION_PREFETCH_CAP
+      : process.env.SEARCH_IMAGE_HYDRATION_PREFETCH_CAP,
+  );
+  if (Number.isFinite(raw)) return Math.max(40, Math.min(800, Math.floor(raw)));
+  return detectionScoped ? 240 : 420;
+}
+
+function imageHydrationPrefetchMultiplier(detectionScoped: boolean): number {
+  const raw = Number(
+    detectionScoped
+      ? process.env.SEARCH_IMAGE_DETECTION_HYDRATION_PREFETCH_MULT
+      : process.env.SEARCH_IMAGE_HYDRATION_PREFETCH_MULT,
+  );
+  if (Number.isFinite(raw)) return Math.max(1, Math.min(5, raw));
+  return detectionScoped ? 1.5 : 3;
+}
+
 function imageCategoryAwareMinResultsPolicy(params: {
   detectionProductCategory?: string;
   baseTarget: number;
@@ -1875,6 +1908,39 @@ function productCategoryFamilyBlob(product: Record<string, unknown>): string {
     .join(" ");
 }
 
+type CatalogFamilySignals = {
+  hasFootwear: boolean;
+  hasTop: boolean;
+  hasTopCore: boolean;
+  hasOuterwear: boolean;
+  hasBottom: boolean;
+  hasDressOnePiece: boolean;
+  hasBagAccessory: boolean;
+  hasBeautyHomeOrEquipment: boolean;
+};
+
+function catalogFamilySignals(product: Record<string, unknown>): CatalogFamilySignals {
+  const blob = productCategoryFamilyBlob(product);
+  const hasFootwear = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|after\s*ski\s*boot|ski\s*boots?|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|ballerina|ballerinas|flat|flats|espadrille|espadrilles|oxford|oxfords|pump|pumps|mule|mules|clog|clogs|slipper|slippers)\b/.test(blob);
+  const hasOuterwear = /\b(outerwear|outwear|jacket|jackets|shirt\s+jackets?|shacket|shackets|overshirt|overshirts|coat|coats|overcoat|overcoats|blazer|blazers|sport\s+coat|sportcoat|suit\s+jackets?|dress\s+jackets?|parka|parkas|blouson|blousons|trench|trenches|windbreaker|windbreakers|bomber|bombers|vest|vests|gilet|gilets|waistcoat|waistcoats|poncho|ponchos|anorak|anoraks|cape|capes|fleece)\b/.test(blob);
+  const hasTopCore = /\b(top|tops|knit\s*tops?|woven\s*tops?|shirt|shirts|shirting|woven\s*shirts?|chemise|t-?shirt|tshirt|tee|tees|blouse|blouses|tank|cami|camisole|sweater|sweaters|cardigan|cardigans|hoodie|hoodies|hoody|sweatshirt|sweatshirts|pullover|pullovers|jumper|jumpers|polo|polos|polo\s*shirts?|polo\s*short\s*sleeve|henley|tunic|knitwear|bodysuit|bodysuits|body|jersey|jerseys|loungewear|crop\s*top|button\s*down|button-down|long\s*sleeve|short\s*sleeve|baselayer)\b/.test(blob);
+  const hasTop = hasTopCore || (hasOuterwear && /\b(hoodie|hoody|sweatshirt|cardigan|pullover|fleece)\b/.test(blob));
+  const hasBottom = /\b(bottom|bottoms|bottom-sw|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|swim\s*short|skirt|skirts|legging|leggings|tight|tights|7\/8\s*tight|jogging|jogger|joggers|sweatpants?|slack|slacks|culotte|culottes|palazzo|chino|chinos|cargo|track\s*(?:pants?|trousers?)|tracksuits?\s*&\s*track\s*trousers)\b/.test(blob);
+  const hasDressOnePiece = /\b(dress|dresses|gown|gowns|frock|frocks|sundress|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|abaya|abayas|kaftan|kaftans|caftan|caftans)\b/.test(blob);
+  const hasBagAccessory = /\b(bag|bags|backpack|backpacks|luggage|duffle|carry\s*on|card\s*holders?|wallet|wallets|pouch|pouches|purse|purses|handbag|handbags|crossbody|shoulder\s*bags?|top\s*handle\s*bags?|shopping\s*bags?|travel\s*bags?|laptop\s*cases?|toiletry\s*bags?|pen\s*cases?|belt|belts|hat|hats|cap|caps|beanie|headwear|gloves|jewelry|jewellery|ring|rings|earring|earrings|necklace|necklaces|bracelet|bracelets|watch|watches|sunglasses|glasses|scarf|scarves|tie|key\s*rings?)\b/.test(blob);
+  const hasBeautyHomeOrEquipment = /\b(makeup|skin\s*care|bath\s*&\s*body|cleanser|cleansers|foundation|foundations|concealer|concealers|lipstick|lipsticks|mascara|mascaras|serum|serums|face\s*cream|face\s*serum|powder|powders|eye\s*shadow|perfume|eau\s*de|home|tableware|bathroom|bottle|ball|bike|helmet|goggles|racquet|skateboard|scooter|mats|climbing\s*equipment|protection|grip|pen|lighter|cigar\s*case)\b/.test(blob);
+  return {
+    hasFootwear,
+    hasTop,
+    hasTopCore,
+    hasOuterwear,
+    hasBottom,
+    hasDressOnePiece,
+    hasBagAccessory,
+    hasBeautyHomeOrEquipment,
+  };
+}
+
 function isStrictDetectionCategory(cat: string): boolean {
   const c = String(cat || "").toLowerCase().trim();
   return c === "tops" || c === "dresses" || c === "footwear" || c === "bottoms" || c === "outerwear";
@@ -1890,38 +1956,43 @@ function passesStrictDetectionCategoryFamily(
   const blob = productCategoryFamilyBlob(product);
   if (!blob.trim()) return false;
 
-  const hasFootwear = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|flat|flats|oxford|oxfords|pump|pumps|mule|mules|clog|clogs)\b/.test(blob);
-  const hasTop = /\b(top|tops|shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|tank|cami|camisole|sweater|sweaters|cardigan|cardigans|hoodie|hoodies|sweatshirt|sweatshirts|pullover|jumper|polo|henley|tunic|knitwear|bodysuit|bodysuits|overshirt|overshirts|jersey|jerseys|loungewear|crop\s*top|button\s*down|button-down)\b/.test(blob);
-  const hasOuterwear = /\b(outerwear|outwear|jacket|jackets|shirt\s+jackets?|shacket|shackets|overshirt|overshirts|coat|coats|overcoat|overcoats|blazer|blazers|sport\s+coat|sportcoat|suit\s+jackets?|dress\s+jackets?|parka|parkas|trench|trenches|windbreaker|windbreakers|bomber|bombers|vest|vests|gilet|gilets|waistcoat|waistcoats|poncho|ponchos|anorak|anoraks|cape|capes)\b/.test(blob);
-  const hasBottom = /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|skirt|skirts|legging|leggings|jogger|joggers|sweatpants?|slack|slacks|culotte|culottes|palazzo|chino|chinos|cargo|track\s*pants?)\b/.test(blob);
-  const hasDressOnePiece = /\b(dress|dresses|gown|gowns|frock|frocks|sundress|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|abaya|abayas|kaftan|kaftans|caftan|caftans)\b/.test(blob);
-  const hasAccessory = /\b(bag|bags|wallet|wallets|belt|belts|hat|hats|cap|caps|jewelry|jewellery|ring|rings|earring|earrings|necklace|necklaces|bracelet|bracelets|watch|watches|sunglasses|glasses|scarf|scarves)\b/.test(blob);
+  const signals = catalogFamilySignals(product);
+  const {
+    hasFootwear,
+    hasTop,
+    hasOuterwear,
+    hasBottom,
+    hasDressOnePiece,
+    hasBagAccessory,
+    hasBeautyHomeOrEquipment,
+  } = signals;
+  if (hasBeautyHomeOrEquipment) return false;
 
   if (d === "footwear") {
-    return hasFootwear;
+    return hasFootwear && !hasBagAccessory;
   }
 
   if (d === "dresses") {
     if (!hasDressOnePiece && !isOnePieceCatalogCandidate(product)) return false;
-    if (hasFootwear || hasAccessory) return false;
+    if (hasFootwear || hasBagAccessory) return false;
     return true;
   }
 
   if (d === "tops") {
     if (!hasTop) return false;
-    if (hasFootwear || hasAccessory) return false;
+    if (hasFootwear || hasBagAccessory || hasBottom || hasDressOnePiece) return false;
     return true;
   }
 
   if (d === "outerwear") {
     if (!hasOuterwear) return false;
-    if (hasFootwear || hasAccessory) return false;
+    if (hasFootwear || hasBagAccessory || hasBottom || hasDressOnePiece) return false;
     return true;
   }
 
   if (d === "bottoms") {
     if (!hasBottom) return false;
-    if (hasFootwear || hasAccessory) return false;
+    if (hasFootwear || hasBagAccessory || hasDressOnePiece) return false;
     return true;
   }
 
@@ -5157,10 +5228,32 @@ export async function searchByImageWithSimilarity(
     }
 
     const hasUsefulMetadataRecall = should.length > 0 && typeRecallTerms.length > 0;
-    if (hasUsefulMetadataRecall) {
+    const visualPoolBeforeMetadataRecall = Array.isArray(hits) ? hits.length : 0;
+    const hasColorRecallTerms = colorRecallTerms.length > 0;
+    const forceMetadataRecall =
+      String(process.env.SEARCH_IMAGE_HYBRID_METADATA_RECALL_ALWAYS ?? "0").toLowerCase() === "1" ||
+      String(process.env.SEARCH_IMAGE_HYBRID_METADATA_RECALL_ALWAYS ?? "0").toLowerCase() === "true";
+    const sparsePoolMinForMetadataRecall = imageMetadataRecallSparsePoolMin(limit);
+    const shouldRunMetadataRecall =
+      hasUsefulMetadataRecall &&
+      (
+        forceMetadataRecall ||
+        hasColorRecallTerms ||
+        visualPoolBeforeMetadataRecall < sparsePoolMinForMetadataRecall
+      );
+    if (hasUsefulMetadataRecall && !shouldRunMetadataRecall && breakdownDebug) {
+      console.log("[image-knn][metadata-recall-skip]", {
+        visualPoolBeforeMetadataRecall,
+        sparsePoolMinForMetadataRecall,
+        typeRecallTerms,
+        colorRecallTerms,
+      });
+    }
+    if (shouldRunMetadataRecall) {
       try {
+        const metadataRecallSize = imageHybridMetadataRecallSize(limit, hasColorRecallTerms);
         const metadataRecallBody = {
-          size: Math.min(220, Math.max(limit * 8, 80)),
+          size: metadataRecallSize,
           _source: baseImageKnnSourceFields,
           query: {
             bool: {
@@ -5193,6 +5286,7 @@ export async function searchByImageWithSimilarity(
             console.log("[image-knn][metadata-recall]", {
               before: beforeCount,
               metadata: metadataHits.length,
+              metadataSize: metadataRecallSize,
               afterMerge: hits.length,
               typeRecallTerms,
               colorRecallTerms,
@@ -5219,13 +5313,20 @@ export async function searchByImageWithSimilarity(
     ),
   ];
   // Optimization: only hydrate what we reasonably need
-  // If limit=20, hydrate ~60 (3x), if limit=50, hydrate ~150 (3x)
+  // Detection-scoped calls run in parallel, so use a smaller overlapped prefetch
+  // and let the post-rerank missing fetch fill any genuinely needed gaps.
   // This reduces hydration requests from ~4 down to 1-2 while preserving ranking quality
   const effectiveLimit = Math.max(limit, 20); // Ensure we have at least 20 results to work with
-  const hydrationCap = Math.min(rawKnnProductIds.length, Math.ceil(effectiveLimit * 3));
+  const hydrationPrefetchMultiplier = imageHydrationPrefetchMultiplier(detectionScoped);
+  const hydrationPrefetchCap = imageHydrationPrefetchCap(detectionScoped);
+  const hydrationCap = Math.min(
+    rawKnnProductIds.length,
+    hydrationPrefetchCap,
+    Math.ceil(effectiveLimit * hydrationPrefetchMultiplier),
+  );
   const idsToHydrate = rawKnnProductIds.slice(0, hydrationCap);
   const endpointLimit = limit;
-  console.log("[hydrate] ids_count", idsToHydrate.length, "endpoint_limit", endpointLimit, "raw_knn_count", rawKnnProductIds.length);
+  console.log("[hydrate] ids_count", idsToHydrate.length, "endpoint_limit", endpointLimit, "raw_knn_count", rawKnnProductIds.length, "prefetch_mult", hydrationPrefetchMultiplier, "prefetch_cap", hydrationPrefetchCap);
   const productHydrationStartedAt = Date.now();
   const productHydrationPromise = getSearchProductsByIdsOrdered(idsToHydrate).then(
     (products) => {
@@ -8668,7 +8769,27 @@ export async function searchByImageWithSimilarity(
   ) {
     const inferredColorPostEnabled =
       String(process.env.SEARCH_INFERRED_COLOR_POSTFILTER ?? "1").toLowerCase() !== "0";
-    if (inferredColorPostEnabled) {
+    const allowHardInferredColorPostfilter =
+      inferredColorPostEnabled &&
+      (
+        !softColorBiasOnly ||
+        forceTrustInferredFootwearColor
+      ) &&
+      (
+        !inferredCropColorConflict ||
+        forceTrustInferredFootwearColor
+      );
+    if (!allowHardInferredColorPostfilter && breakdownDebug) {
+      console.log("[image-search][inferred-color-postfilter-skip]", {
+        softColorBiasOnly,
+        inferredCropColorConflict,
+        forceTrustInferredFootwearColor,
+        preferredInferredColorConfidence,
+        desiredColorsForRelevance,
+        cropDominantColors: normalizedCropColorsForMerge,
+      });
+    }
+    if (allowHardInferredColorPostfilter) {
       const category = String(params.detectionProductCategory ?? "").toLowerCase();
       const desiredPrimaryColor = String(desiredColorsForRelevance[0] ?? "").toLowerCase().trim();
       const whiteIntentForBottoms =
@@ -10024,8 +10145,24 @@ export async function searchByImageWithSimilarity(
   const countAfterZeroResultFallback = results.length;
 
   const productsBeforeLateDetectionFamilyGate = results;
+  const lateDetectionFamilyDropReasons: Record<string, number> = {};
+  const lateDetectionFamilyDropReasonById = new Map<string, string>();
   if (hasDetectionAnchoredTypeIntent) {
-    const isDressDetection = String(params.detectionProductCategory ?? "").toLowerCase().trim() === "dresses";
+    const detectionCategoryForLateGate = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+    const hasStrictLateCategory = isStrictDetectionCategory(detectionCategoryForLateGate);
+    const isDressDetection = detectionCategoryForLateGate === "dresses";
+    const desiredTypeBlobForLateGate = desiredProductTypes.map((t) => String(t).toLowerCase()).join(" ");
+    const wantsOuterwearLikeForLateGate =
+      detectionCategoryForLateGate === "outerwear" ||
+      /\b(jacket|jackets|coat|coats|outerwear|blazer|blazers|parka|parkas|vest|gilet|waistcoat|fleece)\b/.test(
+        desiredTypeBlobForLateGate,
+      );
+    const markLateFamilyDrop = (p: any, reason: string): false => {
+      const id = String((p as any)?.id ?? "");
+      lateDetectionFamilyDropReasons[reason] = (lateDetectionFamilyDropReasons[reason] ?? 0) + 1;
+      if (id) lateDetectionFamilyDropReasonById.set(id, reason);
+      return false;
+    };
     const filtered = results.filter((p: any) => {
       const ex = (p.explain ?? {}) as any;
       const typeComp = Number(ex.productTypeCompliance ?? 0);
@@ -10033,28 +10170,44 @@ export async function searchByImageWithSimilarity(
       const crossFamily = Number(ex.crossFamilyPenalty ?? 0);
       const styleComp = Number(ex.styleCompliance ?? 0);
       const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
+      const familySignals = catalogFamilySignals(p as unknown as Record<string, unknown>);
+      const catalogFamilyPass = hasStrictLateCategory
+        ? passesStrictDetectionCategoryFamily(
+            p as unknown as Record<string, unknown>,
+            detectionCategoryForLateGate,
+          )
+        : true;
       const onePieceCandidate = isDressDetection
         ? isOnePieceCatalogCandidate(p as unknown as Record<string, unknown>)
         : false;
-      if (!hasKidsAudienceIntent && hasChildAudienceSignals(p as Record<string, unknown>)) return false;
+      if (!hasKidsAudienceIntent && hasChildAudienceSignals(p as Record<string, unknown>)) {
+        return markLateFamilyDrop(p, "child_audience_mismatch");
+      }
       if (enforceSleeveGate) {
         const observedSleeve = inferCatalogSleeveToken(p as unknown as Record<string, unknown>);
-        const sleeveMin = desiredSleeveNorm === "long" ? 0.55 : 0.42;
-        const sleeveCompliance = Number(ex.sleeveCompliance ?? 0);
-        if (Number.isFinite(sleeveCompliance) && sleeveCompliance < sleeveMin && sim < 0.93 && !observedSleeve) {
-          return false;
-        }
         if (
           (desiredSleeveNorm === "long" || desiredSleeveNorm === "short" || desiredSleeveNorm === "sleeveless") &&
           observedSleeve &&
           observedSleeve !== desiredSleeveNorm
         ) {
-          return false;
+          return markLateFamilyDrop(p, "sleeve_conflict");
         }
       }
       // Keep tops robust when style is inferred (soft); hard-gate only on explicit style intent.
-      if (params.detectionProductCategory === "tops" && hasExplicitStyleIntent && styleComp < 0.2 && sim < 0.96) return false;
-      if (crossFamily >= 0.5) return false;
+      if (params.detectionProductCategory === "tops" && hasExplicitStyleIntent && styleComp < 0.2 && sim < 0.96) {
+        return markLateFamilyDrop(p, "explicit_style_mismatch");
+      }
+      if (hasStrictLateCategory && !catalogFamilyPass) return markLateFamilyDrop(p, "catalog_family_mismatch");
+      if (
+        hasStrictLateCategory &&
+        detectionCategoryForLateGate === "tops" &&
+        familySignals.hasOuterwear &&
+        !familySignals.hasTopCore &&
+        !wantsOuterwearLikeForLateGate
+      ) {
+        return markLateFamilyDrop(p, "outerwear_not_top");
+      }
+      if (crossFamily >= 0.5) return markLateFamilyDrop(p, "cross_family_penalty");
       if (isDressDetection) {
         const dressVisualOverrideMin = (() => {
           const yoloConfidence = params.detectionYoloConfidence ?? 0;
@@ -10062,42 +10215,31 @@ export async function searchByImageWithSimilarity(
           if (yoloConfidence >= 0.8) return 0.9;
           return 0.92;
         })();
-        if (!onePieceCandidate && sim < dressVisualOverrideMin) return false;
+        if (!onePieceCandidate && sim < dressVisualOverrideMin) {
+          return markLateFamilyDrop(p, "dress_visual_floor");
+        }
         if (exactType >= 1 || typeComp >= 0.14 || onePieceCandidate) return true;
         return sim >= dressVisualOverrideMin && crossFamily < 0.42;
       }
+      if (hasStrictLateCategory && catalogFamilyPass) return true;
       if (exactType >= 1 || typeComp >= 0.3) return true;
-      return sim >= 0.96 && crossFamily < 0.35;
+      return sim >= 0.96 && crossFamily < 0.35
+        ? true
+        : markLateFamilyDrop(p, "type_floor");
     });
     if (filtered.length > 0) {
       results = filtered as ProductResult[];
     } else {
-      // Bug fix: do not keep the full unfiltered list when strict late filtering
-      // returns zero. Keep a small safe fallback instead.
-      const safeFallback = results.filter((p: any) => {
-        const ex = (p.explain ?? {}) as any;
-        const typeComp = Number(ex.productTypeCompliance ?? 0);
-        const exactType = Number(ex.exactTypeScore ?? 0);
-        const crossFamily = Number(ex.crossFamilyPenalty ?? 0);
-        const sim = typeof p.similarity_score === "number" ? p.similarity_score : 0;
-        if (crossFamily >= 0.45) return false;
-        if (isDressDetection) {
-          const onePieceCandidate = isOnePieceCatalogCandidate(p as Record<string, unknown>);
-          if (!onePieceCandidate && sim < 0.95) return false;
-          if (exactType >= 1 || typeComp >= 0.12 || onePieceCandidate) return true;
-          return sim >= 0.94;
-        }
-        if (exactType >= 1 || typeComp >= 0.18) return true;
-        return sim >= 0.97;
-      });
-      if (safeFallback.length > 0) {
-        results = safeFallback as ProductResult[];
-      }
+      results = [];
     }
   }
   const countAfterLateDetectionFamilyGate = results.length;
   if (productsBeforeLateDetectionFamilyGate.length > results.length) {
-    stageDropSamples.late_detection_family_gate = sampleDroppedProducts(productsBeforeLateDetectionFamilyGate, results);
+    stageDropSamples.late_detection_family_gate = sampleDroppedProducts(productsBeforeLateDetectionFamilyGate, results)
+      .map((sample) => ({
+        ...sample,
+        lateDropReason: lateDetectionFamilyDropReasonById.get(String(sample.product_id ?? "")) ?? "unknown",
+      }));
   }
 
   // Final hard family gate: rescue/override paths can re-introduce visually-similar
@@ -10551,6 +10693,7 @@ export async function searchByImageWithSimilarity(
         dropped_by_hydrated_metadata_guard: Math.max(0, countAfterHydrationAssembly - countAfterHydratedMetadataGuard),
         dropped_by_final_result_relevance_gate: Math.max(0, countAfterHydratedMetadataGuard - countAfterFinalResultRelevanceGate),
         dropped_by_late_detection_family_gate: Math.max(0, countAfterZeroResultFallback - countAfterLateDetectionFamilyGate),
+        late_detection_family_drop_reasons: lateDetectionFamilyDropReasons,
         dropped_by_strict_final_detection_category_gate: Math.max(0, countAfterLateDetectionFamilyGate - countAfterStrictFinalDetectionCategoryGate),
         dropped_by_footwear_subtype_gate: Math.max(0, countAfterStrictFinalDetectionCategoryGate - countAfterFootwearSubtypeGate),
         dropped_by_hydration: Math.max(0, hydrationCandidateIdCount - hydratedProductRowsCount),

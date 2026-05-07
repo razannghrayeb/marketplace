@@ -2451,12 +2451,23 @@ export function inferOuterwearSuitSignal(input: {
 
   // Aggregate suit cue: BLIP caption OR (formality≥8 + outerwear category) OR wedding/black-tie OR
   // (tie + formality≥6) OR structured-top+tailored-bottom + tie/wedding signal.
+  const casualOuterwearConflict =
+    /\b(hoodie|hoody|sweatshirt|track\s*jacket|tracksuit|windbreaker|rain\s*jacket|puffer|parka|ski|fleece|bomber|denim\s*jacket|leather\s*jacket)\b/.test(
+      `${labelNorm} ${rawLabelNorm} ${captionNorm}`,
+    );
+  const structuredTailoredSuitCue =
+    structuredTopAndTailoredBottom &&
+    productCategory === "outerwear" &&
+    !isExplicitCoatLabel &&
+    !casualOuterwearConflict;
+
   const suitCue =
     blipSuitCue ||
     weddingCue ||
     (tieCue && formality >= 6) ||
     (formality >= 8) ||
-    (structuredTopAndTailoredBottom && (blipFormalCue || tieCue));
+    (structuredTopAndTailoredBottom && (blipFormalCue || tieCue)) ||
+    structuredTailoredSuitCue;
 
   let subtype: OuterwearSuitSubtype;
   if (isVestLabel) {
