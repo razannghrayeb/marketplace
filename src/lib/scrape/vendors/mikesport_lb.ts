@@ -449,7 +449,8 @@ export function mapMikesportProductToScrapedRows(product: any): ScrapedProduct[]
   const groupMap = new Map<string, { color: string | null; variants: any[] }>();
   for (const v of variants) {
     const optionsList = [v?.option1, v?.option2, v?.option3];
-    const colorValue = colorIndex >= 0 ? normalizeVariantValue(optionsList[colorIndex]) : null;
+    const rawColor = colorIndex >= 0 ? normalizeVariantValue(optionsList[colorIndex]) : null;
+    const colorValue = rawColor && /^\d+$/.test(rawColor) ? null : rawColor;
     const key = colorValue ?? "__default__";
     const entry = groupMap.get(key) ?? { color: colorValue, variants: [] };
     entry.variants.push(v);
