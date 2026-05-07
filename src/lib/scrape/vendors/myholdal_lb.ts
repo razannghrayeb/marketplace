@@ -612,9 +612,9 @@ export function parseProductPage(
   for (const v of np.variants) {
     const optionsList = [v?.option1, v?.option2, v?.option3];
     const rawColorValue = colorIndex >= 0 ? normalizeVariantValue(optionsList[colorIndex]) : null;
-    // Treat gender or language values as null — they are not colors
+    // Treat gender, language, or numeric values as null — they are not colors
     const colorValue =
-      rawColorValue && (looksLikeGenderValue(rawColorValue) || looksLikeLanguageValue(rawColorValue))
+      rawColorValue && (looksLikeGenderValue(rawColorValue) || looksLikeLanguageValue(rawColorValue) || /^\d+$/.test(rawColorValue))
         ? null
         : rawColorValue;
     const key = colorValue ?? "__default__";

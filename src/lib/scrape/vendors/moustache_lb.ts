@@ -402,7 +402,7 @@ export function parseProductPage(
     if (!value) return;
 
     if (name.startsWith("size")) size = value;
-    if (name.startsWith("color")) color = value;
+    if (name.startsWith("color")) color = /^\d+$/.test(value) ? null : value;
   });
 
   const description =
