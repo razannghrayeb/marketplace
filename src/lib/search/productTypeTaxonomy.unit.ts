@@ -5,6 +5,7 @@ declare const expect: any;
 
 import {
   expandProductTypesForQuery,
+  extractExplicitSleeveIntent,
   extractFashionTypeNounTokens,
   extractLexicalProductTypeSeeds,
   filterProductTypeSeedsByMappedCategory,
@@ -111,6 +112,19 @@ describe("extractLexicalProductTypeSeeds", () => {
     expect(extractLexicalProductTypeSeeds("running shorts")).not.toContain("short");
   });
 
+  test("does not treat short sleeve wording as shorts intent", () => {
+    const topSeeds = extractLexicalProductTypeSeeds("short sleeve tops");
+    expect(topSeeds).toContain("tops");
+    expect(topSeeds).not.toContain("short");
+    expect(topSeeds).not.toContain("shorts");
+    expect(extractLexicalProductTypeSeeds("short sleeve shirt")).toEqual(["shirt"]);
+
+    const expanded = expandProductTypesForQuery(["shorts"]);
+    expect(expanded).toContain("shorts");
+    expect(expanded).not.toContain("short");
+    expect(expanded).not.toContain("board shorts");
+  });
+
   test("matches real garment tokens", () => {
     const j = extractLexicalProductTypeSeeds("blue jeans");
     expect(j).toContain("jeans");
@@ -150,6 +164,26 @@ describe("extractFashionTypeNounTokens", () => {
   test("stem plural footwear", () => {
     const t = extractFashionTypeNounTokens("black boots");
     expect(t.some((x) => x === "boot" || x === "boots")).toBe(true);
+  });
+});
+
+describe("extractExplicitSleeveIntent", () => {
+  test("extracts explicit short and long sleeve phrases", () => {
+    expect(extractExplicitSleeveIntent("short sleeve tops")).toBe("short");
+    expect(extractExplicitSleeveIntent("Long Sleeve")).toBe("long");
+    expect(extractExplicitSleeveIntent("polo short-sleeved shirt")).toBe("short");
+  });
+
+  test("ignores ambiguous length words and conflicting sleeve phrases", () => {
+    expect(extractExplicitSleeveIntent("short tops")).toBeUndefined();
+    expect(extractExplicitSleeveIntent("long top")).toBeUndefined();
+    expect(extractExplicitSleeveIntent("short sleeve or long sleeve tops")).toBeUndefined();
+  });
+
+  test("extracts no-sleeve top phrases without treating bare vest as sleeveless", () => {
+    expect(extractExplicitSleeveIntent("tank top")).toBe("sleeveless");
+    expect(extractExplicitSleeveIntent("sleeveless vest top")).toBe("sleeveless");
+    expect(extractExplicitSleeveIntent("tailored vest")).toBeUndefined();
   });
 });
 

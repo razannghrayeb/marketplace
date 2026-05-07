@@ -83,7 +83,20 @@ function buildOsClientConfig() {
             // URL parsing failed — proceed without extracted creds
         }
     }
-    console.log("OS config:", nodeUrl, username, password === null || password === void 0 ? void 0 : password.length);
+    var logUrl = (function () {
+        try {
+            var parsed = new URL(nodeUrl);
+            if (parsed.username || parsed.password) {
+                parsed.username = "***";
+                parsed.password = "***";
+            }
+            return parsed.toString();
+        }
+        catch (_a) {
+            return nodeUrl.replace(/:\/\/[^:@/]+:[^@/]+@/, "://***:***@");
+        }
+    })();
+    console.log("OS config:", logUrl, username ? "***" : undefined, password === null || password === void 0 ? void 0 : password.length);
     return __assign(__assign({ node: nodeUrl }, (username && password ? { auth: { username: username, password: password } } : {})), { ssl: { rejectUnauthorized: false }, maxRetries: 5, requestTimeout: 60000 });
 }
 exports.osClient = new opensearch_1.Client(buildOsClientConfig());

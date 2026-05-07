@@ -1,10 +1,10 @@
 /**
- * Repair OpenSearch Color Fields for Products with Embeddings
+ * Repair OpenSearch color fields from products.color.
  * 
  * Purpose:
  *  - Read correct `products.color` values from PostgreSQL
- *  - Map them to canonical fashion colors
- *  - Update ONLY color-related fields in existing OpenSearch documents
+ *  - Map them through the shared query-time color normalizer
+ *  - Partial-update ONLY color-related fields in existing OpenSearch documents
  *  - Preserve all embeddings and other indexed data
  *  - NO re-processing of images, NO re-computing vectors
  * 
@@ -32,6 +32,7 @@ import { osClient } from "../src/lib/core/opensearch";
 import { config } from "../src/config";
 import { pg } from "../src/lib/core/db";
 import { mapHexToFashionCanonical } from "../src/lib/color/garmentColorPipeline";
+import { normalizeColorTokensFromRaw } from "../src/lib/color/queryColorFilter";
 import { promises as fs } from "fs";
 import { performance } from "perf_hooks";
 
@@ -46,6 +47,7 @@ interface RepairStats {
   processed: number;
   updated: number;
   skipped: number;
+  notFound: number;
   errors: number;
   startTime: number;
   endTime?: number;
@@ -53,82 +55,32 @@ interface RepairStats {
 
 const BULK_BUFFER_SIZE = 1000;
 
-// Fashion canonical color tokens (from garmentColorPipeline.ts)
-const CANONICAL_COLORS = [
-  "black", "white", "off-white", "cream", "ivory", "beige", "brown", "camel", "tan",
-  "gray", "charcoal", "silver", "navy", "blue", "light-blue", "green", "olive", "red",
-  "burgundy", "pink", "purple", "yellow", "orange", "gold", "teal", "multicolor",
-];
-
 // ============================================================================
 // Utility Functions
 // ============================================================================
 
 /**
- * Attempt to normalize color string to canonical format.
- * Handles hex colors, CSS color names, and fashion color tokens.
+ * Normalize raw DB color strings to canonical tokens using the shared parser.
+ * Keeps hex fallback for rare rows that store a raw color value as #RRGGBB.
  */
-function normalizeColorToCanonical(colorStr: string | null): string | null {
-  if (!colorStr) return null;
+function normalizeColorToCanonicalTokens(colorStr: string | null): string[] {
+  if (!colorStr) return [];
 
-  const raw = String(colorStr).trim().toLowerCase();
-  if (!raw) return null;
+  const raw = String(colorStr).trim();
+  if (!raw) return [];
 
-  // Try hex color first (e.g., "#FF5733" or "FF5733")
+  const normalizedTokens = normalizeColorTokensFromRaw(raw);
+  if (normalizedTokens.length > 0) return normalizedTokens;
+
+  // Try hex color fallback (e.g., "#FF5733" or "FF5733").
+  const rawLower = raw.toLowerCase();
   if (raw.startsWith("#") || /^[0-9a-f]{6}$/i.test(raw)) {
-    const hex = raw.startsWith("#") ? raw : `#${raw}`;
+    const hex = rawLower.startsWith("#") ? rawLower : `#${rawLower}`;
     const canonical = mapHexToFashionCanonical(hex);
-    if (canonical) return canonical;
+    return canonical ? [canonical] : [];
   }
 
-  // Check if it's already a canonical color
-  if (CANONICAL_COLORS.includes(raw)) {
-    return raw;
-  }
-
-  // Try common CSS color name mappings (basic normalization)
-  const colorMap: Record<string, string> = {
-    "light blue": "light-blue",
-    "sky blue": "light-blue",
-    "baby blue": "light-blue",
-    "dark blue": "navy",
-    "light green": "green",
-    "dark green": "green",
-    "light gray": "silver",
-    "light grey": "silver",
-    "dark gray": "charcoal",
-    "dark grey": "charcoal",
-    "light brown": "tan",
-    "dark brown": "brown",
-    "light pink": "pink",
-    "hot pink": "pink",
-    "light purple": "purple",
-    "dark purple": "purple",
-    "light yellow": "yellow",
-    "light orange": "orange",
-    "dark orange": "orange",
-    "light red": "red",
-    "dark red": "burgundy",
-    "wine": "burgundy",
-    "maroon": "burgundy",
-    "forest green": "olive",
-    "sage": "olive",
-    "bronze": "brown",
-    "rust": "burgundy",
-    "khaki": "tan",
-    "neutral": "beige",
-    "sand": "beige",
-    "nude": "beige",
-    "blush": "pink",
-  };
-
-  if (colorMap[raw]) {
-    return colorMap[raw];
-  }
-
-  // If no mapping found, return the raw string lowercased
-  // (may match during OpenSearch fuzzy search)
-  return raw;
+  return [];
 }
 
 /**
@@ -175,23 +127,41 @@ async function fetchProductColorRows(
  * Returns an object with only color-related fields to merge into document.
  */
 function buildColorUpdate(
-  canonicalColor: string,
+  canonicalColors: string[],
   confidence: number = 0.7,
 ): Record<string, any> {
+  const colors = [...new Set(canonicalColors.map((c) => String(c ?? "").trim().toLowerCase()).filter(Boolean))];
+  const primary = colors[0] ?? null;
+
   return {
-    attr_color: canonicalColor,
-    attr_colors: [canonicalColor],
+    attr_color: primary,
+    attr_colors: colors,
     attr_colors_text: [], // DB color is not text-derived
     attr_colors_image: [], // DB color is not image-derived
-    color_primary_canonical: canonicalColor,
-    color_secondary_canonical: null,
-    color_accent_canonical: null,
-    color_palette_canonical: [canonicalColor],
+    color_primary_canonical: primary,
+    color_secondary_canonical: colors[1] ?? null,
+    color_accent_canonical: colors[2] ?? null,
+    color_palette_canonical: colors,
     color_confidence_primary: confidence,
     color_confidence_text: confidence,
     color_confidence_image: 0,
     attr_color_source: "catalog", // Marks this as DB-sourced
   };
+}
+
+function countBulkUpdateResults(resp: any): { updated: number; notFound: number; errors: number } {
+  let updated = 0;
+  let notFound = 0;
+  let errors = 0;
+
+  for (const item of resp.body?.items ?? []) {
+    const result = item.update;
+    if (result?.result === "updated" || result?.result === "noop") updated++;
+    else if (result?.status === 404) notFound++;
+    else errors++;
+  }
+
+  return { updated, notFound, errors };
 }
 
 /**
@@ -228,6 +198,7 @@ async function repairColors(): Promise<void> {
     processed: 0,
     updated: 0,
     skipped: 0,
+    notFound: 0,
     errors: 0,
     startTime: performance.now(),
   };
@@ -265,17 +236,16 @@ async function repairColors(): Promise<void> {
 
     console.log(`[repair-colors] Have colors for ${colorMap.size} products`);
 
-    // Step 4: Fetch documents from OpenSearch and build updates
-    console.log(`[repair-colors] Fetching documents from OpenSearch and building updates...`);
+    // Step 3: Build OpenSearch partial updates.
+    console.log(`[repair-colors] Building OpenSearch color updates...`);
     const bulkOps: any[] = [];
 
     for (const [productId, dbColor] of Array.from(colorMap.entries())) {
       stats.processed++;
 
       try {
-        // Normalize color to canonical
-        const canonicalColor = normalizeColorToCanonical(dbColor);
-        if (!canonicalColor) {
+        const canonicalColors = normalizeColorToCanonicalTokens(dbColor);
+        if (canonicalColors.length === 0) {
           console.warn(`[repair-colors] ⚠ Product ${productId}: Could not normalize color "${dbColor}"`);
           stats.skipped++;
           continue;
@@ -305,34 +275,33 @@ async function repairColors(): Promise<void> {
           continue;
         }
 
-        // Build color update
-        const colorUpdate = buildColorUpdate(canonicalColor);
-
-        // Merge into existing document (preserves embeddings)
-        const updatedDoc = {
-          ...existingDoc,
-          ...colorUpdate,
-        };
+        const colorUpdate = buildColorUpdate(canonicalColors);
 
         // Add to bulk buffer
         bulkOps.push(
           {
-            index: {
+            update: {
               _index: config.opensearch.index,
               _id: String(productId),
+              retry_on_conflict: 2,
             },
           },
-          updatedDoc,
+          { doc: colorUpdate },
         );
 
-        if (bulkOps.length >= BULK_BUFFER_SIZE) {
-          console.log(`[repair-colors] Flushing bulk buffer (${bulkOps.length} ops)...`);
+        if (bulkOps.length >= BULK_BUFFER_SIZE * 2) {
+          const docs = bulkOps.length / 2;
+          console.log(`[repair-colors] Flushing bulk buffer (${docs} docs)...`);
           if (!dryRun) {
-            await osClient.bulk({ body: bulkOps });
+            const resp = await osClient.bulk({ body: bulkOps, timeout: "30s" });
+            const result = countBulkUpdateResults(resp);
+            stats.updated += result.updated;
+            stats.notFound += result.notFound;
+            stats.errors += result.errors;
           } else {
-            console.log(`[repair-colors] [DRY-RUN] Would index ${bulkOps.length / 2} documents`);
+            console.log(`[repair-colors] [DRY-RUN] Would update ${docs} documents`);
+            stats.updated += docs;
           }
-          stats.updated += bulkOps.length / 2;
           bulkOps.length = 0;
         }
       } catch (err) {
@@ -343,13 +312,18 @@ async function repairColors(): Promise<void> {
 
     // Final flush
     if (bulkOps.length > 0) {
-      console.log(`[repair-colors] Final flush (${bulkOps.length} ops)...`);
+      const docs = bulkOps.length / 2;
+      console.log(`[repair-colors] Final flush (${docs} docs)...`);
       if (!dryRun) {
-        await osClient.bulk({ body: bulkOps });
+        const resp = await osClient.bulk({ body: bulkOps, timeout: "30s" });
+        const result = countBulkUpdateResults(resp);
+        stats.updated += result.updated;
+        stats.notFound += result.notFound;
+        stats.errors += result.errors;
       } else {
-        console.log(`[repair-colors] [DRY-RUN] Would index ${bulkOps.length / 2} documents`);
+        console.log(`[repair-colors] [DRY-RUN] Would update ${docs} documents`);
+        stats.updated += docs;
       }
-      stats.updated += bulkOps.length / 2;
     }
 
     // Refresh index
@@ -365,6 +339,7 @@ async function repairColors(): Promise<void> {
     console.log(`[repair-colors] Stats:
   - Processed: ${stats.processed}
   - Updated: ${stats.updated}
+  - Not found in OpenSearch: ${stats.notFound}
   - Skipped: ${stats.skipped}
   - Errors: ${stats.errors}
   - Duration: ${duration}s
@@ -372,6 +347,7 @@ async function repairColors(): Promise<void> {
 
     // Save stats
     const statsPath = "./tmp/repair-colors-stats.json";
+    await fs.mkdir("./tmp", { recursive: true });
     await fs.writeFile(statsPath, JSON.stringify(stats, null, 2));
     console.log(`[repair-colors] Stats saved to ${statsPath}`);
   } catch (err) {

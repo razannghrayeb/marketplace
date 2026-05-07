@@ -24,6 +24,7 @@ exports.topsMicroGroup = topsMicroGroup;
 exports.hasGarmentLikeFamilyFromProductTypeSeeds = hasGarmentLikeFamilyFromProductTypeSeeds;
 exports.getProductTypePhrasesLongestFirst = getProductTypePhrasesLongestFirst;
 exports.extractLexicalProductTypeSeeds = extractLexicalProductTypeSeeds;
+exports.extractExplicitSleeveIntent = extractExplicitSleeveIntent;
 exports.intentFamiliesForProductCategory = intentFamiliesForProductCategory;
 exports.filterProductTypeSeedsByMappedCategory = filterProductTypeSeedsByMappedCategory;
 exports.extractFashionTypeNounTokens = extractFashionTypeNounTokens;
@@ -44,7 +45,7 @@ exports.PRODUCT_TYPE_CLUSTERS = [
     ["jean", "jeans", "denim", "denims"],
     ["pant", "pants", "trouser", "trousers", "chino", "chinos", "cargo pants", "cargo", "slacks"],
     // Shorts / skirt (2)
-    ["shorts", "short", "bermuda", "board shorts"],
+    ["shorts", "bermuda", "board shorts"],
     ["skirt", "skirts", "mini skirt", "midi skirt"],
     // Footwear (7) — was one mega-cluster; now siblings are distinguishable in rerank
     ["sneaker", "sneakers", "trainer", "trainers", "running shoe", "running shoes", "athletic shoe", "athletic shoes", "sport shoe", "sport shoes", "tennis shoe", "tennis shoes"],
@@ -572,12 +573,13 @@ function buildSymmetricFromList(pairs) {
         ids.add(a);
         ids.add(b);
     }
+    var idList = Array.from(ids);
     var out = {};
-    for (var _b = 0, ids_1 = ids; _b < ids_1.length; _b++) {
-        var id = ids_1[_b];
+    for (var _b = 0, idList_1 = idList; _b < idList_1.length; _b++) {
+        var id = idList_1[_b];
         out[id] = {};
-        for (var _c = 0, ids_2 = ids; _c < ids_2.length; _c++) {
-            var id2 = ids_2[_c];
+        for (var _c = 0, idList_2 = idList; _c < idList_2.length; _c++) {
+            var id2 = idList_2[_c];
             out[id][id2] = id === id2 ? 0 : 0;
         }
     }
@@ -1082,6 +1084,8 @@ function phraseMatchesWholeWords(queryNorm, phrase) {
     var re = new RegExp("\\b(?:".concat(core, ")\\b"), "i");
     return re.test(queryNorm);
 }
+var GENERIC_SHORTS_QUERY_SEEDS = new Set(["shorts", "bermuda", "bermudas"]);
+var GENERIC_SHORTS_EXPANSION_EXCLUDES = new Set(["short", "board shorts"]);
 function getProductTypePhrasesLongestFirst() {
     if (sortedTypePhrases)
         return sortedTypePhrases;
@@ -1128,6 +1132,22 @@ function extractLexicalProductTypeSeeds(rawQuery) {
             hits.push(w);
     }
     return __spreadArray([], new Set(hits), true);
+}
+function extractExplicitSleeveIntent(rawText) {
+    var qNorm = normalizeForLexicalMatch(rawText);
+    if (!qNorm)
+        return undefined;
+    var hits = new Set();
+    if (/\b(short\s+sleeves?|short\s+sleeved|shortsleeve|short-sleeve(?:d)?)\b/.test(qNorm)) {
+        hits.add("short");
+    }
+    if (/\b(long\s+sleeves?|long\s+sleeved|longsleeve|long-sleeve(?:d)?)\b/.test(qNorm)) {
+        hits.add("long");
+    }
+    if (/\b(sleeveless|no\s+sleeves?|without\s+sleeves?|tank\s+tops?|camisoles?|cami\b|vest\s+tops?|spaghetti\s+straps?|strapless|halter)\b/.test(qNorm)) {
+        hits.add("sleeveless");
+    }
+    return hits.size === 1 ? Array.from(hits)[0] : undefined;
 }
 /** Map vision/catalog aisle strings to taxonomy macro families (tops, dress, outerwear, …). */
 function intentFamiliesForProductCategory(productCategory) {
@@ -1379,7 +1399,7 @@ function inferMacroFamiliesFromListingCategoryFields(categoryCanonical, category
     if (/\b(pants?|jeans?|trousers?|leggings?|joggers?|chinos?|cargos?)\b/.test(combined)) {
         out.add("bottoms");
     }
-    if (/\b(shorts?|skirt|skirts)\b/.test(combined)) {
+    if (/\b(shorts|bermudas?|skirt|skirts)\b/.test(combined)) {
         out.add("shorts_skirt");
     }
     if (/\b(dresses?|gown|gowns)\b/.test(combined)) {
@@ -1442,6 +1462,9 @@ function expandProductTypesForQuery(seeds) {
         if (cluster) {
             for (var _b = 0, cluster_4 = cluster; _b < cluster_4.length; _b++) {
                 var t = cluster_4[_b];
+                if (GENERIC_SHORTS_QUERY_SEEDS.has(key) && GENERIC_SHORTS_EXPANSION_EXCLUDES.has(t)) {
+                    continue;
+                }
                 out.add(t);
             }
         }

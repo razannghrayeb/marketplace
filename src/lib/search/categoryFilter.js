@@ -53,7 +53,7 @@ exports.isProductTypeDominantQuery = isProductTypeDominantQuery;
 exports.shouldHardFilterAstCategory = shouldHardFilterAstCategory;
 exports.isBeautyRetailListingFromFields = isBeautyRetailListingFromFields;
 exports.inferCategoryCanonical = inferCategoryCanonical;
-var core_1 = require("../core");
+var db_1 = require("../core/db");
 /** Canonical aisle → search terms (aligned with queryProcessor dictionary). */
 var CATEGORY_ALIASES = {
     tops: [
@@ -85,6 +85,19 @@ var CATEGORY_ALIASES = {
         "cardigan",
         "cardigans",
         "knitwear",
+        "knit tops",
+        "woven tops",
+        "woven shirts",
+        "shirting",
+        "short sleeve",
+        "short sleeves",
+        "long sleeve",
+        "polo shirts",
+        "polo short sleeve",
+        "track top",
+        "baselayer",
+        "men pullover",
+        "women pullover",
         "overshirt",
         "overshirts",
         "bodysuit",
@@ -109,6 +122,11 @@ var CATEGORY_ALIASES = {
         "culottes",
         "cargo pants",
         "sweatpants",
+        "bermudas",
+        "7/8 tight",
+        "tight",
+        "tights",
+        "track trousers",
     ],
     joggers: ["joggers", "jogger", "jogging", "jogging pants", "track pants", "trackpants", "jogging bottoms"],
     dresses: [
@@ -149,6 +167,8 @@ var CATEGORY_ALIASES = {
         "sport coat",
         "sport coats",
         "sportcoat",
+        "coats & jackets",
+        "outerwear & jackets",
         "tuxedo",
         "tuxedos",
         "cardigan",
@@ -179,6 +199,7 @@ var CATEGORY_ALIASES = {
         "shackets",
         "shirt jacket",
         "shirt jackets",
+        "parkas & blousons",
     ],
     tailored: [
         "tailored",
@@ -221,6 +242,8 @@ var CATEGORY_ALIASES = {
         "ankle boot",
         "chelsea boots",
         "chelsea boot",
+        "after ski boot",
+        "ski boots",
         "sandals",
         "sandal",
         "heels",
@@ -279,6 +302,9 @@ var CATEGORY_ALIASES = {
         "tote",
         "backpack",
         "clutch",
+        "clutches",
+        "pouch",
+        "pouches",
     ],
     bags: [
         "bags",
@@ -293,7 +319,26 @@ var CATEGORY_ALIASES = {
         "totes",
         "backpack",
         "backpacks",
+        "hand bags",
+        "shopping bags",
+        "shoulder bags",
+        "top handle bags",
+        "waist bags",
+        "duffle bags",
+        "travel bags",
+        "lunch bags",
+        "toiletry bags",
+        "laptop cases",
+        "phone cases",
+        "pen cases",
+        "card holders",
+        "bags cases and luggage",
+        "carry on",
+        "large luggages",
+        "medium luggages",
         "crossbody",
+        "crossbody bags",
+        "crossover bags",
         "satchel",
         "satchels",
         "clutch",
@@ -323,6 +368,10 @@ var CATEGORY_ALIASES = {
         "two piece",
         "beach wear",
         "board shorts",
+        "swim short",
+        "bottom-sw",
+        "suit-sw",
+        "monokini",
     ],
     underwear: ["underwear", "lingerie", "undergarments", "innerwear", "boxers", "briefs", "bra", "panties", "thong", "undershirt"],
     /** Skincare / color cosmetics — not apparel; blocks spurious high CLIP scores vs dress/shoe queries */
@@ -357,6 +406,32 @@ var CATEGORY_ALIASES = {
         "nails",
         "bath & body",
         "body care",
+        "blushes",
+        "cleansers",
+        "concealers",
+        "eye liners",
+        "eye shadows",
+        "eyeb rows",
+        "eyes",
+        "face",
+        "face cream",
+        "face serum",
+        "foundations",
+        "gift sets",
+        "hair care",
+        "lip liners",
+        "lips",
+        "lipsticks",
+        "mascaras",
+        "nail care",
+        "powders",
+        "serums",
+        "shampoos",
+        "skin care",
+        "skin whitening",
+        "sun care",
+        "eau de parfum",
+        "eau de toilette",
     ],
 };
 /**
@@ -385,7 +460,7 @@ function loadCategoryVocabulary() {
                     if (vocabCache && Date.now() - vocabCache.at < VOCAB_TTL_MS) {
                         return [2 /*return*/, vocabCache.set];
                     }
-                    return [4 /*yield*/, core_1.pg.query("SELECT DISTINCT LOWER(TRIM(category)) AS c FROM products WHERE category IS NOT NULL AND TRIM(category) <> ''")];
+                    return [4 /*yield*/, db_1.pg.query("SELECT DISTINCT LOWER(TRIM(category)) AS c FROM products WHERE category IS NOT NULL AND TRIM(category) <> ''")];
                 case 1:
                     r = _b.sent();
                     set = new Set();

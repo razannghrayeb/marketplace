@@ -37,7 +37,7 @@ function isTopIntentToken(value) {
     return /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|cami|camisole|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|polo|polos)\b/.test(String(value !== null && value !== void 0 ? value : "").toLowerCase());
 }
 function isBottomIntentToken(value) {
-    return /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|skirt|skirts|legging|leggings|jogger|joggers|slack|slacks|chino|chinos|cargo|cargos)\b/.test(String(value !== null && value !== void 0 ? value : "").toLowerCase());
+    return /\b(bottom|bottoms|pant|pants|trouser|trousers|jean|jeans|denim|shorts|bermudas?|skirt|skirts|legging|leggings|jogger|joggers|slack|slacks|chino|chinos|cargo|cargos)\b/.test(String(value !== null && value !== void 0 ? value : "").toLowerCase());
 }
 function topBottomCategoryConsistencyMultiplier(params) {
     var _a, _b;
@@ -945,7 +945,7 @@ function computeHitRelevance(hit, similarity, intent) {
     ], (Array.isArray(astCategories) ? astCategories : []), true), (Array.isArray(desiredProductTypes) ? desiredProductTypes : []), true).map(function (x) { return String(x).toLowerCase(); })
         .join(" ");
     var isTopLikeIntent = /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|overshirt|overshirts|polo|polos|loungewear)\b/.test(intentBlob);
-    var isBottomLikeIntent = /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts?|skirt|skirts|leggings?)\b/.test(intentBlob);
+    var isBottomLikeIntent = /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts|bermudas?|skirt|skirts|leggings?)\b/.test(intentBlob);
     var isFootwearLikeIntent = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(intentBlob);
     // Detect explicit suit queries and relax color gating so coordinated
     // trousers/dress-pants and shoes surface alongside jackets.
@@ -997,7 +997,7 @@ function computeHitRelevance(hit, similarity, intent) {
     // but did NOT ask for swimwear, exclude swimwear listings completely.
     var swimBlocked = false;
     try {
-        var swimRegex_1 = /\b(swim|swimwear|swimsuit|bikini|one[-\s]?piece|tankini|trunks|boardshorts?|board[-\s]?shorts?|swimshorts?|swim[-\s]?short)\b/;
+        var swimRegex_1 = /\b(swim|swimwear|swimsuit|bikini|one[-\s]?piece|tankini|trunks|boardshorts?|board[-\s]?shorts?|swimshorts?|swim[-\s]?short|bottom[-\s]?sw|suit[-\s]?sw|beach\s*wear|beachwear)\b/;
         var docBlobForSwim = __spreadArray([src.category, src.category_canonical, src.title], (Array.isArray(productTypes) ? productTypes : []), true).filter(Boolean)
             .join(" ")
             .toLowerCase();

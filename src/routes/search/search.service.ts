@@ -55,6 +55,7 @@ import {
   isProductTypeDominantQuery,
 } from '../../lib/search/categoryFilter';
 import {
+  extractExplicitSleeveIntent,
   expandProductTypesForQuery,
   extractFashionTypeNounTokens,
   extractLexicalProductTypeSeeds,
@@ -163,6 +164,48 @@ function hasStrictTrouserTextIntent(desiredProductTypes: string[]): boolean {
   const hasTrouserLike = /\b(trouser|trousers|pant|pants|slack|slacks|chino|chinos|cargo|cargo pants?)\b/.test(blob);
   const hasShortLike = /\b(short|shorts|bermuda|bermudas)\b/.test(blob);
   return hasTrouserLike && !hasShortLike;
+}
+
+const SWIM_TEXT_RE = /\b(swim|swimwear|swimsuit|bikini|tankini|trunks|boardshorts?|board[-\s]?shorts?|swimshorts?|swim[-\s]?shorts?|bottom[-\s]?sw|suit[-\s]?sw|beach\s*wear|beachwear)\b/;
+const SHORTS_TEXT_RE = /\b(shorts|bermudas?|board[-\s]?shorts?|swim[-\s]?shorts?)\b/;
+const EXPLICIT_SLEEVE_TEXT_RE = /\b(short\s+sleeves?|short\s+sleeved|shortsleeve|short-sleeve(?:d)?|long\s+sleeves?|long\s+sleeved|longsleeve|long-sleeve(?:d)?|sleeveless)\b/;
+
+function hasStrictShortsTextIntent(raw: string, desiredProductTypes: string[], desiredSleeve?: string): boolean {
+  const blob = [
+    raw,
+    ...(desiredProductTypes ?? []),
+  ].join(" ").toLowerCase();
+  if (!blob.trim()) return false;
+  if (desiredSleeve || EXPLICIT_SLEEVE_TEXT_RE.test(blob)) return false;
+  return SHORTS_TEXT_RE.test(blob);
+}
+
+function hasExplicitSwimTextIntent(raw: string, desiredProductTypes: string[]): boolean {
+  const blob = [
+    raw,
+    ...(desiredProductTypes ?? []),
+  ].join(" ").toLowerCase();
+  return SWIM_TEXT_RE.test(blob);
+}
+
+function searchHitBlob(src: Record<string, unknown>): string {
+  return [
+    src.title,
+    src.category,
+    (src as any).category_canonical,
+    (src as any).description,
+    Array.isArray((src as any).product_types) ? (src as any).product_types.join(" ") : (src as any).product_types,
+  ]
+    .map((value) => String(value ?? "").toLowerCase())
+    .join(" ");
+}
+
+function isShortsCatalogHit(src: Record<string, unknown>): boolean {
+  return /\b(shorts|bermudas?)\b/.test(searchHitBlob(src));
+}
+
+function isSwimCatalogHit(src: Record<string, unknown>): boolean {
+  return SWIM_TEXT_RE.test(searchHitBlob(src));
 }
 
 function hasHardOppositeGenderSignal(src: Record<string, unknown>, queryGenderRaw: string | null | undefined): boolean {
@@ -1146,6 +1189,44 @@ export async function textSearch(
       }
     }
 
+    const earlyDesiredProductTypes = [
+      ...new Set([
+        ...(ast.entities.productTypes ?? []),
+        ...lexicalTypeSeeds,
+      ].map((t) => String(t).toLowerCase().trim()).filter(Boolean)),
+    ];
+    const earlyDesiredSleeve = extractExplicitSleeveIntent(`${rawQuery} ${ast.searchQuery || ""}`);
+    const strictShortsTextIntentForFilter = hasStrictShortsTextIntent(
+      `${rawQuery} ${ast.searchQuery || ""}`,
+      earlyDesiredProductTypes,
+      earlyDesiredSleeve,
+    );
+    if (
+      strictShortsTextIntentForFilter &&
+      !hasExplicitSwimTextIntent(`${rawQuery} ${ast.searchQuery || ""}`, earlyDesiredProductTypes)
+    ) {
+      filterClauses.push({
+        bool: {
+          _name: "generic_shorts_exclude_swimwear",
+          must_not: [
+            {
+              bool: {
+                should: [
+                  { term: { category_canonical: "swimwear" } },
+                  { terms: { category: ["swimwear", "swim", "swimming", "swim trunks", "board shorts", "swim short", "bottom-sw", "suit-sw", "beach wear"] } },
+                  { terms: { product_types: ["swimwear", "swim shorts", "swim short", "board shorts", "boardshorts", "trunks", "swimsuit", "bikini"] } },
+                  { match_phrase: { title: "swim shorts" } },
+                  { match_phrase: { title: "board shorts" } },
+                  { match_phrase: { title: "swimwear" } },
+                ],
+                minimum_should_match: 1,
+              },
+            },
+          ],
+        },
+      });
+    }
+
     const explicitColorsRaw = (callerFilters as any)?.colors;
     const explicitColors =
       Array.isArray(explicitColorsRaw) && explicitColorsRaw.length > 0
@@ -1898,12 +1979,24 @@ export async function textSearch(
 
     const lexicalMatchQuery =
       (ast.searchQuery && ast.searchQuery.trim()) || rawQuery.trim() || undefined;
+    const desiredSleeve = extractExplicitSleeveIntent(
+      `${rawQuery} ${ast.searchQuery || ""}`,
+    );
+    const strictShortsTextIntent = hasStrictShortsTextIntent(
+      `${rawQuery} ${ast.searchQuery || ""}`,
+      desiredProductTypes,
+      desiredSleeve,
+    );
+    const genericShortsNoSwimIntent =
+      strictShortsTextIntent &&
+      !hasExplicitSwimTextIntent(`${rawQuery} ${ast.searchQuery || ""}`, desiredProductTypes);
 
     const relevanceIntent: SearchHitRelevanceIntent = {
       desiredProductTypes,
       desiredColors,
       desiredColorsTier,
       rerankColorMode,
+      desiredSleeve,
       mergedCategory,
       astCategories: ast.entities.categories ?? [],
       queryAgeGroup,
@@ -1924,6 +2017,7 @@ export async function textSearch(
       colorById.set(idStr, primaryColor);
       complianceById.set(idStr, compliance);
     }
+    const hitById = new Map(hits.map((h: any) => [String(h?._source?.product_id), h]));
 
     const sortedByRelevance = [...hits].sort((a: any, b: any) => {
       const ida = String(a._source.product_id);
@@ -1987,6 +2081,7 @@ export async function textSearch(
     // #endregion
 
     const sortedIds = sortedByRelevance.map((h: any) => String(h._source.product_id));
+    const safeSortedIds = sortedIds.filter((id) => !(complianceById.get(id)?.hardBlocked ?? false));
     const belowRelevanceThreshold =
       hits.length > 0 &&
       thresholdPassedIds.length === 0 &&
@@ -1999,16 +2094,24 @@ export async function textSearch(
           .filter((id) => (complianceById.get(id)?.finalRelevance01 ?? 0) >= softFloorMin)
       : [];
 
-    const failClosedWhenNoSoftFloor = strictFullSuitTextIntent || strictTrouserTextIntent;
+    const failClosedWhenNoSoftFloor = strictFullSuitTextIntent || strictTrouserTextIntent || strictShortsTextIntent;
 
     let finalProductIds = relevanceGateSoft
       ? softFloorPassedIds.length > 0
         ? softFloorPassedIds
         : failClosedWhenNoSoftFloor
           ? []
-          : sortedIds
+          : safeSortedIds
       : thresholdPassedIds;
     const countAfterSoftGate = finalProductIds.length;
+
+    if (strictShortsTextIntent && finalProductIds.length > 0) {
+      finalProductIds = finalProductIds.filter((id) => {
+        const src = hitById.get(id)?._source ?? {};
+        if (!isShortsCatalogHit(src)) return false;
+        return genericShortsNoSwimIntent ? !isSwimCatalogHit(src) : true;
+      });
+    }
     let countAfterColorPost = finalProductIds.length;
 
     if (desiredColors.length > 0) {
@@ -2105,6 +2208,7 @@ export async function textSearch(
               matchedColor: compliance.matchedColor ?? undefined,
               colorTier: compliance.colorTier,
               colorCompliance: compliance.colorCompliance,
+              sleeveCompliance: compliance.sleeveCompliance,
               audienceCompliance: compliance.audienceCompliance,
               crossFamilyPenalty: compliance.crossFamilyPenalty,
               hasTypeIntent: compliance.hasTypeIntent,
@@ -2112,6 +2216,7 @@ export async function textSearch(
               typeGateFactor: compliance.typeGateFactor,
               hardBlocked: compliance.hardBlocked,
               desiredProductTypes,
+              desiredSleeve,
               desiredColors,
               colorMode: rerankColorMode,
               finalRelevance01: compliance.finalRelevance01,
@@ -4569,6 +4674,7 @@ function buildMultiImageSearchHitRelevanceIntent(
   );
 
   const lexicalMatchQuery = searchQ || rawPrompt.trim() || undefined;
+  const desiredSleeve = extractExplicitSleeveIntent(`${rawPrompt} ${searchQ || ""}`);
 
   const negationExcludeTerms = collectMultiImageNegationTerms(parsedIntent, rawPrompt);
   const hasPriceIntent =
@@ -4590,6 +4696,7 @@ function buildMultiImageSearchHitRelevanceIntent(
     desiredProductTypes,
     desiredColors: rerankDesiredColors,
     desiredColorsTier,
+    desiredSleeve,
     rerankColorMode: ast.filters?.colorMode ?? "any",
     mergedCategory,
     astCategories: ast.entities.categories ?? [],

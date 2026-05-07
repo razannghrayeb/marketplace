@@ -196,6 +196,50 @@ describe("computeHitRelevance - type intent reliability", () => {
   });
 });
 
+describe("computeHitRelevance - shorts intent", () => {
+  const shortsIntent: SearchHitRelevanceIntent = {
+    desiredProductTypes: ["shorts"],
+    desiredColors: [],
+    desiredColorsTier: [],
+    rerankColorMode: "any",
+    mergedCategory: "bottoms",
+    astCategories: ["bottoms"],
+    hasAudienceIntent: false,
+    crossFamilyPenaltyWeight: 420,
+    lexicalMatchQuery: "shorts",
+    reliableTypeIntent: true,
+  };
+
+  test("generic shorts blocks swim catalog categories", () => {
+    const rel = computeHitRelevance({
+      _source: {
+        title: "Classic Pull-On Shorts",
+        category: "BOTTOM-SW",
+        category_canonical: "swimwear",
+        product_types: ["shorts"],
+      },
+    } as any, 0.88, shortsIntent);
+
+    expect(rel.finalRelevance01).toBe(0);
+    expect(rel.hardBlocked).toBe(true);
+  });
+
+  test("short-sleeve tops do not satisfy shorts intent", () => {
+    const rel = computeHitRelevance({
+      _source: {
+        title: "Women Short Sleeve Top",
+        category: "Short Sleeve",
+        category_canonical: "tops",
+        product_types: ["short"],
+        attr_sleeve: "short-sleeve",
+      },
+    } as any, 0.88, shortsIntent);
+
+    expect(rel.productTypeCompliance).toBeLessThan(0.3);
+    expect(rel.finalRelevance01).toBeLessThan(0.05);
+  });
+});
+
 describe("computeHitRelevance - suit composite intent", () => {
   test("formal-bottom expansion does not reject tailored suit listings", () => {
     const suitHit = {

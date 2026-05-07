@@ -1,20 +1,11 @@
 "use strict";
-var __spreadArray = (this && this.__spreadArray) || function (to, from, pack) {
-    if (pack || arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
-        if (ar || !(i in from)) {
-            if (!ar) ar = Array.prototype.slice.call(from, 0, i);
-            ar[i] = from[i];
-        }
-    }
-    return to.concat(ar || Array.prototype.slice.call(from));
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.COLOR_CANONICAL_ALIASES = void 0;
 exports.inferColorGroupFromRaw = inferColorGroupFromRaw;
 exports.normalizeColorToken = normalizeColorToken;
 exports.normalizeColorTokensFromRaw = normalizeColorTokensFromRaw;
 exports.expandColorTermsForFilter = expandColorTermsForFilter;
-var colorCanonical_1 = require("./colorCanonical");
+const colorCanonical_1 = require("./colorCanonical");
 /**
  * Query-time color normalization and OpenSearch filter term expansion (shared by text + image search).
  */
@@ -25,6 +16,8 @@ exports.COLOR_CANONICAL_ALIASES = {
         "black out", "raven", "ebony", "obsidian", "noir", "nero", "caviar", "ink black",
         "night black", "phantom black", "carbon black", "washed black", "faded black",
         "matte black", "mat black", "black heather", "black denim", "black rinse",
+        "onix", "aurora onix", "raven black", "black as night", "off noir", "eclipse",
+        "dark matter",
     ],
     white: [
         "white", "off white", "off-white", "offwhite", "ivory", "cream", "bone", "ecru",
@@ -34,6 +27,9 @@ exports.COLOR_CANONICAL_ALIASES = {
         "coconut milk", "vanilla", "flour", "parchment", "paper white", "marshmallow",
         "winter white", "warm white", "broken white", "star white", "sea salt", "seasalt",
         "pearl white", "undyed white", "whitecap", "white cap",
+        "pearl", "moonbeam", "soapstone", "salt", "alpine snow", "cheese white",
+        "smoked pearl", "white dune", "crystal white", "frost", "warm ivory",
+        "cool vanilla", "bone white", "paper", "crema", "white eyelet",
     ],
     gray: [
         "gray", "grey", "heather grey", "heather gray", "silver", "charcoal",
@@ -47,6 +43,11 @@ exports.COLOR_CANONICAL_ALIASES = {
         "metallic silver", "silver metallic", "lunar silver", "chrome", "steel", "lead",
         "fog", "mist", "cloud grey", "cloud gray", "glacier grey", "glacier gray",
         "galactic grey", "moonstone", "quiet shade", "turbulence", "ironstone", "coal",
+        "glacier", "castlerock", "earth day grey", "medium ash", "medium grey",
+        "silver melee", "storm front", "foggy grey", "grey skies", "cosmic grey",
+        "mindful grey", "dash grey", "meteor grey", "vanadis grey", "shipyard",
+        "asphlat", "asphalt grey", "inviting grey", "soot", "heathered soot",
+        "taupe grey", "tungsten rinse", "tungsten blue stone",
     ],
     blue: [
         "blue", "navy", "cobalt", "denim", "sky blue", "mid blue", "midnight blue",
@@ -61,6 +62,18 @@ exports.COLOR_CANONICAL_ALIASES = {
         "collegiate navy", "ink", "inkwell", "legend ink", "blue void", "deep sea",
         "deep navy", "deep blue", "thunder blue", "steel blue", "blue slate",
         "slate blue", "blue stone", "bluestone", "dark blue", "navy blue", "chambray",
+        "horizon", "photo blue", "light photo blue", "solid cape blue", "cape blue",
+        "lucid blue", "night indigo", "carbon midnight", "faded indigo", "blue topaz",
+        "capri", "danube", "arona", "bluefin", "blue shadow", "wham blue",
+        "aurora ink", "preloved ink", "legink", "glacier blue", "dark petrol",
+        "petrol blue", "washed midnight", "blue beyond", "lets scuba", "let's scuba",
+        "scuba", "tradewinds", "abimes", "celeste", "blue opal", "world indigo",
+        "blue spark", "dawn sky", "dark foggy blue", "blue frost", "blue cendre",
+        "classic blue", "pure blue", "vibrant blue", "open air blue", "bluebell",
+        "bellwether blue", "phoenix blue", "moonlit blue", "thrift blue",
+        "blue dusk", "soft blue", "faded blue", "sun faded blue", "whisper blue",
+        "horizon blue", "kingfisher blue", "vintage tint", "salt lake",
+        "skywriting", "spring lake", "longbay", "ocean cavern", "shadow rinse",
     ],
     red: [
         "red", "burgundy", "maroon", "wine", "cherry", "crimson", "scarlet", "ruby",
@@ -68,10 +81,13 @@ exports.COLOR_CANONICAL_ALIASES = {
         "shadow red", "fire", "flame", "lava", "goji", "tomato", "berry red", "poppy",
         "rosewood", "henna", "paprika", "silt red", "pomegranate", "syrah", "merlot",
         "bordeaux", "bordo", "oxblood", "garnet", "currant", "zinfandel", "sangria",
-        "tawny port",
+        "tawny port", "cranberry", "corrida", "rouge", "urgent red", "rose red",
+        "vivid red", "shocking red", "red flame", "cabernet", "aurora ruby",
+        "classic red", "bright red", "poppy red", "fiery red", "goji berry",
+        "port royale",
     ],
     green: [
-        "green", "olive", "khaki", "sage", "mint", "forest green", "forest-green",
+        "green", "olive", "sage", "mint", "forest green", "forest-green",
         "hunter green", "army green", "emerald", "lime", "moss", "kaki", "military",
         "pine", "fir", "evergreen", "laurel", "thyme", "oregano", "eucalyptus",
         "bay leaf", "artichoke", "fennel", "celery", "pistachio", "matcha", "avocado",
@@ -81,7 +97,14 @@ exports.COLOR_CANONICAL_ALIASES = {
         "tapenade", "taiga", "field green", "terrain", "garden green", "leaf green",
         "bamboo", "apple green", "neon green", "cyber green", "hyper green",
         "green strike", "chlorophyll", "oil green", "dark olive", "olive drab",
-        "olive strata", "cargo khaki", "trench coat khaki",
+        "olive strata", "cargo khaki", "khaki green",
+        "honeydew", "grape leaf", "deep cypress", "cypress", "lima", "myrtle",
+        "duck green", "green terrain", "terrain", "algal green", "algal", "olivine",
+        "pea pod", "sinople", "marsh green", "mantis green", "jade tint", "jade green",
+        "lichen", "elm", "twig green", "arden green", "rack green", "camper green",
+        "sulphur spring green", "aloha green", "silver green", "linen green", "celadon",
+        "black sage", "black sage green", "fennel seed", "kambaba", "sagebrush",
+        "white sage", "dark forest", "fatigue", "heathered fatigue", "grass green",
     ],
     beige: [
         "beige", "taupe", "stone", "sand", "light khaki", "toasted coconut", "beech",
@@ -89,6 +112,13 @@ exports.COLOR_CANONICAL_ALIASES = {
         "canvas", "linen", "oatmeal", "oat", "wheat", "straw", "raffia", "rattan",
         "sandstone", "warm sand", "sanddrift", "dune", "desert", "parsnip", "cornstalk",
         "putty", "biscotti", "biscuit", "eggnog", "almond", "sesame", "flax",
+        "quicksand", "silt", "stucco", "angora", "shell beige", "crystal sand",
+        "cavern", "bungee cord", "brindle", "chinchilla", "porcini taupe",
+        "khaki", "classic khaki", "smooth khaki", "trench coat khaki",
+        "khaki stone", "deep sand", "fair", "nude", "delicate nude", "snake taupe",
+        "peyote", "turtledove", "brazilian sand", "canvas tan", "soft sand",
+        "sparkled beige", "heathered tan", "heather beech", "heathered oatmeal",
+        "heathered oat", "heather oatmeal", "heather taupe", "heather beige",
     ],
     camel: [
         "camel", "tan", "camel brown", "light brown", "warm beige", "light camel",
@@ -101,11 +131,16 @@ exports.COLOR_CANONICAL_ALIASES = {
         "hazelnut", "mahogany", "tobacco", "cinnamon", "ginger", "maple", "oak",
         "wood", "cedar", "bark", "acorn", "fawn", "truffle", "umber", "earth brown",
         "saddle brown", "carob", "pecan", "praline", "sepia", "cork",
+        "syrup", "americano", "briquette", "cob", "dark mahogany", "preloved brown",
+        "tiger's eye", "tigereye", "gum", "toasty toffee", "costa riche",
+        "mink brown", "dark tan", "light chocolate", "affogato", "rum",
+        "burnt sugar", "coffee bean",
     ],
     purple: [
         "purple", "violet", "plum", "lavender", "lilac", "mauve", "grape", "orchid",
         "iris", "amethyst", "wisteria", "eggplant", "aubergine", "ube", "raisin",
-        "mulberry", "hyacinth", "grapeberry",
+        "mulberry", "hyacinth", "grapeberry", "mystic purple", "grape ice",
+        "alpine plum", "violet tone", "dark iris", "ice lavender", "burnished lilac",
     ],
     pink: [
         "pink", "blush", "fuchsia", "fuschia", "fushia", "fuhsia", "magenta",
@@ -113,23 +148,34 @@ exports.COLOR_CANONICAL_ALIASES = {
         "guava", "hibiscus", "strawberry", "raspberry", "bubblegum", "taffy",
         "peony", "carnation", "flamingo", "aster", "baby pink", "pale pink",
         "light pink", "clear pink", "bliss pink", "glow pink", "elemental pink",
-        "vivid pink", "neon pink", "rose gold", "nude", "skin", "bridal rose",
+        "vivid pink", "neon pink", "rose gold", "skin", "bridal rose",
+        "blushbaby", "cold pink", "tea rose", "ancient rose", "body rose",
+        "rose parade", "rebellious rose", "fiery pink", "bisou", "french bisou",
+        "sky pink", "rose quartz", "tourmaline pink", "neutral rose", "boss pink",
+        "reseda pink", "toasted rose", "chewing gum pink", "matte bright pink",
+        "whisper pink", "rose dusk", "soft rose", "petal pink", "light rose",
     ],
     yellow: [
         "yellow", "mustard", "golden", "gold", "lemon", "canary", "butter", "banana",
         "corn", "sunflower", "dandelion", "turmeric", "ochre", "citrine", "champagne",
         "honey gold", "lucid lemon", "solar yellow", "volt", "barely volt", "limelight",
+        "minions yellow", "powder yellow", "yellow sizzle", "acidity", "flashy yellow",
+        "crew yellow", "willo", "yzw", "banana crepe", "aged brass", "brass",
+        "multigold", "golden palm",
     ],
     orange: [
         "orange", "rust", "peach", "coral", "burnt orange", "terracotta", "terra cotta",
         "amber", "tangerine", "papaya", "mango", "pumpkin", "kumquat", "marmalade",
         "mandarin", "clementine", "apricot", "copper", "ember", "sunrise", "sunset",
-        "afterglow", "carrot", "tomato orange",
+        "afterglow", "carrot", "tomato orange", "soft orange", "burnt sunrise",
+        "semi coral", "sunkiss", "sunbasque", "ember glow", "bergamotto", "soho sizzle",
     ],
     teal: [
         "teal", "turquoise", "aqua", "cyan", "peacock", "acqua", "aquaverde",
         "aquamarine", "seafoam", "sea foam", "water green", "watergreen", "sea green",
         "tidal teal", "legacy teal", "preloved teal", "real teal", "deep turquoise",
+        "magic aqua", "deepest aqua", "aquarius", "aquarius blue", "reef", "pool",
+        "blue topaz",
     ],
     multicolor: [
         "multicolor", "multi color", "multi-color", "multicolour", "colour block",
@@ -137,9 +183,11 @@ exports.COLOR_CANONICAL_ALIASES = {
         "rainbow", "print", "camo", "camouflage", "leopard", "zebra", "tie dye",
         "tie-dye", "plaid", "gingham", "stripe", "herringbone", "floral", "hearts",
         "confetti", "ombre", "gradient", "marble", "aop", "allover", "check", "dots",
+        "jacquard", "diagonal jacquard", "unicorn star", "multi stripe", "multi-colored",
+        "multi coloured", "dreamy geo combo", "geo combo",
     ],
 };
-var COLOR_COMMON_MISSPELLINGS = {
+const COLOR_COMMON_MISSPELLINGS = {
     fuschia: "fuchsia",
     fushia: "fuchsia",
     fuhsia: "fuchsia",
@@ -176,23 +224,22 @@ var COLOR_COMMON_MISSPELLINGS = {
     wht: "white",
     nvy: "navy",
 };
-var NON_COLOR_VALUE_RE = /^(?:null|none|n\/a|na|no photos?|standard|all hair type|kids?|short|long|regular|tall|one|m|s|xs|xl|2xl|3xl|4xl|5xl|l|\d+(?:\.\d+)?(?:\s?["”]|(?:\s?in(?:seam)?)|\s?eu|\s?ml)?|\d+[a-z]\d+.*)$/i;
-var COLOR_NOISE_WORDS = new Set([
+const NON_COLOR_VALUE_RE = /^(?:null|none|n\/a|na|no photos?|standard|all hair type|kids?|short|long|regular|tall|one|m|s|xs|xl|2xl|3xl|4xl|5xl|l|\d+(?:\.\d+)?(?:\s?["”]|(?:\s?in(?:seam)?)|\s?eu|\s?ml)?|\d+[a-z]\d+.*)$/i;
+const COLOR_NOISE_WORDS = new Set([
     "product", "code", "shade", "universal", "medium", "deep", "light", "dark",
     "mini", "full", "size", "mascara", "hydrator", "spf", "edition", "wash", "washed",
     "garment", "dyed", "heathered", "heather", "chine", "melange", "metallic", "suede",
     "plaid", "gingham", "stripe", "striped", "jacquard", "print", "printed", "allover",
     "twist", "grid", "block", "combo", "fun", "product", "code",
 ]);
-for (var _i = 0, _a = [
+for (const word of [
     "mirror", "lens", "lenses", "frame", "strap", "with", "style", "item", "wordmark",
     "composition", "abstract", "heritage", "vintage", "classic", "team", "logo",
     "logos", "label", "model", "collaboration", "supplier", "colour", "color",
-]; _i < _a.length; _i++) {
-    var word = _a[_i];
+]) {
     COLOR_NOISE_WORDS.add(word);
 }
-var EXTRA_NON_COLOR_VALUE_RE = /^(?:adult|youth|men|women|boys?|girls?|slim|straight|athletic|bikini|force|birthday|congratulation|usa|no pocket|one(?:\s+size(?:\s+for\s+(?:kids?|men|women|youth|adult))?)?|colors?\s+can\s+be\s+customi[sz]ed|supplier\s+colou?r|[ml]\/?[xl]|xs\/s|s\/m|m\/l|l\/xl|xl\/2xl|2xs\/xs|xl\/rg|l\/rg|m\/rg|xxxs|ns|w\d+\s*[-/]\s*l\d+|\d+w\s*[-/]\s*\d+l|\d+(?:\.\d+)?\s*(?:cm|w\s*cm|oz|ml|eu|eeu|l)|\d+\s+\d\/\d\s*eu|\d{2,3}\s*[a-z]{1,2}|[0-9]{2,3}[a-z]?)$/i;
+const EXTRA_NON_COLOR_VALUE_RE = /^(?:adult|youth|men|women|boys?|girls?|slim|straight|athletic|bikini|force|birthday|congratulation|usa|no pocket|pocket|ankle|thong|one(?:\s+size(?:\s+for\s+(?:kids?|men|women|youth|adult))?)?|colors?\s+can\s+be\s+customi[sz]ed|supplier\s+colou?r|[ml]\/?[xl]|xs\/s|s\/m|m\/l|l\/xl|xl\/2xl|2xs\/xs|xl\/rg|l\/rg|m\/rg|xxxs|ns|w\d+\s*[-/]\s*l\d+|\d+w\s*[-/]\s*\d+l|\d+(?:\.\d+)?\s*(?:cm|w\s*cm|oz|ml|eu|eeu|l)|\d+\s+\d\/\d\s*eu|\d+\s*[-/]\s*\d+(?:\s*(?:years?|yrs?|cm|in|inseam|eu))?|\d+\s*(?:years?|yrs?)|\d{2,3}\s*[a-z]{1,2}|[0-9]{2,3}[a-z]?)$/i;
 function normalizeRawColorString(raw) {
     return String(raw !== null && raw !== void 0 ? raw : "")
         .toLowerCase()
@@ -217,22 +264,74 @@ function normalizeRawColorString(raw) {
         .trim();
 }
 function isNonColorValue(raw) {
-    var value = normalizeRawColorString(raw);
-    return !value || NON_COLOR_VALUE_RE.test(value) || EXTRA_NON_COLOR_VALUE_RE.test(value);
+    const value = normalizeRawColorString(raw);
+    if (!value)
+        return true;
+    if (COLOR_NOISE_WORDS.has(value))
+        return true;
+    if (hasKnownColorCue(value))
+        return false;
+    const withoutLeadingCode = value
+        .replace(/^(?:[a-z]{1,4}\s*)?\d+[a-z0-9]*\s+/, "")
+        .trim();
+    if (withoutLeadingCode && withoutLeadingCode !== value && hasKnownColorCue(withoutLeadingCode)) {
+        return false;
+    }
+    return NON_COLOR_VALUE_RE.test(value) || EXTRA_NON_COLOR_VALUE_RE.test(value);
 }
-var COLOR_ALIAS_TO_CANONICAL = (function () {
-    var map = new Map();
-    for (var _i = 0, _a = Object.entries(exports.COLOR_CANONICAL_ALIASES); _i < _a.length; _i++) {
-        var _b = _a[_i], canonical = _b[0], aliases = _b[1];
+const COLOR_ALIAS_TO_CANONICAL = (() => {
+    const map = new Map();
+    for (const [canonical, aliases] of Object.entries(exports.COLOR_CANONICAL_ALIASES)) {
         map.set(canonical, canonical);
-        for (var _c = 0, aliases_1 = aliases; _c < aliases_1.length; _c++) {
-            var alias = aliases_1[_c];
+        for (const alias of aliases)
             map.set(alias.toLowerCase(), canonical);
-        }
     }
     return map;
 })();
-var COLOR_BUCKET_TO_CANONICAL = {
+const EXACT_COLOR_CANONICAL_OVERRIDES = {
+    pelican: "white",
+    pepper: "gray",
+};
+function hasKnownColorCue(raw) {
+    const key = normalizeRawColorString(raw)
+        .replace(/["â€œâ€'`]/g, " ")
+        .replace(/[()]/g, " ")
+        .replace(/[_-]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    if (!key || COLOR_NOISE_WORDS.has(key))
+        return false;
+    if (EXACT_COLOR_CANONICAL_OVERRIDES[key])
+        return true;
+    if (COLOR_ALIAS_TO_CANONICAL.has(key))
+        return true;
+    for (const alias of COLOR_ALIAS_TO_CANONICAL.keys()) {
+        if (alias.length < 3)
+            continue;
+        const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        if (new RegExp(`\\b${escaped}\\b`).test(key))
+            return true;
+        if (alias.length >= 5 && key.includes(alias))
+            return true;
+    }
+    return false;
+}
+function exactAliasCanonical(raw) {
+    var _a, _b;
+    const key = normalizeRawColorString(raw)
+        .replace(/["â€œâ€'`]/g, " ")
+        .replace(/[()]/g, " ")
+        .replace(/[_-]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    return key
+        ? (_b = (_a = EXACT_COLOR_CANONICAL_OVERRIDES[key]) !== null && _a !== void 0 ? _a : COLOR_ALIAS_TO_CANONICAL.get(key)) !== null && _b !== void 0 ? _b : null
+        : null;
+}
+function hasCompositeColorSeparator(raw) {
+    return /[\/,&+|]/.test(String(raw !== null && raw !== void 0 ? raw : "")) || /\b(?:and|with)\b/i.test(String(raw !== null && raw !== void 0 ? raw : ""));
+}
+const COLOR_BUCKET_TO_CANONICAL = {
     black: "black",
     white: "white",
     gray: "gray",
@@ -247,11 +346,11 @@ var COLOR_BUCKET_TO_CANONICAL = {
     teal: "teal",
     multicolor: "multicolor",
 };
-var GROUP_KEYWORD_HINTS = {
+const GROUP_KEYWORD_HINTS = {
     white: [
         "bone", "alabaster", "porcelain", "vanilla", "ivory", "cream", "ecru", "off", "snow", "milk",
         "pearl", "eggshell", "chalk", "linen", "pale", "cloud", "frost", "buttermilk", "oat",
-        "beech", "birch", "parchment", "flour", "crema", "coconut", "whipped cream",
+        "beech", "birch", "parchment", "flour", "crema", "coconut", "whipped cream", "pelican",
     ],
     gray: [
         "graphite", "slate", "steel", "tungsten", "anthracite", "charcoal", "ash", "smoke", "mist",
@@ -263,7 +362,7 @@ var GROUP_KEYWORD_HINTS = {
     blue: [
         "navy", "blue", "indigo", "denim", "cobalt", "azure", "sky", "ocean", "marine", "royal",
         "sapphire", "teal blue", "lapis", "aqua blue", "turquin", "ultramarine", "chambray",
-        "pelican", "atlantic", "sea glass", "spring lake", "longbay", "skywriting",
+        "atlantic", "sea glass", "spring lake", "longbay", "skywriting",
         "midnight", "inkwell", "ocean cavern", "estate blue", "ray blue",
     ],
     green: [
@@ -283,8 +382,7 @@ var GROUP_KEYWORD_HINTS = {
     ],
     red: [
         "red", "burgundy", "bordeaux", "bordo", "maroon", "wine", "crimson", "scarlet", "ruby", "cherry",
-        "sangria", "oxblood", "claret", "tomato", "cinnabar", "vermilion", "brick", "pepper",
-        "merlot",
+        "sangria", "oxblood", "claret", "tomato", "cinnabar", "vermilion", "brick", "merlot",
     ],
     pink: [
         "pink", "rose", "blush", "fuchsia", "magenta", "mauve", "peony", "berry", "raspberry",
@@ -313,23 +411,21 @@ var GROUP_KEYWORD_HINTS = {
     ],
 };
 function inferBucketFromKeywordHints(raw) {
-    var s = normalizeRawColorString(raw);
+    const s = normalizeRawColorString(raw);
     if (!s)
         return null;
-    var best = null;
-    var bestScore = 0;
-    for (var _i = 0, _a = Object.entries(GROUP_KEYWORD_HINTS); _i < _a.length; _i++) {
-        var _b = _a[_i], bucket = _b[0], words = _b[1];
-        var score = 0;
-        for (var _c = 0, words_1 = words; _c < words_1.length; _c++) {
-            var w = words_1[_c];
+    let best = null;
+    let bestScore = 0;
+    for (const [bucket, words] of Object.entries(GROUP_KEYWORD_HINTS)) {
+        let score = 0;
+        for (const w of words) {
             if (!w)
                 continue;
             if (s === w)
                 score += 4;
-            else if (new RegExp("\\b".concat(w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "\\b")).test(s))
+            else if (new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(s))
                 score += 2;
-            else if (s.includes(w))
+            else if (w.length >= 5 && s.includes(w))
                 score += 1;
         }
         if (score > bestScore) {
@@ -339,25 +435,24 @@ function inferBucketFromKeywordHints(raw) {
     }
     return bestScore > 0 ? best : null;
 }
-var COLOR_FAMILY_CLUSTERS = colorCanonical_1.COLOR_FAMILY_GROUPS.map(function (group) {
+const COLOR_FAMILY_CLUSTERS = colorCanonical_1.COLOR_FAMILY_GROUPS.map((group) => {
     var _a, _b;
-    var normalizedMembers = group
-        .map(function (v) { return String(v !== null && v !== void 0 ? v : "").toLowerCase().replace(/[_-]/g, " ").trim(); })
+    const normalizedMembers = group
+        .map((v) => String(v !== null && v !== void 0 ? v : "").toLowerCase().replace(/[_-]/g, " ").trim())
         .filter(Boolean);
-    var representative = (_b = (_a = normalizeColorFamilyRepresentative(normalizedMembers)) !== null && _a !== void 0 ? _a : normalizedMembers[0]) !== null && _b !== void 0 ? _b : "multicolor";
-    return { normalizedMembers: normalizedMembers, representative: representative };
+    const representative = (_b = (_a = normalizeColorFamilyRepresentative(normalizedMembers)) !== null && _a !== void 0 ? _a : normalizedMembers[0]) !== null && _b !== void 0 ? _b : "multicolor";
+    return { normalizedMembers, representative };
 });
 function normalizeColorFamilyRepresentative(members) {
-    for (var _i = 0, members_1 = members; _i < members_1.length; _i++) {
-        var m = members_1[_i];
-        var canonical = COLOR_ALIAS_TO_CANONICAL.get(m);
+    for (const m of members) {
+        const canonical = COLOR_ALIAS_TO_CANONICAL.get(m);
         if (canonical)
             return canonical;
     }
     return null;
 }
 function inferColorFromFamilyCluster(raw) {
-    var key = normalizeRawColorString(raw)
+    const key = normalizeRawColorString(raw)
         .replace(/["“”'`]/g, " ")
         .replace(/[()]/g, " ")
         .replace(/[_-]/g, " ")
@@ -365,26 +460,25 @@ function inferColorFromFamilyCluster(raw) {
         .trim();
     if (!key)
         return null;
-    var bestColor = null;
-    var bestScore = 0;
-    for (var _i = 0, COLOR_FAMILY_CLUSTERS_1 = COLOR_FAMILY_CLUSTERS; _i < COLOR_FAMILY_CLUSTERS_1.length; _i++) {
-        var cluster = COLOR_FAMILY_CLUSTERS_1[_i];
-        var score = 0;
-        for (var _a = 0, _b = cluster.normalizedMembers; _a < _b.length; _a++) {
-            var member = _b[_a];
+    let bestColor = null;
+    let bestScore = 0;
+    for (const cluster of COLOR_FAMILY_CLUSTERS) {
+        let score = 0;
+        for (const member of cluster.normalizedMembers) {
             if (!member)
                 continue;
             if (key === member)
                 score += 4;
-            else if (key.includes(member))
+            else if (member.length >= 5 && key.includes(member))
                 score += 2;
             else {
-                var words = member.split(" ").filter(Boolean);
-                for (var _c = 0, words_2 = words; _c < words_2.length; _c++) {
-                    var w = words_2[_c];
+                const words = member.split(" ").filter(Boolean);
+                for (const w of words) {
                     if (w.length < 3)
                         continue;
-                    if (new RegExp("\\b".concat(w, "\\b")).test(key))
+                    if (COLOR_NOISE_WORDS.has(w))
+                        continue;
+                    if (new RegExp(`\\b${w}\\b`).test(key))
                         score += 1;
                 }
             }
@@ -401,10 +495,10 @@ function inferColorFromFamilyCluster(raw) {
  * Used for clustering/auditing noisy merchant values.
  */
 function inferColorGroupFromRaw(raw) {
-    var _a, _b;
+    var _a, _b, _c;
     if (!raw)
         return "unknown";
-    var source = normalizeRawColorString(raw)
+    const source = normalizeRawColorString(raw)
         .replace(/["“”'`]/g, " ")
         .replace(/[()]/g, " ")
         .replace(/[_-]/g, " ")
@@ -412,67 +506,72 @@ function inferColorGroupFromRaw(raw) {
         .trim();
     if (!source || isNonColorValue(source))
         return "unknown";
-    var candidates = [];
-    var addCandidate = function (token) {
+    const isComposite = hasCompositeColorSeparator(String(raw));
+    const exact = !isComposite ? exactAliasCanonical(source) : null;
+    if (exact) {
+        return (_a = (0, colorCanonical_1.coarseColorBucket)(exact)) !== null && _a !== void 0 ? _a : "unknown";
+    }
+    const candidates = [];
+    const addCandidate = (token) => {
         var _a, _b;
-        var c = String(token !== null && token !== void 0 ? token : "").trim();
+        const c = String(token !== null && token !== void 0 ? token : "").trim();
         if (!c)
             return;
         candidates.push(c);
-        var normalized = (_b = (_a = normalizeColorToken(c)) !== null && _a !== void 0 ? _a : inferColorFromFamilyCluster(c)) !== null && _b !== void 0 ? _b : c;
-        var bucket = (0, colorCanonical_1.coarseColorBucket)(normalized);
+        const normalized = (_b = (_a = normalizeColorToken(c)) !== null && _a !== void 0 ? _a : inferColorFromFamilyCluster(c)) !== null && _b !== void 0 ? _b : c;
+        const bucket = (0, colorCanonical_1.coarseColorBucket)(normalized);
         if (bucket)
             candidates.push(bucket);
     };
-    addCandidate(source);
-    var parts = source
+    if (!isComposite)
+        addCandidate(source);
+    const parts = source
         .replace(/\band\b/g, ",")
         .replace(/\\/g, "/")
         .split(/[\/,&+|,-]/g)
-        .map(function (s) { return s.trim(); })
+        .map((s) => s.trim())
         .filter(Boolean);
-    for (var _i = 0, parts_1 = parts; _i < parts_1.length; _i++) {
-        var p = parts_1[_i];
+    for (const p of parts) {
         if (isNonColorValue(p))
+            continue;
+        if (COLOR_NOISE_WORDS.has(p))
             continue;
         if (/^\d+([.\s]\d+)?$/.test(p))
             continue;
         addCandidate(p);
-        var words = p.split(/\s+/g).filter(Boolean);
-        for (var i = 0; i < words.length; i++) {
-            var w = words[i];
+        const words = p.split(/\s+/g).filter(Boolean);
+        for (let i = 0; i < words.length; i++) {
+            const w = words[i];
             if (/^(?:[a-z]{1,4}\d+|\d+[a-z]{1,4})$/i.test(w))
                 continue;
             if (COLOR_NOISE_WORDS.has(w))
                 continue;
             addCandidate(w);
             if (i < words.length - 1)
-                addCandidate("".concat(w, " ").concat(words[i + 1]));
+                addCandidate(`${w} ${words[i + 1]}`);
         }
     }
-    var votes = new Map();
-    for (var _c = 0, candidates_1 = candidates; _c < candidates_1.length; _c++) {
-        var token = candidates_1[_c];
-        var bucket = (0, colorCanonical_1.coarseColorBucket)(token);
+    const votes = new Map();
+    for (const token of candidates) {
+        const bucket = (0, colorCanonical_1.coarseColorBucket)(token);
         if (!bucket)
             continue;
-        votes.set(bucket, ((_a = votes.get(bucket)) !== null && _a !== void 0 ? _a : 0) + 1);
+        votes.set(bucket, ((_b = votes.get(bucket)) !== null && _b !== void 0 ? _b : 0) + 1);
     }
     if (votes.size === 0) {
-        var hinted = inferBucketFromKeywordHints(source);
-        return (_b = hinted) !== null && _b !== void 0 ? _b : "unknown";
+        const hinted = inferBucketFromKeywordHints(source);
+        return (_c = hinted) !== null && _c !== void 0 ? _c : "unknown";
     }
-    var winner = "unknown";
-    var maxVotes = -1;
-    for (var _d = 0, _e = votes.entries(); _d < _e.length; _d++) {
-        var _f = _e[_d], bucket = _f[0], count = _f[1];
+    let winner = "unknown";
+    let maxVotes = -1;
+    for (const [bucket, count] of votes.entries()) {
         if (count > maxVotes) {
             maxVotes = count;
             winner = bucket;
         }
     }
     if (winner === "unknown") {
-        var hinted = inferBucketFromKeywordHints(source);
+        const hinted = inferBucketFromKeywordHints(source);
         if (hinted)
             return hinted;
     }
@@ -482,7 +581,7 @@ function normalizeColorToken(raw) {
     var _a;
     if (!raw)
         return null;
-    var keyBase = normalizeRawColorString(raw)
+    const keyBase = normalizeRawColorString(raw)
         .replace(/["“”'`]/g, " ")
         .replace(/[()]/g, " ")
         .replace(/[_-]/g, " ")
@@ -490,13 +589,16 @@ function normalizeColorToken(raw) {
         .trim();
     if (!keyBase || isNonColorValue(keyBase))
         return null;
-    var key = (_a = COLOR_COMMON_MISSPELLINGS[keyBase]) !== null && _a !== void 0 ? _a : keyBase;
-    var direct = COLOR_ALIAS_TO_CANONICAL.get(key);
+    const key = (_a = COLOR_COMMON_MISSPELLINGS[keyBase]) !== null && _a !== void 0 ? _a : keyBase;
+    const exactOverride = EXACT_COLOR_CANONICAL_OVERRIDES[key];
+    if (exactOverride)
+        return exactOverride;
+    const direct = COLOR_ALIAS_TO_CANONICAL.get(key);
     if (direct)
         return direct;
     // Phrase fallback for compound merchant values like "mid wash denim".
     // Prefer explicit color words first, then infer denim family as blue.
-    var hasWord = function (w) { return new RegExp("\\b".concat(w, "\\b")).test(key); };
+    const hasWord = (w) => new RegExp(`\\b${w}\\b`).test(key);
     if (key.includes("denim")) {
         if (hasWord("black"))
             return "black";
@@ -508,14 +610,13 @@ function normalizeColorToken(raw) {
     }
     // Generic fallback: if a known alias appears as a whole word/phrase inside
     // the value, resolve to that canonical color.
-    for (var _i = 0, _b = COLOR_ALIAS_TO_CANONICAL.entries(); _i < _b.length; _i++) {
-        var _c = _b[_i], alias = _c[0], canonical = _c[1];
-        if (new RegExp("\\b".concat(alias.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&"), "\\b")).test(key)) {
+    for (const [alias, canonical] of COLOR_ALIAS_TO_CANONICAL.entries()) {
+        if (new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\b`).test(key)) {
             return canonical;
         }
     }
     // Family-cluster fallback for noisy merchant strings.
-    var clustered = inferColorFromFamilyCluster(key);
+    const clustered = inferColorFromFamilyCluster(key);
     if (clustered)
         return clustered;
     return null;
@@ -527,48 +628,54 @@ function normalizeColorToken(raw) {
 function normalizeColorTokensFromRaw(raw) {
     if (!raw)
         return [];
-    var source = normalizeRawColorString(raw);
+    const source = normalizeRawColorString(raw);
     if (!source || isNonColorValue(source))
         return [];
-    var out = [];
-    var add = function (token) {
+    const isComposite = hasCompositeColorSeparator(String(raw));
+    const exact = !isComposite ? exactAliasCanonical(source) : null;
+    if (exact)
+        return [exact];
+    const out = [];
+    const add = (token) => {
         var _a;
-        var norm = (_a = normalizeColorToken(token)) !== null && _a !== void 0 ? _a : inferColorFromFamilyCluster(token);
+        const norm = (_a = normalizeColorToken(token)) !== null && _a !== void 0 ? _a : inferColorFromFamilyCluster(token);
         if (norm && !out.includes(norm))
             out.push(norm);
     };
     // 1) Whole-phrase attempt first for values like "mid wash denim".
-    add(source);
+    if (!isComposite)
+        add(source);
     // 2) Split composite merchant formats.
-    var parts = source
+    const parts = source
         .replace(/\band\b/g, ",")
         .replace(/\\/g, "/")
         .split(/[\/,&+|,-]/g)
-        .map(function (s) { return s.trim(); })
+        .map((s) => s.trim())
         .filter(Boolean);
-    for (var _i = 0, parts_2 = parts; _i < parts_2.length; _i++) {
-        var p = parts_2[_i];
+    for (const p of parts) {
         if (isNonColorValue(p))
+            continue;
+        if (COLOR_NOISE_WORDS.has(p))
             continue;
         if (/^\d+([.\s]\d+)?$/.test(p))
             continue;
         add(p);
         // 3) Token-level fallback for noisy chunks ("khaki green", "grey chine", "flashy yellow").
-        var words = p.split(/\s+/g).filter(Boolean);
-        for (var i = 0; i < words.length; i++) {
-            var w = words[i];
+        const words = p.split(/\s+/g).filter(Boolean);
+        for (let i = 0; i < words.length; i++) {
+            const w = words[i];
             if (/^(?:[a-z]{1,4}\d+|\d+[a-z]{1,4})$/i.test(w))
                 continue;
             if (COLOR_NOISE_WORDS.has(w))
                 continue;
             add(w);
             if (i < words.length - 1)
-                add("".concat(w, " ").concat(words[i + 1]));
+                add(`${w} ${words[i + 1]}`);
         }
     }
     if (out.length === 0) {
-        var group = inferColorGroupFromRaw(source);
-        var canonical = COLOR_BUCKET_TO_CANONICAL[group];
+        const group = inferColorGroupFromRaw(source);
+        const canonical = COLOR_BUCKET_TO_CANONICAL[group];
         if (canonical)
             out.push(canonical);
     }
@@ -576,8 +683,8 @@ function normalizeColorTokensFromRaw(raw) {
 }
 function expandColorTermsForFilter(color) {
     var _a, _b;
-    var canonical = (_a = normalizeColorToken(color)) !== null && _a !== void 0 ? _a : color.toLowerCase();
-    var aliases = (_b = exports.COLOR_CANONICAL_ALIASES[canonical]) !== null && _b !== void 0 ? _b : [canonical];
-    var out = new Set(__spreadArray([canonical], aliases.map(function (a) { return a.toLowerCase(); }), true));
-    return __spreadArray([], out, true);
+    const canonical = (_a = normalizeColorToken(color)) !== null && _a !== void 0 ? _a : color.toLowerCase();
+    const aliases = (_b = exports.COLOR_CANONICAL_ALIASES[canonical]) !== null && _b !== void 0 ? _b : [canonical];
+    const out = new Set([canonical, ...aliases.map((a) => a.toLowerCase())]);
+    return [...out];
 }

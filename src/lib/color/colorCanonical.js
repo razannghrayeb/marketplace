@@ -38,7 +38,7 @@ exports.FASHION_CANONICAL_COLORS = [
     "teal",
     "multicolor",
 ];
-var FASHION_COLOR_ALIASES = {
+const FASHION_COLOR_ALIASES = {
     offwhite: "off-white",
     "off-white": "off-white",
     "off white": "off-white",
@@ -48,6 +48,16 @@ var FASHION_COLOR_ALIASES = {
     ecru: "off-white",
     natural: "off-white",
     eggshell: "off-white",
+    // Modern fashion off-white / cream variants used by Everlane, Madewell, etc.
+    oatmeal: "off-white",
+    oat: "off-white",
+    vanilla: "cream",
+    alabaster: "white",
+    parchment: "off-white",
+    pearl: "off-white",
+    milk: "white",
+    snow: "white",
+    // Tan / camel / beige
     camel: "camel",
     tan: "tan",
     sand: "beige",
@@ -56,23 +66,139 @@ var FASHION_COLOR_ALIASES = {
     "toasted-coconut": "beige",
     "toasted coconut": "beige",
     beech: "beige",
+    fawn: "tan",
+    almond: "beige",
+    biscuit: "beige",
+    wheat: "beige",
+    rye: "beige",
+    // Brown family
+    caramel: "brown",
+    cognac: "brown",
+    toffee: "brown",
+    chestnut: "brown",
+    mahogany: "brown",
+    walnut: "brown",
+    coffee: "brown",
+    latte: "brown",
+    truffle: "brown",
+    nutmeg: "brown",
+    cinnamon: "brown",
+    terracotta: "brown",
+    clay: "brown",
+    sienna: "brown",
+    // Gray family
     antra: "charcoal",
     anthracite: "charcoal",
     charcoal: "charcoal",
     "dark-gray": "charcoal",
     "dark-grey": "charcoal",
     "dark grey": "charcoal",
+    cement: "gray",
+    putty: "beige",
+    pebble: "gray",
+    mushroom: "gray",
+    smoke: "gray",
+    fog: "gray",
+    mist: "gray",
+    dove: "gray",
+    heather: "gray",
+    pewter: "silver",
+    gunmetal: "charcoal",
+    ash: "gray",
+    slate: "charcoal",
+    stone: "gray",
+    // Black variants
     heatheredblack: "black",
     "heathered-black": "black",
     "heathered black": "black",
+    jet: "black",
+    onyx: "black",
+    ebony: "black",
+    raven: "black",
+    // Blue family
     indigo: "denim",
     denim: "denim",
+    "denim-blue": "denim",
+    midnight: "navy",
+    sapphire: "navy",
+    cobalt: "blue",
+    azure: "blue",
+    periwinkle: "light-blue",
+    cornflower: "light-blue",
+    sky: "light-blue",
+    "sky-blue": "light-blue",
+    sea: "blue",
+    ocean: "blue",
+    lake: "blue",
+    "icy-water": "light-blue",
+    "icy water": "light-blue",
+    // Green family
+    seafoam: "green",
+    pine: "green",
+    moss: "olive",
+    military: "olive",
+    hunter: "green",
+    pistachio: "green",
+    lime: "green",
+    chartreuse: "green",
+    emerald: "green",
+    jade: "green",
+    // Yellow / gold family
+    saffron: "yellow",
+    ochre: "yellow",
+    amber: "yellow",
+    canary: "yellow",
+    butter: "yellow",
+    lemon: "yellow",
+    honey: "yellow",
+    mustard: "yellow",
+    golden: "gold",
+    // Red / pink family
+    ruby: "red",
+    crimson: "red",
+    scarlet: "red",
+    claret: "burgundy",
+    oxblood: "burgundy",
+    wine: "burgundy",
+    maroon: "burgundy",
+    raspberry: "pink",
+    watermelon: "pink",
+    bubblegum: "pink",
+    pink: "pink",
+    blush: "pink",
+    rose: "pink",
+    "dusty-pink": "pink",
+    "dusty pink": "pink",
+    "dusty-rose": "pink",
+    "dusty rose": "pink",
+    fuchsia: "pink",
+    fuschia: "pink",
+    fushia: "pink",
+    fuhsia: "pink",
+    magenta: "pink",
+    hotpink: "pink",
+    "hot-pink": "pink",
+    "hot pink": "pink",
+    apricot: "orange",
+    peach: "orange",
+    coral: "orange",
+    salmon: "orange",
+    // Purple family
+    eggplant: "purple",
+    aubergine: "purple",
+    orchid: "purple",
+    grape: "purple",
+    plum: "purple",
+    violet: "purple",
+    lavender: "purple",
+    lilac: "purple",
+    mauve: "purple",
 };
 function canonicalizeFashionColorToken(raw) {
     var _a, _b;
     if (!raw)
         return null;
-    var normalized = normalizeToken(String(raw));
+    const normalized = normalizeToken(String(raw));
     if (!normalized)
         return null;
     return (_b = (_a = FASHION_COLOR_ALIASES[normalized]) !== null && _a !== void 0 ? _a : FASHION_COLOR_ALIASES[normalized.replace(/-/g, "")]) !== null && _b !== void 0 ? _b : normalized;
@@ -141,8 +267,8 @@ function normalizeToken(s) {
         .trim();
 }
 function specialColorMatchScore(desiredRaw, productRaw) {
-    var desired = canonicalizeFashionColorToken(desiredRaw);
-    var product = canonicalizeFashionColorToken(productRaw);
+    const desired = canonicalizeFashionColorToken(desiredRaw);
+    const product = canonicalizeFashionColorToken(productRaw);
     if (!desired || !product)
         return null;
     if (desired === "off-white") {
@@ -167,7 +293,7 @@ function specialColorMatchScore(desiredRaw, productRaw) {
         return 1;
     return null;
 }
-var VERY_LIGHT_NEUTRAL_SET = new Set([
+const VERY_LIGHT_NEUTRAL_SET = new Set([
     "white",
     "off-white",
     "cream",
@@ -179,7 +305,7 @@ var VERY_LIGHT_NEUTRAL_SET = new Set([
  * Light-shade groups (tier: light-shade).
  * These are pale, soft, light variants of their families.
  */
-var LIGHT_SHADE_GROUPS = [
+const LIGHT_SHADE_GROUPS = [
     new Set(["light-blue", "sky-blue", "powder-blue", "baby-blue", "pale-blue"].map(normalizeToken)),
     new Set(["silver", "gray", "grey", "heather-gray", "ash"].map(normalizeToken)),
     new Set(["blush", "dusty-rose", "dusty-pink", "rose", "mauve"].map(normalizeToken)),
@@ -194,7 +320,7 @@ var LIGHT_SHADE_GROUPS = [
  * Dark-shade groups (tier: dark-shade).
  * These are deep, dark, rich variants of their families.
  */
-var DARK_SHADE_GROUPS = [
+const DARK_SHADE_GROUPS = [
     new Set(["navy", "midnight-blue", "indigo", "sapphire", "dark-blue"].map(normalizeToken)),
     new Set(["charcoal", "dark-gray", "dark-grey", "slate", "gunmetal"].map(normalizeToken)),
     new Set(["burgundy", "maroon", "wine", "claret", "oxblood", "garnet"].map(normalizeToken)),
@@ -213,16 +339,14 @@ var DARK_SHADE_GROUPS = [
  * Returns: "light-shade" | "dark-shade" | "mid" | null
  */
 function getShadeGroup(token) {
-    var normalized = normalizeToken(token);
+    const normalized = normalizeToken(token);
     if (!normalized)
         return null;
-    for (var _i = 0, LIGHT_SHADE_GROUPS_1 = LIGHT_SHADE_GROUPS; _i < LIGHT_SHADE_GROUPS_1.length; _i++) {
-        var lightGroup = LIGHT_SHADE_GROUPS_1[_i];
+    for (const lightGroup of LIGHT_SHADE_GROUPS) {
         if (lightGroup.has(normalized))
             return "light-shade";
     }
-    for (var _a = 0, DARK_SHADE_GROUPS_1 = DARK_SHADE_GROUPS; _a < DARK_SHADE_GROUPS_1.length; _a++) {
-        var darkGroup = DARK_SHADE_GROUPS_1[_a];
+    for (const darkGroup of DARK_SHADE_GROUPS) {
         if (darkGroup.has(normalized))
             return "dark-shade";
     }
@@ -234,7 +358,7 @@ function stripTonePrefix(token) {
         .trim();
 }
 function colorTone(tokenRaw) {
-    var token = normalizeToken(tokenRaw);
+    const token = normalizeToken(tokenRaw);
     if (!token)
         return "mid";
     if (token.startsWith("light-") ||
@@ -257,9 +381,9 @@ function colorTone(tokenRaw) {
     return "mid";
 }
 function toneAdjustedFamilyScore(desiredRaw, productRaw) {
-    var desiredTone = colorTone(desiredRaw);
-    var productTone = colorTone(productRaw);
-    var score = 0.88;
+    const desiredTone = colorTone(desiredRaw);
+    const productTone = colorTone(productRaw);
+    let score = 0.88;
     if (desiredTone === "light") {
         if (productTone === "light")
             score += 0.08;
@@ -283,10 +407,10 @@ function coarseColorBucket(raw) {
     var _a, _b, _c, _d;
     if (!raw)
         return null;
-    var key = normalizeToken(raw);
+    const key = normalizeToken(raw);
     if (!key)
         return null;
-    var alias = {
+    const alias = {
         black: "black",
         charcoal: "black",
         white: "white",
@@ -372,9 +496,9 @@ function coarseColorBucket(raw) {
         multicolor: "multicolor",
         multicolour: "multicolor",
     };
-    var noDashKey = key.replace(/-/g, "");
-    var baseKey = stripTonePrefix(key);
-    var baseNoDashKey = baseKey.replace(/-/g, "");
+    const noDashKey = key.replace(/-/g, "");
+    const baseKey = stripTonePrefix(key);
+    const baseNoDashKey = baseKey.replace(/-/g, "");
     return ((_d = (_c = (_b = (_a = alias[key]) !== null && _a !== void 0 ? _a : alias[noDashKey]) !== null && _b !== void 0 ? _b : alias[baseKey]) !== null && _c !== void 0 ? _c : alias[baseNoDashKey]) !== null && _d !== void 0 ? _d : null);
 }
 /**
@@ -391,26 +515,24 @@ function coarseColorBucket(raw) {
  */
 function tieredColorMatchScore(desiredRaw, productColors) {
     var _a;
-    var desired = (_a = canonicalizeFashionColorToken(desiredRaw)) !== null && _a !== void 0 ? _a : normalizeToken(desiredRaw);
+    const desired = (_a = canonicalizeFashionColorToken(desiredRaw)) !== null && _a !== void 0 ? _a : normalizeToken(desiredRaw);
     if (!desired || productColors.length === 0) {
         return { score: 0, matchedColor: null, tier: "none" };
     }
-    var prodNorm = productColors
-        .map(function (c) { var _a; return ({ raw: c, n: (_a = canonicalizeFashionColorToken(String(c))) !== null && _a !== void 0 ? _a : normalizeToken(String(c)) }); })
-        .filter(function (x) { return x.n; });
+    const prodNorm = productColors
+        .map((c) => { var _a; return ({ raw: c, n: (_a = canonicalizeFashionColorToken(String(c))) !== null && _a !== void 0 ? _a : normalizeToken(String(c)) }); })
+        .filter((x) => x.n);
     // Tier 1: Exact match
-    for (var _i = 0, prodNorm_1 = prodNorm; _i < prodNorm_1.length; _i++) {
-        var _b = prodNorm_1[_i], raw = _b.raw, n = _b.n;
+    for (const { raw, n } of prodNorm) {
         if (n === desired) {
             return { score: 1, matchedColor: raw, tier: "exact" };
         }
     }
-    var bestSpecial = { score: 0, matchedColor: null };
-    for (var _c = 0, prodNorm_2 = prodNorm; _c < prodNorm_2.length; _c++) {
-        var _d = prodNorm_2[_c], raw = _d.raw, n = _d.n;
-        var score = specialColorMatchScore(desired, n);
+    let bestSpecial = { score: 0, matchedColor: null };
+    for (const { raw, n } of prodNorm) {
+        const score = specialColorMatchScore(desired, n);
         if (score != null && score > bestSpecial.score) {
-            bestSpecial = { score: score, matchedColor: raw };
+            bestSpecial = { score, matchedColor: raw };
         }
     }
     if (bestSpecial.matchedColor) {
@@ -421,23 +543,21 @@ function tieredColorMatchScore(desiredRaw, productColors) {
         };
     }
     // Tier 2 & 3: Shade-specific matches (light-shade or dark-shade)
-    var desiredShade = getShadeGroup(desired);
-    var bestShade = {
+    const desiredShade = getShadeGroup(desired);
+    let bestShade = {
         score: 0,
         matchedColor: null,
         tier: null,
     };
     if (desiredShade === "light-shade" || desiredShade === "dark-shade") {
-        var targetGroup = desiredShade === "light-shade" ? LIGHT_SHADE_GROUPS : DARK_SHADE_GROUPS;
-        for (var _e = 0, targetGroup_1 = targetGroup; _e < targetGroup_1.length; _e++) {
-            var shadeGroup = targetGroup_1[_e];
+        const targetGroup = desiredShade === "light-shade" ? LIGHT_SHADE_GROUPS : DARK_SHADE_GROUPS;
+        for (const shadeGroup of targetGroup) {
             if (shadeGroup.has(desired)) {
                 // Found the desired color's shade group; check for matches in same group
-                for (var _f = 0, prodNorm_3 = prodNorm; _f < prodNorm_3.length; _f++) {
-                    var _g = prodNorm_3[_f], raw = _g.raw, n = _g.n;
+                for (const { raw, n } of prodNorm) {
                     if (shadeGroup.has(n)) {
-                        var score = 0.92; // High score for same shade group
-                        var productShade = getShadeGroup(n);
+                        let score = 0.92; // High score for same shade group
+                        const productShade = getShadeGroup(n);
                         // Same exact shade nuance deserves higher score
                         if (desired === n)
                             score = 0.98;
@@ -445,7 +565,7 @@ function tieredColorMatchScore(desiredRaw, productColors) {
                         else if (stripTonePrefix(desired) === stripTonePrefix(n))
                             score += 0.04;
                         if (score > bestShade.score) {
-                            bestShade = { score: score, matchedColor: raw, tier: desiredShade };
+                            bestShade = { score, matchedColor: raw, tier: desiredShade };
                         }
                     }
                 }
@@ -457,17 +577,15 @@ function tieredColorMatchScore(desiredRaw, productColors) {
         return { score: bestShade.score, matchedColor: bestShade.matchedColor, tier: bestShade.tier };
     }
     // Tier 4: Family match
-    var bestFamily = {
+    let bestFamily = {
         score: 0,
         matchedColor: null,
     };
-    for (var _h = 0, prodNorm_4 = prodNorm; _h < prodNorm_4.length; _h++) {
-        var _j = prodNorm_4[_h], raw = _j.raw, n = _j.n;
-        for (var _k = 0, COLOR_FAMILY_GROUPS_1 = exports.COLOR_FAMILY_GROUPS; _k < COLOR_FAMILY_GROUPS_1.length; _k++) {
-            var group = COLOR_FAMILY_GROUPS_1[_k];
-            var g = new Set(group.map(normalizeToken));
+    for (const { raw, n } of prodNorm) {
+        for (const group of exports.COLOR_FAMILY_GROUPS) {
+            const g = new Set(group.map(normalizeToken));
             if (g.has(desired) && g.has(n)) {
-                var adjusted = toneAdjustedFamilyScore(desired, n);
+                const adjusted = toneAdjustedFamilyScore(desired, n);
                 if (adjusted > bestFamily.score) {
                     bestFamily = { score: adjusted, matchedColor: raw };
                 }
@@ -478,18 +596,17 @@ function tieredColorMatchScore(desiredRaw, productColors) {
         return { score: bestFamily.score, matchedColor: bestFamily.matchedColor, tier: "family" };
     }
     // Tier 5: Bucket match
-    var db = coarseColorBucket(desired);
-    var desiredTone = colorTone(desired);
-    var bestBucket = {
+    const db = coarseColorBucket(desired);
+    const desiredTone = colorTone(desired);
+    let bestBucket = {
         score: 0,
         matchedColor: null,
     };
-    for (var _l = 0, prodNorm_5 = prodNorm; _l < prodNorm_5.length; _l++) {
-        var _m = prodNorm_5[_l], raw = _m.raw, n = _m.n;
-        var pb = coarseColorBucket(n);
+    for (const { raw, n } of prodNorm) {
+        const pb = coarseColorBucket(n);
         if (db && pb && db === pb) {
-            var score = 0.58;
-            var productTone = colorTone(n);
+            let score = 0.58;
+            const productTone = colorTone(n);
             if (desiredTone === "light") {
                 if (productTone === "light")
                     score += 0.04;
@@ -504,17 +621,16 @@ function tieredColorMatchScore(desiredRaw, productColors) {
             }
             score = Math.max(0, Math.min(0.7, score));
             if (score > bestBucket.score) {
-                bestBucket = { score: score, matchedColor: raw };
+                bestBucket = { score, matchedColor: raw };
             }
         }
     }
     // For light chromatic intents, only allow very-light neutrals as last-resort fallback
     // when there are NO bucket matches at all (strict priority for exact/shade/family/bucket matches first).
     if (desiredTone === "light" && db && db !== "white" && bestBucket.score === 0) {
-        for (var _o = 0, prodNorm_6 = prodNorm; _o < prodNorm_6.length; _o++) {
-            var _p = prodNorm_6[_o], raw = _p.raw, n = _p.n;
+        for (const { raw, n } of prodNorm) {
             if (VERY_LIGHT_NEUTRAL_SET.has(n)) {
-                var neutralFallbackScore = 0.28;
+                const neutralFallbackScore = 0.28;
                 if (neutralFallbackScore > bestBucket.score) {
                     bestBucket = { score: neutralFallbackScore, matchedColor: raw };
                 }
@@ -533,21 +649,21 @@ function tieredColorListCompliance(desired, productColors, mode) {
         return { compliance: 1, bestMatch: null, tier: "none" };
     if (productColors.length === 0)
         return { compliance: 0, bestMatch: null, tier: "none" };
-    var scores = desired.map(function (d) {
-        var m = tieredColorMatchScore(d, productColors);
+    const scores = desired.map((d) => {
+        const m = tieredColorMatchScore(d, productColors);
         return m;
     });
     if (mode === "all") {
-        var ok = scores.every(function (s) { return s.score > 0; });
-        var avg = scores.reduce(function (a, s) { return a + s.score; }, 0) / scores.length;
-        var best_1 = (_a = scores.map(function (s) { return s.matchedColor; }).find(Boolean)) !== null && _a !== void 0 ? _a : null;
+        const ok = scores.every((s) => s.score > 0);
+        const avg = scores.reduce((a, s) => a + s.score, 0) / scores.length;
+        const best = (_a = scores.map((s) => s.matchedColor).find(Boolean)) !== null && _a !== void 0 ? _a : null;
         return {
             compliance: ok ? avg : 0,
-            bestMatch: best_1,
-            tier: scores.every(function (s) { return s.tier === "exact"; }) ? "exact" : (_c = (_b = scores[0]) === null || _b === void 0 ? void 0 : _b.tier) !== null && _c !== void 0 ? _c : "none",
+            bestMatch: best,
+            tier: scores.every((s) => s.tier === "exact") ? "exact" : (_c = (_b = scores[0]) === null || _b === void 0 ? void 0 : _b.tier) !== null && _c !== void 0 ? _c : "none",
         };
     }
-    var best = scores.reduce(function (a, b) { return (a.score >= b.score ? a : b); });
+    const best = scores.reduce((a, b) => (a.score >= b.score ? a : b));
     return {
         compliance: best.score,
         bestMatch: best.matchedColor,

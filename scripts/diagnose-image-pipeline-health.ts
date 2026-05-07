@@ -8,6 +8,59 @@ function pct(part: number, total: number): string {
   return `${((part / total) * 100).toFixed(2)}%`;
 }
 
+async function countOpenSearchDocs(filter: any[]): Promise<number> {
+  const res = await osClient.count({
+    index: config.opensearch.index,
+    body: {
+      query: {
+        bool: { filter },
+      },
+    },
+  });
+  return Number((res as any).body?.count ?? 0);
+}
+
+function hasField(field: string): any {
+  return { exists: { field } };
+}
+
+function shoeBagCategoryFilter(kind: "footwear" | "bags"): any {
+  if (kind === "footwear") {
+    return {
+      bool: {
+        should: [
+          { term: { category_canonical: "footwear" } },
+          { wildcard: { category: { value: "*shoe*" } } },
+          { wildcard: { category: { value: "*sneaker*" } } },
+          { wildcard: { category: { value: "*boot*" } } },
+          { wildcard: { title: { value: "*shoe*" } } },
+          { wildcard: { title: { value: "*sneaker*" } } },
+          { wildcard: { title: { value: "*boot*" } } },
+          { terms: { product_types: ["shoe", "shoes", "sneaker", "sneakers", "boot", "boots", "footwear"] } },
+        ],
+        minimum_should_match: 1,
+      },
+    };
+  }
+
+  return {
+    bool: {
+      should: [
+        { term: { category_canonical: "bags" } },
+        { term: { category_canonical: "accessories" } },
+        { wildcard: { category: { value: "*bag*" } } },
+        { wildcard: { category: { value: "*handbag*" } } },
+        { wildcard: { category: { value: "*tote*" } } },
+        { wildcard: { title: { value: "*bag*" } } },
+        { wildcard: { title: { value: "*handbag*" } } },
+        { wildcard: { title: { value: "*tote*" } } },
+        { terms: { product_types: ["bag", "bags", "handbag", "tote", "clutch", "backpack", "crossbody"] } },
+      ],
+      minimum_should_match: 1,
+    },
+  };
+}
+
 async function main(): Promise<void> {
   const pool = new Pool({
     connectionString: config.database.url,
@@ -131,6 +184,55 @@ async function main(): Promise<void> {
     } else {
       console.log("OK: embedding and embedding_garment coverage are aligned.");
     }
+
+    const shoeFilter = shoeBagCategoryFilter("footwear");
+    const bagFilter = shoeBagCategoryFilter("bags");
+    const [
+      shoeTotal,
+      shoeEmbedding,
+      shoeGarment,
+      shoeTypes,
+      shoeColors,
+      shoeHeelPart,
+      shoeToePart,
+      bagTotal,
+      bagEmbedding,
+      bagGarment,
+      bagTypes,
+      bagColors,
+      bagHandlePart,
+      bagBodyPart,
+    ] = await Promise.all([
+      countOpenSearchDocs([shoeFilter]),
+      countOpenSearchDocs([shoeFilter, hasField("embedding")]),
+      countOpenSearchDocs([shoeFilter, hasField("embedding_garment")]),
+      countOpenSearchDocs([shoeFilter, hasField("product_types")]),
+      countOpenSearchDocs([shoeFilter, hasField("attr_colors")]),
+      countOpenSearchDocs([shoeFilter, hasField("embedding_part_heel")]),
+      countOpenSearchDocs([shoeFilter, hasField("embedding_part_toe")]),
+      countOpenSearchDocs([bagFilter]),
+      countOpenSearchDocs([bagFilter, hasField("embedding")]),
+      countOpenSearchDocs([bagFilter, hasField("embedding_garment")]),
+      countOpenSearchDocs([bagFilter, hasField("product_types")]),
+      countOpenSearchDocs([bagFilter, hasField("attr_colors")]),
+      countOpenSearchDocs([bagFilter, hasField("embedding_part_bag_handle")]),
+      countOpenSearchDocs([bagFilter, hasField("embedding_part_bag_body")]),
+    ]);
+
+    console.log("");
+    console.log("Shoes/Bags debug coverage");
+    console.log("  footwear docs                         :", shoeTotal);
+    console.log(`    embedding                           : ${shoeEmbedding} (${pct(shoeEmbedding, shoeTotal)})`);
+    console.log(`    embedding_garment                   : ${shoeGarment} (${pct(shoeGarment, shoeTotal)})`);
+    console.log(`    product_types                       : ${shoeTypes} (${pct(shoeTypes, shoeTotal)})`);
+    console.log(`    attr_colors                         : ${shoeColors} (${pct(shoeColors, shoeTotal)})`);
+    console.log(`    heel/toe part vectors               : ${shoeHeelPart}/${shoeToePart} (${pct(Math.min(shoeHeelPart, shoeToePart), shoeTotal)})`);
+    console.log("  bag/accessory docs                    :", bagTotal);
+    console.log(`    embedding                           : ${bagEmbedding} (${pct(bagEmbedding, bagTotal)})`);
+    console.log(`    embedding_garment                   : ${bagGarment} (${pct(bagGarment, bagTotal)})`);
+    console.log(`    product_types                       : ${bagTypes} (${pct(bagTypes, bagTotal)})`);
+    console.log(`    attr_colors                         : ${bagColors} (${pct(bagColors, bagTotal)})`);
+    console.log(`    handle/body part vectors            : ${bagHandlePart}/${bagBodyPart} (${pct(Math.min(bagHandlePart, bagBodyPart), bagTotal)})`);
   } finally {
     await pool.end().catch(() => undefined);
   }
