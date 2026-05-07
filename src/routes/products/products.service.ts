@@ -7553,6 +7553,32 @@ export async function searchByImageWithSimilarity(
     (dressPatternMax - dressPatternMedian) >= 0.12;
   const dressPatternMin = Math.max(0.46, Math.min(0.72, dressPatternMax - 0.18));
   const strongVisualOverrideMinSim = imageStrongVisualOverrideMinSimilarity();
+  
+  // Define debug helpers early so they can be used throughout filtering pipeline
+  const imageSearchDropDebugEnabled =
+    String(process.env.SEARCH_IMAGE_DEBUG_DROPS ?? "").toLowerCase().trim() === "1" ||
+    String(process.env.SEARCH_IMAGE_DEBUG_DROPS ?? "").toLowerCase().trim() === "true";
+  const suitPathDebugEnabled = imageSearchDropDebugEnabled && (
+    hasStrictSuitTopIntent(desiredProductTypes) ||
+    hasTailoredTypeIntent(desiredProductTypes) ||
+    detectionCategoryNorm === "tops" ||
+    detectionCategoryNorm === "outerwear" ||
+    detectionCategoryNorm === "tailored"
+  );
+  const debugImageDrop = (stage: string, hit: any, reasons: string[], extra?: Record<string, unknown>) => {
+    if (!imageSearchDropDebugEnabled) return;
+    const src = (hit?._source ?? {}) as Record<string, unknown>;
+    console.warn("[search-image][drop-debug]", {
+      stage,
+      product_id: String(src.product_id ?? hit?.id ?? ""),
+      title: String(src.title ?? ""),
+      category: String(src.category ?? src.category_canonical ?? ""),
+      reasons,
+      suit_cue: explainActualSuitCatalogCue(src),
+      ...extra,
+    });
+  };
+  
   const rankedHitsCategorySafe = strictCategorySafetyActive
     ? rankedHitsCandidates.filter((h: any) => {
       const src = (h?._source ?? {}) as Record<string, unknown>;
@@ -7818,37 +7844,6 @@ export async function searchByImageWithSimilarity(
   }, 0);
   const hasStrongVisualEvidence =
     strongestVisualCandidate >= Math.max(0.7, similarityThreshold - 0.1);
-  const imageSearchDropDebugEnabled =
-    String(process.env.SEARCH_IMAGE_DEBUG_DROPS ?? "").toLowerCase().trim() === "1" ||
-    String(process.env.SEARCH_IMAGE_DEBUG_DROPS ?? "").toLowerCase().trim() === "true";
-  const suitPathDebugEnabled = imageSearchDropDebugEnabled && (
-    hasStrictSuitTopIntent(desiredProductTypes) ||
-    hasTailoredTypeIntent(desiredProductTypes) ||
-    detectionCategoryNorm === "tops" ||
-    detectionCategoryNorm === "outerwear" ||
-    detectionCategoryNorm === "tailored"
-  );
-  const debugImageDrop = (stage: string, hit: any, reasons: string[], extra?: Record<string, unknown>) => {
-    if (!imageSearchDropDebugEnabled) return;
-    const src = (hit?._source ?? {}) as Record<string, unknown>;
-    console.warn("[search-image][drop-debug]", {
-      stage,
-      product_id: String(src.product_id ?? hit?.id ?? ""),
-      title: String(src.title ?? ""),
-      category: String(src.category ?? src.category_canonical ?? ""),
-      reasons,
-      suit_cue: explainActualSuitCatalogCue(src),
-      finalRelevance01: Number((hit as any)?.finalRelevance01 ?? 0),
-      similarity_score: Number((hit as any)?.similarity_score ?? 0),
-      crossFamilyPenalty: Number((hit as any)?.explain?.crossFamilyPenalty ?? 0),
-      productTypeCompliance: Number((hit as any)?.explain?.productTypeCompliance ?? 0),
-      exactTypeScore: Number((hit as any)?.explain?.exactTypeScore ?? 0),
-      colorCompliance: Number((hit as any)?.explain?.colorCompliance ?? 0),
-      sleeveCompliance: Number((hit as any)?.explain?.sleeveCompliance ?? 0),
-      audienceCompliance: Number((hit as any)?.explain?.audienceCompliance ?? 0),
-      ...extra,
-    });
-  };
   const detectionFinalAcceptFloor = hasDetectionAnchoredTypeIntent
     ? imageDetectionFinalAcceptFloor(detectionCategoryNorm)
     : finalAcceptMin;
