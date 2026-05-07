@@ -9999,6 +9999,9 @@ export async function searchByImageWithSimilarity(
   // When unified scorer is enabled, prefer `explain.unifiedScorer.score` instead
   // so experiments drive ordering without changing the pipeline.
   const unifiedScorerEnabled = isUnifiedImageScorerEnabled();
+  if (unifiedScorerEnabled && results.length > 0) {
+    console.warn('[search-image][unified-scorer-sort] ENABLED - sorting by unified score');
+  }
   results.sort((a: any, b: any) => {
     const aExplain = (a.explain ?? {}) as any;
     const bExplain = (b.explain ?? {}) as any;
