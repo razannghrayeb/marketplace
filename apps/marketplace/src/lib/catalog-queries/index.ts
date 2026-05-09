@@ -588,7 +588,7 @@ async function fetchVendorStatsFallback(): Promise<VendorStats[]> {
     const [vendorsRes, statsRes] = await Promise.all([
       sb.from('vendors').select('id, name, url, ship_to_lebanon')
         .not('name', 'in', `(${EXCLUDED_VENDOR_NAMES.map(n => `"${n}"`).join(',')})`),
-      sb.rpc('get_vendor_stats').then(r => r).catch(() => ({ data: null, error: new Error('timeout') })),
+      sb.rpc('get_vendor_stats'),
     ])
 
     if (vendorsRes.error || !vendorsRes.data) return []
