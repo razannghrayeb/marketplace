@@ -114,7 +114,7 @@ let aggregateCache: {
   inFlight: null,
 }
 
-const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'https://marketplace-359201620993.asia-southeast1.run.app').replace(/\/+$/, '')
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'https://marketplace-96918972071.asia-southeast1.run.app').replace(/\/+$/, '')
 
 function toNumber(value: unknown, fallback = 0): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value
