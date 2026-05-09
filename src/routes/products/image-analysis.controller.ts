@@ -23,6 +23,8 @@ import {
   UserDefinedBox,
 } from "./image-analysis.service";
 import { getYOLOv8Client } from "../../lib/image/yolov8Client";
+import { toPublicSearchProducts } from "../../lib/search/publicSearchResult";
+import { sortProductsByUnifiedScorer } from "../../lib/search/sortResults";
 
 const router = Router();
 
@@ -85,19 +87,26 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function finalRelevanceScore(product: unknown): number {
-  const score = Number((product as any)?.finalRelevance01 ?? 0);
-  return Number.isFinite(score) ? score : 0;
+function publicSortedProducts(products: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(products)) return [];
+  return toPublicSearchProducts(sortProductsByUnifiedScorer(products as any));
 }
 
-function sortProductsByFinalRelevanceDesc(products: unknown[]): unknown[] {
-  return [...products].sort((a, b) => {
-    const relevanceDelta = finalRelevanceScore(b) - finalRelevanceScore(a);
-    if (Math.abs(relevanceDelta) > 1e-8) return relevanceDelta;
-    const bSimilarity = Number((b as any)?.similarity_score ?? 0);
-    const aSimilarity = Number((a as any)?.similarity_score ?? 0);
-    return (Number.isFinite(bSimilarity) ? bSimilarity : 0) - (Number.isFinite(aSimilarity) ? aSimilarity : 0);
-  });
+function publicSimilarProductsPayload<T extends Record<string, any>>(payload: T): T {
+  if (!payload.similarProducts || !Array.isArray(payload.similarProducts.byDetection)) return payload;
+  return {
+    ...payload,
+    similarProducts: {
+      ...payload.similarProducts,
+      byDetection: payload.similarProducts.byDetection.map((row: any) => {
+        const { debug: _debug, ...publicRow } = row;
+        return {
+          ...publicRow,
+          products: publicSortedProducts(row.products),
+        };
+      }),
+    },
+  };
 }
 
 // ============================================================================
@@ -360,12 +369,12 @@ router.post(
       // Don't expose raw embedding to clients
       const { embedding, ...safeResult } = result;
 
-      const payload = safeResult as any;
+      const payload = publicSimilarProductsPayload(safeResult as any);
       if (payload.similarProducts && Array.isArray(payload.similarProducts.byDetection)) {
         const originalByDetection = (payload.similarProducts.byDetection as Array<any>).map((row) => ({
           ...row,
           products: Array.isArray(row.products)
-            ? sortProductsByFinalRelevanceDesc(row.products)
+            ? publicSortedProducts(row.products)
             : [],
         }));
 
@@ -546,7 +555,7 @@ router.post(
 
       return res.json({
         success: true,
-        ...safeResult,
+        ...publicSimilarProductsPayload(safeResult as any),
       });
     } catch (error) {
       next(error);
@@ -592,7 +601,7 @@ router.post(
 
       return res.json({
         success: true,
-        ...result,
+        ...publicSimilarProductsPayload(result as any),
       });
     } catch (error) {
       next(error);

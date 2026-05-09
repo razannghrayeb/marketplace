@@ -47,4 +47,11 @@ describe("colorCanonical", () => {
     assert.ok(m.score > 0.5, "Blue bucket match should score > 0.5");
     assert.equal(m.matchedColor, "navy");
   });
+
+  it("treats merchant black names as black for charcoal suit matching", () => {
+    const m = tieredColorMatchScore("charcoal", ["Night Black"]);
+    assert.equal(m.tier, "family");
+    assert.ok(m.score >= 0.9);
+    assert.equal(m.matchedColor, "Night Black");
+  });
 });

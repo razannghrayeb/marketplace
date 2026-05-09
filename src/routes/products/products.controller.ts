@@ -17,6 +17,8 @@ import { isClipAvailable } from "../../lib/image/index";
 import { getProductWithVariants } from "./products.service";
 import { config } from "../../config";
 import { extractQuickFashionColorHints } from "../../lib/color/quickImageColor";
+import { toPublicSearchProducts } from "../../lib/search/publicSearchResult";
+import { sortProductsByUnifiedScorer } from "../../lib/search/sortResults";
 
 // ============================================================================
 // Request Helpers
@@ -247,11 +249,13 @@ export async function searchProductsByImage(req: Request, res: Response) {
           search_image_relax_floor: config.search.searchImageRelaxFloor,
         }
       : {};
+    const data = toPublicSearchProducts(sortProductsByUnifiedScorer(result.results as any));
+    const related = toPublicSearchProducts(sortProductsByUnifiedScorer((result.related ?? []) as any));
 
     res.json({
       success: true,
-      data: result.results,
-      related: result.related,
+      data,
+      related,
       meta: { ...result.meta, ...rankingMeta },
       pagination: { page, limit },
     });
@@ -402,4 +406,3 @@ export async function getSimilarProducts(req: Request, res: Response) {
     res.status(500).json({ success: false, error: "Failed to fetch similar products" });
   }
 }
-

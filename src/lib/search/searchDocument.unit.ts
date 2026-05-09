@@ -1,7 +1,5 @@
-/* Minimal declarations for test globals to satisfy static checks */
-declare const describe: any;
-declare const test: any;
-declare const expect: any;
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
 
 import {
   buildProductSearchDocument,
@@ -9,47 +7,59 @@ import {
 } from "./searchDocument";
 
 describe("extractProductTypesFromTitle - robust type normalization", () => {
-  test("does not collapse shirt into tshirt", () => {
+  it("does not collapse shirt into tshirt", () => {
     const types = extractProductTypesFromTitle("Men Shirt Jacket");
-    expect(types).toContain("shirt");
-    expect(types).not.toContain("tshirt");
+    assert.ok(types.includes("shirt"));
+    assert.ok(!types.includes("tshirt"));
   });
 
-  test("does not collapse blouse into tshirt", () => {
+  it("does not collapse blouse into tshirt", () => {
     const types = extractProductTypesFromTitle("Women Blouse");
-    expect(types).toContain("blouse");
-    expect(types).not.toContain("tshirt");
+    assert.ok(types.includes("blouse"));
+    assert.ok(!types.includes("tshirt"));
   });
 
-  test("short sleeve phrase does not create shorts type", () => {
+  it("short sleeve phrase does not create shorts type", () => {
     const types = extractProductTypesFromTitle("Short Sleeve Top");
-    expect(types).toContain("top");
-    expect(types).not.toContain("shorts");
+    assert.ok(types.includes("top"));
+    assert.ok(!types.includes("shorts"));
   });
 
-  test("real shorts title still maps to shorts", () => {
+  it("real shorts title still maps to shorts", () => {
     const types = extractProductTypesFromTitle("Cotton Shorts");
-    expect(types).toContain("shorts");
+    assert.ok(types.includes("shorts"));
   });
 
-  test("multi-category sanity across families", () => {
-    expect(extractProductTypesFromTitle("Leather Boots")).toContain("boots");
-    expect(extractProductTypesFromTitle("Cargo Pants")).toContain("pants");
-    expect(extractProductTypesFromTitle("Zip Hoodie")).toContain("hoodie");
+  it("denim skirt title does not create trouser product types", () => {
+    const doc = buildProductSearchDocument({
+      productId: 3,
+      title: "Mid Length Dark Blue Light Weight Denim Skirt",
+      category: "skirt",
+    });
+
+    assert.ok(doc.product_types.includes("skirt"));
+    assert.ok(!doc.product_types.includes("jeans"));
+    assert.ok(!doc.product_types.includes("pants"));
   });
 
-  test("shirt jacket titles are normalized toward outerwear in the indexed document", () => {
+  it("multi-category sanity across families", () => {
+    assert.ok(extractProductTypesFromTitle("Leather Boots").includes("boots"));
+    assert.ok(extractProductTypesFromTitle("Cargo Pants").includes("pants"));
+    assert.ok(extractProductTypesFromTitle("Zip Hoodie").includes("hoodie"));
+  });
+
+  it("shirt jacket titles are normalized toward outerwear in the indexed document", () => {
     const doc = buildProductSearchDocument({
       productId: 1,
       title: "Men Shirt Jacket",
       category: "shirts",
     });
 
-    expect(doc.category_canonical).toBe("outerwear");
-    expect(doc.product_types).not.toContain("shirt");
+    assert.equal(doc.category_canonical, "outerwear");
+    assert.ok(!doc.product_types.includes("shirt"));
   });
 
-  test("infers audience gender from parent product URL when title has no gender cue", () => {
+  it("infers audience gender from parent product URL when title has no gender cue", () => {
     const doc = buildProductSearchDocument({
       productId: 2,
       title: "Clean Oxford Shirt",
@@ -57,7 +67,7 @@ describe("extractProductTypesFromTitle - robust type normalization", () => {
       parentProductUrl: "https://shop.test/collections/women-shirts/clean-oxford",
     });
 
-    expect(doc.attr_gender).toBe("women");
-    expect(doc.audience_gender).toBe("women");
+    assert.equal(doc.attr_gender, "women");
+    assert.equal(doc.audience_gender, "women");
   });
 });
