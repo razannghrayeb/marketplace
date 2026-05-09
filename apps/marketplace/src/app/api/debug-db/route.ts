@@ -1,23 +1,43 @@
 import { NextResponse } from 'next/server'
-import { supabaseAdmin } from '@/lib/supabase/client'
 
 export const dynamic = 'force-dynamic'
 
 export async function GET() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? 'MISSING'
-  const keyRaw = process.env.SUPABASE_SERVICE_ROLE_KEY ?? ''
-  const hasKey = keyRaw.length > 10
-  const keyPreview = hasKey ? keyRaw.slice(0, 20) + '...' : 'MISSING'
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || ''
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 
-  const { count, error } = await supabaseAdmin
-    .from('products')
-    .select('*', { count: 'exact', head: true })
+  let restCount: number | null = null
+  let restError: string | null = null
+  let restStatus: number | null = null
+  let contentRange: string | null = null
+
+  try {
+    const url = new URL(`${supabaseUrl}/rest/v1/products`)
+    url.searchParams.set('select', 'id')
+    const res = await fetch(url.toString(), {
+      method: 'GET',
+      headers: {
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+        Prefer: 'count=exact',
+        Range: '0-0',
+      },
+      cache: 'no-store',
+    })
+    restStatus = res.status
+    contentRange = res.headers.get('content-range')
+    const match = contentRange?.match(/\/(\d+)$/)
+    restCount = match ? parseInt(match[1], 10) : null
+  } catch (e) {
+    restError = String(e)
+  }
 
   return NextResponse.json({
-    supabase_url: url,
-    has_service_key: hasKey,
-    key_preview: keyPreview,
-    product_count: count,
-    error: error?.message ?? null,
+    supabase_url: supabaseUrl || 'MISSING',
+    has_service_key: serviceKey.length > 10,
+    rest_status: restStatus,
+    content_range: contentRange,
+    rest_count: restCount,
+    rest_error: restError,
   })
 }
