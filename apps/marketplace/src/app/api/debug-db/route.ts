@@ -14,13 +14,13 @@ export async function GET() {
   try {
     const url = new URL(`${supabaseUrl}/rest/v1/products`)
     url.searchParams.set('select', 'id')
+    url.searchParams.set('limit', '1')
     const res = await fetch(url.toString(), {
       method: 'GET',
       headers: {
         apikey: serviceKey,
         Authorization: `Bearer ${serviceKey}`,
         Prefer: 'count=exact',
-        Range: '0-0',
       },
       cache: 'no-store',
     })
