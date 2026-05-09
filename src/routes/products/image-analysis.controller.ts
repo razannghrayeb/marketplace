@@ -89,7 +89,13 @@ function clamp(value: number, min: number, max: number): number {
 
 function publicSortedProducts(products: unknown): Record<string, unknown>[] {
   if (!Array.isArray(products)) return [];
-  return toPublicSearchProducts(sortProductsByUnifiedScorer(products as any));
+  // Sort by score descending for each detection's products
+  const sorted = (products as any[]).sort((a: any, b: any) => {
+    const scoreA = a.score ?? a.similarity_score ?? a.rerankScore ?? 0;
+    const scoreB = b.score ?? b.similarity_score ?? b.rerankScore ?? 0;
+    return scoreB - scoreA; // Descending: highest score first
+  });
+  return toPublicSearchProducts(sortProductsByUnifiedScorer(sorted));
 }
 
 function publicSimilarProductsPayload<T extends Record<string, any>>(payload: T): T {

@@ -47,6 +47,21 @@ describe("scoreRerankProductTypeBreakdown", () => {
     expect(scoreRerankProductTypeBreakdown(["vest"], ["waistcoat", "outerwear"]).combinedTypeCompliance).toBeGreaterThan(0.6);
   });
 
+  test("catalog outerwear layer buckets score as jacket-family matches", () => {
+    expect(scoreRerankProductTypeBreakdown(["jacket"], ["fleece", "outerwear"]).combinedTypeCompliance).toBeGreaterThan(0.6);
+    expect(scoreRerankProductTypeBreakdown(["jacket"], ["puffer", "outerwear"]).combinedTypeCompliance).toBeGreaterThan(0.6);
+    expect(scoreRerankProductTypeBreakdown(["jacket"], ["blouson", "outerwear"]).combinedTypeCompliance).toBeGreaterThan(0.6);
+    expect(filterProductTypeSeedsByMappedCategory(["fleece", "puffer", "blouson"], "outerwear")).toEqual([
+      "fleece",
+      "puffer",
+      "blouson",
+    ]);
+    expect(filterProductTypeSeedsByMappedCategory(["jackets", "coats"], "outerwear")).toEqual([
+      "jackets",
+      "coats",
+    ]);
+  });
+
   test("sneakers vs heels are not equivalent within footwear", () => {
     const r = scoreRerankProductTypeBreakdown(["sneakers"], ["heels", "shoes"]);
     expect(r.exactTypeScore).toBe(0.7);

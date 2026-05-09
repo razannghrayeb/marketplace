@@ -127,6 +127,8 @@ const FASHION_COLOR_ALIASES: Record<string, string> = {
   coal: "charcoal",
   graphite: "charcoal",
   carbon: "charcoal",
+  "iron-gate": "charcoal",
+  "iron gate": "charcoal",
   "forged-iron": "charcoal",
   magnet: "charcoal",
   // Blue family

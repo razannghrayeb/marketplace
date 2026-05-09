@@ -117,6 +117,22 @@ export function extractProductTypesFromTitle(title: string): string[] {
     ["sherwani suit", "sherwani"],
     ["shirt jacket", "jacket"],
     ["shirt jackets", "jacket"],
+    ["fleece jacket", "fleece"],
+    ["fleece jackets", "fleece"],
+    ["puffer jacket", "puffer"],
+    ["puffer jackets", "puffer"],
+    ["puffer coat", "coat"],
+    ["puffer coats", "coat"],
+    ["down jacket", "puffer"],
+    ["down jackets", "puffer"],
+    ["quilted jacket", "puffer"],
+    ["quilted jackets", "puffer"],
+    ["rain jacket", "jacket"],
+    ["rain jackets", "jacket"],
+    ["shell jacket", "jacket"],
+    ["shell jackets", "jacket"],
+    ["softshell jacket", "jacket"],
+    ["softshell jackets", "jacket"],
     ["shacket", "jacket"],
     ["overshirt", "jacket"],
   ];
@@ -161,6 +177,28 @@ export function extractProductTypesFromTitle(title: string): string[] {
     sweaters: "sweater",
     blazer: "blazer",
     blazers: "blazer",
+    jacket: "jacket",
+    jackets: "jacket",
+    coat: "coat",
+    coats: "coat",
+    parka: "parka",
+    parkas: "parka",
+    windbreaker: "windbreaker",
+    windbreakers: "windbreaker",
+    overcoat: "overcoat",
+    overcoats: "overcoat",
+    bomber: "bomber",
+    bombers: "bomber",
+    blouson: "blouson",
+    blousons: "blouson",
+    fleece: "fleece",
+    fleeces: "fleece",
+    puffer: "puffer",
+    puffers: "puffer",
+    anorak: "anorak",
+    anoraks: "anorak",
+    poncho: "poncho",
+    ponchos: "poncho",
     top: "top",
     tops: "tops",
     blouse: "blouse",
@@ -334,6 +372,13 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
     categoryCanonical && categoryCanonical !== "all"
       ? filterProductTypeSeedsByMappedCategory(descriptionSeedsLexicalRaw, categoryCanonical)
       : descriptionSeedsLexicalRaw;
+  const categorySeedsLexicalRaw = input.category
+    ? extractLexicalProductTypeSeeds(input.category)
+    : [];
+  const categorySeedsLexical =
+    categoryCanonical && categoryCanonical !== "all"
+      ? filterProductTypeSeedsByMappedCategory(categorySeedsLexicalRaw, categoryCanonical)
+      : categorySeedsLexicalRaw;
 
   // Keep precision: description is noisier than title, so cap how many
   // description-derived type seeds we merge in.
@@ -346,6 +391,11 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
 
   const enrichTokens = canonicalTypeIdsToProductTypeTokens(enrich?.canonical_type_ids ?? []);
   const mergedTypeSeeds = [...titleTypes];
+  if (categoryCanonical === "outerwear" || categoryCanonical === "tailored") {
+    for (const t of categorySeedsLexical) {
+      if (t && !mergedTypeSeeds.includes(t)) mergedTypeSeeds.push(t);
+    }
+  }
   for (const t of descriptionSeedsLimited) {
     if (!mergedTypeSeeds.includes(t)) mergedTypeSeeds.push(t);
   }
@@ -362,7 +412,7 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
     }
     if (!mergedTypeSeeds.includes("skirt")) mergedTypeSeeds.unshift("skirt");
   }
-  const hasExplicitOuterwearPhrase = /\b(shirt\s+jackets?|shackets?|overshirts?)\b/.test(categoryAndTitleText);
+  const hasExplicitOuterwearPhrase = /\b(shirt\s+jackets?|shackets?|overshirts?|fleece\s+jackets?|puffer\s+(?:jackets?|coats?)|down\s+(?:jackets?|coats?)|quilted\s+jackets?|rain\s+jackets?|shell\s+jackets?|softshell\s+jackets?|blousons?)\b/.test(categoryAndTitleText);
   if (hasExplicitOuterwearPhrase) {
     for (let i = mergedTypeSeeds.length - 1; i >= 0; i -= 1) {
       if (String(mergedTypeSeeds[i]).toLowerCase().trim() === "shirt") {

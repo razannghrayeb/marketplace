@@ -59,6 +59,25 @@ describe("extractProductTypesFromTitle - robust type normalization", () => {
     assert.ok(!doc.product_types.includes("shirt"));
   });
 
+  it("catalog outerwear layer categories contribute searchable product types", () => {
+    const fleece = buildProductSearchDocument({
+      productId: 4,
+      title: "Thermal Full Zip",
+      category: "Fleece",
+    });
+    const puffer = buildProductSearchDocument({
+      productId: 5,
+      title: "Lightweight Puffer Jacket",
+      category: "Outerwear",
+    });
+
+    assert.equal(fleece.category_canonical, "outerwear");
+    assert.ok(fleece.product_types.includes("fleece"));
+    assert.ok(fleece.product_types.includes("outerwear"));
+    assert.equal(puffer.category_canonical, "outerwear");
+    assert.ok(puffer.product_types.includes("puffer"));
+  });
+
   it("infers audience gender from parent product URL when title has no gender cue", () => {
     const doc = buildProductSearchDocument({
       productId: 2,

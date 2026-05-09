@@ -54,4 +54,11 @@ describe("colorCanonical", () => {
     assert.ok(m.score >= 0.9);
     assert.equal(m.matchedColor, "Night Black");
   });
+
+  it("treats Iron Gate as charcoal for dark suit matching", () => {
+    const m = tieredColorMatchScore("charcoal", ["Iron Gate"]);
+    assert.equal(m.tier, "exact");
+    assert.equal(m.score, 1);
+    assert.equal(m.matchedColor, "Iron Gate");
+  });
 });

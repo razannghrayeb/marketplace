@@ -56,6 +56,7 @@ describe("queryColorFilter", () => {
       ["Aged Brass", ["yellow"]],
       ["Pelican", ["white"]],
       ["Pepper", ["gray"]],
+      ["Iron Gate", ["gray"]],
       ["Shadow Rinse", ["blue"]],
       ["White Sage", ["green"]],
       ["Vintage Tint", ["blue"]],
