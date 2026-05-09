@@ -14,7 +14,7 @@ import {
   dedupeImageSearchResults,
   filterRelatedAgainstMain,
 } from "../../lib/search/resultDedup";
-import { sortProductsByRelevanceAndCategory, sortProductsByFinalRelevance, sortProductsByUnifiedScorer } from "../../lib/search/sortResults";
+import { sortProductsByRelevanceAndCategory, sortProductsByFinalRelevance, sortProductsByUnifiedScorer, unifiedScorerScore } from "../../lib/search/sortResults";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
 import {
   emitImageSearchEval,
@@ -548,63 +548,6 @@ async function getCachedImageQuerySignals(imageBuffer: Buffer): Promise<ImageQue
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(1, value));
-}
-
-function computeShoeBagContradictionCap(params: {
-  detectionCategory: unknown;
-  currentScore: unknown;
-  visualSimilarity: unknown;
-  colorCompliance: unknown;
-  colorTier: unknown;
-  audienceCompliance: unknown;
-  hasTrustedColorIntent: boolean;
-  hasExplicitColorIntent: boolean;
-  hasAudienceIntent: boolean;
-  nearIdenticalRawMin: number;
-}): { score: number; reason: string } | null {
-  const category = String(params.detectionCategory ?? "").toLowerCase().trim();
-  const isFootwear = category === "footwear" || category === "shoes";
-  const isBag = category === "bags" || category === "accessories";
-  if (!isFootwear && !isBag) return null;
-
-  const current = clamp01(Number(params.currentScore ?? 0));
-  if (current <= 0) return null;
-
-  const visual = clamp01(Number(params.visualSimilarity ?? 0));
-  const color = clamp01(Number(params.colorCompliance ?? 0));
-  const tier = String(params.colorTier ?? "none").toLowerCase().trim();
-  const audience = clamp01(Number(params.audienceCompliance ?? 1));
-  const nearVisualRelax = visual >= params.nearIdenticalRawMin ? 0.05 : 0;
-
-  let cap = 1;
-  let reason = "";
-
-  if (params.hasTrustedColorIntent) {
-    if (tier === "none" || color <= 0.02) {
-      const maxCap = isFootwear
-        ? (params.hasExplicitColorIntent ? 0.26 : 0.34)
-        : (params.hasExplicitColorIntent ? 0.30 : 0.38);
-      const visualCap = visual * (params.hasExplicitColorIntent ? 0.36 : 0.46);
-      cap = Math.min(cap, Math.max(0.16, Math.min(maxCap + nearVisualRelax, visualCap + nearVisualRelax)));
-      reason = isFootwear ? "footwear_color_contradiction_cap" : "bag_color_contradiction_cap";
-    } else if (tier === "bucket" && color < (isFootwear ? 0.18 : 0.14)) {
-      const maxCap = isFootwear
-        ? (params.hasExplicitColorIntent ? 0.40 : 0.46)
-        : (params.hasExplicitColorIntent ? 0.44 : 0.50);
-      const visualCap = visual * (params.hasExplicitColorIntent ? 0.52 : 0.58);
-      cap = Math.min(cap, Math.max(0.20, Math.min(maxCap + nearVisualRelax, visualCap + nearVisualRelax)));
-      reason = isFootwear ? "footwear_bucket_color_cap" : "bag_bucket_color_cap";
-    }
-  }
-
-  if (params.hasAudienceIntent && audience <= 0.05) {
-    const audienceCap = isFootwear ? 0.18 : 0.24;
-    cap = Math.min(cap, audienceCap);
-    reason = isFootwear ? "footwear_audience_contradiction_cap" : "bag_audience_contradiction_cap";
-  }
-
-  if (!reason || cap >= current - 1e-6) return null;
-  return { score: Math.max(0, Math.min(current, cap)), reason };
 }
 
 function normalizeStringValue(value: unknown): string {
@@ -1994,7 +1937,7 @@ type CatalogFamilySignals = {
 function catalogFamilySignals(product: Record<string, unknown>): CatalogFamilySignals {
   const blob = productCategoryFamilyBlob(product);
   const hasFootwear = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|after\s*ski\s*boot|ski\s*boots?|heel|heels|sandal|sandals|loafer|loafers|trainer|trainers|ballerina|ballerinas|flat|flats|espadrille|espadrilles|oxford|oxfords|pump|pumps|mule|mules|clog|clogs|slipper|slippers)\b/.test(blob);
-  const hasOuterwear = /\b(outerwear|outwear|tailored|suit|suits|tuxedo|tuxedos|jacket|jackets|shirt\s+jackets?|shacket|shackets|overshirt|overshirts|coat|coats|overcoat|overcoats|blazer|blazers|sport\s+coat|sportcoat|suit\s+jackets?|dress\s+jackets?|parka|parkas|blouson|blousons|trench|trenches|windbreaker|windbreakers|bomber|bombers|vest|vests|gilet|gilets|waistcoat|waistcoats|poncho|ponchos|anorak|anoraks|cape|capes|fleece)\b/.test(blob);
+  const hasOuterwear = /\b(outerwear|outwear|tailored|suit|suits|tuxedo|tuxedos|jacket|jackets|shirt\s+jackets?|shacket|shackets|overshirt|overshirts|coat|coats|overcoat|overcoats|blazer|blazers|sport\s+coat|sportcoat|suit\s+jackets?|dress\s+jackets?|parka|parkas|blouson|blousons|trench|trenches|windbreaker|windbreakers|bomber|bombers|puffer|puffers|down\s+jackets?|quilted\s+jackets?|rain\s+jackets?|shell\s+jackets?|softshell(?:\s+jackets?)?|vest|vests|gilet|gilets|waistcoat|waistcoats|poncho|ponchos|anorak|anoraks|cape|capes|fleece|fleeces)\b/.test(blob);
   const hasTopCore = /\b(top|tops|knit\s*tops?|woven\s*tops?|shirt|shirts|shirting|woven\s*shirts?|chemise|t-?shirt|tshirt|tee|tees|blouse|blouses|tank|cami|camisole|sweater|sweaters|cardigan|cardigans|hoodie|hoodies|hoody|sweatshirt|sweatshirts|pullover|pullovers|jumper|jumpers|polo|polos|polo\s*shirts?|polo\s*short\s*sleeve|henley|tunic|knitwear|bodysuit|bodysuits|body|jersey|jerseys|loungewear|crop\s*top|button\s*down|button-down|long\s*sleeve|short\s*sleeve|baselayer)\b/.test(blob);
   const hasTop = hasTopCore || (hasOuterwear && /\b(hoodie|hoody|sweatshirt|cardigan|pullover|fleece)\b/.test(blob));
   const hasBottom = /\b(bottom|bottoms|bottom-sw|pant|pants|trouser|trousers|jean|jeans|denim|shorts?|swim\s*short|skirt|skirts|legging|leggings|tight|tights|7\/8\s*tight|jogging|jogger|joggers|sweatpants?|slack|slacks|culotte|culottes|palazzo|chino|chinos|cargo|track\s*(?:pants?|trousers?)|tracksuits?\s*&\s*track\s*trousers)\b/.test(blob);
@@ -7925,7 +7868,7 @@ export async function searchByImageWithSimilarity(
         const wantsShirtLike = /\b(shirt|shirts|t-?shirt|tshirt|tee|tees|blouse|blouses|button\s*down|button-down|long sleeve top|short sleeve top)\b/.test(
           desiredTypeBlob,
         );
-        const wantsOuterwearLike = /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|windbreaker|windbreakers|bomber|bombers|trench)\b/.test(
+        const wantsOuterwearLike = /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|windbreaker|windbreakers|bomber|bombers|blouson|blousons|fleece|fleeces|puffer|puffers|down\s+jackets?|quilted\s+jackets?|rain\s+jackets?|shell\s+jackets?|softshell(?:\s+jackets?)?|trench)\b/.test(
           desiredTypeBlob,
         );
         if (wantsShirtLike && !wantsOuterwearLike) {
@@ -7941,7 +7884,7 @@ export async function searchByImageWithSimilarity(
             .filter((x) => x != null)
             .map((x) => String(x).toLowerCase())
             .join(" ");
-          const hasOuterwearCue = /\b(jacket|jackets|coat|coats|outerwear|outwear|parka|parkas|windbreaker|windbreakers|bomber|bombers|trench)\b/.test(
+          const hasOuterwearCue = /\b(jacket|jackets|coat|coats|outerwear|outwear|parka|parkas|windbreaker|windbreakers|bomber|bombers|blouson|blousons|fleece|fleeces|puffer|puffers|down\s+jackets?|quilted\s+jackets?|rain\s+jackets?|shell\s+jackets?|softshell(?:\s+jackets?)?|trench)\b/.test(
             srcBlob,
           );
           const hasShirtCue = /\b(shirt|shirts|t-?shirt|tshirt|tee|blouse|blouses|button\s*down|button-down|top|tops)\b/.test(
@@ -9246,46 +9189,6 @@ export async function searchByImageWithSimilarity(
     stageDropSamples.tailored_guard = sampleDroppedHits(hitsBeforeTailoredGuard, rankedHits);
   }
 
-  let shoeBagContradictionCapCount = 0;
-  if (
-    hasDetectionAnchoredTypeIntent &&
-    rankedHits.length > 0 &&
-    (isFootwearDetectionIntent || bagLikeDetectionIntent) &&
-    (hasExplicitColorIntent || hasInferredColorSignal || hasAudienceIntentForRelevance)
-  ) {
-    for (const h of rankedHits) {
-      const id = String((h as any)?._source?.product_id ?? "");
-      const comp = complianceById.get(id);
-      if (!comp) continue;
-      const cap = computeShoeBagContradictionCap({
-        detectionCategory: params.detectionProductCategory,
-        currentScore: comp.finalRelevance01,
-        visualSimilarity: visualSimFromHit(h),
-        colorCompliance: comp.colorCompliance,
-        colorTier: comp.colorTier,
-        audienceCompliance: comp.audienceCompliance,
-        hasTrustedColorIntent: hasExplicitColorIntent || hasInferredColorSignal,
-        hasExplicitColorIntent,
-        hasAudienceIntent: hasAudienceIntentForRelevance,
-        nearIdenticalRawMin,
-      });
-      if (!cap) continue;
-      comp.finalRelevance01 = cap.score;
-      finalScoreSourceById.set(id, cap.reason);
-      shoeBagContradictionCapCount += 1;
-    }
-
-    if (shoeBagContradictionCapCount > 0) {
-      rankedHits = [...rankedHits].sort((a: any, b: any) => {
-        const fa = complianceById.get(String(a?._source?.product_id ?? ""))?.finalRelevance01 ?? 0;
-        const fb = complianceById.get(String(b?._source?.product_id ?? ""))?.finalRelevance01 ?? 0;
-        if (Math.abs(fb - fa) > 1e-6) return fb - fa;
-        return visualSimFromHit(b) - visualSimFromHit(a);
-      });
-    }
-  }
-  const countAfterShoeBagContradictionCap = rankedHits.length;
-
   rerankTimings['post_filtering_ms'] = Date.now() - postFilteringStartedAt;
   rerankTimings['total_rerank_ms'] = Date.now() - rerankPhaseStartedAt;
 
@@ -9940,37 +9843,6 @@ export async function searchByImageWithSimilarity(
         finalRelevanceSource = calibrationBlend?.source ?? calibratedImageSource(additiveScore, false);
       }
 
-      if (
-        compliance &&
-        hasDetectionAnchoredTypeIntent &&
-        (isFootwearDetectionIntent || bagLikeDetectionIntent) &&
-        (hasExplicitColorIntent || hasInferredColorSignal || hasAudienceIntentForRelevance)
-      ) {
-        const cap = computeShoeBagContradictionCap({
-          detectionCategory: params.detectionProductCategory,
-          currentScore: finalRelevance01,
-          visualSimilarity: similarityScore,
-          colorCompliance: explainColorCompliance ?? compliance.colorCompliance,
-          colorTier: explainColorTier ?? compliance.colorTier,
-          audienceCompliance: compliance.audienceCompliance,
-          hasTrustedColorIntent: hasExplicitColorIntent || hasInferredColorSignal,
-          hasExplicitColorIntent,
-          hasAudienceIntent: hasAudienceIntentForRelevance,
-          nearIdenticalRawMin,
-        });
-        if (cap) {
-          finalRelevance01 = cap.score;
-          acceptanceRelevance01 = cap.score;
-          finalRelevanceSource = cap.reason;
-          if (unifiedScorerResult && typeof unifiedScorerResult === "object") {
-            unifiedScorerResult.score = Math.min(Number(unifiedScorerResult.score ?? cap.score), cap.score);
-            if (Array.isArray(unifiedScorerResult.caps)) {
-              unifiedScorerResult.caps.push({ reason: cap.reason, cap: cap.score });
-            }
-          }
-        }
-      }
-
       return {
         ...p,
         // Never overwrite canonical catalog color with query-time matched color.
@@ -10178,6 +10050,8 @@ export async function searchByImageWithSimilarity(
     : effectiveFinalAcceptMin;
   results = results.filter(
     (p: any) => {
+      const scorerAcceptance = unifiedScorerScore(p);
+      if (scorerAcceptance !== null) return scorerAcceptance >= effectiveFinalResultMin;
       const rankingScore = typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : 0;
       const acceptanceScore = typeof (p.explain as any)?.acceptanceRelevance01 === "number"
         ? Number((p.explain as any).acceptanceRelevance01)
@@ -10540,7 +10414,10 @@ export async function searchByImageWithSimilarity(
   // When unified scorer is enabled, prefer `explain.unifiedScorer.score` instead
   // so experiments drive ordering without changing the pipeline.
   const unifiedScorerEnabled = isUnifiedImageScorerEnabled();
-  if (unifiedScorerEnabled && results.length > 0) {
+  const unifiedSortDebugEnabled =
+    String(process.env.SEARCH_IMAGE_DEBUG_UNIFIED ?? "").toLowerCase() === "1" ||
+    String(process.env.SEARCH_DEBUG ?? "").toLowerCase() === "1";
+  if (unifiedScorerEnabled && unifiedSortDebugEnabled && results.length > 0) {
     console.warn('[search-image][unified-scorer-sort] ENABLED - sorting by unified score');
   }
   results = sortProductsByUnifiedScorer(results);
@@ -10603,7 +10480,6 @@ export async function searchByImageWithSimilarity(
     after_bag_gate: countAfterBagGate,
     after_shorts_guard: countAfterShortsGuard,
     after_tailored_guard: countAfterTailoredGuard,
-    after_shoe_bag_contradiction_cap: countAfterShoeBagContradictionCap,
     hydration_candidate_ids: hydrationCandidateIdCount,
     hydration_prefetch_miss_ids: hydrationPrefetchMissCount,
     hydrated_product_rows: hydratedProductRowsCount,
@@ -10862,7 +10738,6 @@ export async function searchByImageWithSimilarity(
         dropped_by_bag_gate: Math.max(0, countAfterGenderPostfilter - countAfterBagGate),
         dropped_by_shorts_guard: Math.max(0, countAfterBagGate - countAfterShortsGuard),
         dropped_by_tailored_guard: Math.max(0, countAfterShortsGuard - countAfterTailoredGuard),
-        shoe_bag_contradiction_caps: shoeBagContradictionCapCount,
         dropped_by_hydrated_metadata_guard: Math.max(0, countAfterHydrationAssembly - countAfterHydratedMetadataGuard),
         dropped_by_final_result_relevance_gate: Math.max(0, countAfterHydratedMetadataGuard - countAfterFinalResultRelevanceGate),
         dropped_by_late_detection_family_gate: Math.max(0, countAfterZeroResultFallback - countAfterLateDetectionFamilyGate),
@@ -11129,8 +11004,6 @@ export async function searchByImageWithSimilarity(
         hits_after_bag_gate: countAfterBagGate,
         hits_after_shorts_guard: countAfterShortsGuard,
         hits_after_tailored_guard: countAfterTailoredGuard,
-        hits_after_shoe_bag_contradiction_cap: countAfterShoeBagContradictionCap,
-        shoe_bag_contradiction_caps: shoeBagContradictionCapCount,
         hydration_candidate_ids: hydrationCandidateIdCount,
         hydration_prefetch_miss_ids: hydrationPrefetchMissCount,
         hydrated_product_rows: hydratedProductRowsCount,

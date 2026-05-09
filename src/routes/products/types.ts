@@ -483,8 +483,6 @@ export interface SearchResultWithRelated {
       hits_after_bag_gate?: number;
       hits_after_shorts_guard?: number;
       hits_after_tailored_guard?: number;
-      hits_after_shoe_bag_contradiction_cap?: number;
-      shoe_bag_contradiction_caps?: number;
       hydration_candidate_ids: number;
       hydration_prefetch_miss_ids: number;
       hydrated_product_rows: number;

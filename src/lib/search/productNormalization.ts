@@ -33,7 +33,7 @@ function familyFromCategory(value: unknown): string | null {
   if (/\b(bags?|backpacks?|purses?|clutches?|totes?|satchels?|crossbody|crossbodies|hand\s*bags?|handbags?|wallets?|briefcases?|luggage|suitcases?|trolley cases?|duffle|messenger|reporter|pouches?|bumbag|waist bags?|top handle bags?|shoulder bags?|phone bags?|laptop bags?|computer bags?)\b/.test(blob)) return "bags";
   if (/\b(footwear|shoes?|sneakers?|boots?|heels?|flats?|ballerinas?|sandals?|loafers?|trainers?|pumps?|oxfords?|clogs?|slides?|espadrilles?|hikers?|aqua shoes?|boat shoes?|dress shoes?|ski boots?|snowboard boots?|snow shoes?)\b/.test(blob)) return "footwear";
   if (/\b(dresses?|gowns?|frocks?|abayas?|kaftans?|jumpsuits?|playsuits?|jumpplaysuits|rompers?|dress\/top|jilbab|kimono)\b/.test(blob)) return "dresses";
-  if (/\b(outerwear|outwear|jackets?|coats?|coats?\s*&\s*jackets?|blazers?|parkas?(?:\s*&\s*blousons)?|windbreakers?|trench(?:es)?|shackets?|denim jacket|sw\.jacket)\b/.test(blob)) return "outerwear";
+  if (/\b(outerwear|outwear|jackets?|coats?|coats?\s*&\s*jackets?|blazers?|parkas?(?:\s*&\s*blousons)?|blousons?|fleeces?|puffers?|puffer\s+(?:jackets?|coats?)|down\s+(?:jackets?|coats?)|quilted\s+jackets?|rain\s+jackets?|shell\s+jackets?|softshell(?:\s+jackets?)?|windbreakers?|trench(?:es)?|shackets?|denim jacket|sw\.jacket)\b/.test(blob)) return "outerwear";
   if (/\b(bottoms?|pants?|trousers?|jeans?|shorts?|skirts?|skorts?|leggings?|joggers?|slacks?|chinos?|cargo(?:es)?|bottom|bermudas?|tights?|3\/4 pant|3\/4 tight|7\/8 tight|track trousers?)\b/.test(blob)) return "bottoms";
   if (/\b(tops?|shirts?|shirt-[a-z]+|blouses?|tees?|t-?\s?shirts?|sweaters?|pullovers?|pulovers?|hoodies?|hoody|sweatshirts?|cardigans?|vests?|tanks?|camis?|polos?|knitwear|knit tops?|basic top|crop top|long sleeve|sleeveless|track top|rugby shirts?|woven tops?|woven shirts?|bodysuits?|body suit|bodies|baselayer)\b/.test(blob)) return "tops";
   if (/\b(accessories?|hats?|caps?|scarves?|belts?|gloves?|watches?|sunglasses?|ties?)\b/.test(blob)) return "accessories";
@@ -56,7 +56,7 @@ function familyFromTitle(value: unknown): string | null {
   if (/\b(pant|trouser|jean|denim|shorts?|skirt|legging|jogger|slack|chino|cargo|bottom)\b/.test(blob)) return "bottoms";
   if (/\b(top|shirt|blouse|tee|t.?shirt|sweater|hoodie|cardigan|vest|tank|polo|cami|pullover|jumper|knitwear|knit|turtleneck)\b/.test(blob)) return "tops";
   if (/\b(bag|backpack|purse|tote|clutch)\b/.test(blob)) return "bags";
-  if (/\b(jacket|coat|blazer|parka|windbreaker)\b/.test(blob)) return "outerwear";
+  if (/\b(jacket|coat|blazer|parka|windbreaker|blouson|fleece|puffer|down\s+jacket|quilted\s+jacket|rain\s+jacket|shell\s+jacket|softshell)\b/.test(blob)) return "outerwear";
   return null;
 }
 
@@ -98,7 +98,10 @@ function normalizeTypeFromCategory(category: string, family: string | null): str
   }
   if (family === "outerwear") {
     if (/\b(blazer)\b/.test(category)) return "blazer";
-    if (/\b(coat|trench|parka)\b/.test(category)) return "coat";
+    if (/\b(coat|trench|parka|puffer\s+coat|down\s+coat|long\s+coat|wool\s+coat)\b/.test(category)) return "coat";
+    if (/\b(fleece)\b/.test(category)) return "fleece";
+    if (/\b(puffer|down\s+jacket|quilted\s+jacket)\b/.test(category)) return "puffer";
+    if (/\b(blouson)\b/.test(category)) return "blouson";
     return "jacket";
   }
   if (family === "bags") return "bag";

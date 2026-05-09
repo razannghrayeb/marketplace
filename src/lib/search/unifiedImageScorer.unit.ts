@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { scoreCandidateUnified, type UnifiedScoreInputs } from "./unifiedImageScorer";
+import { computeDocFamilySignals, scoreCandidateUnified, type UnifiedScoreInputs } from "./unifiedImageScorer";
 
 function baseInput(overrides: Partial<UnifiedScoreInputs> = {}): UnifiedScoreInputs {
   return {
@@ -60,4 +60,70 @@ test("unified scorer treats stale exact color tier with zero compliance as a mis
   assert.equal(result.floorReason, null);
   assert.ok(result.caps.some((cap) => cap.reason === "color_tier_none_cap"));
   assert.ok(result.score < 0.5);
+});
+
+test("unified scorer caps pure outerwear leakage in top searches", () => {
+  const result = scoreCandidateUnified(baseInput({
+    exactTypeScore: 0,
+    productTypeCompliance: 0.34,
+    siblingClusterScore: 0,
+    parentHypernymScore: 0,
+    crossFamilyPenalty: 0.55,
+    osSimilarity01: 0.93,
+    sleeveCompliance: 1,
+    detectionProductCategory: "tops",
+    docIsTopLike: false,
+    docIsOuterwearOrTailoredLike: true,
+  }));
+
+  assert.ok(result.caps.some((cap) => cap.reason === "top_outerwear_family_cap"));
+  assert.notEqual(result.floorReason, "exact_color_priority_floor");
+  assert.ok(result.score <= 0.572);
+});
+
+test("unified scorer caps plain top leakage in outerwear searches", () => {
+  const result = scoreCandidateUnified(baseInput({
+    exactTypeScore: 0,
+    productTypeCompliance: 0.34,
+    siblingClusterScore: 0,
+    parentHypernymScore: 0,
+    crossFamilyPenalty: 0.55,
+    osSimilarity01: 0.93,
+    sleeveCompliance: 1,
+    detectionProductCategory: "outerwear",
+    docIsTopLike: true,
+    docIsOuterwearOrTailoredLike: false,
+  }));
+
+  assert.ok(result.caps.some((cap) => cap.reason === "outerwear_plain_top_family_cap"));
+  assert.notEqual(result.floorReason, "exact_color_priority_floor");
+  assert.ok(result.score <= 0.572);
+});
+
+test("unified scorer preserves near-identical type-aligned matches across top outerwear ambiguity", () => {
+  const result = scoreCandidateUnified(baseInput({
+    exactTypeScore: 1,
+    productTypeCompliance: 1,
+    crossFamilyPenalty: 0.55,
+    osSimilarity01: 0.98,
+    detectionProductCategory: "tops",
+    docIsTopLike: false,
+    docIsOuterwearOrTailoredLike: true,
+  }));
+
+  assert.ok(!result.caps.some((cap) => cap.reason === "top_outerwear_family_cap"));
+  assert.equal(result.floorReason, "near_identical_floor");
+  assert.ok(result.score >= 0.91);
+});
+
+test("unified scorer treats fleece catalog rows as layered top and outerwear signals", () => {
+  const signals = computeDocFamilySignals({
+    title: "Thermal Full Zip",
+    category: "Fleece",
+    category_canonical: "outerwear",
+    product_types: ["fleece", "outerwear"],
+  });
+
+  assert.equal(signals.docIsTopLike, true);
+  assert.equal(signals.docIsOuterwearOrTailoredLike, true);
 });

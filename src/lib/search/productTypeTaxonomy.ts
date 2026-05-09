@@ -17,7 +17,7 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   // Shorts / skirt (2)
   ["shorts", "bermuda", "board shorts"],
   ["skirt", "skirts", "mini skirt", "midi skirt"],
-  // Footwear (7) — was one mega-cluster; now siblings are distinguishable in rerank
+  // Footwear (8) — was one mega-cluster; now siblings are distinguishable in rerank
   ["sneaker", "sneakers", "trainer", "trainers", "running shoe", "running shoes", "athletic shoe", "athletic shoes", "sport shoe", "sport shoes", "tennis shoe", "tennis shoes"],
   ["boot", "boots", "ankle boot", "ankle boots", "chelsea boot", "chelsea boots", "combat boot", "combat boots"],
   ["sandal", "sandals", "flip flop", "flip flops", "flip-flop", "flip-flops", "gladiator sandal", "gladiator sandals"],
@@ -36,7 +36,7 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   // Tailored / formal (2)
   ["suit", "suits", "tuxedo", "tuxedos", "suit jacket", "dress jacket"],
   ["vest", "vests", "gilet", "gilets", "waistcoat", "waistcoats"],
-  // Outerwear (3)
+  // Outerwear (4)
   ["blazer", "blazers", "sport coat", "sportcoat"],
   [
     "jacket",
@@ -49,6 +49,22 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
     "overshirts",
     "bomber",
     "bomber jacket",
+    "blouson",
+    "blousons",
+    "fleece",
+    "fleeces",
+    "fleece jacket",
+    "fleece jackets",
+    "puffer",
+    "puffer jacket",
+    "down jacket",
+    "quilted jacket",
+    "rain jacket",
+    "rain jackets",
+    "shell jacket",
+    "shell jackets",
+    "softshell",
+    "softshell jacket",
   ],
   [
     "coat",
@@ -60,6 +76,12 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
     "windbreakers",
     "overcoat",
     "overcoats",
+    "puffer coat",
+    "puffer coats",
+    "down coat",
+    "down coats",
+    "long coat",
+    "wool coat",
   ],
   ["poncho", "anorak"],
   // Dress (2)
@@ -306,8 +328,35 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   overshirts: "outerwear",
   bomber: "outerwear",
   "bomber jacket": "outerwear",
+  blouson: "outerwear",
+  blousons: "outerwear",
+  fleece: "outerwear",
+  fleeces: "outerwear",
+  "fleece jacket": "outerwear",
+  "fleece jackets": "outerwear",
+  puffer: "outerwear",
+  puffers: "outerwear",
+  "puffer jacket": "outerwear",
+  "puffer jackets": "outerwear",
+  "down jacket": "outerwear",
+  "down jackets": "outerwear",
+  "quilted jacket": "outerwear",
+  "quilted jackets": "outerwear",
+  "rain jacket": "outerwear",
+  "rain jackets": "outerwear",
+  "shell jacket": "outerwear",
+  "shell jackets": "outerwear",
+  softshell: "outerwear",
+  "softshell jacket": "outerwear",
+  "softshell jackets": "outerwear",
   coat: "outerwear",
   coats: "outerwear",
+  "puffer coat": "outerwear",
+  "puffer coats": "outerwear",
+  "down coat": "outerwear",
+  "down coats": "outerwear",
+  "long coat": "outerwear",
+  "wool coat": "outerwear",
   parka: "outerwear",
   parkas: "outerwear",
   trench: "outerwear",
@@ -404,6 +453,7 @@ const CLUSTER_FAMILY: readonly string[] = [
   "footwear",
   "footwear",
   "footwear",
+  "footwear",
   "tops",
   "tops",
   "tops",
@@ -412,6 +462,7 @@ const CLUSTER_FAMILY: readonly string[] = [
   "tops",
   "tailored",
   "tailored",
+  "outerwear",
   "outerwear",
   "outerwear",
   "outerwear",
@@ -804,6 +855,22 @@ const OUTER_MICRO_JACKET = new Set([
   "overshirts",
   "bomber",
   "bomber jacket",
+  "blouson",
+  "blousons",
+  "fleece",
+  "fleeces",
+  "fleece jacket",
+  "fleece jackets",
+  "puffer",
+  "puffer jacket",
+  "down jacket",
+  "quilted jacket",
+  "rain jacket",
+  "rain jackets",
+  "shell jacket",
+  "shell jackets",
+  "softshell",
+  "softshell jacket",
 ]);
 const OUTER_MICRO_COAT = new Set([
   "coat",
@@ -815,6 +882,12 @@ const OUTER_MICRO_COAT = new Set([
   "windbreakers",
   "overcoat",
   "overcoats",
+  "puffer coat",
+  "puffer coats",
+  "down coat",
+  "down coats",
+  "long coat",
+  "wool coat",
 ]);
 const OUTER_MICRO_VEST = new Set([
   "vest",
@@ -1417,7 +1490,7 @@ export function inferMacroFamiliesFromListingCategoryFields(
   if (/\b(dresses?|gown|gowns)\b/.test(combined)) {
     out.add("dress");
   }
-  if (/\b(coat|coats|jacket|jackets|blazer|blazers|parka|parkas|puffer|vests?)\b/.test(combined)) {
+  if (/\b(coat|coats|jacket|jackets|blazer|blazers|parka|parkas|puffer|puffers|blouson|blousons|fleece|fleeces|rain\s+jackets?|shell\s+jackets?|softshell|down\s+jackets?|quilted\s+jackets?|vests?)\b/.test(combined)) {
     out.add("outerwear");
   }
   if (/\b(suit|suits|tuxedo|tuxedos|waistcoat|waistcoats|vest|vests|gilet|gilets)\b/.test(combined)) {

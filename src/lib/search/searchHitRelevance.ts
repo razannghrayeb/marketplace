@@ -172,8 +172,15 @@ export function computeFinalRelevance01(params: {
   const stylePart = params.hasStyleIntent ? params.styleScore : 1;
   const patternPart = params.hasPatternIntent && typeof params.patternScore === 'number' ? params.patternScore : 1;
   const sleevePart = params.hasSleeveIntent ? params.sleeveScore : 1;
-  // Attribute blend: keep color dominant, but allow style and pattern to influence as well.
-  const attrScore = colorPart * 0.4 + stylePart * 0.15 + patternPart * 0.15 + sleevePart * 0.15 + audPart * 0.15;
+  // Attribute blend: keep color dominant, but boost sleeve weight when explicitly detected.
+  // For image search with explicit sleeve detection (e.g. YOLO), sleeve should be nearly as
+  // important as color to prevent long-sleeve products drowning out short-sleeve matches.
+  const sleeveWeight = params.hasSleeveIntent ? 0.3 : 0.15;  // Increase from 15% to 30% when sleeve intent is explicit
+  const colorWeight = params.hasSleeveIntent ? 0.25 : 0.4;   // Reduce color weight from 40% to 25% when sleeve intent is strong
+  const styleWeight = params.hasSleeveIntent ? 0.1 : 0.15;   // Reduce style weight slightly
+  const patternWeight = params.hasSleeveIntent ? 0.1 : 0.15; // Reduce pattern weight slightly
+  const audWeight = 0.1;                                      // Reduce audience weight
+  const attrScore = colorPart * colorWeight + stylePart * styleWeight + patternPart * patternWeight + sleevePart * sleeveWeight + audPart * audWeight;
   const attrFactor = 0.5 + attrScore * 0.5;
 
   const crossFamilySoftFactor = params.hasReliableTypeIntent === false
@@ -580,6 +587,32 @@ function normalizedFashionColorList(values: string[]): string[] {
   return out;
 }
 
+function hasContrastingColorSignalForDesired(productColors: string[], desiredColorsTier: string[]): boolean {
+  const colors = normalizedFashionColorList(productColors);
+  const desired = normalizedFashionColorList(desiredColorsTier);
+  if (colors.length <= 1 || desired.length === 0) return false;
+
+  let hasDesiredFamilySignal = false;
+  let hasContrastingSignal = false;
+
+  for (const color of colors) {
+    const match = tieredColorListCompliance(desired, [color], "any");
+    if (match.compliance >= 0.75) {
+      hasDesiredFamilySignal = true;
+    } else if (match.compliance <= 0.12) {
+      hasContrastingSignal = true;
+    }
+  }
+
+  return hasDesiredFamilySignal && hasContrastingSignal;
+}
+
+function mixedColorExactTier(compliance: number): "family" | "bucket" | "none" {
+  if (compliance >= 0.7) return "family";
+  if (compliance >= 0.2) return "bucket";
+  return "none";
+}
+
 function resolveProductColorForRanking(params: {
   metadataColors: string[];
   urlColors: string[];
@@ -886,6 +919,12 @@ export function computeHitRelevance(
     const tText = tieredColorListCompliance(desiredColorsTier, textTierRaw, rerankColorMode);
     const tResolved = tieredColorListCompliance(desiredColorsTier, resolvedColor.colors, rerankColorMode);
     const tUnion = tieredColorListCompliance(desiredColorsTier, unionTierRaw, rerankColorMode);
+    const titleHasContrastingColorSignal =
+      resolvedColor.source === "title" &&
+      (
+        hasContrastingColorSignalForDesired(textTierRaw, desiredColorsTier) ||
+        hasContrastingColorSignalForDesired(resolvedColor.colors, desiredColorsTier)
+      );
     matchedColor = tUnion.bestMatch ?? tImg.bestMatch ?? tText.bestMatch;
     colorTier = tUnion.tier;
     const titleColorContradictsImagePalette =
@@ -902,6 +941,22 @@ export function computeHitRelevance(
       colorCompliance = tResolved.compliance;
       matchedColor = tResolved.bestMatch ?? matchedColor;
       colorTier = tResolved.tier;
+      if (titleHasContrastingColorSignal && colorTier === "exact") {
+        const primaryImageMatch = imgTierRaw.length > 0
+          ? tieredColorListCompliance(desiredColorsTier, [imgTierRaw[0]], rerankColorMode)
+          : null;
+        const primaryImageStronglyConfirms =
+          primaryImageMatch !== null &&
+          primaryImageMatch.compliance >= 0.9 &&
+          (
+            primaryImageMatch.tier === "exact" ||
+            primaryImageMatch.tier === "family" ||
+            primaryImageMatch.tier === "light-shade" ||
+            primaryImageMatch.tier === "dark-shade"
+          );
+        colorCompliance = Math.min(colorCompliance, primaryImageStronglyConfirms ? 0.82 : 0.58);
+        colorTier = mixedColorExactTier(colorCompliance);
+      }
     } else if (imgTierRaw.length > 0 && textTierRaw.length > 0) {
       colorCompliance = wtImg * tImg.compliance + wtText * tText.compliance;
     } else if (imgTierRaw.length > 0) {
@@ -968,8 +1023,11 @@ export function computeHitRelevance(
   // Debug help: when catalog color is missing, log visual-derived color signals
   // so engineers can verify that matches come from image/text rather than metadata.
   try {
+    const colorDebugEnabled = ["1", "true", "yes"].includes(
+      String(process.env.SEARCH_COLOR_DEBUG ?? "").toLowerCase(),
+    );
     const hasCatalogColor = typeof hit?._source?.color === "string" && String(hit?._source?.color).trim() !== "";
-    if (!hasCatalogColor && matchedColor) {
+    if (colorDebugEnabled && !hasCatalogColor && matchedColor) {
       // Keep this debug-level and safe for prod use; toggle by inspecting logs.
       // eslint-disable-next-line no-console
       console.debug("color-debug: matchedColor", {
@@ -1220,11 +1278,15 @@ export function computeHitRelevance(
       : productTypeCompliance >= 0.2
         ? 0.35
         : 0.08;
+  // Boost sleeve weight when explicit sleeve intent is detected from image analysis.
+  // This prevents color similarity from overwhelming sleeve mismatch penalties.
+  const sleeveWeight = hasSleeveIntentForDoc ? 85 : 52;  // Increase from 52 to 85 when sleeve intent is explicit
+  const colorWeight = hasSleeveIntentForDoc ? 70 : 90;   // Reduce from 90 to 70 to avoid color drowning out sleeve
   const attrComponentRaw =
-    colorCompliance * 90 * docTrust +
+    colorCompliance * colorWeight * docTrust +
     styleCompliance * 65 * docTrust +
     patternCompliance * 40 * docTrust + // new
-    sleeveCompliance * 52 * docTrust +
+    sleeveCompliance * sleeveWeight * docTrust +
     audienceCompliance * wAud * docTrust;
   const attrComponent = attrComponentRaw * attrTypeGate;
   // Similarity term strengthened and modulated by type compliance.

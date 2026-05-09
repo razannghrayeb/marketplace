@@ -357,6 +357,10 @@ function effectiveIntraFamilyPenalty(input: UnifiedScoreInputs): number {
 function computeCaps(input: UnifiedScoreInputs): { reason: string; value: number }[] {
   const caps: { reason: string; value: number }[] = [];
   const tier = effectiveColorTier(input);
+  const detectionCategory = String(input.detectionProductCategory ?? "").toLowerCase().trim();
+  const nearIdenticalTypeAligned =
+    input.osSimilarity01 >= 0.97 &&
+    (input.exactTypeScore >= 1 || input.productTypeCompliance >= 0.82);
 
   // ── Continuous caps ──
   // Use linear interpolation instead of stepped values so similar penalties produce
@@ -413,6 +417,32 @@ function computeCaps(input: UnifiedScoreInputs): { reason: string; value: number
   }
 
   // Style hard mismatch only — soft mismatches blend through component score.
+  // Tops and outerwear are visually close, especially for long sleeves.
+  // Keep one retrieval path, but cap obvious family drift so exact color or
+  // high visual similarity cannot rank a plain jacket as a top, or a plain
+  // shirt as outerwear. Near-identical + type-aligned matches are preserved.
+  if (!nearIdenticalTypeAligned) {
+    if (detectionCategory === "tops" && input.docIsOuterwearOrTailoredLike && !input.docIsTopLike) {
+      caps.push({ reason: "top_outerwear_family_cap", value: 0.56 });
+    } else if (
+      detectionCategory === "tops" &&
+      input.docIsOuterwearOrTailoredLike &&
+      input.docIsTopLike &&
+      input.exactTypeScore < 1 &&
+      input.productTypeCompliance < 0.50
+    ) {
+      caps.push({ reason: "top_layering_weak_type_cap", value: 0.68 });
+    }
+
+    if (
+      (detectionCategory === "outerwear" || detectionCategory === "tailored") &&
+      input.docIsTopLike &&
+      !input.docIsOuterwearOrTailoredLike
+    ) {
+      caps.push({ reason: "outerwear_plain_top_family_cap", value: 0.56 });
+    }
+  }
+
   if (input.hasStyleIntent && input.styleCompliance <= 0.10) {
     const cap = 0.60 + input.styleCompliance * 0.5; // small continuous variation
     caps.push({ reason: "style_hard_mismatch_cap", value: cap });
@@ -430,9 +460,21 @@ function computeFloor(
   components: { visual: number; type: number; color: number; attrs: number },
 ): { floor: number; reason: string | null } {
   const sim = clamp01(input.osSimilarity01);
+  const detectionCategory = String(input.detectionProductCategory ?? "").toLowerCase().trim();
   const tier = effectiveColorTier(input);
   const sameColorFamily =
     tier === "exact" || tier === "family" || tier === "light-shade" || tier === "dark-shade";
+  const nearIdenticalTypeAligned =
+    sim >= 0.97 &&
+    (input.exactTypeScore >= 1 || input.productTypeCompliance >= 0.82);
+  const structuralFamilyDrift =
+    !nearIdenticalTypeAligned &&
+    (
+      (detectionCategory === "tops" && input.docIsOuterwearOrTailoredLike && !input.docIsTopLike) ||
+      ((detectionCategory === "outerwear" || detectionCategory === "tailored") &&
+        input.docIsTopLike &&
+        !input.docIsOuterwearOrTailoredLike)
+    );
 
   let floor = 0;
   let reason: string | null = null;
@@ -464,7 +506,7 @@ function computeFloor(
   // down. This addresses the user's requirement: same-color products must rank
   // first.
   const audienceOk = !input.hasAudienceIntent || input.audienceCompliance >= 0.70;
-  if (tier === "exact" && input.hasColorIntent && audienceOk) {
+  if (tier === "exact" && input.hasColorIntent && audienceOk && !structuralFamilyDrift) {
     // Floor scales with type + visual evidence so a wrong-type-but-exact-color item
     // doesn't get inflated.
     let colorFloor = 0;
@@ -478,7 +520,7 @@ function computeFloor(
     if (colorFloor > floor) { floor = colorFloor; reason = "exact_color_priority_floor"; }
   }
 
-  if (tier === "family" && input.hasColorIntent && audienceOk) {
+  if (tier === "family" && input.hasColorIntent && audienceOk && !structuralFamilyDrift) {
     let familyColorFloor = 0;
     if (input.exactTypeScore >= 1) {
       familyColorFloor = sim >= 0.85 ? 0.80 : sim >= 0.75 ? 0.74 : sim >= 0.65 ? 0.68 : 0.62;
@@ -601,11 +643,11 @@ export function scoreCandidateUnified(input: UnifiedScoreInputs): UnifiedScoreRe
 // scoreCandidateUnified).
 // ────────────────────────────────────────────────────────────────────────────
 
-const TOP_LIKE_RE = /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|overshirt|overshirts|polo|polos|tunic|loungewear|knitwear|pullover|jumper|henley|bodysuit)\b/;
+const TOP_LIKE_RE = /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|overshirt|overshirts|polo|polos|tunic|loungewear|knitwear|pullover|jumper|henley|bodysuit|fleece)\b/;
 const BOTTOM_LIKE_RE = /\b(bottom|bottoms|pants?|trousers?|jeans?|denim|shorts?|skirt|skirts|leggings?|joggers?|chinos?|culottes?|slacks?|sweatpants?|track\s*pants?)\b/;
 const FOOTWEAR_LIKE_RE = /\b(footwear|shoe|shoes|sneaker|sneakers|trainer|trainers|boot|boots|loafer|loafers|heel|heels|pump|pumps|sandal|sandals|slipper|slippers|clog|clogs|mule|mules|flats?|oxford|oxfords|espadrille|espadrilles|brogue|brogues)\b/;
 const DRESS_LIKE_RE = /\b(dress|dresses|gown|gowns|jumpsuit|jumpsuits|romper|rompers|playsuit|playsuits|sundress|sun\s*dress|abaya|kaftan|caftan|frock)\b/;
-const OUTERWEAR_OR_TAILORED_RE = /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers|overcoat|overcoats|shacket|shackets|overshirt|overshirts|suit|suits|tuxedo|tuxedos|sport\s*coat|dress\s*jacket|waistcoat|waistcoats|gilet|gilets|tailored|vest|vests|poncho|anorak)\b/;
+const OUTERWEAR_OR_TAILORED_RE = /\b(jacket|jackets|coat|coats|blazer|blazers|outerwear|outwear|parka|parkas|trench|windbreaker|windbreakers|bomber|bombers|blouson|blousons|fleece|fleeces|puffer|puffers|down\s+jackets?|quilted\s+jackets?|rain\s+jackets?|shell\s+jackets?|softshell(?:\s+jackets?)?|overcoat|overcoats|shacket|shackets|overshirt|overshirts|suit|suits|tuxedo|tuxedos|sport\s*coat|dress\s*jacket|waistcoat|waistcoats|gilet|gilets|tailored|vest|vests|poncho|anorak)\b/;
 const BAG_LIKE_RE = /\b(bag|bags|handbag|handbags|tote|totes|clutch|clutches|purse|purses|backpack|backpacks|crossbody|satchel|satchels|wallet|wallets|fanny\s*pack|duffel|duffle|messenger\s*bag)\b/;
 
 export interface DocFamilySignals {

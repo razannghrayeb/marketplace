@@ -40,6 +40,14 @@ describe("categoryFilter", () => {
     expect(t.includes("waistcoat")).toBe(true);
   });
 
+  test("getCategorySearchTerms includes catalog outerwear layer buckets", () => {
+    const t = getCategorySearchTerms("outerwear");
+    expect(t.includes("fleece")).toBe(true);
+    expect(t.includes("blouson")).toBe(true);
+    expect(t.includes("puffer jacket")).toBe(true);
+    expect(t.includes("rain jacket")).toBe(true);
+  });
+
   test("inferCategoryCanonical maps vendor label to aisle", () => {
     expect(inferCategoryCanonical("Bags", "")).toBe("accessories");
     expect(inferCategoryCanonical(null, "Men crew neck tee shirt")).toBe("tops");
@@ -50,6 +58,8 @@ describe("categoryFilter", () => {
     expect(inferCategoryCanonical("Long Sleeve", "")).toBe("tops");
     expect(inferCategoryCanonical("Short Sleeve", "")).toBe("tops");
     expect(inferCategoryCanonical("Polo Short Sleeve", "")).toBe("tops");
+    expect(inferCategoryCanonical("Fleece", "")).toBe("outerwear");
+    expect(inferCategoryCanonical("PARKAS & BLOUSONS", "")).toBe("outerwear");
     expect(inferCategoryCanonical("After Ski Boot", "")).toBe("footwear");
     expect(inferCategoryCanonical("SKIN CARE", "")).toBe("beauty");
     expect(inferCategoryCanonical("CONCEALERS", "")).toBe("beauty");

@@ -30,6 +30,7 @@ export const COLOR_CANONICAL_ALIASES: Record<string, string[]> = {
     "gray", "grey", "heather grey", "heather gray", "silver", "charcoal",
     "dark gray", "dark grey", "wolf grey", "wolf gray",
     "smoke grey", "smoke gray", "light smoke grey", "dark smoke grey", "iron grey",
+    "iron gate",
     "castlerock", "castle grey", "vast grey", "dove grey", "college grey", "halo gray",
     "halo grey", "titan gray", "titan grey", "thunder", "thunderstorm", "raincloud",
     "downpour", "storm", "stormy", "tempest", "cinder", "carbon", "forged iron",

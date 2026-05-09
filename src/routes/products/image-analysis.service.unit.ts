@@ -61,17 +61,39 @@ describe("main-path detection search hints", () => {
       }),
     ).toEqual(["jacket", "coat", "blazer"]);
   });
+
+  test("keeps catalog layer terms in one outerwear main-path call when explicit", () => {
+    expect(
+      buildInitialTypeSearchHintsForDetection({
+        detectionLabel: "fleece jacket",
+        productCategory: "outerwear",
+        softProductTypeHints: ["outerwear"],
+        mainPathOnly: true,
+        limit: 3,
+      }),
+    ).toEqual(["fleece", "jacket", "coat"]);
+
+    expect(
+      buildInitialTypeSearchHintsForDetection({
+        detectionLabel: "puffer jacket",
+        productCategory: "outerwear",
+        softProductTypeHints: ["outerwear"],
+        mainPathOnly: true,
+        limit: 3,
+      }),
+    ).toEqual(["puffer", "jacket", "coat"]);
+  });
 });
 
 describe("applyRelevanceThresholdFilter", () => {
-  test("keeps detection candidates accepted by the per-search acceptance score", () => {
+  test("keeps detection candidates accepted by the unified scorer score", () => {
     const kept = applyRelevanceThresholdFilter(
       [
         {
           id: "1",
           title: "The Utility Barrel Pant",
           finalRelevance01: 0.235,
-          explain: { acceptanceRelevance01: 0.691 },
+          explain: { unifiedScorer: { score: 0.691 } },
         } as any,
       ],
       0.3,
@@ -89,7 +111,7 @@ describe("applyRelevanceThresholdFilter", () => {
           title: "Girls Leggings",
           finalRelevance01: 0.235,
           explain: {
-            acceptanceRelevance01: 0.691,
+            unifiedScorer: { score: 0.691 },
             hasAudienceIntent: true,
             audienceCompliance: 0,
           },

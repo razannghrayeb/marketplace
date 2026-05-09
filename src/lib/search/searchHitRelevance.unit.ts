@@ -514,6 +514,64 @@ describe("computeHitRelevance - image palette color authority", () => {
     expect(rel.colorTier).not.toBe("exact");
     expect(rel.colorCompliance).toBeLessThan(0.6);
   });
+
+  test("does not treat mixed title color with secondary image match as exact", () => {
+    const hit = {
+      _source: {
+        title: "Black White Sneaker",
+        category: "shoes",
+        category_canonical: "footwear",
+        product_types: ["sneaker"],
+        attr_colors_text: ["black", "white"],
+        attr_colors_image: ["black", "white", "off-white"],
+        color_palette_canonical: ["black", "white", "off-white"],
+        color_confidence_text: 0.75,
+        color_confidence_image: 0.9,
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.86, {
+      ...baseIntent,
+      desiredProductTypes: ["sneaker"],
+      desiredColors: ["white"],
+      desiredColorsTier: ["white"],
+      mergedCategory: "footwear",
+      astCategories: ["footwear"],
+    });
+
+    expect(rel.colorTier).not.toBe("exact");
+    expect(rel.colorCompliance).toBeLessThan(0.6);
+    expect(rel.colorCompliance).toBeGreaterThan(0.3);
+  });
+
+  test("keeps mixed title color strong when primary image confirms desired color", () => {
+    const hit = {
+      _source: {
+        title: "White Olive Sneaker",
+        category: "shoes",
+        category_canonical: "footwear",
+        product_types: ["sneaker"],
+        attr_colors_text: ["white", "olive"],
+        attr_colors_image: ["white", "off-white", "olive"],
+        color_palette_canonical: ["white", "off-white", "olive"],
+        color_confidence_text: 0.75,
+        color_confidence_image: 0.9,
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.86, {
+      ...baseIntent,
+      desiredProductTypes: ["sneaker"],
+      desiredColors: ["white"],
+      desiredColorsTier: ["white"],
+      mergedCategory: "footwear",
+      astCategories: ["footwear"],
+    });
+
+    expect(rel.colorTier).toBe("family");
+    expect(rel.colorCompliance).toBeGreaterThan(0.75);
+    expect(rel.colorCompliance).toBeLessThan(0.9);
+  });
 });
 
 describe("scoreAudienceCompliance - cue-based gender inference", () => {

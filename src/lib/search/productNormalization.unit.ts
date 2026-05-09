@@ -59,6 +59,8 @@ describe("normalizeHydratedProduct", () => {
     expect(normalizeHydratedProduct({ category: "CROSSBODY BAGS" }).normalizedFamily).toBe("bags");
     expect(normalizeHydratedProduct({ category: "TRACKSUITS & TRACK TROUSERS" }).normalizedFamily).toBe("bottoms");
     expect(normalizeHydratedProduct({ category: "COATS & JACKETS" }).normalizedFamily).toBe("outerwear");
+    expect(normalizeHydratedProduct({ category: "Fleece" }).normalizedType).toBe("fleece");
+    expect(normalizeHydratedProduct({ category: "PARKAS & BLOUSONS" }).normalizedFamily).toBe("outerwear");
     expect(normalizeHydratedProduct({ category: "ABAYAS" }).normalizedFamily).toBe("dresses");
   });
 
