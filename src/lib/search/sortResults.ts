@@ -30,6 +30,15 @@ function primarySortScore(product: SortableProduct): number {
   return Number.isFinite(fallback) ? fallback : 0;
 }
 
+export function unifiedScorerScore(product: unknown): number | null {
+  const record = product as SortableProduct | null | undefined;
+  const unified = Number(record?.explain?.unifiedScorer?.score ?? NaN);
+  if (Number.isFinite(unified)) return unified;
+
+  const exposedScore = Number(record?.score ?? NaN);
+  return Number.isFinite(exposedScore) ? exposedScore : null;
+}
+
 /**
  * Sort products by finalRelevance01 (descending), then tie-break by color, style,
  * rerank score, and similarity.
@@ -112,5 +121,22 @@ export function sortProductsByFinalRelevance<T extends SortableProduct>(products
     if (br !== ar) return br - ar;
 
     return (b.similarity_score ?? 0) - (a.similarity_score ?? 0);
+  });
+}
+
+/**
+ * Sort products strictly by `explain.unifiedScorer.score` descending.
+ * Missing scores are placed after scored items and ties keep the original order.
+ */
+export function sortProductsByUnifiedScorer<T extends SortableProduct>(products: T[]): T[] {
+  return [...products].sort((a: any, b: any) => {
+    const aScore = unifiedScorerScore(a);
+    const bScore = unifiedScorerScore(b);
+
+    if (aScore === null && bScore === null) return 0;
+    if (aScore === null) return 1;
+    if (bScore === null) return -1;
+    if (Math.abs(bScore - aScore) > 1e-8) return bScore - aScore;
+    return 0;
   });
 }

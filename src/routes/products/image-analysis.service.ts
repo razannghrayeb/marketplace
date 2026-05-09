@@ -829,7 +829,9 @@ const FORMALITY_MAP: Record<string, number> = {
 
   // Outerwear
   "long sleeve outwear": 6,
+  "long sleeve outerwear": 6,
   "short sleeve outwear": 5,
+  "short sleeve outerwear": 5,
   blazer: 7,
   coat: 6,
   jacket: 4,
@@ -1546,6 +1548,95 @@ export async function refineFootwearSubtypeWithCLIP(
   }
 
   return label;
+}
+
+export function normalizeDetectionLabelForSearch(label: string): string {
+  return String(label ?? "")
+    .toLowerCase()
+    .replace(/\boutwear\b/g, "outerwear")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function mainPathTypeHintClusterKey(hint: string): string {
+  const h = normalizeDetectionLabelForSearch(hint);
+  if (/\b(t-?shirt|tshirt|tee|tees|tank|camisole|cami)\b/.test(h)) return "top:tee";
+  if (/\b(shirt|shirts|blouse|blouses|button\s*down|button-down)\b/.test(h)) return "top:shirt";
+  if (/\b(sweater|sweaters|cardigan|cardigans|knitwear|jumper|jumpers)\b/.test(h)) return "top:knit";
+  if (/\b(hoodie|hoodies|hoody|sweatshirt|sweatshirts|pullover|pullovers)\b/.test(h)) return "top:hoodie";
+  if (/\b(polos?|polo\s*shirt)\b/.test(h)) return "top:polo";
+  if (/\b(suit|suits|tuxedo|tuxedos)\b/.test(h)) return "tailored:suit";
+  if (/\b(blazer|blazers|sport\s*coat|sportcoat)\b/.test(h)) return "outerwear:blazer";
+  if (/\b(coat|coats|overcoat|overcoats|parka|parkas|trench|trenches)\b/.test(h)) return "outerwear:coat";
+  if (/\b(jacket|jackets|outerwear|shacket|shackets|overshirt|overshirts|bomber|bombers|windbreaker|windbreakers)\b/.test(h)) return "outerwear:jacket";
+  return h;
+}
+
+function mainPathPriorityTypeHints(detectionLabel: string, productCategory: string): string[] {
+  const label = normalizeDetectionLabelForSearch(detectionLabel);
+  const category = String(productCategory ?? "").toLowerCase().trim();
+
+  if (category === "tops") {
+    if (/\blong\s+sleeve\b|\bfull\s+sleeve\b/.test(label)) {
+      return ["shirt", "sweater", "hoodie"];
+    }
+    if (/\bshort\s+sleeve\b|\btee\b|\bt-?shirt\b|\btshirt\b/.test(label)) {
+      return ["tshirt", "shirt", "polo"];
+    }
+  }
+
+  if (category === "outerwear" || category === "tailored") {
+    if (/\b(suit|suits|tuxedo|tuxedos)\b/.test(label)) {
+      return ["suit", "blazer", "dress jacket"];
+    }
+    if (/\b(blazer|sport\s*coat|sportcoat)\b/.test(label)) {
+      return ["blazer", "sport coat", "jacket"];
+    }
+    if (/\b(coat|overcoat|parka|trench)\b/.test(label)) {
+      return ["coat", "jacket", "outerwear"];
+    }
+    return ["jacket", "coat", "blazer"];
+  }
+
+  return [];
+}
+
+export function buildInitialTypeSearchHintsForDetection(params: {
+  detectionLabel: string;
+  productCategory: string;
+  softProductTypeHints?: string[];
+  mainPathOnly?: boolean;
+  limit?: number;
+}): string[] {
+  const limit = Math.max(1, Math.min(3, Math.floor(Number(params.limit ?? 3))));
+  const softHints = (params.softProductTypeHints ?? [])
+    .map((hint) => normalizeDetectionLabelForSearch(String(hint ?? "")))
+    .filter(Boolean);
+
+  if (!params.mainPathOnly) {
+    return [...new Set(softHints)].slice(0, limit);
+  }
+
+  const merged = [
+    ...mainPathPriorityTypeHints(params.detectionLabel, params.productCategory),
+    ...softHints,
+  ];
+  const out: string[] = [];
+  const seenHints = new Set<string>();
+  const seenClusters = new Set<string>();
+
+  for (const raw of merged) {
+    const hint = normalizeDetectionLabelForSearch(raw);
+    if (!hint || seenHints.has(hint)) continue;
+    const cluster = mainPathTypeHintClusterKey(hint);
+    if (seenClusters.has(cluster)) continue;
+    seenHints.add(hint);
+    seenClusters.add(cluster);
+    out.push(hint);
+    if (out.length >= limit) break;
+  }
+
+  return out;
 }
 
 /**
@@ -3946,8 +4037,8 @@ function buildSafeNonEmptyFallback(params: {
   return ranked.slice(0, safeCap);
 }
 
-/** Filter products by minimum finalRelevance01 score. Removes low-relevance matches from results. */
-function applyRelevanceThresholdFilter(
+/** Filter products by minimum relevance score. Removes low-relevance matches from results. */
+export function applyRelevanceThresholdFilter(
   products: ProductResult[],
   minRelevance: number | undefined,
   options?: {
@@ -4039,6 +4130,18 @@ function applyRelevanceThresholdFilter(
   const filtered = products.filter((p) => {
     const relevance = Number((p as any)?.finalRelevance01 ?? 0);
     const explain = ((p as any)?.explain ?? {}) as Record<string, unknown>;
+    const acceptanceRelevance = Number(explain.acceptanceRelevance01 ?? relevance);
+    const colorTier = String(explain.colorTier ?? "").toLowerCase().trim();
+    const colorCompliance = Number(explain.colorCompliance ?? NaN);
+    const hasHardColorIntent =
+      Boolean(explain.hasExplicitColorIntent) || Boolean(explain.colorIntentGatesFinalRelevance);
+    const hasSevereColorContradiction =
+      hasHardColorIntent &&
+      (colorTier === "none" || (Number.isFinite(colorCompliance) && colorCompliance < 0.2));
+    const effectiveRelevance = Math.max(
+      Number.isFinite(relevance) ? relevance : 0,
+      !hasSevereColorContradiction && Number.isFinite(acceptanceRelevance) ? acceptanceRelevance : 0,
+    );
     const categoryNorm = String(options?.category ?? "").toLowerCase().trim();
     const audienceCompliance = Number(explain.audienceCompliance ?? NaN);
     const hasAudienceIntent = Boolean(explain.hasAudienceIntent);
@@ -4046,7 +4149,7 @@ function applyRelevanceThresholdFilter(
     if (hasAudienceIntent && audienceFloor > 0 && Number.isFinite(audienceCompliance) && audienceCompliance < audienceFloor) {
       return false;
     }
-    return relevance >= minRelevance;
+    return effectiveRelevance >= minRelevance;
   });
 
   // Strict mode: keep only true main-path results, no relevance fallback preservation.
@@ -6442,6 +6545,7 @@ export class ImageAnalysisService {
             confidence: detection.confidence,
             areaRatio: detection.area_ratio,
           });
+          label = normalizeDetectionLabelForSearch(label);
           if (hotPathDebug) {
             console.log(`[detection-trace] started label="${label}"${label !== rawLabel ? ` (refined from "${rawLabel}")` : ""} conf=${(detection.confidence ?? 0).toFixed(3)} area=${(detection.area_ratio ?? 0).toFixed(3)}`);
           }
@@ -6555,10 +6659,17 @@ export class ImageAnalysisService {
           if (categoryMapping.productCategory === "tops") {
             const labelNormForTopHints = String(label ?? "").toLowerCase();
             const isShortSleeveTop = /\bshort sleeve top\b/.test(labelNormForTopHints);
+            const isLongSleeveTop = /\blong sleeve top\b|\blong sleeve\b|\bfull sleeve\b/.test(labelNormForTopHints);
             const isMenAudience = String(inferredAudience.gender ?? "").toLowerCase().trim() === "men";
             if (isShortSleeveTop) {
-              const shortTopPriority = ["t-shirt", "tshirt", "tee", "shirt", "polo", "top", "tops"];
+              const shortTopPriority = ["tshirt", "shirt", "polo", "top", "tops"];
               softProductTypeHints = [...new Set([...shortTopPriority, ...softProductTypeHints])];
+            } else if (isLongSleeveTop) {
+              const longTopPriority = ["shirt", "sweater", "hoodie", "blouse", "cardigan", "knitwear", "pullover", "top", "tops"];
+              const nonShortSleeveHints = softProductTypeHints.filter(
+                (t) => !/\b(t-?shirt|tshirt|tee|tees|tank|camisole|cami|sleeveless|crop top|polo)\b/i.test(String(t)),
+              );
+              softProductTypeHints = [...new Set([...longTopPriority, ...nonShortSleeveHints])];
             }
             // Avoid overly narrow/feminine seeds for men tops; they collapse recall.
             if (isMenAudience) {
@@ -7076,9 +7187,21 @@ export class ImageAnalysisService {
 
           const preBlipFilters = { ...filters };
           const preBlipSoftTypeHints = [...softProductTypeHints];
-          const initialTypeSearchHints = [
-            ...new Set(preBlipSoftTypeHints.map((t) => String(t).toLowerCase().trim()).filter(Boolean)),
-          ].slice(0, Math.max(1, Math.min(3, detectionSearchCallLimit)));
+          const initialTypeSearchHints = buildInitialTypeSearchHintsForDetection({
+            detectionLabel: label,
+            productCategory: detectionProductCategoryForSearch,
+            softProductTypeHints: preBlipSoftTypeHints,
+            mainPathOnly,
+            limit: mainPathOnly ? 3 : Math.max(1, Math.min(3, detectionSearchCallLimit)),
+          });
+          if (mainPathOnly && initialTypeSearchHints.length > detectionSearchCallLimit) {
+            detectionSearchCallLimit = initialTypeSearchHints.length;
+          }
+          if (hotPathDebug && mainPathOnly && initialTypeSearchHints.length > 0) {
+            console.log(
+              `[main-path-initial-hints] detection="${label}" category="${detectionProductCategoryForSearch}" hints=[${initialTypeSearchHints.join(",")}]`,
+            );
+          }
           // k-means crop color for this detection is already resolved (awaited above at
           // cropColorsPromise). Pass it to the initial search so the reranker has a color
           // bias from the start rather than ordering results purely by cosine similarity.
@@ -8583,7 +8706,7 @@ export class ImageAnalysisService {
             }
           }
 
-          if (similarResult.results.length === 0) {
+          if (!mainPathOnly && similarResult.results.length === 0) {
             // Fail-safe: avoid zero-result detections when we already have category-safe
             // candidates, but keep quality by using a strict score floor.
             const desiredSleeve = inferSleeveIntentFromDetectionLabel(detection.label);

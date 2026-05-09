@@ -12,6 +12,8 @@
 import { Router, Request, Response } from "express";
 import { multiImageSearch, multiVectorWeightedSearch } from "./search.service";
 import { searchImage, searchText } from "../../lib/search/fashionSearchFacade";
+import { toPublicSearchProducts } from "../../lib/search/publicSearchResult";
+import { sortProductsByUnifiedScorer } from "../../lib/search/sortResults";
 import {
   getAutocompleteSuggestions,
   getTrendingQueries,
@@ -256,8 +258,12 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
       sessionId,
       userId: Number.isFinite(userId as number) ? (userId as number) : undefined,
     });
-    
-    res.json(result);
+
+    res.json({
+      ...result,
+      results: toPublicSearchProducts(sortProductsByUnifiedScorer((result.results ?? []) as any)),
+      related: toPublicSearchProducts(sortProductsByUnifiedScorer((result.related ?? []) as any)),
+    });
   } catch (error) {
     console.error("Image search error:", error);
     res.status(500).json({ error: "Image search failed" });

@@ -112,6 +112,23 @@ const FASHION_COLOR_ALIASES: Record<string, string> = {
   onyx: "black",
   ebony: "black",
   raven: "black",
+  noir: "black",
+  nero: "black",
+  blackout: "black",
+  "black-out": "black",
+  "core-black": "black",
+  "tnf-black": "black",
+  "night-black": "black",
+  "phantom-black": "black",
+  "carbon-black": "black",
+  "ink-black": "black",
+  "off-noir": "black",
+  caviar: "black",
+  coal: "charcoal",
+  graphite: "charcoal",
+  carbon: "charcoal",
+  "forged-iron": "charcoal",
+  magnet: "charcoal",
   // Blue family
   indigo: "denim",
   denim: "denim",
@@ -291,6 +308,8 @@ function specialColorMatchScore(desiredRaw: string, productRaw: string): number 
 
   if (desired === "white" && product === "off-white") return 0.95;
   if (desired === "cream" && ["off-white", "ivory", "bone", "ecru"].includes(product)) return 1;
+  if (desired === "charcoal" && product === "black") return 0.9;
+  if (desired === "black" && product === "charcoal") return 0.88;
   return null;
 }
 
@@ -380,6 +399,7 @@ function colorTone(tokenRaw: string): "light" | "dark" | "mid" {
     token.startsWith("dark-") ||
     token.startsWith("deep-") ||
     token.startsWith("midnight-") ||
+    token === "black" ||
     token === "navy" ||
     token === "charcoal" ||
     token === "burgundy" ||
@@ -632,7 +652,7 @@ export function tieredColorMatchScore(
       const productTone = colorTone(n);
       if (desiredTone === "light") {
         if (productTone === "light") score += 0.04;
-        else if (productTone === "dark") score -= 0.08;
+        else if (productTone === "dark") score -= 0.06;
       } else if (desiredTone === "dark") {
         if (productTone === "dark") score += 0.03;
         else if (productTone === "light") score -= 0.07;

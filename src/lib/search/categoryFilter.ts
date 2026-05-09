@@ -523,15 +523,18 @@ export function isBeautyRetailListingFromFields(
 
 export function inferCategoryCanonical(rawCategory: string | null | undefined, title: string): string | null {
   const cat = rawCategory ? String(rawCategory).toLowerCase().trim() : "";
-  for (const [key, aliases] of Object.entries(CATEGORY_ALIASES)) {
-    if (cat === key) return key;
-    if (cat && aliases.some((a) => a === cat)) return key;
-  }
   const norm = (title || "")
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+  if (norm && /\b(shirt\s+jackets?|shacket|shackets|overshirt|overshirts)\b/.test(norm)) {
+    return "outerwear";
+  }
+  for (const [key, aliases] of Object.entries(CATEGORY_ALIASES)) {
+    if (cat === key) return key;
+    if (cat && aliases.some((a) => a === cat)) return key;
+  }
   if (norm) {
     // Resolve high-signal garment classes first to avoid ambiguous alias collisions
     // like "short jacket" being mapped to bottoms due the token "short".

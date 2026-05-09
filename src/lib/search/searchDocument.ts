@@ -115,6 +115,10 @@ export function extractProductTypesFromTitle(title: string): string[] {
     ["shalwar kameez", "kameez"],
     ["lehenga choli", "lengha"],
     ["sherwani suit", "sherwani"],
+    ["shirt jacket", "jacket"],
+    ["shirt jackets", "jacket"],
+    ["shacket", "jacket"],
+    ["overshirt", "jacket"],
   ];
   for (const [needle, mapped] of phrases) {
     if (normalized.includes(needle)) add(mapped);
@@ -136,6 +140,8 @@ export function extractProductTypesFromTitle(title: string): string[] {
     jeans: "jeans",
     denim: "jeans",
     denims: "jeans",
+    boot: "boots",
+    boots: "boots",
     tshirt: "tshirt",
     "t-shirt": "tshirt",
     tee: "tshirt",
@@ -147,6 +153,10 @@ export function extractProductTypesFromTitle(title: string): string[] {
     leggings: "leggings",
     legging: "leggings",
     shorts: "shorts",
+    skirt: "skirt",
+    skirts: "skirt",
+    skort: "skirt",
+    skorts: "skirt",
     sweater: "sweater",
     sweaters: "sweater",
     blazer: "blazer",
@@ -341,6 +351,25 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
   }
   for (const t of enrichTokens) {
     if (!mergedTypeSeeds.includes(t)) mergedTypeSeeds.push(t);
+  }
+  const categoryAndTitleText = `${input.title ?? ""} ${input.category ?? ""}`.toLowerCase();
+  const hasExplicitSkirtOrSkort = /\b(skorts?|skirts?|mini\s+skirt|midi\s+skirt|maxi\s+skirt)\b/.test(categoryAndTitleText);
+  if (hasExplicitSkirtOrSkort) {
+    for (let i = mergedTypeSeeds.length - 1; i >= 0; i -= 1) {
+      if (/\b(jeans?|denim|pants?|trousers?|chinos?|slacks?)\b/.test(String(mergedTypeSeeds[i]).toLowerCase())) {
+        mergedTypeSeeds.splice(i, 1);
+      }
+    }
+    if (!mergedTypeSeeds.includes("skirt")) mergedTypeSeeds.unshift("skirt");
+  }
+  const hasExplicitOuterwearPhrase = /\b(shirt\s+jackets?|shackets?|overshirts?)\b/.test(categoryAndTitleText);
+  if (hasExplicitOuterwearPhrase) {
+    for (let i = mergedTypeSeeds.length - 1; i >= 0; i -= 1) {
+      if (String(mergedTypeSeeds[i]).toLowerCase().trim() === "shirt") {
+        mergedTypeSeeds.splice(i, 1);
+      }
+    }
+    if (!mergedTypeSeeds.includes("jacket")) mergedTypeSeeds.unshift("jacket");
   }
   const productTypesIndexed = expandProductTypesForIndexing(mergedTypeSeeds);
   const typeConfidence = (() => {
