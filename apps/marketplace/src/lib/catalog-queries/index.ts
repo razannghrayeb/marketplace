@@ -411,6 +411,27 @@ async function fetchProductAggregateRows(): Promise<ProductAggregateRow[]> {
   }
 }
 
+async function sbRestCount(table: string, params: Record<string, string> = {}): Promise<number> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || ''
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+  if (!supabaseUrl || !serviceKey) return 0
+  const url = new URL(`${supabaseUrl}/rest/v1/${table}`)
+  url.searchParams.set('select', 'id')
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v)
+  const res = await fetch(url.toString(), {
+    method: 'HEAD',
+    headers: {
+      apikey: serviceKey,
+      Authorization: `Bearer ${serviceKey}`,
+      Prefer: 'count=exact',
+    },
+    cache: 'no-store',
+  })
+  const range = res.headers.get('content-range') ?? ''
+  const match = range.match(/\/(\d+)$/)
+  return match ? parseInt(match[1], 10) : 0
+}
+
 async function fetchOverviewKPIsFallback(): Promise<OverviewKPIs> {
   const cached = _overviewCache.get()
   if (cached) return cached
@@ -425,31 +446,34 @@ async function fetchOverviewKPIsFallback(): Promise<OverviewKPIs> {
     const pq = (q: ReturnType<typeof sb.from>) =>
       exStr ? q.not('vendor_id', 'in', exStr) : q
 
+    const vendorExclude = EXCLUDED_VENDOR_NAMES.map(n => `"${n}"`).join(',')
+    const vendorIdExclude = exStr ? `not.in.${exStr}` : undefined
+
     const [
-      vendorsRes, totalRes, availableRes, unavailableRes,
-      seenTodayRes, missingCategoryRes, missingColorRes, missingSizeRes,
+      totalVendors, totalProducts, availableProducts, unavailableProducts,
+      seenToday, missingCategoryRes, missingColorRes, missingSizeRes,
       missingImageUrlRes, missingVariantIdRes, missingParentUrlRes, withSalePriceRes,
     ] = await Promise.all([
-      sb.from('vendors').select('*', { count: 'exact', head: true }).not('name', 'in', `(${EXCLUDED_VENDOR_NAMES.map(n => `"${n}"`).join(',')})`),
-      pq(sb.from('products').select('*', { count: 'exact', head: true })),
-      pq(sb.from('products').select('*', { count: 'exact', head: true })).eq('availability', true),
-      pq(sb.from('products').select('*', { count: 'exact', head: true })).eq('availability', false),
-      pq(sb.from('products').select('*', { count: 'exact', head: true })).gte('last_seen', since24h),
+      sbRestCount('vendors', vendorExclude ? { 'name': `not.in.(${vendorExclude})` } : {}),
+      sbRestCount('products', vendorIdExclude ? { vendor_id: vendorIdExclude } : {}),
+      sbRestCount('products', { availability: 'eq.true', ...(vendorIdExclude ? { vendor_id: vendorIdExclude } : {}) }),
+      sbRestCount('products', { availability: 'eq.false', ...(vendorIdExclude ? { vendor_id: vendorIdExclude } : {}) }),
+      sbRestCount('products', { last_seen: `gte.${since24h}`, ...(vendorIdExclude ? { vendor_id: vendorIdExclude } : {}) }),
       pq(sb.from('products').select('*', { count: 'exact', head: true })).is('category', null),
       pq(sb.from('products').select('*', { count: 'exact', head: true })).is('color', null),
       pq(sb.from('products').select('*', { count: 'exact', head: true })).is('size', null),
       pq(sb.from('products').select('*', { count: 'exact', head: true })).is('image_url', null),
       pq(sb.from('products').select('*', { count: 'exact', head: true })).is('variant_id', null),
       pq(sb.from('products').select('*', { count: 'exact', head: true })).is('parent_product_url', null),
-      pq(sb.from('products').select('*', { count: 'exact', head: true })).not('sales_price_cents', 'is', null),
+      sbRestCount('products', { sales_price_cents: 'not.is.null', ...(vendorIdExclude ? { vendor_id: vendorIdExclude } : {}) }),
     ])
 
     const result: OverviewKPIs = {
-      total_vendors: vendorsRes.count ?? 0,
-      total_products: totalRes.count ?? 0,
-      available_products: availableRes.count ?? 0,
-      unavailable_products: unavailableRes.count ?? 0,
-      products_seen_today: seenTodayRes.count ?? 0,
+      total_vendors: totalVendors,
+      total_products: totalProducts,
+      available_products: availableProducts,
+      unavailable_products: unavailableProducts,
+      products_seen_today: seenToday,
       missing_category: missingCategoryRes.count ?? 0,
       missing_color: missingColorRes.count ?? 0,
       missing_size: missingSizeRes.count ?? 0,
@@ -457,8 +481,8 @@ async function fetchOverviewKPIsFallback(): Promise<OverviewKPIs> {
       missing_image_urls: missingImageUrlRes.count ?? 0,
       missing_variant_id: missingVariantIdRes.count ?? 0,
       missing_parent_url: missingParentUrlRes.count ?? 0,
-      with_sale_price: withSalePriceRes.count ?? 0,
-      updated_last_24h: seenTodayRes.count ?? 0,
+      with_sale_price: withSalePriceRes,
+      updated_last_24h: seenToday,
     }
     _overviewCache.set(result)
     return result
@@ -564,7 +588,7 @@ async function fetchVendorStatsFallback(): Promise<VendorStats[]> {
     const [vendorsRes, statsRes] = await Promise.all([
       sb.from('vendors').select('id, name, url, ship_to_lebanon')
         .not('name', 'in', `(${EXCLUDED_VENDOR_NAMES.map(n => `"${n}"`).join(',')})`),
-      sb.rpc('get_vendor_stats'),
+      sb.rpc('get_vendor_stats').then(r => r).catch(() => ({ data: null, error: new Error('timeout') })),
     ])
 
     if (vendorsRes.error || !vendorsRes.data) return []
@@ -572,6 +596,7 @@ async function fetchVendorStatsFallback(): Promise<VendorStats[]> {
     const vendors = vendorsRes.data as Array<{ id: number; name: string; url: string; ship_to_lebanon: boolean }>
     type StatRow = { vendor_id: number; total: number; available: number; missing_category: number; missing_image_url: number; missing_image_urls: number; missing_variant_id: number; missing_parent_url: number; missing_color: number; missing_size: number; healthy: number; latest_last_seen: string | null }
     const statsMap = new Map<number, StatRow>()
+    const hasStats = !statsRes.error && Array.isArray(statsRes.data) && statsRes.data.length > 0
     for (const row of ((statsRes.data ?? []) as StatRow[])) {
       statsMap.set(Number(row.vendor_id), row)
     }
@@ -601,7 +626,7 @@ async function fetchVendorStatsFallback(): Promise<VendorStats[]> {
           health_score: total > 0 ? Math.round((healthy / total) * 100) : 0,
         }
       })
-      .filter((v) => v.total_products > 0)
+      .filter((v) => !hasStats || v.total_products > 0)
       .sort((a, b) => b.total_products - a.total_products)
 
     _vendorStatsCache.set(result)
