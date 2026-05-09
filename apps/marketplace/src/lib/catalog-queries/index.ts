@@ -596,8 +596,9 @@ async function fetchVendorStatsFallback(): Promise<VendorStats[]> {
     const vendors = vendorsRes.data as Array<{ id: number; name: string; url: string; ship_to_lebanon: boolean }>
     type StatRow = { vendor_id: number; total: number; available: number; missing_category: number; missing_image_url: number; missing_image_urls: number; missing_variant_id: number; missing_parent_url: number; missing_color: number; missing_size: number; healthy: number; latest_last_seen: string | null }
     const statsMap = new Map<number, StatRow>()
-    const hasStats = !statsRes.error && Array.isArray(statsRes.data) && statsRes.data.length > 0
-    for (const row of ((statsRes.data ?? []) as StatRow[])) {
+    const statsData = (statsRes.data ?? []) as StatRow[]
+    const hasStats = !statsRes.error && statsData.length > 0
+    for (const row of statsData) {
       statsMap.set(Number(row.vendor_id), row)
     }
 
