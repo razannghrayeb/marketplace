@@ -107,7 +107,7 @@ function publicSortedProducts(products: unknown, options: { includeExplain?: boo
 
 function publicSimilarProductsPayload<T extends Record<string, any>>(
   payload: T,
-  options: { includeExplain?: boolean; includeScoreDebug?: boolean } = {},
+  options: { includeExplain?: boolean; includeScoreDebug?: boolean; includeDetectionDebug?: boolean } = {},
 ): T {
   if (!payload.similarProducts || !Array.isArray(payload.similarProducts.byDetection)) return payload;
   return {
@@ -115,9 +115,10 @@ function publicSimilarProductsPayload<T extends Record<string, any>>(
     similarProducts: {
       ...payload.similarProducts,
       byDetection: payload.similarProducts.byDetection.map((row: any) => {
-        const { debug: _debug, ...publicRow } = row;
+        const { debug: detectionDebug, ...publicRow } = row;
         return {
           ...publicRow,
+          ...(options.includeDetectionDebug && detectionDebug !== undefined ? { debug: detectionDebug } : {}),
           products: publicSortedProducts(row.products, options),
         };
       }),
@@ -389,6 +390,7 @@ router.post(
       const payload = publicSimilarProductsPayload(safeResult as any, {
         includeExplain: rankingExplain,
         includeScoreDebug: rankingExplain,
+        includeDetectionDebug: rankingExplain,
       });
       if (payload.similarProducts && Array.isArray(payload.similarProducts.byDetection)) {
         const originalByDetection = (payload.similarProducts.byDetection as Array<any>).map((row) => ({
