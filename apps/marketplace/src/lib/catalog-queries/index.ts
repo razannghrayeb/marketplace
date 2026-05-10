@@ -423,15 +423,14 @@ async function sbRestCount(table: string, params: Record<string, string | string
   if (!supabaseUrl || !serviceKey) return 0
   try {
     const url = new URL(`${supabaseUrl}/rest/v1/${table}`)
-    url.searchParams.set('select', 'id')
-    url.searchParams.set('limit', '1')
+    url.searchParams.set('select', '*')
     for (const [k, v] of Object.entries(params)) {
       for (const val of Array.isArray(v) ? v : [v]) {
         url.searchParams.append(k, val)
       }
     }
     const res = await fetch(url.toString(), {
-      method: 'GET',
+      method: 'HEAD',
       headers: {
         apikey: serviceKey,
         Authorization: `Bearer ${serviceKey}`,
