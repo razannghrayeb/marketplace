@@ -40,6 +40,16 @@ export function unifiedScorerScore(product: unknown): number | null {
 }
 
 /**
+ * Explicit scorer score from unified-scoring explain payload only.
+ * This intentionally does not fallback to public `score` fields.
+ */
+export function explicitUnifiedScorerScore(product: unknown): number | null {
+  const record = product as SortableProduct | null | undefined;
+  const unified = Number(record?.explain?.unifiedScorer?.score ?? NaN);
+  return Number.isFinite(unified) ? unified : null;
+}
+
+/**
  * Sort products by finalRelevance01 (descending), then tie-break by color, style,
  * rerank score, and similarity.
  */

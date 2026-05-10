@@ -170,6 +170,67 @@ describe("computeHitRelevance - sleeve intent", () => {
 
     expect(rel.sleeveCompliance).toBeLessThan(0.52);
   });
+
+  test("long-sleeve top intent beats short-sleeve exact-color match", () => {
+    const shortSleeveColorExact = computeHitRelevance(
+      {
+        _source: {
+          title: "Women Short Sleeve Top",
+          category: "tops",
+          category_canonical: "tops",
+          product_types: ["top"],
+          attr_sleeve: "short-sleeve",
+          color: "black",
+        },
+      } as any,
+      0.9,
+      {
+        desiredProductTypes: ["top", "shirt"],
+        desiredColors: ["black"],
+        desiredColorsTier: ["black"],
+        desiredStyle: "casual",
+        desiredSleeve: "long",
+        rerankColorMode: "any",
+        mergedCategory: "tops",
+        astCategories: ["tops"],
+        hasAudienceIntent: false,
+        crossFamilyPenaltyWeight: 420,
+        tightSemanticCap: true,
+      },
+    );
+
+    const longSleeveColorExact = computeHitRelevance(
+      {
+        _source: {
+          title: "Women Long Sleeve Top",
+          category: "tops",
+          category_canonical: "tops",
+          product_types: ["top"],
+          attr_sleeve: "long-sleeve",
+          color: "black",
+        },
+      } as any,
+      0.82,
+      {
+        desiredProductTypes: ["top", "shirt"],
+        desiredColors: ["black"],
+        desiredColorsTier: ["black"],
+        desiredStyle: "casual",
+        desiredSleeve: "long",
+        rerankColorMode: "any",
+        mergedCategory: "tops",
+        astCategories: ["tops"],
+        hasAudienceIntent: false,
+        crossFamilyPenaltyWeight: 420,
+        tightSemanticCap: true,
+      },
+    );
+
+    expect(shortSleeveColorExact.sleeveCompliance).toBe(0);
+    expect(longSleeveColorExact.sleeveCompliance).toBe(1);
+    expect(longSleeveColorExact.finalRelevance01).toBeGreaterThan(shortSleeveColorExact.finalRelevance01);
+    expect(longSleeveColorExact.rerankScore).toBeGreaterThan(shortSleeveColorExact.rerankScore);
+  });
 });
 
 describe("scoreCrossFamilyTypePenalty - category fallback", () => {

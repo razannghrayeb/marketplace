@@ -189,6 +189,32 @@ describe("applySleeveIntentGuard", () => {
 
     expect(kept.map((p: any) => p.id)).toEqual(["keep"]);
   });
+
+  test("uses a stricter floor for long-sleeve tops", () => {
+    const kept = applySleeveIntentGuard({
+      detectionLabel: "long sleeve top",
+      categoryMapping: {
+        productCategory: "tops",
+        attributes: { sleeveLength: "long" },
+      } as any,
+      products: [
+        {
+          id: "drop-mid",
+          title: "Top",
+          product_types: ["top"],
+          explain: { sleeveCompliance: 0.36 },
+        },
+        {
+          id: "keep-high",
+          title: "Long Sleeve Top",
+          product_types: ["top"],
+          explain: { sleeveCompliance: 0.63 },
+        },
+      ] as any,
+    } as any);
+
+    expect(kept.map((p: any) => p.id)).toEqual(["keep-high"]);
+  });
 });
 
 describe("outerwear suit signal", () => {
