@@ -27,18 +27,20 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   ["slipper", "slippers", "slip-on", "slip on", "slip ons", "slip-ons", "espadrille", "espadrilles"],
   ["shoe", "shoes"],
   // Tops (6)
-  ["hoodie", "hoodies", "sweatshirt", "sweatshirts", "pullover", "pullovers"],
-  ["sweater", "sweaters", "cardigan", "cardigans", "jumper", "jumpers", "knitwear"],
-  ["shirt", "shirts", "blouse", "blouses", "button down", "button-down"],
-  ["tshirt", "tee", "tees", "t-shirt", "tank", "camisole", "camis"],
-  ["top", "tops", "cami"],
-  ["polo", "polos", "polo shirt"],
+  ["hoodie", "hoodies", "hoody", "sweatshirt", "sweatshirts", "pullover", "pullovers"],
+  ["sweater", "sweaters", "cardigan", "cardigans", "jumper", "jumpers", "knitwear", "knit tops", "long sleeve"],
+  ["shirt", "shirts", "blouse", "blouses", "button down", "button-down", "woven tops", "woven shirts", "shirting", "chemise"],
+  ["tshirt", "tee", "tees", "t-shirt", "t-shirts", "t-shirt-os", "shirt-sp", "tank", "camisole", "camis"],
+  ["top", "tops", "cami", "track top", "baselayer", "body"],
+  ["polo", "polos", "polo shirt", "polo shirts", "polo short sleeve"],
   // Tailored / formal (2)
   ["suit", "suits", "tuxedo", "tuxedos", "suit jacket", "dress jacket"],
   ["vest", "vests", "gilet", "gilets", "waistcoat", "waistcoats"],
   // Outerwear (4)
   ["blazer", "blazers", "sport coat", "sportcoat"],
   [
+    "outerwear & jackets",
+    "coats & jackets",
     "jacket",
     "jackets",
     "shirt jacket",
@@ -71,6 +73,7 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
     "coats",
     "parka",
     "parkas",
+    "parkas & blousons",
     "trench",
     "windbreaker",
     "windbreakers",
@@ -181,6 +184,7 @@ const BROAD_TOP_QUERY_EXPANSION = [
   "tee",
   "tees",
   "t-shirt",
+  "t-shirts",
   "tank",
   "tank top",
   "camisole",
@@ -189,8 +193,11 @@ const BROAD_TOP_QUERY_EXPANSION = [
   "polo",
   "polos",
   "polo shirt",
+  "polo shirts",
+  "polo short sleeve",
   "sweater",
   "sweaters",
+  "knit tops",
   "cardigan",
   "cardigans",
   "jumper",
@@ -198,10 +205,14 @@ const BROAD_TOP_QUERY_EXPANSION = [
   "knitwear",
   "hoodie",
   "hoodies",
+  "hoody",
   "sweatshirt",
   "sweatshirts",
   "pullover",
   "pullovers",
+  "woven tops",
+  "woven shirts",
+  "shirting",
 ] as const;
 
 /** Map specific surface forms to indexed hypernyms (index-time recall). */
@@ -1198,6 +1209,13 @@ export function extractExplicitSleeveIntent(rawText: string): ExplicitSleeveInte
     )
   ) {
     hits.add("sleeveless");
+  }
+
+  // Shopper shorthand: "white tshirt" and "short white tshirt" generally mean a
+  // short-sleeve tee. Only apply this when no explicit/conflicting sleeve phrase
+  // was found, so "long sleeve tshirt" stays long and "tank top" stays sleeveless.
+  if (hits.size === 0 && /\b(?:short(?:\s+\w+){0,3}\s+)?(?:t\s*shirt|tshirt|tee|tees)\b/.test(qNorm)) {
+    hits.add("short");
   }
 
   return hits.size === 1 ? [...hits][0] : undefined;

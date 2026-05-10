@@ -4,6 +4,7 @@
 import { getCategorySearchTerms } from "./categoryFilter";
 import {
   downrankSpuriousProductTypeFromCategory,
+  extractLexicalProductTypeSeeds,
   filterProductTypeSeedsByMappedCategory,
   hasGarmentLikeFamilyFromProductTypeSeeds,
   scoreCrossFamilyTypePenalty,
@@ -259,7 +260,8 @@ export function scoreAudienceCompliance(
   const productTypes = Array.isArray(hit?._source?.product_types)
     ? hit._source.product_types.map((t) => String(t).toLowerCase()).join(" ")
     : "";
-  const audienceBlob = `${title} ${category} ${canonical} ${productTypes}`;
+  const brand = typeof hit?._source?.brand === "string" ? hit._source.brand.toLowerCase() : "";
+  const audienceBlob = `${title} ${brand} ${category} ${canonical} ${productTypes}`;
   // Style-cue regexes (womenStyleCue / menStyleCue) were inlined here previously.
   // Replaced by inferProductGender — see ./productGenderInference for the full
   // cascade (URL → title → category → garment type → style cues → size system).
@@ -410,6 +412,8 @@ export interface HitCompliance {
   penaltyComponent?: number;
   /** Dev / explain: type gate and intent trace */
   hasTypeIntent?: boolean;
+  catalogTypeEvidenceScore?: number;
+  catalogTypeEvidenceSource?: string;
   hasColorIntent?: boolean;
   hasSleeveIntent?: boolean;
   hasAudienceIntent?: boolean;
@@ -555,6 +559,86 @@ function docSupportsSleeveIntent(src: Record<string, unknown>): boolean {
   }
 
   return /\b(dress|dressy|top|shirt|shirts|blouse|blouses|tee|t-?shirt|tank|camisole|cami|sweater|sweaters|cardigan|cardigans|hoodie|hoodies|jacket|jackets|coat|coats|blazer|blazers|outerwear|suit|suits|romper|jumpsuit|vest)\b/.test(bag);
+}
+
+function normalizeCatalogUrlText(value: unknown): string {
+  const raw = String(value ?? "").toLowerCase().trim();
+  if (!raw) return "";
+  const withoutQuery = raw.split(/[?#]/)[0] ?? raw;
+  let decoded = withoutQuery;
+  try {
+    decoded = decodeURIComponent(withoutQuery);
+  } catch {
+    decoded = withoutQuery;
+  }
+  return decoded
+    .replace(/^https?:\/\/[^/]+/i, " ")
+    .replace(/\.[a-z0-9]{2,5}$/i, " ")
+    .replace(/[_+./-]+/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function catalogTypeSeedsFromText(value: unknown): string[] {
+  const text = String(value ?? "").toLowerCase();
+  if (!text.trim()) return [];
+  return extractLexicalProductTypeSeeds(text)
+    .map((t) => String(t).toLowerCase().trim())
+    .filter(Boolean);
+}
+
+function scoreCatalogTypeEvidence(
+  desiredProductTypes: string[],
+  src: Record<string, unknown>,
+): { score: number; source: string; exact: boolean } {
+  if (desiredProductTypes.length === 0) return { score: 0, source: "none", exact: false };
+
+  const categorySeeds = [
+    src.category,
+    src.category_canonical,
+  ]
+    .map((x) => String(x ?? "").toLowerCase().trim())
+    .filter(Boolean);
+  const titleSeeds = catalogTypeSeedsFromText(src.title);
+  const descriptionSeeds = catalogTypeSeedsFromText(src.description);
+  const urlSeeds = [
+    ...catalogTypeSeedsFromText(normalizeCatalogUrlText(src.product_url)),
+    ...catalogTypeSeedsFromText(normalizeCatalogUrlText(src.parent_product_url)),
+  ];
+
+  const candidates = [
+    { source: "category", weight: 1, seeds: categorySeeds },
+    { source: "title", weight: 0.82, seeds: titleSeeds },
+    { source: "description", weight: 0.56, seeds: descriptionSeeds },
+    { source: "url", weight: 0.42, seeds: urlSeeds },
+  ];
+
+  let best = { score: 0, source: "none", exact: false };
+  for (const candidate of candidates) {
+    const seeds = [...new Set(candidate.seeds)];
+    if (seeds.length === 0) continue;
+    let breakdown = scoreRerankProductTypeBreakdown(desiredProductTypes, seeds);
+    for (const seed of seeds) {
+      const single = scoreRerankProductTypeBreakdown(desiredProductTypes, [seed]);
+      if (single.combinedTypeCompliance > breakdown.combinedTypeCompliance) {
+        breakdown = single;
+      }
+    }
+    const hasSpecificCategoryLabel =
+      candidate.source === "category" &&
+      seeds.some((seed) => !/^(top|tops|outerwear|apparel|clothing|fashion)$/.test(seed));
+    const rawScore = Math.max(0, Math.min(1, breakdown.combinedTypeCompliance * candidate.weight));
+    const score =
+      hasSpecificCategoryLabel && rawScore >= 0.45
+        ? Math.max(rawScore, 0.64)
+        : rawScore;
+    const exact = breakdown.exactTypeScore >= 1 && candidate.source !== "url";
+    if (score > best.score) {
+      best = { score, source: candidate.source, exact };
+    }
+  }
+  return best;
 }
 
 function rawColorList(...parts: unknown[]): string[] {
@@ -898,6 +982,17 @@ export function computeHitRelevance(
       Math.min(1, productTypeCompliance * spurious.complianceScale),
     );
   }
+  const catalogTypeEvidence =
+    desiredProductTypes.length > 0
+      ? scoreCatalogTypeEvidence(desiredProductTypes, src)
+      : { score: 0, source: "none", exact: false };
+  if (catalogTypeEvidence.score > productTypeCompliance) {
+    productTypeCompliance = catalogTypeEvidence.score;
+    siblingClusterScore = Math.max(siblingClusterScore, catalogTypeEvidence.score);
+    if (catalogTypeEvidence.exact && catalogTypeEvidence.score >= 0.78) {
+      exactTypeScore = Math.max(exactTypeScore, 0.85);
+    }
+  }
 
   const wcText = Number(hit?._source?.color_confidence_text);
   const wcImg = Number(hit?._source?.color_confidence_image);
@@ -1112,7 +1207,9 @@ export function computeHitRelevance(
           : `${description}`;
     const docSleeve = normalizeSleeveToken(docSleeveRaw);
     const titleSleeve = normalizeSleeveToken(title);
-    const observed = docSleeve ?? titleSleeve ?? normalizeSleeveToken(description);
+    const descriptionSleeve = normalizeSleeveToken(description);
+    const observed = docSleeve ?? titleSleeve ?? descriptionSleeve;
+    const hasExplicitSleeveEvidence = Boolean(docSleeve || titleSleeve || descriptionSleeve);
     const inferredObserved =
       observed ?? inferSleeveFromCatalogSignals(src, title, description);
 
@@ -1125,12 +1222,12 @@ export function computeHitRelevance(
       sleeveCompliance = observed
         ? 1
         : wantedSleeve === "long" && hasStrongLongSleeveCatalogDefault(src, title, description)
-          ? 0.68
+          ? 0.48
           : 0.28;
     } else if (!observed) {
       // Avoid hard contradiction penalty when mismatch comes from heuristic inference only.
       sleeveCompliance = 0.12;
-    } else if (docSleeve) {
+    } else if (hasExplicitSleeveEvidence) {
       sleeveCompliance = 0;
     } else {
       sleeveCompliance = 0.15;
@@ -1350,7 +1447,9 @@ export function computeHitRelevance(
     ? crossFamilyPenalty * (0.55 + 0.45 * typeMetadataConfidence)
     : crossFamilyPenalty;
   const crossPenTrace = Math.max(0, crossFamilyPenaltyForFinal);
-  const hardBlocked = hasReliableTypeIntent && (crossPenTrace >= 0.9 || crossFamilyPenalty >= 0.9);
+  const audienceBlocked = hasAudienceIntent && audienceCompliance < 0.3;
+  const hardBlocked =
+    audienceBlocked || (hasReliableTypeIntent && (crossPenTrace >= 0.9 || crossFamilyPenalty >= 0.9));
   const typeGateFactor = !hasReliableTypeIntent
     ? 1
     : productTypeCompliance >= 0.5
@@ -1387,6 +1486,10 @@ export function computeHitRelevance(
 
   if (garmentVersusBeautyPenalty >= 0.85) {
     finalRelevance01 = Math.min(finalRelevance01, semScore01 * 0.22);
+  }
+
+  if (audienceBlocked) {
+    finalRelevance01 = 0;
   }
 
   const productQualityRaw = Number(hit?._source?.product_quality_score);
@@ -1426,7 +1529,7 @@ export function computeHitRelevance(
   const isBottomLikeIntent =
     /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts|bermudas?|skirt|skirts|leggings?)\b/.test(intentBlob);
   const isFootwearLikeIntent =
-    /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(intentBlob);
+    /\b(footwear|shoe|shoes|sneaker|sneakers|trainer|trainers|boot|boots|loafer|loafers|heel|heels|sandal|sandals|flat|flats|mule|mules|slide|slides|slipper|slippers|pump|pumps|stiletto|stilettos|wedge|wedges|oxford|oxfords|derby|derbies|brogue|brogues|clog|clogs|espadrille|espadrilles)\b/.test(intentBlob);
   // Outerwear-specific intent: jackets/coats/blazers should not silently allow
   // tops/dresses/bottoms to pass when the user uploaded a clearly outer garment.
   const isOuterwearLikeIntent =
@@ -1446,7 +1549,7 @@ export function computeHitRelevance(
     .toLowerCase();
   const docIsTopLike = /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|overshirt|overshirts|polo|polos)\b/.test(docBlobForFamily);
   const docIsBottomLike = /\b(bottom|bottoms|pants?|trousers?|jeans?|shorts|bermudas?|skirt|skirts|leggings?)\b/.test(docBlobForFamily);
-  const docIsFootwearLike = /\b(footwear|shoe|shoes|sneaker|sneakers|boot|boots|loafer|loafers|heel|heels|sandal|sandals)\b/.test(docBlobForFamily);
+  const docIsFootwearLike = /\b(footwear|shoe|shoes|sneaker|sneakers|trainer|trainers|boot|boots|loafer|loafers|heel|heels|sandal|sandals|flat|flats|mule|mules|slide|slides|slipper|slippers|pump|pumps|stiletto|stilettos|wedge|wedges|oxford|oxfords|derby|derbies|brogue|brogues|clog|clogs|espadrille|espadrilles)\b/.test(docBlobForFamily);
   const docIsDressLike = /\b(dress|dresses|gown|jumpsuit|romper|playsuit)\b/.test(docBlobForFamily);
   // docIsOuterwearLike must include tailored vocabulary (suit/tuxedo/sport-coat/
   // dress-jacket/waistcoat/vest/gilet) so a pure suit listing titled "Black
@@ -1491,9 +1594,11 @@ export function computeHitRelevance(
 
   if (hasColorIntentForFinalRelevance && (isTopLikeIntent || isBottomLikeIntent || isFootwearLikeIntent)) {
     const suitRelax = suitIntent;
-    const noneTierLimit = suitRelax ? (isBottomLikeIntent ? 0.16 : isTopLikeIntent ? 0.18 : 0.12) : (isBottomLikeIntent ? 0.06 : isTopLikeIntent ? 0.08 : 0.08);
-    const lowComplianceLimit = suitRelax ? (isBottomLikeIntent ? 0.2 : isTopLikeIntent ? 0.22 : 0.18) : (isBottomLikeIntent ? 0.1 : isTopLikeIntent ? 0.12 : 0.12);
-    const bucketLimit = suitRelax ? (isBottomLikeIntent ? 0.5 : 0.56) : (isBottomLikeIntent ? 0.32 : 0.36);
+    const bottomOrFootwearIntent = isBottomLikeIntent || isFootwearLikeIntent;
+    const noneTierLimit = suitRelax ? (bottomOrFootwearIntent ? 0.16 : 0.18) : (bottomOrFootwearIntent ? 0.06 : 0.08);
+    const lowComplianceLimit = suitRelax ? (bottomOrFootwearIntent ? 0.2 : 0.22) : (bottomOrFootwearIntent ? 0.1 : 0.12);
+    const bucketLimit = suitRelax ? (bottomOrFootwearIntent ? 0.5 : 0.56) : (bottomOrFootwearIntent ? 0.32 : 0.36);
+    const familyLimit = suitRelax ? 0.5 : 0.4;
     // Shade tiers (light-shade, dark-shade) get slightly higher cap than bucket but lower than family
     const shadeLimit = bucketLimit + 0.08;
 
@@ -1501,10 +1606,12 @@ export function computeHitRelevance(
       finalRelevance01 = Math.min(finalRelevance01, noneTierLimit);
     } else if (colorCompliance < 0.2) {
       finalRelevance01 = Math.min(finalRelevance01, lowComplianceLimit);
-    } else if ((isBottomLikeIntent || isTopLikeIntent) && colorTier === "bucket") {
+    } else if ((isBottomLikeIntent || isFootwearLikeIntent || isTopLikeIntent) && colorTier === "bucket") {
       finalRelevance01 = Math.min(finalRelevance01, bucketLimit);
-    } else if ((isBottomLikeIntent || isTopLikeIntent) && (colorTier === "light-shade" || colorTier === "dark-shade")) {
+    } else if ((isBottomLikeIntent || isFootwearLikeIntent || isTopLikeIntent) && (colorTier === "light-shade" || colorTier === "dark-shade")) {
       finalRelevance01 = Math.min(finalRelevance01, shadeLimit);
+    } else if (isFootwearLikeIntent && colorTier === "family") {
+      finalRelevance01 = Math.min(finalRelevance01, familyLimit);
     }
   }
 
@@ -1587,6 +1694,8 @@ export function computeHitRelevance(
     penaltyComponent,
     primaryColor,
     hasTypeIntent,
+    catalogTypeEvidenceScore: Math.round(catalogTypeEvidence.score * 1000) / 1000,
+    catalogTypeEvidenceSource: catalogTypeEvidence.source,
     hasColorIntent: hasColorIntentForFinalRelevance,
     hasSleeveIntent: hasSleeveIntentForDoc,
     hasAudienceIntent,

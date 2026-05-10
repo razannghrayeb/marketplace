@@ -6,6 +6,7 @@ declare const expect: any;
 import {
   applyRelevanceThresholdFilter,
   buildInitialTypeSearchHintsForDetection,
+  inferOuterwearSuitSignal,
   inferFootwearSubtypeFromCaption,
   normalizeDetectionLabelForSearch,
 } from "./image-analysis.service";
@@ -25,7 +26,7 @@ describe("inferFootwearSubtypeFromCaption", () => {
 });
 
 describe("main-path detection search hints", () => {
-  test("uses distinct long-sleeve top seeds before generic top synonyms", () => {
+  test("keeps generic long-sleeve top seeds balanced before generic synonyms", () => {
     expect(
       buildInitialTypeSearchHintsForDetection({
         detectionLabel: "long sleeve top",
@@ -34,7 +35,33 @@ describe("main-path detection search hints", () => {
         mainPathOnly: true,
         limit: 3,
       }),
-    ).toEqual(["shirt", "sweater", "hoodie"]);
+    ).toEqual(["shirt", "woven tops", "sweater"]);
+  });
+
+  test("uses lightweight long-sleeve top seeds when material evidence is light", () => {
+    expect(
+      buildInitialTypeSearchHintsForDetection({
+        detectionLabel: "long sleeve top",
+        productCategory: "tops",
+        materialHint: "cotton",
+        softProductTypeHints: ["top", "sweater"],
+        mainPathOnly: true,
+        limit: 3,
+      }),
+    ).toEqual(["shirt", "woven tops", "shirting"]);
+  });
+
+  test("uses winter long-sleeve top seeds when material evidence is warm", () => {
+    expect(
+      buildInitialTypeSearchHintsForDetection({
+        detectionLabel: "long sleeve top",
+        productCategory: "tops",
+        materialHint: "wool",
+        softProductTypeHints: ["top", "shirt"],
+        mainPathOnly: true,
+        limit: 3,
+      }),
+    ).toEqual(["sweater", "knit tops", "sweatshirt"]);
   });
 
   test("keeps short-sleeve top seeds in the established main path", () => {
@@ -59,7 +86,19 @@ describe("main-path detection search hints", () => {
         mainPathOnly: true,
         limit: 3,
       }),
-    ).toEqual(["jacket", "coat", "blazer"]);
+    ).toEqual(["outerwear", "jacket", "outerwear & jackets"]);
+  });
+
+  test("uses vest-specific seeds for vest detections", () => {
+    expect(
+      buildInitialTypeSearchHintsForDetection({
+        detectionLabel: "vest",
+        productCategory: "outerwear",
+        softProductTypeHints: ["jacket", "coat", "blazer"],
+        mainPathOnly: true,
+        limit: 3,
+      }),
+    ).toEqual(["vest", "waistcoat", "gilet"]);
   });
 
   test("keeps catalog layer terms in one outerwear main-path call when explicit", () => {
@@ -82,6 +121,37 @@ describe("main-path detection search hints", () => {
         limit: 3,
       }),
     ).toEqual(["puffer", "jacket", "coat"]);
+  });
+});
+
+describe("outerwear suit signal", () => {
+  test("keeps generic long-sleeve outwear as jacket when only outfit geometry is formal", () => {
+    const signal = inferOuterwearSuitSignal({
+      yoloLabel: "long sleeve outwear",
+      detectionRawLabel: "long sleeve outwear",
+      productCategoryFromMapping: "outerwear",
+      blipCaption: "a man standing on a street in front of a building",
+      contextualFormalityScore: 7,
+    });
+
+    expect(signal.subtype).toBe("jacket");
+    expect(signal.detectionCategoryForSearch).toBe("outerwear");
+    expect(signal.prioritySeedTypes.slice(0, 3)).toEqual(["jacket", "jackets", "bomber"]);
+  });
+
+  test("uses jacket-first tailored seeds for generic outwear with suit caption", () => {
+    const signal = inferOuterwearSuitSignal({
+      yoloLabel: "long sleeve outwear",
+      detectionRawLabel: "long sleeve outwear",
+      productCategoryFromMapping: "outerwear",
+      blipCaption: "a woman in a suit and heels stands in front of a wall",
+      contextualFormalityScore: 7,
+    });
+
+    expect(signal.subtype).toBe("suit_jacket");
+    expect(signal.detectionCategoryForSearch).toBe("tailored");
+    expect(signal.prioritySeedTypes.slice(0, 4)).toEqual(["blazer", "blazers", "sport coat", "sportcoat"]);
+    expect(signal.prioritySeedTypes.includes("suit")).toBe(false);
   });
 });
 
@@ -122,5 +192,20 @@ describe("applyRelevanceThresholdFilter", () => {
     );
 
     expect(kept).toHaveLength(0);
+  });
+
+  test("prioritizes high-confidence inferred charcoal over grey outerwear", () => {
+    const kept = applyRelevanceThresholdFilter(
+      [
+        { id: "grey", title: "Grey Suit", color: "GREY", finalRelevance01: 0.82, explain: {} } as any,
+        { id: "black-1", title: "Black Suit", color: "BLACK", finalRelevance01: 0.52, explain: {} } as any,
+        { id: "black-2", title: "Classic Black Suit", color: "black", finalRelevance01: 0.5, explain: {} } as any,
+        { id: "black-3", title: "Charcoal Black Suit", color: "charcoal", finalRelevance01: 0.48, explain: {} } as any,
+      ],
+      0.3,
+      { category: "outerwear", desiredColor: "charcoal", desiredColorConfidence: 0.80 },
+    );
+
+    expect(kept.map((p: any) => p.id)).toEqual(["black-1", "black-2", "black-3"]);
   });
 });

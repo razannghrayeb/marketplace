@@ -155,6 +155,17 @@ describe("extractLexicalProductTypeSeeds", () => {
     expect(expanded).toContain("tee");
     expect(expanded).toContain("tank top");
     expect(expanded).toContain("cardigan");
+    expect(expanded).toContain("knit tops");
+    expect(expanded).toContain("woven tops");
+    expect(expanded).toContain("shirting");
+    expect(expanded).toContain("polo short sleeve");
+  });
+
+  test("catalog category labels participate in subtype matching without collapsing outerwear", () => {
+    expect(scoreRerankProductTypeBreakdown(["sweater"], ["Knit Tops"]).combinedTypeCompliance).toBeGreaterThan(0.6);
+    expect(scoreRerankProductTypeBreakdown(["shirt"], ["Woven Tops"]).combinedTypeCompliance).toBeGreaterThan(0.6);
+    expect(scoreRerankProductTypeBreakdown(["jacket"], ["Outerwear & Jackets"]).combinedTypeCompliance).toBeGreaterThan(0.6);
+    expect(scoreRerankProductTypeBreakdown(["jacket"], ["blazer", "outerwear"]).combinedTypeCompliance).toBeLessThan(0.35);
   });
 
   test("vest dress: outerwear vest token dropped when aisle is dresses", () => {
@@ -187,6 +198,10 @@ describe("extractExplicitSleeveIntent", () => {
     expect(extractExplicitSleeveIntent("short sleeve tops")).toBe("short");
     expect(extractExplicitSleeveIntent("Long Sleeve")).toBe("long");
     expect(extractExplicitSleeveIntent("polo short-sleeved shirt")).toBe("short");
+    expect(extractExplicitSleeveIntent("short white tshirt")).toBe("short");
+    expect(extractExplicitSleeveIntent("short black tee")).toBe("short");
+    expect(extractExplicitSleeveIntent("white tshirt")).toBe("short");
+    expect(extractExplicitSleeveIntent("long sleeve tshirt")).toBe("long");
   });
 
   test("ignores ambiguous length words and conflicting sleeve phrases", () => {

@@ -44,8 +44,21 @@ describe("categoryFilter", () => {
     const t = getCategorySearchTerms("outerwear");
     expect(t.includes("fleece")).toBe(true);
     expect(t.includes("blouson")).toBe(true);
+    expect(t.includes("outerwear & jackets")).toBe(true);
+    expect(t.includes("coats & jackets")).toBe(true);
+    expect(t.includes("parkas & blousons")).toBe(true);
     expect(t.includes("puffer jacket")).toBe(true);
     expect(t.includes("rain jacket")).toBe(true);
+  });
+
+  test("getCategorySearchTerms includes observed catalog top buckets", () => {
+    const t = getCategorySearchTerms("tops");
+    expect(t.includes("knit tops")).toBe(true);
+    expect(t.includes("woven tops")).toBe(true);
+    expect(t.includes("shirting")).toBe(true);
+    expect(t.includes("polo short sleeve")).toBe(true);
+    expect(t.includes("hoody")).toBe(true);
+    expect(t.includes("body")).toBe(true);
   });
 
   test("inferCategoryCanonical maps vendor label to aisle", () => {

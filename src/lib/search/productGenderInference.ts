@@ -32,7 +32,7 @@ export const DEFAULT_CATALOG_GENDER_MIN_CONFIDENCE = 0.45;
 export interface InferredGenderResult {
   gender: ProductGender;
   confidence: number; // 0..1
-  source: "explicit_field" | "title" | "url" | "category" | "description" | "garment_type" | "style_cue" | "size_system" | "combined" | "none";
+  source: "explicit_field" | "brand" | "title" | "url" | "category" | "description" | "garment_type" | "style_cue" | "size_system" | "combined" | "none";
   evidence: { men: number; women: number; unisex: number };
   signals: string[]; // human-readable trace for debugging
 }
@@ -212,6 +212,20 @@ export function inferProductGender(input: ProductGenderInput): InferredGenderRes
   }
 
   // ── Layer 3: title (high confidence when explicit gender word present) ──
+  const brandNorm = lower(input.brand);
+  if (MEN_DIRECT_RE.test(brandNorm)) {
+    menScore += 5.0;
+    signals.push("brand=men_word");
+  }
+  if (WOMEN_DIRECT_RE.test(brandNorm)) {
+    womenScore += 5.0;
+    signals.push("brand=women_word");
+  }
+  if (UNISEX_DIRECT_RE.test(brandNorm)) {
+    unisexScore += 3.0;
+    signals.push("brand=unisex_word");
+  }
+
   const titleNorm = lower(input.title);
   if (MEN_DIRECT_RE.test(titleNorm)) {
     menScore += 3.0;
@@ -352,6 +366,8 @@ export function inferProductGender(input: ProductGenderInput): InferredGenderRes
   const source: InferredGenderResult["source"] =
     signals.find((s) => s.startsWith("url") || s.startsWith("parent_url"))
       ? "url"
+      : signals.find((s) => s.startsWith("brand"))
+        ? "brand"
       : signals.find((s) => s.startsWith("title"))
         ? "title"
         : signals.find((s) => s.startsWith("category"))
