@@ -102,7 +102,7 @@ function publicSortedProducts(products: unknown, options: { includeExplain?: boo
     const scoreB = b.score ?? b.similarity_score ?? b.rerankScore ?? 0;
     return scoreB - scoreA; // Descending: highest score first
   });
-  return toPublicSearchProducts(sortProductsByUnifiedScorer(sorted), options);
+  return toPublicSearchProducts(sortProductsByUnifiedScorer(sorted));
 }
 
 function publicSimilarProductsPayload<T extends Record<string, any>>(

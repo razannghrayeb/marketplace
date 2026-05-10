@@ -24,7 +24,9 @@ export type {
 // Configuration
 // ============================================================================
 
-const RANKER_API_URL = process.env.RANKER_API_URL || "http://0.0.0.0:8000";
+// Default to localhost so clients don't attempt to connect to 0.0.0.0
+// Set `RANKER_API_URL` in the environment to point to a remote ranker service.
+const RANKER_API_URL = process.env.RANKER_API_URL || "http://127.0.0.1:8000";
 const RANKER_TIMEOUT_MS = parseInt(process.env.RANKER_TIMEOUT_MS || "5000", 10);
 
 // ============================================================================

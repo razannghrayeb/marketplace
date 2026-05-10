@@ -66,7 +66,7 @@ import {
   filterProductTypeSeedsByMappedCategory,
 } from "../../lib/search/productTypeTaxonomy";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
-import { explicitUnifiedScorerScore, sortProductsByRelevanceAndCategory, unifiedScorerScore } from "../../lib/search/sortResults";
+import { sortProductsByRelevanceAndCategory, unifiedScorerScore } from "../../lib/search/sortResults";
 import {
   computeOutfitCoherence,
   type OutfitCoherenceResult,
@@ -1668,23 +1668,6 @@ export function buildInitialTypeSearchHintsForDetection(params: {
     ...mainPathPriorityTypeHints(params.detectionLabel, params.productCategory, params.materialHint),
     ...softHints,
   ];
-  // Bridging rule: when detection looks like a long-sleeve top but the
-  // productCategory is outerwear and soft hints suggest a vest/waistcoat/gilet,
-  // emit vest-like hints first so vest outerwear is recalled.
-  try {
-    const labelForSearch = normalizeDetectionLabelForSearch(String(params.detectionLabel ?? ""));
-    const categoryForSearch = String(params.productCategory ?? "").toLowerCase().trim();
-    if (categoryForSearch === "outerwear" && /\blong\s+sleeve\b|\bfull\s+sleeve\b/.test(labelForSearch)) {
-      const vestSignals = new Set(["vest", "vest top", "waistcoat", "waistcoats", "gilet", "gilets"]);
-      const softHasVest = softHints.some((h) => vestSignals.has(String(h ?? "").toLowerCase()));
-      if (softHasVest) {
-        // Prepend canonical vest hints while preserving uniqueness handled below.
-        merged.unshift("vest", "waistcoat", "gilet");
-      }
-    }
-  } catch (e) {
-    // noop - conservative fallback to existing merged hints
-  }
   const out: string[] = [];
   const seenHints = new Set<string>();
   const seenClusters = new Set<string>();
@@ -2013,7 +1996,7 @@ export function hardCategoryTermsForDetection(
     const topIntent = parseTopDetectionIntent(detectionLabel);
     const isShortTop = topIntent.isShortTop;
     const isVestTop = topIntent.isVestTop;
-    const isTailoredIntent = hasFormalTailoringCue(detectionLabel) || hasCaptionSuitCue;
+    const isTailoredIntent = hasFormalTailoringCue(detectionLabel);
     if (isVestTop) {
       const vestTopTerms = baseTerms.filter((t) =>
         /\b(vest|vests|waistcoat|waistcoats|gilet|sleeveless top|tank|tank top|camisole|cami)\b/.test(t),
@@ -2157,10 +2140,9 @@ export function hardCategoryTermsForDetection(
     }
 
     if (isGenericShoeLike) {
-      // Generic shoe detections should stay close to closed shoes. Broad footwear
-      // recall lets sandals/clogs/slippers outrank actual shoes when visual KNN is noisy.
-      const genericTerms = genericFootwearTerms(baseTerms);
-      return genericTerms.length > 0 ? genericTerms : broadFootwearTerms(baseTerms);
+      // Generic shoe detections are common; keep recall broad and let subtype rerank
+      // handle precision once visual/category evidence is available.
+      return broadFootwearTerms(baseTerms);
     }
 
     return broadFootwearTerms(baseTerms);
@@ -2171,13 +2153,6 @@ export function hardCategoryTermsForDetection(
     const isBlazerLike = /\b(blazer|blazers|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket)\b/.test(l);
     const isCoatLike = /\b(coat|coats|overcoat|overcoats|parka|parkas|trench|trenches|puffer\s+coats?|down\s+coats?|windbreaker|windbreakers)\b/.test(l);
     const isJacketLike = /\b(jacket|jackets|shirt\s*jacket|shacket|overshirt|bomber|bombers|blouson|blousons|fleece|fleeces|puffer|puffers|down\s+jackets?|quilted\s+jackets?|rain\s+jackets?|shell\s+jackets?|softshell(?:\s+jackets?)?)\b/.test(l);
-    const isGenericLongSleeveOuterwear =
-      hasLongSleeveCue &&
-      /\b(?:outwear|outerwear)\b/.test(l) &&
-      !isVestLike &&
-      !isBlazerLike &&
-      !isCoatLike &&
-      !isJacketLike;
     if (isVestLike) {
       // Vest can be formal (waistcoat/suit vest) or fashion (sleeveless-top style).
       // Return union of outerwear vest terms + sleeveless top terms so both types surface.
@@ -2196,12 +2171,6 @@ export function hardCategoryTermsForDetection(
       // outerwear vocabulary in the recall set rather than narrowing to tailored only.
       const merged = [...new Set([...tailoredTerms, ...baseTerms])];
       return merged.length > 0 ? merged : baseTerms;
-    }
-    if (isGenericLongSleeveOuterwear) {
-      const jacketLayerTerms = baseTerms.filter((t) =>
-        /\b(outerwear|outwear|coats?\s*&\s*jackets?|outerwear\s*&\s*jackets?|jacket|jackets|coat|coats|blazer|blazers|sport\s*coat|sportcoat|shirt\s*jacket|shirt\s*jackets|shacket|shackets|overshirt|overshirts|bomber|bombers|bomber\s*jacket|blouson|blousons|fleece|fleeces|fleece\s*jacket|puffer|puffers|puffer\s*jacket|puffer\s*coat|down\s*jacket|down\s*coat|quilted\s*jacket|rain\s*jacket|shell\s*jacket|softshell|softshell\s*jacket|parka|parkas|trench|trenches|windbreaker|windbreakers|overcoat|overcoats|leather\s*jacket|denim\s*jacket)\b/.test(t),
-      ).filter((t) => !/\b(suit|suits|tuxedo|tuxedos|waistcoat|waistcoats|vest|vests|gilet|gilets)\b/.test(t));
-      return jacketLayerTerms.length > 0 ? jacketLayerTerms : baseTerms;
     }
     if (isBlazerLike) {
       const blazerTerms = baseTerms.filter((t) => /\b(blazer|blazers|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket)\b/.test(t));
@@ -2424,23 +2393,13 @@ function tightenTypeSeedsForDetection(
   return normalized;
 }
 
-const FORMAL_OUTERWEAR_JACKET_RECOVERY_TYPES = [
+const FORMAL_OUTERWEAR_RECOVERY_TYPES = [
+  "suit",
+  "suits",
   "sport coat",
   "dress jacket",
   "blazer",
   "blazers",
-  "tailored jacket",
-  "structured jacket",
-  "jacket",
-  "outerwear",
-];
-
-const FORMAL_OUTERWEAR_FULL_SUIT_RECOVERY_TYPES = [
-  "suit",
-  "suits",
-  "tuxedo",
-  "tuxedos",
-  ...FORMAL_OUTERWEAR_JACKET_RECOVERY_TYPES,
 ];
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -2599,17 +2558,8 @@ export function inferOuterwearSuitSignal(input: {
   const productCategory = String(input.productCategoryFromMapping ?? "").toLowerCase().trim();
   const formality = Math.max(0, Math.min(10, Number(input.contextualFormalityScore) || 0));
 
-  // Step 1: gate. Outerwear/tailored always qualify; strongly formal top detections can also
-  // promote into the tailored lane when the outfit signal already says the crop is suit-like.
-  const topSuitRecoveryEligible = productCategory === "tops" && formality >= 7;
-  // Also allow promotion when the raw labels/caption contain clear outerwear tokens
-  // (jacket/blazer/coat/vest/etc.). This avoids missing jackets that were labelled
-  // by the detector as "long sleeve top" but clearly represent outerwear.
-  const outerwearTokenPresent = /\b(jacket|jackets|coat|coats|blazer|blazers|vest|vests|waistcoat|waistcoats|gilet|gilets|parka|parkas|trench|puffer|suit|suits)\b/.test(
-    `${labelNorm} ${rawLabelNorm} ${captionNorm}`,
-  );
-
-  if (productCategory !== "outerwear" && productCategory !== "tailored" && !topSuitRecoveryEligible && !outerwearTokenPresent) {
+  // Step 1: gate. Only run for outerwear/tailored category. Everything else short-circuits.
+  if (productCategory !== "outerwear" && productCategory !== "tailored") {
     return {
       isOuterwearOrSuit: false,
       subtype: "unknown",
@@ -2674,7 +2624,7 @@ export function inferOuterwearSuitSignal(input: {
     weddingCue ||
     (tieCue && formality >= 6) ||
     (formality >= 8 && (blipFormalCue || blipJacketSuitCue)) ||
-    (structuredTopAndTailoredBottom && (blipFormalCue || tieCue || productCategory === "tops")) ||
+    (structuredTopAndTailoredBottom && (blipFormalCue || tieCue)) ||
     structuredTailoredSuitCue;
 
   let subtype: OuterwearSuitSubtype;
@@ -2793,12 +2743,6 @@ function hasFormalTailoringCue(text: string): boolean {
   return /\b(suit|suits|sport\s*coat|dress\s*jacket|blazer|blazers|tuxedo|tie)\b/.test(s);
 }
 
-function hasFullSuitDetectionCue(text: string): boolean {
-  const s = String(text || "").toLowerCase();
-  if (!s) return false;
-  return /\b(suit|suits|tuxedo|tuxedos|two[-\s]?piece\s+suit|three[-\s]?piece\s+suit|matching\s+suit)\b/.test(s);
-}
-
 export function recoverFormalOuterwearTypes(
   seeds: string[],
   productCategory: string,
@@ -2808,15 +2752,7 @@ export function recoverFormalOuterwearTypes(
   const normalized = [...new Set(seeds.map((s) => String(s).toLowerCase().trim()).filter(Boolean))];
   if (category !== "outerwear") return normalized;
   if (!cueTexts.some((t) => hasFormalTailoringCue(String(t ?? "")))) return normalized;
-  // The first cue is always the detection label in current call sites. Treat a
-  // full-suit detector label as its own lane; full-image captions like
-  // "woman in a suit" should keep an outerwear crop in the jacket/blazer lane so
-  // the downstream full-suit catalog gate does not remove valid coats/blazers.
-  const detectionCue = String(cueTexts[0] ?? "");
-  const recoveryTypes = hasFullSuitDetectionCue(detectionCue)
-    ? FORMAL_OUTERWEAR_FULL_SUIT_RECOVERY_TYPES
-    : FORMAL_OUTERWEAR_JACKET_RECOVERY_TYPES;
-  return [...new Set([...recoveryTypes, ...normalized])];
+  return [...new Set([...FORMAL_OUTERWEAR_RECOVERY_TYPES, ...normalized])];
 }
 
 function hasTailoredBottomCue(label: string): boolean {
@@ -3019,7 +2955,7 @@ function shouldForceTypeFilterForDetection(
   const category = String(categoryMapping.productCategory || "").toLowerCase();
   // Root fix: hard product_types filtering is too brittle for detection-driven retrieval
   // in catalogs with sparse/heterogeneous typing. Keep it only for one-piece/tailored lanes.
-  if (category !== "tailored" && category !== "one_piece") return false;
+  if (category === "accessories" || category === "bags" || category === "footwear" || category === "tops" || category === "bottoms") return false;
   const confOk = (detection.confidence ?? 0) >= imageStrongHintsTypeConfMin();
   const areaOk = (detection.area_ratio ?? 0) >= imageStrongHintsTypeAreaMin();
   return confOk && areaOk;
@@ -3986,7 +3922,7 @@ export function applySleeveIntentGuard(params: {
   const isTopCategory = category === "tops";
   const isOuterwearCategory = category === "outerwear";
   const minCompliance = isTopCategory
-    ? (desiredSleeve === "short" || desiredSleeve === "sleeveless" ? 0.34 : 0.42)
+    ? (desiredSleeve === "short" || desiredSleeve === "sleeveless" ? 0.34 : 0.3)
     : desiredSleeve === "short" || desiredSleeve === "sleeveless"
       ? 0.5
       : 0.4;
@@ -4007,12 +3943,8 @@ export function applySleeveIntentGuard(params: {
     const observedSleeve = inferSleeveFromProductText(blob);
     if (isDressCategory || isTopCategory || isOuterwearCategory) {
       // Sleeve metadata is sparse for apparel, especially outerwear/tailored listings.
-      // Enforce the floor only when the scorer produced sleeveCompliance; otherwise
-      // fall back to explicit contradiction so sparse metadata does not over-prune.
-      const sleeveCompliance = Number((p as any)?.explain?.sleeveCompliance);
-      if (Number.isFinite(sleeveCompliance) && sleeveCompliance < minCompliance) {
-        return false;
-      }
+      // Use only explicit text contradiction so full suits are not dropped just because
+      // a YOLO "long sleeve outwear" label produced low sleeveCompliance.
       return !isSleeveContradiction(desiredSleeve, observedSleeve);
     }
 
@@ -4158,16 +4090,12 @@ function applyAthleticMismatchGuard(params: {
     minFormality >= 7 ||
     hasFormalTailoringCue(detectionLabel) ||
     /\b(formal|semi-formal|smart-casual|dressy|tailored|elegant)\b/.test(softStyle);
-  const genericShoeIntent =
-    category === "footwear" &&
-    isGenericFootwearDetectionLabel(detectionLabel);
 
-  if (!formalIntent && !genericShoeIntent && minFormality < 7) {
+  if (!formalIntent && minFormality < 7) {
     return products;
   }
 
   const athleticCueRe = /\b(athletic|athleisure|sporty|sportswear|gym|workout|training|track|jogger|joggers|running|runner|sneaker|sneakers|trainer|trainers|hoodie|hooded|sweatshirt|sweatpants?)\b/;
-  const openFootwearCueRe = /\b(crocs?|clog|clogs|sandal|sandals|slide|slides|flip\s*flop|flip-flop|slipper|slippers|mule|mules)\b/;
   return products.filter((p) => {
     const blob = [
       (p as any)?.title,
@@ -4184,9 +4112,6 @@ function applyAthleticMismatchGuard(params: {
       .join(" ");
 
     if (category === "tops" && hasTopCasualConflictCue(blob)) {
-      return false;
-    }
-    if (genericShoeIntent && openFootwearCueRe.test(blob)) {
       return false;
     }
     if (formalIntent && athleticCueRe.test(blob)) {
@@ -4255,7 +4180,6 @@ export function applyRelevanceThresholdFilter(
   const rankApparelByDesiredColor = (rows: ProductResult[]): ProductResult[] => {
     const categoryNorm = String(options?.category ?? "").toLowerCase().trim();
     const desiredColorConfidence = Number(options?.desiredColorConfidence ?? 0);
-    const desiredColorExplicit = Boolean(options?.desiredColorExplicit);
     const canUseGenericColorRank =
       !prefersWhiteFamily &&
       desiredColorTokens.length > 0 &&
@@ -4289,7 +4213,7 @@ export function applyRelevanceThresholdFilter(
       );
     };
     const baseSortScore = (item: ProductResult): number => {
-      const unified = explicitUnifiedScorerScore(item);
+      const unified = unifiedScorerScore(item);
       const finalRelevance = Number((item as any)?.finalRelevance01 ?? NaN);
       const similarity = Number((item as any)?.similarity_score ?? NaN);
       const score = Number.isFinite(unified as number)
@@ -4329,8 +4253,8 @@ export function applyRelevanceThresholdFilter(
         categoryNorm === "outerwear" || categoryNorm === "tailored"
           ? 0.78
           : 0.82;
-      const shouldKeepOnlyColorQualified =
-        desiredColorExplicit && desiredColorConfidence >= highConfidenceColorCutoff;
+      const desiredColorExplicit = Boolean(options?.desiredColorExplicit);
+      const shouldKeepOnlyColorQualified = desiredColorExplicit && desiredColorConfidence >= highConfidenceColorCutoff;
       const colorQualified = decorated.filter((item) => {
         const compliance = Number(((item as any)?.explain ?? {}).desiredColorCompliance ?? 0);
         return compliance >= 0.58;
@@ -4421,7 +4345,7 @@ export function applyRelevanceThresholdFilter(
   const filtered = products.filter((p) => {
     const relevance = Number((p as any)?.finalRelevance01 ?? 0);
     const explain = ((p as any)?.explain ?? {}) as Record<string, unknown>;
-    const scorerAcceptance = explicitUnifiedScorerScore(p);
+    const scorerAcceptance = unifiedScorerScore(p);
     const effectiveRelevance =
       scorerAcceptance !== null
         ? scorerAcceptance
@@ -6959,7 +6883,7 @@ export class ImageAnalysisService {
           const formalitySuitCue =
             categoryMapping.productCategory === "outerwear" &&
             contextualFormalityScore >= 7
-              ? " blazer "
+              ? " suit blazer "
               : "";
           const strongTypeSeeds = recoverFormalOuterwearTypes(
             typeSeeds,
@@ -7420,14 +7344,8 @@ export class ImageAnalysisService {
             shouldHardCategory || forceCoreMainPathHardCategory,
           );
           if (filterByDetectedCategory) {
-            // For outerwear detections, skip hard category filtering to maximize recall.
-            // Filtering happens downstream in products.service via search relevance and
-            // reranking (family gating, type compliance, etc.). This allows jackets/blazers/vests/coats
-            // across different catalog category spellings to surface.
-            const isOuterwearDetection = categoryMapping.productCategory === "outerwear";
-            
-            if ((shouldHardCategory || forceCoreMainPathHardCategory) && !isOuterwearDetection) {
-              // Apply hard OpenSearch category filtering for non-outerwear, even when global soft-category is enabled.
+            if (shouldHardCategory || forceCoreMainPathHardCategory) {
+              // Apply hard OpenSearch category filtering, even when global soft-category is enabled.
               const terms = hardCategoryTermsForDetection(label, categoryMapping, {
                 confidence: detection.confidence,
                 areaRatio: detection.area_ratio,
@@ -7456,16 +7374,6 @@ export class ImageAnalysisService {
               predictedCategoryAisles = outerwearSuitSignal.isOuterwearOrSuit
                 ? outerwearSuitSignal.predictedAisles
                 : [categoryMapping.productCategory];
-            } else if (isOuterwearDetection) {
-              // Outerwear: use soft category hints for broad recall.
-              // Downstream reranking in products.service filters via family gating, type compliance, etc.
-              // This allows jackets/blazers/vests/coats from diverse catalog categories to surface.
-              const typeHints = Array.isArray(filters.productTypes) ? filters.productTypes : [];
-              predictedCategoryAisles = typeHints.length
-                ? typeHints
-                : softProductTypeHints.length
-                  ? softProductTypeHints
-                  : ["jacket", "blazer", "coat", "vest", "outerwear"];
             } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
               if (shopLookSingleCategoryHintEnv()) {
                 predictedCategoryAisles = [categoryMapping.productCategory];
@@ -9085,8 +8993,6 @@ export class ImageAnalysisService {
             appliedFilters: {
               category: filters.category,
               color: (filters as any).color,
-              softColor: (filters as any).softColor,
-              softColorStrict: (filters as any).softColorStrict,
               productTypes: filters.productTypes,
               gender: filters.gender,
               ageGroup: filters.ageGroup,
@@ -9244,7 +9150,6 @@ export class ImageAnalysisService {
         category: detection.category,
         desiredColor: inferredDesiredColorState.color,
         desiredColorConfidence: inferredDesiredColorState.confidence,
-        desiredColorExplicit: (detection.appliedFilters as any)?.color != null && String((detection.appliedFilters as any)?.color).trim().length > 0,
       });
       const droppedByFinalRelevance = Math.max(0, beforeProducts.length - afterProducts.length);
       const droppedByColorGate = beforeProducts.filter((prod) => {
@@ -10851,8 +10756,6 @@ export class ImageAnalysisService {
               appliedFilters: {
                 category: filters.category,
                 color: (filters as any).color,
-                softColor: (filters as any).softColor,
-                softColorStrict: (filters as any).softColorStrict,
                 productTypes: filters.productTypes,
                 gender: filters.gender,
                 ageGroup: filters.ageGroup,
@@ -10963,7 +10866,6 @@ export class ImageAnalysisService {
         category: detection.category,
         desiredColor: inferredDesiredColorState.color,
         desiredColorConfidence: inferredDesiredColorState.confidence,
-        desiredColorExplicit: (detection.appliedFilters as any)?.color != null && String((detection.appliedFilters as any)?.color).trim().length > 0,
       });
       const droppedByFinalRelevance = Math.max(0, beforeProducts.length - afterProducts.length);
       const droppedByColorGate = beforeProducts.filter((prod) => {
