@@ -268,8 +268,14 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
 
     res.json({
       ...result,
-      results: toPublicSearchProducts(sortProductsByUnifiedScorer((result.results ?? []) as any), { includeExplain: wantsRankingExplain(req) }),
-      related: toPublicSearchProducts(sortProductsByUnifiedScorer((result.related ?? []) as any), { includeExplain: wantsRankingExplain(req) }),
+      results: toPublicSearchProducts(sortProductsByUnifiedScorer((result.results ?? []) as any), {
+        includeExplain: wantsRankingExplain(req),
+        includeScoreDebug: wantsRankingExplain(req),
+      }),
+      related: toPublicSearchProducts(sortProductsByUnifiedScorer((result.related ?? []) as any), {
+        includeExplain: wantsRankingExplain(req),
+        includeScoreDebug: wantsRankingExplain(req),
+      }),
     });
   } catch (error) {
     console.error("Image search error:", error);

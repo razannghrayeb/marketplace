@@ -66,7 +66,7 @@ import {
   filterProductTypeSeedsByMappedCategory,
 } from "../../lib/search/productTypeTaxonomy";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
-import { sortProductsByRelevanceAndCategory, unifiedScorerScore } from "../../lib/search/sortResults";
+import { explicitUnifiedScorerScore, sortProductsByRelevanceAndCategory, unifiedScorerScore } from "../../lib/search/sortResults";
 import {
   computeOutfitCoherence,
   type OutfitCoherenceResult,
@@ -2393,13 +2393,23 @@ function tightenTypeSeedsForDetection(
   return normalized;
 }
 
-const FORMAL_OUTERWEAR_RECOVERY_TYPES = [
-  "suit",
-  "suits",
+const FORMAL_OUTERWEAR_JACKET_RECOVERY_TYPES = [
   "sport coat",
   "dress jacket",
   "blazer",
   "blazers",
+  "tailored jacket",
+  "structured jacket",
+  "jacket",
+  "outerwear",
+];
+
+const FORMAL_OUTERWEAR_FULL_SUIT_RECOVERY_TYPES = [
+  "suit",
+  "suits",
+  "tuxedo",
+  "tuxedos",
+  ...FORMAL_OUTERWEAR_JACKET_RECOVERY_TYPES,
 ];
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -2743,7 +2753,13 @@ function hasFormalTailoringCue(text: string): boolean {
   return /\b(suit|suits|sport\s*coat|dress\s*jacket|blazer|blazers|tuxedo|tie)\b/.test(s);
 }
 
-function recoverFormalOuterwearTypes(
+function hasFullSuitDetectionCue(text: string): boolean {
+  const s = String(text || "").toLowerCase();
+  if (!s) return false;
+  return /\b(suit|suits|tuxedo|tuxedos|two[-\s]?piece\s+suit|three[-\s]?piece\s+suit|matching\s+suit)\b/.test(s);
+}
+
+export function recoverFormalOuterwearTypes(
   seeds: string[],
   productCategory: string,
   ...cueTexts: Array<string | null | undefined>
@@ -2752,7 +2768,15 @@ function recoverFormalOuterwearTypes(
   const normalized = [...new Set(seeds.map((s) => String(s).toLowerCase().trim()).filter(Boolean))];
   if (category !== "outerwear") return normalized;
   if (!cueTexts.some((t) => hasFormalTailoringCue(String(t ?? "")))) return normalized;
-  return [...new Set([...FORMAL_OUTERWEAR_RECOVERY_TYPES, ...normalized])];
+  // The first cue is always the detection label in current call sites. Treat a
+  // full-suit detector label as its own lane; full-image captions like
+  // "woman in a suit" should keep an outerwear crop in the jacket/blazer lane so
+  // the downstream full-suit catalog gate does not remove valid coats/blazers.
+  const detectionCue = String(cueTexts[0] ?? "");
+  const recoveryTypes = hasFullSuitDetectionCue(detectionCue)
+    ? FORMAL_OUTERWEAR_FULL_SUIT_RECOVERY_TYPES
+    : FORMAL_OUTERWEAR_JACKET_RECOVERY_TYPES;
+  return [...new Set([...recoveryTypes, ...normalized])];
 }
 
 function hasTailoredBottomCue(label: string): boolean {
@@ -4216,7 +4240,7 @@ export function applyRelevanceThresholdFilter(
       );
     };
     const baseSortScore = (item: ProductResult): number => {
-      const unified = unifiedScorerScore(item);
+      const unified = explicitUnifiedScorerScore(item);
       const finalRelevance = Number((item as any)?.finalRelevance01 ?? NaN);
       const similarity = Number((item as any)?.similarity_score ?? NaN);
       const score = Number.isFinite(unified as number)
@@ -4347,7 +4371,7 @@ export function applyRelevanceThresholdFilter(
   const filtered = products.filter((p) => {
     const relevance = Number((p as any)?.finalRelevance01 ?? 0);
     const explain = ((p as any)?.explain ?? {}) as Record<string, unknown>;
-    const scorerAcceptance = unifiedScorerScore(p);
+    const scorerAcceptance = explicitUnifiedScorerScore(p);
     const effectiveRelevance =
       scorerAcceptance !== null
         ? scorerAcceptance
@@ -6885,7 +6909,7 @@ export class ImageAnalysisService {
           const formalitySuitCue =
             categoryMapping.productCategory === "outerwear" &&
             contextualFormalityScore >= 7
-              ? " suit blazer "
+              ? " blazer "
               : "";
           const strongTypeSeeds = recoverFormalOuterwearTypes(
             typeSeeds,

@@ -10,6 +10,7 @@ import {
   inferOuterwearSuitSignal,
   inferFootwearSubtypeFromCaption,
   normalizeDetectionLabelForSearch,
+  recoverFormalOuterwearTypes,
 } from "./image-analysis.service";
 
 describe("inferFootwearSubtypeFromCaption", () => {
@@ -154,6 +155,33 @@ describe("applySleeveIntentGuard", () => {
 });
 
 describe("outerwear suit signal", () => {
+  test("recovers formal generic outerwear through jacket terms without full-suit gating", () => {
+    const recovered = recoverFormalOuterwearTypes(
+      ["long sleeve outerwear", "outerwear"],
+      "outerwear",
+      "long sleeve outerwear",
+      "a woman in a suit and heels stands in front of a wall",
+      "blazer",
+    );
+
+    expect(recovered.slice(0, 4)).toEqual(["sport coat", "dress jacket", "blazer", "blazers"]);
+    expect(recovered).toContain("tailored jacket");
+    expect(recovered).not.toContain("suit");
+    expect(recovered).not.toContain("suits");
+  });
+
+  test("keeps full-suit recovery only for explicit suit detector labels", () => {
+    const recovered = recoverFormalOuterwearTypes(
+      ["outerwear"],
+      "outerwear",
+      "suit",
+      "formal portrait",
+    );
+
+    expect(recovered.slice(0, 4)).toEqual(["suit", "suits", "tuxedo", "tuxedos"]);
+    expect(recovered).toContain("blazer");
+  });
+
   test("keeps generic long-sleeve outwear as jacket when only outfit geometry is formal", () => {
     const signal = inferOuterwearSuitSignal({
       yoloLabel: "long sleeve outwear",

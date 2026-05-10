@@ -46,6 +46,8 @@ export interface UnifiedScoreInputs {
   materialCompliance: number;
   categoryRelevance01: number;
   osSimilarity01: number;
+  /** short | long | sleeveless; optional because older callers only pass hasSleeveIntent. */
+  desiredSleeve?: string;
   // ── Intent flags ──
   hasTypeIntent: boolean;
   hasColorIntent: boolean;
@@ -186,8 +188,12 @@ function computeColorScore(input: UnifiedScoreInputs): number {
  */
 function computeAttributeScore(input: UnifiedScoreInputs): number {
   type AttrEntry = { weight: number; value: number; active: boolean };
+  const sleeveValue =
+    isSparseLongSleeveUnknown(input)
+      ? 0.58
+      : input.sleeveCompliance;
   const entries: AttrEntry[] = [
-    { weight: 0.30, value: input.sleeveCompliance, active: input.hasSleeveIntent },
+    { weight: 0.30, value: sleeveValue, active: input.hasSleeveIntent },
     { weight: 0.25, value: input.lengthCompliance, active: input.hasLengthIntent },
     { weight: 0.20, value: input.styleCompliance, active: input.hasStyleIntent },
     { weight: 0.15, value: input.audienceCompliance, active: input.hasAudienceIntent },
@@ -202,6 +208,12 @@ function computeAttributeScore(input: UnifiedScoreInputs): number {
   if (totalW <= 0) return 0.6;
   const sum = active.reduce((s, e) => s + e.weight * clamp01(e.value), 0);
   return clamp01(sum / totalW);
+}
+
+function isSparseLongSleeveUnknown(input: Pick<UnifiedScoreInputs, "hasSleeveIntent" | "desiredSleeve" | "sleeveCompliance">): boolean {
+  const desired = String(input.desiredSleeve ?? "").toLowerCase().trim();
+  const sleeve = clamp01(Number(input.sleeveCompliance));
+  return input.hasSleeveIntent && desired === "long" && sleeve >= 0.14 && sleeve <= 0.16;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -369,7 +381,7 @@ function computeCaps(input: UnifiedScoreInputs): { reason: string; value: number
 
   // Sleeve mismatch — when intent active, mismatch caps the score continuously.
   // sleeveCompliance 0.0 → cap 0.50, 0.30 → cap 0.78, 0.50+ → no cap.
-  if (input.hasSleeveIntent && input.sleeveCompliance < 0.50) {
+  if (input.hasSleeveIntent && input.sleeveCompliance < 0.50 && !isSparseLongSleeveUnknown(input)) {
     const cap = 0.50 + input.sleeveCompliance * 0.93; // [0.50, 0.965)
     caps.push({ reason: "sleeve_mismatch_cap", value: cap });
   }
@@ -506,7 +518,10 @@ function computeFloor(
   // down. This addresses the user's requirement: same-color products must rank
   // first.
   const audienceOk = !input.hasAudienceIntent || input.audienceCompliance >= 0.70;
-  const sleeveOkForColorPriority = !input.hasSleeveIntent || input.sleeveCompliance >= 0.50;
+  const sleeveOkForColorPriority =
+    !input.hasSleeveIntent ||
+    input.sleeveCompliance >= 0.50 ||
+    isSparseLongSleeveUnknown(input);
   if (tier === "exact" && input.hasColorIntent && audienceOk && sleeveOkForColorPriority && !structuralFamilyDrift) {
     // Floor scales with type + visual evidence so a wrong-type-but-exact-color item
     // doesn't get inflated.
@@ -552,7 +567,9 @@ function computeTieBreakers(input: UnifiedScoreInputs): number {
   // Color compliance fine-grained contribution up to 0.001.
   bonus += clamp01(input.colorCompliance) * 0.001;
   // Sleeve compliance fine-grained contribution up to 0.003 when requested.
-  if (input.hasSleeveIntent) bonus += clamp01(input.sleeveCompliance) * 0.003;
+  if (input.hasSleeveIntent) {
+    bonus += (isSparseLongSleeveUnknown(input) ? 0.58 : clamp01(input.sleeveCompliance)) * 0.003;
+  }
   return bonus;
 }
 

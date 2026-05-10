@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { sortProductsByFinalRelevance } from "./sortResults";
+import { explicitUnifiedScorerScore, sortProductsByFinalRelevance, unifiedScorerScore } from "./sortResults";
 
 function expect(actual: any) {
   return {
@@ -57,5 +57,36 @@ describe("sortProductsByFinalRelevance", () => {
     expect(sorted[0].id).toBe("white-shirt");
     expect(sorted[1].id).toBe("white-shirt-low-color");
     expect(sorted[2].id).toBe("offwhite-pullover");
+  });
+});
+
+describe("unifiedScorerScore", () => {
+  test("keeps the public score fallback behavior", () => {
+    assert.equal(unifiedScorerScore({ id: "public", score: 0.42 }), 0.42);
+  });
+
+  test("explicit unified score ignores legacy score fallback", () => {
+    const product = {
+      id: "suit",
+      score: 0.12,
+      finalRelevance01: 0.89,
+      similarity_score: 0.88,
+      explain: {
+        acceptanceRelevance01: 0.93,
+      },
+    };
+
+    assert.equal(explicitUnifiedScorerScore(product), null);
+  });
+
+  test("explicit unified score reads only real unified scorer output", () => {
+    assert.equal(
+      explicitUnifiedScorerScore({
+        id: "unified",
+        score: 0.12,
+        explain: { unifiedScorer: { score: 0.77 } },
+      }),
+      0.77,
+    );
   });
 });
