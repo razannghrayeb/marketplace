@@ -3264,6 +3264,22 @@ function hasStrictFullSuitIntent(desiredProductTypes: string[]): boolean {
   return /\b(suit|suits|tuxedo|tuxedos|two[-\s]?piece\s+suit|three[-\s]?piece\s+suit|matching\s+suit)\b/.test(specific);
 }
 
+function hasExplicitSuitBottomIntent(desiredProductTypes: string[]): boolean {
+  const desired = desiredProductTypes
+    .map((t) => String(t ?? "").toLowerCase().trim())
+    .filter(Boolean)
+    .join(" ");
+  if (!desired) return false;
+
+  if (/\b(suit\s+jackets?|dress\s+jackets?|blazers?|sport\s+coat|sportcoat)\b/.test(desired)) {
+    return false;
+  }
+
+  return /\b(two[-\s]?piece|three[-\s]?piece|matching\s+suit|suit\s+set|formal\s+set|suit\s+pants|dress\s+pants|formal\s+pants|tailored\s+pants|trousers?|pants?|slacks?)\b/.test(
+    desired,
+  );
+}
+
 function hasTailoredTopCatalogCue(src: Record<string, unknown>): boolean {
   const blob = [
     src.title,
@@ -5780,22 +5796,24 @@ export async function searchByImageWithSimilarity(
         if (!preferredDesiredProductTypes.includes(s)) preferredDesiredProductTypes.push(s);
         if (!desiredProductTypes.includes(s)) desiredProductTypes.push(s);
       }
-      const suitFormalBottoms = [
-        "pants",
-        "pant",
-        "trousers",
-        "trouser",
-        "slacks",
-        "slack",
-        "dress pants",
-        "formal pants",
-        "suit pants",
-        "tailored pants",
-        "dress pant",
-      ];
-      for (const b of suitFormalBottoms) {
-        if (!desiredProductTypes.includes(b)) desiredProductTypes.push(b);
-        if (!preferredDesiredProductTypes.includes(b)) preferredDesiredProductTypes.push(b);
+      if (hasExplicitSuitBottomIntent(desiredProductTypes)) {
+        const suitFormalBottoms = [
+          "pants",
+          "pant",
+          "trousers",
+          "trouser",
+          "slacks",
+          "slack",
+          "dress pants",
+          "formal pants",
+          "suit pants",
+          "tailored pants",
+          "dress pant",
+        ];
+        for (const b of suitFormalBottoms) {
+          if (!desiredProductTypes.includes(b)) desiredProductTypes.push(b);
+          if (!preferredDesiredProductTypes.includes(b)) preferredDesiredProductTypes.push(b);
+        }
       }
     }
   } catch (e) {
@@ -5805,7 +5823,7 @@ export async function searchByImageWithSimilarity(
     desiredProductTypes = [...new Set([...desiredProductTypes, ...softHintsMerged])];
   }
   const hasSuitLikeDesiredIntent = desiredProductTypes.some((t) => /\b(suit|suits|tuxedo|tuxedos)\b/.test(String(t).toLowerCase()));
-  if (hasSuitLikeDesiredIntent) {
+  if (hasSuitLikeDesiredIntent && hasExplicitSuitBottomIntent(desiredProductTypes)) {
     const formalBottomTerms = [
       "pants",
       "pant",
@@ -6008,14 +6026,26 @@ export async function searchByImageWithSimilarity(
       detectionCategoryNorm === "bottoms" ||
       detectionCategoryNorm === "dresses");
   const hasInferredColorSignal = hasTrustedInferredColorSignal && !inferredOnlyMulticolorIntent;
+  const suppressSoftColorPreference =
+    hasDetectionAnchoredTypeIntent &&
+    detectionCategoryNorm === "tops" &&
+    typeof filtersRecord.sleeve === "string" &&
+    !hasExplicitColorIntent;
 
   let allColorsForRelevance: string[];
   if (hasExplicitColorIntent) {
     allColorsForRelevance = [...explicitColorsForRelevance];
-  } else if (hasTrustedInferredColorSignal && !inferredOnlyMulticolorIntent && normalizedInferredColors.length > 0) {
+  } else if (
+    !suppressSoftColorPreference &&
+    hasTrustedInferredColorSignal &&
+    !inferredOnlyMulticolorIntent &&
+    normalizedInferredColors.length > 0
+  ) {
     allColorsForRelevance = [...normalizedInferredColors];
-  } else {
+  } else if (!suppressSoftColorPreference) {
     allColorsForRelevance = [...normalizedCropColorsForMerge];
+  } else {
+    allColorsForRelevance = [];
   }
 
   // Bottoms warm-neutral intent is often represented as one inferred token (e.g. beige),
@@ -6152,7 +6182,9 @@ export async function searchByImageWithSimilarity(
       ? normalizeMaterialToken(filtersRecord.material)
       : undefined;
   const desiredSleeveFromFilter =
-    typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
+    typeof filtersRecord.sleeve === "string"
+      ? extractExplicitSleeveIntent(filtersRecord.sleeve) ?? String(filtersRecord.sleeve).toLowerCase().trim()
+      : undefined;
   const desiredSleeveFromTypes = extractExplicitSleeveIntent(desiredProductTypes.join(" "));
   const desiredSleeveForRelevance = desiredSleeveFromFilter || desiredSleeveFromTypes;
   const desiredSleeveNorm = desiredSleeveForRelevance;
@@ -6191,11 +6223,12 @@ export async function searchByImageWithSimilarity(
   const hasColorIntentForFinal = hasExplicitColorIntent || inferredColorCanHardGateFinal;
   const hasColorPreferenceForRanking =
     hasExplicitColorIntent ||
-    hasInferredColorSignal ||
-    hasCropColorSignal ||
-    desiredColorsForRelevance.length > 0;
-  const hasInferredColorIntentForRescue = !hasExplicitColorIntent && hasInferredColorSignal;
-  const hasSoftColorIntentForRescue = !hasExplicitColorIntent && desiredColorsForRelevance.length > 0;
+    (!suppressSoftColorPreference &&
+      (hasInferredColorSignal || hasCropColorSignal || desiredColorsForRelevance.length > 0));
+  const hasInferredColorIntentForRescue =
+    !hasExplicitColorIntent && hasInferredColorSignal && !suppressSoftColorPreference;
+  const hasSoftColorIntentForRescue =
+    !hasExplicitColorIntent && desiredColorsForRelevance.length > 0 && !suppressSoftColorPreference;
   const strictInferredOnePieceColorGate =
     inferredColorCanHardGateFinal &&
     desiredProductTypes.some((t) => /\b(dress|gown|jumpsuit|romper|playsuit)\b/.test(String(t).toLowerCase()));
@@ -7191,12 +7224,35 @@ export async function searchByImageWithSimilarity(
         (comp.crossFamilyPenalty ?? 0) < 0.52;
       const shoeFinalBefore = Math.max(0, Math.min(1, Number(comp.finalRelevance01 ?? 0)));
       if (strongShoeEvidence) {
+        // If the query/soft-style indicates formal wear (suit/formal/semi-formal)
+        // prefer exact types (oxfords, loafers) over visually-similar casual shoes
+        const isFormalQuery = Boolean(
+          (typeof desiredStyleForRelevance === "string" && /\b(formal|semi-?formal|smart[-\s]?casual|dressy|elegant)\b/.test(desiredStyleForRelevance)) ||
+            hasSuitLikeDesiredIntent ||
+            hasExplicitStyleIntent && /\b(formal|semi-?formal|smart[-\s]?casual|dressy|elegant)\b/.test(String(explicitStyleForRelevance || ""))
+        );
+
+        // Base weights; lower visual weight and raise type/structural importance for formal queries
+        let visualWeight = isFormalQuery ? 0.45 : 0.58;
+        let structuralWeight = isFormalQuery ? 0.20 : 0.14;
+        let typeWeight = isFormalQuery ? 0.11 : 0.04;
+
         let blendedShoeMain =
-          0.58 * shoeVisualComp +
-          0.14 * shoeStructuralComp +
-          0.18 * shoeColorComp +      // color weight higher than other categories
+          visualWeight * shoeVisualComp +
+          structuralWeight * shoeStructuralComp +
+          0.18 * shoeColorComp +      // color weight remains high for shoes
           0.06 * shoeAudienceComp +
-          0.04 * shoeTypeComp;
+          typeWeight * shoeTypeComp;
+
+        // Penalize obviously casual footwear (clogs, sandals, slides, crocs, sneakers)
+        // when the query is clearly formal so they don't surface above formal shoes.
+        if (isFormalQuery) {
+          const docText = String(hit?._source?.title ?? hit?._source?.category ?? "").toLowerCase();
+          const casualFootwearRe = /\b(clog|clogs|sandal|sandals|slide|slides|slipper|slippers|crocs|sneaker|sneakers|flip[-\s]?flop)\b/;
+          if (casualFootwearRe.test(docText)) {
+            blendedShoeMain *= 0.45;
+          }
+        }
         // Aggressive color damping for shoes: a black boot must not appear for a
         // white sneaker query even when the shape similarity is very high.
         const hasShoeColorIntent = hasColorPreferenceForRanking || Boolean((comp as any).hasColorIntent ?? hasColorIntentForFinal);

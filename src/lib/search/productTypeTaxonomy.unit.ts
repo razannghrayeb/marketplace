@@ -1,7 +1,36 @@
-/* Minimal declarations for test globals to satisfy static checks */
-declare const describe: any;
-declare const test: any;
-declare const expect: any;
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+
+function expect(actual: any) {
+  return {
+    toBe(expected: any) {
+      assert.equal(actual, expected);
+    },
+    toEqual(expected: any) {
+      assert.deepEqual(actual, expected);
+    },
+    toBeGreaterThan(expected: number) {
+      assert.ok(actual > expected, `${actual} is not greater than ${expected}`);
+    },
+    toBeGreaterThanOrEqual(expected: number) {
+      assert.ok(actual >= expected, `${actual} is not greater than or equal to ${expected}`);
+    },
+    toBeLessThan(expected: number) {
+      assert.ok(actual < expected, `${actual} is not less than ${expected}`);
+    },
+    toBeLessThanOrEqual(expected: number) {
+      assert.ok(actual <= expected, `${actual} is not less than or equal to ${expected}`);
+    },
+    toBeUndefined() {
+      assert.equal(actual, undefined);
+    },
+    not: {
+      toBe(expected: any) {
+        assert.notEqual(actual, expected);
+      },
+    },
+  };
+}
 
 import {
   expandProductTypesForQuery,
@@ -197,6 +226,7 @@ describe("extractExplicitSleeveIntent", () => {
   test("extracts explicit short and long sleeve phrases", () => {
     expect(extractExplicitSleeveIntent("short sleeve tops")).toBe("short");
     expect(extractExplicitSleeveIntent("Long Sleeve")).toBe("long");
+    expect(extractExplicitSleeveIntent("long sleeve top")).toBe("long");
     expect(extractExplicitSleeveIntent("polo short-sleeved shirt")).toBe("short");
     expect(extractExplicitSleeveIntent("short white tshirt")).toBe("short");
     expect(extractExplicitSleeveIntent("short black tee")).toBe("short");

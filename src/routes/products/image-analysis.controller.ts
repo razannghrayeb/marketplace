@@ -23,6 +23,7 @@ import {
   UserDefinedBox,
 } from "./image-analysis.service";
 import { getYOLOv8Client } from "../../lib/image/yolov8Client";
+import { config } from "../../config";
 import { toPublicSearchProducts } from "../../lib/search/publicSearchResult";
 import { sortProductsByUnifiedScorer } from "../../lib/search/sortResults";
 
@@ -49,6 +50,12 @@ const upload = multer({
 
 const analysisService = getImageAnalysisService();
 const yoloClient = getYOLOv8Client();
+
+function wantsRankingExplain(req: Request): boolean {
+  if (config.search.searchRankingDebug) return true;
+  const v = req.query.rankingDebug ?? req.query.ranking_debug;
+  return v === "1" || v === "true";
+}
 
 /** Accept common frontend field names for the outfit / person photo */
 const IMAGE_UPLOAD_FIELDS = [
@@ -89,7 +96,7 @@ function clamp(value: number, min: number, max: number): number {
 
 function publicSortedProducts(products: unknown): Record<string, unknown>[] {
   if (!Array.isArray(products)) return [];
-  // Sort by score descending for each detection's products
+  // Sort by score descending for each detection's products, { includeExplain: wantsRankingExplain(req) }
   const sorted = (products as any[]).sort((a: any, b: any) => {
     const scoreA = a.score ?? a.similarity_score ?? a.rerankScore ?? 0;
     const scoreB = b.score ?? b.similarity_score ?? b.rerankScore ?? 0;

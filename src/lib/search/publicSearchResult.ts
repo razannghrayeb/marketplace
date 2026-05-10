@@ -2,13 +2,18 @@ import { unifiedScorerScore } from "./sortResults";
 
 type ProductLike = Record<string, unknown>;
 
+export interface PublicSearchProductOptions {
+  includeExplain?: boolean;
+}
+
 /**
- * Public search payloads expose the chosen unified score, not the internal
- * relevance/debug fields used to build it.
+ * Public search payloads expose the chosen unified score, and can optionally
+ * keep `explain` for ranking-debug workflows.
  */
-export function toPublicSearchProduct<T extends ProductLike>(product: T): ProductLike {
+export function toPublicSearchProduct<T extends ProductLike>(product: T, options: PublicSearchProductOptions = {}): ProductLike {
+  const { includeExplain = false } = options;
   const {
-    explain: _explain,
+    explain,
     finalRelevance01: _finalRelevance01,
     rerankScore: _rerankScore,
     mlRerankScore: _mlRerankScore,
@@ -27,9 +32,10 @@ export function toPublicSearchProduct<T extends ProductLike>(product: T): Produc
   } = product;
 
   const score = unifiedScorerScore(product);
-  return score === null ? publicProduct : { ...publicProduct, score };
+  const withExplain = includeExplain && explain !== undefined ? { ...publicProduct, explain } : publicProduct;
+  return score === null ? withExplain : { ...withExplain, score };
 }
 
-export function toPublicSearchProducts<T extends ProductLike>(products: T[] | undefined | null): ProductLike[] {
-  return Array.isArray(products) ? products.map((product) => toPublicSearchProduct(product)) : [];
+export function toPublicSearchProducts<T extends ProductLike>(products: T[] | undefined | null, options: PublicSearchProductOptions = {}): ProductLike[] {
+  return Array.isArray(products) ? products.map((product) => toPublicSearchProduct(product, options)) : [];
 }

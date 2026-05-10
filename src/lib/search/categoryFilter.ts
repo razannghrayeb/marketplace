@@ -177,6 +177,11 @@ const CATEGORY_ALIASES: Record<string, string[]> = {
     "softshell jacket",
     "softshell jackets",
     "parkas & blousons",
+    // Additional missing categories from DB
+    "parkas & blousons",
+    "women coat",
+    "women vest",
+    "women cardigan",
   ],
   tailored: [
     "tailored",
@@ -198,6 +203,17 @@ const CATEGORY_ALIASES: Record<string, string[]> = {
     "structured jackets",
     "tailored jacket",
     "tailored jackets",
+    // Additional suit variants from DB
+    "suit-2p",
+    "suit-2pnos",
+    "suit-txd",
+    "suit-sw",
+    "men blazer",
+    "men suits",
+    "men vest",
+    "women blazer",
+    "lefon blazer",
+    "lefon vest",
   ],
   footwear: [
     "footwear",
