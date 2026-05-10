@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic'
+
 import { NextRequest, NextResponse } from 'next/server'
 import { fetchProducts } from '@/lib/catalog-queries'
 import type { ProductFilters, SortConfig, ProductSortField } from '@/types/catalog-admin'

@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server'
 import { fetchRecentPriceChanges, fetchCurrentSaleProducts } from '@/lib/catalog-queries'
 
+export const dynamic = 'force-dynamic'
+
 export async function GET() {
   const [changes, currentSales] = await Promise.allSettled([
     fetchRecentPriceChanges(800),

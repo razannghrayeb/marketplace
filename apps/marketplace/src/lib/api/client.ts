@@ -4,7 +4,7 @@
  */
 
 /** Backend origin only (no trailing slash). Same join rules for GET and POST so paths stay consistent. */
-const DEFAULT_CLOUD_API = 'https://marketplace-359201620993.asia-southeast1.run.app'
+const DEFAULT_CLOUD_API = 'https://marketplace-96918972071.asia-southeast1.run.app'
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_URL || DEFAULT_CLOUD_API).replace(/\/+$/, '')
 
