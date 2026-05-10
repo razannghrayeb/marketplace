@@ -257,10 +257,10 @@ const LONG_SLEEVE_BIASED_CATEGORIES: Set<LongSleeveTopCategory> = new Set([
  * Normalize a category name to canonical form.
  * Returns null if category cannot be mapped.
  */
-export function normalizeCategory(rawCategory: string | null): LongSleeveTopCategory | null {
-  if (!rawCategory) return null;
+export function normalizeCategory(rawCategory: string | null | undefined): LongSleeveTopCategory | null {
+  if (rawCategory === undefined || rawCategory === null) return null;
 
-  const normalized = rawCategory.toLowerCase().trim();
+  const normalized = String(rawCategory).toLowerCase().trim();
   const mapped = LONG_SLEEVE_TOPS_MAP[normalized];
 
   if (mapped) {
