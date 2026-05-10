@@ -5495,8 +5495,12 @@ export async function searchByImageWithSimilarity(
   const hasQueryPartEmbeddings = Object.keys(partQueryEmbeddings).some(
     (key) => partQueryEmbeddings[key] && Array.isArray(partQueryEmbeddings[key]) && partQueryEmbeddings[key]!.length > 0
   );
+  const attrEmbeddingMergeTargets = Array.isArray(hits) ? [...hits] : [];
+  // Start attr mget immediately so network latency overlaps the intent/compliance prep below.
+  // We still await before any embedding-dependent scoring to keep ranking behavior unchanged.
+  const attrEmbeddingsHydrationPromise = (async (): Promise<void> => {
+    if (attrEmbeddingMergeTargets.length === 0) return;
 
-  if (Array.isArray(hits) && hits.length > 0) {
     const attrFieldsToFetch: string[] = [];
     if (runColor) attrFieldsToFetch.push("embedding_color");
     if (runTexture) attrFieldsToFetch.push("embedding_texture");
@@ -5504,98 +5508,52 @@ export async function searchByImageWithSimilarity(
     if (runStyle) attrFieldsToFetch.push("embedding_style");
     if (runPattern) attrFieldsToFetch.push("embedding_pattern");
     if (hasQueryPartEmbeddings) attrFieldsToFetch.push(...partEmbeddingFields);
+    if (attrFieldsToFetch.length === 0) return;
 
-    if (attrFieldsToFetch.length > 0) {
-      const topIds = hits
-        .slice(0, 200)
-        .map((h) => String(h?._source?.product_id ?? ""))
-        .filter(Boolean);
-      const uniqueIds = [...new Set(topIds)];
-      if (uniqueIds.length > 0) {
-        try {
-          const mgetStartedAt = Date.now();
-          const attrMgetBatchSizeRaw = Number(process.env.SEARCH_IMAGE_ATTR_MGET_BATCH_SIZE ?? "50");
-          const attrMgetBatchSize =
-            Number.isFinite(attrMgetBatchSizeRaw) && attrMgetBatchSizeRaw > 0
-              ? Math.max(1, Math.min(200, Math.floor(attrMgetBatchSizeRaw)))
-              : 50;
-          const attrMgetBatches: string[][] = [];
-          for (let i = 0; i < uniqueIds.length; i += attrMgetBatchSize) {
-            attrMgetBatches.push(uniqueIds.slice(i, i + attrMgetBatchSize));
-          }
-          const mgetResponses = await Promise.all(
-            attrMgetBatches.map((ids) =>
-              (osClient as any).mget(
-                { index: config.opensearch.index, body: { ids }, _source: attrFieldsToFetch },
-                { requestTimeout: 8_000, maxRetries: 0 },
-              ),
-            ),
-          );
-          rerankTimings['attr_mget_ms'] = Date.now() - mgetStartedAt;
-          rerankTimings['attr_mget_batches'] = attrMgetBatches.length;
-          
-          const byId = new Map<string, any>();
-          for (const mgetResp of mgetResponses) {
-            for (const doc of (mgetResp.body?.docs ?? [])) {
-              if (doc?.found && doc?._source) byId.set(String(doc._id ?? ""), doc._source);
-            }
-          }
-          for (const hit of hits) {
-            const pid = String(hit?._source?.product_id ?? "");
-            const embData = byId.get(pid);
-            if (embData && hit._source) Object.assign(hit._source, embData);
-          }
-        } catch (err: any) {
-          console.warn("[image-knn] attr mget failed (proceeding without attr embeddings):", err?.message ?? err);
-        }
-      }
-    }
-  }
+    const topIds = attrEmbeddingMergeTargets
+      .slice(0, 200)
+      .map((h) => String(h?._source?.product_id ?? ""))
+      .filter(Boolean);
+    const uniqueIds = [...new Set(topIds)];
+    if (uniqueIds.length === 0) return;
 
-  if (hasQueryPartEmbeddings && Array.isArray(hits) && hits.length > 0) {
     try {
-      const partSimilarityStartedAt = Date.now();
-      const { cosineSimilarity } = await import("../../lib/image/clip");
-
-      for (const hit of hits) {
-        const partSims: Record<string, number> = {};
-        const productId = String(hit?._source?.product_id ?? "");
-
-        if (!productId) continue;
-
-        // For each part type with a query embedding
-        for (const [partType, queryPartVec] of Object.entries(partQueryEmbeddings)) {
-          if (!queryPartVec || !Array.isArray(queryPartVec) || queryPartVec.length === 0) {
-            partSims[partType] = 0;
-            continue;
-          }
-
-          // Try to get the corresponding document part vector
-          const docPartField = `embedding_part_${partType}`;
-          const docPartVec = asFloatVector(hit?._source?.[docPartField], queryPartVec.length);
-
-          if (docPartVec) {
-            // Compute cosine similarity between query and document part vectors
-            try {
-              const rawSim = cosineSimilarity(queryPartVec, docPartVec);
-              partSims[partType] = normalizeTo01ByVersion(rawSim, "v2");
-            } catch {
-              partSims[partType] = 0;
-            }
-          } else {
-            partSims[partType] = 0;
-          }
-        }
-
-        partSimByDocId.set(productId, partSims);
+      const mgetStartedAt = Date.now();
+      const attrMgetBatchSizeRaw = Number(process.env.SEARCH_IMAGE_ATTR_MGET_BATCH_SIZE ?? "50");
+      const attrMgetBatchSize =
+        Number.isFinite(attrMgetBatchSizeRaw) && attrMgetBatchSizeRaw > 0
+          ? Math.max(1, Math.min(200, Math.floor(attrMgetBatchSizeRaw)))
+          : 50;
+      const attrMgetBatches: string[][] = [];
+      for (let i = 0; i < uniqueIds.length; i += attrMgetBatchSize) {
+        attrMgetBatches.push(uniqueIds.slice(i, i + attrMgetBatchSize));
       }
-      rerankTimings['part_similarity_ms'] = Date.now() - partSimilarityStartedAt;
-    } catch (err) {
-      console.warn("[image-search] part similarity computation failed", {
-        message: err instanceof Error ? err.message : String(err),
-      });
+      const mgetResponses = await Promise.all(
+        attrMgetBatches.map((ids) =>
+          (osClient as any).mget(
+            { index: config.opensearch.index, body: { ids }, _source: attrFieldsToFetch },
+            { requestTimeout: 8_000, maxRetries: 0 },
+          ),
+        ),
+      );
+      rerankTimings['attr_mget_ms'] = Date.now() - mgetStartedAt;
+      rerankTimings['attr_mget_batches'] = attrMgetBatches.length;
+
+      const byId = new Map<string, any>();
+      for (const mgetResp of mgetResponses) {
+        for (const doc of (mgetResp.body?.docs ?? [])) {
+          if (doc?.found && doc?._source) byId.set(String(doc._id ?? ""), doc._source);
+        }
+      }
+      for (const hit of attrEmbeddingMergeTargets) {
+        const pid = String(hit?._source?.product_id ?? "");
+        const embData = byId.get(pid);
+        if (embData && hit._source) Object.assign(hit._source, embData);
+      }
+    } catch (err: any) {
+      console.warn("[image-knn] attr mget failed (proceeding without attr embeddings):", err?.message ?? err);
     }
-  }
+  })();
 
   const visualSimFromHit = (hit: any): number => {
     if (typeof hit?._exactCosineRaw === "number") {
@@ -6476,6 +6434,53 @@ export async function searchByImageWithSimilarity(
     hasLengthIntentById.set(idStr, hasLengthIntentForHit);
     complianceById.set(idStr, compWithExpandedPenalty);
     colorByHitId.set(idStr, primaryColor);
+  }
+
+  await attrEmbeddingsHydrationPromise;
+
+  if (hasQueryPartEmbeddings && attrEmbeddingMergeTargets.length > 0) {
+    try {
+      const partSimilarityStartedAt = Date.now();
+      const { cosineSimilarity } = await import("../../lib/image/clip");
+
+      for (const hit of attrEmbeddingMergeTargets) {
+        const partSims: Record<string, number> = {};
+        const productId = String(hit?._source?.product_id ?? "");
+
+        if (!productId) continue;
+
+        // For each part type with a query embedding
+        for (const [partType, queryPartVec] of Object.entries(partQueryEmbeddings)) {
+          if (!queryPartVec || !Array.isArray(queryPartVec) || queryPartVec.length === 0) {
+            partSims[partType] = 0;
+            continue;
+          }
+
+          // Try to get the corresponding document part vector
+          const docPartField = `embedding_part_${partType}`;
+          const docPartVec = asFloatVector(hit?._source?.[docPartField], queryPartVec.length);
+
+          if (docPartVec) {
+            // Compute cosine similarity between query and document part vectors
+            try {
+              const rawSim = cosineSimilarity(queryPartVec, docPartVec);
+              partSims[partType] = normalizeTo01ByVersion(rawSim, "v2");
+            } catch {
+              partSims[partType] = 0;
+            }
+          } else {
+            partSims[partType] = 0;
+          }
+        }
+
+        partSimByDocId.set(productId, partSims);
+      }
+      rerankTimings['part_similarity_ms'] = Date.now() - partSimilarityStartedAt;
+    } catch (err) {
+      console.warn("[image-search] part similarity computation failed", {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // Precompute color embedding cosine + align `colorCompliance` with it when tier metadata
