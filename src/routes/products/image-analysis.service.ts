@@ -1668,6 +1668,23 @@ export function buildInitialTypeSearchHintsForDetection(params: {
     ...mainPathPriorityTypeHints(params.detectionLabel, params.productCategory, params.materialHint),
     ...softHints,
   ];
+  // Bridging rule: when detection looks like a long-sleeve top but the
+  // productCategory is outerwear and soft hints suggest a vest/waistcoat/gilet,
+  // emit vest-like hints first so vest outerwear is recalled.
+  try {
+    const labelForSearch = normalizeDetectionLabelForSearch(String(params.detectionLabel ?? ""));
+    const categoryForSearch = String(params.productCategory ?? "").toLowerCase().trim();
+    if (categoryForSearch === "outerwear" && /\blong\s+sleeve\b|\bfull\s+sleeve\b/.test(labelForSearch)) {
+      const vestSignals = new Set(["vest", "vest top", "waistcoat", "waistcoats", "gilet", "gilets"]);
+      const softHasVest = softHints.some((h) => vestSignals.has(String(h ?? "").toLowerCase()));
+      if (softHasVest) {
+        // Prepend canonical vest hints while preserving uniqueness handled below.
+        merged.unshift("vest", "waistcoat", "gilet");
+      }
+    }
+  } catch (e) {
+    // noop - conservative fallback to existing merged hints
+  }
   const out: string[] = [];
   const seenHints = new Set<string>();
   const seenClusters = new Set<string>();
@@ -2585,7 +2602,14 @@ export function inferOuterwearSuitSignal(input: {
   // Step 1: gate. Outerwear/tailored always qualify; strongly formal top detections can also
   // promote into the tailored lane when the outfit signal already says the crop is suit-like.
   const topSuitRecoveryEligible = productCategory === "tops" && formality >= 7;
-  if (productCategory !== "outerwear" && productCategory !== "tailored" && !topSuitRecoveryEligible) {
+  // Also allow promotion when the raw labels/caption contain clear outerwear tokens
+  // (jacket/blazer/coat/vest/etc.). This avoids missing jackets that were labelled
+  // by the detector as "long sleeve top" but clearly represent outerwear.
+  const outerwearTokenPresent = /\b(jacket|jackets|coat|coats|blazer|blazers|vest|vests|waistcoat|waistcoats|gilet|gilets|parka|parkas|trench|puffer|suit|suits)\b/.test(
+    `${labelNorm} ${rawLabelNorm} ${captionNorm}`,
+  );
+
+  if (productCategory !== "outerwear" && productCategory !== "tailored" && !topSuitRecoveryEligible && !outerwearTokenPresent) {
     return {
       isOuterwearOrSuit: false,
       subtype: "unknown",
@@ -2995,7 +3019,7 @@ function shouldForceTypeFilterForDetection(
   const category = String(categoryMapping.productCategory || "").toLowerCase();
   // Root fix: hard product_types filtering is too brittle for detection-driven retrieval
   // in catalogs with sparse/heterogeneous typing. Keep it only for one-piece/tailored lanes.
-  if (category === "accessories" || category === "bags" || category === "footwear" || category === "tops" || category === "bottoms") return false;
+  if (category !== "tailored" && category !== "one_piece") return false;
   const confOk = (detection.confidence ?? 0) >= imageStrongHintsTypeConfMin();
   const areaOk = (detection.area_ratio ?? 0) >= imageStrongHintsTypeAreaMin();
   return confOk && areaOk;
@@ -7396,8 +7420,14 @@ export class ImageAnalysisService {
             shouldHardCategory || forceCoreMainPathHardCategory,
           );
           if (filterByDetectedCategory) {
-            if (shouldHardCategory || forceCoreMainPathHardCategory) {
-              // Apply hard OpenSearch category filtering, even when global soft-category is enabled.
+            // For outerwear detections, skip hard category filtering to maximize recall.
+            // Filtering happens downstream in products.service via search relevance and
+            // reranking (family gating, type compliance, etc.). This allows jackets/blazers/vests/coats
+            // across different catalog category spellings to surface.
+            const isOuterwearDetection = categoryMapping.productCategory === "outerwear";
+            
+            if ((shouldHardCategory || forceCoreMainPathHardCategory) && !isOuterwearDetection) {
+              // Apply hard OpenSearch category filtering for non-outerwear, even when global soft-category is enabled.
               const terms = hardCategoryTermsForDetection(label, categoryMapping, {
                 confidence: detection.confidence,
                 areaRatio: detection.area_ratio,
@@ -7426,6 +7456,16 @@ export class ImageAnalysisService {
               predictedCategoryAisles = outerwearSuitSignal.isOuterwearOrSuit
                 ? outerwearSuitSignal.predictedAisles
                 : [categoryMapping.productCategory];
+            } else if (isOuterwearDetection) {
+              // Outerwear: use soft category hints for broad recall.
+              // Downstream reranking in products.service filters via family gating, type compliance, etc.
+              // This allows jackets/blazers/vests/coats from diverse catalog categories to surface.
+              const typeHints = Array.isArray(filters.productTypes) ? filters.productTypes : [];
+              predictedCategoryAisles = typeHints.length
+                ? typeHints
+                : softProductTypeHints.length
+                  ? softProductTypeHints
+                  : ["jacket", "blazer", "coat", "vest", "outerwear"];
             } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
               if (shopLookSingleCategoryHintEnv()) {
                 predictedCategoryAisles = [categoryMapping.productCategory];

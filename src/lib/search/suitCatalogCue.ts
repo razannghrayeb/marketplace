@@ -57,10 +57,6 @@ export function explainActualSuitCatalogCue(src: Record<string, unknown>): SuitC
     return { matched: false, reasons: [nonTailoredReason], normalizedText: norm };
   }
 
-  const catCanon = normalizeCatalogText(src.category_canonical);
-  const catRaw = normalizeCatalogText(src.category);
-  const hasTailoredContext = /\b(tailored|formal|formalwear|suiting|tailoring)\b/.test(`${catCanon} ${catRaw} ${norm}`) || catCanon === "tailored";
-
   const reasons: string[] = [];
 
   if (/\btuxedos?\b/.test(norm)) {
@@ -79,12 +75,7 @@ export function explainActualSuitCatalogCue(src: Record<string, unknown>): SuitC
     return { matched: true, reasons, normalizedText: norm };
   }
   if (/\bsuit\s+jackets?\b/.test(norm)) {
-    if (hasTailoredContext || /\b(blazer|blazers|dress\s+jacket|dress\s+jackets?|sport\s+coat|sportcoat)\b/.test(norm) || /\b(pant|pants|trouser|trousers|slacks|dress\s+pants|2p|2\s*piece|3p|3\s*piece|set|full\s+set)\b/.test(norm)) {
-      reasons.push("suit_jacket_formal_context");
-      return { matched: true, reasons, normalizedText: norm };
-    }
     reasons.push("suit_jacket_only");
-    return { matched: false, reasons, normalizedText: norm };
   }
 
   const hasBlazer = /\b(blazer|blazers|suit jacket|suit jackets|dress jacket|dress jackets|sport coat|sportcoat)\b/.test(norm);
@@ -94,7 +85,8 @@ export function explainActualSuitCatalogCue(src: Record<string, unknown>): SuitC
     return { matched: true, reasons, normalizedText: norm };
   }
 
-  if (hasTailoredContext && (/\b(suit|suits|tuxedo|tuxedos)\b/.test(norm) || hasBlazer || hasSuitBottomHint)) {
+  const catRaw = normalizeCatalogText(src.category);
+  if (/\b(suits?|tuxedos?)\b/.test(catRaw)) {
     reasons.push("suit_category");
     return { matched: true, reasons, normalizedText: norm };
   }

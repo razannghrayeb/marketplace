@@ -103,7 +103,6 @@ interface ReindexConfig {
   bgRemoval: boolean;
   bgRemovalThreshold: number;
   noBgRemovalSidecar: boolean; // skip Python sidecar even if available
-  clipExecutionProviders?: string;
 }
 
 interface Progress {

@@ -1,6 +1,6 @@
 /**
  * Centralized sorting logic for ProductResults
- * Sorts by: category → finalRelevance01 → explainable tie-breaks → rerankScore → similarity
+ * Sorts by: category → finalRelevance01 → color → styleCompliance → rerankScore → similarity
  */
 
 export type SortableProduct = {
@@ -37,12 +37,6 @@ export function unifiedScorerScore(product: unknown): number | null {
 
   const exposedScore = Number(record?.score ?? NaN);
   return Number.isFinite(exposedScore) ? exposedScore : null;
-}
-
-export function explicitUnifiedScorerScore(product: unknown): number | null {
-  const record = product as SortableProduct | null | undefined;
-  const unified = Number(record?.explain?.unifiedScorer?.score ?? NaN);
-  return Number.isFinite(unified) ? unified : null;
 }
 
 /**
@@ -128,22 +122,6 @@ export function sortProductsByFinalRelevance<T extends SortableProduct>(products
     const fa = primarySortScore(a);
     const fb = primarySortScore(b);
     if (Math.abs(fb - fa) > 1e-6) return fb - fa;
-
-    const typeA = Number(a.explain?.productTypeCompliance ?? 0);
-    const typeB = Number(b.explain?.productTypeCompliance ?? 0);
-    if (Math.abs(typeB - typeA) > 1e-8) return typeB - typeA;
-
-    const sleeveA = Number(a.explain?.sleeveCompliance ?? 0);
-    const sleeveB = Number(b.explain?.sleeveCompliance ?? 0);
-    if (Math.abs(sleeveB - sleeveA) > 1e-8) return sleeveB - sleeveA;
-
-    const colorCompA = Number(a.explain?.colorCompliance ?? 0);
-    const colorCompB = Number(b.explain?.colorCompliance ?? 0);
-    if (Math.abs(colorCompB - colorCompA) > 1e-8) return colorCompB - colorCompA;
-
-    const styleA = Number(a.explain?.styleCompliance ?? 0);
-    const styleB = Number(b.explain?.styleCompliance ?? 0);
-    if (Math.abs(styleB - styleA) > 1e-8) return styleB - styleA;
 
     // Fallback tie-breaker
     const ar = a.rerankScore ?? 0;

@@ -20,7 +20,6 @@ function baseInput(overrides: Partial<UnifiedScoreInputs> = {}): UnifiedScoreInp
     materialCompliance: 0,
     categoryRelevance01: 1,
     osSimilarity01: 0.88,
-    desiredSleeve: "short",
     hasTypeIntent: true,
     hasColorIntent: true,
     hasSleeveIntent: true,
@@ -95,31 +94,6 @@ test("unified scorer does not let exact color floor rescue sleeve mismatches", (
   assert.equal(mismatched.floorReason, null);
   assert.ok(mismatched.caps.some((cap) => cap.reason === "sleeve_mismatch_cap"));
   assert.ok(matching.score > mismatched.score);
-});
-
-test("unified scorer treats sparse long-sleeve catalog evidence as unknown, not a confirmed mismatch", () => {
-  const sparseLongSleeve = scoreCandidateUnified(baseInput({
-    desiredSleeve: "long",
-    sleeveCompliance: 0.15,
-    exactTypeScore: 1,
-    productTypeCompliance: 1,
-    colorTier: "family",
-    colorCompliance: 0.82,
-    osSimilarity01: 0.86,
-  }));
-  const confirmedSleeveless = scoreCandidateUnified(baseInput({
-    desiredSleeve: "long",
-    sleeveCompliance: 0,
-    exactTypeScore: 1,
-    productTypeCompliance: 1,
-    colorTier: "family",
-    colorCompliance: 0.82,
-    osSimilarity01: 0.86,
-  }));
-
-  assert.ok(!sparseLongSleeve.caps.some((cap) => cap.reason === "sleeve_mismatch_cap"));
-  assert.ok(confirmedSleeveless.caps.some((cap) => cap.reason === "sleeve_mismatch_cap"));
-  assert.ok(sparseLongSleeve.score > confirmedSleeveless.score);
 });
 
 test("unified scorer caps plain top leakage in outerwear searches", () => {

@@ -37,8 +37,6 @@ interface ProductMetadataRow {
   title: string | null;
   description: string | null;
   category: string | null;
-  product_url: string | null;
-  parent_product_url: string | null;
 }
 
 interface RepairStats {
@@ -89,9 +87,7 @@ async function fetchProductMetadataRows(
       id,
       title,
       description,
-      category,
-      product_url,
-      parent_product_url
+      category
     FROM products
     WHERE id IS NOT NULL
     ${where.length > 0 ? "AND " + where.join(" AND ") : ""}
@@ -116,8 +112,6 @@ function computeProductTypes(product: ProductMetadataRow): {
     title: product.title || "",
     description: product.description || "",
     category: product.category || "",
-    productUrl: product.product_url || null,
-    parentProductUrl: product.parent_product_url || null,
   });
 
   return {

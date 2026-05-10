@@ -141,10 +141,6 @@ export async function getOrCreateVendorId(name: string, url: string): Promise<nu
 export async function upsertProduct(p: ScrapedProduct): Promise<number> {
 
   if (!p.vendor_url) throw new Error("vendor_url is required");
-  if (!p.price_cents || p.price_cents <= 0) {
-    console.warn(`[ingest] Skipping zero-price product: ${p.product_url}`);
-    return -1;
-  }
  const vendorId = await getOrCreateVendorId(p.vendor_name, p.vendor_url);
 
   const imageUrls = p.image_urls ?? null;
