@@ -2140,9 +2140,10 @@ function hardCategoryTermsForDetection(
     }
 
     if (isGenericShoeLike) {
-      // Generic shoe detections are common; keep recall broad and let subtype rerank
-      // handle precision once visual/category evidence is available.
-      return broadFootwearTerms(baseTerms);
+      // Generic shoe detections should stay close to closed shoes. Broad footwear
+      // recall lets sandals/clogs/slippers outrank actual shoes when visual KNN is noisy.
+      const genericTerms = genericFootwearTerms(baseTerms);
+      return genericTerms.length > 0 ? genericTerms : broadFootwearTerms(baseTerms);
     }
 
     return broadFootwearTerms(baseTerms);
@@ -4118,12 +4119,16 @@ function applyAthleticMismatchGuard(params: {
     minFormality >= 7 ||
     hasFormalTailoringCue(detectionLabel) ||
     /\b(formal|semi-formal|smart-casual|dressy|tailored|elegant)\b/.test(softStyle);
+  const genericShoeIntent =
+    category === "footwear" &&
+    isGenericFootwearDetectionLabel(detectionLabel);
 
-  if (!formalIntent && minFormality < 7) {
+  if (!formalIntent && !genericShoeIntent && minFormality < 7) {
     return products;
   }
 
   const athleticCueRe = /\b(athletic|athleisure|sporty|sportswear|gym|workout|training|track|jogger|joggers|running|runner|sneaker|sneakers|trainer|trainers|hoodie|hooded|sweatshirt|sweatpants?)\b/;
+  const openFootwearCueRe = /\b(crocs?|clog|clogs|sandal|sandals|slide|slides|flip\s*flop|flip-flop|slipper|slippers|mule|mules)\b/;
   return products.filter((p) => {
     const blob = [
       (p as any)?.title,
@@ -4140,6 +4145,9 @@ function applyAthleticMismatchGuard(params: {
       .join(" ");
 
     if (category === "tops" && hasTopCasualConflictCue(blob)) {
+      return false;
+    }
+    if (genericShoeIntent && openFootwearCueRe.test(blob)) {
       return false;
     }
     if (formalIntent && athleticCueRe.test(blob)) {
@@ -9019,6 +9027,8 @@ export class ImageAnalysisService {
             appliedFilters: {
               category: filters.category,
               color: (filters as any).color,
+              softColor: (filters as any).softColor,
+              softColorStrict: (filters as any).softColorStrict,
               productTypes: filters.productTypes,
               gender: filters.gender,
               ageGroup: filters.ageGroup,
@@ -10782,6 +10792,8 @@ export class ImageAnalysisService {
               appliedFilters: {
                 category: filters.category,
                 color: (filters as any).color,
+                softColor: (filters as any).softColor,
+                softColorStrict: (filters as any).softColorStrict,
                 productTypes: filters.productTypes,
                 gender: filters.gender,
                 ageGroup: filters.ageGroup,
