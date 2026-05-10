@@ -1667,6 +1667,7 @@ export function scoreCrossFamilyTypePenalty(
   for (const qh of qHints) {
     for (const dh of dHints) {
       if (!garmentHintsConflict(qh, dh)) continue;
+      if (qh.kind === "bottom" && dh.kind === "bottom") continue;
       const severeBottomAxis =
         (qh.kind === "bottom" && dh.kind === "shorts_skirt") ||
         (qh.kind === "shorts_skirt" && dh.kind === "bottom");

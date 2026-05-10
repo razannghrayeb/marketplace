@@ -57,6 +57,7 @@ import {
   extractLexicalProductTypeSeeds,
   filterProductTypeSeedsByMappedCategory,
   inferMacroFamiliesFromListingCategoryFields,
+  scoreCrossFamilyTypePenalty,
   scoreRerankProductTypeBreakdown,
 } from "./productTypeTaxonomy";
 
@@ -143,6 +144,28 @@ describe("scoreRerankProductTypeBreakdown", () => {
     const r = scoreRerankProductTypeBreakdown(["pants", "trousers"], ["suit", "outerwear"]);
     expect(r.exactTypeScore).toBe(0.2);
     expect(r.combinedTypeCompliance).toBeLessThan(0.35);
+  });
+
+  test("broad trouser recall hints do not cross-family block plain pants", () => {
+    const penalty = scoreCrossFamilyTypePenalty(
+      [
+        "pants",
+        "pant",
+        "trousers",
+        "chinos",
+        "cargo pants",
+        "track trousers",
+        "tracksuits & track trousers",
+        "chino",
+        "slacks",
+        "jeans",
+        "jean",
+      ],
+      ["pants", "trouser"],
+      { category: "Bottoms", categoryCanonical: "bottoms" },
+    );
+
+    expect(penalty).toBe(0);
   });
 
   test("full suit intent does not treat standalone blazers as exact suits", () => {

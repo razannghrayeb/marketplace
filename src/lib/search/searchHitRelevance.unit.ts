@@ -195,6 +195,45 @@ describe("scoreCrossFamilyTypePenalty - category fallback", () => {
     });
     expect(p).toBeLessThan(0.3);
   });
+
+  test("broad trouser recall does not cross-family penalize plain pants rows", () => {
+    const hit = {
+      _source: {
+        title: "Everyday Straight-Fit Chino | Black",
+        category: "Bottoms",
+        category_canonical: "bottoms",
+        product_types: ["pants", "chino"],
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.97, {
+      desiredProductTypes: [
+        "pants",
+        "pant",
+        "trousers",
+        "chinos",
+        "cargo pants",
+        "track trousers",
+        "tracksuits & track trousers",
+        "chino",
+        "slacks",
+        "jeans",
+        "jean",
+      ],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "bottoms",
+      astCategories: ["bottoms"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.crossFamilyPenalty).toBe(0);
+    expect(rel.finalRelevance01).toBeGreaterThan(0.3);
+  });
 });
 
 describe("computeHitRelevance - type intent reliability", () => {
