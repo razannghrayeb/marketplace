@@ -4514,7 +4514,6 @@ function buildHardCategoryFilterClause(input: string | string[]): Record<string,
       should: [
         { terms: { category: terms } },
         { terms: { category_canonical: terms } },
-        { terms: { product_types: terms } },
       ],
       minimum_should_match: 1,
     },
@@ -4541,15 +4540,9 @@ function categorySoftScoreForHit(hit: any, desiredCatalogTerms: Set<string> | nu
   const categoryCanonical = String(hit?._source?.category_canonical ?? "")
     .toLowerCase()
     .trim();
-  const productTypes = Array.isArray(hit?._source?.product_types)
-    ? hit._source.product_types.map((t: unknown) => String(t).toLowerCase().trim())
-    : [];
 
   if ((category && desiredCatalogTerms.has(category)) || (categoryCanonical && desiredCatalogTerms.has(categoryCanonical))) {
     return 1;
-  }
-  if (productTypes.some((t: string) => t && desiredCatalogTerms.has(t))) {
-    return 0.88;
   }
   return 0;
 }
@@ -4663,16 +4656,6 @@ export async function searchByImageWithSimilarity(
   }
   if (filters.brand) filter.push({ term: { brand: String(filters.brand).toLowerCase() } });
   if (filters.vendorId) filter.push({ term: { vendor_id: String(filters.vendorId) } });
-  if (Array.isArray((filters as { productTypes?: string[] }).productTypes)) {
-    const productTypeTerms = ((filters as { productTypes?: string[] }).productTypes ?? [])
-      .map((t) => String(t).toLowerCase().trim())
-      .filter(Boolean);
-    if (productTypeTerms.length > 0 && !detectionScoped) {
-      // Root fix: detection-derived product types are noisy and can zero-out KNN retrieval.
-      // Keep hard type filters for non-detection image search, but not for per-detection stage.
-      filter.push({ terms: { product_types: productTypeTerms } });
-    }
-  }
   const filtersAny = filters as { gender?: string; color?: string; softColor?: string; style?: string; softStyle?: string };
   const queryGenderNormForPost = normalizeQueryGender(filtersAny.gender);
   const visualPrimaryBroad = isBroadImageSearchVisualPrimaryRanking(filters, imageSearchTextQuery);
@@ -5316,20 +5299,12 @@ export async function searchByImageWithSimilarity(
     detectionScoped &&
     String(process.env.SEARCH_IMAGE_HYBRID_METADATA_RECALL ?? "1").toLowerCase() !== "0"
   ) {
-    const typeRecallSeeds = [
-      ...(((filters as { productTypes?: string[] }).productTypes ?? []).map((t) => String(t).toLowerCase().trim())),
-      ...((softProductTypeHintsParam ?? []).map((t) => String(t).toLowerCase().trim())),
-    ].filter(Boolean);
-    const typeRecallTerms = [...new Set(expandProductTypesForQuery(typeRecallSeeds))];
     const colorRecallTerms = [
       ...((filtersAny.color ? expandColorTermsForFilter(String(filtersAny.color)) : [])),
       ...((filtersAny.softColor ? expandColorTermsForFilter(String(filtersAny.softColor)) : [])),
     ].filter(Boolean);
 
     const should: any[] = [];
-    if (typeRecallTerms.length > 0) {
-      should.push({ terms: { product_types: [...new Set(typeRecallTerms)], boost: 4 } });
-    }
     if (colorRecallTerms.length > 0) {
       should.push({ terms: { attr_colors: [...new Set(colorRecallTerms)], boost: 2.2 } });
       should.push({ terms: { color_palette_canonical: [...new Set(colorRecallTerms)], boost: 1.2 } });
@@ -5343,7 +5318,7 @@ export async function searchByImageWithSimilarity(
       }
     }
 
-    const hasUsefulMetadataRecall = should.length > 0 && typeRecallTerms.length > 0;
+    const hasUsefulMetadataRecall = should.length > 0;
     const visualPoolBeforeMetadataRecall = Array.isArray(hits) ? hits.length : 0;
     const hasColorRecallTerms = colorRecallTerms.length > 0;
     const forceMetadataRecall =
@@ -5361,7 +5336,6 @@ export async function searchByImageWithSimilarity(
       console.log("[image-knn][metadata-recall-skip]", {
         visualPoolBeforeMetadataRecall,
         sparsePoolMinForMetadataRecall,
-        typeRecallTerms,
         colorRecallTerms,
       });
     }
@@ -5375,7 +5349,6 @@ export async function searchByImageWithSimilarity(
             bool: {
               filter: [
                 { bool: { must_not: [{ term: { is_hidden: true } }] } },
-                { terms: { product_types: typeRecallTerms } },
                 {
                   bool: {
                     must_not: [
@@ -5404,7 +5377,6 @@ export async function searchByImageWithSimilarity(
               metadata: metadataHits.length,
               metadataSize: metadataRecallSize,
               afterMerge: hits.length,
-              typeRecallTerms,
               colorRecallTerms,
             });
           }
@@ -9989,6 +9961,8 @@ export async function searchByImageWithSimilarity(
             source === "catalog_color_correction" ||
             source === "catalog_color_visual_override" ||
             source === "catalog_color_mix_dampen" ||
+            source === "bottom_cross_family_cap" ||
+            source === "bottoms_gender_hard_cap" ||
             source === "context_personalization";
           if (canLiftFrom) {
             finalRelevance01 = Math.max(finalRelevance01 ?? 0, floor);
