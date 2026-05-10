@@ -215,3 +215,5 @@ export async function runMoustache() {
   console.log(`\nDone. TotalUrls=${allProductUrls.size}, Saved=${saved}, Failed=${failed}`);
 }
 
+
+runMoustache().catch((e) => { console.error(e); process.exit(1); });

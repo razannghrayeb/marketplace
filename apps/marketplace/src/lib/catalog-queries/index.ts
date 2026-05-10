@@ -164,12 +164,18 @@ async function backendGet(path: string, params?: Record<string, string | number 
       if (v != null && v !== '') url.searchParams.set(k, String(v))
     }
   }
-  const res = await fetch(url.toString(), { cache: 'no-store' })
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(`Backend ${path} failed (${res.status}): ${body || res.statusText}`)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 12_000)
+  try {
+    const res = await fetch(url.toString(), { cache: 'no-store', signal: controller.signal })
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      throw new Error(`Backend ${path} failed (${res.status}): ${body || res.statusText}`)
+    }
+    return res.json().catch(() => ({}))
+  } finally {
+    clearTimeout(timer)
   }
-  return res.json().catch(() => ({}))
 }
 
 function mapBackendProductToAggregate(row: BackendProductRow): ProductAggregateRow {
@@ -411,26 +417,35 @@ async function fetchProductAggregateRows(): Promise<ProductAggregateRow[]> {
   }
 }
 
-async function sbRestCount(table: string, params: Record<string, string> = {}): Promise<number> {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || ''
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+async function sbRestCount(table: string, params: Record<string, string | string[]> = {}): Promise<number> {
+  const supabaseUrl = (process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '').trim()
+  const serviceKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ADMIN_KEY || '').trim()
   if (!supabaseUrl || !serviceKey) return 0
-  const url = new URL(`${supabaseUrl}/rest/v1/${table}`)
-  url.searchParams.set('select', 'id')
-  url.searchParams.set('limit', '1')
-  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v)
-  const res = await fetch(url.toString(), {
-    method: 'GET',
-    headers: {
-      apikey: serviceKey,
-      Authorization: `Bearer ${serviceKey}`,
-      Prefer: 'count=exact',
-    },
-    cache: 'no-store',
-  })
-  const range = res.headers.get('content-range') ?? ''
-  const match = range.match(/\/(\d+)$/)
-  return match ? parseInt(match[1], 10) : 0
+  try {
+    const url = new URL(`${supabaseUrl}/rest/v1/${table}`)
+    url.searchParams.set('select', 'id')
+    url.searchParams.set('limit', '1')
+    for (const [k, v] of Object.entries(params)) {
+      for (const val of Array.isArray(v) ? v : [v]) {
+        url.searchParams.append(k, val)
+      }
+    }
+    const res = await fetch(url.toString(), {
+      method: 'GET',
+      headers: {
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+        Prefer: 'count=exact',
+      },
+      cache: 'no-store',
+    })
+    if (!res.ok) return 0
+    const range = res.headers.get('content-range') ?? ''
+    const match = range.match(/\/(\d+)$/)
+    return match ? parseInt(match[1], 10) : 0
+  } catch {
+    return 0
+  }
 }
 
 async function fetchOverviewKPIsFallback(): Promise<OverviewKPIs> {
@@ -544,29 +559,22 @@ async function fetchVendorProductCountsFallback(): Promise<VendorProductCount[]>
   if (inflight) return inflight
 
   const promise = (async () => {
-    const [vendorsRes, statsRes] = await Promise.all([
-      sb.from('vendors').select('id, name')
-        .not('name', 'in', `(${EXCLUDED_VENDOR_NAMES.map(n => `"${n}"`).join(',')})`),
-      sb.rpc('get_vendor_stats'),
-    ])
+    const vendorsRes = await sb.from('vendors').select('id, name')
+      .not('name', 'in', `(${EXCLUDED_VENDOR_NAMES.map(n => `"${n}"`).join(',')})`)
     if (vendorsRes.error || !vendorsRes.data) return []
 
-    type StatRow = { vendor_id: number; total: number; available: number }
-    const statsMap = new Map<number, StatRow>()
-    for (const row of ((statsRes.data ?? []) as StatRow[])) {
-      statsMap.set(Number(row.vendor_id), row)
+    const vendors = vendorsRes.data as Array<{ id: number; name: string }>
+    const rows: Array<{ vendor_name: string; total: number; available: number; unavailable: number }> = []
+    for (const v of vendors) {
+      const vidFilter = `eq.${v.id}`
+      const [total, available] = await Promise.all([
+        sbRestCount('products', { vendor_id: vidFilter }),
+        sbRestCount('products', { vendor_id: vidFilter, availability: 'eq.true' }),
+      ])
+      rows.push({ vendor_name: v.name, total, available, unavailable: total - available })
     }
 
-    const result = (vendorsRes.data as Array<{ id: number; name: string }>)
-      .map((v) => {
-        const s = statsMap.get(v.id)
-        const total = Number(s?.total ?? 0)
-        const available = Number(s?.available ?? 0)
-        return { vendor_name: v.name, total, available, unavailable: total - available }
-      })
-      .filter((v) => v.total > 0)
-      .sort((a, b) => b.total - a.total)
-
+    const result = rows.filter((v) => v.total > 0).sort((a, b) => b.total - a.total)
     _vendorCountsCache.set(result)
     return result
   })()
@@ -586,51 +594,50 @@ async function fetchVendorStatsFallback(): Promise<VendorStats[]> {
   if (inflight) return inflight
 
   const promise = (async () => {
-    const [vendorsRes, statsRes] = await Promise.all([
-      sb.from('vendors').select('id, name, url, ship_to_lebanon')
-        .not('name', 'in', `(${EXCLUDED_VENDOR_NAMES.map(n => `"${n}"`).join(',')})`),
-      sb.rpc('get_vendor_stats'),
-    ])
+    const vendorsRes = await sb.from('vendors').select('id, name, url, ship_to_lebanon')
+      .not('name', 'in', `(${EXCLUDED_VENDOR_NAMES.map(n => `"${n}"`).join(',')})`)
 
     if (vendorsRes.error || !vendorsRes.data) return []
 
     const vendors = vendorsRes.data as Array<{ id: number; name: string; url: string; ship_to_lebanon: boolean }>
-    type StatRow = { vendor_id: number; total: number; available: number; missing_category: number; missing_image_url: number; missing_image_urls: number; missing_variant_id: number; missing_parent_url: number; missing_color: number; missing_size: number; healthy: number; latest_last_seen: string | null }
-    const statsMap = new Map<number, StatRow>()
-    const statsData = (statsRes.data ?? []) as StatRow[]
-    const hasStats = !statsRes.error && statsData.length > 0
-    for (const row of statsData) {
-      statsMap.set(Number(row.vendor_id), row)
+
+    const rows: VendorStats[] = []
+    for (const vendor of vendors) {
+      const vidFilter = `eq.${vendor.id}`
+      const [total, available, missingCat, missingImg, missingVariant, missingParent, missingColor, missingSize, lastRes] = await Promise.all([
+        sbRestCount('products', { vendor_id: vidFilter }),
+        sbRestCount('products', { vendor_id: vidFilter, availability: 'eq.true' }),
+        sbRestCount('products', { vendor_id: vidFilter, category: 'is.null' }),
+        sbRestCount('products', { vendor_id: vidFilter, image_url: 'is.null' }),
+        sbRestCount('products', { vendor_id: vidFilter, variant_id: 'is.null' }),
+        sbRestCount('products', { vendor_id: vidFilter, parent_product_url: 'is.null' }),
+        sbRestCount('products', { vendor_id: vidFilter, color: 'is.null' }),
+        sbRestCount('products', { vendor_id: vidFilter, size: 'is.null' }),
+        sb.from('products').select('last_seen').eq('vendor_id', vendor.id)
+          .not('last_seen', 'is', null).order('last_seen', { ascending: false }).limit(1),
+      ])
+      const lastRow = (lastRes as { data?: Array<{ last_seen: string }> }).data?.[0]
+      rows.push({
+        id: vendor.id,
+        name: vendor.name,
+        url: vendor.url,
+        ship_to_lebanon: vendor.ship_to_lebanon,
+        total_products: total,
+        available_products: available,
+        unavailable_products: total - available,
+        missing_category: missingCat,
+        missing_image_url: missingImg,
+        missing_image_urls: missingImg,
+        missing_variant_id: missingVariant,
+        missing_parent_url: missingParent,
+        missing_color: missingColor,
+        missing_size: missingSize,
+        latest_last_seen: lastRow?.last_seen ?? null,
+        health_score: 0,
+      })
     }
 
-    const result = vendors
-      .map((vendor) => {
-        const s = statsMap.get(vendor.id)
-        const total = Number(s?.total ?? 0)
-        const available = Number(s?.available ?? 0)
-        const healthy = Number(s?.healthy ?? 0)
-        return {
-          id: vendor.id,
-          name: vendor.name,
-          url: vendor.url,
-          ship_to_lebanon: vendor.ship_to_lebanon,
-          total_products: total,
-          available_products: available,
-          unavailable_products: total - available,
-          missing_category: Number(s?.missing_category ?? 0),
-          missing_image_url: Number(s?.missing_image_url ?? 0),
-          missing_image_urls: Number(s?.missing_image_urls ?? 0),
-          missing_variant_id: Number(s?.missing_variant_id ?? 0),
-          missing_parent_url: Number(s?.missing_parent_url ?? 0),
-          missing_color: Number(s?.missing_color ?? 0),
-          missing_size: Number(s?.missing_size ?? 0),
-          latest_last_seen: s?.latest_last_seen ?? null,
-          health_score: total > 0 ? Math.round((healthy / total) * 100) : 0,
-        }
-      })
-      .filter((v) => !hasStats || v.total_products > 0)
-      .sort((a, b) => b.total_products - a.total_products)
-
+    const result = rows.filter((v) => v.total_products > 0).sort((a, b) => b.total_products - a.total_products)
     _vendorStatsCache.set(result)
     return result
   })()
@@ -655,23 +662,20 @@ async function fetchFreshnessStatsFallback(): Promise<FreshnessStats> {
     const recentCut = new Date(now - 7 * DAY_MS).toISOString()
     const agingCut = new Date(now - 14 * DAY_MS).toISOString()
     const excludedIds = await getExcludedVendorIds()
-    const exStr = excludedIds.length > 0 ? `(${excludedIds.join(',')})` : null
+    const exFilter: Record<string, string> = excludedIds.length > 0 ? { vendor_id: `not.in.(${excludedIds.join(',')})` } : {}
 
-    const pq = (q: ReturnType<typeof sb.from>) =>
-      exStr ? q.not('vendor_id', 'in', exStr) : q
-
-    const [freshRes, recentRes, agingRes, staleRes] = await Promise.all([
-      pq(sb.from('products').select('*', { count: 'exact', head: true })).gte('last_seen', freshCut),
-      pq(sb.from('products').select('*', { count: 'exact', head: true })).gte('last_seen', recentCut).lt('last_seen', freshCut),
-      pq(sb.from('products').select('*', { count: 'exact', head: true })).gte('last_seen', agingCut).lt('last_seen', recentCut),
-      pq(sb.from('products').select('*', { count: 'exact', head: true })).lt('last_seen', agingCut),
+    const [fresh, recent, aging, stale] = await Promise.all([
+      sbRestCount('products', { last_seen: `gte.${freshCut}`, ...exFilter }),
+      sbRestCount('products', { last_seen: [`gte.${recentCut}`, `lt.${freshCut}`], ...exFilter }),
+      sbRestCount('products', { last_seen: [`gte.${agingCut}`, `lt.${recentCut}`], ...exFilter }),
+      sbRestCount('products', { last_seen: `lt.${agingCut}`, ...exFilter }),
     ])
 
     const result: FreshnessStats = {
-      fresh_count: freshRes.count ?? 0,
-      recent_count: recentRes.count ?? 0,
-      aging_count: agingRes.count ?? 0,
-      stale_count: staleRes.count ?? 0,
+      fresh_count: fresh,
+      recent_count: recent,
+      aging_count: aging,
+      stale_count: stale,
     }
     _freshnessCache.set(result)
     return result
@@ -1127,37 +1131,33 @@ export async function fetchVendorFreshness(): Promise<VendorFreshness[]> {
 
     const vendors = vendorsRes.data as Array<{ id: number | string; name: string }>
 
-    const results = await Promise.all(
-      vendors.map(async (vendor) => {
-        const vid = vendor.id
-        const [freshRes, recentRes, agingRes, staleRes, lastRes] = await Promise.all([
-          sb.from('products').select('*', { count: 'exact', head: true }).eq('vendor_id', vid).gte('last_seen', freshCut),
-          sb.from('products').select('*', { count: 'exact', head: true }).eq('vendor_id', vid).gte('last_seen', recentCut).lt('last_seen', freshCut),
-          sb.from('products').select('*', { count: 'exact', head: true }).eq('vendor_id', vid).gte('last_seen', agingCut).lt('last_seen', recentCut),
-          sb.from('products').select('*', { count: 'exact', head: true }).eq('vendor_id', vid).lt('last_seen', agingCut),
-          sb.from('products').select('last_seen').eq('vendor_id', vid).not('last_seen', 'is', null).order('last_seen', { ascending: false }).limit(1),
-        ])
+    const results: VendorFreshness[] = []
+    for (const vendor of vendors) {
+      const vid = vendor.id
+      const vidFilter = `eq.${vid}`
+      const [fresh, recent, aging, stale, lastRes] = await Promise.all([
+        sbRestCount('products', { vendor_id: vidFilter, last_seen: `gte.${freshCut}` }),
+        sbRestCount('products', { vendor_id: vidFilter, last_seen: [`gte.${recentCut}`, `lt.${freshCut}`] }),
+        sbRestCount('products', { vendor_id: vidFilter, last_seen: [`gte.${agingCut}`, `lt.${recentCut}`] }),
+        sbRestCount('products', { vendor_id: vidFilter, last_seen: `lt.${agingCut}` }),
+        sb.from('products').select('last_seen').eq('vendor_id', vid).not('last_seen', 'is', null).order('last_seen', { ascending: false }).limit(1),
+      ])
 
-        const fresh = freshRes.count ?? 0
-        const recent = recentRes.count ?? 0
-        const aging = agingRes.count ?? 0
-        const stale = staleRes.count ?? 0
-        const product_count = fresh + recent + aging + stale
-        const denom = Math.max(1, product_count)
-        const lastRow = lastRes.data?.[0] as { last_seen: string } | undefined
+      const product_count = fresh + recent + aging + stale
+      const denom = Math.max(1, product_count)
+      const lastRow = lastRes.data?.[0] as { last_seen: string } | undefined
 
-        return {
-          vendor_id: String(vid),
-          vendor_name: vendor.name ?? String(vid),
-          product_count,
-          fresh_pct: Math.round((fresh / denom) * 100),
-          recent_pct: Math.round((recent / denom) * 100),
-          aging_pct: Math.round((aging / denom) * 100),
-          stale_pct: Math.round((stale / denom) * 100),
-          last_scrape: lastRow?.last_seen ?? null,
-        }
+      results.push({
+        vendor_id: String(vid),
+        vendor_name: vendor.name ?? String(vid),
+        product_count,
+        fresh_pct: Math.round((fresh / denom) * 100),
+        recent_pct: Math.round((recent / denom) * 100),
+        aging_pct: Math.round((aging / denom) * 100),
+        stale_pct: Math.round((stale / denom) * 100),
+        last_scrape: lastRow?.last_seen ?? null,
       })
-    )
+    }
 
     const result = results
       .filter((v) => v.product_count > 0)

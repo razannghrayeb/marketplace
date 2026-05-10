@@ -6,38 +6,39 @@ export async function GET() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || ''
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 
-  let restCount: number | null = null
-  let restError: string | null = null
-  let restStatus: number | null = null
-  let contentRange: string | null = null
+  let countResult: number | null = null
+  let countError: string | null = null
+  let countStatus: number | null = null
 
   try {
     const url = new URL(`${supabaseUrl}/rest/v1/products`)
-    url.searchParams.set('select', 'id')
-    url.searchParams.set('limit', '1')
+    url.searchParams.set('select', 'count()')
     const res = await fetch(url.toString(), {
       method: 'GET',
       headers: {
         apikey: serviceKey,
         Authorization: `Bearer ${serviceKey}`,
-        Prefer: 'count=exact',
       },
       cache: 'no-store',
     })
-    restStatus = res.status
-    contentRange = res.headers.get('content-range')
-    const match = contentRange?.match(/\/(\d+)$/)
-    restCount = match ? parseInt(match[1], 10) : null
+    countStatus = res.status
+    if (res.ok) {
+      const json = await res.json()
+      const first = Array.isArray(json) ? json[0] : json
+      const c = first?.count
+      countResult = typeof c === 'number' ? c : (typeof c === 'string' ? parseInt(c, 10) : null)
+    } else {
+      countError = await res.text().catch(() => res.statusText)
+    }
   } catch (e) {
-    restError = String(e)
+    countError = String(e)
   }
 
   return NextResponse.json({
     supabase_url: supabaseUrl || 'MISSING',
     has_service_key: serviceKey.length > 10,
-    rest_status: restStatus,
-    content_range: contentRange,
-    rest_count: restCount,
-    rest_error: restError,
+    count_status: countStatus,
+    count_result: countResult,
+    count_error: countError,
   })
 }
