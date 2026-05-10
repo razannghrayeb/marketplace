@@ -54,6 +54,25 @@ function normalizeArray(values: Array<unknown> | undefined): string[] {
   return out;
 }
 
+function normalizeCatalogUrlText(value: unknown): string {
+  const raw = String(value ?? "").toLowerCase().trim();
+  if (!raw) return "";
+  const withoutQuery = raw.split(/[?#]/)[0] ?? raw;
+  let decoded = withoutQuery;
+  try {
+    decoded = decodeURIComponent(withoutQuery);
+  } catch {
+    decoded = withoutQuery;
+  }
+  return decoded
+    .replace(/^https?:\/\/[^/]+/i, " ")
+    .replace(/\.[a-z0-9]{2,5}$/i, " ")
+    .replace(/[_+./-]+/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function computeProductQualityScore(input: {
   imageCdn?: string | null;
   priceCents?: number | null;
@@ -361,10 +380,13 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
   const categoryCanonical = inferCategoryCanonical(input.category ?? null, input.title || "");
 
   const titleTypesRaw = extractProductTypesFromTitle(input.title || "");
+  const titleSeedsLexicalRaw = input.title
+    ? extractLexicalProductTypeSeeds(input.title)
+    : [];
   const titleTypes =
     categoryCanonical && categoryCanonical !== "all"
-      ? filterProductTypeSeedsByMappedCategory(titleTypesRaw, categoryCanonical)
-      : titleTypesRaw;
+      ? filterProductTypeSeedsByMappedCategory([...new Set([...titleTypesRaw, ...titleSeedsLexicalRaw])], categoryCanonical)
+      : [...new Set([...titleTypesRaw, ...titleSeedsLexicalRaw])];
   const descriptionSeedsLexicalRaw = input.description
     ? extractLexicalProductTypeSeeds(input.description)
     : [];
@@ -379,6 +401,12 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
     categoryCanonical && categoryCanonical !== "all"
       ? filterProductTypeSeedsByMappedCategory(categorySeedsLexicalRaw, categoryCanonical)
       : categorySeedsLexicalRaw;
+  const urlSeedsLexicalRaw = [
+    ...extractLexicalProductTypeSeeds(normalizeCatalogUrlText(input.productUrl)),
+    ...extractLexicalProductTypeSeeds(normalizeCatalogUrlText(input.parentProductUrl)),
+  ];
+  // URL paths often carry vendor breadcrumbs/handles and can correct bad category labels.
+  const urlSeedsLexical = urlSeedsLexicalRaw;
 
   // Keep precision: description is noisier than title, so cap how many
   // description-derived type seeds we merge in.
@@ -397,6 +425,9 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
     }
   }
   for (const t of descriptionSeedsLimited) {
+    if (!mergedTypeSeeds.includes(t)) mergedTypeSeeds.push(t);
+  }
+  for (const t of urlSeedsLexical.slice(0, 4)) {
     if (!mergedTypeSeeds.includes(t)) mergedTypeSeeds.push(t);
   }
   for (const t of enrichTokens) {

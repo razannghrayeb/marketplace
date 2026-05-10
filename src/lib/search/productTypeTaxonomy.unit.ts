@@ -215,6 +215,22 @@ describe("extractLexicalProductTypeSeeds", () => {
     expect(scoreRerankProductTypeBreakdown(["jacket"], ["blazer", "outerwear"]).combinedTypeCompliance).toBeLessThan(0.35);
   });
 
+  test("catalog title/url garment cues cover long-sleeve and outerwear wording", () => {
+    expect(extractLexicalProductTypeSeeds("ribbed crewneck long sleeve top")).toContain("long sleeve");
+    expect(extractLexicalProductTypeSeeds("mock neck sweater")).toContain("mock neck");
+    expect(extractLexicalProductTypeSeeds("waterproof raincoat")).toContain("raincoat");
+    expect(extractLexicalProductTypeSeeds("/women/outerwear/quilted-raincoat")).toContain("raincoat");
+  });
+
+  test("high-volume vendor category labels produce searchable type seeds", () => {
+    expect(extractLexicalProductTypeSeeds("TRACKSUITS & TRACK TROUSERS")).toContain("tracksuits & track trousers");
+    expect(extractLexicalProductTypeSeeds("7/8 Tight")).toContain("7/8 tight");
+    expect(extractLexicalProductTypeSeeds("After Ski Boot")).toContain("after ski boot");
+    expect(extractLexicalProductTypeSeeds("POUCHES")).toContain("pouches");
+    expect(extractLexicalProductTypeSeeds("CARD HOLDERS")).toContain("card holders");
+    expect(extractLexicalProductTypeSeeds("TOP HANDLE BAGS")).toContain("top handle bags");
+  });
+
   test("vest dress: outerwear vest token dropped when aisle is dresses", () => {
     const seeds = extractLexicalProductTypeSeeds("vest dress");
     expect(seeds).toContain("vest");
@@ -283,5 +299,13 @@ describe("inferMacroFamiliesFromListingCategoryFields", () => {
   test("maps tailored listing categories to tailored family", () => {
     const fams = inferMacroFamiliesFromListingCategoryFields("tailored", "waistcoat");
     expect(fams.has("tailored")).toBe(true);
+  });
+
+  test("maps descriptive title cues to top and outerwear families", () => {
+    expect(inferMacroFamiliesFromListingCategoryFields(undefined, "crewneck long sleeve")).toEqual(new Set(["tops"]));
+    expect(inferMacroFamiliesFromListingCategoryFields(undefined, "waterproof raincoat")).toEqual(new Set(["outerwear"]));
+    expect(inferMacroFamiliesFromListingCategoryFields(undefined, "lapel blazer")).toEqual(new Set(["outerwear"]));
+    expect(inferMacroFamiliesFromListingCategoryFields(undefined, "After Ski Boot")).toEqual(new Set(["footwear"]));
+    expect(inferMacroFamiliesFromListingCategoryFields(undefined, "POUCHES")).toEqual(new Set(["bags"]));
   });
 });

@@ -278,6 +278,61 @@ describe("computeHitRelevance - type intent reliability", () => {
     expect(urlRel.exactTypeScore).toBeLessThan(1);
   });
 
+  test("title evidence rescues long-sleeve tops when category metadata is sparse", () => {
+    const rel = computeHitRelevance({
+      _source: {
+        title: "Ribbed Crewneck Long Sleeve Top",
+        category: null,
+        category_canonical: null,
+        product_types: [],
+      },
+    } as any, 0.86, {
+      desiredProductTypes: ["top", "long sleeve"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      desiredSleeve: "long",
+      rerankColorMode: "any",
+      mergedCategory: "tops",
+      astCategories: ["tops"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.productTypeCompliance).toBeGreaterThan(0.55);
+    expect(rel.sleeveCompliance).toBeGreaterThan(0.7);
+    expect(rel.finalRelevance01).toBeGreaterThan(0.25);
+    expect(rel.hardBlocked).toBe(false);
+  });
+
+  test("url/description evidence rescues outerwear when category is misleading", () => {
+    const rel = computeHitRelevance({
+      _source: {
+        title: "Waterproof Layer",
+        description: "Lightweight quilted raincoat for layering.",
+        category: "Shoes",
+        category_canonical: "footwear",
+        product_types: [],
+        product_url: "https://example.test/women/outerwear/quilted-raincoat",
+      },
+    } as any, 0.88, {
+      desiredProductTypes: ["jacket", "raincoat"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "outerwear",
+      astCategories: ["outerwear"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.catalogTypeEvidenceSource === "description" || rel.catalogTypeEvidenceSource === "url").toBe(true);
+    expect(rel.crossFamilyPenalty).toBeLessThan(0.8);
+    expect(rel.finalRelevance01).toBeGreaterThan(0.2);
+    expect(rel.hardBlocked).toBe(false);
+  });
+
   test("weak inferred type hints do not hard-zero high visual matches", () => {
     const rel = computeHitRelevance(footwearHit, 0.92, {
       desiredProductTypes: ["dress"],

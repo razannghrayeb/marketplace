@@ -10,8 +10,8 @@
 /** Narrow micro-clusters — avoid mega-clusters that equate unrelated garment types. */
 export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   // Bottoms (4)
-  ["jogger", "joggers", "sweatpants", "track pants", "jogging pants", "jogging bottoms", "trackpants"],
-  ["legging", "leggings", "tights"],
+  ["jogger", "joggers", "sweatpants", "track pants", "track trousers", "tracksuits", "tracksuits & track trousers", "jogging pants", "jogging bottoms", "trackpants"],
+  ["legging", "leggings", "tight", "tights", "7/8 tight"],
   ["jean", "jeans", "denim", "denims"],
   ["pant", "pants", "trouser", "trousers", "chino", "chinos", "cargo pants", "cargo", "slacks"],
   // Shorts / skirt (2)
@@ -19,7 +19,7 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   ["skirt", "skirts", "mini skirt", "midi skirt"],
   // Footwear (8) — was one mega-cluster; now siblings are distinguishable in rerank
   ["sneaker", "sneakers", "trainer", "trainers", "running shoe", "running shoes", "athletic shoe", "athletic shoes", "sport shoe", "sport shoes", "tennis shoe", "tennis shoes"],
-  ["boot", "boots", "ankle boot", "ankle boots", "chelsea boot", "chelsea boots", "combat boot", "combat boots"],
+  ["boot", "boots", "ankle boot", "ankle boots", "chelsea boot", "chelsea boots", "combat boot", "combat boots", "after ski", "after ski boot"],
   ["sandal", "sandals", "flip flop", "flip flops", "flip-flop", "flip-flops", "gladiator sandal", "gladiator sandals"],
   ["heel", "heels", "pump", "pumps", "stiletto", "stilettos", "wedge", "wedges", "slingback", "slingbacks", "kitten heel", "kitten heels"],
   ["flat", "flats", "ballerina", "ballerinas", "ballet flat", "ballet flats", "loafer", "loafers", "moccasin", "moccasins", "oxford", "oxfords", "derby", "derbies", "brogue", "brogues", "dress shoe", "dress shoes"],
@@ -28,7 +28,24 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
   ["shoe", "shoes"],
   // Tops (6)
   ["hoodie", "hoodies", "hoody", "sweatshirt", "sweatshirts", "pullover", "pullovers"],
-  ["sweater", "sweaters", "cardigan", "cardigans", "jumper", "jumpers", "knitwear", "knit tops", "long sleeve"],
+  [
+    "sweater",
+    "sweaters",
+    "cardigan",
+    "cardigans",
+    "jumper",
+    "jumpers",
+    "knitwear",
+    "knit tops",
+    "long sleeve",
+    "crewneck",
+    "crew neck",
+    "v-neck",
+    "v neck",
+    "mock neck",
+    "turtleneck",
+    "turteneck",
+  ],
   ["shirt", "shirts", "blouse", "blouses", "button down", "button-down", "woven tops", "woven shirts", "shirting", "chemise"],
   ["tshirt", "tee", "tees", "t-shirt", "t-shirts", "t-shirt-os", "shirt-sp", "tank", "camisole", "camis"],
   ["top", "tops", "cami", "track top", "baselayer", "body"],
@@ -63,6 +80,8 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
     "quilted jacket",
     "rain jacket",
     "rain jackets",
+    "raincoat",
+    "raincoats",
     "shell jacket",
     "shell jackets",
     "softshell",
@@ -144,6 +163,30 @@ export const PRODUCT_TYPE_CLUSTERS: readonly (readonly string[])[] = [
     "wallets",
     "bucket bag",
     "shoulder bag",
+    "shoulder bags",
+    "shopping bag",
+    "shopping bags",
+    "waist bag",
+    "waist bags",
+    "duffle bag",
+    "duffle bags",
+    "lunch bag",
+    "lunch bags",
+    "travel bag",
+    "travel bags",
+    "toiletry bag",
+    "toiletry bags",
+    "pouch",
+    "pouches",
+    "card holder",
+    "card holders",
+    "crossbody bag",
+    "crossbody bags",
+    "crossover bag",
+    "crossover bags",
+    "top handle bag",
+    "top handle bags",
+    "leather goods",
   ],
   ["hat", "hats", "cap", "caps", "beanie", "beanies", "beret", "berets"],
   ["scarf", "scarves", "shawl", "shawls", "wrap", "wraps", "stole", "stoles"],
@@ -225,9 +268,15 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   trousers: "pants",
   legging: "pants",
   leggings: "pants",
+  tight: "pants",
+  tights: "pants",
+  "7/8 tight": "pants",
   jogger: "pants",
   joggers: "pants",
   sweatpants: "pants",
+  tracksuits: "pants",
+  "track trousers": "pants",
+  "tracksuits & track trousers": "pants",
   pant: "pants",
   pants: "pants",
   cargo: "pants",
@@ -252,6 +301,8 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   "chelsea boots": "shoes",
   "combat boot": "shoes",
   "combat boots": "shoes",
+  "after ski": "shoes",
+  "after ski boot": "shoes",
   sandal: "shoes",
   sandals: "shoes",
   loafer: "shoes",
@@ -355,6 +406,8 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   "quilted jackets": "outerwear",
   "rain jacket": "outerwear",
   "rain jackets": "outerwear",
+  raincoat: "outerwear",
+  raincoats: "outerwear",
   "shell jacket": "outerwear",
   "shell jackets": "outerwear",
   softshell: "outerwear",
@@ -381,20 +434,45 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   gilets: "tailored",
   waistcoat: "tailored",
   waistcoats: "tailored",
+  tailored: "tailored",
   poncho: "outerwear",
   anorak: "outerwear",
 
   tote: "bag",
   totes: "bag",
+  pouch: "bag",
+  pouches: "bag",
   clutch: "bag",
   clutches: "bag",
   purse: "bag",
   purses: "bag",
   backpack: "bag",
   backpacks: "bag",
+  "shopping bag": "bag",
+  "shopping bags": "bag",
+  "shoulder bag": "bag",
+  "shoulder bags": "bag",
+  "waist bag": "bag",
+  "waist bags": "bag",
+  "duffle bag": "bag",
+  "duffle bags": "bag",
+  "lunch bag": "bag",
+  "lunch bags": "bag",
+  "travel bag": "bag",
+  "travel bags": "bag",
+  "toiletry bag": "bag",
+  "toiletry bags": "bag",
+  "card holder": "bag",
+  "card holders": "bag",
   satchel: "bag",
   satchels: "bag",
   crossbody: "bag",
+  "crossbody bag": "bag",
+  "crossbody bags": "bag",
+  "crossover bag": "bag",
+  "crossover bags": "bag",
+  "top handle bag": "bag",
+  "top handle bags": "bag",
   handbag: "bag",
   handbags: "bag",
   wallet: "bag",
@@ -727,11 +805,14 @@ export function bottomMicroGroup(token: string): keyof typeof BOTTOM_MICRO | nul
     "joggers",
     "sweatpants",
     "track pants",
+    "track trousers",
+    "tracksuits",
+    "tracksuits & track trousers",
     "jogging pants",
     "jogging bottoms",
     "trackpants",
   ]);
-  const leg = new Set(["legging", "leggings", "tights"]);
+  const leg = new Set(["legging", "leggings", "tight", "tights", "7/8 tight"]);
   const jean = new Set(["jean", "jeans", "denim", "denims"]);
   const tail = new Set(["pant", "pants", "trouser", "trousers", "chino", "chinos", "slacks", "dress pants", "dress pant"]);
   const cargo = new Set(["cargo", "cargo pants", "cargos"]);
@@ -782,7 +863,7 @@ export function footwearMicroGroup(token: string): keyof typeof FOOTWEAR_MICRO |
     "tennis shoes",
   ]);
   const genericShoe = new Set(["shoe", "shoes"]);
-  const boot = new Set(["boot", "boots", "ankle boot", "ankle boots", "chelsea boot", "chelsea boots", "combat boot", "combat boots"]);
+  const boot = new Set(["boot", "boots", "ankle boot", "ankle boots", "chelsea boot", "chelsea boots", "combat boot", "combat boots", "after ski", "after ski boot"]);
   const sandal = new Set(["sandal", "sandals", "flip flop", "flip flops", "flip-flop", "flip-flops", "gladiator sandal", "gladiator sandals"]);
   const heel = new Set(["heel", "heels", "pump", "pumps", "stiletto", "stilettos", "wedge", "wedges", "slingback", "slingbacks", "kitten heel", "kitten heels"]);
   const flatDress = new Set([
@@ -840,7 +921,25 @@ export function topsMicroGroup(token: string): keyof typeof TOPS_MICRO | null {
   const t = token.toLowerCase().trim();
   if (!t) return null;
   if (new Set(["hoodie", "hoodies", "sweatshirt", "sweatshirts", "pullover", "pullovers"]).has(t)) return "hoodie";
-  if (new Set(["sweater", "sweaters", "cardigan", "cardigans", "jumper", "jumpers", "knitwear"]).has(t)) return "knit";
+  if (
+    new Set([
+      "sweater",
+      "sweaters",
+      "cardigan",
+      "cardigans",
+      "jumper",
+      "jumpers",
+      "knitwear",
+      "long sleeve",
+      "crewneck",
+      "crew neck",
+      "v-neck",
+      "v neck",
+      "mock neck",
+      "turtleneck",
+      "turteneck",
+    ]).has(t)
+  ) return "knit";
   if (new Set(["shirt", "shirts", "blouse", "blouses", "button down", "button-down"]).has(t)) return "shirt";
   if (new Set(["tshirt", "tee", "tees", "t-shirt", "tank", "camisole", "camis"]).has(t)) return "tee";
   if (new Set(["top", "tops", "cami"]).has(t)) return "generic_top";
@@ -878,6 +977,8 @@ const OUTER_MICRO_JACKET = new Set([
   "quilted jacket",
   "rain jacket",
   "rain jackets",
+  "raincoat",
+  "raincoats",
   "shell jacket",
   "shell jackets",
   "softshell",
@@ -1482,7 +1583,7 @@ export function inferMacroFamiliesFromListingCategoryFields(
 
   const out = new Set<string>();
   if (
-    /\b(footwear|sneaker|sneakers|boot|boots|sandal|sandals|loafer|loafers|heel|heels|slipper|slippers|mule|mules|clog|clogs|trainer|trainers|flipflop|flip-flop|flip flops|crocs?|shoe|shoes)\b/.test(
+    /\b(footwear|sneaker|sneakers|boot|boots|after\s+ski(?:\s+boot)?|sandal|sandals|loafer|loafers|heel|heels|slipper|slippers|mule|mules|clog|clogs|trainer|trainers|ballerinas?|espadrilles?|flipflop|flip-flop|flip flops|crocs?|shoe|shoes)\b/.test(
       combined,
     )
   ) {
@@ -1493,13 +1594,13 @@ export function inferMacroFamiliesFromListingCategoryFields(
   );
   if (
     !hasTopAccessoryPhrase &&
-    /\b(shirt|shirts|blouse|blouses|tee|tees|t-?shirt|tshirt|polos?|sweater|sweaters|hoodie|hoodies|cardigan|cardigans|tank|tanks|camisole|bodysuit|top|tops)\b/.test(
+    /\b(shirt|shirts|blouse|blouses|tee|tees|t-?shirt|tshirt|polos?|sweater|sweaters|hoodie|hoodies|cardigan|cardigans|tank|tanks|camisole|bodysuit|top|tops|long\s+sleeve|crew\s*neck|crewneck|v[-\s]?neck|mock\s+neck|turtleneck|turteneck)\b/.test(
       combined,
     )
   ) {
     out.add("tops");
   }
-  if (/\b(pants?|jeans?|trousers?|leggings?|joggers?|chinos?|cargos?)\b/.test(combined)) {
+  if (/\b(pants?|jeans?|trousers?|leggings?|tights?|joggers?|chinos?|cargos?|track\s+trousers|tracksuits?)\b/.test(combined)) {
     out.add("bottoms");
   }
   if (/\b(shorts|bermudas?|skirt|skirts)\b/.test(combined)) {
@@ -1508,13 +1609,13 @@ export function inferMacroFamiliesFromListingCategoryFields(
   if (/\b(dresses?|gown|gowns)\b/.test(combined)) {
     out.add("dress");
   }
-  if (/\b(coat|coats|jacket|jackets|blazer|blazers|parka|parkas|puffer|puffers|blouson|blousons|fleece|fleeces|rain\s+jackets?|shell\s+jackets?|softshell|down\s+jackets?|quilted\s+jackets?|vests?)\b/.test(combined)) {
+  if (/\b(coat|coats|jacket|jackets|blazer|blazers|parka|parkas|puffer|puffers|blouson|blousons|fleece|fleeces|rain\s+jackets?|raincoats?|shell\s+jackets?|softshell|down\s+jackets?|quilted\s+jackets?|vests?)\b/.test(combined)) {
     out.add("outerwear");
   }
-  if (/\b(suit|suits|tuxedo|tuxedos|waistcoat|waistcoats|vest|vests|gilet|gilets)\b/.test(combined)) {
+  if (/\b(suit|suits|tuxedo|tuxedos|waistcoat|waistcoats|vest|vests|gilet|gilets|tailored)\b/.test(combined)) {
     out.add("tailored");
   }
-  if (/\b(bag|bags|handbag|handbags|tote|totes|backpack|backpacks)\b/.test(combined)) {
+  if (/\b(bag|bags|handbag|handbags|tote|totes|backpack|backpacks|wallets?|purses?|pouches?|clutches|crossbody|crossover|shoulder\s+bags?|shopping\s+bags?|waist\s+bags?|duffle\s+bags?|lunch\s+bags?|travel\s+bags?|toiletry\s+bags?|card\s+holders?|top\s+handle\s+bags?|leather\s+goods)\b/.test(combined)) {
     out.add("bags");
   }
   return out;
@@ -1858,7 +1959,7 @@ function inferGarmentHintsFromCategoryString(raw: string | undefined): GarmentHi
       if (dr) out.push({ kind: "dress", id: DRESS_MICRO[dr] });
     }
   }
-  if (/\b(bag|bags|handbag|handbags|tote|totes|clutch|clutches|purse|purses|backpack|backpacks|satchel|satchels|crossbody|wallet|wallets)\b/.test(s)) {
+  if (/\b(bag|bags|handbag|handbags|tote|totes|clutch|clutches|purse|purses|pouch|pouches|backpack|backpacks|satchel|satchels|crossbody|crossover|wallet|wallets|shoulder\s+bags?|shopping\s+bags?|waist\s+bags?|duffle\s+bags?|lunch\s+bags?|travel\s+bags?|toiletry\s+bags?|card\s+holders?|top\s+handle\s+bags?|leather\s+goods)\b/.test(s)) {
     out.push({ kind: "accessory", id: "bag" });
   }
   if (/\b(hat|hats|cap|caps|beanie|beanies|beret|berets)\b/.test(s)) {
@@ -1895,13 +1996,39 @@ function accessoryMicroGroup(
       "clutches",
       "purse",
       "purses",
+      "pouch",
+      "pouches",
       "backpack",
       "backpacks",
       "satchel",
       "satchels",
       "crossbody",
+      "crossbody bag",
+      "crossbody bags",
+      "crossover",
+      "crossover bag",
+      "crossover bags",
       "wallet",
       "wallets",
+      "shopping bag",
+      "shopping bags",
+      "shoulder bag",
+      "shoulder bags",
+      "waist bag",
+      "waist bags",
+      "duffle bag",
+      "duffle bags",
+      "lunch bag",
+      "lunch bags",
+      "travel bag",
+      "travel bags",
+      "toiletry bag",
+      "toiletry bags",
+      "card holder",
+      "card holders",
+      "top handle bag",
+      "top handle bags",
+      "leather goods",
     ]).has(t)
   )
     return "bag";
