@@ -5442,6 +5442,36 @@ export async function searchByImageWithSimilarity(
       return { error };
     },
   );
+  const prefetchedImageIds = [
+    ...new Set(
+      idsToHydrate
+        .map((id) => parseInt(id, 10))
+        .filter(Number.isFinite),
+    ),
+  ];
+  const imagePrefetchStartedAt = Date.now();
+  const imageHydrationPromise = prefetchedImageIds.length > 0
+    ? getImagesForProducts(prefetchedImageIds).then(
+      (images) => {
+        console.log(
+          "[hydrate-step] images_prefetch_ms",
+          Date.now() - imagePrefetchStartedAt,
+          "count",
+          prefetchedImageIds.length,
+        );
+        return { images };
+      },
+      (error) => {
+        console.log(
+          "[hydrate-step] images_prefetch_ms",
+          Date.now() - imagePrefetchStartedAt,
+          "count",
+          prefetchedImageIds.length,
+        );
+        return { error };
+      },
+    )
+    : Promise.resolve({ images: new Map<number, ProductImage[]>() });
 
   const signals = await signalsPromise;
   rerankTimings['signals_wait_ms'] = Date.now() - rerankPhaseStartedAt;
@@ -5490,15 +5520,31 @@ export async function searchByImageWithSimilarity(
       if (uniqueIds.length > 0) {
         try {
           const mgetStartedAt = Date.now();
-          const mgetResp = await (osClient as any).mget(
-            { index: config.opensearch.index, body: { ids: uniqueIds }, _source: attrFieldsToFetch },
-            { requestTimeout: 8_000, maxRetries: 0 },
+          const attrMgetBatchSizeRaw = Number(process.env.SEARCH_IMAGE_ATTR_MGET_BATCH_SIZE ?? "50");
+          const attrMgetBatchSize =
+            Number.isFinite(attrMgetBatchSizeRaw) && attrMgetBatchSizeRaw > 0
+              ? Math.max(1, Math.min(200, Math.floor(attrMgetBatchSizeRaw)))
+              : 50;
+          const attrMgetBatches: string[][] = [];
+          for (let i = 0; i < uniqueIds.length; i += attrMgetBatchSize) {
+            attrMgetBatches.push(uniqueIds.slice(i, i + attrMgetBatchSize));
+          }
+          const mgetResponses = await Promise.all(
+            attrMgetBatches.map((ids) =>
+              (osClient as any).mget(
+                { index: config.opensearch.index, body: { ids }, _source: attrFieldsToFetch },
+                { requestTimeout: 8_000, maxRetries: 0 },
+              ),
+            ),
           );
           rerankTimings['attr_mget_ms'] = Date.now() - mgetStartedAt;
+          rerankTimings['attr_mget_batches'] = attrMgetBatches.length;
           
           const byId = new Map<string, any>();
-          for (const doc of (mgetResp.body?.docs ?? [])) {
-            if (doc?.found && doc?._source) byId.set(String(doc._id ?? ""), doc._source);
+          for (const mgetResp of mgetResponses) {
+            for (const doc of (mgetResp.body?.docs ?? [])) {
+              if (doc?.found && doc?._source) byId.set(String(doc._id ?? ""), doc._source);
+            }
           }
           for (const hit of hits) {
             const pid = String(hit?._source?.product_id ?? "");
@@ -9443,13 +9489,44 @@ export async function searchByImageWithSimilarity(
       ),
     ];
     const imagesHydrationStartedAt = Date.now();
-    const imagesByProduct =
-      numericIds.length > 0
-        ? await getImagesForProducts(numericIds).then((hydratedImages) => {
-          console.log("[hydrate-step] images_ms", Date.now() - imagesHydrationStartedAt);
+    const prefetchedImages = await imageHydrationPromise;
+    const prefetchedImagesMap =
+      (prefetchedImages as any).error
+        ? new Map<number, ProductImage[]>()
+        : ((prefetchedImages as any).images as Map<number, ProductImage[]>);
+    const prefetchedImagesHadError = Boolean((prefetchedImages as any).error);
+    const prefetchedImageIdSet = new Set(prefetchedImageIds);
+    const missingImageIds = prefetchedImagesHadError
+      ? numericIds
+      : numericIds.filter((id) => !prefetchedImageIdSet.has(id));
+    const missingImagesByProduct =
+      missingImageIds.length > 0
+        ? await getImagesForProducts(missingImageIds).then((hydratedImages) => {
+          console.log(
+            "[hydrate-step] images_missing_ms",
+            Date.now() - imagesHydrationStartedAt,
+            "count",
+            missingImageIds.length,
+          );
           return hydratedImages;
         })
         : new Map<number, ProductImage[]>();
+    const imagesByProduct = new Map<number, ProductImage[]>(prefetchedImagesMap);
+    for (const [productId, images] of missingImagesByProduct.entries()) {
+      imagesByProduct.set(productId, images);
+    }
+    if (numericIds.length > 0) {
+      console.log(
+        "[hydrate-step] images_ms",
+        Date.now() - imagesHydrationStartedAt,
+        "count",
+        numericIds.length,
+        "prefetched",
+        prefetchedImagesHadError ? 0 : Math.min(prefetchedImageIds.length, numericIds.length),
+        "missing",
+        missingImageIds.length,
+      );
+    }
     if (numericIds.length === 0) {
       console.log("[hydrate-step] images_ms", Date.now() - imagesHydrationStartedAt);
     }
@@ -10856,6 +10933,12 @@ export async function searchByImageWithSimilarity(
     finalize_related_ms: finalizeRelatedMs,
     finalize_exact_phash_ms: finalizeExactPhashMs,
     finalize_near_exact_ms: finalizeNearExactMs,
+    onnx_total_ms: 0,
+    onnx_candidate_prepare_ms: 0,
+    onnx_call_ms: 0,
+    onnx_apply_ms: 0,
+    final_sort_after_onnx_ms: 0,
+    response_total_ms: stageFinalizedAt - evalT0,
   };
 
   // Log detailed reranking breakdown
@@ -10972,7 +11055,9 @@ export async function searchByImageWithSimilarity(
 
   // Ensure final ordering after any rescue/injection steps (pHash, near-exact, related)
   try {
+    const onnxTotalStartedAt = Date.now();
     if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0 && results.length > 1) {
+      const onnxCandidatePrepareStartedAt = Date.now();
       const topRerankWindow = Math.min(results.length, 200);
       const baseCandidates = results.slice(0, topRerankWindow).map((product, index) => ({
         id: String(product.id),
@@ -10984,11 +11069,15 @@ export async function searchByImageWithSimilarity(
           null,
         baseScore: Number(product.finalRelevance01 ?? product.similarity_score ?? 0) - index * 1e-6,
       }));
+      timing.onnx_candidate_prepare_ms = Date.now() - onnxCandidatePrepareStartedAt;
+      const onnxCallStartedAt = Date.now();
       const reranked = await rerankImageCandidates({
         queryImageBuffer: imageBuffer,
         candidates: baseCandidates,
         topK: topRerankWindow,
       });
+      timing.onnx_call_ms = Date.now() - onnxCallStartedAt;
+      const onnxApplyStartedAt = Date.now();
       const rerankScoreById = new Map(reranked.map((item) => [String(item.id), Number(item.score) || 0]));
       results = results.map((product) => {
         const rerankScore = rerankScoreById.get(String(product.id));
@@ -11073,6 +11162,8 @@ export async function searchByImageWithSimilarity(
           },
         };
       });
+      timing.onnx_apply_ms = Date.now() - onnxApplyStartedAt;
+      timing.onnx_total_ms = Date.now() - onnxTotalStartedAt;
     }
 
     const dbgEnabled = String(process.env.SEARCH_IMAGE_SORT_DEBUG ?? "").toLowerCase() === "1" || String(process.env.SEARCH_IMAGE_SORT_DEBUG ?? "").toLowerCase() === "true";
@@ -11084,7 +11175,10 @@ export async function searchByImageWithSimilarity(
       }
     }
 
+    const finalSortAfterOnnxStartedAt = Date.now();
     results = sortProductsByUnifiedScorer(results).slice(0, limit);
+    timing.final_sort_after_onnx_ms = Date.now() - finalSortAfterOnnxStartedAt;
+    timing.response_total_ms = Date.now() - evalT0;
 
     if (dbgEnabled) {
       try {
@@ -11095,6 +11189,7 @@ export async function searchByImageWithSimilarity(
     }
   } catch (e) {
     // Defensive: sorting should not throw; log and continue with current order
+    timing.response_total_ms = Date.now() - evalT0;
     console.warn('[search-image] final sort failed:', (e as Error).message);
   }
 
