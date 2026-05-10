@@ -60,25 +60,6 @@ function topBottomCategoryConsistencyMultiplier(params: {
   return 1;
 }
 
-function hasTopLikeIntentContext(params: {
-  mergedCategory?: string;
-  astCategories?: string[];
-  desiredProductTypes?: string[];
-}): boolean {
-  const blob = [
-    params.mergedCategory,
-    ...(params.astCategories ?? []),
-    ...(params.desiredProductTypes ?? []),
-  ]
-    .map((x) => String(x ?? "").toLowerCase().trim())
-    .filter(Boolean)
-    .join(" ");
-  if (!blob) return false;
-  return /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|polo|polos)\b/.test(
-    blob,
-  );
-}
-
 /** 0..1: query category hints vs document `category` / `category_canonical` (alias-aware). */
 export function scoreCategoryRelevance01(
   mergedCategory: string | undefined,
@@ -142,8 +123,6 @@ export function computeFinalRelevance01(params: {
   hasStyleIntent: boolean;
   hasPatternIntent?: boolean;
   hasSleeveIntent: boolean;
-  /** Strongly prioritize sleeve over color for long-sleeve top intent. */
-  prioritizeSleeveIntent?: boolean;
   hasAudienceIntent: boolean;
   /** From scoreCrossFamilyTypePenalty; strong garment↔footwear mismatches are typically ≥ 0.8 */
   crossFamilyPenalty: number;
@@ -197,12 +176,11 @@ export function computeFinalRelevance01(params: {
   // Attribute blend: keep color dominant, but boost sleeve weight when explicitly detected.
   // For image search with explicit sleeve detection (e.g. YOLO), sleeve should be nearly as
   // important as color to prevent long-sleeve products drowning out short-sleeve matches.
-  const prioritizeSleeve = params.hasSleeveIntent && params.prioritizeSleeveIntent === true;
-  const sleeveWeight = prioritizeSleeve ? 0.42 : params.hasSleeveIntent ? 0.3 : 0.15;
-  const colorWeight = prioritizeSleeve ? 0.18 : params.hasSleeveIntent ? 0.25 : 0.4;
-  const styleWeight = prioritizeSleeve ? 0.08 : params.hasSleeveIntent ? 0.1 : 0.15;
-  const patternWeight = prioritizeSleeve ? 0.08 : params.hasSleeveIntent ? 0.1 : 0.15;
-  const audWeight = prioritizeSleeve ? 0.08 : 0.1;
+  const sleeveWeight = params.hasSleeveIntent ? 0.3 : 0.15;  // Increase from 15% to 30% when sleeve intent is explicit
+  const colorWeight = params.hasSleeveIntent ? 0.25 : 0.4;   // Reduce color weight from 40% to 25% when sleeve intent is strong
+  const styleWeight = params.hasSleeveIntent ? 0.1 : 0.15;   // Reduce style weight slightly
+  const patternWeight = params.hasSleeveIntent ? 0.1 : 0.15; // Reduce pattern weight slightly
+  const audWeight = 0.1;                                      // Reduce audience weight
   const attrScore = colorPart * colorWeight + stylePart * styleWeight + patternPart * patternWeight + sleevePart * sleeveWeight + audPart * audWeight;
   const attrFactor = 0.5 + attrScore * 0.5;
 
@@ -1219,14 +1197,6 @@ export function computeHitRelevance(
   const wantedSleeve = normalizeSleeveToken(desiredSleeve);
   const sleeveIntentApplicable = docSupportsSleeveIntent(src);
   const hasSleeveIntentForDoc = Boolean(wantedSleeve) && sleeveIntentApplicable;
-  const prioritizeLongSleeveTopIntent =
-    hasSleeveIntentForDoc &&
-    wantedSleeve === "long" &&
-    hasTopLikeIntentContext({
-      mergedCategory,
-      astCategories,
-      desiredProductTypes,
-    });
   if (hasSleeveIntentForDoc) {
     const description = typeof hit?._source?.description === "string" ? hit._source.description : "";
     const docSleeveRaw =
@@ -1407,8 +1377,8 @@ export function computeHitRelevance(
         : 0.08;
   // Boost sleeve weight when explicit sleeve intent is detected from image analysis.
   // This prevents color similarity from overwhelming sleeve mismatch penalties.
-  const sleeveWeight = prioritizeLongSleeveTopIntent ? 120 : hasSleeveIntentForDoc ? 85 : 52;
-  const colorWeight = prioritizeLongSleeveTopIntent ? 48 : hasSleeveIntentForDoc ? 70 : 90;
+  const sleeveWeight = hasSleeveIntentForDoc ? 85 : 52;  // Increase from 52 to 85 when sleeve intent is explicit
+  const colorWeight = hasSleeveIntentForDoc ? 70 : 90;   // Reduce from 90 to 70 to avoid color drowning out sleeve
   const attrComponentRaw =
     colorCompliance * colorWeight * docTrust +
     styleCompliance * 65 * docTrust +
@@ -1504,7 +1474,6 @@ export function computeHitRelevance(
     hasStyleIntent: Boolean(normalizedDesiredStyle),
     hasPatternIntent: Boolean(normalizedDesiredPattern), // new
     hasSleeveIntent: hasSleeveIntentForDoc,
-    prioritizeSleeveIntent: prioritizeLongSleeveTopIntent,
     hasAudienceIntent,
     crossFamilyPenalty: crossFamilyPenaltyForFinal,
     intraFamilyPenalty,

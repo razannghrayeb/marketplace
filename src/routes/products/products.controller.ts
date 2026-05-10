@@ -250,14 +250,8 @@ export async function searchProductsByImage(req: Request, res: Response) {
         }
       : {};
     const includeExplain = wantsRankingDebug(req);
-    const data = toPublicSearchProducts(sortProductsByUnifiedScorer(result.results as any), {
-      includeExplain,
-      includeScoreDebug: includeExplain,
-    });
-    const related = toPublicSearchProducts(sortProductsByUnifiedScorer((result.related ?? []) as any), {
-      includeExplain,
-      includeScoreDebug: includeExplain,
-    });
+    const data = toPublicSearchProducts(sortProductsByUnifiedScorer(result.results as any));
+    const related = toPublicSearchProducts(sortProductsByUnifiedScorer((result.related ?? []) as any));
 
     res.json({
       success: true,
