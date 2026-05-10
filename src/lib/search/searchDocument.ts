@@ -452,7 +452,7 @@ export function buildProductSearchDocument(input: BuildSearchDocumentInput): Rec
     }
     if (!mergedTypeSeeds.includes("jacket")) mergedTypeSeeds.unshift("jacket");
   }
-  const productTypesIndexed = expandProductTypesForIndexing(mergedTypeSeeds);
+  const productTypesIndexed: string[] = [];
   const typeConfidence = (() => {
     const fromEnrich =
       enrichTokens.length > 0
