@@ -291,6 +291,9 @@ export const CANONICAL_PART_SLOTS: Record<PartType, PartSlot> = {
  */
 export function getApplicablePartTypesForLabel(label: string): PartType[] {
   const normalized = String(label).toLowerCase().trim();
+  if (normalized === "generic" || normalized === "outfit" || normalized === "garment") {
+    return getAllPartTypes();
+  }
   const applicable: PartType[] = [];
   
   for (const [, slot] of Object.entries(CANONICAL_PART_SLOTS)) {

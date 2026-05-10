@@ -670,10 +670,6 @@ export async function computeAndGenerateQueryPartEmbeddings(
 
   try {
     const { extractAllApplicablePartCrops } = await import("./partCropping");
-    const { getAllPartTypes } = await import("./partExtraction");
-
-    // For query, assume "generic outfit" label that matches all parts
-    const allParts = getAllPartTypes();
     
     // Step 1: Extract parts from full query image (not from ROI, since we don't have one)
     // Use standard garment center crop to focus on main fashion item

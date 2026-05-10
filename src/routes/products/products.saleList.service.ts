@@ -13,21 +13,44 @@ const SALE_WHERE = `
   AND p.sales_price_cents < p.price_cents
 `;
 
-function orderClause(sort: string | undefined): string {
+function orderClause(sort: string | undefined, alias = "p"): string {
+  const prefix = alias ? `${alias}.` : "";
   switch (sort) {
     case "price_asc":
-      return "p.sales_price_cents ASC NULLS LAST, p.id DESC";
+      return `${prefix}sales_price_cents ASC NULLS LAST, ${prefix}id DESC`;
     case "price_desc":
-      return "p.sales_price_cents DESC NULLS LAST, p.id DESC";
+      return `${prefix}sales_price_cents DESC NULLS LAST, ${prefix}id DESC`;
     case "discount":
     default:
-      return `(
-          (p.price_cents - p.sales_price_cents)::numeric
-          / NULLIF(p.price_cents, 0)
-        ) DESC NULLS LAST,
-        p.sales_price_cents ASC,
-        p.id DESC`;
+      return `${prefix}discount_ratio DESC NULLS LAST,
+        ${prefix}sales_price_cents ASC,
+        ${prefix}id DESC`;
   }
+}
+
+async function countSaleProducts(hiddenClause: string, normalizedParentExpr: string): Promise<number> {
+  const countResult = await pg.query<{ c: string }>(
+    `WITH ranked AS (
+       SELECT
+         p.id,
+         row_number() OVER (
+           PARTITION BY p.vendor_id, ${normalizedParentExpr}
+           ORDER BY
+             CASE WHEN p.availability THEN 1 ELSE 0 END DESC,
+             p.last_seen DESC NULLS LAST,
+             p.id DESC
+         ) AS rn
+       FROM products p
+       WHERE 1=1
+         ${hiddenClause}
+         AND ${SALE_WHERE.replace(/\n/g, " ")}
+     )
+     SELECT COUNT(*)::int AS c
+     FROM ranked
+     WHERE rn = 1`,
+  );
+
+  return Number(countResult.rows[0]?.c ?? 0);
 }
 
 export async function listProductsOnSale(params: {
@@ -57,33 +80,18 @@ export async function listProductsOnSale(params: {
     END
   `;
 
-  const countResult = await pg.query<{ c: string }>(
-    `WITH ranked AS (
-       SELECT
-         p.id,
-         row_number() OVER (
-           PARTITION BY p.vendor_id, ${normalizedParentExpr}
-           ORDER BY
-             CASE WHEN p.availability THEN 1 ELSE 0 END DESC,
-             p.last_seen DESC NULLS LAST,
-             p.id DESC
-         ) AS rn
-       FROM products p
-       WHERE 1=1
-         ${hiddenClause}
-         AND ${SALE_WHERE.replace(/\n/g, " ")}
-     )
-     SELECT COUNT(*)::int AS c
-     FROM ranked
-     WHERE rn = 1`,
-  );
-  const total = Number(countResult.rows[0]?.c ?? 0);
-
-  const orderSql = orderClause(sort);
+  const orderSql = orderClause(sort, "d");
   const result = await pg.query(
     `WITH ranked AS (
        SELECT
-         p.*,
+         p.id,
+         p.vendor_id,
+         p.price_cents,
+         p.sales_price_cents,
+         (
+           (p.price_cents - p.sales_price_cents)::numeric
+           / NULLIF(p.price_cents, 0)
+         ) AS discount_ratio,
          row_number() OVER (
            PARTITION BY p.vendor_id, ${normalizedParentExpr}
            ORDER BY
@@ -96,16 +104,34 @@ export async function listProductsOnSale(params: {
          ${hiddenClause}
          AND ${SALE_WHERE.replace(/\n/g, " ")}
      )
-     SELECT r.*, v.name as vendor_name
-     FROM ranked r
-     LEFT JOIN vendors v ON v.id = r.vendor_id
-     WHERE r.rn = 1
-     ORDER BY ${orderSql.replace(/\bp\./g, "r.")}
-     LIMIT $1 OFFSET $2`,
+     , deduped AS (
+       SELECT
+         id,
+         price_cents,
+         sales_price_cents,
+         discount_ratio
+       FROM ranked
+       WHERE rn = 1
+     )
+     , page_rows AS (
+       SELECT
+         d.id,
+         COUNT(*) OVER()::int AS total,
+         row_number() OVER (ORDER BY ${orderSql}) AS ordinal
+       FROM deduped d
+       ORDER BY ${orderSql}
+       LIMIT $1 OFFSET $2
+     )
+     SELECT p.*, v.name as vendor_name, pr.total
+     FROM page_rows pr
+     JOIN products p ON p.id = pr.id
+     LEFT JOIN vendors v ON v.id = p.vendor_id
+     ORDER BY pr.ordinal`,
     [limit, offset],
   );
 
   const rows = result.rows ?? [];
+  const total = rows.length > 0 ? Number(rows[0].total ?? 0) : await countSaleProducts(hiddenClause, normalizedParentExpr);
   const numericIds = rows.map((r: { id: number | string }) => Number(r.id)).filter((n) => Number.isFinite(n));
   const imagesByProduct = await getImagesForProducts(numericIds);
 
@@ -114,8 +140,9 @@ export async function listProductsOnSale(params: {
     const imgs = imagesByProduct.get(pid) || [];
     const primary = imgs.find((i) => i.is_primary) || imgs[0];
     const cdn = primary?.cdn_url ?? (p.image_cdn as string | null) ?? (p.image_url as string | null);
+    const { total: _total, ...productRow } = p;
     return {
-      ...p,
+      ...productRow,
       id: pid,
       image_cdn: cdn,
       image_url: cdn,

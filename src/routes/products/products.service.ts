@@ -394,6 +394,25 @@ function imageShoeBagPipelineDebugEnabled(): boolean {
   return raw === "1" || raw === "true" || raw === "on" || raw === "yes";
 }
 
+function imagePartExcludedCategories(): Set<string> {
+  return new Set(
+    String(process.env.SEARCH_IMAGE_PART_EXCLUDE_CATEGORIES ?? "")
+      .split(",")
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+function imagePartMatchingEnabledForCategory(category: string): boolean {
+  const normalized = String(category ?? "").toLowerCase().trim();
+  if (!normalized) return true;
+  const excluded = imagePartExcludedCategories();
+  if (excluded.has(normalized)) return false;
+  if ((normalized === "footwear" || normalized === "shoes") && excluded.has("shoes")) return false;
+  if (normalized === "shoes" && excluded.has("footwear")) return false;
+  return true;
+}
+
 function searchRelevanceGateMode(): "soft" | "strict" {
   const raw = String(process.env.SEARCH_RELEVANCE_GATE_MODE ?? "soft").toLowerCase().trim();
   return raw === "strict" ? "strict" : "soft";
@@ -4849,6 +4868,9 @@ export async function searchByImageWithSimilarity(
   // category to reduce _source serialization overhead per kNN hit.
   const detectionCategoryForSource = String(params.detectionProductCategory ?? "").toLowerCase().trim();
   const partEmbeddingFields: string[] = (() => {
+    if (!imagePartMatchingEnabledForCategory(detectionCategoryForSource)) {
+      return [];
+    }
     if (!detectionCategoryForSource) {
       // No category hint: fetch all (non-detection full-image search path)
       return [
@@ -6835,7 +6857,11 @@ export async function searchByImageWithSimilarity(
     // ────────────────────────────────────────────────────────────────
     let partMatchingFactor = 1.0; // default: no-op
     const partSims = partSimByDocId.get(idStr);
-    if (partSims && typeof partSims === 'object') {
+    if (
+      partSims &&
+      typeof partSims === 'object' &&
+      imagePartMatchingEnabledForCategory(String(params.detectionProductCategory ?? ""))
+    ) {
       const isTopIntentForPartBoost =
         String(params.detectionProductCategory ?? "").toLowerCase().trim() === "tops" ||
         isTopLikeCategory(String(mergedCategoryForRelevance ?? ""));

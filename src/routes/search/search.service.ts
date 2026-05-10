@@ -1933,23 +1933,6 @@ export async function textSearch(
       ? response.body.hits.hits
       : [];
     const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
-    const rawHitProductIds = [
-      ...new Set(
-        hits
-          .map((hit: any) => String(hit?._source?.product_id ?? ""))
-          .filter(Boolean),
-      ),
-    ];
-    const rawHitNumericIds = rawHitProductIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
-    const productHydrationPromise = getSearchProductsByIdsOrdered(rawHitProductIds).then(
-      (products) => ({ products }),
-      (error) => ({ error }),
-    );
-    const imageHydrationPromise = getImagesForProducts(rawHitNumericIds).then(
-      (imagesByProduct) => ({ imagesByProduct }),
-      (error) => ({ error }),
-    );
-
     // Normalize scores into ~[0,1] for `similarity_score` (max-of-recall vs tanh of raw OS score)
     const maxScore = hits.length > 0 ? hits[0]._score ?? 1 : 1;
     const useTanhSim = config.search.similarityNormalize === "tanh";
@@ -2055,46 +2038,6 @@ export async function textSearch(
   
     const softFloorMin = config.search.softFinalRelevanceFloorMin;
 
-    // #region agent log
-    (() => {
-      let minFinalRelevance01 = Number.POSITIVE_INFINITY;
-      let softFloorPassedIdsCount = 0;
-      for (const h of sortedByRelevance) {
-        const id = String(h?._source?.product_id);
-        const v = complianceById.get(id)?.finalRelevance01 ?? 0;
-        if (v < minFinalRelevance01) minFinalRelevance01 = v;
-        if (v >= softFloorMin) softFloorPassedIdsCount++;
-      }
-      if (!Number.isFinite(minFinalRelevance01)) minFinalRelevance01 = 0;
-      const belowCount = Math.max(0, sortedByRelevance.length - thresholdPassedIds.length);
-      fetch("http://127.0.0.1:7383/ingest/ccea0d1b-4b26-441e-9797-fbae444c347a", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "00a194" },
-        body: JSON.stringify({
-          sessionId: "00a194",
-          runId: "relevance-gate-debug",
-          hypothesisId: "H1",
-          location: "search.service.ts:textSearchGateDecision",
-          message: "text search relevance gate decision",
-          data: {
-            finalAcceptMin,
-            relevanceGateMode: config.search.relevanceGateMode,
-            relevanceGateSoft,
-            strictColorTypeIntent,
-            hitsCount: hits.length,
-            sortedByRelevanceCount: sortedByRelevance.length,
-            thresholdPassedIdsCount: thresholdPassedIds.length,
-            belowFinalAcceptMinCount: belowCount,
-            softFloorMin,
-            softFloorPassedIdsCount,
-            minFinalRelevance01: minFinalRelevance01,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-    })();
-    // #endregion
-
     const sortedIds = sortedByRelevance.map((h: any) => String(h._source.product_id));
     const safeSortedIds = sortedIds.filter((id) => !(complianceById.get(id)?.hardBlocked ?? false));
     const belowRelevanceThreshold =
@@ -2166,11 +2109,22 @@ export async function textSearch(
           })
         : Promise.resolve([] as ProductResult[]);
 
-    // Hydration is intentionally started from the raw OpenSearch candidates above,
-    // so PostgreSQL can fetch card metadata while deterministic reranking runs.
+    const hydrationWindowEnd = Math.min(
+      finalProductIds.length,
+      offset + Math.max(limit * 4, limit + 48),
+    );
+    const hydratedProductIds = finalProductIds.slice(0, hydrationWindowEnd);
+    const hydratedNumericIds = hydratedProductIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
+
     const [productHydration, imageHydration, relatedProducts] = await Promise.all([
-      productHydrationPromise,
-      imageHydrationPromise,
+      getSearchProductsByIdsOrdered(hydratedProductIds).then(
+        (products) => ({ products }),
+        (error) => ({ error }),
+      ),
+      getImagesForProducts(hydratedNumericIds).then(
+        (imagesByProduct) => ({ imagesByProduct }),
+        (error) => ({ error }),
+      ),
       relatedPromise,
     ]);
     if ((productHydration as any).error) throw (productHydration as any).error;
