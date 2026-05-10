@@ -2042,9 +2042,10 @@ function passesFootwearSubtypeGate(
     wantsLoafers,
     wantsFlats,
   ].filter(Boolean).length;
-  // Generic shoe intents often expand to several footwear siblings for recall.
-  // Only hard-block cross-subtypes when the intent points to one clear subtype.
-  if (requestedSubtypeCount !== 1) return true;
+  const wantsGenericShoes =
+    requestedSubtypeCount === 0 &&
+    /\b(shoe|shoes|footwear)\b/.test(desired) &&
+    !/\b(sandal|sandals|slide|slides|clog|clogs|crocs?|slipper|slippers|flip\s*flop|flip-flop|mule|mules)\b/.test(desired);
 
   const blob = [
     ...(Array.isArray(product.product_types) ? product.product_types : []),
@@ -2064,6 +2065,13 @@ function passesFootwearSubtypeGate(
   const isHeel = /\b(heel|heels|pump|pumps|stiletto|kitten\s*heel|platform\s*heel|wedge\s*heel|block\s*heel)\b/.test(blob);
   const isLoafer = /\b(loafer|loafers|moccasin|slip.?on)\b/.test(blob);
   const isFlat = /\b(flat|flats|ballet\s*flat|oxford|oxfords|derby|brogues?)\b/.test(blob);
+  const isOpenFootwear = /\b(crocs?|clog|clogs|sandal|sandals|slide|slides|flip\s*flop|flip-flop|slipper|slippers|mule|mules)\b/.test(blob);
+
+  if (wantsGenericShoes) return !isOpenFootwear;
+
+  // Generic shoe intents often expand to several footwear siblings for recall.
+  // Only hard-block cross-subtypes when the intent points to one clear subtype.
+  if (requestedSubtypeCount !== 1) return true;
 
   if (wantsSneakers) return !isBoot && !isHeel && !isSandal && !isFlat && !isLoafer;
   if (wantsBoots) return !isSandal && !isSneak && !isHeel;
@@ -5887,6 +5895,10 @@ export async function searchByImageWithSimilarity(
       : filtersRecord.color
         ? [String(filtersRecord.color).toLowerCase()]
         : [];
+  const softColorsForRelevance =
+    !explicitColorsForRelevance.length && typeof filtersRecord.softColor === "string"
+      ? [String(filtersRecord.softColor).toLowerCase().trim()].filter(Boolean)
+      : [];
 
   // Crop-dominant colors: extracted from garment pixels via k-means.
   // These participate in color compliance scoring (rerankScore + colorMatch)
@@ -6035,6 +6047,16 @@ export async function searchByImageWithSimilarity(
   let allColorsForRelevance: string[];
   if (hasExplicitColorIntent) {
     allColorsForRelevance = [...explicitColorsForRelevance];
+  } else if (
+    !suppressSoftColorPreference &&
+    softColorsForRelevance.length > 0 &&
+    (
+      Boolean((filtersRecord as { softColorStrict?: unknown }).softColorStrict) ||
+      isFootwearDetectionIntent ||
+      detectionCategoryNorm === "bags"
+    )
+  ) {
+    allColorsForRelevance = [...softColorsForRelevance];
   } else if (
     !suppressSoftColorPreference &&
     hasTrustedInferredColorSignal &&
