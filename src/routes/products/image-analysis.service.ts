@@ -3986,7 +3986,7 @@ export function applySleeveIntentGuard(params: {
   const isTopCategory = category === "tops";
   const isOuterwearCategory = category === "outerwear";
   const minCompliance = isTopCategory
-    ? (desiredSleeve === "short" || desiredSleeve === "sleeveless" ? 0.34 : 0.3)
+    ? (desiredSleeve === "short" || desiredSleeve === "sleeveless" ? 0.34 : 0.42)
     : desiredSleeve === "short" || desiredSleeve === "sleeveless"
       ? 0.5
       : 0.4;
