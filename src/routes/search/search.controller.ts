@@ -12,6 +12,7 @@
 import { Router, Request, Response } from "express";
 import { multiImageSearch, multiVectorWeightedSearch } from "./search.service";
 import { searchImage, searchText } from "../../lib/search/fashionSearchFacade";
+import { config } from "../../config";
 import { toPublicSearchProducts } from "../../lib/search/publicSearchResult";
 import { sortProductsByUnifiedScorer } from "../../lib/search/sortResults";
 import {
@@ -53,6 +54,12 @@ import multer from "multer";
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+function wantsRankingExplain(req: Request): boolean {
+  if (config.search.searchRankingDebug) return true;
+  const v = req.query.rankingDebug ?? req.query.ranking_debug;
+  return v === "1" || v === "true";
+}
 
 /**
  * GET /search?q=shirt&brand=Nike&gender=men
@@ -261,8 +268,8 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
 
     res.json({
       ...result,
-      results: toPublicSearchProducts(sortProductsByUnifiedScorer((result.results ?? []) as any)),
-      related: toPublicSearchProducts(sortProductsByUnifiedScorer((result.related ?? []) as any)),
+      results: toPublicSearchProducts(sortProductsByUnifiedScorer((result.results ?? []) as any), { includeExplain: wantsRankingExplain(req) }),
+      related: toPublicSearchProducts(sortProductsByUnifiedScorer((result.related ?? []) as any), { includeExplain: wantsRankingExplain(req) }),
     });
   } catch (error) {
     console.error("Image search error:", error);

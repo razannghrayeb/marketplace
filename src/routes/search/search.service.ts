@@ -132,16 +132,21 @@ function hasActualSuitCatalogCue(src: Record<string, unknown>): boolean {
   if (!blob.trim()) return false;
   const norm = blob.replace(/[^a-z0-9\s\-_/]/g, " ").replace(/\s+/g, " ").trim();
   if (!norm) return false;
+  const catCanon = String(src.category_canonical ?? "").toLowerCase().trim();
+  const catRaw = String(src.category ?? "").toLowerCase().trim();
+  const hasTailoredContext = catCanon === "tailored" || /\b(tailored|formal|formalwear|suiting|tailoring)\b/.test(`${catCanon} ${catRaw} ${norm}`);
   if (/\b(suit|suits|tuxedo|tuxedos)\b/i.test(norm)) {
     const withoutSuitJacket = norm.replace(/\bsuit jacket\b/gi, "").trim();
     if (/\b(suit|suits)\b/i.test(withoutSuitJacket) || /\btuxedo\b/i.test(withoutSuitJacket)) return true;
   }
   const hasBlazer = /\b(blazer|blazers|suit jacket|dress jacket|sport coat|sportcoat)\b/i.test(norm);
   const hasSuitBottomHint = /\b(pant|pants|trouser|trousers|slacks|dress pants|2p|set|full set)\b/i.test(norm);
+  if (/\bsuit\s+jackets?\b/i.test(norm)) {
+    if (hasTailoredContext || hasBlazer || hasSuitBottomHint) return true;
+    return false;
+  }
   if (hasBlazer && hasSuitBottomHint) return true;
-  const catCanon = String(src.category_canonical ?? "").toLowerCase();
-  const catRaw = String(src.category ?? "").toLowerCase();
-  if (catCanon === "tailored" || /\b(suit|suits|tailored|tailoring|waistcoat|waistcoats)\b/.test(catRaw)) return true;
+  if (hasTailoredContext && (/\b(suit|suits|tuxedo|tuxedos)\b/i.test(norm) || hasBlazer || hasSuitBottomHint)) return true;
   return false;
 }
 
@@ -238,8 +243,18 @@ function hasHardOppositeGenderSignal(src: Record<string, unknown>, queryGenderRa
   const hasWomenStyleCue = womenStyleCue.test(blob);
   const hasMenStyleCue = menStyleCue.test(blob);
 
-  if (queryGender === "men") return (hasWomenCue || hasWomenStyleCue) && !(hasMenCue || hasMenStyleCue);
-  if (queryGender === "women") return (hasMenCue || hasMenStyleCue) && !(hasWomenCue || hasWomenStyleCue);
+  const hasMenSignal = hasMenCue || hasMenStyleCue;
+  const hasWomenSignal = hasWomenCue || hasWomenStyleCue;
+  const hasConflict = hasMenSignal && hasWomenSignal;
+
+  // Block if: conflicting signals (both men + women present), 
+  // OR clear opposite gender indicator (gender word without opposing word)
+  if (queryGender === "men") {
+    return hasConflict || (hasWomenSignal && !hasMenSignal);
+  }
+  if (queryGender === "women") {
+    return hasConflict || (hasMenSignal && !hasWomenSignal);
+  }
   return false;
 }
 

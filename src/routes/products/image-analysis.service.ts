@@ -3900,7 +3900,7 @@ function applyDetectionCategoryGuard(
   return guarded;
 }
 
-function applySleeveIntentGuard(params: {
+export function applySleeveIntentGuard(params: {
   products: ProductResult[];
   detectionLabel: string;
   categoryMapping: CategoryMapping;
@@ -3943,8 +3943,12 @@ function applySleeveIntentGuard(params: {
     const observedSleeve = inferSleeveFromProductText(blob);
     if (isDressCategory || isTopCategory || isOuterwearCategory) {
       // Sleeve metadata is sparse for apparel, especially outerwear/tailored listings.
-      // Use only explicit text contradiction so full suits are not dropped just because
-      // a YOLO "long sleeve outwear" label produced low sleeveCompliance.
+      // Enforce the floor only when the scorer produced sleeveCompliance; otherwise
+      // fall back to explicit contradiction so sparse metadata does not over-prune.
+      const sleeveCompliance = Number((p as any)?.explain?.sleeveCompliance);
+      if (Number.isFinite(sleeveCompliance) && sleeveCompliance < minCompliance) {
+        return false;
+      }
       return !isSleeveContradiction(desiredSleeve, observedSleeve);
     }
 

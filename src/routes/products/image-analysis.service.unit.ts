@@ -5,6 +5,7 @@ declare const expect: any;
 
 import {
   applyRelevanceThresholdFilter,
+  applySleeveIntentGuard,
   buildInitialTypeSearchHintsForDetection,
   inferOuterwearSuitSignal,
   inferFootwearSubtypeFromCaption,
@@ -121,6 +122,34 @@ describe("main-path detection search hints", () => {
         limit: 3,
       }),
     ).toEqual(["puffer", "jacket", "coat"]);
+  });
+});
+
+describe("applySleeveIntentGuard", () => {
+  test("drops top candidates that fail the sleeve compliance floor when metadata is available", () => {
+    const kept = applySleeveIntentGuard({
+      detectionLabel: "long sleeve top",
+      categoryMapping: {
+        productCategory: "tops",
+        attributes: { sleeveLength: "long" },
+      } as any,
+      products: [
+        {
+          id: "drop",
+          title: "Short Sleeve Top",
+          product_types: ["top"],
+          explain: { sleeveCompliance: 0.18 },
+        },
+        {
+          id: "keep",
+          title: "Long Sleeve Top",
+          product_types: ["top"],
+          explain: { sleeveCompliance: 0.63 },
+        },
+      ] as any,
+    } as any);
+
+    expect(kept.map((p: any) => p.id)).toEqual(["keep"]);
   });
 });
 

@@ -249,8 +249,9 @@ export async function searchProductsByImage(req: Request, res: Response) {
           search_image_relax_floor: config.search.searchImageRelaxFloor,
         }
       : {};
-    const data = toPublicSearchProducts(sortProductsByUnifiedScorer(result.results as any));
-    const related = toPublicSearchProducts(sortProductsByUnifiedScorer((result.related ?? []) as any));
+    const includeExplain = wantsRankingDebug(req);
+    const data = toPublicSearchProducts(sortProductsByUnifiedScorer(result.results as any), { includeExplain });
+    const related = toPublicSearchProducts(sortProductsByUnifiedScorer((result.related ?? []) as any), { includeExplain });
 
     res.json({
       success: true,
