@@ -61,6 +61,7 @@ import {
 import { merchandiseVisualSimilarity01 } from "../../lib/search/merchandiseVisualSimilarity";
 import {
   expandProductTypesForQuery,
+  extractExplicitSleeveIntent,
   extractFashionTypeNounTokens,
   extractLexicalProductTypeSeeds,
   scoreRerankProductTypeBreakdown,
@@ -2846,6 +2847,53 @@ function normalizeSimpleToken(x: unknown): string {
   return String(x ?? "").toLowerCase().trim();
 }
 
+function normalizeMaterialToken(x: unknown): string {
+  const s = normalizeSimpleToken(x).replace(/[^a-z0-9]+/g, " ").trim();
+  if (!s) return "";
+  if (/\b(linen|ramie)\b/.test(s)) return "linen";
+  if (/\b(cotton|poplin|voile|percale)\b/.test(s)) return "cotton";
+  if (/\b(jersey|modal|viscose|rayon|lyocell|tencel)\b/.test(s)) return "jersey";
+  if (/\b(wool|woolen|woollen|cashmere|merino|alpaca|mohair)\b/.test(s)) return "wool";
+  if (/\b(knit|knitted|knitwear|crochet)\b/.test(s)) return "knit";
+  if (/\b(fleece|sherpa|boucle|tweed|corduroy|flannel)\b/.test(s)) return "fleece";
+  return s.split(/\s+/)[0] ?? "";
+}
+
+function materialFamily(token: unknown): "summer" | "winter" | "other" | "" {
+  const m = normalizeMaterialToken(token);
+  if (!m) return "";
+  if (m === "linen" || m === "cotton" || m === "jersey") return "summer";
+  if (m === "wool" || m === "knit" || m === "fleece") return "winter";
+  return "other";
+}
+
+function catalogMaterialTokens(src: Record<string, unknown>): string[] {
+  const raw = [
+    src.attr_material,
+    src.title,
+    src.description,
+    src.category,
+    ...(Array.isArray(src.product_types) ? src.product_types : []),
+  ]
+    .map((x) => String(x ?? "").toLowerCase())
+    .join(" ");
+  const out = new Set<string>();
+  for (const part of raw.split(/[,;/|]+/g)) {
+    const normalized = normalizeMaterialToken(part);
+    if (normalized) out.add(normalized);
+  }
+  for (const explicit of raw.match(/\b(linen|cotton|jersey|modal|viscose|rayon|lyocell|tencel|wool|woolen|woollen|cashmere|merino|knit|knitted|knitwear|fleece|sherpa|tweed|corduroy|flannel)\b/g) ?? []) {
+    const normalized = normalizeMaterialToken(explicit);
+    if (normalized) out.add(normalized);
+  }
+  return [...out];
+}
+
+function hasSummerToWinterMaterialConflict(desiredMaterial: unknown, src: Record<string, unknown>): boolean {
+  if (materialFamily(desiredMaterial) !== "summer") return false;
+  return catalogMaterialTokens(src).some((token) => materialFamily(token) === "winter");
+}
+
 function normalizeAudienceAgeGroupValue(x: unknown): string | undefined {
   const s = normalizeSimpleToken(x);
   if (!s) return undefined;
@@ -2879,6 +2927,25 @@ function tokenizeLexicalTerms(text: string): string[] {
     .filter((tok) => tok.length >= 3);
 }
 
+function normalizeCatalogUrlForKeywordSignal(value: unknown): string {
+  const raw = String(value ?? "").toLowerCase().trim();
+  if (!raw) return "";
+  const withoutQuery = raw.split(/[?#]/)[0] ?? raw;
+  let decoded = withoutQuery;
+  try {
+    decoded = decodeURIComponent(withoutQuery);
+  } catch {
+    decoded = withoutQuery;
+  }
+  return decoded
+    .replace(/^https?:\/\/[^/]+/i, " ")
+    .replace(/\.[a-z0-9]{2,5}$/i, " ")
+    .replace(/[_+./-]+/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function computeSubtypeKeywordSignal(params: {
   desiredProductTypes: string[];
   preferredDesiredProductTypes?: string[];
@@ -2905,7 +2972,7 @@ function computeSubtypeKeywordSignal(params: {
   const hitTypes = Array.isArray(src.product_types)
     ? src.product_types.map((t: unknown) => String(t).toLowerCase().trim()).filter(Boolean)
     : [];
-  const haystack = [
+  const strongHaystack = [
     ...hitTypes,
     String(src.category_canonical ?? "").toLowerCase(),
     String(src.category ?? "").toLowerCase(),
@@ -2913,19 +2980,27 @@ function computeSubtypeKeywordSignal(params: {
   ]
     .filter(Boolean)
     .join(" ");
+  const supportHaystack = [
+    String(src.description ?? "").toLowerCase(),
+    normalizeCatalogUrlForKeywordSignal(src.product_url),
+    normalizeCatalogUrlForKeywordSignal(src.parent_product_url),
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const haystack = `${strongHaystack} ${supportHaystack}`.trim();
 
   const exactHit = desired.some((d) => {
     if (!d) return false;
     if (hitTypes.includes(d)) return true;
     const escaped = d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`\\b${escaped}\\b`, "i").test(haystack);
+    return new RegExp(`\\b${escaped}\\b`, "i").test(strongHaystack);
   });
 
   const exactMatchedDesired = desired.filter((d) => {
     if (!d) return false;
     if (hitTypes.includes(d)) return true;
     const escaped = d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`\\b${escaped}\\b`, "i").test(haystack);
+    return new RegExp(`\\b${escaped}\\b`, "i").test(strongHaystack);
   });
 
   const genericTypeTerms = new Set([
@@ -2959,10 +3034,12 @@ function computeSubtypeKeywordSignal(params: {
     return { boost: 0, overlap: 0, exactHit };
   }
 
-  const hitTokens = new Set(tokenizeLexicalTerms(haystack));
+  const strongTokens = new Set(tokenizeLexicalTerms(strongHaystack));
+  const supportTokens = new Set(tokenizeLexicalTerms(supportHaystack));
   let matched = 0;
   for (const tok of desiredTokens) {
-    if (hitTokens.has(tok)) matched += 1;
+    if (strongTokens.has(tok)) matched += 1;
+    else if (supportTokens.has(tok)) matched += 0.55;
   }
   const overlap = Math.max(0, Math.min(1, matched / desiredTokens.size));
 
@@ -3279,7 +3356,7 @@ function isTooCasualBottomForTailoredIntent(src: Record<string, unknown>): boole
     .join(" ")
     .toLowerCase();
   if (!blob.trim()) return false;
-  return /\b(jeans?|denim|jogger|joggers|sweatpants?|track\s*pants?|cargo(?:\s*pants?)?)\b/.test(blob);
+  return /\b(jeans?|denim|jogger|joggers|sweatpants?|track\s*pants?|cargo(?:\s*pants?)?|drawstring|corduroy|5[-\s]?pocket|tactical|hiking|basketball|lifestyle\s+pant)\b/.test(blob);
 }
 
 const BAD_COLOR_CODE_MAP: Record<string, string> = {
@@ -6070,8 +6147,14 @@ export async function searchByImageWithSimilarity(
     : hasSoftStyleHint
       ? softStyleForRelevance
       : undefined;
-  const desiredSleeveForRelevance =
+  const desiredMaterialForRelevance =
+    typeof filtersRecord.material === "string"
+      ? normalizeMaterialToken(filtersRecord.material)
+      : undefined;
+  const desiredSleeveFromFilter =
     typeof filtersRecord.sleeve === "string" ? String(filtersRecord.sleeve).toLowerCase().trim() : undefined;
+  const desiredSleeveFromTypes = extractExplicitSleeveIntent(desiredProductTypes.join(" "));
+  const desiredSleeveForRelevance = desiredSleeveFromFilter || desiredSleeveFromTypes;
   const desiredSleeveNorm = desiredSleeveForRelevance;
   const isTopDetectionIntent =
     params.detectionProductCategory === "tops" ||
@@ -9126,11 +9209,12 @@ export async function searchByImageWithSimilarity(
         (isTailoredStyleIntent || hasTailoredTypeIntent(desiredProductTypes))
       ) ||
       // For bottoms, only enforce tailored hard-gating when style is explicitly formal.
-      // Inferred trouser/cargo/chino labels are too noisy and were suppressing valid cargo results.
+      // Require both formal style and tailored bottom type so generic trouser/cargo/chino
+      // labels do not suppress casual browsing, while suit photos still avoid jeans/joggers.
       (
         detectionCategoryNormForTailored === "bottoms" &&
-        hasExplicitStyleIntent &&
-        isTailoredStyleIntent
+        isTailoredStyleIntent &&
+        hasTailoredTypeIntent(desiredProductTypes)
       )
     );
   const hitsBeforeTailoredGuard = rankedHits;
@@ -9583,6 +9667,17 @@ export async function searchByImageWithSimilarity(
               finalRelevanceSource = "sleeve_no_metadata_cap";
             }
           }
+        }
+
+        if (
+          isTopDetection &&
+          desiredMaterialForRelevance &&
+          hasSummerToWinterMaterialConflict(desiredMaterialForRelevance, p as unknown as Record<string, unknown>)
+        ) {
+          const materialSim = materialSimById.get(idStr) ?? 0;
+          const cap = materialSim >= 0.74 && similarityScore >= nearIdenticalRawMin ? 0.62 : 0.46;
+          finalRelevance01 = Math.min(finalRelevance01 ?? 0, cap);
+          finalRelevanceSource = "summer_material_conflict_cap";
         }
 
         if (isDressDetection) {
@@ -10142,6 +10237,14 @@ export async function searchByImageWithSimilarity(
         if (hasDetectionAnchoredTypeIntent) {
           const typeComp = Number(explainAny?.productTypeCompliance ?? 0);
           const exactType = Number(explainAny?.exactTypeScore ?? 0);
+          if (
+            params.detectionProductCategory === "tops" &&
+            desiredMaterialForRelevance &&
+            hasSummerToWinterMaterialConflict(desiredMaterialForRelevance, p as Record<string, unknown>) &&
+            sim < 0.96
+          ) {
+            return false;
+          }
           if (isDressDetectionForOverride) {
             const onePieceCandidate = isOnePieceCatalogCandidate(p as Record<string, unknown>);
             // Dress metadata can miss one-piece cues; keep visually strong candidates.
@@ -10275,6 +10378,14 @@ export async function searchByImageWithSimilarity(
       // Keep tops robust when style is inferred (soft); hard-gate only on explicit style intent.
       if (params.detectionProductCategory === "tops" && hasExplicitStyleIntent && styleComp < 0.2 && sim < 0.96) {
         return markLateFamilyDrop(p, "explicit_style_mismatch");
+      }
+      if (
+        detectionCategoryForLateGate === "tops" &&
+        desiredMaterialForRelevance &&
+        hasSummerToWinterMaterialConflict(desiredMaterialForRelevance, p as unknown as Record<string, unknown>) &&
+        sim < 0.96
+      ) {
+        return markLateFamilyDrop(p, "summer_material_conflict");
       }
       if (hasStrictLateCategory && !catalogFamilyPass) return markLateFamilyDrop(p, "catalog_family_mismatch");
       if (

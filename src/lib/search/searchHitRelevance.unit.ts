@@ -1,10 +1,30 @@
-/* Minimal declarations for test globals to satisfy static checks */
-declare const describe: any;
-declare const test: any;
-declare const expect: any;
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
 
 import { computeHitRelevance, scoreAudienceCompliance, type SearchHitRelevanceIntent } from "./searchHitRelevance";
 import { scoreCrossFamilyTypePenalty } from "./productTypeTaxonomy";
+
+function expect(actual: any) {
+  return {
+    toBe(expected: any) {
+      assert.equal(actual, expected);
+    },
+    toBeGreaterThan(expected: number) {
+      assert.ok(actual > expected, `${actual} is not greater than ${expected}`);
+    },
+    toBeGreaterThanOrEqual(expected: number) {
+      assert.ok(actual >= expected, `${actual} is not greater than or equal to ${expected}`);
+    },
+    toBeLessThan(expected: number) {
+      assert.ok(actual < expected, `${actual} is not less than ${expected}`);
+    },
+    not: {
+      toBe(expected: any) {
+        assert.notEqual(actual, expected);
+      },
+    },
+  };
+}
 
 describe("computeHitRelevance - sleeve intent", () => {
   test("short-sleeve intent penalizes long-sleeve product", () => {
@@ -93,6 +113,63 @@ describe("computeHitRelevance - sleeve intent", () => {
     expect(rel.sleeveCompliance).toBeGreaterThan(0.2);
     expect(rel.sleeveCompliance).toBeLessThan(0.4);
   });
+
+  test("long-sleeve intent hard-penalizes explicit short-sleeve title without metadata", () => {
+    const hit = {
+      _source: {
+        title: "Women Short Sleeve Top",
+        category: "tops",
+        category_canonical: "tops",
+        product_types: ["top"],
+        attr_sleeve: null,
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.9, {
+      desiredProductTypes: ["shirt", "top"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      desiredStyle: "casual",
+      desiredSleeve: "long",
+      rerankColorMode: "any",
+      mergedCategory: "tops",
+      astCategories: ["tops"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+    });
+
+    expect(rel.sleeveCompliance).toBe(0);
+    expect(rel.finalRelevance01).toBeLessThan(0.72);
+  });
+
+  test("long-sleeve intent treats sweater defaults as weak without explicit sleeve metadata", () => {
+    const hit = {
+      _source: {
+        title: "Wool Crewneck Sweater",
+        category: "sweaters",
+        category_canonical: "tops",
+        product_types: ["sweater"],
+        attr_sleeve: null,
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.86, {
+      desiredProductTypes: ["shirt", "top"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      desiredStyle: "casual",
+      desiredSleeve: "long",
+      rerankColorMode: "any",
+      mergedCategory: "tops",
+      astCategories: ["tops"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+    });
+
+    expect(rel.sleeveCompliance).toBeLessThan(0.52);
+  });
 });
 
 describe("scoreCrossFamilyTypePenalty - category fallback", () => {
@@ -130,6 +207,76 @@ describe("computeHitRelevance - type intent reliability", () => {
       attr_sleeve: null,
     },
   } as any;
+
+  test("uses catalog category labels as type evidence when product_types are sparse", () => {
+    const rel = computeHitRelevance({
+      _source: {
+        title: "Soft Rib Long Sleeve",
+        category: "Knit Tops",
+        category_canonical: "tops",
+        product_types: [],
+      },
+    } as any, 0.82, {
+      desiredProductTypes: ["sweater"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "tops",
+      astCategories: ["tops"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.productTypeCompliance).toBeGreaterThan(0.6);
+    expect(rel.catalogTypeEvidenceSource).toBe("category");
+  });
+
+  test("uses title and url as bounded type evidence without making url exact", () => {
+    const titleRel = computeHitRelevance({
+      _source: {
+        title: "Classic Zip Jacket",
+        category: "Outerwear",
+        category_canonical: "outerwear",
+        product_types: [],
+      },
+    } as any, 0.82, {
+      desiredProductTypes: ["jacket"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "outerwear",
+      astCategories: ["outerwear"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      reliableTypeIntent: true,
+    });
+
+    const urlRel = computeHitRelevance({
+      _source: {
+        title: "Classic Zip",
+        category: "Misc",
+        category_canonical: "misc",
+        product_types: [],
+        product_url: "https://example.test/products/classic-zip-jacket-black",
+      },
+    } as any, 0.82, {
+      desiredProductTypes: ["jacket"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "outerwear",
+      astCategories: ["outerwear"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      reliableTypeIntent: true,
+    });
+
+    expect(titleRel.productTypeCompliance).toBeGreaterThan(urlRel.productTypeCompliance);
+    expect(urlRel.productTypeCompliance).toBeGreaterThan(0.3);
+    expect(urlRel.catalogTypeEvidenceSource).toBe("url");
+    expect(urlRel.exactTypeScore).toBeLessThan(1);
+  });
 
   test("weak inferred type hints do not hard-zero high visual matches", () => {
     const rel = computeHitRelevance(footwearHit, 0.92, {
@@ -323,6 +470,63 @@ describe("computeHitRelevance - suit composite intent", () => {
 
     expect(rel.crossFamilyPenalty).toBeGreaterThanOrEqual(0.8);
     expect(rel.finalRelevance01).toBeLessThan(0.2);
+  });
+});
+
+describe("computeHitRelevance - footwear family gating", () => {
+  test("footwear intent accepts flat-style aliases in doc metadata", () => {
+    const hit = {
+      _source: {
+        title: "Robin Blue Satin Flat",
+        category: "Flats + Other",
+        category_canonical: "footwear",
+        product_types: ["flat"],
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.91, {
+      desiredProductTypes: ["shoe"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "footwear",
+      astCategories: ["footwear"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.hardBlocked).toBe(false);
+    expect(rel.finalRelevance01).toBeGreaterThan(0.1);
+  });
+
+  test("footwear color intent caps family-tier matches more tightly", () => {
+    const hit = {
+      _source: {
+        title: "Navy Leather Pump",
+        category: "shoes",
+        category_canonical: "footwear",
+        product_types: ["pump"],
+        color: "navy",
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.96, {
+      desiredProductTypes: ["shoe"],
+      desiredColors: ["blue"],
+      desiredColorsTier: ["blue"],
+      rerankColorMode: "any",
+      mergedCategory: "footwear",
+      astCategories: ["footwear"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.colorTier === "exact").toBe(false);
+    expect(rel.finalRelevance01).toBeLessThan(0.45);
   });
 });
 
@@ -575,6 +779,50 @@ describe("computeHitRelevance - image palette color authority", () => {
 });
 
 describe("scoreAudienceCompliance - cue-based gender inference", () => {
+  test("men query hard-penalizes a women department brand even when category is mislabeled men", () => {
+    const hit = {
+      _source: {
+        title: "Long Sleeved Grey Buttoned Pullover",
+        brand: "MOUSTACHE women",
+        category: "men pullover",
+        category_canonical: "tops",
+        product_types: ["pullover"],
+      },
+    } as any;
+
+    const compliance = scoreAudienceCompliance(undefined, "men", hit);
+    expect(compliance).toBeLessThan(0.3);
+  });
+
+  test("explicit men search blocks women department hits before acceptance", () => {
+    const hit = {
+      _source: {
+        title: "Long Sleeved Grey Buttoned Pullover",
+        brand: "MOUSTACHE women",
+        category: "men pullover",
+        category_canonical: "tops",
+        product_types: ["pullover"],
+      },
+    } as any;
+
+    const rel = computeHitRelevance(hit, 0.95, {
+      desiredProductTypes: ["pullover"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "tops",
+      astCategories: ["tops"],
+      audienceGenderForScoring: "men",
+      hasAudienceIntent: true,
+      crossFamilyPenaltyWeight: 420,
+      reliableTypeIntent: true,
+    });
+
+    expect(rel.audienceCompliance).toBeLessThan(0.3);
+    expect(rel.finalRelevance01).toBe(0);
+    expect(rel.hardBlocked).toBe(true);
+  });
+
   test("women query is penalized by masculine style cues even without gender words", () => {
     const hit = {
       _source: {

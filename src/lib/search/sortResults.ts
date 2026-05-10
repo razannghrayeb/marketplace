@@ -76,6 +76,14 @@ export function sortProductsByRelevanceAndCategory<T extends SortableProduct>(
     
     if (Math.abs(fb - fa) > 1e-8) return fb - fa;
 
+    const sleeveA = Number(a.explain?.sleeveCompliance ?? 0);
+    const sleeveB = Number(b.explain?.sleeveCompliance ?? 0);
+    if (Math.abs(sleeveB - sleeveA) > 1e-8) return sleeveB - sleeveA;
+
+    const colorCompA = Number(a.explain?.colorCompliance ?? 0);
+    const colorCompB = Number(b.explain?.colorCompliance ?? 0);
+    if (Math.abs(colorCompB - colorCompA) > 1e-8) return colorCompB - colorCompA;
+
     // Tie-breaker: prioritize same color / color presence.
     const colorA = String(a.color ?? "").toLowerCase().trim();
     const colorB = String(b.color ?? "").toLowerCase().trim();
@@ -137,6 +145,19 @@ export function sortProductsByUnifiedScorer<T extends SortableProduct>(products:
     if (aScore === null) return 1;
     if (bScore === null) return -1;
     if (Math.abs(bScore - aScore) > 1e-8) return bScore - aScore;
-    return 0;
+
+    const sleeveA = Number(a.explain?.sleeveCompliance ?? 0);
+    const sleeveB = Number(b.explain?.sleeveCompliance ?? 0);
+    if (Math.abs(sleeveB - sleeveA) > 1e-8) return sleeveB - sleeveA;
+
+    const colorA = Number(a.explain?.colorCompliance ?? 0);
+    const colorB = Number(b.explain?.colorCompliance ?? 0);
+    if (Math.abs(colorB - colorA) > 1e-8) return colorB - colorA;
+
+    const rerankA = Number(a.rerankScore ?? 0);
+    const rerankB = Number(b.rerankScore ?? 0);
+    if (Math.abs(rerankB - rerankA) > 1e-8) return rerankB - rerankA;
+
+    return Number(b.similarity_score ?? 0) - Number(a.similarity_score ?? 0);
   });
 }

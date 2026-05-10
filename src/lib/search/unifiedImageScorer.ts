@@ -506,7 +506,8 @@ function computeFloor(
   // down. This addresses the user's requirement: same-color products must rank
   // first.
   const audienceOk = !input.hasAudienceIntent || input.audienceCompliance >= 0.70;
-  if (tier === "exact" && input.hasColorIntent && audienceOk && !structuralFamilyDrift) {
+  const sleeveOkForColorPriority = !input.hasSleeveIntent || input.sleeveCompliance >= 0.50;
+  if (tier === "exact" && input.hasColorIntent && audienceOk && sleeveOkForColorPriority && !structuralFamilyDrift) {
     // Floor scales with type + visual evidence so a wrong-type-but-exact-color item
     // doesn't get inflated.
     let colorFloor = 0;
@@ -520,7 +521,7 @@ function computeFloor(
     if (colorFloor > floor) { floor = colorFloor; reason = "exact_color_priority_floor"; }
   }
 
-  if (tier === "family" && input.hasColorIntent && audienceOk && !structuralFamilyDrift) {
+  if (tier === "family" && input.hasColorIntent && audienceOk && sleeveOkForColorPriority && !structuralFamilyDrift) {
     let familyColorFloor = 0;
     if (input.exactTypeScore >= 1) {
       familyColorFloor = sim >= 0.85 ? 0.80 : sim >= 0.75 ? 0.74 : sim >= 0.65 ? 0.68 : 0.62;
@@ -542,14 +543,16 @@ function computeFloor(
 function computeTieBreakers(input: UnifiedScoreInputs): number {
   const sim = clamp01(input.osSimilarity01);
   let bonus = 0;
-  // Visual sim contributes up to 0.005.
-  bonus += sim * 0.005;
-  // Exact color match contributes 0.003.
-  if (effectiveColorTier(input) === "exact") bonus += 0.003;
+  // Visual sim contributes up to 0.004.
+  bonus += sim * 0.004;
+  // Exact color match contributes 0.002.
+  if (effectiveColorTier(input) === "exact") bonus += 0.002;
   // Exact type contributes 0.002.
   if (input.exactTypeScore >= 1) bonus += 0.002;
-  // Color compliance fine-grained contribution up to 0.002.
-  bonus += clamp01(input.colorCompliance) * 0.002;
+  // Color compliance fine-grained contribution up to 0.001.
+  bonus += clamp01(input.colorCompliance) * 0.001;
+  // Sleeve compliance fine-grained contribution up to 0.003 when requested.
+  if (input.hasSleeveIntent) bonus += clamp01(input.sleeveCompliance) * 0.003;
   return bonus;
 }
 

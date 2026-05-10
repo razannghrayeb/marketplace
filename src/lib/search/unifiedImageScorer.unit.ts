@@ -81,6 +81,21 @@ test("unified scorer caps pure outerwear leakage in top searches", () => {
   assert.ok(result.score <= 0.572);
 });
 
+test("unified scorer does not let exact color floor rescue sleeve mismatches", () => {
+  const matching = scoreCandidateUnified(baseInput({
+    sleeveCompliance: 1,
+    osSimilarity01: 0.86,
+  }));
+  const mismatched = scoreCandidateUnified(baseInput({
+    sleeveCompliance: 0,
+    osSimilarity01: 0.89,
+  }));
+
+  assert.equal(mismatched.floorReason, null);
+  assert.ok(mismatched.caps.some((cap) => cap.reason === "sleeve_mismatch_cap"));
+  assert.ok(matching.score > mismatched.score);
+});
+
 test("unified scorer caps plain top leakage in outerwear searches", () => {
   const result = scoreCandidateUnified(baseInput({
     exactTypeScore: 0,

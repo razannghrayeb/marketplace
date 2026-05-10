@@ -1568,6 +1568,7 @@ function mainPathTypeHintClusterKey(hint: string): string {
   if (/\b(hoodie|hoodies|hoody|sweatshirt|sweatshirts|pullover|pullovers)\b/.test(h)) return "top:hoodie";
   if (/\b(polos?|polo\s*shirt)\b/.test(h)) return "top:polo";
   if (/\b(suit|suits|tuxedo|tuxedos)\b/.test(h)) return "tailored:suit";
+  if (/\b(vest|vests|waistcoat|waistcoats|gilet|gilets)\b/.test(h)) return "tailored:vest";
   if (/\b(blazer|blazers|sport\s*coat|sportcoat)\b/.test(h)) return "outerwear:blazer";
   if (/\b(coat|coats|overcoat|overcoats|parka|parkas|trench|trenches|puffer\s+coats?|down\s+coats?|long\s+coat|wool\s+coat)\b/.test(h)) return "outerwear:coat";
   if (/\b(blouson|blousons|fleece|fleeces|puffer|puffers|down\s+jackets?|quilted\s+jackets?|rain\s+jackets?|shell\s+jackets?|softshell(?:\s+jackets?)?)\b/.test(h)) return "outerwear:layer";
@@ -1575,13 +1576,46 @@ function mainPathTypeHintClusterKey(hint: string): string {
   return h;
 }
 
-function mainPathPriorityTypeHints(detectionLabel: string, productCategory: string): string[] {
+function normalizeMaterialHintForSearch(value: unknown): string {
+  const s = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!s) return "";
+  if (/\b(wool|woolen|woollen|cashmere|merino|alpaca|mohair|knit|knitted|knitwear|fleece|sherpa)\b/.test(s)) {
+    return "winter";
+  }
+  if (/\b(cotton|linen|ramie|jersey|modal|viscose|rayon|lyocell|tencel|poplin)\b/.test(s)) {
+    return "lightweight";
+  }
+  return "";
+}
+
+function longSleeveTopPriorityHints(detectionLabel: string, materialHint?: string | null, broad = false): string[] {
+  const label = normalizeDetectionLabelForSearch(detectionLabel);
+  const material = normalizeMaterialHintForSearch(materialHint);
+  if (/\b(hoodie|hoodies|hoody|sweatshirt|sweatshirts)\b/.test(label)) {
+    return broad ? ["hoodie", "sweatshirt", "pullover", "top"] : ["hoodie", "sweatshirt", "pullover"];
+  }
+  if (/\b(sweater|cardigan|pullover|jumper|knitwear)\b/.test(label) || material === "winter") {
+    return broad
+      ? ["sweater", "knit tops", "sweatshirt", "cardigan", "knitwear", "hoodie", "hoody", "pullover", "top", "tops"]
+      : ["sweater", "knit tops", "sweatshirt"];
+  }
+  if (material === "lightweight") {
+    return broad
+      ? ["shirt", "woven tops", "shirting", "blouse", "top", "long sleeve", "button down", "tops"]
+      : ["shirt", "woven tops", "shirting"];
+  }
+  return broad
+    ? ["shirt", "woven tops", "top", "sweater", "knit tops", "blouse", "cardigan", "tops"]
+    : ["shirt", "woven tops", "sweater"];
+}
+
+function mainPathPriorityTypeHints(detectionLabel: string, productCategory: string, materialHint?: string | null): string[] {
   const label = normalizeDetectionLabelForSearch(detectionLabel);
   const category = String(productCategory ?? "").toLowerCase().trim();
 
   if (category === "tops") {
     if (/\blong\s+sleeve\b|\bfull\s+sleeve\b/.test(label)) {
-      return ["shirt", "sweater", "hoodie"];
+      return longSleeveTopPriorityHints(label, materialHint, false);
     }
     if (/\bshort\s+sleeve\b|\btee\b|\bt-?shirt\b|\btshirt\b/.test(label)) {
       return ["tshirt", "shirt", "polo"];
@@ -1589,6 +1623,9 @@ function mainPathPriorityTypeHints(detectionLabel: string, productCategory: stri
   }
 
   if (category === "outerwear" || category === "tailored") {
+    if (/\b(vest|vests|waistcoat|waistcoats|gilet|gilets)\b/.test(label)) {
+      return ["vest", "waistcoat", "gilet"];
+    }
     if (/\b(suit|suits|tuxedo|tuxedos)\b/.test(label)) {
       return ["suit", "blazer", "dress jacket"];
     }
@@ -1604,7 +1641,7 @@ function mainPathPriorityTypeHints(detectionLabel: string, productCategory: stri
     if (/\b(puffer|down\s+jacket|quilted\s+jacket|blouson|rain\s+jacket|shell\s+jacket|softshell)\b/.test(label)) {
       return ["puffer", "jacket", "coat"];
     }
-    return ["jacket", "coat", "blazer"];
+    return ["outerwear", "jacket", "outerwear & jackets"];
   }
 
   return [];
@@ -1613,6 +1650,7 @@ function mainPathPriorityTypeHints(detectionLabel: string, productCategory: stri
 export function buildInitialTypeSearchHintsForDetection(params: {
   detectionLabel: string;
   productCategory: string;
+  materialHint?: string | null;
   softProductTypeHints?: string[];
   mainPathOnly?: boolean;
   limit?: number;
@@ -1627,7 +1665,7 @@ export function buildInitialTypeSearchHintsForDetection(params: {
   }
 
   const merged = [
-    ...mainPathPriorityTypeHints(params.detectionLabel, params.productCategory),
+    ...mainPathPriorityTypeHints(params.detectionLabel, params.productCategory, params.materialHint),
     ...softHints,
   ];
   const out: string[] = [];
@@ -2111,13 +2149,6 @@ function hardCategoryTermsForDetection(
   }
 
   if (categoryMapping.productCategory === "outerwear") {
-    if (hasCaptionSuitCue) {
-      const tailoredTerms = getCategorySearchTerms("tailored").map((t) => String(t).toLowerCase().trim());
-      // Suit listings are often indexed as outerwear, so keep both formalwear and
-      // outerwear vocabulary in the recall set rather than narrowing to tailored only.
-      const merged = [...new Set([...tailoredTerms, ...baseTerms])];
-      return merged.length > 0 ? merged : baseTerms;
-    }
     const isVestLike = /\bvest\b|\bgilet\b|\bwaistcoat\b/.test(l);
     const isBlazerLike = /\b(blazer|blazers|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket)\b/.test(l);
     const isCoatLike = /\b(coat|coats|overcoat|overcoats|parka|parkas|trench|trenches|puffer\s+coats?|down\s+coats?|windbreaker|windbreakers)\b/.test(l);
@@ -2132,6 +2163,13 @@ function hardCategoryTermsForDetection(
         .map((t) => String(t).toLowerCase().trim())
         .filter((t) => /\b(vest|vests|tank|tank top|camisole|cami|sleeveless)\b/.test(t));
       const merged = [...new Set([...formalVest, ...fashionVest])];
+      return merged.length > 0 ? merged : baseTerms;
+    }
+    if (hasCaptionSuitCue) {
+      const tailoredTerms = getCategorySearchTerms("tailored").map((t) => String(t).toLowerCase().trim());
+      // Suit listings are often indexed as outerwear, so keep both formalwear and
+      // outerwear vocabulary in the recall set rather than narrowing to tailored only.
+      const merged = [...new Set([...tailoredTerms, ...baseTerms])];
       return merged.length > 0 ? merged : baseTerms;
     }
     if (isBlazerLike) {
@@ -2546,7 +2584,9 @@ export function inferOuterwearSuitSignal(input: {
   }
 
   // Step 2: extract individual signals.
-  const blipSuitCue = /\b(suit|suiting|blazer|sport\s*coat|dress\s*jacket|suit\s*jacket|tuxedo|waistcoat)\b/.test(captionNorm);
+  const blipFullSuitCue = /\b(suit|suits|suiting|tuxedo|tuxedos)\b/.test(captionNorm);
+  const blipJacketSuitCue = /\b(blazer|sport\s*coat|dress\s*jacket|suit\s*jacket|waistcoat)\b/.test(captionNorm);
+  const blipSuitCue = blipFullSuitCue || blipJacketSuitCue;
   const blipFormalCue = /\b(formal|business\s*formal|smart|tailored|elegant)\b/.test(captionNorm);
   const weddingCue = /\b(wedding|black[-\s]?tie|ceremony|bow\s*tie|bowtie)\b/.test(captionNorm);
   const tieCue = /\btie\b/.test(captionNorm);
@@ -2576,13 +2616,14 @@ export function inferOuterwearSuitSignal(input: {
     structuredTopAndTailoredBottom &&
     productCategory === "outerwear" &&
     !isExplicitCoatLabel &&
-    !casualOuterwearConflict;
+    !casualOuterwearConflict &&
+    (blipFormalCue || tieCue || weddingCue || blipJacketSuitCue);
 
   const suitCue =
     blipSuitCue ||
     weddingCue ||
     (tieCue && formality >= 6) ||
-    (formality >= 8) ||
+    (formality >= 8 && (blipFormalCue || blipJacketSuitCue)) ||
     (structuredTopAndTailoredBottom && (blipFormalCue || tieCue)) ||
     structuredTailoredSuitCue;
 
@@ -2620,7 +2661,7 @@ export function inferOuterwearSuitSignal(input: {
       case "suit_full":
         return [...SUIT_FULL_TYPES, "tailored", ...BLAZER_TYPES];
       case "suit_jacket":
-        return [...BLAZER_TYPES, ...SUIT_FULL_TYPES, "tailored", "outerwear"];
+        return [...BLAZER_TYPES, ...(blipJacketSuitCue || isExplicitBlazerLabel ? SUIT_FULL_TYPES : []), "tailored", "outerwear"];
       case "blazer":
         return [...BLAZER_TYPES, ...(suitCue ? SUIT_FULL_TYPES : []), "outerwear", "tailored"];
       case "vest":
@@ -2645,7 +2686,7 @@ export function inferOuterwearSuitSignal(input: {
       case "suit_full":
         return [...SUIT_FULL_TYPES, ...BLAZER_TYPES];
       case "suit_jacket":
-        return [...BLAZER_TYPES, ...SUIT_FULL_TYPES];
+        return [...BLAZER_TYPES, ...(blipJacketSuitCue || isExplicitBlazerLabel ? SUIT_FULL_TYPES : [])];
       case "blazer":
         return [...BLAZER_TYPES, ...(suitCue ? SUIT_FULL_TYPES : [])];
       case "vest":
@@ -3263,7 +3304,53 @@ function dedupeDetectionsByCategoryHighestConfidence(detections: Detection[]): D
     }
   }
 
-  return result;
+  return suppressCrossCategoryDuplicateLayerDetections(result);
+}
+
+function suppressCrossCategoryDuplicateLayerDetections(detections: Detection[]): Detection[] {
+  if (!Array.isArray(detections) || detections.length <= 1) return detections;
+
+  const shouldDrop = new Set<Detection>();
+  for (const candidate of detections) {
+    const candidateCategory = mapDetectionToCategory(candidate.label, candidate.confidence).productCategory;
+    if (candidateCategory !== "tops") continue;
+
+    const candidateLabel = normalizeLooseText(candidate.label);
+    const candidateConf = Number.isFinite(candidate.confidence) ? Number(candidate.confidence) : 0;
+    const candidateArea = detectionBoxArea(candidate.box);
+    if (candidateArea <= 0 || candidateConf >= 0.55) continue;
+
+    for (const other of detections) {
+      if (other === candidate) continue;
+      const otherCategory = mapDetectionToCategory(other.label, other.confidence).productCategory;
+      const otherLabel = normalizeLooseText(other.label);
+      if (otherCategory !== "outerwear" || !/\b(vest|gilet|waistcoat)\b/.test(otherLabel)) continue;
+
+      const otherConf = Number.isFinite(other.confidence) ? Number(other.confidence) : 0;
+      if (otherConf < candidateConf + 0.05) continue;
+
+      const otherArea = detectionBoxArea(other.box);
+      if (otherArea <= 0) continue;
+
+      const overlap = intersectionArea(candidate.box, other.box);
+      const containment = overlap / Math.max(1e-6, Math.min(candidateArea, otherArea));
+      const iou = boundingBoxIou(candidate.box, other.box);
+      const isGenericTopDuplicate =
+        /\b(long sleeve top|short sleeve top|top|shirt|blouse)\b/.test(candidateLabel) &&
+        (containment >= 0.86 || iou >= 0.72);
+      if (isGenericTopDuplicate) {
+        shouldDrop.add(candidate);
+        break;
+      }
+    }
+  }
+
+  if (shouldDrop.size === 0) return detections;
+  const kept = detections.filter((d) => !shouldDrop.has(d));
+  console.log(
+    `[dedupe-cross-category] kept=${kept.length}/${detections.length} dropped=${shouldDrop.size}`,
+  );
+  return kept;
 }
 
 function imagePrimaryDetectionBoost(): number {
@@ -3605,6 +3692,12 @@ function applyDetectionCategoryGuard(
 
     const allowByTerm = allowedTerms.some((term) => textHasWholePhrase(haystack, term));
     if (!allowByTerm) {
+      const vestLikeOuterwearDetection =
+        (categoryMapping.productCategory === "outerwear" || categoryMapping.productCategory === "tailored") &&
+        /\b(vest|vests|gilet|gilets|waistcoat|waistcoats)\b/.test(normalizeLooseText(detectionLabel));
+      if (vestLikeOuterwearDetection) {
+        return false;
+      }
       // Apparel detections are sometimes under-described in catalog metadata
       // (for example, a true dress can be indexed with a generic fashion title).
       // If the strict term gate would zero the result set, rescue only candidates
@@ -4155,7 +4248,11 @@ export function applyRelevanceThresholdFilter(
     };
     if (canUseGenericColorRank && rows.length > 1) {
       const decorated = rows.map(decorateWithDesiredColorScore);
-      const shouldKeepOnlyColorQualified = desiredColorConfidence >= 0.82;
+      const highConfidenceColorCutoff =
+        categoryNorm === "outerwear" || categoryNorm === "tailored"
+          ? 0.78
+          : 0.82;
+      const shouldKeepOnlyColorQualified = desiredColorConfidence >= highConfidenceColorCutoff;
       const colorQualified = decorated.filter((item) => {
         const compliance = Number(((item as any)?.explain ?? {}).desiredColorCompliance ?? 0);
         return compliance >= 0.58;
@@ -6709,6 +6806,18 @@ export class ImageAnalysisService {
           const categoryMapping = normalizeCategoryMapping(mapDetectionToCategory(label, detection.confidence, {
             box_normalized: (detection as any).box_normalized,
           }));
+          const textureMaterialPromise = inferMaterialFromTextureCrop({
+            clipBuffer,
+            productCategory: categoryMapping.productCategory,
+            detectionLabel: label,
+            caption:
+              categoryMapping.productCategory === "tops" ||
+                categoryMapping.productCategory === "bottoms" ||
+                categoryMapping.productCategory === "dresses" ||
+                categoryMapping.productCategory === "outerwear"
+                ? null
+                : blipCaption,
+          }).catch(() => ({ material: null, confidence: 0 }));
           const skipDetectionBlip =
             shopLookSkipDetectionBlipCategories().has(
               String(categoryMapping.productCategory || "").toLowerCase(),
@@ -6758,6 +6867,11 @@ export class ImageAnalysisService {
             confidence: detection.confidence,
             areaRatio: detection.area_ratio,
           });
+          const textureMaterial = await textureMaterialPromise;
+          const confidentTextureMaterial =
+            textureMaterial.material && textureMaterial.confidence >= imageMinMaterialConfidenceEnv()
+              ? textureMaterial.material
+              : null;
           // Synthetic formality cue forces suit-type recovery when the contextual signal
           // is strong (structured top + tailored bottom, BLIP-derived formality, etc.) even
           // when neither YOLO label nor BLIP caption literally contain the word "suit" or
@@ -6792,7 +6906,7 @@ export class ImageAnalysisService {
               const shortTopPriority = ["tshirt", "shirt", "polo", "top", "tops"];
               softProductTypeHints = [...new Set([...shortTopPriority, ...softProductTypeHints])];
             } else if (isLongSleeveTop) {
-              const longTopPriority = ["shirt", "sweater", "hoodie", "blouse", "cardigan", "knitwear", "pullover", "top", "tops"];
+              const longTopPriority = longSleeveTopPriorityHints(label, confidentTextureMaterial, true);
               const nonShortSleeveHints = softProductTypeHints.filter(
                 (t) => !/\b(t-?shirt|tshirt|tee|tees|tank|camisole|cami|sleeveless|crop top|polo)\b/i.test(String(t)),
               );
@@ -6850,26 +6964,37 @@ export class ImageAnalysisService {
             contextualFormalityScore,
           });
           if (outerwearSuitSignal.isOuterwearOrSuit && outerwearSuitSignal.prioritySeedTypes.length > 0) {
-            // Push subtype-specific priority seeds (e.g. ["suit","suits","tuxedo",
-            // "blazer",...] for a suit_full detection) to the front so they survive
-            // truncation in initialTypeSearchHints (top-3) and the kNN candidate
-            // pool actually contains suits / blazers / etc., not just generic
-            // jackets that happen to be visually similar.
+            const labelNormForOuterwearType = normalizeDetectionLabelForSearch(`${label} ${detection.raw_label ?? ""}`);
+            const genericLongSleeveOuterwear =
+              /\blong\s*sleeve\s*(?:outwear|outerwear)\b/.test(labelNormForOuterwearType);
+            const explicitOuterwearSubtypeCue =
+              /\b(blazer|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket|tailored\s*jacket|jacket|jackets|coat|coats|overcoat|trench|parka|puffer|fleece|bomber|blouson|windbreaker|rain\s*jacket|shell\s*jacket|softshell|shacket|shirt\s*jacket|vest|waistcoat|gilet)\b/.test(
+                `${labelNormForOuterwearType} ${blipCaptionNorm}`,
+              );
+            const shouldHardFilterOuterwearType =
+              !genericLongSleeveOuterwear || explicitOuterwearSubtypeCue;
+            // Push subtype-specific priority seeds to the front so they survive
+            // truncation in initialTypeSearchHints. For the generic detector label
+            // "long sleeve outwear", keep those seeds soft unless a real subtype
+            // cue exists; hard productTypes here can otherwise empty the query or
+            // over-rank full suits for a plain jacket crop.
             softProductTypeHints = [
               ...new Set([
                 ...outerwearSuitSignal.prioritySeedTypes,
                 ...softProductTypeHints,
               ]),
             ];
-            const existingProductTypes = Array.isArray(filters.productTypes)
-              ? filters.productTypes
-              : [];
-            filters.productTypes = [
-              ...new Set([
-                ...existingProductTypes,
-                ...outerwearSuitSignal.prioritySeedTypes,
-              ]),
-            ].slice(0, 12);
+            if (shouldHardFilterOuterwearType) {
+              const existingProductTypes = Array.isArray(filters.productTypes)
+                ? filters.productTypes
+                : [];
+              filters.productTypes = [
+                ...new Set([
+                  ...existingProductTypes,
+                  ...outerwearSuitSignal.prioritySeedTypes,
+                ]),
+              ].slice(0, 12);
+            }
           }
           if (hasSuitCaptionCue && categoryMapping.productCategory === "tops") {
             const suitTopPriority = [
@@ -6898,6 +7023,9 @@ export class ImageAnalysisService {
               "formal pants",
             ];
             softProductTypeHints = [...new Set([...suitBottomPriority, ...softProductTypeHints])];
+            const existingTypes = Array.isArray(filters.productTypes) ? filters.productTypes : [];
+            filters.productTypes = [...new Set([...existingTypes, ...suitBottomPriority])].slice(0, 10);
+            filters.softStyle = "semi-formal";
           }
           if (shouldForceTypeFilterForDetection(detection, categoryMapping, strongTypeSeeds)) {
             filters.productTypes = strongTypeSeeds.slice(0, 10);
@@ -6923,19 +7051,6 @@ export class ImageAnalysisService {
             productCategory: categoryMapping.productCategory,
             detectionLabel: label,
           }).catch(() => []);
-
-          const textureMaterialPromise = inferMaterialFromTextureCrop({
-            clipBuffer,
-            productCategory: categoryMapping.productCategory,
-            detectionLabel: label,
-            caption:
-              categoryMapping.productCategory === "tops" ||
-                categoryMapping.productCategory === "bottoms" ||
-                categoryMapping.productCategory === "dresses" ||
-                categoryMapping.productCategory === "outerwear"
-                ? null
-                : blipCaption,
-          }).catch(() => ({ material: null, confidence: 0 }));
 
           // Preserve category-slot color from full-image caption (e.g. "blue jeans")
           // only as a low-priority fallback for this detection.
@@ -7031,7 +7146,7 @@ export class ImageAnalysisService {
             filters.softStyle = "semi-formal";
             delete (filters as any).minFormality;
           }
-          if (categoryMapping.productCategory === "bottoms") {
+          if (categoryMapping.productCategory === "bottoms" && !hasSuitCaptionCue) {
             delete (filters as any).softStyle;
             delete (filters as any).minFormality;
           }
@@ -7039,7 +7154,7 @@ export class ImageAnalysisService {
             mainPathOnly &&
             (
               categoryMapping.productCategory === "tops" ||
-              categoryMapping.productCategory === "bottoms" ||
+              (categoryMapping.productCategory === "bottoms" && !hasSuitCaptionCue) ||
               categoryMapping.productCategory === "dresses" ||
               categoryMapping.productCategory === "outerwear"
             )
@@ -7291,7 +7406,6 @@ export class ImageAnalysisService {
             categoryMapping.productCategory === "outerwear"
               ? "embedding"
               : shopTheLookKnnField();
-          const textureMaterial = await textureMaterialPromise;
           if (textureMaterial.material && textureMaterial.confidence >= imageMinMaterialConfidenceEnv()) {
             (filters as any).material = textureMaterial.material;
           }
@@ -7317,6 +7431,7 @@ export class ImageAnalysisService {
           const initialTypeSearchHints = buildInitialTypeSearchHintsForDetection({
             detectionLabel: label,
             productCategory: detectionProductCategoryForSearch,
+            materialHint: confidentTextureMaterial,
             softProductTypeHints: preBlipSoftTypeHints,
             mainPathOnly,
             limit: mainPathOnly ? 3 : Math.max(1, Math.min(3, detectionSearchCallLimit)),
@@ -9657,6 +9772,30 @@ export class ImageAnalysisService {
             contextualFormalityScore,
             blipCaption,
           );
+          const blipCaptionNorm = String(blipCaption ?? "").toLowerCase();
+          const hasSuitCaptionCue =
+            /\b(suit|suiting|blazer|sport coat|dress jacket|suit jacket|tuxedo|waistcoat|vest)\b/.test(blipCaptionNorm) ||
+            (/\btie\b/.test(blipCaptionNorm) && contextualFormalityScore >= 6) ||
+            (contextualFormalityScore >= 8 &&
+              (categoryMapping.productCategory === "tops" ||
+                categoryMapping.productCategory === "outerwear" ||
+                categoryMapping.productCategory === "bottoms")) ||
+            /\b(wedding|black-tie|black tie|ceremony|bow tie|bowtie|business formal)\b/.test(
+              blipCaptionNorm,
+            );
+          if (hasSuitCaptionCue && categoryMapping.productCategory === "bottoms") {
+            const suitBottomPriority = [
+              "trousers",
+              "dress pants",
+              "slacks",
+              "tailored trousers",
+              "formal pants",
+            ];
+            browseTypeSeeds = [...new Set([...suitBottomPriority, ...browseTypeSeeds])];
+            const existingTypes = Array.isArray(filters.productTypes) ? filters.productTypes : [];
+            filters.productTypes = [...new Set([...existingTypes, ...suitBottomPriority])].slice(0, 10);
+            filters.softStyle = "semi-formal";
+          }
           if (shouldForceTypeFilterForDetection(detection, categoryMapping, browseTypeSeeds)) {
             filters.productTypes = browseTypeSeeds.slice(0, 10);
           }
@@ -9722,7 +9861,7 @@ export class ImageAnalysisService {
             filters.softStyle = "semi-formal";
             delete (filters as any).minFormality;
           }
-          if (categoryMapping.productCategory === "bottoms") {
+          if (categoryMapping.productCategory === "bottoms" && !hasSuitCaptionCue) {
             delete (filters as any).softStyle;
             delete (filters as any).minFormality;
           }
