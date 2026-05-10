@@ -1,12 +1,7 @@
 /**
- * Ensure OpenSearch Index Schema with Part-Level Embeddings
- * 
- * This script:
- * 1. Creates the index if it doesn't exist (via ensureIndex)
- * 2. Detects if part embedding fields are missing
- * 3. Non-breaking update: adds missing part fields to existing index
- * 
- * Safe to run multiple times. No data loss.
+ * Ensure OpenSearch Index Schema with Part-Level Embeddings and scalar ranking fields.
+ *
+ * Safe to run multiple times. It only adds missing mappings; it does not delete data.
  */
 
 import { osClient, ensureIndex } from "../src/lib/core/opensearch";
@@ -26,37 +21,38 @@ const PART_EMBEDDING_FIELDS = [
   "embedding_part_pattern_patch",
 ];
 
-async function ensurePartEmbeddingFields() {
+const SCALAR_FIELDS: Record<string, any> = {
+  product_quality_score: { type: "float" },
+};
+
+async function ensureOpenSearchSchema() {
   const index = config.opensearch.index;
 
   try {
-    // 1. Ensure index exists
     console.log(`[1/3] Ensuring index exists: ${index}`);
     await ensureIndex();
-    console.log(`     ✓ Index exists`);
+    console.log("     Index exists");
 
-    // 2. Get current mapping
-    console.log(`[2/3] Checking for missing part embedding fields`);
+    console.log("[2/3] Checking for missing part embedding/scalar fields");
     const mapping = await osClient.indices.getMapping({ index });
     const properties = mapping.body[index].mappings.properties;
 
-    const missingFields = PART_EMBEDDING_FIELDS.filter(
-      (field) => !properties[field]
-    );
+    const missingPartFields = PART_EMBEDDING_FIELDS.filter((field) => !properties[field]);
+    const missingScalarFields = Object.keys(SCALAR_FIELDS).filter((field) => !properties[field]);
 
-    if (missingFields.length === 0) {
-      console.log(`     ✓ All 9 part embedding fields already exist`);
+    if (missingPartFields.length === 0 && missingScalarFields.length === 0) {
+      console.log("     All part embedding and scalar fields already exist");
       return;
     }
 
-    console.log(`     ⚠ Found ${missingFields.length} missing field(s):`);
-    missingFields.forEach((f) => console.log(`       - ${f}`));
+    console.log(`     Missing fields: ${missingPartFields.length + missingScalarFields.length}`);
+    missingPartFields.forEach((field) => console.log(`       - ${field}`));
+    missingScalarFields.forEach((field) => console.log(`       - ${field}`));
 
-    // 3. Add missing fields via non-breaking mapping update
-    console.log(`[3/3] Adding missing fields to mapping`);
+    console.log("[3/3] Adding missing fields to mapping");
     const newProperties: Record<string, any> = {};
 
-    missingFields.forEach((field) => {
+    for (const field of missingPartFields) {
       newProperties[field] = {
         type: "knn_vector",
         dimension: EMBEDDING_DIM,
@@ -70,7 +66,11 @@ async function ensurePartEmbeddingFields() {
           },
         },
       };
-    });
+    }
+
+    for (const field of missingScalarFields) {
+      newProperties[field] = SCALAR_FIELDS[field];
+    }
 
     await osClient.indices.putMapping({
       index,
@@ -79,21 +79,19 @@ async function ensurePartEmbeddingFields() {
       },
     });
 
-    console.log(`     ✓ Successfully added ${missingFields.length} field(s)`);
+    console.log(`     Successfully added ${Object.keys(newProperties).length} field(s)`);
     console.log("");
-    console.log("✅ Schema update complete. Index is ready for Phase 1.");
+    console.log("Schema update complete.");
     console.log("");
     console.log("Next steps:");
-    console.log(`  1. Run reindex: npx tsx scripts/resume-reindex.ts --force`);
-    console.log(`  2. Monitor indexing progress (takes 1-2 days for full catalog)`);
-    console.log(`  3. Stage rollout: SEARCH_IMAGE_PART_WEIGHT=20 (start at 2%)`);
+    console.log("  1. Run reindex/backfill so existing docs receive product_quality_score");
+    console.log("  2. Run diagnose-image-pipeline-health.ts or a field count to verify coverage");
   } catch (error) {
-    console.error("❌ Schema update failed:", error);
+    console.error("Schema update failed:", error);
     process.exit(1);
   }
 }
 
-// Run
-ensurePartEmbeddingFields().then(() => {
+ensureOpenSearchSchema().then(() => {
   process.exit(0);
 });

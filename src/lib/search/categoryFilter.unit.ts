@@ -44,6 +44,19 @@ describe("categoryFilter", () => {
     expect(t.includes("pouches")).toBe(true);
     expect(t.includes("crossbody bags")).toBe(true);
     expect(t.includes("card holders")).toBe(true);
+    expect(t.includes("bags cases and luggage")).toBe(true);
+    expect(t.includes("carry on")).toBe(true);
+    expect(t.includes("shoulder straps")).toBe(true);
+    expect(t.includes("mini bags")).toBe(true);
+    expect(t.includes("tote bags")).toBe(true);
+  });
+
+  test("getCategorySearchTerms expands footwear catalog aliases", () => {
+    const t = getCategorySearchTerms("footwear");
+    expect(t.includes("flats + other")).toBe(true);
+    expect(t.includes("shoes-cl")).toBe(true);
+    expect(t.includes("shoes-sp")).toBe(true);
+    expect(t.includes("after ski boot")).toBe(true);
   });
 
   test("getCategorySearchTerms expands tailored aliases", () => {
@@ -92,6 +105,13 @@ describe("categoryFilter", () => {
     expect(inferCategoryCanonical("7/8 Tight", "")).toBe("bottoms");
     expect(inferCategoryCanonical("POUCHES", "")).toBe("bags");
     expect(inferCategoryCanonical("CARD HOLDERS", "")).toBe("bags");
+    expect(inferCategoryCanonical("Bags cases and Luggage", "")).toBe("bags");
+    expect(inferCategoryCanonical("CARRY ON", "")).toBe("bags");
+    expect(inferCategoryCanonical("LARGE LUGGAGES", "")).toBe("bags");
+    expect(inferCategoryCanonical("MEDIUM LUGGAGES", "")).toBe("bags");
+    expect(inferCategoryCanonical("SHOULDER STRAPS", "")).toBe("bags");
+    expect(inferCategoryCanonical("MINI BAGS", "")).toBe("bags");
+    expect(inferCategoryCanonical("TOTE BAGS", "")).toBe("bags");
     expect(inferCategoryCanonical("CAPS & HATS", "")).toBe("accessories");
     expect(inferCategoryCanonical("UNDERWEAR TRUNKS", "")).toBe("underwear");
     expect(inferCategoryCanonical("Bathroom Essentials", "")).toBe("beauty");

@@ -234,6 +234,8 @@ const CATEGORY_ALIASES: Record<string, string[]> = {
     "running shoe",
     "athletic shoes",
     "athletic shoe",
+    "shoes-cl",
+    "shoes-sp",
     "tennis shoes",
     "tennis shoe",
     "boots",
@@ -280,8 +282,6 @@ const CATEGORY_ALIASES: Record<string, string[]> = {
     "espadrille",
     "dress shoes",
     "dress shoe",
-    "shoes-cl",
-    "shoes-sp",
   ],
   accessories: [
     "accessories",
@@ -348,29 +348,49 @@ const CATEGORY_ALIASES: Record<string, string[]> = {
     "purses",
     "tote",
     "totes",
+    "tote bags",
     "pouch",
     "pouches",
     "backpack",
     "backpacks",
     "hand bags",
+    "mini bags",
     "shopping bags",
+    "shopping bag",
     "shoulder bags",
+    "shoulder bag",
+    "shoulder straps",
+    "shoulder strap",
     "top handle bags",
+    "top handle bag",
     "waist bags",
+    "waist bag",
     "pouches",
     "duffle bags",
+    "duffle bag",
+    "duffel bags",
+    "duffel bag",
     "travel bags",
+    "travel bag",
     "lunch bags",
+    "lunch bag",
     "toiletry bags",
+    "toiletry bag",
     "laptop cases",
     "phone cases",
     "pen cases",
     "card holders",
     "card holder",
     "bags cases and luggage",
-    "carry on",
+    "bags cases luggage",
+    "luggage",
+    "luggages",
+    "large luggage",
     "large luggages",
+    "medium luggage",
     "medium luggages",
+    "carry on",
+    "carry-on",
     "crossbody",
     "crossbody bags",
     "crossover bags",
@@ -642,13 +662,13 @@ export function inferCategoryCanonical(rawCategory: string | null | undefined, t
   }
   if (
     norm &&
-    /\b(top\s+handle\s+bags?|hand\s*bags?|handbags?|wallets?|purses?|pouches?|backpacks?|clutches|crossbody(?:\s+bags?)?|crossover(?:\s+bags?)?|shoulder\s+bags?|shopping\s+bags?|waist\s+bags?|duffle\s+bags?|travel\s+bags?|lunch\s+bags?|toiletry\s+bags?|laptop\s+(?:cases|bags)|card\s+holders?|carry\s+on|luggages?|leather\s+goods)\b/.test(norm)
+    /\b(top\s+handle\s+bags?|hand\s*bags?|handbags?|wallets?|purses?|pouches?|backpacks?|clutches|crossbody(?:\s+bags?)?|crossover(?:\s+bags?)?|shoulder\s+(?:bags?|straps?)|shopping\s+bags?|tote\s+bags?|mini\s+bags?|waist\s+bags?|duff(?:le|el)\s+bags?|travel\s+bags?|lunch\s+bags?|toiletry\s+bags?|laptop\s+(?:cases|bags)|card\s+holders?|carry[-\s]?on|(?:large|medium)\s+luggages?|luggages?|leather\s+goods|bags?\s+cases?\s+(?:and\s+)?luggage)\b/.test(norm)
   ) {
     return "bags";
   }
   if (
     cat &&
-    /\b(bags?|hand\s*bags?|handbags?|wallets?|purses?|pouches?|backpacks?|clutches|crossbody(?:\s+bags?)?|crossover(?:\s+bags?)?|shoulder\s+bags?|shopping\s+bags?|top\s+handle\s+bags?|waist\s+bags?|duffle\s+bags?|travel\s+bags?|lunch\s+bags?|toiletry\s+bags?|laptop\s+(?:cases|bags)|card\s+holders?|carry\s+on|luggages?|leather\s+goods)\b/.test(cat)
+    /\b(bags?|hand\s*bags?|handbags?|wallets?|purses?|pouches?|backpacks?|clutches|crossbody(?:\s+bags?)?|crossover(?:\s+bags?)?|shoulder\s+(?:bags?|straps?)|shopping\s+bags?|tote\s+bags?|mini\s+bags?|top\s+handle\s+bags?|waist\s+bags?|duff(?:le|el)\s+bags?|travel\s+bags?|lunch\s+bags?|toiletry\s+bags?|laptop\s+(?:cases|bags)|card\s+holders?|carry[-\s]?on|(?:large|medium)\s+luggages?|luggages?|leather\s+goods|bags?\s+cases?\s+(?:and\s+)?luggage)\b/.test(cat)
   ) {
     return "bags";
   }

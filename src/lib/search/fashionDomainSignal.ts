@@ -39,13 +39,15 @@ async function loadFashionTextPrototype(): Promise<number[] | null> {
     "suit",
     "abaya",
   ];
-  const vecs: number[][] = [];
-  for (const s of seeds) {
-    const v = await getQueryEmbedding(s);
-    if (v?.length) vecs.push(l2Normalize(v));
-  }
+  const vecs = (await Promise.all(seeds.map((s) => getQueryEmbedding(s))))
+    .filter((v): v is number[] => Boolean(v?.length))
+    .map((v) => l2Normalize(v));
   fashionPrototype = meanVec(vecs);
   return fashionPrototype;
+}
+
+function hasObviousFashionTerm(rawQuery: string): boolean {
+  return /\b(dress|dresses|jeans|denim|sneakers?|shoes?|heels?|boots?|sandals?|jacket|coat|blazer|shirt|t-?shirt|tee|top|blouse|hoodie|sweater|cardigan|skirt|pants|trousers?|shorts|leggings?|suit|tuxedo|abaya|kaftan|gown|handbags?|bags?|wallet|scarf|belt|hat|cap|jewelry|necklace|earrings?|bracelet|ring)\b/i.test(rawQuery);
 }
 
 /**
@@ -55,6 +57,7 @@ async function loadFashionTextPrototype(): Promise<number[] | null> {
 export async function computeEmbeddingFashionScore(rawQuery: string): Promise<number | null> {
   const q = rawQuery.trim();
   if (!q) return null;
+  if (hasObviousFashionTerm(q)) return 1;
   const [qEmb, proto] = await Promise.all([getQueryEmbedding(q), loadFashionTextPrototype()]);
   if (!qEmb?.length || !proto?.length) return null;
   const sim = cosineSim(l2Normalize(qEmb), proto);

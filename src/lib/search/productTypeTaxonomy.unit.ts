@@ -132,6 +132,9 @@ describe("scoreRerankProductTypeBreakdown", () => {
   test("common footwear catalog phrases map to subtype clusters", () => {
     expect(scoreRerankProductTypeBreakdown(["sneakers"], ["running shoes"]).combinedTypeCompliance).toBeGreaterThan(0.6);
     expect(scoreRerankProductTypeBreakdown(["dress shoes"], ["oxfords"]).combinedTypeCompliance).toBeGreaterThan(0.6);
+    expect(scoreRerankProductTypeBreakdown(["flats"], ["Flats + Other"]).combinedTypeCompliance).toBeGreaterThan(0.6);
+    expect(scoreRerankProductTypeBreakdown(["sneakers"], ["shoes-sp"]).combinedTypeCompliance).toBeGreaterThan(0.6);
+    expect(scoreRerankProductTypeBreakdown(["loafers"], ["shoes-cl"]).combinedTypeCompliance).toBeGreaterThan(0.6);
   });
 
   test("hoodie vs dress shirt are distinct tops", () => {
@@ -249,9 +252,17 @@ describe("extractLexicalProductTypeSeeds", () => {
     expect(extractLexicalProductTypeSeeds("TRACKSUITS & TRACK TROUSERS")).toContain("tracksuits & track trousers");
     expect(extractLexicalProductTypeSeeds("7/8 Tight")).toContain("7/8 tight");
     expect(extractLexicalProductTypeSeeds("After Ski Boot")).toContain("after ski boot");
+    expect(extractLexicalProductTypeSeeds("Flats + Other")).toContain("flats + other");
+    expect(extractLexicalProductTypeSeeds("shoes-cl")).toContain("shoes-cl");
+    expect(extractLexicalProductTypeSeeds("shoes-sp")).toContain("shoes-sp");
     expect(extractLexicalProductTypeSeeds("POUCHES")).toContain("pouches");
     expect(extractLexicalProductTypeSeeds("CARD HOLDERS")).toContain("card holders");
     expect(extractLexicalProductTypeSeeds("TOP HANDLE BAGS")).toContain("top handle bags");
+    expect(extractLexicalProductTypeSeeds("Bags cases and Luggage")).toContain("bags cases and luggage");
+    expect(extractLexicalProductTypeSeeds("CARRY ON")).toContain("carry on");
+    expect(extractLexicalProductTypeSeeds("SHOULDER STRAPS")).toContain("shoulder straps");
+    expect(extractLexicalProductTypeSeeds("MINI BAGS")).toContain("mini bags");
+    expect(extractLexicalProductTypeSeeds("TOTE BAGS")).toContain("tote bags");
   });
 
   test("vest dress: outerwear vest token dropped when aisle is dresses", () => {
@@ -329,6 +340,9 @@ describe("inferMacroFamiliesFromListingCategoryFields", () => {
     expect(inferMacroFamiliesFromListingCategoryFields(undefined, "waterproof raincoat")).toEqual(new Set(["outerwear"]));
     expect(inferMacroFamiliesFromListingCategoryFields(undefined, "lapel blazer")).toEqual(new Set(["outerwear"]));
     expect(inferMacroFamiliesFromListingCategoryFields(undefined, "After Ski Boot")).toEqual(new Set(["footwear"]));
+    expect(inferMacroFamiliesFromListingCategoryFields(undefined, "shoes-cl")).toEqual(new Set(["footwear"]));
     expect(inferMacroFamiliesFromListingCategoryFields(undefined, "POUCHES")).toEqual(new Set(["bags"]));
+    expect(inferMacroFamiliesFromListingCategoryFields(undefined, "Bags cases and Luggage")).toEqual(new Set(["bags"]));
+    expect(inferMacroFamiliesFromListingCategoryFields(undefined, "CARRY ON")).toEqual(new Set(["bags"]));
   });
 });
