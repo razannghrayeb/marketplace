@@ -588,6 +588,15 @@ function catalogTypeSeedsFromText(value: unknown): string[] {
     .filter(Boolean);
 }
 
+function catalogTypeSeedsFromSource(src: Record<string, unknown>): string[] {
+  return [
+    ...catalogTypeSeedsFromText(src.title),
+    ...catalogTypeSeedsFromText(src.description),
+    ...catalogTypeSeedsFromText(normalizeCatalogUrlText(src.product_url)),
+    ...catalogTypeSeedsFromText(normalizeCatalogUrlText(src.parent_product_url)),
+  ];
+}
+
 function scoreCatalogTypeEvidence(
   desiredProductTypes: string[],
   src: Record<string, unknown>,
@@ -610,8 +619,8 @@ function scoreCatalogTypeEvidence(
   const candidates = [
     { source: "category", weight: 1, seeds: categorySeeds },
     { source: "title", weight: 0.82, seeds: titleSeeds },
-    { source: "description", weight: 0.56, seeds: descriptionSeeds },
-    { source: "url", weight: 0.42, seeds: urlSeeds },
+    { source: "description", weight: 0.6, seeds: descriptionSeeds },
+    { source: "url", weight: 0.62, seeds: urlSeeds },
   ];
 
   let best = { score: 0, source: "none", exact: false };
@@ -1147,13 +1156,25 @@ export function computeHitRelevance(
       ? hit._source.category_canonical
       : undefined;
 
+  const catalogProductTypeSeeds = catalogTypeSeedsFromSource(src);
+  const productTypesForFamilyPenalty =
+    catalogProductTypeSeeds.length > 0
+      ? [...new Set([...productTypes, ...catalogProductTypeSeeds])]
+      : productTypes;
+
   let crossFamilyPenalty =
     desiredProductTypes.length > 0
-      ? scoreCrossFamilyTypePenalty(desiredProductTypes, productTypes, {
+      ? scoreCrossFamilyTypePenalty(desiredProductTypes, productTypesForFamilyPenalty, {
           category: docCategoryForPenalty,
           categoryCanonical: docCanonicalForPenalty,
         })
       : 0;
+  if (catalogTypeEvidence.score >= 0.55 && catalogTypeEvidence.source !== "category") {
+    // Title/URL/description are often more reliable than sparse vendor categories.
+    // Keep some penalty for contradictory catalog metadata, but do not let category
+    // alone hard-block a row with strong textual type evidence.
+    crossFamilyPenalty = Math.min(crossFamilyPenalty, 0.55);
+  }
 
   // Style compliance: keyword match on indexed `attr_style`.
   // We keep this intentionally simple so it works well with `keyword` fields.
@@ -1543,7 +1564,15 @@ export function computeHitRelevance(
   const suitIntent = /\b(suit|suits|two[-\s]?piece|three[-\s]?piece|matching\s*suit)\b/.test(intentBlob);
 
   // Document-level family detection (used for hard-blocking non-matching families)
-  const docBlobForFamily = [src.category, src.category_canonical, src.title, ...(Array.isArray(productTypes) ? productTypes : [])]
+  const docBlobForFamily = [
+    src.category,
+    src.category_canonical,
+    src.title,
+    src.description,
+    normalizeCatalogUrlText(src.product_url),
+    normalizeCatalogUrlText(src.parent_product_url),
+    ...(Array.isArray(productTypes) ? productTypes : []),
+  ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();

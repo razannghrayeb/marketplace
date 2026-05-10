@@ -1,7 +1,16 @@
-/* Minimal declarations for test globals to satisfy static checks */
-declare const describe: any;
-declare const test: any;
-declare const expect: any;
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+
+function expect(actual: any) {
+  return {
+    toBe(expected: any) {
+      assert.equal(actual, expected);
+    },
+    toEqual(expected: any) {
+      assert.deepEqual(actual, expected);
+    },
+  };
+}
 
 import {
   getCategorySearchTerms,
@@ -32,6 +41,9 @@ describe("categoryFilter", () => {
     const t = getCategorySearchTerms("bags");
     expect(t.includes("handbag")).toBe(true);
     expect(t.includes("wallet")).toBe(true);
+    expect(t.includes("pouches")).toBe(true);
+    expect(t.includes("crossbody bags")).toBe(true);
+    expect(t.includes("card holders")).toBe(true);
   });
 
   test("getCategorySearchTerms expands tailored aliases", () => {
@@ -62,9 +74,9 @@ describe("categoryFilter", () => {
   });
 
   test("inferCategoryCanonical maps vendor label to aisle", () => {
-    expect(inferCategoryCanonical("Bags", "")).toBe("accessories");
+    expect(inferCategoryCanonical("Bags", "")).toBe("bags");
     expect(inferCategoryCanonical(null, "Men crew neck tee shirt")).toBe("tops");
-    expect(inferCategoryCanonical(null, "Top Handle Bag")).toBe("accessories");
+    expect(inferCategoryCanonical(null, "Top Handle Bag")).toBe("bags");
     expect(inferCategoryCanonical("TOP HANDLE BAGS", "")).toBe("bags");
     expect(inferCategoryCanonical("Knit Tops", "")).toBe("tops");
     expect(inferCategoryCanonical("Woven Tops", "")).toBe("tops");
@@ -74,6 +86,15 @@ describe("categoryFilter", () => {
     expect(inferCategoryCanonical("Fleece", "")).toBe("outerwear");
     expect(inferCategoryCanonical("PARKAS & BLOUSONS", "")).toBe("outerwear");
     expect(inferCategoryCanonical("After Ski Boot", "")).toBe("footwear");
+    expect(inferCategoryCanonical("Flats + Other", "")).toBe("footwear");
+    expect(inferCategoryCanonical("Ballerinas", "")).toBe("footwear");
+    expect(inferCategoryCanonical("TRACKSUITS & TRACK TROUSERS", "")).toBe("bottoms");
+    expect(inferCategoryCanonical("7/8 Tight", "")).toBe("bottoms");
+    expect(inferCategoryCanonical("POUCHES", "")).toBe("bags");
+    expect(inferCategoryCanonical("CARD HOLDERS", "")).toBe("bags");
+    expect(inferCategoryCanonical("CAPS & HATS", "")).toBe("accessories");
+    expect(inferCategoryCanonical("UNDERWEAR TRUNKS", "")).toBe("underwear");
+    expect(inferCategoryCanonical("Bathroom Essentials", "")).toBe("beauty");
     expect(inferCategoryCanonical("SKIN CARE", "")).toBe("beauty");
     expect(inferCategoryCanonical("CONCEALERS", "")).toBe("beauty");
     expect(inferCategoryCanonical(null, "Men's suit jacket")).toBe("tailored");
