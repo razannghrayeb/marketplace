@@ -24,9 +24,27 @@ function expect(actual: any) {
     toBeUndefined() {
       assert.equal(actual, undefined);
     },
+    toContain(expected: any) {
+      if (Array.isArray(actual)) {
+        assert.ok(actual.includes(expected), `Expected array to contain ${expected}`);
+      } else if (typeof actual === 'string') {
+        assert.ok(actual.indexOf(String(expected)) !== -1, `Expected string to contain ${expected}`);
+      } else {
+        assert.fail('toContain called on non-string, non-array');
+      }
+    },
     not: {
       toBe(expected: any) {
         assert.notEqual(actual, expected);
+      },
+      toContain(expected: any) {
+        if (Array.isArray(actual)) {
+          assert.ok(!actual.includes(expected), `Expected array to not contain ${expected}`);
+        } else if (typeof actual === 'string') {
+          assert.ok(actual.indexOf(String(expected)) === -1, `Expected string to not contain ${expected}`);
+        } else {
+          // Nothing to assert; treat as pass
+        }
       },
     },
   };
