@@ -4164,7 +4164,6 @@ export function applyRelevanceThresholdFilter(
     category?: string;
     desiredColor?: string | string[];
     desiredColorConfidence?: number;
-    desiredColorExplicit?: boolean;
   },
 ): ProductResult[] {
   const relevanceDebugEnabled =
@@ -4253,8 +4252,7 @@ export function applyRelevanceThresholdFilter(
         categoryNorm === "outerwear" || categoryNorm === "tailored"
           ? 0.78
           : 0.82;
-      const desiredColorExplicit = Boolean(options?.desiredColorExplicit);
-      const shouldKeepOnlyColorQualified = desiredColorExplicit && desiredColorConfidence >= highConfidenceColorCutoff;
+      const shouldKeepOnlyColorQualified = desiredColorConfidence >= highConfidenceColorCutoff;
       const colorQualified = decorated.filter((item) => {
         const compliance = Number(((item as any)?.explain ?? {}).desiredColorCompliance ?? 0);
         return compliance >= 0.58;
