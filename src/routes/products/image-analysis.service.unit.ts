@@ -353,7 +353,7 @@ describe("applyRelevanceThresholdFilter", () => {
         { id: "black-3", title: "Charcoal Black Suit", color: "charcoal", finalRelevance01: 0.48, explain: {} } as any,
       ],
       0.3,
-      { category: "outerwear", desiredColor: "charcoal", desiredColorConfidence: 1, desiredColorExplicit: true },
+      { category: "outerwear", desiredColor: "charcoal", desiredColorConfidence: 1 },
     );
 
     expect(kept.map((p: any) => p.id)).toEqual(["black-1", "black-2", "black-3"]);
