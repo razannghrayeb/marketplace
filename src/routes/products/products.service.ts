@@ -231,6 +231,15 @@ export interface ProductResult {
   candidateScore?: number;
 }
 
+const IMAGE_SIMILARITY_SCORE_DECIMALS = 4;
+const IMAGE_SIMILARITY_SCORE_SCALE = 10 ** IMAGE_SIMILARITY_SCORE_DECIMALS;
+
+function roundImageSimilarityScore(score: number): number {
+  if (!Number.isFinite(score)) return 0;
+  const clamped = Math.max(0, Math.min(1, score));
+  return Math.round(clamped * IMAGE_SIMILARITY_SCORE_SCALE) / IMAGE_SIMILARITY_SCORE_SCALE;
+}
+
 // ============================================================================
 // Unified Candidate Generator
 // ============================================================================
@@ -3181,7 +3190,9 @@ function hasOppositeGenderSignalForQuery(
   const menRe = /\b(men|mens|male|man|gents?|gentlemen)\b/;
   const womenRe = /\b(women|womens|female|lady|ladies|woman)\b/;
   const womenStyleCue = /\b(dress|dresses|gown|skirt|skirted|blouse|camisole|cami|heels?|pumps?|stiletto|mary jane|handbag|clutch|tote|purse|vest\s*dress|sling\s*dress|abaya|kaftan|mini\s*skirt|midi\s*skirt|maxi\s*skirt)\b/;
-  const menStyleCue = /\b(suit|suits|tie|oxford|oxfords|dress\s*shirt|button\s*down|button-down|briefs|boxer|boxers|cargo\s*pants?|chino|chinos|loafer|loafers|briefcase|messenger|sport\s*coat|blazer)\b/;
+  // Keep shared tailored items gender-neutral here. In particular, "blazer" is common
+  // in women's catalogs and should not make a neutral outerwear row look male-only.
+  const menStyleCue = /\b(suit|suits|tie|oxford|oxfords|dress\s*shirt|button\s*down|button-down|briefs|boxer|boxers|cargo\s*pants?|chino|chinos|loafer|loafers|briefcase|messenger|sport\s*coat)\b/;
   const hasMenCue = menRe.test(blob);
   const hasWomenCue = womenRe.test(blob);
   const hasWomenStyleCue = womenStyleCue.test(blob);
@@ -5613,7 +5624,7 @@ export async function searchByImageWithSimilarity(
         const sim = scoreMap.get(String(p.id)) ?? 0;
         return {
           ...p,
-          similarity_score: Math.round(sim * 100) / 100,
+          similarity_score: roundImageSimilarityScore(sim),
           match_type: sim >= config.clip.matchTypeExactMin ? ("exact" as const) : ("similar" as const),
           rerankScore: undefined,
           finalRelevance01: sim,
@@ -9375,7 +9386,7 @@ export async function searchByImageWithSimilarity(
       useMerchSimForThresholdAndPrimarySort
         ? (merchandiseSimById.get(id) ?? visualSimFromHit(hit))
         : visualSimFromHit(hit);
-    scoreMap.set(id, Math.round(sim * 100) / 100);
+    scoreMap.set(id, roundImageSimilarityScore(sim));
   });
 
   // Fetch product card data. Product rows started hydrating right after kNN,
@@ -10421,6 +10432,12 @@ export async function searchByImageWithSimilarity(
       /\b(jacket|jackets|coat|coats|outerwear|blazer|blazers|parka|parkas|vest|gilet|waistcoat|fleece)\b/.test(
         desiredTypeBlobForLateGate,
       );
+    const wantsFullSuitForLateGate =
+      detectionCategoryForLateGate === "tailored" ||
+      hasStrictFullSuitIntent(desiredProductTypes) ||
+      /\b(suit|suits|tuxedo|tuxedos|two[-\s]?piece|three[-\s]?piece|matching\s+suit)\b/.test(
+        `${desiredTypeBlobForLateGate} ${String(params.detectionLabel ?? "")}`.toLowerCase(),
+      );
     const markLateFamilyDrop = (p: any, reason: string): false => {
       const id = String((p as any)?.id ?? "");
       lateDetectionFamilyDropReasons[reason] = (lateDetectionFamilyDropReasons[reason] ?? 0) + 1;
@@ -10478,6 +10495,14 @@ export async function searchByImageWithSimilarity(
         !wantsOuterwearLikeForLateGate
       ) {
         return markLateFamilyDrop(p, "outerwear_not_top");
+      }
+      if (
+        hasStrictLateCategory &&
+        detectionCategoryForLateGate === "outerwear" &&
+        !wantsFullSuitForLateGate &&
+        hasActualSuitCatalogCue(p as unknown as Record<string, unknown>)
+      ) {
+        return markLateFamilyDrop(p, "full_suit_without_suit_intent");
       }
       if (crossFamily >= 0.5) return markLateFamilyDrop(p, "cross_family_penalty");
       if (isDressDetection) {
@@ -11293,7 +11318,7 @@ async function findSimilarByPHash(
     const distance = distanceMap.get(p.id) || 64;
     return {
       ...p,
-      similarity_score: Math.round((1 - distance / 64) * 100) / 100,
+      similarity_score: roundImageSimilarityScore(1 - distance / 64),
       match_type: "related" as const,
       images: images.map((img) => ({
         id: img.id,

@@ -1,12 +1,33 @@
-/* Minimal declarations for test globals to satisfy static checks */
-declare const describe: any;
-declare const test: any;
-declare const expect: any;
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+
+function expect(actual: any) {
+  return {
+    toBe(expected: any) {
+      assert.equal(actual, expected);
+    },
+    toEqual(expected: any) {
+      assert.deepStrictEqual(actual, expected);
+    },
+    toContain(expected: any) {
+      assert.ok(actual.includes(expected), `${JSON.stringify(actual)} does not contain ${JSON.stringify(expected)}`);
+    },
+    toHaveLength(expected: number) {
+      assert.equal(actual.length, expected);
+    },
+    not: {
+      toContain(expected: any) {
+        assert.ok(!actual.includes(expected), `${JSON.stringify(actual)} unexpectedly contains ${JSON.stringify(expected)}`);
+      },
+    },
+  };
+}
 
 import {
   applyRelevanceThresholdFilter,
   applySleeveIntentGuard,
   buildInitialTypeSearchHintsForDetection,
+  hardCategoryTermsForDetection,
   inferOuterwearSuitSignal,
   inferFootwearSubtypeFromCaption,
   normalizeDetectionLabelForSearch,
@@ -89,6 +110,22 @@ describe("main-path detection search hints", () => {
         limit: 3,
       }),
     ).toEqual(["outerwear", "jacket", "outerwear & jackets"]);
+  });
+
+  test("keeps generic long-sleeve outwear hard category terms out of the full-suit lane", () => {
+    const terms = hardCategoryTermsForDetection(
+      "long sleeve outwear",
+      { productCategory: "outerwear" } as any,
+      undefined,
+      "a man standing on a street in front of a building",
+    );
+
+    expect(terms).toContain("jacket");
+    expect(terms).toContain("blazer");
+    expect(terms).not.toContain("suit");
+    expect(terms).not.toContain("suits");
+    expect(terms).not.toContain("tuxedo");
+    expect(terms).not.toContain("tuxedos");
   });
 
   test("uses vest-specific seeds for vest detections", () => {
@@ -210,6 +247,21 @@ describe("outerwear suit signal", () => {
     expect(signal.prioritySeedTypes.slice(0, 4)).toEqual(["blazer", "blazers", "sport coat", "sportcoat"]);
     expect(signal.prioritySeedTypes.includes("suit")).toBe(false);
   });
+
+  test("promotes a formal top crop into the tailored lane when the outfit context is strong", () => {
+    const signal = inferOuterwearSuitSignal({
+      yoloLabel: "long sleeve top",
+      detectionRawLabel: "long sleeve top",
+      productCategoryFromMapping: "tops",
+      blipCaption: "formal portrait",
+      contextualFormalityScore: 7,
+    });
+
+    expect(signal.isOuterwearOrSuit).toBe(true);
+    expect(signal.subtype).toBe("suit_jacket");
+    expect(signal.detectionCategoryForSearch).toBe("tailored");
+    expect(signal.predictedAisles).toEqual(["tailored", "outerwear"]);
+  });
 });
 
 describe("applyRelevanceThresholdFilter", () => {
@@ -251,7 +303,7 @@ describe("applyRelevanceThresholdFilter", () => {
     expect(kept).toHaveLength(0);
   });
 
-  test("prioritizes high-confidence inferred charcoal over grey outerwear", () => {
+  test("uses high-confidence inferred charcoal as a soft rank signal for outerwear", () => {
     const kept = applyRelevanceThresholdFilter(
       [
         { id: "grey", title: "Grey Suit", color: "GREY", finalRelevance01: 0.82, explain: {} } as any,
@@ -261,6 +313,21 @@ describe("applyRelevanceThresholdFilter", () => {
       ],
       0.3,
       { category: "outerwear", desiredColor: "charcoal", desiredColorConfidence: 0.80 },
+    );
+
+    expect(kept.map((p: any) => p.id)).toEqual(["black-1", "black-2", "black-3", "grey"]);
+  });
+
+  test("uses explicit charcoal as a hard color qualifier for outerwear when enough matches exist", () => {
+    const kept = applyRelevanceThresholdFilter(
+      [
+        { id: "grey", title: "Grey Suit", color: "GREY", finalRelevance01: 0.82, explain: {} } as any,
+        { id: "black-1", title: "Black Suit", color: "BLACK", finalRelevance01: 0.52, explain: {} } as any,
+        { id: "black-2", title: "Classic Black Suit", color: "black", finalRelevance01: 0.5, explain: {} } as any,
+        { id: "black-3", title: "Charcoal Black Suit", color: "charcoal", finalRelevance01: 0.48, explain: {} } as any,
+      ],
+      0.3,
+      { category: "outerwear", desiredColor: "charcoal", desiredColorConfidence: 1, desiredColorExplicit: true },
     );
 
     expect(kept.map((p: any) => p.id)).toEqual(["black-1", "black-2", "black-3"]);

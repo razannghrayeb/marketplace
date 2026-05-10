@@ -1970,7 +1970,7 @@ function isBottomCatalogCue(text: string): boolean {
   );
 }
 
-function hardCategoryTermsForDetection(
+export function hardCategoryTermsForDetection(
   detectionLabel: string,
   categoryMapping: CategoryMapping,
   opts?: { confidence?: number; areaRatio?: number; forceSuitCue?: boolean },
@@ -1996,7 +1996,7 @@ function hardCategoryTermsForDetection(
     const topIntent = parseTopDetectionIntent(detectionLabel);
     const isShortTop = topIntent.isShortTop;
     const isVestTop = topIntent.isVestTop;
-    const isTailoredIntent = hasFormalTailoringCue(detectionLabel);
+    const isTailoredIntent = hasFormalTailoringCue(detectionLabel) || hasCaptionSuitCue;
     if (isVestTop) {
       const vestTopTerms = baseTerms.filter((t) =>
         /\b(vest|vests|waistcoat|waistcoats|gilet|sleeveless top|tank|tank top|camisole|cami)\b/.test(t),
@@ -2154,6 +2154,13 @@ function hardCategoryTermsForDetection(
     const isBlazerLike = /\b(blazer|blazers|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket)\b/.test(l);
     const isCoatLike = /\b(coat|coats|overcoat|overcoats|parka|parkas|trench|trenches|puffer\s+coats?|down\s+coats?|windbreaker|windbreakers)\b/.test(l);
     const isJacketLike = /\b(jacket|jackets|shirt\s*jacket|shacket|overshirt|bomber|bombers|blouson|blousons|fleece|fleeces|puffer|puffers|down\s+jackets?|quilted\s+jackets?|rain\s+jackets?|shell\s+jackets?|softshell(?:\s+jackets?)?)\b/.test(l);
+    const isGenericLongSleeveOuterwear =
+      hasLongSleeveCue &&
+      /\b(?:outwear|outerwear)\b/.test(l) &&
+      !isVestLike &&
+      !isBlazerLike &&
+      !isCoatLike &&
+      !isJacketLike;
     if (isVestLike) {
       // Vest can be formal (waistcoat/suit vest) or fashion (sleeveless-top style).
       // Return union of outerwear vest terms + sleeveless top terms so both types surface.
@@ -2172,6 +2179,12 @@ function hardCategoryTermsForDetection(
       // outerwear vocabulary in the recall set rather than narrowing to tailored only.
       const merged = [...new Set([...tailoredTerms, ...baseTerms])];
       return merged.length > 0 ? merged : baseTerms;
+    }
+    if (isGenericLongSleeveOuterwear) {
+      const jacketLayerTerms = baseTerms.filter((t) =>
+        /\b(outerwear|outwear|coats?\s*&\s*jackets?|outerwear\s*&\s*jackets?|jacket|jackets|coat|coats|blazer|blazers|sport\s*coat|sportcoat|shirt\s*jacket|shirt\s*jackets|shacket|shackets|overshirt|overshirts|bomber|bombers|bomber\s*jacket|blouson|blousons|fleece|fleeces|fleece\s*jacket|puffer|puffers|puffer\s*jacket|puffer\s*coat|down\s*jacket|down\s*coat|quilted\s*jacket|rain\s*jacket|shell\s*jacket|softshell|softshell\s*jacket|parka|parkas|trench|trenches|windbreaker|windbreakers|overcoat|overcoats|leather\s*jacket|denim\s*jacket)\b/.test(t),
+      ).filter((t) => !/\b(suit|suits|tuxedo|tuxedos|waistcoat|waistcoats|vest|vests|gilet|gilets)\b/.test(t));
+      return jacketLayerTerms.length > 0 ? jacketLayerTerms : baseTerms;
     }
     if (isBlazerLike) {
       const blazerTerms = baseTerms.filter((t) => /\b(blazer|blazers|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket)\b/.test(t));
@@ -2569,8 +2582,10 @@ export function inferOuterwearSuitSignal(input: {
   const productCategory = String(input.productCategoryFromMapping ?? "").toLowerCase().trim();
   const formality = Math.max(0, Math.min(10, Number(input.contextualFormalityScore) || 0));
 
-  // Step 1: gate. Only run for outerwear/tailored category. Everything else short-circuits.
-  if (productCategory !== "outerwear" && productCategory !== "tailored") {
+  // Step 1: gate. Outerwear/tailored always qualify; strongly formal top detections can also
+  // promote into the tailored lane when the outfit signal already says the crop is suit-like.
+  const topSuitRecoveryEligible = productCategory === "tops" && formality >= 7;
+  if (productCategory !== "outerwear" && productCategory !== "tailored" && !topSuitRecoveryEligible) {
     return {
       isOuterwearOrSuit: false,
       subtype: "unknown",
@@ -2635,7 +2650,7 @@ export function inferOuterwearSuitSignal(input: {
     weddingCue ||
     (tieCue && formality >= 6) ||
     (formality >= 8 && (blipFormalCue || blipJacketSuitCue)) ||
-    (structuredTopAndTailoredBottom && (blipFormalCue || tieCue)) ||
+    (structuredTopAndTailoredBottom && (blipFormalCue || tieCue || productCategory === "tops")) ||
     structuredTailoredSuitCue;
 
   let subtype: OuterwearSuitSubtype;
@@ -4200,6 +4215,7 @@ export function applyRelevanceThresholdFilter(
     category?: string;
     desiredColor?: string | string[];
     desiredColorConfidence?: number;
+    desiredColorExplicit?: boolean;
   },
 ): ProductResult[] {
   const relevanceDebugEnabled =
@@ -4215,6 +4231,7 @@ export function applyRelevanceThresholdFilter(
   const rankApparelByDesiredColor = (rows: ProductResult[]): ProductResult[] => {
     const categoryNorm = String(options?.category ?? "").toLowerCase().trim();
     const desiredColorConfidence = Number(options?.desiredColorConfidence ?? 0);
+    const desiredColorExplicit = Boolean(options?.desiredColorExplicit);
     const canUseGenericColorRank =
       !prefersWhiteFamily &&
       desiredColorTokens.length > 0 &&
@@ -4288,7 +4305,8 @@ export function applyRelevanceThresholdFilter(
         categoryNorm === "outerwear" || categoryNorm === "tailored"
           ? 0.78
           : 0.82;
-      const shouldKeepOnlyColorQualified = desiredColorConfidence >= highConfidenceColorCutoff;
+      const shouldKeepOnlyColorQualified =
+        desiredColorExplicit && desiredColorConfidence >= highConfidenceColorCutoff;
       const colorQualified = decorated.filter((item) => {
         const compliance = Number(((item as any)?.explain ?? {}).desiredColorCompliance ?? 0);
         return compliance >= 0.58;
@@ -9186,6 +9204,7 @@ export class ImageAnalysisService {
         category: detection.category,
         desiredColor: inferredDesiredColorState.color,
         desiredColorConfidence: inferredDesiredColorState.confidence,
+        desiredColorExplicit: (detection.appliedFilters as any)?.color != null && String((detection.appliedFilters as any)?.color).trim().length > 0,
       });
       const droppedByFinalRelevance = Math.max(0, beforeProducts.length - afterProducts.length);
       const droppedByColorGate = beforeProducts.filter((prod) => {
@@ -10904,6 +10923,7 @@ export class ImageAnalysisService {
         category: detection.category,
         desiredColor: inferredDesiredColorState.color,
         desiredColorConfidence: inferredDesiredColorState.confidence,
+        desiredColorExplicit: (detection.appliedFilters as any)?.color != null && String((detection.appliedFilters as any)?.color).trim().length > 0,
       });
       const droppedByFinalRelevance = Math.max(0, beforeProducts.length - afterProducts.length);
       const droppedByColorGate = beforeProducts.filter((prod) => {
