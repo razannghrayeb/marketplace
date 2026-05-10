@@ -94,18 +94,21 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function publicSortedProducts(products: unknown): Record<string, unknown>[] {
+function publicSortedProducts(products: unknown, options: { includeExplain?: boolean; includeScoreDebug?: boolean } = {}): Record<string, unknown>[] {
   if (!Array.isArray(products)) return [];
-  // Sort by score descending for each detection's products, { includeExplain: wantsRankingExplain(req) }
+  // Sort by score descending for each detection's products.
   const sorted = (products as any[]).sort((a: any, b: any) => {
     const scoreA = a.score ?? a.similarity_score ?? a.rerankScore ?? 0;
     const scoreB = b.score ?? b.similarity_score ?? b.rerankScore ?? 0;
     return scoreB - scoreA; // Descending: highest score first
   });
-  return toPublicSearchProducts(sortProductsByUnifiedScorer(sorted));
+  return toPublicSearchProducts(sortProductsByUnifiedScorer(sorted), options);
 }
 
-function publicSimilarProductsPayload<T extends Record<string, any>>(payload: T): T {
+function publicSimilarProductsPayload<T extends Record<string, any>>(
+  payload: T,
+  options: { includeExplain?: boolean; includeScoreDebug?: boolean } = {},
+): T {
   if (!payload.similarProducts || !Array.isArray(payload.similarProducts.byDetection)) return payload;
   return {
     ...payload,
@@ -115,7 +118,7 @@ function publicSimilarProductsPayload<T extends Record<string, any>>(payload: T)
         const { debug: _debug, ...publicRow } = row;
         return {
           ...publicRow,
-          products: publicSortedProducts(row.products),
+          products: publicSortedProducts(row.products, options),
         };
       }),
     },
@@ -382,12 +385,19 @@ router.post(
       // Don't expose raw embedding to clients
       const { embedding, ...safeResult } = result;
 
-      const payload = publicSimilarProductsPayload(safeResult as any);
+      const rankingExplain = wantsRankingExplain(req);
+      const payload = publicSimilarProductsPayload(safeResult as any, {
+        includeExplain: rankingExplain,
+        includeScoreDebug: rankingExplain,
+      });
       if (payload.similarProducts && Array.isArray(payload.similarProducts.byDetection)) {
         const originalByDetection = (payload.similarProducts.byDetection as Array<any>).map((row) => ({
           ...row,
           products: Array.isArray(row.products)
-            ? publicSortedProducts(row.products)
+            ? publicSortedProducts(row.products, {
+                includeExplain: rankingExplain,
+                includeScoreDebug: rankingExplain,
+              })
             : [],
         }));
 
@@ -568,7 +578,10 @@ router.post(
 
       return res.json({
         success: true,
-        ...publicSimilarProductsPayload(safeResult as any),
+        ...publicSimilarProductsPayload(safeResult as any, {
+          includeExplain: wantsRankingExplain(req),
+          includeScoreDebug: wantsRankingExplain(req),
+        }),
       });
     } catch (error) {
       next(error);
@@ -614,7 +627,10 @@ router.post(
 
       return res.json({
         success: true,
-        ...publicSimilarProductsPayload(result as any),
+        ...publicSimilarProductsPayload(result as any, {
+          includeExplain: wantsRankingExplain(req),
+          includeScoreDebug: wantsRankingExplain(req),
+        }),
       });
     } catch (error) {
       next(error);

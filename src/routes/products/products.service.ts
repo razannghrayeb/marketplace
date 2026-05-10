@@ -14,7 +14,7 @@ import {
   dedupeImageSearchResults,
   filterRelatedAgainstMain,
 } from "../../lib/search/resultDedup";
-import { sortProductsByRelevanceAndCategory, sortProductsByFinalRelevance, sortProductsByUnifiedScorer, unifiedScorerScore } from "../../lib/search/sortResults";
+import { explicitUnifiedScorerScore, sortProductsByRelevanceAndCategory, sortProductsByFinalRelevance, sortProductsByUnifiedScorer, unifiedScorerScore } from "../../lib/search/sortResults";
 import { getCategorySearchTerms } from "../../lib/search/categoryFilter";
 import {
   emitImageSearchEval,
@@ -6185,8 +6185,11 @@ export async function searchByImageWithSimilarity(
     typeof filtersRecord.sleeve === "string"
       ? extractExplicitSleeveIntent(filtersRecord.sleeve) ?? String(filtersRecord.sleeve).toLowerCase().trim()
       : undefined;
+  const desiredSleeveFromDetection = extractExplicitSleeveIntent(
+    `${params.detectionLabel ?? ""} ${params.detectionProductCategory ?? ""}`,
+  );
   const desiredSleeveFromTypes = extractExplicitSleeveIntent(desiredProductTypes.join(" "));
-  const desiredSleeveForRelevance = desiredSleeveFromFilter || desiredSleeveFromTypes;
+  const desiredSleeveForRelevance = desiredSleeveFromFilter || desiredSleeveFromDetection || desiredSleeveFromTypes;
   const desiredSleeveNorm = desiredSleeveForRelevance;
   const isTopDetectionIntent =
     params.detectionProductCategory === "tops" ||
@@ -9947,6 +9950,7 @@ export async function searchByImageWithSimilarity(
             materialCompliance: Number((compliance as any).materialCompliance ?? (compliance as any).materialEmbeddingSim ?? 0),
             categoryRelevance01: Number(compliance.categoryRelevance01 ?? 0),
             osSimilarity01: Number(compliance.osSimilarity01 ?? similarityScore ?? 0),
+            desiredSleeve: desiredSleeveForRelevance,
 
             hasTypeIntent: Boolean(compliance.hasTypeIntent),
             hasColorIntent: Boolean(hasColorPreferenceForRanking || compliance.hasColorIntent),
@@ -10201,7 +10205,7 @@ export async function searchByImageWithSimilarity(
     : effectiveFinalAcceptMin;
   results = results.filter(
     (p: any) => {
-      const scorerAcceptance = unifiedScorerScore(p);
+      const scorerAcceptance = explicitUnifiedScorerScore(p);
       if (scorerAcceptance !== null) return scorerAcceptance >= effectiveFinalResultMin;
       const rankingScore = typeof p.finalRelevance01 === "number" ? p.finalRelevance01 : 0;
       const acceptanceScore = typeof (p.explain as any)?.acceptanceRelevance01 === "number"
