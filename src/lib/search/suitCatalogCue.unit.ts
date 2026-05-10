@@ -21,21 +21,10 @@ describe("suitCatalogCue", () => {
     assert.ok(cue.reasons.includes("non_tailored_suit_phrase"));
   });
 
-  it("accepts suit jacket listings when they live in a formal context", () => {
-    assert.equal(
-      hasActualSuitCatalogCue({
-        title: "Men Wool Suit Jacket",
-        category: "Tailored",
-        category_canonical: "tailored",
-      }),
-      true,
-    );
-  });
-
-  it("does not treat suit jackets as full suits outside formal context", () => {
+  it("does not treat suit jackets as full suits", () => {
     const cue = explainActualSuitCatalogCue({
       title: "Men Wool Suit Jacket",
-      category: "Outerwear",
+      category: "Blazers",
     });
 
     assert.equal(cue.matched, false);

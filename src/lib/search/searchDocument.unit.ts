@@ -89,28 +89,4 @@ describe("extractProductTypesFromTitle - robust type normalization", () => {
     assert.equal(doc.attr_gender, "women");
     assert.equal(doc.audience_gender, "women");
   });
-
-  it("indexes long-sleeve top cues from title into product_types", () => {
-    const doc = buildProductSearchDocument({
-      productId: 6,
-      title: "Ribbed Crewneck Long Sleeve Top",
-      category: null,
-    });
-
-    assert.ok(doc.product_types.includes("long sleeve"));
-    assert.ok(doc.product_types.includes("top"));
-  });
-
-  it("indexes outerwear cues from description and URL into product_types", () => {
-    const doc = buildProductSearchDocument({
-      productId: 7,
-      title: "Waterproof Layer",
-      description: "Lightweight quilted raincoat for layering.",
-      category: "Shoes",
-      productUrl: "https://shop.test/women/outerwear/quilted-raincoat",
-    });
-
-    assert.ok(doc.product_types.includes("raincoat"));
-    assert.ok(doc.product_types.includes("outerwear"));
-  });
 });

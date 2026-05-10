@@ -35,9 +35,9 @@ const BLIP_API_TIMEOUT_MS = Math.max(
 /**
  * ONNX Runtime execution providers for BLIP local sessions.
  * - `BLIP_EXECUTION_PROVIDERS=cuda,cpu` — try CUDA first, then CPU.
- * - `BLIP_EXECUTION_PROVIDERS=dml,cpu` — DirectML on Windows laptops with GPU.
+ * - `BLIP_EXECUTION_PROVIDERS=dml,cpu` — DirectML on Windows.
  * - `BLIP_USE_GPU=true` — shorthand for `cuda,cpu`.
- * - Default: Windows uses `dml,cpu`; other platforms use `cuda,cpu`.
+ * - Default: `cuda,cpu` (GPU-first with CPU fallback).
  */
 function getBlipExecutionProviders(): string[] {
   const raw = process.env.BLIP_EXECUTION_PROVIDERS?.trim();
@@ -47,9 +47,6 @@ function getBlipExecutionProviders(): string[] {
   const gpu = process.env.BLIP_USE_GPU?.trim().toLowerCase();
   if (gpu === 'false' || gpu === '0' || gpu === 'no') {
     return ['cpu'];
-  }
-  if (process.platform === 'win32') {
-    return ['dml', 'cpu'];
   }
   return ['cuda', 'cpu'];
 }

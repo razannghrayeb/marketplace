@@ -57,7 +57,7 @@ var dns_1 = require("dns");
 var config_1 = require("../../config");
 // Force IPv4-first DNS resolution — avoids long IPv6 timeouts on Windows
 // when connecting to cloud-hosted databases (Supabase, Neon, etc.)
-(dns_1.default || dns_1).setDefaultResultOrder("ipv4first");
+dns_1.default.setDefaultResultOrder("ipv4first");
 /**
  * Session-mode poolers (PgBouncer, Supabase pooler on :5432) cap clients at pool_size.
  * Node's pg default max=10 × many instances → MaxClientsInSessionMode.

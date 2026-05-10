@@ -215,7 +215,6 @@ export async function ensureIndex() {
             category_confidence: { type: "float" },
             brand_confidence: { type: "float" },
             type_confidence: { type: "float" },
-            product_quality_score: { type: "float" },
             // Array of product images
             images: {
               type: "nested",

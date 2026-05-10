@@ -1,17 +1,17 @@
 {
-  "timestamp": "2026-05-10T10:06:15.453Z",
-  "dryRun": true,
+  "timestamp": "2026-05-09T21:04:29.892Z",
+  "dryRun": false,
   "options": {
-    "limit": 100,
+    "category": "Fleece",
     "batchSize": 500
   },
   "stats": {
-    "processed": 100,
-    "updated": 63,
-    "skipped": 37,
+    "processed": 346,
+    "updated": 226,
+    "skipped": 120,
     "notFound": 0,
     "errors": 0,
-    "startTime": 1508.4631,
-    "endTime": 37294.0917
+    "startTime": 668.4226,
+    "endTime": 138700.5047
   }
 }
