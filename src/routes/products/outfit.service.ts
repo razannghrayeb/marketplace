@@ -23,6 +23,13 @@ import {
 import { catalogGenderFromCaption } from "../../lib/image/captionAttributeInference";
 import { coarseColorBucket } from "../../lib/color/colorCanonical";
 import { completeStyleCategoryLabel } from "./outfit-category";
+import { designerColorScore } from "../../lib/outfit/colorIntelligence";
+import { inferAnchorTemperatureC, scoreWeatherFit } from "../../lib/outfit/weatherIntelligence";
+import {
+  getStylistDirection,
+  scoreAgainstDirection,
+  type StylistDirection,
+} from "../../lib/outfit/stylistDirection";
 
 // ============================================================================
 // Types
@@ -2082,6 +2089,40 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       ? params.sourceAudienceGenderHint
       : inferGenderSegmentFromText(sourceAudienceText);
 
+  // --- New intelligence layers ------------------------------------------------
+  // (a) Anchor-derived temperature in °C — drives the new weather score.
+  const anchorTempInference = inferAnchorTemperatureC({
+    title: params.sourceProduct.title,
+    category: params.sourceProduct.category,
+    description: params.sourceProduct.description,
+    season: params.sourceStyle.season,
+  });
+  const anchorTempC = anchorTempInference.temperatureC;
+  const anchorFamily = categoryFamily(params.sourceCategory);
+
+  // (b) One Gemini call per anchor for a styling direction. Always resolves;
+  //     falls back to a heuristic spec on any Gemini failure or missing creds.
+  //     User chose no cache — fetched fresh on every /complete-style request.
+  let stylistDirection: StylistDirection;
+  try {
+    stylistDirection = await getStylistDirection({
+      title: params.sourceProduct.title,
+      brand: params.sourceProduct.brand ?? null,
+      category: params.sourceProduct.category ?? null,
+      description: params.sourceProduct.description ?? null,
+      color: params.sourceProduct.color ?? null,
+      family: anchorFamily,
+      style: params.sourceStyle,
+      audienceGender: params.sourceAudienceGenderHint,
+      ageGroup: params.sourceAgeGroupHint,
+    });
+  } catch (err) {
+    // Belt-and-braces: getStylistDirection already swallows errors, but in
+    // case it is changed later, we keep the pipeline alive with a minimal
+    // direction shape so the per-candidate code doesn't need null checks.
+    stylistDirection = { rationale: "", slots: {}, avoid: {}, source: "heuristic" };
+  }
+
   const enriched = await Promise.all(topSuggestions.map(async (s) => {
     const row = rowById.get(s.product_id);
     if (!row) {
@@ -2139,15 +2180,40 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     for (const b of extractColorBucketsFromText(candidateProduct.color)) candidateColorBuckets.add(b);
     for (const b of extractColorBucketsFromText(candidateStyle.colorProfile.primary)) candidateColorBuckets.add(b);
     for (const b of extractColorBucketsFromText(candidateProduct.title)) candidateColorBuckets.add(b);
-    const colorScore = scoreColorCompatibilityByBuckets(sourceColorBuckets, candidateColorBuckets, candidateFamily);
+    const legacyColorScore = scoreColorCompatibilityByBuckets(sourceColorBuckets, candidateColorBuckets, candidateFamily);
+    // Designer-aware color logic. We blend with legacy by the new module's
+    // self-reported confidence so unrecognised colors don't lose the bucket
+    // heuristics' coverage. Higher-confidence designer hits dominate.
+    const designerJudgement = designerColorScore(
+      params.sourceProduct.color || params.sourceStyle.colorProfile.primary,
+      candidateProduct.color || candidateStyle.colorProfile.primary,
+      { candidateIsCoreGarment: isCoreGarmentFamily(candidateFamily) },
+    );
+    const colorScore =
+      designerJudgement.confidence > 0
+        ? designerJudgement.score * designerJudgement.confidence +
+          legacyColorScore * (1 - designerJudgement.confidence)
+        : legacyColorScore;
+
     const aestheticScore = scoreAestheticCompatibility(params.sourceStyle.aesthetic, candidateStyle.aesthetic);
     const formalityScore = scoreFormalityCompatibility(params.sourceStyle.formality, candidateStyle.formality);
     const seasonScore = scoreSeasonCompatibility(params.sourceStyle.season, candidateStyle.season);
-    const weatherScore = scoreWeatherCompatibility(
+
+    // Weather: prefer the temperature-aware fit; fall back to the legacy
+    // season-cue scorer when the candidate can't be classified.
+    const legacyWeatherScore = scoreWeatherCompatibility(
       params.sourceStyle.season,
       candidateProduct.title,
       candidateProduct.category
     );
+    const weatherFit = scoreWeatherFit({
+      anchorTempC,
+      candidateText: `${candidateProduct.title || ""} ${candidateProduct.category || ""} ${candidateProduct.description || ""}`,
+    });
+    const weatherScore =
+      weatherFit.confidence > 0
+        ? weatherFit.score * weatherFit.confidence + legacyWeatherScore * (1 - weatherFit.confidence)
+        : legacyWeatherScore;
     const aestheticGarmentScore = scoreAestheticGarmentCompatibility(
       params.sourceStyle,
       candidateFamily,
@@ -2315,6 +2381,24 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       return null;
     }
 
+    // Stylist-direction signal: SOFT boost when the candidate matches what a
+    // stylist would pair with this anchor; SOFT penalty when it conflicts.
+    // Never hard-rejects — keeps Gemini errors / quirky picks from removing
+    // otherwise-fine candidates. Weights kept small (≤10% of final score)
+    // so the existing 17-feature reranker remains the primary signal.
+    const stylistAlignment = scoreAgainstDirection({
+      direction: stylistDirection,
+      candidateFamily,
+      candidateText: `${candidateProduct.title || ""} ${candidateProduct.category || ""} ${candidateProduct.description || ""}`,
+      candidateColor: candidateProduct.color,
+    });
+    if (stylistAlignment.score !== 0) {
+      const stylistAdjustment = stylistAlignment.score >= 0
+        ? 1 + Math.min(0.08, stylistAlignment.score * 0.1) // up to +8% boost
+        : 1 + Math.max(-0.1, stylistAlignment.score * 0.12); // down to -10% penalty
+      finalScore = Math.round(finalScore * stylistAdjustment * 1000) / 1000;
+    }
+
     const matchReasons = buildFashionReasons({
       categoryScore,
       colorScore,
@@ -2362,11 +2446,29 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       matchReasons.push("pattern clash risk with your anchor piece");
     }
 
+    // Surface the new intelligence signals where they add information the
+    // hand-tuned heuristics didn't already say.
+    if (designerJudgement.confidence >= 0.85 && designerJudgement.score >= 0.9) {
+      matchReasons.unshift(designerJudgement.reason);
+    } else if (designerJudgement.confidence >= 0.85 && designerJudgement.score <= 0.3) {
+      matchReasons.push(designerJudgement.reason);
+    }
+    if (weatherFit.confidence >= 0.6 && weatherFit.score <= 0.55) {
+      matchReasons.push(weatherFit.reason);
+    } else if (weatherFit.confidence >= 0.6 && weatherFit.score >= 0.9) {
+      matchReasons.push(weatherFit.reason);
+    }
+    if (stylistAlignment.score >= 0.35) {
+      matchReasons.unshift(stylistAlignment.reason);
+    } else if (stylistAlignment.score <= -0.2) {
+      matchReasons.push(stylistAlignment.reason);
+    }
+
     return {
       ...s,
       score: finalScore,
       fashionScore: Math.round(fashionScore * 1000) / 1000,
-      matchReasons: matchReasons.slice(0, 5),
+      matchReasons: Array.from(new Set(matchReasons)).slice(0, 6),
       reason: s.reason || "fashion-aware match",
     };
   }));
