@@ -194,6 +194,11 @@ export async function getOutfitRecommendations(
     }
   );
 
+  // Load wardrobe context once so it can flow into rerank scoring, Gemini
+  // stylist direction, and post-rerank slot injection. Resolves to undefined
+  // for anonymous callers — the pipeline stays unchanged in that case.
+  const wardrobeContext = await loadWardrobeContextForCompleteStyle(userId, productId);
+
   const rerankedSuggestions = await rerankCompleteStyleSuggestions({
     sourceProduct,
     sourceStyle,
@@ -203,6 +208,7 @@ export async function getOutfitRecommendations(
     maxSuggestions: Math.max(retrievalPoolSize * 2, maxTotal * 2),
     sourceAudienceGenderHint: audienceGenderHint,
     sourceAgeGroupHint: ageGroupHint,
+    wardrobe: wardrobeContext,
   });
 
   const filteredSuggestions = applyCompleteStyleOptionFilters(
@@ -258,8 +264,29 @@ export async function getOutfitRecommendations(
     rerankedSuggestions
   );
 
+  // Same temperature inference used inside the rerank — reused here so the
+  // wardrobe injection scores items on the same scale as catalog candidates.
+  const anchorTempForInjection = inferAnchorTemperatureC({
+    title: sourceProduct.title,
+    category: sourceProduct.category,
+    description: sourceProduct.description,
+    season: sourceStyle.season,
+  }).temperatureC;
+
+  const finalizeWithWardrobe = (mapped: StyleRecommendationResponse): StyleRecommendationResponse => {
+    if (!wardrobeContext) return mapped;
+    return injectOwnedWardrobeItemsIntoResponse({
+      response: mapped,
+      wardrobe: wardrobeContext,
+      sourceProduct,
+      sourceStyle,
+      anchorTempC: anchorTempForInjection,
+      maxPerCategory,
+    });
+  };
+
   if (balancedWithCoreSlots.length > 0) {
-    return mapCompleteLookToStyleResponse({
+    return finalizeWithWardrobe(mapCompleteLookToStyleResponse({
       sourceProduct,
       completeLookResult: {
         ...completeLookResult,
@@ -269,7 +296,7 @@ export async function getOutfitRecommendations(
       maxPerCategory,
       detectedCategory: resolvedSourceCategory,
       sourceStyle,
-    });
+    }));
   }
 
   // Main-path rescue: keep response in complete-look pipeline with a lighter coverage fallback.
@@ -284,7 +311,7 @@ export async function getOutfitRecommendations(
     rerankedSuggestions
   );
   if (relaxedWithCoreSlots.length > 0) {
-    return mapCompleteLookToStyleResponse({
+    return finalizeWithWardrobe(mapCompleteLookToStyleResponse({
       sourceProduct,
       completeLookResult: {
         ...completeLookResult,
@@ -294,7 +321,7 @@ export async function getOutfitRecommendations(
       maxPerCategory,
       detectedCategory: resolvedSourceCategory,
       sourceStyle,
-    });
+    }));
   }
 
   // Optional legacy fallback, disabled by default to avoid quality regressions.
@@ -311,7 +338,7 @@ export async function getOutfitRecommendations(
     return formatOutfitCompletion(userId ? await mergeWardrobeOwnedIntoCompletion(result, userId, options) : result);
   }
 
-  return mapCompleteLookToStyleResponse({
+  return finalizeWithWardrobe(mapCompleteLookToStyleResponse({
     sourceProduct,
     completeLookResult: {
       ...completeLookResult,
@@ -321,7 +348,7 @@ export async function getOutfitRecommendations(
     maxPerCategory,
     detectedCategory: resolvedSourceCategory,
     sourceStyle,
-  });
+  }));
 
   // Log impressions for training data (async, non-blocking)
   // Intentionally skipped when no legacy result is used.
@@ -638,18 +665,243 @@ function formatOutfitCompletion(result: OutfitCompletion): StyleRecommendationRe
 
 type CompleteLookMappedSourceProduct = Product & { gender?: string | null };
 
+/**
+ * Compact view of the requesting user's wardrobe used by the complete-style
+ * rerank: detected slot per item, plus the raw product so we can inject owned
+ * items directly into the response when they fit a missing/needed slot.
+ */
+type WardrobeContextItem = {
+  product: Product;
+  detectedCategory: ProductCategory;
+  family: string;
+};
+
+type WardrobeContext = {
+  items: WardrobeContextItem[];
+  /** Set of catalog product ids the user owns (fast `has` lookup in rerank). */
+  productIds: Set<number>;
+  /** Short text lines for the Gemini stylist prompt. */
+  summaries: string[];
+};
+
+/** Maps the user-facing bucket label produced by completeStyleCategoryLabel
+ * back to the internal `family` tag used in WardrobeContextItem. */
+const BUCKET_LABEL_TO_FAMILY: Record<string, string> = {
+  Tops: "tops",
+  Bottoms: "bottoms",
+  Shoes: "shoes",
+  Bags: "bags",
+  Outerwear: "outerwear",
+  Dress: "dress",
+  Dresses: "dress",
+  Accessories: "accessories",
+};
+
+/**
+ * After the main rerank + mapping, surface owned wardrobe items that fit the
+ * recommendation slots even when the catalog search didn't return them.
+ *
+ * Pure read on the already-loaded wardrobe context — no DB call, no Gemini.
+ * Items are scored with the new color/weather intelligence so their match
+ * score is on the same scale as the catalog suggestions, then inserted at
+ * the top of the matching bucket with `owned: true`.
+ */
+function injectOwnedWardrobeItemsIntoResponse(params: {
+  response: StyleRecommendationResponse;
+  wardrobe: WardrobeContext;
+  sourceProduct: CompleteLookMappedSourceProduct;
+  sourceStyle: StyleProfile;
+  anchorTempC: number;
+  maxPerCategory: number;
+}): StyleRecommendationResponse {
+  const { response, wardrobe, sourceProduct, sourceStyle, anchorTempC, maxPerCategory } = params;
+  if (!wardrobe.items.length) return response;
+
+  // Build family -> items map for fast lookup per bucket.
+  const itemsByFamily = new Map<string, WardrobeContextItem[]>();
+  for (const item of wardrobe.items) {
+    const fam = item.family || "unknown";
+    if (!itemsByFamily.has(fam)) itemsByFamily.set(fam, []);
+    itemsByFamily.get(fam)!.push(item);
+  }
+
+  for (const rec of response.recommendations) {
+    const family = BUCKET_LABEL_TO_FAMILY[rec.category];
+    if (!family) continue;
+    const wardrobeForSlot = itemsByFamily.get(family);
+    if (!wardrobeForSlot || wardrobeForSlot.length === 0) continue;
+
+    const existingIds = new Set(rec.products.map((p) => p.id));
+    const additions: typeof rec.products = [];
+
+    for (const item of wardrobeForSlot) {
+      if (existingIds.has(item.product.id)) {
+        // Already in the bucket — make sure the owned flag is set.
+        const inBucket = rec.products.find((p) => p.id === item.product.id);
+        if (inBucket && inBucket.owned !== true) {
+          inBucket.owned = true;
+          if (!inBucket.matchReasons.includes("In your wardrobe")) {
+            inBucket.matchReasons = ["In your wardrobe", ...inBucket.matchReasons].slice(0, 6);
+          }
+        }
+        continue;
+      }
+
+      // Score with the same intelligence used in the catalog rerank.
+      const designerJudgement = designerColorScore(
+        sourceProduct.color || sourceStyle.colorProfile.primary,
+        item.product.color || null,
+        { candidateIsCoreGarment: isCoreGarmentFamily(family) },
+      );
+      const weatherFit = scoreWeatherFit({
+        anchorTempC,
+        candidateText: `${item.product.title || ""} ${item.product.category || ""} ${item.product.description || ""}`,
+      });
+      // Baseline 0.55 (owned items are usable by default), then layer in
+      // color & weather signals. Bounded [0, 1].
+      let combined = 0.55;
+      if (designerJudgement.confidence > 0) {
+        combined += (designerJudgement.score - 0.55) * 0.35;
+      }
+      if (weatherFit.confidence > 0) {
+        combined += (weatherFit.score - 0.55) * 0.2;
+      }
+      combined = Math.max(0, Math.min(1, combined));
+
+      const matchReasons: string[] = ["In your wardrobe"];
+      if (designerJudgement.confidence >= 0.7 && designerJudgement.score >= 0.85) {
+        matchReasons.push(designerJudgement.reason);
+      }
+      if (weatherFit.confidence >= 0.6 && weatherFit.score >= 0.85) {
+        matchReasons.push(weatherFit.reason);
+      } else if (weatherFit.confidence >= 0.6 && weatherFit.score <= 0.45) {
+        matchReasons.push(weatherFit.reason);
+      }
+
+      const priceCents = typeof item.product.price_cents === "number" && Number.isFinite(item.product.price_cents)
+        ? Math.round(item.product.price_cents)
+        : 0;
+
+      additions.push({
+        id: item.product.id,
+        title: item.product.title,
+        brand: item.product.brand,
+        price: priceCents,
+        currency: item.product.currency || sourceProduct.currency || "USD",
+        image: item.product.image_cdn || item.product.image_url,
+        matchScore: Math.round(combined * 100),
+        matchReasons: matchReasons.slice(0, 4),
+        owned: true,
+      });
+      existingIds.add(item.product.id);
+    }
+
+    if (additions.length > 0) {
+      // Owned items get top placement; keep at most maxPerCategory + 2 in the
+      // bucket so the "you already own these" cluster never crowds catalog
+      // suggestions entirely.
+      const sortedAdditions = additions.sort((a, b) => b.matchScore - a.matchScore);
+      rec.products = [...sortedAdditions, ...rec.products].slice(0, Math.max(maxPerCategory + 2, rec.products.length));
+    }
+  }
+
+  response.totalRecommendations = response.recommendations.reduce(
+    (sum, r) => sum + r.products.length,
+    0,
+  );
+  return response;
+}
+
+async function loadWardrobeContextForCompleteStyle(
+  userId: number | undefined,
+  anchorProductId: number,
+): Promise<WardrobeContext | undefined> {
+  if (!userId || userId < 1) return undefined;
+  try {
+    const rows = await pg.query<Product & { product_id?: number }>(
+      `SELECT
+         p.id,
+         p.title,
+         p.brand,
+         p.category,
+         p.color,
+         p.price_cents,
+         p.currency,
+         p.image_url,
+         p.image_cdn,
+         p.description
+       FROM wardrobe_items wi
+       JOIN products p ON p.id = wi.product_id
+       WHERE wi.user_id = $1
+         AND wi.product_id IS NOT NULL
+         AND wi.product_id <> $2
+         AND p.availability = true
+       LIMIT 60`,
+      [userId, anchorProductId],
+    );
+
+    if (!rows.rows.length) return undefined;
+
+    const items: WardrobeContextItem[] = [];
+    const productIds = new Set<number>();
+    const summaries: string[] = [];
+
+    for (const row of rows.rows) {
+      const id = Number(row.id);
+      if (!Number.isFinite(id) || id < 1) continue;
+      productIds.add(id);
+
+      let detectedCategory: ProductCategory = "unknown";
+      try {
+        const det = await detectCategory(row.title, row.description);
+        detectedCategory = det.category as ProductCategory;
+      } catch {
+        /* ignore */
+      }
+      const family = categoryFamily(
+        `${detectedCategory} ${String(row.category || "")} ${String(row.title || "")}`,
+      );
+
+      items.push({
+        product: { ...row, id },
+        detectedCategory,
+        family,
+      });
+
+      if (summaries.length < 20) {
+        const parts = [
+          row.title,
+          row.color ? `(${row.color})` : "",
+          family && family !== "unknown" ? `[${family}]` : "",
+        ].filter(Boolean);
+        summaries.push(`- ${parts.join(" ")}`);
+      }
+    }
+
+    if (!items.length) return undefined;
+    return { items, productIds, summaries };
+  } catch (err) {
+    console.warn("[CompleteStyle] wardrobe context load failed", err);
+    return undefined;
+  }
+}
+
 type CompleteLookMappedSuggestion = {
   product_id: number;
   title: string;
   brand?: string;
   category?: string;
+  color?: string;
   price_cents?: number;
+  currency?: string;
   image_url?: string;
   image_cdn?: string;
   score: number;
   reason: string;
   matchReasons?: string[];
   fashionScore?: number;
+  /** Set true when this product id appears in the requesting user's wardrobe. */
+  owned?: boolean;
 };
 
 async function getCatalogProductById(productId: number): Promise<CompleteLookMappedSourceProduct | null> {
@@ -747,6 +999,9 @@ type FashionRerankContext = {
   maxSuggestions: number;
   sourceAudienceGenderHint?: string;
   sourceAgeGroupHint?: string;
+  /** Optional pre-loaded wardrobe context — when present the rerank tags
+   * owned candidates and feeds Gemini a summary of what the user already has. */
+  wardrobe?: WardrobeContext;
 };
 
 type CandidateStyleRow = {
@@ -2103,6 +2358,8 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
   // (b) One Gemini call per anchor for a styling direction. Always resolves;
   //     falls back to a heuristic spec on any Gemini failure or missing creds.
   //     User chose no cache — fetched fresh on every /complete-style request.
+  //     Wardrobe summaries (when available) tell Gemini what the user already
+  //     owns so it can suggest pairings that complete real outfits.
   let stylistDirection: StylistDirection;
   try {
     stylistDirection = await getStylistDirection({
@@ -2115,6 +2372,7 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       style: params.sourceStyle,
       audienceGender: params.sourceAudienceGenderHint,
       ageGroup: params.sourceAgeGroupHint,
+      wardrobeSummaries: params.wardrobe?.summaries,
     });
   } catch (err) {
     // Belt-and-braces: getStylistDirection already swallows errors, but in
@@ -2399,6 +2657,14 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       finalScore = Math.round(finalScore * stylistAdjustment * 1000) / 1000;
     }
 
+    // Wardrobe-aware signal: candidates the user already owns get a small
+    // bump and the `owned` flag so they surface as "you already have this".
+    // Bonus capped at +6% so it never overrides real fashion-fit signals.
+    const isOwned = params.wardrobe?.productIds.has(candidateProduct.id) === true;
+    if (isOwned) {
+      finalScore = Math.round(Math.min(1, finalScore * 1.06) * 1000) / 1000;
+    }
+
     const matchReasons = buildFashionReasons({
       categoryScore,
       colorScore,
@@ -2463,6 +2729,9 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     } else if (stylistAlignment.score <= -0.2) {
       matchReasons.push(stylistAlignment.reason);
     }
+    if (isOwned) {
+      matchReasons.unshift("In your wardrobe");
+    }
 
     return {
       ...s,
@@ -2470,6 +2739,7 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       fashionScore: Math.round(fashionScore * 1000) / 1000,
       matchReasons: Array.from(new Set(matchReasons)).slice(0, 6),
       reason: s.reason || "fashion-aware match",
+      owned: isOwned || undefined,
     };
   }));
 
@@ -2752,6 +3022,7 @@ function mapCompleteLookToStyleResponse(params: {
     image?: string;
     matchScore: number;
     matchReasons: string[];
+    owned?: boolean;
   }>>();
   const reasons = new Map<string, string>();
   const sourceText = `${String(sourceProduct.title || "")} ${String(sourceProduct.category || "")} ${String(sourceProduct.description || "")}`.toLowerCase();
@@ -2988,6 +3259,7 @@ function mapCompleteLookToStyleResponse(params: {
       image: s.image_cdn || s.image_url,
       matchScore: Math.round(Math.max(0, Math.min(1, s.score || 0)) * 100),
       matchReasons: s.matchReasons?.length ? s.matchReasons : [s.reason || "Complements your selected item"],
+      owned: s.owned === true ? true : undefined,
     });
 
     if (!reasons.has(categoryLabel)) {
@@ -3048,6 +3320,7 @@ function mapCompleteLookToStyleResponse(params: {
         image: s.image_cdn || s.image_url,
         matchScore: Math.round(Math.max(0, Math.min(1, s.score || 0)) * 100),
         matchReasons: s.matchReasons?.length ? s.matchReasons : [s.reason || "Complements your selected item"],
+        owned: s.owned === true ? true : undefined,
       });
       if (!reasons.has(categoryLabel)) {
         reasons.set(categoryLabel, s.reason || `Recommended ${categoryLabel.toLowerCase()} for this look`);

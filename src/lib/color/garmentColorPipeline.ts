@@ -109,7 +109,15 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
   if (chroma < 11) {
     // Dark brown leather/suede can be low-chroma under shadow and was collapsing
     // into charcoal. Preserve warm-neutral hues before generic gray buckets.
-    if (lab[0] >= 16 && lab[0] <= 62 && lab[1] >= 1.5 && lab[2] >= 4.5) {
+    // Thresholds raised: previous (a>=1.5, b>=4.5) misfired on black under warm
+    // light. Real warm-neutral fabric has a*>=3, b*>=8, chroma>=7.
+    if (
+      lab[0] >= 22 &&
+      lab[0] <= 62 &&
+      lab[1] >= 3 &&
+      lab[2] >= 8 &&
+      chroma >= 7
+    ) {
       if (lab[0] < 35) return "brown";
       if (lab[0] < 48) return "camel";
       return "tan";
@@ -121,9 +129,12 @@ function mapRgbToCanonical(r: number, g: number, b: number): string {
     if (lab[0] < 14) return "black";
     if (lab[0] < 36) return "charcoal";
     if (lab[0] < 68) return "gray";
-    if (lab[0] < 78) return "silver";
-    if (lab[0] > 92) return "white";
-    return "off-white";
+    if (lab[0] < 82) return "silver";
+    if (lab[0] < 92) {
+      // Off-white is warm. Cool / neutral light tones stay silver (apparel remap → gray).
+      return lab[2] >= 3 ? "off-white" : "silver";
+    }
+    return "white";
   }
 
   // Dark saturated: detect via channel dominance before LAB distance
@@ -476,8 +487,15 @@ export async function extractGarmentFashionColors(
     if (iw > 32 && ih > 32 && box.x2 > box.x1 + 2 && box.y2 > box.y1 + 2) {
       const bw = box.x2 - box.x1;
       const bh = box.y2 - box.y1;
-      const padX = bw * 0.08;
-      const padY = bh * 0.08;
+      // Adaptive pad: SHRINK inward for tight slots (shoes, small accessories)
+      // where the YOLO box already encloses the item — outward padding was
+      // pulling in floor/wall pixels and biasing k-means toward background.
+      // Larger garments (jackets, dresses, trousers) get a small outward pad
+      // because YOLO occasionally clips sleeve / hem edges.
+      const areaRatio = (bw * bh) / Math.max(1, iw * ih);
+      const padFactor = areaRatio < 0.04 ? -0.05 : 0.04;
+      const padX = bw * padFactor;
+      const padY = bh * padFactor;
       const x1 = Math.max(0, Math.floor(box.x1 - padX));
       const y1 = Math.max(0, Math.floor(box.y1 - padY));
       const x2 = Math.min(iw, Math.ceil(box.x2 + padX));
@@ -504,13 +522,19 @@ export async function extractGarmentFashionColors(
     pixels.push([data[i], data[i + 1], data[i + 2]]);
   }
 
-  // Strip near-white studio background pixels before clustering so they don't
-  // dilute a dark/coloured garment into "white" or "off-white".
-  // Heuristic: all channels >= 238 AND low saturation (max−min <= 15).
+  // Strip near-white / very-light-neutral studio background pixels before
+  // clustering so they don't dilute a dark/coloured garment into white/off-white.
+  // Two cutoffs:
+  //   (a) near-pure-white (existing)
+  //   (b) very-light + near-neutral — catches pale-gray seamless paper and
+  //       light wooden / cream floors that survived (a).
   // Safety fallback: if >70 % of pixels would be removed the garment is itself
   // light-coloured (white shirt, ivory dress) — keep all pixels in that case.
   const bgFiltered = pixels.filter(([r, g, b]) => {
-    return !(r >= 238 && g >= 238 && b >= 238 && Math.max(r, g, b) - Math.min(r, g, b) <= 15);
+    const span = Math.max(r, g, b) - Math.min(r, g, b);
+    if (r >= 238 && g >= 238 && b >= 238 && span <= 15) return false;
+    if (Math.min(r, g, b) >= 215 && span <= 18) return false;
+    return true;
   });
   const effectivePixels = bgFiltered.length >= pixels.length * 0.3 ? bgFiltered : pixels;
 
