@@ -42,13 +42,13 @@ export interface CompleteStyleOptions {
   excludeBrands?: string[];
   preferSameBrand?: boolean;
   disablePriceFilter?: boolean;  // Disable default 0.5x-2.5x price range
-  sourceMode?: "default" | "tryon";
+  sourceMode?: "default" | "tryon" | "wardrobe";
   audienceGenderHint?: "men" | "women" | "unisex";
   allowLegacyFallback?: boolean;
 }
 
 export interface StyleRecommendationResponse {
-  completionMode: "product" | "tryon";
+  completionMode: "product" | "tryon" | "wardrobe";
   sourceProduct: Product;
   detectedCategory: ProductCategory;
   style: {
@@ -362,7 +362,7 @@ export async function getOutfitRecommendationsFromProduct(
   options: CompleteStyleOptions = {},
   userId?: number
 ): Promise<StyleRecommendationResponse> {
-  if (options.sourceMode !== "tryon") {
+  if (options.sourceMode !== "tryon" && options.sourceMode !== "wardrobe") {
     const catalogProductId = await resolveCatalogProductIdForCompleteStyle(product);
     if (catalogProductId) {
       const completeLookBacked = await getOutfitRecommendations(catalogProductId, options, userId);
@@ -388,7 +388,115 @@ export async function getOutfitRecommendationsFromProduct(
       completionMode: "tryon",
     };
   }
+  if (options.sourceMode === "wardrobe") {
+    return {
+      ...formatted,
+      completionMode: "wardrobe",
+    };
+  }
   return formatted;
+}
+
+export async function getOutfitRecommendationsFromWardrobeItem(
+  wardrobeItemId: number,
+  options: CompleteStyleOptions = {},
+  userId?: number
+): Promise<StyleRecommendationResponse | null> {
+  if (!userId || userId < 1) return null;
+
+  const result = await pg.query<{
+    wardrobe_item_id: number;
+    product_id?: number | null;
+    wardrobe_name?: string | null;
+    wardrobe_brand?: string | null;
+    wardrobe_image_url?: string | null;
+    wardrobe_image_cdn?: string | null;
+    dominant_colors?: Array<{ hex?: string | null }> | null;
+    category_name?: string | null;
+    audience_gender?: string | null;
+    age_group?: string | null;
+    style_tags?: string[] | null;
+    occasion_tags?: string[] | null;
+    season_tags?: string[] | null;
+    product_title?: string | null;
+    product_brand?: string | null;
+    product_category?: string | null;
+    product_color?: string | null;
+    product_price_cents?: number | null;
+    product_currency?: string | null;
+    product_image_url?: string | null;
+    product_image_cdn?: string | null;
+    product_description?: string | null;
+  }>(
+    `SELECT
+       wi.id AS wardrobe_item_id,
+       wi.product_id,
+       wi.name AS wardrobe_name,
+       wi.brand AS wardrobe_brand,
+       wi.image_url AS wardrobe_image_url,
+       wi.image_cdn AS wardrobe_image_cdn,
+       wi.dominant_colors,
+       c.name AS category_name,
+       wam.audience_gender,
+       wam.age_group,
+       wam.style_tags,
+       wam.occasion_tags,
+       wam.season_tags,
+       p.title AS product_title,
+       p.brand AS product_brand,
+       p.category AS product_category,
+       p.color AS product_color,
+       p.price_cents AS product_price_cents,
+       p.currency AS product_currency,
+       p.image_url AS product_image_url,
+       p.image_cdn AS product_image_cdn,
+       p.description AS product_description
+     FROM wardrobe_items wi
+     LEFT JOIN categories c ON c.id = wi.category_id
+     LEFT JOIN wardrobe_item_audience_metadata wam ON wam.wardrobe_item_id = wi.id
+     LEFT JOIN products p ON p.id = wi.product_id
+     WHERE wi.id = $1
+       AND wi.user_id = $2
+     LIMIT 1`,
+    [wardrobeItemId, userId],
+  );
+
+  const row = result.rows[0];
+  if (!row) return null;
+
+  const dominantColor = Array.isArray(row.dominant_colors)
+    ? row.dominant_colors.map((c) => String(c?.hex || "").trim()).find(Boolean)
+    : undefined;
+  const styleTags = Array.isArray(row.style_tags) ? row.style_tags.filter(Boolean) : [];
+  const occasionTags = Array.isArray(row.occasion_tags) ? row.occasion_tags.filter(Boolean) : [];
+  const seasonTags = Array.isArray(row.season_tags) ? row.season_tags.filter(Boolean) : [];
+  const descriptionParts = [
+    row.product_description,
+    styleTags.length ? `Style tags: ${styleTags.join(", ")}` : "",
+    occasionTags.length ? `Occasions: ${occasionTags.join(", ")}` : "",
+    seasonTags.length ? `Seasons: ${seasonTags.join(", ")}` : "",
+    row.audience_gender ? `Audience: ${row.audience_gender}` : "",
+    row.age_group ? `Age group: ${row.age_group}` : "",
+  ].filter(Boolean);
+
+  const productInput: Product = {
+    id: 0,
+    title: row.wardrobe_name || row.product_title || "Wardrobe item",
+    brand: row.wardrobe_brand || row.product_brand || undefined,
+    category: row.category_name || row.product_category || undefined,
+    color: dominantColor || row.product_color || undefined,
+    price_cents: Number(row.product_price_cents) || 0,
+    currency: row.product_currency || "USD",
+    image_url: row.wardrobe_image_cdn || row.wardrobe_image_url || row.product_image_cdn || row.product_image_url || undefined,
+    image_cdn: row.wardrobe_image_cdn || row.product_image_cdn || undefined,
+    description: descriptionParts.join(". ") || undefined,
+  };
+
+  return getOutfitRecommendationsFromProduct(
+    productInput,
+    { ...options, sourceMode: "wardrobe" },
+    userId,
+  );
 }
 
 /**

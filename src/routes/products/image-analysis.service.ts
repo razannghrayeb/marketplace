@@ -6706,6 +6706,16 @@ export class ImageAnalysisService {
         rankerApiUrlConfigured: Boolean(process.env.RANKER_API_URL),
       });
     }
+    const sharedHydrationCache = {
+      productsById: new Map<string, any>(),
+      primaryImagesByProductId: new Map<number, any[]>(),
+      stats: {
+        productHits: 0,
+        productMisses: 0,
+        imageHits: 0,
+        imageMisses: 0,
+      },
+    };
     const settled = await mapPoolSettled(
       detectionJobs,
       detectionConcurrency,
@@ -6783,6 +6793,7 @@ export class ImageAnalysisService {
               ...payloadForCall,
               filters: filtersForCall,
               detectionLabel: (payloadForCall as any).detectionLabel ?? label ?? detection.label,
+              hydrationCache: sharedHydrationCache,
             });
             const elapsedMs = Date.now() - startedAt;
             detectionSearchTotalMs += elapsedMs;
@@ -9128,6 +9139,14 @@ export class ImageAnalysisService {
       similarityTimings.detectionSearchCallsAvg = Math.round((total / detectionSearchCallCounts.length) * 100) / 100;
       similarityTimings.detectionSearchCallsMax = Math.max(...detectionSearchCallCounts);
     }
+    console.info("[image-search][hydration-cache]", {
+      product_hits: sharedHydrationCache.stats.productHits,
+      product_misses: sharedHydrationCache.stats.productMisses,
+      image_hits: sharedHydrationCache.stats.imageHits,
+      image_misses: sharedHydrationCache.stats.imageMisses,
+      cached_products: sharedHydrationCache.productsById.size,
+      cached_primary_images: sharedHydrationCache.primaryImagesByProductId.size,
+    });
 
     const groupedResults: DetectionSimilarProducts[] = [];
     let totalProducts = 0;
@@ -9724,6 +9743,16 @@ export class ImageAnalysisService {
     const selectiveDetectionConcurrency = shopLookPerDetectionConcurrency(
       selectiveDetectionJobs.map(({ detection }) => detection),
     );
+    const sharedHydrationCache = {
+      productsById: new Map<string, any>(),
+      primaryImagesByProductId: new Map<number, any[]>(),
+      stats: {
+        productHits: 0,
+        productMisses: 0,
+        imageHits: 0,
+        imageMisses: 0,
+      },
+    };
     const selectiveSettled = await mapPoolSettled(
       selectiveDetectionJobs,
       selectiveDetectionConcurrency,
@@ -10339,6 +10368,7 @@ export class ImageAnalysisService {
             sessionId: options.sessionId,
             userId: options.userId,
             sessionFilters: options.sessionFilters ?? undefined,
+            hydrationCache: sharedHydrationCache,
             // Style and pattern intent are handled via filters or blipSignal; do not pass as top-level params
           });
 
@@ -10395,6 +10425,7 @@ export class ImageAnalysisService {
               sessionId: options.sessionId,
               userId: options.userId,
               sessionFilters: options.sessionFilters ?? undefined,
+              hydrationCache: sharedHydrationCache,
             });
           }
 
@@ -10461,6 +10492,7 @@ export class ImageAnalysisService {
               sessionId: options.sessionId,
               userId: options.userId,
               sessionFilters: options.sessionFilters ?? undefined,
+              hydrationCache: sharedHydrationCache,
             });
             if (similarResult.results.length === 0) {
               const fallbackStructuralFilters = preserveHardCategoryInFallback && fallbackCategoryTerms.length > 0
@@ -10505,6 +10537,7 @@ export class ImageAnalysisService {
                 sessionId: options.sessionId,
                 userId: options.userId,
                 sessionFilters: options.sessionFilters ?? undefined,
+                hydrationCache: sharedHydrationCache,
               });
             }
           }
@@ -10545,6 +10578,7 @@ export class ImageAnalysisService {
               sessionId: options.sessionId,
               userId: options.userId,
               sessionFilters: options.sessionFilters ?? undefined,
+              hydrationCache: sharedHydrationCache,
             });
           }
 
@@ -10601,6 +10635,7 @@ export class ImageAnalysisService {
                   sessionId: options.sessionId,
                   userId: options.userId,
                   sessionFilters: options.sessionFilters ?? undefined,
+                  hydrationCache: sharedHydrationCache,
                 })
               ),
             );
@@ -10675,6 +10710,7 @@ export class ImageAnalysisService {
               sessionId: options.sessionId,
               userId: options.userId,
               sessionFilters: options.sessionFilters ?? undefined,
+              hydrationCache: sharedHydrationCache,
             });
 
             const ablationCategorySafe = applyDetectionCategoryGuard(
@@ -10857,6 +10893,14 @@ export class ImageAnalysisService {
         embeddingBatchMs: selectiveEmbeddingBatchMs,
       });
     }
+    console.info("[image-search][selective-hydration-cache]", {
+      product_hits: sharedHydrationCache.stats.productHits,
+      product_misses: sharedHydrationCache.stats.productMisses,
+      image_hits: sharedHydrationCache.stats.imageHits,
+      image_misses: sharedHydrationCache.stats.imageMisses,
+      cached_products: sharedHydrationCache.productsById.size,
+      cached_primary_images: sharedHydrationCache.primaryImagesByProductId.size,
+    });
 
     for (const outcome of selectiveSettled) {
       if (outcome.status === "fulfilled" && outcome.value) {

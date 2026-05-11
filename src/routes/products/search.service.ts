@@ -69,6 +69,7 @@ export async function searchByImageWithSimilarity(
     userId,
     sessionFilters,
     collapseVariantGroups,
+    hydrationCache,
   } = params;
 
   // Phase 2 alignment: route through the unified canonical facade.
@@ -99,6 +100,7 @@ export async function searchByImageWithSimilarity(
     userId,
     sessionFilters,
     collapseVariantGroups,
+    hydrationCache,
   }) as Promise<SearchResultWithRelated>;
 }
 
@@ -221,4 +223,3 @@ export {
   findRelatedProducts,
   type FindRelatedProductsOptions,
 } from "../../lib/search/relatedProducts";
-

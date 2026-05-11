@@ -136,6 +136,8 @@ export interface ImageSearchParams extends SearchParams {
   sessionFilters?: Partial<SearchFilters>;
   /** When true, merge same variant family into one representative result. */
   collapseVariantGroups?: boolean;
+  /** Internal per-request hydration cache shared across shop-the-look detection searches. */
+  hydrationCache?: any;
 }
 
 export interface TextSearchParams extends SearchParams {

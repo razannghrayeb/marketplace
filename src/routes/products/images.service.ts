@@ -651,3 +651,79 @@ export async function getImagesForProducts(productIds: number[]): Promise<Map<nu
 
   return imageMap;
 }
+
+/**
+ * Get one display image per product for latency-sensitive search result cards.
+ */
+export async function getPrimaryImagesForProducts(productIds: number[]): Promise<Map<number, ProductImage[]>> {
+  if (productIds.length === 0) return new Map();
+  const uniqueProductIds = [...new Set(productIds.filter((id) => Number.isFinite(id)))];
+  if (uniqueProductIds.length === 0) return new Map();
+
+  const now = Date.now();
+  prunePrimaryImageCache(now);
+  const imageMap = new Map<number, ProductImage[]>();
+  const missingIds: number[] = [];
+  let cacheHits = 0;
+  for (const id of uniqueProductIds) {
+    const cached = primaryImageCache.get(id);
+    if (cached && now - cached.createdAt <= PRIMARY_IMAGE_CACHE_TTL_MS) {
+      imageMap.set(id, cached.images);
+      cacheHits += 1;
+    } else {
+      missingIds.push(id);
+    }
+  }
+
+  if (missingIds.length === 0) {
+    console.log("[primary-image-cache]", {
+      requested: uniqueProductIds.length,
+      hits: cacheHits,
+      misses: 0,
+    });
+    return imageMap;
+  }
+
+  const result = await pg.query(
+    `SELECT DISTINCT ON (product_id)
+       id, product_id, r2_key, cdn_url, p_hash, is_primary, created_at
+     FROM product_images
+     WHERE product_id = ANY($1::bigint[])
+     ORDER BY product_id, is_primary DESC, created_at ASC`,
+    [missingIds]
+  );
+
+  for (const row of result.rows) {
+    const images = [row];
+    imageMap.set(row.product_id, images);
+    primaryImageCache.set(row.product_id, { createdAt: now, images });
+  }
+
+  console.log("[primary-image-cache]", {
+    requested: uniqueProductIds.length,
+    hits: cacheHits,
+    misses: missingIds.length,
+    db_rows: result.rows.length,
+  });
+
+  return imageMap;
+}
+
+const PRIMARY_IMAGE_CACHE_TTL_MS = Math.max(
+  0,
+  Math.min(60 * 60 * 1000, Number(process.env.SEARCH_PRIMARY_IMAGE_CACHE_TTL_MS ?? "600000") || 600000),
+);
+const PRIMARY_IMAGE_CACHE_MAX = Math.max(
+  100,
+  Math.min(100_000, Number(process.env.SEARCH_PRIMARY_IMAGE_CACHE_MAX ?? "20000") || 20000),
+);
+const primaryImageCache = new Map<number, { createdAt: number; images: ProductImage[] }>();
+
+function prunePrimaryImageCache(now = Date.now()): void {
+  if (primaryImageCache.size <= PRIMARY_IMAGE_CACHE_MAX) return;
+  for (const [id, entry] of primaryImageCache) {
+    if (now - entry.createdAt > PRIMARY_IMAGE_CACHE_TTL_MS || primaryImageCache.size > PRIMARY_IMAGE_CACHE_MAX) {
+      primaryImageCache.delete(id);
+    }
+  }
+}

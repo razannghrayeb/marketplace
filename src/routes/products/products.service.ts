@@ -6,7 +6,7 @@ import {
   productsTableHasIsHiddenColumn,
 } from "../../lib/core/index";
 import { config } from "../../config";
-import { getImagesForProducts, ProductImage } from "./images.service";
+import { getImagesForProducts, getPrimaryImagesForProducts, ProductImage } from "./images.service";
 import { hammingDistance } from "../../lib/products";
 import { learnUserLifestyle } from "../../lib/wardrobe/lifestyleAdapter";
 import { getSession } from "../../lib/queryProcessor/conversationalContext";
@@ -189,7 +189,20 @@ export interface ImageSearchParams extends SearchParams {
   sessionFilters?: Record<string, unknown> | null;
   /** When true, merge same variant family into one representative result. */
   collapseVariantGroups?: boolean;
+  /** Per-request cache shared across shop-the-look detection searches. */
+  hydrationCache?: ImageSearchHydrationCache;
 }
+
+export type ImageSearchHydrationCache = {
+  productsById: Map<string, any>;
+  primaryImagesByProductId: Map<number, ProductImage[]>;
+  stats: {
+    productHits: number;
+    productMisses: number;
+    imageHits: number;
+    imageMisses: number;
+  };
+};
 
 export interface TextSearchParams extends SearchParams {
   includeRelated?: boolean;      // Include related products (same category/brand)
@@ -433,6 +446,35 @@ function pruneImageQuerySignalCache(now: number): void {
   let dropped = 0;
   for (const key of imageQuerySignalCache.keys()) {
     imageQuerySignalCache.delete(key);
+    dropped += 1;
+    if (dropped >= overflow) break;
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Attribute / part embedding response cache (mget memoization)
+// ───────────────────────────────────────────────────────────────────────────
+// Embedding fields on a product change only on reindex, so we can safely memoize
+// the OpenSearch mget response by product_id. Entries accumulate fields as
+// successive queries request them (e.g. detection #1 fetches color+style, then
+// detection #2 needing color+pattern only mgets the missing `embedding_pattern`).
+// Strictly additive optimization: lookup returns the same `_source` subset the
+// mget would have returned, so ranking inputs are byte-identical.
+const ATTR_EMBED_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const ATTR_EMBED_CACHE_MAX = 20_000; // ~product cards worth of partial _source
+const attrEmbedCache = new Map<string, { createdAt: number; source: Record<string, any> }>();
+
+function pruneAttrEmbedCache(now: number): void {
+  for (const [key, entry] of attrEmbedCache.entries()) {
+    if (now - entry.createdAt > ATTR_EMBED_CACHE_TTL_MS) {
+      attrEmbedCache.delete(key);
+    }
+  }
+  if (attrEmbedCache.size <= ATTR_EMBED_CACHE_MAX) return;
+  const overflow = attrEmbedCache.size - ATTR_EMBED_CACHE_MAX;
+  let dropped = 0;
+  for (const key of attrEmbedCache.keys()) {
+    attrEmbedCache.delete(key);
     dropped += 1;
     if (dropped >= overflow) break;
   }
@@ -5406,8 +5448,73 @@ export async function searchByImageWithSimilarity(
   const idsToHydrate = rawKnnProductIds.slice(0, hydrationCap);
   const endpointLimit = limit;
   console.log("[hydrate] ids_count", idsToHydrate.length, "endpoint_limit", endpointLimit, "raw_knn_count", rawKnnProductIds.length, "prefetch_mult", hydrationPrefetchMultiplier, "prefetch_cap", hydrationPrefetchCap);
+  const requestHydrationCache = params.hydrationCache;
+  const fetchPrimaryImagesForHydration = async (numericIds: number[]): Promise<Map<number, ProductImage[]>> => {
+    const uniqueIds = [...new Set(numericIds.filter(Number.isFinite))];
+    if (uniqueIds.length === 0) return new Map<number, ProductImage[]>();
+    const imagesByProduct = new Map<number, ProductImage[]>();
+    const missingIds: number[] = [];
+    for (const id of uniqueIds) {
+      const cached = requestHydrationCache?.primaryImagesByProductId.get(id);
+      if (cached) {
+        imagesByProduct.set(id, cached);
+        if (requestHydrationCache) requestHydrationCache.stats.imageHits += 1;
+      } else {
+        missingIds.push(id);
+      }
+    }
+    if (requestHydrationCache) requestHydrationCache.stats.imageMisses += missingIds.length;
+    if (missingIds.length > 0) {
+      const fetched = await getPrimaryImagesForProducts(missingIds);
+      for (const [productId, images] of fetched.entries()) {
+        imagesByProduct.set(productId, images);
+        requestHydrationCache?.primaryImagesByProductId.set(productId, images);
+      }
+    }
+    if (requestHydrationCache && (uniqueIds.length > 0)) {
+      console.log("[hydrate-cache] images", {
+        requested: uniqueIds.length,
+        request_hits: uniqueIds.length - missingIds.length,
+        request_misses: missingIds.length,
+        total_hits: requestHydrationCache.stats.imageHits,
+        total_misses: requestHydrationCache.stats.imageMisses,
+      });
+    }
+    return imagesByProduct;
+  };
   const productHydrationStartedAt = Date.now();
-  const productHydrationPromise = getSearchProductsByIdsOrdered(idsToHydrate).then(
+  const productHydrationPromise = (async () => {
+    const productsById = new Map<string, any>();
+    const missingIds: string[] = [];
+    for (const id of idsToHydrate) {
+      const idStr = String(id);
+      const cached = requestHydrationCache?.productsById.get(idStr);
+      if (cached) {
+        productsById.set(idStr, cached);
+        if (requestHydrationCache) requestHydrationCache.stats.productHits += 1;
+      } else {
+        missingIds.push(idStr);
+      }
+    }
+    if (requestHydrationCache) requestHydrationCache.stats.productMisses += missingIds.length;
+    if (missingIds.length > 0) {
+      const fetched = await getSearchProductsByIdsOrdered(missingIds);
+      for (const product of fetched) {
+        productsById.set(String(product.id), product);
+        requestHydrationCache?.productsById.set(String(product.id), product);
+      }
+    }
+    if (requestHydrationCache) {
+      console.log("[hydrate-cache] products", {
+        requested: idsToHydrate.length,
+        request_hits: idsToHydrate.length - missingIds.length,
+        request_misses: missingIds.length,
+        total_hits: requestHydrationCache.stats.productHits,
+        total_misses: requestHydrationCache.stats.productMisses,
+      });
+    }
+    return idsToHydrate.map((id) => productsById.get(String(id))).filter(Boolean);
+  })().then(
     (products) => {
       console.log(
         "[hydrate-step] products_ms",
@@ -5427,6 +5534,21 @@ export async function searchByImageWithSimilarity(
       return { error };
     },
   );
+  const imageHydrationIds = [
+    ...new Set(
+      idsToHydrate
+        .map((id) => parseInt(String(id), 10))
+        .filter(Number.isFinite),
+    ),
+  ];
+  const imageHydrationStartedAt = Date.now();
+  const imageHydrationPromise: Promise<Map<number, ProductImage[]>> =
+    imageHydrationIds.length > 0
+      ? fetchPrimaryImagesForHydration(imageHydrationIds).then((hydratedImages) => {
+          console.log("[hydrate-step] images_prefetch_ms", Date.now() - imageHydrationStartedAt, "count", imageHydrationIds.length);
+          return hydratedImages;
+        })
+      : Promise.resolve(new Map<number, ProductImage[]>());
 
   const signals = await signalsPromise;
   rerankTimings['signals_wait_ms'] = Date.now() - rerankPhaseStartedAt;
@@ -5483,38 +5605,78 @@ export async function searchByImageWithSimilarity(
         const parallelChunks = Boolean(config.search?.attrMget?.parallel);
         const idsToFetch = uniqueIds.slice(0, maxIds);
 
+        // Consult the per-product embedding cache: any id whose cached source already
+        // contains every field in `attrFieldsToFetch` skips the mget round-trip.
+        const cacheNow = Date.now();
+        pruneAttrEmbedCache(cacheNow);
+        const byId = new Map<string, any>();
+        const missingIds: string[] = [];
+        let cacheHits = 0;
+        for (const id of idsToFetch) {
+          const entry = attrEmbedCache.get(id);
+          if (entry && cacheNow - entry.createdAt <= ATTR_EMBED_CACHE_TTL_MS) {
+            let satisfied = true;
+            for (const f of attrFieldsToFetch) {
+              if (!(f in entry.source)) { satisfied = false; break; }
+            }
+            if (satisfied) {
+              byId.set(id, entry.source);
+              cacheHits += 1;
+              continue;
+            }
+          }
+          missingIds.push(id);
+        }
+
         const mgetStartedAt = Date.now();
         let docs: any[] = [];
 
-        if (!parallelChunks) {
-          const mgetResp = await (osClient as any).mget(
-            { index: config.opensearch.index, body: { ids: idsToFetch }, _source: attrFieldsToFetch },
-            { requestTimeout: 8_000, maxRetries: 0 },
-          );
-          docs = mgetResp.body?.docs ?? [];
-        } else {
-          // Opt-in path: split into chunks and run parallel mget calls across OpenSearch.
-          const chunks: string[][] = [];
-          for (let i = 0; i < idsToFetch.length; i += chunkSize) {
-            chunks.push(idsToFetch.slice(i, i + chunkSize));
-          }
-
-          const mgetPromises = chunks.map((chunk) =>
-            (osClient as any).mget(
-              { index: config.opensearch.index, body: { ids: chunk }, _source: attrFieldsToFetch },
+        if (missingIds.length > 0) {
+          if (!parallelChunks) {
+            const mgetResp = await (osClient as any).mget(
+              { index: config.opensearch.index, body: { ids: missingIds }, _source: attrFieldsToFetch },
               { requestTimeout: 8_000, maxRetries: 0 },
-            ),
-          );
+            );
+            docs = mgetResp.body?.docs ?? [];
+          } else {
+            // Opt-in path: split into chunks and run parallel mget calls across OpenSearch.
+            const chunks: string[][] = [];
+            for (let i = 0; i < missingIds.length; i += chunkSize) {
+              chunks.push(missingIds.slice(i, i + chunkSize));
+            }
 
-          const resps = await Promise.all(mgetPromises);
-          for (const r of resps) docs.push(...(r.body?.docs ?? []));
+            const mgetPromises = chunks.map((chunk) =>
+              (osClient as any).mget(
+                { index: config.opensearch.index, body: { ids: chunk }, _source: attrFieldsToFetch },
+                { requestTimeout: 8_000, maxRetries: 0 },
+              ),
+            );
+
+            const resps = await Promise.all(mgetPromises);
+            for (const r of resps) docs.push(...(r.body?.docs ?? []));
+          }
         }
 
         const mgetMs = Date.now() - mgetStartedAt;
 
-        const byId = new Map<string, any>();
         for (const doc of docs) {
-          if (doc?.found && doc?._source) byId.set(String(doc._id ?? ""), doc._source);
+          if (doc?.found && doc?._source) {
+            const id = String(doc._id ?? "");
+            // Merge into cache so later requests with overlapping field sets benefit.
+            const prev = attrEmbedCache.get(id)?.source ?? {};
+            const merged = { ...prev, ...doc._source };
+            attrEmbedCache.set(id, { createdAt: cacheNow, source: merged });
+            byId.set(id, merged);
+          }
+        }
+
+        if (cacheHits > 0 || missingIds.length < idsToFetch.length) {
+          console.log("[attr-embed-cache]", {
+            requested: idsToFetch.length,
+            hits: cacheHits,
+            misses: missingIds.length,
+            mget_ms: mgetMs,
+          });
         }
 
         return { byId, mgetMs };
@@ -5524,6 +5686,19 @@ export async function searchByImageWithSimilarity(
       }
     }
   )();
+  let attrMgetApplied = false;
+  const applyAttrMgetResult = (attrMgetResult: { byId: Map<string, any>; mgetMs: number } | null | undefined): void => {
+    rerankTimings['attr_mget_ms'] = attrMgetResult?.mgetMs ?? 0;
+    if (!attrMgetResult?.byId || attrMgetResult.byId.size === 0 || attrMgetApplied) return;
+    attrMgetApplied = true;
+    for (const hit of hits) {
+      const pid = String(hit?._source?.product_id ?? "");
+      const embData = attrMgetResult.byId.get(pid);
+      if (embData && hit._source) {
+        Object.assign(hit._source, embData);
+      }
+    }
+  };
 
   // ────────────────────────────────────────────────────────────────────────────
   // Part embedding similarity computation (runs while attr_mget executes in parallel)
@@ -5730,6 +5905,36 @@ export async function searchByImageWithSimilarity(
   const candidateSelectionStartMs = Date.now();
   const baseCandidates = hitsByKnnScore.slice(0, fetchLimit);
   rerankTimings['candidate_selection_ms'] = Date.now() - candidateSelectionStartMs;
+  const attrBlockingTimeoutMsRaw = Number(process.env.SEARCH_ATTR_MGET_BLOCKING_TIMEOUT_MS ?? "500");
+  const attrBlockingTimeoutMs = Number.isFinite(attrBlockingTimeoutMsRaw)
+    ? Math.max(0, Math.min(8_000, Math.floor(attrBlockingTimeoutMsRaw)))
+    : 500;
+  if ((runColor || runStyle || runPattern || runTexture || runMaterial) && attrBlockingTimeoutMs > 0) {
+    const attrWaitStartedAt = Date.now();
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    let attrMgetTimedOut = false;
+    const attrMgetResult = await Promise.race([
+      attrMgetPromise,
+      new Promise<null>((resolve) => {
+        timeoutHandle = setTimeout(() => {
+          attrMgetTimedOut = true;
+          resolve(null);
+        }, attrBlockingTimeoutMs);
+      }),
+    ]);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    rerankTimings['attr_mget_blocking_wait_ms'] = Date.now() - attrWaitStartedAt;
+    if (attrMgetResult) {
+      applyAttrMgetResult(attrMgetResult);
+    } else if (attrMgetTimedOut) {
+      rerankTimings['attr_mget_timed_out'] = 1;
+      void attrMgetPromise.then(applyAttrMgetResult);
+    } else {
+      rerankTimings['attr_mget_ms'] = 0;
+    }
+  } else {
+    void attrMgetPromise.then(applyAttrMgetResult);
+  }
 
   /** Per-hit soft signals for ranking + explain (visual + category + optional attribute embeddings). */
   const imageCompositeById = new Map<string, number>();
@@ -9382,28 +9587,14 @@ export async function searchByImageWithSimilarity(
   let hydrationMissingProductRowsCount = 0;
   if (uniqueProductIds.length > 0) {
     hydrationCandidateIdCount = uniqueProductIds.length;
-    // PHASE 1 OPTIMIZATION: Include attrMgetPromise in parallel execution
-    const [productHydration, userLifestyle, attrMgetResult] = await Promise.all([
+    const [productHydration, userLifestyle, prefetchedImagesByProduct] = await Promise.all([
       productHydrationPromise,
       personalizationPromise,
-      attrMgetPromise,
+      imageHydrationPromise,
     ]);
     if ((productHydration as any).error) throw (productHydration as any).error;
     const productById = new Map(((productHydration as any).products as any[]).map((p: any) => [String(p.id), p]));
-    
-    // PHASE 1 OPTIMIZATION: Apply deferred attr_mget results
-    if (attrMgetResult?.byId && attrMgetResult.byId.size > 0) {
-      rerankTimings['attr_mget_ms'] = attrMgetResult.mgetMs;
-      for (const hit of hits) {
-        const pid = String(hit?._source?.product_id ?? "");
-        const embData = attrMgetResult.byId.get(pid);
-        if (embData && hit._source) {
-          Object.assign(hit._source, embData);
-        }
-      }
-    } else {
-      rerankTimings['attr_mget_ms'] = 0;
-    }
+    void attrMgetPromise.then(applyAttrMgetResult);
     
     const missingHydrationIds = uniqueProductIds.filter((id) => !productById.has(String(id)));
     hydrationPrefetchMissCount = missingHydrationIds.length;
@@ -9418,18 +9609,41 @@ export async function searchByImageWithSimilarity(
           .filter(Number.isFinite),
       ),
     ];
+    const prefetchedImageIds = new Set(imageHydrationIds.map((id) => String(id)));
+    const missingImageIds = candidateImageIds.filter((id) => !prefetchedImageIds.has(String(id)));
     const imagesHydrationStartedAt = Date.now();
     const imagesPromise: Promise<Map<number, ProductImage[]>> =
-      candidateImageIds.length > 0
-        ? getImagesForProducts(candidateImageIds).then((hydratedImages) => {
-            console.log("[hydrate-step] images_ms", Date.now() - imagesHydrationStartedAt);
-            return hydratedImages;
+      missingImageIds.length > 0
+        ? fetchPrimaryImagesForHydration(missingImageIds).then((hydratedImages) => {
+            for (const [productId, images] of hydratedImages.entries()) {
+              prefetchedImagesByProduct.set(productId, images);
+            }
+            console.log("[hydrate-step] images_missing_ms", Date.now() - imagesHydrationStartedAt, "count", missingImageIds.length);
+            return prefetchedImagesByProduct;
           })
-        : Promise.resolve(new Map<number, ProductImage[]>());
+        : Promise.resolve(prefetchedImagesByProduct);
 
     if (missingHydrationIds.length > 0) {
       const missingHydrationStartedAt = Date.now();
-      const missingProducts = await getSearchProductsByIdsOrdered(missingHydrationIds);
+      const cachedMissingProducts: any[] = [];
+      const uncachedMissingIds: string[] = [];
+      for (const id of missingHydrationIds) {
+        const cached = requestHydrationCache?.productsById.get(String(id));
+        if (cached) {
+          cachedMissingProducts.push(cached);
+          if (requestHydrationCache) requestHydrationCache.stats.productHits += 1;
+        } else {
+          uncachedMissingIds.push(String(id));
+        }
+      }
+      if (requestHydrationCache) requestHydrationCache.stats.productMisses += uncachedMissingIds.length;
+      const fetchedMissingProducts = uncachedMissingIds.length > 0
+        ? await getSearchProductsByIdsOrdered(uncachedMissingIds)
+        : [];
+      for (const product of fetchedMissingProducts) {
+        requestHydrationCache?.productsById.set(String(product.id), product);
+      }
+      const missingProducts = [...cachedMissingProducts, ...fetchedMissingProducts];
       for (const product of missingProducts) {
         productById.set(String(product.id), product);
       }
@@ -9439,6 +9653,8 @@ export async function searchByImageWithSimilarity(
           Date.now() - missingHydrationStartedAt,
           "count",
           missingHydrationIds.length,
+          "request_cache_hits",
+          cachedMissingProducts.length,
           "found",
           missingProducts.length,
         );
@@ -10904,6 +11120,8 @@ export async function searchByImageWithSimilarity(
       // Core metrics
       signals_wait_ms: rerankTimings['signals_wait_ms'],
       attr_mget_ms: rerankTimings['attr_mget_ms'],
+      attr_mget_blocking_wait_ms: rerankTimings['attr_mget_blocking_wait_ms'],
+      attr_mget_timed_out: rerankTimings['attr_mget_timed_out'],
       attribute_similarity_ms: rerankTimings['attribute_similarity_ms'],
       final_relevance_ms: rerankTimings['final_relevance_ms'],
       sorting_ms: rerankTimings['sorting_ms'],
