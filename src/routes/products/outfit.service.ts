@@ -22,6 +22,7 @@ import {
 } from "../../lib/recommendations";
 import { catalogGenderFromCaption } from "../../lib/image/captionAttributeInference";
 import { coarseColorBucket } from "../../lib/color/colorCanonical";
+import { completeStyleCategoryLabel } from "./outfit-category";
 
 // ============================================================================
 // Types
@@ -125,7 +126,7 @@ export async function getOutfitRecommendations(
   // Use the wardrobe complete-look engine for product pages so both catalog product
   // and user wardrobe context influence the recommendations.
   const maxTotal = Math.max(1, Math.min(options.maxTotal ?? 20, 50));
-  const maxPerCategory = Math.max(1, Math.min(options.maxPerCategory ?? 5, 20));
+  const maxPerCategory = Math.max(1, Math.min(options.maxPerCategory ?? 8, 20));
   const retrievalPoolSize = Math.max(maxTotal * 3, 30);
   const anchorProductIds = [productId];
   
@@ -1105,6 +1106,33 @@ function isWarmSeasonItem(title?: string | null, category?: string | null): bool
   return /\b(short|shorts|mini skirt|linen short|swim|bikini|tank|sleeveless|sandal|flip flop|slide|espadrille)\b/.test(text);
 }
 
+function isColdAccessoryCandidate(value: string): boolean {
+  const text = normalizeStyleToken(value);
+  return /\b(scarf|scarves|beanie|earmuffs?|gloves?|mittens?|wool hat|knit hat|winter hat)\b/.test(text);
+}
+
+function shouldRejectAccessoryForSourceWeather(
+  sourceProduct: { title?: string | null; category?: string | null; description?: string | null },
+  sourceStyle: StyleProfile,
+  candidateTitle?: string | null,
+  candidateCategory?: string | null,
+  candidateDescription?: string | null,
+): boolean {
+  const candidateText = `${String(candidateTitle || "")} ${String(candidateCategory || "")} ${String(candidateDescription || "")}`;
+  if (!isColdAccessoryCandidate(candidateText)) return false;
+
+  const sourceText = normalizeStyleToken(
+    `${sourceProduct.title || ""} ${sourceProduct.category || ""} ${sourceProduct.description || ""}`
+  );
+  const explicitlyColdAnchor =
+    sourceStyle.season === "winter" ||
+    /\b(winter|cold|coat|jacket|parka|puffer|sweater|cardigan|hoodie|knit|knitted|wool|cashmere|fleece|thermal)\b/.test(sourceText);
+  const beachOnlyScarf = /\b(beach scarf|sarong|pareo)\b/.test(normalizeStyleToken(candidateText));
+
+  if (sourceStyle.occasion === "beach" && beachOnlyScarf) return false;
+  return !explicitlyColdAnchor;
+}
+
 function hasAnyCue(text: string, cues: RegExp): boolean {
   return cues.test(normalizeStyleToken(text));
 }
@@ -1374,6 +1402,18 @@ function shouldHardRejectFashionCandidate(params: {
     if (!allowedActiveAccessoryCue.test(normalizeStyleToken(accText))) return true;
   }
   if (
+    candidateFamily === "accessories" &&
+    shouldRejectAccessoryForSourceWeather(
+      sourceProduct,
+      sourceStyle,
+      candidateProduct.title,
+      candidateProduct.category,
+      candidateProduct.description,
+    )
+  ) {
+    return true;
+  }
+  if (
     candidateFamily === "bottoms" &&
     isSkirtBottomCue(`${candidateProduct.title || ""} ${candidateProduct.category || ""}`) &&
     isCozyTopAnchor(sourceProduct) &&
@@ -1488,9 +1528,19 @@ const COLOR_BUCKET_COMPATIBILITY: Record<string, string[]> = {
   brown: ["blue", "green", "red"],
 };
 
+function normalizeFashionColorAlias(value: string): string {
+  return value
+    .replace(/\bbordo\b/g, " burgundy ")
+    .replace(/\bbordeaux\b/g, " burgundy ")
+    .replace(/\bwine\b/g, " burgundy ")
+    .replace(/\bmaroon\b/g, " burgundy ")
+    .replace(/\boxblood\b/g, " burgundy ")
+    .replace(/\bgrey\b/g, " gray ");
+}
+
 function extractColorBucketsFromText(value?: string | null): Set<string> {
   const out = new Set<string>();
-  const raw = String(value || "").toLowerCase();
+  const raw = normalizeFashionColorAlias(String(value || "").toLowerCase());
   if (!raw) return out;
 
   const normalized = raw
@@ -1908,7 +1958,8 @@ function buildFashionReasons(params: {
 
 function colorComfortHintForCategory(
   sourceStyle: StyleProfile,
-  category: string
+  category: string,
+  sourceProduct?: { color?: string | null; title?: string | null; category?: string | null; description?: string | null },
 ): string {
   const titleForBucket = (bucket: string): string => {
     switch (bucket) {
@@ -1928,6 +1979,10 @@ function colorComfortHintForCategory(
   };
 
   const sourceBuckets = new Set<string>();
+  for (const b of extractColorBucketsFromText(sourceProduct?.color)) sourceBuckets.add(b);
+  for (const b of extractColorBucketsFromText(sourceProduct?.title)) sourceBuckets.add(b);
+  for (const b of extractColorBucketsFromText(sourceProduct?.category)) sourceBuckets.add(b);
+  for (const b of extractColorBucketsFromText(sourceProduct?.description)) sourceBuckets.add(b);
   for (const b of extractColorBucketsFromText(sourceStyle.colorProfile.primary)) sourceBuckets.add(b);
   for (const harmony of sourceStyle.colorProfile.harmonies || []) {
     for (const c of harmony.colors || []) {
@@ -2361,21 +2416,6 @@ function normalizeAudienceHint(raw: unknown): string | undefined {
   if (hasMen) return "men";
   if (hasWomen) return "women";
   return undefined;
-}
-
-function completeStyleCategoryLabel(raw?: string): string {
-  const c = String(raw || "").toLowerCase().trim();
-  if (!c) return "Recommended";
-  if (c.includes("pyjama") || c.includes("pajama") || c.includes("sleepwear") || c.includes("nightwear") || c.includes("loungewear")) return "";
-  if (c.includes("footwear") || c.includes("shoe") || c.includes("sneaker") || c.includes("boot") || c.includes("sandal") || c.includes("loafer") || c.includes("heel") || c.includes("flat") || c.includes("mule") || c.includes("trainer")) return "Shoes";
-  if (c.includes("dress")) return "Dresses";
-  if (c.includes("outerwear") || c.includes("jacket") || c.includes("coat") || c.includes("blazer")) return "Outerwear";
-  if (c.includes("top") || c.includes("shirt") || c.includes("blouse") || c.includes("polo") || c.includes("hoodie") || c.includes("sweater")) return "Tops";
-  if (c.includes("bottom") || c.includes("pants") || c.includes("trouser") || c.includes("jeans") || c.includes("skirt") || c.includes("short")) return "Bottoms";
-  if (c.includes("bag") || c.includes("backpack") || c.includes("crossbody") || c.includes("clutch") || c.includes("tote")) return "Bags";
-  if (c.includes("wallet") || c.includes("accessor") || c.includes("watch") || c.includes("scarf") || c.includes("hat") || c.includes("belt") || c.includes("jewel") || c.includes("jewelry") || c.includes("sunglass")) return "Accessories";
-  if (c === "recommended") return "Accessories";
-  return c.charAt(0).toUpperCase() + c.slice(1);
 }
 
 function isHeadbandLikeRecommendation(item: {
@@ -2815,12 +2855,12 @@ function mapCompleteLookToStyleResponse(params: {
   // Pass 2 fallback: ensure shoes/bags are populated with best valid candidates.
   const ensureCategoryFilled = (categoryLabel: "Shoes" | "Bags") => {
     const existing = groups.get(categoryLabel) || [];
-    if (existing.length >= Math.min(2, maxPerCategory)) return;
+    if (existing.length >= Math.min(4, maxPerCategory)) return;
     if (!groups.has(categoryLabel)) groups.set(categoryLabel, []);
     const bucket = groups.get(categoryLabel)!;
 
     for (const s of stagedSuggestions) {
-      if (bucket.length >= Math.min(2, maxPerCategory)) break;
+      if (bucket.length >= Math.min(4, maxPerCategory)) break;
       const text = `${String(s.title || "")} ${String(s.category || "")}`.toLowerCase();
       const productId = s.product_id;
       if (bucket.some((b) => b.id === productId)) continue;
@@ -2877,7 +2917,7 @@ function mapCompleteLookToStyleResponse(params: {
 
   const recommendations = Array.from(groups.entries()).map(([category, products]) => {
     const priority = completeStylePriorityFromCategory(category, completeLookResult.missingCategories || []);
-    const colorHint = colorComfortHintForCategory(sourceStyle, category);
+    const colorHint = colorComfortHintForCategory(sourceStyle, category, sourceProduct);
     const styleReason = reasons.get(category) || `Recommended ${category.toLowerCase()} for this look`;
     return {
       category,

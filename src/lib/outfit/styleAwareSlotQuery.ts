@@ -641,10 +641,12 @@ const WEATHER_SLOT_OVERRIDES: Partial<Record<WeatherContext, Partial<Record<stri
   hot: {
     shoes: ["sandals", "open toe shoes", "slides"],
     bags: ["straw bag", "canvas tote", "woven bag"],
+    accessories: ["sunglasses", "sun hat", "cap", "lightweight jewelry"],
     outerwear: [], // empty → suppress outerwear in hot weather
   },
   warm: {
     shoes: ["sandals", "sneakers", "loafers", "mules"],
+    accessories: ["sunglasses", "cap", "hat", "lightweight jewelry"],
   },
   cool: {
     shoes: ["closed toe shoes", "boots", "loafers"],
