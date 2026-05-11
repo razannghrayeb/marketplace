@@ -12,6 +12,7 @@ import {
 } from "./productTypeTaxonomy";
 import { isBeautyRetailListingFromFields } from "./categoryFilter";
 import { extractAttributesSync } from "./attributeExtractor";
+import { hasActualSuitCatalogCue } from "./suitCatalogCue";
 import { canonicalizeFashionColorToken, tieredColorListCompliance } from "../color/colorCanonical";
 import { normalizeColorToken } from "../color/queryColorFilter";
 import { inferProductGender, complianceFromInferredGender, type ProductGender } from "./productGenderInference";
@@ -1590,6 +1591,22 @@ export function computeHitRelevance(
 
   if ((hardBlocked || (hasReliableTypeIntent && crossFamilyPenalty >= 0.9)) && productTypeCompliance < 0.2) {
     finalRelevance01 = Math.min(finalRelevance01, 0.02);
+  }
+
+  if (suitIntent) {
+    const suitCatalogCue = hasActualSuitCatalogCue(src);
+    if (suitCatalogCue) {
+      const suitFloor = Math.min(
+        0.92,
+        0.68 + (0.12 * exactTypeScore) + (0.08 * categoryRelevance01),
+      );
+      finalRelevance01 = Math.max(finalRelevance01, suitFloor);
+    } else if (docIsOuterwearLike) {
+      const nonSuitOuterwearCap = /\b(blazer|blazers|sport\s*coat|sportcoat)\b/.test(docBlobForFamily)
+        ? 0.62
+        : 0.58;
+      finalRelevance01 = Math.min(finalRelevance01, nonSuitOuterwearCap);
+    }
   }
 
   if (hasColorIntentForFinalRelevance && (isTopLikeIntent || isBottomLikeIntent || isFootwearLikeIntent)) {

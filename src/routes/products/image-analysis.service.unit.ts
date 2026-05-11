@@ -109,7 +109,7 @@ describe("main-path detection search hints", () => {
         mainPathOnly: true,
         limit: 3,
       }),
-    ).toEqual(["outerwear", "jacket", "outerwear & jackets"]);
+    ).toEqual(["outerwear", "jacket", "cardigan"]);
   });
 
   test("keeps generic long-sleeve outwear hard category terms out of the full-suit lane", () => {
@@ -257,6 +257,18 @@ describe("outerwear suit signal", () => {
     expect(signal.subtype).toBe("jacket");
     expect(signal.detectionCategoryForSearch).toBe("outerwear");
     expect(signal.prioritySeedTypes.slice(0, 3)).toEqual(["jacket", "jackets", "bomber"]);
+  });
+
+  test("recovers cardigan as a valid generic outerwear family term", () => {
+    const recovered = recoverFormalOuterwearTypes(
+      ["long sleeve outerwear", "outerwear"],
+      "outerwear",
+      "long sleeve outerwear",
+      "a person wearing a cardigan over a tee",
+    );
+
+    expect(recovered).toContain("cardigan");
+    expect(recovered).toContain("cardigans");
   });
 
   test("uses jacket-first tailored seeds for generic outwear with suit caption", () => {
