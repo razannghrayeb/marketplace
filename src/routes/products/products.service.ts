@@ -5426,56 +5426,65 @@ export async function searchByImageWithSimilarity(
   const exactCosineRerank = imageExactCosineRerankEnabled();
 
   // ────────────────────────────────────────────────────────────────────────────
-  // ATTRIBUTE / PART EMBEDDING ENRICHMENT (two-pass mget)
+  // PHASE 1 OPTIMIZATION: Deferred Attribute Embedding Fetch (parallelizes with hydration)
   // ────────────────────────────────────────────────────────────────────────────
-  // The initial kNN response intentionally excludes attribute and part embeddings
-  // to keep response payload small (~2 MB vs ~84 MB).  Now that we know which
-  // signals are active and have the full hit list, fetch only the needed vectors
-  // for the top N hits via a single mget call.
+  // Originally this was synchronous/await, blocking the reranking pipeline.
+  // Now we defer execution and await it together with hydration at line 9310.
+  // This parallelizes the 5.2s attr_mget with the 3.0s hydration, saving ~3s.
+  const attrMgetPromise: Promise<{ byId: Map<string, any>; mgetMs: number } | null> = (
+    async () => {
+      try {
+        if (!Array.isArray(hits) || hits.length === 0) return null;
+
+        const attrFieldsToFetch: string[] = [];
+        if (runColor) attrFieldsToFetch.push("embedding_color");
+        if (runTexture) attrFieldsToFetch.push("embedding_texture");
+        if (runMaterial) attrFieldsToFetch.push("embedding_material");
+        if (runStyle) attrFieldsToFetch.push("embedding_style");
+        if (runPattern) attrFieldsToFetch.push("embedding_pattern");
+        if (Object.keys(partQueryEmbeddings).some(
+          (key) => partQueryEmbeddings[key] && Array.isArray(partQueryEmbeddings[key]) && partQueryEmbeddings[key]!.length > 0
+        )) {
+          attrFieldsToFetch.push(...partEmbeddingFields);
+        }
+
+        if (attrFieldsToFetch.length === 0) return null;
+
+        const topIds = hits
+          .slice(0, 200)
+          .map((h) => String(h?._source?.product_id ?? ""))
+          .filter(Boolean);
+        const uniqueIds = [...new Set(topIds)];
+
+        if (uniqueIds.length === 0) return null;
+
+        const mgetStartedAt = Date.now();
+        const mgetResp = await (osClient as any).mget(
+          { index: config.opensearch.index, body: { ids: uniqueIds }, _source: attrFieldsToFetch },
+          { requestTimeout: 8_000, maxRetries: 0 },
+        );
+        const mgetMs = Date.now() - mgetStartedAt;
+
+        const byId = new Map<string, any>();
+        for (const doc of (mgetResp.body?.docs ?? [])) {
+          if (doc?.found && doc?._source) byId.set(String(doc._id ?? ""), doc._source);
+        }
+
+        return { byId, mgetMs };
+      } catch (err: any) {
+        console.warn("[image-knn] attr mget failed (proceeding without attr embeddings):", err?.message ?? err);
+        return null;
+      }
+    }
+  )();
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // Part embedding similarity computation (runs while attr_mget executes in parallel)
+  // ────────────────────────────────────────────────────────────────────────────
   const partSimByDocId = new Map<string, Record<string, number>>();
   const hasQueryPartEmbeddings = Object.keys(partQueryEmbeddings).some(
     (key) => partQueryEmbeddings[key] && Array.isArray(partQueryEmbeddings[key]) && partQueryEmbeddings[key]!.length > 0
   );
-
-  if (Array.isArray(hits) && hits.length > 0) {
-    const attrFieldsToFetch: string[] = [];
-    if (runColor) attrFieldsToFetch.push("embedding_color");
-    if (runTexture) attrFieldsToFetch.push("embedding_texture");
-    if (runMaterial) attrFieldsToFetch.push("embedding_material");
-    if (runStyle) attrFieldsToFetch.push("embedding_style");
-    if (runPattern) attrFieldsToFetch.push("embedding_pattern");
-    if (hasQueryPartEmbeddings) attrFieldsToFetch.push(...partEmbeddingFields);
-
-    if (attrFieldsToFetch.length > 0) {
-      const topIds = hits
-        .slice(0, 200)
-        .map((h) => String(h?._source?.product_id ?? ""))
-        .filter(Boolean);
-      const uniqueIds = [...new Set(topIds)];
-      if (uniqueIds.length > 0) {
-        try {
-          const mgetStartedAt = Date.now();
-          const mgetResp = await (osClient as any).mget(
-            { index: config.opensearch.index, body: { ids: uniqueIds }, _source: attrFieldsToFetch },
-            { requestTimeout: 8_000, maxRetries: 0 },
-          );
-          rerankTimings['attr_mget_ms'] = Date.now() - mgetStartedAt;
-          
-          const byId = new Map<string, any>();
-          for (const doc of (mgetResp.body?.docs ?? [])) {
-            if (doc?.found && doc?._source) byId.set(String(doc._id ?? ""), doc._source);
-          }
-          for (const hit of hits) {
-            const pid = String(hit?._source?.product_id ?? "");
-            const embData = byId.get(pid);
-            if (embData && hit._source) Object.assign(hit._source, embData);
-          }
-        } catch (err: any) {
-          console.warn("[image-knn] attr mget failed (proceeding without attr embeddings):", err?.message ?? err);
-        }
-      }
-    }
-  }
 
   if (hasQueryPartEmbeddings && Array.isArray(hits) && hits.length > 0) {
     try {
@@ -5540,6 +5549,11 @@ export async function searchByImageWithSimilarity(
   const rawOpenSearchHitCount = Array.isArray(hits) ? hits.length : 0;
   let countAfterEarlyImageKeyCollapse = rawOpenSearchHitCount;
 
+  // ────────────────────────────────────────────────────────────────────────────
+  // PHASE 2 INSTRUMENTATION: Image collapse timing
+  // ────────────────────────────────────────────────────────────────────────────
+  const imageCollapseStartMs = Date.now();
+
   // Collapse size/style variants at the earliest possible point — before any quality gate.
   // Vendors index every size variant as a separate product sharing the same image_url,
   // which saturates the KNN recall window. Sorting by _score first guarantees we keep
@@ -5560,7 +5574,12 @@ export async function searchByImageWithSimilarity(
     });
     countAfterEarlyImageKeyCollapse = hits.length;
   }
+  rerankTimings['image_collapse_ms'] = Date.now() - imageCollapseStartMs;
 
+  // ────────────────────────────────────────────────────────────────────────────
+  // PHASE 2 INSTRUMENTATION: Debug bypass and hits sort timing
+  // ────────────────────────────────────────────────────────────────────────────
+  const rawCosineDebugStartMs = Date.now();
   const rawCosineDebugAllowed =
     debugRawCosineFirst &&
     String(process.env.NODE_ENV ?? "").toLowerCase() !== "production" &&
@@ -5631,7 +5650,14 @@ export async function searchByImageWithSimilarity(
       },
     };
   }
+  if (rawCosineDebugAllowed) {
+    rerankTimings['debug_bypass_ms'] = Date.now() - rawCosineDebugStartMs;
+  }
 
+  // ────────────────────────────────────────────────────────────────────────────
+  // PHASE 2 INSTRUMENTATION: Hits sort and candidate selection timing
+  // ────────────────────────────────────────────────────────────────────────────
+  const hitsSortStartMs = Date.now();
   const aisleSoftWeightBase = Math.max(
     0,
     Math.min(400, Number(process.env.SEARCH_IMAGE_AISLE_SOFT_WEIGHT ?? "130") || 130),
@@ -5643,6 +5669,7 @@ export async function searchByImageWithSimilarity(
   const hitsByKnnScore = [...hits].sort(
     (a: any, b: any) => visualSimFromHit(b) - visualSimFromHit(a),
   );
+  rerankTimings['hits_sort_ms'] = Date.now() - hitsSortStartMs;
   // Score at least max(limit*5, 500) when possible; cap by pool + actual hit count.
   // Detection-scoped searches use an additional cap to bound rerank CPU without changing output size.
   const fetchLimitBase = Math.min(
@@ -5653,7 +5680,9 @@ export async function searchByImageWithSimilarity(
   const fetchLimit = detectionScoped
     ? Math.max(limit, Math.min(fetchLimitBase, imageDetectionRerankCandidateCap()))
     : fetchLimitBase;
+  const candidateSelectionStartMs = Date.now();
   const baseCandidates = hitsByKnnScore.slice(0, fetchLimit);
+  rerankTimings['candidate_selection_ms'] = Date.now() - candidateSelectionStartMs;
 
   /** Per-hit soft signals for ranking + explain (visual + category + optional attribute embeddings). */
   const imageCompositeById = new Map<string, number>();
@@ -9306,12 +9335,29 @@ export async function searchByImageWithSimilarity(
   let hydrationMissingProductRowsCount = 0;
   if (uniqueProductIds.length > 0) {
     hydrationCandidateIdCount = uniqueProductIds.length;
-    const [productHydration, userLifestyle] = await Promise.all([
+    // PHASE 1 OPTIMIZATION: Include attrMgetPromise in parallel execution
+    const [productHydration, userLifestyle, attrMgetResult] = await Promise.all([
       productHydrationPromise,
       personalizationPromise,
+      attrMgetPromise,
     ]);
     if ((productHydration as any).error) throw (productHydration as any).error;
     const productById = new Map(((productHydration as any).products as any[]).map((p: any) => [String(p.id), p]));
+    
+    // PHASE 1 OPTIMIZATION: Apply deferred attr_mget results
+    if (attrMgetResult?.byId && attrMgetResult.byId.size > 0) {
+      rerankTimings['attr_mget_ms'] = attrMgetResult.mgetMs;
+      for (const hit of hits) {
+        const pid = String(hit?._source?.product_id ?? "");
+        const embData = attrMgetResult.byId.get(pid);
+        if (embData && hit._source) {
+          Object.assign(hit._source, embData);
+        }
+      }
+    } else {
+      rerankTimings['attr_mget_ms'] = 0;
+    }
+    
     const missingHydrationIds = uniqueProductIds.filter((id) => !productById.has(String(id)));
     hydrationPrefetchMissCount = missingHydrationIds.length;
     if (missingHydrationIds.length > 0) {
@@ -10752,15 +10798,31 @@ export async function searchByImageWithSimilarity(
   };
 
   // Log detailed reranking breakdown
+  // PHASE 2 INSTRUMENTATION: Enhanced metrics logging
   if (String(process.env.DEBUG_RERANK_TIMING ?? "").toLowerCase() === "1" || rerankTimings['total_rerank_ms'] > 4000) {
     console.warn("[rerank-timing-breakdown]", {
-      ...rerankTimings,
+      // Core metrics
+      signals_wait_ms: rerankTimings['signals_wait_ms'],
+      attr_mget_ms: rerankTimings['attr_mget_ms'],
+      attribute_similarity_ms: rerankTimings['attribute_similarity_ms'],
+      final_relevance_ms: rerankTimings['final_relevance_ms'],
+      sorting_ms: rerankTimings['sorting_ms'],
+      post_filtering_ms: rerankTimings['post_filtering_ms'],
+      total_rerank_ms: rerankTimings['total_rerank_ms'],
+      // PHASE 2 investigation metrics
+      image_collapse_ms: rerankTimings['image_collapse_ms'],
+      debug_bypass_ms: rerankTimings['debug_bypass_ms'],
+      hits_sort_ms: rerankTimings['hits_sort_ms'],
+      candidate_selection_ms: rerankTimings['candidate_selection_ms'],
+      // Context
       hits_processed: Math.min(baseCandidates.length, 500),
       has_color_query: runColor,
       has_style_query: runStyle,
       has_pattern_query: runPattern,
       has_texture_query: runTexture,
       has_material_query: runMaterial,
+      // Phase 1 parallelization check
+      parallelization_effective: (rerankTimings['attr_mget_ms'] ?? 0) > 0,
     });
   }
 
