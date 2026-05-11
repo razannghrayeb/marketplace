@@ -5391,10 +5391,17 @@ export async function searchByImageWithSimilarity(
   const effectiveLimit = Math.max(limit, 20); // Ensure we have at least 20 results to work with
   const hydrationPrefetchMultiplier = imageHydrationPrefetchMultiplier(detectionScoped);
   const hydrationPrefetchCap = imageHydrationPrefetchCap(detectionScoped);
+  // Align prefetch window with the post-rerank `maxHydrate` cap (line 9350-9352) so the
+  // second `getSearchProductsByIdsOrdered(missingHydrationIds)` round-trip drops out.
+  // Same product rows fetched, single PG query instead of two sequential ones.
+  const postRerankHydrateCap = Math.max(effectiveLimit * 10, 150);
   const hydrationCap = Math.min(
     rawKnnProductIds.length,
     hydrationPrefetchCap,
-    Math.ceil(effectiveLimit * hydrationPrefetchMultiplier),
+    Math.max(
+      Math.ceil(effectiveLimit * hydrationPrefetchMultiplier),
+      postRerankHydrateCap,
+    ),
   );
   const idsToHydrate = rawKnnProductIds.slice(0, hydrationCap);
   const endpointLimit = limit;
@@ -9400,6 +9407,26 @@ export async function searchByImageWithSimilarity(
     
     const missingHydrationIds = uniqueProductIds.filter((id) => !productById.has(String(id)));
     hydrationPrefetchMissCount = missingHydrationIds.length;
+
+    // Kick off images fetch in parallel with the missing-products PG fetch.
+    // Image rows are keyed by product_id; running with the full candidate set just
+    // produces extra entries in the map that nothing reads, so this is result-neutral.
+    const candidateImageIds = [
+      ...new Set(
+        uniqueProductIds
+          .map((id) => parseInt(String(id), 10))
+          .filter(Number.isFinite),
+      ),
+    ];
+    const imagesHydrationStartedAt = Date.now();
+    const imagesPromise: Promise<Map<number, ProductImage[]>> =
+      candidateImageIds.length > 0
+        ? getImagesForProducts(candidateImageIds).then((hydratedImages) => {
+            console.log("[hydrate-step] images_ms", Date.now() - imagesHydrationStartedAt);
+            return hydratedImages;
+          })
+        : Promise.resolve(new Map<number, ProductImage[]>());
+
     if (missingHydrationIds.length > 0) {
       const missingHydrationStartedAt = Date.now();
       const missingProducts = await getSearchProductsByIdsOrdered(missingHydrationIds);
@@ -9429,22 +9456,8 @@ export async function searchByImageWithSimilarity(
     const products = productIds.map((id: string) => productById.get(String(id))).filter(Boolean);
     const hydratedProductIds = [...new Set(products.map((product: any) => String(product.id)))];
     hydratedProductRowsCount = hydratedProductIds.length;
-    const numericIds = [
-      ...new Set(
-        hydratedProductIds
-          .map((id) => parseInt(id, 10))
-          .filter(Number.isFinite),
-      ),
-    ];
-    const imagesHydrationStartedAt = Date.now();
-    const imagesByProduct =
-      numericIds.length > 0
-        ? await getImagesForProducts(numericIds).then((hydratedImages) => {
-          console.log("[hydrate-step] images_ms", Date.now() - imagesHydrationStartedAt);
-          return hydratedImages;
-        })
-        : new Map<number, ProductImage[]>();
-    if (numericIds.length === 0) {
+    const imagesByProduct = await imagesPromise;
+    if (candidateImageIds.length === 0) {
       console.log("[hydrate-step] images_ms", Date.now() - imagesHydrationStartedAt);
     }
     console.log("[hydrate-step] vendors_ms", 0);
@@ -10177,10 +10190,30 @@ export async function searchByImageWithSimilarity(
   // This prevents opposite-gender and shorts-vs-trousers leaks when index fields are sparse/noisy.
   const countAfterHydrationAssembly = results.length;
   const productsBeforeHydratedMetadataGuard = results;
+  // SCOPED to long-sleeve-outerwear pipeline only: hasOppositeGenderSignalForQuery treats
+  // sartorial cues like "blazer"/"suit" in the title as a men-only style cue. For LSO
+  // detections (blazer / suit / coat queries) this drops legitimate items whose
+  // audience_gender / numeric audienceCompliance already align with the query — e.g.
+  // women's "Tailored Drape Blazer" gets nuked because title contains "blazer". Skip
+  // the title-pattern check for this one pipeline; explicit catalog gender signals
+  // and the numeric audienceCompliance floor below still catch real cross-gender items.
+  const detectionLabelNormForGuard = String(params.detectionLabel ?? "")
+    .toLowerCase()
+    .trim();
+  const detectionCategoryNormForGuard = String(params.detectionProductCategory ?? "")
+    .toLowerCase()
+    .trim();
+  const isGenericLongSleeveOuterwearForGuard =
+    detectionCategoryNormForGuard === "outerwear" &&
+    /\blong\s*sleeve\s*(?:outwear|outerwear)\b/.test(detectionLabelNormForGuard);
   if ((queryGenderNormForPost || shouldRejectShortsForTrouserIntent) && results.length > 0) {
     results = results.filter((p: any) => {
       const src = p as Record<string, unknown>;
-      if (queryGenderNormForPost && hasOppositeGenderSignalForQuery(src, queryGenderNormForPost)) {
+      if (
+        queryGenderNormForPost &&
+        !isGenericLongSleeveOuterwearForGuard &&
+        hasOppositeGenderSignalForQuery(src, queryGenderNormForPost)
+      ) {
         return false;
       }
       // Detection-scoped image search needs a hard numeric audience guard because many
