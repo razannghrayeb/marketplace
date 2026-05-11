@@ -83,6 +83,15 @@ export function scoreCategoryRelevance01(
   let best = 0;
   for (const h of hints) {
     if (!h) continue;
+    const outerwearTailoredAdjacent =
+      (h === "outerwear" || h === "outwear") &&
+      (dcc === "tailored" || /\b(suit|suits|tuxedo|tuxedos|tailored|waistcoat|gilet)\b/.test(dc));
+    const tailoredOuterwearAdjacent =
+      h === "tailored" &&
+      (dcc === "outerwear" || /\b(blazer|blazers|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket)\b/.test(dc));
+    if (outerwearTailoredAdjacent || tailoredOuterwearAdjacent) {
+      best = Math.max(best, 0.55);
+    }
     const aliases = new Set(getCategorySearchTerms(h).map((t) => t.toLowerCase()));
     aliases.add(h);
     if (aliases.has(dc) || aliases.has(dcc)) {
@@ -515,7 +524,7 @@ function inferSleeveFromCatalogSignals(
   }
 
   // Type-level defaults when explicit sleeve fields are missing.
-  if (/\b(hoodie|hooded|sweater|cardigan|pullover|jacket|coat|parka|trench|blazer|windbreaker|overcoat)\b/.test(bag)) {
+  if (/\b(hoodie|hooded|sweater|cardigan|pullover|jacket|coat|parka|trench|blazer|windbreaker|overcoat|suit|suits|tuxedo|tuxedos|tailored)\b/.test(bag)) {
     return "long";
   }
 
@@ -540,7 +549,7 @@ function hasStrongLongSleeveCatalogDefault(
     .map((x) => String(x ?? "").toLowerCase())
     .join(" ");
 
-  return /\b(hoodie|hooded|sweater|cardigan|pullover|jacket|coat|parka|trench|blazer|windbreaker|overcoat)\b/.test(bag);
+  return /\b(hoodie|hooded|sweater|cardigan|pullover|jacket|coat|parka|trench|blazer|windbreaker|overcoat|suit|suits|tuxedo|tuxedos|tailored)\b/.test(bag);
 }
 
 function docSupportsSleeveIntent(src: Record<string, unknown>): boolean {

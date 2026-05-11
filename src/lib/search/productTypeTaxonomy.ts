@@ -1409,6 +1409,9 @@ function intraFamilySubtypePenalty(querySeeds: string[], docTypes: string[]): nu
   const docs = docTypes.map((s) => s.toLowerCase().trim()).filter(Boolean);
   if (seeds.length === 0 || docs.length === 0) return 0;
 
+  const hasBroadOuterwearSeed = seeds.some((s) =>
+    /\b(?:outerwear|outwear|outerwear\s*&\s*jackets|coats?\s*&\s*jackets?)\b/.test(s),
+  );
   let maxPen = 0;
 
   for (const s of seeds) {
@@ -1442,6 +1445,7 @@ function intraFamilySubtypePenalty(querySeeds: string[], docTypes: string[]): nu
       const oq = outerMicroGroup(s);
       const od = outerMicroGroup(d);
       if (oq && od) {
+        if (hasBroadOuterwearSeed) continue;
         maxPen = Math.max(maxPen, OUTER_PAIR_PENALTY[oq][od] ?? 0);
       }
 
@@ -1565,6 +1569,16 @@ export function scoreCrossFamilyTypePenalty(
 
   const expandedQuery = expandProductTypesForQuery(seeds);
   const qFam = familiesForTokens(expandedQuery);
+  const sleeveOnlyTopSeed =
+    seeds.some((s) => /\b(?:long|short)\s+sleeve\b/.test(s)) &&
+    !seeds.some((s) =>
+      /\b(top|tops|shirt|shirts|blouse|blouses|tee|t-?shirt|tshirt|tank|camisole|cami|sweater|sweaters|hoodie|hoodies|sweatshirt|sweatshirts|cardigan|cardigans|polo|polos|pullover|knitwear)\b/.test(
+        s,
+      ),
+    );
+  if (sleeveOnlyTopSeed && (qFam.has("outerwear") || qFam.has("tailored"))) {
+    qFam.delete("tops");
+  }
   if (qFam.size === 0) return 0;
 
   let dFam = familiesForTokens(docProductTypes.map((t) => t.toLowerCase().trim()).filter(Boolean));

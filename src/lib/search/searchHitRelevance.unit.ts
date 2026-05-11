@@ -881,6 +881,54 @@ describe("computeHitRelevance - image palette color authority", () => {
   });
 });
 
+describe("computeHitRelevance - generic outerwear suit handling", () => {
+  const genericLongSleeveOuterwearIntent = {
+    desiredProductTypes: ["long sleeve", "outerwear", "jacket", "coat", "blazer"],
+    desiredColors: ["charcoal"],
+    desiredColorsTier: ["charcoal"],
+    desiredSleeve: "long",
+    rerankColorMode: "any",
+    mergedCategory: "outerwear",
+    astCategories: ["outerwear"],
+    hasAudienceIntent: false,
+    crossFamilyPenaltyWeight: 420,
+    tightSemanticCap: true,
+    reliableTypeIntent: true,
+  } satisfies SearchHitRelevanceIntent;
+
+  test("does not treat sleeve-only seeds as a tops-vs-tailored mismatch", () => {
+    const penalty = scoreCrossFamilyTypePenalty(
+      ["long sleeve", "outerwear", "jacket", "coat", "blazer"],
+      ["suit", "outerwear"],
+      { category: "suit-2p", categoryCanonical: "tailored" },
+    );
+
+    expect(penalty).toBeLessThan(0.4);
+  });
+
+  test("keeps actual suit listings relevant for generic long-sleeve outerwear detections", () => {
+    const rel = computeHitRelevance(
+      {
+        _source: {
+          title: "Grey Casual Stylish Suit",
+          category: "suit-2p",
+          category_canonical: "tailored",
+          product_types: ["suit", "outerwear"],
+          color: "gray",
+        },
+      } as any,
+      0.878,
+      genericLongSleeveOuterwearIntent,
+    );
+
+    expect(rel.productTypeCompliance).toBeGreaterThan(0.8);
+    expect(rel.crossFamilyPenalty).toBeLessThan(0.4);
+    expect(rel.sleeveCompliance).toBeGreaterThan(0.4);
+    expect(rel.categoryRelevance01).toBeGreaterThan(0.5);
+    expect(rel.finalRelevance01).toBeGreaterThan(0.65);
+  });
+});
+
 describe("scoreAudienceCompliance - cue-based gender inference", () => {
   test("men query hard-penalizes a women department brand even when category is mislabeled men", () => {
     const hit = {
