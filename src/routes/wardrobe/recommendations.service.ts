@@ -116,6 +116,11 @@ export const TRACKED_OUTFIT_SLOTS = new Set([
   "tops",
   "bags",
   "accessories",
+  "dresses",
+  "bottoms",
+  "shoes",
+  "outerwear",
+  "tailored",
 ]);
 
 const STYLE_TERMS_LEXICON = [
@@ -1706,8 +1711,10 @@ async function runCompleteLookCore(
       // Safety-net recall path: keep strict gender/age, but remove slot-intent filter
       // and relax floor slightly to prevent zero-result categories.
       if (scored.length < minPerCategory) {
-        const recallVectorHits = await runSearch(buildFilters(false, false), true);
-        const recallLexicalHits = await runSearch(buildFilters(false, false), false);
+        // For bags specifically, maintain stronger filtering to avoid mixing with jewelry/scarves
+        const fallbackSlotIntentFilter = category === "bags";
+        const recallVectorHits = await runSearch(buildFilters(fallbackSlotIntentFilter, false), true);
+        const recallLexicalHits = await runSearch(buildFilters(fallbackSlotIntentFilter, false), false);
         scored = dedupeCompleteLookSuggestions(
           scored
             .concat(scoreHits(recallVectorHits, { relaxedFloor: true }))
@@ -3351,6 +3358,7 @@ function wardrobeSlotToCategoryCanonical(slot: string): string {
     tops: "tops",
     bottoms: "bottoms",
     outerwear: "outerwear",
+    tailored: "tailored",
     dresses: "dresses",
     accessories: "accessories",
   };
