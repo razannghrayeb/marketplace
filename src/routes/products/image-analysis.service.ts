@@ -2149,6 +2149,22 @@ export function hardCategoryTermsForDetection(
   }
 
   if (categoryMapping.productCategory === "outerwear") {
+    // For generic long sleeve outerwear detections, skip hard category narrowing to maximize recall.
+    // Filtering happens downstream in products.service via search relevance and reranking
+    // (family gating, type compliance, outfit compatibility rules, etc.). This allows jackets/blazers/vests/coats
+    // across different catalog category spellings to surface.
+    const isGenericLongSleeveOuterwear =
+      /\blong\s*sleeve\s*(?:outwear|outerwear)\b/.test(l) &&
+      !/\b(blazer|blazers|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket|jacket|jackets|coat|coats|parka|vest|vests|gilet|waistcoat)\b/.test(l);
+
+    if (isGenericLongSleeveOuterwear) {
+      // Return broad outerwear base terms + tailored terms for maximum recall
+      // Downstream filtering will handle type/style/formality disambiguation
+      const tailoredTerms = getCategorySearchTerms("tailored").map((t) => String(t).toLowerCase().trim());
+      const merged = [...new Set([...baseTerms, ...tailoredTerms])];
+      return merged.length > 0 ? merged : baseTerms;
+    }
+
     const isVestLike = /\bvest\b|\bgilet\b|\bwaistcoat\b/.test(l);
     const isBlazerLike = /\b(blazer|blazers|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket)\b/.test(l);
     const isCoatLike = /\b(coat|coats|overcoat|overcoats|parka|parkas|trench|trenches|puffer\s+coats?|down\s+coats?|windbreaker|windbreakers)\b/.test(l);
@@ -7342,8 +7358,17 @@ export class ImageAnalysisService {
             shouldHardCategory || forceCoreMainPathHardCategory,
           );
           if (filterByDetectedCategory) {
-            if (shouldHardCategory || forceCoreMainPathHardCategory) {
-              // Apply hard OpenSearch category filtering, even when global soft-category is enabled.
+            // For generic long sleeve outerwear detections, skip hard category filtering
+            // to maximize recall. Filtering happens downstream via search relevance and reranking.
+            const isGenericLongSleeveOuterwear =
+              categoryMapping.productCategory === "outerwear" &&
+              /\blong\s*sleeve\s*(?:outwear|outerwear)\b/.test(normalizeDetectionLabelForSearch(label)) &&
+              !/\b(blazer|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket|jacket|jackets|coat|coats|parka|vest|vests|gilet|waistcoat)\b/.test(
+                `${normalizeDetectionLabelForSearch(label)} ${blipCaptionNorm}`
+              );
+
+            if ((shouldHardCategory || forceCoreMainPathHardCategory) && !isGenericLongSleeveOuterwear) {
+              // Apply hard OpenSearch category filtering for non-generic-outerwear, even when global soft-category is enabled.
               const terms = hardCategoryTermsForDetection(label, categoryMapping, {
                 confidence: detection.confidence,
                 areaRatio: detection.area_ratio,
@@ -7372,6 +7397,16 @@ export class ImageAnalysisService {
               predictedCategoryAisles = outerwearSuitSignal.isOuterwearOrSuit
                 ? outerwearSuitSignal.predictedAisles
                 : [categoryMapping.productCategory];
+            } else if (isGenericLongSleeveOuterwear) {
+              // For generic long sleeve outerwear, use soft category filtering with broad outerwear + tailored terms
+              // This allows jackets/blazers/vests/coats to surface regardless of exact catalog category
+              const baseTerms = getCategorySearchTerms(categoryMapping.productCategory);
+              const tailoredTerms = getCategorySearchTerms("tailored");
+              const allTerms = [...new Set([...baseTerms, ...tailoredTerms])];
+              // Use soft category boost path for predicted aisles
+              predictedCategoryAisles = outerwearSuitSignal.isOuterwearOrSuit
+                ? outerwearSuitSignal.predictedAisles
+                : allTerms;
             } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
               if (shopLookSingleCategoryHintEnv()) {
                 predictedCategoryAisles = [categoryMapping.productCategory];

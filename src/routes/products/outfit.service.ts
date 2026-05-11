@@ -2662,6 +2662,12 @@ function mapCompleteLookToStyleResponse(params: {
     sourceStyle.occasion === "formal" ||
     sourceStyle.occasion === "semi-formal";
 
+  // Detect if source is an outerwear item (suit, blazer, jacket, etc.)
+  const sourceIsOuterwear = detectedCategory === "jacket" || categoryFamily(detectedCategory) === "outerwear";
+  const sourceIsSuit = /\b(suit|suits|tuxedo|two[-\s]?piece|three[-\s]?piece|formal suit|business suit)\b/.test(sourceText);
+  const sourceIsBlazer = /\b(blazer|blazers|sport\s*coat|sportcoat|suit\s*jacket|dress\s*jacket|tailored\s*jacket)\b/.test(sourceText);
+  const sourceIsJacket = sourceIsOuterwear && !sourceIsSuit && !sourceIsBlazer;
+
   const isShoeLike = (value: string): boolean =>
     /\b(shoe|shoes|sneaker|trainer|heel|pump|stiletto|sandal|loafer|flat|mule|boot|oxford|espadrille)\b/.test(value);
   const isSneakerLike = (value: string): boolean =>
@@ -2714,6 +2720,20 @@ function mapCompleteLookToStyleResponse(params: {
     }
 
     if (categoryLabel === "Bottoms") {
+      // When source is a formal outerwear item (suit or blazer), prefer formal button/tailored bottoms
+      if ((sourceIsSuit || sourceIsBlazer) && sourceStyle.formality >= 5) {
+        // For formal occasions with suit/blazer, require formal button or tailored bottoms
+        const hasFormalButton = /\b(formal button|dress pant|dress pants|tailored trouser|tailored trousers|tailored pant|pleated|slacks?|formal|tuxedo|dress)\b/.test(text);
+        if (!hasFormalButton) {
+          // Allow some flexibility for semi-formal occasions, but reject casual/sporty bottoms
+          if (
+            /\b(short|shorts|jogger|joggers|sweatpants|track pant|track pants|cargo|swim short|biker short|cycling short|legging|leggings|casual|athletic|training|gym)\b/.test(text)
+          ) {
+            return false;
+          }
+        }
+      }
+      
       if (
         (sourceStyle.occasion === "formal" || sourceStyle.occasion === "semi-formal" || sourceStyle.occasion === "party") &&
         /\b(short|shorts|jogger|joggers|sweatpants|track pant|track pants|cargo|swim short|biker short|cycling short)\b/.test(text)
@@ -2763,6 +2783,27 @@ function mapCompleteLookToStyleResponse(params: {
       /\b(sports legging|sport legging|training legging|gym legging|running legging|workout legging)\b/.test(text)
     ) {
       return false;
+    }
+
+    // Outfit-aware tops filtering: when source is a suit/blazer, return suits not just jackets
+    if (categoryLabel === "Tops") {
+      if (sourceIsSuit) {
+        // For suit sources, also include other suits in the tops recommendations
+        // Don't reject suits - they're valid companions for complete looks
+        const isSuitLike = /\b(suit|suits|tuxedo|blazer|sport\s*coat|dress\s*jacket|tailored\s*jacket)\b/.test(text);
+        // But still filter out inappropriate casual tops if it's a formal suit
+        if (!isSuitLike && sourceStyle.formality >= 6) {
+          const isFormalTop = /\b(dress shirt|oxford|formal shirt|button[-\s]?up|crisp|tailored|structured)\b/.test(text);
+          if (!isFormalTop && /\b(hoodie|hoody|sweatshirt|tshirt|t-shirt|casual|sporty|athletic)\b/.test(text)) {
+            return false;
+          }
+        }
+      } else if (sourceIsBlazer && sourceStyle.formality >= 5) {
+        // For blazer sources, exclude full suits to prevent redundancy
+        const isFullSuit = /\b(full suit|complete suit|two[-\s]?piece|three[-\s]?piece|matching suit)\b/.test(text);
+        if (isFullSuit) return false;
+        // But allow tailored tops and other blazers
+      }
     }
 
     // Hard dress-shoe gate in mapped response path.
