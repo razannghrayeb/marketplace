@@ -28,8 +28,8 @@ function getOptionalUserId(req: Request): number | undefined {
 
 function parseCompleteStyleOptions(query: any): CompleteStyleOptions {
   const options: CompleteStyleOptions = {
-    maxPerCategory: Math.min(parseInt(query.maxPerCategory) || 5, 20),
-    maxTotal: Math.min(parseInt(query.maxTotal) || 20, 50),
+    maxPerCategory: Math.min(parseInt(query.maxPerCategory) || 8, 20),
+    maxTotal: Math.min(parseInt(query.maxTotal) || 30, 50),
     preferSameBrand: query.preferSameBrand === "true",
     disablePriceFilter: query.disablePriceFilter === "true",
   };
