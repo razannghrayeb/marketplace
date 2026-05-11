@@ -412,6 +412,10 @@ function buildOuterwearContract(intent: FashionIntent): ProductContract {
     "windbreaker",
     "rain jacket",
     "sports coat",
+    "vest",
+    "gilet",
+    "waistcoat",
+    "quilted vest",
   ];
 
   // relatedTypes: looser outerwear
@@ -427,7 +431,7 @@ function buildOuterwearContract(intent: FashionIntent): ProductContract {
   ];
 
   // weakTypes: borderline outerwear
-  const weakTypes = ["vest", "gilet", "quilted vest"];
+  const weakTypes: string[] = [];
 
   // badTypes: not outerwear
   const badTypes = [

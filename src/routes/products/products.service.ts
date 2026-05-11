@@ -1052,6 +1052,18 @@ function imageDetectionKnnPoolCap(): number {
   return Math.max(60, Math.min(700, Math.floor(raw)));
 }
 
+function imageAttributeMgetChunkSize(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_ATTR_MGET_CHUNK_SIZE ?? "50");
+  if (!Number.isFinite(raw)) return 50;
+  return Math.max(10, Math.min(200, Math.floor(raw)));
+}
+
+function imageAttributeMgetConcurrency(): number {
+  const raw = Number(process.env.SEARCH_IMAGE_ATTR_MGET_CONCURRENCY ?? "4");
+  if (!Number.isFinite(raw)) return 4;
+  return Math.max(1, Math.min(8, Math.floor(raw)));
+}
+
 function imageHybridMetadataRecallSize(limit: number, hasColorRecall: boolean): number {
   const raw = Number(process.env.SEARCH_IMAGE_HYBRID_METADATA_RECALL_SIZE);
   if (Number.isFinite(raw)) return Math.max(20, Math.min(220, Math.floor(raw)));
@@ -5452,17 +5464,36 @@ export async function searchByImageWithSimilarity(
         .map((h) => String(h?._source?.product_id ?? ""))
         .filter(Boolean);
       const uniqueIds = [...new Set(topIds)];
+      rerankTimings['attr_mget_ids'] = uniqueIds.length;
+      rerankTimings['attr_mget_fields'] = attrFieldsToFetch.length;
       if (uniqueIds.length > 0) {
         try {
           const mgetStartedAt = Date.now();
-          const mgetResp = await (osClient as any).mget(
-            { index: config.opensearch.index, body: { ids: uniqueIds }, _source: attrFieldsToFetch },
-            { requestTimeout: 8_000, maxRetries: 0 },
-          );
+          const uniqueAttrFields = [...new Set(attrFieldsToFetch)];
+          const chunkSize = imageAttributeMgetChunkSize();
+          const concurrency = imageAttributeMgetConcurrency();
+          const chunks: string[][] = [];
+          for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+            chunks.push(uniqueIds.slice(i, i + chunkSize));
+          }
+          const docs: any[] = [];
+          for (let i = 0; i < chunks.length; i += concurrency) {
+            const wave = chunks.slice(i, i + concurrency);
+            const responses = await Promise.all(
+              wave.map((ids) =>
+                (osClient as any).mget(
+                  { index: config.opensearch.index, body: { ids }, _source: uniqueAttrFields },
+                  { requestTimeout: 8_000, maxRetries: 0 },
+                ),
+              ),
+            );
+            for (const resp of responses) docs.push(...(resp.body?.docs ?? []));
+          }
           rerankTimings['attr_mget_ms'] = Date.now() - mgetStartedAt;
+          rerankTimings['attr_mget_chunks'] = chunks.length;
           
           const byId = new Map<string, any>();
-          for (const doc of (mgetResp.body?.docs ?? [])) {
+          for (const doc of docs) {
             if (doc?.found && doc?._source) byId.set(String(doc._id ?? ""), doc._source);
           }
           for (const hit of hits) {
@@ -5471,6 +5502,7 @@ export async function searchByImageWithSimilarity(
             if (embData && hit._source) Object.assign(hit._source, embData);
           }
         } catch (err: any) {
+          rerankTimings['attr_mget_failed'] = 1;
           console.warn("[image-knn] attr mget failed (proceeding without attr embeddings):", err?.message ?? err);
         }
       }
