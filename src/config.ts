@@ -273,6 +273,13 @@ export const config = {
     /** Optional gs://bucket/prefix — when set, API may write outputs there (see Google docs) */
     storageUri: process.env.TRYON_STORAGE_URI?.trim() || "",
   },
+  vertexGenerative: {
+    project: process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || "",
+    location: process.env.GOOGLE_CLOUD_LOCATION || "global",
+    apiEndpoint: process.env.API_ENDPOINT || "https://aiplatform.googleapis.com",
+    modelId: process.env.MODEL_ID || "gemini-2.5-flash",
+    generateContentApi: process.env.GENERATE_CONTENT_API || "generateContent",
+  },
   jwt: {
     secret: process.env.JWT_SECRET || "change-me-in-production",
     accessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "15m",

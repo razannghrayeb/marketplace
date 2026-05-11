@@ -2,9 +2,8 @@
  * LLM outfit narrative + per-product reasons (with Redis cache + template fallback).
  */
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { getRedis, isRedisAvailable } from "../redis";
-import { resolveGeminiGenerationModel } from "../prompt/gemeni";
+import { generateVertexContentText } from "./googleVertexGenerative";
 import type { Product, ProductCategory, RecommendedProduct, StyleProfile, StyleRecommendation } from "./completestyle";
 
 export interface OutfitNarrative {
@@ -95,22 +94,16 @@ async function callLlmJson(systemPrompt: string, userPrompt: string): Promise<st
     return data.choices?.[0]?.message?.content ?? "";
   }
 
-  const geminiKey = process.env.GEMINI_API_KEY?.trim();
-  if (geminiKey) {
-    const genAI = new GoogleGenerativeAI(geminiKey);
-    const model = genAI.getGenerativeModel({
-      model: resolveGeminiGenerationModel(),
+  try {
+    return await generateVertexContentText({
       systemInstruction: systemPrompt,
+      userPrompt,
+      temperature: 0.35,
+      maxOutputTokens: 512,
+      responseMimeType: "application/json",
     });
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-      generationConfig: {
-        temperature: 0.35,
-        maxOutputTokens: 512,
-        responseMimeType: "application/json",
-      },
-    });
-    return result.response.text();
+  } catch {
+    /* fall through to other providers */
   }
 
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
