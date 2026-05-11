@@ -223,6 +223,9 @@ export async function getStylistDirection(anchor: {
   style: StyleProfile;
   audienceGender?: string;
   ageGroup?: string;
+  /** Optional short-form summaries of items the user already owns; the
+   * stylist is told to favour pairings that build outfits around these. */
+  wardrobeSummaries?: string[];
 }): Promise<StylistDirection> {
   const fallback = heuristicDirection({
     title: anchor.title,
@@ -248,6 +251,11 @@ export async function getStylistDirection(anchor: {
 
   const otherSlots = SLOT_KEYS.filter((s) => s !== anchor.family).join(", ");
 
+  const wardrobeBlock =
+    Array.isArray(anchor.wardrobeSummaries) && anchor.wardrobeSummaries.length > 0
+      ? `\nUSER WARDROBE (already owned — favour pairings that build outfits AROUND these items where it makes sense, and avoid suggestions that conflict with them):\n${anchor.wardrobeSummaries.slice(0, 20).join("\n")}\n`
+      : "";
+
   const systemPrompt =
     "You are a senior fashion stylist. For the anchor garment given, decide what real items would complete the outfit per slot.\n" +
     "Rules:\n" +
@@ -263,8 +271,9 @@ export async function getStylistDirection(anchor: {
     `Anchor sits in slot '${anchor.family}', so style the OTHER slots: ${otherSlots}.`;
 
   const userPrompt =
-    `Anchor:\n${anchorBullet}\n\n` +
-    `Produce the styling direction now. Each slot's keywords should be REAL garments a stylist would name out loud.`;
+    `Anchor:\n${anchorBullet}\n` +
+    wardrobeBlock +
+    `\nProduce the styling direction now. Each slot's keywords should be REAL garments a stylist would name out loud.`;
 
   try {
     const raw = await Promise.race([

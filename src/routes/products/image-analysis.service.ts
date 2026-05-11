@@ -5662,6 +5662,21 @@ function setDetectionColorIfHigherConfidence(
       return;
     }
 
+    // Same protection for warm-neutral (camel/tan/brown/beige) on footwear: a
+    // black/dark shoe photographed on a wooden or warm floor frequently yields
+    // a warm-neutral k-means primary from background bleed. Require caption
+    // confirmation OR very high crop confidence before trusting it as the
+    // first signal for the slot.
+    if (
+      !incomingFromCaption &&
+      footwearLike &&
+      isWarmNeutralColor(c) &&
+      !prevColor &&
+      nextConf < 0.85
+    ) {
+      return;
+    }
+
     // Do not let dark-neutral variants (charcoal, dark-gray) from crop/detection-caption
     // override canonical "black" from the full-image caption for any slot.
     // Camera exposure and warm lighting frequently render black garments as charcoal — both
