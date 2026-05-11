@@ -240,6 +240,18 @@ export const config = {
       0.15,
       1,
     ),
+    /** Opt-in: control attribute multi-get behavior (safe off by default). */
+    attrMget: {
+      /** Maximum ids to mget when not using chunked parallel mode. Default preserves legacy 200. */
+      maxIds: finiteEnvNumber(process.env.SEARCH_ATTR_MGET_MAX_IDS, 200, 50, 5000),
+      /** When enabled, perform mget in parallel chunks of this size. */
+      chunkSize: finiteEnvNumber(process.env.SEARCH_ATTR_MGET_CHUNK_SIZE, 200, 10, 2000),
+      /** When true, enable chunked parallel mget across all candidate ids. Default false (preserves results). */
+      parallel: (() => {
+        const v = String(process.env.SEARCH_ATTR_MGET_PARALLEL ?? "").toLowerCase().trim();
+        return v === "1" || v === "true";
+      })(),
+    },
     /** Cap BLIP caption wait for POST /products/search/image (ms). */
     blipCaptionTimeoutMs: finiteEnvNumber(process.env.SEARCH_BLIP_CAPTION_TIMEOUT_MS, 900, 200, 8000),
     /**

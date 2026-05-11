@@ -477,6 +477,48 @@ describe("computeHitRelevance - suit composite intent", () => {
     expect(rel.finalRelevance01).toBeGreaterThan(0.3);
   });
 
+  test("actual suit listings outrank generic outerwear under suit intent", () => {
+    const suitHit = {
+      _source: {
+        title: "Men Black Two Piece Suit",
+        category: "Suits",
+        category_canonical: "tailored",
+        product_types: ["suit"],
+        attr_gender: "men",
+      },
+    } as any;
+
+    const coatHit = {
+      _source: {
+        title: "Men Wool Coat",
+        category: "Outerwear & Jackets",
+        category_canonical: "outerwear",
+        product_types: ["coat"],
+        attr_gender: "men",
+      },
+    } as any;
+
+    const intent = {
+      desiredProductTypes: ["suit", "pants", "trousers", "slacks"],
+      desiredColors: [],
+      desiredColorsTier: [],
+      rerankColorMode: "any",
+      mergedCategory: "tailored",
+      astCategories: ["tailored"],
+      hasAudienceIntent: false,
+      crossFamilyPenaltyWeight: 420,
+      tightSemanticCap: true,
+      reliableTypeIntent: true,
+    } as const;
+
+      const suitRel = computeHitRelevance(suitHit, 0.19, intent as any);
+      const coatRel = computeHitRelevance(coatHit, 0.86, intent as any);
+
+    expect(suitRel.finalRelevance01).toBeGreaterThan(coatRel.finalRelevance01);
+    expect(suitRel.finalRelevance01).toBeGreaterThan(0.65);
+    expect(coatRel.finalRelevance01).toBeLessThan(0.65);
+  });
+
   test("formal-bottom expansion keeps sparse suit category rows viable", () => {
     const sparseSuitHit = {
       _source: {

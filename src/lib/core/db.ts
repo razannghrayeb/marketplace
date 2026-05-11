@@ -289,8 +289,9 @@ export async function getSearchProductsByIdsOrdered(ids: (number | string)[]): P
        p.sales_price_cents,
        p.image_url,
        p.image_cdn
-     FROM products p
-     WHERE p.id = ANY($1::bigint[])`,
+     FROM unnest($1::bigint[]) WITH ORDINALITY AS input(id, ord)
+     JOIN products p ON p.id = input.id
+     ORDER BY input.ord`,
     [numericIds],
   );
 

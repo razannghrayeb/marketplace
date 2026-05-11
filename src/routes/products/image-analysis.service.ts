@@ -1641,7 +1641,7 @@ function mainPathPriorityTypeHints(detectionLabel: string, productCategory: stri
     if (/\b(puffer|down\s+jacket|quilted\s+jacket|blouson|rain\s+jacket|shell\s+jacket|softshell)\b/.test(label)) {
       return ["puffer", "jacket", "coat"];
     }
-    return ["outerwear", "jacket", "outerwear & jackets"];
+    return ["outerwear", "jacket", "cardigan"];
   }
 
   return [];
@@ -2483,6 +2483,8 @@ const OUTERWEAR_BASE_TYPES = [
   "windbreakers",
   "overcoat",
   "overcoats",
+  "cardigan",
+  "cardigans",
 ];
 
 const SUIT_FULL_TYPES = [
