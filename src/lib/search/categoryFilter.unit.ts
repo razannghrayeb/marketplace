@@ -73,6 +73,10 @@ describe("categoryFilter", () => {
     expect(inferCategoryCanonical("Polo Short Sleeve", "")).toBe("tops");
     expect(inferCategoryCanonical("Fleece", "")).toBe("outerwear");
     expect(inferCategoryCanonical("PARKAS & BLOUSONS", "")).toBe("outerwear");
+    expect(inferCategoryCanonical("OUTWEAR", "")).toBe("outerwear");
+    expect(inferCategoryCanonical("denim jacket", "")).toBe("outerwear");
+    expect(inferCategoryCanonical("women blazer", "")).toBe("outerwear");
+    expect(inferCategoryCanonical("sw.jacket", "")).toBe("outerwear");
     expect(inferCategoryCanonical("After Ski Boot", "")).toBe("footwear");
     expect(inferCategoryCanonical("SKIN CARE", "")).toBe("beauty");
     expect(inferCategoryCanonical("CONCEALERS", "")).toBe("beauty");

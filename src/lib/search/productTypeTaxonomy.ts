@@ -321,6 +321,11 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
 
   blazer: "outerwear",
   blazers: "outerwear",
+  "lefon blazer": "outerwear",
+  "men blazer": "outerwear",
+  "men blazers": "outerwear",
+  "women blazer": "outerwear",
+  "women blazers": "outerwear",
   "sport coat": "outerwear",
   sportcoat: "outerwear",
   "suit jacket": "tailored",
@@ -331,6 +336,14 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   tuxedos: "tailored",
   jacket: "outerwear",
   jackets: "outerwear",
+  "men jacket": "outerwear",
+  "men jackets": "outerwear",
+  "women jacket": "outerwear",
+  "women jackets": "outerwear",
+  "denim jacket": "outerwear",
+  "denim jackets": "outerwear",
+  "sw.jacket": "outerwear",
+  "sw jacket": "outerwear",
   "shirt jacket": "outerwear",
   "shirt jackets": "outerwear",
   shacket: "outerwear",
@@ -362,6 +375,10 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   "softshell jackets": "outerwear",
   coat: "outerwear",
   coats: "outerwear",
+  "men coat": "outerwear",
+  "men coats": "outerwear",
+  "women coat": "outerwear",
+  "women coats": "outerwear",
   "puffer coat": "outerwear",
   "puffer coats": "outerwear",
   "down coat": "outerwear",
@@ -375,6 +392,7 @@ export const TYPE_TO_HYPERNYM: Record<string, string> = {
   windbreakers: "outerwear",
   overcoat: "outerwear",
   overcoats: "outerwear",
+  outwear: "outerwear",
   vest: "tailored",
   vests: "tailored",
   gilet: "tailored",
@@ -1263,8 +1281,16 @@ export function filterProductTypeSeedsByMappedCategory(
 ): string[] {
   const allowed = intentFamiliesForProductCategory(productCategory);
   if (!allowed || seeds.length === 0) return seeds;
+  const mappedCategory = String(productCategory || "").toLowerCase().trim();
 
   const kept = seeds.filter((seed) => {
+    const seedText = String(seed || "").toLowerCase().trim();
+    if (
+      mappedCategory === "outerwear" &&
+      /\b(vest|vests|gilet|gilets|waistcoat|waistcoats)\b/.test(seedText)
+    ) {
+      return true;
+    }
     const fams = familiesForExpandedSeed(String(seed));
     if (fams.size === 0) return true;
     for (const f of fams) {
@@ -1508,7 +1534,7 @@ export function inferMacroFamiliesFromListingCategoryFields(
   if (/\b(dresses?|gown|gowns)\b/.test(combined)) {
     out.add("dress");
   }
-  if (/\b(coat|coats|jacket|jackets|blazer|blazers|parka|parkas|puffer|puffers|blouson|blousons|fleece|fleeces|rain\s+jackets?|shell\s+jackets?|softshell|down\s+jackets?|quilted\s+jackets?|vests?)\b/.test(combined)) {
+  if (/\b(outwear|coat|coats|jacket|jackets|blazer|blazers|parka|parkas|puffer|puffers|blouson|blousons|fleece|fleeces|rain\s+jackets?|shell\s+jackets?|softshell|down\s+jackets?|quilted\s+jackets?|vests?)\b/.test(combined)) {
     out.add("outerwear");
   }
   if (/\b(suit|suits|tuxedo|tuxedos|waistcoat|waistcoats|vest|vests|gilet|gilets)\b/.test(combined)) {

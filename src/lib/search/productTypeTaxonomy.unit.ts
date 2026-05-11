@@ -226,6 +226,13 @@ describe("filterProductTypeSeedsByMappedCategory - accessory isolation", () => {
 });
 
 describe("inferMacroFamiliesFromListingCategoryFields", () => {
+  test("maps observed outerwear catalog labels to outerwear family", () => {
+    for (const label of ["outwear", "denim jacket", "women blazer", "men coat", "sw.jacket"]) {
+      const fams = inferMacroFamiliesFromListingCategoryFields(label, "");
+      expect(fams.has("outerwear")).toBe(true);
+    }
+  });
+
   test("does not infer tops from top handle bag phrases", () => {
     const fams = inferMacroFamiliesFromListingCategoryFields("bags", "Top Handle Bag");
     expect(fams.has("tops")).toBe(false);
