@@ -101,6 +101,7 @@ export interface UnifiedImageSearchParams {
   userId?: number;
   sessionFilters?: Partial<LegacySearchFilters>;
   collapseVariantGroups?: boolean;
+  hydrationCache?: any;
 }
 type EnhancedTextSearchOutput = SearchResultWithRelated & { total: number; tookMs: number };
 
@@ -436,6 +437,7 @@ export async function searchImage(
     userId,
     sessionFilters,
     collapseVariantGroups,
+    hydrationCache,
   } = params;
 
   if ((!imageEmbedding || imageEmbedding.length === 0) && !imageBuffer) {
@@ -554,6 +556,7 @@ export async function searchImage(
     userId,
     sessionFilters: inheritedSessionFilters as any,
     collapseVariantGroups,
+    hydrationCache,
   } as any);
 
   const metaAny = res.meta as Record<string, unknown> | undefined;

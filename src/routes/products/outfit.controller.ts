@@ -8,6 +8,7 @@ import { Request, Response } from "express";
 import {
   getOutfitRecommendations,
   getOutfitRecommendationsFromProduct,
+  getOutfitRecommendationsFromWardrobeItem,
   getProductStyleProfile,
   type CompleteStyleOptions,
 } from "./outfit.service";
@@ -36,6 +37,9 @@ function parseCompleteStyleOptions(query: any): CompleteStyleOptions {
 
   if (query.mode === "tryon") {
     options.sourceMode = "tryon";
+  }
+  if (query.mode === "wardrobe") {
+    options.sourceMode = "wardrobe";
   }
   if (query.audienceGenderHint === "men" || query.audienceGenderHint === "women" || query.audienceGenderHint === "unisex") {
     options.audienceGenderHint = query.audienceGenderHint;
@@ -108,12 +112,19 @@ export async function completeStyle(req: Request, res: Response) {
  * 
  * Body:
  * - product_id?: number
+ * - wardrobe_item_id?: number (or item_id) with mode/sourceMode "wardrobe"
  * - product: { title, brand?, category?, color?, price_cents?, currency?, image_url?, description? }
  * - options?: { maxPerCategory?, maxTotal?, preferSameBrand?, priceRange?, excludeBrands? }
  */
 export async function completeStyleFromBody(req: Request, res: Response) {
   try {
-    const { product, product_id: productIdRaw, options: bodyOptions } = req.body;
+    const {
+      product,
+      product_id: productIdRaw,
+      wardrobe_item_id: wardrobeItemIdRaw,
+      item_id: itemIdRaw,
+      options: bodyOptions,
+    } = req.body;
 
     // Only an explicit top-level `product_id` should trigger DB-backed mode.
     // If callers send a `product` object (even with an `id`), treat it as
@@ -123,9 +134,22 @@ export async function completeStyleFromBody(req: Request, res: Response) {
       productIdRaw !== undefined && productIdRaw !== null
         ? parseInt(String(productIdRaw), 10)
         : Number.NaN;
+    const wardrobeItemIdCandidate =
+      wardrobeItemIdRaw !== undefined && wardrobeItemIdRaw !== null
+        ? parseInt(String(wardrobeItemIdRaw), 10)
+        : itemIdRaw !== undefined && itemIdRaw !== null
+          ? parseInt(String(itemIdRaw), 10)
+          : Number.NaN;
 
-    if (!Number.isFinite(productIdCandidate) && (!product || !product.title)) {
-      return res.status(400).json({ success: false, error: { message: "Product with title is required" } });
+    if (
+      !Number.isFinite(productIdCandidate) &&
+      !Number.isFinite(wardrobeItemIdCandidate) &&
+      (!product || !product.title)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: { message: "product_id, wardrobe_item_id, or product with title is required" },
+      });
     }
 
     const queryOptions = parseCompleteStyleOptions(req.query);
@@ -152,7 +176,9 @@ export async function completeStyleFromBody(req: Request, res: Response) {
           ? bodyOptions.excludeBrands
           : queryOptions.excludeBrands,
       sourceMode:
-        bodyOptions?.sourceMode === "tryon" || req.query.mode === "tryon"
+        bodyOptions?.sourceMode === "wardrobe" || req.query.mode === "wardrobe"
+          ? "wardrobe"
+          : bodyOptions?.sourceMode === "tryon" || req.query.mode === "tryon"
           ? "tryon"
           : queryOptions.sourceMode,
       audienceGenderHint:
@@ -164,6 +190,25 @@ export async function completeStyleFromBody(req: Request, res: Response) {
     };
 
     const userId = getOptionalUserId(req);
+
+    if (Number.isFinite(wardrobeItemIdCandidate) && wardrobeItemIdCandidate >= 1) {
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          error: { message: "Authentication is required for wardrobe complete style" },
+        });
+      }
+
+      const result = await getOutfitRecommendationsFromWardrobeItem(
+        wardrobeItemIdCandidate,
+        { ...options, sourceMode: "wardrobe" },
+        userId,
+      );
+      if (!result) {
+        return res.status(404).json({ success: false, error: { message: "Wardrobe item not found" } });
+      }
+      return res.json({ success: true, data: result });
+    }
 
     // Prefer DB-backed product flow when ID is provided so POST and GET share
     // the same complete-look recommendation pipeline.
