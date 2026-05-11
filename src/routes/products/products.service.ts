@@ -438,6 +438,35 @@ function pruneImageQuerySignalCache(now: number): void {
   }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Attribute / part embedding response cache (mget memoization)
+// ───────────────────────────────────────────────────────────────────────────
+// Embedding fields on a product change only on reindex, so we can safely memoize
+// the OpenSearch mget response by product_id. Entries accumulate fields as
+// successive queries request them (e.g. detection #1 fetches color+style, then
+// detection #2 needing color+pattern only mgets the missing `embedding_pattern`).
+// Strictly additive optimization: lookup returns the same `_source` subset the
+// mget would have returned, so ranking inputs are byte-identical.
+const ATTR_EMBED_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const ATTR_EMBED_CACHE_MAX = 20_000; // ~product cards worth of partial _source
+const attrEmbedCache = new Map<string, { createdAt: number; source: Record<string, any> }>();
+
+function pruneAttrEmbedCache(now: number): void {
+  for (const [key, entry] of attrEmbedCache.entries()) {
+    if (now - entry.createdAt > ATTR_EMBED_CACHE_TTL_MS) {
+      attrEmbedCache.delete(key);
+    }
+  }
+  if (attrEmbedCache.size <= ATTR_EMBED_CACHE_MAX) return;
+  const overflow = attrEmbedCache.size - ATTR_EMBED_CACHE_MAX;
+  let dropped = 0;
+  for (const key of attrEmbedCache.keys()) {
+    attrEmbedCache.delete(key);
+    dropped += 1;
+    if (dropped >= overflow) break;
+  }
+}
+
 async function computeImageQuerySignals(imageBuffer: Buffer): Promise<ImageQuerySignals> {
   let colorQueryEmbedding: number[] | null = null;
   let textureQueryEmbedding: number[] | null = null;
@@ -5483,38 +5512,78 @@ export async function searchByImageWithSimilarity(
         const parallelChunks = Boolean(config.search?.attrMget?.parallel);
         const idsToFetch = uniqueIds.slice(0, maxIds);
 
+        // Consult the per-product embedding cache: any id whose cached source already
+        // contains every field in `attrFieldsToFetch` skips the mget round-trip.
+        const cacheNow = Date.now();
+        pruneAttrEmbedCache(cacheNow);
+        const byId = new Map<string, any>();
+        const missingIds: string[] = [];
+        let cacheHits = 0;
+        for (const id of idsToFetch) {
+          const entry = attrEmbedCache.get(id);
+          if (entry && cacheNow - entry.createdAt <= ATTR_EMBED_CACHE_TTL_MS) {
+            let satisfied = true;
+            for (const f of attrFieldsToFetch) {
+              if (!(f in entry.source)) { satisfied = false; break; }
+            }
+            if (satisfied) {
+              byId.set(id, entry.source);
+              cacheHits += 1;
+              continue;
+            }
+          }
+          missingIds.push(id);
+        }
+
         const mgetStartedAt = Date.now();
         let docs: any[] = [];
 
-        if (!parallelChunks) {
-          const mgetResp = await (osClient as any).mget(
-            { index: config.opensearch.index, body: { ids: idsToFetch }, _source: attrFieldsToFetch },
-            { requestTimeout: 8_000, maxRetries: 0 },
-          );
-          docs = mgetResp.body?.docs ?? [];
-        } else {
-          // Opt-in path: split into chunks and run parallel mget calls across OpenSearch.
-          const chunks: string[][] = [];
-          for (let i = 0; i < idsToFetch.length; i += chunkSize) {
-            chunks.push(idsToFetch.slice(i, i + chunkSize));
-          }
-
-          const mgetPromises = chunks.map((chunk) =>
-            (osClient as any).mget(
-              { index: config.opensearch.index, body: { ids: chunk }, _source: attrFieldsToFetch },
+        if (missingIds.length > 0) {
+          if (!parallelChunks) {
+            const mgetResp = await (osClient as any).mget(
+              { index: config.opensearch.index, body: { ids: missingIds }, _source: attrFieldsToFetch },
               { requestTimeout: 8_000, maxRetries: 0 },
-            ),
-          );
+            );
+            docs = mgetResp.body?.docs ?? [];
+          } else {
+            // Opt-in path: split into chunks and run parallel mget calls across OpenSearch.
+            const chunks: string[][] = [];
+            for (let i = 0; i < missingIds.length; i += chunkSize) {
+              chunks.push(missingIds.slice(i, i + chunkSize));
+            }
 
-          const resps = await Promise.all(mgetPromises);
-          for (const r of resps) docs.push(...(r.body?.docs ?? []));
+            const mgetPromises = chunks.map((chunk) =>
+              (osClient as any).mget(
+                { index: config.opensearch.index, body: { ids: chunk }, _source: attrFieldsToFetch },
+                { requestTimeout: 8_000, maxRetries: 0 },
+              ),
+            );
+
+            const resps = await Promise.all(mgetPromises);
+            for (const r of resps) docs.push(...(r.body?.docs ?? []));
+          }
         }
 
         const mgetMs = Date.now() - mgetStartedAt;
 
-        const byId = new Map<string, any>();
         for (const doc of docs) {
-          if (doc?.found && doc?._source) byId.set(String(doc._id ?? ""), doc._source);
+          if (doc?.found && doc?._source) {
+            const id = String(doc._id ?? "");
+            // Merge into cache so later requests with overlapping field sets benefit.
+            const prev = attrEmbedCache.get(id)?.source ?? {};
+            const merged = { ...prev, ...doc._source };
+            attrEmbedCache.set(id, { createdAt: cacheNow, source: merged });
+            byId.set(id, merged);
+          }
+        }
+
+        if (cacheHits > 0 || missingIds.length < idsToFetch.length) {
+          console.log("[attr-embed-cache]", {
+            requested: idsToFetch.length,
+            hits: cacheHits,
+            misses: missingIds.length,
+            mget_ms: mgetMs,
+          });
         }
 
         return { byId, mgetMs };
