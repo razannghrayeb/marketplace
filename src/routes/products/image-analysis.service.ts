@@ -7401,14 +7401,23 @@ export class ImageAnalysisService {
                 : [categoryMapping.productCategory];
             } else if (isGenericLongSleeveOuterwear) {
               // For generic long sleeve outerwear, use soft category filtering with broad outerwear + tailored terms
-              // This allows jackets/blazers/vests/coats to surface regardless of exact catalog category
+              // This allows jackets/blazers/vests/coats to surface regardless of exact catalog category.
+              // CRITICAL: include BOTH "outerwear" and "tailored" as predicted aisles so the downstream
+              // scoreCategoryRelevance01 awards 1.0 (not 0.55 adjacency) to suits (catalog category often
+              // "men suits" / "suit-txd" → matches "tailored") AND blazers/coats (catalog "blazer"/"outerwear"
+              // → matches "outerwear"). Without both, suits get categoryScore 0.55 and rank below blazers
+              // even when visual similarity is higher.
               const baseTerms = getCategorySearchTerms(categoryMapping.productCategory);
               const tailoredTerms = getCategorySearchTerms("tailored");
               const allTerms = [...new Set([...baseTerms, ...tailoredTerms])];
-              // Use soft category boost path for predicted aisles
-              predictedCategoryAisles = outerwearSuitSignal.isOuterwearOrSuit
-                ? outerwearSuitSignal.predictedAisles
-                : allTerms;
+              predictedCategoryAisles = [
+                ...new Set([
+                  ...(outerwearSuitSignal.isOuterwearOrSuit ? outerwearSuitSignal.predictedAisles : []),
+                  "outerwear",
+                  "tailored",
+                  ...allTerms,
+                ]),
+              ];
             } else if (imageSoftCategoryEnv() || shopLookSoftCategoryEnv()) {
               if (shopLookSingleCategoryHintEnv()) {
                 predictedCategoryAisles = [categoryMapping.productCategory];

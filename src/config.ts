@@ -245,11 +245,11 @@ export const config = {
       /** Maximum ids to mget when not using chunked parallel mode. Default preserves legacy 200. */
       maxIds: finiteEnvNumber(process.env.SEARCH_ATTR_MGET_MAX_IDS, 200, 50, 5000),
       /** When enabled, perform mget in parallel chunks of this size. */
-      chunkSize: finiteEnvNumber(process.env.SEARCH_ATTR_MGET_CHUNK_SIZE, 200, 10, 2000),
-      /** When true, enable chunked parallel mget across all candidate ids. Default false (preserves results). */
+      chunkSize: finiteEnvNumber(process.env.SEARCH_ATTR_MGET_CHUNK_SIZE, 50, 10, 2000),
+      /** When true, enable chunked parallel mget across all candidate ids. Default true — same result set, fetched in parallel chunks. */
       parallel: (() => {
-        const v = String(process.env.SEARCH_ATTR_MGET_PARALLEL ?? "").toLowerCase().trim();
-        return v === "1" || v === "true";
+        const v = String(process.env.SEARCH_ATTR_MGET_PARALLEL ?? "1").toLowerCase().trim();
+        return v !== "0" && v !== "false" && v !== "off" && v !== "no";
       })(),
     },
     /** Cap BLIP caption wait for POST /products/search/image (ms). */
