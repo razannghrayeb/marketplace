@@ -10452,19 +10452,22 @@ export async function searchByImageWithSimilarity(
       if (
         hasStrictLateCategory &&
         !catalogFamilyPass &&
-        detectionCategoryForLateGate === "outerwear"
+        // match mapped category variants like "outerwear", "long sleeve outerwear" or accidental typos like "outwear"
+        /outerwear|outwear/.test(detectionCategoryForLateGate)
       ) {
         const candidateBlob = productCategoryFamilyBlob(p as unknown as Record<string, unknown>);
-        const hasExplicitBlazerCue = /\b(blazer|blazers|dress jacket|sport\s*coat|sportcoat|tailor(?:ed)?|tailored jacket)\b/.test(String(candidateBlob ?? ""));
+        // include cardigan tokens as explicit lightweight outerwear cue
+        const hasExplicitBlazerCue = /\b(blazer|blazers|dress jacket|sport\s*coat|sportcoat|tailor(?:ed)?|tailored jacket|cardigan|cardigans)\b/.test(String(candidateBlob ?? ""));
         const sim = typeof (p as any).similarity_score === "number" ? (p as any).similarity_score : 0;
-        if (hasExplicitBlazerCue && sim >= 0.92) {
-          // Treat as passing the family gate (conservative rescue)
-          // small debug log to help telemetry if enabled
+        // lower the rescue threshold slightly to 0.90 to catch high-confidence matches
+        if (hasExplicitBlazerCue && sim >= 0.9) {
           try {
             console.debug(`[search-image][blazer-rescue] product=${String((p as any).id ?? "")} sim=${sim}`);
           } catch (e) {}
-          // override the catalogFamilyPass variable for this candidate by short-circuiting later checks
-          // We'll keep catalogFamilyPass true for subsequent logic by proceeding without marking drop here.
+          // mark candidate so later family gates know it was rescued
+          try {
+            (p as any).__blazerRescue = true;
+          } catch (e) {}
         }
       }
       const onePieceCandidate = isDressDetection
@@ -10495,7 +10498,7 @@ export async function searchByImageWithSimilarity(
       ) {
         return markLateFamilyDrop(p, "summer_material_conflict");
       }
-      if (hasStrictLateCategory && !catalogFamilyPass) return markLateFamilyDrop(p, "catalog_family_mismatch");
+      if (hasStrictLateCategory && !catalogFamilyPass && !(p as any).__blazerRescue) return markLateFamilyDrop(p, "catalog_family_mismatch");
       if (
         hasStrictLateCategory &&
         detectionCategoryForLateGate === "tops" &&
@@ -10555,6 +10558,8 @@ export async function searchByImageWithSimilarity(
       // When a user uploads the product's own image, YOLO may detect a different category
       // than what the catalog label says, which would silently drop the same product.
       const pSim = typeof (p as any).similarity_score === "number" ? (p as any).similarity_score : 0;
+      // Allow explicit blazer rescue candidates to bypass strict final family gate.
+      if ((p as any).__blazerRescue) return true;
       if (pSim >= nearIdenticalRawMin) return true;
       // For dresses: high visual+category relevance is an alternative pass so that
       // catalog items with sparse keyword labels (e.g. "evening wear") aren't dropped
