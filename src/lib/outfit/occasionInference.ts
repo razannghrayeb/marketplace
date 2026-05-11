@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { generateVertexContentText } from "./googleVertexGenerative";
 
 export type InferredOccasion = "formal" | "semi-formal" | "casual" | "active" | "party" | "beach";
 
@@ -82,9 +82,6 @@ function parseLlmJson(raw: string): OccasionInferenceResult | null {
 }
 
 async function inferOccasionLlm(anchors: OccasionInferenceAnchor[]): Promise<OccasionInferenceResult | null> {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) return null;
-
   const items = anchors
     .slice(0, 8)
     .map((a) => {
@@ -103,19 +100,14 @@ async function inferOccasionLlm(anchors: OccasionInferenceAnchor[]): Promise<Occ
     items,
   ].join("\n");
 
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const modelName = process.env.GEMINI_GENERATION_MODEL || process.env.GEMINI_MODEL || "gemini-1.5-flash";
-  const model = genAI.getGenerativeModel({ model: modelName });
-  const result = await model.generateContent({
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 180,
-      responseMimeType: "application/json",
-    },
+  const raw = await generateVertexContentText({
+    userPrompt: prompt,
+    temperature: 0.1,
+    maxOutputTokens: 180,
+    responseMimeType: "application/json",
   });
 
-  return parseLlmJson(result.response.text());
+  return parseLlmJson(raw);
 }
 
 export async function inferOccasion(
