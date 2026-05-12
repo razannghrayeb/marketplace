@@ -1083,6 +1083,25 @@ function imageDetectionRerankCandidateCap(): number {
 }
 
 /**
+ * Expensive metadata compliance scoring cap.
+ *
+ * Retrieval can stay wide for recall, but computing full compliance for every ANN
+ * candidate is CPU-heavy. Keep this cap independent from kNN/rerank retrieval so
+ * we can score the strongest prefix quickly while still hydrating enough winners.
+ */
+function imageComplianceCandidateCap(detectionScoped: boolean, limit: number): number {
+  const envKey = detectionScoped
+    ? "SEARCH_IMAGE_DETECTION_COMPLIANCE_CANDIDATE_CAP"
+    : "SEARCH_IMAGE_COMPLIANCE_CANDIDATE_CAP";
+  const fallback = detectionScoped ? Math.max(180, Math.min(260, limit * 12)) : Math.max(300, limit * 8);
+  const raw = Number(process.env[envKey] ?? fallback);
+  if (!Number.isFinite(raw)) return fallback;
+  const min = detectionScoped ? 120 : 180;
+  const max = detectionScoped ? 700 : 1200;
+  return Math.max(min, Math.min(max, Math.floor(raw)));
+}
+
+/**
  * Detection-scoped kNN retrieval cap. This bounds OpenSearch latency for per-detection
  * calls while keeping a broader default pool for non-detection image searches.
  */
@@ -5887,7 +5906,11 @@ export async function searchByImageWithSimilarity(
     ? Math.max(limit, Math.min(fetchLimitBase, imageDetectionRerankCandidateCap()))
     : fetchLimitBase;
   const candidateSelectionStartMs = Date.now();
-  const baseCandidates = hitsByKnnScore.slice(0, fetchLimit);
+  const complianceCandidateCap = imageComplianceCandidateCap(detectionScoped, limit);
+  const effectiveRerankCandidateCount = Math.min(fetchLimit, complianceCandidateCap);
+  const baseCandidates = hitsByKnnScore.slice(0, effectiveRerankCandidateCount);
+  rerankTimings['candidate_cap_requested'] = fetchLimit;
+  rerankTimings['candidate_cap_effective'] = effectiveRerankCandidateCount;
   rerankTimings['candidate_selection_ms'] = Date.now() - candidateSelectionStartMs;
   const attrBlockingTimeoutMsRaw = Number(process.env.SEARCH_ATTR_MGET_BLOCKING_TIMEOUT_MS ?? "500");
   const attrBlockingTimeoutMs = Number.isFinite(attrBlockingTimeoutMsRaw)
@@ -6589,12 +6612,21 @@ export async function searchByImageWithSimilarity(
   // multiple concurrent detections the synchronous compliance pass can otherwise
   // saturate the event loop and inflate everyone's `attr_mget_blocking_wait_ms`.
   // Pure scheduling change — no result drift, no scoring difference.
-  const COMPLIANCE_YIELD_EVERY = 64;
+  const complianceYieldEveryRaw = Number(process.env.SEARCH_IMAGE_COMPLIANCE_YIELD_EVERY ?? "256");
+  const COMPLIANCE_YIELD_EVERY = Number.isFinite(complianceYieldEveryRaw)
+    ? Math.max(0, Math.min(2000, Math.floor(complianceYieldEveryRaw)))
+    : 256;
   let complianceYieldCounter = 0;
+  let complianceYieldCount = 0;
+  let computeHitRelevanceMs = 0;
+  let compliancePostComputeMs = 0;
   for (const hit of baseCandidates) {
+    const computeStartedAt = Date.now();
     const idStr = String(hit._source.product_id);
     const sim = visualSimFromHit(hit);
     const rel = computeHitRelevance(hit, sim, relevanceIntent);
+    computeHitRelevanceMs += Date.now() - computeStartedAt;
+    const postComputeStartedAt = Date.now();
     const { primaryColor, ...comp } = rel;
     strictFinalById.set(idStr, Number(comp.finalRelevance01 ?? 0));
     const compWithExpandedPenalty = applyExpandedColorTierPenalty({
@@ -6640,13 +6672,19 @@ export async function searchByImageWithSimilarity(
     hasLengthIntentById.set(idStr, hasLengthIntentForHit);
     complianceById.set(idStr, compWithExpandedPenalty);
     colorByHitId.set(idStr, primaryColor);
-    complianceYieldCounter += 1;
-    if (complianceYieldCounter >= COMPLIANCE_YIELD_EVERY) {
+    compliancePostComputeMs += Date.now() - postComputeStartedAt;
+    if (COMPLIANCE_YIELD_EVERY > 0) complianceYieldCounter += 1;
+    if (COMPLIANCE_YIELD_EVERY > 0 && complianceYieldCounter >= COMPLIANCE_YIELD_EVERY) {
       complianceYieldCounter = 0;
+      complianceYieldCount += 1;
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
   }
   rerankTimings['compliance_loop_ms'] = Date.now() - complianceLoopStartedAt;
+  rerankTimings['compute_hit_relevance_ms'] = computeHitRelevanceMs;
+  rerankTimings['compliance_post_compute_ms'] = compliancePostComputeMs;
+  rerankTimings['compliance_yield_count'] = complianceYieldCount;
+  rerankTimings['compliance_yield_every'] = COMPLIANCE_YIELD_EVERY;
 
   // Precompute color embedding cosine + align `colorCompliance` with it when tier metadata
   // is absent (no tokens) or contradicts strong embedding_color match — before composite
@@ -11144,6 +11182,12 @@ export async function searchByImageWithSimilarity(
       debug_bypass_ms: rerankTimings['debug_bypass_ms'],
       hits_sort_ms: rerankTimings['hits_sort_ms'],
       candidate_selection_ms: rerankTimings['candidate_selection_ms'],
+      candidate_cap_requested: rerankTimings['candidate_cap_requested'],
+      candidate_cap_effective: rerankTimings['candidate_cap_effective'],
+      compute_hit_relevance_ms: rerankTimings['compute_hit_relevance_ms'],
+      compliance_post_compute_ms: rerankTimings['compliance_post_compute_ms'],
+      compliance_yield_count: rerankTimings['compliance_yield_count'],
+      compliance_yield_every: rerankTimings['compliance_yield_every'],
       // Context
       hits_processed: Math.min(baseCandidates.length, 500),
       has_color_query: runColor,

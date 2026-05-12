@@ -2565,22 +2565,22 @@ function colorComfortHintForCategory(
 async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Promise<CompleteLookMappedSuggestion[]> {
   if (!params.suggestions.length) return [];
 
+  // Keep the expensive ONNX-backed rerank bounded. The upstream retrieval
+  // already returns score-ordered candidates, so reranking the first few dozen
+  // preserves coverage without turning every complete-style request into a
+  // large batch inference job.
+  const expensiveRerankLimit = Math.max(24, Math.min(48, params.maxSuggestions));
   const topSuggestions = [...params.suggestions]
     .sort((a, b) => b.score - a.score)
-    .slice(0, Math.max(params.maxSuggestions, 20));
+    .slice(0, expensiveRerankLimit);
 
-  const candidateIds = Array.from(new Set(topSuggestions.map((s) => s.product_id))).slice(0, 80);
-  const candidateRows = await pg.query<CandidateStyleRow>(
+  const candidateIds = Array.from(new Set(topSuggestions.map((s) => s.product_id))).slice(0, expensiveRerankLimit);
+  const candidateRowsPromise = pg.query<CandidateStyleRow>(
     `SELECT id, title, brand, category, color, price_cents, currency, image_url, image_cdn, description, gender
      FROM products
      WHERE id = ANY($1)`,
     [candidateIds]
   );
-
-  const rowById = new Map<number, CandidateStyleRow>();
-  for (const row of candidateRows.rows) {
-    rowById.set(row.id, row);
-  }
 
   const sourceColorBuckets = new Set<string>();
   for (const b of extractColorBucketsFromText(params.sourceProduct.color)) sourceColorBuckets.add(b);
@@ -2624,28 +2624,31 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
 
   // (b) One Gemini call per anchor for a styling direction. Always resolves;
   //     falls back to a heuristic spec on any Gemini failure or missing creds.
-  //     User chose no cache — fetched fresh on every /complete-style request.
+  //     Fetched fresh on every /complete-style request, but overlaps with
+  //     candidate hydration so it is not paid serially before reranking.
   //     Wardrobe summaries (when available) tell Gemini what the user already
   //     owns so it can suggest pairings that complete real outfits.
-  let stylistDirection: StylistDirection;
-  try {
-    stylistDirection = await getStylistDirection({
-      title: params.sourceProduct.title,
-      brand: params.sourceProduct.brand ?? null,
-      category: params.sourceProduct.category ?? null,
-      description: params.sourceProduct.description ?? null,
-      color: params.sourceProduct.color ?? null,
-      family: anchorFamily,
-      style: params.sourceStyle,
-      audienceGender: params.sourceAudienceGenderHint,
-      ageGroup: params.sourceAgeGroupHint,
-      wardrobeSummaries: params.wardrobe?.summaries,
-    });
-  } catch (err) {
-    // Belt-and-braces: getStylistDirection already swallows errors, but in
-    // case it is changed later, we keep the pipeline alive with a minimal
-    // direction shape so the per-candidate code doesn't need null checks.
-    stylistDirection = { rationale: "", slots: {}, avoid: {}, source: "heuristic" };
+  const stylistDirectionPromise = getStylistDirection({
+    title: params.sourceProduct.title,
+    brand: params.sourceProduct.brand ?? null,
+    category: params.sourceProduct.category ?? null,
+    description: params.sourceProduct.description ?? null,
+    color: params.sourceProduct.color ?? null,
+    family: anchorFamily,
+    style: params.sourceStyle,
+    audienceGender: params.sourceAudienceGenderHint,
+    ageGroup: params.sourceAgeGroupHint,
+    wardrobeSummaries: params.wardrobe?.summaries,
+  }).catch((): StylistDirection => ({ rationale: "", slots: {}, avoid: {}, source: "heuristic" }));
+
+  const [candidateRows, stylistDirection] = await Promise.all([
+    candidateRowsPromise,
+    stylistDirectionPromise,
+  ]);
+
+  const rowById = new Map<number, CandidateStyleRow>();
+  for (const row of candidateRows.rows) {
+    rowById.set(row.id, row);
   }
 
   const enriched = await Promise.all(topSuggestions.map(async (s) => {

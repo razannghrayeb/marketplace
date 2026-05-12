@@ -206,11 +206,19 @@ function parseGeminiDirection(raw: string): StylistDirection | null {
   }
 }
 
+function stylistDirectionTimeoutMs(): number {
+  const raw = Number.parseInt(String(process.env.STYLIST_DIRECTION_TIMEOUT_MS || ""), 10);
+  if (Number.isFinite(raw) && raw > 0) {
+    return Math.max(250, Math.min(raw, 6000));
+  }
+  return 1800;
+}
+
 /**
  * Ask Gemini what a stylist would pair with the anchor.
  *
  * Always resolves — falls back to heuristic on any error, missing config, or
- * timeout. Latency cap is 6s; the rerank step runs other features in the
+ * timeout. Latency cap defaults to 1.8s; the rerank step runs other features in the
  * background and joins the result.
  */
 export async function getStylistDirection(anchor: {
@@ -284,7 +292,7 @@ export async function getStylistDirection(anchor: {
         maxOutputTokens: 700,
         responseMimeType: "application/json",
       }),
-      new Promise<string>((_, rej) => setTimeout(() => rej(new Error("stylistDirection_timeout")), 6000)),
+      new Promise<string>((_, rej) => setTimeout(() => rej(new Error("stylistDirection_timeout")), stylistDirectionTimeoutMs())),
     ]);
     const parsed = parseGeminiDirection(raw);
     if (!parsed) return fallback;
