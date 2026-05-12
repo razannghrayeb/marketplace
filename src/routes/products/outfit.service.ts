@@ -332,6 +332,9 @@ export async function getOutfitRecommendations(
                 : undefined,
         detectedCategories: detectedCategoryMap,
         stylistDirection,
+        // This path runs `rerankCompleteStyleSuggestions` below — tell the
+        // inner pipeline to skip its redundant wardrobe-context rerank.
+        skipInnerFashionRerank: true,
       },
     );
 
@@ -547,6 +550,142 @@ export async function getOutfitRecommendationsFromProduct(
   return formatted;
 }
 
+// ============================================================================
+// Wardrobe-item enrichment
+// ----------------------------------------------------------------------------
+// Wardrobe items (especially user-uploaded ones with no `product_id` link)
+// don't have the rich gender / color / category / style metadata that catalog
+// products do. To give them a fair chance in the complete-style pipeline, we
+// run an AI image analysis once per item (YOLO + Gemini Vision) and cache the
+// result in `wardrobe_item_analysis_cache`. Subsequent requests reuse the
+// cached analysis and incur zero extra latency.
+// ============================================================================
+
+const WARDROBE_ANALYSIS_VERSION = "1.0";
+
+type CachedWardrobeAnalysis = {
+  analysis: import("../../lib/wardrobe/imageRecognition").WardrobeItemAnalysis;
+  detectionMethod?: string | null;
+};
+
+/** Read a cached analysis for a wardrobe item, if present and current. */
+async function loadCachedWardrobeAnalysis(
+  wardrobeItemId: number,
+): Promise<CachedWardrobeAnalysis | null> {
+  try {
+    const result = await pg.query<{
+      analysis_json: any;
+      detection_method: string | null;
+      analysis_version: string | null;
+    }>(
+      `SELECT analysis_json, detection_method, analysis_version
+       FROM wardrobe_item_analysis_cache
+       WHERE wardrobe_item_id = $1
+         AND (expires_at IS NULL OR expires_at > NOW())
+       LIMIT 1`,
+      [wardrobeItemId],
+    );
+    const row = result.rows[0];
+    if (!row || !row.analysis_json) return null;
+    if (row.analysis_version && row.analysis_version !== WARDROBE_ANALYSIS_VERSION) return null;
+    return {
+      analysis: row.analysis_json as CachedWardrobeAnalysis["analysis"],
+      detectionMethod: row.detection_method ?? null,
+    };
+  } catch (err) {
+    console.warn(`[wardrobe-enrich] cache read failed for item ${wardrobeItemId}:`, err);
+    return null;
+  }
+}
+
+/** Persist an analysis result for future requests. Best-effort; never throws. */
+async function persistWardrobeAnalysis(
+  wardrobeItemId: number,
+  analysis: import("../../lib/wardrobe/imageRecognition").WardrobeItemAnalysis,
+): Promise<void> {
+  try {
+    const embeddingJson = Array.isArray(analysis.embedding) && analysis.embedding.length > 0
+      ? JSON.stringify(analysis.embedding)
+      : null;
+    await pg.query(
+      `INSERT INTO wardrobe_item_analysis_cache
+        (wardrobe_item_id, analysis_json, detection_method, processing_time_ms, embedding_vector, analysis_version)
+       VALUES ($1, $2::jsonb, $3, $4, $5, $6)
+       ON CONFLICT (wardrobe_item_id) DO UPDATE SET
+         analysis_json = EXCLUDED.analysis_json,
+         detection_method = EXCLUDED.detection_method,
+         processing_time_ms = EXCLUDED.processing_time_ms,
+         embedding_vector = EXCLUDED.embedding_vector,
+         analysis_version = EXCLUDED.analysis_version,
+         analyzed_at = NOW()`,
+      [
+        wardrobeItemId,
+        JSON.stringify(analysis),
+        analysis.metadata?.detectionMethod ?? null,
+        analysis.metadata?.processingTimeMs ?? null,
+        embeddingJson,
+        WARDROBE_ANALYSIS_VERSION,
+      ],
+    );
+  } catch (err) {
+    console.warn(`[wardrobe-enrich] cache write failed for item ${wardrobeItemId}:`, err);
+  }
+}
+
+/**
+ * Get an analysis for a wardrobe item. Reads cache first; on miss, fetches the
+ * image, runs `analyzeWardrobePhoto`, and persists the result. Returns null on
+ * any unrecoverable failure (cache fallback to legacy behavior).
+ */
+async function getOrAnalyzeWardrobeItem(
+  wardrobeItemId: number,
+  imageUrl: string | null | undefined,
+): Promise<{ analysis: CachedWardrobeAnalysis["analysis"]; imageBuffer: Buffer | null } | null> {
+  const cached = await loadCachedWardrobeAnalysis(wardrobeItemId);
+  if (cached) {
+    return { analysis: cached.analysis, imageBuffer: null };
+  }
+  if (!imageUrl) return null;
+  const buffer = await fetchImageBufferFromUrl(imageUrl);
+  if (!buffer) return null;
+  try {
+    const { analyzeWardrobePhoto } = await import("../../lib/wardrobe/imageRecognition");
+    const analysis = await analyzeWardrobePhoto(buffer, {
+      useGemini: true,
+      // Skip CLIP embedding extraction in this hot path — the rich pipeline
+      // doesn't consume it for an unlinked wardrobe-item anchor, and image
+      // embedding adds ~100-300ms per cold call.
+      extractEmbedding: false,
+    });
+    // Fire-and-forget persistence so we don't block the request on the write.
+    void persistWardrobeAnalysis(wardrobeItemId, analysis);
+    return { analysis, imageBuffer: buffer };
+  } catch (err) {
+    console.warn(`[wardrobe-enrich] analyzeWardrobePhoto failed for item ${wardrobeItemId}:`, err);
+    return null;
+  }
+}
+
+/** Best-effort write of an audience-gender hint into wardrobe_item_audience_metadata. */
+async function persistWardrobeAudienceGender(
+  wardrobeItemId: number,
+  userId: number,
+  gender: "men" | "women" | "unisex",
+): Promise<void> {
+  try {
+    await pg.query(
+      `INSERT INTO wardrobe_item_audience_metadata (wardrobe_item_id, user_id, audience_gender)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (wardrobe_item_id) DO UPDATE SET
+         audience_gender = COALESCE(wardrobe_item_audience_metadata.audience_gender, EXCLUDED.audience_gender),
+         updated_at = NOW()`,
+      [wardrobeItemId, userId, gender],
+    );
+  } catch (err) {
+    console.warn(`[wardrobe-enrich] wam upsert failed for item ${wardrobeItemId}:`, err);
+  }
+}
+
 export async function getOutfitRecommendationsFromWardrobeItem(
   wardrobeItemId: number,
   options: CompleteStyleOptions = {},
@@ -631,21 +770,98 @@ export async function getOutfitRecommendationsFromWardrobeItem(
     row.age_group ? `Age group: ${row.age_group}` : "",
   ].filter(Boolean);
 
+  const imageUrlForAnchor =
+    row.wardrobe_image_cdn || row.wardrobe_image_url || row.product_image_cdn || row.product_image_url || undefined;
+
+  // Run AI enrichment + BLIP gender inference in parallel. Both are
+  // best-effort: failures degrade silently and we fall back to whatever the
+  // schema already had.
+  const needsEnrichment =
+    !row.category_name ||
+    !dominantColor ||
+    !row.product_description ||
+    !row.audience_gender ||
+    !row.product_gender;
+
+  const enrichmentPromise = needsEnrichment && imageUrlForAnchor
+    ? getOrAnalyzeWardrobeItem(wardrobeItemId, imageUrlForAnchor)
+    : Promise.resolve(null);
+
+  const wamGender = row.audience_gender || row.product_gender;
+  const needsGenderInference = !wamGender && Boolean(imageUrlForAnchor);
+
+  const [enrichmentResult] = await Promise.all([enrichmentPromise]);
+
+  // BLIP gender inference runs in parallel with everything else further down
+  // the pipeline, so we only need it now if the enrichment didn't surface a
+  // usable hint. Reuse the fetched buffer when possible to avoid a re-fetch.
+  let extractedGender: string | undefined;
+  if (needsGenderInference) {
+    const sharedBuffer = enrichmentResult?.imageBuffer ?? null;
+    const titleForCaption = row.wardrobe_name || row.product_title || null;
+    if (sharedBuffer) {
+      extractedGender = await inferGenderFromImageBuffer(sharedBuffer, titleForCaption).catch(() => undefined);
+    } else if (imageUrlForAnchor) {
+      extractedGender = await inferGenderFromImageUrl(imageUrlForAnchor, titleForCaption).catch(() => undefined);
+    }
+    if (
+      userId &&
+      (extractedGender === "men" || extractedGender === "women" || extractedGender === "unisex")
+    ) {
+      // Fire-and-forget — never block the response on this write.
+      void persistWardrobeAudienceGender(wardrobeItemId, userId, extractedGender);
+    }
+  }
+
+  // Merge AI-extracted attributes when present. User-provided fields always
+  // win; AI fills gaps; the linked catalog product fills any remaining gap.
+  const analysis = enrichmentResult?.analysis;
+  const analysisPrimaryColorHex = analysis?.colors?.dominantHex?.find(Boolean);
+  const analysisPrimaryColorName = analysis?.colors?.primary?.find(Boolean);
+  const analysisStyleTags = Array.isArray(analysis?.attributes?.style) ? analysis!.attributes!.style! : [];
+  const analysisOccasionTags = Array.isArray(analysis?.attributes?.occasion) ? analysis!.attributes!.occasion! : [];
+  const analysisSeasonTags = Array.isArray(analysis?.attributes?.season) ? analysis!.attributes!.season! : [];
+
+  const mergedDescriptionParts = [
+    row.product_description || analysis?.description,
+    styleTags.length
+      ? `Style tags: ${styleTags.join(", ")}`
+      : analysisStyleTags.length
+        ? `Style tags: ${analysisStyleTags.join(", ")}`
+        : "",
+    occasionTags.length
+      ? `Occasions: ${occasionTags.join(", ")}`
+      : analysisOccasionTags.length
+        ? `Occasions: ${analysisOccasionTags.join(", ")}`
+        : "",
+    seasonTags.length
+      ? `Seasons: ${seasonTags.join(", ")}`
+      : analysisSeasonTags.length
+        ? `Seasons: ${analysisSeasonTags.join(", ")}`
+        : "",
+    analysis?.pattern ? `Pattern: ${analysis.pattern}` : "",
+    analysis?.material ? `Material: ${analysis.material}` : "",
+    row.audience_gender ? `Audience: ${row.audience_gender}` : "",
+    row.age_group ? `Age group: ${row.age_group}` : "",
+  ].filter(Boolean);
+
   const productInput: Product = {
     id: 0,
-    title: row.wardrobe_name || row.product_title || "Wardrobe item",
+    title: row.wardrobe_name || row.product_title || analysis?.suggestedName || "Wardrobe item",
     brand: row.wardrobe_brand || row.product_brand || undefined,
-    category: row.category_name || row.product_category || undefined,
-    color: dominantColor || row.product_color || undefined,
+    category: row.category_name || analysis?.category || row.product_category || undefined,
+    color: dominantColor || analysisPrimaryColorHex || analysisPrimaryColorName || row.product_color || undefined,
     price_cents: Number(row.product_price_cents) || 0,
     currency: row.product_currency || "USD",
-    image_url: row.wardrobe_image_cdn || row.wardrobe_image_url || row.product_image_cdn || row.product_image_url || undefined,
+    image_url: imageUrlForAnchor,
     image_cdn: row.wardrobe_image_cdn || row.product_image_cdn || undefined,
-    description: descriptionParts.join(". ") || undefined,
-    gender: row.audience_gender || row.product_gender || undefined,
+    description: mergedDescriptionParts.join(". ") || undefined,
+    gender: row.audience_gender || row.product_gender || extractedGender || undefined,
   };
 
-  const wardrobeAudienceGenderHint = normalizeAudienceHint(row.audience_gender || row.product_gender);
+  const wardrobeAudienceGenderHint = normalizeAudienceHint(
+    row.audience_gender || row.product_gender || extractedGender,
+  );
 
   return getOutfitRecommendationsFromProduct(
     productInput,
@@ -783,30 +999,53 @@ function isClothingItem(product: { category?: string | null; title?: string | nu
 }
 
 /**
- * Infer audience gender from image URL using BLIP vision model
- * Returns "men" | "women" | undefined based on high-confidence visual cues
+ * Infer audience gender from an image buffer using BLIP vision model.
+ * Returns "men" | "women" | "unisex" | undefined based on high-confidence cues.
  */
-async function inferGenderFromImageUrl(imageUrl: string, productTitle?: string | null): Promise<string | undefined> {
+async function inferGenderFromImageBuffer(buffer: Buffer, productTitle?: string | null): Promise<string | undefined> {
   try {
-    // Fetch image buffer from URL with explicit abort timeout
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-    const response = await fetch(imageUrl, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (!response.ok) return undefined;
-
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
     if (!buffer || buffer.length === 0) return undefined;
-
-    // Use BLIP to generate caption describing the image
     const { blip } = await import("../../lib/image");
     const caption = await blip.caption(buffer).catch(() => null);
     if (!caption || typeof caption !== "string") return undefined;
-
-    // Extract gender from caption using same logic as image analysis service
     const parsed = catalogGenderFromCaption(caption, productTitle);
     if (parsed === "men" || parsed === "women" || parsed === "unisex") {
+      return parsed;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Fetch image bytes from a URL with a hard timeout. Returns null on failure.
+ */
+async function fetchImageBufferFromUrl(imageUrl: string, timeoutMs = 10000): Promise<Buffer | null> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const response = await fetch(imageUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!response.ok) return null;
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    return buffer.length > 0 ? buffer : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Infer audience gender from image URL using BLIP vision model.
+ * Returns "men" | "women" | "unisex" | undefined based on high-confidence visual cues.
+ */
+async function inferGenderFromImageUrl(imageUrl: string, productTitle?: string | null): Promise<string | undefined> {
+  try {
+    const buffer = await fetchImageBufferFromUrl(imageUrl);
+    if (!buffer) return undefined;
+    const parsed = await inferGenderFromImageBuffer(buffer, productTitle);
+    if (parsed) {
       return parsed;
     }
     return undefined;

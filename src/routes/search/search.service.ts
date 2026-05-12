@@ -1169,6 +1169,25 @@ export async function textSearch(
       if (primaryProductType) {
         const seeds = typeSeedsRaw.map((t) => String(t).toLowerCase());
         const expandedTypes = expandProductTypesForQuery(seeds);
+        const productTypeRecallClause = {
+          bool: {
+            _name: 'soft_product_type_recall',
+            should: [
+              { terms: { product_types: expandedTypes } },
+              { match_phrase: { title: primaryProductType.toLowerCase() } },
+              {
+                multi_match: {
+                  query: expandedTypes.slice(0, 24).join(' '),
+                  fields: ['title^2.5', 'category.search^1.2', 'description'],
+                  type: 'best_fields',
+                  operator: 'or',
+                  boost: 1.4,
+                },
+              },
+            ],
+            minimum_should_match: 1,
+          },
+        };
 
         if (strictProductTypeFilterEnv()) {
           filterClauses.push({
@@ -1181,6 +1200,8 @@ export async function textSearch(
               minimum_should_match: 1,
             },
           });
+        } else if (productTypeDominant) {
+          mustClauses.push(productTypeRecallClause);
         } else {
           shouldClauses.push({
             bool: {
@@ -2248,7 +2269,10 @@ export async function textSearch(
     }
 
     const preDedupeCount = results.length;
-    results = dedupeSearchResults(results as any) as ProductResult[];
+    results = dedupeSearchResults(results as any, {
+      collapseCanonicalGroups: false,
+      collapseNearPHash: false,
+    }) as ProductResult[];
     const countAfterDedupe = results.length;
 
     const totalAboveThreshold = results.length;
