@@ -2273,6 +2273,20 @@ export async function textSearch(
     }
 
     const preDedupeCount = results.length;
+    try {
+      const sample = results.slice(0, 40).map((r: any) => ({
+        id: String(r.id ?? ""),
+        canonical_id: r.canonical_id ?? null,
+        image_cdn: r.image_cdn ?? null,
+        primary_image: (r.images && r.images.length ? (r.images.find((i: any) => i.is_primary)?.url || r.images[0]?.url) : (r.image_cdn || r.image_url || null)) || null,
+        p_hash: r.p_hash || (r.images && r.images.length ? (r.images.find((i: any) => i.is_primary)?.p_hash || r.images[0]?.p_hash) : null),
+        score: r.finalRelevance01 ?? r.rerankScore ?? r.similarity_score ?? 0,
+      }));
+      console.debug("[textSearch][dedupe-debug] preDedupeCount", preDedupeCount, "sample_keys", sample);
+    } catch (e) {
+      /* ignore debug logging errors */
+    }
+
     results = dedupeSearchResults(results as any, {
       collapseCanonicalGroups: false,
       collapseNearPHash: false,
