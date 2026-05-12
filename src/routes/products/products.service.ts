@@ -5433,17 +5433,10 @@ export async function searchByImageWithSimilarity(
   const effectiveLimit = Math.max(limit, 20); // Ensure we have at least 20 results to work with
   const hydrationPrefetchMultiplier = imageHydrationPrefetchMultiplier(detectionScoped);
   const hydrationPrefetchCap = imageHydrationPrefetchCap(detectionScoped);
-  // Align prefetch window with the post-rerank `maxHydrate` cap (line 9350-9352) so the
-  // second `getSearchProductsByIdsOrdered(missingHydrationIds)` round-trip drops out.
-  // Same product rows fetched, single PG query instead of two sequential ones.
-  const postRerankHydrateCap = Math.max(effectiveLimit * 10, 150);
   const hydrationCap = Math.min(
     rawKnnProductIds.length,
     hydrationPrefetchCap,
-    Math.max(
-      Math.ceil(effectiveLimit * hydrationPrefetchMultiplier),
-      postRerankHydrateCap,
-    ),
+    Math.ceil(effectiveLimit * hydrationPrefetchMultiplier),
   );
   const idsToHydrate = rawKnnProductIds.slice(0, hydrationCap);
   const endpointLimit = limit;
@@ -5552,7 +5545,10 @@ export async function searchByImageWithSimilarity(
 
   const signals = await signalsPromise;
   rerankTimings['signals_wait_ms'] = Date.now() - rerankPhaseStartedAt;
-  
+  // Diagnostic: track every wall-clock chunk between signals_wait and attr_sim so
+  // we can see where the unmeasured "rerank gap" lives.
+  const postSignalsStartedAt = Date.now();
+
   colorQueryEmbedding = signals.colorQueryEmbedding;
   textureQueryEmbedding = signals.textureQueryEmbedding;
   materialQueryEmbedding = signals.materialQueryEmbedding;
@@ -6599,6 +6595,14 @@ export async function searchByImageWithSimilarity(
   // overwrites comp.finalRelevance01 with its looser score. Without this, the cross-family
   // gate ("sweater query → jacket doc") and color-tier caps are silently lost in image search.
   const strictFinalById = new Map<string, number>();
+  const complianceLoopStartedAt = Date.now();
+  // Yield to the event loop every COMPLIANCE_YIELD_EVERY hits so sibling parallel
+  // detections' I/O callbacks (mget completion, setTimeout) can fire on time. With
+  // multiple concurrent detections the synchronous compliance pass can otherwise
+  // saturate the event loop and inflate everyone's `attr_mget_blocking_wait_ms`.
+  // Pure scheduling change — no result drift, no scoring difference.
+  const COMPLIANCE_YIELD_EVERY = 64;
+  let complianceYieldCounter = 0;
   for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
     const sim = visualSimFromHit(hit);
@@ -6648,12 +6652,19 @@ export async function searchByImageWithSimilarity(
     hasLengthIntentById.set(idStr, hasLengthIntentForHit);
     complianceById.set(idStr, compWithExpandedPenalty);
     colorByHitId.set(idStr, primaryColor);
+    complianceYieldCounter += 1;
+    if (complianceYieldCounter >= COMPLIANCE_YIELD_EVERY) {
+      complianceYieldCounter = 0;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
   }
+  rerankTimings['compliance_loop_ms'] = Date.now() - complianceLoopStartedAt;
 
   // Precompute color embedding cosine + align `colorCompliance` with it when tier metadata
   // is absent (no tokens) or contradicts strong embedding_color match — before composite
   // blending so colorSimEff / explain colorScore stay consistent with colorSimRaw.
   const hasAnyColorTokenIntent = allColorsForRelevance.length > 0;
+  const colorCosineLoopStartedAt = Date.now();
   if (runColor) {
     for (const hit of baseCandidates) {
       const idStr = String(hit._source.product_id);
@@ -6705,11 +6716,14 @@ export async function searchByImageWithSimilarity(
     }
   }
 
+  rerankTimings['color_cosine_loop_ms'] = Date.now() - colorCosineLoopStartedAt;
+
   const useMerchSim = imageMerchandiseSimilarityBindingEnabled();
   const useMerchSimForThresholdAndPrimarySort =
     useMerchSim && hasStrictTypeIntentForMerchandiseGate;
   const merchandiseSimById = new Map<string, number>();
   const merchAlignmentById = new Map<string, number>();
+  const merchandiseLoopStartedAt = Date.now();
   for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
     const raw = visualSimFromHit(hit);
@@ -6736,6 +6750,7 @@ export async function searchByImageWithSimilarity(
     merchandiseSimById.set(idStr, m.effective01);
     merchAlignmentById.set(idStr, m.alignmentFactor);
   }
+  rerankTimings['merchandise_loop_ms'] = Date.now() - merchandiseLoopStartedAt;
 
   // Update osSimilarity01 for near-identical hits (for explain output accuracy).
   for (const hit of baseCandidates) {
@@ -6769,6 +6784,7 @@ export async function searchByImageWithSimilarity(
 
   // After compliance + merchandise sim: compute per-hit embedding similarities,
   // BLIP alignment (as soft reranking factor), and composite score.
+  rerankTimings['pre_attr_sim_ms'] = Date.now() - postSignalsStartedAt;
   const attributeSimilarityStartedAt = Date.now();
   for (const hit of baseCandidates) {
     const idStr = String(hit._source.product_id);
@@ -11127,6 +11143,13 @@ export async function searchByImageWithSimilarity(
       sorting_ms: rerankTimings['sorting_ms'],
       post_filtering_ms: rerankTimings['post_filtering_ms'],
       total_rerank_ms: rerankTimings['total_rerank_ms'],
+      // Diagnostic: per-loop breakdown for the previously unmeasured "gap" between
+      // signals_wait and attr_sim. Sum of these + signals_wait + attr_sim + final_relevance
+      // + sorting + post_filtering should ~= total_rerank_ms. If not, more gaps exist.
+      pre_attr_sim_ms: rerankTimings['pre_attr_sim_ms'],
+      compliance_loop_ms: rerankTimings['compliance_loop_ms'],
+      color_cosine_loop_ms: rerankTimings['color_cosine_loop_ms'],
+      merchandise_loop_ms: rerankTimings['merchandise_loop_ms'],
       // PHASE 2 investigation metrics
       image_collapse_ms: rerankTimings['image_collapse_ms'],
       debug_bypass_ms: rerankTimings['debug_bypass_ms'],
