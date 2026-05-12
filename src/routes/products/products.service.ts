@@ -3203,7 +3203,15 @@ function extractCanonicalColorTokensFromRawColor(raw: string | null | undefined)
   return normalizeColorTokensFromRaw(raw);
 }
 
+// WeakMap-memoize the result of pure per-src predicates that get called from
+// many filter loops with the same `src` reference. Result is stable for a given
+// src object — same content, deterministic regex tests. WeakMap auto-collects
+// entries when the src object is GC'd, so this has no memory leak.
+const _hasChildAudienceSignalsCache = new WeakMap<object, boolean>();
 function hasChildAudienceSignals(src: Record<string, unknown>): boolean {
+  if (typeof src !== "object" || src === null) return false;
+  const cached = _hasChildAudienceSignalsCache.get(src);
+  if (cached !== undefined) return cached;
   const fields = [
     src.title,
     src.brand,
@@ -3220,11 +3228,20 @@ function hasChildAudienceSignals(src: Record<string, unknown>): boolean {
     .map((value) => String(value ?? "").toLowerCase())
     .join(" ");
 
-  if (!fields.trim()) return false;
-  if (/\b(kids?|children|child|baby|babies|toddler|toddlers|youth|junior)\b/.test(fields)) return true;
-  if (/\b(girls?|boys?)\b/.test(fields)) return true;
-  if (/\b(?:\d{1,2}\s?(?:m|mo|months?|y|yr|yrs|years?))\b/.test(fields)) return true;
-  return false;
+  let result: boolean;
+  if (!fields.trim()) {
+    result = false;
+  } else if (/\b(kids?|children|child|baby|babies|toddler|toddlers|youth|junior)\b/.test(fields)) {
+    result = true;
+  } else if (/\b(girls?|boys?)\b/.test(fields)) {
+    result = true;
+  } else if (/\b(?:\d{1,2}\s?(?:m|mo|months?|y|yr|yrs|years?))\b/.test(fields)) {
+    result = true;
+  } else {
+    result = false;
+  }
+  _hasChildAudienceSignalsCache.set(src, result);
+  return result;
 }
 
 function hasOppositeGenderSignalForQuery(
@@ -3281,7 +3298,11 @@ function hasStrictTrouserIntent(desiredProductTypes: string[]): boolean {
   return hasTrouserLike && !hasShortLike;
 }
 
+const _isShortsCatalogCache = new WeakMap<object, boolean>();
 function isShortsCatalogCandidate(src: Record<string, unknown>): boolean {
+  if (typeof src !== "object" || src === null) return false;
+  const cached = _isShortsCatalogCache.get(src);
+  if (cached !== undefined) return cached;
   const blob = [
     src.title,
     src.category,
@@ -3290,11 +3311,16 @@ function isShortsCatalogCandidate(src: Record<string, unknown>): boolean {
   ]
     .map((value) => String(value ?? "").toLowerCase())
     .join(" ");
-  if (!blob.trim()) return false;
-  return /\b(shorts?|bermudas?|board\s?shorts?)\b/.test(blob);
+  const result = blob.trim().length > 0 && /\b(shorts?|bermudas?|board\s?shorts?)\b/.test(blob);
+  _isShortsCatalogCache.set(src, result);
+  return result;
 }
 
+const _isAthleticCatalogCache = new WeakMap<object, boolean>();
 function isAthleticCatalogCandidate(src: Record<string, unknown>): boolean {
+  if (typeof src !== "object" || src === null) return false;
+  const cached = _isAthleticCatalogCache.get(src);
+  if (cached !== undefined) return cached;
   const blob = [
     src.title,
     src.description,
@@ -3308,9 +3334,14 @@ function isAthleticCatalogCandidate(src: Record<string, unknown>): boolean {
     .join(" ")
     .toLowerCase();
 
-  if (!blob.trim()) return false;
+  if (!blob.trim()) {
+    _isAthleticCatalogCache.set(src, false);
+    return false;
+  }
   const athleticTokenRe = /\b(sport|sportswear|athlet|training|workout|gym|fitness|crossfit|yoga|jogger|track\s?pant|trackpant|running|runner|dry\s?-?fit|dri\s?-?fit|leggings?)\b/i;
-  return athleticTokenRe.test(blob);
+  const result = athleticTokenRe.test(blob);
+  _isAthleticCatalogCache.set(src, result);
+  return result;
 }
 
 function hasTailoredTypeIntent(desiredProductTypes: string[]): boolean {
@@ -9740,6 +9771,22 @@ export async function searchByImageWithSimilarity(
     console.log("[hydrate-step] vendors_ms", 0);
 
     const assembleStartedAt = Date.now();
+    // Loop-invariants: detection-scoped flags and intent regexes don't depend on `p`.
+    // Hoisted out of the products.map() body so we compute each one ONCE per
+    // detection instead of once per product. Behavior identical — same values used
+    // inside the per-product checks below.
+    const _assemblyDetectionCategoryNorm = String(params.detectionProductCategory ?? "").toLowerCase().trim();
+    const _assemblyIsBottomsDetectionForGenderGate = _assemblyDetectionCategoryNorm === "bottoms";
+    const _assemblyHasBinaryQueryGenderIntent = queryGenderNorm === "men" || queryGenderNorm === "women";
+    const _assemblyIsStyleSportIntent = /\b(sport|athletic|training|active|workout|gym|fitness|running|jogging)\b/i.test(desiredStyleForRelevance ?? "");
+    const _assemblyIsTypeSportIntent = desiredProductTypes.some((t: any) => {
+      const x = String(t ?? "").toLowerCase();
+      if (!x) return false;
+      if (x.includes("sport coat")) return false;
+      return /\b(sport|sportswear|athletic|training|workout|gym|fitness|jogger|track|legging|running)\b/.test(x);
+    });
+    const _assemblyIsExplicitSportIntent = _assemblyIsStyleSportIntent || _assemblyIsTypeSportIntent;
+    const _assemblyIsFormalIntent = /\b(formal|business|tailored|smart)\b/i.test(desiredStyleForRelevance ?? "");
     results = products.map((p: any) => {
       const images: ProductImage[] = imagesByProduct.get(parseInt(p.id, 10)) || [];
       const idStr = String(p.id);
@@ -9801,13 +9848,10 @@ export async function searchByImageWithSimilarity(
         product_types: (p as any)?.product_types,
       } as Record<string, unknown>;
 
-      const isBottomsDetectionForGenderGate =
-        String(params.detectionProductCategory ?? "").toLowerCase().trim() === "bottoms";
-      const hasBinaryQueryGenderIntent = queryGenderNorm === "men" || queryGenderNorm === "women";
       if (
         hasDetectionAnchoredTypeIntent &&
-        isBottomsDetectionForGenderGate &&
-        hasBinaryQueryGenderIntent &&
+        _assemblyIsBottomsDetectionForGenderGate &&
+        _assemblyHasBinaryQueryGenderIntent &&
         compliance
       ) {
         const audienceCompliance = Math.max(0, Math.min(1, Number(compliance.audienceCompliance ?? 1)));
@@ -9833,23 +9877,12 @@ export async function searchByImageWithSimilarity(
         String(p.title ?? "") + " " + String(p.description ?? ""),
       );
       const isSportContext = isSportBrand && isSportKeyword;
-      const isStyleSportIntent = /\b(sport|athletic|training|active|workout|gym|fitness|running|jogging)\b/i.test(
-        desiredStyleForRelevance ?? "",
-      );
-      const isTypeSportIntent = desiredProductTypes.some((t) => {
-        const x = String(t ?? "").toLowerCase();
-        if (!x) return false;
-        if (x.includes("sport coat")) return false;
-        return /\b(sport|sportswear|athletic|training|workout|gym|fitness|jogger|track|legging|running)\b/.test(x);
-      });
-      const isExplicitSportIntent = isStyleSportIntent || isTypeSportIntent;
-      const isFormalIntent = /\b(formal|business|tailored|smart)\b/i.test(desiredStyleForRelevance ?? "");
       if (
         hasDetectionAnchoredTypeIntent &&
         isSportContext &&
-        !isExplicitSportIntent
+        !_assemblyIsExplicitSportIntent
       ) {
-        if (isFormalIntent || params.detectionProductCategory === "tops" || params.detectionProductCategory === "bottoms" || params.detectionProductCategory === "outerwear") {
+        if (_assemblyIsFormalIntent || params.detectionProductCategory === "tops" || params.detectionProductCategory === "bottoms" || params.detectionProductCategory === "outerwear") {
           // In formal or non-sport apparel flows, sportswear should not survive due visual similarity.
           finalRelevance01 = 0;
           finalRelevanceSource = "sport_keyword_hard_gate";
@@ -10472,6 +10505,10 @@ export async function searchByImageWithSimilarity(
     }) as ProductResult[];
     console.log("[hydrate-step] assemble_ms", Date.now() - assembleStartedAt);
   }
+  // Timer for post-assembly filtering chain (gender guards, relevance gates,
+  // strong-visual overrides, variant collapse, etc.). This is the dominant
+  // tail of `hydrate_ms` and is currently unmeasured — closing the gap.
+  const postAssemblyStartedAt = Date.now();
   // Final hard contradiction guard on hydrated product metadata.
   // This prevents opposite-gender and shorts-vs-trousers leaks when index fields are sparse/noisy.
   const countAfterHydrationAssembly = results.length;
@@ -11070,6 +11107,7 @@ export async function searchByImageWithSimilarity(
     knn_timed_out: knnTimedOut,
   };
 
+  console.log("[hydrate-step] post_assembly_ms", Date.now() - postAssemblyStartedAt);
   stageHydrationDoneAt = Date.now();
 
   let related: ProductResult[] = [];
