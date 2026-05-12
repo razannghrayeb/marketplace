@@ -30,6 +30,12 @@ import {
   scoreAgainstDirection,
   type StylistDirection,
 } from "../../lib/outfit/stylistDirection";
+import {
+  classifyStyleAttributesFromEmbedding,
+  isStyleClipInferenceEnabled,
+  scoreSoftStyleAlignment,
+  type StyleAttributeDistribution,
+} from "../../lib/outfit/styleAttributesClip";
 
 // ============================================================================
 // Types
@@ -150,6 +156,43 @@ function memoBuildStyleProfile(cache: RequestCache, product: Product) {
   return pending;
 }
 
+/**
+ * Load the primary image embedding for a catalog product from `product_images`.
+ * Returns `null` on any failure. Safe to call unconditionally — never throws.
+ *
+ * Used by the Fashion-CLIP zero-shot style classifier so the anchor's
+ * aesthetic/occasion distribution can be derived from its image. We only fetch
+ * one row per request and only when STYLE_CLIP_INFERENCE_ENABLED is on, so the
+ * cost is one indexed lookup per /complete-style call.
+ */
+async function loadAnchorPrimaryImageEmbedding(productId: number): Promise<number[] | null> {
+  try {
+    const result = await pg.query<{ embedding: unknown }>(
+      `SELECT embedding
+         FROM product_images
+        WHERE product_id = $1 AND embedding IS NOT NULL
+        ORDER BY is_primary DESC, created_at ASC
+        LIMIT 1`,
+      [productId],
+    );
+    const raw = result.rows[0]?.embedding;
+    if (raw == null) return null;
+    if (Array.isArray(raw) && raw.every((n) => typeof n === "number")) return raw as number[];
+    if (typeof raw === "string" && raw.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.every((n) => typeof n === "number")) return parsed;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  } catch (err) {
+    console.warn(`[loadAnchorPrimaryImageEmbedding] failed for product ${productId}:`, err);
+    return null;
+  }
+}
+
 // ============================================================================
 // Service Functions
 // ============================================================================
@@ -235,12 +278,28 @@ export async function getOutfitRecommendations(
     detectedCategoryMap.set(productId, resolvedSourceCategory);
   }
 
+  // Optional Fashion-CLIP zero-shot style classification of the anchor image.
+  // Gated behind STYLE_CLIP_INFERENCE_ENABLED so the new signal can be rolled
+  // out without risk. When the flag is off, the entire branch short-circuits
+  // and no DB / CLIP work happens. On failure we resolve to null and the
+  // rerank treats it as no-signal (not a penalty).
+  const anchorStyleDistributionPromise: Promise<StyleAttributeDistribution | null> =
+    isStyleClipInferenceEnabled()
+      ? loadAnchorPrimaryImageEmbedding(productId)
+          .then((vec) => (vec ? classifyStyleAttributesFromEmbedding(vec) : null))
+          .catch((err) => {
+            console.warn(`[complete-style] anchor style classification failed for ${productId}:`, err);
+            return null;
+          })
+      : Promise.resolve(null);
+
   // Phase B: completeLook retrieval and wardrobe context resolve in parallel.
   // wardrobeContextPromise was started in Phase A; awaiting both together
   // overlaps the catalog-side ES query with the user-side wardrobe DB load.
-  const [stylistDirection, wardrobeContext] = await Promise.all([
+  const [stylistDirection, wardrobeContext, anchorStyleDistribution] = await Promise.all([
     stylistDirectionPromise,
     wardrobeContextPromise,
+    anchorStyleDistributionPromise,
   ]);
 
   const completeLookResult = await completeLookSuggestionsForCatalogProducts(
@@ -280,6 +339,7 @@ export async function getOutfitRecommendations(
     wardrobe: wardrobeContext,
     requestCache,
     stylistDirection,
+    anchorStyleDistribution,
   });
 
   const filteredSuggestions = applyCompleteStyleOptionFilters(
@@ -1210,6 +1270,10 @@ type FashionRerankContext = {
    * repeated calls within a single complete-style request don't re-run ONNX. */
   requestCache?: RequestCache;
   stylistDirection?: StylistDirection;
+  /** Optional Fashion-CLIP zero-shot style distribution for the anchor product.
+   * When present, the rerank adds a small additive bonus for candidates that
+   * align with this distribution. When absent, scoring proceeds unchanged. */
+  anchorStyleDistribution?: StyleAttributeDistribution | null;
 };
 
 type CandidateStyleRow = {
@@ -2887,7 +2951,16 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     const candidateMaterial = normalizeStyleToken(candidateProduct.description);
     const materialOverlap = sourceMaterial && candidateMaterial && sourceMaterial === candidateMaterial ? 0.88 : 0.65;
 
-    const fashionScoreRaw =
+    // Weights — total 1.85. Each feature is in [0,1], so the raw sum is in [0,1.85].
+    // Many slot-specific features (top/shoe/bag pipeline) default to 1 for non-matching
+    // families, so dividing by the constant total would inflate scores for those slots.
+    // Build an effective denominator from the weights that actually carried signal
+    // for this candidate (slot-specific features collapse to neutral 1 for other families).
+    const candidateFamilyIsTops = candidateFamily === "tops";
+    const candidateFamilyIsShoes = candidateFamily === "shoes";
+    const candidateFamilyIsBags = candidateFamily === "bags";
+    const candidateFamilyIsBottoms = candidateFamily === "bottoms";
+    let fashionScoreRaw =
       categoryScore * 0.23 +
       aestheticScore * 0.18 +
       colorScore * 0.14 +
@@ -2895,18 +2968,55 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       seasonScore * 0.07 +
       weatherScore * 0.09 +
       aestheticGarmentScore * 0.08 +
-      topPipelineScore * 0.08 +
-      shoePipelineScore * 0.1 +
-      footwearAestheticScore * 0.08 +
-      footwearOccasionScore * 0.16 +
-      bagOccasionScore * 0.1 +
-      bagPipelineScore * 0.08 +
-      bottomSilhouetteScore * 0.1 +
       garmentOccasionScore * 0.1 +
       patternOverlap * 0.06 +
       materialOverlap * 0.04 +
       priceScore * 0.02;
-    const fashionScore = Math.max(0, Math.min(1, fashionScoreRaw / 1.6));
+    let activeWeightSum = 0.23 + 0.18 + 0.14 + 0.14 + 0.07 + 0.09 + 0.08 + 0.1 + 0.06 + 0.04 + 0.02; // 1.15
+    if (candidateFamilyIsTops) {
+      fashionScoreRaw += topPipelineScore * 0.08;
+      activeWeightSum += 0.08;
+    }
+    if (candidateFamilyIsShoes) {
+      fashionScoreRaw +=
+        shoePipelineScore * 0.1 +
+        footwearAestheticScore * 0.08 +
+        footwearOccasionScore * 0.16;
+      activeWeightSum += 0.1 + 0.08 + 0.16;
+    }
+    if (candidateFamilyIsBags) {
+      fashionScoreRaw += bagOccasionScore * 0.1 + bagPipelineScore * 0.08;
+      activeWeightSum += 0.1 + 0.08;
+    }
+    if (candidateFamilyIsBottoms) {
+      fashionScoreRaw += bottomSilhouetteScore * 0.1;
+      activeWeightSum += 0.1;
+    }
+    // Fashion-CLIP soft-style signal — medium weight, opt-in, additive only.
+    // Only contributes when `anchorStyleDistribution` was successfully computed
+    // (anchor had a usable image embedding AND the env flag is on). When absent
+    // the weight is 0, leaving the rest of the rerank untouched.
+    //
+    // Weight 0.12 (~10% of fashionScore, ~7% of final ranking): high enough to
+    // actually shift positions for anchors with title-vs-image mismatches, low
+    // enough that bad CLIP inference can't flip top-of-pool with bottom-of-pool.
+    // Asymmetric match (anchor distribution vs candidate's rule-labeled
+    // aesthetic) caps the ceiling — symmetric matching needs the candidate
+    // backfill (see B1 docs).
+    const SOFT_STYLE_WEIGHT = 0.12;
+    if (params.anchorStyleDistribution) {
+      const softStyleScore = scoreSoftStyleAlignment(
+        params.anchorStyleDistribution,
+        candidateStyle.aesthetic,
+        candidateStyle.occasion,
+      );
+      fashionScoreRaw += softStyleScore * SOFT_STYLE_WEIGHT;
+      activeWeightSum += SOFT_STYLE_WEIGHT;
+    }
+    // Normalize against the active weight sum so scores span the full [0,1] range
+    // regardless of slot. This fixes a long-standing compression where the constant
+    // /1.6 denominator pushed realistic items below the post-rerank score floor.
+    const fashionScore = Math.max(0, Math.min(1, fashionScoreRaw / Math.max(0.01, activeWeightSum)));
 
     const retrievalScore = Math.max(0, Math.min(1, s.score || 0));
     let finalScore = Math.round((fashionScore * 0.7 + retrievalScore * 0.3) * 1000) / 1000;
@@ -3001,11 +3111,12 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       return null;
     }
 
-    // Stylist-direction signal: SOFT boost when the candidate matches what a
-    // stylist would pair with this anchor; SOFT penalty when it conflicts.
+    // Stylist-direction signal: medium-weight boost when the candidate matches what
+    // a stylist would pair with this anchor; medium-weight penalty when it conflicts.
     // Never hard-rejects — keeps Gemini errors / quirky picks from removing
-    // otherwise-fine candidates. Weights kept small (≤10% of final score)
-    // so the existing 17-feature reranker remains the primary signal.
+    // otherwise-fine candidates. Lifted from ±10% to ±25/-30% so the LLM stylist
+    // (which already runs per request) actually shapes results instead of being
+    // decorative. The 17-feature reranker is still the dominant signal.
     const stylistAlignment = scoreAgainstDirection({
       direction: stylistDirection,
       candidateFamily,
@@ -3014,8 +3125,8 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     });
     if (stylistAlignment.score !== 0) {
       const stylistAdjustment = stylistAlignment.score >= 0
-        ? 1 + Math.min(0.08, stylistAlignment.score * 0.1) // up to +8% boost
-        : 1 + Math.max(-0.1, stylistAlignment.score * 0.12); // down to -10% penalty
+        ? 1 + Math.min(0.25, stylistAlignment.score * 0.3) // up to +25% boost
+        : 1 + Math.max(-0.3, stylistAlignment.score * 0.35); // down to -30% penalty
       finalScore = Math.round(finalScore * stylistAdjustment * 1000) / 1000;
     }
 
@@ -3112,15 +3223,35 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     };
   }));
 
-  return enriched
+  const survivors = enriched
     .filter((row): row is NonNullable<typeof row> => row !== null)
-    .filter((row) => !isHeadbandLikeRecommendation(row))
-    .filter((row) => {
-      const family = categoryFamily(row.category);
-      const minScore = family === "bags" ? 0.44 : family === "shoes" ? 0.38 : family === "tops" ? 0.42 : family === "accessories" ? 0.43 : 0.5;
-      return (row.score || 0) >= minScore;
-    })
-    .sort((a, b) => (b.score || 0) - (a.score || 0));
+    .filter((row) => !isHeadbandLikeRecommendation(row));
+
+  // Per-family quantile floor instead of absolute thresholds. The absolute floors
+  // (bags 0.44 / shoes 0.38 / tops 0.42 / accessories 0.43 / else 0.5) wiped out
+  // 30-60% of an already-compressed score pool. A quantile keeps the actual top
+  // of each pool no matter how the scoring shifts, with a permissive absolute
+  // safety net so we never accept obviously broken candidates.
+  const ABSOLUTE_SAFETY_FLOOR = 0.22;
+  const TARGET_KEEP_FRACTION = 0.75; // keep roughly the top 75% per family
+  const familyBuckets = new Map<string, typeof survivors>();
+  for (const row of survivors) {
+    const family = categoryFamily(row.category) || "other";
+    if (!familyBuckets.has(family)) familyBuckets.set(family, []);
+    familyBuckets.get(family)!.push(row);
+  }
+  const kept: typeof survivors = [];
+  for (const [, bucket] of familyBuckets) {
+    if (bucket.length === 0) continue;
+    const sorted = [...bucket].sort((a, b) => (b.score || 0) - (a.score || 0));
+    const idx = Math.floor(sorted.length * TARGET_KEEP_FRACTION);
+    const quantileFloor = sorted[Math.min(sorted.length - 1, idx)]?.score ?? ABSOLUTE_SAFETY_FLOOR;
+    const effectiveFloor = Math.max(ABSOLUTE_SAFETY_FLOOR, Math.min(quantileFloor, 0.45));
+    for (const row of sorted) {
+      if ((row.score || 0) >= effectiveFloor) kept.push(row);
+    }
+  }
+  return kept.sort((a, b) => (b.score || 0) - (a.score || 0));
 }
 
 function normalizeAudienceHint(raw: unknown): string | undefined {
@@ -3658,66 +3789,99 @@ function mapCompleteLookToStyleResponse(params: {
     return true;
   };
 
+  // Pre-group surviving suggestions by their display category. This lets us run
+  // an MMR-style selection per slot rather than the previous global loop with
+  // hard-stop caps (which collapsed most slots to ~2 items because the top 2
+  // results were usually the same subtype).
+  type SlotBucket = { suggestion: CompleteLookMappedSuggestion; categoryLabel: string };
+  const slotPools = new Map<string, SlotBucket[]>();
   for (const s of stagedSuggestions) {
     const categoryLabel = completeStyleCategoryLabel(`${s.category || ""} ${s.title || ""}`);
     if (!categoryLabel) continue;
     if (!shouldKeepMappedSuggestion(categoryLabel, s)) continue;
+    if (!slotPools.has(categoryLabel)) slotPools.set(categoryLabel, []);
+    slotPools.get(categoryLabel)!.push({ suggestion: s, categoryLabel });
+  }
+
+  // MMR-style picker: greedy selection that penalises a candidate's score by
+  // how saturated its subtype and brand already are in the bucket. Replaces
+  // the old `if bucket.length >= 2 && sameSubtypeCount >= 2 → continue` caps.
+  //
+  // Effect: top-of-pool items still get in even when they share a subtype,
+  // but as a subtype/brand saturates the next candidate of the same kind
+  // takes a score hit that lets a *different* subtype/brand leapfrog it.
+  // This delivers genuine variety without hard-stopping at 2.
+  const subtypeFnFor = (categoryLabel: string): ((text: string) => string) => {
+    if (categoryLabel === "Shoes") return (t) => footwearSubtypeLabel(t);
+    if (categoryLabel === "Tops") return (t) => topSubtypeLabel(t);
+    if (categoryLabel === "Bags") return (t) => bagSubtypeLabel(t);
+    return () => "generic";
+  };
+  const pickWithMMR = (
+    pool: SlotBucket[],
+    categoryLabel: string,
+    cap: number,
+  ): CompleteLookMappedSuggestion[] => {
+    if (pool.length === 0 || cap <= 0) return [];
+    const subtypeOf = subtypeFnFor(categoryLabel);
+    const remaining = pool.slice();
+    const picked: CompleteLookMappedSuggestion[] = [];
+    const subtypeCounts = new Map<string, number>();
+    const brandCounts = new Map<string, number>();
+
+    // Saturation penalties — tuned to "soft" so they bend ranking but rarely
+    // outrank a meaningfully better candidate. Activates after 1 of the same
+    // subtype/brand is already picked.
+    const SUBTYPE_PENALTY = 0.06;
+    const BRAND_PENALTY = 0.04;
+
+    while (picked.length < cap && remaining.length > 0) {
+      let bestIdx = -1;
+      let bestEffective = -Infinity;
+      for (let i = 0; i < remaining.length; i++) {
+        const s = remaining[i].suggestion;
+        const subtype = subtypeOf(`${s.title || ""} ${s.category || ""}`);
+        const brand = String(s.brand || "").toLowerCase().trim();
+        const subSat = subtypeCounts.get(subtype) || 0;
+        const brandSat = brand ? brandCounts.get(brand) || 0 : 0;
+        const base = Number.isFinite(s.score) ? Number(s.score) : 0;
+        const effective = base - SUBTYPE_PENALTY * subSat - BRAND_PENALTY * brandSat;
+        if (effective > bestEffective) {
+          bestEffective = effective;
+          bestIdx = i;
+        }
+      }
+      if (bestIdx < 0) break;
+      const winner = remaining.splice(bestIdx, 1)[0];
+      picked.push(winner.suggestion);
+      const subtype = subtypeOf(`${winner.suggestion.title || ""} ${winner.suggestion.category || ""}`);
+      subtypeCounts.set(subtype, (subtypeCounts.get(subtype) || 0) + 1);
+      const brand = String(winner.suggestion.brand || "").toLowerCase().trim();
+      if (brand) brandCounts.set(brand, (brandCounts.get(brand) || 0) + 1);
+    }
+    return picked;
+  };
+
+  for (const [categoryLabel, pool] of slotPools) {
+    const picked = pickWithMMR(pool, categoryLabel, maxPerCategory);
+    if (picked.length === 0) continue;
     if (!groups.has(categoryLabel)) groups.set(categoryLabel, []);
     const bucket = groups.get(categoryLabel)!;
-    if (bucket.length >= maxPerCategory) continue;
-    if (categoryLabel === "Shoes") {
-      const subtype = footwearSubtypeLabel(`${s.title || ""} ${s.category || ""}`);
-      const sameSubtypeCount = bucket.filter((item) =>
-        footwearSubtypeLabel(item.title) === subtype
-      ).length;
-      const normalizedBrand = String(s.brand || "").toLowerCase().trim();
-      const sameBrandCount = bucket.filter(
-        (item) => String(item.brand || "").toLowerCase().trim() === normalizedBrand
-      ).length;
-      // Diversity-aware caps: prevent monotony but avoid collapsing to too few results.
-      if (bucket.length >= 2 && sameSubtypeCount >= 2) continue;
-      if (bucket.length >= 2 && normalizedBrand && sameBrandCount >= 2) continue;
-    }
-    if (categoryLabel === "Tops") {
-      const subtype = topSubtypeLabel(`${s.title || ""} ${s.category || ""}`);
-      const sameSubtypeCount = bucket.filter(
-        (item) => topSubtypeLabel(item.title) === subtype
-      ).length;
-      const normalizedBrand = String(s.brand || "").toLowerCase().trim();
-      const sameBrandCount = bucket.filter(
-        (item) => String(item.brand || "").toLowerCase().trim() === normalizedBrand
-      ).length;
-      if (bucket.length >= 2 && sameSubtypeCount >= 2) continue;
-      if (bucket.length >= 3 && normalizedBrand && sameBrandCount >= 2) continue;
-    }
-    if (categoryLabel === "Bags") {
-      const normalizedBrand = String(s.brand || "").toLowerCase().trim();
-      const subtype = bagSubtypeLabel(`${s.title || ""} ${s.category || ""}`);
-      const sameSubtypeCount = bucket.filter(
-        (item) => bagSubtypeLabel(item.title) === subtype
-      ).length;
-      const sameBrandCount = bucket.filter(
-        (item) => String(item.brand || "").toLowerCase().trim() === normalizedBrand
-      ).length;
-      // Diversity-aware caps for bags: allow depth, avoid monotony.
-      if (bucket.length >= 2 && sameSubtypeCount >= 2) continue;
-      if (bucket.length >= 2 && normalizedBrand && sameBrandCount >= 2) continue;
-    }
-
-    bucket.push({
-      id: s.product_id,
-      title: s.title,
-      brand: s.brand,
-      price: typeof s.price_cents === "number" && Number.isFinite(s.price_cents) ? Math.round(s.price_cents) : 0,
-      currency: sourceProduct.currency || "USD",
-      image: s.image_cdn || s.image_url,
-      matchScore: Math.round(Math.max(0, Math.min(1, s.score || 0)) * 100),
-      matchReasons: s.matchReasons?.length ? s.matchReasons : [s.reason || "Complements your selected item"],
-      owned: s.owned === true ? true : undefined,
-    });
-
-    if (!reasons.has(categoryLabel)) {
-      reasons.set(categoryLabel, s.reason || `Recommended ${categoryLabel.toLowerCase()} for this look`);
+    for (const s of picked) {
+      bucket.push({
+        id: s.product_id,
+        title: s.title,
+        brand: s.brand,
+        price: typeof s.price_cents === "number" && Number.isFinite(s.price_cents) ? Math.round(s.price_cents) : 0,
+        currency: sourceProduct.currency || "USD",
+        image: s.image_cdn || s.image_url,
+        matchScore: Math.round(Math.max(0, Math.min(1, s.score || 0)) * 100),
+        matchReasons: s.matchReasons?.length ? s.matchReasons : [s.reason || "Complements your selected item"],
+        owned: s.owned === true ? true : undefined,
+      });
+      if (!reasons.has(categoryLabel)) {
+        reasons.set(categoryLabel, s.reason || `Recommended ${categoryLabel.toLowerCase()} for this look`);
+      }
     }
   }
 
@@ -3807,40 +3971,54 @@ function mapCompleteLookToStyleResponse(params: {
   ensureCategoryFilled("Shoes");
   ensureCategoryFilled("Bags");
 
-  const ensureMinimumTotal = (minimum: number) => {
-    const total = () => Array.from(groups.values()).reduce((sum, items) => sum + items.length, 0);
-    if (total() >= minimum) return;
-
+  // Per-slot minimum top-up. The previous behaviour only aimed for 4 items
+  // *total*, so populated slots would carry the whole response and other slots
+  // returned 0-1. Now we top up *each* slot that has any candidates available
+  // to a sensible floor (half of maxPerCategory, capped at 4) so users see
+  // meaningful depth in every populated slot.
+  const ensurePerSlotMinimum = () => {
+    const minPerSlot = Math.max(3, Math.min(4, Math.floor(maxPerCategory / 2)));
+    const usedIds = new Set<number>();
+    for (const items of groups.values()) {
+      for (const item of items) usedIds.add(item.id);
+    }
+    // Gather all slots that already have anything OR appear in stagedSuggestions.
+    const slotsToFill = new Set<string>(groups.keys());
     for (const s of stagedSuggestions) {
-      if (total() >= minimum) break;
-      const categoryLabel = completeStyleCategoryLabel(`${s.category || ""} ${s.title || ""}`);
-      if (!categoryLabel) continue;
-      if (!shouldKeepMappedSuggestion(categoryLabel, s)) continue;
-      if (!groups.has(categoryLabel)) groups.set(categoryLabel, []);
-      const bucket = groups.get(categoryLabel)!;
-      if (bucket.length >= maxPerCategory) continue;
-      if (bucket.some((b) => b.id === s.product_id)) continue;
-      const alreadyUsed = Array.from(groups.values()).some((items) => items.some((item) => item.id === s.product_id));
-      if (alreadyUsed) continue;
-
-      bucket.push({
-        id: s.product_id,
-        title: s.title,
-        brand: s.brand,
-        price: typeof s.price_cents === "number" && Number.isFinite(s.price_cents) ? Math.round(s.price_cents) : 0,
-        currency: sourceProduct.currency || "USD",
-        image: s.image_cdn || s.image_url,
-        matchScore: Math.round(Math.max(0, Math.min(1, s.score || 0)) * 100),
-        matchReasons: s.matchReasons?.length ? s.matchReasons : [s.reason || "Complements your selected item"],
-        owned: s.owned === true ? true : undefined,
-      });
-      if (!reasons.has(categoryLabel)) {
-        reasons.set(categoryLabel, s.reason || `Recommended ${categoryLabel.toLowerCase()} for this look`);
+      const label = completeStyleCategoryLabel(`${s.category || ""} ${s.title || ""}`);
+      if (label) slotsToFill.add(label);
+    }
+    for (const slot of slotsToFill) {
+      const bucket = groups.get(slot) || [];
+      if (bucket.length >= minPerSlot) continue;
+      if (!groups.has(slot)) groups.set(slot, []);
+      const target = groups.get(slot)!;
+      for (const s of stagedSuggestions) {
+        if (target.length >= Math.min(minPerSlot, maxPerCategory)) break;
+        if (usedIds.has(s.product_id)) continue;
+        const candidateLabel = completeStyleCategoryLabel(`${s.category || ""} ${s.title || ""}`);
+        if (candidateLabel !== slot) continue;
+        if (!shouldKeepMappedSuggestion(slot, s)) continue;
+        target.push({
+          id: s.product_id,
+          title: s.title,
+          brand: s.brand,
+          price: typeof s.price_cents === "number" && Number.isFinite(s.price_cents) ? Math.round(s.price_cents) : 0,
+          currency: sourceProduct.currency || "USD",
+          image: s.image_cdn || s.image_url,
+          matchScore: Math.round(Math.max(0, Math.min(1, s.score || 0)) * 100),
+          matchReasons: s.matchReasons?.length ? s.matchReasons : [s.reason || "Complements your selected item"],
+          owned: s.owned === true ? true : undefined,
+        });
+        usedIds.add(s.product_id);
+        if (!reasons.has(slot)) {
+          reasons.set(slot, s.reason || `Recommended ${slot.toLowerCase()} for this look`);
+        }
       }
     }
   };
 
-  ensureMinimumTotal(Math.min(4, Math.max(1, completeLookResult.suggestions.length)));
+  ensurePerSlotMinimum();
 
   const recommendations = Array.from(groups.entries()).map(([category, products]) => {
     const priority = completeStylePriorityFromCategory(category, completeLookResult.missingCategories || []);
