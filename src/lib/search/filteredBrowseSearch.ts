@@ -74,12 +74,21 @@ export async function searchProductsFilteredBrowse(params: {
   page: number;
   limit: number;
 }): Promise<any[]> {
+  const pageResult = await searchProductsFilteredBrowsePage(params);
+  return pageResult.results;
+}
+
+export async function searchProductsFilteredBrowsePage(params: {
+  filters?: Partial<SearchFilters>;
+  page: number;
+  limit: number;
+}): Promise<{ results: any[]; has_next: boolean; has_prev: boolean }> {
   const { filters = {}, page, limit } = params;
   const filter: any[] = [{ bool: { must_not: [{ term: { is_hidden: true } }] } }];
   appendBrowseFilters(filter, filters as SearchFilters);
 
   const groupedOffset = (page - 1) * limit;
-  const groupedNeeded = groupedOffset + limit;
+  const groupedNeeded = groupedOffset + limit + 1;
   const batchSize = Math.min(200, Math.max(limit * 5, 50));
 
   const representativeIds: string[] = [];
@@ -135,14 +144,15 @@ export async function searchProductsFilteredBrowse(params: {
     if (hits.length < batchSize) break;
   }
 
+  const hasNext = representativeIds.length > groupedOffset + limit;
   const pagedIds = representativeIds.slice(groupedOffset, groupedOffset + limit);
-  if (pagedIds.length === 0) return [];
+  if (pagedIds.length === 0) return { results: [], has_next: false, has_prev: page > 1 };
 
   const products = await getProductsByIdsOrdered(pagedIds);
   const numericIds = pagedIds.map((id) => parseInt(id, 10)).filter(Number.isFinite);
   const imagesByProduct = await getImagesForProducts(numericIds);
 
-  return products.map((p: any) => {
+  const results = products.map((p: any) => {
     const images = imagesByProduct.get(parseInt(p.id, 10)) || [];
     return {
       ...p,
@@ -155,4 +165,6 @@ export async function searchProductsFilteredBrowse(params: {
       })),
     };
   });
+
+  return { results, has_next: hasNext, has_prev: page > 1 };
 }
