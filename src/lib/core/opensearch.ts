@@ -50,6 +50,7 @@ function buildOsClientConfig() {
     ssl: { rejectUnauthorized: false },
     maxRetries: 5,
     requestTimeout: 60000,
+    compression: "gzip",
   };
 }
 
