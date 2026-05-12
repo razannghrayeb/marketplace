@@ -687,34 +687,79 @@ export function tieredColorMatchScore(
   return { score: 0, matchedColor: null, tier: "none" };
 }
 
+type TieredColorComplianceResult = {
+  compliance: number;
+  bestMatch: string | null;
+  tier: "exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none";
+};
+
+// ───────────────────────────────────────────────────────────────────────────
+// LRU memoization for tieredColorListCompliance.
+// ───────────────────────────────────────────────────────────────────────────
+// Pure function. Within a rerank request, `desired` and `mode` are stable while
+// `productColors` repeats heavily across hits (many products share the same
+// canonical color tuple, e.g. ["blue"] or ["navy","white"]). Callers read the
+// result fields without mutating the object — verified safe to share by reference.
+const tieredColorComplianceCache = new Map<string, TieredColorComplianceResult>();
+const TIERED_COLOR_COMPLIANCE_CACHE_MAX = 30_000;
+
+function tieredColorComplianceCacheKey(
+  desired: string[],
+  productColors: string[],
+  mode: "any" | "all",
+): string {
+  // The function doesn't normalize the lists itself, so callers pass the canonical
+  // tokens. We sort both to make order-equivalent inputs cache-equivalent (output
+  // is order-insensitive since we iterate all desired and take a best/avg).
+  const dKey = [...desired].sort().join("|");
+  const pKey = [...productColors].sort().join("|");
+  return dKey + "||" + pKey + "||" + mode;
+}
+
 export function tieredColorListCompliance(
   desired: string[],
   productColors: string[],
   mode: "any" | "all",
-): { compliance: number; bestMatch: string | null; tier: "exact" | "light-shade" | "dark-shade" | "family" | "bucket" | "none" } {
+): TieredColorComplianceResult {
   if (desired.length === 0) return { compliance: 1, bestMatch: null, tier: "none" };
   if (productColors.length === 0) return { compliance: 0, bestMatch: null, tier: "none" };
+
+  const cacheKey = tieredColorComplianceCacheKey(desired, productColors, mode);
+  const cachedHit = tieredColorComplianceCache.get(cacheKey);
+  if (cachedHit !== undefined) {
+    tieredColorComplianceCache.delete(cacheKey);
+    tieredColorComplianceCache.set(cacheKey, cachedHit);
+    return cachedHit;
+  }
 
   const scores = desired.map((d) => {
     const m = tieredColorMatchScore(d, productColors);
     return m;
   });
 
+  let result: TieredColorComplianceResult;
   if (mode === "all") {
     const ok = scores.every((s) => s.score > 0);
     const avg = scores.reduce((a, s) => a + s.score, 0) / scores.length;
     const best = scores.map((s) => s.matchedColor).find(Boolean) ?? null;
-    return {
+    result = {
       compliance: ok ? avg : 0,
       bestMatch: best,
       tier: scores.every((s) => s.tier === "exact") ? "exact" : scores[0]?.tier ?? "none",
     };
+  } else {
+    const best = scores.reduce((a, b) => (a.score >= b.score ? a : b));
+    result = {
+      compliance: best.score,
+      bestMatch: best.matchedColor,
+      tier: best.tier,
+    };
   }
 
-  const best = scores.reduce((a, b) => (a.score >= b.score ? a : b));
-  return {
-    compliance: best.score,
-    bestMatch: best.matchedColor,
-    tier: best.tier,
-  };
+  if (tieredColorComplianceCache.size >= TIERED_COLOR_COMPLIANCE_CACHE_MAX) {
+    const firstKey = tieredColorComplianceCache.keys().next().value;
+    if (firstKey !== undefined) tieredColorComplianceCache.delete(firstKey);
+  }
+  tieredColorComplianceCache.set(cacheKey, result);
+  return result;
 }
