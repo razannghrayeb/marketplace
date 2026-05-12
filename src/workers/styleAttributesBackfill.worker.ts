@@ -1,38 +1,42 @@
 /**
  * Style Attributes Backfill Worker
  *
- * One-shot (or rerunnable) job that classifies every product with a usable
- * primary image embedding via Fashion-CLIP zero-shot prompts and stores:
- *   - aesthetic / occasion soft distributions (jsonb)
+ * One-shot (or rerunnable) job that classifies every product whose primary
+ * image has been embedded into OpenSearch via Fashion-CLIP zero-shot prompts
+ * and stores:
+ *   - aesthetic / occasion soft distributions (jsonb on products, object in OS)
  *   - argmax aesthetic / occasion labels
  *   - expected formality (1-10)
  *   - confidence margin
  *
- * Persists to BOTH:
- *   - `products` table (via UPDATE in batches, idempotent on attr_style_clip_at)
- *   - OpenSearch index (via _bulk update calls, partial doc updates only)
+ * Source of embeddings: **OpenSearch** (this repo's pipeline doesn't persist
+ * embeddings into `product_images.embedding` — they live only in the OS index).
+ *
+ * Sinks:
+ *   - `products` table (UPDATE with attr_*_probs columns + attr_style_clip_at)
+ *   - OpenSearch index (partial doc update so retrieval reads them at runtime)
  *
  * Design notes:
- * - **Idempotent**: filters on `attr_style_clip_at IS NULL`. To re-classify
- *   everything (e.g. after a CLIP model change), pass `--force` or clear the
- *   column manually.
- * - **No image inference**: reads the already-stored `product_images.embedding`
- *   and just computes cosine against the cached prompt embeddings. This is what
- *   makes 100K products take minutes instead of hours.
- * - **Graceful per-row failure**: a malformed embedding or missing image
- *   doesn't abort the batch — the row is logged and skipped.
- * - **Bounded memory**: cursor-style pagination by `id` ascending, fixed batch
- *   size, no full table SELECT.
+ * - **Idempotent**: filters OS for docs that DON'T have `attr_aesthetic_top`
+ *   yet. Re-running picks up only un-classified docs. Use --force to redo all.
+ * - **No image inference**: classification is pure cosine math against cached
+ *   Fashion-CLIP prompt embeddings. ~1ms per product — 100K → ~3-5 minutes
+ *   dominated by Postgres UPDATE throughput.
+ * - **Per-row failure is non-fatal**: malformed embedding rows are logged and
+ *   skipped; the rest of the batch proceeds.
+ * - **Bounded memory**: OpenSearch scroll API, fixed batch size, no full
+ *   table SELECT.
  *
  * Run: `node dist/workers/styleAttributesBackfill.worker.js`
  *   Flags:
- *     --batch-size=200            (default 200)
+ *     --batch-size=200            (default 200, max 1000)
  *     --max-batches=N             (default no limit; useful for canary runs)
  *     --force                     re-classify all products, not just pending
  *     --dry-run                   classify but don't write — for spot-checking
  */
 
-import { pg, osClient, ensureStyleAttributeFields } from "../lib/core";
+import { pg } from "../lib/core";
+import { osClient, ensureStyleAttributeFields } from "../lib/core/opensearch";
 import { config } from "../config";
 import {
   classifyStyleAttributesFromEmbedding,
@@ -66,49 +70,14 @@ function parseFlags(): CliFlags {
   };
 }
 
-interface BatchRow {
+interface OsHit {
   product_id: number;
-  embedding: unknown;
+  embedding: number[];
 }
 
-function parseVector(value: unknown): number[] | null {
+function coerceEmbedding(value: unknown): number[] | null {
   if (Array.isArray(value) && value.every((n) => typeof n === "number")) return value as number[];
-  if (typeof value === "string" && value.startsWith("[")) {
-    try {
-      const parsed = JSON.parse(value);
-      if (Array.isArray(parsed) && parsed.every((n) => typeof n === "number")) return parsed;
-    } catch {
-      return null;
-    }
-  }
   return null;
-}
-
-/**
- * Selects the next batch of products that:
- *   - Have at least one product_images row with a non-null embedding.
- *   - Have not been classified yet (unless --force).
- *   - Are sorted by product id so this is resumable.
- */
-async function fetchNextBatch(
-  flags: CliFlags,
-  afterId: number,
-): Promise<BatchRow[]> {
-  const pendingClause = flags.force ? "" : "AND p.attr_style_clip_at IS NULL";
-  const result = await pg.query<BatchRow>(
-    `SELECT DISTINCT ON (p.id)
-            p.id AS product_id,
-            pi.embedding AS embedding
-       FROM products p
-       JOIN product_images pi ON pi.product_id = p.id
-      WHERE p.id > $1
-        AND pi.embedding IS NOT NULL
-        ${pendingClause}
-      ORDER BY p.id ASC, pi.is_primary DESC, pi.created_at ASC
-      LIMIT $2`,
-    [afterId, flags.batchSize],
-  );
-  return result.rows;
 }
 
 interface ClassifiedRow {
@@ -117,9 +86,73 @@ interface ClassifiedRow {
 }
 
 /**
+ * Open a scrolled cursor on the products index for docs that have an embedding
+ * but no `attr_aesthetic_top` yet (or all of them when --force is set).
+ */
+async function openScroll(flags: CliFlags): Promise<{ scrollId: string; hits: any[] }> {
+  const must: any[] = [{ exists: { field: "embedding" } }];
+  const must_not: any[] = flags.force ? [] : [{ exists: { field: "attr_aesthetic_top" } }];
+
+  const res = await osClient.search({
+    index: config.opensearch.index,
+    scroll: "5m",
+    body: {
+      size: flags.batchSize,
+      // Sort by _doc — fastest scroll order. We're processing the entire matching
+      // set, so meaningful ordering would only add cost.
+      sort: ["_doc"],
+      query: {
+        bool: { must, must_not },
+      },
+      // Embeddings are large — explicitly request them so we don't fight any
+      // index-level "exclude vectors from _source" defaults.
+      _source: ["product_id", "embedding"],
+    },
+  });
+  return {
+    scrollId: String(res.body?._scroll_id ?? ""),
+    hits: res.body?.hits?.hits ?? [],
+  };
+}
+
+async function continueScroll(scrollId: string): Promise<{ scrollId: string; hits: any[] }> {
+  const res = await osClient.scroll({
+    body: { scroll: "5m", scroll_id: scrollId },
+  });
+  return {
+    scrollId: String(res.body?._scroll_id ?? scrollId),
+    hits: res.body?.hits?.hits ?? [],
+  };
+}
+
+async function clearScroll(scrollId: string): Promise<void> {
+  if (!scrollId) return;
+  try {
+    await osClient.clearScroll({ body: { scroll_id: scrollId } });
+  } catch (err) {
+    // Non-fatal — scrolls auto-expire after 5m anyway.
+    console.warn("[styleAttributesBackfill] clearScroll failed (non-fatal):", err);
+  }
+}
+
+function hitsToRows(hits: any[]): OsHit[] {
+  const out: OsHit[] = [];
+  for (const h of hits) {
+    const src = h?._source || {};
+    const idRaw = src.product_id ?? h._id;
+    const id = parseInt(String(idRaw), 10);
+    const emb = coerceEmbedding(src.embedding);
+    if (Number.isFinite(id) && id >= 1 && emb) {
+      out.push({ product_id: id, embedding: emb });
+    }
+  }
+  return out;
+}
+
+/**
  * Persist a batch of classifications to Postgres in one round-trip using
- * `UPDATE ... FROM (VALUES ...)`. We send the JSONB distributions as a single
- * parameter array so the planner can inline the join cheaply.
+ * `UPDATE ... FROM UNNEST(...)`. Sends each column as a parallel array so the
+ * planner can inline the join cheaply.
  */
 async function writeBatchToPostgres(rows: ClassifiedRow[]): Promise<void> {
   if (rows.length === 0) return;
@@ -158,8 +191,8 @@ async function writeBatchToPostgres(rows: ClassifiedRow[]): Promise<void> {
 /**
  * Mirror the same distributions to the OpenSearch document. We use partial
  * doc updates (`update` action) so we never overwrite fields the indexer is
- * responsible for. If the doc doesn't exist yet (unindexed product) we
- * tolerate the 404 — the next reindex will pick up the new fields from PG.
+ * responsible for. If the doc disappeared mid-run we tolerate the 404 — the
+ * data is already in Postgres and a subsequent reindex will sync it back.
  */
 async function writeBatchToOpenSearch(rows: ClassifiedRow[]): Promise<void> {
   if (rows.length === 0) return;
@@ -178,9 +211,6 @@ async function writeBatchToOpenSearch(rows: ClassifiedRow[]): Promise<void> {
     });
   }
   const res = await osClient.bulk({ body, refresh: false });
-  // Bulk update returns per-action results. Document-missing (404) is benign
-  // for products that aren't yet indexed; surface other errors so the operator
-  // sees them but don't fail the whole run.
   if (res.body?.errors) {
     const items: any[] = res.body.items || [];
     let benign = 0;
@@ -198,7 +228,7 @@ async function writeBatchToOpenSearch(rows: ClassifiedRow[]): Promise<void> {
       }
     }
     if (benign > 0) {
-      console.log(`[styleAttributesBackfill] ${benign} docs not in OS yet (will pick up on next reindex)`);
+      console.log(`[styleAttributesBackfill] ${benign} docs missing in OS (non-fatal)`);
     }
     if (real > 0) {
       console.warn(`[styleAttributesBackfill] ${real} OpenSearch errors in batch`);
@@ -220,7 +250,6 @@ async function main(): Promise<void> {
     );
   }
 
-  let afterId = 0;
   let batchNum = 0;
   let totalSeen = 0;
   let totalClassified = 0;
@@ -228,71 +257,77 @@ async function main(): Promise<void> {
   let totalSkippedClassifierNull = 0;
   const startedAt = Date.now();
 
-  while (true) {
-    if (flags.maxBatches !== null && batchNum >= flags.maxBatches) {
-      console.log(`[styleAttributesBackfill] reached max-batches=${flags.maxBatches}`);
-      break;
-    }
-    const batch = await fetchNextBatch(flags, afterId);
-    if (batch.length === 0) {
-      console.log("[styleAttributesBackfill] no more pending products — done");
-      break;
-    }
-    batchNum++;
-    totalSeen += batch.length;
-
-    const classified: ClassifiedRow[] = [];
-    for (const row of batch) {
-      const vec = parseVector(row.embedding);
-      if (!vec || vec.length === 0) {
-        totalSkippedNoVector++;
-        continue;
-      }
-      // Classification is pure JS math (cosine against cached prompt embeddings).
-      // ensurePromptEmbeddings runs on the first call and caches for the rest.
-      const dist = await classifyStyleAttributesFromEmbedding(vec).catch((err) => {
-        console.warn(`[styleAttributesBackfill] classify failed for product ${row.product_id}:`, err);
-        return null;
-      });
-      if (!dist) {
-        totalSkippedClassifierNull++;
-        continue;
-      }
-      classified.push({ productId: row.product_id, distribution: dist });
-    }
-
-    if (!flags.dryRun) {
-      // Postgres first — the persistent record of "this row has been classified"
-      // is `attr_style_clip_at`. If OpenSearch write fails, we still don't
-      // re-classify on resume because PG already records the result. The OS
-      // doc can be backfilled by a subsequent reindex.
-      try {
-        await writeBatchToPostgres(classified);
-      } catch (err) {
-        console.error(`[styleAttributesBackfill] PG write failed (batch ${batchNum}):`, err);
-        // Don't advance afterId — let the next run retry this slice.
+  let scroll = await openScroll(flags);
+  try {
+    while (true) {
+      if (scroll.hits.length === 0) {
+        console.log("[styleAttributesBackfill] scroll exhausted — done");
         break;
       }
-      try {
-        await writeBatchToOpenSearch(classified);
-      } catch (err) {
-        console.warn(`[styleAttributesBackfill] OS write failed (batch ${batchNum}, non-fatal):`, err);
+      if (flags.maxBatches !== null && batchNum >= flags.maxBatches) {
+        console.log(`[styleAttributesBackfill] reached max-batches=${flags.maxBatches}`);
+        break;
       }
+      batchNum++;
+      const rows = hitsToRows(scroll.hits);
+      totalSeen += scroll.hits.length;
+      totalSkippedNoVector += scroll.hits.length - rows.length;
+
+      const classified: ClassifiedRow[] = [];
+      for (const row of rows) {
+        // Classification is pure JS math against cached prompt embeddings.
+        // The first call lazily initialises prompt embeddings and caches them
+        // for the rest of the run.
+        const dist = await classifyStyleAttributesFromEmbedding(row.embedding).catch((err) => {
+          console.warn(
+            `[styleAttributesBackfill] classify failed for product ${row.product_id}:`,
+            err,
+          );
+          return null;
+        });
+        if (!dist) {
+          totalSkippedClassifierNull++;
+          continue;
+        }
+        classified.push({ productId: row.product_id, distribution: dist });
+      }
+
+      if (!flags.dryRun) {
+        try {
+          await writeBatchToPostgres(classified);
+        } catch (err) {
+          console.error(`[styleAttributesBackfill] PG write failed (batch ${batchNum}):`, err);
+          // Hard stop: don't advance the scroll if we couldn't persist. The
+          // user can re-run and we'll resume from where we are (the OS filter
+          // skips classified products).
+          break;
+        }
+        try {
+          await writeBatchToOpenSearch(classified);
+        } catch (err) {
+          console.warn(
+            `[styleAttributesBackfill] OS write failed (batch ${batchNum}, non-fatal):`,
+            err,
+          );
+        }
+      }
+      totalClassified += classified.length;
+
+      const elapsedS = (Date.now() - startedAt) / 1000;
+      const rate = totalClassified > 0 ? Math.round(totalClassified / Math.max(0.001, elapsedS)) : 0;
+      console.log(
+        `[styleAttributesBackfill] batch ${batchNum} done | classified_total=${totalClassified} | no_vec=${totalSkippedNoVector} | classifier_null=${totalSkippedClassifierNull} | seen=${totalSeen} | ${elapsedS.toFixed(1)}s | ${rate}/s`,
+      );
+
+      scroll = await continueScroll(scroll.scrollId);
     }
-
-    totalClassified += classified.length;
-    afterId = batch[batch.length - 1].product_id;
-
-    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-    const rate = totalClassified > 0 ? Math.round(totalClassified / Number(elapsed)) : 0;
-    console.log(
-      `[styleAttributesBackfill] batch ${batchNum} done | last_id=${afterId} | classified_total=${totalClassified} | no_vec=${totalSkippedNoVector} | classifier_null=${totalSkippedClassifierNull} | seen=${totalSeen} | ${elapsed}s | ${rate}/s`,
-    );
+  } finally {
+    await clearScroll(scroll.scrollId);
   }
 
-  const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+  const elapsedS = (Date.now() - startedAt) / 1000;
   console.log(
-    `[styleAttributesBackfill] FINISHED in ${elapsed}s | seen=${totalSeen} | classified=${totalClassified} | skipped(no_vec)=${totalSkippedNoVector} | skipped(classifier_null)=${totalSkippedClassifierNull}`,
+    `[styleAttributesBackfill] FINISHED in ${elapsedS.toFixed(1)}s | seen=${totalSeen} | classified=${totalClassified} | skipped(no_vec)=${totalSkippedNoVector} | skipped(classifier_null)=${totalSkippedClassifierNull}`,
   );
 }
 

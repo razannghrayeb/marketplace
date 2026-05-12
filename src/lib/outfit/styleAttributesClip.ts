@@ -20,7 +20,7 @@
  *   - No side effects: no DB writes, no schema changes.
  */
 
-import { getTextEmbedding, cosineSimilarity, isTextSearchAvailable } from "../image";
+import { getTextEmbedding, cosineSimilarity } from "../image";
 
 export type Aesthetic =
   | "classic"
@@ -106,11 +106,6 @@ async function ensurePromptEmbeddings(): Promise<CachedEmbeddings | null> {
 
   initPromise = (async () => {
     try {
-      if (!isTextSearchAvailable()) {
-        console.warn("[styleAttributesClip] CLIP text encoder unavailable; disabling style classifier");
-        initFailedPermanently = true;
-        return null;
-      }
       const aestheticEntries = Object.entries(AESTHETIC_PROMPTS) as Array<[Aesthetic, string]>;
       const occasionEntries = Object.entries(OCCASION_PROMPTS) as Array<[Occasion, string]>;
 
