@@ -520,10 +520,42 @@ function isAudienceCompatible(sourceProduct: Product, candidateProduct: Product)
   return true;
 }
 
-function buildAudienceFilterForSource(sourceProduct: Product): any | null {
+function inferGenderFromCategory(detectedCategory: ProductCategory | string): AudienceGender | null {
+  const cat = String(detectedCategory || "").toLowerCase();
+  // Typically female-skewed categories
+  if (/skirt|dress|blouse|heels?|clutch|purse|lipstick|mascara/.test(cat)) return "women";
+  // Typically male-skewed categories
+  if (/blazer|suit|loafer|oxford|tie|bow\s*tie|cufflink/.test(cat)) return "men";
+  // Unisex/neutral categories
+  return null;
+}
+
+function buildAudienceFilterForSource(sourceProduct: Product, detectedCategory?: ProductCategory | string): any | null {
   const sourceAudience = inferSourceAudience(sourceProduct);
-  const gender = sourceAudience.gender;
-  if (!gender || gender === "unisex") return null;
+  let gender = sourceAudience.gender;
+  
+  // If source is unisex, try to infer from category
+  if ((!gender || gender === "unisex") && detectedCategory) {
+    gender = inferGenderFromCategory(detectedCategory);
+  }
+  
+  // If still unisex/null, apply lenient unisex filter
+  if (!gender || gender === "unisex") {
+    return {
+      bool: {
+        should: [
+          { term: { audience_gender: "unisex" } },
+          { match: { attr_gender: "unisex" } },
+          // Allow products without explicit gender marker
+          { bool: { must_not: [
+            { exists: { field: "audience_gender" } },
+            { exists: { field: "attr_gender" } },
+          ]}},
+        ],
+        minimum_should_match: 1,
+      },
+    };
+  }
 
   const opposite = gender === "men" ? "women" : "men";
   const allowGenderTerms =
@@ -1405,6 +1437,7 @@ export async function completeMyStyle(
         preferSameBrand: preferSameBrand ? product.brand : undefined,
         useVisualSimilarity,
         sourceProduct: product,
+        sourceDetectedCategory: detectedCategory,
       }
     );
     
@@ -1522,6 +1555,7 @@ async function findProductsForCategory(
     preferSameBrand?: string;
     useVisualSimilarity: boolean;
     sourceProduct: Product;
+    sourceDetectedCategory?: ProductCategory | string;
   }
 ): Promise<RecommendedProduct[]> {
   try {
@@ -1541,7 +1575,7 @@ async function findProductsForCategory(
     }));
 
     // Build OpenSearch query
-    const audienceFilter = buildAudienceFilterForSource(options.sourceProduct);
+    const audienceFilter = buildAudienceFilterForSource(options.sourceProduct, options.sourceDetectedCategory);
     const query: any = {
       bool: {
         must: [
@@ -1896,8 +1930,41 @@ async function findProductsForCategory(
     // Filter out low-confidence predictions (below 40% confidence)
     const highConfidenceProducts = scoredProducts.filter(p => p.confidence >= 0.4);
 
+    // Gender Consistency Post-Filter: Ensure recommendation set is gender-aligned
+    // If products have mixed genders, infer dominant gender from top-scored products
+    // and filter out outliers to maintain coherence
+    let genderConsistentProducts = highConfidenceProducts;
+    if (highConfidenceProducts.length > 1) {
+      const topProducts = highConfidenceProducts.slice(0, Math.min(5, highConfidenceProducts.length));
+      let detectedGenders = new Map<string, number>();
+      
+      for (const p of topProducts) {
+        const pGender = normalizeAudienceGender(p.gender) || 
+          inferAudienceGenderFromText(`${p.title || ""} ${p.category || ""}`);
+        if (pGender && pGender !== "unisex") {
+          detectedGenders.set(pGender, (detectedGenders.get(pGender) || 0) + 1);
+        }
+      }
+      
+      // If we have a clear majority gender, filter to maintain consistency
+      if (detectedGenders.size > 0) {
+        const dominantGender = Array.from(detectedGenders.entries())
+          .sort((a, b) => b[1] - a[1])[0][0];
+        
+        // Only enforce if we have strong signal (at least 60% of top 5)
+        if (detectedGenders.get(dominantGender)! >= topProducts.length * 0.6) {
+          genderConsistentProducts = highConfidenceProducts.filter(p => {
+            const pGender = normalizeAudienceGender(p.gender) || 
+              inferAudienceGenderFromText(`${p.title || ""} ${p.category || ""}`);
+            // Keep products that match dominant gender, plus unisex
+            return !pGender || pGender === "unisex" || pGender === dominantGender;
+          });
+        }
+      }
+    }
+
     // Phase 3: Diversification - Avoid all products from same brand
-    const diversified = diversifyRecommendations(highConfidenceProducts, {
+    const diversified = diversifyRecommendations(genderConsistentProducts, {
       maxSameBrand: Math.ceil(options.maxResults / 3), // Max 1/3 from same brand
       maxSamePrice: Math.ceil(options.maxResults / 2), // Max 1/2 in same price range
     });

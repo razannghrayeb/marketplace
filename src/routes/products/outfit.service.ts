@@ -2199,6 +2199,13 @@ const COLOR_BUCKET_COMPATIBILITY: Record<string, string[]> = {
   brown: ["blue", "green", "red"],
 };
 
+function containsColorPhrase(normalizedText: string, phrase: string): boolean {
+  const normalizedPhrase = phrase.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalizedPhrase) return false;
+  const escaped = normalizedPhrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`).test(normalizedText);
+}
+
 function normalizeFashionColorAlias(value: string): string {
   return value
     .replace(/\bbordo\b/g, " burgundy ")
@@ -2224,7 +2231,7 @@ function extractColorBucketsFromText(value?: string | null): Set<string> {
 
   const phrases: string[] = [];
   for (const phrase of FASHION_COLOR_LEXICON) {
-    if (normalized.includes(phrase)) phrases.push(phrase);
+    if (containsColorPhrase(normalized, phrase)) phrases.push(phrase);
   }
 
   const tokens = normalized.split(" ").filter(Boolean);
@@ -2672,12 +2679,15 @@ function colorComfortHintForCategory(
 
   const pickPalette = (target: string): string[] => {
     const safeNeutrals = neutrals.length > 0 ? neutrals : ["black", "white", "gray", "brown"];
+    const primaryIsNeutral = primaryBucket ? neutralOrder.includes(primaryBucket) : false;
     const compatibleChromatic =
-      primaryBucket && COLOR_BUCKET_COMPATIBILITY[primaryBucket]
+      !primaryIsNeutral && primaryBucket && COLOR_BUCKET_COMPATIBILITY[primaryBucket]
         ? COLOR_BUCKET_COMPATIBILITY[primaryBucket]
         : [];
     const harmonyChromatic = chromatic.filter((c) => c !== primaryBucket);
-    const accentPool = Array.from(new Set([...harmonyChromatic, ...compatibleChromatic])).slice(0, 2);
+    const accentPool = primaryIsNeutral
+      ? []
+      : Array.from(new Set([...harmonyChromatic, ...compatibleChromatic])).slice(0, 2);
 
     if (target === "Bottoms") {
       return [...safeNeutrals.slice(0, 3), ...accentPool.slice(0, 1)];
@@ -4348,3 +4358,8 @@ async function logOutfitImpressions(
     });
   }
 }
+
+export const __outfitServiceTest = {
+  extractColorBucketsFromText,
+  colorComfortHintForCategory,
+};

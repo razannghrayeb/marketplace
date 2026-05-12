@@ -6391,11 +6391,26 @@ export class ImageAnalysisService {
       generateEmbedding: true, // Force embedding for similarity search
       deferFullImageEmbedding: findSimilar,
     });
-    const sourceImagePHash = await computePHash(buffer).catch(() => undefined);
+    const fullBlipCaptionPromise: Promise<string | null> =
+      analysisResult.services?.blip
+        ? getCachedCaption(buffer, "full")
+        : Promise.resolve(null);
+    const sourceImagePHash = analysisResult.image?.pHash ?? (await computePHash(buffer).catch(() => undefined));
     const similarityStartedAt = Date.now();
     const similarityTimings: ImageSimilarityStageTimings = { totalMs: 0 };
     // By now rembg is likely already done (ran in parallel with YOLO)
     const { buffer: fullProcessBuf } = await fullProcessBufPromise;
+    let fullFrameEmbeddingMs = 0;
+    const fullFrameEmbeddingPromise = findSimilar
+      ? (async () => {
+          const startedAt = Date.now();
+          try {
+            return await processImageForEmbedding(fullProcessBuf).catch(() => null);
+          } finally {
+            fullFrameEmbeddingMs = Date.now() - startedAt;
+          }
+        })()
+      : Promise.resolve<number[] | null>(null);
 
     // Similarity search disabled — return early
     if (!findSimilar) {
@@ -6425,7 +6440,7 @@ export class ImageAnalysisService {
     if (!analysisResult.detection || analysisResult.detection.items.length === 0) {
       const fallbackDetection = syntheticFullImageDetectionBlock(imageWidth, imageHeight);
       const fallbackDetectedCategories = [...new Set(fallbackDetection.items.map((item) => item.label))];
-      const fallbackEmbedding = await processImageForEmbedding(fullProcessBuf).catch(() => null);
+      const fallbackEmbedding = await fullFrameEmbeddingPromise;
       if (!fallbackEmbedding || fallbackEmbedding.length === 0) {
         return {
           ...analysisResult,
@@ -6594,9 +6609,9 @@ export class ImageAnalysisService {
     let blipStructuredConfidence = 0;
     let fullBlipSignal: BlipSignal | undefined = undefined;
     if (analysisResult.services?.blip) {
-      blipCaption = await getCachedCaption(buffer, "full");
+      blipCaption = await fullBlipCaptionPromise;
       obs.fullCaptionHit = Boolean(blipCaption && blipCaption.trim().length > 0);
-      blipStructured = buildStructuredBlipOutput(blipCaption);
+      blipStructured = buildStructuredBlipOutput(blipCaption ?? "");
       blipStructuredConfidence = blipStructured.confidence;
       fullBlipSignal = buildBlipSignal(blipStructured, blipStructuredConfidence);
 
@@ -6725,7 +6740,9 @@ export class ImageAnalysisService {
     // (finalEmbedding per-detection) is correct for the embedding_garment catalog field, but
     // querying the full-frame catalog `embedding` field with a tight crop vector creates a
     // systematic framing mismatch. Using the full-image vector for that field restores alignment.
-    const fullFrameEmbedding = await processImageForEmbedding(fullProcessBuf).catch(() => null);
+    const fullFrameEmbeddingWaitStartedAt = Date.now();
+    const fullFrameEmbedding = await fullFrameEmbeddingPromise;
+    const fullFrameEmbeddingWaitMs = Date.now() - fullFrameEmbeddingWaitStartedAt;
 
     const detectionEmbeddingBatchStartedAt = Date.now();
     const detectionEmbeddingBatch = await computeShopTheLookGarmentEmbeddingsFromDetections(
@@ -6758,6 +6775,8 @@ export class ImageAnalysisService {
       console.info("[image-search][detection-runtime]", {
         detectionJobs: detectionJobs.length,
         detectionConcurrency,
+        fullFrameEmbeddingMs,
+        fullFrameEmbeddingWaitMs,
         embeddingBatchMs: detectionEmbeddingBatchMs,
         embeddingBatchReady: detectionEmbeddingBatchReady,
         mainPathOnly,
@@ -9634,8 +9653,21 @@ export class ImageAnalysisService {
       generateEmbedding: true,
       preprocessing,
     });
-    const sourceImagePHash = await computePHash(buffer).catch(() => undefined);
+    const fullBlipCaptionSelectivePromise: Promise<string | null> =
+      fullResult.services?.blip
+        ? getCachedCaption(buffer, "full")
+        : Promise.resolve(null);
+    const sourceImagePHash = fullResult.image?.pHash ?? (await computePHash(buffer).catch(() => undefined));
     const { buffer: fullProcessBuf } = await prepareBufferForImageSearchQuery(buffer);
+    let fullFrameEmbeddingSelectiveMs = 0;
+    const fullFrameEmbeddingSelectivePromise = (async () => {
+      const startedAt = Date.now();
+      try {
+        return await processImageForEmbedding(fullProcessBuf).catch(() => null);
+      } finally {
+        fullFrameEmbeddingSelectiveMs = Date.now() - startedAt;
+      }
+    })();
 
     if (!fullResult.detection) {
       return {
@@ -9714,9 +9746,9 @@ export class ImageAnalysisService {
     let blipStructuredConfidence = 0;
     let fullBlipSignal: BlipSignal | undefined = undefined;
     if (fullResult.services?.blip) {
-      blipCaption = await getCachedCaption(buffer, "full");
+      blipCaption = await fullBlipCaptionSelectivePromise;
       obs.fullCaptionHit = Boolean(blipCaption && blipCaption.trim().length > 0);
-      blipStructured = buildStructuredBlipOutput(blipCaption);
+      blipStructured = buildStructuredBlipOutput(blipCaption ?? "");
       blipStructuredConfidence = blipStructured.confidence;
       fullBlipSignal = buildBlipSignal(blipStructured, blipStructuredConfidence);
     }
@@ -9781,7 +9813,9 @@ export class ImageAnalysisService {
     // Avoid TS "never" narrowing when caption inference is type-proved unreachable.
     const captionWantsJeans = blipStructured.productTypeHints.includes("jeans");
     const contextualFormalityScore = inferContextualFormalityFromDetections(allItemsToProcess);
-    const fullFrameEmbedding_selective = await processImageForEmbedding(fullProcessBuf).catch(() => null);
+    const fullFrameEmbeddingSelectiveWaitStartedAt = Date.now();
+    const fullFrameEmbedding_selective = await fullFrameEmbeddingSelectivePromise;
+    const fullFrameEmbeddingSelectiveWaitMs = Date.now() - fullFrameEmbeddingSelectiveWaitStartedAt;
 
     const selectiveDetectionJobs = allItemsToProcess.map((detection, i) => ({
       detection,
@@ -10949,6 +10983,8 @@ export class ImageAnalysisService {
         detectionJobs: selectiveDetectionJobs.length,
         embeddingBatchReady: selectiveEmbeddingBatchReady,
         embeddingFallbackCount: selectiveEmbeddingFallbackCount,
+        fullFrameEmbeddingMs: fullFrameEmbeddingSelectiveMs,
+        fullFrameEmbeddingWaitMs: fullFrameEmbeddingSelectiveWaitMs,
         embeddingBatchMs: selectiveEmbeddingBatchMs,
       });
     }
