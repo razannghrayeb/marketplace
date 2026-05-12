@@ -1,7 +1,7 @@
 import { osClient } from "../core/opensearch";
 import { processImageForEmbedding, computeAndGenerateQueryPartEmbeddings, extractGarmentCenterCropBuffer } from "../image/processor";
 import { attributeEmbeddings } from "./attributeEmbeddings";
-import { cosineSimilarity01 } from "../image/clip";
+import { cosineSimilarity } from "../image/clip";
 import { config } from "../../config";
 
 type AltPipelineOptions = {
@@ -24,6 +24,13 @@ export async function altImageSearch(
   const candidateK = Number(opts.candidateK ?? Number(process.env.ALT_PIPELINE_CANDIDATE_K ?? 300));
   const size = Number(opts.size ?? 20);
   const visualThreshold = Number(opts.visualThreshold ?? Number(process.env.ALT_PIPELINE_SIMILARITY_THRESHOLD ?? 0.82));
+
+  function cosineSimilarity01(a: number[] | undefined, b: number[] | undefined): number {
+    if (!a?.length || !b?.length || a.length !== b.length) return 0;
+    const cos = cosineSimilarity(a, b);
+    if (!Number.isFinite(cos)) return 0;
+    return Math.max(0, Math.min(1, cos));
+  }
 
   // 1) Preprocess + global embedding
   const bufForClip = await extractGarmentCenterCropBuffer(imageBuffer).catch(() => imageBuffer);
