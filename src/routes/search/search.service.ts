@@ -1036,7 +1036,11 @@ export async function textSearch(
         mergedCategory,
         hasProductTypeConstraint,
       ) && Boolean(merged.category);
-    const productTypeDominant = isProductTypeDominantQuery(ast, rawQuery);
+    const rawWords = rawQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const lexicalSeedsPresent = lexicalTypeSeeds.length > 0;
+    const productTypeDominant =
+      isProductTypeDominantQuery(ast, rawQuery) ||
+      (lexicalSeedsPresent && rawWords.length <= 2 && (ast.entities.brands?.length ?? 0) === 0);
     /**
      * Default: text kNN is should-boost only (SEARCH_KNN_TEXT_IN_MUST unset).
      * Legacy must+min_score: set SEARCH_KNN_TEXT_IN_MUST=1, then boost-only only for category/type-dominant queries.
