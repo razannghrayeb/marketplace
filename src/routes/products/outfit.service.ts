@@ -109,6 +109,48 @@ export interface StyleProfileResponse {
 }
 
 // ============================================================================
+// Request-scoped memoization for ONNX-backed lookups
+// ============================================================================
+
+type DetectCategoryResult = Awaited<ReturnType<typeof detectCategory>>;
+
+interface RequestCache {
+  detectCategory: Map<string, Promise<DetectCategoryResult>>;
+  buildStyleProfile: Map<string, Promise<StyleProfile>>;
+}
+
+function createRequestCache(): RequestCache {
+  return {
+    detectCategory: new Map(),
+    buildStyleProfile: new Map(),
+  };
+}
+
+function cacheKey(...parts: Array<string | null | undefined>): string {
+  return parts.map((p) => String(p ?? "")).join("");
+}
+
+function memoDetectCategory(cache: RequestCache, title: string, description?: string) {
+  const key = cacheKey(title, description);
+  let pending = cache.detectCategory.get(key);
+  if (!pending) {
+    pending = detectCategory(title, description);
+    cache.detectCategory.set(key, pending);
+  }
+  return pending;
+}
+
+function memoBuildStyleProfile(cache: RequestCache, product: Product) {
+  const key = cacheKey(product.title, product.description, product.color);
+  let pending = cache.buildStyleProfile.get(key);
+  if (!pending) {
+    pending = buildStyleProfile(product);
+    cache.buildStyleProfile.set(key, pending);
+  }
+  return pending;
+}
+
+// ============================================================================
 // Service Functions
 // ============================================================================
 
@@ -136,32 +178,43 @@ export async function getOutfitRecommendations(
   const maxPerCategory = Math.max(1, Math.min(options.maxPerCategory ?? 8, 20));
   const retrievalPoolSize = Math.max(maxTotal * 3, 30);
   const anchorProductIds = [productId];
-  
-  const detected = await detectCategory(sourceProduct.title, sourceProduct.description);
-  const resolvedSourceCategory = correctDetectedSourceCategory(
-    detected.category as ProductCategory,
-    sourceProduct
-  );
-  
-  // Infer audience gender from product metadata first, then BLIP if unknown
-  let audienceGenderHint =
+
+  const requestCache = createRequestCache();
+
+  // Text-based gender hint is cheap and synchronous — decide whether the
+  // BLIP image inference even needs to run.
+  const textGenderHint =
     options.audienceGenderHint ||
     normalizeAudienceHint(sourceProduct.gender) ||
     inferAudienceGenderHintFromProduct(sourceProduct);
-  
-  // If gender is unknown and we have an image, use BLIP to detect gender from image content.
-  // We only trust BLIP when caption parsing yields a concrete retail gender signal.
-  if (!audienceGenderHint && sourceProduct.image_url) {
-    try {
-      audienceGenderHint = await inferGenderFromImageUrl(sourceProduct.image_url, sourceProduct.title);
-    } catch (err) {
-      // Silently fail - fall back to text-based inference
-      console.debug("[OutfitService] BLIP gender detection failed, using text hints");
-    }
-  }
-  
   const ageGroupHint = inferAgeGroupHintFromProduct(sourceProduct);
-  const rawSourceStyle = await buildStyleProfile(sourceProduct);
+
+  // Phase A: fire all the independent async work concurrently. detectCategory
+  // and buildStyleProfile both hit ONNX; running them in parallel with BLIP
+  // gender inference and the wardrobe context query cuts the serial tail.
+  const detectedPromise = memoDetectCategory(
+    requestCache,
+    sourceProduct.title,
+    sourceProduct.description,
+  );
+  const rawSourceStylePromise = memoBuildStyleProfile(requestCache, sourceProduct);
+  const blipGenderPromise: Promise<string | undefined> =
+    !textGenderHint && sourceProduct.image_url
+      ? inferGenderFromImageUrl(sourceProduct.image_url, sourceProduct.title).catch(() => undefined)
+      : Promise.resolve(undefined);
+  const wardrobeContextPromise = loadWardrobeContextForCompleteStyle(userId, productId, requestCache);
+
+  const [detected, rawSourceStyle, blipGender] = await Promise.all([
+    detectedPromise,
+    rawSourceStylePromise,
+    blipGenderPromise,
+  ]);
+
+  const resolvedSourceCategory = correctDetectedSourceCategory(
+    detected.category as ProductCategory,
+    sourceProduct,
+  );
+  const audienceGenderHint = textGenderHint || blipGender;
   const sourceStyle = calibrateSourceStyleFromAnchor(sourceProduct, resolvedSourceCategory, rawSourceStyle);
 
   // Pass detected category to wardrobe engine for accurate gap detection
@@ -170,34 +223,35 @@ export async function getOutfitRecommendations(
     detectedCategoryMap.set(productId, resolvedSourceCategory);
   }
 
-  const completeLookResult = await completeLookSuggestionsForCatalogProducts(
-    userId ?? 0,
-    anchorProductIds,
-    retrievalPoolSize,
-    undefined,
-    { 
-      audienceGenderHint, 
-      ageGroupHint,
-      occasionHint: sourceStyle.occasion,
-      styleHints: [sourceStyle.aesthetic, sourceStyle.occasion === "active" ? "sporty" : ""].filter(Boolean),
-      colorHints: [sourceProduct.color || sourceStyle.colorProfile.primary].filter(Boolean),
-      weatherHint: sourceStyle.season === "winter"
-        ? { season: "winter", temperatureC: 8 }
-        : sourceStyle.season === "summer"
-          ? { season: "summer", temperatureC: 30 }
-          : sourceStyle.season === "spring"
-            ? { season: "spring", temperatureC: 20 }
-            : sourceStyle.season === "fall"
-              ? { season: "fall", temperatureC: 16 }
-              : undefined,
-      detectedCategories: detectedCategoryMap,
-    }
-  );
-
-  // Load wardrobe context once so it can flow into rerank scoring, Gemini
-  // stylist direction, and post-rerank slot injection. Resolves to undefined
-  // for anonymous callers — the pipeline stays unchanged in that case.
-  const wardrobeContext = await loadWardrobeContextForCompleteStyle(userId, productId);
+  // Phase B: completeLook retrieval and wardrobe context resolve in parallel.
+  // wardrobeContextPromise was started in Phase A; awaiting both together
+  // overlaps the catalog-side ES query with the user-side wardrobe DB load.
+  const [completeLookResult, wardrobeContext] = await Promise.all([
+    completeLookSuggestionsForCatalogProducts(
+      userId ?? 0,
+      anchorProductIds,
+      retrievalPoolSize,
+      undefined,
+      {
+        audienceGenderHint,
+        ageGroupHint,
+        occasionHint: sourceStyle.occasion,
+        styleHints: [sourceStyle.aesthetic, sourceStyle.occasion === "active" ? "sporty" : ""].filter(Boolean),
+        colorHints: [sourceProduct.color || sourceStyle.colorProfile.primary].filter(Boolean),
+        weatherHint: sourceStyle.season === "winter"
+          ? { season: "winter", temperatureC: 8 }
+          : sourceStyle.season === "summer"
+            ? { season: "summer", temperatureC: 30 }
+            : sourceStyle.season === "spring"
+              ? { season: "spring", temperatureC: 20 }
+              : sourceStyle.season === "fall"
+                ? { season: "fall", temperatureC: 16 }
+                : undefined,
+        detectedCategories: detectedCategoryMap,
+      },
+    ),
+    wardrobeContextPromise,
+  ]);
 
   const rerankedSuggestions = await rerankCompleteStyleSuggestions({
     sourceProduct,
@@ -209,6 +263,7 @@ export async function getOutfitRecommendations(
     sourceAudienceGenderHint: audienceGenderHint,
     sourceAgeGroupHint: ageGroupHint,
     wardrobe: wardrobeContext,
+    requestCache,
   });
 
   const filteredSuggestions = applyCompleteStyleOptionFilters(
@@ -923,6 +978,7 @@ function injectOwnedWardrobeItemsIntoResponse(params: {
 async function loadWardrobeContextForCompleteStyle(
   userId: number | undefined,
   anchorProductId: number,
+  requestCache?: RequestCache,
 ): Promise<WardrobeContext | undefined> {
   if (!userId || userId < 1) return undefined;
   try {
@@ -950,22 +1006,30 @@ async function loadWardrobeContextForCompleteStyle(
 
     if (!rows.rows.length) return undefined;
 
+    // Run detectCategory in parallel — previously this was a sequential
+    // for...of loop, paying ONNX latency once per row.
+    const detections = await Promise.all(
+      rows.rows.map((row) => {
+        const id = Number(row.id);
+        if (!Number.isFinite(id) || id < 1) return Promise.resolve(null);
+        const promise = requestCache
+          ? memoDetectCategory(requestCache, row.title, row.description)
+          : detectCategory(row.title, row.description);
+        return promise
+          .then((det) => ({ row, id, detected: det.category as ProductCategory }))
+          .catch(() => ({ row, id, detected: "unknown" as ProductCategory }));
+      }),
+    );
+
     const items: WardrobeContextItem[] = [];
     const productIds = new Set<number>();
     const summaries: string[] = [];
 
-    for (const row of rows.rows) {
-      const id = Number(row.id);
-      if (!Number.isFinite(id) || id < 1) continue;
+    for (const result of detections) {
+      if (!result) continue;
+      const { row, id, detected: detectedCategory } = result;
       productIds.add(id);
 
-      let detectedCategory: ProductCategory = "unknown";
-      try {
-        const det = await detectCategory(row.title, row.description);
-        detectedCategory = det.category as ProductCategory;
-      } catch {
-        /* ignore */
-      }
       const family = categoryFamily(
         `${detectedCategory} ${String(row.category || "")} ${String(row.title || "")}`,
       );
@@ -1080,6 +1144,7 @@ function inferAgeGroupHintFromProduct(product: {
   const adultHits = (text.match(/\bmen\b|\bwomen\b|\badult\b|\bladies\b|\bgents\b|\bmale\b|\bfemale\b/g) || []).length;
   if (kidsHits > adultHits && kidsHits > 0) return "kids";
   if (adultHits > kidsHits && adultHits > 0) return "adult";
+  if (/\b(dress|gown|heel|heels|pump|pumps|stiletto|loafer|loafers|handbag|clutch|satchel)\b/.test(text)) return "adult";
   return undefined;
 }
 
@@ -1110,6 +1175,9 @@ type FashionRerankContext = {
   /** Optional pre-loaded wardrobe context — when present the rerank tags
    * owned candidates and feeds Gemini a summary of what the user already has. */
   wardrobe?: WardrobeContext;
+  /** Shared request-scoped cache for detectCategory / buildStyleProfile so
+   * repeated calls within a single complete-style request don't re-run ONNX. */
+  requestCache?: RequestCache;
 };
 
 type CandidateStyleRow = {
@@ -1191,11 +1259,11 @@ function isPatternHeavyPair(sourceText: string, candidateText: string): boolean 
 function categoryFamily(label?: string | null): string {
   const text = normalizeStyleToken(label);
   if (!text) return "unknown";
+  if (/\b(dress\s+shoes?|dress\s+sandals?|shoe|shoes|sneaker|sneakers|trainer|trainers|heel|heels|boot|boots|sandal|sandals|loafer|loafers|flat|flats|mule|mules|oxford|oxfords)\b/.test(text)) return "shoes";
   if (text.includes("dress") || text.includes("gown")) return "dress";
   if (text.includes("top") || text.includes("shirt") || text.includes("blouse") || text.includes("hoodie") || text.includes("sweater") || text.includes("sweatshirt") || text.includes("tshirt") || text.includes("tee")) return "tops";
   if (text.includes("bottom") || text.includes("pant") || text.includes("trouser") || text.includes("jean") || text.includes("skirt") || text.includes("short")) return "bottoms";
   if (text.includes("outer") || text.includes("jacket") || text.includes("coat") || text.includes("blazer") || text.includes("cardigan") || text.includes("bomber")) return "outerwear";
-  if (text.includes("shoe") || text.includes("sneaker") || text.includes("heel") || text.includes("boot") || text.includes("sandal") || text.includes("loafer") || text.includes("flat")) return "shoes";
   if (text.includes("bag") || text.includes("clutch") || text.includes("tote") || text.includes("backpack") || text.includes("crossbody")) return "bags";
   if (text.includes("accessor") || text.includes("watch") || text.includes("scarf") || text.includes("hat") || text.includes("sunglass") || text.includes("jewel") || text.includes("belt")) return "accessories";
   return text;
@@ -1311,7 +1379,7 @@ function assessShoeCandidate(params: {
   const text = normalizeStyleToken(`${candidateTitle || ""} ${candidateCategory || ""} ${candidateDescription || ""}`);
   const subtype = footwearSubtypeLabel(text);
   const footwearCue = /\b(shoe|shoes|sneaker|trainer|boot|heel|pump|sandal|loafer|flat|oxford|mule|espadrille)\b/.test(text);
-  const accessoryNoiseCue = /\b(sock|socks|shoe lace|shoelace|insole|insoles|care kit|cleaner|deodorizer)\b/.test(text);
+  const accessoryNoiseCue = /\b(sock|socks|shoe lace|shoelace|insole|insoles|care kit|cleaner|deodorizer|aqua shoe|aqua shoes|water shoe|water shoes|beach aqua)\b/.test(text);
   const preferred = preferredShoeSubtypesByOccasion(sourceStyle.occasion, sourceStyle.season);
   const weatherFit = isWeatherSuitableShoeForSeason(sourceStyle.season, text);
 
@@ -1369,7 +1437,8 @@ function assessBagCandidate(value: string): {
   const hasBagCue = /\b(bag|handbag|tote|crossbody|clutch|satchel|backpack|shoulder bag|messenger|hobo|bucket bag|belt bag|mini bag|top handle)\b/.test(text);
   const subtype = bagSubtypeLabel(text);
   const isAccessoryNoise = /\b(wallet|card holder|card case|keychain|key ring|bag charm|charm|strap|belt only|coin purse|phone case|pouch accessory)\b/.test(text);
-  const isTravelUtility = /\b(duffle|duffel|luggage|suitcase|travel pouch|toiletry|passport holder)\b/.test(text);
+  const isTravelUtility = /\b(duffle|duffel|luggage|suitcase|travel pouch|toiletry|passport holder|sleeping bag|hiking bag|trekking bag|trail bag|school bag|back to school|bookbag)\b/.test(text);
+  const isSportUtility = /\b(gym bag|fitness bag|weightlifting|training bag)\b/.test(text);
   const isBagAccessoriesBucket = /\bbag accessories?\b/.test(text);
 
   let pipelineScore = 0.5;
@@ -1377,7 +1446,8 @@ function assessBagCandidate(value: string): {
   if (subtype !== "other") pipelineScore += 0.2;
   if (isBagAccessoriesBucket && subtype === "other") pipelineScore -= 0.24;
   if (isAccessoryNoise) pipelineScore -= 0.24;
-  if (isTravelUtility) pipelineScore -= 0.16;
+  if (isTravelUtility) pipelineScore -= 0.28;
+  if (isSportUtility) pipelineScore -= 0.2;
 
   return {
     isBagCandidate: hasBagCue,
@@ -1414,6 +1484,65 @@ function preferredBagSubtypesBySeason(
   if (season === "winter") return ["satchel", "shoulder", "crossbody", "backpack"];
   if (season === "fall") return ["satchel", "crossbody", "shoulder", "tote"];
   return ["crossbody", "tote", "shoulder", "satchel"];
+}
+
+function hasUtilityBagCue(value: string): boolean {
+  return /\b(hiking|trekking|trail|sleeping bag|school bag|back to school|bookbag|gym bag|fitness|weightlifting|luggage|suitcase|duffle|duffel|toiletry|passport holder)\b/.test(
+    normalizeStyleToken(value)
+  );
+}
+
+function isComfortableAccessoryForOccasion(
+  sourceStyle: StyleProfile,
+  candidateTitle?: string | null,
+  candidateCategory?: string | null,
+  candidateDescription?: string | null,
+): boolean {
+  const text = normalizeStyleToken(`${candidateTitle || ""} ${candidateCategory || ""} ${candidateDescription || ""}`);
+  const accessoryCue = /\b(accessor|watch|sunglass|scarf|hat|cap|belt|jewel|jewelry|necklace|bracelet|ring|earring|hair clip|headband)\b/.test(text);
+  if (!accessoryCue) return false;
+
+  const utilityCue = /\b(weightlifting|fitness belt|training belt|rfid|travel|passport|luggage tag|phone case|keychain|key ring|strap|card holder|wallet)\b/.test(text);
+  if (utilityCue) return false;
+
+  if (sourceStyle.occasion === "formal" || sourceStyle.occasion === "semi-formal" || sourceStyle.occasion === "party") {
+    const dressyAccessoryCue = /\b(watch|sunglass|sunglasses|necklace|bracelet|ring|earring|jewel|jewelry|silk scarf|hair clip|belt)\b/.test(text);
+    const casualAccessoryCue = /\b(cap|beanie|bucket hat|sport watch|canvas belt|fitness|gym|training)\b/.test(text);
+    return dressyAccessoryCue && !casualAccessoryCue;
+  }
+
+  return true;
+}
+
+function hasComfortableShoeColorForAnchor(params: {
+  sourceStyle: StyleProfile;
+  sourceBuckets: Set<string>;
+  candidateBuckets: Set<string>;
+  candidateText: string;
+}): boolean {
+  const { sourceStyle, sourceBuckets, candidateBuckets, candidateText } = params;
+  if (candidateBuckets.size === 0) return true;
+
+  const text = normalizeStyleToken(candidateText);
+  if (/\b(gold|silver|metallic|nude|tan|camel|beige|cream|ivory|black|white|gray|grey|brown|navy|clear)\b/.test(text)) return true;
+
+  const dressyContext =
+    sourceStyle.occasion === "party" ||
+    sourceStyle.occasion === "formal" ||
+    sourceStyle.occasion === "semi-formal" ||
+    sourceStyle.formality >= 5;
+  if (!dressyContext || !hasChromaticColor(sourceBuckets)) return true;
+
+  const loudWarmCue = /\b(coral|orange|neon|lime|hot pink|fuchsia|aqua|turquoise)\b/.test(text);
+  if (loudWarmCue) return false;
+
+  for (const bucket of candidateBuckets) {
+    if (NEUTRAL_COLOR_BUCKETS.has(bucket)) return true;
+  }
+
+  // Tonal burgundy/wine shoes can work; bright same-family red/coral usually overwhelms a dress.
+  if (sourceBuckets.has("red") && /\b(burgundy|wine|bordeaux|maroon|oxblood)\b/.test(text)) return true;
+  return false;
 }
 
 function scoreFootwearAestheticCompatibility(
@@ -1672,6 +1801,7 @@ function shouldHardRejectFashionCandidate(params: {
   sourceStyle: StyleProfile;
   sourceProduct: CompleteLookMappedSourceProduct;
   candidateProduct: Product;
+  sourceColorBuckets: Set<string>;
   colorScore: number;
   patternHeavyPair: boolean;
   candidateColorBuckets: Set<string>;
@@ -1685,6 +1815,7 @@ function shouldHardRejectFashionCandidate(params: {
     sourceStyle,
     sourceProduct,
     candidateProduct,
+    sourceColorBuckets,
     colorScore,
     patternHeavyPair,
     candidateColorBuckets,
@@ -1723,10 +1854,27 @@ function shouldHardRejectFashionCandidate(params: {
     if (!isWeatherSuitableShoeForSeason(sourceStyle.season, candidateText)) {
       return true;
     }
+    if (
+      !hasComfortableShoeColorForAnchor({
+        sourceStyle,
+        sourceBuckets: sourceColorBuckets,
+        candidateBuckets: candidateColorBuckets,
+        candidateText: `${candidateProduct.title || ""} ${candidateProduct.category || ""} ${candidateProduct.color || ""}`,
+      })
+    ) {
+      return true;
+    }
   }
 
   if (candidateFamily === "shoes" && footwearOccasionScore < minimumOccasionCompatibilityForFamily(sourceStyle.occasion, candidateFamily)) return true;
   if (candidateFamily === "bags" && bagOccasionScore < minimumOccasionCompatibilityForFamily(sourceStyle.occasion, candidateFamily)) return true;
+  if (
+    candidateFamily === "bags" &&
+    (sourceStyle.occasion === "formal" || sourceStyle.occasion === "semi-formal" || sourceStyle.occasion === "party") &&
+    hasUtilityBagCue(candidateText)
+  ) {
+    return true;
+  }
   if (candidateFamily === "bags" && !isStrictBagProduct(candidateProduct.title, candidateProduct.category, candidateProduct.description)) return true;
   if (candidateFamily === "tops") {
     const topAssessment = assessTopCandidate({
@@ -1795,6 +1943,17 @@ function shouldHardRejectFashionCandidate(params: {
     return true;
   }
   if ((candidateFamily === "tops" || candidateFamily === "bottoms" || candidateFamily === "outerwear" || candidateFamily === "accessories") && garmentOccasionScore < minimumOccasionCompatibilityForFamily(sourceStyle.occasion, candidateFamily)) return true;
+  if (
+    candidateFamily === "accessories" &&
+    !isComfortableAccessoryForOccasion(
+      sourceStyle,
+      candidateProduct.title,
+      candidateProduct.category,
+      candidateProduct.description,
+    )
+  ) {
+    return true;
+  }
   if (violatesOccasionPolicy(sourceStyle.occasion, candidateFamily, candidateProduct.title, candidateProduct.category)) return true;
 
   // Prevent strong chromatic clashes on core garment recommendations.
@@ -2534,8 +2693,14 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       return null;
     }
 
-    const candidateCategory = await detectCategory(candidateProduct.title, candidateProduct.description);
-    const candidateStyle = await buildStyleProfile(candidateProduct);
+    const [candidateCategory, candidateStyle] = await Promise.all([
+      params.requestCache
+        ? memoDetectCategory(params.requestCache, candidateProduct.title, candidateProduct.description)
+        : detectCategory(candidateProduct.title, candidateProduct.description),
+      params.requestCache
+        ? memoBuildStyleProfile(params.requestCache, candidateProduct)
+        : buildStyleProfile(candidateProduct),
+    ]);
 
     const sourceFamily = categoryFamily(params.sourceCategory);
     const detectedFamily = categoryFamily(candidateCategory.category);
@@ -2737,6 +2902,7 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       sourceStyle: params.sourceStyle,
       sourceProduct: params.sourceProduct,
       candidateProduct,
+      sourceColorBuckets,
       colorScore,
       patternHeavyPair,
       candidateColorBuckets,
@@ -3142,6 +3308,13 @@ function mapCompleteLookToStyleResponse(params: {
     sourceStyle.occasion === "party" ||
     sourceStyle.occasion === "formal" ||
     sourceStyle.occasion === "semi-formal";
+  const sourceAgeSegment =
+    inferAgeSegmentFromText(`${sourceProduct.title || ""} ${sourceProduct.category || ""} ${sourceProduct.description || ""}`) === "kids"
+      ? "kids"
+      : "adult";
+  const sourceColorBuckets = new Set<string>();
+  for (const b of extractColorBucketsFromText(sourceProduct.color)) sourceColorBuckets.add(b);
+  for (const b of extractColorBucketsFromText(sourceStyle.colorProfile.primary)) sourceColorBuckets.add(b);
 
   // Detect if source is an outerwear item (suit, blazer, jacket, etc.)
   const sourceIsOuterwear = detectedCategory === "jacket" || categoryFamily(detectedCategory) === "outerwear";
@@ -3166,6 +3339,11 @@ function mapCompleteLookToStyleResponse(params: {
 
   const shouldKeepMappedSuggestion = (categoryLabel: string, s: CompleteLookMappedSuggestion): boolean => {
     const text = `${String(s.title || "")} ${String(s.category || "")}`.toLowerCase();
+    const normalizedText = normalizeStyleToken(`${s.title || ""} ${s.category || ""} ${s.color || ""}`);
+    const candidateAge = inferAgeSegmentFromText(normalizedText);
+
+    if (sourceAgeSegment === "adult" && candidateAge === "kids") return false;
+    if (sourceAgeSegment === "kids" && candidateAge === "adult") return false;
 
     // Never allow bag-accessory placeholders unless concrete bag subtype exists.
     if (categoryLabel === "Bags") {
@@ -3179,6 +3357,14 @@ function mapCompleteLookToStyleResponse(params: {
         return false;
       }
       if (looksLikeBagAccessoryNoise(text)) return false;
+      if (
+        sourceIsDressyOccasion &&
+        (hasUtilityBagCue(normalizedText) ||
+          scoreBagOccasionCompatibility(sourceStyle.occasion, s.title, s.category) <
+            minimumOccasionCompatibilityForFamily(sourceStyle.occasion, "bags"))
+      ) {
+        return false;
+      }
     }
 
     if (categoryLabel === "Shoes") {
@@ -3189,6 +3375,26 @@ function mapCompleteLookToStyleResponse(params: {
         candidateCategory: s.category,
       });
       if (shoeAssessment.isNoise || shoeAssessment.pipelineScore < 0.5) return false;
+      const shoeColorBuckets = new Set<string>();
+      for (const b of extractColorBucketsFromText(s.color)) shoeColorBuckets.add(b);
+      for (const b of extractColorBucketsFromText(s.title)) shoeColorBuckets.add(b);
+      if (
+        !hasComfortableShoeColorForAnchor({
+          sourceStyle,
+          sourceBuckets: sourceColorBuckets,
+          candidateBuckets: shoeColorBuckets,
+          candidateText: normalizedText,
+        })
+      ) {
+        return false;
+      }
+    }
+
+    if (
+      categoryLabel === "Accessories" &&
+      !isComfortableAccessoryForOccasion(sourceStyle, s.title, s.category)
+    ) {
+      return false;
     }
 
     if (categoryLabel === "Tops") {
@@ -3398,6 +3604,19 @@ function mapCompleteLookToStyleResponse(params: {
           candidateCategory: s.category,
         });
         if (shoeAssessment.isNoise || shoeAssessment.pipelineScore < 0.5) continue;
+        const shoeColorBuckets = new Set<string>();
+        for (const b of extractColorBucketsFromText(s.color)) shoeColorBuckets.add(b);
+        for (const b of extractColorBucketsFromText(s.title)) shoeColorBuckets.add(b);
+        if (
+          !hasComfortableShoeColorForAnchor({
+            sourceStyle,
+            sourceBuckets: sourceColorBuckets,
+            candidateBuckets: shoeColorBuckets,
+            candidateText: `${s.title || ""} ${s.category || ""} ${s.color || ""}`,
+          })
+        ) {
+          continue;
+        }
         if (sourceIsDressyOccasion && sourceIsDressAnchor) {
           if (isSneakerLike(text)) continue;
           // Prefer dressy shoes, but don't force-empty category if metadata is noisy.
@@ -3412,6 +3631,14 @@ function mapCompleteLookToStyleResponse(params: {
           bagAssessment.isAccessoryNoise ||
           bagAssessment.isTravelUtility ||
           bagAssessment.pipelineScore < 0.58
+        ) {
+          continue;
+        }
+        if (
+          sourceIsDressyOccasion &&
+          (hasUtilityBagCue(text) ||
+            scoreBagOccasionCompatibility(sourceStyle.occasion, s.title, s.category) <
+              minimumOccasionCompatibilityForFamily(sourceStyle.occasion, "bags"))
         ) {
           continue;
         }
