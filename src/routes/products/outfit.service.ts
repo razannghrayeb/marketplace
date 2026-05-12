@@ -216,6 +216,18 @@ export async function getOutfitRecommendations(
   );
   const audienceGenderHint = textGenderHint || blipGender;
   const sourceStyle = calibrateSourceStyleFromAnchor(sourceProduct, resolvedSourceCategory, rawSourceStyle);
+  const sourceFamily = categoryFamily(resolvedSourceCategory);
+  const stylistDirectionPromise = getStylistDirection({
+    title: sourceProduct.title,
+    brand: sourceProduct.brand ?? null,
+    category: sourceProduct.category ?? null,
+    description: sourceProduct.description ?? null,
+    color: sourceProduct.color ?? null,
+    family: sourceFamily,
+    style: sourceStyle,
+    audienceGender: audienceGenderHint,
+    ageGroup: ageGroupHint,
+  }).catch((): StylistDirection => ({ rationale: "", slots: {}, avoid: {}, source: "heuristic" }));
 
   // Pass detected category to wardrobe engine for accurate gap detection
   const detectedCategoryMap = new Map<number, string>();
@@ -226,8 +238,12 @@ export async function getOutfitRecommendations(
   // Phase B: completeLook retrieval and wardrobe context resolve in parallel.
   // wardrobeContextPromise was started in Phase A; awaiting both together
   // overlaps the catalog-side ES query with the user-side wardrobe DB load.
-  const [completeLookResult, wardrobeContext] = await Promise.all([
-    completeLookSuggestionsForCatalogProducts(
+  const [stylistDirection, wardrobeContext] = await Promise.all([
+    stylistDirectionPromise,
+    wardrobeContextPromise,
+  ]);
+
+  const completeLookResult = await completeLookSuggestionsForCatalogProducts(
       userId ?? 0,
       anchorProductIds,
       retrievalPoolSize,
@@ -248,10 +264,9 @@ export async function getOutfitRecommendations(
                 ? { season: "fall", temperatureC: 16 }
                 : undefined,
         detectedCategories: detectedCategoryMap,
+        stylistDirection,
       },
-    ),
-    wardrobeContextPromise,
-  ]);
+    );
 
   const rerankedSuggestions = await rerankCompleteStyleSuggestions({
     sourceProduct,
@@ -264,6 +279,7 @@ export async function getOutfitRecommendations(
     sourceAgeGroupHint: ageGroupHint,
     wardrobe: wardrobeContext,
     requestCache,
+    stylistDirection,
   });
 
   const filteredSuggestions = applyCompleteStyleOptionFilters(
@@ -482,6 +498,7 @@ export async function getOutfitRecommendationsFromWardrobeItem(
     product_image_url?: string | null;
     product_image_cdn?: string | null;
     product_description?: string | null;
+    product_gender?: string | null;
   }>(
     `SELECT
        wi.id AS wardrobe_item_id,
@@ -505,7 +522,8 @@ export async function getOutfitRecommendationsFromWardrobeItem(
        p.currency AS product_currency,
        p.image_url AS product_image_url,
        p.image_cdn AS product_image_cdn,
-       p.description AS product_description
+       p.description AS product_description,
+       p.gender AS product_gender
      FROM wardrobe_items wi
      LEFT JOIN categories c ON c.id = wi.category_id
      LEFT JOIN wardrobe_item_audience_metadata wam ON wam.wardrobe_item_id = wi.id
@@ -545,11 +563,24 @@ export async function getOutfitRecommendationsFromWardrobeItem(
     image_url: row.wardrobe_image_cdn || row.wardrobe_image_url || row.product_image_cdn || row.product_image_url || undefined,
     image_cdn: row.wardrobe_image_cdn || row.product_image_cdn || undefined,
     description: descriptionParts.join(". ") || undefined,
+    gender: row.audience_gender || row.product_gender || undefined,
   };
+
+  const wardrobeAudienceGenderHint = normalizeAudienceHint(row.audience_gender || row.product_gender);
 
   return getOutfitRecommendationsFromProduct(
     productInput,
-    { ...options, sourceMode: "wardrobe" },
+    {
+      ...options,
+      sourceMode: "wardrobe",
+      audienceGenderHint:
+        options.audienceGenderHint ||
+        (wardrobeAudienceGenderHint === "men" ||
+        wardrobeAudienceGenderHint === "women" ||
+        wardrobeAudienceGenderHint === "unisex"
+          ? wardrobeAudienceGenderHint
+          : undefined),
+    },
     userId,
   );
 }
@@ -1178,6 +1209,7 @@ type FashionRerankContext = {
   /** Shared request-scoped cache for detectCategory / buildStyleProfile so
    * repeated calls within a single complete-style request don't re-run ONNX. */
   requestCache?: RequestCache;
+  stylistDirection?: StylistDirection;
 };
 
 type CandidateStyleRow = {
@@ -1484,6 +1516,43 @@ function preferredBagSubtypesBySeason(
   if (season === "winter") return ["satchel", "shoulder", "crossbody", "backpack"];
   if (season === "fall") return ["satchel", "crossbody", "shoulder", "tote"];
   return ["crossbody", "tote", "shoulder", "satchel"];
+}
+
+function scoreBottomSilhouetteForAnchor(params: {
+  sourceStyle: StyleProfile;
+  sourceProduct: { title?: string | null; category?: string | null; description?: string | null };
+  candidateTitle?: string | null;
+  candidateCategory?: string | null;
+  candidateDescription?: string | null;
+}): number {
+  const source = normalizeStyleToken(`${params.sourceProduct.title || ""} ${params.sourceProduct.category || ""} ${params.sourceProduct.description || ""}`);
+  const candidate = normalizeStyleToken(`${params.candidateTitle || ""} ${params.candidateCategory || ""} ${params.candidateDescription || ""}`);
+  const isTailored = /\b(tailored|dress pant|dress pants|trouser|trousers|slack|slacks|pleated|wide leg|wide-leg|straight leg|straight-leg|pencil skirt|midi skirt)\b/.test(candidate);
+  const isDenim = /\b(jean|jeans|denim)\b/.test(candidate);
+  const isSkirt = /\b(skirt|mini skirt|midi skirt|maxi skirt)\b/.test(candidate);
+  const isShort = /\b(short|shorts|bermuda)\b/.test(candidate);
+  const isSport = /\b(legging|leggings|jogger|joggers|sweatpants|track pant|track pants|training|gym|running|workout|athletic)\b/.test(candidate);
+  const isSlim = /\b(skinny|slim|legging|leggings)\b/.test(candidate);
+  const isWideStraight = /\b(wide leg|wide-leg|straight leg|straight-leg|relaxed|barrel|cargo pant|cargo pants)\b/.test(candidate);
+
+  const sourceCozyOrOversized = /\b(oversized|boxy|relaxed|sweater|hoodie|sweatshirt|cardigan|knit|wool|fleece|cashmere)\b/.test(source);
+  const sourceTailored = /\b(blazer|suit|tailored|button[-\s]?down|dress shirt|coat)\b/.test(source);
+  const sourceSummer = /\b(tank|cami|sleeveless|linen|beach|crop top|summer)\b/.test(source);
+  const dressy = params.sourceStyle.occasion === "formal" || params.sourceStyle.occasion === "semi-formal" || params.sourceStyle.occasion === "party" || params.sourceStyle.formality >= 5;
+
+  let score = 0.66;
+  if (isTailored) score += dressy || sourceTailored ? 0.25 : 0.08;
+  if (isDenim) score += dressy ? -0.08 : 0.14;
+  if (isWideStraight) score += sourceCozyOrOversized ? 0.16 : 0.06;
+  if (isSlim) score += sourceCozyOrOversized ? 0.1 : -0.02;
+  if (isSkirt) score += dressy ? 0.1 : sourceCozyOrOversized ? -0.2 : 0.02;
+  if (isShort) score += sourceSummer || params.sourceStyle.occasion === "beach" ? 0.14 : -0.28;
+  if (isSport) score += params.sourceStyle.occasion === "active" || params.sourceStyle.aesthetic === "sporty" ? 0.2 : -0.34;
+  if ((params.sourceStyle.season === "fall" || params.sourceStyle.season === "winter") && isShort) score -= 0.26;
+  if (dressy && (isSport || isShort)) score -= 0.3;
+  if (sourceTailored && isSport) score -= 0.22;
+
+  return Math.max(0, Math.min(1, score));
 }
 
 function hasUtilityBagCue(value: string): boolean {
@@ -2628,18 +2697,20 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
   //     candidate hydration so it is not paid serially before reranking.
   //     Wardrobe summaries (when available) tell Gemini what the user already
   //     owns so it can suggest pairings that complete real outfits.
-  const stylistDirectionPromise = getStylistDirection({
-    title: params.sourceProduct.title,
-    brand: params.sourceProduct.brand ?? null,
-    category: params.sourceProduct.category ?? null,
-    description: params.sourceProduct.description ?? null,
-    color: params.sourceProduct.color ?? null,
-    family: anchorFamily,
-    style: params.sourceStyle,
-    audienceGender: params.sourceAudienceGenderHint,
-    ageGroup: params.sourceAgeGroupHint,
-    wardrobeSummaries: params.wardrobe?.summaries,
-  }).catch((): StylistDirection => ({ rationale: "", slots: {}, avoid: {}, source: "heuristic" }));
+  const stylistDirectionPromise = params.stylistDirection
+    ? Promise.resolve(params.stylistDirection)
+    : getStylistDirection({
+        title: params.sourceProduct.title,
+        brand: params.sourceProduct.brand ?? null,
+        category: params.sourceProduct.category ?? null,
+        description: params.sourceProduct.description ?? null,
+        color: params.sourceProduct.color ?? null,
+        family: anchorFamily,
+        style: params.sourceStyle,
+        audienceGender: params.sourceAudienceGenderHint,
+        ageGroup: params.sourceAgeGroupHint,
+        wardrobeSummaries: params.wardrobe?.summaries,
+      }).catch((): StylistDirection => ({ rationale: "", slots: {}, avoid: {}, source: "heuristic" }));
 
   const [candidateRows, stylistDirection] = await Promise.all([
     candidateRowsPromise,
@@ -2790,6 +2861,16 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       candidateFamily === "bags"
         ? assessBagCandidate(`${candidateProduct.title || ""} ${candidateProduct.category || ""} ${candidateProduct.description || ""}`).pipelineScore
         : 1;
+    const bottomSilhouetteScore =
+      candidateFamily === "bottoms"
+        ? scoreBottomSilhouetteForAnchor({
+            sourceStyle: params.sourceStyle,
+            sourceProduct: params.sourceProduct,
+            candidateTitle: candidateProduct.title,
+            candidateCategory: candidateProduct.category,
+            candidateDescription: candidateProduct.description,
+          })
+        : 1;
     const garmentOccasionScore = scoreOccasionGarmentCompatibility(
       params.sourceStyle.occasion,
       candidateFamily,
@@ -2820,11 +2901,12 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       footwearOccasionScore * 0.16 +
       bagOccasionScore * 0.1 +
       bagPipelineScore * 0.08 +
+      bottomSilhouetteScore * 0.1 +
       garmentOccasionScore * 0.1 +
       patternOverlap * 0.06 +
       materialOverlap * 0.04 +
       priceScore * 0.02;
-    const fashionScore = Math.max(0, Math.min(1, fashionScoreRaw / 1.5));
+    const fashionScore = Math.max(0, Math.min(1, fashionScoreRaw / 1.6));
 
     const retrievalScore = Math.max(0, Math.min(1, s.score || 0));
     let finalScore = Math.round((fashionScore * 0.7 + retrievalScore * 0.3) * 1000) / 1000;
@@ -2869,6 +2951,9 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
     }
     if (candidateFamily === "bags" && bagOccasionScore < 0.45) {
       finalScore = Math.round(finalScore * 0.76 * 1000) / 1000;
+    }
+    if (candidateFamily === "bottoms" && bottomSilhouetteScore < 0.45) {
+      finalScore = Math.round(finalScore * 0.62 * 1000) / 1000;
     }
     if (
       (candidateFamily === "tops" || candidateFamily === "bottoms" || candidateFamily === "shoes") &&
@@ -2967,6 +3052,13 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
         bagOccasionScore < 0.45
           ? "bag style is less suitable for this occasion"
           : "bag style matches the occasion"
+      );
+    }
+    if (candidateFamily === "bottoms") {
+      matchReasons.push(
+        bottomSilhouetteScore < 0.45
+          ? "bottom silhouette may not balance the anchor"
+          : "bottom silhouette balances the anchor"
       );
     }
     if (candidateFamily === "accessories") {
@@ -3315,6 +3407,10 @@ function mapCompleteLookToStyleResponse(params: {
     inferAgeSegmentFromText(`${sourceProduct.title || ""} ${sourceProduct.category || ""} ${sourceProduct.description || ""}`) === "kids"
       ? "kids"
       : "adult";
+  const sourceGenderSegment = inferGenderSegmentFromText(
+    `${sourceProduct.title || ""} ${sourceProduct.category || ""} ${sourceProduct.description || ""} ${sourceProduct.gender || ""}`
+  );
+  const sourceFamily = categoryFamily(detectedCategory);
   const sourceColorBuckets = new Set<string>();
   for (const b of extractColorBucketsFromText(sourceProduct.color)) sourceColorBuckets.add(b);
   for (const b of extractColorBucketsFromText(sourceStyle.colorProfile.primary)) sourceColorBuckets.add(b);
@@ -3326,15 +3422,32 @@ function mapCompleteLookToStyleResponse(params: {
   const sourceIsJacket = sourceIsOuterwear && !sourceIsSuit && !sourceIsBlazer;
 
   const isShoeLike = (value: string): boolean =>
-    /\b(shoe|shoes|sneaker|trainer|heel|pump|stiletto|sandal|loafer|flat|mule|boot|oxford|espadrille)\b/.test(value);
+    /\b(shoe|shoes|sneaker|trainer|heel|pump|stiletto|sandal|loafer|flat|mule|boot|oxford|espadrille|clog|clogs|crocs?)\b/.test(value);
   const isSneakerLike = (value: string): boolean =>
     /\b(sneaker|sneakers|trainer|trainers|tennis shoe|running shoe|athletic shoes?|sportswear shoes?)\b/.test(value);
   const isDressyShoeLike = (value: string): boolean =>
     /\b(heel|heels|pump|pumps|stiletto|stilettos|sandal|sandals|dress sandal|mule|mules|ballet flat|ballerina|slingback|kitten heel|espadrille|loafer|loafers)\b/.test(value);
+  const isTooCasualShoeForDressyAnchor = (value: string): boolean => {
+    const text = normalizeStyleToken(value);
+    const dressyClassicContext =
+      sourceIsDressyOccasion ||
+      sourceStyle.formality >= 5 ||
+      sourceStyle.aesthetic === "classic" ||
+      sourceStyle.aesthetic === "minimalist";
+    if (!dressyClassicContext) return false;
+    return /\b(crocs?|clog|clogs|rubber|eva|foam|all terrain|all-terrain|utility sandal|sport sandal|slide sandal|slides?|flip flop|flip-flop|pool sandal|lifestyle sandal)\b/.test(text);
+  };
   const isRealBagLike = (value: string): boolean =>
     /\b(tote|crossbody|clutch|satchel|backpack|shoulder bag|handbag|hobo|messenger|bucket bag|top handle|mini bag)\b/.test(value);
   const looksLikeBagAccessoryNoise = (value: string): boolean =>
     /\b(wallet|card holder|card case|keychain|key ring|strap|bag charm|coin purse|phone case)\b/.test(value);
+  const bottomSubtype = (value: string): "pants" | "skirt" | "shorts" | "other" => {
+    const text = normalizeStyleToken(value);
+    if (/\b(skirt|mini skirt|midi skirt|maxi skirt|pencil skirt|pleated skirt)\b/.test(text)) return "skirt";
+    if (/\b(short|shorts|bermuda)\b/.test(text)) return "shorts";
+    if (/\b(pants?|trousers?|jeans?|slacks?|chinos?|leggings?)\b/.test(text)) return "pants";
+    return "other";
+  };
 
   const stagedSuggestions = completeLookResult.suggestions
     .slice()
@@ -3378,6 +3491,7 @@ function mapCompleteLookToStyleResponse(params: {
         candidateCategory: s.category,
       });
       if (shoeAssessment.isNoise || shoeAssessment.pipelineScore < 0.5) return false;
+      if (isTooCasualShoeForDressyAnchor(text)) return false;
       const shoeColorBuckets = new Set<string>();
       for (const b of extractColorBucketsFromText(s.color)) shoeColorBuckets.add(b);
       for (const b of extractColorBucketsFromText(s.title)) shoeColorBuckets.add(b);
@@ -3410,6 +3524,29 @@ function mapCompleteLookToStyleResponse(params: {
     }
 
     if (categoryLabel === "Bottoms") {
+      const silhouetteScore = scoreBottomSilhouetteForAnchor({
+        sourceStyle,
+        sourceProduct,
+        candidateTitle: s.title,
+        candidateCategory: s.category,
+      });
+      if (silhouetteScore < 0.36) return false;
+      const subtype = bottomSubtype(text);
+      const skirtNeedsStrongWomenContext =
+        sourceGenderSegment === "women" ||
+        sourceIsDressAnchor ||
+        sourceStyle.occasion === "party" ||
+        sourceStyle.occasion === "formal";
+      if (
+        subtype === "skirt" &&
+        !skirtNeedsStrongWomenContext &&
+        (sourceFamily === "tops" || sourceFamily === "outerwear") &&
+        sourceStyle.formality >= 3
+      ) {
+        const existingSkirts = groups.get("Bottoms")?.filter((item) => bottomSubtype(item.title) === "skirt").length ?? 0;
+        if (existingSkirts >= 1) return false;
+      }
+
       // When source is a formal outerwear item (suit or blazer), prefer formal button/tailored bottoms
       if ((sourceIsSuit || sourceIsBlazer) && sourceStyle.formality >= 5) {
         // For formal occasions with suit/blazer, require formal button or tailored bottoms
@@ -3600,6 +3737,7 @@ function mapCompleteLookToStyleResponse(params: {
       if (categoryLabel === "Shoes") {
         const familyLooksShoes = categoryFamily(s.category) === "shoes";
         if (!isShoeLike(text) && !familyLooksShoes) continue;
+        if (isTooCasualShoeForDressyAnchor(text)) continue;
         const shoeAssessment = assessShoeCandidate({
           sourceStyle,
           sourceFamily: categoryFamily(detectedCategory),
@@ -3668,6 +3806,41 @@ function mapCompleteLookToStyleResponse(params: {
 
   ensureCategoryFilled("Shoes");
   ensureCategoryFilled("Bags");
+
+  const ensureMinimumTotal = (minimum: number) => {
+    const total = () => Array.from(groups.values()).reduce((sum, items) => sum + items.length, 0);
+    if (total() >= minimum) return;
+
+    for (const s of stagedSuggestions) {
+      if (total() >= minimum) break;
+      const categoryLabel = completeStyleCategoryLabel(`${s.category || ""} ${s.title || ""}`);
+      if (!categoryLabel) continue;
+      if (!shouldKeepMappedSuggestion(categoryLabel, s)) continue;
+      if (!groups.has(categoryLabel)) groups.set(categoryLabel, []);
+      const bucket = groups.get(categoryLabel)!;
+      if (bucket.length >= maxPerCategory) continue;
+      if (bucket.some((b) => b.id === s.product_id)) continue;
+      const alreadyUsed = Array.from(groups.values()).some((items) => items.some((item) => item.id === s.product_id));
+      if (alreadyUsed) continue;
+
+      bucket.push({
+        id: s.product_id,
+        title: s.title,
+        brand: s.brand,
+        price: typeof s.price_cents === "number" && Number.isFinite(s.price_cents) ? Math.round(s.price_cents) : 0,
+        currency: sourceProduct.currency || "USD",
+        image: s.image_cdn || s.image_url,
+        matchScore: Math.round(Math.max(0, Math.min(1, s.score || 0)) * 100),
+        matchReasons: s.matchReasons?.length ? s.matchReasons : [s.reason || "Complements your selected item"],
+        owned: s.owned === true ? true : undefined,
+      });
+      if (!reasons.has(categoryLabel)) {
+        reasons.set(categoryLabel, s.reason || `Recommended ${categoryLabel.toLowerCase()} for this look`);
+      }
+    }
+  };
+
+  ensureMinimumTotal(Math.min(4, Math.max(1, completeLookResult.suggestions.length)));
 
   const recommendations = Array.from(groups.entries()).map(([category, products]) => {
     const priority = completeStylePriorityFromCategory(category, completeLookResult.missingCategories || []);
@@ -3758,7 +3931,8 @@ async function mergeWardrobeOwnedIntoCompletion(
       p.currency,
       p.image_url,
       p.image_cdn,
-      p.description
+      p.description,
+      p.gender
     FROM wardrobe_items wi
     JOIN products p ON p.id = wi.product_id
     WHERE wi.user_id = $1

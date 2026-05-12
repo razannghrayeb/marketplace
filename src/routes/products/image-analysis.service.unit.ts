@@ -370,4 +370,57 @@ describe("applyRelevanceThresholdFilter", () => {
 
     expect(kept.map((p: any) => p.id)).toEqual(["black-1", "black-2", "black-3"]);
   });
+
+  test("keeps generic long-sleeve outerwear candidates accepted by final relevance", () => {
+    const kept = applyRelevanceThresholdFilter(
+      [
+        {
+          id: "248173",
+          title: "The Oversized Blazer in Wool | Glen Plaid",
+          category: "Outerwear",
+          color: "Glen Plaid",
+          similarity_score: 0.91,
+          finalRelevance01: 0.48,
+          explain: {
+            unifiedScorer: { score: 0.24 },
+            acceptanceRelevance01: 0.806,
+            productTypeCompliance: 1,
+            categoryScore: 1,
+            colorCompliance: 0,
+            colorTier: "none",
+            audienceCompliance: 1,
+            crossFamilyPenalty: 0,
+            hardBlocked: false,
+          },
+        } as any,
+      ],
+      0.3,
+      { category: "outerwear", detectionLabel: "long sleeve outerwear" },
+    );
+
+    expect(kept.map((p: any) => p.id)).toEqual(["248173"]);
+  });
+
+  test("does not apply the long-sleeve outerwear rescue to other categories", () => {
+    const kept = applyRelevanceThresholdFilter(
+      [
+        {
+          id: "plain-top",
+          title: "Plain Top",
+          finalRelevance01: 0.48,
+          explain: {
+            unifiedScorer: { score: 0.24 },
+            acceptanceRelevance01: 0.806,
+            productTypeCompliance: 1,
+            categoryScore: 1,
+            audienceCompliance: 1,
+          },
+        } as any,
+      ],
+      0.3,
+      { category: "tops", detectionLabel: "long sleeve top" },
+    );
+
+    expect(kept).toHaveLength(0);
+  });
 });

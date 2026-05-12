@@ -1146,6 +1146,18 @@ function imageHydrationPrefetchMultiplier(detectionScoped: boolean): number {
   return detectionScoped ? 1.5 : 3;
 }
 
+function imageHydrationResultCap(detectionScoped: boolean, limit: number): number {
+  const envKey = detectionScoped
+    ? "SEARCH_IMAGE_DETECTION_HYDRATION_RESULT_CAP"
+    : "SEARCH_IMAGE_HYDRATION_RESULT_CAP";
+  const fallback = detectionScoped ? Math.max(limit * 6, 72) : Math.max(limit * 10, 150);
+  const raw = Number(process.env[envKey] ?? fallback);
+  if (!Number.isFinite(raw)) return fallback;
+  const min = detectionScoped ? Math.max(limit, 24) : Math.max(limit, 60);
+  const max = detectionScoped ? 200 : 800;
+  return Math.max(min, Math.min(max, Math.floor(raw)));
+}
+
 function imageCategoryAwareMinResultsPolicy(params: {
   detectionProductCategory?: string;
   baseTarget: number;
@@ -9603,7 +9615,7 @@ export async function searchByImageWithSimilarity(
 
   const maxHydrate = Math.min(
     rankedHits.length,
-    Math.max(limit * 10, 150),
+    imageHydrationResultCap(detectionScoped, limit),
   );
   const hitsForHydrate = rankedHits.slice(0, maxHydrate);
   const productIds = hitsForHydrate

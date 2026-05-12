@@ -827,8 +827,8 @@ function binaryGenderAllowsUnisexFilter(g: string): boolean {
 
 /** OpenSearch fetch size: large enough to rerank meaningfully, capped for latency. */
 function computeTextRecallSize(limit: number, offset: number): number {
-  const w = config.search.recallWindow;
-  const cap = config.search.recallMax;
+  const w = config.search.textRecallWindow;
+  const cap = config.search.textRecallMax;
   const widened = Math.max(w, Math.ceil(limit * 25));
   const tailRoom = offset + Math.ceil(limit * 1.5);
   return Math.min(cap, Math.max(widened, tailRoom));
@@ -2446,7 +2446,7 @@ export async function textSearch(
         category_filter_mode: categoryFilterMode,
         product_type_filter_mode: productTypeFilterMode,
         text_knn_mode: textKnnMode,
-        recall_window: config.search.recallWindow,
+        recall_window: config.search.textRecallWindow,
         candidate_k: recallSize,
         endpoint_limit: limit,
         limit_per_item: null,

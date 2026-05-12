@@ -116,9 +116,22 @@ export const config = {
     ),
   },
   search: {
-    /** OpenSearch candidates before rerank (tune with SEARCH_RECALL_WINDOW). */
+    /** Shared legacy OpenSearch candidates before rerank. Prefer pipeline-specific knobs for new tuning. */
     recallWindow: finiteEnvNumber(process.env.SEARCH_RECALL_WINDOW, 500, 50, 2000),
     recallMax: finiteEnvNumber(process.env.SEARCH_RECALL_MAX, 600, 100, 2000),
+    /** Text-search-only OpenSearch candidates before rerank. Falls back to legacy SEARCH_RECALL_* for compatibility. */
+    textRecallWindow: finiteEnvNumber(
+      process.env.SEARCH_TEXT_RECALL_WINDOW ?? process.env.SEARCH_RECALL_WINDOW,
+      500,
+      50,
+      2000,
+    ),
+    textRecallMax: finiteEnvNumber(
+      process.env.SEARCH_TEXT_RECALL_MAX ?? process.env.SEARCH_RECALL_MAX,
+      600,
+      100,
+      2000,
+    ),
     /** Text acceptance gate (defaults to legacy SEARCH_FINAL_ACCEPT_MIN when set). */
     finalAcceptMinText: finiteEnvNumber(
       process.env.SEARCH_FINAL_ACCEPT_MIN_TEXT ?? process.env.SEARCH_FINAL_ACCEPT_MIN,
