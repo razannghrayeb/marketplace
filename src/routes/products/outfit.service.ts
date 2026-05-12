@@ -208,7 +208,11 @@ export async function getOutfitRecommendations(
   options: CompleteStyleOptions = {},
   userId?: number
 ): Promise<StyleRecommendationResponse | null> {
+  const tStart = Date.now();
+  const tLog = (label: string, since: number) =>
+    console.info(`[complete-style][timing] product=${productId} ${label}=${Date.now() - since}ms`);
   const sourceProduct = await getCatalogProductById(productId);
+  tLog("getCatalogProductById", tStart);
   if (!sourceProduct) {
     return null;
   }
@@ -250,11 +254,13 @@ export async function getOutfitRecommendations(
       : Promise.resolve(undefined);
   const wardrobeContextPromise = loadWardrobeContextForCompleteStyle(userId, productId, requestCache);
 
+  const tPhaseA = Date.now();
   const [detected, rawSourceStyle, blipGender] = await Promise.all([
     detectedPromise,
     rawSourceStylePromise,
     blipGenderPromise,
   ]);
+  tLog("phaseA(detect+style+blip)", tPhaseA);
 
   const resolvedSourceCategory = correctDetectedSourceCategory(
     detected.category as ProductCategory,
@@ -300,7 +306,9 @@ export async function getOutfitRecommendations(
   // and anchorStyleDistribution are consumed by rerank/finalize later. Awaiting
   // only stylistDirection here lets the catalog ES retrieval start sooner while
   // the wardrobe DB load and CLIP classification finish in the background.
+  const tStylist = Date.now();
   const stylistDirection = await stylistDirectionPromise;
+  tLog("stylistDirection", tStylist);
 
   const completeLookPromise = completeLookSuggestionsForCatalogProducts(
       userId ?? 0,
@@ -327,12 +335,15 @@ export async function getOutfitRecommendations(
       },
     );
 
+  const tCompleteLook = Date.now();
   const [completeLookResult, wardrobeContext, anchorStyleDistribution] = await Promise.all([
     completeLookPromise,
     wardrobeContextPromise,
     anchorStyleDistributionPromise,
   ]);
+  tLog(`completeLook(suggestions=${completeLookResult.suggestions.length})`, tCompleteLook);
 
+  const tRerank = Date.now();
   const rerankedSuggestions = await rerankCompleteStyleSuggestions({
     sourceProduct,
     sourceStyle,
@@ -347,6 +358,8 @@ export async function getOutfitRecommendations(
     stylistDirection,
     anchorStyleDistribution,
   });
+  tLog(`rerankCompleteStyleSuggestions(in=${completeLookResult.suggestions.length},out=${rerankedSuggestions.length})`, tRerank);
+  tLog("total", tStart);
 
   const filteredSuggestions = applyCompleteStyleOptionFilters(
     rerankedSuggestions,
