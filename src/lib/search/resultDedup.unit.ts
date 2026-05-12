@@ -24,6 +24,31 @@ describe("dedupeSearchResults", () => {
     expect(String(out[0].id)).toBe("1");
   });
 
+  test("can keep canonical siblings and near-pHash variants for text search", () => {
+    const out = dedupeSearchResults(
+      [
+        {
+          id: "1",
+          canonical_id: "10",
+          similarity_score: 0.9,
+          images: [{ url: "https://cdn/x/a.jpg", is_primary: true, p_hash: "aaaa" }],
+        },
+        {
+          id: "2",
+          canonical_id: "10",
+          similarity_score: 0.8,
+          images: [{ url: "https://cdn/x/b.jpg", is_primary: true, p_hash: "aaab" }],
+        },
+      ],
+      {
+        collapseCanonicalGroups: false,
+        collapseNearPHash: false,
+      },
+    );
+
+    expect(out.length).toBe(2);
+  });
+
   test("filterRelatedAgainstMain removes overlapping ids", () => {
     const main = [{ id: "1", similarity_score: 1, images: [] }];
     const rel = [

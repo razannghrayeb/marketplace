@@ -20,6 +20,10 @@ export interface DedupSearchResultItem {
 export interface DedupOptions {
   /** Max Hamming distance between pHashes to treat as duplicate (default 10) */
   imageHammingMax?: number;
+  /** Keep canonical siblings separate when true; default collapses them. */
+  collapseCanonicalGroups?: boolean;
+  /** Keep near-pHash variants separate when true; default collapses them. */
+  collapseNearPHash?: boolean;
 }
 
 function normalizeImageUrl(raw: string | null | undefined): string | null {
@@ -69,6 +73,8 @@ function scoreOf(p: DedupSearchResultItem): number {
  */
 export function dedupeSearchResults<T extends DedupSearchResultItem>(items: T[], opts?: DedupOptions): T[] {
   const hammingMax = opts?.imageHammingMax ?? config.search.dedupeImageHammingMax;
+  const collapseCanonicalGroups = opts?.collapseCanonicalGroups ?? true;
+  const collapseNearPHash = opts?.collapseNearPHash ?? true;
   const sorted = [...items].sort((a, b) => scoreOf(b) - scoreOf(a));
   const seenIds = new Set<string>();
   const seenCanonical = new Set<string>();
@@ -81,13 +87,13 @@ export function dedupeSearchResults<T extends DedupSearchResultItem>(items: T[],
     if (idStr && seenIds.has(idStr)) continue;
 
     const c = p.canonical_id != null && String(p.canonical_id) !== "" ? String(p.canonical_id) : "";
-    if (c && seenCanonical.has(c)) continue;
+    if (collapseCanonicalGroups && c && seenCanonical.has(c)) continue;
 
     const url = primaryImageUrl(p);
     if (url && seenUrls.has(url)) continue;
 
     const ph = primaryPHash(p);
-    if (ph && ph.length >= 8) {
+    if (collapseNearPHash && ph && ph.length >= 8) {
       let nearDup = false;
       for (const k of keptPhashes) {
         if (hammingDistance(ph, k) <= hammingMax) {
@@ -100,7 +106,7 @@ export function dedupeSearchResults<T extends DedupSearchResultItem>(items: T[],
     }
 
     if (idStr) seenIds.add(idStr);
-    if (c) seenCanonical.add(c);
+    if (collapseCanonicalGroups && c) seenCanonical.add(c);
     if (url) seenUrls.add(url);
     out.push(p);
   }

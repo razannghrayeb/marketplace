@@ -368,19 +368,33 @@ export async function createItem(req: Request, res: Response, next: NextFunction
 
     const audienceGender = parseAudienceGender(req.body.audience_gender ?? req.body.gender);
     const ageGroup = parseAgeGroup(req.body.age_group ?? req.body.ageGroup ?? req.body.audience_age_group);
+    
+    // Gender and age group are MANDATORY for wardrobe items
+    if (!audienceGender) {
+      return res.status(400).json({
+        success: false,
+        error: "audience_gender is required. Must be one of: 'men', 'women', 'unisex'"
+      });
+    }
+    if (!ageGroup) {
+      return res.status(400).json({
+        success: false,
+        error: "age_group is required. Must be one of: 'kids', 'adult'"
+      });
+    }
+
     const styleTags = parseStringArray(req.body.style_tags ?? req.body.styleTags);
     const occasionTags = parseStringArray(req.body.occasion_tags ?? req.body.occasionTags);
     const seasonTags = parseStringArray(req.body.season_tags ?? req.body.seasonTags);
 
-    if (audienceGender || ageGroup || styleTags.length > 0 || occasionTags.length > 0 || seasonTags.length > 0) {
-      await upsertWardrobeItemAudienceMetadata(item.id, userId, {
-        audience_gender: audienceGender,
-        age_group: ageGroup,
-        style_tags: styleTags,
-        occasion_tags: occasionTags,
-        season_tags: seasonTags,
-      });
-    }
+    // Always create audience metadata row (mandatory fields are validated above)
+    await upsertWardrobeItemAudienceMetadata(item.id, userId, {
+      audience_gender: audienceGender,
+      age_group: ageGroup,
+      style_tags: styleTags,
+      occasion_tags: occasionTags,
+      season_tags: seasonTags,
+    });
 
     if (derivedDominantColors && derivedDominantColors.length > 0) {
       await updateWardrobeItem(item.id, userId, {
@@ -454,13 +468,34 @@ export async function updateItem(req: Request, res: Response, next: NextFunction
     const occasionTags = parseStringArray(req.body.occasion_tags ?? req.body.occasionTags);
     const seasonTags = parseStringArray(req.body.season_tags ?? req.body.seasonTags);
 
-    if (audienceGender || ageGroup || styleTags.length > 0 || occasionTags.length > 0 || seasonTags.length > 0) {
+    // If audience metadata fields are being updated, always upsert the row
+    if (
+      req.body.audience_gender !== undefined ||
+      req.body.age_group !== undefined ||
+      req.body.style_tags !== undefined ||
+      req.body.occasion_tags !== undefined ||
+      req.body.season_tags !== undefined
+    ) {
+      // Fetch existing metadata to preserve fields not being updated
+      const existingMeta = await pg.query(
+        `SELECT audience_gender, age_group, style_tags, occasion_tags, season_tags 
+         FROM wardrobe_item_audience_metadata WHERE wardrobe_item_id = $1`,
+        [itemId]
+      );
+      
+      const existing = existingMeta.rows[0];
+      const finalGender = audienceGender !== undefined ? audienceGender : existing?.audience_gender ?? null;
+      const finalAge = ageGroup !== undefined ? ageGroup : existing?.age_group ?? null;
+      const finalStyleTags = styleTags.length > 0 || req.body.style_tags !== undefined ? styleTags : existing?.style_tags ?? [];
+      const finalOccasionTags = occasionTags.length > 0 || req.body.occasion_tags !== undefined ? occasionTags : existing?.occasion_tags ?? [];
+      const finalSeasonTags = seasonTags.length > 0 || req.body.season_tags !== undefined ? seasonTags : existing?.season_tags ?? [];
+
       await upsertWardrobeItemAudienceMetadata(itemId, userId, {
-        audience_gender: audienceGender,
-        age_group: ageGroup,
-        style_tags: styleTags,
-        occasion_tags: occasionTags,
-        season_tags: seasonTags,
+        audience_gender: finalGender,
+        age_group: finalAge,
+        style_tags: finalStyleTags,
+        occasion_tags: finalOccasionTags,
+        season_tags: finalSeasonTags,
       });
     }
 

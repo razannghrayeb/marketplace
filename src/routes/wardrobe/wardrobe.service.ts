@@ -56,7 +56,9 @@ export interface CreateWardrobeItemInput {
   brand?: string;
   pattern_id?: number;
   material_id?: number;
+  /** MANDATORY: Must be validated at controller level before calling service */
   audience_gender?: string | null;
+  /** MANDATORY: Must be validated at controller level before calling service */
   age_group?: string | null;
   style_tags?: string[] | null;
   occasion_tags?: string[] | null;

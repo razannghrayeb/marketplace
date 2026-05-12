@@ -1156,6 +1156,14 @@ type CompleteLookAudienceOptions = {
   allowUserAudienceFallback?: boolean;
   enforceNeutralAudienceWhenUnknown?: boolean;
   useDetectedCategoryForCurrentItems?: boolean;
+  /**
+   * When true, the caller will run its own source-anchored rerank
+   * (`rerankCompleteStyleSuggestions`) on the result, so the inner
+   * wardrobe-context `rerankCompleteLookFashionAware` is redundant and
+   * should be skipped to save latency. Only `getOutfitRecommendations`
+   * (the catalog product-page path) should set this.
+   */
+  skipInnerFashionRerank?: boolean;
 };
 
 function normalizeOccasionHint(value?: string | null): InferredOccasion | null {
@@ -1618,7 +1626,32 @@ async function runCompleteLookCore(
             weatherAlignment * 0.06;
 
           const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment * bottomSilhouetteAlignment * accessoryStyleAlignment);
-          const slotAwareFinalScore = Math.round((finalScore * (0.7 + slotStyleScore * 0.3) * footwearDressAlignment) * 1000) / 1000;
+          let slotAwareFinalScore = Math.round((finalScore * (0.7 + slotStyleScore * 0.3) * footwearDressAlignment) * 1000) / 1000;
+
+          // Soft cross-gender guard for bags: bags with no structured gender
+          // tag AND no text-inferable gender are currently allowed through on a
+          // gendered anchor (via allowUnknownForBags=true) because dropping all
+          // unlabeled bags would empty the slot. Apply a heavy score penalty so
+          // they only surface as last-resort, never ahead of properly-tagged
+          // bags. Bags with a matching explicit gender or unisex tag are
+          // unaffected.
+          if (
+            category === "bags" &&
+            inferredAudienceGender &&
+            inferredAudienceGender !== "unisex"
+          ) {
+            const bagDocGender =
+              normalizeAudienceGenderValue(source?.audience_gender) ||
+              normalizeAudienceGenderValue(source?.attr_gender);
+            if (!bagDocGender) {
+              const bagTextGender = inferGenderFromText(
+                `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.category_canonical || "")}`
+              );
+              if (!bagTextGender) {
+                slotAwareFinalScore = Math.round(slotAwareFinalScore * 0.4 * 1000) / 1000;
+              }
+            }
+          }
 
           const floor = relaxedFloor ? Math.max(0.32, minimumSlotScore(category) - 0.06) : minimumSlotScore(category);
           if (slotAwareFinalScore < floor) {
@@ -1923,21 +1956,30 @@ async function runCompleteLookCore(
     }
   }
 
-  mergedSuggestions = await rerankCompleteLookFashionAware({
-    suggestions: mergedSuggestions,
-    preferredStyleTerms,
-    preferredFormality,
-    inferredOccasion,
-    wardrobeColorFamilies,
-    wardrobeCanonicalColors,
-    preferredColorHints,
-    preferredColorFamilies,
-    weatherHint: hintedWeather,
-    currentCategoryList,
-    inferredAudienceGender,
-    inferredAgeGroup,
-    limit,
-  }).catch(() => mergedSuggestions);
+  // Skip the inner wardrobe-context rerank only when the caller has signalled
+  // it will run its own source-anchored rerank
+  // (`rerankCompleteStyleSuggestions`) on the result. That outer rerank is
+  // strictly stronger (anchored on the actual source product, with hard
+  // demographic gating, weather scoring, stylist-direction alignment, etc.),
+  // so the inner one would do redundant work. The wardrobe endpoint and any
+  // other caller that doesn't run the outer rerank still gets the inner one.
+  if (!audienceOptions.skipInnerFashionRerank) {
+    mergedSuggestions = await rerankCompleteLookFashionAware({
+      suggestions: mergedSuggestions,
+      preferredStyleTerms,
+      preferredFormality,
+      inferredOccasion,
+      wardrobeColorFamilies,
+      wardrobeCanonicalColors,
+      preferredColorHints,
+      preferredColorFamilies,
+      weatherHint: hintedWeather,
+      currentCategoryList,
+      inferredAudienceGender,
+      inferredAgeGroup,
+      limit,
+    }).catch(() => mergedSuggestions);
+  }
   if (hintedWeather) {
     mergedSuggestions = mergedSuggestions.filter(
       (s) => !isWeatherIncompatibleForSlot(s.stylistSignals?.slot || s.category || "accessories", s, hintedWeather),
@@ -2369,7 +2411,7 @@ export async function completeLookSuggestionsForCatalogProducts(
   productIds: number[],
   limit: number = 10,
   requestCatalogFilters?: CompleteLookCatalogFilters,
-  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint" | "styleHints" | "colorHints" | "weatherHint" | "stylistDirection"> & { detectedCategories?: Map<number, string> } = {}
+  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint" | "styleHints" | "colorHints" | "weatherHint" | "stylistDirection" | "skipInnerFashionRerank"> & { detectedCategories?: Map<number, string> } = {}
 ): Promise<CompleteLookSuggestionsResult> {
   if (!Array.isArray(productIds) || productIds.length === 0) {
     return {
@@ -2432,6 +2474,7 @@ export async function completeLookSuggestionsForCatalogProducts(
     allowUserAudienceFallback: false,
     enforceNeutralAudienceWhenUnknown: true,
     useDetectedCategoryForCurrentItems: true,
+    skipInnerFashionRerank: options.skipInnerFashionRerank,
   });
 }
 
@@ -3269,7 +3312,28 @@ async function fetchCategoryTopUpSuggestions(params: {
       weatherAlignment * 0.03;
 
     const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment * accessoryStyleAlignment);
-    const slotAwareScore = Math.round((score * (0.72 + slotStyleScore * 0.28) * footwearDressAlignment) * 1000) / 1000;
+    let slotAwareScore = Math.round((score * (0.72 + slotStyleScore * 0.28) * footwearDressAlignment) * 1000) / 1000;
+
+    // Soft cross-gender guard for bags (mirrors slot-loop logic): an unlabeled
+    // bag on a gendered anchor gets a heavy score penalty so it only surfaces
+    // as last-resort behind properly-tagged bags.
+    if (
+      matchedSlot === "bags" &&
+      params.inferredAudienceGender &&
+      params.inferredAudienceGender !== "unisex"
+    ) {
+      const bagDocGender =
+        normalizeAudienceGenderValue(source?.audience_gender) ||
+        normalizeAudienceGenderValue(source?.attr_gender);
+      if (!bagDocGender) {
+        const bagTextGender = inferGenderFromText(
+          `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.category_canonical || "")}`
+        );
+        if (!bagTextGender) {
+          slotAwareScore = Math.round(slotAwareScore * 0.4 * 1000) / 1000;
+        }
+      }
+    }
 
     if (slotAwareScore < minimumSlotScore(matchedSlot)) continue;
 
