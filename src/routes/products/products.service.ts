@@ -5585,6 +5585,49 @@ export async function searchByImageWithSimilarity(
   // for every candidate. We only fetch product_images later for rows with no
   // product-level image URL.
 
+  const earlyHydrationStartedAt = Date.now();
+  const earlyEffectiveLimit = Math.max(limit, 20);
+  const earlyHydrationPrefetchTarget = detectionScoped
+    ? imageDetectionHydrationPrefetchTarget(earlyEffectiveLimit)
+    : earlyEffectiveLimit;
+  const earlyHydrationPrefetchMultiplier = imageHydrationPrefetchMultiplier(detectionScoped);
+  const earlyHydrationPrefetchCap = imageHydrationPrefetchCap(detectionScoped);
+  const earlyHydrationCap = Math.min(
+    Array.isArray(hits) ? hits.length : 0,
+    earlyHydrationPrefetchCap,
+    Math.ceil(earlyHydrationPrefetchTarget * earlyHydrationPrefetchMultiplier),
+  );
+  const earlyHydrationIds = [
+    ...new Set(
+      (Array.isArray(hits) ? hits : [])
+        .slice()
+        .sort((a: any, b: any) => Number(b?._score ?? 0) - Number(a?._score ?? 0))
+        .map((hit: any) => String(hit?._source?.product_id ?? ""))
+        .filter(Boolean),
+    ),
+  ].slice(0, earlyHydrationCap);
+  const earlyHydrationStarted = earlyHydrationIds.length > 0;
+  const earlyHydrationIdSet = new Set(earlyHydrationIds);
+  if (earlyHydrationStarted) {
+    console.log(
+      "[hydrate-early] ids_count",
+      earlyHydrationIds.length,
+      "endpoint_limit",
+      limit,
+      "raw_knn_count",
+      Array.isArray(hits) ? hits.length : 0,
+      "prefetch_target",
+      earlyHydrationPrefetchTarget,
+      "prefetch_mult",
+      earlyHydrationPrefetchMultiplier,
+      "prefetch_cap",
+      earlyHydrationPrefetchCap,
+    );
+    productHydrationPromise = startProductHydration(earlyHydrationIds);
+    rerankTimings['early_hydration_start_ms'] = Date.now() - earlyHydrationStartedAt;
+    rerankTimings['early_hydration_ids'] = earlyHydrationIds.length;
+  }
+
   const signals = await signalsPromise;
   rerankTimings['signals_wait_ms'] = Date.now() - rerankPhaseStartedAt;
   // Diagnostic: track every wall-clock chunk between signals_wait and attr_sim so
@@ -5989,8 +6032,24 @@ export async function searchByImageWithSimilarity(
         .filter(Boolean),
     ),
   ].slice(0, hydrationCap);
-  console.log("[hydrate] ids_count", idsToHydrate.length, "endpoint_limit", limit, "raw_knn_count", Array.isArray(hits) ? hits.length : 0, "prefetch_source_count", hydrationSourceHits.length, "prefetch_target", hydrationPrefetchTarget, "prefetch_mult", hydrationPrefetchMultiplier, "prefetch_cap", hydrationPrefetchCap);
-  productHydrationPromise = startProductHydration(idsToHydrate);
+  const refinedMissingHydrationIds = idsToHydrate.filter((id) => !earlyHydrationIdSet.has(String(id)));
+  console.log("[hydrate] ids_count", idsToHydrate.length, "endpoint_limit", limit, "raw_knn_count", Array.isArray(hits) ? hits.length : 0, "prefetch_source_count", hydrationSourceHits.length, "prefetch_target", hydrationPrefetchTarget, "prefetch_mult", hydrationPrefetchMultiplier, "prefetch_cap", hydrationPrefetchCap, "early_started", earlyHydrationStarted ? 1 : 0, "refined_missing", refinedMissingHydrationIds.length);
+  if (!earlyHydrationStarted) {
+    productHydrationPromise = startProductHydration(idsToHydrate);
+  } else if (refinedMissingHydrationIds.length > 0) {
+    const earlyProductHydrationPromise = productHydrationPromise;
+    const refinedProductHydrationPromise = startProductHydration(refinedMissingHydrationIds);
+    productHydrationPromise = Promise.all([earlyProductHydrationPromise, refinedProductHydrationPromise]).then(
+      ([early, refined]) => {
+        if ((early as any).error) return early;
+        if ((refined as any).error) return refined;
+        const byId = new Map<string, any>();
+        for (const product of (early as any).products ?? []) byId.set(String(product.id), product);
+        for (const product of (refined as any).products ?? []) byId.set(String(product.id), product);
+        return { products: [...byId.values()] };
+      },
+    );
+  }
 
   const attrBlockingTimeoutMsRaw = Number(process.env.SEARCH_ATTR_MGET_BLOCKING_TIMEOUT_MS ?? "500");
   const attrBlockingTimeoutMs = Number.isFinite(attrBlockingTimeoutMsRaw)
