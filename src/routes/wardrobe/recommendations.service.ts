@@ -1412,7 +1412,12 @@ async function runCompleteLookCore(
     "product_types",
   ];
 
-  for (const category of missingCategories) {
+  // Each category's ES retrieval is independent — running them concurrently
+  // collapses the per-slot wall-time (2-4 ES round-trips × N slots) into a
+  // single round-trip's worth of latency. Loop-body shared state
+  // (suggestionsByCategory, requestTrace.slots) is keyed by category, so
+  // parallel writes don't collide.
+  await Promise.all(missingCategories.map(async (category) => {
     try {
       const perCategoryPool = Math.max(40, Math.ceil(limit / Math.max(missingCategories.length, 1)) * 10);
       const minPerCategory = Math.max(6, Math.ceil(limit / Math.max(1, missingCategories.length)));
@@ -1881,7 +1886,7 @@ async function runCompleteLookCore(
       suggestionsByCategory.set(category, []);
       requestTrace.slots[category] = { evaluated: 0, rejected: 0, returned: 0 };
     }
-  }
+  }));
 
   let mergedSuggestions = dedupeCompleteLookSuggestions(
     Array.from(suggestionsByCategory.values())
