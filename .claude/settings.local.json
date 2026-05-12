@@ -28,7 +28,10 @@
       "PowerShell(Write-Output '--- search ---'; Get-ChildItem \"d:\\\\marketplace\\\\src\\\\lib\\\\search\" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }; Write-Output '--- ranker ---'; Get-ChildItem \"d:\\\\marketplace\\\\src\\\\lib\\\\ranker\" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }; Write-Output '--- detection ---'; Get-ChildItem \"d:\\\\marketplace\\\\src\\\\lib\\\\detection\" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }; Write-Output '--- query ---'; Get-ChildItem \"d:\\\\marketplace\\\\src\\\\lib\\\\query\" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }; Write-Output '--- queryProcessor ---'; Get-ChildItem \"d:\\\\marketplace\\\\src\\\\lib\\\\queryProcessor\" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })",
       "PowerShell(\\(Get-Content 'd:\\\\marketplace\\\\src\\\\routes\\\\products\\\\image-analysis.service.ts'\\).Length)",
       "Bash(echo \"EXITCODE=$?\")",
-      "Bash(echo \"EXIT=$?\")"
+      "Bash(echo \"EXIT=$?\")",
+      "PowerShell($lines = Get-Content 'src/routes/products/products.service.ts'; $matches = @\\(\\); for \\($i = 5937; $i -lt 9558; $i++\\) { if \\($lines[$i] -match 'await '\\) { $matches += \"{0}: {1}\" -f \\($i+1\\), $lines[$i].Trim\\(\\) } }; $matches | Select-Object -First 30)",
+      "PowerShell(Select-String -Path 'src/routes/products/products.service.ts' -Pattern 'await ' | Where-Object { $_.LineNumber -ge 5938 -and $_.LineNumber -le 9558 } | Select-Object LineNumber, Line)",
+      "Bash(awk -F: '$1>=5938 && $1<=9558')"
     ]
   }
 }
