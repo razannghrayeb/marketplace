@@ -520,6 +520,49 @@ function isAudienceCompatible(sourceProduct: Product, candidateProduct: Product)
   return true;
 }
 
+function buildAudienceFilterForSource(sourceProduct: Product): any | null {
+  const sourceAudience = inferSourceAudience(sourceProduct);
+  const gender = sourceAudience.gender;
+  if (!gender || gender === "unisex") return null;
+
+  const opposite = gender === "men" ? "women" : "men";
+  const allowGenderTerms =
+    gender === "men"
+      ? ["men", "man", "male", "mens", "men's", "gents", "boys", "boy", "unisex"]
+      : ["women", "woman", "female", "womens", "women's", "ladies", "girls", "girl", "unisex"];
+  const oppositeTitleTerms =
+    opposite === "men"
+      ? ["men", "mens", "men's", "male", "man", "gents", "boys", "boy"]
+      : ["women", "womens", "women's", "female", "woman", "ladies", "girls", "girl"];
+  const oppositeAttrTerms =
+    opposite === "men"
+      ? ["men", "man", "male", "mens", "men's", "gents", "boys", "boy"]
+      : ["women", "woman", "female", "womens", "women's", "ladies", "girls", "girl"];
+
+  return {
+    bool: {
+      should: [
+        { terms: { gender: allowGenderTerms } },
+        { terms: { audience_gender: [gender, "unisex"] } },
+        { terms: { attr_gender: allowGenderTerms } },
+        ...allowGenderTerms.map((kw) => ({ match: { title: kw } })),
+      ],
+      minimum_should_match: 1,
+      must_not: [
+        { terms: { audience_gender: [opposite] } },
+        { terms: { attr_gender: oppositeAttrTerms } },
+        { terms: { gender: oppositeAttrTerms } },
+        {
+          bool: {
+            should: oppositeTitleTerms.map((kw) => ({ match: { title: kw } })),
+            minimum_should_match: 1,
+          },
+        },
+      ],
+    },
+  };
+}
+
 // ============================================================================
 // Style & Occasion Rules
 // ============================================================================
@@ -1498,6 +1541,7 @@ async function findProductsForCategory(
     }));
 
     // Build OpenSearch query
+    const audienceFilter = buildAudienceFilterForSource(options.sourceProduct);
     const query: any = {
       bool: {
         must: [
@@ -1512,6 +1556,7 @@ async function findProductsForCategory(
         filter: [
           // Allow BOTH in_stock and out_of_stock products for outfit recommendations
           { bool: { should: [{ term: { availability: "in_stock" } }, { term: { availability: "out_of_stock" } }], minimum_should_match: 1 } },
+          ...(audienceFilter ? [audienceFilter] : []),
         ]
       }
     };
@@ -1567,6 +1612,9 @@ async function findProductsForCategory(
           "brand",
           "category",
           "gender",
+          "attr_gender",
+          "audience_gender",
+          "age_group",
           "color",
           "price_usd",
           "currency",
@@ -1604,7 +1652,14 @@ async function findProductsForCategory(
         title: String(raw.title ?? ""),
         brand: raw.brand != null ? String(raw.brand) : undefined,
         category: raw.category != null ? String(raw.category) : undefined,
-        gender: raw.gender != null ? String(raw.gender) : undefined,
+        gender:
+          raw.audience_gender != null
+            ? String(raw.audience_gender)
+            : raw.attr_gender != null
+              ? String(raw.attr_gender)
+              : raw.gender != null
+                ? String(raw.gender)
+                : undefined,
         color: raw.color != null ? String(raw.color) : undefined,
         price_cents: priceCents,
         currency: raw.currency != null ? String(raw.currency) : "USD",

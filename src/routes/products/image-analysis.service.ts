@@ -4171,6 +4171,58 @@ function buildSafeNonEmptyFallback(params: {
   return ranked.slice(0, safeCap);
 }
 
+function isGenericLongSleeveOuterwearDetection(label: string | undefined): boolean {
+  return /\blong\s*sleeve\s*(?:outwear|outerwear)\b/i.test(String(label ?? ""));
+}
+
+function genericLongSleeveOuterwearAcceptanceScore(
+  product: ProductResult,
+  categoryNorm: string,
+  detectionLabel: string | undefined,
+): number | null {
+  if (categoryNorm !== "outerwear" || !isGenericLongSleeveOuterwearDetection(detectionLabel)) return null;
+
+  const explain = ((product as any)?.explain ?? {}) as Record<string, unknown>;
+  if (Boolean(explain.hardBlocked)) return null;
+
+  const categoryScore = Number(explain.categoryScore ?? explain.categoryRelevance01 ?? NaN);
+  if (Number.isFinite(categoryScore) && categoryScore < 0.5) return null;
+
+  const audienceCompliance = Number(explain.audienceCompliance ?? NaN);
+  if (Number.isFinite(audienceCompliance) && audienceCompliance < 0.35) return null;
+
+  const crossFamilyPenalty = Number(explain.crossFamilyPenalty ?? NaN);
+  if (Number.isFinite(crossFamilyPenalty) && crossFamilyPenalty >= 0.72) return null;
+
+  const productTypeCompliance = Number(explain.productTypeCompliance ?? NaN);
+  const exactTypeScore = Number(explain.exactTypeScore ?? NaN);
+  const hasCategoryOrTypeEvidence =
+    (Number.isFinite(categoryScore) && categoryScore >= 0.5) ||
+    (Number.isFinite(productTypeCompliance) && productTypeCompliance >= 0.5) ||
+    (Number.isFinite(exactTypeScore) && exactTypeScore >= 0.5);
+  if (!hasCategoryOrTypeEvidence) return null;
+
+  if (
+    Number.isFinite(productTypeCompliance) &&
+    Number.isFinite(exactTypeScore) &&
+    productTypeCompliance < 0.5 &&
+    exactTypeScore < 0.5
+  ) {
+    return null;
+  }
+
+  const finalRelevance = Number((product as any)?.finalRelevance01 ?? NaN);
+  const acceptanceRelevance = Number(explain.acceptanceRelevance01 ?? NaN);
+  const similarity = Number((product as any)?.similarity_score ?? NaN);
+  const score = Math.max(
+    Number.isFinite(finalRelevance) ? finalRelevance : 0,
+    Number.isFinite(acceptanceRelevance) ? acceptanceRelevance : 0,
+    Number.isFinite(similarity) ? Math.max(0, Math.min(1, similarity - 0.42)) : 0,
+  );
+
+  return Number.isFinite(score) ? Math.max(0, Math.min(1, score)) : null;
+}
+
 /** Filter products by minimum relevance score. Removes low-relevance matches from results. */
 export function applyRelevanceThresholdFilter(
   products: ProductResult[],
@@ -4362,13 +4414,20 @@ export function applyRelevanceThresholdFilter(
     const relevance = Number((p as any)?.finalRelevance01 ?? 0);
     const explain = ((p as any)?.explain ?? {}) as Record<string, unknown>;
     const scorerAcceptance = unifiedScorerScore(p);
-    const effectiveRelevance =
-      scorerAcceptance !== null
-        ? scorerAcceptance
-        : Number.isFinite(relevance)
-          ? relevance
-          : 0;
     const categoryNorm = String(options?.category ?? "").toLowerCase().trim();
+    const outerwearDetectorAcceptance = genericLongSleeveOuterwearAcceptanceScore(
+      p,
+      categoryNorm,
+      options?.detectionLabel,
+    );
+    const effectiveRelevance =
+      outerwearDetectorAcceptance !== null
+        ? Math.max(scorerAcceptance ?? 0, outerwearDetectorAcceptance)
+        : scorerAcceptance !== null
+          ? scorerAcceptance
+          : Number.isFinite(relevance)
+            ? relevance
+            : 0;
     const audienceCompliance = Number(explain.audienceCompliance ?? NaN);
     const hasAudienceIntent = Boolean(explain.hasAudienceIntent);
     const audienceFloor = categoryNorm === "bags" ? 0.46 : categoryNorm === "tops" || categoryNorm === "bottoms" ? 0.52 : 0;

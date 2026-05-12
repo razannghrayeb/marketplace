@@ -19,3 +19,15 @@ test("fitness belts stay grouped as accessories, not bags", () => {
 
   assert.equal(label, "Accessories");
 });
+
+test("skirt titles with trench coat color names stay grouped as bottoms", () => {
+  const label = completeStyleCategoryLabel("Skirts Seamed Midi Skirt | Trench Coat Khaki");
+
+  assert.equal(label, "Bottoms");
+});
+
+test("dress pants stay grouped as bottoms", () => {
+  const label = completeStyleCategoryLabel("Women's Dress Pants Straight Leg Trouser");
+
+  assert.equal(label, "Bottoms");
+});

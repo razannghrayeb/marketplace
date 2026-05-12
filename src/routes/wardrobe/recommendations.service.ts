@@ -38,7 +38,9 @@ import {
   resolveWeatherContext,
   type FashionAesthetic,
   type OutfitOccasion,
+  type StyleSlotQuery,
 } from "../../lib/outfit/styleAwareSlotQuery";
+import type { StylistDirection } from "../../lib/outfit/stylistDirection";
 
 // ============================================================================
 // Types
@@ -81,6 +83,7 @@ export interface CompleteLookSuggestion extends ProductRecommendation {
     footwearStyleAlignment?: number;
     bagStyleAlignment?: number;
     bagColorAlignment?: number;
+    bottomSilhouetteAlignment?: number;
     colorDecisionAlignment?: number;
     accessoryStyleAlignment?: number;
   };
@@ -294,6 +297,10 @@ function sourceMatchesSlot(slot: string, source: any): boolean {
   const allow = slotKeywordRegex(slot);
   const reject = slotMismatchRegex(slot);
   if (reject && reject.test(blob)) return false;
+  if (slot === "bags" && canonical === "bags") {
+    const bagNoise = /\b(wallet|card holder|card case|coin purse|phone case|bag charm|strap|duffle|duffel|luggage|suitcase|travel accessory|key ring|keychain|sleeping bag|toiletry|passport holder)\b/.test(blob);
+    return !bagNoise;
+  }
   if (!allow) return canonical === slot;
 
   const textMatches = allow.test(blob);
@@ -333,6 +340,46 @@ function sourceMatchesSlot(slot: string, source: any): boolean {
   }
 
   return true;
+}
+
+function stylistSlotKey(slot: string): keyof StylistDirection["slots"] | null {
+  const normalized = normalizeWardrobeCategory(slot) || String(slot || "").toLowerCase().trim();
+  if (normalized === "dresses") return "dress";
+  if (normalized === "tops" || normalized === "bottoms" || normalized === "shoes" || normalized === "bags" || normalized === "outerwear" || normalized === "accessories") {
+    return normalized;
+  }
+  return null;
+}
+
+function mergeStylistDirectionIntoSlotQuery(
+  base: StyleSlotQuery,
+  slot: string,
+  direction?: StylistDirection,
+): StyleSlotQuery {
+  if (!direction) return base;
+  const key = stylistSlotKey(slot);
+  const ideal = key ? direction.slots[key] : undefined;
+  const unique = (items: string[], limit: number) => {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const item of items) {
+      const s = String(item || "").toLowerCase().trim();
+      if (!s || seen.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+      if (out.length >= limit) break;
+    }
+    return out;
+  };
+
+  const avoidForSlot = (direction.avoid.families || []).includes(String(key || "").toLowerCase())
+    ? ["avoid-this-slot"]
+    : [];
+  return {
+    primaryTerms: unique([...(ideal?.keywords || []), ...base.primaryTerms], 12),
+    boostTerms: unique([...(ideal?.styles || []), ...(ideal?.colors || []), ...base.boostTerms], 12),
+    avoidTerms: unique([...(direction.avoid.keywords || []), ...(direction.avoid.styles || []), ...avoidForSlot, ...base.avoidTerms], 14),
+  };
 }
 
 function inferStrongTitleSlot(source: any): string | null {
@@ -538,6 +585,54 @@ function scoreBagStyleCompatibility(
   }
 
   return 0.72;
+}
+
+function scoreBottomSilhouetteCompatibility(params: {
+  currentItems: CompleteLookAnchorRow[];
+  currentCategoryList: string[];
+  source: any;
+  inferredOccasion: InferredOccasion;
+  preferredStyleTerms: string[];
+  preferredFormality: "casual" | "business" | "formal" | "mixed";
+  weatherHint?: WeatherHint;
+}): number {
+  const candidate = `${String(params.source?.title || "")} ${String(params.source?.category || "")} ${String(params.source?.attr_style || "")} ${String(params.source?.product_types || "")}`.toLowerCase();
+  const anchorBlob = params.currentItems
+    .map((item) => `${String(item.title || "")} ${String(item.name || "")} ${String(item.category_name || "")}`)
+    .join(" ")
+    .toLowerCase();
+  const styleSet = new Set(params.preferredStyleTerms.map((t) => String(t || "").toLowerCase().trim()).filter(Boolean));
+
+  const isTailored = /\b(tailored|dress pant|dress pants|trouser|trousers|slack|slacks|pleated|wide leg|wide-leg|straight leg|straight-leg|pencil skirt|midi skirt)\b/.test(candidate);
+  const isDenim = /\b(jean|jeans|denim)\b/.test(candidate);
+  const isSkirt = /\b(skirt|mini skirt|midi skirt|maxi skirt)\b/.test(candidate);
+  const isShort = /\b(short|shorts|bermuda)\b/.test(candidate);
+  const isSport = /\b(legging|leggings|jogger|joggers|sweatpants|track pant|track pants|training|gym|running|workout|athletic)\b/.test(candidate);
+  const isSlim = /\b(skinny|slim|legging|leggings)\b/.test(candidate);
+  const isWideStraight = /\b(wide leg|wide-leg|straight leg|straight-leg|relaxed|barrel|cargo pant|cargo pants)\b/.test(candidate);
+
+  const anchorOversizedOrCozy = /\b(oversized|boxy|relaxed|sweater|hoodie|sweatshirt|cardigan|knit|wool|fleece|cashmere)\b/.test(anchorBlob);
+  const anchorTailored = /\b(blazer|suit|tailored|button[-\s]?down|dress shirt|coat)\b/.test(anchorBlob);
+  const anchorLightSummer = /\b(tank|cami|sleeveless|linen|beach|crop top|summer)\b/.test(anchorBlob);
+  const anchorDressy = params.inferredOccasion === "formal" || params.inferredOccasion === "semi-formal" || params.inferredOccasion === "party" || params.preferredFormality === "formal" || params.preferredFormality === "business";
+  const prefersStreet = styleSet.has("streetwear") || styleSet.has("edgy");
+  const prefersSport = styleSet.has("sporty") || styleSet.has("athleisure") || params.inferredOccasion === "active";
+
+  let score = 0.68;
+  if (isTailored) score += anchorDressy || anchorTailored ? 0.24 : 0.08;
+  if (isDenim) score += anchorDressy ? -0.08 : 0.14;
+  if (isWideStraight) score += anchorOversizedOrCozy || prefersStreet ? 0.14 : 0.06;
+  if (isSlim) score += anchorOversizedOrCozy ? 0.1 : -0.02;
+  if (isSkirt) score += anchorDressy ? 0.12 : anchorOversizedOrCozy ? -0.2 : 0.02;
+  if (isShort) score += anchorLightSummer || params.inferredOccasion === "beach" ? 0.14 : -0.26;
+  if (isSport) score += prefersSport ? 0.18 : -0.34;
+
+  if (params.weatherHint?.season === "winter" && isShort) score -= 0.28;
+  if (params.weatherHint?.temperatureC != null && params.weatherHint.temperatureC <= 12 && isShort) score -= 0.24;
+  if (anchorDressy && (isSport || isShort)) score -= 0.28;
+  if (anchorTailored && isSport) score -= 0.22;
+
+  return Math.max(0, Math.min(1, score));
 }
 
 function scoreAccessoryStyleCompatibility(
@@ -1057,6 +1152,7 @@ type CompleteLookAudienceOptions = {
   styleHints?: string[];
   colorHints?: string[];
   weatherHint?: WeatherHint;
+  stylistDirection?: StylistDirection;
   allowUserAudienceFallback?: boolean;
   enforceNeutralAudienceWhenUnknown?: boolean;
   useDetectedCategoryForCurrentItems?: boolean;
@@ -1241,6 +1337,20 @@ async function runCompleteLookCore(
     warmWeatherLikely,
     shouldOfferOuterwear,
   });
+  const requestTrace: {
+    mode: CompleteLookSuggestionsResult["completionMode"];
+    currentSlots: string[];
+    missingSlots: string[];
+    stylistSource?: string;
+    slots: Record<string, { evaluated: number; rejected: number; returned: number }>;
+    finalReturned?: number;
+  } = {
+    mode: completionMode,
+    currentSlots: currentCategoryList.slice(),
+    missingSlots: missingCategories.slice(),
+    stylistSource: audienceOptions.stylistDirection?.source,
+    slots: {},
+  };
 
   const userPriceTier = await inferPriceTier(userId).catch(() => null);
   const ownedProductIds = new Set<string>(
@@ -1419,6 +1529,18 @@ async function runCompleteLookCore(
             category === "bags"
               ? scoreBagStyleCompatibility(inferredOccasion, preferredStyleTerms, source)
               : 1;
+          const bottomSilhouetteAlignment =
+            category === "bottoms"
+              ? scoreBottomSilhouetteCompatibility({
+                  currentItems,
+                  currentCategoryList,
+                  source,
+                  inferredOccasion,
+                  preferredStyleTerms,
+                  preferredFormality,
+                  weatherHint: hintedWeather,
+                })
+              : 1;
           const accessoryStyleAlignment =
             category === "accessories"
               ? scoreAccessoryStyleCompatibility(inferredOccasion, preferredStyleTerms, source)
@@ -1446,6 +1568,9 @@ async function runCompleteLookCore(
             continue;
           }
           if (hintedWeather && isWeatherIncompatibleForSlot(category, source, hintedWeather)) {
+            continue;
+          }
+          if (category === "bottoms" && bottomSilhouetteAlignment < 0.34) {
             continue;
           }
 
@@ -1487,7 +1612,7 @@ async function runCompleteLookCore(
             formalityAlignment * 0.07 +
             weatherAlignment * 0.06;
 
-          const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment * accessoryStyleAlignment);
+          const slotStyleScore = Math.min(1, footwearStyleAlignment * bagStyleAlignment * bottomSilhouetteAlignment * accessoryStyleAlignment);
           const slotAwareFinalScore = Math.round((finalScore * (0.7 + slotStyleScore * 0.3) * footwearDressAlignment) * 1000) / 1000;
 
           const floor = relaxedFloor ? Math.max(0.32, minimumSlotScore(category) - 0.06) : minimumSlotScore(category);
@@ -1505,6 +1630,7 @@ async function runCompleteLookCore(
           if (colorPreferenceAlignment >= 0.82) reasons.push("matches preferred colors");
           if (category === "shoes" && footwearStyleAlignment >= 0.85) reasons.push("footwear fits the occasion");
           if (category === "bags" && bagStyleAlignment >= 0.85) reasons.push("bag style suits the outfit");
+          if (category === "bottoms" && bottomSilhouetteAlignment >= 0.82) reasons.push("bottom silhouette balances the anchor");
           if (category === "accessories" && accessoryStyleAlignment >= 0.82) reasons.push("accessories suit the occasion");
           if (reasons.length === 0) reasons.push("balances the current outfit");
 
@@ -1521,6 +1647,7 @@ async function runCompleteLookCore(
             footwearStyleAlignment: Math.round(footwearStyleAlignment * 1000) / 1000,
             bagStyleAlignment: Math.round(bagStyleAlignment * 1000) / 1000,
             bagColorAlignment: Math.round(bagColorAlignment * 1000) / 1000,
+            bottomSilhouetteAlignment: Math.round(bottomSilhouetteAlignment * 1000) / 1000,
             colorDecisionAlignment: Math.round(colorDecisionAlignment * 1000) / 1000,
             accessoryStyleAlignment: Math.round(accessoryStyleAlignment * 1000) / 1000,
           };
@@ -1558,13 +1685,18 @@ async function runCompleteLookCore(
       // Compute aesthetic-aware slot terms once per category (reused inside runSearch)
       const weatherCtx = resolveWeatherContext(hintedWeather?.temperatureC, hintedWeather?.season);
       const detectedAesthetic = inferPreferredAesthetic(preferredStyleTerms) as FashionAesthetic;
-      const slotQuerySpec = getStyleAwareSlotTerms({
+      const slotQuerySpecBase = getStyleAwareSlotTerms({
         aesthetic: detectedAesthetic,
         occasion: inferredOccasion as OutfitOccasion,
         sourceCategory: currentCategoryList[0] || "unknown",
         targetSlot: category,
         weather: weatherCtx,
       });
+      const slotQuerySpec = mergeStylistDirectionIntoSlotQuery(
+        slotQuerySpecBase,
+        category,
+        audienceOptions.stylistDirection,
+      );
       if (slotQuerySpec.primaryTerms.length > 0) {
         console.info("[outfit-stylist]", {
           slot: category,
@@ -1711,8 +1843,9 @@ async function runCompleteLookCore(
       // Safety-net recall path: keep strict gender/age, but remove slot-intent filter
       // and relax floor slightly to prevent zero-result categories.
       if (scored.length < minPerCategory) {
-        // For bags specifically, maintain stronger filtering to avoid mixing with jewelry/scarves
-        const fallbackSlotIntentFilter = category === "bags";
+        // Source-level slot guards are now precise enough to allow broad bag
+        // recall; this prevents strict title intent filters from starving bags.
+        const fallbackSlotIntentFilter = false;
         const recallVectorHits = await runSearch(buildFilters(fallbackSlotIntentFilter, false), true);
         const recallLexicalHits = await runSearch(buildFilters(fallbackSlotIntentFilter, false), false);
         scored = dedupeCompleteLookSuggestions(
@@ -1738,9 +1871,15 @@ async function runCompleteLookCore(
 
       scored.sort((a, b) => b.score - a.score);
       suggestionsByCategory.set(category, scored.slice(0, Math.max(minPerCategory * 2, 12)));
+      requestTrace.slots[category] = {
+        evaluated: slotCandidatesEvaluated,
+        rejected: slotCandidatesRejected,
+        returned: scored.length,
+      };
     } catch (err) {
       console.error(`Error fetching ${category} suggestions:`, err);
       suggestionsByCategory.set(category, []);
+      requestTrace.slots[category] = { evaluated: 0, rejected: 0, returned: 0 };
     }
   }
 
@@ -1807,6 +1946,10 @@ async function runCompleteLookCore(
   mergedSuggestions = enforceVariantDiversity(mergedSuggestions, 2);
 
   mergedSuggestions = mergedSuggestions.slice(0, limit);
+  requestTrace.finalReturned = mergedSuggestions.length;
+  if (process.env.DEBUG_COMPLETE_STYLE === "1" || mergedSuggestions.length < Math.min(4, limit)) {
+    console.info("[complete-look][trace]", requestTrace);
+  }
 
   const outfitSets = buildOutfitSets(suggestionsByCategory, missingCategories);
   for (const set of outfitSets) {
@@ -2221,7 +2364,7 @@ export async function completeLookSuggestionsForCatalogProducts(
   productIds: number[],
   limit: number = 10,
   requestCatalogFilters?: CompleteLookCatalogFilters,
-  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint" | "styleHints" | "colorHints" | "weatherHint"> & { detectedCategories?: Map<number, string> } = {}
+  options: Pick<CompleteLookAudienceOptions, "audienceGenderHint" | "ageGroupHint" | "occasionHint" | "styleHints" | "colorHints" | "weatherHint" | "stylistDirection"> & { detectedCategories?: Map<number, string> } = {}
 ): Promise<CompleteLookSuggestionsResult> {
   if (!Array.isArray(productIds) || productIds.length === 0) {
     return {
@@ -2280,6 +2423,7 @@ export async function completeLookSuggestionsForCatalogProducts(
     styleHints: options.styleHints,
     colorHints: options.colorHints,
     weatherHint: options.weatherHint,
+    stylistDirection: options.stylistDirection,
     allowUserAudienceFallback: false,
     enforceNeutralAudienceWhenUnknown: true,
     useDetectedCategoryForCurrentItems: true,

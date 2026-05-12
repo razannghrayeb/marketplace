@@ -140,8 +140,8 @@ export async function searchProductsByTitle(req: Request, res: Response) {
           final_accept_min: config.search.finalAcceptMinText,
           relevance_gate_mode: config.search.relevanceGateMode,
           similarity_normalize: config.search.similarityNormalize,
-          recall_window: config.search.recallWindow,
-          recall_max: config.search.recallMax,
+          recall_window: config.search.textRecallWindow,
+          recall_max: config.search.textRecallMax,
         }
       : {};
 
