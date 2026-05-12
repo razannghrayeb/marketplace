@@ -5449,29 +5449,6 @@ export async function searchByImageWithSimilarity(
   stageKnnDoneAt = Date.now();
   const rerankPhaseStartedAt = Date.now();
   const rerankTimings: Record<string, number> = {};
-  
-  const rawKnnProductIds = [
-    ...new Set(
-      (Array.isArray(hits) ? hits : [])
-        .map((hit: any) => String(hit?._source?.product_id ?? ""))
-        .filter(Boolean),
-    ),
-  ];
-  // Optimization: only hydrate what we reasonably need
-  // Detection-scoped calls run in parallel, so use a smaller overlapped prefetch
-  // and let the post-rerank missing fetch fill any genuinely needed gaps.
-  // This reduces hydration requests from ~4 down to 1-2 while preserving ranking quality
-  const effectiveLimit = Math.max(limit, 20); // Ensure we have at least 20 results to work with
-  const hydrationPrefetchMultiplier = imageHydrationPrefetchMultiplier(detectionScoped);
-  const hydrationPrefetchCap = imageHydrationPrefetchCap(detectionScoped);
-  const hydrationCap = Math.min(
-    rawKnnProductIds.length,
-    hydrationPrefetchCap,
-    Math.ceil(effectiveLimit * hydrationPrefetchMultiplier),
-  );
-  const idsToHydrate = rawKnnProductIds.slice(0, hydrationCap);
-  const endpointLimit = limit;
-  console.log("[hydrate] ids_count", idsToHydrate.length, "endpoint_limit", endpointLimit, "raw_knn_count", rawKnnProductIds.length, "prefetch_mult", hydrationPrefetchMultiplier, "prefetch_cap", hydrationPrefetchCap);
   const requestHydrationCache = params.hydrationCache;
   const fetchPrimaryImagesForHydration = async (numericIds: number[]): Promise<Map<number, ProductImage[]>> => {
     const uniqueIds = [...new Set(numericIds.filter(Number.isFinite))];
@@ -5506,8 +5483,9 @@ export async function searchByImageWithSimilarity(
     }
     return imagesByProduct;
   };
-  const productHydrationStartedAt = Date.now();
-  const productHydrationPromise = (async () => {
+  const startProductHydration = (idsToHydrate: string[]) => {
+    const productHydrationStartedAt = Date.now();
+    return (async () => {
     const productsById = new Map<string, any>();
     const missingIds: string[] = [];
     for (const id of idsToHydrate) {
@@ -5558,6 +5536,8 @@ export async function searchByImageWithSimilarity(
       return { error };
     },
   );
+  };
+  let productHydrationPromise: Promise<{ products: any[] } | { error: unknown }> = Promise.resolve({ products: [] });
   // Product rows carry the card image URL, so avoid an eager product_images query
   // for every candidate. We only fetch product_images later for rows with no
   // product-level image URL.
@@ -5924,6 +5904,41 @@ export async function searchByImageWithSimilarity(
   rerankTimings['candidate_cap_requested'] = fetchLimit;
   rerankTimings['candidate_cap_effective'] = effectiveRerankCandidateCount;
   rerankTimings['candidate_selection_ms'] = Date.now() - candidateSelectionStartMs;
+
+  // Start product hydration after the cheap rerank prefix is known, not directly
+  // from raw kNN hits. This preserves I/O overlap with the expensive compliance
+  // loop while avoiding broad prefetches for candidates that basic family/category
+  // signals already show are very likely to be discarded.
+  const effectiveLimit = Math.max(limit, 20);
+  const hydrationPrefetchMultiplier = imageHydrationPrefetchMultiplier(detectionScoped);
+  const hydrationPrefetchCap = imageHydrationPrefetchCap(detectionScoped);
+  const hydrationCap = Math.min(
+    baseCandidates.length,
+    hydrationPrefetchCap,
+    Math.ceil(effectiveLimit * hydrationPrefetchMultiplier),
+  );
+  const jobFamilyForPrefetch = imageSearchFamilyFromDetection(
+    params.detectionProductCategory,
+  );
+  const prefetchCandidates =
+    detectionScoped && jobFamilyForPrefetch !== "unknown"
+      ? baseCandidates.filter((hit: any) => {
+          const src = (hit?._source ?? {}) as Record<string, unknown>;
+          if (hasChildAudienceSignals(src)) return false;
+          return !isImpossibleImageFamilyMismatch(jobFamilyForPrefetch, imageSearchFamilyFromProduct(src));
+        })
+      : baseCandidates;
+  const hydrationSourceHits = prefetchCandidates.length > 0 ? prefetchCandidates : baseCandidates;
+  const idsToHydrate = [
+    ...new Set(
+      hydrationSourceHits
+        .map((hit: any) => String(hit?._source?.product_id ?? ""))
+        .filter(Boolean),
+    ),
+  ].slice(0, hydrationCap);
+  console.log("[hydrate] ids_count", idsToHydrate.length, "endpoint_limit", limit, "raw_knn_count", Array.isArray(hits) ? hits.length : 0, "prefetch_source_count", hydrationSourceHits.length, "prefetch_mult", hydrationPrefetchMultiplier, "prefetch_cap", hydrationPrefetchCap);
+  productHydrationPromise = startProductHydration(idsToHydrate);
+
   const attrBlockingTimeoutMsRaw = Number(process.env.SEARCH_ATTR_MGET_BLOCKING_TIMEOUT_MS ?? "500");
   const attrBlockingTimeoutMs = Number.isFinite(attrBlockingTimeoutMsRaw)
     ? Math.max(0, Math.min(8_000, Math.floor(attrBlockingTimeoutMsRaw)))
