@@ -34,6 +34,9 @@ import {
   classifyStyleAttributesFromEmbedding,
   isStyleClipInferenceEnabled,
   scoreSoftStyleAlignment,
+  scoreSymmetricStyleAlignment,
+  parseStoredAestheticDistribution,
+  parseStoredOccasionDistribution,
   type StyleAttributeDistribution,
 } from "../../lib/outfit/styleAttributesClip";
 
@@ -1288,6 +1291,12 @@ type CandidateStyleRow = {
   image_cdn?: string | null;
   description?: string | null;
   gender?: string | null;
+  // Fashion-CLIP backfilled distributions — present once the styleAttributesBackfill
+  // worker has processed the product. Null on rows that haven't been classified yet;
+  // the rerank falls back to asymmetric label-vs-distribution matching in that case.
+  attr_aesthetic_probs?: unknown;
+  attr_occasion_probs?: unknown;
+  attr_aesthetic_margin?: number | null;
 };
 
 function normalizeStyleToken(value: unknown): string {
@@ -2709,7 +2718,8 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
 
   const candidateIds = Array.from(new Set(topSuggestions.map((s) => s.product_id))).slice(0, expensiveRerankLimit);
   const candidateRowsPromise = pg.query<CandidateStyleRow>(
-    `SELECT id, title, brand, category, color, price_cents, currency, image_url, image_cdn, description, gender
+    `SELECT id, title, brand, category, color, price_cents, currency, image_url, image_cdn, description, gender,
+            attr_aesthetic_probs, attr_occasion_probs, attr_aesthetic_margin
      FROM products
      WHERE id = ANY($1)`,
     [candidateIds]
@@ -2992,26 +3002,45 @@ async function rerankCompleteStyleSuggestions(params: FashionRerankContext): Pro
       fashionScoreRaw += bottomSilhouetteScore * 0.1;
       activeWeightSum += 0.1;
     }
-    // Fashion-CLIP soft-style signal — medium weight, opt-in, additive only.
-    // Only contributes when `anchorStyleDistribution` was successfully computed
-    // (anchor had a usable image embedding AND the env flag is on). When absent
-    // the weight is 0, leaving the rest of the rerank untouched.
+    // Fashion-CLIP soft-style signal — opt-in, additive only.
+    // Two paths:
+    //   1. Symmetric (distribution × distribution): both anchor and candidate
+    //      have been classified by Fashion-CLIP. Highest-quality match using
+    //      Jensen-Shannon similarity. Higher weight (0.18) because the signal
+    //      is bilateral and confidence-dampened on both sides.
+    //   2. Asymmetric (distribution × rule label): only the anchor has been
+    //      classified (candidate not yet backfilled). Lower weight (0.10)
+    //      because half the comparison is still text-rule-derived.
     //
-    // Weight 0.12 (~10% of fashionScore, ~7% of final ranking): high enough to
-    // actually shift positions for anchors with title-vs-image mismatches, low
-    // enough that bad CLIP inference can't flip top-of-pool with bottom-of-pool.
-    // Asymmetric match (anchor distribution vs candidate's rule-labeled
-    // aesthetic) caps the ceiling — symmetric matching needs the candidate
-    // backfill (see B1 docs).
-    const SOFT_STYLE_WEIGHT = 0.12;
+    // When the env flag is off OR the anchor distribution failed to compute,
+    // weight is 0 and the rest of the rerank is untouched.
+    const candidateAestheticDist = parseStoredAestheticDistribution(row.attr_aesthetic_probs);
+    const candidateOccasionDist = parseStoredOccasionDistribution(row.attr_occasion_probs);
+    const candidateHasBackfill =
+      candidateAestheticDist !== null && candidateOccasionDist !== null;
     if (params.anchorStyleDistribution) {
-      const softStyleScore = scoreSoftStyleAlignment(
-        params.anchorStyleDistribution,
-        candidateStyle.aesthetic,
-        candidateStyle.occasion,
-      );
-      fashionScoreRaw += softStyleScore * SOFT_STYLE_WEIGHT;
-      activeWeightSum += SOFT_STYLE_WEIGHT;
+      if (candidateHasBackfill) {
+        const SYMMETRIC_WEIGHT = 0.18;
+        const symmetricScore = scoreSymmetricStyleAlignment(params.anchorStyleDistribution, {
+          aesthetic: candidateAestheticDist,
+          occasion: candidateOccasionDist,
+          margin:
+            typeof row.attr_aesthetic_margin === "number" && Number.isFinite(row.attr_aesthetic_margin)
+              ? row.attr_aesthetic_margin
+              : 0.1,
+        });
+        fashionScoreRaw += symmetricScore * SYMMETRIC_WEIGHT;
+        activeWeightSum += SYMMETRIC_WEIGHT;
+      } else {
+        const ASYMMETRIC_WEIGHT = 0.1;
+        const softStyleScore = scoreSoftStyleAlignment(
+          params.anchorStyleDistribution,
+          candidateStyle.aesthetic,
+          candidateStyle.occasion,
+        );
+        fashionScoreRaw += softStyleScore * ASYMMETRIC_WEIGHT;
+        activeWeightSum += ASYMMETRIC_WEIGHT;
+      }
     }
     // Normalize against the active weight sum so scores span the full [0,1] range
     // regardless of slot. This fixes a long-standing compression where the constant

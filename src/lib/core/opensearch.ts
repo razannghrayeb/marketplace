@@ -436,11 +436,55 @@ export async function ensureIndex() {
                 parameters: { nlist: 128, nprobes: 8, encoder: { name: "sq", parameters: { type: "fp16" } } },
               },
             },
+            // ====================================================================
+            // FASHION-CLIP ZERO-SHOT STYLE ATTRIBUTES — distributions stored as
+            // objects so retrieval can read per-aesthetic / per-occasion
+            // probabilities. `enabled: false` skips indexing — we only read these
+            // at scoring time, never filter on them, so no inverted index needed.
+            // The denormalized argmax labels (attr_aesthetic_top / *_top) carry
+            // the keyword indexes for facets/filters when we need them.
+            // ====================================================================
+            attr_aesthetic_probs: { type: "object", enabled: false },
+            attr_occasion_probs: { type: "object", enabled: false },
+            attr_clip_formality: { type: "float" },
+            attr_aesthetic_top: { type: "keyword" },
+            attr_occasion_top: { type: "keyword" },
+            attr_aesthetic_margin: { type: "float" },
           },
         },
       },
     });
     console.log(`Created OpenSearch index: ${index}`);
+  }
+}
+
+/**
+ * Additively register the Fashion-CLIP style attribute fields on an existing
+ * OpenSearch index. Safe to call on a live index — `putMapping` only adds
+ * fields, never modifies or removes them.
+ *
+ * Idempotent: re-running is a no-op once the fields are present.
+ */
+export async function ensureStyleAttributeFields(): Promise<void> {
+  const index = config.opensearch.index;
+  try {
+    await osClient.indices.putMapping({
+      index,
+      body: {
+        properties: {
+          attr_aesthetic_probs: { type: "object", enabled: false },
+          attr_occasion_probs: { type: "object", enabled: false },
+          attr_clip_formality: { type: "float" },
+          attr_aesthetic_top: { type: "keyword" },
+          attr_occasion_top: { type: "keyword" },
+          attr_aesthetic_margin: { type: "float" },
+        },
+      },
+    });
+    console.log(`[ensureStyleAttributeFields] Style attribute fields registered on ${index}`);
+  } catch (err) {
+    console.warn(`[ensureStyleAttributeFields] failed to update mapping on ${index}:`, err);
+    throw err;
   }
 }
 
