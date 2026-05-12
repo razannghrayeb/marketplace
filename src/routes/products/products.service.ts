@@ -5527,21 +5527,9 @@ export async function searchByImageWithSimilarity(
       return { error };
     },
   );
-  const imageHydrationIds = [
-    ...new Set(
-      idsToHydrate
-        .map((id) => parseInt(String(id), 10))
-        .filter(Number.isFinite),
-    ),
-  ];
-  const imageHydrationStartedAt = Date.now();
-  const imageHydrationPromise: Promise<Map<number, ProductImage[]>> =
-    imageHydrationIds.length > 0
-      ? fetchPrimaryImagesForHydration(imageHydrationIds).then((hydratedImages) => {
-          console.log("[hydrate-step] images_prefetch_ms", Date.now() - imageHydrationStartedAt, "count", imageHydrationIds.length);
-          return hydratedImages;
-        })
-      : Promise.resolve(new Map<number, ProductImage[]>());
+  // Product rows carry the card image URL, so avoid an eager product_images query
+  // for every candidate. We only fetch product_images later for rows with no
+  // product-level image URL.
 
   const signals = await signalsPromise;
   rerankTimings['signals_wait_ms'] = Date.now() - rerankPhaseStartedAt;
@@ -9603,41 +9591,17 @@ export async function searchByImageWithSimilarity(
   let hydrationMissingProductRowsCount = 0;
   if (uniqueProductIds.length > 0) {
     hydrationCandidateIdCount = uniqueProductIds.length;
-    const [productHydration, userLifestyle, prefetchedImagesByProduct] = await Promise.all([
+    const [productHydration, userLifestyle] = await Promise.all([
       productHydrationPromise,
       personalizationPromise,
-      imageHydrationPromise,
     ]);
+    const prefetchedImagesByProduct = new Map<number, ProductImage[]>();
     if ((productHydration as any).error) throw (productHydration as any).error;
     const productById = new Map(((productHydration as any).products as any[]).map((p: any) => [String(p.id), p]));
     void attrMgetPromise.then(applyAttrMgetResult);
     
     const missingHydrationIds = uniqueProductIds.filter((id) => !productById.has(String(id)));
     hydrationPrefetchMissCount = missingHydrationIds.length;
-
-    // Kick off images fetch in parallel with the missing-products PG fetch.
-    // Image rows are keyed by product_id; running with the full candidate set just
-    // produces extra entries in the map that nothing reads, so this is result-neutral.
-    const candidateImageIds = [
-      ...new Set(
-        uniqueProductIds
-          .map((id) => parseInt(String(id), 10))
-          .filter(Number.isFinite),
-      ),
-    ];
-    const prefetchedImageIds = new Set(imageHydrationIds.map((id) => String(id)));
-    const missingImageIds = candidateImageIds.filter((id) => !prefetchedImageIds.has(String(id)));
-    const imagesHydrationStartedAt = Date.now();
-    const imagesPromise: Promise<Map<number, ProductImage[]>> =
-      missingImageIds.length > 0
-        ? fetchPrimaryImagesForHydration(missingImageIds).then((hydratedImages) => {
-            for (const [productId, images] of hydratedImages.entries()) {
-              prefetchedImagesByProduct.set(productId, images);
-            }
-            console.log("[hydrate-step] images_missing_ms", Date.now() - imagesHydrationStartedAt, "count", missingImageIds.length);
-            return prefetchedImagesByProduct;
-          })
-        : Promise.resolve(prefetchedImagesByProduct);
 
     if (missingHydrationIds.length > 0) {
       const missingHydrationStartedAt = Date.now();
@@ -9688,10 +9652,26 @@ export async function searchByImageWithSimilarity(
     const products = productIds.map((id: string) => productById.get(String(id))).filter(Boolean);
     const hydratedProductIds = [...new Set(products.map((product: any) => String(product.id)))];
     hydratedProductRowsCount = hydratedProductIds.length;
-    const imagesByProduct = await imagesPromise;
-    if (candidateImageIds.length === 0) {
-      console.log("[hydrate-step] images_ms", Date.now() - imagesHydrationStartedAt);
+    const candidateImageIds: number[] = [];
+    for (const id of hydratedProductIds) {
+      const product = productById.get(String(id));
+      const productImageUrl = String(product?.image_cdn ?? product?.image_url ?? "").trim();
+      const numericId = parseInt(String(id), 10);
+      if (!productImageUrl && Number.isFinite(numericId)) candidateImageIds.push(numericId);
     }
+    const missingImageIds = candidateImageIds;
+    const imagesHydrationStartedAt = Date.now();
+    const imagesByProduct =
+      missingImageIds.length > 0
+        ? await fetchPrimaryImagesForHydration(missingImageIds).then((hydratedImages) => {
+            for (const [productId, images] of hydratedImages.entries()) {
+              prefetchedImagesByProduct.set(productId, images);
+            }
+            console.log("[hydrate-step] images_missing_ms", Date.now() - imagesHydrationStartedAt, "count", missingImageIds.length);
+            return prefetchedImagesByProduct;
+          })
+        : prefetchedImagesByProduct;
+    console.log("[hydrate-step] images_ms", Date.now() - imagesHydrationStartedAt, "count", missingImageIds.length);
     console.log("[hydrate-step] vendors_ms", 0);
 
     const assembleStartedAt = Date.now();
@@ -9721,12 +9701,21 @@ export async function searchByImageWithSimilarity(
       const taxonomyMatch = taxonomyMatchById.get(idStr) ?? 0;
       const imageCompositeScore = imageCompositeById.get(idStr) ?? 0;
       const imageCompositeScore01 = imageCompositeNormById.get(idStr) ?? 0;
-      const imagesOut = images.map((img) => ({
-        id: img.id,
-        url: img.cdn_url,
-        is_primary: img.is_primary,
-        p_hash: img.p_hash ?? undefined,
-      }));
+      const productImageUrl = String(p.image_cdn ?? p.image_url ?? "").trim();
+      const imagesOut = images.length > 0
+        ? images.map((img) => ({
+            id: img.id,
+            url: img.cdn_url,
+            is_primary: img.is_primary,
+            p_hash: img.p_hash ?? undefined,
+          }))
+        : productImageUrl
+          ? [{
+              id: Number(p.id),
+              url: productImageUrl,
+              is_primary: true,
+            }]
+          : [];
       const authoritativeColorRaw = typeof p.color === "string" ? p.color : "";
       const authoritativeColorTokens = extractCanonicalColorTokensFromRawColor(authoritativeColorRaw);
       const authoritativeColorNorm = authoritativeColorTokens[0] ?? "";
