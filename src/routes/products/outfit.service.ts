@@ -296,16 +296,13 @@ export async function getOutfitRecommendations(
           })
       : Promise.resolve(null);
 
-  // Phase B: completeLook retrieval and wardrobe context resolve in parallel.
-  // wardrobeContextPromise was started in Phase A; awaiting both together
-  // overlaps the catalog-side ES query with the user-side wardrobe DB load.
-  const [stylistDirection, wardrobeContext, anchorStyleDistribution] = await Promise.all([
-    stylistDirectionPromise,
-    wardrobeContextPromise,
-    anchorStyleDistributionPromise,
-  ]);
+  // Phase B: only completeLook actually needs stylistDirection — wardrobeContext
+  // and anchorStyleDistribution are consumed by rerank/finalize later. Awaiting
+  // only stylistDirection here lets the catalog ES retrieval start sooner while
+  // the wardrobe DB load and CLIP classification finish in the background.
+  const stylistDirection = await stylistDirectionPromise;
 
-  const completeLookResult = await completeLookSuggestionsForCatalogProducts(
+  const completeLookPromise = completeLookSuggestionsForCatalogProducts(
       userId ?? 0,
       anchorProductIds,
       retrievalPoolSize,
@@ -329,6 +326,12 @@ export async function getOutfitRecommendations(
         stylistDirection,
       },
     );
+
+  const [completeLookResult, wardrobeContext, anchorStyleDistribution] = await Promise.all([
+    completeLookPromise,
+    wardrobeContextPromise,
+    anchorStyleDistributionPromise,
+  ]);
 
   const rerankedSuggestions = await rerankCompleteStyleSuggestions({
     sourceProduct,
