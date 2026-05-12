@@ -1093,10 +1093,13 @@ function imageComplianceCandidateCap(detectionScoped: boolean, limit: number): n
   const envKey = detectionScoped
     ? "SEARCH_IMAGE_DETECTION_COMPLIANCE_CANDIDATE_CAP"
     : "SEARCH_IMAGE_COMPLIANCE_CANDIDATE_CAP";
-  const fallback = detectionScoped ? Math.max(180, Math.min(260, limit * 12)) : Math.max(300, limit * 8);
+  // Shop-the-look calls run one image search per detection. Keeping the per-item
+  // compliance window modest avoids multiplying CPU and attr-embedding mget work
+  // across the whole outfit while preserving enough candidates for rerank/fallback.
+  const fallback = detectionScoped ? Math.max(120, Math.min(180, limit * 3)) : Math.max(300, limit * 8);
   const raw = Number(process.env[envKey] ?? fallback);
   if (!Number.isFinite(raw)) return fallback;
-  const min = detectionScoped ? 120 : 180;
+  const min = detectionScoped ? 80 : 180;
   const max = detectionScoped ? 700 : 1200;
   return Math.max(min, Math.min(max, Math.floor(raw)));
 }
@@ -1133,7 +1136,7 @@ function imageHydrationPrefetchCap(detectionScoped: boolean): number {
       : process.env.SEARCH_IMAGE_HYDRATION_PREFETCH_CAP,
   );
   if (Number.isFinite(raw)) return Math.max(40, Math.min(800, Math.floor(raw)));
-  return detectionScoped ? 240 : 420;
+  return detectionScoped ? 120 : 420;
 }
 
 function imageHydrationPrefetchMultiplier(detectionScoped: boolean): number {
@@ -1143,7 +1146,16 @@ function imageHydrationPrefetchMultiplier(detectionScoped: boolean): number {
       : process.env.SEARCH_IMAGE_HYDRATION_PREFETCH_MULT,
   );
   if (Number.isFinite(raw)) return Math.max(1, Math.min(5, raw));
-  return detectionScoped ? 1.5 : 3;
+  return detectionScoped ? 1 : 3;
+}
+
+function imageDetectionHydrationPrefetchTarget(limit: number): number {
+  const raw = Number(process.env.SEARCH_IMAGE_DETECTION_HYDRATION_PREFETCH_TARGET);
+  if (Number.isFinite(raw)) return Math.max(20, Math.min(160, Math.floor(raw)));
+  // Detection searches are one slice of a larger shop-the-look request. The route
+  // can pass a large endpoint limit, but prefetch only needs enough rows to cover
+  // likely winners; any missed winner is hydrated after rerank without being dropped.
+  return Math.max(40, Math.min(70, Math.floor(limit)));
 }
 
 function imageHydrationResultCap(detectionScoped: boolean, limit: number): number {
@@ -5626,7 +5638,14 @@ export async function searchByImageWithSimilarity(
 
         // Preserve the legacy result set in both paths: cap the candidate list first,
         // then either issue one mget or fan out the same ids across parallel chunks.
-        const maxIds = config.search?.attrMget?.maxIds ?? 200;
+        const configuredMaxIds = config.search?.attrMget?.maxIds ?? 200;
+        const detectionAttrMaxIdsRaw = Number(process.env.SEARCH_IMAGE_DETECTION_ATTR_MGET_MAX_IDS ?? "120");
+        const detectionAttrMaxIds = Number.isFinite(detectionAttrMaxIdsRaw)
+          ? Math.max(50, Math.min(300, Math.floor(detectionAttrMaxIdsRaw)))
+          : 120;
+        const maxIds = detectionScoped
+          ? Math.min(configuredMaxIds, detectionAttrMaxIds)
+          : configuredMaxIds;
         const chunkSize = config.search?.attrMget?.chunkSize ?? maxIds;
         const parallelChunks = Boolean(config.search?.attrMget?.parallel);
         const idsToFetch = uniqueIds.slice(0, maxIds);
@@ -5941,12 +5960,15 @@ export async function searchByImageWithSimilarity(
   // loop while avoiding broad prefetches for candidates that basic family/category
   // signals already show are very likely to be discarded.
   const effectiveLimit = Math.max(limit, 20);
+  const hydrationPrefetchTarget = detectionScoped
+    ? imageDetectionHydrationPrefetchTarget(effectiveLimit)
+    : effectiveLimit;
   const hydrationPrefetchMultiplier = imageHydrationPrefetchMultiplier(detectionScoped);
   const hydrationPrefetchCap = imageHydrationPrefetchCap(detectionScoped);
   const hydrationCap = Math.min(
     baseCandidates.length,
     hydrationPrefetchCap,
-    Math.ceil(effectiveLimit * hydrationPrefetchMultiplier),
+    Math.ceil(hydrationPrefetchTarget * hydrationPrefetchMultiplier),
   );
   const jobFamilyForPrefetch = imageSearchFamilyFromDetection(
     params.detectionProductCategory,
@@ -5967,7 +5989,7 @@ export async function searchByImageWithSimilarity(
         .filter(Boolean),
     ),
   ].slice(0, hydrationCap);
-  console.log("[hydrate] ids_count", idsToHydrate.length, "endpoint_limit", limit, "raw_knn_count", Array.isArray(hits) ? hits.length : 0, "prefetch_source_count", hydrationSourceHits.length, "prefetch_mult", hydrationPrefetchMultiplier, "prefetch_cap", hydrationPrefetchCap);
+  console.log("[hydrate] ids_count", idsToHydrate.length, "endpoint_limit", limit, "raw_knn_count", Array.isArray(hits) ? hits.length : 0, "prefetch_source_count", hydrationSourceHits.length, "prefetch_target", hydrationPrefetchTarget, "prefetch_mult", hydrationPrefetchMultiplier, "prefetch_cap", hydrationPrefetchCap);
   productHydrationPromise = startProductHydration(idsToHydrate);
 
   const attrBlockingTimeoutMsRaw = Number(process.env.SEARCH_ATTR_MGET_BLOCKING_TIMEOUT_MS ?? "500");

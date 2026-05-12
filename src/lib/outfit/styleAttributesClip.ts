@@ -334,3 +334,117 @@ export function scoreSoftStyleAlignment(
   const blended = aestheticScore * 0.6 + occasionScore * 0.4;
   return blended * confidence + 0.5 * (1 - confidence);
 }
+
+/**
+ * Type guard / parser for distributions read back from Postgres (jsonb) or
+ * OpenSearch (object). Defensive — tolerates missing keys, garbage values,
+ * and partial backfills. Returns null when the payload is unusable.
+ */
+export function parseStoredAestheticDistribution(value: unknown): Record<Aesthetic, number> | null {
+  if (!value || typeof value !== "object") return null;
+  const keys: Aesthetic[] = [
+    "classic",
+    "modern",
+    "bohemian",
+    "minimalist",
+    "streetwear",
+    "romantic",
+    "edgy",
+    "sporty",
+  ];
+  const out = {} as Record<Aesthetic, number>;
+  let sum = 0;
+  for (const k of keys) {
+    const v = (value as Record<string, unknown>)[k];
+    const n = typeof v === "number" ? v : typeof v === "string" ? parseFloat(v) : NaN;
+    if (!Number.isFinite(n) || n < 0) return null;
+    out[k] = n;
+    sum += n;
+  }
+  // Tolerate slightly off softmaxes (rounding/storage drift) but reject
+  // anything obviously wrong (all zeros, single 9999, etc).
+  if (sum < 0.5 || sum > 1.5) return null;
+  // Renormalise to exactly 1 so downstream comparisons are clean.
+  if (sum > 0 && Math.abs(sum - 1) > 1e-4) {
+    for (const k of keys) out[k] = out[k] / sum;
+  }
+  return out;
+}
+
+export function parseStoredOccasionDistribution(value: unknown): Record<Occasion, number> | null {
+  if (!value || typeof value !== "object") return null;
+  const keys: Occasion[] = ["formal", "semi-formal", "casual", "active", "party", "beach"];
+  const out = {} as Record<Occasion, number>;
+  let sum = 0;
+  for (const k of keys) {
+    const v = (value as Record<string, unknown>)[k];
+    const n = typeof v === "number" ? v : typeof v === "string" ? parseFloat(v) : NaN;
+    if (!Number.isFinite(n) || n < 0) return null;
+    out[k] = n;
+    sum += n;
+  }
+  if (sum < 0.5 || sum > 1.5) return null;
+  if (sum > 0 && Math.abs(sum - 1) > 1e-4) {
+    for (const k of keys) out[k] = out[k] / sum;
+  }
+  return out;
+}
+
+/**
+ * Symmetric distribution-vs-distribution alignment: 1 - JS divergence,
+ * mapped into [0,1] with the easy region (good matches) at ~0.7-1.0 and
+ * outright clashes at ~0.0-0.3.
+ *
+ * Use this when both the source and the candidate have been classified
+ * by Fashion-CLIP. It's strictly better than the asymmetric
+ * scoreSoftStyleAlignment(label) because both sides contribute soft signal.
+ */
+function jsDivergenceSimilarity(
+  a: Record<string, number>,
+  b: Record<string, number>,
+): number {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  // Mid distribution = average of a and b.
+  let kl_a = 0;
+  let kl_b = 0;
+  for (const k of keys) {
+    const pa = a[k] ?? 0;
+    const pb = b[k] ?? 0;
+    const m = (pa + pb) / 2;
+    if (m > 0) {
+      if (pa > 0) kl_a += pa * Math.log(pa / m);
+      if (pb > 0) kl_b += pb * Math.log(pb / m);
+    }
+  }
+  // JS divergence is in [0, ln(2)≈0.693]. Map to similarity in [0,1] where
+  // identical distributions give 1, completely disjoint give 0.
+  const jsDiv = (kl_a + kl_b) / 2;
+  return Math.max(0, Math.min(1, 1 - jsDiv / Math.LN2));
+}
+
+/**
+ * Symmetric style alignment when both source and candidate have full
+ * distributions (post-backfill). Combines aesthetic + occasion symmetry
+ * and applies the same confidence dampening as the asymmetric version.
+ *
+ * Returns 0.5 (neutral) when either side is missing — caller should fall back
+ * to `scoreSoftStyleAlignment` for partial coverage.
+ */
+export function scoreSymmetricStyleAlignment(
+  source: StyleAttributeDistribution | null,
+  candidate: {
+    aesthetic: Record<Aesthetic, number> | null;
+    occasion: Record<Occasion, number> | null;
+    margin: number;
+  } | null,
+): number {
+  if (!source || !candidate || !candidate.aesthetic || !candidate.occasion) return 0.5;
+  const aestheticSim = jsDivergenceSimilarity(source.aesthetic, candidate.aesthetic);
+  const occasionSim = jsDivergenceSimilarity(source.occasion, candidate.occasion);
+  const blended = aestheticSim * 0.6 + occasionSim * 0.4;
+  // Confidence: min of the two distributions' margins. If either side is
+  // uncertain, pull toward neutral.
+  const minMargin = Math.min(source.aestheticMargin, candidate.margin);
+  const confidence = Math.min(1, Math.max(0.4, minMargin * 4 + 0.5));
+  return blended * confidence + 0.5 * (1 - confidence);
+}

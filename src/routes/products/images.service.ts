@@ -46,6 +46,10 @@ import { buildProductSearchDocument } from "../../lib/search/searchDocument";
 import { loadProductSearchEnrichmentByIds } from "../../lib/search/loadProductSearchEnrichment";
 import { extractGarmentFashionColors } from "../../lib/color/garmentColorPipeline";
 import type { PixelBox } from "../../lib/image";
+import {
+  classifyStyleAttributesFromEmbedding,
+  isStyleClipInferenceEnabled,
+} from "../../lib/outfit/styleAttributesClip";
 import sharpLib from "sharp";
 
 const sharp = typeof sharpLib === "function" ? sharpLib : (sharpLib as any).default;
@@ -612,6 +616,59 @@ export async function updateProductIndex(productId: number, sourceBuffer?: Buffe
       }
     } catch (err) {
       console.warn(`[updateProductIndex] Failed to backfill embedding for product ${productId}:`, err);
+    }
+  }
+
+  // ============================================================================
+  // Fashion-CLIP style attribute classification at ingest/reindex time.
+  // Pure cosine math (~1ms) against cached prompt embeddings — same cost regardless
+  // of whether the row was classified before, so we re-run on every reindex to
+  // catch CLIP model upgrades. Gated behind STYLE_CLIP_INFERENCE_ENABLED so the
+  // pipeline only pays the cost when the feature is on.
+  //
+  // Failures are logged and swallowed: the indexing path must never fail on
+  // optional classification.
+  // ============================================================================
+  if (isStyleClipInferenceEnabled() && Array.isArray(primaryImage?.embedding) && primaryImage.embedding.length > 0) {
+    try {
+      const dist = await classifyStyleAttributesFromEmbedding(primaryImage.embedding);
+      if (dist) {
+        // Mirror to OpenSearch doc so retrieval can read distribution fields.
+        (doc as any).attr_aesthetic_probs = dist.aesthetic;
+        (doc as any).attr_occasion_probs = dist.occasion;
+        (doc as any).attr_clip_formality = dist.formality;
+        (doc as any).attr_aesthetic_top = dist.topAesthetic;
+        (doc as any).attr_occasion_top = dist.topOccasion;
+        (doc as any).attr_aesthetic_margin = dist.aestheticMargin;
+        // Persist to Postgres so the backfill worker doesn't redo this row and
+        // so future queries can read the distribution server-side.
+        await pg
+          .query(
+            `UPDATE products
+                SET attr_aesthetic_probs   = $2::jsonb,
+                    attr_occasion_probs    = $3::jsonb,
+                    attr_clip_formality    = $4,
+                    attr_aesthetic_top     = $5,
+                    attr_occasion_top      = $6,
+                    attr_aesthetic_margin  = $7,
+                    attr_style_clip_at     = NOW()
+              WHERE id = $1`,
+            [
+              productId,
+              JSON.stringify(dist.aesthetic),
+              JSON.stringify(dist.occasion),
+              dist.formality,
+              dist.topAesthetic,
+              dist.topOccasion,
+              dist.aestheticMargin,
+            ],
+          )
+          .catch((err) => {
+            console.warn(`[updateProductIndex] style-clip PG write failed for ${productId}:`, err);
+          });
+      }
+    } catch (err) {
+      console.warn(`[updateProductIndex] style-clip classification failed for ${productId}:`, err);
     }
   }
 
