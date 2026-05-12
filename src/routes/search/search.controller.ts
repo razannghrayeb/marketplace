@@ -12,6 +12,9 @@
 import { Router, Request, Response } from "express";
 import { multiImageSearch, multiVectorWeightedSearch } from "./search.service";
 import { searchImage, searchText } from "../../lib/search/fashionSearchFacade";
+import { altImageSearch } from "../../lib/search";
+import { getYOLOv8Client } from "../../lib/image/yolov8Client";
+import { computeShopTheLookGarmentEmbeddingsFromDetections } from "../../lib/image/processor";
 import { config } from "../../config";
 import { toPublicSearchProducts } from "../../lib/search/publicSearchResult";
 import { sortProductsByUnifiedScorer } from "../../lib/search/sortResults";
@@ -274,6 +277,85 @@ router.post("/image", upload.single("image"), async (req: Request, res: Response
   } catch (error) {
     console.error("Image search error:", error);
     res.status(500).json({ error: "Image search failed" });
+  }
+});
+
+/**
+ * POST /search/image/alt
+ *
+ * Experimental/test-only endpoint that runs the alternative global-first
+ * image pipeline: computes global embedding, retrieves global kNN, then
+ * conditionally computes attribute/part embeddings for top candidates and
+ * reranks. Returns an array of `{ productId, visualSim, attrSims, finalScore }`.
+ */
+router.post("/image/alt", upload.single("image"), async (req: Request, res: Response) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "Image file is required" });
+
+    const validation = await validateImage(req.file.buffer);
+    if (!validation.valid) return res.status(400).json({ error: validation.error || "Invalid image" });
+
+    // Gate the experimental endpoint behind ALT_PIPELINE_ENABLED to avoid
+    // exposing it accidentally in production. Use "1" or "true" to enable.
+    const altEnabled = String(process.env.ALT_PIPELINE_ENABLED ?? "").toLowerCase();
+    if (!(altEnabled === "1" || altEnabled === "true")) {
+      return res.status(404).json({ error: "Not found" });
+    }
+
+    const confidence = req.query.confidence ? parseFloat(req.query.confidence as string) : 0.25;
+    const limitPerItem = req.query.limit_per_item ? parseInt(req.query.limit_per_item as string, 10) : 20;
+    const includeEmpty = req.query.include_empty_groups === "true";
+
+    // 1) Run YOLO detection (same as /api/images/search)
+    const yolo = getYOLOv8Client();
+    const detected = await yolo.detectFromBuffer(req.file.buffer, "alt-search.jpg", { confidence });
+    const detections = Array.isArray(detected?.detections) ? detected.detections : [];
+
+    // If no detections, fallback to running a whole-image alt search
+    if (!detections || detections.length === 0) {
+      const results = await altImageSearch(req.file.buffer, { size: limitPerItem });
+      return res.json({ success: true, detection: { items: [], count: 0 }, similarProducts: { byDetection: [], totalProducts: results.length }, results });
+    }
+
+    // 2) Compute padded garment crops & embeddings for all detections
+    const boxes = detections.map((d: any) => d.box ?? d.bbox ?? null);
+    const embeddings = await computeShopTheLookGarmentEmbeddingsFromDetections(req.file.buffer, boxes);
+
+    // 3) For each detection, run altImageSearch on the padded crop buffer when available.
+    // Run in parallel with a configurable concurrency limit to avoid overloading downstream services.
+    const concurrency = Math.max(1, Math.min(64, Number(process.env.ALT_PIPELINE_DETECTION_CONCURRENCY ?? 6)));
+
+    async function processDetection(det: any, idx: number) {
+      const embedInfo = embeddings[idx];
+      const detectionInfo = { label: det.label, confidence: det.confidence, box: det.box ?? det.bbox ?? det };
+      if (!embedInfo || !embedInfo.clipBufferForAttributes) {
+        return { detection: detectionInfo, products: [], count: 0, debug: { embed_ok: false } };
+      }
+      try {
+        const products = await altImageSearch(embedInfo.clipBufferForAttributes, { size: limitPerItem });
+        return { detection: detectionInfo, products, count: products.length, debug: { embed_ok: true } };
+      } catch (err) {
+        return { detection: detectionInfo, products: [], count: 0, debug: { embed_ok: false, error: String(err) } };
+      }
+    }
+
+    const perDetection: any[] = new Array(detections.length);
+    let nextIndex = 0;
+    await Promise.all(Array.from({ length: Math.min(concurrency, detections.length) }, async () => {
+      for (;;) {
+        const i = nextIndex++;
+        if (i >= detections.length) return;
+        // eslint-disable-next-line no-await-in-loop
+        perDetection[i] = await processDetection(detections[i], i);
+      }
+    }));
+
+    const byDetection = perDetection.map((pd) => ({ detection: pd.detection, category: undefined, products: pd.products, count: pd.count, debug: pd.debug }));
+
+    return res.json({ success: true, detection: { items: detections, count: detections.length }, similarProducts: { byDetection, totalProducts: perDetection.reduce((s, p) => s + p.count, 0) } });
+  } catch (err) {
+    console.error("Alt image search error:", err);
+    res.status(500).json({ error: "Alt image search failed" });
   }
 });
 

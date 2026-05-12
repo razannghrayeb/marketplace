@@ -122,3 +122,5 @@ export {
   type TextSearchEvalPayload,
   type ImageSearchEvalPayload,
 } from "./evalHooks";
+
+export { altImageSearch } from "./altPipeline";
