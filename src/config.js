@@ -24,9 +24,9 @@ function loadDotEnv() {
     candidates.push(".env");
     for (var _i = 0, candidates_1 = candidates; _i < candidates_1.length; _i++) {
         var candidate = candidates_1[_i];
-        var resolved = path_1.default.resolve(process.cwd(), candidate);
-        if (fs_1.default.existsSync(resolved)) {
-            dotenv_1.default.config({ path: resolved, override: false });
+        var resolved = path_1.resolve(process.cwd(), candidate);
+        if (fs_1.existsSync(resolved)) {
+            dotenv_1.config({ path: resolved, override: false });
             return;
         }
     }

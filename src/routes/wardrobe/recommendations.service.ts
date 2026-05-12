@@ -3786,7 +3786,7 @@ function scoreWeatherAlignment(slotRaw: string, source: any, weatherHint?: Weath
   const slot = normalizeWardrobeCategory(slotRaw) || slotRaw;
   const blob = `${String(source?.title || "")} ${String(source?.category || "")} ${String(source?.attr_material || "")} ${String(source?.attr_style || "")} ${String(source?.product_types || "")}`.toLowerCase();
   const hasHeavySignal = /\b(wool|fleece|puffer|thermal|down|cashmere|heavy|coat|parka|snow|fur-lined|insulated|boots?)\b/.test(blob);
-  const hasLightSignal = /\b(linen|cotton|breathable|airy|shorts?|tank|sleeveless|sandal|slides?|espadrille|beach|resort)\b/.test(blob);
+  const hasLightSignal = /\b(linen|cotton|breathable|airy|shorts?|tank|sleeveless|short\s*sleeves?|t-?shirt|tee|sandal|slides?|espadrille|beach|resort)\b/.test(blob);
   const hasRainSignal = /\b(rain|waterproof|windbreaker|trench)\b/.test(blob);
 
   let score = 0.7;
@@ -3843,7 +3843,7 @@ function isWeatherIncompatibleForSlot(slotRaw: string, source: any, weatherHint?
   const heavyOuterwear = /\b(puffer|parka|heavy coat|winter coat|wool coat|down jacket|fur[-\s]?lined|insulated|blazer|jacket|coat)\b/.test(blob);
   const winterBoot = /\b(snow boots?|winter boots?|fur[-\s]?lined boots?|insulated boots?|combat boots?)\b/.test(blob);
   const summerFootwear = /\b(sandal|sandals|slides?|flip flop|flip-flop|espadrille|open toe|open-toe)\b/.test(blob);
-  const coldTop = /\b(tank|sleeveless|strapless|halter|cami|tube top)\b/.test(blob);
+  const coldTop = /\b(tank|sleeveless|strapless|halter|cami|tube top|short\s*sleeves?|short[-\s]?sleeve|t-?shirt|tee)\b/.test(blob);
   const coldBottom = /\b(shorts?|bermuda|skort)\b/.test(blob);
   const heavyTop = /\b(wool sweater|chunky knit|heavy knit|fleece|thermal|hoodie|sweatshirt|cardigan)\b/.test(blob);
 

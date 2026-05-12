@@ -543,7 +543,7 @@ function normalizeTitle(title) {
  * Generate hash for caching
  */
 function hashTitle(normalizedTitle) {
-    return crypto_1.default.createHash("sha256").update(normalizedTitle).digest("hex").slice(0, 16);
+    return crypto_1.createHash("sha256").update(normalizedTitle).digest("hex").slice(0, 16);
 }
 // ============================================================================
 // Rule-Based Extraction (Fast Path)
