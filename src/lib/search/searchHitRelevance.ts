@@ -624,15 +624,36 @@ function scoreCatalogTypeEvidence(
     { source: "url", weight: 0.42, seeds: urlSeeds },
   ];
 
+  // Precompute the max possible score from candidates AFTER each index so we can
+  // early-exit when `best.score` is already higher than any remaining candidate
+  // can achieve. Remaining max = max weight of remaining candidates (since
+  // breakdown.combinedTypeCompliance is clamped to [0,1]). Note: the
+  // `hasSpecificCategoryLabel ? max(rawScore, 0.64) : rawScore` floor only applies
+  // to source === "category", which is index 0 in the array — never a remaining
+  // candidate — so it cannot lift a later candidate above its weight.
+  const remainingMaxAfter: number[] = new Array(candidates.length);
+  let runningMaxRemaining = 0;
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    remainingMaxAfter[i] = runningMaxRemaining;
+    if (candidates[i].weight > runningMaxRemaining) runningMaxRemaining = candidates[i].weight;
+  }
+
   let best = { score: 0, source: "none", exact: false };
-  for (const candidate of candidates) {
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i];
     const seeds = [...new Set(candidate.seeds)];
     if (seeds.length === 0) continue;
     let breakdown = scoreRerankProductTypeBreakdown(desiredProductTypes, seeds);
-    for (const seed of seeds) {
-      const single = scoreRerankProductTypeBreakdown(desiredProductTypes, [seed]);
-      if (single.combinedTypeCompliance > breakdown.combinedTypeCompliance) {
-        breakdown = single;
+    // Inner-loop skip: if the all-seeds breakdown is already at the [0,1] cap, no
+    // single-seed call can produce a strictly greater `combinedTypeCompliance`,
+    // so the loop is a provable no-op. Math-equivalent to running the full loop.
+    if (breakdown.combinedTypeCompliance < 1) {
+      for (const seed of seeds) {
+        const single = scoreRerankProductTypeBreakdown(desiredProductTypes, [seed]);
+        if (single.combinedTypeCompliance > breakdown.combinedTypeCompliance) {
+          breakdown = single;
+          if (breakdown.combinedTypeCompliance >= 1) break;
+        }
       }
     }
     const hasSpecificCategoryLabel =
@@ -647,6 +668,9 @@ function scoreCatalogTypeEvidence(
     if (score > best.score) {
       best = { score, source: candidate.source, exact };
     }
+    // Outer early-exit: `best.score` is already higher than any remaining
+    // candidate's max-possible score, so the remaining iterations cannot replace it.
+    if (best.score >= remainingMaxAfter[i]) break;
   }
   return best;
 }

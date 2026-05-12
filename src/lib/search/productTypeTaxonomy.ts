@@ -1766,6 +1766,40 @@ function isBroadExactToken(token: string): boolean {
   return hyperValues.has(t);
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// LRU memoization for scoreRerankProductTypeBreakdown.
+// ───────────────────────────────────────────────────────────────────────────
+// The function is pure and called many times per rerank request — typically with
+// a STABLE `querySeeds` (the user's desiredProductTypes is fixed across all hits
+// of a single rerank call) and a `docTypes` that often repeats across products
+// (e.g. dozens of hits with ["shirt"] or ["jeans", "pants"]).
+//
+// The result object is treated as read-only by all callers (verified: callers
+// either reassign the variable or read individual numeric fields without mutating
+// the object). Cache returns the same shared object on hit — safe.
+//
+// Map preserves insertion order, so we get a cheap LRU: on hit, delete + re-set
+// to move to the end; on overflow, drop the first (oldest) key.
+const scoreRerankBreakdownCache = new Map<string, RerankTypeBreakdown>();
+const SCORE_RERANK_BREAKDOWN_CACHE_MAX = 50_000;
+
+function scoreRerankBreakdownCacheKey(
+  querySeeds: string[],
+  docTypes: string[],
+  opts?: { siblingClusterWeight?: number; intraPenaltyWeight?: number },
+): string {
+  // Normalize identically to the function body so identical (seeds, docs)
+  // inputs in different forms hit the same cache slot. Seeds are deduped+sorted
+  // (the function does Set first; output is order-insensitive in seeds). Docs
+  // are normalized but order is preserved to avoid risking semantic change.
+  const seedsNorm = querySeeds.map((s) => s.toLowerCase().trim()).filter(Boolean);
+  const seedsKey = [...new Set(seedsNorm)].sort().join("|");
+  const docsKey = docTypes.map((t) => t.toLowerCase().trim()).filter(Boolean).join("|");
+  const w1 = opts?.siblingClusterWeight !== undefined ? String(opts.siblingClusterWeight) : "";
+  const w2 = opts?.intraPenaltyWeight !== undefined ? String(opts.intraPenaltyWeight) : "";
+  return seedsKey + "||" + docsKey + "||" + w1 + ":" + w2;
+}
+
 export function scoreRerankProductTypeBreakdown(
   querySeeds: string[],
   docTypes: string[],
@@ -1781,6 +1815,15 @@ export function scoreRerankProductTypeBreakdown(
       intraFamilyPenalty: 0,
       combinedTypeCompliance: 0,
     };
+  }
+
+  const cacheKey = scoreRerankBreakdownCacheKey(querySeeds, docTypes, opts);
+  const cachedHit = scoreRerankBreakdownCache.get(cacheKey);
+  if (cachedHit !== undefined) {
+    // LRU touch: move to end.
+    scoreRerankBreakdownCache.delete(cacheKey);
+    scoreRerankBreakdownCache.set(cacheKey, cachedHit);
+    return cachedHit;
   }
 
   const wSib = opts?.siblingClusterWeight ?? DEFAULT_SIBLING_CLUSTER_WEIGHT;
@@ -1807,13 +1850,20 @@ export function scoreRerankProductTypeBreakdown(
       ? Math.max(0.2, Math.min(0.65, combinedTypeCompliance))
       : 0;
 
-  return {
+  const result: RerankTypeBreakdown = {
     exactTypeScore,
     siblingClusterScore,
     parentHypernymScore,
     intraFamilyPenalty,
     combinedTypeCompliance,
   };
+
+  if (scoreRerankBreakdownCache.size >= SCORE_RERANK_BREAKDOWN_CACHE_MAX) {
+    const firstKey = scoreRerankBreakdownCache.keys().next().value;
+    if (firstKey !== undefined) scoreRerankBreakdownCache.delete(firstKey);
+  }
+  scoreRerankBreakdownCache.set(cacheKey, result);
+  return result;
 }
 
 /** Minimum intra-family penalty to treat two bottom/footwear/tops hints as conflicting. */
