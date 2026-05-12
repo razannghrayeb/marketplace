@@ -284,6 +284,7 @@ export async function getSearchProductsByIdsOrdered(ids: (number | string)[]): P
        p.brand,
        p.category,
        p.color,
+       p.product_url,
        COALESCE(p.currency, 'USD') AS currency,
        p.price_cents,
        p.sales_price_cents,
